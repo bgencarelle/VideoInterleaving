@@ -5,6 +5,7 @@ from midi_mtc_png_display import mtc_png_realtime
 
 
 def main():
+
     if input("Do you want to run write_folder_list()? (y/n) ").lower() == 'y':
         try:
             write_folder_list()
@@ -31,7 +32,7 @@ def main():
             print("well that was a waste of time")
             main()
     else:
-        print("quit me. I dare you")
+        return
         main()
 
 

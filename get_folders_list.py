@@ -60,45 +60,17 @@ def write_folder_list():
         ((f, *Image.open(os.path.join(folder, f)).size) for f in os.listdir(folder) if f.endswith('.png')),
         (None, 0, 0)), count_png_files(folder)) for folder in folder_dict.values()], key=lambda x: x[3])
 
-    # Updated code to output folder_count_XXXX.csv and strip unnecessary details
-    with open(os.path.join(processed_dir, f'folder_count_{total_pngs}.csv'), 'w', newline='') as f:
-        writer = csv.writer(f)
-
+    # Save folder_count_XXXX.txt
+    with open(os.path.join(processed_dir, f'folder_count_{total_pngs}.txt'), 'w') as f:
         for index, (folder, first_png, width, height, count) in enumerate(folder_counts, 1):
-            first_png_stripped = os.path.splitext(os.path.basename(first_png))[0]  # Remove the file extension
-            parent_dir = os.path.dirname(folder)  # Get parent directory
-            grandparent_dir = os.path.dirname(parent_dir)  # Get grandparent directory
+            first_png_stripped = os.path.splitext(os.path.basename(first_png))[0]
+            f.write(f"{index}, {folder}, {first_png_stripped}, {width}x{height} pixels, {count}\n")
 
-            # Keep only parent and grandparent directories in the folder path
-            folder_relative = os.path.join(grandparent_dir, os.path.basename(parent_dir), os.path.basename(folder))
-
-            writer.writerow([index, folder_relative, first_png_stripped, f"{width}x{height} pixels", count])
-
-    # Add the following code snippet to replace the previous file writing block
-    file_format = input("Choose output format (txt, csv, or both): ").strip().lower()
-
-    while file_format not in ('txt', 'csv', 'both'):
-        print("Invalid format. Please choose 'txt', 'csv', or 'both'.")
-        file_format = input("Choose output format (txt, csv, or both): ").strip().lower()
-
-    if file_format in ('txt', 'both'):
-        with open(os.path.join(processed_dir, 'folder_locations.txt'), 'w') as f:
-            current_count = folder_counts[0][4]
-            for index, (folder, _, _, _, count) in enumerate(folder_counts, 1):
-                if count != current_count:
-                    f.write("#########\n")
-                    current_count = count
-                f.write(f"{index}. {folder}\n")
-
-    if file_format in ('csv', 'both'):
-        with open(os.path.join(processed_dir, 'folder_locations.csv'), 'w', newline='') as f:
-            writer = csv.writer(f)
-            current_count = folder_counts[0][4]
-            for index, (folder, _, _, _, count) in enumerate(folder_counts, 1):
-                if count != current_count:
-                    writer.writerow(["#########"])
-                    current_count = count
-                writer.writerow([index, folder])  # Separate the number and the file location by a comma
+    # Save folder_locations.csv
+    with open(os.path.join(processed_dir, 'folder_locations.csv'), 'w', newline='') as f:
+        writer = csv.writer(f)
+        for index, (folder, _, _, _, count) in enumerate(folder_counts, 1):
+            writer.writerow([index, folder])
 
     print("Updated folder_locations files in the foldersProcessed directory.")
 

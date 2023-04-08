@@ -129,11 +129,11 @@ def display_png_filters(index, png_paths, folder=0, openCV_filters=None):
             frame = cv2.resize(frame, (900, 1200))
 
             # Check for transparency
-            if frame.shape[2] == 4:
-                alpha_channel = frame[:, :, 3]
-                _, mask = cv2.threshold(alpha_channel, 128, 255, cv2.THRESH_BINARY)
-                frame = cv2.bitwise_and(frame, frame, mask=mask)
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+            # if frame.shape[2] == 4:
+            #     alpha_channel = frame[:, :, 3]
+            #     _, mask = cv2.threshold(alpha_channel, 128, 255, cv2.THRESH_BINARY)
+            #     frame = cv2.bitwise_and(frame, frame, mask=mask)
+            #     frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
 
             # Apply OpenCV filters (dummy code for now)
             if openCV_filters:
