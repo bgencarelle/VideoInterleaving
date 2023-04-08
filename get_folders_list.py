@@ -2,6 +2,7 @@ import os
 import re
 import csv
 from PIL import Image
+from collections import defaultdict
 
 
 def get_subdirectories(path):
@@ -19,6 +20,28 @@ def count_png_files(path):
 def parse_line(line):
     match = re.match(r'(\d+)\. (.+)', line)
     return (int(match.group(1)), match.group(2)) if match else (None, None)
+
+
+def has_alpha_channel(image):
+    return image.mode in ('RGBA', 'LA') or (image.mode == 'P' and 'transparency' in image.info)
+
+
+def create_additional_csv_files(folder_counts, processed_dir):
+    groups = defaultdict(list)
+
+    for index, (folder, first_png, width, height, has_alpha, file_count) in enumerate(folder_counts, 1):
+        groups[file_count].append((index, folder, first_png, width, height, has_alpha, file_count))
+
+    for file_count, group in groups.items():
+        with open(os.path.join(processed_dir, f'folder_locations_{file_count}.csv'), 'w', newline='') as f:
+            writer = csv.writer(f)
+            for (index, folder, first_png, width, height, has_alpha, file_count) in group:
+                first_png_image = Image.open(os.path.join(folder, first_png))
+                if has_alpha:
+                    alpha_match = 'Match' if first_png_image.size == first_png_image.split()[-1].size else 'NoMatch'
+                else:
+                    alpha_match = 'NoAlpha'
+                writer.writerow([index, folder, f"{width}x{height} pixels", file_count, 'Yes' if has_alpha else 'No', alpha_match])
 
 
 def write_folder_list():
@@ -57,23 +80,34 @@ def write_folder_list():
     total_pngs = sum(count_png_files(folder) for folder in folder_dict.values())
 
     folder_counts = sorted([(folder, *next(
-        ((f, *Image.open(os.path.join(folder, f)).size) for f in os.listdir(folder) if f.endswith('.png')),
-        (None, 0, 0)), count_png_files(folder)) for folder in folder_dict.values()], key=lambda x: x[3])
+        ((f, *Image.open(os.path.join(folder, f)).size, has_alpha_channel(Image.open(os.path.join(folder, f)))) for f in
+         os.listdir(folder) if f.endswith('.png')),
+        (None, 0, 0, False)), count_png_files(folder)) for folder in folder_dict.values()], key=lambda x: x[4])
 
     # Save folder_count_XXXX.txt
     with open(os.path.join(processed_dir, f'folder_count_{total_pngs}.txt'), 'w') as f:
-        for index, (folder, first_png, width, height, count) in enumerate(folder_counts, 1):
+        for index, (folder, first_png, width, height, has_alpha, count) in enumerate(folder_counts, 1):
             first_png_stripped = os.path.splitext(os.path.basename(first_png))[0]
             f.write(f"{index}, {folder}, {first_png_stripped}, {width}x{height} pixels, {count}\n")
 
     # Save folder_locations.csv
     with open(os.path.join(processed_dir, 'folder_locations.csv'), 'w', newline='') as f:
         writer = csv.writer(f)
-        for index, (folder, _, _, _, count) in enumerate(folder_counts, 1):
-            writer.writerow([index, folder])
+        for index, (folder, first_png, width, height, has_alpha, count) in enumerate(folder_counts, 1):
+            first_png_image = Image.open(os.path.join(folder, first_png))
+            if has_alpha:
+                alpha_match = 'Match' if first_png_image.size == first_png_image.split()[-1].size else 'NoMatch'
+            else:
+                alpha_match = 'NoAlpha'
+            writer.writerow(
+                [index, folder, f"{width}x{height} pixels", count, 'Yes' if has_alpha else 'No', alpha_match])
+
+    # Create additional folder_locations_XXXX.csv files
+    create_additional_csv_files(folder_counts, processed_dir)
 
     print("Updated folder_locations files in the foldersProcessed directory.")
 
 
 if __name__ == "__main__":
     write_folder_list()
+
