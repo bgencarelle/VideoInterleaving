@@ -1,0 +1,20 @@
+
+Verification of weights:
+Total Iterations: 2221
+Total Items: 35536
+Folder 0 (FaceWithBG) representation: 18.65% (Expected: 6.25%)
+Folder 1 (faceUpscale3) representation: 6.20% (Expected: 6.25%)
+Folder 2 (FaceFills3) representation: 6.13% (Expected: 6.25%)
+Folder 3 (faceUpscale2) representation: 6.30% (Expected: 6.25%)
+Folder 4 (faceMono) representation: 6.15% (Expected: 6.25%)
+Folder 5 (faceUpscale1) representation: 6.21% (Expected: 6.25%)
+Folder 6 (VulkanDeepBG) representation: 6.20% (Expected: 6.25%)
+Folder 7 (FaceWithBG copy) representation: 0.00% (Expected: 6.25%)
+Folder 8 (FaceWithBG_iterate6) representation: 0.00% (Expected: 6.25%)
+Folder 9 (faceSplit2) representation: 6.22% (Expected: 6.25%)
+Folder 10 (faceSplit5) representation: 6.11% (Expected: 6.25%)
+Folder 11 (faceSplit3) representation: 6.53% (Expected: 6.25%)
+Folder 12 (FaceBGOnly) representation: 6.39% (Expected: 6.25%)
+Folder 13 (FaceFills2) representation: 6.21% (Expected: 6.25%)
+Folder 14 (VulkanLowResPath5) representation: 6.39% (Expected: 6.25%)
+Folder 15 (faceNoBG) representation: 6.30% (Expected: 6.25%)
