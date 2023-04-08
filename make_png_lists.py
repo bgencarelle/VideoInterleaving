@@ -4,6 +4,8 @@ import re
 from itertools import zip_longest
 import csv
 import inspect
+import sys
+
 
 def parse_folder_locations():
     folder_dict = {}
@@ -21,6 +23,23 @@ def parse_folder_locations():
                 if folder:
                     folder_dict[number] = folder
     return folder_dict
+
+
+def check_unequal_png_counts():
+    processed_dir = 'foldersProcessed'
+    csv_path = os.path.join(processed_dir, 'folder_locations.csv')
+
+    if os.path.exists(csv_path):
+        png_counts = set()
+        with open(csv_path, 'r', newline='') as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if not row:
+                    break
+                png_counts.add(int(row[3]))  # Column 4 has index 3
+                if len(png_counts) > 1:
+                    print("error: unequal png count found, please fix before proceeding")
+                    sys.exit(0)
 
 
 def parse_line(line):
@@ -181,50 +200,83 @@ def expanded_weighted_sampling(grouped_png_files, folder_weights, total_items, o
 
 def process_files():
     folder_dict = parse_folder_locations()
-
+    check_unequal_png_counts()
     if not folder_dict:
-        raise Exception("No accessible files in the foldersProcessed directory.")
+        print("No accessible files in the foldersProcessed directory.")
+        sys.exit(1)  # Terminate the script with a non-zero exit code
 
+    sorted_png_files = sort_png_files(folder_dict)
+    grouped_png_files = interleave_lists(sorted_png_files)
+
+    output_folder = "generatedPngLists"
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+
+    ask_generate_csv(grouped_png_files, output_folder)
+    ask_create_weighted_file_lists(sorted_png_files, folder_dict, grouped_png_files, output_folder)
+
+
+def sort_png_files(folder_dict):
     sorted_png_files = []
     for number in sorted(folder_dict.keys()):
         folder = folder_dict[number]
         png_files = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith('.png')]
         png_files.sort(key=natural_sort_key)
         sorted_png_files.append(png_files)
+    return sorted_png_files
 
-    grouped_png_files = interleave_lists(sorted_png_files)
-    expand = 0
-    output_folder = "generatedPngLists"
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
 
-    if input("Do you want to generate an CSV with all of the files? (yes/no, default no): ").lower().strip() in ["yes", "y"]:
+def ask_generate_csv(grouped_png_files, output_folder):
+    if input("Do you want to generate an CSV with all of the files? (yes/no, default no): ").lower().strip() in ["yes",
+                                                                                                                 "y"]:
         write_sorted_png_stream(grouped_png_files, output_folder)
 
+
+def ask_create_weighted_file_lists(sorted_png_files, folder_dict, grouped_png_files, output_folder):
     if not input("Do you want to create weighted file lists? (yes/no, default yes): ").lower().strip() in ["n", "no"]:
         folder_weights = get_folder_weights(len(sorted_png_files), folder_dict)
-        if input("Do you want to generate a weighted csv? (yes/no, default no): ").lower().strip() in ["yes", "y"]:
-            sampled_png_files = weighted_sampling(grouped_png_files, folder_weights, output_folder)
-            verify_weights(sampled_png_files, folder_weights, folder_dict)  # Add the call to verify_weights here
+        ask_generate_weighted_csv(grouped_png_files, folder_weights, output_folder, folder_dict)
 
-            if input("Do you want to generate this as a list? (yes/no, default default no): ").lower().strip() in ["yes", "y"]:
-                write_sorted_random(sampled_png_files, output_folder)
-            if input("Now we can reapply this weighting and make a new csv, ok? (yes/no, default no): ").lower().strip() in ["yes", "y"]:
-                while True:
-                    try:
-                        counts = int(
-                            input("Enter the number of items you want for each step(must be greater than 0): "))
-                        if counts > 0:
-                            break
-                        else:
-                            print("Count must be greater than 0.")
-                    except ValueError:
-                        print("Invalid input. Please enter a valid integer greater than 0.")
-                expanded_sampled_png_files = expanded_weighted_sampling(grouped_png_files,
-                                                                        folder_weights, counts, output_folder)
-                verify_weights(sampled_png_files, folder_weights, folder_dict)  # Add the call to verify_weights here
-                if input("Do you want to make this list? (yes/no, default no): ").lower().strip() in ["yes", "y"]:
-                    write_sorted_multiplier_random(expanded_sampled_png_files, output_folder)
+
+def ask_generate_weighted_csv(grouped_png_files, folder_weights, output_folder, folder_dict):
+    if input("Do you want to generate a weighted csv? (yes/no, default no): ").lower().strip() in ["yes", "y"]:
+        sampled_png_files = weighted_sampling(grouped_png_files, folder_weights, output_folder)
+        verify_weights(sampled_png_files, folder_weights, folder_dict)
+        ask_generate_list(sampled_png_files, output_folder)
+        ask_reapply_weighting(grouped_png_files, folder_weights, output_folder, folder_dict)
+
+
+def ask_generate_list(sampled_png_files, output_folder):
+    if input("Do you want to generate this as a list? (yes/no, default default no): ").lower().strip() in ["yes", "y"]:
+        write_sorted_random(sampled_png_files, output_folder)
+
+
+def ask_reapply_weighting(grouped_png_files, folder_weights, output_folder, folder_dict):
+    if input("Now we can reapply this weighting and make a new csv, ok? (yes/no, default no): ").lower().strip() in [
+            "yes", "y"]:
+        counts = get_counts_input()
+        expanded_sampled_png_files = expanded_weighted_sampling(grouped_png_files, folder_weights, counts,
+                                                                output_folder)
+        verify_weights(expanded_sampled_png_files, folder_weights, folder_dict)
+        ask_make_list(expanded_sampled_png_files, output_folder)
+
+
+def get_counts_input():
+    while True:
+        try:
+            counts = int(input("Enter the number of items you want for each step(must be greater than 0): "))
+            if counts > 0:
+                break
+            else:
+                print("Count must be greater than 0.")
+        except ValueError:
+            print("Invalid input. Please enter a valid integer greater than 0.")
+    return counts
+
+
+def ask_make_list(expanded_sampled_png_files, output_folder):
+    if input("Do you want to make this list? (yes/no, default no): ").lower().strip() in ["yes", "y"]:
+        write_sorted_multiplier_random(expanded_sampled_png_files, output_folder)
 
 
 if __name__ == "__main__":
