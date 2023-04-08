@@ -27,7 +27,7 @@ def parse_folder_locations():
 
 def check_unequal_png_counts():
     processed_dir = 'foldersProcessed'
-    csv_path = os.path.join(processed_dir, 'folder_locations.csv')
+    csv_path = os.path.join(processed_dir, 'folder_locations_2221.csv')
 
     if os.path.exists(csv_path):
         png_counts = set()

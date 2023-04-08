@@ -10,6 +10,7 @@ highest_timecode_seen = 0
 clock_counter = 0
 stop_event = Event()
 mtc_values = [0, 0, 0, 0]
+note = 1
 
 mtc_img = np.zeros((150, 600), dtype=np.uint8)
 last_mtc_timecode = '00:00:00:00:00'
@@ -63,10 +64,9 @@ def calculate_total_frames(hours, minutes, seconds, frames):
     return total_frames
 
 
-def process_midi_messages(input_port):
-    global clock_counter, mtc_values, frame_counter, last_mtc_timecode
+def process_midi_messages(input_port, channels):
+    global clock_counter, mtc_values, frame_counter, last_mtc_timecode,note
     current_total_frames = 0
-
     for msg in input_port.iter_pending():
         if msg.type == 'quarter_frame':
             mtc_type, value = parse_mtc(msg)
@@ -83,8 +83,7 @@ def process_midi_messages(input_port):
             # handle note off message
             pass
         elif msg.type == 'note_on':
-            # handle note on message
-            pass
+            note = msg.note
         elif msg.type == 'control_change' and msg.control == 1:
             # handle mod wheel message
             pass
@@ -119,7 +118,8 @@ def display_png_live(frame, mtc_timecode, estimate_frame_counter, index):
     cv2.imshow(f'MTC Timecode - PID: {os.getpid()}', frame)
 
 
-def display_png_filters(index, png_paths, folder=0, openCV_filters=None):
+def display_png_filters(index, png_paths, folder, openCV_filters=None):
+
     if 0 <= index < len(png_paths):
         png_file = png_paths[index][folder]
         frame = cv2.imread(png_file, cv2.IMREAD_UNCHANGED)
@@ -141,21 +141,43 @@ def display_png_filters(index, png_paths, folder=0, openCV_filters=None):
 
             return frame
 
+def select_midi_input():
+    available_ports = mido.get_input_names()
+    print("Please select a MIDI input port:")
+    for i, port in enumerate(available_ports):
+        print(f"{i + 1}: {port}")
 
+    while True:
+        try:
+            selection = int(input("> "))
+            if selection not in range(1, len(available_ports) + 1):
+                raise ValueError
+            break
+        except ValueError:
+            print("Invalid selection. Please enter a number corresponding to a port.")
+
+    selected_port = available_ports[selection - 1]
+    print(f"Selected port: {selected_port}")
+    return selected_port
 def mtc_png_realtime():
     global clock_counter
-    input_port = mido.open_input('IAC Driver Bus 1')
+
+    midi_input_port = select_midi_input()  # Let user choose MIDI input port
+    input_port = mido.open_input(midi_input_port)
     csv_source = select_csv_file()
     png_paths = parse_array_file(csv_source)
-    midi_note = 64
-    note_scaled = midi_note % 12 # this scales the keys to one octave
-    counter = 0
     old_timecode = 0
+    # Choose the MIDI channels you want to listen to (0-based)
+    listening_channels = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]  # For example, listen to channels 1, 2, and 3
+
     while not stop_event.is_set():
-        mtc_timecode_local, estimate_frame_counter_local = process_midi_messages(input_port)
+
+        note_scaled = note % 12  # this scales the keys to one octave
+        print(note_scaled)
+        mtc_timecode_local, estimate_frame_counter_local = process_midi_messages(input_port, listening_channels)
         index = calculate_index(estimate_frame_counter_local, png_paths)
         # In the mtc_png_realtime() function, modify the display_png_live line:
-        frame = display_png_filters(index, png_paths, counter)
+        frame = display_png_filters(index, png_paths, note_scaled)
         if frame is not None:
             display_png_live(frame, mtc_timecode_local, estimate_frame_counter_local, index)
         old_timecode = mtc_timecode_local
