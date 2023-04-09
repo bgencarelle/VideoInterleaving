@@ -3,15 +3,26 @@ import cv2
 import csv
 import numpy as np
 import os
+import time
 from threading import Event
-import random
+import time
+from collections import deque
+
+BUFFER_SIZE = 100
+
+clock_intervals = deque()
+intervals_sum = 0.0
 
 highest_timecode_seen = 0
 clock_counter = 0
 stop_event = Event()
 mtc_values = [0, 0, 0, 0]
 note = 1
-
+last_clock_time = None
+clock_message_count = 0
+use_midi_beat_clock = False
+previous_time = time.time()
+avg_clock_interval = 0.1
 mtc_img = np.zeros((150, 600), dtype=np.uint8)
 last_mtc_timecode = '00:00:00:00:00'
 
@@ -65,20 +76,54 @@ def calculate_total_frames(hours, minutes, seconds, frames):
 
 
 def process_midi_messages(input_port, channels):
-    global clock_counter, mtc_values, frame_counter, last_mtc_timecode,note
+    global clock_counter, mtc_values, frame_counter, last_mtc_timecode, note
+    global last_clock_time, clock_message_count, previous_time,intervals_sum
     current_total_frames = 0
+
+
     for msg in input_port.iter_pending():
-        if msg.type == 'quarter_frame':
-            mtc_type, value = parse_mtc(msg)
-            last_mtc_timecode = update_mtc_timecode(mtc_type, value, clock_counter)
-        elif msg.type == 'clock':
-            clock_counter += 1
+        if msg.type == 'clock':
+            current_time = time.time()
+            if last_clock_time is not None:
+                clock_interval = current_time - last_clock_time
+
+                if len(clock_intervals) == BUFFER_SIZE:
+                    # Remove the oldest interval from the sum
+                    intervals_sum -= clock_intervals.popleft()
+
+                clock_intervals.append(clock_interval)
+                intervals_sum += clock_interval
+
+                if len(clock_intervals) == BUFFER_SIZE:
+                    avg_clock_interval = intervals_sum / BUFFER_SIZE
+                    bpm = 60 / (avg_clock_interval * 24)
+                    print(f"BPM: {bpm:.2f}")
+
+            last_clock_time = current_time
+        elif msg.type == 'quarter_frame':
+            if not use_midi_beat_clock:
+                mtc_type, value = parse_mtc(msg)
+                last_mtc_timecode = update_mtc_timecode(mtc_type, value, clock_counter)
+                hours = mtc_values[0] & 0x1F
+                minutes = mtc_values[1]
+                seconds = mtc_values[2]
+                frames = mtc_values[3]
+                current_total_frames = calculate_total_frames(hours, minutes, seconds, frames)
+
+
+
+        elif msg.type == 'stop':  # Reset clock_counter and last_mtc_timecode on stop
+            pass
+            # clock_counter = 0
+            # last_mtc_timecode = '00:00:00:00:00'
+            # mtc_values = [0, 0, 0, 0]
         elif msg.type == 'sysex' and msg.data[:5] == [0x7F, 0x7F, 0x01, 0x01, 0x00]:
-            clock_counter = 0
-            mtc_values = [msg.data[5], msg.data[6], msg.data[7], msg.data[8]]
-            for mtc_type, value in enumerate(mtc_values):
-                last_mtc_timecode = update_mtc_timecode(mtc_type * 2, value & 0x0F, clock_counter)
-                last_mtc_timecode = update_mtc_timecode(mtc_type * 2 + 1, value >> 4, clock_counter)
+            if not use_midi_beat_clock:
+                clock_counter = 0
+                mtc_values = [msg.data[5], msg.data[6], msg.data[7], msg.data[8]]
+                for mtc_type, value in enumerate(mtc_values):
+                    last_mtc_timecode = update_mtc_timecode(mtc_type * 2, value & 0x0F, clock_counter)
+                    last_mtc_timecode = update_mtc_timecode(mtc_type * 2 + 1, value >> 4, clock_counter)
         elif msg.type == 'note_off':
             # handle note off message
             pass
@@ -90,15 +135,30 @@ def process_midi_messages(input_port, channels):
         elif msg.type == 'pitchwheel':
             # handle pitch wheel message
             pass
+        elif msg.type == 'control_change':
+            # Handle All Notes Off message (CC number 123)
+            if msg.control == 123:
+                clock_counter = 0
+                last_mtc_timecode = '00:00:00:00:00'
+                mtc_values = [0, 0, 0, 0]
+            # Handle Stop message (CC number 120)
+            elif msg.control == 51:
+                clock_counter = 0
+                last_mtc_timecode = '00:00:00:00:00'
+                mtc_values = [0, 0, 0, 0]
+            # Handle other control change messages
+            elif msg.control == 1:
+                # handle mod wheel message
+                pass
 
-    if last_mtc_timecode is not None:
+    if last_mtc_timecode is not None or use_midi_beat_clock:
         hours = mtc_values[0] & 0x1F
         minutes = mtc_values[1]
         seconds = mtc_values[2]
         frames = mtc_values[3]
         current_total_frames = calculate_total_frames(hours, minutes, seconds, frames)
 
-    return last_mtc_timecode, current_total_frames
+    return str(last_mtc_timecode), current_total_frames
 
 
 def calculate_index(estimate_frame_counter, png_paths, index_mult=2.0, frame_duration=8.6326):
@@ -119,7 +179,6 @@ def display_png_live(frame, mtc_timecode, estimate_frame_counter, index):
 
 
 def display_png_filters(index, png_paths, folder, openCV_filters=None):
-
     if 0 <= index < len(png_paths):
         png_file = png_paths[index][folder]
         frame = cv2.imread(png_file, cv2.IMREAD_UNCHANGED)
@@ -141,6 +200,7 @@ def display_png_filters(index, png_paths, folder, openCV_filters=None):
 
             return frame
 
+
 def select_midi_input():
     available_ports = mido.get_input_names()
     print("Please select a MIDI input port:")
@@ -159,6 +219,8 @@ def select_midi_input():
     selected_port = available_ports[selection - 1]
     print(f"Selected port: {selected_port}")
     return selected_port
+
+
 def mtc_png_realtime():
     global clock_counter
 
@@ -168,19 +230,24 @@ def mtc_png_realtime():
     png_paths = parse_array_file(csv_source)
     old_timecode = 0
     # Choose the MIDI channels you want to listen to (0-based)
-    listening_channels = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]  # For example, listen to channels 1, 2, and 3
+    listening_channels = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+                          15]  # For example, listen to channels 1, 2, and 3
 
     while not stop_event.is_set():
 
         note_scaled = note % 12  # this scales the keys to one octave
-        print(note_scaled)
-        mtc_timecode_local, estimate_frame_counter_local = process_midi_messages(input_port, listening_channels)
+        #print(note_scaled)
+        mtc_timecode_local, _ = process_midi_messages(input_port, listening_channels)
+        if use_midi_beat_clock:
+            estimate_frame_counter_local = clock_counter
+        else:
+            estimate_frame_counter_local = calculate_total_frames(mtc_values[0] & 0x1F, mtc_values[1], mtc_values[2],
+                                                                  mtc_values[3])
+
         index = calculate_index(estimate_frame_counter_local, png_paths)
-        # In the mtc_png_realtime() function, modify the display_png_live line:
         frame = display_png_filters(index, png_paths, note_scaled)
         if frame is not None:
             display_png_live(frame, mtc_timecode_local, estimate_frame_counter_local, index)
-        old_timecode = mtc_timecode_local
 
         # Break the loop if the 'q' key is pressed
         if cv2.waitKey(1) & 0xFF == ord('q'):
