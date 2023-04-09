@@ -4,15 +4,20 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="88dca403-b94f-482c-88d5-5ae9c6ad30e5" name="Changes" comment="Filtered some noise from folder lists. Making things more stable as we prep for REAL TIME MIDI CONTROL">
-      <change afterPath="$PROJECT_DIR$/foldersProcessed/folder_count_48870.txt" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/foldersProcessed/folder_count_48871.txt" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/foldersProcessed/folder_locations.csv" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/foldersProcessed/folder_locations_2221.csv" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/foldersProcessed/folder_locations_2225.csv" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/generatedPngLists/sorted_png_stream.csv" afterDir="false" />
+    <list default="true" id="88dca403-b94f-482c-88d5-5ae9c6ad30e5" name="Changes" comment="MIDI control is working!!!">
+      <change afterPath="$PROJECT_DIR$/foldersProcessed/folder_count_42199.txt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/generatedPngLists/expanded_weighted_sampling.csv" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/generatedPngLists/sorted_multiplier_random_list.txt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/generatedPngLists/weighted_sampling.csv" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/weights_ask_generate_weighted_csv.txt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/weights_ask_reapply_weighting.txt" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/make_png_lists.py" beforeDir="false" afterPath="$PROJECT_DIR$/make_png_lists.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/foldersProcessed/folder_count_48870.txt" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/foldersProcessed/folder_count_48871.txt" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/foldersProcessed/folder_locations.csv" beforeDir="false" afterPath="$PROJECT_DIR$/foldersProcessed/folder_locations.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/foldersProcessed/folder_locations_2221.csv" beforeDir="false" afterPath="$PROJECT_DIR$/foldersProcessed/folder_locations_2221.csv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/foldersProcessed/folder_locations_2225.csv" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/generatedPngLists/sorted_png_stream.csv" beforeDir="false" afterPath="$PROJECT_DIR$/generatedPngLists/sorted_png_stream.csv" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/midi_mtc_png_display.py" beforeDir="false" afterPath="$PROJECT_DIR$/midi_mtc_png_display.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -115,7 +120,9 @@
       <workItem from="1680913545462" duration="8306000" />
       <workItem from="1680921974331" duration="1113000" />
       <workItem from="1680951906047" duration="10866000" />
-      <workItem from="1680989304613" duration="3320000" />
+      <workItem from="1680989304613" duration="3460000" />
+      <workItem from="1681038047552" duration="2751000" />
+      <workItem from="1681056218476" duration="9777000" />
     </task>
     <task id="LOCAL-00001" summary="Lots of changes, but it is working nicely.">
       <created>1679677664677</created>
@@ -187,7 +194,14 @@
       <option name="project" value="LOCAL" />
       <updated>1680986044055</updated>
     </task>
-    <option name="localTasksCounter" value="11" />
+    <task id="LOCAL-00011" summary="MIDI control is working!!!">
+      <created>1680993034994</created>
+      <option name="number" value="00011" />
+      <option name="presentableId" value="LOCAL-00011" />
+      <option name="project" value="LOCAL" />
+      <updated>1680993034994</updated>
+    </task>
+    <option name="localTasksCounter" value="12" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -214,12 +228,13 @@
     <MESSAGE value="displays png to screens, added main, sorts folders with error checking." />
     <MESSAGE value="Ok, working again." />
     <MESSAGE value="Filtered some noise from folder lists. Making things more stable as we prep for REAL TIME MIDI CONTROL" />
-    <option name="LAST_COMMIT_MESSAGE" value="Filtered some noise from folder lists. Making things more stable as we prep for REAL TIME MIDI CONTROL" />
+    <MESSAGE value="MIDI control is working!!!" />
+    <option name="LAST_COMMIT_MESSAGE" value="MIDI control is working!!!" />
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
     <SUITE FILE_PATH="coverage/VideoInterleaving$folders.coverage" NAME="folders Coverage Results" MODIFIED="1679666933824" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/VideoInterleaving$midi_clock.coverage" NAME="midi_clock Coverage Results" MODIFIED="1680986596545" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
-    <SUITE FILE_PATH="coverage/VideoInterleaving$midi_mtc_png_display.coverage" NAME="midi_mtc_png_display Coverage Results" MODIFIED="1680992024806" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/VideoInterleaving$midi_mtc_png_display.coverage" NAME="midi_mtc_png_display Coverage Results" MODIFIED="1681071785100" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/VideoInterleaving$interleave_file.coverage" NAME="interleave_file Coverage Results" MODIFIED="1680466715424" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/VideoInterleaving$get_folders_list.coverage" NAME="get_folders_list Coverage Results" MODIFIED="1680985880894" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/VideoInterleaving$process_folders.coverage" NAME="process_folders Coverage Results" MODIFIED="1680543293144" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
@@ -233,7 +248,7 @@
     <SUITE FILE_PATH="coverage/VideoInterleaving$Main.coverage" NAME="Main Coverage Results" MODIFIED="1679747778147" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/VideoInterleaving$sort_files.coverage" NAME="sort_files Coverage Results" MODIFIED="1679670360066" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/VideoInterleaving$midio.coverage" NAME="midio Coverage Results" MODIFIED="1680078823487" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
-    <SUITE FILE_PATH="coverage/VideoInterleaving$main.coverage" NAME="main Coverage Results" MODIFIED="1680990313311" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/VideoInterleaving$main.coverage" NAME="main Coverage Results" MODIFIED="1681063090971" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/VideoInterleaving$video_merge.coverage" NAME="video_merge Coverage Results" MODIFIED="1680466333083" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/VideoInterleaving$midi_calc.coverage" NAME="midi_calc Coverage Results" MODIFIED="1680635177952" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/VideoInterleaving$make_png_lists.coverage" NAME="make_png_lists Coverage Results" MODIFIED="1680986834496" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
