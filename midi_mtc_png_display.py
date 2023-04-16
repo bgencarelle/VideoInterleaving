@@ -8,11 +8,11 @@ from threading import Event
 import time
 from collections import deque
 
-BUFFER_SIZE = 100
+BUFFER_SIZE = 200
 
 clock_intervals = deque()
 intervals_sum = 0.0
-
+frame_counter = 0
 highest_timecode_seen = 0
 clock_counter = 0
 stop_event = Event()
@@ -20,7 +20,7 @@ mtc_values = [0, 0, 0, 0]
 note = 1
 last_clock_time = None
 clock_message_count = 0
-use_midi_beat_clock = False
+use_midi_beat_clock = True
 previous_time = time.time()
 avg_clock_interval = 0.1
 mtc_img = np.zeros((150, 600), dtype=np.uint8)
@@ -41,7 +41,7 @@ def parse_mtc(msg):
     return mtc_type, value
 
 
-def update_mtc_timecode(mtc_type, value, clock_counter):
+def update_mtc_timecode(mtc_type, value, mtc_clock_counter):
     global mtc_values
 
     if mtc_type == 0:
@@ -65,7 +65,7 @@ def update_mtc_timecode(mtc_type, value, clock_counter):
     minutes = mtc_values[1]
     seconds = mtc_values[2]
     frames = mtc_values[3]
-    subframes = int((clock_counter / 24) * 100)  # Assuming 24 PPQN (Pulses Per Quarter Note)
+    subframes = int((mtc_clock_counter / 24) * 100)  # Assuming 24 PPQN (Pulses Per Quarter Note)
 
     return f'{hours:02}:{minutes:02}:{seconds:02}:{frames:02}:{subframes:02}'
 
@@ -77,9 +77,8 @@ def calculate_total_frames(hours, minutes, seconds, frames):
 
 def process_midi_messages(input_port, channels):
     global clock_counter, mtc_values, frame_counter, last_mtc_timecode, note
-    global last_clock_time, clock_message_count, previous_time,intervals_sum
+    global last_clock_time, clock_message_count, previous_time, intervals_sum
     current_total_frames = 0
-
 
     for msg in input_port.iter_pending():
         if msg.type == 'clock':
@@ -95,12 +94,14 @@ def process_midi_messages(input_port, channels):
                 intervals_sum += clock_interval
 
                 if len(clock_intervals) == BUFFER_SIZE:
-                    avg_clock_interval = intervals_sum / BUFFER_SIZE
-                    bpm = 60 / (avg_clock_interval * 24)
+                    buf_clock_interval = intervals_sum / BUFFER_SIZE
+                    bpm = 60 / (buf_clock_interval * 24)
                     print(f"BPM: {bpm:.2f}")
 
             last_clock_time = current_time
-        elif msg.type == 'quarter_frame':
+            clock_counter += 1  # Increment the clock_counter
+            frame_counter += 1  # Increment the frame_counter
+        if msg.type == 'quarter_frame':
             if not use_midi_beat_clock:
                 mtc_type, value = parse_mtc(msg)
                 last_mtc_timecode = update_mtc_timecode(mtc_type, value, clock_counter)
@@ -109,9 +110,6 @@ def process_midi_messages(input_port, channels):
                 seconds = mtc_values[2]
                 frames = mtc_values[3]
                 current_total_frames = calculate_total_frames(hours, minutes, seconds, frames)
-
-
-
         elif msg.type == 'stop':  # Reset clock_counter and last_mtc_timecode on stop
             pass
             # clock_counter = 0
@@ -157,6 +155,8 @@ def process_midi_messages(input_port, channels):
         seconds = mtc_values[2]
         frames = mtc_values[3]
         current_total_frames = calculate_total_frames(hours, minutes, seconds, frames)
+        if use_midi_beat_clock:
+            current_total_frames = int(clock_counter / 24)
 
     return str(last_mtc_timecode), current_total_frames
 
@@ -178,7 +178,7 @@ def display_png_live(frame, mtc_timecode, estimate_frame_counter, index):
     cv2.imshow(f'MTC Timecode - PID: {os.getpid()}', frame)
 
 
-def display_png_filters(index, png_paths, folder, openCV_filters=None):
+def display_png_filters(index, png_paths, folder, open_cv_filters=None):
     if 0 <= index < len(png_paths):
         png_file = png_paths[index][folder]
         frame = cv2.imread(png_file, cv2.IMREAD_UNCHANGED)
@@ -192,10 +192,10 @@ def display_png_filters(index, png_paths, folder, openCV_filters=None):
             #     alpha_channel = frame[:, :, 3]
             #     _, mask = cv2.threshold(alpha_channel, 128, 255, cv2.THRESH_BINARY)
             #     frame = cv2.bitwise_and(frame, frame, mask=mask)
-            #     frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+            #     frame = cv2.cvtColonr(frame, cv2.COLOR_BGRA2BGR)
 
             # Apply OpenCV filters (dummy code for now)
-            if openCV_filters:
+            if open_cv_filters:
                 pass
 
             return frame
@@ -228,7 +228,6 @@ def mtc_png_realtime():
     input_port = mido.open_input(midi_input_port)
     csv_source = select_csv_file()
     png_paths = parse_array_file(csv_source)
-    old_timecode = 0
     # Choose the MIDI channels you want to listen to (0-based)
     listening_channels = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
                           15]  # For example, listen to channels 1, 2, and 3
@@ -236,7 +235,7 @@ def mtc_png_realtime():
     while not stop_event.is_set():
 
         note_scaled = note % 12  # this scales the keys to one octave
-        #print(note_scaled)
+        # print(note_scaled)
         mtc_timecode_local, _ = process_midi_messages(input_port, listening_channels)
         if use_midi_beat_clock:
             estimate_frame_counter_local = clock_counter

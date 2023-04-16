@@ -33,7 +33,6 @@ def main():
             main()
     else:
         return
-        main()
 
 
 if __name__ == "__main__":
