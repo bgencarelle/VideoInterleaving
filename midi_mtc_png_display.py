@@ -19,8 +19,9 @@ stop_event = Event()
 mtc_values = [0, 0, 0, 0]
 note = 1
 last_clock_time = None
+display_clock_time = False
 clock_message_count = 0
-use_midi_beat_clock = True
+use_midi_beat_clock = False
 previous_time = time.time()
 avg_clock_interval = 0.1
 mtc_img = np.zeros((150, 600), dtype=np.uint8)
@@ -162,6 +163,7 @@ def process_midi_messages(input_port, channels):
 
 
 def calculate_index(estimate_frame_counter, png_paths, index_mult=2.0, frame_duration=8.6326):
+    frame_duration *= .5
     effective_length = len(png_paths)
     index = int(estimate_frame_counter / (frame_duration / index_mult)) % (effective_length * 2)
     if index >= effective_length:
@@ -170,11 +172,12 @@ def calculate_index(estimate_frame_counter, png_paths, index_mult=2.0, frame_dur
 
 
 def display_png_live(frame, mtc_timecode, estimate_frame_counter, index):
-    # Display timecode and other information
-    cv2.putText(frame, mtc_timecode, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 2)
-    cv2.putText(frame, f'Estimate Frame Counter: {estimate_frame_counter}', (10, 100),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-    cv2.putText(frame, f'index: {index}', (10, 140), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    if display_clock_time:
+        # Display timecode and other information
+        cv2.putText(frame, mtc_timecode, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 2)
+        cv2.putText(frame, f'Estimate Frame Counter: {estimate_frame_counter}', (10, 100),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        cv2.putText(frame, f'index: {index}', (10, 140), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
     cv2.imshow(f'MTC Timecode - PID: {os.getpid()}', frame)
 
 
