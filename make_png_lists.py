@@ -9,8 +9,8 @@ import sys
 
 def parse_folder_locations():
     folder_dict = {}
-    processed_dir = 'foldersProcessed'
-    csv_path = os.path.join(processed_dir, 'folder_locations_2221.csv')
+    csv_path = choose_file()
+    check_unequal_png_counts(csv_path)
 
     if os.path.exists(csv_path):
         with open(csv_path, 'r', newline='') as f:
@@ -25,10 +25,25 @@ def parse_folder_locations():
     return folder_dict
 
 
-def check_unequal_png_counts():
+def choose_file():
     processed_dir = 'foldersProcessed'
-    csv_path = os.path.join(processed_dir, 'folder_locations_2221.csv')
+    available_files = [f for f in os.listdir(processed_dir) if f.endswith('.csv')]
+    print("Available CSV files:")
+    for i, file in enumerate(available_files):
+        print(f"{i + 1}: {file}")
 
+    while True:
+        try:
+            choice = int(input("Enter the number corresponding to the desired file: ")) - 1
+            if 0 <= choice < len(available_files):
+                return os.path.join(processed_dir, available_files[choice])
+            else:
+                print("Invalid choice. Please enter a valid number.")
+        except ValueError:
+            print("Invalid input. Please enter a valid number.")
+
+
+def check_unequal_png_counts(csv_path):
     if os.path.exists(csv_path):
         png_counts = set()
         with open(csv_path, 'r', newline='') as f:
@@ -155,11 +170,11 @@ def write_sorted_multiplier_random(expanded_sampled_png_files, output_folder):
 def write_sorted_png_stream(grouped_png_files, output_folder):
     with open(os.path.join(output_folder, 'sorted_png_stream.csv'), 'w', newline='') as f:
         csv_writer = csv.writer(f)
-        sorted_grouped_png_files = sorted(enumerate(grouped_png_files), key=lambda x: x[1][0]) # Sort by the number in C1
+        sorted_grouped_png_files = sorted(enumerate(grouped_png_files), key=lambda x: x[1][0])
+        # Sort by the number in C1
         for index, group in sorted_grouped_png_files:
             csv_writer.writerow([index] + group)
     print("Non-Weighted Grouped list written to sorted_png_stream.csv")
-
 
 
 def weighted_sampling(grouped_png_files, folder_weights, output_folder):
@@ -202,7 +217,6 @@ def expanded_weighted_sampling(grouped_png_files, folder_weights, total_items, o
 
 def process_files():
     folder_dict = parse_folder_locations()
-    check_unequal_png_counts()
     if not folder_dict:
         print("No accessible files in the foldersProcessed directory.")
         sys.exit(1)  # Terminate the script with a non-zero exit code
