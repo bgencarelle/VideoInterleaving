@@ -10,7 +10,7 @@ import sys
 def parse_folder_locations():
     folder_dict = {}
     processed_dir = 'foldersProcessed'
-    csv_path = os.path.join(processed_dir, 'folder_locations.csv')
+    csv_path = os.path.join(processed_dir, 'folder_locations_2221.csv')
 
     if os.path.exists(csv_path):
         with open(csv_path, 'r', newline='') as f:
@@ -155,9 +155,11 @@ def write_sorted_multiplier_random(expanded_sampled_png_files, output_folder):
 def write_sorted_png_stream(grouped_png_files, output_folder):
     with open(os.path.join(output_folder, 'sorted_png_stream.csv'), 'w', newline='') as f:
         csv_writer = csv.writer(f)
-        for index, group in enumerate(grouped_png_files):
+        sorted_grouped_png_files = sorted(enumerate(grouped_png_files), key=lambda x: x[1][0]) # Sort by the number in C1
+        for index, group in sorted_grouped_png_files:
             csv_writer.writerow([index] + group)
     print("Non-Weighted Grouped list written to sorted_png_stream.csv")
+
 
 
 def weighted_sampling(grouped_png_files, folder_weights, output_folder):
