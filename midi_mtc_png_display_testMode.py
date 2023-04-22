@@ -20,7 +20,7 @@ stop_event = Event()
 mtc_values = [0, 0, 0, 0]
 note = 0
 last_clock_time = None
-display_clock_time = False
+display_clock_time = True
 check_bpm = False
 clock_message_count = 0
 use_midi_beat_clock = False
@@ -28,6 +28,47 @@ previous_time = time.time()
 avg_clock_interval = 0.1
 mtc_img = np.zeros((150, 600), dtype=np.uint8)
 last_mtc_timecode = '00:00:00:00:00'
+
+
+
+def select_midi_input():
+    available_ports = mido.get_input_names()
+
+    # Check if there are any available ports
+    if len(available_ports) == 0:
+        print("No MIDI input ports available.")
+        return None
+
+    # Check if there is only one port or all ports have the same name
+    if len(set(available_ports)) == 1:
+        selected_port = available_ports[0]
+        print("Only one input port available, defaulting to:")
+        print(selected_port)
+        return selected_port
+
+    # Prompt user to select a port
+    print("Please select a MIDI input port:")
+    for i, port in enumerate(available_ports):
+        print(f"{i + 1}: {port}")
+
+    while True:
+        try:
+            selection = input("> ")
+            if selection == "":
+                selected_port = available_ports[0]
+                print(f"Defaulting to first MIDI input port: {selected_port}")
+                return selected_port
+
+            selection = int(selection)
+            if selection not in range(1, len(available_ports) + 1):
+                raise ValueError
+
+            selected_port = available_ports[selection - 1]
+            print(f"Selected port: {selected_port}")
+            return selected_port
+
+        except ValueError:
+            print("Invalid selection. Please enter a number corresponding to a port.")
 
 
 def select_csv_file():
@@ -101,8 +142,9 @@ def update_mtc_timecode(mtc_type, value, mtc_clock_counter):
     seconds = mtc_values[2]
     frames = mtc_values[3]
     subframes = int((mtc_clock_counter / 24) * 100)  # Assuming 24 PPQN (Pulses Per Quarter Note)
+    total = f'{hours:02}:{minutes:02}:{seconds:02}:{frames:02}:{subframes:02}'
 
-    return f'{hours:02}:{minutes:02}:{seconds:02}:{frames:02}:{subframes:02}'
+    return total
 
 
 def calculate_total_frames(hours, minutes, seconds, frames):
@@ -117,8 +159,9 @@ def process_midi_messages(input_port, channels):
 
     for msg in input_port.iter_pending():
         if msg.type == 'clock':
-            current_time = time.time()
+
             if check_bpm is True:
+                current_time = time.time()
                 if last_clock_time is not None:
                     clock_interval = current_time - last_clock_time
 
@@ -133,8 +176,7 @@ def process_midi_messages(input_port, channels):
                         buf_clock_interval = intervals_sum / CLOCK_BUFFER_SIZE
                         bpm = 60 / (buf_clock_interval * 24)
                         print(f"BPM: {bpm:.2f}")
-
-            last_clock_time = current_time
+                last_clock_time = current_time
             clock_counter += 1  # Increment the clock_counter
             frame_counter += 1  # Increment the frame_counter
         if msg.type == 'quarter_frame':
@@ -153,7 +195,6 @@ def process_midi_messages(input_port, channels):
             # mtc_values = [0, 0, 0, 0]
         elif msg.type == 'sysex' and msg.data[:5] == [0x7F, 0x7F, 0x01, 0x01, 0x00]:
             if not use_midi_beat_clock:
-                clock_counter = 0
                 mtc_values = [msg.data[5], msg.data[6], msg.data[7], msg.data[8]]
                 for mtc_type, value in enumerate(mtc_values):
                     last_mtc_timecode = update_mtc_timecode(mtc_type * 2, value & 0x0F, clock_counter)
@@ -176,10 +217,10 @@ def process_midi_messages(input_port, channels):
                 last_mtc_timecode = '00:00:00:00:00'
                 mtc_values = [0, 0, 0, 0]
             # Handle Stop message (CC number 120)
-            elif msg.control == 51:
-                clock_counter = 0
-                last_mtc_timecode = '00:00:00:00:00'
-                mtc_values = [0, 0, 0, 0]
+            # elif msg.control == 51:
+            #     clock_counter = 0
+            #     last_mtc_timecode = '00:00:00:00:00'
+            #     mtc_values = [0, 0, 0, 0]
             # Handle other control change messages
             elif msg.control == 1:
                 # handle mod wheel message
@@ -191,6 +232,7 @@ def process_midi_messages(input_port, channels):
         seconds = mtc_values[2]
         frames = mtc_values[3]
         current_total_frames = calculate_total_frames(hours, minutes, seconds, frames)
+
         if use_midi_beat_clock:
             current_total_frames = int(clock_counter / 24)
 
@@ -203,13 +245,19 @@ def print_memory_usage():
     print(f"Memory usage: {mem_info.rss / (1024 * 1024):.2f} MB")
 
 
-def calculate_index(estimate_frame_counter, png_paths, index_mult=2.0, frame_duration=8.6326):
-    frame_duration *= .50
+import numpy as np
+
+def calculate_index(estimate_frame_counter, png_paths, index_mult=1.0, frame_duration=8.6326):
     effective_length = len(png_paths)
-    index = int(estimate_frame_counter / (frame_duration / index_mult)) % (effective_length * 2)
-    if index >= effective_length:
-        index = effective_length - (index - effective_length) - 1
+    progress = int(estimate_frame_counter / (frame_duration / index_mult)) % (effective_length * 2)
+    if progress <= effective_length:
+        index = int(progress)
+    else:
+        index = int(effective_length * 2 - progress)
+    # Ensure the index is within the valid range
+    index = max(0, min(index, effective_length - 1))
     return index
+
 
 
 def display_png_live(frame, mtc_timecode, estimate_frame_counter, index):
@@ -222,97 +270,91 @@ def display_png_live(frame, mtc_timecode, estimate_frame_counter, index):
     cv2.imshow(f'MTC Timecode - PID: {os.getpid()}', frame)
 
 
-def display_png_filters(index, png_paths, folder, open_cv_filters=None, use_as_top_mask=True, solid_color_mask=True,
-                        bg_mask=12):
+
+def display_png_filters(index, png_paths, folder, open_cv_filters=None, use_as_top_mask=True, solid_color_mask=True, bg_mask=12, buffer_size=30):
+    # Create a circular buffer (deque) for buff_png if it doesn't exist yet
+    if not hasattr(display_png_filters, "buff_png"):
+        display_png_filters.buff_png = deque(maxlen=buffer_size)
+
+    effective_length = len(png_paths)
+
+    # Define a function to search the buffer for a frame
+    def find_frame_in_buffer(index, folder):
+        for buffered_frame in display_png_filters.buff_png:
+            if buffered_frame["folder"] == folder and (buffered_frame["index"] == index or buffered_frame["index"] == effective_length - index - 1):
+                return buffered_frame["frame"]
+        return None
+
+    # Search for the main frame in the buffer
+    main_frame = find_frame_in_buffer(index, folder)
+    if main_frame is not None:
+        return main_frame
+
+    # Search for the background frame in the buffer if necessary
+    background_frame = None
+    if use_as_top_mask:
+        background_frame = find_frame_in_buffer(index, bg_mask)
+
+    # If neither frame is in the buffer, read them from the files
+    if main_frame is None:
+        png_file = png_paths[index][folder]
+        main_frame = cv2.imread(png_file, cv2.IMREAD_UNCHANGED)
+
+    if use_as_top_mask and background_frame is None:
+        background_file = png_paths[index][bg_mask]
+        background_frame = cv2.imread(background_file, cv2.IMREAD_UNCHANGED)
+
+    # Process the main_frame and background_frame
     bg_color = (30, 32, 30)
     mask_bg_color = (32, 245, 30)
 
-    if 0 <= index < len(png_paths):
-        png_file = png_paths[index][folder]
-        frame = cv2.imread(png_file, cv2.IMREAD_UNCHANGED)
+    if main_frame is not None:
+        background = np.zeros_like(main_frame[..., 0:3], dtype=np.uint8)
+        background[:, :] = bg_color
 
-        if frame is not None:
-            background = np.zeros_like(frame[..., 0:3], dtype=np.uint8)
-            background[:, :] = bg_color
+        if main_frame.shape[2] == 4:
+            alpha_channel = main_frame[:, :, 3] / 255.0
+            inv_alpha_channel = 1 - alpha_channel
 
-            if frame.shape[2] == 4:
-                alpha_channel = frame[:, :, 3] / 255.0
-                inv_alpha_channel = 1 - alpha_channel
+            main_frame = cv2.cvtColor(main_frame, cv2.COLOR_BGRA2BGR)
+            main_layer = (main_frame * alpha_channel[..., None]) + (background * inv_alpha_channel[..., None])
+            main_layer = main_layer.astype(np.uint8)
 
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-                main_layer = (frame * alpha_channel[..., None]) + (background * inv_alpha_channel[..., None])
-                main_layer = main_layer.astype(np.uint8)
+        if use_as_top_mask and background_frame is not None:
+            if background_frame.shape[2] == 4:
+                mask_alpha_channel = background_frame[:, :, 3] / 255.0
+                inv_mask_alpha_channel = 1 - mask_alpha_channel
+            else:
+                mask_alpha_channel = np.ones(main_layer.shape[:2], dtype=np.float32)
+                inv_mask_alpha_channel = np.zeros(main_layer.shape[:2], dtype=np.float32)
 
-            if use_as_top_mask:
-                background_file = png_paths[index][bg_mask]
-                background_mask = cv2.imread(background_file, cv2.IMREAD_UNCHANGED)
+            if solid_color_mask:
+                floating_mask = np.zeros_like(main_layer, dtype=np.uint8)
+                floating_mask[:, :] = mask_bg_color
+            else:
+                floating_mask = cv2.cvtColor(background_frame, cv2.COLOR_BGRA2BGR)
+                floating_mask = cv2.resize(floating_mask, (main_frame.shape[1], main_frame.shape[0]))
 
-                if background_mask.shape[2] == 4:
-                    mask_alpha_channel = background_mask[:, :, 3] / 255.0
-                    inv_mask_alpha_channel = 1 - mask_alpha_channel
-                else:
-                    mask_alpha_channel = np.ones(main_layer.shape[:2], dtype=np.float32)
-                    inv_mask_alpha_channel = np.zeros(main_layer.shape[:2], dtype=np.float32)
+            main_layer = (main_layer * inv_mask_alpha_channel[..., None]) + (
+                        floating_mask * mask_alpha_channel[..., None])
+            main_layer = main_layer.astype(np.uint8)
 
-                if solid_color_mask:
-                    floating_mask = np.zeros_like(main_layer, dtype=np.uint8)
-                    floating_mask[:, :] = mask_bg_color
-                else:
-                    floating_mask = cv2.cvtColor(background_mask, cv2.COLOR_BGRA2BGR)
-                    floating_mask = cv2.resize(floating_mask, (frame.shape[1], frame.shape[0]))
+        if open_cv_filters:
+            for open_cv_filter in open_cv_filters:
+                main_layer = open_cv_filter(main_layer)
 
-                main_layer = (main_layer * inv_mask_alpha_channel[..., None]) + (
-                            floating_mask * mask_alpha_channel[..., None])
-                main_layer = main_layer.astype(np.uint8)
+        # Add the processed frames to the buffer
+        display_png_filters.buff_png.append({"index": index, "folder": folder, "frame": main_layer})
 
-            if open_cv_filters:
-                pass
+        if use_as_top_mask:
+            display_png_filters.buff_png.append({"index": index, "folder": bg_mask, "frame": background_frame})
 
-            return main_layer
-
-
-def select_midi_input():
-    available_ports = mido.get_input_names()
-
-    # Check if there are any available ports
-    if len(available_ports) == 0:
-        print("No MIDI input ports available.")
-        return None
-
-    # Check if there is only one port or all ports have the same name
-    if len(set(available_ports)) == 1:
-        selected_port = available_ports[0]
-        print("Only one input port available, defaulting to:")
-        print(selected_port)
-        return selected_port
-
-    # Prompt user to select a port
-    print("Please select a MIDI input port:")
-    for i, port in enumerate(available_ports):
-        print(f"{i + 1}: {port}")
-
-    while True:
-        try:
-            selection = input("> ")
-            if selection == "":
-                selected_port = available_ports[0]
-                print(f"Defaulting to first MIDI input port: {selected_port}")
-                return selected_port
-
-            selection = int(selection)
-            if selection not in range(1, len(available_ports) + 1):
-                raise ValueError
-
-            selected_port = available_ports[selection - 1]
-            print(f"Selected port: {selected_port}")
-            return selected_port
-
-        except ValueError:
-            print("Invalid selection. Please enter a number corresponding to a port.")
+        return main_layer
 
 
 def mtc_png_realtime():
     global clock_counter
+    global display_clock_time
 
     midi_input_port = select_midi_input()  # Let user choose MIDI input port
     input_port = mido.open_input(midi_input_port)
@@ -325,14 +367,12 @@ def mtc_png_realtime():
     while not stop_event.is_set():
 
         note_scaled = note % 12  # this scales the keys to one octave
-        # print(note_scaled)
         mtc_timecode_local, _ = process_midi_messages(input_port, listening_channels)
         if use_midi_beat_clock:
             estimate_frame_counter_local = clock_counter
         else:
             estimate_frame_counter_local = calculate_total_frames(mtc_values[0] & 0x1F, mtc_values[1], mtc_values[2],
                                                                   mtc_values[3])
-
         index = calculate_index(estimate_frame_counter_local, png_paths)
         frame = display_png_filters(index, png_paths, note_scaled)
         if frame is not None:
@@ -345,6 +385,10 @@ def mtc_png_realtime():
         # Break the loop if the 'q' key is pressed
         if cv2.waitKey(1) & 0xFF == ord('f'):
             print_memory_usage()
+
+        # Break the loop if the 'q' key is pressed
+        if cv2.waitKey(1) & 0xFF == ord('c'):
+            display_clock_time = not display_clock_time
     # Clean up
     input_port.close()
     cv2.destroyAllWindows()
