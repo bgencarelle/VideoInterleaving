@@ -1,12 +1,13 @@
-import mido
-import cv2
 import csv
-import numpy as np
 import os
 import time
-from threading import Event
-import time
 from collections import deque
+from threading import Event
+
+import cv2
+import mido
+import numpy as np
+import psutil
 
 CLOCK_BUFFER_SIZE = 200
 FRAME_BUFFER_SIZE = 30
@@ -27,6 +28,38 @@ previous_time = time.time()
 avg_clock_interval = 0.1
 mtc_img = np.zeros((150, 600), dtype=np.uint8)
 last_mtc_timecode = '00:00:00:00:00'
+
+
+def select_csv_file():
+    csv_dir = 'generatedPngLists'
+    csv_files = [f for f in os.listdir(csv_dir) if f.endswith('.csv')]
+
+    if len(csv_files) == 0:
+        print(f"No .csv files found in directory {csv_dir}")
+        return None
+
+    if len(csv_files) == 1:
+        print("Only one .csv file found, defaulting to:")
+        selected_file = os.path.join(csv_dir, csv_files[0])
+        print(selected_file)
+        return selected_file
+
+    print("Please select a .csv file to use:")
+    for i, f in enumerate(csv_files):
+        print(f"{i + 1}: {f}")
+
+    while True:
+        try:
+            selection = int(input("> "))
+            if selection not in range(1, len(csv_files) + 1):
+                raise ValueError
+            break
+        except ValueError:
+            print("Invalid selection. Please enter a number corresponding to a file.")
+
+    selected_file = os.path.join(csv_dir, csv_files[selection - 1])
+    print(f"Selected file: {selected_file}")
+    return selected_file
 
 
 def parse_array_file(file_path):
@@ -85,7 +118,7 @@ def process_midi_messages(input_port, channels):
     for msg in input_port.iter_pending():
         if msg.type == 'clock':
             current_time = time.time()
-            if check_bpm == True:
+            if check_bpm is True:
                 if last_clock_time is not None:
                     clock_interval = current_time - last_clock_time
 
@@ -164,8 +197,14 @@ def process_midi_messages(input_port, channels):
     return str(last_mtc_timecode), current_total_frames
 
 
+def print_memory_usage():
+    process = psutil.Process(os.getpid())
+    mem_info = process.memory_info()
+    print(f"Memory usage: {mem_info.rss / (1024 * 1024):.2f} MB")
+
+
 def calculate_index(estimate_frame_counter, png_paths, index_mult=2.0, frame_duration=8.6326):
-    frame_duration *= .25
+    frame_duration *= .50
     effective_length = len(png_paths)
     index = int(estimate_frame_counter / (frame_duration / index_mult)) % (effective_length * 2)
     if index >= effective_length:
@@ -183,9 +222,10 @@ def display_png_live(frame, mtc_timecode, estimate_frame_counter, index):
     cv2.imshow(f'MTC Timecode - PID: {os.getpid()}', frame)
 
 
-def display_png_filters(index, png_paths, folder, open_cv_filters=None, use_as_top_mask=True, solid_color_mask=True, bg_mask=12):
+def display_png_filters(index, png_paths, folder, open_cv_filters=None, use_as_top_mask=True, solid_color_mask=True,
+                        bg_mask=12):
     bg_color = (30, 32, 30)
-    mask_bg_color = (32,245,30)
+    mask_bg_color = (32, 245, 30)
 
     if 0 <= index < len(png_paths):
         png_file = png_paths[index][folder]
@@ -221,7 +261,8 @@ def display_png_filters(index, png_paths, folder, open_cv_filters=None, use_as_t
                     floating_mask = cv2.cvtColor(background_mask, cv2.COLOR_BGRA2BGR)
                     floating_mask = cv2.resize(floating_mask, (frame.shape[1], frame.shape[0]))
 
-                main_layer = (main_layer * inv_mask_alpha_channel[..., None]) + (floating_mask * mask_alpha_channel[..., None])
+                main_layer = (main_layer * inv_mask_alpha_channel[..., None]) + (
+                            floating_mask * mask_alpha_channel[..., None])
                 main_layer = main_layer.astype(np.uint8)
 
             if open_cv_filters:
@@ -301,44 +342,12 @@ def mtc_png_realtime():
         if cv2.waitKey(1) & 0xFF == ord('q'):
             stop_event.set()
 
+        # Break the loop if the 'q' key is pressed
+        if cv2.waitKey(1) & 0xFF == ord('f'):
+            print_memory_usage()
     # Clean up
     input_port.close()
     cv2.destroyAllWindows()
-
-
-import os
-
-def select_csv_file():
-    csv_dir = 'generatedPngLists'
-    csv_files = [f for f in os.listdir(csv_dir) if f.endswith('.csv')]
-
-    if len(csv_files) == 0:
-        print(f"No .csv files found in directory {csv_dir}")
-        return None
-
-    if len(csv_files) == 1:
-        print("Only one .csv file found, defaulting to:")
-        selected_file = os.path.join(csv_dir, csv_files[0])
-        print(selected_file)
-        return selected_file
-
-    print("Please select a .csv file to use:")
-    for i, f in enumerate(csv_files):
-        print(f"{i + 1}: {f}")
-
-    while True:
-        try:
-            selection = int(input("> "))
-            if selection not in range(1, len(csv_files) + 1):
-                raise ValueError
-            break
-        except ValueError:
-            print("Invalid selection. Please enter a number corresponding to a file.")
-
-    selected_file = os.path.join(csv_dir, csv_files[selection - 1])
-    print(f"Selected file: {selected_file}")
-    return selected_file
-
 
 
 if __name__ == "__main__":
