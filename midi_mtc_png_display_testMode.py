@@ -3,14 +3,13 @@ import os
 import time
 from collections import deque
 from threading import Event
+from midi_control import process_midi_messages
 
 import cv2
 import mido
 import numpy as np
 import psutil
 
-CLOCK_BUFFER_SIZE = 200
-FRAME_BUFFER_SIZE = 30
 clock_intervals = deque()
 intervals_sum = 0.0
 frame_counter = 0
@@ -28,7 +27,10 @@ previous_time = time.time()
 avg_clock_interval = 0.1
 mtc_img = np.zeros((150, 600), dtype=np.uint8)
 last_mtc_timecode = '00:00:00:00:00'
-total_frames=0
+total_frames = 0
+mod_value = 0
+note_scaled = 0
+mask_control = 1
 
 def select_midi_input():
     available_ports = mido.get_input_names()
@@ -110,129 +112,9 @@ def parse_array_file(file_path):
     return png_paths
 
 
-def parse_mtc(msg):
-    mtc_type = msg.frame_type
-    value = msg.frame_value
-    return mtc_type, value
-
-
-def update_mtc_timecode(mtc_type, value, mtc_clock_counter):
-    global mtc_values
-
-    if mtc_type == 0:
-        mtc_values[3] = (mtc_values[3] & 0xF0) | value
-    elif mtc_type == 1:
-        mtc_values[3] = (mtc_values[3] & 0x0F) | (value << 4)
-    elif mtc_type == 2:
-        mtc_values[2] = (mtc_values[2] & 0xF0) | value
-    elif mtc_type == 3:
-        mtc_values[2] = (mtc_values[2] & 0x0F) | (value << 4)
-    elif mtc_type == 4:
-        mtc_values[1] = (mtc_values[1] & 0xF0) | value
-    elif mtc_type == 5:
-        mtc_values[1] = (mtc_values[1] & 0x0F) | (value << 4)
-    elif mtc_type == 6:
-        mtc_values[0] = (mtc_values[0] & 0xF0) | value
-    elif mtc_type == 7:
-        mtc_values[0] = (mtc_values[0] & 0x0F) | (value << 4)
-
-    hours = mtc_values[0] & 0x1F
-    minutes = mtc_values[1]
-    seconds = mtc_values[2]
-    frames = mtc_values[3]
-    total = f'{hours:02}:{minutes:02}:{seconds:02}:{frames:02}'
-
-    return total
-
-
 def calculate_total_frames(hours, minutes, seconds, frames):
     total_frames = (hours * 60 * 60 * 30) + (minutes * 60 * 30) + (seconds * 30) + frames
     return total_frames
-
-def process_midi_messages(input_port, channels):
-    global clock_counter, mtc_values, frame_counter, last_mtc_timecode, note
-    global last_clock_time, clock_message_count, previous_time, intervals_sum
-    current_total_frames = 0
-
-    for msg in input_port.iter_pending():
-        if msg.type == 'clock':
-
-            if check_bpm is True:
-                current_time = time.time()
-                if last_clock_time is not None:
-                    clock_interval = current_time - last_clock_time
-
-                    if len(clock_intervals) == CLOCK_BUFFER_SIZE:
-                        # Remove the oldest interval from the sum
-                        intervals_sum -= clock_intervals.popleft()
-
-                    clock_intervals.append(clock_interval)
-                    intervals_sum += clock_interval
-
-                    if len(clock_intervals) == CLOCK_BUFFER_SIZE:
-                        buf_clock_interval = intervals_sum / CLOCK_BUFFER_SIZE
-                        bpm = 60 / (buf_clock_interval * 24)
-                        print(f"BPM: {bpm:.2f}")
-                last_clock_time = current_time
-            clock_counter += 1
-        if msg.type == 'quarter_frame':
-            if not use_midi_beat_clock:
-                mtc_type, value = parse_mtc(msg)
-                last_mtc_timecode = update_mtc_timecode(mtc_type, value, clock_counter)
-                hours = mtc_values[0] & 0x1F
-                minutes = mtc_values[1]
-                seconds = mtc_values[2]
-                frames = mtc_values[3]
-                current_total_frames = calculate_total_frames(hours, minutes, seconds, frames)
-        elif msg.type == 'stop':  # Reset clock_counter and last_mtc_timecode on stop
-            pass
-            # clock_counter = 0
-            # last_mtc_timecode = '00:00:00:00:00'
-            # mtc_values = [0, 0, 0, 0]
-        elif msg.type == 'sysex' and msg.data[:5] == [0x7F, 0x7F, 0x01, 0x01, 0x00]:
-            if not use_midi_beat_clock:
-                mtc_values = [msg.data[5], msg.data[6], msg.data[7], msg.data[8]]
-                for mtc_type, value in enumerate(mtc_values):
-                    last_mtc_timecode = update_mtc_timecode(mtc_type * 2, value & 0x0F, clock_counter)
-                    last_mtc_timecode = update_mtc_timecode(mtc_type * 2 + 1, value >> 4, clock_counter)
-        elif msg.type == 'note_off':
-            # handle note off message
-            note = 0
-        elif msg.type == 'note_on':
-            note = msg.note
-        elif msg.type == 'control_change' and msg.control == 1:
-            # handle mod wheel message
-            pass
-        elif msg.type == 'pitchwheel':
-            # handle pitch wheel message
-            pass
-        elif msg.type == 'control_change':
-            # Handle All Notes Off message (CC number 123)
-            if msg.control == 123:
-                clock_counter = 0
-                last_mtc_timecode = '00:00:00:00:00'
-                mtc_values = [0, 0, 0, 0]
-            # Handle Stop message (CC number 120)
-            # elif msg.control == 51:
-            #     clock_counter = 0
-            #     last_mtc_timecode = '00:00:00:00:00'
-            #     mtc_values = [0, 0, 0, 0]
-            # Handle other control change messages
-            elif msg.control == 1:
-                # handle mod wheel message
-                pass
-
-    if last_mtc_timecode is not None or use_midi_beat_clock:
-        hours = mtc_values[0] & 0x1F
-        minutes = mtc_values[1]
-        seconds = mtc_values[2]
-        frames = mtc_values[3]
-        current_total_frames = calculate_total_frames(hours, minutes, seconds, frames)
-
-    if use_midi_beat_clock:
-            current_total_frames = int(clock_counter / 24)
-
-    return str(last_mtc_timecode), current_total_frames
 
 
 def print_memory_usage():
@@ -241,7 +123,7 @@ def print_memory_usage():
     print(f"Memory usage: {mem_info.rss / (1024 * 1024):.2f} MB")
 
 
-def calculate_index(estimate_frame_counter, png_paths, index_mult=1.0, frame_duration=8.6326, smoothing_factor=0.1):
+def calculate_index(estimate_frame_counter, png_paths, index_mult=4.0, frame_duration=8.6326, smoothing_factor=0.1):
     effective_length = len(png_paths)
     progress = (estimate_frame_counter / (frame_duration / index_mult)) % (effective_length * 2)
 
@@ -258,6 +140,10 @@ def calculate_index(estimate_frame_counter, png_paths, index_mult=1.0, frame_dur
 
     return index
 
+def read_frame(png_paths, index, folder):
+    png_file = png_paths[index][folder]
+    return cv2.imread(png_file, cv2.IMREAD_UNCHANGED)
+
 
 def display_png_live(frame, mtc_timecode, estimate_frame_counter, index):
     clean_frame = frame.copy()  # Create a clean copy of the frame
@@ -271,89 +157,143 @@ def display_png_live(frame, mtc_timecode, estimate_frame_counter, index):
     cv2.imshow(f'MTC Timecode - PID: {os.getpid()}', clean_frame)
 
 
+def display_png_filters(index, png_paths, folder, open_cv_filters=None, use_as_top_mask=True, solid_color_mask=True,
+                        bg_mask=12, buffer_size=2221):
+    # Create a circular buffer (deque) for buff_png if it doesn't exist yet
+    if not hasattr(display_png_filters, "buff_png"):
+        display_png_filters.buff_png = deque(maxlen=buffer_size)
 
-def read_frame(png_paths, index, folder):
-    png_file = png_paths[index][folder]
-    return cv2.imread(png_file, cv2.IMREAD_UNCHANGED)
+    effective_length = len(png_paths)
 
-def process_alpha(main_frame, bg_color):
-    background = np.zeros_like(main_frame[..., 0:3], dtype=np.uint8)
-    background[:, :] = bg_color
-    alpha_channel = main_frame[:, :, 3] / 255.0
-    inv_alpha_channel = 1 - alpha_channel
-    main_frame = cv2.cvtColor(main_frame, cv2.COLOR_BGRA2BGR)
-    return (main_frame * alpha_channel[..., None]) + (background * inv_alpha_channel[..., None])
+    # Define a function to search the buffer for a frame
+    def find_frame_in_buffer(index, folder):
+        for buffered_frame in display_png_filters.buff_png:
+            if buffered_frame["folder"] == folder and (
+                    buffered_frame["index"] == index or buffered_frame["index"] == effective_length - index - 1):
+                return buffered_frame["frame"]
+        return None
 
-def apply_mask(main_layer, background_frame, solid_color_mask, mask_bg_color):
-    if background_frame.shape[2] == 4:
-        mask_alpha_channel = background_frame[:, :, 3] / 255.0
-    else:
-        mask_alpha_channel = np.ones(main_layer.shape[:2], dtype=np.float32)
-    inv_mask_alpha_channel = 1 - mask_alpha_channel
-    floating_mask = np.zeros_like(main_layer, dtype=np.uint8) if solid_color_mask else cv2.cvtColor(background_frame, cv2.COLOR_BGRA2BGR)
-    floating_mask[:, :] = mask_bg_color
-    return (main_layer * inv_mask_alpha_channel[..., None]) + (floating_mask * mask_alpha_channel[..., None])
+    # Search for the main frame in the buffer
+    main_frame = find_frame_in_buffer(index, folder)
+    if main_frame is not None:
+        return main_frame
 
-def apply_open_cv_filters(main_layer, open_cv_filters):
-    for open_cv_filter in open_cv_filters:
-        main_layer = open_cv_filter(main_layer)
-    return main_layer
+    # Search for the background frame in the buffer if necessary
+    background_frame = None
+    if use_as_top_mask:
+        background_frame = find_frame_in_buffer(index, bg_mask)
 
-def display_png_filters(index, png_paths, folder, open_cv_filters=None, use_as_top_mask=True, solid_color_mask=True, bg_mask=12):
-    main_frame = read_frame(png_paths, index, folder)
-    background_frame = read_frame(png_paths, index, bg_mask) if use_as_top_mask else None
+    # If neither frame is in the buffer, read them from the files
+    if main_frame is None:
+        png_file = png_paths[index][folder]
+        main_frame = cv2.imread(png_file, cv2.IMREAD_UNCHANGED)
 
+    if use_as_top_mask and background_frame is None:
+        background_file = png_paths[index][bg_mask]
+        background_frame = cv2.imread(background_file, cv2.IMREAD_UNCHANGED)
+
+    # Process the main_frame and background_frame
     bg_color = (30, 32, 30)
     mask_bg_color = (32, 245, 30)
 
-    if main_frame.shape[2] == 4:
-        main_layer = process_alpha(main_frame, bg_color).astype(np.uint8)
-    else:
-        main_layer = main_frame
+    if main_frame is not None:
+        background = np.zeros_like(main_frame[..., 0:3], dtype=np.uint8)
+        background[:, :] = bg_color
 
-    if use_as_top_mask and background_frame is not None:
-        main_layer = apply_mask(main_layer, background_frame, solid_color_mask, mask_bg_color).astype(np.uint8)
+        if main_frame.shape[2] == 4:
+            alpha_channel = main_frame[:, :, 3] / 255.0
+            inv_alpha_channel = 1 - alpha_channel
 
-    if open_cv_filters:
-        main_layer = apply_open_cv_filters(main_layer, open_cv_filters)
-    return main_layer
+            main_frame = cv2.cvtColor(main_frame, cv2.COLOR_BGRA2BGR)
+            main_layer = (main_frame * alpha_channel[..., None]) + (background * inv_alpha_channel[..., None])
+            main_layer = main_layer.astype(np.uint8)
+
+        if use_as_top_mask and background_frame is not None:
+            if background_frame.shape[2] == 4:
+                mask_alpha_channel = background_frame[:, :, 3] / 255.0
+                inv_mask_alpha_channel = 1 - mask_alpha_channel
+            else:
+                mask_alpha_channel = np.ones(main_layer.shape[:2], dtype=np.float32)
+                inv_mask_alpha_channel = np.zeros(main_layer.shape[:2], dtype=np.float32)
+
+            if solid_color_mask:
+                floating_mask = np.zeros_like(main_layer, dtype=np.uint8)
+                floating_mask[:, :] = mask_bg_color
+            else:
+                floating_mask = cv2.cvtColor(background_frame, cv2.COLOR_BGRA2BGR)
+                floating_mask = cv2.resize(floating_mask, (main_frame.shape[1], main_frame.shape[0]))
+
+            main_layer = (main_layer * inv_mask_alpha_channel[..., None]) + (
+                    floating_mask * mask_alpha_channel[..., None])
+            main_layer = main_layer.astype(np.uint8)
+
+        if open_cv_filters:
+            for open_cv_filter in open_cv_filters:
+                main_layer = open_cv_filter(main_layer)
+
+        # Add the processed frames to the buffer
+        display_png_filters.buff_png.append({"index": index, "folder": folder, "frame": main_layer})
+
+        if use_as_top_mask:
+            display_png_filters.buff_png.append({"index": index, "folder": bg_mask, "frame": background_frame})
+
+        return main_layer
+
+def scale_value(value, input_min, input_max, output_min, output_max):
+    return ((value - input_min) / (input_max - input_min)) * (output_max - output_min) + output_min
 
 
+def get_color_image(png_paths):
+    # Read the main frame from the files
+    bg_color = (30, 32, 30)
+    png_file = png_paths[0][0]
+    main_frame = cv2.imread(png_file, cv2.IMREAD_UNCHANGED)
+    background = np.zeros_like(main_frame[..., 0:3], dtype=np.uint8)
+    background[:, :] = bg_color
+    return background
 
-def mtc_png_realtime_midi(png_paths, input_port, listening_channels=1):
+def mtc_png_realtime_midi(png_paths,):
+    global mod_value, note_scaled, display_clock_time, mask_control
     while not stop_event.is_set():
 
+
         note_scaled = note % 12  # this scales the keys to one octave
-        mtc_timecode_local, local_total_frames = process_midi_messages(input_port, listening_channels)
-        index = calculate_index(local_total_frames, png_paths)
-        time.sleep(.001)
-        frame = display_png_filters(index, png_paths, note_scaled)
-        time.sleep(.001)
+        index = calculate_index(total_frames, png_paths)
+        frame = display_png_filters(index, png_paths, note_scaled, False, True, mask_control)
         if frame is not None:
-            display_png_live(frame, mtc_timecode_local,local_total_frames , index)
-            time.sleep(.01)
+            display_png_live(frame, mtc_timecode_local, total_frames, index)
 
         # Break the loop if the 'q' key is pressed
         key_pressed = cv2.waitKey(1) & 0xFF
-        if key_pressed in (ord('q'), ord('f'), ord('c')):
+        if key_pressed in (ord('q'), ord('f'), ord('c'), ord('1')):
             if key_pressed == ord('q'):
                 stop_event.set()
             if key_pressed == ord('f'):
                 print_memory_usage()
             if key_pressed == ord('c'):
                 display_clock_time = not display_clock_time
+                print("clock display toggled")
+            if key_pressed == ord('1'):
+                mask_control = (mask_control + 1) % 5
+                print(mask_control)
     # Clean up
     input_port.close()
     cv2.destroyAllWindows()
 
+
 def main():
+    mtc_timecode_local, total_frames, note, mod_value \
+        = process_midi_messages(input_port, listening_channels)
+    mtc_png_realtime_midi(png_paths, input_port, listening_channels)
+
+
+
+if __name__ == "__main__":
     listening_channels = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
                           15]  # For example, listen to channels 1, 2, and 3
     midi_input_port = select_midi_input()  # Let user choose MIDI input port
     input_port = mido.open_input(midi_input_port)
     csv_source = select_csv_file()
     png_paths = parse_array_file(csv_source)
-    mtc_png_realtime_midi(png_paths, input_port, listening_channels)
-
-if __name__ == "__main__":
+    background_color = get_color_image(png_paths)
     main()

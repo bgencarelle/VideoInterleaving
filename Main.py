@@ -28,7 +28,7 @@ def main():
         if csv_files:
             mtc_png_realtime()
         else:
-            print("Cannot run mtc_png_realtime(). No .csv files found in directory generatedPngLists.")
+            print("Cannot run mtc_png_realtime_midi(). No .csv files found in directory generatedPngLists.")
             print("well that was a waste of time")
             main()
     else:
