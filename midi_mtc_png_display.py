@@ -28,7 +28,8 @@ previous_time = time.time()
 avg_clock_interval = 0.1
 mtc_img = np.zeros((150, 600), dtype=np.uint8)
 last_mtc_timecode = '00:00:00:00:00'
-total_frames=0
+total_frames = 0
+
 
 def select_midi_input():
     available_ports = mido.get_input_names()
@@ -149,6 +150,7 @@ def calculate_total_frames(hours, minutes, seconds, frames):
     total_frames = (hours * 60 * 60 * 30) + (minutes * 60 * 30) + (seconds * 30) + frames
     return total_frames
 
+
 def process_midi_messages(input_port, channels):
     global clock_counter, mtc_values, frame_counter, last_mtc_timecode, note
     global last_clock_time, clock_message_count, previous_time, intervals_sum
@@ -185,10 +187,7 @@ def process_midi_messages(input_port, channels):
                 frames = mtc_values[3]
                 current_total_frames = calculate_total_frames(hours, minutes, seconds, frames)
         elif msg.type == 'stop':  # Reset clock_counter and last_mtc_timecode on stop
-            pass
-            # clock_counter = 0
-            # last_mtc_timecode = '00:00:00:00:00'
-            # mtc_values = [0, 0, 0, 0]
+            pass  # clock_counter = 0  # last_mtc_timecode = '00:00:00:00:00'  # mtc_values = [0, 0, 0, 0]
         elif msg.type == 'sysex' and msg.data[:5] == [0x7F, 0x7F, 0x01, 0x01, 0x00]:
             if not use_midi_beat_clock:
                 mtc_values = [msg.data[5], msg.data[6], msg.data[7], msg.data[8]]
@@ -230,7 +229,7 @@ def process_midi_messages(input_port, channels):
         current_total_frames = calculate_total_frames(hours, minutes, seconds, frames)
 
     if use_midi_beat_clock:
-            current_total_frames = int(clock_counter / 24)
+        current_total_frames = int(clock_counter / 24)
 
     return str(last_mtc_timecode), current_total_frames
 
@@ -241,21 +240,15 @@ def print_memory_usage():
     print(f"Memory usage: {mem_info.rss / (1024 * 1024):.2f} MB")
 
 
-def calculate_index(estimate_frame_counter, png_paths, index_mult=1.0, frame_duration=8.6326, smoothing_factor=0.1):
+def calculate_index(estimate_frame_counter, png_paths, index_mult=1.0, frame_duration=8.6326):
     effective_length = len(png_paths)
     progress = (estimate_frame_counter / (frame_duration / index_mult)) % (effective_length * 2)
-
     if int(progress) <= effective_length:
         index = int(progress)
     else:
         index = int(effective_length * 2 - progress)
-
-    # Apply the smoothing factor to the index calculation
-    smoothed_index = int(index * (1 - smoothing_factor) + smoothing_factor * (index + 1))
-
     # Ensure the index is within the valid range
-    index = max(0, min(smoothed_index, effective_length - 1))
-
+    index = max(0, min(index, effective_length - 1))
     return index
 
 
@@ -271,56 +264,90 @@ def display_png_live(frame, mtc_timecode, estimate_frame_counter, index):
     cv2.imshow(f'MTC Timecode - PID: {os.getpid()}', clean_frame)
 
 
+def display_png_filters(index, png_paths, folder, open_cv_filters=None, use_as_top_mask=True, solid_color_mask=True,
+                        bg_mask=12, buffer_size=2221):
+    # Create a circular buffer (deque) for buff_png if it doesn't exist yet
+    if not hasattr(display_png_filters, "buff_png"):
+        display_png_filters.buff_png = deque(maxlen=buffer_size)
 
-def read_frame(png_paths, index, folder):
-    png_file = png_paths[index][folder]
-    return cv2.imread(png_file, cv2.IMREAD_UNCHANGED)
+    effective_length = len(png_paths)
 
-def process_alpha(main_frame, bg_color):
-    background = np.zeros_like(main_frame[..., 0:3], dtype=np.uint8)
-    background[:, :] = bg_color
-    alpha_channel = main_frame[:, :, 3] / 255.0
-    inv_alpha_channel = 1 - alpha_channel
-    main_frame = cv2.cvtColor(main_frame, cv2.COLOR_BGRA2BGR)
-    return (main_frame * alpha_channel[..., None]) + (background * inv_alpha_channel[..., None])
+    # Define a function to search the buffer for a frame
+    def find_frame_in_buffer(index, folder):
+        for buffered_frame in display_png_filters.buff_png:
+            if buffered_frame["folder"] == folder and (
+                    buffered_frame["index"] == index or buffered_frame["index"] == effective_length - index - 1):
+                return buffered_frame["frame"]
+        return None
 
-def apply_mask(main_layer, background_frame, solid_color_mask, mask_bg_color):
-    if background_frame.shape[2] == 4:
-        mask_alpha_channel = background_frame[:, :, 3] / 255.0
-    else:
-        mask_alpha_channel = np.ones(main_layer.shape[:2], dtype=np.float32)
-    inv_mask_alpha_channel = 1 - mask_alpha_channel
-    floating_mask = np.zeros_like(main_layer, dtype=np.uint8) if solid_color_mask else cv2.cvtColor(background_frame, cv2.COLOR_BGRA2BGR)
-    floating_mask[:, :] = mask_bg_color
-    return (main_layer * inv_mask_alpha_channel[..., None]) + (floating_mask * mask_alpha_channel[..., None])
+    # Search for the main frame in the buffer
+    main_frame = find_frame_in_buffer(index, folder)
+    if main_frame is not None:
+        return main_frame
 
-def apply_open_cv_filters(main_layer, open_cv_filters):
-    for open_cv_filter in open_cv_filters:
-        main_layer = open_cv_filter(main_layer)
-    return main_layer
+    # Search for the background frame in the buffer if necessary
+    background_frame = None
+    if use_as_top_mask:
+        background_frame = find_frame_in_buffer(index, bg_mask)
 
-def display_png_filters(index, png_paths, folder, open_cv_filters=None, use_as_top_mask=True, solid_color_mask=True, bg_mask=12):
-    main_frame = read_frame(png_paths, index, folder)
-    background_frame = read_frame(png_paths, index, bg_mask) if use_as_top_mask else None
+    # If neither frame is in the buffer, read them from the files
+    if main_frame is None:
+        png_file = png_paths[index][folder]
+        main_frame = cv2.imread(png_file, cv2.IMREAD_UNCHANGED)
 
+    if use_as_top_mask and background_frame is None:
+        background_file = png_paths[index][bg_mask]
+        background_frame = cv2.imread(background_file, cv2.IMREAD_UNCHANGED)
+
+    # Process the main_frame and background_frame
     bg_color = (30, 32, 30)
     mask_bg_color = (32, 245, 30)
 
-    if main_frame.shape[2] == 4:
-        main_layer = process_alpha(main_frame, bg_color).astype(np.uint8)
-    else:
-        main_layer = main_frame
+    if main_frame is not None:
+        background = np.zeros_like(main_frame[..., 0:3], dtype=np.uint8)
+        background[:, :] = bg_color
 
-    if use_as_top_mask and background_frame is not None:
-        main_layer = apply_mask(main_layer, background_frame, solid_color_mask, mask_bg_color).astype(np.uint8)
+        if main_frame.shape[2] == 4:
+            alpha_channel = main_frame[:, :, 3] / 255.0
+            inv_alpha_channel = 1 - alpha_channel
 
-    if open_cv_filters:
-        main_layer = apply_open_cv_filters(main_layer, open_cv_filters)
-    return main_layer
+            main_frame = cv2.cvtColor(main_frame, cv2.COLOR_BGRA2BGR)
+            main_layer = (main_frame * alpha_channel[..., None]) + (background * inv_alpha_channel[..., None])
+            main_layer = main_layer.astype(np.uint8)
+
+        if use_as_top_mask and background_frame is not None:
+            if background_frame.shape[2] == 4:
+                mask_alpha_channel = background_frame[:, :, 3] / 255.0
+                inv_mask_alpha_channel = 1 - mask_alpha_channel
+            else:
+                mask_alpha_channel = np.ones(main_layer.shape[:2], dtype=np.float32)
+                inv_mask_alpha_channel = np.zeros(main_layer.shape[:2], dtype=np.float32)
+
+            if solid_color_mask:
+                floating_mask = np.zeros_like(main_layer, dtype=np.uint8)
+                floating_mask[:, :] = mask_bg_color
+            else:
+                floating_mask = cv2.cvtColor(background_frame, cv2.COLOR_BGRA2BGR)
+                floating_mask = cv2.resize(floating_mask, (main_frame.shape[1], main_frame.shape[0]))
+
+            main_layer = (main_layer * inv_mask_alpha_channel[..., None]) + (
+                    floating_mask * mask_alpha_channel[..., None])
+            main_layer = main_layer.astype(np.uint8)
+
+        if open_cv_filters:
+            for open_cv_filter in open_cv_filters:
+                main_layer = open_cv_filter(main_layer)
+
+        # Add the processed frames to the buffer
+        display_png_filters.buff_png.append({"index": index, "folder": folder, "frame": main_layer})
+
+        if use_as_top_mask:
+            display_png_filters.buff_png.append({"index": index, "folder": bg_mask, "frame": background_frame})
+
+        return main_layer
 
 
-
-def mtc_png_realtime_midi(png_paths, input_port, listening_channels=1):
+def mtc_png_realtime(png_paths, input_port, listening_channels=1):
     while not stop_event.is_set():
 
         note_scaled = note % 12  # this scales the keys to one octave
@@ -328,10 +355,8 @@ def mtc_png_realtime_midi(png_paths, input_port, listening_channels=1):
         index = calculate_index(local_total_frames, png_paths)
         time.sleep(.001)
         frame = display_png_filters(index, png_paths, note_scaled)
-        time.sleep(.001)
         if frame is not None:
-            display_png_live(frame, mtc_timecode_local,local_total_frames , index)
-            time.sleep(.01)
+            display_png_live(frame, mtc_timecode_local, local_total_frames, index)
 
         # Break the loop if the 'q' key is pressed
         key_pressed = cv2.waitKey(1) & 0xFF
@@ -342,9 +367,11 @@ def mtc_png_realtime_midi(png_paths, input_port, listening_channels=1):
                 print_memory_usage()
             if key_pressed == ord('c'):
                 display_clock_time = not display_clock_time
+    time.sleep(0.01)
     # Clean up
     input_port.close()
     cv2.destroyAllWindows()
+
 
 def main():
     listening_channels = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
@@ -353,7 +380,8 @@ def main():
     input_port = mido.open_input(midi_input_port)
     csv_source = select_csv_file()
     png_paths = parse_array_file(csv_source)
-    mtc_png_realtime_midi(png_paths, input_port, listening_channels)
+    mtc_png_realtime(png_paths, input_port, listening_channels)
+
 
 if __name__ == "__main__":
     main()
