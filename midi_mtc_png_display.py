@@ -240,15 +240,21 @@ def print_memory_usage():
     print(f"Memory usage: {mem_info.rss / (1024 * 1024):.2f} MB")
 
 
-def calculate_index(estimate_frame_counter, png_paths, index_mult=1.0, frame_duration=8.6326):
+def calculate_index(estimate_frame_counter, png_paths, index_mult=4.0, frame_duration=8.6326, smoothing_factor=0.1):
     effective_length = len(png_paths)
     progress = (estimate_frame_counter / (frame_duration / index_mult)) % (effective_length * 2)
+
     if int(progress) <= effective_length:
         index = int(progress)
     else:
         index = int(effective_length * 2 - progress)
+
+    # Apply the smoothing factor to the index calculation
+    smoothed_index = int(index * (1 - smoothing_factor) + smoothing_factor * (index + 1))
+
     # Ensure the index is within the valid range
-    index = max(0, min(index, effective_length - 1))
+    index = max(0, min(smoothed_index, effective_length - 1))
+
     return index
 
 
@@ -265,7 +271,7 @@ def display_png_live(frame, mtc_timecode, estimate_frame_counter, index):
 
 
 def display_png_filters(index, png_paths, folder, open_cv_filters=None, use_as_top_mask=True, solid_color_mask=True,
-                        bg_mask=12, buffer_size=2221):
+                        bg_mask=4, buffer_size=2221):
     # Create a circular buffer (deque) for buff_png if it doesn't exist yet
     if not hasattr(display_png_filters, "buff_png"):
         display_png_filters.buff_png = deque(maxlen=buffer_size)
@@ -275,7 +281,7 @@ def display_png_filters(index, png_paths, folder, open_cv_filters=None, use_as_t
     # Define a function to search the buffer for a frame
     def find_frame_in_buffer(index, folder):
         for buffered_frame in display_png_filters.buff_png:
-            if buffered_frame["folder"] == folder and (
+            if buffered_frame["main_folder"] == folder and (
                     buffered_frame["index"] == index or buffered_frame["index"] == effective_length - index - 1):
                 return buffered_frame["frame"]
         return None
@@ -339,10 +345,10 @@ def display_png_filters(index, png_paths, folder, open_cv_filters=None, use_as_t
                 main_layer = open_cv_filter(main_layer)
 
         # Add the processed frames to the buffer
-        display_png_filters.buff_png.append({"index": index, "folder": folder, "frame": main_layer})
+        display_png_filters.buff_png.append({"index": index, "main_folder": folder, "frame": main_layer})
 
         if use_as_top_mask:
-            display_png_filters.buff_png.append({"index": index, "folder": bg_mask, "frame": background_frame})
+            display_png_filters.buff_png.append({"index": index, "main_folder": bg_mask, "frame": background_frame})
 
         return main_layer
 
