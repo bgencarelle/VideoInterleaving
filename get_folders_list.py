@@ -47,7 +47,7 @@ def create_additional_csv_files(folder_counts, processed_dir):
 def write_folder_list():
     folder_dict = {}
     processed_dir = "foldersProcessed"
-
+    background_mode = False
     if not os.path.exists(processed_dir):
         os.makedirs(processed_dir)
 
@@ -58,10 +58,19 @@ def write_folder_list():
                 if folder:
                     folder_dict[number] = folder
 
+
     while True:
-        folder_path = input("Enter a folder path (or type 'quit' to stop): ").strip()
+        if not background_mode:
+            folder_path = input("Enter a foreground path (or type 'quit' to switch to background mode): ").strip()
+        else:
+            folder_path = input("Enter a background path (or type 'quit' to stop): ").strip()
         if folder_path.lower() == 'quit':
-            break
+            if not background_mode:
+                print("Switching to background mode...")
+                background_mode = True
+                continue
+            else:
+                break
 
         if not os.path.exists(folder_path) or not os.path.isdir(folder_path):
             print("Invalid directory. Please try again.")
@@ -75,7 +84,7 @@ def write_folder_list():
                 folder_dict[max(folder_dict.keys()) + 1 if folder_dict else 1] = subdirectory
 
     if not folder_dict:
-        raise Exception("No folders added. Please add at least one folder.")
+        raise Exception("No folders added. Please add at least one main_folder.")
 
     total_pngs = sum(count_png_files(folder) for folder in folder_dict.values())
 

@@ -168,7 +168,7 @@ def display_png_filters(index, png_paths, folder, open_cv_filters=None, use_as_t
     # Define a function to search the buffer for a frame
     def find_frame_in_buffer(index, folder):
         for buffered_frame in display_png_filters.buff_png:
-            if buffered_frame["folder"] == folder and (
+            if buffered_frame["main_folder"] == folder and (
                     buffered_frame["index"] == index or buffered_frame["index"] == effective_length - index - 1):
                 return buffered_frame["frame"]
         return None
@@ -232,10 +232,10 @@ def display_png_filters(index, png_paths, folder, open_cv_filters=None, use_as_t
                 main_layer = open_cv_filter(main_layer)
 
         # Add the processed frames to the buffer
-        display_png_filters.buff_png.append({"index": index, "folder": folder, "frame": main_layer})
+        display_png_filters.buff_png.append({"index": index, "main_folder": folder, "frame": main_layer})
 
         if use_as_top_mask:
-            display_png_filters.buff_png.append({"index": index, "folder": bg_mask, "frame": background_frame})
+            display_png_filters.buff_png.append({"index": index, "main_folder": bg_mask, "frame": background_frame})
 
         return main_layer
 

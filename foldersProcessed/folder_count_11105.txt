@@ -1,0 +1,5 @@
+1, /Users/main1/Downloads/png/face_digital_anime_final, face_digital_animeup_0916, 810x1080 pixels, 2221
+2, /Users/main1/Downloads/png/face_digital_40x_final, face_digital_40x_0801, 810x1080 pixels, 2221
+3, /Users/main1/Downloads/png/faceSource, benFaceSource1700, 810x1080 pixels, 2221
+4, /Users/main1/Downloads/png/faceBGAnimeXXX, faceBG_anime_0819, 810x1080 pixels, 2221
+5, /Users/main1/Downloads/png/FaceBGOnly, FaceBGOnly_0424, 810x1080 pixels, 2221
