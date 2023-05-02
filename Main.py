@@ -2,7 +2,7 @@ import os
 from get_folders_list import write_folder_list
 from make_png_lists import process_files
 from midi_mtc_png_display import mtc_png_realtime
-
+from image_display import display_and_run
 
 def main():
 
@@ -23,10 +23,10 @@ def main():
             main()
             return  # Exit the script if an exception occurs in process_files
 
-    if input("Do you want to run midi_mtc_png_display()? (y/n) ").lower() == 'y':
+    if not input("Do you want to run image_display()? (y/n) ").lower() == 'n':
         csv_files = [f for f in os.listdir('generatedPngLists') if f.endswith('.csv')]
         if csv_files:
-            mtc_png_realtime()
+            display_and_run()
         else:
             print("Cannot run mtc_png_realtime_midi(). No .csv files found in directory generatedPngLists.")
             print("well that was a waste of time")

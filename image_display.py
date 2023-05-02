@@ -4,10 +4,16 @@ import time
 import csv
 import os
 import pygame
+import pygame.time
 from pygame.locals import *
 from OpenGL.GL import *
 from OpenGL.GLU import *
+import threading
+from queue import Queue, Empty
 import mido
+from PIL import Image
+from concurrent.futures import ThreadPoolExecutor
+
 def select_midi_input():
     available_ports = mido.get_input_names()
 
@@ -83,7 +89,7 @@ def get_aspect_ratio(image_path):
     image = cv2.imread(image_path)
     h, w, _ = image.shape
     aspect_ratio = h/w
-    return aspect_ratio
+    return aspect_ratio, w
 
 
 def get_image_names_from_csv(file_path):
@@ -93,10 +99,16 @@ def get_image_names_from_csv(file_path):
 
     return png_paths
 
+
+import imageio
+
+import cv2
+
 def read_image(image_path):
-    image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-    image = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
-    return image
+    image_np = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+    image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGBA)
+    return image_np
+
 
 def create_texture(image):
     texture_id = glGenTextures(1)
@@ -120,97 +132,115 @@ def display_image(texture_id, width, height):
     glEnd()
 
 
-def blend_images(image1, image2):
-    alpha1 = image1[:, :, 3] / 255.0
-    alpha2 = image2[:, :, 3] / 255.0
-    blended_alpha = alpha1 + (1 - alpha1) * alpha2
-
-    blended_image = np.zeros_like(image1)
-    for c in range(3):
-        blended_image[:, :, c] = (image1[:, :, c] * alpha1 + image2[:, :, c] * alpha2 * (1 - alpha1)) / blended_alpha
-
-    blended_image[:, :, 3] = blended_alpha * 255
-    return blended_image.astype(np.uint8)
-
-def overlay_images(image1, image2):
-    blended_image = blend_images(image1, image2)
-    texture_id = create_texture(blended_image)
-    return texture_id
 def setup_blending():
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
-def display_image_with_blending(texture_id, width, height):
-    glBindTexture(GL_TEXTURE_2D, texture_id)
-    glBegin(GL_QUADS)
-    glTexCoord2f(0, 1)
-    glVertex2f(0, 0)
-    glTexCoord2f(1, 1)
-    glVertex2f(width, 0)
-    glTexCoord2f(1, 0)
-    glVertex2f(width, height)
-    glTexCoord2f(0, 0)
-    glVertex2f(0, height)
-    glEnd()
 
-def overlay_images_fast(texture_id1, texture_id2, width, height):
-    setup_blending()
-    display_image_with_blending(texture_id1, width, height)
-    display_image_with_blending(texture_id2, width, height)
+def overlay_images_fast(texture_id_main, texture_id_float, width, height):
+
+    glClear(GL_COLOR_BUFFER_BIT)
+
+    display_image(texture_id_float, width, height)
+    display_image(texture_id_main, width, height)
+
+def load_texture(texture_id, image):
+    glBindTexture(GL_TEXTURE_2D, texture_id)
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image.shape[1], image.shape[0], 0, GL_RGBA, GL_UNSIGNED_BYTE, image)
+
+
+def load_images(index, png_paths, main_folder, float_folder):
+
+    main_image_path = png_paths[index][main_folder]
+    float_image_path = png_paths[index][float_folder]
+
+    main_image = read_image(main_image_path)
+    float_image = read_image(float_image_path)
+
+    return main_image, float_image
 
 def run_display(index, png_paths, main_folder, float_folder, display):
+    width, height = display
+    fps = 30
+    clock = pygame.time.Clock()
+    prev_time = time.time()
+    old_index = fps
 
+    # Initialize PINGPONG related variables
+    PINGPONG = True
+    direction = 1
+
+    # Create initial textures
+    main_image = read_image(png_paths[index][main_folder])
+    float_image = read_image(png_paths[index][float_folder])
+    texture_id1 = create_texture(main_image)
+    texture_id2 = create_texture(float_image)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        # Start the first image loading future
+        image_future = executor.submit(load_images, index, png_paths, main_folder, float_folder)
+
+        while True:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    pygame.quit()
+                    return
+
+            if image_future.done():
+                main_image, float_image = image_future.result()
+                load_texture(texture_id1, main_image)
+                load_texture(texture_id2, float_image)
+
+                if PINGPONG:
+                    # Reverse direction at boundaries
+                    if index == 0 or index == len(png_paths) - 1:
+                        direction = -direction
+
+                index += direction
+
+                current_time = time.time()
+                if current_time - prev_time >= 1:
+                    print("index diff is:", index-old_index)
+                    old_index=index
+                    prev_time = current_time
+                    part = clock.get_fps()
+                    main_folder = (main_folder + 1) % (len(png_paths[0]) - 2)
+                    print(part)
+
+                # Start a new future for the next images
+                image_future = executor.submit(load_images, index, png_paths, main_folder, float_folder)
+
+            overlay_images_fast(texture_id1, texture_id2, width, height)
+
+            pygame.display.flip()
+            clock.tick(fps)
+
+
+def display_init(display):
     pygame.init()
     width, height = display
     pygame.display.set_mode(display, DOUBLEBUF | OPENGL)
-    fps = 20
+
     glMatrixMode(GL_PROJECTION)
     gluOrtho2D(0, width, 0, height)
 
     glEnable(GL_TEXTURE_2D)
+    setup_blending()
 
-    clock = pygame.time.Clock()
-
-    while True:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                pygame.quit()
-                return
-
-        main_image_path = png_paths[index][main_folder]
-        main_image = read_image(main_image_path)
-        float_image_path = png_paths[index][float_folder]
-        float_image = read_image(float_image_path)
-        texture_id2 = create_texture(float_image)
-        texture_id1 = create_texture(main_image)
-
-        overlay_images_fast(texture_id1, texture_id2, width, height)
-        #overlay_id = display_overlay(texture_float, texture_main, width, height)
-
-        part = clock.get_fps()
-        #display_image(overlay_id, width, height)
-        index = (index + 1) % len(png_paths)
-        if index % fps == 0:
-            main_folder = (main_folder + 1) % (len(png_paths[0]) - 2)
-            print(part)
-
-        pygame.display.flip()
-        clock.tick(fps)  # Target 60 FPS
-
-
-def main():
+def display_and_run():
     csv_source = select_csv_file()
     png_paths = get_image_names_from_csv(csv_source)
     print(len(png_paths[0]))
-    aspect_ratio = get_aspect_ratio(png_paths[0][0])
+    aspect_ratio, width = get_aspect_ratio(png_paths[0][0])
 
-    width = 810
-    height = int(width * aspect_ratio)
-    display = (width, height)
+    print(width)
+    height = int(width * aspect_ratio)/2
+    display = (width/2, height)
     start_index = 0
-    main_folder = 1
-    float_folder = 3
+    main_folder = 6
+    float_folder = 0
+    display_init(display)
     run_display(start_index, png_paths, main_folder, float_folder, display)
 
 if __name__ == "__main__":
-    main()
+    display_and_run()
