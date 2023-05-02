@@ -1,10 +1,11 @@
 import csv
 import os
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
+from queue import SimpleQueue
 
 import cv2
-import time
 import mido
 import pygame
 import pygame.time
@@ -147,7 +148,7 @@ def load_texture(texture_id, image):
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image.shape[1], image.shape[0], 0, GL_RGBA, GL_UNSIGNED_BYTE, image)
 
 
-def event_check(image_size, fullscreen):
+def event_check(image_size, fullscreen, index, text_mode = False):
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             pygame.quit()
@@ -155,8 +156,12 @@ def event_check(image_size, fullscreen):
         elif event.type == KEYDOWN:
             if event.key == K_f:  # Press 'f' key to toggle fullscreen
                 fullscreen = toggle_fullscreen(image_size, fullscreen)
-    return fullscreen
-
+            if event.key == K_i:  # Press 'i' key to jump around
+                index += 500
+                print("jump around")
+            if event.key == K_t: # press 't' toggle text
+                text_mode = not text_mode
+    return fullscreen, index
 
 
 def toggle_fullscreen(image_size, current_fullscreen_status):
@@ -165,8 +170,9 @@ def toggle_fullscreen(image_size, current_fullscreen_status):
     return new_fullscreen_status
 
 
-def display_init(image_size, fullscreen=False):
-    pygame.init()
+def display_init(image_size, fullscreen=False, setup=False):
+    if setup:
+        pygame.init()
     width, height = image_size
 
     flags = OPENGL
@@ -203,14 +209,15 @@ def display_init(image_size, fullscreen=False):
 def load_images(index, png_paths, main_folder, float_folder):
     main_image = read_image(png_paths[index][main_folder])
     float_image = read_image(png_paths[index][float_folder])
-    #print("index = ", index, "main_folder: ", main_folder)
+    # print("index = ", index, "main_folder: ", main_folder)
     return main_image, float_image
 
 
-from concurrent.futures import ThreadPoolExecutor
-from queue import SimpleQueue
-
 def run_display(index, png_paths, main_folder, float_folder, image_size):
+
+    font_size = 24
+    font = pygame.font.Font(None, font_size)
+    text_display = False
     fps = 30
     clock = pygame.time.Clock()
     fullscreen = False
@@ -239,9 +246,8 @@ def run_display(index, png_paths, main_folder, float_folder, image_size):
             image_future = executor.submit(load_images, index, png_paths, main_folder, float_folder)
             image_queue.put(image_future)
 
-
         while True:
-            fullscreen = event_check(image_size, fullscreen)
+            fullscreen, index, text_display = event_check(image_size, fullscreen, index, text_display)
 
             if not image_queue.empty():
                 main_image, float_image = image_queue.get().result()
@@ -253,14 +259,15 @@ def run_display(index, png_paths, main_folder, float_folder, image_size):
                     if (index + direction) < 0 or index >= len(png_paths) - 1:
                         direction = -direction
 
-                index += direction
+                index = (index + direction) % (len(png_paths) - 1)
+
                 current_time = time.time()
-                if current_time - prev_time >= .01125:
-                    print("index: ", index,"   index diff:  ", index - old_index)
+                if current_time - prev_time >= 2:
+                    print("index: ", index, "   index diff:  ", index - old_index)
                     old_index = index
                     prev_time = current_time
-                    part = clock.get_fps()
                     main_folder = (main_folder + 1) % (len(png_paths[0]) - 1)
+                    part = clock.get_fps()
                     print(part)
 
                 # Start a new future for the next images
@@ -275,7 +282,6 @@ def run_display(index, png_paths, main_folder, float_folder, image_size):
             clock.tick(fps)
 
 
-
 def display_and_run():
     csv_source = select_csv_file()
     png_paths = get_image_names_from_csv(csv_source)
@@ -287,7 +293,7 @@ def display_and_run():
     start_index = 0
     main_folder = 2
     float_folder = 6
-    display_init(image_size)
+    display_init(image_size, True, True)
     run_display(start_index, png_paths, main_folder, float_folder, image_size)
 
 
