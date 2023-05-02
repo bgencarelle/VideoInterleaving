@@ -270,7 +270,7 @@ def display_png_live(frame, mtc_timecode, estimate_frame_counter, index):
     cv2.imshow(f'MTC Timecode - PID: {os.getpid()}', clean_frame)
 
 
-def display_png_filters(index, png_paths, folder, open_cv_filters=None, use_as_top_mask=True, solid_color_mask=True,
+def display_png_filters(index, png_paths, folder, open_cv_filters=None, use_as_top_mask=True, solid_color_mask=False,
                         bg_mask=4, buffer_size=2221):
     # Create a circular buffer (deque) for buff_png if it doesn't exist yet
     if not hasattr(display_png_filters, "buff_png"):

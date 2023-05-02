@@ -243,7 +243,7 @@ def sort_png_files(folder_dict):
 
 
 def ask_generate_csv(grouped_png_files, output_folder):
-    if input("Do you want to generate an CSV with all of the files? (yes/no, default no): ").lower().strip() in ["yes",
+    if not input("Do you want to generate an CSV with all of the files? (yes/no, default yes): ").lower().strip() in ["yes",
                                                                                                                  "y"]:
         write_sorted_png_stream(grouped_png_files, output_folder)
 
