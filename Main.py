@@ -1,7 +1,7 @@
 import os
 from get_folders_list import write_folder_list
 from make_png_lists import process_files
-from midi_mtc_png_display import mtc_png_realtime
+from midi_mtc_old import mtc_png_realtime
 from image_display import display_and_run
 
 def main():

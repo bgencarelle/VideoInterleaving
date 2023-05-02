@@ -3,7 +3,6 @@ import os
 import time
 from collections import deque
 from threading import Event
-from midi_control import process_midi_messages
 
 import cv2
 import mido
@@ -157,100 +156,8 @@ def display_png_live(frame, mtc_timecode, estimate_frame_counter, index):
     cv2.imshow(f'MTC Timecode - PID: {os.getpid()}', clean_frame)
 
 
-def display_png_filters(index, png_paths, folder, open_cv_filters=None, use_as_top_mask=True, solid_color_mask=True,
-                        bg_mask=12, buffer_size=2221):
-    # Create a circular buffer (deque) for buff_png if it doesn't exist yet
-    if not hasattr(display_png_filters, "buff_png"):
-        display_png_filters.buff_png = deque(maxlen=buffer_size)
-
-    effective_length = len(png_paths)
-
-    # Define a function to search the buffer for a frame
-    def find_frame_in_buffer(index, folder):
-        for buffered_frame in display_png_filters.buff_png:
-            if buffered_frame["main_folder"] == folder and (
-                    buffered_frame["index"] == index or buffered_frame["index"] == effective_length - index - 1):
-                return buffered_frame["frame"]
-        return None
-
-    # Search for the main frame in the buffer
-    main_frame = find_frame_in_buffer(index, folder)
-    if main_frame is not None:
-        return main_frame
-
-    # Search for the background frame in the buffer if necessary
-    background_frame = None
-    if use_as_top_mask:
-        background_frame = find_frame_in_buffer(index, bg_mask)
-
-    # If neither frame is in the buffer, read them from the files
-    if main_frame is None:
-        png_file = png_paths[index][folder]
-        main_frame = cv2.imread(png_file, cv2.IMREAD_UNCHANGED)
-
-    if use_as_top_mask and background_frame is None:
-        background_file = png_paths[index][bg_mask]
-        background_frame = cv2.imread(background_file, cv2.IMREAD_UNCHANGED)
-
-    # Process the main_frame and background_frame
-    bg_color = (30, 32, 30)
-    mask_bg_color = (32, 245, 30)
-
-    if main_frame is not None:
-        background = np.zeros_like(main_frame[..., 0:3], dtype=np.uint8)
-        background[:, :] = bg_color
-
-        if main_frame.shape[2] == 4:
-            alpha_channel = main_frame[:, :, 3] / 255.0
-            inv_alpha_channel = 1 - alpha_channel
-
-            main_frame = cv2.cvtColor(main_frame, cv2.COLOR_BGRA2BGR)
-            main_layer = (main_frame * alpha_channel[..., None]) + (background * inv_alpha_channel[..., None])
-            main_layer = main_layer.astype(np.uint8)
-
-        if use_as_top_mask and background_frame is not None:
-            if background_frame.shape[2] == 4:
-                mask_alpha_channel = background_frame[:, :, 3] / 255.0
-                inv_mask_alpha_channel = 1 - mask_alpha_channel
-            else:
-                mask_alpha_channel = np.ones(main_layer.shape[:2], dtype=np.float32)
-                inv_mask_alpha_channel = np.zeros(main_layer.shape[:2], dtype=np.float32)
-
-            if solid_color_mask:
-                floating_mask = np.zeros_like(main_layer, dtype=np.uint8)
-                floating_mask[:, :] = mask_bg_color
-            else:
-                floating_mask = cv2.cvtColor(background_frame, cv2.COLOR_BGRA2BGR)
-                floating_mask = cv2.resize(floating_mask, (main_frame.shape[1], main_frame.shape[0]))
-
-            main_layer = (main_layer * inv_mask_alpha_channel[..., None]) + (
-                    floating_mask * mask_alpha_channel[..., None])
-            main_layer = main_layer.astype(np.uint8)
-
-        if open_cv_filters:
-            for open_cv_filter in open_cv_filters:
-                main_layer = open_cv_filter(main_layer)
-
-        # Add the processed frames to the buffer
-        display_png_filters.buff_png.append({"index": index, "main_folder": folder, "frame": main_layer})
-
-        if use_as_top_mask:
-            display_png_filters.buff_png.append({"index": index, "main_folder": bg_mask, "frame": background_frame})
-
-        return main_layer
-
-def scale_value(value, input_min, input_max, output_min, output_max):
-    return ((value - input_min) / (input_max - input_min)) * (output_max - output_min) + output_min
 
 
-def get_color_image(png_paths):
-    # Read the main frame from the files
-    bg_color = (30, 32, 30)
-    png_file = png_paths[0][0]
-    main_frame = cv2.imread(png_file, cv2.IMREAD_UNCHANGED)
-    background = np.zeros_like(main_frame[..., 0:3], dtype=np.uint8)
-    background[:, :] = bg_color
-    return background
 
 def mtc_png_realtime_midi(png_paths,):
     global mod_value, note_scaled, display_clock_time, mask_control

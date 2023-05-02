@@ -1,26 +1,47 @@
 import mido
-from midi_mtc_png_display import select_midi_input
 from concurrent.futures import ThreadPoolExecutor
 import threading
-import csv
-import os
 import sys
 
-def write_total_frames_to_csv(total_frames, file_name='output.csv'):
-    if not os.path.exists(file_name):
-        with open(file_name, 'w', newline='', encoding='utf-8-sig') as csvfile:
-            csv_writer = csv.writer(csvfile, dialect='excel')
-            csv_writer.writerow(['Index', 'Total Frames', 'Difference'])
 
-    # Read the current number of rows in the file to determine the index
-    with open(file_name, 'r', newline='') as csvfile:
-        current_rows = sum(1 for row in csv.reader(csvfile))
-        index = current_rows - 1  # Subtract 1 for the header row
-        difference = total_frames - 2 * index
+def select_midi_input():
+    available_ports = mido.get_input_names()
 
-    with open(file_name, 'a', newline='', encoding='utf-8-sig') as csvfile:
-        csv_writer = csv.writer(csvfile, dialect='excel')
-        csv_writer.writerow([index, total_frames, difference])
+    # Check if there are any available ports
+    if len(available_ports) == 0:
+        print("No MIDI input ports available.")
+        return None
+
+    # Check if there is only one port or all ports have the same name
+    if len(set(available_ports)) == 1:
+        selected_port = available_ports[0]
+        print("Only one input port available, defaulting to:")
+        print(selected_port)
+        return selected_port
+
+    # Prompt user to select a port
+    print("Please select a MIDI input port:")
+    for i, port in enumerate(available_ports):
+        print(f"{i + 1}: {port}")
+
+    while True:
+        try:
+            selection = input("> ")
+            if selection == "":
+                selected_port = available_ports[0]
+                print(f"Defaulting to first MIDI input port: {selected_port}")
+                return selected_port
+
+            selection = int(selection)
+            if selection not in range(1, len(available_ports) + 1):
+                raise ValueError
+
+            selected_port = available_ports[selection - 1]
+            print(f"Selected port: {selected_port}")
+            return selected_port
+
+        except ValueError:
+            print("Invalid selection. Please enter a number corresponding to a port.")
 
 
 def check_input_key():
@@ -111,16 +132,14 @@ class MidiProcessor:
         total_frames = (hours * 60 * 60 * self.frame_rate) + \
                        (minutes * 60 * self.frame_rate) + (seconds * self.frame_rate) + frames
         self.total_frames = total_frames
-        write_total_frames_to_csv(self.total_frames)
 
-        # print(f"Total frames: {self.total_frames}")
+        print(f"Total frames: {self.total_frames}")
 
 
 if __name__ == "__main__":
-    midi_input = select_midi_input()
     midi_processor = MidiProcessor()
+    midi_port = select_midi_input()
 
     with ThreadPoolExecutor() as executor:
-        midi_port = midi_input
         executor.submit(midi_processor.process_midi, midi_port)
         executor.submit(check_input_key, midi_processor)
