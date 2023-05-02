@@ -1,3 +1,5 @@
+import sys
+
 import cv2
 import numpy as np
 import time
@@ -13,6 +15,7 @@ from queue import Queue, Empty
 import mido
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
+import math
 
 def select_midi_input():
     available_ports = mido.get_input_names()
@@ -137,8 +140,8 @@ def setup_blending():
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
 
-def overlay_images_fast(texture_id_main, texture_id_float, width, height):
-
+def overlay_images_fast(texture_id_main, texture_id_float, image_size):
+    width,height = image_size
     glClear(GL_COLOR_BUFFER_BIT)
 
     display_image(texture_id_float, width, height)
@@ -148,23 +151,32 @@ def load_texture(texture_id, image):
     glBindTexture(GL_TEXTURE_2D, texture_id)
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image.shape[1], image.shape[0], 0, GL_RGBA, GL_UNSIGNED_BYTE, image)
 
+def load_images(index, png_paths, main_folder, float_folder, BUFF=False):
+    if not BUFF:
+        main_image = read_image(png_paths[index][main_folder])
+        float_image = read_image(png_paths[index][float_folder])
+        return main_image, float_image
+    else:
+        buff_image = []
+        for i in range(len(png_paths[index])):
+            if index >= len(png_paths):
+                print(f"Error: index {index} is out of range for png_paths")
+                return None, None
+            if i >= len(png_paths[index]):
+                print(f"Error: index {i} is out of range for png_paths[{index}]")
+                return None, None
 
-def load_images(index, png_paths, main_folder, float_folder):
+            print(i)
+            buff_image.append(read_image(png_paths[index][i]))
+            return buff_image
 
-    main_image_path = png_paths[index][main_folder]
-    float_image_path = png_paths[index][float_folder]
 
-    main_image = read_image(main_image_path)
-    float_image = read_image(float_image_path)
-
-    return main_image, float_image
-
-def run_display(index, png_paths, main_folder, float_folder, display):
-    width, height = display
-    fps = 30
+def run_display(index, png_paths, main_folder, float_folder, image_size):
+    width, height = image_size
+    fps = 14
     clock = pygame.time.Clock()
-    prev_time = time.time()
-    old_index = fps
+    fullscreen = False
+    window_size = None
 
     # Initialize PINGPONG related variables
     PINGPONG = True
@@ -185,6 +197,11 @@ def run_display(index, png_paths, main_folder, float_folder, display):
                 if event.type == pygame.QUIT:
                     pygame.quit()
                     return
+                elif event.type == KEYDOWN:
+                    if event.key == K_f:  # Press 'f' key to toggle fullscreen
+                        fullscreen = toggle_fullscreen(image_size, fullscreen)
+                    elif event.key == K_ESCAPE:
+                        running = False
 
             if image_future.done():
                 main_image, float_image = image_future.result()
@@ -193,39 +210,74 @@ def run_display(index, png_paths, main_folder, float_folder, display):
 
                 if PINGPONG:
                     # Reverse direction at boundaries
-                    if index == 0 or index == len(png_paths) - 1:
+                    if index < 0 or index >= len(png_paths) - 1:
                         direction = -direction
 
                 index += direction
-
-                current_time = time.time()
-                if current_time - prev_time >= 1:
-                    print("index diff is:", index-old_index)
-                    old_index=index
-                    prev_time = current_time
-                    part = clock.get_fps()
-                    main_folder = (main_folder + 1) % (len(png_paths[0]) - 2)
-                    print(part)
+                #previous,_= check_time(previous,index)
 
                 # Start a new future for the next images
                 image_future = executor.submit(load_images, index, png_paths, main_folder, float_folder)
 
-            overlay_images_fast(texture_id1, texture_id2, width, height)
+            overlay_images_fast(texture_id1, texture_id2, image_size)
 
             pygame.display.flip()
             clock.tick(fps)
 
 
-def display_init(display):
-    pygame.init()
-    width, height = display
-    pygame.display.set_mode(display, DOUBLEBUF | OPENGL)
+# def check_time(prev_time, index):
+#     current_time = time.time()
+#     if current_time - prev_time >= 1:
+#         print("index diff is:", index - old_index)
+#         old_index = index
+#         prev_time = current_time
+#         part = pygame.time.Clock.get_fps()
+#         main_folder += 1
+#         print(part)
+#     return prev_time, main_folder
 
-    glMatrixMode(GL_PROJECTION)
-    gluOrtho2D(0, width, 0, height)
+
+def toggle_fullscreen(image_size, current_fullscreen_status):
+    new_fullscreen_status = not current_fullscreen_status
+    display_init(image_size, new_fullscreen_status)
+    return new_fullscreen_status
+
+def display_init(image_size, fullscreen=False):
+    pygame.init()
+    width, height = image_size
+
+    flags = OPENGL
+    flags |= DOUBLEBUF
+    if fullscreen:
+        flags |= FULLSCREEN
+        pygame.display.set_caption('Fullscreen Mode')
+        fullscreen_size = pygame.display.list_modes()[0]
+        fullscreen_width, fullscreen_height = fullscreen_size
+        # Calculate scaling factor and position for fullscreen mode
+        scale = min(fullscreen_width / width, fullscreen_height / height)
+        offset_x = int((fullscreen_width - width * scale) / 2)
+        offset_y = int((fullscreen_height - height * scale) / 2)
+        pygame.display.set_mode((fullscreen_width, fullscreen_height), flags)
+    else:
+        pygame.display.set_mode(image_size, flags)
+        print(str(flags))
+        pygame.display.set_caption('Windowed Mode')
 
     glEnable(GL_TEXTURE_2D)
     setup_blending()
+
+    glMatrixMode(GL_PROJECTION)
+    glLoadIdentity()
+    gluOrtho2D(0, width, 0, height)
+    glMatrixMode(GL_MODELVIEW)
+    glLoadIdentity()
+
+    if fullscreen:
+        glViewport(offset_x, offset_y, int(width * scale), int(height * scale))
+    else:
+        glViewport(0, 0, width, height)
+        # Explicitly set the window size back to image_size when returning to windowed mode
+        pygame.display.set_mode(image_size, flags)
 
 def display_and_run():
     csv_source = select_csv_file()
@@ -234,13 +286,13 @@ def display_and_run():
     aspect_ratio, width = get_aspect_ratio(png_paths[0][0])
 
     print(width)
-    height = int(width * aspect_ratio)/2
-    display = (width/2, height)
+    height = int(width * aspect_ratio)
+    image_size = (width, height)
     start_index = 0
-    main_folder = 6
-    float_folder = 0
-    display_init(display)
-    run_display(start_index, png_paths, main_folder, float_folder, display)
+    main_folder = 2
+    float_folder = 6
+    display_init(image_size)
+    run_display(start_index, png_paths, main_folder, float_folder, image_size)
 
 if __name__ == "__main__":
     display_and_run()
