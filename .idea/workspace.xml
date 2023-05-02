@@ -4,7 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="88dca403-b94f-482c-88d5-5ae9c6ad30e5" name="Changes" comment="need to buffer image loading.">
+    <list default="true" id="88dca403-b94f-482c-88d5-5ae9c6ad30e5" name="Changes" comment="still no buffer, but able to toggle fullscreen.">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/image_display.py" beforeDir="false" afterPath="$PROJECT_DIR$/image_display.py" afterDir="false" />
     </list>
@@ -167,7 +167,7 @@
       <workItem from="1682887878280" duration="821000" />
       <workItem from="1682955442381" duration="36000" />
       <workItem from="1682955593102" duration="27606000" />
-      <workItem from="1682990814273" duration="15939000" />
+      <workItem from="1682990814273" duration="28843000" />
     </task>
     <task id="LOCAL-00001" summary="Lots of changes, but it is working nicely.">
       <created>1679677664677</created>
@@ -337,7 +337,14 @@
       <option name="project" value="LOCAL" />
       <updated>1682987996959</updated>
     </task>
-    <option name="localTasksCounter" value="25" />
+    <task id="LOCAL-00025" summary="still no buffer, but able to toggle fullscreen.">
+      <created>1683034383311</created>
+      <option name="number" value="00025" />
+      <option name="presentableId" value="LOCAL-00025" />
+      <option name="project" value="LOCAL" />
+      <updated>1683034383311</updated>
+    </task>
+    <option name="localTasksCounter" value="26" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -378,10 +385,11 @@
     <MESSAGE value="switch to pygame" />
     <MESSAGE value="switch to pygame, opengl. HUGE improvement." />
     <MESSAGE value="need to buffer image loading." />
-    <option name="LAST_COMMIT_MESSAGE" value="need to buffer image loading." />
+    <MESSAGE value="still no buffer, but able to toggle fullscreen." />
+    <option name="LAST_COMMIT_MESSAGE" value="still no buffer, but able to toggle fullscreen." />
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
-    <SUITE FILE_PATH="coverage/VideoInterleaving$image_display.coverage" NAME="image_display Coverage Results" MODIFIED="1683034015434" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/VideoInterleaving$image_display.coverage" NAME="image_display Coverage Results" MODIFIED="1683055389289" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/VideoInterleaving$interleave_file.coverage" NAME="interleave_file Coverage Results" MODIFIED="1680466715424" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/VideoInterleaving$midi_mtc_pillow.coverage" NAME="midi_mtc_pillow Coverage Results" MODIFIED="1682329613415" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/VideoInterleaving$get_folders_list.coverage" NAME="get_folders_list Coverage Results" MODIFIED="1682815056112" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
