@@ -133,7 +133,6 @@ def toggle_fullscreen(image_size, current_fullscreen_status):
     else:
         new_fullscreen_status = not current_fullscreen_status
         display_init(image_size, new_fullscreen_status)
-
     return new_fullscreen_status
 
 
