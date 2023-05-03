@@ -134,12 +134,14 @@ class MidiProcessor:
         self.total_frames = total_frames
 
         print(f"Total frames: {self.total_frames}")
+        return self.total_frames
 
-
-if __name__ == "__main__":
+def midi_control_stuff():
     midi_processor = MidiProcessor()
     midi_port = select_midi_input()
+    midi_processor.process_midi(midi_port)
+    return midi_processor
 
-    with ThreadPoolExecutor() as executor:
-        executor.submit(midi_processor.process_midi, midi_port)
-        executor.submit(check_input_key, midi_processor)
+if __name__ == "__main__":
+    midi_control_stuff()
+

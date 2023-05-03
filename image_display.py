@@ -6,52 +6,51 @@ from concurrent.futures import ThreadPoolExecutor
 from queue import SimpleQueue
 
 import cv2
-import mido
-import pygame
 import pygame.time
 from OpenGL.GL import *
 from OpenGL.GLU import *
+
+from midi_control import MidiProcessor
+from midi_control import select_midi_input
+
+if platform.system() == 'Darwin':
+    from Quartz import CGWindowListCopyWindowInfo, kCGWindowListOptionOnScreenOnly, kCGNullWindowID
+elif platform.system() == 'Linux':
+    from Xlib import X, display
+
+import platform
+import pygame
 from pygame.locals import *
 
 
-def select_midi_input():
-    available_ports = mido.get_input_names()
-
-    # Check if there are any available ports
-    if len(available_ports) == 0:
-        print("No MIDI input ports available.")
-        return None
-
-    # Check if there is only one port or all ports have the same name
-    if len(set(available_ports)) == 1:
-        selected_port = available_ports[0]
-        print("Only one input port available, defaulting to:")
-        print(selected_port)
-        return selected_port
-
-    # Prompt user to select a port
-    print("Please select a MIDI input port:")
-    for i, port in enumerate(available_ports):
-        print(f"{i + 1}: {port}")
-
-    while True:
-        try:
-            selection = input("> ")
-            if selection == "":
-                selected_port = available_ports[0]
-                print(f"Defaulting to first MIDI input port: {selected_port}")
-                return selected_port
-
-            selection = int(selection)
-            if selection not in range(1, len(available_ports) + 1):
-                raise ValueError
-
-            selected_port = available_ports[selection - 1]
-            print(f"Selected port: {selected_port}")
-            return selected_port
-
-        except ValueError:
-            print("Invalid selection. Please enter a number corresponding to a port.")
+def is_window_maximized():
+    if platform.system() == 'Darwin':
+        from AppKit import NSScreen
+        import os
+        pid = os.getpid()
+        screen_frame = NSScreen.mainScreen().frame()
+        screen_width, screen_height = screen_frame.size.width, screen_frame.size.height
+        window_list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID)
+        for window in window_list:
+            if window.get('kCGWindowOwnerPID') == pid:
+                window_width = window.get('kCGWindowBounds')['Width']
+                window_height = window.get('kCGWindowBounds')['Height']
+                return window_width >= screen_width or window_height >= screen_height
+        return False
+    elif platform.system() == 'Linux':
+        d = display.Display()
+        root = d.screen().root
+        pygame_window_id = pygame.display.get_wm_info()['window']
+        window = d.create_resource_object('window', pygame_window_id)
+        wm_state = d.intern_atom('_NET_WM_STATE')
+        max_horz = d.intern_atom('_NET_WM_STATE_MAXIMIZED_HORZ')
+        max_vert = d.intern_atom('_NET_WM_STATE_MAXIMIZED_VERT')
+        fullscreen = d.intern_atom('_NET_WM_STATE_FULLSCREEN')
+        wm_state_data = window.get_full_property(wm_state, X.AnyPropertyType)
+        return (max_horz in wm_state_data.value and max_vert in wm_state_data.value) or (
+                fullscreen in wm_state_data.value)
+    else:
+        raise NotImplementedError(f"Maximized window detection is not implemented for {platform.system()}")
 
 
 def select_csv_file():
@@ -101,6 +100,42 @@ def get_image_names_from_csv(file_path):
     return png_paths
 
 
+def event_check(image_size, fullscreen, index, text_mode=False):
+    width, height = image_size
+    aspect_ratio = width / height
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            pygame.quit()
+            sys.exit()
+        if event.type == KEYDOWN:
+            if event.key == K_f:  # Press 'f' key to toggle fullscreen
+                fullscreen = toggle_fullscreen(image_size, fullscreen)
+            if event.key == K_i:  # Press 'i' key to jump around
+                index += 500
+                print("jump around")
+            if event.key == K_t:  # press 't' toggle text
+                text_mode = not text_mode
+        elif event.type == VIDEORESIZE:
+            new_width, new_height = event.size
+            window_check = fullscreen
+            if new_width / new_height > aspect_ratio:
+                new_width = int(new_height * aspect_ratio)
+            else:
+                new_height = int(new_width / aspect_ratio)
+            display_init((new_width, new_height), window_check)
+
+    return fullscreen, index, text_mode
+
+
+def toggle_fullscreen(image_size, current_fullscreen_status):
+    if current_fullscreen_status and is_window_maximized():
+        new_fullscreen_status = not current_fullscreen_status
+        display_init(image_size, new_fullscreen_status)
+    else:
+        new_fullscreen_status = current_fullscreen_status
+    return new_fullscreen_status
+
+
 def read_image(image_path):
     image_np = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
     image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGBA)
@@ -116,8 +151,14 @@ def create_texture(image):
     return texture_id
 
 
-def display_image(texture_id, width, height):
+def display_image(texture_id, width, height, rgba=None):
     glBindTexture(GL_TEXTURE_2D, texture_id)
+
+    if rgba:
+        glColor4f(*rgba)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
     glBegin(GL_QUADS)
     glTexCoord2f(0, 1)
     glVertex2f(0, 0)
@@ -129,18 +170,17 @@ def display_image(texture_id, width, height):
     glVertex2f(0, height)
     glEnd()
 
+    if rgba:
+        glColor4f(1, 1, 1, 1)
+        glDisable(GL_BLEND)
 
-def setup_blending():
-    glEnable(GL_BLEND)
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
-
-def overlay_images_fast(texture_id_main, texture_id_float, image_size):
+def overlay_images_fast(texture_id_main, texture_id_float, image_size, main_rgba=None, float_rgba=None):
     width, height = image_size
     glClear(GL_COLOR_BUFFER_BIT)
 
-    display_image(texture_id_float, width, height)
-    display_image(texture_id_main, width, height)
+    display_image(texture_id_float, width, height, rgba=float_rgba)
+    display_image(texture_id_main, width, height, rgba=main_rgba)
 
 
 def load_texture(texture_id, image):
@@ -148,79 +188,20 @@ def load_texture(texture_id, image):
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image.shape[1], image.shape[0], 0, GL_RGBA, GL_UNSIGNED_BYTE, image)
 
 
-def event_check(image_size, fullscreen, index, text_mode = False):
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            pygame.quit()
-            sys.exit()
-        elif event.type == KEYDOWN:
-            if event.key == K_f:  # Press 'f' key to toggle fullscreen
-                fullscreen = toggle_fullscreen(image_size, fullscreen)
-            if event.key == K_i:  # Press 'i' key to jump around
-                index += 500
-                print("jump around")
-            if event.key == K_t: # press 't' toggle text
-                text_mode = not text_mode
-    return fullscreen, index
-
-
-def toggle_fullscreen(image_size, current_fullscreen_status):
-    new_fullscreen_status = not current_fullscreen_status
-    display_init(image_size, new_fullscreen_status)
-    return new_fullscreen_status
-
-
-def display_init(image_size, fullscreen=False, setup=False):
-    if setup:
-        pygame.init()
-    width, height = image_size
-
-    flags = OPENGL
-    flags |= DOUBLEBUF
-    if fullscreen:
-        flags |= FULLSCREEN
-        pygame.display.set_caption('Fullscreen Mode')
-        fullscreen_size = pygame.display.list_modes()[0]
-        fullscreen_width, fullscreen_height = fullscreen_size
-        # Calculate scaling factor and position for fullscreen mode
-        scale = min(fullscreen_width / width, fullscreen_height / height)
-        offset_x = int((fullscreen_width - width * scale) / 2)
-        offset_y = int((fullscreen_height - height * scale) / 2)
-        pygame.display.set_mode((fullscreen_width, fullscreen_height), flags)
-
-        glViewport(offset_x, offset_y, int(width * scale), int(height * scale))
-    else:
-        pygame.display.set_mode(image_size, flags)
-        print("windowed")
-        pygame.display.set_caption('Windowed Mode')
-        glViewport(0, 0, width, height)
-        # Explicitly set the window size back to image_size when returning to windowed mode
-        pygame.display.set_mode(image_size, flags)
-
-    glEnable(GL_TEXTURE_2D)
-    setup_blending()
-    glMatrixMode(GL_PROJECTION)
-    glLoadIdentity()
-    gluOrtho2D(0, width, 0, height)
-    glMatrixMode(GL_MODELVIEW)
-    glLoadIdentity()
-
-
 def load_images(index, png_paths, main_folder, float_folder):
     main_image = read_image(png_paths[index][main_folder])
     float_image = read_image(png_paths[index][float_folder])
-    # print("index = ", index, "main_folder: ", main_folder)
     return main_image, float_image
 
 
 def run_display(index, png_paths, main_folder, float_folder, image_size):
-
     font_size = 24
     font = pygame.font.Font(None, font_size)
     text_display = False
     fps = 30
     clock = pygame.time.Clock()
-    fullscreen = False
+    fullscreen = True
+    print_update = False
 
     current_time = time.time()
     prev_time = current_time
@@ -247,8 +228,8 @@ def run_display(index, png_paths, main_folder, float_folder, image_size):
             image_queue.put(image_future)
 
         while True:
-            fullscreen, index, text_display = event_check(image_size, fullscreen, index, text_display)
 
+            fullscreen, index, text_display = event_check(image_size, fullscreen, index, text_display)
             if not image_queue.empty():
                 main_image, float_image = image_queue.get().result()
                 load_texture(texture_id1, main_image)
@@ -262,11 +243,11 @@ def run_display(index, png_paths, main_folder, float_folder, image_size):
                 index = (index + direction) % (len(png_paths) - 1)
 
                 current_time = time.time()
-                if current_time - prev_time >= 2:
+                if (current_time - prev_time >= 1) and print_update:
                     print("index: ", index, "   index diff:  ", index - old_index)
                     old_index = index
                     prev_time = current_time
-                    main_folder = (main_folder + 1) % (len(png_paths[0]) - 1)
+                    float_folder = (float_folder + 1) % (len(png_paths[0]) - 1)
                     part = clock.get_fps()
                     print(part)
 
@@ -282,16 +263,62 @@ def run_display(index, png_paths, main_folder, float_folder, image_size):
             clock.tick(fps)
 
 
+def setup_blending():
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+
+def display_init(image_size, fullscreen=False, setup=False):
+    pygame.init()
+    width, height = image_size
+    fullscreen_size = pygame.display.list_modes()[0]
+    fullscreen_width, fullscreen_height = fullscreen_size
+    # Calculate scaling factor and position for fullscreen mode
+    scale = min(fullscreen_width / width, fullscreen_height / height)
+    offset_x = int((fullscreen_width - width * scale) / 2)
+    offset_y = int((fullscreen_height - height * scale) / 2)
+    fullscreen == fullscreen
+    flags = OPENGL
+    flags |= DOUBLEBUF
+    if fullscreen:
+        flags |= FULLSCREEN
+        pygame.display.set_caption('Fullscreen Mode')
+        pygame.display.set_mode((fullscreen_width, fullscreen_height), flags)
+
+        glViewport(offset_x, offset_y, int(width * scale), int(height * scale))
+    else:
+        flags |= RESIZABLE
+        pygame.display.set_mode(image_size, flags)
+        pygame.display.set_caption('Windowed Mode')
+        glViewport(0, 0, width, height)
+        # Explicitly set the window size back to image_size when returning to windowed mode
+        pygame.display.set_mode(image_size, flags)
+
+    if setup:
+        glEnable(GL_TEXTURE_2D)
+        setup_blending()
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        gluOrtho2D(0, width, 0, height)
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+
+
 def display_and_run():
+    midi_port = select_midi_input()
+    midi_stuff = MidiProcessor()
+    # midi_stuff.process_midi(midi_port)
+    print(platform.system())
     csv_source = select_csv_file()
     png_paths = get_image_names_from_csv(csv_source)
     print(len(png_paths[0]))
     aspect_ratio, width = get_aspect_ratio(png_paths[0][0])
     print(width)
+    width = 640
     height = int(width * aspect_ratio)
     image_size = (width, height)
     start_index = 0
-    main_folder = 2
+    main_folder = 6
     float_folder = 6
     display_init(image_size, True, True)
     run_display(start_index, png_paths, main_folder, float_folder, image_size)
