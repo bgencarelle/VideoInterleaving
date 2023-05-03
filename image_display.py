@@ -9,7 +9,7 @@ import cv2
 import pygame.time
 from OpenGL.GL import *
 from OpenGL.GLU import *
-import platform
+
 from midi_control import MidiProcessor
 from midi_control import select_midi_input
 
@@ -128,12 +128,11 @@ def event_check(image_size, fullscreen, index, text_mode=False):
 
 
 def toggle_fullscreen(image_size, current_fullscreen_status):
-    if not current_fullscreen_status and is_window_maximized():
-        new_fullscreen_status = current_fullscreen_status
-    else:
+    if current_fullscreen_status and is_window_maximized():
         new_fullscreen_status = not current_fullscreen_status
         display_init(image_size, new_fullscreen_status)
-
+    else:
+        new_fullscreen_status = current_fullscreen_status
     return new_fullscreen_status
 
 
@@ -291,7 +290,6 @@ def display_init(image_size, fullscreen=False, setup=False):
         flags |= RESIZABLE
         pygame.display.set_mode(image_size, flags)
         pygame.display.set_caption('Windowed Mode')
-        print(pygame.display.list_modes())
         glViewport(0, 0, width, height)
         # Explicitly set the window size back to image_size when returning to windowed mode
         pygame.display.set_mode(image_size, flags)
