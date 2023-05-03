@@ -1,51 +1,26 @@
-import math
+import csv
+import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-import concurrent
 from queue import SimpleQueue
 
-import calculators
-import midi_control
 import cv2
 import pygame.time
 from OpenGL.GL import *
 from OpenGL.GLU import *
-from platform import system
 
+from midi_control import MidiProcessor
+from midi_control import select_midi_input
 
-if system() == 'Darwin':
+if platform.system() == 'Darwin':
     from Quartz import CGWindowListCopyWindowInfo, kCGWindowListOptionOnScreenOnly, kCGNullWindowID
-elif system() == 'Linux':
+elif platform.system() == 'Linux':
     from Xlib import X, display
 
 import platform
 import pygame
 from pygame.locals import *
-
-
-FULLSCREEN_MODE = False
-MTC_CLOCK = 0
-MIDI_CLOCK = 1
-MIXED_CLOCK = 2
-FREE_CLOCK = 3
-CLOCK_MODE = 2
-
-MIDI_MODE = True if CLOCK_MODE < FREE_CLOCK else False
-
-FPS = 30
-run_mode = True
-
-BUFFER_SIZE = 15
-PINGPONG = True
-
-vid_clock = None
-pause_mode = False
-png_paths_len = 0
-png_paths = 0
-folder_count = 0
-image_size = (800, 600)
-text_display = False
 
 
 def is_window_maximized():
@@ -78,62 +53,86 @@ def is_window_maximized():
         raise NotImplementedError(f"Maximized window detection is not implemented for {platform.system()}")
 
 
-def event_check(fullscreen):
-    global image_size, run_mode, pause_mode
+def select_csv_file():
+    csv_dir = 'generatedPngLists'
+    csv_files = [f for f in os.listdir(csv_dir) if f.endswith('.csv')]
+
+    if len(csv_files) == 0:
+        print(f"No .csv files found in directory {csv_dir}")
+        return None
+
+    if len(csv_files) == 1:
+        print("Only one .csv file found, defaulting to:")
+        selected_file = os.path.join(csv_dir, csv_files[0])
+        print(selected_file)
+        return selected_file
+
+    print("Please select a .csv file to use:")
+    for i, f in enumerate(csv_files):
+        print(f"{i + 1}: {f}")
+
+    while True:
+        try:
+            selection = int(input("> "))
+            if selection not in range(1, len(csv_files) + 1):
+                raise ValueError
+            break
+        except ValueError:
+            print("Invalid selection. Please enter a number corresponding to a file.")
+
+    selected_file = os.path.join(csv_dir, csv_files[selection - 1])
+    print(f"Selected file: {selected_file}")
+    return selected_file
+
+
+def get_aspect_ratio(image_path):
+    image = cv2.imread(image_path)
+    h, w, _ = image.shape
+    aspect_ratio = h / w
+    return aspect_ratio, w
+
+
+def get_image_names_from_csv(file_path):
+    with open(file_path, 'r') as csvfile:
+        csv_reader = csv.reader(csvfile)
+        png_paths = [row[1:] for row in csv_reader]
+
+    return png_paths
+
+
+def event_check(image_size, fullscreen, index, text_mode=False):
     width, height = image_size
     aspect_ratio = width / height
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
-            run_mode = False
+            pygame.quit()
             sys.exit()
         if event.type == KEYDOWN:
-            if event.key == K_q:  # Press 'p' key to toggle pause
-                # print("bailing out")
-                run_mode = False
-                sys.exit()
             if event.key == K_f:  # Press 'f' key to toggle fullscreen
-                fullscreen = toggle_fullscreen(fullscreen)
-            if event.key == K_p:  # Press 'p' key to toggle fullscreen
-                pause_mode = not pause_mode
-                print(pause_mode)
+                fullscreen = toggle_fullscreen(image_size, fullscreen)
             if event.key == K_i:  # Press 'i' key to jump around
-                # index += 500
+                index += 500
                 print("jump around")
-            if event.key == K_t:  # Press ' t ' key to jump around
+            if event.key == K_t:  # press 't' toggle text
                 text_mode = not text_mode
         elif event.type == VIDEORESIZE:
             new_width, new_height = event.size
+            window_check = fullscreen
             if new_width / new_height > aspect_ratio:
                 new_width = int(new_height * aspect_ratio)
-                image_size = new_width, new_height
             else:
                 new_height = int(new_width / aspect_ratio)
-                image_size = new_width, new_height
-            display_init(fullscreen)
+            display_init((new_width, new_height), window_check)
 
-    return fullscreen
-
-
-def get_aspect_ratio(image_path):
-    # Load image with Pygame
-    image = pygame.image.load(image_path)
-
-    # Get image dimensions
-    w, h = image.get_size()
-
-    # Calculate aspect clock_frame_ratio
-    aspect_ratio = h / w
-    print(f'this is {w} wide and {h} tall, with an aspect ratio of {aspect_ratio}')
-    return aspect_ratio, w, h,
+    return fullscreen, index, text_mode
 
 
-def toggle_fullscreen(current_fullscreen_status):
-    if is_window_maximized() and not current_fullscreen_status:
-        print("dooo")
-        return current_fullscreen_status
-    else:
+def toggle_fullscreen(image_size, current_fullscreen_status):
+    if current_fullscreen_status and is_window_maximized():
         new_fullscreen_status = not current_fullscreen_status
-        display_init(new_fullscreen_status)
+        display_init(image_size, new_fullscreen_status)
+    else:
+        new_fullscreen_status = current_fullscreen_status
     return new_fullscreen_status
 
 
@@ -152,7 +151,7 @@ def create_texture(image):
     return texture_id
 
 
-def display_image(texture_id, width, height, rgba=(1, 1, 1, 1)):
+def display_image(texture_id, width, height, rgba=None):
     glBindTexture(GL_TEXTURE_2D, texture_id)
 
     if rgba:
@@ -176,26 +175,8 @@ def display_image(texture_id, width, height, rgba=(1, 1, 1, 1)):
         glDisable(GL_BLEND)
 
 
-def set_rgba_relative(index=0):
-    scale = 30.00
-    index_scale = (index/png_paths_len)
-    pi_scale = math.pi/2.000
-
-    hapi_scale = math.pi * index_scale
-    main_alpha = 1
-    if index > 200:
-        float_alpha = (math.sin(hapi_scale))
-    else:
-        float_alpha = 0
-    main_rgba = (1, 1, 1, main_alpha)
-    float_rgba = (1, 1, 1, float_alpha)
-    return main_rgba, float_rgba
-
-
-def overlay_images_fast(texture_id_main, texture_id_float, index=0, background_color=(32, 30, 32)):
+def overlay_images_fast(texture_id_main, texture_id_float, image_size, main_rgba=None, float_rgba=None):
     width, height = image_size
-    main_rgba, float_rgba = set_rgba_relative(index)
-    glClearColor(background_color[0]/255, background_color[1]/255, background_color[2]/255, 1.0)
     glClear(GL_COLOR_BUFFER_BIT)
 
     display_image(texture_id_float, width, height, rgba=float_rgba)
@@ -207,149 +188,79 @@ def load_texture(texture_id, image):
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image.shape[1], image.shape[0], 0, GL_RGBA, GL_UNSIGNED_BYTE, image)
 
 
-def load_images(index, main_folder, float_folder):
+def load_images(index, png_paths, main_folder, float_folder):
     main_image = read_image(png_paths[index][main_folder])
     float_image = read_image(png_paths[index][float_folder])
     return main_image, float_image
 
 
-def get_index(index, direction):
-    if MIDI_MODE:
-        midi_control.process_midi(MIDI_CLOCK)
-        index = midi_control.index
-        direction = midi_control.index_direction
-    else:
-        if PINGPONG:
-            # Reverse index_direction at boundaries
-            if (index + direction) < 0 or index + direction >= png_paths_len:
-                direction *= -1
-            index += direction
-        else:
-            index = (index + 1) % png_paths_len
-    if pause_mode:
-        direction_out = 0
-    else:
-        direction_out = direction
-    return index, direction_out
+def run_display(index, png_paths, main_folder, float_folder, image_size):
+    font_size = 24
+    font = pygame.font.Font(None, font_size)
+    text_display = False
+    fps = 30
+    clock = pygame.time.Clock()
+    fullscreen = True
+    print_update = False
 
+    current_time = time.time()
+    prev_time = current_time
+    old_index = index
 
-def print_index_diff_wrapper():
-    storage = {'old_index': 0, 'prev_time': 0}
+    # Initialize PINGPONG related variables
+    PINGPONG = True
+    direction = 1
 
-    def print_index_diff(index):
-        current_time = time.time()
-        if (current_time - storage['prev_time']) >= 1 and not storage['old_index'] == index:
-            print("index: ", index, "   index diff:  ", index - storage['old_index'])
-            storage['old_index'] = index
-            storage['prev_time'] = current_time
-            fippy = vid_clock.get_fps()
-            print(f'fps: {fippy}')
-            print(f'midi_control.bpm: {midi_control.bpm}')
-    return print_index_diff
+    # Create initial textures
+    main_image, float_image = load_images(index, png_paths, main_folder, float_folder)
+    texture_id1 = create_texture(main_image)
+    texture_id2 = create_texture(float_image)
 
-
-print_index_diff_function = print_index_diff_wrapper()
-
-
-def run_display_setup():
-    global vid_clock
-    pygame.init()
-    display_init(False)
-    vid_clock = pygame.time.Clock()
-    if MIDI_MODE:
-        midi_control.midi_control_stuff_main()
-    run_display()
-    return
-
-
-def run_display():
-    global run_mode
-    main_folder = 9
-    float_folder = 12
-    buffer_index, buffer_direction = get_index(0, 1)
-    fullscreen = False
-
-    index_changed = False
-
-    def queue_image(buffer_idx, main_folder_q, float_folder_q, image_queue):
-        buffer_idx = max(0, min(buffer_idx, png_paths_len - 1))
-        image_future = executor.submit(load_images, buffer_idx, main_folder_q, float_folder_q)
-        image_queue.put(image_future)
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        index, direction = get_index(0, 1)
+    with ThreadPoolExecutor(max_workers=4) as executor:
         image_queue = SimpleQueue()
+        buffer_size = 5
 
-        main_image, float_image = load_images(index, main_folder, float_folder)
-        texture_id1 = create_texture(main_image)
-        texture_id2 = create_texture(float_image)
+        # Preload images
+        for _ in range(buffer_size):
+            index += direction
+            index = max(0, min(index, len(png_paths) - 1))
+            image_future = executor.submit(load_images, index, png_paths, main_folder, float_folder)
+            image_queue.put(image_future)
 
-        for _ in range(BUFFER_SIZE):
-            # index, index_direction = get_index(index, index_direction)
-            buffer_index += direction
-            if buffer_index >= png_paths_len or buffer_index < 0:
-                buffer_index += direction * -1
-            queue_image(buffer_index, main_folder, float_folder, image_queue)
+        while True:
 
-        last_skipped_index = -1
+            fullscreen, index, text_display = event_check(image_size, fullscreen, index, text_display)
+            if not image_queue.empty():
+                main_image, float_image = image_queue.get().result()
+                load_texture(texture_id1, main_image)
+                load_texture(texture_id2, float_image)
 
-        while run_mode:
-            try:
-                float_folder, main_folder = time_stamp_control(float_folder, index, main_folder)
-                midi_control.process_midi(CLOCK_MODE)
-                prev_index = index
-                fullscreen = event_check(fullscreen)
-                index, direction = get_index(index, direction)
-                print_index_diff_function(index)
-                if index_changed != index:
-                    buffer_index = index
-                    if abs(prev_index - index) > 1 and last_skipped_index != index:
-                        last_skipped_index = index
+                if PINGPONG:
+                    # Reverse direction at boundaries
+                    if (index + direction) < 0 or index >= len(png_paths) - 1:
+                        direction = -direction
 
-                    buffer_synced = False
-                    discarded_images = []
-                    while not buffer_synced and not image_queue.empty():
-                        main_image, float_image = image_queue.get().result()
-                        if buffer_index == index:
-                            # print("MATCH!")
-                            buffer_synced = True
-                            buffer_direction = direction
-                            load_texture(texture_id1, main_image)
-                            load_texture(texture_id2, float_image)
+                index = (index + direction) % (len(png_paths) - 1)
 
-                            if buffer_index > png_paths_len or buffer_index < 0:
-                                print("AH SHIT")
-                                buffer_index += buffer_direction * -1
-                            queue_image(buffer_index, main_folder, float_folder, image_queue)
-                        else:
-                            discarded_images.append((main_image, float_image))
+                current_time = time.time()
+                if (current_time - prev_time >= 1) and print_update:
+                    print("index: ", index, "   index diff:  ", index - old_index)
+                    old_index = index
+                    prev_time = current_time
+                    float_folder = (float_folder + 1) % (len(png_paths[0]) - 1)
+                    part = clock.get_fps()
+                    print(part)
 
-                    # Put discarded images back into the queue
-                    for discarded_image in discarded_images:
-                        image_queue.put(discarded_image)
+                # Start a new future for the next images
+                next_index = index + buffer_size * direction
+                next_index = max(0, min(next_index, len(png_paths) - 1))
+                image_future = executor.submit(load_images, next_index, png_paths, main_folder, float_folder)
+                image_queue.put(image_future)
 
-                overlay_images_fast(texture_id1, texture_id2, index)
+            overlay_images_fast(texture_id1, texture_id2, image_size)
 
-                pygame.display.flip()
-                vid_clock.tick(FPS)
-            except Exception as e:
-                print(f"An error occurred: {e}")
-                # Optionally, you can add a time.sleep() here to throttle the loop in case of an error
-                # time.sleep(0.1)
-
-
-def time_stamp_control(float_folder, index, main_folder):
-    time_stamp = midi_control.total_frames / midi_control.frame_rate
-    if time_stamp > 5 and (index % (FPS * 2)) == 0:
-        main_folder = (1 + main_folder) % 9  # chromatic
-    if time_stamp > 30 and (index % FPS * 3) == 0:
-        float_folder = (float_folder + 1) % folder_count
-        if float_folder >= 13 or float_folder < 10:
-            float_folder = 10
-    if time_stamp < 30:
-        main_folder = 9
-        float_folder = 12
-    return float_folder, main_folder
+            pygame.display.flip()
+            clock.tick(fps)
 
 
 def setup_blending():
@@ -357,52 +268,60 @@ def setup_blending():
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
 
-def display_init(fullscreen=False):
-    aspect_ratio, w, h = get_aspect_ratio(png_paths[0][0])
+def display_init(image_size, fullscreen=False, setup=False):
+    pygame.init()
+    width, height = image_size
     fullscreen_size = pygame.display.list_modes()[0]
     fullscreen_width, fullscreen_height = fullscreen_size
     # Calculate scaling factor and position for fullscreen mode
-    scale = min(fullscreen_width / w, fullscreen_height / h)
-    offset_x = int((fullscreen_width - w * scale) / 2)
-    offset_y = int((fullscreen_height - h * scale) / 2)
+    scale = min(fullscreen_width / width, fullscreen_height / height)
+    offset_x = int((fullscreen_width - width * scale) / 2)
+    offset_y = int((fullscreen_height - height * scale) / 2)
+    fullscreen == fullscreen
     flags = OPENGL
     flags |= DOUBLEBUF
     if fullscreen:
         flags |= FULLSCREEN
         pygame.display.set_caption('Fullscreen Mode')
         pygame.display.set_mode((fullscreen_width, fullscreen_height), flags)
-        glViewport(offset_x, offset_y, int(w * scale), int(h * scale))
+
+        glViewport(offset_x, offset_y, int(width * scale), int(height * scale))
     else:
         flags |= RESIZABLE
         pygame.display.set_mode(image_size, flags)
         pygame.display.set_caption('Windowed Mode')
-        glViewport(0, 0, w, h)  # Update to use original width and height
+        glViewport(0, 0, width, height)
+        # Explicitly set the window size back to image_size when returning to windowed mode
+        pygame.display.set_mode(image_size, flags)
 
-    glEnable(GL_TEXTURE_2D)
-    setup_blending()
-    glMatrixMode(GL_PROJECTION)
-    glLoadIdentity()
-    if fullscreen:
-        gluOrtho2D(0, int(w * scale), 0, int(h * scale))  # Use scaled dimensions in fullscreen mode
-    else:
-        gluOrtho2D(0, w, 0, h)  # Use original dimensions in windowed mode
-    glMatrixMode(GL_MODELVIEW)
-    glLoadIdentity()
+    if setup:
+        glEnable(GL_TEXTURE_2D)
+        setup_blending()
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        gluOrtho2D(0, width, 0, height)
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
 
 
 def display_and_run():
-    global png_paths_len, png_paths, folder_count, image_size
-    csv_source, png_paths = calculators.init_all()
-    print(platform.system(), "midi clock mode is:", CLOCK_MODE)
-    # csv_source = select_csv_file()
-    # png_paths = get_image_names_from_csv(csv_source)
-    folder_count = len(png_paths[2220])
-    print(f'folder_count: {folder_count}')
-    png_paths_len = len(png_paths)-1
-    aspect_ratio, width, height = get_aspect_ratio(png_paths[0][0])
+    midi_port = select_midi_input()
+    midi_stuff = MidiProcessor()
+    # midi_stuff.process_midi(midi_port)
+    print(platform.system())
+    csv_source = select_csv_file()
+    png_paths = get_image_names_from_csv(csv_source)
+    print(len(png_paths[0]))
+    aspect_ratio, width = get_aspect_ratio(png_paths[0][0])
+    print(width)
+    width = 640
+    height = int(width * aspect_ratio)
     image_size = (width, height)
-    print(image_size)
-    run_display_setup()
+    start_index = 0
+    main_folder = 6
+    float_folder = 6
+    display_init(image_size, True, True)
+    run_display(start_index, png_paths, main_folder, float_folder, image_size)
 
 
 if __name__ == "__main__":
