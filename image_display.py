@@ -22,6 +22,7 @@ import platform
 import pygame
 from pygame.locals import *
 
+
 def is_window_maximized():
     if platform.system() == 'Darwin':
         from AppKit import NSScreen
@@ -52,13 +53,14 @@ def is_window_maximized():
         raise NotImplementedError(f"Maximized window detection is not implemented for {platform.system()}")
 
 
-def event_check(image_size, fullscreen, index, direction = 1, text_mode=False, force_quit=False):
+def event_check(image_size, fullscreen, index, direction=1, text_mode=False, force_quit=False):
     width, height = image_size
     aspect_ratio = width / height
     old_direction = 1
     paused = False
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
+            sys.exit()
             sys.exit()
             pygame.quit()
         if event.type == KEYDOWN:
@@ -85,6 +87,7 @@ def event_check(image_size, fullscreen, index, direction = 1, text_mode=False, f
             display_init((new_width, new_height), window_check)
 
     return fullscreen, index, text_mode, force_quit
+
 
 def get_aspect_ratio(image_path):
     # Load image with Pygame
@@ -182,7 +185,7 @@ def run_display(index, direction, png_paths, main_folder, float_folder, image_si
 
 
     # Initialize PINGPONG related variables
-    PINGPONG = True
+    pingpong= True
     direction = 1
 
     # Create initial textures
@@ -205,31 +208,29 @@ def run_display(index, direction, png_paths, main_folder, float_folder, image_si
             queue_image(index, direction, png_paths, main_folder, float_folder, image_queue)
 
         while not force_quit:
-
-
             fullscreen, index, text_display, force_quit = event_check(image_size, fullscreen, index, text_display, force_quit)
+            if midi_mode:
+                index = midi_control.index
+                direction = midi_control.direction
+            current_time = time.time()
+            if (current_time - prev_time >= 4) and print_update:
+                print("index: ", index, "   index diff:  ", index - old_index)
+                old_index = index
+                prev_time = current_time
+                float_folder = (float_folder + 1) % (len(png_paths[0]) )
+                part = clock.get_fps()
+                print(part)
             if not image_queue.empty():
                 main_image, float_image = image_queue.get().result()
                 load_texture(texture_id1, main_image)
                 load_texture(texture_id2, float_image)
-                if midi_mode:
-                    total_frames = midi_control.total_frames
-                    index, direction = calculators.calculate_index(total_frames)
+
                 if not midi_mode:
-                    if PINGPONG:
+                    if pingpong:
                         # Reverse direction at boundaries
                         if (index + direction) < 0 or index >= len(png_paths) - 1:
                             direction = -direction
                         index = (index + direction) % (len(png_paths) - 1)
-
-                current_time = time.time()
-                if (current_time - prev_time >= 4) and print_update:
-                    print("index: ", index, "   index diff:  ", index - old_index)
-                    old_index = index
-                    prev_time = current_time
-                    float_folder = (float_folder + 1) % (len(png_paths[0]) )
-                    part = clock.get_fps()
-                    print(part)
 
                 # Start a new future for the next images
                 next_index = index + buffer_size * direction
@@ -256,7 +257,6 @@ def display_init(image_size, fullscreen=False, setup=False):
     scale = min(fullscreen_width / width, fullscreen_height / height)
     offset_x = int((fullscreen_width - width * scale) / 2)
     offset_y = int((fullscreen_height - height * scale) / 2)
-    fullscreen == fullscreen
     flags = OPENGL
     flags |= DOUBLEBUF
     if fullscreen:
@@ -285,6 +285,8 @@ def display_init(image_size, fullscreen=False, setup=False):
         glLoadIdentity()
 
 
+import concurrent.futures
+
 
 def display_and_run():
     midi_control.midi_control_stuff_main()
@@ -300,13 +302,26 @@ def display_and_run():
     float_folder = 0
     fullscreen = False
     setup_mode = True
-    threading.Thread(target=midi_control.process_midi).start()
     start_frames = midi_control.total_frames
     print(start_frames)
-    index,direction = calculators.calculate_index(start_frames)
+    index, direction = calculators.calculate_index(start_frames)
     display_init(image_size, fullscreen, setup_mode)
-    run_display(index, direction,png_paths, main_folder, float_folder, image_size)
 
+    # Create a stop event for the MIDI processing thread
+    stop_midi_event = threading.Event()
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        # Start the MIDI processing task, passing the stop event
+        midi_future = executor.submit(midi_control.process_midi)
+
+        # Your existing code to run the display
+        run_display(index, direction, png_paths, main_folder, float_folder, image_size)
+
+        # Set the stop event for the MIDI processing thread
+        stop_midi_event.set()
+
+        # Wait for the MIDI processing task to finish
+        midi_future.result()
 
 
 if __name__ == "__main__":
