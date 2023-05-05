@@ -12,7 +12,7 @@ frame_rate = 30
 mtc_values = [0, 0, 0, 0]
 midi_port = None
 index = 0
-
+direction = 1
 
 def select_midi_input():
     available_ports = mido.get_input_names()
@@ -63,7 +63,7 @@ def process_midi():
 
 
 def process_mtc(msg):
-    global mtc_received, recent_messages, total_frames, frame_rate, mtc_values
+    global mtc_received, recent_messages, total_frames, frame_rate, mtc_values, index, direction
 
     mtc_type, value = parse_mtc(msg)
     update_mtc_timecode(mtc_type, value)
@@ -74,6 +74,7 @@ def process_mtc(msg):
         calculate_frame_rate()
         calculate_time_code()
         calculate_total_frames()
+        index, direction = calculators.calculate_index(total_frames)
         mtc_received = False
         recent_messages.clear()
 
