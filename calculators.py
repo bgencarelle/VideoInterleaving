@@ -99,9 +99,12 @@ def check_index_differences():
         print(f"Result: {result}, Count: {count}")
 
 
-def calculate_index(estimate_frame_counter, index_mult=4.0):
+def calculate_index(estimate_frame_counter, index_mult=8.0):
     global frame_duration, png_paths_len
-    progress = (estimate_frame_counter / (frame_duration / index_mult)) % (png_paths_len * 2)
+    if index_mult >= frame_duration*.5:
+        index_mult = frame_duration*.5
+    frame_scale = 1 / (frame_duration / index_mult)
+    progress = (estimate_frame_counter * frame_scale) % (png_paths_len * 2)
 
     if int(progress) <= png_paths_len:
         index = int(progress)
@@ -117,18 +120,18 @@ def calculate_index(estimate_frame_counter, index_mult=4.0):
     return index, direction
 
 
-
 def init_all():
     csv_source = select_csv_file()
-    png_paths = get_image_names_from_csv(csv_source)
+    get_image_names_from_csv(csv_source)
     # print(png_paths_len == len(png_paths), png_paths_len)
-    frame_dur = calculate_frame_duration()
+    calculate_frame_duration()
 
 
 def main():
     init_all()
     # print(frame_dur)
     check_index_differences()
+
 
 if __name__ == "__main__":
     main()
