@@ -1,15 +1,10 @@
 import csv
 import os
 import mido
-import decimal
-import math
-from collections import deque
 
-
-png_paths_len = 2221
-frame_duration = 4.0
-video_length = 19173
-bpm_smoothing_window = 10
+png_paths_len = 1
+frame_duration = 1.0
+video_length = 1
 
 
 def get_midi_length(midi_file_path):
@@ -20,65 +15,20 @@ def get_midi_length(midi_file_path):
     return midi_length_frames
 
 
-def set_video_length(video_name, video_name_length):
-    presets_folder = "presets"
-    if not os.path.exists(presets_folder):
-        os.makedirs(presets_folder)
-
-    csv_file_path = os.path.join(presets_folder, "set_video_length.csv")
-
-    with open(csv_file_path, mode="a", newline='') as file:
-        writer = csv.writer(file)
-        writer.writerow([video_name, video_name_length])
-
-
-def get_video_length(video_number=0):
-    with open("presets/set_video_length.csv", mode="r", newline='') as file:
-        reader = csv.reader(file)
-        video_lengths = list(reader)
-
-        if len(video_lengths) == 1:
-            return int(video_lengths[0][1])
-
-        if 0 < video_number <= len(video_lengths):
-            return int(video_lengths[video_number - 1][1])
-
-        print("Please choose a video by name from the list:")
-        for i, video in enumerate(video_lengths):
-            print(f"{i+1}. {video[0]}")
-
-        while True:
-            selected_video = input("Enter the name of the video: ")
-            for video in video_lengths:
-                if video[0] == selected_video:
-                    return int(video[1])
-            print("Invalid video name. Please try again.")
-
-
-def calculate_frame_duration(text_mode=True, setup_mode=False):
-    global video_length, frame_duration
-    if setup_mode:
-        if text_mode:
-            while True:
-                try:
-                    video_length = int(input("Please specify the length of the video in frames: "))
-                    video_length = abs(video_length)
-                    break
-                except ValueError:
-                    print("Invalid input. Please enter a positive integer.")
-            video_name = input("Please enter the name of the video: ")
-            set_video_length(video_name, video_length)
-        else:
-            midi_file_path = input("Please enter the MIDI file path: ")
-            if not os.path.exists(midi_file_path):
-                raise FileNotFoundError("MIDI file not found.")
-            if not midi_file_path.lower().endswith('.mid'):
-                raise ValueError("Invalid file type. Please provide a valid MIDI file.")
-            video_length = get_midi_length(midi_file_path)
-            video_name = input("Please enter the name of the video: ")
-            set_video_length(video_name, video_length)
+def calculate_frame_duration(text_mode=True):
+    global png_paths_len, frame_duration, video_length
+    if text_mode:
+        video_length = int(input("Please specify the length of the video in frames: "))
+        if video_length <= 30:
+            raise ValueError("Length should be greater than 30.")
     else:
-        video_length = get_video_length(video_number=0)
+        midi_file_path = input("Please enter the MIDI file path: ")
+        if not os.path.exists(midi_file_path):
+            raise FileNotFoundError("MIDI file not found.")
+        if not midi_file_path.lower().endswith('.mid'):
+            raise ValueError("Invalid file type. Please provide a valid MIDI file.")
+        video_length = get_midi_length(midi_file_path)
+
     frame_duration = video_length / png_paths_len
     print("Frame scaling factor for this video: ", frame_duration)
     return frame_duration
@@ -127,83 +77,58 @@ def get_image_names_from_csv(file_path):
 
 def check_index_differences():
     previous_index = None
-    positive_result_counts = {}
-    negative_result_counts = {}
-    video_length_mx = video_length * 20
+    result_counts = {}
+    video_length_mx = video_length
 
     for i in range(video_length_mx):
-        current_index, direction= calculate_index(i)
+        current_index, _ = calculate_index(i*2)
 
         # Count the unique results
-        if direction > 0:
-            if current_index not in positive_result_counts:
-                positive_result_counts[current_index] = 0
-            positive_result_counts[current_index] += 1
-        else:
-            if current_index not in negative_result_counts:
-                negative_result_counts[current_index] = 0
-            negative_result_counts[current_index] += 1
+        if current_index not in result_counts:
+            result_counts[current_index] = 0
+        result_counts[current_index] += 1
 
         # Check index differences
         if previous_index is not None and abs(current_index - previous_index) > 1:
-            abs_diff_check = abs(current_index - previous_index)
-            print(f"Index difference greater than 1 found between steps {i - 1} and {i}: {abs_diff_check}")
+            print(f"Index difference greater than 1 found between steps {i - 1} and {i}")
 
         previous_index = current_index
 
     print("Number of times each unique result appears:")
-    sorted_positive_results = sorted(positive_result_counts.items())
-    sorted_negative_results = sorted(negative_result_counts.items(), key=lambda x: abs(x[0]))
-
-    for pos_result, pos_count in sorted_positive_results:
-        for neg_result, neg_count in sorted_negative_results:
-            if abs(pos_result) == abs(neg_result):
-                diff_result = abs(pos_count - neg_count)
-                if diff_result >= 1:
-                    print(f"Result: {pos_result}, Count: {pos_count} --- Result: -{neg_result}, Count: {neg_count},"
-                          f"diff: {diff_result}")
-                break
-    print(f"extremes 0: {positive_result_counts[0]}, pos {png_paths_len-1}: {positive_result_counts[png_paths_len-1]},"
-          f"neg: {negative_result_counts[png_paths_len-1]}, ")
+    for result, count in result_counts.items():
+        print(f"Result: {result}, Count: {count}")
 
 
-def calculate_index(frame_counter):
-    scale_ref = 4.0
+def calculate_index(estimate_frame_counter, index_mult=4.0):
+    global frame_duration, png_paths_len
+    progress = (estimate_frame_counter / (frame_duration / index_mult)) % (png_paths_len * 2)
 
-    frame_scale = scale_ref / frame_duration
-
-    progress = (decimal.Decimal(frame_counter * frame_scale)) % (png_paths_len * 2)
-
-    if progress < png_paths_len:
-        index = int(progress.quantize(decimal.Decimal('1.000000'), rounding=decimal.ROUND_HALF_UP))
+    if int(progress) <= png_paths_len:
+        index = int(progress)
         direction = 1
     else:
-        index = int((decimal.Decimal(png_paths_len * 2) - progress).quantize(decimal.Decimal('1.000000'), rounding=decimal.ROUND_HALF_UP))
+        index = int(png_paths_len * 2 - progress)
         direction = -1
 
     # Ensure the index is within the valid range
-    index = max(0, min(index, png_paths_len))
+    index = max(0, min(index, png_paths_len - 1))
+    print(index, direction)
 
-    # print(index * direction)
     return index, direction
 
 
 
 def init_all():
-    global frame_duration
     csv_source = select_csv_file()
     png_paths = get_image_names_from_csv(csv_source)
     # print(png_paths_len == len(png_paths), png_paths_len)
-    frame_duration = calculate_frame_duration(True, False)
-
-    return csv_source, png_paths
+    frame_dur = calculate_frame_duration()
 
 
 def main():
     init_all()
     # print(frame_dur)
     check_index_differences()
-
 
 if __name__ == "__main__":
     main()
