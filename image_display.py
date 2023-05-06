@@ -4,7 +4,6 @@ from concurrent.futures import ThreadPoolExecutor
 import concurrent
 from queue import SimpleQueue
 
-import calculators
 from calculators import select_csv_file, get_image_names_from_csv
 import midi_control
 import cv2
@@ -14,9 +13,7 @@ from OpenGL.GLU import *
 from platform import system
 
 if system() == 'Darwin':
-    from Quartz import CGWindowListCopyWindowInfo, kCGWindowListOptionOnScreenOnly, kCGNullWindowID
-elif system() == 'Linux':
-    from Xlib import X, display
+    from Quartz import CGWindowListCopyWindowInfo, kCGWindowListOptionOnScreenOnly
 
 import platform
 import pygame
@@ -29,27 +26,13 @@ def is_window_maximized():
         pid = os.getpid()
         screen_frame = NSScreen.mainScreen().frame()
         screen_width, screen_height = screen_frame.size.width, screen_frame.size.height
-        window_list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID)
+        window_list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly)
         for window in window_list:
             if window.get('kCGWindowOwnerPID') == pid:
                 window_width = window.get('kCGWindowBounds')['Width']
                 window_height = window.get('kCGWindowBounds')['Height']
                 return window_width >= screen_width or window_height >= screen_height
         return False
-    elif platform.system() == 'Linux':
-        d = display.Display()
-        root = d.screen().root
-        pygame_window_id = pygame.display.get_wm_info()['window']
-        window = d.create_resource_object('window', pygame_window_id)
-        wm_state = d.intern_atom('_NET_WM_STATE')
-        max_horz = d.intern_atom('_NET_WM_STATE_MAXIMIZED_HORZ')
-        max_vert = d.intern_atom('_NET_WM_STATE_MAXIMIZED_VERT')
-        fullscreen = d.intern_atom('_NET_WM_STATE_FULLSCREEN')
-        wm_state_data = window.get_full_property(wm_state, X.AnyPropertyType)
-        return (max_horz in wm_state_data.value and max_vert in wm_state_data.value) or (
-                fullscreen in wm_state_data.value)
-    else:
-        raise NotImplementedError(f"Maximized window detection is not implemented for {platform.system()}")
 
 
 def event_check(image_size, fullscreen, text_mode=False, force_quit=False):
@@ -174,8 +157,8 @@ def run_display(index, direction, png_paths, main_folder, float_folder, image_si
     fullscreen = False
     print_update = True
     force_quit = False
-    midi_mode = True
-    midi_clock_mode = False
+    midi_mode = False
+    midi_clock_mode = True
     freewheel_mode = False
     current_time = time.time()
     prev_time = current_time
@@ -213,6 +196,7 @@ def run_display(index, direction, png_paths, main_folder, float_folder, image_si
 
             if midi_clock_mode:
                 index = midi_control.clock_index
+                direction = midi_control.clock_index_direction
 
             current_time = time.time()
             if (current_time - prev_time >= 4) and print_update:
@@ -325,8 +309,6 @@ def display_and_run():
 
         # Your existing code to run the display
         run_display(index, direction, png_paths, main_folder, float_folder, image_size)
-
-
         # Wait for the MIDI processing task to finish
         midi_future.result()
 

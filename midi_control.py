@@ -14,6 +14,8 @@ midi_port = None
 index = 0
 direction = 1
 clock_index = 0
+clock_index_direction = 1
+
 
 def select_midi_input():
     available_ports = mido.get_input_names()
@@ -54,6 +56,7 @@ def select_midi_input():
         except ValueError:
             print("Invalid selection. Please enter a number corresponding to a port.")
 
+
 def process_midi():
     with mido.open_input(midi_port) as in_port:
         for msg in in_port:
@@ -80,7 +83,6 @@ def process_mtc(msg):
         recent_messages.clear()
 
 
-
 def is_complete_mtc_code():
     # Assuming all 8 messages have been received when the list has 8 elements
     return len(recent_messages) == 8
@@ -100,6 +102,7 @@ def calculate_time_code():
     frames = mtc_values[3]
     time_code = f'{hours:02}:{minutes:02}:{seconds:02}:{frames:02}'
     print(f"Time code: {time_code}")
+
 
 def parse_mtc(msg):
     mtc_type = msg.frame_type
@@ -139,10 +142,8 @@ def calculate_total_frames():
                    (minutes * 60 * frame_rate) + (seconds * frame_rate) + frames
     total_frames = total_frames
 
-    #print(f"Total frames: {total_frames}")
+    # print(f"Total frames: {total_frames}")
     return total_frames
-
-
 
 
 def handle_note_on(msg):
@@ -162,10 +163,12 @@ def handle_program_change(msg):
 
 
 def handle_clock(msg):
+    global clock_index_direction
     global clock_index
     clock_counter(1)
-    clock_index = calculators.calculate_index(clock_counter())
+    clock_index, clock_index_direction = calculators.calculate_index(clock_counter())
     # print("Clock message received")
+
 
 def clock_counter(amount=None):
     if not hasattr(clock_counter, "counter"):
@@ -173,8 +176,9 @@ def clock_counter(amount=None):
 
     if amount is not None:
         clock_counter.counter += amount
-    #print(clock_counter.counter)
+    # print(clock_counter.counter)
     return clock_counter.counter
+
 
 def process_message(msg):
     handler = message_handlers.get(msg.type)
@@ -184,8 +188,6 @@ def process_message(msg):
         print(f"Unhandled message type: {msg.type}")
 
 
-
-
 message_handlers = {
     'note_on': handle_note_on,
     'note_off': handle_note_off,
@@ -193,10 +195,14 @@ message_handlers = {
     'program_change': handle_program_change,
     'clock': handle_clock,
 }
+
+
 def midi_control_stuff_main():
+    global midi_port
     midi_port = select_midi_input()
     calculators.init_all()
-    #process_midi()
+    # process_midi()
+
 
 if __name__ == "__main__":
     midi_control_stuff_main()
