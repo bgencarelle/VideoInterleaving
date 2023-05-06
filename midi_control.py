@@ -13,6 +13,7 @@ mtc_values = [0, 0, 0, 0]
 midi_port = None
 index = 0
 direction = 1
+clock_index = 0
 
 def select_midi_input():
     available_ports = mido.get_input_names()
@@ -161,7 +162,9 @@ def handle_program_change(msg):
 
 
 def handle_clock(msg):
+    global clock_index
     clock_counter(1)
+    clock_index = calculators.calculate_index(clock_counter())
     # print("Clock message received")
 
 def clock_counter(amount=None):
@@ -170,7 +173,7 @@ def clock_counter(amount=None):
 
     if amount is not None:
         clock_counter.counter += amount
-
+    #print(clock_counter.counter)
     return clock_counter.counter
 
 def process_message(msg):
