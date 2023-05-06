@@ -1,6 +1,7 @@
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+import concurrent
 from queue import SimpleQueue
 
 import calculators
@@ -11,7 +12,6 @@ import pygame.time
 from OpenGL.GL import *
 from OpenGL.GLU import *
 from platform import system
-import threading
 
 if system() == 'Darwin':
     from Quartz import CGWindowListCopyWindowInfo, kCGWindowListOptionOnScreenOnly, kCGNullWindowID
@@ -21,7 +21,6 @@ elif system() == 'Linux':
 import platform
 import pygame
 from pygame.locals import *
-
 
 def is_window_maximized():
     if platform.system() == 'Darwin':
@@ -53,27 +52,24 @@ def is_window_maximized():
         raise NotImplementedError(f"Maximized window detection is not implemented for {platform.system()}")
 
 
-def event_check(image_size, fullscreen, index, direction=1, text_mode=False, force_quit=False):
+def event_check(image_size, fullscreen, text_mode=False, force_quit=False):
     width, height = image_size
     aspect_ratio = width / height
     old_direction = 1
     paused = False
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
-            sys.exit()
-            sys.exit()
             pygame.quit()
+            sys.exit()
         if event.type == KEYDOWN:
             if event.key == K_q:  # Press 'p' key to toggle pause
-                force_quit=True
-                print("bailing out")
+                # print("bailing out")
                 pygame.quit()
                 sys.exit()
             if event.key == K_f:  # Press 'f' key to toggle fullscreen
-                pass
-               # fullscreen = toggle_fullscreen(image_size, fullscreen)
+                fullscreen = toggle_fullscreen(image_size, fullscreen)
             if event.key == K_i:  # Press 'i' key to jump around
-                index += 500
+                #index += 500
                 print("jump around")
             if event.key == K_t:  # press 't' toggle text
                 text_mode = not text_mode
@@ -86,7 +82,7 @@ def event_check(image_size, fullscreen, index, direction=1, text_mode=False, for
                 new_height = int(new_width / aspect_ratio)
             display_init((new_width, new_height), window_check)
 
-    return fullscreen, index, text_mode, force_quit
+    return fullscreen, text_mode, force_quit
 
 
 def get_aspect_ratio(image_path):
@@ -179,14 +175,16 @@ def run_display(index, direction, png_paths, main_folder, float_folder, image_si
     print_update = True
     force_quit = False
     midi_mode = True
+    midi_clock_mode = False
+    freewheel_mode = False
     current_time = time.time()
     prev_time = current_time
     old_index = index
 
-
     # Initialize PINGPONG related variables
     pingpong= True
-    direction = 1
+
+    min_buffered_images = 5  # Set the minimum number of images to buffer before displaying
 
     # Create initial textures
     main_image, float_image = load_images(index, png_paths, main_folder, float_folder)
@@ -197,9 +195,9 @@ def run_display(index, direction, png_paths, main_folder, float_folder, image_si
         image_future = executor.submit(load_images, index, png_paths, main_folder, float_folder)
         image_queue.put(image_future)
 
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor() as executor:
         image_queue = SimpleQueue()
-        buffer_size = 5
+        buffer_size = 8
 
         # Preload images
         for _ in range(buffer_size):
@@ -208,19 +206,23 @@ def run_display(index, direction, png_paths, main_folder, float_folder, image_si
             queue_image(index, direction, png_paths, main_folder, float_folder, image_queue)
 
         while not force_quit:
-            fullscreen, index, text_display, force_quit = event_check(image_size, fullscreen, index, text_display, force_quit)
+            fullscreen, text_display, force_quit = event_check(image_size, fullscreen, text_display)
             if midi_mode:
                 index = midi_control.index
                 direction = midi_control.direction
+
+            if midi_clock_mode:
+                index = midi_control.clock_index
+
             current_time = time.time()
             if (current_time - prev_time >= 4) and print_update:
                 print("index: ", index, "   index diff:  ", index - old_index)
                 old_index = index
                 prev_time = current_time
-                float_folder = (float_folder + 1) % (len(png_paths[0]) )
+                float_folder = (float_folder + 1) % (len(png_paths[0]))
                 part = clock.get_fps()
                 print(part)
-            if not image_queue.empty():
+            if not image_queue.empty() and image_queue.qsize() >= min_buffered_images:
                 main_image, float_image = image_queue.get().result()
                 load_texture(texture_id1, main_image)
                 load_texture(texture_id2, float_image)
@@ -285,6 +287,14 @@ def display_init(image_size, fullscreen=False, setup=False):
         glLoadIdentity()
 
 
+def midi_task_wrapper():
+    try:
+        midi_control.process_midi()
+    except concurrent.futures.CancelledError:
+        # Clean up and close MIDI resources here, if necessary
+        pass
+
+
 import concurrent.futures
 
 
@@ -304,11 +314,10 @@ def display_and_run():
     setup_mode = True
     start_frames = midi_control.total_frames
     print(start_frames)
-    index, direction = calculators.calculate_index(start_frames)
+    index = 0
+    direction = 1
     display_init(image_size, fullscreen, setup_mode)
 
-    # Create a stop event for the MIDI processing thread
-    stop_midi_event = threading.Event()
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
         # Start the MIDI processing task, passing the stop event
@@ -317,8 +326,6 @@ def display_and_run():
         # Your existing code to run the display
         run_display(index, direction, png_paths, main_folder, float_folder, image_size)
 
-        # Set the stop event for the MIDI processing thread
-        stop_midi_event.set()
 
         # Wait for the MIDI processing task to finish
         midi_future.result()
