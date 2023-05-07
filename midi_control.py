@@ -101,7 +101,7 @@ def calculate_time_code():
     seconds = mtc_values[2]
     frames = mtc_values[3]
     time_code = f'{hours:02}:{minutes:02}:{seconds:02}:{frames:02}'
-    print(f"Time code: {time_code}")
+    #print(f"Time code: {time_code}")
 
 
 def parse_mtc(msg):
@@ -201,7 +201,7 @@ def midi_control_stuff_main():
     global midi_port
     midi_port = select_midi_input()
     calculators.init_all()
-    # process_midi()
+    #process_midi()
 
 
 if __name__ == "__main__":
