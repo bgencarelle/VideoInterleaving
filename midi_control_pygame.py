@@ -10,7 +10,7 @@ total_frames = 0
 frame_rate = 30
 mtc_values = [0, 0, 0, 0]
 index = 0
-index_direction = 0
+direction = 0
 
 
 def calculate_total_frames():
@@ -49,7 +49,7 @@ def calculate_time_code():
 
 
 def process_mtc(msg):
-    global mtc_received, recent_messages, total_frames, frame_rate, mtc_values, index, index_direction
+    global mtc_received, recent_messages, total_frames, frame_rate, mtc_values, index, direction
 
     mtc_type, value = parse_mtc(msg)
     frame_updated = update_mtc_timecode(mtc_type, value)
@@ -288,8 +288,6 @@ def midi_parser(callback, device_id=None):
         pygame.midi.quit()
         pygame.quit()
 
-def process_midi(device_id=None):
-    midi_parser(process_message, device_id)
 
 if __name__ == "__main__":
     midi_parser(process_message)
