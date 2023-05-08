@@ -140,7 +140,7 @@ def create_texture(image):
     return texture_id
 
 
-def display_image(texture_id, width, height, rgba=None):
+def display_image(texture_id, width, height, rgba=(1, 1, 1, 1)):
     glBindTexture(GL_TEXTURE_2D, texture_id)
 
     if rgba:
@@ -164,7 +164,7 @@ def display_image(texture_id, width, height, rgba=None):
         glDisable(GL_BLEND)
 
 
-def overlay_images_fast(texture_id_main, texture_id_float, main_rgba=None, float_rgba=None):
+def overlay_images_fast(texture_id_main, texture_id_float, main_rgba=None, float_rgba=(1, 1, 1, 1)):
     width, height = image_size
     glClear(GL_COLOR_BUFFER_BIT)
 
@@ -203,7 +203,6 @@ def set_index(index, direction):
 
 def print_index_diff_wrapper():
     storage = {'old_index': 0, 'prev_time': 0}
-
     def print_index_diff(index):
         current_time = time.time()
         if (current_time - storage['prev_time']) >= 1:
@@ -212,7 +211,6 @@ def print_index_diff_wrapper():
             storage['prev_time'] = current_time
             fippy = vid_clock.get_fps()
             print(f'fps: {fippy}')
-
 
     return print_index_diff
 
@@ -244,6 +242,7 @@ def run_display():
     buffer_index = index
     buffer_direction = direction
     fullscreen = False
+    displayed_buffer_index = -1  # Initialize a variable to track the displayed buffer index
 
     index_changed = False
     buffer_synced = True
@@ -281,27 +280,30 @@ def run_display():
             if index % (FPS * 5) == 0:
                 main_folder = (main_folder + 1) % folder_count
 
-            if index_changed and not image_queue.empty() and image_queue.qsize() >= min_buffered_images:
-                main_image, float_image = image_queue.get().result()
-                load_texture(texture_id1, main_image)
-                load_texture(texture_id2, float_image)
+            if index_changed:
+                buffer_synced = False
+                while not buffer_synced and not image_queue.empty():
+                    main_image, float_image = image_queue.get().result()
+                    displayed_buffer_index = buffer_index
+                    if buffer_index == index:
+                        buffer_synced = True
+                        load_texture(texture_id1, main_image)
+                        load_texture(texture_id2, float_image)
 
-                if buffer_index == index:
-                    buffer_synced = True
-
-                next_buffer_index = buffer_index + buffer_direction
-                if next_buffer_index >= png_paths_len or next_buffer_index < 0:
-                    buffer_direction *= -1
-                    next_buffer_index = buffer_index + buffer_direction
-                queue_image(next_buffer_index, main_folder, float_folder, image_queue)
-
-                index_changed = False  # Reset index_changed to False after queueing the next image
+                        # Start a new future for the next images
+                        next_buffer_index = buffer_index + buffer_direction
+                        if next_buffer_index >= png_paths_len or next_buffer_index < 0:
+                            buffer_direction *= -1
+                            next_buffer_index = buffer_index + buffer_direction
+                        queue_image(next_buffer_index, main_folder, float_folder, image_queue)
 
             if buffer_synced:
                 overlay_images_fast(texture_id1, texture_id2)
 
             pygame.display.flip()
+            print("Displayed buffer index:", displayed_buffer_index)
             vid_clock.tick(FPS)
+
 
 def setup_blending():
     glEnable(GL_BLEND)
@@ -356,7 +358,6 @@ def display_and_run():
     folder_count = len(png_paths[0])
     png_paths_len = len(png_paths) - 1
     aspect_ratio, width, height = get_aspect_ratio(png_paths[0][0])
-
     height = int(width * aspect_ratio)
     image_size = (width, height)
     display_init(False, True)

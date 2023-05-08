@@ -200,9 +200,9 @@ message_handlers = {
 def midi_control_stuff_main():
     global midi_port
     midi_port = select_midi_input()
+
+def main():
     calculators.init_all()
-    #process_midi()
-
-
+    process_midi()
 if __name__ == "__main__":
-    midi_control_stuff_main()
+    main()
