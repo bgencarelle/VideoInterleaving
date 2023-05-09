@@ -5,9 +5,9 @@ import decimal
 import math
 
 
-png_paths_len = 1
-frame_duration = 1.0
-video_length = 1
+png_paths_len = 2221
+frame_duration = 4.0
+video_length = 19173
 
 def get_midi_length(midi_file_path):
     midi_file = mido.MidiFile(midi_file_path)
@@ -37,8 +37,8 @@ def calculate_frame_duration(text_mode=True, setup_mode = False):
                 raise ValueError("Invalid file type. Please provide a valid MIDI file.")
             video_length = get_midi_length(midi_file_path)
 
-        frame_duration = video_length / png_paths_len
-        print("Frame scaling factor for this video: ", frame_duration)
+    frame_duration = video_length / png_paths_len
+    print("Frame scaling factor for this video: ", frame_duration)
     return frame_duration
 
 
@@ -111,18 +111,18 @@ def check_index_differences():
 
 import decimal
 
-def calculate_index(estimate_frame_counter, index_mult=1.0):
+def calculate_index(estimate_frame_counter, index_mult=.5):
     global frame_duration, png_paths_len
     if index_mult >= frame_duration * 0.5:
         index_mult = frame_duration * 0.5
     frame_scale = decimal.Decimal(1.0000) / (decimal.Decimal(frame_duration) / decimal.Decimal(index_mult))
-    progress = (decimal.Decimal(estimate_frame_counter) * frame_scale) % (decimal.Decimal(png_paths_len) * 2)
+    progress = (decimal.Decimal(estimate_frame_counter) * frame_scale) % (png_paths_len * 2)
 
     if progress < png_paths_len:
-        index = int(progress.quantize(decimal.Decimal('1'), rounding=decimal.ROUND_HALF_UP))
+        index = int(progress.quantize(decimal.Decimal('1.01'), rounding=decimal.ROUND_HALF_UP))
         direction = 1
     else:
-        index = int((decimal.Decimal(png_paths_len * 2) - progress).quantize(decimal.Decimal('1'), rounding=decimal.ROUND_HALF_DOWN))
+        index = int((decimal.Decimal(png_paths_len * 2) - progress).quantize(decimal.Decimal('1.1'), rounding=decimal.ROUND_HALF_DOWN))
         direction = -1
 
     # Ensure the index is within the valid range
