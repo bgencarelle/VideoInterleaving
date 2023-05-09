@@ -181,7 +181,7 @@ def set_rgba_relative(index = 0):
 
     hapi_scale = pi_scale * index_scale
     main_alpha = math.cos(hapi_scale)
-    float_alpha = math.sin(hapi_scale)
+    float_alpha = 1 # math.sin(hapi_scale)
     main_rgba = (1, 1, 1, main_alpha)
     float_rgba = (1, 1, 1, float_alpha)
     return main_rgba, float_rgba
@@ -282,7 +282,7 @@ def run_display():
         texture_id2 = create_texture(float_image)
 
         for _ in range(BUFFER_SIZE):
-            index, direction = set_index(index, direction)
+            # index, direction = set_index(index, direction)
             buffer_index += direction
             if buffer_index >= png_paths_len or buffer_index < 0:
                 buffer_index += direction * -1
