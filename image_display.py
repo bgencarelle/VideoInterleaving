@@ -1,3 +1,4 @@
+import math
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -34,7 +35,7 @@ MIDI_MODE = True if CLOCK_MODE < FREE_CLOCK else False
 FPS = 30
 run_mode = True
 
-BUFFER_SIZE = 15
+BUFFER_SIZE = 30
 PINGPONG = True
 
 vid_clock = None
@@ -173,16 +174,26 @@ def display_image(texture_id, width, height, rgba=(1, 1, 1, 1)):
         glColor4f(1, 1, 1, 1)
         glDisable(GL_BLEND)
 
+def set_rgba_relative(index = 0):
+    scale = 20.00
+    index_scale = scale*(index/png_paths_len)
+    pi_scale = math.pi/2.000
 
-def overlay_images_fast(texture_id_main, texture_id_float, main_rgba=(1, 1, 1, 1), float_rgba=(1, 1, 1, 1), background_color=(32, 30, 32)):
+    hapi_scale = pi_scale * index_scale
+    main_alpha = math.cos(hapi_scale)
+    float_alpha = 1 # math.sin(hapi_scale)
+    main_rgba = (1, 1, 1, main_alpha)
+    float_rgba = (1, 1, 1, float_alpha)
+    return main_rgba, float_rgba
+
+def overlay_images_fast(texture_id_main, texture_id_float, index=0, background_color=(32, 30, 32)):
     width, height = image_size
-
+    main_rgba, float_rgba = set_rgba_relative(index)
     glClearColor(background_color[0]/255, background_color[1]/255, background_color[2]/255, 1.0)
     glClear(GL_COLOR_BUFFER_BIT)
 
     display_image(texture_id_float, width, height, rgba=float_rgba)
     display_image(texture_id_main, width, height, rgba=main_rgba)
-
 
 
 def load_texture(texture_id, image):
@@ -197,6 +208,8 @@ def load_images(index, main_folder, float_folder):
 
 
 def set_index(index, direction):
+    if MIDI_MODE:
+        midi_control.process_midi()
     if CLOCK_MODE == MTC_CLOCK:
         index = midi_control.index
         direction = midi_control.direction
@@ -248,23 +261,12 @@ def run_display_setup():
 
 def run_display():
     global run_mode
-    main_alpha = 1
-    float_alpha = 1
-    main_rgba = (1, 1, 1, main_alpha)
-    float_rgba = (1, 1, 1, float_alpha)
     main_folder = 6
     float_folder = 2
-    if MIDI_MODE:
-        midi_control.process_midi()
-    index, direction = set_index(0, 1)
     buffer_index, buffer_direction = set_index(0, 1)
     fullscreen = False
 
     index_changed = False
-
-    main_image, float_image = load_images(index, main_folder, float_folder)
-    texture_id1 = create_texture(main_image)
-    texture_id2 = create_texture(float_image)
 
     def queue_image(buffer_idx, main_folder_q, float_folder_q, image_queue):
         buffer_idx = max(0, min(buffer_idx, png_paths_len - 1))
@@ -272,9 +274,15 @@ def run_display():
         image_queue.put(image_future)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
+        index, direction = set_index(0,1)
         image_queue = SimpleQueue()
 
+        main_image, float_image = load_images(index, main_folder, float_folder)
+        texture_id1 = create_texture(main_image)
+        texture_id2 = create_texture(float_image)
+
         for _ in range(BUFFER_SIZE):
+            # index, direction = set_index(index, direction)
             buffer_index += direction
             if buffer_index >= png_paths_len or buffer_index < 0:
                 buffer_index += direction * -1
@@ -309,8 +317,7 @@ def run_display():
                             print("AH SHIT")
                             buffer_index += buffer_direction * -1
                         queue_image(buffer_index, main_folder, float_folder, image_queue)
-
-            overlay_images_fast(texture_id1, texture_id2)
+            overlay_images_fast(texture_id1, texture_id2, index)
 
             pygame.display.flip()
             vid_clock.tick(FPS)
