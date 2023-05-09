@@ -7,7 +7,6 @@ video_len = 1
 source_frame_total = 1
 mtc_received = False
 recent_messages = []
-total_frames = 0
 frame_rate = 30
 mtc_values = [0, 0, 0, 0]
 input_port = None
@@ -78,7 +77,8 @@ def process_mtc(msg):
     if is_complete_mtc_code():
         mtc_received = True
         calculate_time_code()
-        calculate_total_frames()
+        total_frames = calculate_total_frames()
+        print(total_frames)
         index, direction = calculators.calculate_index(total_frames)
         mtc_received = False
         recent_messages.clear()
@@ -127,7 +127,7 @@ def update_mtc_timecode(mtc_type, value):
 
 
 def calculate_total_frames():
-    global total_frames, frame_rate, mtc_values
+    frame_rate, mtc_values
 
     hours = mtc_values[0] & 0x1F
     minutes = mtc_values[1]
@@ -135,7 +135,6 @@ def calculate_total_frames():
     frames = mtc_values[3]
     total_frames = (hours * 60 * 60 * frame_rate) + \
                    (minutes * 60 * frame_rate) + (seconds * frame_rate) + frames
-    total_frames = total_frames
 
     # print(f"Total frames: {total_frames}")
     return total_frames
