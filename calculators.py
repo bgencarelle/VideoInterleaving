@@ -111,7 +111,7 @@ def check_index_differences():
 
 import decimal
 
-def calculate_index(estimate_frame_counter, index_mult=.5):
+def calculate_index(estimate_frame_counter, index_mult=2.0):
     global frame_duration, png_paths_len
     if index_mult >= frame_duration * 0.5:
         index_mult = frame_duration * 0.5
