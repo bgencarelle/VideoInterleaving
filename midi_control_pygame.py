@@ -288,6 +288,8 @@ def midi_parser(callback, device_id=None):
         pygame.midi.quit()
         pygame.quit()
 
+def process_midi(device_id=None):
+    midi_parser(process_message, device_id)
 
 if __name__ == "__main__":
     midi_parser(process_message)

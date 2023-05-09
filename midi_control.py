@@ -10,7 +10,7 @@ recent_messages = []
 total_frames = 0
 frame_rate = 30
 mtc_values = [0, 0, 0, 0]
-midi_port = None
+input_port = None
 index = 0
 direction = 1
 clock_index = 0
@@ -58,12 +58,14 @@ def select_midi_input():
 
 
 def process_midi():
-    with mido.open_input(midi_port) as in_port:
-        for msg in in_port:
-            if msg.type == 'quarter_frame':
-                process_mtc(msg)
-            elif msg.type in ('note_on', 'note_off', 'mod_wheel', 'program_change', 'clock'):
-                process_message(msg)
+    in_port = input_port
+    for msg in in_port.iter_pending():
+        if msg.type == 'quarter_frame':
+            process_mtc(msg)
+        elif msg.type in ('note_on', 'note_off', 'mod_wheel', 'program_change', 'clock'):
+            process_message(msg)
+
+
 
 
 def process_mtc(msg):
@@ -75,7 +77,6 @@ def process_mtc(msg):
 
     if is_complete_mtc_code():
         mtc_received = True
-        calculate_frame_rate()
         calculate_time_code()
         calculate_total_frames()
         index, direction = calculators.calculate_index(total_frames)
@@ -87,12 +88,6 @@ def is_complete_mtc_code():
     # Assuming all 8 messages have been received when the list has 8 elements
     return len(recent_messages) == 8
 
-
-def calculate_frame_rate():
-    global frame_rate
-    # Calculate the frame rate
-    # Assuming 30 fps for now, you can update this as needed
-    frame_rate = 30
 
 
 def calculate_time_code():
@@ -198,11 +193,15 @@ message_handlers = {
 
 
 def midi_control_stuff_main():
-    global midi_port
+    global input_port
     midi_port = select_midi_input()
+    input_port = mido.open_input(midi_port)
 
 def main():
+    midi_control_stuff_main()
     calculators.init_all()
-    process_midi()
+    while True:
+        process_midi()
+
 if __name__ == "__main__":
     main()
