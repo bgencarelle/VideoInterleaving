@@ -1,20 +1,25 @@
-import mido
-import calculators
+import time
 
+import mido
+
+import calculators
 
 frame_duration = 1
 video_len = 1
 source_frame_total = 1
 mtc_received = False
 recent_messages = []
-frame_rate = 30
 mtc_values = [0, 0, 0, 0]
 input_port = None
 index = 0
+frame_rate = 30
 direction = 1
 clock_index = 0
 clock_index_direction = 1
-
+last_received_mtc_time = 0  # Initialize last received MTC message time
+total_frames = 0
+frame_type_count = {i: 0 for i in range(8)}  # Initialize frame type count
+new_mtc_code_started = [False]
 
 def select_midi_input():
     available_ports = mido.get_input_names()
@@ -63,40 +68,46 @@ def process_midi():
             process_mtc(msg)
         elif msg.type in ('note_on', 'note_off', 'mod_wheel', 'program_change', 'clock'):
             process_message(msg)
-
-
+    return
 
 
 def process_mtc(msg):
-    global mtc_received, recent_messages, total_frames, frame_rate, mtc_values, index, direction
-
+    global mtc_received, frame_rate, mtc_values, index, direction, total_frames
     mtc_type, value = parse_mtc(msg)
     update_mtc_timecode(mtc_type, value)
-    recent_messages.append(msg)
 
-    if is_complete_mtc_code():
+    if mtc_type == 7:  # Recalculate timecode once FRAMES LSB quarter-frame is received
+        old_total_frames = total_frames
         mtc_received = True
         calculate_time_code()
         total_frames = calculate_total_frames()
-        print(total_frames)
+        total_frame_diff = (total_frames-old_total_frames)
+        if total_frame_diff >2:
+            print(f'difference: {total_frame_diff},at frame: {total_frames}')
         index, direction = calculators.calculate_index(total_frames)
         mtc_received = False
-        recent_messages.clear()
 
+def update_mtc_timecode(mtc_type, value):
+    global mtc_values
 
-def is_complete_mtc_code():
-    # Assuming all 8 messages have been received when the list has 8 elements
-    return len(recent_messages) == 8
+    # Update the buffer with the received quarter-frame value
+    mtc_values[mtc_type] = value
 
 
 
 def calculate_time_code():
+    global frame_rate
     hours = mtc_values[0] & 0x1F
     minutes = mtc_values[1]
     seconds = mtc_values[2]
     frames = mtc_values[3]
-    time_code = f'{hours:02}:{minutes:02}:{seconds:02}:{frames:02}'
-    #print(f"Time code: {time_code}")
+
+    frame_rate_code = (mtc_values[0] & 0x60) >> 5
+    frame_rates = {0: 24, 1: 25, 2: 29.97, 3: 30}
+    frame_rate = frame_rates[frame_rate_code]
+
+    time_code = f'{hours:02}:{minutes:02}:{seconds:02}:{frames:02} @ {frame_rate} fps'
+    # print(f"Time code: {time_code}")
 
 
 def parse_mtc(msg):
@@ -196,11 +207,13 @@ def midi_control_stuff_main():
     midi_port = select_midi_input()
     input_port = mido.open_input(midi_port)
 
+
 def main():
     midi_control_stuff_main()
     calculators.init_all()
     while True:
         process_midi()
+
 
 if __name__ == "__main__":
     main()
