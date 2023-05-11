@@ -1,9 +1,16 @@
 import time
+from collections import deque
 
 import mido
 
 import calculators
 
+
+CLOCK_BUFFER_SIZE = 200
+TIMEOUT_SECONDS = 1  # Set the timeout value as needed
+
+clock_counter_sum = 0
+clock_mode = 1  # 0 is mtc, 1 is midi_clock
 frame_duration = 1
 video_len = 1
 source_frame_total = 1
@@ -20,6 +27,8 @@ last_received_mtc_time = 0  # Initialize last received MTC message time
 total_frames = 0
 frame_type_count = {i: 0 for i in range(8)}  # Initialize frame type count
 new_mtc_code_started = [False]
+bpm = 120
+
 
 def select_midi_input():
     available_ports = mido.get_input_names()
@@ -61,7 +70,9 @@ def select_midi_input():
             print("Invalid selection. Please enter a number corresponding to a port.")
 
 
-def process_midi():
+def process_midi(mode=clock_mode):
+    global clock_mode
+    clock_mode = mode
     in_port = input_port
     for msg in in_port.iter_pending():
         if msg.type == 'quarter_frame':
@@ -72,27 +83,35 @@ def process_midi():
 
 
 def process_mtc(msg):
-    global mtc_received, frame_rate, mtc_values, index, direction, total_frames
+    global mtc_received, frame_rate, mtc_values, index, direction, total_frames, clock_counter_sum
     mtc_type, value = parse_mtc(msg)
     update_mtc_timecode(mtc_type, value)
 
     if mtc_type == 7:  # Recalculate timecode once FRAMES LSB quarter-frame is received
         old_total_frames = total_frames
+        old_total_clocks = clock_counter_sum
         mtc_received = True
         calculate_time_code()
         total_frames = calculate_total_frames()
-        total_frame_diff = (total_frames-old_total_frames)
-        if total_frame_diff >2:
+        frames_by_2 = total_frames // 2
+        clock_counter_sum = clock_counter()
+        clock_diff = (clock_counter_sum - old_total_clocks) * 24
+        total_frame_diff = abs(total_frames - old_total_frames)
+        #print("clock_diff", clock_diff)
+        if total_frame_diff > 2:
             print(f'difference: {total_frame_diff},at frame: {total_frames}')
-        index, direction = calculators.calculate_index(total_frames)
+        # print(bpm)
+        index, direction = calculators.calculate_index(frames_by_2 + clock_diff)
+        # print(bpm, "INDEX:", index*direction, "FRAMES:", total_frames)
+
         mtc_received = False
+
 
 def update_mtc_timecode(mtc_type, value):
     global mtc_values
 
     # Update the buffer with the received quarter-frame value
     mtc_values[mtc_type] = value
-
 
 
 def calculate_time_code():
@@ -107,6 +126,7 @@ def calculate_time_code():
     frame_rate = frame_rates[frame_rate_code]
 
     time_code = f'{hours:02}:{minutes:02}:{seconds:02}:{frames:02} @ {frame_rate} fps'
+    return time_code
     # print(f"Time code: {time_code}")
 
 
@@ -138,17 +158,15 @@ def update_mtc_timecode(mtc_type, value):
 
 
 def calculate_total_frames():
-    frame_rate, mtc_values
-
     hours = mtc_values[0] & 0x1F
     minutes = mtc_values[1]
     seconds = mtc_values[2]
     frames = mtc_values[3]
-    total_frames = (hours * 60 * 60 * frame_rate) + \
-                   (minutes * 60 * frame_rate) + (seconds * frame_rate) + frames
+    calc_frames = (hours * 60 * 60 * frame_rate) + \
+                  (minutes * 60 * frame_rate) + (seconds * frame_rate) + frames
 
     # print(f"Total frames: {total_frames}")
-    return total_frames
+    return calc_frames
 
 
 def handle_note_on(msg):
@@ -168,11 +186,39 @@ def handle_program_change(msg):
 
 
 def handle_clock(msg):
-    global clock_index_direction
-    global clock_index
+    global clock_index, clock_index_direction, bpm
+
+    if not hasattr(handle_clock, "clock_intervals"):
+        handle_clock.clock_intervals = deque(maxlen=CLOCK_BUFFER_SIZE)
+        handle_clock.intervals_sum = 0
+        handle_clock.last_clock_time = None
+
+    current_time = time.time()
+
+    # Check if the timeout has been exceeded
+    if handle_clock.last_clock_time is not None and current_time - handle_clock.last_clock_time > TIMEOUT_SECONDS:
+        print("Clock messages stopped. No BPM update.")
+    else:
+        if handle_clock.last_clock_time is not None:
+            clock_interval = current_time - handle_clock.last_clock_time
+
+            if len(handle_clock.clock_intervals) == CLOCK_BUFFER_SIZE:
+                # Remove the oldest interval from the sum
+                handle_clock.intervals_sum -= handle_clock.clock_intervals.popleft()
+
+            handle_clock.clock_intervals.append(clock_interval)
+            handle_clock.intervals_sum += clock_interval
+
+            if len(handle_clock.clock_intervals) == CLOCK_BUFFER_SIZE:
+                avg_clock_interval = handle_clock.intervals_sum / CLOCK_BUFFER_SIZE
+                bpm = 60 / (avg_clock_interval * 24)
+                # print(f"BPM: {bpm:.2f}")
+
+    handle_clock.last_clock_time = current_time
+    # Your original code
     clock_counter(1)
-    clock_index, clock_index_direction = calculators.calculate_index(clock_counter())
-    # print("Clock message received")
+    if clock_mode == 1:
+        clock_index, clock_index_direction = calculators.calculate_index(clock_counter(), False)
 
 
 def clock_counter(amount=None):
