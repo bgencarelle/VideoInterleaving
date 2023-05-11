@@ -9,6 +9,7 @@ png_paths_len = 2221
 frame_duration = 4.0
 video_length = 19173
 
+
 def get_midi_length(midi_file_path):
     midi_file = mido.MidiFile(midi_file_path)
     midi_length_seconds = midi_file.length
@@ -17,8 +18,43 @@ def get_midi_length(midi_file_path):
     return midi_length_frames
 
 
-def calculate_frame_duration(text_mode=True, setup_mode = False):
-    global png_paths_len, frame_duration, video_length
+def set_video_length(video_name, video_name_length):
+    presets_folder = "presets"
+    if not os.path.exists(presets_folder):
+        os.makedirs(presets_folder)
+
+    csv_file_path = os.path.join(presets_folder, "set_video_length.csv")
+
+    with open(csv_file_path, mode="a", newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow([video_name, video_name_length])
+
+
+def get_video_length(video_number=0):
+    with open("presets/set_video_length.csv", mode="r", newline='') as file:
+        reader = csv.reader(file)
+        video_lengths = list(reader)
+
+        if len(video_lengths) == 1:
+            return int(video_lengths[0][1])
+
+        if 0 < video_number <= len(video_lengths):
+            return int(video_lengths[video_number - 1][1])
+
+        print("Please choose a video by name from the list:")
+        for i, video in enumerate(video_lengths):
+            print(f"{i+1}. {video[0]}")
+
+        while True:
+            selected_video = input("Enter the name of the video: ")
+            for video in video_lengths:
+                if video[0] == selected_video:
+                    return int(video[1])
+            print("Invalid video name. Please try again.")
+
+
+def calculate_frame_duration(text_mode=True, setup_mode=False):
+    global frame_duration, video_length
     if setup_mode:
         if text_mode:
             while True:
@@ -28,7 +64,8 @@ def calculate_frame_duration(text_mode=True, setup_mode = False):
                     break
                 except ValueError:
                     print("Invalid input. Please enter a positive integer.")
-
+            video_name = input("Please enter the name of the video: ")
+            set_video_length(video_name, video_length)
         else:
             midi_file_path = input("Please enter the MIDI file path: ")
             if not os.path.exists(midi_file_path):
@@ -36,7 +73,10 @@ def calculate_frame_duration(text_mode=True, setup_mode = False):
             if not midi_file_path.lower().endswith('.mid'):
                 raise ValueError("Invalid file type. Please provide a valid MIDI file.")
             video_length = get_midi_length(midi_file_path)
-
+            video_name = input("Please enter the name of the video: ")
+            set_video_length(video_name, video_length)
+    else:
+        video_length = get_video_length(video_number=0)
     frame_duration = video_length / png_paths_len
     print("Frame scaling factor for this video: ", frame_duration)
     return frame_duration
@@ -104,22 +144,28 @@ def check_index_differences():
         previous_index = current_index
 
     print("Number of times each unique result appears:")
-    for result, count in result_counts.items():
+    sorted_results = sorted(result_counts.items())
+    for result, count in sorted_results:
         print(f"Result: {result}, Count: {count}")
     print(f"0:{result_counts[0]} ")
 
 
-import decimal
-
-def calculate_index(estimate_frame_counter, index_mult=2.0):
-    global frame_duration, png_paths_len
-    if index_mult >= frame_duration * 0.5:
-        index_mult = frame_duration * 0.5
-    frame_scale = decimal.Decimal(1.0000) / (decimal.Decimal(frame_duration) / decimal.Decimal(index_mult))
-    progress = (decimal.Decimal(estimate_frame_counter) * frame_scale) % (png_paths_len * 2)
+def calculate_index(estimate_frame_counter, use_bpm=False, bpm=120.0, index_mult=4.0):
+    frame_duration_lim = .5 * frame_duration
+    if use_bpm:
+        index_bpm_scale = (bpm/120.0) * index_mult
+    else:
+        index_bpm_scale = index_mult
+    if index_bpm_scale >= frame_duration_lim:
+        index_bpm_scale = frame_duration_lim
+    elif index_bpm_scale <= 1:
+        # print(index_bpm_scale)
+        index_bpm_scale = 1
+    frame_scale = index_bpm_scale / frame_duration
+    progress = (decimal.Decimal(estimate_frame_counter * frame_scale)) % (png_paths_len * 2)
 
     if progress < png_paths_len:
-        index = int(progress.quantize(decimal.Decimal('1.01'), rounding=decimal.ROUND_HALF_UP))
+        index = int(progress.quantize(decimal.Decimal('1.21'), rounding=decimal.ROUND_HALF_UP))
         direction = 1
     else:
         index = int((decimal.Decimal(png_paths_len * 2) - progress).quantize(decimal.Decimal('1.1'), rounding=decimal.ROUND_HALF_DOWN))
@@ -132,12 +178,12 @@ def calculate_index(estimate_frame_counter, index_mult=2.0):
 
 
 
-
 def init_all():
     csv_source = select_csv_file()
-    get_image_names_from_csv(csv_source)
+    png_paths = get_image_names_from_csv(csv_source)
     # print(png_paths_len == len(png_paths), png_paths_len)
-    calculate_frame_duration()
+    calculate_frame_duration(True, False)
+    return csv_source, png_paths
 
 
 def main():

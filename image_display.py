@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import concurrent
 from queue import SimpleQueue
 
-from calculators import select_csv_file, get_image_names_from_csv
+import calculators
 import midi_control
 import cv2
 import pygame.time
@@ -35,7 +35,7 @@ MIDI_MODE = True if CLOCK_MODE < FREE_CLOCK else False
 FPS = 30
 run_mode = True
 
-BUFFER_SIZE = 30
+BUFFER_SIZE = 15
 PINGPONG = True
 
 vid_clock = None
@@ -174,17 +174,22 @@ def display_image(texture_id, width, height, rgba=(1, 1, 1, 1)):
         glColor4f(1, 1, 1, 1)
         glDisable(GL_BLEND)
 
-def set_rgba_relative(index = 0):
-    scale = 20.00
-    index_scale = scale*(index/png_paths_len)
+
+def set_rgba_relative(index=0):
+    scale = 30.00
+    index_scale = (index/png_paths_len)
     pi_scale = math.pi/2.000
 
-    hapi_scale = pi_scale * index_scale
-    main_alpha = math.cos(hapi_scale)
-    float_alpha = 1 # math.sin(hapi_scale)
+    hapi_scale = math.pi * index_scale
+    main_alpha = 1
+    if index > 200:
+        float_alpha = (math.sin(hapi_scale))
+    else:
+        float_alpha = 0
     main_rgba = (1, 1, 1, main_alpha)
     float_rgba = (1, 1, 1, float_alpha)
     return main_rgba, float_rgba
+
 
 def overlay_images_fast(texture_id_main, texture_id_float, index=0, background_color=(32, 30, 32)):
     width, height = image_size
@@ -207,9 +212,10 @@ def load_images(index, main_folder, float_folder):
     return main_image, float_image
 
 
-def set_index(index, direction):
+def get_index(index, direction):
     if MIDI_MODE:
-        midi_control.process_midi()
+        midi_control.process_midi(MIDI_CLOCK)
+
     if CLOCK_MODE == MTC_CLOCK:
         index = midi_control.index
         direction = midi_control.direction
@@ -242,6 +248,7 @@ def print_index_diff_wrapper():
             storage['prev_time'] = current_time
             fippy = vid_clock.get_fps()
             print(f'fps: {fippy}')
+            print(f'midi_control.bpm: {midi_control.bpm}')
     return print_index_diff
 
 
@@ -261,9 +268,9 @@ def run_display_setup():
 
 def run_display():
     global run_mode
-    main_folder = 6
-    float_folder = 2
-    buffer_index, buffer_direction = set_index(0, 1)
+    main_folder = 9
+    float_folder = 12
+    buffer_index, buffer_direction = get_index(0, 1)
     fullscreen = False
 
     index_changed = False
@@ -274,7 +281,7 @@ def run_display():
         image_queue.put(image_future)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        index, direction = set_index(0,1)
+        index, direction = get_index(0, 1)
         image_queue = SimpleQueue()
 
         main_image, float_image = load_images(index, main_folder, float_folder)
@@ -282,7 +289,7 @@ def run_display():
         texture_id2 = create_texture(float_image)
 
         for _ in range(BUFFER_SIZE):
-            # index, direction = set_index(index, direction)
+            # index, direction = get_index(index, direction)
             buffer_index += direction
             if buffer_index >= png_paths_len or buffer_index < 0:
                 buffer_index += direction * -1
@@ -291,36 +298,62 @@ def run_display():
         last_skipped_index = -1
 
         while run_mode:
-            midi_control.process_midi()
-            prev_index = index
-            fullscreen = event_check(fullscreen)
-            index, direction = set_index(index, direction)
-            print_index_diff_function(index)
-            if index_changed != index:
-                buffer_index = index
-                if abs(prev_index - index) > 1 and last_skipped_index != index:
-                    print(f'sleep is WRONG, index is {index}, prev index is {prev_index}')
-                    #time.sleep(.03)
-                    last_skipped_index = index
+            try:
+                float_folder, main_folder = time_stamp_control(float_folder, index, main_folder)
+                midi_control.process_midi(CLOCK_MODE)
+                prev_index = index
+                fullscreen = event_check(fullscreen)
+                index, direction = get_index(index, direction)
+                print_index_diff_function(index)
+                if index_changed != index:
+                    buffer_index = index
+                    if abs(prev_index - index) > 1 and last_skipped_index != index:
+                        last_skipped_index = index
 
-                buffer_synced = False
-                while not buffer_synced and not image_queue.empty():
-                    main_image, float_image = image_queue.get().result()
-                    if buffer_index == index:
-                        buffer_synced = True
-                        load_texture(texture_id1, main_image)
-                        load_texture(texture_id2, float_image)
+                    buffer_synced = False
+                    discarded_images = []
+                    while not buffer_synced and not image_queue.empty():
+                        main_image, float_image = image_queue.get().result()
+                        if buffer_index == index:
+                            # print("MATCH!")
+                            buffer_synced = True
+                            buffer_direction = direction
+                            load_texture(texture_id1, main_image)
+                            load_texture(texture_id2, float_image)
 
-                        # Start a new future for the next images
-                        buffer_index, buffer_direction = set_index(buffer_index, buffer_direction)
-                        if buffer_index >= png_paths_len or buffer_index < 0:
-                            print("AH SHIT")
-                            buffer_index += buffer_direction * -1
-                        queue_image(buffer_index, main_folder, float_folder, image_queue)
-            overlay_images_fast(texture_id1, texture_id2, index)
+                            if buffer_index > png_paths_len or buffer_index < 0:
+                                print("AH SHIT")
+                                buffer_index += buffer_direction * -1
+                            queue_image(buffer_index, main_folder, float_folder, image_queue)
+                        else:
+                            discarded_images.append((main_image, float_image))
 
-            pygame.display.flip()
-            vid_clock.tick(FPS)
+                    # Put discarded images back into the queue
+                    for discarded_image in discarded_images:
+                        image_queue.put(discarded_image)
+
+                overlay_images_fast(texture_id1, texture_id2, index)
+
+                pygame.display.flip()
+                vid_clock.tick(FPS)
+            except Exception as e:
+                print(f"An error occurred: {e}")
+                # Optionally, you can add a time.sleep() here to throttle the loop in case of an error
+                # time.sleep(0.1)
+
+
+def time_stamp_control(float_folder, index, main_folder):
+    time_stamp = midi_control.total_frames / midi_control.frame_rate
+    if time_stamp > 5 and (index % (FPS * 2)) == 0:
+        main_folder = (1 + main_folder) % 9  # chromatic
+    if time_stamp > 30 and (index % FPS * 3) == 0:
+        float_folder = (float_folder + 1) % folder_count
+        if float_folder >= 13 or float_folder < 10:
+            float_folder = 10
+    if time_stamp < 30:
+        main_folder = 9
+        float_folder = 12
+    return float_folder, main_folder
 
 
 def setup_blending():
@@ -363,11 +396,13 @@ def display_init(fullscreen=False):
 
 def display_and_run():
     global png_paths_len, png_paths, folder_count, image_size
-    print(platform.system())
-    csv_source = select_csv_file()
-    png_paths = get_image_names_from_csv(csv_source)
-    folder_count = len(png_paths[0])
-    png_paths_len = len(png_paths) - 1
+    csv_source, png_paths = calculators.init_all()
+    print(platform.system(), "midi clock mode is:", CLOCK_MODE)
+    # csv_source = select_csv_file()
+    # png_paths = get_image_names_from_csv(csv_source)
+    folder_count = len(png_paths[2220])
+    print(f'folder_count: {folder_count}')
+    png_paths_len = len(png_paths)-1
     aspect_ratio, width, height = get_aspect_ratio(png_paths[0][0])
     image_size = (width, height)
     print(image_size)
