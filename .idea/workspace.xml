@@ -4,14 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="88dca403-b94f-482c-88d5-5ae9c6ad30e5" name="Changes" comment="Running into this issue with MTC. Not sure what to do with it. Clock speed can vary linearly, but changes in BPM are causing glitches.">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/calculators.py" beforeDir="false" afterPath="$PROJECT_DIR$/calculators.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/image_display.py" beforeDir="false" afterPath="$PROJECT_DIR$/image_display.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/midi_control.py" beforeDir="false" afterPath="$PROJECT_DIR$/midi_control.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/midi_control_pygame.py" beforeDir="false" afterPath="$PROJECT_DIR$/midi_control_pygame.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/presets/set_video_length.csv" beforeDir="false" afterPath="$PROJECT_DIR$/presets/set_video_length.csv" afterDir="false" />
-    </list>
+    <list default="true" id="88dca403-b94f-482c-88d5-5ae9c6ad30e5" name="Changes" comment="Integrated midi clock and mtc. Now there are 4 modes of operation." />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -192,7 +185,7 @@
       <workItem from="1683628411790" duration="36776000" />
       <workItem from="1683692130644" duration="59798000" />
       <workItem from="1683886033813" duration="23930000" />
-      <workItem from="1683995294090" duration="13490000" />
+      <workItem from="1683995294090" duration="13825000" />
     </task>
     <task id="LOCAL-00001" summary="Lots of changes, but it is working nicely.">
       <created>1679677664677</created>
@@ -481,7 +474,21 @@
       <option name="project" value="LOCAL" />
       <updated>1683843246577</updated>
     </task>
-    <option name="localTasksCounter" value="42" />
+    <task id="LOCAL-00042" summary="Integrated midi clock and mtc. Now there are 4 modes of operation.">
+      <created>1684021049581</created>
+      <option name="number" value="00042" />
+      <option name="presentableId" value="LOCAL-00042" />
+      <option name="project" value="LOCAL" />
+      <updated>1684021049581</updated>
+    </task>
+    <task id="LOCAL-00043" summary="Integrated midi clock and mtc. Now there are 4 modes of operation.">
+      <created>1684021273680</created>
+      <option name="number" value="00043" />
+      <option name="presentableId" value="LOCAL-00043" />
+      <option name="project" value="LOCAL" />
+      <updated>1684021273680</updated>
+    </task>
+    <option name="localTasksCounter" value="44" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -500,7 +507,6 @@
   </component>
   <component name="VcsManagerConfiguration">
     <option name="ADD_EXTERNAL_FILES_SILENTLY" value="true" />
-    <MESSAGE value="Working MTC again. Added some sorting stuff." />
     <MESSAGE value="Ok,slowly removing magic numbers. make_png_lists.py now looks in folder locations directory and lets user choose which to use. &#10;&#10;Coming up-midi mode and random mode." />
     <MESSAGE value="added initial code for background removal/masking" />
     <MESSAGE value="Masking is working. Now comes buffer" />
@@ -525,7 +531,9 @@
     <MESSAGE value="made the mido non-blocking. Decided to stick with that for now as pygame midi isn't well documented. Working on alpha blend for effects.&#10;&#10;Still having buffer issues if the external source skips around. Not sure what to do. I might check to see if the midi source is the problem" />
     <MESSAGE value="ChatGPT used MY code to fix an MTC timecode problem! How cool is that" />
     <MESSAGE value="Running into this issue with MTC. Not sure what to do with it. Clock speed can vary linearly, but changes in BPM are causing glitches." />
-    <option name="LAST_COMMIT_MESSAGE" value="Running into this issue with MTC. Not sure what to do with it. Clock speed can vary linearly, but changes in BPM are causing glitches." />
+    <MESSAGE value="Integrated midi clock and mtc. Now there are 4 modes of operation." />
+    <option name="LAST_COMMIT_MESSAGE" value="Integrated midi clock and mtc. Now there are 4 modes of operation." />
+    <option name="GROUP_MULTIFILE_MERGE_BY_DIRECTORY" value="true" />
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
     <SUITE FILE_PATH="coverage/VideoInterleaving$image_display.coverage" NAME="image_display Coverage Results" MODIFIED="1684020941448" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
