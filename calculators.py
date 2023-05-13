@@ -3,11 +3,13 @@ import os
 import mido
 import decimal
 import math
+from collections import deque
 
 
 png_paths_len = 2221
 frame_duration = 4.0
 video_length = 19173
+bpm_smoothing_window = 10
 
 
 def get_midi_length(midi_file_path):
@@ -54,7 +56,7 @@ def get_video_length(video_number=0):
 
 
 def calculate_frame_duration(text_mode=True, setup_mode=False):
-    global frame_duration, video_length
+    global video_length, frame_duration
     if setup_mode:
         if text_mode:
             while True:
@@ -125,16 +127,22 @@ def get_image_names_from_csv(file_path):
 
 def check_index_differences():
     previous_index = None
-    result_counts = {}
-    video_length_mx = video_length
+    positive_result_counts = {}
+    negative_result_counts = {}
+    video_length_mx = video_length * 20
 
     for i in range(video_length_mx):
-        current_index, _ = calculate_index(i)
+        current_index, direction= calculate_index(i)
 
         # Count the unique results
-        if current_index not in result_counts:
-            result_counts[current_index] = 0
-        result_counts[current_index] += 1
+        if direction > 0:
+            if current_index not in positive_result_counts:
+                positive_result_counts[current_index] = 0
+            positive_result_counts[current_index] += 1
+        else:
+            if current_index not in negative_result_counts:
+                negative_result_counts[current_index] = 0
+            negative_result_counts[current_index] += 1
 
         # Check index differences
         if previous_index is not None and abs(current_index - previous_index) > 1:
@@ -144,45 +152,50 @@ def check_index_differences():
         previous_index = current_index
 
     print("Number of times each unique result appears:")
-    sorted_results = sorted(result_counts.items())
-    for result, count in sorted_results:
-        print(f"Result: {result}, Count: {count}")
-    print(f"0:{result_counts[0]} ")
+    sorted_positive_results = sorted(positive_result_counts.items())
+    sorted_negative_results = sorted(negative_result_counts.items(), key=lambda x: abs(x[0]))
+
+    for pos_result, pos_count in sorted_positive_results:
+        for neg_result, neg_count in sorted_negative_results:
+            if abs(pos_result) == abs(neg_result):
+                diff_result = abs(pos_count - neg_count)
+                if diff_result >= 1:
+                    print(f"Result: {pos_result}, Count: {pos_count} --- Result: -{neg_result}, Count: {neg_count},"
+                          f"diff: {diff_result}")
+                break
+    print(f"extremes 0: {positive_result_counts[0]}, pos {png_paths_len-1}: {positive_result_counts[png_paths_len-1]},"
+          f"neg: {negative_result_counts[png_paths_len-1]}, ")
 
 
-def calculate_index(estimate_frame_counter, use_bpm=False, bpm=120.0, index_mult=4.0):
-    frame_duration_lim = .5 * frame_duration
-    if use_bpm:
-        index_bpm_scale = (bpm/120.0) * index_mult
-    else:
-        index_bpm_scale = index_mult
-    if index_bpm_scale >= frame_duration_lim:
-        index_bpm_scale = frame_duration_lim
-    elif index_bpm_scale <= 1:
-        # print(index_bpm_scale)
-        index_bpm_scale = 1
-    frame_scale = index_bpm_scale / frame_duration
-    progress = (decimal.Decimal(estimate_frame_counter * frame_scale)) % (png_paths_len * 2)
+def calculate_index(frame_counter):
+    scale_ref = 4.0
+
+    frame_scale = scale_ref / frame_duration
+
+    progress = (decimal.Decimal(frame_counter * frame_scale)) % (png_paths_len * 2)
 
     if progress < png_paths_len:
-        index = int(progress.quantize(decimal.Decimal('1.21'), rounding=decimal.ROUND_HALF_UP))
+        index = int(progress.quantize(decimal.Decimal('1.000000'), rounding=decimal.ROUND_HALF_UP))
         direction = 1
     else:
-        index = int((decimal.Decimal(png_paths_len * 2) - progress).quantize(decimal.Decimal('1.1'), rounding=decimal.ROUND_HALF_DOWN))
+        index = int((decimal.Decimal(png_paths_len * 2) - progress).quantize(decimal.Decimal('1.000000'), rounding=decimal.ROUND_HALF_UP))
         direction = -1
 
     # Ensure the index is within the valid range
-    index = max(0, min(index, png_paths_len - 1))
+    index = max(0, min(index, png_paths_len))
 
+    # print(index * direction)
     return index, direction
 
 
 
 def init_all():
+    global frame_duration
     csv_source = select_csv_file()
     png_paths = get_image_names_from_csv(csv_source)
     # print(png_paths_len == len(png_paths), png_paths_len)
-    calculate_frame_duration(True, False)
+    frame_duration = calculate_frame_duration(True, False)
+
     return csv_source, png_paths
 
 
