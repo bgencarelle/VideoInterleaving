@@ -27,8 +27,9 @@ from pygame.locals import *
 FULLSCREEN_MODE = False
 MTC_CLOCK = 0
 MIDI_CLOCK = 1
-FREE_CLOCK = 2
-CLOCK_MODE = 0
+MIXED_CLOCK = 2
+FREE_CLOCK = 3
+CLOCK_MODE = 2
 
 MIDI_MODE = True if CLOCK_MODE < FREE_CLOCK else False
 
@@ -120,7 +121,7 @@ def get_aspect_ratio(image_path):
     # Get image dimensions
     w, h = image.get_size()
 
-    # Calculate aspect ratio
+    # Calculate aspect clock_frame_ratio
     aspect_ratio = h / w
     print(f'this is {w} wide and {h} tall, with an aspect ratio of {aspect_ratio}')
     return aspect_ratio, w, h,
@@ -215,16 +216,11 @@ def load_images(index, main_folder, float_folder):
 def get_index(index, direction):
     if MIDI_MODE:
         midi_control.process_midi(MIDI_CLOCK)
-
-    if CLOCK_MODE == MTC_CLOCK:
         index = midi_control.index
-        direction = midi_control.direction
-    elif CLOCK_MODE == MIDI_CLOCK:
-        index = midi_control.clock_index
-        direction = midi_control.clock_index_direction
+        direction = midi_control.index_direction
     else:
         if PINGPONG:
-            # Reverse direction at boundaries
+            # Reverse index_direction at boundaries
             if (index + direction) < 0 or index + direction >= png_paths_len:
                 direction *= -1
             index += direction
@@ -289,7 +285,7 @@ def run_display():
         texture_id2 = create_texture(float_image)
 
         for _ in range(BUFFER_SIZE):
-            # index, direction = get_index(index, direction)
+            # index, index_direction = get_index(index, index_direction)
             buffer_index += direction
             if buffer_index >= png_paths_len or buffer_index < 0:
                 buffer_index += direction * -1
