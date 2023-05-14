@@ -9,12 +9,12 @@ def get_subdirectories(path):
     return [os.path.join(root, d) for root, dirs, _ in os.walk(path) for d in dirs]
 
 
-def contains_png_files(path):
-    return any(file.endswith('.png') for file in os.listdir(path))
+def contains_image_files(path):
+    return any(file.endswith(('.png', '.webp')) for file in os.listdir(path))
 
+def count_image_files(path):
+    return len([file for file in os.listdir(path) if file.endswith(('.png', '.webp'))])
 
-def count_png_files(path):
-    return len([file for file in os.listdir(path) if file.endswith('.png')])
 
 
 def parse_line(line):
@@ -37,11 +37,12 @@ def create_additional_csv_files(folder_counts, processed_dir):
             writer = csv.writer(f)
             for (index, folder, first_png, width, height, has_alpha, file_count) in group:
                 first_png_image = Image.open(os.path.join(folder, first_png))
+                file_extension = os.path.splitext(first_png)[1]
                 if has_alpha:
                     alpha_match = 'Match' if first_png_image.size == first_png_image.split()[-1].size else 'NoMatch'
                 else:
                     alpha_match = 'NoAlpha'
-                writer.writerow([index, folder, f"{width}x{height} pixels", file_count, 'Yes' if has_alpha else 'No', alpha_match])
+                writer.writerow([index, folder, f"{width}x{height} pixels", file_count, 'Yes' if has_alpha else 'No', alpha_match, file_extension])
 
 
 def write_folder_list():
@@ -76,22 +77,22 @@ def write_folder_list():
             print("Invalid directory. Please try again.")
             continue
 
-        if contains_png_files(folder_path) and folder_path not in folder_dict.values():
+        if contains_image_files(folder_path) and folder_path not in folder_dict.values():
             folder_dict[max(folder_dict.keys()) + 1 if folder_dict else 1] = folder_path
 
         for subdirectory in get_subdirectories(folder_path):
-            if contains_png_files(subdirectory) and subdirectory not in folder_dict.values():
+            if contains_image_files(subdirectory) and subdirectory not in folder_dict.values():
                 folder_dict[max(folder_dict.keys()) + 1 if folder_dict else 1] = subdirectory
 
     if not folder_dict:
         raise Exception("No folders added. Please add at least one main_folder.")
 
-    total_pngs = sum(count_png_files(folder) for folder in folder_dict.values())
+    total_pngs = sum(count_image_files(folder) for folder in folder_dict.values())
 
     folder_counts = sorted([(folder, *next(
         ((f, *Image.open(os.path.join(folder, f)).size, has_alpha_channel(Image.open(os.path.join(folder, f)))) for f in
          os.listdir(folder) if f.endswith('.png')),
-        (None, 0, 0, False)), count_png_files(folder)) for folder in folder_dict.values()], key=lambda x: x[4])
+        (None, 0, 0, False)), count_image_files(folder)) for folder in folder_dict.values()], key=lambda x: x[4])
 
     # Save folder_count_XXXX.txt
     with open(os.path.join(processed_dir, f'folder_count_{total_pngs}.txt'), 'w') as f:
