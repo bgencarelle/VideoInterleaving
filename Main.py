@@ -1,6 +1,6 @@
 import os
 from get_folders_list import write_folder_list
-from make_png_lists import process_files
+from make_file_lists import process_files
 from image_display import display_and_run
 
 def main():

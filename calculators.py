@@ -33,7 +33,24 @@ def set_video_length(video_name, video_name_length):
 
 
 def get_video_length(video_number=0):
-    with open("presets/set_video_length.csv", mode="r", newline='') as file:
+    presets_folder = "presets"
+    csv_file_path = os.path.join(presets_folder, "set_video_length.csv")
+
+    if not os.path.exists(csv_file_path):
+        print("Video length file not found.")
+        choice = input(
+            "Would you like to enter the video length manually or derive it from a MIDI file? (manual/midi) ").strip().lower()
+
+        if choice == "manual":
+            frame_duration = calculate_frame_duration(text_mode=True, setup_mode=True)
+        elif choice == "midi":
+            frame_duration = calculate_frame_duration(text_mode=False, setup_mode=True)
+        else:
+            raise ValueError("Invalid input. Please enter 'manual' or 'midi'.")
+
+        return frame_duration
+
+    with open(csv_file_path, mode="r", newline='') as file:
         reader = csv.reader(file)
         video_lengths = list(reader)
 
@@ -45,7 +62,7 @@ def get_video_length(video_number=0):
 
         print("Please choose a video by name from the list:")
         for i, video in enumerate(video_lengths):
-            print(f"{i+1}. {video[0]}")
+            print(f"{i + 1}. {video[0]}")
 
         while True:
             selected_video = input("Enter the name of the video: ")

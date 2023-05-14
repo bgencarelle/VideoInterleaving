@@ -264,8 +264,8 @@ def run_display_setup():
 
 def run_display():
     global run_mode
-    main_folder = 9
-    float_folder = 12
+    main_folder = 1
+    float_folder = 4
     buffer_index, buffer_direction = get_index(0, 1)
     fullscreen = False
 
@@ -295,7 +295,7 @@ def run_display():
 
         while run_mode:
             try:
-                float_folder, main_folder = time_stamp_control(float_folder, index, main_folder)
+                #float_folder, main_folder = time_stamp_control(float_folder, index, main_folder)
                 midi_control.process_midi(CLOCK_MODE)
                 prev_index = index
                 fullscreen = event_check(fullscreen)
@@ -345,7 +345,7 @@ def time_stamp_control(float_folder, index, main_folder):
     if time_stamp > 30 and (index % FPS * 3) == 0:
         float_folder = (float_folder + 1) % folder_count
         if float_folder >= 13 or float_folder < 10:
-            float_folder = 10
+            float_folder = 1
     if time_stamp < 30:
         main_folder = 9
         float_folder = 12
