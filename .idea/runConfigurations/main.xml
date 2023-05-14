@@ -1,13 +1,13 @@
 <component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="main" type="PythonConfigurationType" factoryName="Python" nameIsGenerated="true">
+  <configuration default="false" name="main" type="PythonConfigurationType" factoryName="Python" singleton="true" nameIsGenerated="true">
     <module name="VideoInterleaving" />
     <option name="INTERPRETER_OPTIONS" value="" />
     <option name="PARENT_ENVS" value="true" />
     <envs>
       <env name="PYTHONUNBUFFERED" value="1" />
     </envs>
-    <option name="SDK_HOME" value="$USER_HOME$/miniforge3/envs/VideoInterleaving/bin/python" />
-    <option name="SDK_NAME" value="Python 3.10 (VideoInterleaving)" />
+    <option name="SDK_HOME" value="$USER_HOME$/anaconda3/bin/python" />
+    <option name="SDK_NAME" value="$USER_HOME$/anaconda3" />
     <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
     <option name="IS_MODULE_SDK" value="false" />
     <option name="ADD_CONTENT_ROOTS" value="true" />
