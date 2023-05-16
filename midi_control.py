@@ -81,7 +81,7 @@ def process_midi(mode=CLOCK_MODE):
     clock_mode = mode
     in_port = input_port
     for msg in in_port.iter_pending():
-        if msg.type == 'quarter_frame':  # and clock_mode == 0:
+        if msg.type == 'quarter_frame' and clock_mode != 0:
             process_mtc(msg)
         elif msg.type in (
                 'note_on',
@@ -255,7 +255,7 @@ def handle_clock(msg):
         index, index_direction = calculators.calculate_index(clock_counter())
     elif clock_mode == MIXED_CLOCK:
         index, index_direction = calculators.calculate_index(clock_counter() * clock_frame_ratio)
-    print(f'clock counter: {clock_counter()}, Index: {index * index_direction}')
+    #print(f'clock counter: {clock_counter()}, Index: {index * index_direction}')
 
 
 def handle_start(msg):

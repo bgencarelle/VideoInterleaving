@@ -91,20 +91,20 @@ def write_folder_list():
 
     folder_counts = sorted([(folder, *next(
         ((f, *Image.open(os.path.join(folder, f)).size, has_alpha_channel(Image.open(os.path.join(folder, f)))) for f in
-         os.listdir(folder) if f.endswith('.png')),
+         os.listdir(folder) if f.endswith(('.png', '.webp'))),
         (None, 0, 0, False)), count_image_files(folder)) for folder in folder_dict.values()], key=lambda x: x[4])
 
     # Save folder_count_XXXX.txt
     with open(os.path.join(processed_dir, f'folder_count_{total_pngs}.txt'), 'w') as f:
-        for index, (folder, first_png, width, height, has_alpha, count) in enumerate(folder_counts, 1):
-            first_png_stripped = os.path.splitext(os.path.basename(first_png))[0]
+        for index, (folder, first_img, width, height, has_alpha, count) in enumerate(folder_counts, 1):
+            first_png_stripped = os.path.splitext(os.path.basename(first_img))[0]
             f.write(f"{index}, {folder}, {first_png_stripped}, {width}x{height} pixels, {count}\n")
 
     # Save folder_locations.csv
     with open(os.path.join(processed_dir, 'folder_locations.csv'), 'w', newline='') as f:
         writer = csv.writer(f)
-        for index, (folder, first_png, width, height, has_alpha, count) in enumerate(folder_counts, 1):
-            first_png_image = Image.open(os.path.join(folder, first_png))
+        for index, (folder, first_img, width, height, has_alpha, count) in enumerate(folder_counts, 1):
+            first_png_image = Image.open(os.path.join(folder, first_img))
             if has_alpha:
                 alpha_match = 'Match' if first_png_image.size == first_png_image.split()[-1].size else 'NoMatch'
             else:

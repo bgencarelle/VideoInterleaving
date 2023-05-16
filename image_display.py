@@ -2,17 +2,15 @@ import math
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-import concurrent
+from platform import system
 from queue import SimpleQueue
 
-import calculators
-import midi_control
-import cv2
 import pygame.time
 from OpenGL.GL import *
 from OpenGL.GLU import *
-from platform import system
 
+import calculators
+import midi_control
 
 if system() == 'Darwin':
     from Quartz import CGWindowListCopyWindowInfo, kCGWindowListOptionOnScreenOnly, kCGNullWindowID
@@ -23,20 +21,23 @@ import platform
 import pygame
 from pygame.locals import *
 
+import cv2
+import webp
 
 FULLSCREEN_MODE = False
 MTC_CLOCK = 0
 MIDI_CLOCK = 1
 MIXED_CLOCK = 2
 FREE_CLOCK = 3
-CLOCK_MODE = 2
+
+CLOCK_MODE = 3
 
 MIDI_MODE = True if CLOCK_MODE < FREE_CLOCK else False
 
 FPS = 30
 run_mode = True
 
-BUFFER_SIZE = 15
+BUFFER_SIZE = 120
 PINGPONG = True
 
 vid_clock = None
@@ -137,9 +138,17 @@ def toggle_fullscreen(current_fullscreen_status):
     return new_fullscreen_status
 
 
+
+
 def read_image(image_path):
-    image_np = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-    image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGBA)
+    if image_path.endswith('.webp'):
+        with open(image_path, 'rb') as f:
+            webp_data = webp.WebPData.from_buffer(f.read())
+            image_np = webp_data.decode(color_mode=webp.WebPColorMode.RGBA)
+    else:
+        image_np = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+        image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGBA)
+
     return image_np
 
 
@@ -178,8 +187,8 @@ def display_image(texture_id, width, height, rgba=(1, 1, 1, 1)):
 
 def set_rgba_relative(index=0):
     scale = 30.00
-    index_scale = (index/png_paths_len)
-    pi_scale = math.pi/2.000
+    index_scale = (index / png_paths_len)
+    pi_scale = math.pi / 2.000
 
     hapi_scale = math.pi * index_scale
     main_alpha = 1
@@ -195,7 +204,7 @@ def set_rgba_relative(index=0):
 def overlay_images_fast(texture_id_main, texture_id_float, index=0, background_color=(32, 30, 32)):
     width, height = image_size
     main_rgba, float_rgba = set_rgba_relative(index)
-    glClearColor(background_color[0]/255, background_color[1]/255, background_color[2]/255, 1.0)
+    glClearColor(background_color[0] / 255, background_color[1] / 255, background_color[2] / 255, 1.0)
     glClear(GL_COLOR_BUFFER_BIT)
 
     display_image(texture_id_float, width, height, rgba=float_rgba)
@@ -215,6 +224,8 @@ def load_images(index, main_folder, float_folder):
 
 def get_index(index, direction):
     if MIDI_MODE:
+        sys.exit(0)
+        print(MIDI_MODE)
         midi_control.process_midi(MIDI_CLOCK)
         index = midi_control.index
         direction = midi_control.index_direction
@@ -245,6 +256,7 @@ def print_index_diff_wrapper():
             fippy = vid_clock.get_fps()
             print(f'fps: {fippy}')
             print(f'midi_control.bpm: {midi_control.bpm}')
+
     return print_index_diff
 
 
@@ -295,8 +307,9 @@ def run_display():
 
         while run_mode:
             try:
-                #float_folder, main_folder = time_stamp_control(float_folder, index, main_folder)
-                midi_control.process_midi(CLOCK_MODE)
+                # float_folder, main_folder = time_stamp_control(float_folder, index, main_folder)
+                if MIDI_MODE:
+                    midi_control.process_midi(CLOCK_MODE)
                 prev_index = index
                 fullscreen = event_check(fullscreen)
                 index, direction = get_index(index, direction)
@@ -398,7 +411,7 @@ def display_and_run():
     # png_paths = get_image_names_from_csv(csv_source)
     folder_count = len(png_paths[2220])
     print(f'folder_count: {folder_count}')
-    png_paths_len = len(png_paths)-1
+    png_paths_len = len(png_paths) - 1
     aspect_ratio, width, height = get_aspect_ratio(png_paths[0][0])
     image_size = (width, height)
     print(image_size)
