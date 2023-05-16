@@ -102,7 +102,7 @@ def calculate_frame_duration(text_mode=True, setup_mode=False):
 
 
 def select_csv_file():
-    csv_dir = 'generatedPngLists'
+    csv_dir = 'generatedIMGLists'
     csv_files = [f for f in os.listdir(csv_dir) if f.endswith('.csv')]
 
     if not csv_files:

@@ -10,7 +10,7 @@ import sys
 def parse_folder_locations():
     folder_dict = {}
     csv_path = choose_file()
-    check_unequal_png_counts(csv_path)
+    check_unequal_img_counts(csv_path)
 
     if os.path.exists(csv_path):
         with open(csv_path, 'r', newline='') as f:
@@ -43,17 +43,17 @@ def choose_file():
             print("Invalid input. Please enter a valid number.")
 
 
-def check_unequal_png_counts(csv_path):
+def check_unequal_img_counts(csv_path):
     if os.path.exists(csv_path):
-        png_counts = set()
+        img_counts = set()
         with open(csv_path, 'r', newline='') as f:
             reader = csv.reader(f)
             for row in reader:
                 if not row:
                     break
-                png_counts.add(int(row[3]))  # Column 4 has index 3
-                if len(png_counts) > 1:
-                    print("error: unequal png count found, please fix before proceeding")
+                img_counts.add(int(row[3]))  # Column 4 has index 3
+                if len(img_counts) > 1:
+                    print("error: unequal file count found, please fix before proceeding")
                     sys.exit(0)
 
 
@@ -119,13 +119,13 @@ def get_folder_weights(folder_count, folder_dict):
     return folder_weights
 
 
-def verify_weights(sampled_png_files, folder_weights, folder_dict):
-    iteration_count = len(sampled_png_files)
-    item_count = sum([len(group) for group in sampled_png_files])
+def verify_weights(sampled_img_files, folder_weights, folder_dict):
+    iteration_count = len(sampled_img_files)
+    item_count = sum([len(group) for group in sampled_img_files])
 
     folder_occurrences = {key: 0 for key in folder_dict.keys()}
 
-    for group in sampled_png_files:
+    for group in sampled_img_files:
         for filepath in group:
             for i, folder_path in folder_dict.items():
                 if folder_path in filepath:
@@ -151,30 +151,31 @@ def verify_weights(sampled_png_files, folder_weights, folder_dict):
     print(f"Verification of weights saved to {output_filename}")
 
 
-def write_sorted_random(sampled_png_files, output_folder):
+def write_sorted_random(sampled_img_files, output_folder):
     with open(os.path.join(output_folder, 'sorted_random_list.txt'), 'w') as f:
-        for group in sampled_png_files:
+        for group in sampled_img_files:
             for filepath in group:
                 f.write(filepath + '\n')
     print("Sorted randomized list written to sorted_random_list.txt")
 
 
-def write_sorted_multiplier_random(expanded_sampled_png_files, output_folder):
+def write_sorted_multiplier_random(expanded_sampled_image_file, output_folder):
     with open(os.path.join(output_folder, 'sorted_multiplier_random_list.txt'), 'w') as f:
-        for group in expanded_sampled_png_files:
+        for group in expanded_sampled_image_file:
             for filepath in group:
                 f.write(filepath + '\n')
     print("Sorted multiplier randomized list written to sorted_multiplier_random.txt")
 
 
-def write_sorted_png_stream(grouped_png_files, output_folder):
-    with open(os.path.join(output_folder, 'sorted_png_stream.csv'), 'w', newline='') as f:
+def write_sorted_images(grouped_image_files, output_folder):
+    with open(os.path.join(output_folder, 'sorted_image'
+                                          '_stream.csv'), 'w', newline='') as f:
         csv_writer = csv.writer(f)
-        sorted_grouped_png_files = sorted(enumerate(grouped_png_files), key=lambda x: x[1][0])
+        sorted_grouped_png_files = sorted(enumerate(grouped_image_files), key=lambda x: x[1][0])
         # Sort by the number in C1
         for index, group in sorted_grouped_png_files:
             csv_writer.writerow([index] + group)
-    print("Non-Weighted Grouped list written to sorted_png_stream.csv")
+    print("Non-Weighted Grouped list written to sorted_image_stream.csv")
 
 
 def weighted_sampling(grouped_png_files, folder_weights, output_folder):
@@ -221,30 +222,31 @@ def process_files():
         print("No accessible files in the foldersProcessed directory.")
         sys.exit(1)  # Terminate the script with a non-zero exit code
 
-    sorted_png_files = sort_png_files(folder_dict)
-    grouped_png_files = interleave_lists(sorted_png_files)
+    sorted_image_files = sort_image_files(folder_dict)
+    grouped_image_files = interleave_lists(sorted_image_files)
 
-    output_folder = "generatedPngLists"
+    output_folder = "generatedIMGlists"
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
 
-    ask_generate_csv(grouped_png_files, output_folder)
-    ask_create_weighted_file_lists(sorted_png_files, folder_dict, grouped_png_files, output_folder)
+    ask_generate_csv(grouped_image_files, output_folder)
+    ask_create_weighted_file_lists(sorted_image_files, folder_dict, grouped_image_files, output_folder)
 
 
-def sort_png_files(folder_dict):
-    sorted_png_files = []
+def sort_image_files(folder_dict):
+    sorted_image_files = []
     for number in sorted(folder_dict.keys()):
         folder = folder_dict[number]
-        png_files = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith('.png')]
-        png_files.sort(key=natural_sort_key)
-        sorted_png_files.append(png_files)
-    return sorted_png_files
+        image_files = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(('.png', '.webp'))]
+        image_files.sort(key=natural_sort_key)
+        sorted_image_files.append(image_files)
+    return sorted_image_files
+
 
 
 def ask_generate_csv(grouped_png_files, output_folder):
     if input("Do you want to generate a CSV with all of the files? (yes/no, default yes): ").lower().strip() not in ["no", "n"]:
-        write_sorted_png_stream(grouped_png_files, output_folder)
+        write_sorted_images(grouped_png_files, output_folder)
 
 
 
