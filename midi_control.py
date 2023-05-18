@@ -1,5 +1,3 @@
-# Description: This file contains the functions for processing MIDI messages
-import sys
 import time
 from collections import deque
 
@@ -14,7 +12,7 @@ CLOCK_MODE = 2
 CLOCK_BUFFER_SIZE = 50
 TIMEOUT_SECONDS = 1  # Set the timeout value as needed
 
-###globals, sorry not sorry
+# globals, sorry not sorry
 clock_mode = CLOCK_MODE  # 0 is mtc, 1 is midi_clock, 2 is hybrid (tempo from midi, rough location from mtc)
 png_paths_len = 0
 clock_counter_sum = 0
@@ -34,7 +32,6 @@ total_frames = 0
 frame_type_count = {i: 0 for i in range(8)}  # Initialize frame type count
 new_mtc_code_started = [False]
 bpm = 120
-clock_frame_ratio = 1.0
 
 
 def select_midi_input():
@@ -76,7 +73,7 @@ def select_midi_input():
         except ValueError:
             print("Invalid selection. Please enter a number corresponding to a port.")
 
-#rewrite the below to use classes and objects
+
 def process_midi(mode=CLOCK_MODE):
     global clock_mode
     clock_mode = mode
@@ -122,8 +119,8 @@ def process_mtc(msg):
         clock_counter_sum = clock_counter()
         if total_frames > 2:
             clock_frame_ratio = clock_counter_sum / total_frames
-        #print("clock counts since 0: ", clock_counter_sum, "clock_frame_ratio * frames: ", ratio_frames)
-        #print("bpm: ", bpm, "INDEX: ", index*index_direction)
+        # print("clock counts since 0: ", clock_counter_sum, "clock_frame_ratio * frames: ", ratio_frames)
+        # print("bpm: ", bpm, "INDEX: ", index*index_direction)
         mtc_received = False
 
 
@@ -256,7 +253,7 @@ def handle_clock(msg):
         index, index_direction = calculators.calculate_index(clock_counter())
     elif clock_mode == MIXED_CLOCK:
         index, index_direction = calculators.calculate_index(clock_counter() * clock_frame_ratio)
-    #print(f'clock counter: {clock_counter()}, Index: {index * index_direction}')
+    # print(f'clock counter: {clock_counter()}, Index: {index * index_direction}')
 
 
 def handle_start(msg):

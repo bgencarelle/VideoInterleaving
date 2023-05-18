@@ -243,11 +243,9 @@ def sort_image_files(folder_dict):
     return sorted_image_files
 
 
-
 def ask_generate_csv(grouped_png_files, output_folder):
-    if input("Do you want to generate a CSV with all of the files? (yes/no, default yes): ").lower().strip() not in ["no", "n"]:
+    if input("Do you want a CSV with all of the files? (yes/no, default yes): ").lower().strip() not in ["no", "n"]:
         write_sorted_images(grouped_png_files, output_folder)
-
 
 
 def ask_create_weighted_file_lists(sorted_png_files, folder_dict, grouped_png_files, output_folder):
