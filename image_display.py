@@ -34,10 +34,10 @@ CLOCK_MODE = 3
 
 MIDI_MODE = True if CLOCK_MODE < FREE_CLOCK else False
 
-FPS = 30
+FPS = 24
 run_mode = True
 
-BUFFER_SIZE = 120
+BUFFER_SIZE = 10
 PINGPONG = True
 
 vid_clock = None
@@ -224,11 +224,11 @@ def load_images(index, main_folder, float_folder):
 
 def get_index(index, direction):
     if MIDI_MODE:
-        sys.exit(0)
-        print(MIDI_MODE)
         midi_control.process_midi(MIDI_CLOCK)
+        print(MIDI_CLOCK)
         index = midi_control.index
         direction = midi_control.index_direction
+        print(index*direction)
     else:
         if PINGPONG:
             # Reverse index_direction at boundaries
