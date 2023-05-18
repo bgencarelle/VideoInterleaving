@@ -2,8 +2,6 @@ import csv
 import os
 import mido
 import decimal
-import math
-from collections import deque
 
 
 png_paths_len = 2221
@@ -33,13 +31,14 @@ def set_video_length(video_name, video_name_length):
 
 
 def get_video_length(video_number=0):
+    global frame_duration
     presets_folder = "presets"
     csv_file_path = os.path.join(presets_folder, "set_video_length.csv")
 
     if not os.path.exists(csv_file_path):
         print("Video length file not found.")
         choice = input(
-            "Would you like to enter the video length manually or derive it from a MIDI file? (manual/midi) ").strip().lower()
+            "Enter the video length manually or derive it from a MIDI file? (manual/midi) ").strip().lower()
 
         if choice == "manual":
             frame_duration = calculate_frame_duration(text_mode=True, setup_mode=True)
@@ -149,7 +148,7 @@ def check_index_differences():
     video_length_mx = video_length * 20
 
     for i in range(video_length_mx):
-        current_index, direction= calculate_index(i)
+        current_index, direction = calculate_index(i)
 
         # Count the unique results
         if direction > 0:
@@ -192,10 +191,10 @@ def calculate_index(frame_counter):
     progress = (decimal.Decimal(frame_counter * frame_scale)) % (png_paths_len * 2)
 
     if progress < png_paths_len:
-        index = int(progress.quantize(decimal.Decimal('1.000000'), rounding=decimal.ROUND_HALF_UP))
+        index = int(progress.quantize(decimal.Decimal('1.000'), rounding=decimal.ROUND_HALF_UP))
         direction = 1
     else:
-        index = int((decimal.Decimal(png_paths_len * 2) - progress).quantize(decimal.Decimal('1.000000'), rounding=decimal.ROUND_HALF_UP))
+        index = int((decimal.Decimal(png_paths_len * 2) - progress).quantize(decimal.Decimal('1.000'), rounding=decimal.ROUND_HALF_UP))
         direction = -1
 
     # Ensure the index is within the valid range
@@ -203,7 +202,6 @@ def calculate_index(frame_counter):
 
     # print(index * direction)
     return index, direction
-
 
 
 def init_all():

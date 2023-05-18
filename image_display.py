@@ -138,8 +138,6 @@ def toggle_fullscreen(current_fullscreen_status):
     return new_fullscreen_status
 
 
-
-
 def read_image(image_path):
     if image_path.endswith('.webp'):
         with open(image_path, 'rb') as f:
