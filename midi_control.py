@@ -1,3 +1,4 @@
+# Description: This file contains the functions for processing MIDI messages
 import sys
 import time
 from collections import deque
@@ -75,13 +76,13 @@ def select_midi_input():
         except ValueError:
             print("Invalid selection. Please enter a number corresponding to a port.")
 
-
+#rewrite the below to use classes and objects
 def process_midi(mode=CLOCK_MODE):
     global clock_mode
     clock_mode = mode
     in_port = input_port
     for msg in in_port.iter_pending():
-        if msg.type == 'quarter_frame' and clock_mode != 0:
+        if msg.type == 'quarter_frame' and clock_mode != 1:
             process_mtc(msg)
         elif msg.type in (
                 'note_on',
