@@ -4,14 +4,10 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="88dca403-b94f-482c-88d5-5ae9c6ad30e5" name="Changes" comment="Ok, so webp is great, like really great">
-      <change afterPath="$PROJECT_DIR$/foldersProcessed/folder_count_19989.txt" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/foldersProcessed/folder_locations.csv" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/foldersProcessed/folder_locations_2221.csv" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/generatedIMGlists/sorted_image_stream.csv" afterDir="false" />
+    <list default="true" id="88dca403-b94f-482c-88d5-5ae9c6ad30e5" name="Changes" comment="minor">
+      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/csv-editor.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/csv-editor.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Main.py" beforeDir="false" afterPath="$PROJECT_DIR$/Main.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/image_display.py" beforeDir="false" afterPath="$PROJECT_DIR$/image_display.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -220,6 +216,7 @@
       <workItem from="1684368796140" duration="1712000" />
       <workItem from="1684416046688" duration="606000" />
       <workItem from="1684435684140" duration="2775000" />
+      <workItem from="1684492138643" duration="4299000" />
     </task>
     <task id="LOCAL-00001" summary="Lots of changes, but it is working nicely.">
       <created>1679677664677</created>
@@ -543,7 +540,21 @@
       <option name="project" value="LOCAL" />
       <updated>1684369741855</updated>
     </task>
-    <option name="localTasksCounter" value="47" />
+    <task id="LOCAL-00047" summary="minor">
+      <created>1684492458579</created>
+      <option name="number" value="00047" />
+      <option name="presentableId" value="LOCAL-00047" />
+      <option name="project" value="LOCAL" />
+      <updated>1684492458579</updated>
+    </task>
+    <task id="LOCAL-00048" summary="minor">
+      <created>1684492500451</created>
+      <option name="number" value="00048" />
+      <option name="presentableId" value="LOCAL-00048" />
+      <option name="project" value="LOCAL" />
+      <updated>1684492500451</updated>
+    </task>
+    <option name="localTasksCounter" value="49" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -562,7 +573,6 @@
   </component>
   <component name="VcsManagerConfiguration">
     <option name="ADD_EXTERNAL_FILES_SILENTLY" value="true" />
-    <MESSAGE value="Masking is working. Now comes buffer" />
     <MESSAGE value="turns out the buffer wasn't the problem. It was the index." />
     <MESSAGE value="Still having MTC calculation issues." />
     <MESSAGE value="Realízed that fighting MTC was pointless. &#10;Instead focused on just smoothing index calculation and adding some sleep. &#10;&#10;Jumpiness is now good enough." />
@@ -587,10 +597,11 @@
     <MESSAGE value="Ok, so webp??" />
     <MESSAGE value="Ok, so webp is great" />
     <MESSAGE value="Ok, so webp is great, like really great" />
-    <option name="LAST_COMMIT_MESSAGE" value="Ok, so webp is great, like really great" />
+    <MESSAGE value="minor" />
+    <option name="LAST_COMMIT_MESSAGE" value="minor" />
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
-    <SUITE FILE_PATH="coverage/VideoInterleaving$image_display.coverage" NAME="image_display Coverage Results" MODIFIED="1684440500752" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/VideoInterleaving$image_display.coverage" NAME="image_display Coverage Results" MODIFIED="1684509261309" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/VideoInterleaving$interleave_file.coverage" NAME="interleave_file Coverage Results" MODIFIED="1680466715424" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/VideoInterleaving$midi_mtc_pillow.coverage" NAME="midi_mtc_pillow Coverage Results" MODIFIED="1682329613415" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/VideoInterleaving$get_folders_list.coverage" NAME="get_folders_list Coverage Results" MODIFIED="1684109870923" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
