@@ -12,10 +12,7 @@ from OpenGL.GLU import *
 import calculators
 import midi_control
 
-if system() == 'Darwin':
-    from Quartz import CGWindowListCopyWindowInfo, kCGWindowListOptionOnScreenOnly, kCGNullWindowID
-elif system() == 'Linux':
-    from Xlib import X, display
+
 
 import platform
 import pygame
@@ -48,6 +45,16 @@ folder_count = 0
 image_size = (800, 600)
 text_display = False
 
+from platform import system
+import platform
+
+if system() == 'Darwin':
+    from Quartz import CGWindowListCopyWindowInfo, kCGWindowListOptionOnScreenOnly, kCGNullWindowID
+elif system() == 'Linux':
+    from Xlib import X, display
+elif system() == 'Windows':
+    import pygetwindow as gw
+
 
 def is_window_maximized():
     if platform.system() == 'Darwin':
@@ -75,9 +82,11 @@ def is_window_maximized():
         wm_state_data = window.get_full_property(wm_state, X.AnyPropertyType)
         return (max_horz in wm_state_data.value and max_vert in wm_state_data.value) or (
                 fullscreen in wm_state_data.value)
+    elif platform.system() == 'Windows':
+        win = gw.getActiveWindow()
+        return win.isMaximized
     else:
         raise NotImplementedError(f"Maximized window detection is not implemented for {platform.system()}")
-
 
 def event_check(fullscreen):
     global image_size, run_mode, pause_mode
