@@ -3,6 +3,7 @@ from get_folders_list import write_folder_list
 from make_file_lists import process_files
 from image_display import display_and_run
 
+
 def main():
 
     while True:
@@ -51,6 +52,7 @@ def main():
             return
         else:
             print("Please enter 'y' or 'n'.")
+
 
 if __name__ == "__main__":
     main()
