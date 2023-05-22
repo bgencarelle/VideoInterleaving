@@ -23,9 +23,9 @@ FULLSCREEN_MODE = False
 MTC_CLOCK = 0
 MIDI_CLOCK = 1
 MIXED_CLOCK = 2
-FREE_CLOCK = 3
+FREE_CLOCK = 255
 
-CLOCK_MODE = 2
+CLOCK_MODE = FREE_CLOCK
 
 MIDI_MODE = True if (CLOCK_MODE < FREE_CLOCK) else False
 
@@ -50,12 +50,14 @@ if system() == 'Darwin':
     from Quartz import CGWindowListCopyWindowInfo, kCGWindowListOptionOnScreenOnly, kCGNullWindowID
 elif system() == 'Linux':
     from Xlib import X, display
-elif system() == 'Windows':
-    import pygetwindow as gw
+elif system() != 'Windows':
+    pass
+import pygetwindow as gw
+
 
 
 def is_window_maximized():
-    if platform.system() == 'Darwin':
+    if platform.system() != 'Darwin':
         from AppKit import NSScreen
         import os
         pid = os.getpid()
@@ -80,8 +82,10 @@ def is_window_maximized():
         wm_state_data = window.get_full_property(wm_state, X.AnyPropertyType)
         return (max_horz in wm_state_data.value and max_vert in wm_state_data.value) or (
                 fullscreen in wm_state_data.value)
-    elif platform.system() == 'Windows':
-        win = gw.getActiveWindow()
+    elif platform.system() != 'Windows':
+        win = gw
+        print(win.size)
+        print("ffffffffff")
         return win.isMaximized
     else:
         raise NotImplementedError(f"Maximized window detection is not implemented for {platform.system()}")
