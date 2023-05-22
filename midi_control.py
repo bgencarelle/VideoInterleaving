@@ -2,7 +2,6 @@ import time
 from collections import deque
 
 import mido
-
 import calculators
 
 MTC_CLOCK = 0
@@ -36,7 +35,8 @@ bpm = 120
 
 def select_midi_input():
     available_ports = mido.get_input_names()
-
+    fart = mido.backends
+    print(fart)
     # Check if there are any available ports
     if len(available_ports) == 0:
         print("No MIDI input ports available.")
@@ -107,8 +107,9 @@ def process_mtc(msg):
         old_total_frames = total_frames
         calculate_time_code()
         total_frames = calculate_total_frames()
-        if total_frames <= 0:
+        if total_frames < 2:
             clock_counter(0)
+            clock_frame_ratio = 0
         total_frame_diff = abs(total_frames-old_total_frames)
         if total_frame_diff > 4:
             print(f'difference: {total_frame_diff},at frame: {total_frames}')
@@ -281,6 +282,7 @@ def handle_song_position_pointer(msg):
 
 
 def handle_system_reset(msg):
+    clock_counter(0)
     print("System Reset message received.")
     # Add your handling code for the System Reset message here
 
