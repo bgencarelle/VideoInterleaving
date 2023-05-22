@@ -10,6 +10,13 @@
             </Attribute>
           </value>
         </entry>
+        <entry key="/foldersProcessed/folder_locations_2221.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
         <entry key="/presets/set_video_length.csv">
           <value>
             <Attribute>
