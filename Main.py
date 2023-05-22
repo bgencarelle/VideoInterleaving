@@ -1,4 +1,9 @@
 import os
+import get_folders_list
+import calculators
+import image_display
+import make_file_lists
+import mido.backends
 from get_folders_list import write_folder_list
 from make_file_lists import process_files
 from image_display import display_and_run
@@ -10,7 +15,7 @@ def main():
         user_input = input("Do you want to run_mode write_folder_list()? (y/n) ").lower()
         if user_input == 'y':
             try:
-                write_folder_list()
+                get_folders_list.write_folder_list()
             except Exception as e:
                 print(f"Error: {e}")
                 main()
@@ -26,7 +31,7 @@ def main():
         if user_input == 'y':
             print("There are a few things we can do here. Let's go through the options")
             try:
-                process_files()
+                make_file_lists.process_files()
             except Exception as e:
                 print(f"Error: {e}: \n Restarting from the beginning because you like to waste time on nonsense")
                 main()
@@ -42,7 +47,7 @@ def main():
         if user_input == 'y':
             csv_files = [f for f in os.listdir('generatedIMGLists') if f.endswith('.csv')]
             if csv_files:
-                display_and_run()
+                image_display.display_and_run()
             else:
                 print("Cannot run_mode mtc_png_realtime_midi(). No .csv files found in directory generatedPngLists.")
                 print("Well, that was a waste of time")

@@ -12,8 +12,6 @@ from OpenGL.GLU import *
 import calculators
 import midi_control
 
-
-
 import platform
 import pygame
 from pygame.locals import *
@@ -152,7 +150,7 @@ def read_image(image_path):
         with open(image_path, 'rb') as f:
             webp_data = webp.WebPData.from_buffer(f.read())
             image_np = webp_data.decode(color_mode=webp.WebPColorMode.RGBA)
-    else:
+    if image_path.endswith('.png'):
         image_np = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
         image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGBA)
 

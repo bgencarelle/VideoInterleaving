@@ -1,9 +1,0 @@
-1, /Users/main1/Movies/benVideoArtProjects/benFace/Chromatic2_webp_compressed_og/5_F_face_ps3, face_ps_upscale3_0021, 1080x1440 pixels, 2221
-2, /Users/main1/Movies/benVideoArtProjects/benFace/Chromatic2_webp_compressed_og/4_E_face_ps2, face_ps_upscale2_0343, 1080x1440 pixels, 2221
-3, /Users/main1/Movies/benVideoArtProjects/benFace/Chromatic2_webp_compressed_og/9_A_FaceWithBGAnimePass2, face_animePass_med_2170, 1080x1440 pixels, 2221
-4, /Users/main1/Movies/benVideoArtProjects/benFace/Chromatic2_webp_compressed_og/3_D#_FaceFills3, facefills2_0358, 1080x1440 pixels, 2221
-5, /Users/main1/Movies/benVideoArtProjects/benFace/Chromatic2_webp_compressed_og/7_G_VulkanLowResPath5, face_animeFuzz_0546, 1080x1440 pixels, 2221
-6, /Users/main1/Movies/benVideoArtProjects/benFace/Chromatic2_webp_compressed_og/0_C_faceNoBG, faceNoBG_0240, 1080x1440 pixels, 2221
-7, /Users/main1/Movies/benVideoArtProjects/benFace/Chromatic2_webp_compressed_og/2_D_face_ps_1, face_ps_upscale1_0316, 1080x1440 pixels, 2221
-8, /Users/main1/Movies/benVideoArtProjects/benFace/Chromatic2_webp_compressed_og/6_F#_FaceFills4Anime, facefills_animeUp__0286, 1080x1440 pixels, 2221
-9, /Users/main1/Movies/benVideoArtProjects/benFace/Chromatic2_webp_compressed_og/1_C#_FaceFills1, face_fills1_2190, 1080x1440 pixels, 2221
