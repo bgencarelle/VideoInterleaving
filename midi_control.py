@@ -7,7 +7,7 @@ import calculators
 MTC_CLOCK = 0
 MIDI_CLOCK = 1
 MIXED_CLOCK = 2
-CLOCK_MODE = 2
+CLOCK_MODE = 0
 CLOCK_BUFFER_SIZE = 50
 TIMEOUT_SECONDS = 1  # Set the timeout value as needed
 
@@ -32,11 +32,20 @@ frame_type_count = {i: 0 for i in range(8)}  # Initialize frame type count
 new_mtc_code_started = [False]
 bpm = 120
 
+midi_data_dictionary = {
+    'Note_On': (0, 127, 0),
+    'Note_Off': (None, None, None),
+    'Modulation': (0, 0),
+    'Index_and_Direction': (0, 1),
+    #'Stop': False,
+    #'Start': False,
+    #'Pause': False,
+    #'Reset': False
+}
+
 
 def select_midi_input():
     available_ports = mido.get_input_names()
-    fart = mido.backends
-    print(fart)
     # Check if there are any available ports
     if len(available_ports) == 0:
         print("No MIDI input ports available.")
@@ -98,7 +107,8 @@ def process_midi(mode=CLOCK_MODE):
 
 
 def process_mtc(msg):
-    global mtc_received, frame_rate, mtc_values, index, index_direction, total_frames, clock_counter_sum, clock_frame_ratio
+    global mtc_received, frame_rate, mtc_values, index, index_direction, total_frames, clock_counter_sum, \
+        clock_frame_ratio
     mtc_type, value = parse_mtc(msg)
     update_mtc_timecode(mtc_type, value)
 
@@ -107,18 +117,19 @@ def process_mtc(msg):
         old_total_frames = total_frames
         calculate_time_code()
         total_frames = calculate_total_frames()
-        if total_frames < 2:
+        if total_frames < 4:
             clock_counter(0)
             clock_frame_ratio = 0
         total_frame_diff = abs(total_frames-old_total_frames)
-        if total_frame_diff > 4:
+        if total_frame_diff > 8:
             print(f'difference: {total_frame_diff},at frame: {total_frames}')
             clock_counter(0)
             clock_counter(clock_frame_ratio * total_frames)
         if clock_mode == MTC_CLOCK:
             index, index_direction = calculators.calculate_index(total_frames)
+            midi_data_dictionary['Index_and_Direction'] = (index, index_direction)
         clock_counter_sum = clock_counter()
-        if total_frames > 2:
+        if total_frames >= 4:
             clock_frame_ratio = clock_counter_sum / total_frames
         # print("clock counts since 0: ", clock_counter_sum, "clock_frame_ratio * frames: ", ratio_frames)
         # print("bpm: ", bpm, "INDEX: ", index*index_direction)
@@ -188,15 +199,18 @@ def handle_stop(msg):
 
 
 def handle_note_on(msg):
-    print(f"Note on: {msg.note}, velocity: {msg.velocity}, channel: {msg.channel}")
+    midi_data_dictionary['Note_On'] = (msg.note, msg.velocity, msg.channel)
+    # print(f"Note on: {msg.note}, velocity: {msg.velocity}, channel: {msg.channel}")
 
 
 def handle_note_off(msg):
-    print(f"Note off: {msg.note}, velocity: {msg.velocity}, channel: {msg.channel}")
+    midi_data_dictionary['Note_Off'] = (msg.note, msg.velocity, msg.channel)
+    # print(f"Note off: {msg.note}, velocity: {msg.velocity}, channel: {msg.channel}")
 
 
 def handle_mod_wheel(msg):
-    print(f"Modulation wheel: value: {msg.value}, channel: {msg.channel}")
+    midi_data_dictionary['Modulation'] = (msg.value, msg.channel)
+    # print(f"Modulation wheel: value: {msg.value}, channel: {msg.channel}")
 
 
 def handle_program_change(msg):
@@ -252,8 +266,10 @@ def handle_clock(msg):
     clock_counter(1)
     if clock_mode == MIDI_CLOCK:
         index, index_direction = calculators.calculate_index(clock_counter())
+        midi_data_dictionary['Index_and_Direction'] = (index, index_direction)
     elif clock_mode == MIXED_CLOCK:
         index, index_direction = calculators.calculate_index(clock_counter() * clock_frame_ratio)
+        midi_data_dictionary['Index_and_Direction'] = (index, index_direction)
     # print(f'clock counter: {clock_counter()}, Index: {index * index_direction}')
 
 
@@ -282,7 +298,9 @@ def handle_song_position_pointer(msg):
 
 
 def handle_system_reset(msg):
+    global total_frames
     clock_counter(0)
+    total_frames = 0
     print("System Reset message received.")
     # Add your handling code for the System Reset message here
 

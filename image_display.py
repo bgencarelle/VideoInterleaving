@@ -4,6 +4,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from platform import system
 from queue import SimpleQueue
+import threading
 
 import pygame.time
 from OpenGL.GL import *
@@ -12,6 +13,8 @@ from OpenGL.GLU import *
 import calculators
 import midi_control
 
+from platform import system
+
 import platform
 import pygame
 from pygame.locals import *
@@ -19,15 +22,18 @@ from pygame.locals import *
 import cv2
 import webp
 
+import index_client
+
 FULLSCREEN_MODE = False
 MTC_CLOCK = 0
 MIDI_CLOCK = 1
 MIXED_CLOCK = 2
+CLIENT_MODE = 3
 FREE_CLOCK = 255
 
-CLOCK_MODE = FREE_CLOCK
+CLOCK_MODE = CLIENT_MODE
 
-MIDI_MODE = True if (CLOCK_MODE < FREE_CLOCK) else False
+MIDI_MODE = True if (CLOCK_MODE < CLIENT_MODE) else False
 
 FPS = 30
 run_mode = True
@@ -43,8 +49,6 @@ folder_count = 0
 image_size = (800, 600)
 text_display = False
 
-from platform import system
-import platform
 
 if system() == 'Darwin':
     from Quartz import CGWindowListCopyWindowInfo, kCGWindowListOptionOnScreenOnly, kCGNullWindowID
@@ -89,6 +93,7 @@ def is_window_maximized():
         return win.isMaximized
     else:
         raise NotImplementedError(f"Maximized window detection is not implemented for {platform.system()}")
+
 
 def event_check(fullscreen):
     global image_size, run_mode, pause_mode
@@ -231,13 +236,14 @@ def load_images(index, main_folder, float_folder):
     return main_image, float_image
 
 
-def get_index(index, direction):
+def update_index_and_folders(index, direction):
     if MIDI_MODE:
         midi_control.process_midi(MIDI_CLOCK)
-        #print(MIDI_CLOCK)
-        index = midi_control.index
-        direction = midi_control.index_direction
-        #print(index*direction)
+        index, direction = midi_control.midi_data_dictionary['Index_and_Direction']
+        print(index*direction)
+    if CLOCK_MODE == CLIENT_MODE:
+        index, direction = index_client.midi_data_dictionary['Index_and_Direction']
+        #fill in there
     else:
         if PINGPONG:
             # Reverse index_direction at boundaries
@@ -279,6 +285,8 @@ def run_display_setup():
     vid_clock = pygame.time.Clock()
     if MIDI_MODE:
         midi_control.midi_control_stuff_main()
+    elif CLOCK_MODE == CLIENT_MODE:
+        threading.Thread(target=index_client.receive_midi_data, daemon=True).start()
     run_display()
     return
 
@@ -287,7 +295,7 @@ def run_display():
     global run_mode
     main_folder = 1
     float_folder = 4
-    buffer_index, buffer_direction = get_index(0, 1)
+    buffer_index, buffer_direction = update_index_and_folders(0, 1)
     fullscreen = False
 
     index_changed = False
@@ -298,7 +306,7 @@ def run_display():
         image_queue.put(image_future)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        index, direction = get_index(0, 1)
+        index, direction = update_index_and_folders(0, 1)
         image_queue = SimpleQueue()
 
         main_image, float_image = load_images(index, main_folder, float_folder)
@@ -306,7 +314,7 @@ def run_display():
         texture_id2 = create_texture(float_image)
 
         for _ in range(BUFFER_SIZE):
-            # index, index_direction = get_index(index, index_direction)
+            # index, index_direction = update_index_and_folders(index, index_direction)
             buffer_index += direction
             if buffer_index >= png_paths_len or buffer_index < 0:
                 buffer_index += direction * -1
@@ -317,11 +325,11 @@ def run_display():
         while run_mode:
             try:
                 # float_folder, main_folder = time_stamp_control(float_folder, index, main_folder)
-                if MIDI_MODE:
-                    midi_control.process_midi(CLOCK_MODE)
+                # if MIDI_MODE:
+                # midi_control.process_midi(CLOCK_MODE)
                 prev_index = index
                 fullscreen = event_check(fullscreen)
-                index, direction = get_index(index, direction)
+                index, direction = update_index_and_folders(index, direction)
                 print_index_diff_function(index)
                 if index_changed != index:
                     buffer_index = index
