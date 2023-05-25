@@ -1,72 +1,45 @@
-import socket
+import asyncio
+import websockets
 import json
 import time
-import midi_control  # assuming this is your module name
-import threading
+import midi_control
 
 midi_control.midi_control_stuff_main()
 
-# Create a TCP/IP socket
-sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+midi_data_dictionary = None
 
-# Get the current IP address
-current_ip = socket.gethostbyname(socket.gethostname())
-print('Current IP address:', current_ip)
+async def process_midi():
+    global midi_data_dictionary
+    while True:
+        start_time = time.time()
+        midi_control.process_midi(2)
+        midi_data_dictionary = midi_control.midi_data_dictionary
+        elapsed = time.time() - start_time
+        sleep_time = max(1/120 - elapsed, 0)
+        await asyncio.sleep(sleep_time)
 
-# Bind the socket to a specific address and port
-server_address = (current_ip, 12345)  # use the current IP address
-sock.bind(server_address)
-
-# Listen for incoming connections
-sock.listen(1)
-
-# Keep track of the number of active connections
-active_connections = 0
-max_connections = 10
-connection_lock = threading.Lock()
-
-
-def handle_client(connection):
-    global active_connections
+async def handle_client(websocket, path):
+    global midi_data_dictionary
     last_data = None
     try:
-        # Send data
         while True:
-            # Process MIDI
-            midi_control.process_midi(2)
-            data = midi_control.midi_data_dictionary
+            data = midi_data_dictionary
             encoded_data = (json.dumps(data) + '\n').encode()
-
-            # Check if data has changed
             if encoded_data != last_data:
-                # Send the MIDI data
                 try:
-                    connection.sendall(encoded_data)
-                    last_data = encoded_data  # Update last_data
-                except BrokenPipeError:
+                    await websocket.send(encoded_data)
+                    last_data = encoded_data
+                except websockets.exceptions.ConnectionClosed:
                     print("Client disconnected, stopping sending data")
                     break
+            await asyncio.sleep(1 / 120)
+    except Exception as e:
+        print(f"Exception: {e}")
 
-            time.sleep(1 / 120)  # wait for 1/30th of a second
-    finally:
-        # Clean up the connection
-        connection.close()
-        with connection_lock:
-            active_connections -= 1
+start_server = websockets.serve(handle_client, "192.168.178.23", 12345)
 
+midi_process = asyncio.ensure_future(process_midi())
+server = asyncio.ensure_future(start_server)
 
-while True:
-    # Wait for a connection
-    print('waiting for a connection')
-    connection, client_address = sock.accept()
-
-    with connection_lock:
-        if active_connections >= max_connections:
-            print('Too many connections, refusing connection from', client_address)
-            connection.close()
-        else:
-            print('connection from', client_address)
-            active_connections += 1
-            thread = threading.Thread(target=handle_client, args=(connection,))
-            thread.start()
+asyncio.get_event_loop().run_until_complete(server)
+asyncio.get_event_loop().run_forever()
