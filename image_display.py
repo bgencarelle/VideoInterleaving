@@ -33,11 +33,11 @@ MIXED_CLOCK = 2
 CLIENT_MODE = 3
 FREE_CLOCK = 255
 
-CLOCK_MODE = CLIENT_MODE
+CLOCK_MODE = FREE_CLOCK
 
 MIDI_MODE = True if (CLOCK_MODE < CLIENT_MODE) else False
 
-FPS = 24
+FPS = 30
 run_mode = True
 
 BUFFER_SIZE = 15
@@ -61,7 +61,7 @@ elif system() != 'Windows':
 
 
 def is_window_maximized():
-    if platform.system() != 'Darwin':
+    if platform.system() == 'Darwin':
         from AppKit import NSScreen
         import os
         pid = os.getpid()
@@ -86,7 +86,7 @@ def is_window_maximized():
         wm_state_data = window.get_full_property(wm_state, X.AnyPropertyType)
         return (max_horz in wm_state_data.value and max_vert in wm_state_data.value) or (
                 fullscreen in wm_state_data.value)
-    elif platform.system() != 'Windows':
+    elif platform.system() == 'Windows':
         win = gw
         print(win.size)
         print("ffffffffff")
