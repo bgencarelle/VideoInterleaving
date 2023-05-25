@@ -10,6 +10,8 @@ import pygame.time
 from OpenGL.GL import *
 from OpenGL.GLU import *
 
+import pygetwindow as gw
+
 import calculators
 import midi_control
 
@@ -35,7 +37,7 @@ CLOCK_MODE = CLIENT_MODE
 
 MIDI_MODE = True if (CLOCK_MODE < CLIENT_MODE) else False
 
-FPS = 30
+FPS = 24
 run_mode = True
 
 BUFFER_SIZE = 15
@@ -56,8 +58,6 @@ elif system() == 'Linux':
     from Xlib import X, display
 elif system() != 'Windows':
     pass
-import pygetwindow as gw
-
 
 
 def is_window_maximized():
@@ -286,7 +286,7 @@ def run_display_setup():
     if MIDI_MODE:
         midi_control.midi_control_stuff_main()
     elif CLOCK_MODE == CLIENT_MODE:
-        threading.Thread(target=index_client.receive_midi_data, daemon=True).start()
+        threading.Thread(target=index_client.start_client, daemon=True).start()
     run_display()
     return
 
