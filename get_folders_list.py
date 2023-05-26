@@ -1,3 +1,4 @@
+# this creates the lists of folders that contain our png and webp files
 import os
 import re
 import csv
@@ -12,9 +13,9 @@ def get_subdirectories(path):
 def contains_image_files(path):
     return any(file.endswith(('.png', '.webp')) for file in os.listdir(path))
 
+
 def count_image_files(path):
     return len([file for file in os.listdir(path) if file.endswith(('.png', '.webp'))])
-
 
 
 def parse_line(line):
@@ -58,7 +59,6 @@ def write_folder_list():
                 number, folder = parse_line(line.strip())
                 if folder:
                     folder_dict[number] = folder
-
 
     while True:
         if not background_mode:
@@ -120,4 +120,3 @@ def write_folder_list():
 
 if __name__ == "__main__":
     write_folder_list()
-

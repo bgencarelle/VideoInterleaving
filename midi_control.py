@@ -1,3 +1,4 @@
+#this handles all of the midi stuff
 import time
 from collections import deque
 

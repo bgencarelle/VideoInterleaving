@@ -1,22 +1,30 @@
+#web server thing for syncing
 import asyncio
 import websockets
 import json
 import time
 import midi_control
 
+MTC_CLOCK = 0
+MIDI_CLOCK = 1
+MIXED_CLOCK = 2
+CLOCK_MODE = 2
+
 midi_control.midi_control_stuff_main()
 
 midi_data_dictionary = None
+
 
 async def process_midi():
     global midi_data_dictionary
     while True:
         start_time = time.time()
-        midi_control.process_midi(2)
+        midi_control.process_midi(CLOCK_MODE)
         midi_data_dictionary = midi_control.midi_data_dictionary
         elapsed = time.time() - start_time
         sleep_time = max(1/120 - elapsed, 0)
         await asyncio.sleep(sleep_time)
+
 
 async def handle_client(websocket, path):
     global midi_data_dictionary
@@ -36,7 +44,7 @@ async def handle_client(websocket, path):
     except Exception as e:
         print(f"Exception: {e}")
 
-start_server = websockets.serve(handle_client, "192.168.178.23", 12345)
+start_server = websockets.serve(handle_client, "192.168.178.23", 12345)  # only works when ip is hardcoded for some
 
 midi_process = asyncio.ensure_future(process_midi())
 server = asyncio.ensure_future(start_server)

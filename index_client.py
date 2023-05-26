@@ -1,3 +1,4 @@
+# web client thing for syncing
 import asyncio
 import websockets
 import json
@@ -11,7 +12,7 @@ midi_data_dictionary = {
     'Index_and_Direction': (0, 1),
 }
 
-async def receive_midi_data(uri="ws://192.168.178.23:12345"):
+async def receive_midi_data(uri="ws://192.168.178.23:12345"): # need to make this not hardcoded
     global midi_data_dictionary  # specify that we're using the global dictionary
     while True:
         try:
