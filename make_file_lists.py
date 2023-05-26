@@ -1,3 +1,5 @@
+# this turns our list of folders into a list of png and webp files.
+# It also can generated randomized png lists for randomizing stuff
 import random
 import os
 import re

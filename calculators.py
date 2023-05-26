@@ -1,3 +1,5 @@
+# this is the main stuff for all of the index calculations and csv file generation
+
 import csv
 import os
 import mido
@@ -217,7 +219,7 @@ def init_all():
 def main():
     init_all()
     # print(frame_dur)
-    check_index_differences()
+    #check_index_differences()
 
 
 if __name__ == "__main__":
