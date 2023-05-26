@@ -1,10 +1,9 @@
-# this is the main stuff for all of the index calculations and csv file generation
-
+# this is the main stuff for all the index calculations and csv file generation
 import csv
 import os
 import mido
 import decimal
-
+import make_file_lists
 
 png_paths_len = 2221
 frame_duration = 4.0
@@ -38,19 +37,8 @@ def get_video_length(video_number=0):
     csv_file_path = os.path.join(presets_folder, "set_video_length.csv")
 
     if not os.path.exists(csv_file_path):
-        print("Video length file not found.")
-        choice = input(
-            "Enter the video length manually or derive it from a MIDI file? (manual/midi) ").strip().lower()
-
-        if choice == "manual":
-            frame_duration = calculate_frame_duration(text_mode=True, setup_mode=True)
-        elif choice == "midi":
-            frame_duration = calculate_frame_duration(text_mode=False, setup_mode=True)
-        else:
-            raise ValueError("Invalid input. Please enter 'manual' or 'midi'.")
-
-        return frame_duration
-
+        print("Video length file not found, let's add that now")
+        calculate_frame_duration(True)
     with open(csv_file_path, mode="r", newline='') as file:
         reader = csv.reader(file)
         video_lengths = list(reader)
@@ -73,28 +61,53 @@ def get_video_length(video_number=0):
             print("Invalid video name. Please try again.")
 
 
-def calculate_frame_duration(text_mode=True, setup_mode=False):
+def calculate_frame_duration(setup_mode=False):
     global video_length, frame_duration
     if setup_mode:
-        if text_mode:
-            while True:
-                try:
-                    video_length = int(input("Please specify the length of the video in frames: "))
-                    video_length = abs(video_length)
+        while True:
+            user_input = input("Would you like to enter the frame count manually? (y/n): ")
+            if user_input.lower() != 'n':
+                text_mode = True
+            else:
+                text_mode = False
+
+            if text_mode:
+                while True:
+                    video_length_input = input("Please specify the length of the video in frames or type 'midi' to switch mode: ")
+                    if video_length_input.lower() == "midi":
+                        text_mode = False
+                        break
+                    try:
+                        video_length = int(video_length_input)
+                        video_length = abs(video_length)
+                        break
+                    except ValueError:
+                        print("Invalid input. Please enter a positive integer.")
+                if text_mode:
+                    video_name = input("Please enter the name of the video: ")
+                    set_video_length(video_name, video_length)
                     break
-                except ValueError:
-                    print("Invalid input. Please enter a positive integer.")
-            video_name = input("Please enter the name of the video: ")
-            set_video_length(video_name, video_length)
-        else:
-            midi_file_path = input("Please enter the MIDI file path: ")
-            if not os.path.exists(midi_file_path):
-                raise FileNotFoundError("MIDI file not found.")
-            if not midi_file_path.lower().endswith('.mid'):
-                raise ValueError("Invalid file type. Please provide a valid MIDI file.")
-            video_length = get_midi_length(midi_file_path)
-            video_name = input("Please enter the name of the video: ")
-            set_video_length(video_name, video_length)
+            else:
+                while True:
+                    midi_file_path = input("Please enter the MIDI file path so we can calculate the frame count or type 'text' to switch mode: ")
+                    if midi_file_path.lower() == "text":
+                        text_mode = True
+                        break
+                    if not os.path.exists(midi_file_path):
+                        print("MIDI file not found. Please try again.")
+                    elif not midi_file_path.lower().endswith('.mid'):
+                        print("Invalid file type. Please provide a valid MIDI file.")
+                    else:
+                        try:
+                            video_length = get_midi_length(midi_file_path)
+                            break
+                        except Exception as e:
+                            print(f"An error occurred: {e}")
+                if not text_mode:
+                    video_name = input("Please enter the name of the video: ")
+                    set_video_length(video_name, video_length)
+                    break
+
     else:
         video_length = get_video_length(video_number=0)
     frame_duration = video_length / png_paths_len
@@ -104,34 +117,36 @@ def calculate_frame_duration(text_mode=True, setup_mode=False):
 
 def select_csv_file():
     csv_dir = 'generatedIMGLists'
-    csv_files = [f for f in os.listdir(csv_dir) if f.endswith('.csv')]
-
-    if not csv_files:
-        print(f"No .csv files found in directory {csv_dir}")
-        return None
-
-    if len(csv_files) == 1:
-        print("Only one .csv file found, defaulting to:")
-        selected_file = os.path.join(csv_dir, csv_files[0])
-        print(selected_file)
-        return selected_file
-
-    print("Please select a .csv file to use:")
-    for i, f in enumerate(csv_files):
-        print(f"{i + 1}: {f}")
 
     while True:
-        try:
-            selection = int(input("> "))
-            if selection not in range(1, len(csv_files) + 1):
-                raise ValueError
-            break
-        except ValueError:
-            print("Invalid selection. Please enter a number corresponding to a file.")
+        csv_files = [f for f in os.listdir(csv_dir) if f.endswith('.csv')]
 
-    selected_file = os.path.join(csv_dir, csv_files[selection - 1])
-    print(f"Selected file: {selected_file}")
-    return selected_file
+        if not csv_files:
+            print(f"No .csv files found in directory {csv_dir}")
+            make_file_lists.process_files()
+            continue
+
+        if len(csv_files) == 1:
+            print("Only one .csv file found, defaulting to:")
+            selected_file = os.path.join(csv_dir, csv_files[0])
+            print(selected_file)
+            return selected_file
+
+        print("Please select a .csv file to use:")
+        for i, f in enumerate(csv_files):
+            print(f"{i + 1}: {f}")
+
+        while True:
+            try:
+                selection = int(input("> "))
+                if selection in range(1, len(csv_files) + 1):
+                    selected_file = os.path.join(csv_dir, csv_files[selection - 1])
+                    print(f"Selected file: {selected_file}")
+                    return selected_file
+                else:
+                    raise ValueError
+            except ValueError:
+                print("Invalid selection. Please enter a number corresponding to a file.")
 
 
 def get_image_names_from_csv(file_path):
@@ -196,7 +211,8 @@ def calculate_index(frame_counter):
         index = int(progress.quantize(decimal.Decimal('1.000'), rounding=decimal.ROUND_HALF_UP))
         direction = 1
     else:
-        index = int((decimal.Decimal(png_paths_len * 2) - progress).quantize(decimal.Decimal('1.000'), rounding=decimal.ROUND_HALF_UP))
+        index = int((decimal.Decimal(png_paths_len * 2) - progress).quantize(decimal.Decimal('1.000'),
+                                                                             rounding=decimal.ROUND_HALF_UP))
         direction = -1
 
     # Ensure the index is within the valid range
@@ -206,12 +222,12 @@ def calculate_index(frame_counter):
     return index, direction
 
 
-def init_all():
+def init_all(setup=False):
     global frame_duration
     csv_source = select_csv_file()
     png_paths = get_image_names_from_csv(csv_source)
     # print(png_paths_len == len(png_paths), png_paths_len)
-    frame_duration = calculate_frame_duration(True, False)
+    frame_duration = calculate_frame_duration(setup)
 
     return csv_source, png_paths
 
@@ -219,7 +235,7 @@ def init_all():
 def main():
     init_all()
     # print(frame_dur)
-    #check_index_differences()
+    # check_index_differences()
 
 
 if __name__ == "__main__":
