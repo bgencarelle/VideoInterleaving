@@ -7,7 +7,7 @@ from itertools import zip_longest
 import csv
 import inspect
 import sys
-
+import get_folders_list
 
 def parse_folder_locations():
     folder_dict = {}
@@ -27,9 +27,17 @@ def parse_folder_locations():
     return folder_dict
 
 
+import get_folders_list
+
 def choose_file():
     processed_dir = 'foldersProcessed'
     available_files = [f for f in os.listdir(processed_dir) if f.endswith('.csv')]
+
+    if not available_files:  # If no files found
+        "No Folders Found, running get_folders_list"
+        get_folders_list.write_folder_list()
+        available_files = [f for f in os.listdir(processed_dir) if f.endswith('.csv')]
+
     print("Available CSV files:")
     for i, file in enumerate(available_files):
         print(f"{i + 1}: {file}")
@@ -43,6 +51,7 @@ def choose_file():
                 print("Invalid choice. Please enter a valid number.")
         except ValueError:
             print("Invalid input. Please enter a valid number.")
+
 
 
 def check_unequal_img_counts(csv_path):
