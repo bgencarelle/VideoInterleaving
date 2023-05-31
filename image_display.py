@@ -33,14 +33,14 @@ MIXED_CLOCK = 2
 CLIENT_MODE = 3
 FREE_CLOCK = 255
 
-CLOCK_MODE = FREE_CLOCK
+CLOCK_MODE = MIXED_CLOCK
 
 MIDI_MODE = True if (CLOCK_MODE < CLIENT_MODE) else False
 
 FPS = 30
 run_mode = True
 
-BUFFER_SIZE = 15
+BUFFER_SIZE = FPS // 2
 PINGPONG = True
 
 vid_clock = None
@@ -49,6 +49,7 @@ png_paths_len = 0
 png_paths = 0
 folder_count = 0
 image_size = (800, 600)
+aspect_ratio = 1.333
 text_display = False
 
 
@@ -238,10 +239,10 @@ def load_images(index, main_folder, float_folder):
 
 def update_index_and_folders(index, direction):
     if MIDI_MODE:
-        midi_control.process_midi(MIDI_CLOCK)
+        midi_control.process_midi(CLOCK_MODE)
         index, direction = midi_control.midi_data_dictionary['Index_and_Direction']
         print(index*direction)
-    if CLOCK_MODE == CLIENT_MODE:
+    elif CLOCK_MODE == CLIENT_MODE:
         index, direction = index_client.midi_data_dictionary['Index_and_Direction']
         #fill in there
     else:
@@ -388,7 +389,7 @@ def setup_blending():
 
 
 def display_init(fullscreen=False):
-    aspect_ratio, w, h = get_aspect_ratio(png_paths[0][0])
+    w, h = image_size
     fullscreen_size = pygame.display.list_modes()[0]
     fullscreen_width, fullscreen_height = fullscreen_size
     # Calculate scaling factor and position for fullscreen mode
@@ -421,12 +422,10 @@ def display_init(fullscreen=False):
 
 
 def display_and_run():
-    global png_paths_len, png_paths, folder_count, image_size
+    global png_paths_len, png_paths, folder_count, image_size, aspect_ratio
     csv_source, png_paths = calculators.init_all()
     print(platform.system(), "midi clock mode is:", CLOCK_MODE)
-    # csv_source = select_csv_file()
-    # png_paths = get_image_names_from_csv(csv_source)
-    folder_count = len(png_paths[2220])
+    folder_count = len(png_paths[0])
     print(f'folder_count: {folder_count}')
     png_paths_len = len(png_paths) - 1
     aspect_ratio, width, height = get_aspect_ratio(png_paths[0][0])

@@ -1,4 +1,4 @@
-#this handles all of the midi stuff
+# this handles all the midi stuff
 import time
 from collections import deque
 
@@ -8,7 +8,7 @@ import calculators
 MTC_CLOCK = 0
 MIDI_CLOCK = 1
 MIXED_CLOCK = 2
-CLOCK_MODE = 0
+CLOCK_MODE = 2
 CLOCK_BUFFER_SIZE = 50
 TIMEOUT_SECONDS = 1  # Set the timeout value as needed
 
@@ -38,10 +38,10 @@ midi_data_dictionary = {
     'Note_Off': (None, None, None),
     'Modulation': (0, 0),
     'Index_and_Direction': (0, 1),
-    #'Stop': False,
-    #'Start': False,
-    #'Pause': False,
-    #'Reset': False
+    # 'Stop': False,
+    # 'Start': False,
+    # 'Pause': False,
+    # 'Reset': False
 }
 
 
@@ -254,7 +254,7 @@ def handle_clock(msg):
     handle_clock.last_clock_time = current_time
 
     # Check if total_frames has not changed in 200ms
-    if clock_mode != MIDI_CLOCK:
+    if clock_mode == MTC_CLOCK:
         if handle_clock.last_total_frames is not None and handle_clock.last_total_frames == total_frames\
                 and current_time - handle_clock.last_total_frames_time > 0.2:
             clock_counter(0)
