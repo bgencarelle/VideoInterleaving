@@ -218,7 +218,7 @@ def calculate_index(frame_counter):
     # Ensure the index is within the valid range
     index = max(0, min(index, png_paths_len))
 
-    print(index * direction)
+    #print(index * direction)
     return index, direction
 
 

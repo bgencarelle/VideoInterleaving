@@ -25,7 +25,7 @@ async def receive_midi_data(uri="ws://192.168.178.23:12345"): # need to make thi
                     json_data = json.loads(data.decode())
                     # Store received data
                     midi_data_dictionary.update(json_data)
-                    print(midi_data_dictionary['Index_and_Direction'])
+                    #print(midi_data_dictionary['Index_and_Direction'])
 
         except (websockets.exceptions.ConnectionClosedError,
                 websockets.exceptions.ConnectionClosedOK) as e:
