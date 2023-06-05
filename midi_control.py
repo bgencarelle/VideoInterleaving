@@ -102,6 +102,7 @@ def process_midi(mode=CLOCK_MODE):
                 'continue',
                 'songpos',
                 'reset',
+                'active_sensing',
         ):
             process_message(msg)
     return
@@ -305,6 +306,13 @@ def handle_system_reset(msg):
     print("System Reset message received.")
     # Add your handling code for the System Reset message here
 
+def handle_active_sensing(msg):
+    #global total_frames
+    #clock_counter(0)
+    #total_frames = 0
+    print("ACTIVEEEEEE")
+    # Add your handling code for the System Reset message here
+
 
 def clock_counter(amount=None):
     if not hasattr(clock_counter, "counter"):
@@ -338,6 +346,7 @@ message_handlers = {
     'continue': handle_continue,
     'songpos': handle_song_position_pointer,
     'system_reset': handle_system_reset,
+    'active_sensing': handle_active_sensing,
 }
 
 

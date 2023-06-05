@@ -33,9 +33,8 @@ MIXED_CLOCK = 2
 CLIENT_MODE = 3
 FREE_CLOCK = 255
 
-CLOCK_MODE = MIXED_CLOCK
-
-MIDI_MODE = True if (CLOCK_MODE < CLIENT_MODE) else False
+clock_mode = FREE_CLOCK
+midi_mode = False
 
 FPS = 30
 run_mode = True
@@ -52,6 +51,33 @@ image_size = (800, 600)
 aspect_ratio = 1.333
 text_display = False
 
+valid_modes = {"MTC_CLOCK": MTC_CLOCK, "MIDI_CLOCK": MIDI_CLOCK, "MIXED_CLOCK": MIXED_CLOCK,
+               "CLIENT_MODE": CLIENT_MODE, "FREE_CLOCK": FREE_CLOCK}
+
+def set_clock_mode(mode=None):
+    global clock_mode, midi_mode
+    # If a mode argument is provided and it's valid, silently set the clock_mode
+    if mode and mode in valid_modes.values():
+        clock_mode = mode
+    else:
+        while True:
+            print("Please choose a clock mode from the following options:")
+            for i, (mode_name, mode_value) in enumerate(valid_modes.items(), 1):
+                print(f"{i}. {mode_name}")
+
+            user_choice = input("Enter the number corresponding to your choice: ")
+
+            if user_choice.isdigit() and 1 <= int(user_choice) <= len(valid_modes):
+                clock_mode = list(valid_modes.values())[int(user_choice) - 1]
+                print(f"Clock mode has been set to {list(valid_modes.keys())[int(user_choice) - 1]}")
+                break
+            else:
+                print(f"Invalid input: '{user_choice}'. Please try again.")
+
+    midi_mode = True if (clock_mode < CLIENT_MODE) else False
+    print("YER", list(valid_modes.keys())[list(valid_modes.values()).index(clock_mode)])
+
+
 
 if system() == 'Darwin':
     from Quartz import CGWindowListCopyWindowInfo, kCGWindowListOptionOnScreenOnly, kCGNullWindowID
@@ -59,6 +85,7 @@ elif system() == 'Linux':
     from Xlib import X, display
 elif system() != 'Windows':
     pass
+
 
 
 def is_window_maximized():
@@ -238,11 +265,11 @@ def load_images(index, main_folder, float_folder):
 
 
 def update_index_and_folders(index, direction):
-    if MIDI_MODE:
-        midi_control.process_midi(CLOCK_MODE)
+    if midi_mode:
+        midi_control.process_midi(clock_mode)
         index, direction = midi_control.midi_data_dictionary['Index_and_Direction']
-        print(index*direction)
-    elif CLOCK_MODE == CLIENT_MODE:
+        # print(index*direction)
+    elif clock_mode == CLIENT_MODE:
         index, direction = index_client.midi_data_dictionary['Index_and_Direction']
         #fill in there
     else:
@@ -278,15 +305,14 @@ def print_index_diff_wrapper():
 
 print_index_diff_function = print_index_diff_wrapper()
 
-
 def run_display_setup():
     global vid_clock
     pygame.init()
     display_init(False)
     vid_clock = pygame.time.Clock()
-    if MIDI_MODE:
+    if midi_mode:
         midi_control.midi_control_stuff_main()
-    elif CLOCK_MODE == CLIENT_MODE:
+    elif clock_mode == CLIENT_MODE:
         threading.Thread(target=index_client.start_client, daemon=True).start()
     run_display()
     return
@@ -326,8 +352,8 @@ def run_display():
         while run_mode:
             try:
                 # float_folder, main_folder = time_stamp_control(float_folder, index, main_folder)
-                # if MIDI_MODE:
-                # midi_control.process_midi(CLOCK_MODE)
+                # if midi_mode:
+                # midi_control.process_midi(clock_mode)
                 prev_index = index
                 fullscreen = event_check(fullscreen)
                 index, direction = update_index_and_folders(index, direction)
@@ -421,10 +447,11 @@ def display_init(fullscreen=False):
     glLoadIdentity()
 
 
-def display_and_run():
+def display_and_run(clock_source=None):
+    set_clock_mode(clock_source)
     global png_paths_len, png_paths, folder_count, image_size, aspect_ratio
     csv_source, png_paths = calculators.init_all()
-    print(platform.system(), "midi clock mode is:", CLOCK_MODE)
+    print(platform.system(), "midi clock mode is:", clock_mode)
     folder_count = len(png_paths[0])
     print(f'folder_count: {folder_count}')
     png_paths_len = len(png_paths) - 1
