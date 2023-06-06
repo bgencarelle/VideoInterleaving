@@ -4,6 +4,11 @@ import calculators
 import image_display
 import make_file_lists
 
+MTC_CLOCK = 0
+MIDI_CLOCK = 1
+MIXED_CLOCK = 2
+CLIENT_MODE = 3
+FREE_CLOCK = 255
 
 def main(setup_mode=True):
 
@@ -70,8 +75,8 @@ def main(setup_mode=True):
             else:
                 print("Please enter 'y' or 'n'.")
     else:
-        image_display.display_and_run()
+        image_display.display_and_run(None)
 
 
 if __name__ == "__main__":
-    main(True)
+    main(False)
