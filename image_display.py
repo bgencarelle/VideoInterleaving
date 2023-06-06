@@ -14,16 +14,13 @@ import pygetwindow as gw
 
 import calculators
 import midi_control
-
-from platform import system
-
 import platform
 import pygame
 from pygame.locals import *
 
 import cv2
 import webp
-
+import random
 import index_client
 
 FULLSCREEN_MODE = False
@@ -39,7 +36,7 @@ midi_mode = False
 FPS = 30
 run_mode = True
 
-BUFFER_SIZE = FPS // 2
+BUFFER_SIZE = FPS
 PINGPONG = True
 
 vid_clock = None
@@ -51,8 +48,25 @@ image_size = (800, 600)
 aspect_ratio = 1.333
 text_display = False
 
+control_data_dictionary = {
+    'Note_On': (0, 127, 0),
+    'Note_Off': (None, None, None),
+    'Modulation': (0, 0),
+    'Index_and_Direction': (0, 1),
+    'BPM': 120,
+    # 'Stop': False,
+    # 'Start': False,
+    # 'Pause': False,
+    # 'Reset': False
+}
+
+folder_dictionary = {
+    'Main_and_Float_Folders': (6, 0),
+}
+
 valid_modes = {"MTC_CLOCK": MTC_CLOCK, "MIDI_CLOCK": MIDI_CLOCK, "MIXED_CLOCK": MIXED_CLOCK,
                "CLIENT_MODE": CLIENT_MODE, "FREE_CLOCK": FREE_CLOCK}
+
 
 def set_clock_mode(mode=None):
     global clock_mode, midi_mode
@@ -78,14 +92,12 @@ def set_clock_mode(mode=None):
     print("YER", list(valid_modes.keys())[list(valid_modes.values()).index(clock_mode)])
 
 
-
 if system() == 'Darwin':
     from Quartz import CGWindowListCopyWindowInfo, kCGWindowListOptionOnScreenOnly, kCGNullWindowID
 elif system() == 'Linux':
     from Xlib import X, display
 elif system() != 'Windows':
     pass
-
 
 
 def is_window_maximized():
@@ -227,7 +239,9 @@ def display_image(texture_id, width, height, rgba=(1, 1, 1, 1)):
         glDisable(GL_BLEND)
 
 
-def set_rgba_relative(index=0):
+def set_rgba_relative():
+    global control_data_dictionary
+    index, _ = control_data_dictionary['Index_and_Direction']
     scale = 30.00
     index_scale = (index / png_paths_len)
     pi_scale = math.pi / 2.000
@@ -235,9 +249,10 @@ def set_rgba_relative(index=0):
     hapi_scale = math.pi * index_scale
     main_alpha = 1
     if index > 200:
-        float_alpha = (math.sin(hapi_scale))
+        float_alpha = 1 # (math.sin(hapi_scale))
+       # print("Yer float alpha", float_alpha)
     else:
-        float_alpha = 0
+        float_alpha = 1
     main_rgba = (1, 1, 1, main_alpha)
     float_rgba = (1, 1, 1, float_alpha)
     return main_rgba, float_rgba
@@ -245,12 +260,12 @@ def set_rgba_relative(index=0):
 
 def overlay_images_fast(texture_id_main, texture_id_float, index=0, background_color=(32, 30, 32)):
     width, height = image_size
-    main_rgba, float_rgba = set_rgba_relative(index)
+    main_rgba, float_rgba = set_rgba_relative()
     glClearColor(background_color[0] / 255, background_color[1] / 255, background_color[2] / 255, 1.0)
     glClear(GL_COLOR_BUFFER_BIT)
 
-    display_image(texture_id_float, width, height, rgba=float_rgba)
-    display_image(texture_id_main, width, height, rgba=main_rgba)
+    display_image(texture_id_float, width, height, rgba=main_rgba)
+    display_image(texture_id_main, width, height, rgba=float_rgba)
 
 
 def load_texture(texture_id, image):
@@ -265,14 +280,16 @@ def load_images(index, main_folder, float_folder):
 
 
 def update_index_and_folders(index, direction):
+    global control_data_dictionary
     if midi_mode:
         midi_control.process_midi(clock_mode)
-        index, direction = midi_control.midi_data_dictionary['Index_and_Direction']
+        control_data_dictionary = midi_control.midi_data_dictionary
+        index, direction = control_data_dictionary['Index_and_Direction']
         # print(index*direction)
     elif clock_mode == CLIENT_MODE:
-        index, direction = index_client.midi_data_dictionary['Index_and_Direction']
-        #fill in there
-    else:
+        control_data_dictionary = index_client.midi_data_dictionary
+        index, direction = control_data_dictionary['Index_and_Direction']
+    elif clock_mode == FREE_CLOCK:
         if PINGPONG:
             # Reverse index_direction at boundaries
             if (index + direction) < 0 or index + direction >= png_paths_len:
@@ -280,11 +297,30 @@ def update_index_and_folders(index, direction):
             index += direction
         else:
             index = (index + 1) % png_paths_len
-    if pause_mode:
-        direction_out = 0
+        control_data_dictionary['Index_and_Direction'] = index, direction
+    update_control_data()
+    return index, direction
+
+
+def update_control_data():
+    global control_data_dictionary
+    main_folder = 6
+    float_folder = 0
+    main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
+    index, direction = control_data_dictionary['Index_and_Direction']
+    if clock_mode == FREE_CLOCK:
+        if index <= 4 * FPS:
+            float_folder = 0
+        elif (index % 2 * FPS == 0):
+            float_folder = random.randint(0, folder_count-1)
+            print(float_folder)
+
     else:
-        direction_out = direction
-    return index, direction_out
+        print(control_data_dictionary['Note_On'])
+        note, channel, _ = control_data_dictionary['Note_On']
+        float_folder = (note % 12) % folder_count
+
+    folder_dictionary['Main_and_Float_Folders'] = main_folder, float_folder
 
 
 def print_index_diff_wrapper():
@@ -305,6 +341,7 @@ def print_index_diff_wrapper():
 
 print_index_diff_function = print_index_diff_wrapper()
 
+
 def run_display_setup():
     global vid_clock
     pygame.init()
@@ -320,8 +357,7 @@ def run_display_setup():
 
 def run_display():
     global run_mode
-    main_folder = 1
-    float_folder = 4
+    index, direction = control_data_dictionary['Index_and_Direction']
     buffer_index, buffer_direction = update_index_and_folders(0, 1)
     fullscreen = False
 
@@ -333,7 +369,9 @@ def run_display():
         image_queue.put(image_future)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        index, direction = update_index_and_folders(0, 1)
+        update_index_and_folders(index, direction)
+        index, direction = control_data_dictionary['Index_and_Direction']
+        main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
         image_queue = SimpleQueue()
 
         main_image, float_image = load_images(index, main_folder, float_folder)
@@ -341,7 +379,6 @@ def run_display():
         texture_id2 = create_texture(float_image)
 
         for _ in range(BUFFER_SIZE):
-            # index, index_direction = update_index_and_folders(index, index_direction)
             buffer_index += direction
             if buffer_index >= png_paths_len or buffer_index < 0:
                 buffer_index += direction * -1
@@ -351,13 +388,13 @@ def run_display():
 
         while run_mode:
             try:
-                # float_folder, main_folder = time_stamp_control(float_folder, index, main_folder)
-                # if midi_mode:
-                # midi_control.process_midi(clock_mode)
                 prev_index = index
                 fullscreen = event_check(fullscreen)
-                index, direction = update_index_and_folders(index, direction)
-                print_index_diff_function(index)
+                update_index_and_folders(index, direction)
+                index, direction = control_data_dictionary['Index_and_Direction']
+                main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
+
+                # print_index_diff_function(index)
                 if index_changed != index:
                     buffer_index = index
                     if abs(prev_index - index) > 1 and last_skipped_index != index:
@@ -395,24 +432,6 @@ def run_display():
                 # time.sleep(0.1)
 
 
-def time_stamp_control(float_folder, index, main_folder):
-    time_stamp = midi_control.total_frames / midi_control.frame_rate
-    if time_stamp > 5 and (index % (FPS * 2)) == 0:
-        main_folder = (1 + main_folder) % 9  # chromatic
-    if time_stamp > 30 and (index % FPS * 3) == 0:
-        float_folder = (float_folder + 1) % folder_count
-        if float_folder >= 13 or float_folder < 10:
-            float_folder = 1
-    if time_stamp < 30:
-        main_folder = 9
-        float_folder = 12
-    return float_folder, main_folder
-
-
-def setup_blending():
-    glEnable(GL_BLEND)
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-
 
 def display_init(fullscreen=False):
     w, h = image_size
@@ -436,7 +455,8 @@ def display_init(fullscreen=False):
         glViewport(0, 0, w, h)  # Update to use original width and height
 
     glEnable(GL_TEXTURE_2D)
-    setup_blending()
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
     glMatrixMode(GL_PROJECTION)
     glLoadIdentity()
     if fullscreen:

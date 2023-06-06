@@ -38,6 +38,7 @@ midi_data_dictionary = {
     'Note_Off': (None, None, None),
     'Modulation': (0, 0),
     'Index_and_Direction': (0, 1),
+    'BPM': (120),
     # 'Stop': False,
     # 'Start': False,
     # 'Pause': False,
@@ -250,6 +251,7 @@ def handle_clock(msg):
             if len(handle_clock.clock_intervals) == CLOCK_BUFFER_SIZE:
                 avg_clock_interval = handle_clock.intervals_sum / CLOCK_BUFFER_SIZE
                 bpm = 60 / (avg_clock_interval * 24)
+                midi_data_dictionary['BPM'] = (bpm)
                 # print(f"BPM: {bpm:.2f}")
 
     handle_clock.last_clock_time = current_time

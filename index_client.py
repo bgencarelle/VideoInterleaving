@@ -10,7 +10,13 @@ midi_data_dictionary = {
     'Note_Off': (None, None, None),
     'Modulation': (0, 0),
     'Index_and_Direction': (0, 1),
+    'BPM': (120),
+    # 'Stop': False,
+    # 'Start': False,
+    # 'Pause': False,
+    # 'Reset': False
 }
+
 
 async def receive_midi_data(uri="ws://192.168.178.23:12345"): # need to make this not hardcoded
     global midi_data_dictionary  # specify that we're using the global dictionary
