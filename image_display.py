@@ -298,22 +298,24 @@ def update_index_and_folders(index, direction):
         else:
             index = (index + 1) % png_paths_len
         control_data_dictionary['Index_and_Direction'] = index, direction
-    update_control_data()
+    update_control_data(index, direction)
     return index, direction
 
 
-def update_control_data():
-    global control_data_dictionary
-    main_folder = 6
-    float_folder = 0
+def update_control_data(index, direction):
+    rand_mult = random.randint(1,9)
     main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
-    index, direction = control_data_dictionary['Index_and_Direction']
     if clock_mode == FREE_CLOCK:
         if index <= 4 * FPS:
             float_folder = 0
-        elif (index % 2 * FPS == 0):
+            main_folder = 6
+        if index % ( FPS * rand_mult) == 0:
             float_folder = random.randint(0, folder_count-1)
             print(float_folder)
+            rand_mult = random.randint(1, 9)
+        if index % (2 * FPS * rand_mult - 1) == 0:
+            main_folder = random.randint(0, folder_count-1)
+            print(main_folder)
 
     else:
         print(control_data_dictionary['Note_On'])
@@ -468,6 +470,7 @@ def display_init(fullscreen=False):
 
 
 def display_and_run(clock_source=None):
+    random.seed(time.time())
     set_clock_mode(clock_source)
     global png_paths_len, png_paths, folder_count, image_size, aspect_ratio
     csv_source, png_paths = calculators.init_all()
