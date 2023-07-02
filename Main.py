@@ -63,7 +63,7 @@ def main(setup_mode=True):
         while True:
             user_input = input("Do you want to run our main image_display()? (y/n) ").lower()
             if user_input != 'n':
-                csv_files = [f for f in os.listdir('generatedIMGLists') if f.endswith('.csv')]
+                csv_files = [f for f in os.listdir('generated_img_lists') if f.endswith('.csv')]
                 if csv_files:
                     image_display.display_and_run()
                 else:

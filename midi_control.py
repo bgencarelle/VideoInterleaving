@@ -3,6 +3,10 @@ import time
 from collections import deque
 
 import mido
+import mido.backends.rtmidi
+import mido.backends.backend
+import mido.backends.pygame
+
 import calculators
 
 MTC_CLOCK = 0
@@ -38,7 +42,7 @@ midi_data_dictionary = {
     'Note_Off': (None, None, None),
     'Modulation': (0, 0),
     'Index_and_Direction': (0, 1),
-    'BPM': (120),
+    'BPM': 120,
     # 'Stop': False,
     # 'Start': False,
     # 'Pause': False,
@@ -46,7 +50,7 @@ midi_data_dictionary = {
 }
 
 
-def select_midi_input():
+def select_midi_input(midi_in_select=False):
     available_ports = mido.get_input_names()
     # Check if there are any available ports
     if len(available_ports) == 0:
@@ -54,7 +58,7 @@ def select_midi_input():
         return None
 
     # Check if there is only one port or all ports have the same name
-    if len(set(available_ports)) == 1:
+    if len(set(available_ports)) == 1 or not midi_in_select:
         selected_port = available_ports[0]
         print("Only one input port available, defaulting to:")
         print(selected_port)
@@ -93,6 +97,7 @@ def process_midi(mode=CLOCK_MODE):
         if msg.type == 'quarter_frame' and clock_mode != 1:
             process_mtc(msg)
         elif msg.type in (
+                'control_change',
                 'note_on',
                 'note_off',
                 'mod_wheel',
@@ -104,6 +109,7 @@ def process_midi(mode=CLOCK_MODE):
                 'songpos',
                 'reset',
                 'active_sensing',
+                'pitchwheel'
         ):
             process_message(msg)
     return
@@ -217,7 +223,8 @@ def handle_mod_wheel(msg):
 
 
 def handle_program_change(msg):
-    print(f"Program change: program: {msg.program}, channel: {msg.channel}")
+    pass
+    # print(f"Program change: program: {msg.program}, channel: {msg.channel}")
 
 
 def handle_clock(msg):
@@ -251,7 +258,7 @@ def handle_clock(msg):
             if len(handle_clock.clock_intervals) == CLOCK_BUFFER_SIZE:
                 avg_clock_interval = handle_clock.intervals_sum / CLOCK_BUFFER_SIZE
                 bpm = 60 / (avg_clock_interval * 24)
-                midi_data_dictionary['BPM'] = (bpm)
+                midi_data_dictionary['BPM'] = bpm
                 # print(f"BPM: {bpm:.2f}")
 
     handle_clock.last_clock_time = current_time
@@ -308,12 +315,18 @@ def handle_system_reset(msg):
     print("System Reset message received.")
     # Add your handling code for the System Reset message here
 
+
 def handle_active_sensing(msg):
-    #global total_frames
-    #clock_counter(0)
-    #total_frames = 0
+    # global total_frames
+    # clock_counter(0)
+    # total_frames = 0
     print("ACTIVEEEEEE")
     # Add your handling code for the System Reset message here
+
+
+def handle_pitchwheel(msg):
+    pass
+    # print("pitchwheel fun:", msg)
 
 
 def clock_counter(amount=None):
@@ -330,18 +343,22 @@ def clock_counter(amount=None):
 
 
 def process_message(msg):
-    handler = message_handlers.get(msg.type)
-    if handler:
-        handler(msg)
+    # print(msg.type)
+    if msg.type == 'control_change':
+        handle_control_change(msg)
     else:
-        print(f"Unhandled message type: {msg.type}")
+        handler = message_handlers.get(msg.type)
+        if handler:
+            handler(msg)
+        else:
+            print(f"Unhandled message type: {msg.type}")
 
 
 message_handlers = {
     'note_on': handle_note_on,
     'note_off': handle_note_off,
-    'mod_wheel': handle_mod_wheel,
     'program_change': handle_program_change,
+    'pitchwheel': handle_pitchwheel,
     'clock': handle_clock,
     'stop': handle_stop,
     'start': handle_start,
@@ -352,10 +369,22 @@ message_handlers = {
 }
 
 
+def handle_control_change(msg):
+    if msg.control == 1:
+        handle_mod_wheel(msg)
+    else:
+        pass  # print(f"Unhandled control change: {msg.control}")
+
+
+def handle_mod_wheel(msg):
+    midi_data_dictionary['Modulation'] = (msg.value, msg.channel)
+    print(f"Modulation wheel: value: {msg.value}, channel: {msg.channel}")
+
+
 def midi_control_stuff_main():
     global input_port, png_paths_len
-    _, png_paths = calculators.init_all()
-    png_paths_len = len(png_paths)
+    # png_paths = calculators.init_all()
+    # png_paths_len = len(png_paths)
     midi_port = select_midi_input()
     input_port = mido.open_input(midi_port)
 
