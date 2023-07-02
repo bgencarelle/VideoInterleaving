@@ -10,7 +10,6 @@ import pygame.time
 from OpenGL.GL import *
 from OpenGL.GLU import *
 
-import pygetwindow as gw
 
 import calculators
 import midi_control
@@ -131,6 +130,7 @@ def is_window_maximized():
         return (max_horz in wm_state_data.value and max_vert in wm_state_data.value) or (
                 fullscreen in wm_state_data.value)
     elif platform.system() == 'Windows':
+        import pygetwindow as gw
         win = gw
         print(win.size)
         print("ffffffffff")
