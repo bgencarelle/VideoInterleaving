@@ -7,7 +7,7 @@ import make_file_lists
 
 png_paths_len = 2221
 frame_duration = 4.0
-video_length = 19173
+video_length = 9173
 bpm_smoothing_window = 10
 
 
@@ -27,13 +27,13 @@ def set_video_length(video_name, video_name_length):
     csv_file_path = os.path.join(presets_folder, "set_video_length.csv")
 
     with open(csv_file_path, mode="a", newline='') as file:
-        writer = csv.writer(file)
+        writer = csv.writer(file, lineterminator='\n')
         writer.writerow([video_name, video_name_length])
 
 
 def get_video_length(video_number=0):
     global frame_duration
-    presets_folder = "presets"
+    presets_folder = "ppresets"
     csv_file_path = os.path.join(presets_folder, "set_video_length.csv")
 
     if not os.path.exists(csv_file_path):
@@ -109,14 +109,14 @@ def calculate_frame_duration(setup_mode=False):
                     break
 
     else:
-        video_length = get_video_length(video_number=0)
+        video_length = get_video_length()
     frame_duration = video_length / png_paths_len
     print("Frame scaling factor for this video: ", frame_duration)
     return frame_duration
 
 
-def select_csv_file():
-    csv_dir = 'generatedIMGLists'
+def select_img_list_files():
+    csv_dir = 'generated_img_Lists'
 
     while True:
         csv_files = [f for f in os.listdir(csv_dir) if f.endswith('.csv')]
@@ -126,27 +126,36 @@ def select_csv_file():
             make_file_lists.process_files()
             continue
 
+        selected_files = {'main': '', 'secondary': ''}
+
         if len(csv_files) == 1:
-            print("Only one .csv file found, defaulting to:")
-            selected_file = os.path.join(csv_dir, csv_files[0])
-            print(selected_file)
-            return selected_file
+            print("Only one .csv file found, defaulting to main and secondary:")
+            selected_files['main'] = selected_files['secondary'] = os.path.join(csv_dir, csv_files[0])
+            print(selected_files)
+            return selected_files['main'], selected_files['secondary']
 
-        print("Please select a .csv file to use:")
-        for i, f in enumerate(csv_files):
-            print(f"{i + 1}: {f}")
+        for file_type in ['main', 'secondary']:
+            if len(csv_files) == 2 and file_type == 'secondary':
+                remaining_file = list(set(csv_files) - set(os.path.basename(fp) for fp in selected_files.values()))[0]
+                selected_files[file_type] = os.path.join(csv_dir, remaining_file)
+                print(f"Secondary file defaulted to: {selected_files[file_type]}")
+                return selected_files['main'], selected_files['secondary']
 
-        while True:
-            try:
-                selection = int(input("> "))
-                if selection in range(1, len(csv_files) + 1):
-                    selected_file = os.path.join(csv_dir, csv_files[selection - 1])
-                    print(f"Selected file: {selected_file}")
-                    return selected_file
-                else:
-                    raise ValueError
-            except ValueError:
-                print("Invalid selection. Please enter a number corresponding to a file.")
+            print(f"Please select a .csv file to use as {file_type}")
+            for i, f in enumerate(csv_files):
+                print(f"{i + 1}: {f}")
+
+            while True:
+                try:
+                    selection = int(input("> "))
+                    if selection in range(1, len(csv_files) + 1):
+                        selected_files[file_type] = os.path.join(csv_dir, csv_files[selection - 1])
+                        print(f"Selected {file_type} file: {selected_files[file_type]}")
+                        break
+                    else:
+                        raise ValueError
+                except ValueError:
+                    print("Invalid selection. Please enter a number corresponding to a file.")
 
 
 def get_image_names_from_csv(file_path):
@@ -224,12 +233,13 @@ def calculate_index(frame_counter):
 
 def init_all(setup=False):
     global frame_duration
-    csv_source = select_csv_file()
-    png_paths = get_image_names_from_csv(csv_source)
-    # print(png_paths_len == len(png_paths), png_paths_len)
+    csv_main, csv_float = select_img_list_files()
+    main_image_paths = get_image_names_from_csv(csv_main)
+    float_image_paths = get_image_names_from_csv(csv_float)
+    # print(png_paths_len == len(main_folder_path), png_paths_len)
     frame_duration = calculate_frame_duration(setup)
 
-    return csv_source, png_paths
+    return csv_main, main_image_paths, float_image_paths
 
 
 def main():

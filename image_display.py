@@ -36,17 +36,21 @@ midi_mode = False
 FPS = 30
 run_mode = True
 
-BUFFER_SIZE = FPS
+BUFFER_SIZE = FPS // 3
 PINGPONG = True
 
 vid_clock = None
 pause_mode = False
 png_paths_len = 0
-png_paths = 0
-folder_count = 0
+main_folder_path = 0
+float_folder_path = 0
+float_folder_count = 0
+
+main_folder_count = 0
 image_size = (800, 600)
 aspect_ratio = 1.333
 text_display = False
+
 
 control_data_dictionary = {
     'Note_On': (0, 127, 0),
@@ -61,7 +65,7 @@ control_data_dictionary = {
 }
 
 folder_dictionary = {
-    'Main_and_Float_Folders': (6, 0),
+    'Main_and_Float_Folders': (0, 8),
 }
 
 valid_modes = {"MTC_CLOCK": MTC_CLOCK, "MIDI_CLOCK": MIDI_CLOCK, "MIXED_CLOCK": MIXED_CLOCK,
@@ -70,7 +74,7 @@ valid_modes = {"MTC_CLOCK": MTC_CLOCK, "MIDI_CLOCK": MIDI_CLOCK, "MIXED_CLOCK": 
 
 def set_clock_mode(mode=None):
     global clock_mode, midi_mode
-    # If a mode argument is provided and it's valid, silently set the clock_mode
+    # If a mode argument is provided and valid, silently set the clock_mode
     if mode and mode in valid_modes.values():
         clock_mode = mode
     else:
@@ -96,7 +100,7 @@ if system() == 'Darwin':
     from Quartz import CGWindowListCopyWindowInfo, kCGWindowListOptionOnScreenOnly, kCGNullWindowID
 elif system() == 'Linux':
     from Xlib import X, display
-elif system() != 'Windows':
+elif system() == 'Windows':
     pass
 
 
@@ -179,9 +183,9 @@ def get_aspect_ratio(image_path):
     w, h = image.get_size()
 
     # Calculate aspect clock_frame_ratio
-    aspect_ratio = h / w
+    a_ratio = h / w
     print(f'this is {w} wide and {h} tall, with an aspect ratio of {aspect_ratio}')
-    return aspect_ratio, w, h,
+    return a_ratio, w, h,
 
 
 def toggle_fullscreen(current_fullscreen_status):
@@ -250,7 +254,7 @@ def set_rgba_relative():
     main_alpha = 1
     if index > 200:
         float_alpha = 1 # (math.sin(hapi_scale))
-       # print("Yer float alpha", float_alpha)
+        # print("Yer float alpha", float_alpha)
     else:
         float_alpha = 1
     main_rgba = (1, 1, 1, main_alpha)
@@ -264,8 +268,8 @@ def overlay_images_fast(texture_id_main, texture_id_float, index=0, background_c
     glClearColor(background_color[0] / 255, background_color[1] / 255, background_color[2] / 255, 1.0)
     glClear(GL_COLOR_BUFFER_BIT)
 
-    display_image(texture_id_float, width, height, rgba=main_rgba)
-    display_image(texture_id_main, width, height, rgba=float_rgba)
+    display_image(texture_id_main, width, height, rgba=main_rgba)
+    display_image(texture_id_float, width, height, rgba=float_rgba)
 
 
 def load_texture(texture_id, image):
@@ -274,8 +278,8 @@ def load_texture(texture_id, image):
 
 
 def load_images(index, main_folder, float_folder):
-    main_image = read_image(png_paths[index][main_folder])
-    float_image = read_image(png_paths[index][float_folder])
+    main_image = read_image(main_folder_path[index][main_folder])
+    float_image = read_image(float_folder_path[index][float_folder])
     return main_image, float_image
 
 
@@ -303,24 +307,28 @@ def update_index_and_folders(index, direction):
 
 
 def update_control_data(index, direction):
-    rand_mult = random.randint(1,9)
+    rand_mult = random.randint(1, 9)
     main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
     if clock_mode == FREE_CLOCK:
         if index <= 4 * FPS:
             float_folder = 0
             main_folder = 6
-        if index % ( FPS * rand_mult) == 0:
-            float_folder = random.randint(0, folder_count-1)
+        if index % (FPS * rand_mult) == 0:
+            float_folder = random.randint(0, main_folder_count - 1)
             print(float_folder)
             rand_mult = random.randint(1, 9)
         if index % (2 * FPS * rand_mult - 1) == 0:
-            main_folder = random.randint(0, folder_count-1)
+            main_folder = random.randint(0, main_folder_count - 1)
             print(main_folder)
 
     else:
-        print(control_data_dictionary['Note_On'])
+        # print(control_data_dictionary['Note_On'])
         note, channel, _ = control_data_dictionary['Note_On']
-        float_folder = (note % 12) % folder_count
+        modulation, channel = control_data_dictionary['Modulation']
+        mod_value = int(modulation / 127 * float_folder_count)
+        # print(mod_value)
+        float_folder = (mod_value) % float_folder_count
+        main_folder = (note % 12) % main_folder_count
 
     folder_dictionary['Main_and_Float_Folders'] = main_folder, float_folder
 
@@ -346,13 +354,13 @@ print_index_diff_function = print_index_diff_wrapper()
 
 def run_display_setup():
     global vid_clock
-    pygame.init()
-    display_init(False)
-    vid_clock = pygame.time.Clock()
     if midi_mode:
         midi_control.midi_control_stuff_main()
     elif clock_mode == CLIENT_MODE:
         threading.Thread(target=index_client.start_client, daemon=True).start()
+    pygame.init()
+    display_init(False)
+    vid_clock = pygame.time.Clock()
     run_display()
     return
 
@@ -470,15 +478,16 @@ def display_init(fullscreen=False):
 
 
 def display_and_run(clock_source=None):
+    global png_paths_len, main_folder_path, main_folder_count, \
+        float_folder_path, float_folder_count, image_size, aspect_ratio
     random.seed(time.time())
     set_clock_mode(clock_source)
-    global png_paths_len, png_paths, folder_count, image_size, aspect_ratio
-    csv_source, png_paths = calculators.init_all()
+    csv_source, main_folder_path, float_folder_path = calculators.init_all()
     print(platform.system(), "midi clock mode is:", clock_mode)
-    folder_count = len(png_paths[0])
-    print(f'folder_count: {folder_count}')
-    png_paths_len = len(png_paths) - 1
-    aspect_ratio, width, height = get_aspect_ratio(png_paths[0][0])
+    main_folder_count = len(main_folder_path[0])
+    float_folder_count = len(float_folder_path[0])
+    png_paths_len = len(main_folder_path) - 1
+    aspect_ratio, width, height = get_aspect_ratio(main_folder_path[0][0])
     image_size = (width, height)
     print(image_size)
     run_display_setup()
