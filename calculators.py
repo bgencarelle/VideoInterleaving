@@ -33,7 +33,7 @@ def set_video_length(video_name, video_name_length):
 
 def get_video_length(video_number=0):
     global frame_duration
-    presets_folder = "ppresets"
+    presets_folder = "presets"
     csv_file_path = os.path.join(presets_folder, "set_video_length.csv")
 
     if not os.path.exists(csv_file_path):
