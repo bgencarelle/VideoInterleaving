@@ -97,10 +97,10 @@ def set_clock_mode(mode=None):
 
 if system() == 'Darwin':
     from Quartz import CGWindowListCopyWindowInfo, kCGWindowListOptionOnScreenOnly, kCGNullWindowID
-elif system() == 'Linux':
-    from Xlib import X, display
-elif system() == 'Windows':
-    pass
+# elif system() == 'Linux':
+#    from Xlib import X, display
+# elif system() == 'Windows':
+#   pass
 
 
 def is_window_maximized():
@@ -117,24 +117,24 @@ def is_window_maximized():
                 window_height = window.get('kCGWindowBounds')['Height']
                 return window_width >= screen_width or window_height >= screen_height
         return False
-    elif platform.system() == 'Linux':
-        d = display.Display()
-        root = d.screen().root
-        pygame_window_id = pygame.display.get_wm_info()['window']
-        window = d.create_resource_object('window', pygame_window_id)
-        wm_state = d.intern_atom('_NET_WM_STATE')
-        max_horz = d.intern_atom('_NET_WM_STATE_MAXIMIZED_HORZ')
-        max_vert = d.intern_atom('_NET_WM_STATE_MAXIMIZED_VERT')
-        fullscreen = d.intern_atom('_NET_WM_STATE_FULLSCREEN')
-        wm_state_data = window.get_full_property(wm_state, X.AnyPropertyType)
-        return (max_horz in wm_state_data.value and max_vert in wm_state_data.value) or (
-                fullscreen in wm_state_data.value)
-    elif platform.system() == 'Windows':
-        import pygetwindow as gw
-        win = gw
-        print(win.size)
-        print("ffffffffff")
-        return win.isMaximized
+    # elif platform.system() == 'Linux':
+    #     d = display.Display()
+    #     root = d.screen().root
+    #     pygame_window_id = pygame.display.get_wm_info()['window']
+    #     window = d.create_resource_object('window', pygame_window_id)
+    #     wm_state = d.intern_atom('_NET_WM_STATE')
+    #     max_horz = d.intern_atom('_NET_WM_STATE_MAXIMIZED_HORZ')
+    #     max_vert = d.intern_atom('_NET_WM_STATE_MAXIMIZED_VERT')
+    #     fullscreen = d.intern_atom('_NET_WM_STATE_FULLSCREEN')
+    #     wm_state_data = window.get_full_property(wm_state, X.AnyPropertyType)
+    #     return (max_horz in wm_state_data.value and max_vert in wm_state_data.value) or (
+    #             fullscreen in wm_state_data.value)
+    # elif platform.system() == 'Windows':
+    #     import pygetwindow as gw
+    #     win = gw
+    #     print(win.size)
+    #     print("ffffffffff")
+    #     return win.isMaximized
     else:
         raise NotImplementedError(f"Maximized window detection is not implemented for {platform.system()}")
 
@@ -308,18 +308,23 @@ def update_index_and_folders(index, direction):
 
 def update_control_data(index, direction):
     rand_mult = random.randint(1, 9)
+    rand_start = 8 * (FPS - (rand_mult * rand_mult // 2))
+    
     main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
     if clock_mode == FREE_CLOCK:
-        if index <= 4 * FPS:
+    
+        # print('index position and stuff ', index, ' : ', rand_start)
+        if index <= rand_start * direction or (index > 100 * rand_start and index < 140 * rand_start):
             float_folder = 0
-            main_folder = 6
-        if index % (FPS * rand_mult) == 0:
-            float_folder = random.randint(0, main_folder_count - 1)
-            print(float_folder)
-            rand_mult = random.randint(1, 9)
-        if index % (2 * FPS * rand_mult - 1) == 0:
+            main_folder = 0
+            print('in stable mode')
+        elif index % (FPS * rand_mult) == 0:
+            float_folder = random.randint(0, float_folder_count - 1)
+            print('background layer:  ', float_folder)
+            rand_mult = random.randint(1, 12)
+        elif index % (2 * FPS * rand_mult - 1) == 0:
             main_folder = random.randint(0, main_folder_count - 1)
-            print(main_folder)
+            print('foreground: ', main_folder)
 
     else:
         # print(control_data_dictionary['Note_On'])

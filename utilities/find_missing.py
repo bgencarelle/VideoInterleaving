@@ -1,5 +1,6 @@
 import os
 
+
 def find_missing_files(folder_path):
     all_files = sorted(os.listdir(folder_path))
     missing_files = []
@@ -24,6 +25,7 @@ def find_missing_files(folder_path):
                 missing_files.append(missing_file)
 
     return missing_files
+
 
 while True:
     folder_path = input("Enter the folder path: ").strip()

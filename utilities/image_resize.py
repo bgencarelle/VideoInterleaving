@@ -8,6 +8,7 @@ counter_lock = threading.Lock()
 processed_files = 0
 total_files = 0
 
+
 def count_png_files(src):
     count = 0
     for root, _, files in os.walk(src):
@@ -15,6 +16,7 @@ def count_png_files(src):
             if file.endswith('.png'):
                 count += 1
     return count
+
 
 def create_smol_structure(src, dest, height, num_threads):
     global processed_files
@@ -31,6 +33,7 @@ def create_smol_structure(src, dest, height, num_threads):
 
     print(f"\nAll {processed_files} images have been resized.")
 
+
 def resize_image(src_path, dest_path, height):
     global processed_files
     with Image.open(src_path) as img:
@@ -46,11 +49,13 @@ def resize_image(src_path, dest_path, height):
         print(f"Processed {processed_files}/{total_files} images", end='\r')
         sys.stdout.flush()
 
+
 def add_srgb_profile(img):
     if 'icc_profile' not in img.info:
         srgb_profile = ImageCms.createProfile("sRGB")
         img = ImageCms.profileToProfile(img, srgb_profile, srgb_profile, outputMode='RGBA')
     return img
+
 
 def main():
     parent_dir = input("Enter the parent directory: ")
@@ -68,6 +73,7 @@ def main():
     total_files = count_png_files(parent_dir)
 
     create_smol_structure(parent_dir, smol_dir, height, num_threads)
+
 
 if __name__ == "__main__":
     main()

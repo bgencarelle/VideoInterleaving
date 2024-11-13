@@ -40,7 +40,9 @@ def create_folder_csv_files(folder_counts, processed_dir):
     def write_csv(group, file_name_format):
         for file_count, sub_group in group.items():
             # Sort the group based on the numeric prefix in the actual folder name, or the folder name itself
-            sub_group.sort(key=lambda x: (int(os.path.basename(x[0]).partition('_')[0]) if os.path.basename(x[0]).partition('_')[0].isdigit() else float('inf'), os.path.basename(x[0])))
+            sub_group.sort(key=lambda x: (
+            int(os.path.basename(x[0]).partition('_')[0]) if os.path.basename(x[0]).partition('_')[
+                0].isdigit() else float('inf'), os.path.basename(x[0])))
             with open(os.path.join(processed_dir, file_name_format.format(file_count)), 'w', newline='') as f:
                 writer = csv.writer(f)
                 for index, (folder, first_png, width, height, has_alpha, file_count) in enumerate(sub_group, 1):
@@ -50,7 +52,9 @@ def create_folder_csv_files(folder_counts, processed_dir):
                         alpha_match = 'Match' if first_png_image.size == first_png_image.split()[-1].size else 'NoMatch'
                     else:
                         alpha_match = 'NoAlpha'
-                    writer.writerow([index, folder, f"{width}x{height} pixels", file_count, 'Yes' if has_alpha else 'No', alpha_match, file_extension])
+                    writer.writerow(
+                        [index, folder, f"{width}x{height} pixels", file_count, 'Yes' if has_alpha else 'No',
+                         alpha_match, file_extension])
 
     write_csv(groups, 'main_folder_{}.csv')
     write_csv(float_group, 'float_folder_{}.csv')

@@ -128,6 +128,23 @@ def select_img_list_files():
 
         selected_files = {'main': '', 'secondary': ''}
 
+        # If there is a file that starts with 'main_folder', select it as the main file automatically
+        main_folder_file = next((f for f in csv_files if f.startswith('main_folder')), None)
+        if main_folder_file:
+            selected_files['main'] = os.path.join(csv_dir, main_folder_file)
+            csv_files.remove(main_folder_file)
+            
+            if csv_files:
+                # If there's another file, assign it as secondary
+                selected_files['secondary'] = os.path.join(csv_dir, csv_files[0])
+            else:
+                # If there's only one file, use it as both main and secondary
+                selected_files['secondary'] = selected_files['main']
+
+            print("Auto-selected main and secondary files:")
+            print(selected_files)
+            return selected_files['main'], selected_files['secondary']
+
         if len(csv_files) == 1:
             print("Only one .csv file found, defaulting to main and secondary:")
             selected_files['main'] = selected_files['secondary'] = os.path.join(csv_dir, csv_files[0])
@@ -150,12 +167,14 @@ def select_img_list_files():
                     selection = int(input("> "))
                     if selection in range(1, len(csv_files) + 1):
                         selected_files[file_type] = os.path.join(csv_dir, csv_files[selection - 1])
+                        csv_files.pop(selection - 1)
                         print(f"Selected {file_type} file: {selected_files[file_type]}")
                         break
                     else:
                         raise ValueError
                 except ValueError:
                     print("Invalid selection. Please enter a number corresponding to a file.")
+
 
 
 def get_image_names_from_csv(file_path):
@@ -243,7 +262,7 @@ def init_all(setup=False):
 
 
 def main():
-    init_all()
+    init_all(False)
     # print(frame_dur)
     # check_index_differences()
 

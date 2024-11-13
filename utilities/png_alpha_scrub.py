@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from PIL import Image, PngImagePlugin
 
+
 def transparent_to_black(input_file):
     img = Image.open(input_file).convert("RGBA")
     img_data = np.array(img)
@@ -14,6 +15,7 @@ def transparent_to_black(input_file):
     # Create a new Image object from the modified NumPy array
     new_img = Image.fromarray(img_data)
     new_img.save(input_file, "PNG")
+
 
 def process_file(filepath):
     try:
