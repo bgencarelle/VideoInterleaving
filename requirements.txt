@@ -1,0 +1,9 @@
+pillow
+numpy
+webp
+mido[ports-rtmidi]
+websockets
+pygame
+opencv-python
+PyOpenGl
+pyobjc-framework-Quartz

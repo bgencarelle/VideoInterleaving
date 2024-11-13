@@ -22,7 +22,7 @@ async def process_midi():
         midi_control.process_midi(CLOCK_MODE)
         midi_data_dictionary = midi_control.midi_data_dictionary
         elapsed = time.time() - start_time
-        sleep_time = max(1/90 - elapsed, 0)
+        sleep_time = max(1 / 90 - elapsed, 0)
         await asyncio.sleep(sleep_time)
 
 

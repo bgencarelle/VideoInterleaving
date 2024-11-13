@@ -10,7 +10,7 @@ MIXED_CLOCK = 2
 CLIENT_MODE = 3
 FREE_CLOCK = 255
 
-def main(setup_mode=True):
+def main(setup_mode=False):
 
     if setup_mode:
         while True:
@@ -75,7 +75,7 @@ def main(setup_mode=True):
             else:
                 print("Please enter 'y' or 'n'.")
     else:
-        image_display.display_and_run(None)
+        image_display.display_and_run(FREE_CLOCK)
 
 
 if __name__ == "__main__":
