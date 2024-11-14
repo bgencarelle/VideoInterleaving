@@ -11,6 +11,13 @@ __pycache__/
 *.csv
 .csv
 
+# image files
+.webp
+*.webp
+.png
+*.png
+*.jpg
+
 # Distribution / packaging
 .Python
 build/
@@ -168,3 +175,5 @@ cython_debug/
 .idea/codeStyles/
 
 .idea/
+/folders_processed/folder_count_53304.txt
+/images/mapped_webp_810/0_C_faceNoBG/faceNoBG_0000.webp
