@@ -49,6 +49,7 @@ main_folder_count = 0
 image_size = (800, 600)
 aspect_ratio = 1.333
 text_display = False
+mouse_visible = False
 
 
 control_data_dictionary = {
@@ -140,7 +141,7 @@ def is_window_maximized():
 
 
 def event_check(fullscreen):
-    global image_size, run_mode, pause_mode
+    global image_size, run_mode, pause_mode, mouse_visible
     width, height = image_size
     aspect_ratio = width / height
     for event in pygame.event.get():
@@ -152,16 +153,25 @@ def event_check(fullscreen):
                 # print("bailing out")
                 run_mode = False
                 sys.exit()
+            if event.key == K_y:  # Press 'p' key to toggle pause
+                # print("bailing out")
+                run_mode = False
+                sys.exit()
             if event.key == K_f:  # Press 'f' key to toggle fullscreen
                 fullscreen = toggle_fullscreen(fullscreen)
+                pygame.mouse.set_visible(not fullscreen)
+            if event.key == K_0:  # Press '0' key to toggle fullscreen
+                fullscreen = toggle_fullscreen(fullscreen)
+                pygame.mouse.set_visible(not fullscreen)
+            if event.key == K_m:  # Press '0' key to toggle fullscreen
+                mouse_visible =  not mouse_visible
+                pygame.mouse.set_visible(mouse_visible)
             if event.key == K_p:  # Press 'p' key to toggle fullscreen
                 pause_mode = not pause_mode
                 print(pause_mode)
             if event.key == K_i:  # Press 'i' key to jump around
                 # index += 500
                 print("jump around")
-            if event.key == K_t:  # Press ' t ' key to jump around
-                text_mode = not text_mode
         elif event.type == VIDEORESIZE:
             new_width, new_height = event.size
             if new_width / new_height > aspect_ratio:
@@ -314,17 +324,17 @@ def update_control_data(index, direction):
     if clock_mode == FREE_CLOCK:
     
         # print('index position and stuff ', index, ' : ', rand_start)
-        if index <= rand_start * direction or (index > 100 * rand_start and index < 140 * rand_start):
+        if index <= rand_start * direction or (index > (100 * rand_start) and index < (140 * rand_start)):
             float_folder = 0
             main_folder = 0
-            print('in stable mode')
+            #print('in stable mode')
         elif index % (FPS * rand_mult) == 0:
             float_folder = random.randint(0, float_folder_count - 1)
-            print('background layer:  ', float_folder)
+            #print('background layer:  ', float_folder)
             rand_mult = random.randint(1, 12)
         elif index % (2 * FPS * rand_mult - 1) == 0:
             main_folder = random.randint(0, main_folder_count - 1)
-            print('foreground: ', main_folder)
+            #print('foreground: ', main_folder)
 
     else:
         # print(control_data_dictionary['Note_On'])
@@ -366,6 +376,7 @@ def run_display_setup():
     pygame.init()
     display_init(False)
     vid_clock = pygame.time.Clock()
+    pygame.mouse.set_visible(mouse_visible)
     run_display()
     return
 
@@ -374,7 +385,7 @@ def run_display():
     global run_mode
     index, direction = control_data_dictionary['Index_and_Direction']
     buffer_index, buffer_direction = update_index_and_folders(0, 1)
-    fullscreen = False
+    fullscreen = True
 
     index_changed = False
 
@@ -448,7 +459,7 @@ def run_display():
 
 
 
-def display_init(fullscreen=False):
+def display_init(fullscreen=True):
     w, h = image_size
     fullscreen_size = pygame.display.list_modes()[0]
     fullscreen_width, fullscreen_height = fullscreen_size
@@ -485,7 +496,7 @@ def display_init(fullscreen=False):
 def display_and_run(clock_source=None):
     global png_paths_len, main_folder_path, main_folder_count, \
         float_folder_path, float_folder_count, image_size, aspect_ratio
-    random.seed(time.time())
+    random.seed()
     set_clock_mode(clock_source)
     csv_source, main_folder_path, float_folder_path = calculators.init_all()
     print(platform.system(), "midi clock mode is:", clock_mode)

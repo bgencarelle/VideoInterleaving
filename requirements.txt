@@ -1,7 +1,7 @@
 pillow
 numpy
 webp
-mido[ports-rtmidi]
+'mido[ports-rtmidi]'
 websockets
 pygame
 opencv-python
