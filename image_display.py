@@ -499,7 +499,7 @@ def display_and_run(clock_source=None):
     random.seed()
     set_clock_mode(clock_source)
     csv_source, main_folder_path, float_folder_path = calculators.init_all()
-    print(platform.system(), "midi clock mode is:", clock_mode)
+    print("platform is:", platform.system(), " \nmidi clock mode is:", clock_mode)
     main_folder_count = len(main_folder_path[0])
     float_folder_count = len(float_folder_path[0])
     png_paths_len = len(main_folder_path) - 1
