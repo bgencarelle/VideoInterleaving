@@ -35,7 +35,7 @@ midi_mode = False
 FPS = 30
 run_mode = True
 
-BUFFER_SIZE = FPS // 3
+BUFFER_SIZE = FPS // 2
 PINGPONG = True
 
 vid_clock = None
@@ -385,7 +385,7 @@ def run_display():
     global run_mode
     index, direction = control_data_dictionary['Index_and_Direction']
     buffer_index, buffer_direction = update_index_and_folders(0, 1)
-    fullscreen = True
+    fullscreen = False
 
     index_changed = False
 
