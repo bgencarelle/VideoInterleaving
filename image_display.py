@@ -22,7 +22,7 @@ import webp
 import random
 import index_client
 
-FULLSCREEN_MODE = False
+FULLSCREEN_MODE = True
 MTC_CLOCK = 0
 MIDI_CLOCK = 1
 MIXED_CLOCK = 2
@@ -374,7 +374,7 @@ def run_display_setup():
     elif clock_mode == CLIENT_MODE:
         threading.Thread(target=index_client.start_client, daemon=True).start()
     pygame.init()
-    display_init(False)
+    display_init()
     vid_clock = pygame.time.Clock()
     pygame.mouse.set_visible(mouse_visible)
     run_display()
@@ -385,7 +385,7 @@ def run_display():
     global run_mode
     index, direction = control_data_dictionary['Index_and_Direction']
     buffer_index, buffer_direction = update_index_and_folders(0, 1)
-    fullscreen = False
+    fullscreen = True
 
     index_changed = False
 
