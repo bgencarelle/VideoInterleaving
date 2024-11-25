@@ -40,5 +40,5 @@ The project is still very much in development and was initially created based on
 
 ## Demos
 
-Demos of the project in action can be found on [Ben's YouTube page](https://www.youtube.com/bencarelle).
+Demos of the project in action can be found on [Ben's YouTube page](https://www.youtube.com/@bgencarelle).
 
