@@ -1,23 +1,21 @@
-import math
-import sys
-import time
-from concurrent.futures import ThreadPoolExecutor
-from platform import system
-from queue import SimpleQueue
-import threading
 
+import math
+import pygame
 import pygame.time
 from OpenGL.GL import *
 from OpenGL.GLU import *
-
-
+import cv2
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+from queue import SimpleQueue
+import threading
+from pygame.locals import *
+# local stuff
 import calculators
 import midi_control
 import platform
-import pygame
-from pygame.locals import *
 
-import cv2
 import webp
 import random
 import index_client
@@ -42,12 +40,12 @@ vid_clock = None
 pause_mode = False
 png_paths_len = 0
 main_folder_path = 0
-float_folder_path = 0
+float_folder_path: int = 0
 float_folder_count = 0
 
 main_folder_count = 0
 image_size = (800, 600)
-aspect_ratio = 1.333
+aspect_ratio = 1
 text_display = False
 mouse_visible = False
 
@@ -70,7 +68,6 @@ folder_dictionary = {
 
 valid_modes = {"MTC_CLOCK": MTC_CLOCK, "MIDI_CLOCK": MIDI_CLOCK, "MIXED_CLOCK": MIXED_CLOCK,
                "CLIENT_MODE": CLIENT_MODE, "FREE_CLOCK": FREE_CLOCK}
-
 
 def set_clock_mode(mode=None):
     global clock_mode, midi_mode
@@ -95,53 +92,17 @@ def set_clock_mode(mode=None):
     midi_mode = True if (clock_mode < CLIENT_MODE) else False
     print("YER", list(valid_modes.keys())[list(valid_modes.values()).index(clock_mode)])
 
-
-if system() == 'Darwin':
-    from Quartz import CGWindowListCopyWindowInfo, kCGWindowListOptionOnScreenOnly, kCGNullWindowID
-# elif system() == 'Linux':
-#    from Xlib import X, display
-# elif system() == 'Windows':
-#   pass
-
-
 def is_window_maximized():
-    if platform.system() == 'Darwin':
-        from AppKit import NSScreen
-        import os
-        pid = os.getpid()
-        screen_frame = NSScreen.mainScreen().frame()
-        screen_width, screen_height = screen_frame.size.width, screen_frame.size.height
-        window_list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID)
-        for window in window_list:
-            if window.get('kCGWindowOwnerPID') == pid:
-                window_width = window.get('kCGWindowBounds')['Width']
-                window_height = window.get('kCGWindowBounds')['Height']
-                return window_width >= screen_width or window_height >= screen_height
-        return False
-    # elif platform.system() == 'Linux':
-    #     d = display.Display()
-    #     root = d.screen().root
-    #     pygame_window_id = pygame.display.get_wm_info()['window']
-    #     window = d.create_resource_object('window', pygame_window_id)
-    #     wm_state = d.intern_atom('_NET_WM_STATE')
-    #     max_horz = d.intern_atom('_NET_WM_STATE_MAXIMIZED_HORZ')
-    #     max_vert = d.intern_atom('_NET_WM_STATE_MAXIMIZED_VERT')
-    #     fullscreen = d.intern_atom('_NET_WM_STATE_FULLSCREEN')
-    #     wm_state_data = window.get_full_property(wm_state, X.AnyPropertyType)
-    #     return (max_horz in wm_state_data.value and max_vert in wm_state_data.value) or (
-    #             fullscreen in wm_state_data.value)
-    # elif platform.system() == 'Windows':
-    #     import pygetwindow as gw
-    #     win = gw
-    #     print(win.size)
-    #     print("ffffffffff")
-    #     return win.isMaximized
-    else:
-        raise NotImplementedError(f"Maximized window detection is not implemented for {platform.system()}")
+    display_info = pygame.display.Info()
+    screen_width = display_info.current_w
+    screen_height = display_info.current_h
+    window_size = pygame.display.get_window_size()
+    window_width, window_height = window_size
+    return window_width >= screen_width or window_height >= screen_height
 
 
 def event_check(fullscreen):
-    global image_size, run_mode, pause_mode, mouse_visible
+    global image_size, run_mode, pause_mode, mouse_visible, aspect_ratio
     width, height = image_size
     aspect_ratio = width / height
     for event in pygame.event.get():
@@ -149,11 +110,7 @@ def event_check(fullscreen):
             run_mode = False
             sys.exit()
         if event.type == KEYDOWN:
-            if event.key == K_q:  # Press 'p' key to toggle pause
-                # print("bailing out")
-                run_mode = False
-                sys.exit()
-            if event.key == K_y:  # Press 'p' key to toggle pause
+            if event.key == K_q:  # Press 'q' key to quit
                 # print("bailing out")
                 run_mode = False
                 sys.exit()
@@ -163,15 +120,12 @@ def event_check(fullscreen):
             if event.key == K_0:  # Press '0' key to toggle fullscreen
                 fullscreen = toggle_fullscreen(fullscreen)
                 pygame.mouse.set_visible(not fullscreen)
-            if event.key == K_m:  # Press '0' key to toggle fullscreen
+            if event.key == K_m:  # Press 'm' key to toggle mouse visibility
                 mouse_visible =  not mouse_visible
                 pygame.mouse.set_visible(mouse_visible)
             if event.key == K_p:  # Press 'p' key to toggle fullscreen
                 pause_mode = not pause_mode
                 print(pause_mode)
-            if event.key == K_i:  # Press 'i' key to jump around
-                # index += 500
-                print("jump around")
         elif event.type == VIDEORESIZE:
             new_width, new_height = event.size
             if new_width / new_height > aspect_ratio:
@@ -188,10 +142,8 @@ def event_check(fullscreen):
 def get_aspect_ratio(image_path):
     # Load image with Pygame
     image = pygame.image.load(image_path)
-
     # Get image dimensions
     w, h = image.get_size()
-
     # Calculate aspect clock_frame_ratio
     a_ratio = h / w
     print(f'this is {w} wide and {h} tall, with an aspect ratio of {aspect_ratio}')
@@ -199,16 +151,15 @@ def get_aspect_ratio(image_path):
 
 
 def toggle_fullscreen(current_fullscreen_status):
-    if is_window_maximized() and not current_fullscreen_status:
-        print("dooo")
-        return current_fullscreen_status
-    else:
-        new_fullscreen_status = not current_fullscreen_status
-        display_init(new_fullscreen_status)
-    return new_fullscreen_status
+    if not is_window_maximized() or current_fullscreen_status:
+        current_fullscreen_status = not current_fullscreen_status
+        display_init(current_fullscreen_status)
+    return current_fullscreen_status
+
 
 
 def read_image(image_path):
+    image_np = None
     if image_path.endswith('.webp'):
         with open(image_path, 'rb') as f:
             webp_data = webp.WebPData.from_buffer(f.read())
@@ -254,21 +205,11 @@ def display_image(texture_id, width, height, rgba=(1, 1, 1, 1)):
 
 
 def set_rgba_relative():
-    global control_data_dictionary
-    index, _ = control_data_dictionary['Index_and_Direction']
-    scale = 30.00
-    index_scale = (index / png_paths_len)
-    pi_scale = math.pi / 2.000
 
-    hapi_scale = math.pi * index_scale
-    main_alpha = 1
-    if index > 200:
-        float_alpha = 1 # (math.sin(hapi_scale))
-        # print("Yer float alpha", float_alpha)
-    else:
-        float_alpha = 1
-    main_rgba = (1, 1, 1, main_alpha)
-    float_rgba = (1, 1, 1, float_alpha)
+    main_alpha = 1.0
+    float_alpha = 1.0
+    main_rgba = (1.0, 1.0, 1.0, main_alpha)
+    float_rgba = (1.0, 1.0, 1.0, float_alpha)
     return main_rgba, float_rgba
 
 
@@ -342,7 +283,7 @@ def update_control_data(index, direction):
         modulation, channel = control_data_dictionary['Modulation']
         mod_value = int(modulation / 127 * float_folder_count)
         # print(mod_value)
-        float_folder = (mod_value) % float_folder_count
+        float_folder = mod_value % float_folder_count
         main_folder = (note % 12) % main_folder_count
 
     folder_dictionary['Main_and_Float_Folders'] = main_folder, float_folder
@@ -389,12 +330,12 @@ def run_display():
 
     index_changed = False
 
-    def queue_image(buffer_idx, main_folder_q, float_folder_q, image_queue):
+    def queue_image(buffer_idx, main_folder_q, float_folder_q, image_queue_in):
         buffer_idx = max(0, min(buffer_idx, png_paths_len - 1))
         image_future = executor.submit(load_images, buffer_idx, main_folder_q, float_folder_q)
-        image_queue.put(image_future)
+        image_queue_in.put(image_future)
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=1) as executor:
         update_index_and_folders(index, direction)
         index, direction = control_data_dictionary['Index_and_Direction']
         main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
@@ -460,6 +401,7 @@ def run_display():
 
 
 def display_init(fullscreen=True):
+    global image_size
     w, h = image_size
     fullscreen_size = pygame.display.list_modes()[0]
     fullscreen_width, fullscreen_height = fullscreen_size
