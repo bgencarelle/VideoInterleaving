@@ -27,6 +27,7 @@ MTC_CLOCK = 0
 MIDI_CLOCK = 1
 MIXED_CLOCK = 2
 CLIENT_MODE = 3
+
 FREE_CLOCK = 255
 
 clock_mode = FREE_CLOCK
@@ -148,6 +149,7 @@ def get_aspect_ratio(image_path):
     return a_ratio, w, h,
 
 def read_image(image_path):
+    image_np = None
     if image_path.endswith('.webp'):
         image_np = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
         image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGBA)
@@ -397,8 +399,7 @@ def display_init(fullscreen=False):
     flags = OPENGL
     flags |= DOUBLEBUF
     if fullscreen:
-        flags = OPENGL
-        flags |= DOUBLEBUF
+
         flags |= FULLSCREEN
         pygame.display.set_caption('Fullscreen Mode')
         pygame.display.set_mode((fullscreen_width, fullscreen_height), flags)
@@ -422,7 +423,7 @@ def display_init(fullscreen=False):
     glLoadIdentity()
 
 
-def display_and_run(clock_source=None):
+def display_and_run(clock_source=FREE_CLOCK):
     global png_paths_len, main_folder_path, main_folder_count, \
         float_folder_path, float_folder_count, image_size, aspect_ratio
     random.seed(time.time())
