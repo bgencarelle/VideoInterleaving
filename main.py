@@ -10,7 +10,7 @@ MIXED_CLOCK = 2
 CLIENT_MODE = 3
 FREE_CLOCK = 255
 
-CLOCK_MODE = 255
+CLOCK_MODE = FREE_CLOCK
 
 def main(setup_mode=False, clock=CLOCK_MODE):
 
