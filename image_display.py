@@ -1,26 +1,28 @@
-
 import math
-import pygame
-import pygame.time
-from OpenGL.GL import *
-from OpenGL.GLU import *
-import cv2
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from platform import system
 from queue import SimpleQueue
 import threading
-from pygame.locals import *
-# local stuff
+
+import pygame.time
+from OpenGL.GL import *
+from OpenGL.GLU import *
+
+
 import calculators
 import midi_control
 import platform
+import pygame
+from pygame.locals import *
 
+import cv2
 import webp
 import random
 import index_client
 
-FULLSCREEN_MODE = True
+FULLSCREEN_MODE = False
 MTC_CLOCK = 0
 MIDI_CLOCK = 1
 MIXED_CLOCK = 2
@@ -33,21 +35,20 @@ midi_mode = False
 FPS = 30
 run_mode = True
 
-BUFFER_SIZE = FPS // 2
+BUFFER_SIZE = FPS // 3
 PINGPONG = True
 
 vid_clock = None
 pause_mode = False
 png_paths_len = 0
 main_folder_path = 0
-float_folder_path: int = 0
+float_folder_path = 0
 float_folder_count = 0
 
 main_folder_count = 0
 image_size = (800, 600)
-aspect_ratio = 1
+aspect_ratio = 1.333
 text_display = False
-mouse_visible = False
 
 
 control_data_dictionary = {
@@ -68,6 +69,7 @@ folder_dictionary = {
 
 valid_modes = {"MTC_CLOCK": MTC_CLOCK, "MIDI_CLOCK": MIDI_CLOCK, "MIXED_CLOCK": MIXED_CLOCK,
                "CLIENT_MODE": CLIENT_MODE, "FREE_CLOCK": FREE_CLOCK}
+
 
 def set_clock_mode(mode=None):
     global clock_mode, midi_mode
@@ -92,40 +94,34 @@ def set_clock_mode(mode=None):
     midi_mode = True if (clock_mode < CLIENT_MODE) else False
     print("YER", list(valid_modes.keys())[list(valid_modes.values()).index(clock_mode)])
 
-def is_window_maximized():
-    display_info = pygame.display.Info()
-    screen_width = display_info.current_w
-    screen_height = display_info.current_h
-    window_size = pygame.display.get_window_size()
-    window_width, window_height = window_size
-    return window_width >= screen_width or window_height >= screen_height
+
+def toggle_fullscreen(current_fullscreen_status):
+    global image_size
+    if current_fullscreen_status:
+        # Switch back to windowed mode
+        pygame.display.set_mode(image_size, pygame.RESIZABLE | OPENGL | DOUBLEBUF)
+        pygame.display.set_caption('Windowed Mode')
+    else:
+        # Switch to fullscreen mode
+        pygame.display.set_mode((0, 0), FULLSCREEN | OPENGL | DOUBLEBUF)
+        pygame.display.set_caption('Fullscreen Mode')
+    return not current_fullscreen_status
 
 
 def event_check(fullscreen):
-    global image_size, run_mode, pause_mode, mouse_visible, aspect_ratio
+    global image_size, run_mode, pause_mode
     width, height = image_size
     aspect_ratio = width / height
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             run_mode = False
-            sys.exit()
         if event.type == KEYDOWN:
-            if event.key == K_q:  # Press 'q' key to quit
+            if event.key == K_q:  # Press 'p' key to toggle pause
                 # print("bailing out")
                 run_mode = False
-                sys.exit()
+                pygame.quit()
             if event.key == K_f:  # Press 'f' key to toggle fullscreen
                 fullscreen = toggle_fullscreen(fullscreen)
-                pygame.mouse.set_visible(not fullscreen)
-            if event.key == K_0:  # Press '0' key to toggle fullscreen
-                fullscreen = toggle_fullscreen(fullscreen)
-                pygame.mouse.set_visible(not fullscreen)
-            if event.key == K_m:  # Press 'm' key to toggle mouse visibility
-                mouse_visible =  not mouse_visible
-                pygame.mouse.set_visible(mouse_visible)
-            if event.key == K_p:  # Press 'p' key to toggle fullscreen
-                pause_mode = not pause_mode
-                print(pause_mode)
         elif event.type == VIDEORESIZE:
             new_width, new_height = event.size
             if new_width / new_height > aspect_ratio:
@@ -142,28 +138,19 @@ def event_check(fullscreen):
 def get_aspect_ratio(image_path):
     # Load image with Pygame
     image = pygame.image.load(image_path)
+
     # Get image dimensions
     w, h = image.get_size()
+
     # Calculate aspect clock_frame_ratio
     a_ratio = h / w
     print(f'this is {w} wide and {h} tall, with an aspect ratio of {aspect_ratio}')
     return a_ratio, w, h,
 
-
-def toggle_fullscreen(current_fullscreen_status):
-    if not is_window_maximized() or current_fullscreen_status:
-        current_fullscreen_status = not current_fullscreen_status
-        display_init(current_fullscreen_status)
-    return current_fullscreen_status
-
-
-
 def read_image(image_path):
-    image_np = None
     if image_path.endswith('.webp'):
-        with open(image_path, 'rb') as f:
-            webp_data = webp.WebPData.from_buffer(f.read())
-            image_np = webp_data.decode(color_mode=webp.WebPColorMode.RGBA)
+        image_np = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+        image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGBA)
     if image_path.endswith('.png'):
         image_np = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
         image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGBA)
@@ -205,15 +192,15 @@ def display_image(texture_id, width, height, rgba=(1, 1, 1, 1)):
 
 
 def set_rgba_relative():
-
-    main_alpha = 1.0
-    float_alpha = 1.0
-    main_rgba = (1.0, 1.0, 1.0, main_alpha)
-    float_rgba = (1.0, 1.0, 1.0, float_alpha)
+    main_alpha = 1
+    float_alpha = 1 #
+    main_rgba = (1, 1, 1, main_alpha)
+    float_rgba = (1, 1, 1, float_alpha)
     return main_rgba, float_rgba
 
 
-def overlay_images_fast(texture_id_main, texture_id_float, index=0, background_color=(32, 30, 32)):
+def overlay_images_fast(texture_id_main, texture_id_float, index=0, background_color=(0, 0, 0)):
+    global image_size
     width, height = image_size
     main_rgba, float_rgba = set_rgba_relative()
     glClearColor(background_color[0] / 255, background_color[1] / 255, background_color[2] / 255, 1.0)
@@ -231,7 +218,11 @@ def load_texture(texture_id, image):
 def load_images(index, main_folder, float_folder):
     main_image = read_image(main_folder_path[index][main_folder])
     float_image = read_image(float_folder_path[index][float_folder])
-    return main_image, float_image
+    if run_mode:
+        return main_image, float_image
+    else:
+        print("quit via quit")
+        return None, None
 
 
 def update_index_and_folders(index, direction):
@@ -260,22 +251,22 @@ def update_index_and_folders(index, direction):
 def update_control_data(index, direction):
     rand_mult = random.randint(1, 9)
     rand_start = 8 * (FPS - (rand_mult * rand_mult // 2))
-    
+
     main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
     if clock_mode == FREE_CLOCK:
-    
+
         # print('index position and stuff ', index, ' : ', rand_start)
-        if index <= rand_start * direction or (index > (100 * rand_start) and index < (140 * rand_start)):
+        if index <= rand_start * direction or (index > 100 * rand_start and index < 140 * rand_start):
             float_folder = 0
             main_folder = 0
-            #print('in stable mode')
+            print('in stable mode')
         elif index % (FPS * rand_mult) == 0:
             float_folder = random.randint(0, float_folder_count - 1)
-            #print('background layer:  ', float_folder)
+            print('background layer:  ', float_folder)
             rand_mult = random.randint(1, 12)
         elif index % (2 * FPS * rand_mult - 1) == 0:
             main_folder = random.randint(0, main_folder_count - 1)
-            #print('foreground: ', main_folder)
+            print('foreground: ', main_folder)
 
     else:
         # print(control_data_dictionary['Note_On'])
@@ -283,7 +274,7 @@ def update_control_data(index, direction):
         modulation, channel = control_data_dictionary['Modulation']
         mod_value = int(modulation / 127 * float_folder_count)
         # print(mod_value)
-        float_folder = mod_value % float_folder_count
+        float_folder = (mod_value) % float_folder_count
         main_folder = (note % 12) % main_folder_count
 
     folder_dictionary['Main_and_Float_Folders'] = main_folder, float_folder
@@ -315,9 +306,8 @@ def run_display_setup():
     elif clock_mode == CLIENT_MODE:
         threading.Thread(target=index_client.start_client, daemon=True).start()
     pygame.init()
-    display_init()
+    display_init(False)
     vid_clock = pygame.time.Clock()
-    pygame.mouse.set_visible(mouse_visible)
     run_display()
     return
 
@@ -326,16 +316,16 @@ def run_display():
     global run_mode
     index, direction = control_data_dictionary['Index_and_Direction']
     buffer_index, buffer_direction = update_index_and_folders(0, 1)
-    fullscreen = True
+    fullscreen = False
 
     index_changed = False
 
-    def queue_image(buffer_idx, main_folder_q, float_folder_q, image_queue_in):
+    def queue_image(buffer_idx, main_folder_q, float_folder_q, q_image_queue):
         buffer_idx = max(0, min(buffer_idx, png_paths_len - 1))
         image_future = executor.submit(load_images, buffer_idx, main_folder_q, float_folder_q)
-        image_queue_in.put(image_future)
+        q_image_queue.put(image_future)
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
+    with ThreadPoolExecutor(max_workers=2) as executor:
         update_index_and_folders(index, direction)
         index, direction = control_data_dictionary['Index_and_Direction']
         main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
@@ -400,8 +390,7 @@ def run_display():
 
 
 
-def display_init(fullscreen=True):
-    global image_size
+def display_init(fullscreen=False):
     w, h = image_size
     fullscreen_size = pygame.display.list_modes()[0]
     fullscreen_width, fullscreen_height = fullscreen_size
@@ -412,6 +401,8 @@ def display_init(fullscreen=True):
     flags = OPENGL
     flags |= DOUBLEBUF
     if fullscreen:
+        flags = OPENGL
+        flags |= DOUBLEBUF
         flags |= FULLSCREEN
         pygame.display.set_caption('Fullscreen Mode')
         pygame.display.set_mode((fullscreen_width, fullscreen_height), flags)
@@ -438,10 +429,10 @@ def display_init(fullscreen=True):
 def display_and_run(clock_source=None):
     global png_paths_len, main_folder_path, main_folder_count, \
         float_folder_path, float_folder_count, image_size, aspect_ratio
-    random.seed()
+    random.seed(time.time())
     set_clock_mode(clock_source)
     csv_source, main_folder_path, float_folder_path = calculators.init_all()
-    print("platform is:", platform.system(), " \nmidi clock mode is:", clock_mode)
+    print(platform.system(), "midi clock mode is:", clock_mode)
     main_folder_count = len(main_folder_path[0])
     float_folder_count = len(float_folder_path[0])
     png_paths_len = len(main_folder_path) - 1

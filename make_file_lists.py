@@ -32,8 +32,8 @@ def find_default_csvs(processed_dir):
     with the same XXXX.
     Returns the list of paths if found, else None.
     """
-    float_pattern = re.compile(r'^float_folder_(\d{4})\.csv$')
-    main_pattern = re.compile(r'^main_folder_(\d{4})\.csv$')
+    float_pattern = re.compile(r'^float_folder_(\d{1,30})\.csv$')
+    main_pattern = re.compile(r'^main_folder_(\d{1,30})\.csv$')
 
     float_files = {}
     main_files = {}
@@ -69,7 +69,7 @@ def choose_file(processed_dir):
     for i, file in enumerate(available_files):
         print(f"{i + 1}: {file}")
 
-    if len(available_files) > 1:
+    if len(available_files) > 2:
         response = input("Multiple CSV files found. Do you want to process all? (y/n): ").strip().lower()
         if response == "y":
             return [os.path.join(processed_dir, f) for f in available_files]
@@ -83,7 +83,7 @@ def choose_file(processed_dir):
                         print("Invalid choice. Please enter a valid number.")
                 except ValueError:
                     print("Invalid input. Please enter a valid number.")
-    elif len(available_files) == 1:
+    elif len(available_files) == 2:
         return [os.path.join(processed_dir, available_files[0])]
     else:
         return []
