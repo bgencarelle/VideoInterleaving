@@ -218,11 +218,7 @@ def load_texture(texture_id, image):
 def load_images(index, main_folder, float_folder):
     main_image = read_image(main_folder_path[index][main_folder])
     float_image = read_image(float_folder_path[index][float_folder])
-    if run_mode:
-        return main_image, float_image
-    else:
-        print("quit via quit")
-        return None, None
+    return main_image, float_image
 
 
 def update_index_and_folders(index, direction):
