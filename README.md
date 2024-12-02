@@ -11,7 +11,7 @@ VideoInterleaving is a platform designed to enable artists to create video insta
 ## Requirements
 
 - Python
-- A reasonably fast storage solution
+- A reasonably fast storage solution 
 
 ## Installation
 
