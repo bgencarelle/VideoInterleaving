@@ -6,6 +6,7 @@ import re
 import csv
 from PIL import Image
 from collections import defaultdict
+import shutil
 
 def get_subdirectories(path):
     """Retrieve all subdirectories within a given path."""
@@ -97,115 +98,66 @@ def write_folder_list():
     processed_dir = os.path.join(script_dir, "folders_processed")
 
     # Ensure the processed directory exists
-    if not os.path.exists(processed_dir):
-        try:
-            os.makedirs(processed_dir)
-            print(f"Created directory: {processed_dir}")
-        except Exception as e:
-            print(f"Failed to create 'folders_processed' directory at {processed_dir}: {e}")
-            raise
+    if os.path.exists(processed_dir):
+        # Clear the processed directory if it already exists
+        shutil.rmtree(processed_dir)
+    os.makedirs(processed_dir)
 
-    # Attempt to add 'images' directory
+    # Check for the existence of the 'images' directory
     images_path = os.path.join(script_dir, "images")
 
+    if not os.path.exists(images_path) or not os.path.isdir(images_path):
+        print(
+            "The 'images' directory is missing. Please create the directory and populate it with PNG or WEBP files before running this script again.")
+        return  # Exit the function
+
+    # Collect all subdirectories and main images directory
     folder_dict = {}
+    folder_key = 1
 
-    if os.path.exists(images_path) and os.path.isdir(images_path):
-        # Add 'images' to folder_dict only if it contains image files
-        if contains_image_files(images_path):
-            folder_dict[1] = images_path
+    # Recursively add the "images" path and its subdirectories
+    for subdirectory in [images_path] + get_subdirectories(images_path):
+        if contains_image_files(subdirectory):
+            folder_dict[folder_key] = subdirectory
+            folder_key += 1
 
-        # Add subdirectories that contain image files
-        for subdirectory in get_subdirectories(images_path):
-            if contains_image_files(subdirectory) and subdirectory not in folder_dict.values():
-                folder_dict[len(folder_dict) + 1] = subdirectory
-
-    # If 'images' was not added (doesn't exist or has no image files), prompt the user
+    # Abort if no valid folders are found
     if not folder_dict:
-        print("The default 'images' directory is missing or contains no image files.")
-        print("Please enter directories manually.")
+        print("No valid image files were found in the 'images' directory or its subdirectories.")
+        return  # Exit the function
 
-        # Load existing folder locations if available
-        folder_locations_path = os.path.join(script_dir, 'folder_locations.txt')
-        if os.path.exists(folder_locations_path):
-            with open(folder_locations_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    number, folder = parse_line(line.strip())
-                    if folder:
-                        # Convert relative path to absolute path
-                        folder_abs = os.path.join(script_dir, folder)
-                        if os.path.exists(folder_abs) and os.path.isdir(folder_abs):
-                            folder_dict[number] = folder_abs
-                        else:
-                            print(f"Warning: Folder '{folder}' does not exist and will be skipped.")
-
-        # Interactive prompt loop
-        while True:
-            folder_path = input("Enter individual paths, parent directories or type quit to stop: ").strip()
-            if folder_path.lower() == 'quit':
-                break
-
-            folder_abs = os.path.abspath(folder_path)
-            if not os.path.exists(folder_abs) or not os.path.isdir(folder_abs):
-                print("Invalid directory. Please try again.")
-                continue
-
-            if contains_image_files(folder_abs) and folder_abs not in folder_dict.values():
-                new_key = max(folder_dict.keys(), default=0) + 1
-                folder_dict[new_key] = folder_abs
-                print(f"Added folder: {folder_abs}")
-
-            # Add subdirectories that contain image files
-            for subdirectory in get_subdirectories(folder_abs):
-                if contains_image_files(subdirectory) and subdirectory not in folder_dict.values():
-                    new_key = max(folder_dict.keys(), default=0) + 1
-                    folder_dict[new_key] = subdirectory
-                    print(f"Added subdirectory: {subdirectory}")
-
-    # Final check to ensure at least one folder is added
-    if not folder_dict:
-        raise Exception("No folders added. Please add at least one main_folder.")
-
-    # Calculate the total number of PNGs and WEBPs
-    total_pngs = sum(count_image_files(folder) for folder in folder_dict.values())
-
-    # Gather folder counts and image details
+    # Collect folder details and count images
+    total_images = 0
     folder_counts = []
+
     for folder in folder_dict.values():
         image_files = [f for f in os.listdir(folder) if f.lower().endswith(('.png', '.webp'))]
         if image_files:
-            first_img = image_files[0]
+            first_image = image_files[0]
             try:
-                with Image.open(os.path.join(folder, first_img)) as img:
+                with Image.open(os.path.join(folder, first_image)) as img:
                     width, height = img.size
                     has_alpha = has_alpha_channel(img)
             except Exception as e:
-                print(f"Error opening image {first_img} in folder {folder}: {e}")
-                first_img = None
+                print(f"Error processing image {first_image} in folder {folder}: {e}")
+                first_image = None
                 width, height, has_alpha = 0, 0, False
             file_count = count_image_files(folder)
-            folder_counts.append((folder, first_img, width, height, has_alpha, file_count))
+            total_images += file_count
+            folder_counts.append((folder, first_image, width, height, has_alpha, file_count))
 
-    # Save folder_count_XXXX.txt with relative paths
-    folder_count_filename = f'folder_count_{total_pngs}.txt'
+    # Save folder count to a text file
+    folder_count_filename = f'folder_count_{total_images}.txt'
     folder_count_path = os.path.join(processed_dir, folder_count_filename)
-    try:
-        with open(folder_count_path, 'w', encoding='utf-8') as f:
-            for index, (folder, first_img, width, height, has_alpha, count) in enumerate(folder_counts, 1):
-                folder_rel = os.path.relpath(folder, script_dir)
-                first_png_stripped = os.path.splitext(os.path.basename(first_img))[0] if first_img else "NoImage"
-                f.write(f"{index}, {folder_rel}, {first_png_stripped}, {width}x{height} pixels, {count}\n")
-        print(f"Folder count file created: {folder_count_path}")
-    except Exception as e:
-        print(f"Failed to write folder count file at {folder_count_path}: {e}")
-        raise
+    with open(folder_count_path, 'w', encoding='utf-8') as f:
+        for index, (folder, first_image, width, height, has_alpha, count) in enumerate(folder_counts, 1):
+            folder_rel = os.path.relpath(folder, script_dir)
+            first_image_name = os.path.splitext(os.path.basename(first_image))[0] if first_image else "NoImage"
+            f.write(f"{index}, {folder_rel}, {first_image_name}, {width}x{height} pixels, {count}\n")
+    print(f"Folder count file created: {folder_count_path}")
 
-    # Create additional folder_locations_XXXX.csv files with relative paths
-    try:
-        create_folder_csv_files(folder_counts, processed_dir, script_dir)
-    except Exception as e:
-        print(f"Failed to create folder CSV files: {e}")
-        raise
+    # Create CSV files for main and float folders
+    create_folder_csv_files(folder_counts, processed_dir, script_dir)
 
 def sort_image_files(folder_dict, script_dir):
     """Sort image files in each folder using natural sort."""

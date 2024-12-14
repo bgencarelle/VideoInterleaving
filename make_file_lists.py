@@ -5,6 +5,7 @@ import re
 from itertools import zip_longest
 import csv
 import sys
+import shutil
 import get_folders_list
 
 def parse_folder_locations(csv_path):
@@ -157,15 +158,9 @@ def process_files():
     processed_dir = os.path.join(script_dir, 'folders_processed')
     generated_dir = os.path.join(script_dir, 'generated_img_lists')
 
-    # Check if 'folders_processed' exists
-    if not os.path.exists(processed_dir):
-        print("'folders_processed' directory not found. Running get_folders_list to generate it.")
-        get_folders_list.write_folder_list()
-
-    # Refresh the existence after attempting to create
-    if not os.path.exists(processed_dir):
-        print("Failed to create 'folders_processed' directory. Please check permissions.")
-        sys.exit(1)
+    # Always call get_folders_list.write_folder_list to ensure folders are generated
+    print("Generating folders and CSV files with get_folders_list...")
+    get_folders_list.write_folder_list()
 
     # Attempt to find default CSVs
     default_csvs = find_default_csvs(processed_dir)
@@ -176,28 +171,16 @@ def process_files():
             print(f" - {csv_file}")
         csv_paths = default_csvs
     else:
-        print("Default CSV files not found. Running get_folders_list to generate them.")
-        get_folders_list.write_folder_list()
-        # Try finding default CSVs again
-        default_csvs = find_default_csvs(processed_dir)
-        if default_csvs:
-            print("Default CSV files found after running get_folders_list:")
-            for csv_file in default_csvs:
-                print(f" - {csv_file}")
-            csv_paths = default_csvs
-        else:
-            print("Default CSV files still not found. Falling back to user prompts.")
-            csv_paths = choose_file(processed_dir)
+        print("No default CSV files were generated. Please check 'get_folders_list' output.")
+        sys.exit(1)
 
-    # Ensure 'generated_img_lists' exists and is clean
-    if not os.path.exists(generated_dir):
-        os.makedirs(generated_dir)
-    else:
-        # Remove existing files in 'generated_img_lists'
-        for file in os.listdir(generated_dir):
-            file_path = os.path.join(generated_dir, file)
-            if os.path.isfile(file_path):
-                os.remove(file_path)
+    # Delete the old files/folder
+    if os.path.exists(generated_dir):
+        # Delete the entire folder and its contents
+        shutil.rmtree(generated_dir)
+
+    # Recreate the folder after deleting it
+    os.makedirs(generated_dir)
 
     for csv_path in csv_paths:
         check_unequal_img_counts(csv_path)
@@ -210,6 +193,5 @@ def process_files():
         grouped_image_files = interleave_lists(sorted_image_files)
 
         write_sorted_images(grouped_image_files, generated_dir, csv_path)
-
 if __name__ == "__main__":
     process_files()
