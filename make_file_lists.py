@@ -131,8 +131,8 @@ def write_sorted_images(grouped_image_files, output_folder, csv_path):
     output_csv_name = f'{os.path.splitext(os.path.basename(csv_path))[0]}_list.csv'
     with open(os.path.join(output_folder, output_csv_name), 'w', newline='') as f:
         csv_writer = csv.writer(f)
-        # Enumerate starts at 1
-        for index, group in enumerate(grouped_image_files, start=1):
+        # Enumerate starts at 0
+        for index, group in enumerate(grouped_image_files, start=0):
             csv_writer.writerow([index] + group)
     print(f"CSV written to {os.path.join(output_folder, output_csv_name)}")
 
