@@ -1,38 +1,76 @@
 import os
-from PIL import Image
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from PIL import Image, UnidentifiedImageError
+import webp
 
-# Define the WebP quality level
-webp_quality = 95
 
-def convert_image(file_path, output_folder, quality):
-    """Converts a single image to WebP format with RGBA mode and specified quality."""
+def process_image(input_path, output_path, quality=85, max_width=720):
+    """
+    Process a single image:
+    - Opens the image using Pillow.
+    - Resizes it to a maximum width of 'max_width' while maintaining aspect ratio.
+    - Ensures the image is in RGBA mode to preserve all four channels (including alpha).
+    - Encodes the image to WebP using webp.WebPPicture with a photo-optimized preset.
+    """
     try:
-        with Image.open(file_path) as img:
+        # Ensure the parent directory of the output file exists
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+        with Image.open(input_path) as img:
+            # Convert to RGBA to preserve alpha
             img = img.convert("RGBA")
-            output_path = os.path.join(output_folder, f"{os.path.splitext(os.path.basename(file_path))[0]}.webp")
-            img.save(output_path, format="WEBP", quality=quality)
-            print(f"Converted {os.path.basename(file_path)} to WebP at {quality}% quality.")
+
+            # Resize if needed
+            width, height = img.size
+            if width > max_width:
+                aspect_ratio = height / width
+                new_width = max_width
+                new_height = int(new_width * aspect_ratio)
+                img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+            # Encode to WebP in memory with PHOTO preset
+            pic = webp.WebPPicture.from_pil(img)
+            config = webp.WebPConfig.new(preset=webp.WebPPreset.PHOTO, quality=quality)
+            buf = pic.encode(config).buffer()
+
+            # Write the encoded data to disk
+            with open(output_path, 'wb') as f:
+                f.write(buf)
+
+            print(f"Processed: {input_path} -> {output_path}")
+
+    except UnidentifiedImageError:
+        print(f"Skipping invalid image file: {input_path}")
     except Exception as e:
-        print(f"Could not convert {os.path.basename(file_path)}: {e}")
+        print(f"Error processing {input_path}: {e}")
 
-def convert_images_to_webp(input_folder, quality=webp_quality, max_workers=4):
-    # Create the output folder by appending '_webp_{webp_quality}' to the input folder name
-    output_folder = f"{input_folder}_webp_{webp_quality}"
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
 
-    # List of all image files in the input folder
-    image_files = [os.path.join(input_folder, filename) for filename in os.listdir(input_folder)]
-    
-    # Use ThreadPoolExecutor to process images concurrently
+def process_directory(input_dir, quality=85, max_width=720, max_workers=6):
+    """
+    Recursively processes all images in 'input_dir', converting them to WebP with
+    the given quality and max_width settings, preserving alpha channels.
+    The output directory will be created in the same parent directory as 'input_dir'.
+    """
+    input_dir = Path(input_dir)
+    output_dir = input_dir.parent / f"{input_dir.name}_{quality}q_{max_width}p"
+
+    image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff", ".webp"}
+    image_files = [
+        file for file in input_dir.rglob("*")
+        if file.suffix.lower() in image_extensions and file.is_file()
+    ]
+
+    # Use threading to speed up processing for large numbers of images
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(convert_image, file_path, output_folder, quality) for file_path in image_files]
-        
-        # Wait for all threads to complete
-        for future in as_completed(futures):
-            future.result()  # This will raise any exceptions caught during processing
+        for image_file in image_files:
+            relative_path = image_file.relative_to(input_dir)
+            output_path = output_dir / relative_path.with_suffix(".webp")
+            executor.submit(process_image, image_file, output_path, quality, max_width)
 
-# Prompt for input folder
-input_folder = input("Enter the path to the folder containing the images: ")
-convert_images_to_webp(input_folder, quality=webp_quality)
+    print(f"Processing complete. Optimized images saved to: {output_dir}")
+
+
+if __name__ == "__main__":
+    source_directory = input("Enter the source directory path: ").strip()
+    process_directory(source_directory)
