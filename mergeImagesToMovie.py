@@ -1,19 +1,15 @@
-import csv
 import os
+import csv
+from PIL import Image
 import glob
-import shutil
-from datetime import datetime
-import cv2
-from multiprocessing import Pool, cpu_count
-import subprocess
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from functools import partial
+from tqdm import tqdm
 
 # Constants
-FRAME_LIMIT = None  # Set to an integer (e.g., 30) for testing or None to process all frames
-TEMP_MERGED_DIR = "temp_merged_frames"
-MERGED_FRAME_PREFIX = "frame"
-MERGED_FRAME_EXTENSION = ".png"  # Save merged images as PNG to preserve transparency
-MAIN_FLOAT_CSV_PATTERN = "main_float_*.csv"
-FRAMERATE = 30  # Default framerate, can be modified as needed
+MAIN_FLOAT_CSV_PATTERN = "*.csv"  # Default pattern to find CSV files
+OUTPUT_FOLDER = "merged_images"  # Folder to save the merged images
+
 
 def find_csv_files(pattern=MAIN_FLOAT_CSV_PATTERN):
     """
@@ -21,200 +17,116 @@ def find_csv_files(pattern=MAIN_FLOAT_CSV_PATTERN):
     """
     return glob.glob(pattern)
 
-def read_csv(file_path, frame_limit=None):
+
+def read_csv(file_path):
     """
-    Read the CSV file and return a list of tuples containing:
-    (Absolute Index, Main Image Path, Float Image Path)
+    Read the CSV file and return a list of rows, excluding the header.
     """
-    frames = []
-    with open(file_path, 'r', newline='') as csvfile:
+    rows = []
+    with open(file_path, newline='', encoding='utf-8') as csvfile:
         reader = csv.reader(csvfile)
-        header = next(reader)  # Skip header
+        header = next(reader, None)  # Skip header
         for row in reader:
-            if len(row) < 3:
-                print(f"Skipping incomplete row in {file_path}: {row}")
-                continue
-            abs_index, main_image, float_image = row[:3]
-            frames.append((abs_index, main_image, float_image))
-            if frame_limit and len(frames) >= frame_limit:
-                break
-    return frames
+            if len(row) >= 3:
+                rows.append(row)
+            else:
+                print(f"Warning: Skipping malformed row: {row}")
+    return rows
 
-def ensure_directory(path):
-    """
-    Ensure that the given directory exists. If not, create it.
-    """
-    if not os.path.exists(path):
-        os.makedirs(path)
 
-def merge_images_opencv(args):
+def alpha_composite_images(main_image_path, float_image_path, output_path):
     """
-    Merge two images using OpenCV with alpha blending and save the result.
-    Mimics OpenGL's glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA).
+    Composite the float image onto the main image while respecting alpha.
     """
-    idx, main_img_path, float_img_path, output_dir = args
-    merged_frame_name = f"{MERGED_FRAME_PREFIX}{idx:04d}{MERGED_FRAME_EXTENSION}"
-    merged_frame_path = os.path.join(output_dir, merged_frame_name)
-
     try:
-        # Read main and float images with alpha channel
-        main_img = cv2.imread(main_img_path, cv2.IMREAD_UNCHANGED)
-        float_img = cv2.imread(float_img_path, cv2.IMREAD_UNCHANGED)
+        main_image = Image.open(main_image_path).convert("RGBA")
+        float_image = Image.open(float_image_path).convert("RGBA")
 
-        if main_img is None:
-            print(f"Main image not found or unreadable: {main_img_path}. Skipping frame {idx}.")
-            return False
-        if float_img is None:
-            print(f"Float image not found or unreadable: {float_img_path}. Skipping frame {idx}.")
-            return False
+        # Perform alpha compositing
+        merged_image = Image.alpha_composite(main_image, float_image)
 
-        # Ensure both images have alpha channels
-        if main_img.shape[2] == 3:
-            main_img = cv2.cvtColor(main_img, cv2.COLOR_BGR2BGRA)
-        if float_img.shape[2] == 3:
-            float_img = cv2.cvtColor(float_img, cv2.COLOR_BGR2BGRA)
+        # Ensure the output directory exists
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-        # Resize float image to match main image size if necessary
-        if main_img.shape[:2] != float_img.shape[:2]:
-            float_img = cv2.resize(float_img, (main_img.shape[1], main_img.shape[0]), interpolation=cv2.INTER_AREA)
-
-        # Extract BGR and Alpha channels
-        main_bgr = main_img[:, :, :3].astype(float)
-        main_alpha = main_img[:, :, 3].astype(float) / 255.0
-
-        float_bgr = float_img[:, :, :3].astype(float)
-        float_alpha = float_img[:, :, 3].astype(float) / 255.0
-
-        # Perform alpha blending
-        blended_bgr = (float_bgr * float_alpha[:, :, None]) + (main_bgr * (1 - float_alpha[:, :, None]))
-        blended_alpha = (float_alpha + main_alpha * (1 - float_alpha))
-
-        # Combine BGR and Alpha channels
-        blended_bgr = blended_bgr.astype('uint8')
-        blended_alpha = (blended_alpha * 255).astype('uint8')
-        blended_img = cv2.merge((blended_bgr, blended_alpha))
-
-        # Save the blended image as PNG
-        cv2.imwrite(merged_frame_path, blended_img)
-        print(f"Merged frame {idx}: {merged_frame_name}")
-        return True
-
+        # Save the result
+        merged_image.save(output_path)
+        return (output_path, "Success", None)
     except Exception as e:
-        print(f"Error merging frame {idx}: {e}")
-        return False
+        return (output_path, "Failed", str(e))
 
-def compile_video_ffmpeg(frames_dir, output_video, framerate=FRAMERATE):
+
+def process_row(row, output_folder):
     """
-    Compile merged frames into a video using FFmpeg.
-    Assumes frames are named sequentially as frame0000.png, frame0001.png, etc.
+    Process a single CSV row: composite images and save the output.
     """
-    # FFmpeg requires a consistent naming pattern. Ensure frames are zero-padded.
-    input_pattern = os.path.join(frames_dir, f"{MERGED_FRAME_PREFIX}%04d{MERGED_FRAME_EXTENSION}")  # e.g., frame0000.png
+    absolute_index, main_image_path, float_image_path = row
+    # Derive output filename (e.g., Absolute Index.png)
+    # You can customize the naming convention as needed
+    output_filename = f"{absolute_index}.png"
+    output_path = os.path.join(output_folder, output_filename)
 
-    command = [
-        "ffmpeg",
-        "-y",  # Overwrite output files without asking
-        "-framerate", str(framerate),
-        "-i", input_pattern,
-        "-c:v", "libx264",
-        "-preset", "fast",  # Use 'fast' preset for quicker encoding
-        "-pix_fmt", "yuv420p",  # Ensure compatibility
-        output_video
-    ]
+    return alpha_composite_images(main_image_path, float_image_path, output_path)
 
-    try:
-        print(f"Compiling video: {output_video}")
-        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        print(f"Video created: {output_video}")
-    except subprocess.CalledProcessError as e:
-        print(f"Error compiling video:\nCommand: {' '.join(command)}\nError: {e.stderr.decode()}")
 
-def process_csv_file(csv_file, frame_limit=FRAME_LIMIT, framerate=FRAMERATE):
+def process_all_rows(rows, output_folder, max_workers=None):
     """
-    Process a single CSV file: merge images and compile them into a video.
+    Process all CSV rows using parallel processing.
     """
-    print(f"\nProcessing CSV: {csv_file}")
+    os.makedirs(output_folder, exist_ok=True)
 
-    # Read frames from CSV
-    frames = read_csv(csv_file, frame_limit)
-    print(f"Number of frames to process: {len(frames)}")
+    results = []
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # Partial function to fix the output_folder parameter
+        process_func = partial(process_row, output_folder=output_folder)
 
-    if not frames:
-        print(f"No valid frames found in {csv_file}. Skipping.")
-        return
+        # Submit all tasks to the executor
+        future_to_row = {executor.submit(process_func, row): row for row in rows}
 
-    # Prepare temporary directory for merged frames
-    temp_dir = TEMP_MERGED_DIR
-    ensure_directory(temp_dir)
+        # Use tqdm to display a progress bar
+        for future in tqdm(as_completed(future_to_row), total=len(future_to_row), desc="Processing Images"):
+            output_path, status, error = future.result()
+            if status == "Failed":
+                print(f"Error processing {output_path}: {error}")
+            results.append((output_path, status, error))
 
-    # Prepare arguments for multiprocessing
-    merge_args = [
-        (idx, main_img, float_img, temp_dir)
-        for idx, (abs_index, main_img, float_img) in enumerate(frames)
-    ]
+    return results
 
-    # Use multiprocessing Pool to merge images in parallel
-    cpu_cores = cpu_count()
-    print(f"Starting image merging with {cpu_cores} parallel processes...")
-    with Pool(processes=cpu_cores) as pool:
-        results = pool.map(merge_images_opencv, merge_args)
-
-    successful_merges = sum(results)
-    print(f"Successfully merged {successful_merges}/{len(frames)} frames.")
-
-    if successful_merges == 0:
-        print(f"No frames were successfully merged for {csv_file}. Skipping video compilation.")
-        shutil.rmtree(temp_dir)
-        return
-
-    # Compile merged frames into a video
-    csv_basename = os.path.splitext(os.path.basename(csv_file))[0]
-    output_video = f"{csv_basename}.mp4"
-    compile_video_ffmpeg(temp_dir, output_video, framerate=framerate)
-
-    # Clean up temporary frames
-    shutil.rmtree(temp_dir)
-    print(f"Cleaned up temporary frames in {temp_dir}")
 
 def main():
-    """
-    Main function to process all relevant CSV files in the current directory.
-    """
-    start_time = datetime.now()
-    print(f"Script started at {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-
-    # Find all relevant CSV files
+    # Step 1: Find CSV files
     csv_files = find_csv_files()
     if not csv_files:
-        print(f"No CSV files found matching the pattern '{MAIN_FLOAT_CSV_PATTERN}'. Exiting.")
+        print("No CSV files found.")
         return
 
-    print(f"Found {len(csv_files)} CSV file(s) to process.")
+    print(f"Found CSV files: {csv_files}")
 
-    # Optional: Ask the user for the desired framerate
-    global FRAMERATE
-    while True:
-        try:
-            user_input = input(f"Enter the desired framerate (default {FRAMERATE} FPS): ").strip()
-            if user_input == "":
-                break  # Use default
-            framerate_input = int(user_input)
-            if framerate_input <= 0:
-                print("Please enter a positive integer for framerate.")
-                continue
-            FRAMERATE = framerate_input
-            break
-        except ValueError:
-            print("Invalid input. Please enter a positive integer for framerate.")
+    # Step 2: Read the first CSV file (you can modify to handle multiple files if needed)
+    csv_file = csv_files[0]
+    print(f"Using CSV file: {csv_file}")
 
-    # Process each CSV file
-    for csv_file in csv_files:
-        process_csv_file(csv_file, frame_limit=FRAME_LIMIT, framerate=FRAMERATE)
+    # Step 3: Parse the CSV
+    rows = read_csv(csv_file)
+    print(f"Loaded {len(rows)} rows from the CSV.")
 
-    end_time = datetime.now()
-    duration = end_time - start_time
-    print(f"\nScript completed at {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Total duration: {duration}")
+    if not rows:
+        print("No valid rows to process.")
+        return
+
+    # Step 4: Determine the number of workers
+    # If max_workers is None, it defaults to the number of CPUs on the machine
+    max_workers = os.cpu_count()
+    print(f"Using {max_workers} parallel workers.")
+
+    # Step 5: Process all rows with parallel execution
+    results = process_all_rows(rows, OUTPUT_FOLDER, max_workers=max_workers)
+
+    # Step 6: Summary of results
+    success_count = sum(1 for _, status, _ in results if status == "Success")
+    failure_count = len(results) - success_count
+    print(f"Completed processing. {success_count} succeeded, {failure_count} failed.")
+    print(f"Merged images saved to {OUTPUT_FOLDER}")
+
 
 if __name__ == "__main__":
     main()
