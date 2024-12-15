@@ -2,7 +2,9 @@ import csv
 import calculators
 import random
 import time
+import argparse
 from datetime import datetime
+
 
 def get_image_names_from_csv(file_path):
     global png_paths_len
@@ -12,10 +14,12 @@ def get_image_names_from_csv(file_path):
         png_paths_len = len(png_paths)
     return png_paths
 
+
 def load_images(index, main_folder, float_folder):
     main_image = main_folder_path[index][main_folder]
     float_image = float_folder_path[index][float_folder]
     return main_image, float_image
+
 
 FPS = 30
 PINGPONG = True
@@ -34,6 +38,7 @@ folder_dictionary = {
     'Main_and_Float_Folders': (0, 0),
 }
 
+
 def update_index_and_folders(index, direction):
     global control_data_dictionary
 
@@ -49,6 +54,7 @@ def update_index_and_folders(index, direction):
     control_data_dictionary['Index_and_Direction'] = (index, direction)
     update_control_data(index, direction)
     return index, direction
+
 
 def update_control_data(index, direction):
     rand_mult = random.randint(1, 9)
@@ -66,6 +72,7 @@ def update_control_data(index, direction):
         main_folder = random.randint(0, main_folder_count - 1)
 
     folder_dictionary['Main_and_Float_Folders'] = (main_folder, float_folder)
+
 
 def main_csv_test(cycles):
     output_rows = []  # Initialize the list to hold CSV rows
@@ -107,6 +114,7 @@ def main_csv_test(cycles):
 
     return output_rows
 
+
 def write_to_csv(output_rows):
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     filename = f"main_float_{png_paths_len}_{timestamp}.csv"
@@ -115,16 +123,31 @@ def write_to_csv(output_rows):
         writer.writerow(['Absolute Index', 'Main Image', 'Float Image'])
         writer.writerows(output_rows)
 
-if __name__ == "__main__":
-    while True:
-        try:
-            cycles = int(input("Enter the number of full forward and reverse cycles: "))
-            if cycles <= 0:
-                print("Please enter a positive integer.")
-                continue
-            break
-        except ValueError:
-            print("Invalid input. Please enter a positive integer.")
+
+def run(cycles):
     output_rows = main_csv_test(cycles)
     write_to_csv(output_rows)
     print(f"CSV file created with {len(output_rows)} rows.")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Process image paths and generate a CSV.")
+    parser.add_argument(
+        "--cycles", type=int, default=None, help="Number of full forward and reverse cycles"
+    )
+    args = parser.parse_args()
+
+    if args.cycles is None:
+        while True:
+            try:
+                cycles = int(input("Enter the number of full forward and reverse cycles: "))
+                if cycles <= 0:
+                    print("Please enter a positive integer.")
+                    continue
+                break
+            except ValueError:
+                print("Invalid input. Please enter a positive integer.")
+    else:
+        cycles = args.cycles
+
+    run(cycles)
