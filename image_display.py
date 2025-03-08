@@ -1,7 +1,7 @@
 import math
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from platform import system
 from queue import SimpleQueue
 import threading
@@ -168,9 +168,17 @@ def set_rgba_relative():
     float_rgba = (1, 1, 1, float_alpha)
     return main_rgba, float_rgba
 
+# Original load_images still exists for non-process use.
 def load_images(index, main_folder, float_folder):
     main_image = read_image(main_folder_path[index][main_folder])
     float_image = read_image(float_folder_path[index][float_folder])
+    return main_image, float_image
+
+# --- New Worker Function for ProcessPool ---
+def load_images_worker(buffer_idx, main_folder, float_folder, main_folder_path_arg, float_folder_path_arg):
+    """Worker function that receives all necessary parameters."""
+    main_image = read_image(main_folder_path_arg[buffer_idx][main_folder])
+    float_image = read_image(float_folder_path_arg[buffer_idx][float_folder])
     return main_image, float_image
 
 # --- FPS Calculation ---
@@ -277,7 +285,6 @@ def display_init(fullscreen=True):
     w, h = image_size  # native image dimensions
 
     if fullscreen:
-        # Use the largest available mode
         fullscreen_size = pygame.display.list_modes()[0]
         fs_fullscreen_width, fs_fullscreen_height = fullscreen_size
         fs_scale = min(fs_fullscreen_width / w, fs_fullscreen_height / h)
@@ -287,7 +294,6 @@ def display_init(fullscreen=True):
         pygame.display.set_caption('Fullscreen Mode')
         screen = pygame.display.set_mode((fs_fullscreen_width, fs_fullscreen_height), flags)
     else:
-        # Windowed mode: fixed window width (e.g. 400 pixels) and computed height
         win_width = 400
         win_height = int(400 * h / w)
         win_scale = min(win_width / w, win_height / h)
@@ -322,7 +328,6 @@ def display_image(surface, width, height, rgba=(1, 1, 1, 1)):
     scaled_width = int(width * fs_scale)
     scaled_height = int(height * fs_scale)
     scaled_surface = pygame.transform.smoothscale(surface, (scaled_width, scaled_height))
-    # (Optionally modulate alpha here if needed)
     screen.blit(scaled_surface, (fs_offset_x, fs_offset_y))
 
 def overlay_images_fast(surface_main, surface_float, index=0, background_color=(0, 0, 0)):
@@ -345,7 +350,6 @@ def run_display_setup():
         threading.Thread(target=index_client.start_client, daemon=True).start()
     pygame.init()
     pygame.mouse.set_visible(False)
-    # Set up a timer event firing at (1000/IPS) ms intervals.
     pygame.time.set_timer(UPDATE_INDEX_EVENT, int(1000 / IPS))
     display_init(True)
     vid_clock = pygame.time.Clock()
@@ -360,17 +364,24 @@ def run_display():
 
     def queue_image(buffer_idx, main_folder_q, float_folder_q, q_image_queue):
         buffer_idx = max(0, min(buffer_idx, png_paths_len - 1))
-        image_future = executor.submit(load_images, buffer_idx, main_folder_q, float_folder_q)
+        # Submit the worker with explicit folder path arguments.
+        image_future = executor.submit(
+            load_images_worker,
+            buffer_idx,
+            main_folder_q,
+            float_folder_q,
+            main_folder_path,
+            float_folder_path
+        )
         q_image_queue.put(image_future)
 
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    with ProcessPoolExecutor(max_workers=8) as executor:
         update_index_and_folders(index, direction)
         index, direction = control_data_dictionary['Index_and_Direction']
         main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
         image_queue = SimpleQueue()
 
         main_image, float_image = load_images(index, main_folder, float_folder)
-        # Create surfaces (formerly textures)
         surface_main = create_texture(main_image)
         surface_float = create_texture(float_image)
 
@@ -398,19 +409,18 @@ def run_display():
                     buffer_synced = False
                     discarded_images = []
                     while not buffer_synced and not image_queue.empty():
-                        main_image, float_image = image_queue.get().result()
+                        main_img, float_img = image_queue.get().result()
                         if buffer_index == index:
                             buffer_synced = True
                             buffer_direction = direction
-                            # Update the surfaces (simulate texture updates)
-                            surface_main = load_texture(surface_main, main_image)
-                            surface_float = load_texture(surface_float, float_image)
+                            surface_main = load_texture(surface_main, main_img)
+                            surface_float = load_texture(surface_float, float_img)
                             if buffer_index > png_paths_len or buffer_index < 0:
                                 print("AH SHIT")
                                 buffer_index += buffer_direction * -1
                             queue_image(buffer_index, main_folder, float_folder, image_queue)
                         else:
-                            discarded_images.append((main_image, float_image))
+                            discarded_images.append((main_img, float_img))
                     for discarded_image in discarded_images:
                         image_queue.put(discarded_image)
 
