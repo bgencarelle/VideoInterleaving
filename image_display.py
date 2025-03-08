@@ -314,7 +314,7 @@ def run_display_setup():
     pygame.mouse.set_visible(False)
     # Set up the timer to fire at (1000/IPS) ms intervals.
     pygame.time.set_timer(UPDATE_INDEX_EVENT, int(1000 / IPS))
-    display_init(False)
+    display_init(True)
     vid_clock = pygame.time.Clock()
     run_display()
     return
