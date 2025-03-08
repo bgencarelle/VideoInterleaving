@@ -36,7 +36,7 @@ FPS = 60
 IPS = 30
 run_mode = True
 
-BUFFER_SIZE = IPS // 3
+BUFFER_SIZE = IPS
 PINGPONG = True
 
 vid_clock = None
@@ -366,15 +366,11 @@ def run_display_setup():
 
 def run_display():
     global run_mode
-    # Get initial index and direction
     index, direction = control_data_dictionary['Index_and_Direction']
-    # Prime the buffer with an initial update (unchanged)
     buffer_index, buffer_direction = update_index_and_folders(0, 1)
     fullscreen = True
 
-    # Set up a variable to track the previous index for change detection
-    prev_index = index
-    last_skipped_index = -1
+    index_changed = False
 
     def queue_image(buffer_idx, main_folder_q, float_folder_q, q_image_queue):
         buffer_idx = max(0, min(buffer_idx, png_paths_len - 1))
@@ -382,6 +378,8 @@ def run_display():
         q_image_queue.put(image_future)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
+        update_index_and_folders(index, direction)
+        index, direction = control_data_dictionary['Index_and_Direction']
         main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
         image_queue = SimpleQueue()
 
@@ -395,25 +393,18 @@ def run_display():
                 buffer_index += direction * -1
             queue_image(buffer_index, main_folder, float_folder, image_queue)
 
-        # --- NEW: Start an independent thread to update the index ---
-        def index_update_loop():
-            while run_mode:
-                current_idx, current_dir = control_data_dictionary['Index_and_Direction']
-                update_index_and_folders(current_idx, current_dir)
-                time.sleep(1.0 / FPS)
-        index_thread = threading.Thread(target=index_update_loop, daemon=True)
-        index_thread.start()
-        # --- End new code ---
+        last_skipped_index = -1
 
         while run_mode:
             try:
                 prev_index = index
                 fullscreen = event_check(fullscreen)
-                # NOTE: Removed the update_index_and_folders call from the render loop.
+                update_index_and_folders(index, direction)
                 index, direction = control_data_dictionary['Index_and_Direction']
                 main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
 
-                if prev_index != index:
+                # print_index_diff_function(index)
+                if index_changed != index:
                     buffer_index = index
                     if abs(prev_index - index) > 1 and last_skipped_index != index:
                         last_skipped_index = index
@@ -439,12 +430,11 @@ def run_display():
                         image_queue.put(discarded_image)
 
                 overlay_images_fast(texture_id1, texture_id2, index)
+
                 pygame.display.flip()
-                vid_clock.tick(FPS*4)
+                vid_clock.tick(FPS)
             except Exception as e:
                 print(f"An error occurred: {e}")
-                # Optionally, add a short sleep here to throttle in case of repeated errors
-                # time.sleep(0.1)
 
 
 def display_init(fullscreen=True):
@@ -487,7 +477,7 @@ def display_and_run(clock_source=FREE_CLOCK):
         float_folder_path, float_folder_count, image_size, aspect_ratio
     random.seed(time.time())
     set_clock_mode(clock_source)
-    csv_source, main_folder_path, float_folder_path = calculators.init_all()
+    csv_source, main_folder_path, float_folder_path = calculators.init_all(clock_source)
     print(platform.system(), "midi clock mode is:", clock_mode)
     main_folder_count = len(main_folder_path[0])
     float_folder_count = len(float_folder_path[0])
