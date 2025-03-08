@@ -37,7 +37,7 @@ FPS = 60
 IPS = 30  # images per second (used for index updates)
 run_mode = True
 
-BUFFER_SIZE = IPS
+BUFFER_SIZE = FPS // 4
 PINGPONG = True
 
 vid_clock = None
