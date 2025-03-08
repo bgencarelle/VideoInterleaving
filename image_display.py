@@ -270,16 +270,16 @@ def update_index_and_folders(index, direction):
 
 def update_control_data(index, direction):
     rand_mult = random.randint(1, 9)
-    rand_start = 8 * (FPS - (rand_mult * rand_mult // 2))
+    rand_start = 8 * (IPS - (rand_mult * rand_mult // 2))
     main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
     if clock_mode == FREE_CLOCK:
         if index <= rand_start * direction or (index > 100 * rand_start and index < 140 * rand_start):
             float_folder = 0
             main_folder = 0
-        elif index % (FPS * rand_mult) == 0:
+        elif index % (IPS * rand_mult) == 0:
             float_folder = random.randint(0, float_folder_count - 1)
             rand_mult = random.randint(1, 12)
-        elif index % (2 * FPS * rand_mult - 1) == 0:
+        elif index % (2 * IPS * rand_mult - 1) == 0:
             main_folder = random.randint(0, main_folder_count - 1)
     else:
         note, channel, _ = control_data_dictionary['Note_On']
