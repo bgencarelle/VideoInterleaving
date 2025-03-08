@@ -199,8 +199,8 @@ def overlay_images_fast(texture_id_main, texture_id_float, index=0, background_c
     main_rgba, float_rgba = set_rgba_relative()
     glClearColor(background_color[0] / 255, background_color[1] / 255, background_color[2] / 255, 1.0)
     glClear(GL_COLOR_BUFFER_BIT)
-    display_image(texture_id_main, width, height, rgba=main_rgba)
-    display_image(texture_id_float, width, height, rgba=float_rgba)
+    display_image(texture_id_main, width, height, rgba=float_rgba)
+    display_image(texture_id_float, width, height, rgba=main_rgba)
 
 def load_texture(texture_id, image):
     glBindTexture(GL_TEXTURE_2D, texture_id)
