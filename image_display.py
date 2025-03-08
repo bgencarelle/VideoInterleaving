@@ -6,6 +6,7 @@ from platform import system
 from queue import SimpleQueue
 import threading
 
+import datetime
 import pygame.time
 from OpenGL.GL import *
 from OpenGL.GLU import *
@@ -51,7 +52,19 @@ image_size = (800, 600)
 aspect_ratio = 1.333
 text_display = False
 
-launch_time = time.time()
+# Global launch_time variable
+launch_time = None
+
+def set_launch_time(from_birth=False):
+    global launch_time
+    if from_birth:
+        # Create a datetime object for November 17, 1978, at 7:11 AM EST (UTC-5)
+        fixed_datetime = datetime.datetime(1978, 11, 17, 7, 11, tzinfo=datetime.timezone(datetime.timedelta(hours=-5)))
+        launch_time = fixed_datetime.timestamp()
+    else:
+        launch_time = time.time()
+
+set_launch_time(from_birth=True)
 
 control_data_dictionary = {
     'Note_On': (0, 127, 0),
