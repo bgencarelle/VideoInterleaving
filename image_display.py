@@ -2,24 +2,25 @@ import math
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import ProcessPoolExecutor
 from platform import system
 from queue import SimpleQueue
 import threading
 import datetime
+import random
+import platform
+
 import pygame
 import pygame.time
 from pygame.locals import *
+
 import cv2
 import webp
-import random
-import platform
 
 import calculators
 import midi_control
 import index_client
 
-# --- Constants and Global Variables ---
+# Mode constants
 FULLSCREEN_MODE = True
 MTC_CLOCK = 0
 MIDI_CLOCK = 1
@@ -27,13 +28,12 @@ MIXED_CLOCK = 2
 CLIENT_MODE = 3
 FREE_CLOCK = 255
 
+# Global state variables
 clock_mode = FREE_CLOCK
 midi_mode = False
-
 FPS = 60
-IPS = 30  # images per second (used for index updates)
+IPS = 30   # images per second (used for index updates)
 run_mode = True
-
 BUFFER_SIZE = FPS // 4
 PINGPONG = True
 
@@ -44,38 +44,27 @@ main_folder_path = 0
 float_folder_path = 0
 float_folder_count = 0
 main_folder_count = 0
-
 image_size = (800, 600)
 aspect_ratio = 1.333
 text_display = False
 
-# Global launch_time variable
+# Global launch_time variable (for timing)
 launch_time = None
-
-# Global variable for the display surface and display metrics
-screen = None
-fs_scale = None
-fs_offset_x = None
-fs_offset_y = None
-fs_fullscreen_width = None
-fs_fullscreen_height = None
-
-# --- Timing Functions ---
 def set_launch_time(from_birth=False):
     global launch_time
     if from_birth:
         # Create a datetime object for November 17, 1978, at 7:11 AM EST (UTC-5)
-        fixed_datetime = datetime.datetime(1978, 11, 17, 7, 11, tzinfo=datetime.timezone(datetime.timedelta(hours=-5)))
+        fixed_datetime = datetime.datetime(1978, 11, 17, 7, 11,
+                                           tzinfo=datetime.timezone(datetime.timedelta(hours=-5)))
         launch_time = fixed_datetime.timestamp()
     else:
         launch_time = time.time()
-
 set_launch_time(from_birth=True)
 
 # Custom event for timer updates
 UPDATE_INDEX_EVENT = pygame.USEREVENT + 1
 
-# --- Control Dictionaries ---
+# Data dictionaries for MIDI and folder handling
 control_data_dictionary = {
     'Note_On': (0, 127, 0),
     'Note_Off': (None, None, None),
@@ -83,15 +72,12 @@ control_data_dictionary = {
     'Index_and_Direction': (0, 1),
     'BPM': 120,
 }
-
 folder_dictionary = {
     'Main_and_Float_Folders': (0, 8),
 }
-
 valid_modes = {"MTC_CLOCK": MTC_CLOCK, "MIDI_CLOCK": MIDI_CLOCK, "MIXED_CLOCK": MIXED_CLOCK,
                "CLIENT_MODE": CLIENT_MODE, "FREE_CLOCK": FREE_CLOCK}
 
-# --- Clock Mode and Event Handling ---
 def set_clock_mode(mode=None):
     global clock_mode, midi_mode
     if mode and mode in valid_modes.values():
@@ -118,8 +104,8 @@ def toggle_fullscreen(current_fullscreen_status):
 
 def event_check(fullscreen):
     global image_size, run_mode, pause_mode
-    width, height = image_size
-    aspect = width / height
+    w, h = image_size
+    aspect_ratio_local = w / h
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             run_mode = False
@@ -135,29 +121,29 @@ def event_check(fullscreen):
                 fullscreen = toggle_fullscreen(fullscreen)
         elif event.type == VIDEORESIZE:
             new_width, new_height = event.size
-            if new_width / new_height > aspect:
-                new_width = int(new_height * aspect)
+            if new_width / new_height > aspect_ratio_local:
+                new_width = int(new_height * aspect_ratio_local)
                 image_size = new_width, new_height
             else:
-                new_height = int(new_width / aspect)
+                new_height = int(new_width / aspect_ratio_local)
                 image_size = new_width, new_height
             display_init(fullscreen)
     return fullscreen
 
-# --- Image and Texture Functions ---
 def get_aspect_ratio(image_path):
     image = pygame.image.load(image_path)
     w, h = image.get_size()
     a_ratio = h / w
-    print(f'this is {w} wide and {h} tall, with an aspect ratio of {aspect_ratio}')
-    return a_ratio, w, h,
+    print(f'This is {w} wide and {h} tall, with an aspect ratio of {a_ratio}')
+    return a_ratio, w, h
 
 def read_image(image_path):
+    """Reads an image file (.webp or .png) and converts it to RGBA using OpenCV."""
     image_np = None
     if image_path.endswith('.webp'):
         image_np = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
         image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGBA)
-    if image_path.endswith('.png'):
+    elif image_path.endswith('.png'):
         image_np = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
         image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGBA)
     return image_np
@@ -170,11 +156,12 @@ def set_rgba_relative():
     return main_rgba, float_rgba
 
 def load_images(index, main_folder, float_folder):
+    """Load the main and float images from the given folders using the index."""
     main_image = read_image(main_folder_path[index][main_folder])
     float_image = read_image(float_folder_path[index][float_folder])
     return main_image, float_image
 
-# --- FPS Calculation ---
+# Globals for FPS calculation
 last_call_time = None
 last_index = None
 fps_total = 0.0
@@ -216,7 +203,6 @@ def calculate_free_clock_index(total_images, pingpong=True):
     last_index = index
     return index, direction
 
-# --- Folder and MIDI Control Functions ---
 def update_index_and_folders(index, direction):
     global control_data_dictionary
     if midi_mode:
@@ -249,7 +235,7 @@ def update_control_data(index, direction):
         note, channel, _ = control_data_dictionary['Note_On']
         modulation, channel = control_data_dictionary['Modulation']
         mod_value = int(modulation / 127 * float_folder_count)
-        float_folder = mod_value % float_folder_count
+        float_folder = (mod_value) % float_folder_count
         main_folder = (note % 12) % main_folder_count
     folder_dictionary['Main_and_Float_Folders'] = main_folder, float_folder
 
@@ -258,17 +244,25 @@ def print_index_diff_wrapper():
     def print_index_diff(index):
         current_time = time.time()
         if (current_time - storage['prev_time']) >= 1 and storage['old_index'] != index:
-            print("index: ", index, "   index diff:  ", index - storage['old_index'])
+            print("index:", index, "   index diff:", index - storage['old_index'])
             storage['old_index'] = index
             storage['prev_time'] = current_time
             fippy = vid_clock.get_fps()
             print(f'fps: {fippy}')
             print(f'midi_control.bpm: {midi_control.bpm}')
     return print_index_diff
-
 print_index_diff_function = print_index_diff_wrapper()
 
-# --- New Rendering Functions Using Pygame Accelerated Blitting ---
+# ----- Updated Rendering Functions Using Pygame Blitting -----
+
+# Global variable for the display surface and scaling/offset values.
+screen = None
+fs_scale = 1.0
+fs_offset_x = 0
+fs_offset_y = 0
+fs_fullscreen_width = 0
+fs_fullscreen_height = 0
+
 def display_init(fullscreen=True):
     """
     Initialize the display using Pygame’s accelerated blitting.
@@ -276,7 +270,6 @@ def display_init(fullscreen=True):
     """
     global fs_scale, fs_offset_x, fs_offset_y, fs_fullscreen_width, fs_fullscreen_height, screen, image_size
     w, h = image_size  # native image dimensions
-
     if fullscreen:
         # Use the largest available mode
         fullscreen_size = pygame.display.list_modes()[0]
@@ -291,13 +284,12 @@ def display_init(fullscreen=True):
         # Windowed mode: fixed window width (e.g. 400 pixels) and computed height
         win_width = 400
         win_height = int(400 * h / w)
-        win_scale = min(win_width / w, win_height / h)
-        win_offset_x = int((win_width - w * win_scale) / 2)
-        win_offset_y = int((win_height - h * win_scale) / 2)
+        win_offset_x = int((win_width - w * (win_width / w)) / 2)
+        win_offset_y = int((win_height - h * (win_width / w)) / 2)
         flags = pygame.RESIZABLE | pygame.DOUBLEBUF | pygame.HWSURFACE
         pygame.display.set_caption('Windowed Mode')
         screen = pygame.display.set_mode((win_width, win_height), flags)
-        fs_scale = win_scale
+        fs_scale = win_width / w
         fs_offset_x = win_offset_x
         fs_offset_y = win_offset_y
 
@@ -311,7 +303,7 @@ def create_texture(image):
 def load_texture(existing_texture, image):
     """
     "Updates" an existing texture by creating a new surface from the image.
-    (Since Pygame surfaces are immutable, we simply return a new surface.)
+    (Since Pygame surfaces are immutable once created, we simply return a new one.)
     """
     return create_texture(image)
 
@@ -320,16 +312,17 @@ def display_image(surface, width, height, rgba=(1, 1, 1, 1)):
     Draws the given surface on the global screen.
     Applies scaling and offsets based on the current display configuration.
     """
+    # Compute scaled dimensions
     scaled_width = int(width * fs_scale)
     scaled_height = int(height * fs_scale)
     scaled_surface = pygame.transform.smoothscale(surface, (scaled_width, scaled_height))
-    # (Optionally modulate alpha here if needed)
+    # (Optional: modulate alpha if rgba[3] != 1)
     screen.blit(scaled_surface, (fs_offset_x, fs_offset_y))
 
 def overlay_images_fast(surface_main, surface_float, index=0, background_color=(0, 0, 0)):
     """
     Clears the screen with the background color and overlays two image surfaces.
-    The order mimics the original OpenGL approach.
+    This mimics the original layering approach.
     """
     screen.fill(background_color)
     width, height = image_size
@@ -337,7 +330,8 @@ def overlay_images_fast(surface_main, surface_float, index=0, background_color=(
     display_image(surface_main, width, height, rgba=float_rgba)
     display_image(surface_float, width, height, rgba=main_rgba)
 
-# --- Main Display Loop ---
+# ----- Display and Main Loop -----
+
 def run_display_setup():
     global vid_clock
     if midi_mode:
@@ -346,7 +340,7 @@ def run_display_setup():
         threading.Thread(target=index_client.start_client, daemon=True).start()
     pygame.init()
     pygame.mouse.set_visible(False)
-    # Set up a timer event firing at (1000/IPS) ms intervals.
+    # Set up the timer to fire at (1000/IPS) ms intervals.
     pygame.time.set_timer(UPDATE_INDEX_EVENT, int(1000 / IPS))
     display_init(True)
     vid_clock = pygame.time.Clock()
@@ -364,17 +358,19 @@ def run_display():
         image_future = executor.submit(load_images, buffer_idx, main_folder_q, float_folder_q)
         q_image_queue.put(image_future)
 
-    with ProcessPoolExecutor(max_workers=8) as executor:
+    with ThreadPoolExecutor(max_workers=8) as executor:
         update_index_and_folders(index, direction)
         index, direction = control_data_dictionary['Index_and_Direction']
         main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
         image_queue = SimpleQueue()
 
+        # Initial load of the images
         main_image, float_image = load_images(index, main_folder, float_folder)
         # Create surfaces (formerly textures)
         surface_main = create_texture(main_image)
         surface_float = create_texture(float_image)
 
+        # Preload additional images in the background
         for _ in range(BUFFER_SIZE):
             buffer_index += direction
             if buffer_index >= png_paths_len or buffer_index < 0:
@@ -398,22 +394,23 @@ def run_display():
 
                     buffer_synced = False
                     discarded_images = []
+                    # Process queued images and only update when buffer_index matches current index.
                     while not buffer_synced and not image_queue.empty():
-                        main_image, float_image = image_queue.get().result()
+                        loaded = image_queue.get().result()
+                        main_img, float_img = loaded
                         if buffer_index == index:
                             buffer_synced = True
                             buffer_direction = direction
-                            # Update the surfaces (simulate texture updates)
-                            surface_main = load_texture(surface_main, main_image)
-                            surface_float = load_texture(surface_float, float_image)
+                            surface_main = load_texture(surface_main, main_img)
+                            surface_float = load_texture(surface_float, float_img)
                             if buffer_index > png_paths_len or buffer_index < 0:
                                 print("AH SHIT")
                                 buffer_index += buffer_direction * -1
                             queue_image(buffer_index, main_folder, float_folder, image_queue)
                         else:
-                            discarded_images.append((main_image, float_image))
-                    for discarded_image in discarded_images:
-                        image_queue.put(discarded_image)
+                            discarded_images.append((main_img, float_img))
+                    for discarded in discarded_images:
+                        image_queue.put(discarded)
 
                 overlay_images_fast(surface_main, surface_float, index)
                 pygame.display.flip()
@@ -421,10 +418,9 @@ def run_display():
             except Exception as e:
                 print(f"An error occurred: {e}")
 
-# --- Entry Point ---
 def display_and_run(clock_source=FREE_CLOCK):
     global png_paths_len, main_folder_path, main_folder_count, \
-        float_folder_path, float_folder_count, image_size, aspect_ratio
+           float_folder_path, float_folder_count, image_size, aspect_ratio
     random.seed(time.time())
     set_clock_mode(clock_source)
     csv_source, main_folder_path, float_folder_path = calculators.init_all(clock_source)
