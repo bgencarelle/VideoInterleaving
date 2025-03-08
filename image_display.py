@@ -32,12 +32,10 @@ FREE_CLOCK = 255
 clock_mode = FREE_CLOCK
 midi_mode = False
 
-# New: Separate rates for index updates (IPS) and display FPS.
-IPS = 30  # Index updates per second
-FPS = 60  # Display frames per second
+FPS = 30
+run_mode = True
 
-# Use IPS for index-based buffering calculations.
-BUFFER_SIZE = IPS // 3
+BUFFER_SIZE = FPS // 3
 PINGPONG = True
 
 vid_clock = None
@@ -51,13 +49,18 @@ main_folder_count = 0
 image_size = (800, 600)
 aspect_ratio = 1.333
 text_display = False
-run_mode = True
+
+
 control_data_dictionary = {
     'Note_On': (0, 127, 0),
     'Note_Off': (None, None, None),
     'Modulation': (0, 0),
     'Index_and_Direction': (0, 1),
     'BPM': 120,
+    # 'Stop': False,
+    # 'Start': False,
+    # 'Pause': False,
+    # 'Reset': False
 }
 
 folder_dictionary = {
@@ -70,6 +73,7 @@ valid_modes = {"MTC_CLOCK": MTC_CLOCK, "MIDI_CLOCK": MIDI_CLOCK, "MIXED_CLOCK": 
 
 def set_clock_mode(mode=None):
     global clock_mode, midi_mode
+    # If a mode argument is provided and valid, silently set the clock_mode
     if mode and mode in valid_modes.values():
         clock_mode = mode
     else:
@@ -77,13 +81,16 @@ def set_clock_mode(mode=None):
             print("Please choose a clock mode from the following options:")
             for i, (mode_name, mode_value) in enumerate(valid_modes.items(), 1):
                 print(f"{i}. {mode_name}")
+
             user_choice = input("Enter the number corresponding to your choice: ")
+
             if user_choice.isdigit() and 1 <= int(user_choice) <= len(valid_modes):
                 clock_mode = list(valid_modes.values())[int(user_choice) - 1]
                 print(f"Clock mode has been set to {list(valid_modes.keys())[int(user_choice) - 1]}")
                 break
             else:
                 print(f"Invalid input: '{user_choice}'. Please try again.")
+
     midi_mode = True if (clock_mode < CLIENT_MODE) else False
     print("YER", list(valid_modes.keys())[list(valid_modes.values()).index(clock_mode)])
 
@@ -91,9 +98,11 @@ def set_clock_mode(mode=None):
 def toggle_fullscreen(current_fullscreen_status):
     global image_size
     if current_fullscreen_status:
+        # Switch back to windowed mode
         pygame.display.set_mode(image_size, pygame.RESIZABLE | OPENGL | DOUBLEBUF)
         pygame.display.set_caption('Windowed Mode')
     else:
+        # Switch to fullscreen mode
         pygame.display.set_mode((0, 0), FULLSCREEN | OPENGL | DOUBLEBUF)
         pygame.display.set_caption('Fullscreen Mode')
     return not current_fullscreen_status
@@ -107,10 +116,10 @@ def event_check(fullscreen):
         if event.type == pygame.QUIT:
             run_mode = False
         if event.type == KEYDOWN:
-            if event.key == K_q:
+            if event.key == K_q:  # Press 'q' key to quit
                 run_mode = False
                 pygame.quit()
-            if event.key == K_f:
+            if event.key == K_f:  # Press 'f' key to toggle fullscreen
                 fullscreen = toggle_fullscreen(fullscreen)
         elif event.type == VIDEORESIZE:
             new_width, new_height = event.size
@@ -121,12 +130,18 @@ def event_check(fullscreen):
                 new_height = int(new_width / aspect_ratio)
                 image_size = new_width, new_height
             display_init(fullscreen)
+
     return fullscreen
 
 
 def get_aspect_ratio(image_path):
+    # Load image with Pygame
     image = pygame.image.load(image_path)
+
+    # Get image dimensions
     w, h = image.get_size()
+
+    # Calculate aspect clock_frame_ratio
     a_ratio = h / w
     print(f'this is {w} wide and {h} tall, with an aspect ratio of {aspect_ratio}')
     return a_ratio, w, h,
@@ -140,6 +155,7 @@ def read_image(image_path):
     if image_path.endswith('.png'):
         image_np = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
         image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGBA)
+
     return image_np
 
 
@@ -154,10 +170,12 @@ def create_texture(image):
 
 def display_image(texture_id, width, height, rgba=(1, 1, 1, 1)):
     glBindTexture(GL_TEXTURE_2D, texture_id)
+
     if rgba:
         glColor4f(*rgba)
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
     glBegin(GL_QUADS)
     glTexCoord2f(0, 1)
     glVertex2f(0, 0)
@@ -168,6 +186,7 @@ def display_image(texture_id, width, height, rgba=(1, 1, 1, 1)):
     glTexCoord2f(0, 0)
     glVertex2f(0, height)
     glEnd()
+
     if rgba:
         glColor4f(1, 1, 1, 1)
         glDisable(GL_BLEND)
@@ -175,7 +194,7 @@ def display_image(texture_id, width, height, rgba=(1, 1, 1, 1)):
 
 def set_rgba_relative():
     main_alpha = 1
-    float_alpha = 1
+    float_alpha = 1  #
     main_rgba = (1, 1, 1, main_alpha)
     float_rgba = (1, 1, 1, float_alpha)
     return main_rgba, float_rgba
@@ -187,6 +206,7 @@ def overlay_images_fast(texture_id_main, texture_id_float, index=0, background_c
     main_rgba, float_rgba = set_rgba_relative()
     glClearColor(background_color[0] / 255, background_color[1] / 255, background_color[2] / 255, 1.0)
     glClear(GL_COLOR_BUFFER_BIT)
+
     display_image(texture_id_main, width, height, rgba=main_rgba)
     display_image(texture_id_float, width, height, rgba=float_rgba)
 
@@ -212,39 +232,53 @@ def update_index_and_folders(index, direction):
         control_data_dictionary = index_client.midi_data_dictionary
         index, direction = control_data_dictionary['Index_and_Direction']
     elif clock_mode == FREE_CLOCK:
-        # In FREE_CLOCK, the index will be computed based on time.
-        # (The new time-based logic is handled in run_display.)
-        control_data_dictionary['Index_and_Direction'] = (index, direction)
+        if PINGPONG:
+            # Reverse index_direction at boundaries
+            if (index + direction) < 0 or index + direction >= png_paths_len:
+                direction *= -1
+            index += direction
+        else:
+            index = (index + 1) % png_paths_len
+        control_data_dictionary['Index_and_Direction'] = index, direction
     update_control_data(index, direction)
     return index, direction
 
 
 def update_control_data(index, direction):
-    # Replace FPS with IPS for index-related timing
     rand_mult = random.randint(1, 9)
-    rand_start = 8 * (IPS - (rand_mult * rand_mult // 2))
+    rand_start = 8 * (FPS - (rand_mult * rand_mult // 2))
+
     main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
     if clock_mode == FREE_CLOCK:
+
+        # print('index position and stuff ', index, ' : ', rand_start)
         if index <= rand_start * direction or (index > 100 * rand_start and index < 140 * rand_start):
             float_folder = 0
             main_folder = 0
-        elif index % (IPS * rand_mult) == 0:
+           # print('in stable mode')
+        elif index % (FPS * rand_mult) == 0:
             float_folder = random.randint(0, float_folder_count - 1)
+           # print('background layer:  ', float_folder)
             rand_mult = random.randint(1, 12)
-        elif index % (2 * IPS * rand_mult - 1) == 0:
+        elif index % (2 * FPS * rand_mult - 1) == 0:
             main_folder = random.randint(0, main_folder_count - 1)
-        folder_dictionary['Main_and_Float_Folders'] = main_folder, float_folder
+            #print('foreground: ', main_folder)
+
     else:
+        # print(control_data_dictionary['Note_On'])
         note, channel, _ = control_data_dictionary['Note_On']
         modulation, channel = control_data_dictionary['Modulation']
         mod_value = int(modulation / 127 * float_folder_count)
-        float_folder = mod_value % float_folder_count
+        # print(mod_value)
+        float_folder = (mod_value) % float_folder_count
         main_folder = (note % 12) % main_folder_count
-        folder_dictionary['Main_and_Float_Folders'] = main_folder, float_folder
+
+    folder_dictionary['Main_and_Float_Folders'] = main_folder, float_folder
 
 
 def print_index_diff_wrapper():
     storage = {'old_index': 0, 'prev_time': 0}
+
     def print_index_diff(index):
         current_time = time.time()
         if (current_time - storage['prev_time']) >= 1 and not storage['old_index'] == index:
@@ -254,7 +288,9 @@ def print_index_diff_wrapper():
             fippy = vid_clock.get_fps()
             print(f'fps: {fippy}')
             print(f'midi_control.bpm: {midi_control.bpm}')
+
     return print_index_diff
+
 
 print_index_diff_function = print_index_diff_wrapper()
 
@@ -275,13 +311,15 @@ def run_display_setup():
 
 def run_display():
     global run_mode
-    # Initialize start time for time-based index calculation.
-    start_time = time.time()
-    last_index = -1
-    # Prime initial index and direction from control_data_dictionary.
+    # Get initial index and direction
     index, direction = control_data_dictionary['Index_and_Direction']
-    buffer_index = index
+    # Prime the buffer with an initial update (unchanged)
+    buffer_index, buffer_direction = update_index_and_folders(0, 1)
     fullscreen = True
+
+    # Set up a variable to track the previous index for change detection
+    prev_index = index
+    last_skipped_index = -1
 
     def queue_image(buffer_idx, main_folder_q, float_folder_q, q_image_queue):
         buffer_idx = max(0, min(buffer_idx, png_paths_len - 1))
@@ -302,55 +340,46 @@ def run_display():
                 buffer_index += direction * -1
             queue_image(buffer_index, main_folder, float_folder, image_queue)
 
-        last_skipped_index = -1
+        # --- NEW: Start an independent thread to update the index ---
+        def index_update_loop():
+            while run_mode:
+                current_idx, current_dir = control_data_dictionary['Index_and_Direction']
+                update_index_and_folders(current_idx, current_dir)
+                time.sleep(1.0 / FPS)
+        index_thread = threading.Thread(target=index_update_loop, daemon=True)
+        index_thread.start()
+        # --- End new code ---
 
         while run_mode:
             try:
+                prev_index = index
                 fullscreen = event_check(fullscreen)
-                # For FREE_CLOCK, calculate the index based on elapsed time.
-                if clock_mode == FREE_CLOCK:
-                    elapsed = time.time() - start_time
-                    t = elapsed * IPS  # This would be the "ideal" linear index
-                    if PINGPONG:
-                        period = 2 * (png_paths_len - 1)
-                        mod_val = t % period
-                        if mod_val < png_paths_len:
-                            index = int(mod_val)
-                            direction = 1
-                        else:
-                            index = int(period - mod_val)
-                            direction = -1
-                    else:
-                        index = int(t) % png_paths_len
-                        direction = 1
-                    control_data_dictionary['Index_and_Direction'] = (index, direction)
-                else:
-                    index, direction = update_index_and_folders(
-                        control_data_dictionary['Index_and_Direction'][0],
-                        control_data_dictionary['Index_and_Direction'][1]
-                    )
+                # NOTE: Removed the update_index_and_folders call from the render loop.
+                index, direction = control_data_dictionary['Index_and_Direction']
+                main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
 
-                # Update folder data only when the index changes.
-                if index != last_index:
-                    update_control_data(index, direction)
-                    last_index = index
+                if prev_index != index:
                     buffer_index = index
-                    if abs(index - last_index) > 1 and last_skipped_index != index:
+                    if abs(prev_index - index) > 1 and last_skipped_index != index:
                         last_skipped_index = index
+
                     buffer_synced = False
                     discarded_images = []
                     while not buffer_synced and not image_queue.empty():
                         main_image, float_image = image_queue.get().result()
                         if buffer_index == index:
                             buffer_synced = True
+                            buffer_direction = direction
                             load_texture(texture_id1, main_image)
                             load_texture(texture_id2, float_image)
-                            if buffer_index >= png_paths_len or buffer_index < 0:
+
+                            if buffer_index > png_paths_len or buffer_index < 0:
                                 print("AH SHIT")
-                                buffer_index += direction * -1
+                                buffer_index += buffer_direction * -1
                             queue_image(buffer_index, main_folder, float_folder, image_queue)
                         else:
                             discarded_images.append((main_image, float_image))
+
                     for discarded_image in discarded_images:
                         image_queue.put(discarded_image)
 
@@ -359,7 +388,7 @@ def run_display():
                 vid_clock.tick(FPS)
             except Exception as e:
                 print(f"An error occurred: {e}")
-                # Optionally, add a brief sleep to throttle on error
+                # Optionally, add a short sleep here to throttle in case of repeated errors
                 # time.sleep(0.1)
 
 
@@ -367,10 +396,12 @@ def display_init(fullscreen=True):
     w, h = image_size
     fullscreen_size = pygame.display.list_modes()[0]
     fullscreen_width, fullscreen_height = fullscreen_size
+    # Calculate scaling factor and position for fullscreen mode
     scale = min(fullscreen_width / w, fullscreen_height / h)
     offset_x = int((fullscreen_width - w * scale) / 2)
     offset_y = int((fullscreen_height - h * scale) / 2)
-    flags = OPENGL | DOUBLEBUF
+    flags = OPENGL
+    flags |= DOUBLEBUF
     if fullscreen:
         flags |= FULLSCREEN
         pygame.display.set_caption('Fullscreen Mode')
@@ -380,16 +411,17 @@ def display_init(fullscreen=True):
         flags |= RESIZABLE
         pygame.display.set_mode(image_size, flags)
         pygame.display.set_caption('Windowed Mode')
-        glViewport(0, 0, w, h)
+        glViewport(0, 0, w, h)  # Update to use original width and height
+
     glEnable(GL_TEXTURE_2D)
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
     glMatrixMode(GL_PROJECTION)
     glLoadIdentity()
     if fullscreen:
-        gluOrtho2D(0, int(w * scale), 0, int(h * scale))
+        gluOrtho2D(0, int(w * scale), 0, int(h * scale))  # Use scaled dimensions in fullscreen mode
     else:
-        gluOrtho2D(0, w, 0, h)
+        gluOrtho2D(0, w, 0, h)  # Use original dimensions in windowed mode
     glMatrixMode(GL_MODELVIEW)
     glLoadIdentity()
 
