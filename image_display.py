@@ -326,7 +326,7 @@ def run_display():
         image_future = executor.submit(load_images, buffer_idx, main_folder_q, float_folder_q)
         q_image_queue.put(image_future)
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=8) as executor:
         update_index_and_folders(index, direction)
         index, direction = control_data_dictionary['Index_and_Direction']
         main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
