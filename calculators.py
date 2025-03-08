@@ -116,7 +116,7 @@ def calculate_frame_duration(setup_mode=False):
 
 
 def select_img_list_files():
-    csv_dir = 'generated_img_Lists'
+    csv_dir = 'generated_img_lists'
 
     while True:
         csv_files = [f for f in os.listdir(csv_dir) if f.endswith('.csv')]
