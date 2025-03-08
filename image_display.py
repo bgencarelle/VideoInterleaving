@@ -167,6 +167,16 @@ def create_texture(image):
     return texture_id
 
 def display_image(texture_id, width, height, rgba=(1, 1, 1, 1)):
+    # Use the fullscreen scale and offsets if set
+    try:
+        scale = fs_scale
+        offset_x = fs_offset_x
+        offset_y = fs_offset_y
+    except NameError:
+        scale = 1
+        offset_x = 0
+        offset_y = 0
+
     glBindTexture(GL_TEXTURE_2D, texture_id)
     if rgba:
         glColor4f(*rgba)
@@ -174,13 +184,13 @@ def display_image(texture_id, width, height, rgba=(1, 1, 1, 1)):
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
     glBegin(GL_QUADS)
     glTexCoord2f(0, 1)
-    glVertex2f(0, 0)
+    glVertex2f(offset_x, offset_y)
     glTexCoord2f(1, 1)
-    glVertex2f(width, 0)
+    glVertex2f(offset_x + width * scale, offset_y)
     glTexCoord2f(1, 0)
-    glVertex2f(width, height)
+    glVertex2f(offset_x + width * scale, offset_y + height * scale)
     glTexCoord2f(0, 0)
-    glVertex2f(0, height)
+    glVertex2f(offset_x, offset_y + height * scale)
     glEnd()
     if rgba:
         glColor4f(1, 1, 1, 1)
@@ -386,35 +396,40 @@ def run_display():
             except Exception as e:
                 print(f"An error occurred: {e}")
 
+
 def display_init(fullscreen=True):
+    global fs_scale, fs_offset_x, fs_offset_y, fs_fullscreen_width, fs_fullscreen_height
     w, h = image_size
     fullscreen_size = pygame.display.list_modes()[0]
-    fullscreen_width, fullscreen_height = fullscreen_size
-    scale = min(fullscreen_width / w, fullscreen_height / h)
-    offset_x = int((fullscreen_width - w * scale) / 2)
-    offset_y = int((fullscreen_height - h * scale) / 2)
+    fs_fullscreen_width, fs_fullscreen_height = fullscreen_size
+    fs_scale = min(fs_fullscreen_width / w, fs_fullscreen_height / h)
+    fs_offset_x = int((fs_fullscreen_width - w * fs_scale) / 2)
+    fs_offset_y = int((fs_fullscreen_height - h * fs_scale) / 2)
+
     flags = OPENGL | DOUBLEBUF
     if fullscreen:
         flags |= FULLSCREEN
         pygame.display.set_caption('Fullscreen Mode')
-        pygame.display.set_mode((fullscreen_width, fullscreen_height), flags, vsync=1)
-        glViewport(offset_x, offset_y, int(w * scale), int(h * scale))
+        pygame.display.set_mode((fs_fullscreen_width, fs_fullscreen_height), flags, vsync=1)
+        glViewport(0, 0, fs_fullscreen_width, fs_fullscreen_height)
     else:
         flags |= RESIZABLE
         pygame.display.set_mode(image_size, flags, vsync=1)
         pygame.display.set_caption('Windowed Mode')
         glViewport(0, 0, w, h)
+
     glEnable(GL_TEXTURE_2D)
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
     glMatrixMode(GL_PROJECTION)
     glLoadIdentity()
     if fullscreen:
-        gluOrtho2D(0, int(w * scale), 0, int(h * scale))
+        gluOrtho2D(0, fs_fullscreen_width, 0, fs_fullscreen_height)
     else:
         gluOrtho2D(0, w, 0, h)
     glMatrixMode(GL_MODELVIEW)
     glLoadIdentity()
+
 
 def display_and_run(clock_source=FREE_CLOCK):
     global png_paths_len, main_folder_path, main_folder_count, \
