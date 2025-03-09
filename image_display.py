@@ -5,29 +5,25 @@ from concurrent.futures import ThreadPoolExecutor
 from platform import system
 from queue import SimpleQueue
 import threading
-
 import datetime
 import pygame.time
-from OpenGL.GL import *
-from OpenGL.GLU import *
-
-import calculators
-import midi_control
 import platform
 import pygame
 from pygame.locals import *
-
 import cv2
 import webp
 import random
+
+import calculators
+import midi_control
 import index_client
 
+# --- Global Constants & Variables ---
 FULLSCREEN_MODE = True
 MTC_CLOCK = 0
 MIDI_CLOCK = 1
 MIXED_CLOCK = 2
 CLIENT_MODE = 3
-
 FREE_CLOCK = 255
 
 clock_mode = FREE_CLOCK
@@ -46,7 +42,6 @@ png_paths_len = 0
 main_folder_path = 0
 float_folder_path = 0
 float_folder_count = 0
-
 main_folder_count = 0
 image_size = (800, 600)
 aspect_ratio = 1.333
@@ -153,33 +148,75 @@ def read_image(image_path):
         image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGBA)
     return image_np
 
-def create_texture(image):
-    texture_id = glGenTextures(1)
-    glBindTexture(GL_TEXTURE_2D, texture_id)
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image.shape[1], image.shape[0], 0, GL_RGBA, GL_UNSIGNED_BYTE, image)
-    return texture_id
+# --- New Rendering Functions Using Pygame's Accelerated Blitting ---
+# Global screen variable for display surface
+screen = None
+fs_scale = 1
+fs_offset_x = 0
+fs_offset_y = 0
+fs_fullscreen_width = 0
+fs_fullscreen_height = 0
 
-def display_image(texture_id, width, height, rgba=(1, 1, 1, 1)):
-    glBindTexture(GL_TEXTURE_2D, texture_id)
-    if rgba:
-        glColor4f(*rgba)
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    glBegin(GL_QUADS)
-    glTexCoord2f(0, 1)
-    glVertex2f(fs_offset_x, fs_offset_y)
-    glTexCoord2f(1, 1)
-    glVertex2f(fs_offset_x + width * fs_scale, fs_offset_y)
-    glTexCoord2f(1, 0)
-    glVertex2f(fs_offset_x + width * fs_scale, fs_offset_y + height * fs_scale)
-    glTexCoord2f(0, 0)
-    glVertex2f(fs_offset_x, fs_offset_y + height * fs_scale)
-    glEnd()
-    if rgba:
-        glColor4f(1, 1, 1, 1)
-        glDisable(GL_BLEND)
+def display_init(fullscreen=True):
+    """
+    Sets up the Pygame display window using SDL2 acceleration.
+    Computes scaling factors and offsets so that images are centered.
+    """
+    global fs_scale, fs_offset_x, fs_offset_y, fs_fullscreen_width, fs_fullscreen_height, screen
+    w, h = image_size  # native image dimensions
+
+    if fullscreen:
+        # Use the native display resolution
+        fullscreen_size = pygame.display.list_modes()[0]
+        fs_fullscreen_width, fs_fullscreen_height = fullscreen_size
+        fs_scale = min(fs_fullscreen_width / w, fs_fullscreen_height / h)
+        fs_offset_x = int((fs_fullscreen_width - w * fs_scale) / 2)
+        fs_offset_y = int((fs_fullscreen_height - h * fs_scale) / 2)
+        screen = pygame.display.set_mode((fs_fullscreen_width, fs_fullscreen_height),
+                                         pygame.FULLSCREEN | pygame.DOUBLEBUF | pygame.HWSURFACE)
+        pygame.display.set_caption('Fullscreen Mode')
+    else:
+        # For windowed mode, force a window width of 400 and compute height to preserve aspect ratio.
+        win_width = 400
+        win_height = int(400 * h / w)
+        win_scale = min(win_width / w, win_height / h)
+        win_offset_x = int((win_width - w * win_scale) / 2)
+        win_offset_y = int((win_height - h * win_scale) / 2)
+        fs_scale = win_scale
+        fs_offset_x = win_offset_x
+        fs_offset_y = win_offset_y
+        screen = pygame.display.set_mode((win_width, win_height),
+                                         pygame.RESIZABLE | pygame.DOUBLEBUF | pygame.HWSURFACE)
+        pygame.display.set_caption('Windowed Mode')
+
+def create_texture(image):
+    """
+    Converts a numpy RGBA image (from cv2/webp reading) into a Pygame surface.
+    """
+    surface = pygame.image.frombuffer(image.tobytes(), (image.shape[1], image.shape[0]), "RGBA")
+    return surface.convert_alpha()
+
+def load_texture(old_texture, image):
+    """
+    "Updates" the texture by creating a new surface from the given image.
+    """
+    new_texture = pygame.image.frombuffer(image.tobytes(), (image.shape[1], image.shape[0]), "RGBA")
+    return new_texture.convert_alpha()
+
+def display_image(texture, width, height, rgba=(1, 1, 1, 1)):
+    """
+    Blits the given texture (a Pygame surface) to the global screen.
+    It scales the texture according to fs_scale and positions it using fs_offset_x/fs_offset_y.
+    The rgba parameter’s alpha value (fourth element) is used for per-image alpha blending.
+    """
+    scaled_width = int(width * fs_scale)
+    scaled_height = int(height * fs_scale)
+    # Set per-surface alpha; assumes rgba[3] is in range [0,1]
+    alpha = int(rgba[3] * 255)
+    texture.set_alpha(alpha)
+    # Create a scaled version of the texture
+    scaled_texture = pygame.transform.smoothscale(texture, (scaled_width, scaled_height))
+    screen.blit(scaled_texture, (fs_offset_x, fs_offset_y))
 
 def set_rgba_relative():
     main_alpha = 1
@@ -188,25 +225,24 @@ def set_rgba_relative():
     float_rgba = (1, 1, 1, float_alpha)
     return main_rgba, float_rgba
 
-def overlay_images_fast(texture_id_main, texture_id_float, index=0, background_color=(0, 0, 0)):
-    global image_size
+def overlay_images_fast(texture_main, texture_float, index=0, background_color=(0, 0, 0)):
+    """
+    Clears the screen to the background_color, then draws two images.
+    Uses set_rgba_relative() to obtain alpha values for each layer.
+    """
+    screen.fill(background_color)
     width, height = image_size
-    main_rgba, float_rgba = set_rgba_relative()
-    glClearColor(background_color[0] / 255, background_color[1] / 255, background_color[2] / 255, 1.0)
-    glClear(GL_COLOR_BUFFER_BIT)
-    display_image(texture_id_main, width, height, rgba=float_rgba)
-    display_image(texture_id_float, width, height, rgba=main_rgba)
+    main_rgba, float_rgba = set_rgba_relative()  # (1,1,1,alpha) values
+    display_image(texture_main, width, height, rgba=float_rgba)
+    display_image(texture_float, width, height, rgba=main_rgba)
 
-def load_texture(texture_id, image):
-    glBindTexture(GL_TEXTURE_2D, texture_id)
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image.shape[1], image.shape[0], 0, GL_RGBA, GL_UNSIGNED_BYTE, image)
+# --- Unchanged Functions (Indexing, Timing, etc.) ---
 
 def load_images(index, main_folder, float_folder):
     main_image = read_image(main_folder_path[index][main_folder])
     float_image = read_image(float_folder_path[index][float_folder])
     return main_image, float_image
 
-# Globals for running FPS calculation
 last_call_time = None
 last_index = None
 fps_total = 0.0
@@ -258,7 +294,6 @@ def update_index_and_folders(index, direction):
         control_data_dictionary = index_client.midi_data_dictionary
         index, direction = control_data_dictionary['Index_and_Direction']
     elif clock_mode == FREE_CLOCK:
-        # For FREE_CLOCK, assume the timer event already updates the index.
         index, direction = control_data_dictionary['Index_and_Direction']
     update_control_data(index, direction)
     return index, direction
@@ -288,7 +323,7 @@ def print_index_diff_wrapper():
     storage = {'old_index': 0, 'prev_time': 0}
     def print_index_diff(index):
         current_time = time.time()
-        if (current_time - storage['prev_time']) >= 1 and not storage['old_index'] == index:
+        if (current_time - storage['prev_time']) >= 1 and storage['old_index'] != index:
             print("index: ", index, "   index diff:  ", index - storage['old_index'])
             storage['old_index'] = index
             storage['prev_time'] = current_time
@@ -307,7 +342,6 @@ def run_display_setup():
         threading.Thread(target=index_client.start_client, daemon=True).start()
     pygame.init()
     pygame.mouse.set_visible(False)
-    # Set up the timer to fire at (1000/IPS) ms intervals.
     pygame.time.set_timer(UPDATE_INDEX_EVENT, int(1000 / IPS))
     display_init(True)
     vid_clock = pygame.time.Clock()
@@ -315,7 +349,7 @@ def run_display_setup():
     return
 
 def run_display():
-    global run_mode
+    global run_mode, screen
     index, direction = control_data_dictionary['Index_and_Direction']
     buffer_index, buffer_direction = update_index_and_folders(0, 1)
     fullscreen = True
@@ -333,8 +367,8 @@ def run_display():
         image_queue = SimpleQueue()
 
         main_image, float_image = load_images(index, main_folder, float_folder)
-        texture_id1 = create_texture(main_image)
-        texture_id2 = create_texture(float_image)
+        texture_main = create_texture(main_image)
+        texture_float = create_texture(float_image)
 
         for _ in range(BUFFER_SIZE):
             buffer_index += direction
@@ -364,8 +398,8 @@ def run_display():
                         if buffer_index == index:
                             buffer_synced = True
                             buffer_direction = direction
-                            load_texture(texture_id1, main_image)
-                            load_texture(texture_id2, float_image)
+                            texture_main = load_texture(texture_main, main_image)
+                            texture_float = load_texture(texture_float, float_image)
                             if buffer_index > png_paths_len or buffer_index < 0:
                                 print("AH SHIT")
                                 buffer_index += buffer_direction * -1
@@ -375,61 +409,11 @@ def run_display():
                     for discarded_image in discarded_images:
                         image_queue.put(discarded_image)
 
-                overlay_images_fast(texture_id1, texture_id2, index)
+                overlay_images_fast(texture_main, texture_float, index)
                 pygame.display.flip()
                 vid_clock.tick(FPS)
             except Exception as e:
                 print(f"An error occurred: {e}")
-
-
-def display_init(fullscreen=True):
-    global fs_scale, fs_offset_x, fs_offset_y, fs_fullscreen_width, fs_fullscreen_height
-    w, h = image_size  # native image dimensions
-
-    if fullscreen:
-        # Fullscreen: use the native display resolution
-        fullscreen_size = pygame.display.list_modes()[0]
-        fs_fullscreen_width, fs_fullscreen_height = fullscreen_size
-        fs_scale = min(fs_fullscreen_width / w, fs_fullscreen_height / h)
-        fs_offset_x = int((fs_fullscreen_width - w * fs_scale) / 2)
-        fs_offset_y = int((fs_fullscreen_height - h * fs_scale) / 2)
-
-        flags = OPENGL | DOUBLEBUF | FULLSCREEN
-        pygame.display.set_caption('Fullscreen Mode')
-        pygame.display.set_mode((fs_fullscreen_width, fs_fullscreen_height), flags, vsync=1)
-        glViewport(0, 0, fs_fullscreen_width, fs_fullscreen_height)
-
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
-        gluOrtho2D(0, fs_fullscreen_width, 0, fs_fullscreen_height)
-    else:
-        # Windowed: force window width to 400, with height computed from the image's aspect ratio
-        win_width = 400
-        win_height = int(400 * h / w)
-        win_scale = min(win_width / w, win_height / h)
-        win_offset_x = int((win_width - w * win_scale) / 2)
-        win_offset_y = int((win_height - h * win_scale) / 2)
-
-        flags = OPENGL | DOUBLEBUF | RESIZABLE
-        pygame.display.set_caption('Windowed Mode')
-        pygame.display.set_mode((win_width, win_height), flags, vsync=1)
-        glViewport(0, 0, win_width, win_height)
-
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
-        gluOrtho2D(0, win_width, 0, win_height)
-
-        # Use the windowed scale and offsets for drawing
-        fs_scale = win_scale
-        fs_offset_x = win_offset_x
-        fs_offset_y = win_offset_y
-
-    glMatrixMode(GL_MODELVIEW)
-    glLoadIdentity()
-    glEnable(GL_TEXTURE_2D)
-    glEnable(GL_BLEND)
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-
 
 def display_and_run(clock_source=FREE_CLOCK):
     global png_paths_len, main_folder_path, main_folder_count, \
