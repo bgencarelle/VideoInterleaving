@@ -3,7 +3,7 @@
 
 FULLSCREEN_MODE = True
 IPS = 30
-FPS = 120
+FPS = 60
 
 BUFFER_SIZE = IPS // 4  # e.g., 15 if FPS==60
 PINGPONG = True
