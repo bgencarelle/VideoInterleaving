@@ -17,14 +17,17 @@ import index_client
 
 # Import functions from the new modules
 from settings import (FULLSCREEN_MODE, MIDI_MODE, MTC_CLOCK, MIDI_CLOCK, MIXED_CLOCK, PINGPONG, BUFFER_SIZE,
-                      CLIENT_MODE, FREE_CLOCK, IPS, FPS,CLOCK_MODE, VALID_MODES)
+                      CLIENT_MODE, FREE_CLOCK, IPS, FPS, CLOCK_MODE, VALID_MODES)
 from index_calculator import set_launch_time, update_index
 from folder_selector import update_folder_selection
 # Import shared globals
 from globals import control_data_dictionary, folder_dictionary
 
-run_mode = True
+# New imports for VBO rendering.
+import numpy as np
+from OpenGL.arrays import vbo
 
+run_mode = True
 
 pause_mode = False
 png_paths_len = 0
@@ -121,7 +124,7 @@ def update_texture(texture_id, new_image):
 
 def display_image(texture_id, width, height, rgba=(1, 1, 1, 1)):
     """
-    Draws a textured quad using immediate mode.
+    Draws a textured quad using a VBO to reduce CPU overhead.
     This function uses the global fs_offset_x, fs_offset_y, and fs_scale values
     set during display initialization to position and scale the quad.
     """
@@ -130,20 +133,30 @@ def display_image(texture_id, width, height, rgba=(1, 1, 1, 1)):
         glColor4f(*rgba)
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    glBegin(GL_QUADS)
-    # Bottom-left corner.
-    glTexCoord2f(0, 1)
-    glVertex2f(fs_offset_x, fs_offset_y)
-    # Bottom-right corner.
-    glTexCoord2f(1, 1)
-    glVertex2f(fs_offset_x + width * fs_scale, fs_offset_y)
-    # Top-right corner.
-    glTexCoord2f(1, 0)
-    glVertex2f(fs_offset_x + width * fs_scale, fs_offset_y + height * fs_scale)
-    # Top-left corner.
-    glTexCoord2f(0, 0)
-    glVertex2f(fs_offset_x, fs_offset_y + height * fs_scale)
-    glEnd()
+    # Calculate scaled dimensions.
+    scaled_width = width * fs_scale
+    scaled_height = height * fs_scale
+    # Create an array of vertices (x, y, s, t) for the quad.
+    vertices = np.array([
+        fs_offset_x,                fs_offset_y,                 0.0, 1.0,  # Bottom-left.
+        fs_offset_x + scaled_width, fs_offset_y,                 1.0, 1.0,  # Bottom-right.
+        fs_offset_x + scaled_width, fs_offset_y + scaled_height,   1.0, 0.0,  # Top-right.
+        fs_offset_x,                fs_offset_y + scaled_height,   0.0, 0.0   # Top-left.
+    ], dtype=np.float32)
+    # Create and bind a VBO with the vertex data.
+    quad_vbo = vbo.VBO(vertices)
+    quad_vbo.bind()
+    # Enable vertex arrays and define pointers.
+    glEnableClientState(GL_VERTEX_ARRAY)
+    glVertexPointer(2, GL_FLOAT, 16, quad_vbo)  # 2 floats per vertex; stride = 4 * 4 bytes.
+    glEnableClientState(GL_TEXTURE_COORD_ARRAY)
+    glTexCoordPointer(2, GL_FLOAT, 16, quad_vbo + 8)  # Texture coords start after 2 floats (8 bytes).
+    # Draw the quad.
+    glDrawArrays(GL_QUADS, 0, 4)
+    # Disable client states and unbind the VBO.
+    glDisableClientState(GL_VERTEX_ARRAY)
+    glDisableClientState(GL_TEXTURE_COORD_ARRAY)
+    quad_vbo.unbind()
     if rgba:
         glColor4f(1, 1, 1, 1)
         glDisable(GL_BLEND)
@@ -164,7 +177,6 @@ def overlay_images_fast(texture_id_main, texture_id_float, background_color=(0, 
     # Draw the two textures.
     display_image(texture_id_main, width, height)
     display_image(texture_id_float, width, height)
-
 
 def load_images(index, main_folder, float_folder):
     main_image = read_image(main_folder_path[index][main_folder])
@@ -196,7 +208,6 @@ def run_display_setup():
     display_init(FULLSCREEN_MODE)
     run_display()
     return
-
 
 def run_display():
     global run_mode
@@ -267,7 +278,6 @@ def run_display():
                 vid_clock.tick(FPS)
             except Exception as e:
                 print(f"An error occurred: {e}")
-
 
 def display_init(fullscreen=True):
     global fs_scale, fs_offset_x, fs_offset_y, fs_fullscreen_width, fs_fullscreen_height, image_size
