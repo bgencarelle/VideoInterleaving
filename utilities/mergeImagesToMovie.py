@@ -23,7 +23,7 @@ def find_csv_files(pattern: str = DEFAULT_CSV_PATTERN) -> List[Path]:
     """
     Find all CSV files matching the given pattern in the current directory.
     """
-    return sorted(Path('.').glob(pattern))
+    return sorted(Path('..').glob(pattern))
 
 def read_csv(file_path: Path) -> List[List[str]]:
     """
