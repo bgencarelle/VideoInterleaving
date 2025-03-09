@@ -412,6 +412,9 @@ def run_display():
                 overlay_images_fast(texture_main, texture_float, index)
                 pygame.display.flip()
                 vid_clock.tick(FPS)
+                current_fps = vid_clock.get_fps()
+                print(f"Displayed FPS: {current_fps:.2f}")
+
             except Exception as e:
                 print(f"An error occurred: {e}")
 
