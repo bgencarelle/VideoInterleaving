@@ -6,7 +6,7 @@ FULLSCREEN_MODE = False
 IPS = 30
 FPS = 60
 
-BUFFER_SIZE = IPS // 4  # e.g., 15 if IPS==60
+BUFFER_SIZE = IPS // 4 # e.g., 15 if IPS==60
 PINGPONG = True
 FROM_BIRTH = True
 # Clock Mode Constants
