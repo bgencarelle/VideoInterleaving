@@ -1,6 +1,7 @@
 import time
 from concurrent.futures import ThreadPoolExecutor
-from queue import SimpleQueue
+from queue import SimpleQueue  # no longer used in our new ring-buffer approach
+from collections import deque  # NEW: for ring-buffer
 import threading
 
 import datetime
@@ -19,12 +20,12 @@ import webp
 import random
 import index_client
 
+# Mode Constants
 FULLSCREEN_MODE = True
 MTC_CLOCK = 0
 MIDI_CLOCK = 1
 MIXED_CLOCK = 2
 CLIENT_MODE = 3
-
 FREE_CLOCK = 255
 
 clock_mode = FREE_CLOCK
@@ -34,7 +35,7 @@ FPS = 60
 IPS = 30  # images per second (used for index updates)
 run_mode = True
 
-BUFFER_SIZE = FPS // 4
+BUFFER_SIZE = FPS // 4  # for ring-buffer (e.g., 15 if FPS=60)
 PINGPONG = True
 
 vid_clock = None
@@ -43,7 +44,6 @@ png_paths_len = 0
 main_folder_path = 0
 float_folder_path = 0
 float_folder_count = 0
-
 main_folder_count = 0
 image_size = (800, 600)
 aspect_ratio = 1.333
@@ -51,6 +51,7 @@ text_display = False
 
 # Global launch_time variable
 launch_time = None
+
 
 def set_launch_time(from_birth=False):
     global launch_time
@@ -60,6 +61,7 @@ def set_launch_time(from_birth=False):
         launch_time = fixed_datetime.timestamp()
     else:
         launch_time = time.time()
+
 
 set_launch_time(from_birth=True)
 
@@ -81,6 +83,7 @@ folder_dictionary = {
 valid_modes = {"MTC_CLOCK": MTC_CLOCK, "MIDI_CLOCK": MIDI_CLOCK, "MIXED_CLOCK": MIXED_CLOCK,
                "CLIENT_MODE": CLIENT_MODE, "FREE_CLOCK": FREE_CLOCK}
 
+
 def set_clock_mode(mode=None):
     global clock_mode, midi_mode
     if mode and mode in valid_modes.values():
@@ -100,10 +103,12 @@ def set_clock_mode(mode=None):
     midi_mode = True if (clock_mode < CLIENT_MODE) else False
     print("YER", list(valid_modes.keys())[list(valid_modes.values()).index(clock_mode)])
 
+
 def toggle_fullscreen(current_fullscreen_status):
     new_fullscreen = not current_fullscreen_status
     display_init(new_fullscreen)
     return new_fullscreen
+
 
 def event_check(fullscreen):
     global image_size, run_mode, pause_mode
@@ -133,12 +138,14 @@ def event_check(fullscreen):
             display_init(fullscreen)
     return fullscreen
 
+
 def get_aspect_ratio(image_path):
     image = pygame.image.load(image_path)
     w, h = image.get_size()
     a_ratio = h / w
     print(f'this is {w} wide and {h} tall, with an aspect ratio of {aspect_ratio}')
     return a_ratio, w, h,
+
 
 def read_image(image_path):
     if image_path.lower().endswith(('.webp', '.png')):
@@ -151,13 +158,26 @@ def read_image(image_path):
     else:
         raise ValueError("Unsupported image format.")
 
+
 def create_texture(image):
+    """Create a new texture and allocate memory using glTexImage2D."""
     texture_id = glGenTextures(1)
     glBindTexture(GL_TEXTURE_2D, texture_id)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image.shape[1], image.shape[0], 0, GL_RGBA, GL_UNSIGNED_BYTE, image)
+    # Allocate texture memory and upload the initial image data
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image.shape[1], image.shape[0],
+                 0, GL_RGBA, GL_UNSIGNED_BYTE, image)
     return texture_id
+
+
+def update_texture(texture_id, new_image):
+    """Update an existing texture using glTexSubImage2D.
+       Assumes new_image has the same dimensions as the texture."""
+    glBindTexture(GL_TEXTURE_2D, texture_id)
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, new_image.shape[1], new_image.shape[0],
+                    GL_RGBA, GL_UNSIGNED_BYTE, new_image)
+
 
 def display_image(texture_id, width, height, rgba=(1, 1, 1, 1)):
     glBindTexture(GL_TEXTURE_2D, texture_id)
@@ -179,12 +199,14 @@ def display_image(texture_id, width, height, rgba=(1, 1, 1, 1)):
         glColor4f(1, 1, 1, 1)
         glDisable(GL_BLEND)
 
+
 def set_rgba_relative():
     main_alpha = 1
     float_alpha = 1
     main_rgba = (1, 1, 1, main_alpha)
     float_rgba = (1, 1, 1, float_alpha)
     return main_rgba, float_rgba
+
 
 def overlay_images_fast(texture_id_main, texture_id_float, index=0, background_color=(0, 0, 0)):
     global image_size
@@ -195,20 +217,20 @@ def overlay_images_fast(texture_id_main, texture_id_float, index=0, background_c
     display_image(texture_id_main, width, height, rgba=float_rgba)
     display_image(texture_id_float, width, height, rgba=main_rgba)
 
-def load_texture(texture_id, image):
-    glBindTexture(GL_TEXTURE_2D, texture_id)
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image.shape[1], image.shape[0], 0, GL_RGBA, GL_UNSIGNED_BYTE, image)
 
+# Use the existing load_images() function to load the two images for a given index
 def load_images(index, main_folder, float_folder):
     main_image = read_image(main_folder_path[index][main_folder])
     float_image = read_image(float_folder_path[index][float_folder])
     return main_image, float_image
+
 
 # Globals for running FPS calculation
 last_call_time = None
 last_index = None
 fps_total = 0.0
 fps_count = 0
+
 
 def calculate_free_clock_index(total_images, pingpong=True):
     global launch_time, last_call_time, last_index, fps_total, fps_count
@@ -246,6 +268,7 @@ def calculate_free_clock_index(total_images, pingpong=True):
     last_index = index
     return index, direction
 
+
 def update_index_and_folders(index, direction):
     global control_data_dictionary
     if midi_mode:
@@ -256,10 +279,10 @@ def update_index_and_folders(index, direction):
         control_data_dictionary = index_client.midi_data_dictionary
         index, direction = control_data_dictionary['Index_and_Direction']
     elif clock_mode == FREE_CLOCK:
-        # For FREE_CLOCK, assume the timer event already updates the index.
         index, direction = control_data_dictionary['Index_and_Direction']
     update_control_data(index, direction)
     return index, direction
+
 
 def update_control_data(index, direction):
     rand_mult = random.randint(1, 9)
@@ -278,24 +301,48 @@ def update_control_data(index, direction):
         note, channel, _ = control_data_dictionary['Note_On']
         modulation, channel = control_data_dictionary['Modulation']
         mod_value = int(modulation / 127 * float_folder_count)
-        float_folder = (mod_value) % float_folder_count
+        float_folder = mod_value % float_folder_count
         main_folder = (note % 12) % main_folder_count
     folder_dictionary['Main_and_Float_Folders'] = main_folder, float_folder
 
+
 def print_index_diff_wrapper():
     storage = {'old_index': 0, 'prev_time': 0}
+
     def print_index_diff(index):
         current_time = time.time()
-        if (current_time - storage['prev_time']) >= 1 and not storage['old_index'] == index:
-            print("index: ", index, "   index diff:  ", index - storage['old_index'])
+        if (current_time - storage['prev_time']) >= 1 and storage['old_index'] != index:
+            print("index:", index, "   index diff:", index - storage['old_index'])
             storage['old_index'] = index
             storage['prev_time'] = current_time
             fippy = vid_clock.get_fps()
             print(f'fps: {fippy}')
             print(f'midi_control.bpm: {midi_control.bpm}')
+
     return print_index_diff
 
+
 print_index_diff_function = print_index_diff_wrapper()
+
+
+# NEW: Ring-buffer class for image futures
+class ImageLoaderBuffer:
+    def __init__(self, buffer_size):
+        self.buffer_size = buffer_size
+        self.buffer = deque(maxlen=buffer_size)
+
+    def add_image_future(self, index, future):
+        clamped_index = max(0, min(index, png_paths_len - 1))
+        self.buffer.append((clamped_index, future))
+
+    def get_future_for_index(self, index):
+        for item in list(self.buffer):
+            buf_index, future = item
+            if buf_index == index:
+                self.buffer.remove(item)
+                return future
+        return None
+
 
 def run_display_setup():
     global vid_clock
@@ -305,40 +352,37 @@ def run_display_setup():
         threading.Thread(target=index_client.start_client, daemon=True).start()
     pygame.init()
     pygame.mouse.set_visible(False)
-    # Set up the timer to fire at (1000/IPS) ms intervals.
     pygame.time.set_timer(UPDATE_INDEX_EVENT, int(1000 / IPS))
     display_init(True)
     vid_clock = pygame.time.Clock()
     run_display()
     return
 
+
 def run_display():
     global run_mode
     index, direction = control_data_dictionary['Index_and_Direction']
+    # Initialize buffer index using update_index_and_folders
     buffer_index, buffer_direction = update_index_and_folders(0, 1)
     fullscreen = True
-    index_changed = False
 
-    def queue_image(buffer_idx, main_folder_q, float_folder_q, q_image_queue):
-        buffer_idx = max(0, min(buffer_idx, png_paths_len - 1))
-        image_future = executor.submit(load_images, buffer_idx, main_folder_q, float_folder_q)
-        q_image_queue.put(image_future)
+    # NEW: create a ring-buffer for image futures
+    image_buffer = ImageLoaderBuffer(BUFFER_SIZE)
 
     with ThreadPoolExecutor(max_workers=8) as executor:
-        update_index_and_folders(index, direction)
-        index, direction = control_data_dictionary['Index_and_Direction']
+        # Preload the ring-buffer with initial image futures
         main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
-        image_queue = SimpleQueue()
+        initial_index = index
+        for i in range(BUFFER_SIZE):
+            buf_idx = (initial_index + i) % png_paths_len
+            future = executor.submit(load_images, buf_idx, main_folder, float_folder)
+            image_buffer.add_image_future(buf_idx, future)
+            print(f"[Preload] Queued future for index {buf_idx}")
 
+        # Load the current images synchronously for initial textures
         main_image, float_image = load_images(index, main_folder, float_folder)
         texture_id1 = create_texture(main_image)
         texture_id2 = create_texture(float_image)
-
-        for _ in range(BUFFER_SIZE):
-            buffer_index += direction
-            if buffer_index >= png_paths_len or buffer_index < 0:
-                buffer_index += direction * -1
-            queue_image(buffer_index, main_folder, float_folder, image_queue)
 
         last_skipped_index = -1
 
@@ -350,28 +394,27 @@ def run_display():
                 index, direction = control_data_dictionary['Index_and_Direction']
                 main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
 
-                if index_changed != index:
-                    buffer_index = index
-                    if abs(prev_index - index) > 1 and last_skipped_index != index:
-                        last_skipped_index = index
+                # Try to get the future corresponding to the current index
+                future = image_buffer.get_future_for_index(index)
+                if future is not None:
+                    print(f"[Main Loop] Found future for index {index}")
+                    # Wait for image loading to complete
+                    main_image, float_image = future.result()
+                    # Update textures with new image data using glTexSubImage2D
+                    update_texture(texture_id1, main_image)
+                    update_texture(texture_id2, float_image)
 
-                    buffer_synced = False
-                    discarded_images = []
-                    while not buffer_synced and not image_queue.empty():
-                        main_image, float_image = image_queue.get().result()
-                        if buffer_index == index:
-                            buffer_synced = True
-                            buffer_direction = direction
-                            load_texture(texture_id1, main_image)
-                            load_texture(texture_id2, float_image)
-                            if buffer_index > png_paths_len or buffer_index < 0:
-                                print("AH SHIT")
-                                buffer_index += buffer_direction * -1
-                            queue_image(buffer_index, main_folder, float_folder, image_queue)
-                        else:
-                            discarded_images.append((main_image, float_image))
-                    for discarded_image in discarded_images:
-                        image_queue.put(discarded_image)
+                    # Queue the next image for this slot
+                    next_index = (index + direction) % png_paths_len
+                    new_future = executor.submit(load_images, next_index, main_folder, float_folder)
+                    image_buffer.add_image_future(next_index, new_future)
+                    print(f"[Main Loop] Queued new future for index {next_index}")
+                else:
+                    # Debug: indicate that no future was found for the current index.
+                    print(f"[Main Loop] No future found for index {index}, requeuing...")
+                    next_index = (index + direction) % png_paths_len
+                    new_future = executor.submit(load_images, next_index, main_folder, float_folder)
+                    image_buffer.add_image_future(next_index, new_future)
 
                 overlay_images_fast(texture_id1, texture_id2, index)
                 pygame.display.flip()
@@ -385,7 +428,6 @@ def display_init(fullscreen=True):
     w, h = image_size  # native image dimensions
 
     if fullscreen:
-        # Fullscreen: use the native display resolution
         fullscreen_size = pygame.display.list_modes()[0]
         fs_fullscreen_width, fs_fullscreen_height = fullscreen_size
         fs_scale = min(fs_fullscreen_width / w, fs_fullscreen_height / h)
@@ -401,7 +443,6 @@ def display_init(fullscreen=True):
         glLoadIdentity()
         gluOrtho2D(0, fs_fullscreen_width, 0, fs_fullscreen_height)
     else:
-        # Windowed: force window width to 400, with height computed from the image's aspect ratio
         win_width = 400
         win_height = int(400 * h / w)
         win_scale = min(win_width / w, win_height / h)
@@ -417,7 +458,6 @@ def display_init(fullscreen=True):
         glLoadIdentity()
         gluOrtho2D(0, win_width, 0, win_height)
 
-        # Use the windowed scale and offsets for drawing
         fs_scale = win_scale
         fs_offset_x = win_offset_x
         fs_offset_y = win_offset_y
@@ -443,6 +483,7 @@ def display_and_run(clock_source=FREE_CLOCK):
     image_size = (width, height)
     print(image_size)
     run_display_setup()
+
 
 if __name__ == "__main__":
     display_and_run()
