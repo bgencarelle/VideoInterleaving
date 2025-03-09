@@ -16,8 +16,8 @@ import random
 import index_client
 
 # Import functions from the new modules
-from settings import (FULLSCREEN_MODE, MTC_CLOCK, MIDI_CLOCK, MIXED_CLOCK,
-                      CLIENT_MODE, FREE_CLOCK, IPS, CLOCK_MODE, VALID_MODES)
+from settings import (FULLSCREEN_MODE, MTC_CLOCK, MIDI_CLOCK, MIXED_CLOCK, PINGPONG, BUFFER_SIZE,
+                      CLIENT_MODE, FREE_CLOCK, IPS, FPS,CLOCK_MODE, VALID_MODES)
 from index_calculator import set_launch_time, update_index
 from folder_selector import update_folder_selection
 
@@ -27,11 +27,8 @@ from globals import control_data_dictionary, folder_dictionary
 clock_mode = CLOCK_MODE
 midi_mode = False
 
-FPS = 60
 run_mode = True
 
-BUFFER_SIZE = FPS // 4  # e.g., 15 if FPS==60
-PINGPONG = True
 
 pause_mode = False
 png_paths_len = 0
@@ -147,7 +144,7 @@ def set_rgba_relative():
     float_rgba = (1, 1, 1, float_alpha)
     return main_rgba, float_rgba
 
-def overlay_images_fast(texture_id_main, texture_id_float, index=0, background_color=(0, 0, 0)):
+def overlay_images_fast(texture_id_main, texture_id_float, background_color=(0, 0, 0)):
     global image_size
     width, height = image_size
     main_rgba, float_rgba = set_rgba_relative()
@@ -183,53 +180,81 @@ def run_display_setup():
         threading.Thread(target=index_client.start_client, daemon=True).start()
     pygame.init()
     pygame.mouse.set_visible(False)
-    display_init(True)
+    display_init(FULLSCREEN_MODE)
     run_display()
     return
 
+
 def run_display():
     global run_mode
+    # Create a clock for FPS regulation.
     vid_clock = pygame.time.Clock()
-    # Initial index and folder update
+
+    # Initial index and folder update.
     index, direction = update_index(png_paths_len, PINGPONG)
+    # Save the last displayed index.
+    last_index = index
     control_data_dictionary['Index_and_Direction'] = (index, direction)
     update_folder_selection(index, direction, float_folder_count, main_folder_count)
+
     fullscreen = True
+    # Use our fixed-size buffer (based on IPS, not FPS)
     image_buffer = ImageLoaderBuffer(BUFFER_SIZE)
+
+    # Preload BUFFER_SIZE images starting from the initial index.
     with ThreadPoolExecutor(max_workers=8) as executor:
         main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
-        initial_index = index
         for i in range(BUFFER_SIZE):
-            buf_idx = (initial_index + i) % png_paths_len
+            buf_idx = (index + i) % png_paths_len
             future = executor.submit(load_images, buf_idx, main_folder, float_folder)
             image_buffer.add_image_future(buf_idx, future)
+
+        # Synchronously load the current image to create the initial textures.
         main_image, float_image = load_images(index, main_folder, float_folder)
         texture_id1 = create_texture(main_image)
         texture_id2 = create_texture(float_image)
+
+        # Main display loop.
         while run_mode:
             try:
+                # Process events (fullscreen toggling, resize, quit, etc.)
                 fullscreen = event_check(fullscreen)
-                index, direction = update_index(png_paths_len, PINGPONG)
-                control_data_dictionary['Index_and_Direction'] = (index, direction)
-                update_folder_selection(index, direction, float_folder_count, main_folder_count)
-                main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
-                future = image_buffer.get_future_for_index(index)
-                if future is not None:
-                    main_image, float_image = future.result()
+
+                # Calculate new index/direction.
+                new_index, new_direction = update_index(png_paths_len, PINGPONG)
+
+                # Only update textures if the index has changed.
+                if new_index != last_index:
+                    index, direction = new_index, new_direction
+                    last_index = index
+                    control_data_dictionary['Index_and_Direction'] = (index, direction)
+                    update_folder_selection(index, direction, float_folder_count, main_folder_count)
+                    main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
+
+                    # Check if the image for the new index is already loaded.
+                    future = image_buffer.get_future_for_index(index)
+                    if future is not None:
+                        main_image, float_image = future.result()
+                    else:
+                        # Fallback: load synchronously if missing.
+                        main_image, float_image = load_images(index, main_folder, float_folder)
+
                     update_texture(texture_id1, main_image)
                     update_texture(texture_id2, float_image)
+
+                    # Schedule loading for the next index if not already queued.
                     next_index = (index + direction) % png_paths_len
-                    new_future = executor.submit(load_images, next_index, main_folder, float_folder)
-                    image_buffer.add_image_future(next_index, new_future)
-                else:
-                    next_index = (index + direction) % png_paths_len
-                    new_future = executor.submit(load_images, next_index, main_folder, float_folder)
-                    image_buffer.add_image_future(next_index, new_future)
-                overlay_images_fast(texture_id1, texture_id2, index)
+                    if image_buffer.get_future_for_index(next_index) is None:
+                        new_future = executor.submit(load_images, next_index, main_folder, float_folder)
+                        image_buffer.add_image_future(next_index, new_future)
+
+                # Draw current textures.
+                overlay_images_fast(texture_id1, texture_id2)
                 pygame.display.flip()
                 vid_clock.tick(FPS)
             except Exception as e:
                 print(f"An error occurred: {e}")
+
 
 def display_init(fullscreen=True):
     global fs_scale, fs_offset_x, fs_offset_y, fs_fullscreen_width, fs_fullscreen_height, image_size
