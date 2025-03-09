@@ -311,7 +311,7 @@ def run_display():
     image_buffer = ImageLoaderBuffer(BUFFER_SIZE)
 
     # Preload BUFFER_SIZE images starting from the initial index.
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
         for i in range(BUFFER_SIZE):
             buf_idx = (index + i) % png_paths_len
