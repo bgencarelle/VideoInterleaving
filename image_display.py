@@ -141,14 +141,15 @@ def get_aspect_ratio(image_path):
     return a_ratio, w, h,
 
 def read_image(image_path):
-    image_np = None
-    if image_path.endswith('.webp'):
+    if image_path.lower().endswith(('.webp', '.png')):
         image_np = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+        if image_np is None:
+            raise ValueError(f"Failed to load image: {image_path}")
+        # cv2 loads in BGR order so converting to RGBA might be needed.
         image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGBA)
-    if image_path.endswith('.png'):
-        image_np = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-        image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGBA)
-    return image_np
+        return image_np
+    else:
+        raise ValueError("Unsupported image format.")
 
 def create_texture(image):
     texture_id = glGenTextures(1)
