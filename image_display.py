@@ -377,7 +377,7 @@ def run_display():
             buf_idx = (initial_index + i) % png_paths_len
             future = executor.submit(load_images, buf_idx, main_folder, float_folder)
             image_buffer.add_image_future(buf_idx, future)
-            print(f"[Preload] Queued future for index {buf_idx}")
+            #print(f"[Preload] Queued future for index {buf_idx}")
 
         # Load the current images synchronously for initial textures
         main_image, float_image = load_images(index, main_folder, float_folder)
@@ -397,7 +397,7 @@ def run_display():
                 # Try to get the future corresponding to the current index
                 future = image_buffer.get_future_for_index(index)
                 if future is not None:
-                    print(f"[Main Loop] Found future for index {index}")
+                    #print(f"[Main Loop] Found future for index {index}")
                     # Wait for image loading to complete
                     main_image, float_image = future.result()
                     # Update textures with new image data using glTexSubImage2D
@@ -408,10 +408,10 @@ def run_display():
                     next_index = (index + direction) % png_paths_len
                     new_future = executor.submit(load_images, next_index, main_folder, float_folder)
                     image_buffer.add_image_future(next_index, new_future)
-                    print(f"[Main Loop] Queued new future for index {next_index}")
+                    #print(f"[Main Loop] Queued new future for index {next_index}")
                 else:
                     # Debug: indicate that no future was found for the current index.
-                    print(f"[Main Loop] No future found for index {index}, requeuing...")
+                    #print(f"[Main Loop] No future found for index {index}, requeuing...")
                     next_index = (index + direction) % png_paths_len
                     new_future = executor.submit(load_images, next_index, main_folder, float_folder)
                     image_buffer.add_image_future(next_index, new_future)
