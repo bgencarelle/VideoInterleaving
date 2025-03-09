@@ -1,7 +1,7 @@
 # settings.py
 # Display Mode
 
-FULLSCREEN_MODE = False
+FULLSCREEN_MODE = True
 ##
 IPS = 30
 FPS = 60
