@@ -41,6 +41,9 @@ text_display = False
 
 texture_dimensions = {}
 
+# Global shader program variable.
+blend_shader_program = None
+
 def toggle_fullscreen(current_fullscreen_status):
     new_fullscreen = not current_fullscreen_status
     display_init(new_fullscreen)
@@ -95,8 +98,8 @@ def create_texture(image):
     texture_id = glGenTextures(1)
     glBindTexture(GL_TEXTURE_2D, texture_id)
     # Set filtering parameters.
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
     # Set wrap modes (optional, but recommended for predictable edge behavior).
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
@@ -161,12 +164,60 @@ def display_image(texture_id, width, height, rgba=(1, 1, 1, 1)):
         glColor4f(1, 1, 1, 1)
         glDisable(GL_BLEND)
 
+# New helper functions for shader creation.
+def compile_shader(source, shader_type):
+    shader = glCreateShader(shader_type)
+    glShaderSource(shader, source)
+    glCompileShader(shader)
+    # Check compile status.
+    result = glGetShaderiv(shader, GL_COMPILE_STATUS)
+    if not result:
+        error = glGetShaderInfoLog(shader)
+        raise RuntimeError(f"Shader compilation failed: {error}")
+    return shader
+
+def init_blend_shader():
+    global blend_shader_program
+    vertex_src = """
+    #version 120
+    attribute vec2 position;
+    attribute vec2 texcoord;
+    varying vec2 v_texcoord;
+    void main() {
+        gl_Position = gl_ModelViewProjectionMatrix * vec4(position, 0.0, 1.0);
+        v_texcoord = texcoord;
+    }
+    """
+    fragment_src = """
+    #version 120
+    uniform sampler2D texture0;
+    uniform sampler2D texture1;
+    varying vec2 v_texcoord;
+    void main() {
+        vec4 color0 = texture2D(texture0, v_texcoord);
+        vec4 color1 = texture2D(texture1, v_texcoord);
+        gl_FragColor = mix(color0, color1, color1.a);
+    }
+    """
+    vertex_shader = compile_shader(vertex_src, GL_VERTEX_SHADER)
+    fragment_shader = compile_shader(fragment_src, GL_FRAGMENT_SHADER)
+    program = glCreateProgram()
+    glAttachShader(program, vertex_shader)
+    glAttachShader(program, fragment_shader)
+    glLinkProgram(program)
+    # Check link status.
+    result = glGetProgramiv(program, GL_LINK_STATUS)
+    if not result:
+        error = glGetProgramInfoLog(program)
+        raise RuntimeError(f"Program link failed: {error}")
+    blend_shader_program = program
+
 def overlay_images_fast(texture_id_main, texture_id_float, background_color=(0, 0, 0)):
     """
-    Clears the screen with the given background color and draws two textures.
-    The scaling and positioning remain unchanged.
+    Clears the screen with the given background color and draws two textures
+    using a shader that blends them. The scaling and positioning remain unchanged.
     """
-    global image_size
+    global image_size, blend_shader_program
     width, height = image_size
     # Clear the background.
     glClearColor(background_color[0] / 255.0,
@@ -174,9 +225,43 @@ def overlay_images_fast(texture_id_main, texture_id_float, background_color=(0, 
                  background_color[2] / 255.0,
                  1.0)
     glClear(GL_COLOR_BUFFER_BIT)
-    # Draw the two textures.
-    display_image(texture_id_main, width, height)
-    display_image(texture_id_float, width, height)
+    # Use the blend shader program.
+    glUseProgram(blend_shader_program)
+    # Bind the two textures to texture units 0 and 1.
+    glActiveTexture(GL_TEXTURE0)
+    glBindTexture(GL_TEXTURE_2D, texture_id_main)
+    glActiveTexture(GL_TEXTURE1)
+    glBindTexture(GL_TEXTURE_2D, texture_id_float)
+    # Set shader sampler uniforms.
+    loc0 = glGetUniformLocation(blend_shader_program, "texture0")
+    loc1 = glGetUniformLocation(blend_shader_program, "texture1")
+    glUniform1i(loc0, 0)
+    glUniform1i(loc1, 1)
+    # Calculate scaled dimensions.
+    scaled_width = width * fs_scale
+    scaled_height = height * fs_scale
+    # Create an array of vertices (x, y, s, t) for the quad.
+    vertices = np.array([
+        fs_offset_x,                fs_offset_y,                 0.0, 1.0,  # Bottom-left.
+        fs_offset_x + scaled_width, fs_offset_y,                 1.0, 1.0,  # Bottom-right.
+        fs_offset_x + scaled_width, fs_offset_y + scaled_height,   1.0, 0.0,  # Top-right.
+        fs_offset_x,                fs_offset_y + scaled_height,   0.0, 0.0   # Top-left.
+    ], dtype=np.float32)
+    quad_vbo = vbo.VBO(vertices)
+    quad_vbo.bind()
+    # Get attribute locations from the shader.
+    pos_loc = glGetAttribLocation(blend_shader_program, "position")
+    tex_loc = glGetAttribLocation(blend_shader_program, "texcoord")
+    glEnableVertexAttribArray(pos_loc)
+    glVertexAttribPointer(pos_loc, 2, GL_FLOAT, GL_FALSE, 16, quad_vbo)
+    glEnableVertexAttribArray(tex_loc)
+    glVertexAttribPointer(tex_loc, 2, GL_FLOAT, GL_FALSE, 16, quad_vbo + 8)
+    # Draw the quad.
+    glDrawArrays(GL_QUADS, 0, 4)
+    glDisableVertexAttribArray(pos_loc)
+    glDisableVertexAttribArray(tex_loc)
+    quad_vbo.unbind()
+    glUseProgram(0)
 
 def load_images(index, main_folder, float_folder):
     main_image = read_image(main_folder_path[index][main_folder])
@@ -324,6 +409,8 @@ def display_init(fullscreen=True):
     glEnable(GL_TEXTURE_2D)
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    # Initialize the blend shader.
+    init_blend_shader()
 
 def display_and_run(clock_source=FREE_CLOCK):
     global png_paths_len, main_folder_path, main_folder_count, \
