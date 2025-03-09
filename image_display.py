@@ -16,16 +16,12 @@ import random
 import index_client
 
 # Import functions from the new modules
-from settings import (FULLSCREEN_MODE, MTC_CLOCK, MIDI_CLOCK, MIXED_CLOCK, PINGPONG, BUFFER_SIZE,
+from settings import (FULLSCREEN_MODE, MIDI_MODE, MTC_CLOCK, MIDI_CLOCK, MIXED_CLOCK, PINGPONG, BUFFER_SIZE,
                       CLIENT_MODE, FREE_CLOCK, IPS, FPS,CLOCK_MODE, VALID_MODES)
 from index_calculator import set_launch_time, update_index
 from folder_selector import update_folder_selection
-from event_handler import handle_events
 # Import shared globals
 from globals import control_data_dictionary, folder_dictionary
-
-clock_mode = CLOCK_MODE
-midi_mode = False
 
 run_mode = True
 
@@ -40,13 +36,7 @@ image_size = (800, 600)
 aspect_ratio = 1.333
 text_display = False
 
-launch_time = None
-
-def set_launch_time_wrapper(from_birth=False):
-    set_launch_time(from_birth)
-
-set_launch_time_wrapper(from_birth=True)
-
+texture_dimensions = {}
 
 def toggle_fullscreen(current_fullscreen_status):
     new_fullscreen = not current_fullscreen_status
@@ -93,9 +83,6 @@ def read_image(image_path):
         return image_np
     else:
         raise ValueError("Unsupported image format.")
-
-# Global dictionary to track texture dimensions by texture_id
-texture_dimensions = {}
 
 def create_texture(image):
     """
@@ -200,7 +187,7 @@ class ImageLoaderBuffer:
         return None
 
 def run_display_setup():
-    if midi_mode:
+    if MIDI_MODE:
         midi_control.midi_control_stuff_main()
     elif CLOCK_MODE == CLIENT_MODE:
         threading.Thread(target=index_client.start_client, daemon=True).start()
@@ -223,7 +210,7 @@ def run_display():
     control_data_dictionary['Index_and_Direction'] = (index, direction)
     update_folder_selection(index, direction, float_folder_count, main_folder_count)
 
-    fullscreen = True
+    fullscreen = FULLSCREEN_MODE
     # Use our fixed-size buffer (based on IPS, not FPS)
     image_buffer = ImageLoaderBuffer(BUFFER_SIZE)
 

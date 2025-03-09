@@ -1,9 +1,9 @@
 import time
 import datetime
 from globals import control_data_dictionary
-from settings import IPS, MTC_CLOCK, MIDI_CLOCK, MIXED_CLOCK, CLIENT_MODE, FREE_CLOCK, VALID_MODES
+from settings import IPS, MTC_CLOCK, MIDI_CLOCK, MIXED_CLOCK, CLIENT_MODE, FREE_CLOCK, VALID_MODES, FROM_BIRTH, CLOCK_MODE
 
-clock_mode = FREE_CLOCK
+clock_mode = CLOCK_MODE
 midi_mode = False
 launch_time = None
 
@@ -18,7 +18,7 @@ def set_launch_time(from_birth=False):
     else:
         launch_time = time.time()
 
-set_launch_time(from_birth=True)
+set_launch_time(from_birth=FROM_BIRTH)
 
 def set_clock_mode(mode=None):
     global clock_mode, midi_mode
