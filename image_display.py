@@ -1,8 +1,5 @@
-import math
-import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from platform import system
 from queue import SimpleQueue
 import threading
 
