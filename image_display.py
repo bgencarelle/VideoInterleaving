@@ -20,7 +20,7 @@ from settings import (FULLSCREEN_MODE, MTC_CLOCK, MIDI_CLOCK, MIXED_CLOCK, PINGP
                       CLIENT_MODE, FREE_CLOCK, IPS, FPS,CLOCK_MODE, VALID_MODES)
 from index_calculator import set_launch_time, update_index
 from folder_selector import update_folder_selection
-
+from event_handler import handle_events
 # Import shared globals
 from globals import control_data_dictionary, folder_dictionary
 
@@ -98,38 +98,62 @@ def read_image(image_path):
 texture_dimensions = {}
 
 def create_texture(image):
+    """
+    Creates and initializes an OpenGL texture from the given image.
+    Uses GL_NEAREST filtering, and now explicitly sets wrap modes.
+    """
     texture_id = glGenTextures(1)
     glBindTexture(GL_TEXTURE_2D, texture_id)
+    # Set filtering parameters.
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+    # Set wrap modes (optional, but recommended for predictable edge behavior).
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
     w, h = image.shape[1], image.shape[0]
+    # Create the texture; using GL_RGBA for both internal format and data format.
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, image)
     texture_dimensions[texture_id] = (w, h)
     return texture_id
 
 def update_texture(texture_id, new_image):
+    """
+    Updates an existing texture with new image data.
+    Reallocates the texture if the dimensions have changed.
+    """
     glBindTexture(GL_TEXTURE_2D, texture_id)
     w, h = new_image.shape[1], new_image.shape[0]
     expected = texture_dimensions.get(texture_id, (None, None))
     if expected != (w, h):
+        # Reallocate texture storage.
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, new_image)
         texture_dimensions[texture_id] = (w, h)
     else:
+        # Update texture content.
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, new_image)
 
 def display_image(texture_id, width, height, rgba=(1, 1, 1, 1)):
+    """
+    Draws a textured quad using immediate mode.
+    This function uses the global fs_offset_x, fs_offset_y, and fs_scale values
+    set during display initialization to position and scale the quad.
+    """
     glBindTexture(GL_TEXTURE_2D, texture_id)
     if rgba:
         glColor4f(*rgba)
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
     glBegin(GL_QUADS)
+    # Bottom-left corner.
     glTexCoord2f(0, 1)
     glVertex2f(fs_offset_x, fs_offset_y)
+    # Bottom-right corner.
     glTexCoord2f(1, 1)
     glVertex2f(fs_offset_x + width * fs_scale, fs_offset_y)
+    # Top-right corner.
     glTexCoord2f(1, 0)
     glVertex2f(fs_offset_x + width * fs_scale, fs_offset_y + height * fs_scale)
+    # Top-left corner.
     glTexCoord2f(0, 0)
     glVertex2f(fs_offset_x, fs_offset_y + height * fs_scale)
     glEnd()
@@ -137,21 +161,23 @@ def display_image(texture_id, width, height, rgba=(1, 1, 1, 1)):
         glColor4f(1, 1, 1, 1)
         glDisable(GL_BLEND)
 
-def set_rgba_relative():
-    main_alpha = 1
-    float_alpha = 1
-    main_rgba = (1, 1, 1, main_alpha)
-    float_rgba = (1, 1, 1, float_alpha)
-    return main_rgba, float_rgba
-
 def overlay_images_fast(texture_id_main, texture_id_float, background_color=(0, 0, 0)):
+    """
+    Clears the screen with the given background color and draws two textures.
+    The scaling and positioning remain unchanged.
+    """
     global image_size
     width, height = image_size
-    main_rgba, float_rgba = set_rgba_relative()
-    glClearColor(background_color[0] / 255, background_color[1] / 255, background_color[2] / 255, 1.0)
+    # Clear the background.
+    glClearColor(background_color[0] / 255.0,
+                 background_color[1] / 255.0,
+                 background_color[2] / 255.0,
+                 1.0)
     glClear(GL_COLOR_BUFFER_BIT)
-    display_image(texture_id_main, width, height, rgba=float_rgba)
-    display_image(texture_id_float, width, height, rgba=main_rgba)
+    # Draw the two textures.
+    display_image(texture_id_main, width, height)
+    display_image(texture_id_float, width, height)
+
 
 def load_images(index, main_folder, float_folder):
     main_image = read_image(main_folder_path[index][main_folder])
