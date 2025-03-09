@@ -1,9 +1,7 @@
 import time
 from concurrent.futures import ThreadPoolExecutor
-from queue import SimpleQueue  # no longer used in our new ring-buffer approach
-from collections import deque  # NEW: for ring-buffer
+from collections import deque  # NEW: using deque for the ring-buffer
 import threading
-
 import datetime
 import pygame.time
 from OpenGL.GL import *
@@ -16,7 +14,6 @@ import pygame
 from pygame.locals import *
 
 import cv2
-import webp
 import random
 import index_client
 
@@ -35,7 +32,7 @@ FPS = 60
 IPS = 30  # images per second (used for index updates)
 run_mode = True
 
-BUFFER_SIZE = FPS // 4  # for ring-buffer (e.g., 15 if FPS=60)
+BUFFER_SIZE = FPS // 4  # e.g., 15 if FPS==60
 PINGPONG = True
 
 vid_clock = None
@@ -56,7 +53,6 @@ launch_time = None
 def set_launch_time(from_birth=False):
     global launch_time
     if from_birth:
-        # Create a datetime object for November 17, 1978, at 7:11 AM EST (UTC-5)
         fixed_datetime = datetime.datetime(1978, 11, 17, 7, 11, tzinfo=datetime.timezone(datetime.timedelta(hours=-5)))
         launch_time = fixed_datetime.timestamp()
     else:
@@ -118,7 +114,6 @@ def event_check(fullscreen):
         if event.type == pygame.QUIT:
             run_mode = False
         elif event.type == UPDATE_INDEX_EVENT:
-            # Update the index based on elapsed time using the timer event.
             index, direction = calculate_free_clock_index(png_paths_len, PINGPONG)
             control_data_dictionary['Index_and_Direction'] = index, direction
         elif event.type == KEYDOWN:
@@ -152,11 +147,14 @@ def read_image(image_path):
         image_np = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
         if image_np is None:
             raise ValueError(f"Failed to load image: {image_path}")
-        # cv2 loads in BGR order so converting to RGBA might be needed.
         image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGBA)
         return image_np
     else:
         raise ValueError("Unsupported image format.")
+
+
+# Global dictionary to track texture dimensions by texture_id
+texture_dimensions = {}
 
 
 def create_texture(image):
@@ -165,18 +163,29 @@ def create_texture(image):
     glBindTexture(GL_TEXTURE_2D, texture_id)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-    # Allocate texture memory and upload the initial image data
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image.shape[1], image.shape[0],
-                 0, GL_RGBA, GL_UNSIGNED_BYTE, image)
+    w, h = image.shape[1], image.shape[0]
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, image)
+    texture_dimensions[texture_id] = (w, h)
     return texture_id
 
 
 def update_texture(texture_id, new_image):
-    """Update an existing texture using glTexSubImage2D.
-       Assumes new_image has the same dimensions as the texture."""
+    """Update an existing texture.
+       If the incoming image dimensions differ from the texture, reallocate the texture.
+       Alternatively, you could resize the new_image to match the texture dimensions."""
     glBindTexture(GL_TEXTURE_2D, texture_id)
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, new_image.shape[1], new_image.shape[0],
-                    GL_RGBA, GL_UNSIGNED_BYTE, new_image)
+    w, h = new_image.shape[1], new_image.shape[0]
+    expected = texture_dimensions.get(texture_id, (None, None))
+    if expected != (w, h):
+        # Option 1: Reallocate texture to new dimensions:
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, new_image)
+        texture_dimensions[texture_id] = (w, h)
+        # Option 2 (alternative): Resize new_image to expected size:
+        # new_image = cv2.resize(new_image, (expected[0], expected[1]))
+        # glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, expected[0], expected[1],
+        #                 GL_RGBA, GL_UNSIGNED_BYTE, new_image)
+    else:
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, new_image)
 
 
 def display_image(texture_id, width, height, rgba=(1, 1, 1, 1)):
@@ -218,7 +227,7 @@ def overlay_images_fast(texture_id_main, texture_id_float, index=0, background_c
     display_image(texture_id_float, width, height, rgba=main_rgba)
 
 
-# Use the existing load_images() function to load the two images for a given index
+# Use the existing load_images() function to load the two images for a given index.
 def load_images(index, main_folder, float_folder):
     main_image = read_image(main_folder_path[index][main_folder])
     float_image = read_image(float_folder_path[index][float_folder])
@@ -289,7 +298,7 @@ def update_control_data(index, direction):
     rand_start = 8 * (IPS - (rand_mult * rand_mult // 2))
     main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
     if clock_mode == FREE_CLOCK:
-        if index <= rand_start * direction or (index > 100 * rand_start and index < 140 * rand_start):
+        if index <= rand_start * direction or (100 * rand_start < index < 140 * rand_start):
             float_folder = 0
             main_folder = 0
         elif index % (IPS * rand_mult) == 0:
@@ -312,7 +321,8 @@ def print_index_diff_wrapper():
     def print_index_diff(index):
         current_time = time.time()
         if (current_time - storage['prev_time']) >= 1 and storage['old_index'] != index:
-            print("index:", index, "   index diff:", index - storage['old_index'])
+            # Reduced logging here
+            print("index:", index, "   diff:", index - storage['old_index'])
             storage['old_index'] = index
             storage['prev_time'] = current_time
             fippy = vid_clock.get_fps()
@@ -377,14 +387,13 @@ def run_display():
             buf_idx = (initial_index + i) % png_paths_len
             future = executor.submit(load_images, buf_idx, main_folder, float_folder)
             image_buffer.add_image_future(buf_idx, future)
-            #print(f"[Preload] Queued future for index {buf_idx}")
+            # Reduced logging: (print statements can be commented out)
+            # print(f"[Preload] Queued future for index {buf_idx}")
 
-        # Load the current images synchronously for initial textures
+        # Synchronously load the current images for initial textures
         main_image, float_image = load_images(index, main_folder, float_folder)
         texture_id1 = create_texture(main_image)
         texture_id2 = create_texture(float_image)
-
-        last_skipped_index = -1
 
         while run_mode:
             try:
@@ -394,28 +403,22 @@ def run_display():
                 index, direction = control_data_dictionary['Index_and_Direction']
                 main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
 
-                # Try to get the future corresponding to the current index
                 future = image_buffer.get_future_for_index(index)
                 if future is not None:
-                    #print(f"[Main Loop] Found future for index {index}")
-                    # Wait for image loading to complete
+                    # When a future is ready, update textures using glTexSubImage2D (or reallocate if needed)
                     main_image, float_image = future.result()
-                    # Update textures with new image data using glTexSubImage2D
                     update_texture(texture_id1, main_image)
                     update_texture(texture_id2, float_image)
-
-                    # Queue the next image for this slot
+                    # Queue next image for this slot
                     next_index = (index + direction) % png_paths_len
                     new_future = executor.submit(load_images, next_index, main_folder, float_folder)
                     image_buffer.add_image_future(next_index, new_future)
-                    #print(f"[Main Loop] Queued new future for index {next_index}")
                 else:
-                    # Debug: indicate that no future was found for the current index.
-                    #print(f"[Main Loop] No future found for index {index}, requeuing...")
+                    # If no future is found, queue one immediately (fallback)
                     next_index = (index + direction) % png_paths_len
                     new_future = executor.submit(load_images, next_index, main_folder, float_folder)
                     image_buffer.add_image_future(next_index, new_future)
-
+                    # Optionally log a brief message or skip
                 overlay_images_fast(texture_id1, texture_id2, index)
                 pygame.display.flip()
                 vid_clock.tick(FPS)
@@ -428,11 +431,22 @@ def display_init(fullscreen=True):
     w, h = image_size  # native image dimensions
 
     if fullscreen:
-        fullscreen_size = pygame.display.list_modes()[0]
-        fs_fullscreen_width, fs_fullscreen_height = fullscreen_size
-        fs_scale = min(fs_fullscreen_width / w, fs_fullscreen_height / h)
-        fs_offset_x = int((fs_fullscreen_width - w * fs_scale) / 2)
-        fs_offset_y = int((fs_fullscreen_height - h * fs_scale) / 2)
+        modes = pygame.display.list_modes()
+        if not modes:
+            raise RuntimeError("No display modes available!")
+        fs_fullscreen_width, fs_fullscreen_height = modes[0]
+
+        # Compute scale: choose the scale that makes the image as large as possible
+        # while keeping its aspect ratio intact.
+        scale_x = fs_fullscreen_width / w
+        scale_y = fs_fullscreen_height / h
+        fs_scale = min(scale_x, scale_y)
+
+        # Compute offsets to center the image:
+        scaled_width = w * fs_scale
+        scaled_height = h * fs_scale
+        fs_offset_x = int((fs_fullscreen_width - scaled_width) / 2)
+        fs_offset_y = int((fs_fullscreen_height - scaled_height) / 2)
 
         flags = OPENGL | DOUBLEBUF | FULLSCREEN
         pygame.display.set_caption('Fullscreen Mode')
@@ -441,13 +455,17 @@ def display_init(fullscreen=True):
 
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
+        # Set up orthographic projection with origin at bottom left.
         gluOrtho2D(0, fs_fullscreen_width, 0, fs_fullscreen_height)
     else:
+        # For windowed mode, similar logic applies but with fixed window dimensions.
         win_width = 400
         win_height = int(400 * h / w)
-        win_scale = min(win_width / w, win_height / h)
-        win_offset_x = int((win_width - w * win_scale) / 2)
-        win_offset_y = int((win_height - h * win_scale) / 2)
+        scale_x = win_width / w
+        scale_y = win_height / h
+        win_scale = min(scale_x, scale_y)
+        win_offset_x = int((win_width - (w * win_scale)) / 2)
+        win_offset_y = int((win_height - (h * win_scale)) / 2)
 
         flags = OPENGL | DOUBLEBUF | RESIZABLE
         pygame.display.set_caption('Windowed Mode')
