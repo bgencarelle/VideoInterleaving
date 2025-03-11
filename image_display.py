@@ -110,17 +110,27 @@ def create_texture(image):
 
 def update_texture(texture_id, new_image):
     """
-    Updates an existing texture with new image data.
-    Reallocates the texture if the dimensions have changed.
+    Updates an existing texture with new image data using a Pixel Buffer Object (PBO)
+    to offload data transfer asynchronously. Reallocates the texture if the dimensions have changed.
     """
     glBindTexture(GL_TEXTURE_2D, texture_id)
     w, h = new_image.shape[1], new_image.shape[0]
     expected = texture_dimensions.get(texture_id, (None, None))
     if expected != (w, h):
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, new_image)
+        # Reallocate texture storage without providing data
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, None)
         texture_dimensions[texture_id] = (w, h)
-    else:
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, new_image)
+    # Create a PBO
+    pbo = glGenBuffers(1)
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo)
+    size = new_image.nbytes
+    # Asynchronously upload the new image data to the PBO
+    glBufferData(GL_PIXEL_UNPACK_BUFFER, size, new_image, GL_STREAM_DRAW)
+    # Update texture data from the PBO (pointer is now None)
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, None)
+    # Unbind and delete the PBO
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0)
+    glDeleteBuffers(1, [pbo])
 
 def display_image(texture_id, width, height, rgba=(1, 1, 1, 1)):
     """
