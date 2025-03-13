@@ -1,5 +1,4 @@
 import os
-
 os.environ['PYOPENGL_ERROR_CHECKING'] = '0'
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -10,7 +9,6 @@ from OpenGL.GL import *
 from OpenGL.GLU import *
 import OpenGL.GL as GL
 GL.glGetError = lambda: 0
-
 
 import calculators
 import midi_control
@@ -23,7 +21,8 @@ import index_client
 
 # Import functions from the new modules
 from settings import (FULLSCREEN_MODE, MIDI_MODE, MTC_CLOCK, MIDI_CLOCK, MIXED_CLOCK, PINGPONG, BUFFER_SIZE,
-                      CLIENT_MODE, FREE_CLOCK, IPS, FPS, CLOCK_MODE, TEST_MODE, VALID_MODES)
+                      CLIENT_MODE, FREE_CLOCK, IPS, FPS, CLOCK_MODE, TEST_MODE, VALID_MODES,
+                      INITIAL_ROTATION, INITIAL_MIRROR)
 from index_calculator import set_launch_time, update_index
 from folder_selector import update_folder_selection
 # Import shared globals
@@ -32,6 +31,7 @@ from globals import control_data_dictionary, folder_dictionary
 # New imports for VBO rendering.
 import numpy as np
 from OpenGL.arrays import vbo
+import math
 
 # Global variables and preallocated vertex array.
 run_mode = True
@@ -66,13 +66,17 @@ quad_vertices = None
 # Global VBO for the quad; reusing this reduces per-frame allocations.
 quad_vbo = None
 
+# New globals for rotation and mirroring.
+rotation_angle = INITIAL_ROTATION  # in degrees, e.g. 270 initially
+mirror_mode = INITIAL_MIRROR       # 0 for normal, 1 for mirrored
+
 def toggle_fullscreen(current_fullscreen_status):
     new_fullscreen = not current_fullscreen_status
     display_init(new_fullscreen)
     return new_fullscreen
 
 def event_check(fullscreen):
-    global image_size, run_mode
+    global image_size, run_mode, rotation_angle, mirror_mode
     width, height = image_size
     aspect_ratio_local = width / height
     for event in pygame.event.get():
@@ -84,6 +88,14 @@ def event_check(fullscreen):
                 pygame.quit()
             if event.key == pygame.K_f:
                 fullscreen = toggle_fullscreen(fullscreen)
+            if event.key == pygame.K_r:
+                # Rotate image in 90 degree increments.
+                rotation_angle = (rotation_angle + 90) % 360
+                display_init(fullscreen)
+            if event.key == pygame.K_m:
+                # Toggle mirror (flip horizontally).
+                mirror_mode = 1 - mirror_mode
+                display_init(fullscreen)
         elif event.type == pygame.VIDEORESIZE:
             new_width, new_height = event.size
             if new_width / new_height > aspect_ratio_local:
@@ -239,31 +251,68 @@ def init_simple_shader():
     simple_shader_position_loc = glGetAttribLocation(simple_shader_program, "position")
     simple_shader_texcoord_loc = glGetAttribLocation(simple_shader_program, "texcoord")
 
+def compute_transformed_quad():
+    """
+    Computes the quad vertices (with texture coordinates) after applying rotation and mirroring.
+    The approach is:
+      - Compute the natural (unrotated) quad for the image (scaled by fs_scale).
+      - Define it centered at the origin.
+      - Rotate each vertex about the origin by rotation_angle.
+      - Translate the quad so that its bounding box (computed from effective dimensions)
+        is centered at (fs_offset_x + effective_width/2, fs_offset_y + effective_height/2).
+      - Use fixed texture coordinates (flipped horizontally if mirror_mode is set).
+    """
+    global fs_scale, fs_offset_x, fs_offset_y, image_size, rotation_angle, mirror_mode
+    w, h = image_size
+    # Natural size after scaling
+    w_scaled = w * fs_scale
+    h_scaled = h * fs_scale
+    # Effective dimensions (swapped if rotated by 90 or 270)
+    if rotation_angle % 180 == 90:
+        effective_w = h * fs_scale
+        effective_h = w * fs_scale
+    else:
+        effective_w = w * fs_scale
+        effective_h = h * fs_scale
+    # Target center for the rotated image's bounding box
+    target_cx = fs_offset_x + effective_w / 2
+    target_cy = fs_offset_y + effective_h / 2
+    # Define natural quad vertices centered at origin.
+    # Order: top-left, top-right, bottom-right, bottom-left.
+    pts = [(-w_scaled/2, -h_scaled/2),
+           (w_scaled/2, -h_scaled/2),
+           (w_scaled/2, h_scaled/2),
+           (-w_scaled/2, h_scaled/2)]
+    rad = math.radians(rotation_angle)
+    cosA = math.cos(rad)
+    sinA = math.sin(rad)
+    rotated_pts = []
+    for (x, y) in pts:
+        rx = x * cosA - y * sinA
+        ry = x * sinA + y * cosA
+        rotated_pts.append((rx, ry))
+    final_pts = [(target_cx + x, target_cy + y) for (x, y) in rotated_pts]
+    # Texture coordinates.
+    # If mirror_mode is active, flip the horizontal texture coordinate.
+    if mirror_mode:
+        tex_coords = [(1,1), (0,1), (0,0), (1,0)]
+    else:
+        tex_coords = [(0,1), (1,1), (1,0), (0,0)]
+    vertices = np.zeros(16, dtype=np.float32)
+    for i in range(4):
+        vertices[i*4 + 0] = final_pts[i][0]
+        vertices[i*4 + 1] = final_pts[i][1]
+        vertices[i*4 + 2] = tex_coords[i][0]
+        vertices[i*4 + 3] = tex_coords[i][1]
+    return vertices
+
 def display_image(texture_id, width, height):
     """
     Draws a textured quad using the simple shader program.
+    The quad vertices are computed with rotation and mirroring applied.
     """
-    scaled_width = width * fs_scale
-    scaled_height = height * fs_scale
-    # Update preallocated quad vertices (each vertex: x, y, u, v)
-    quad_vertices[0] = fs_offset_x
-    quad_vertices[1] = fs_offset_y
-    quad_vertices[2] = 0.0
-    quad_vertices[3] = 1.0
-    quad_vertices[4] = fs_offset_x + scaled_width
-    quad_vertices[5] = fs_offset_y
-    quad_vertices[6] = 1.0
-    quad_vertices[7] = 1.0
-    quad_vertices[8] = fs_offset_x + scaled_width
-    quad_vertices[9] = fs_offset_y + scaled_height
-    quad_vertices[10] = 1.0
-    quad_vertices[11] = 0.0
-    quad_vertices[12] = fs_offset_x
-    quad_vertices[13] = fs_offset_y + scaled_height
-    quad_vertices[14] = 0.0
-    quad_vertices[15] = 0.0
-    # Update VBO with new vertex data
-    quad_vbo.set_array(quad_vertices)
+    vertices = compute_transformed_quad()
+    quad_vbo.set_array(vertices)
     quad_vbo.bind()
     glUseProgram(simple_shader_program)
     glActiveTexture(GL_TEXTURE0)
@@ -282,6 +331,7 @@ def display_image(texture_id, width, height):
 def overlay_images_fast(texture_id_main, texture_id_float, background_color=(0, 0, 0)):
     """
     Clears the screen with the background color and draws two textures using the blend shader.
+    The quad vertices are computed with rotation and mirroring applied.
     """
     global image_size
     width, height = image_size
@@ -297,26 +347,8 @@ def overlay_images_fast(texture_id_main, texture_id_float, background_color=(0, 
     glBindTexture(GL_TEXTURE_2D, texture_id_float)
     glUniform1i(blend_shader_tex0_loc, 0)
     glUniform1i(blend_shader_tex1_loc, 1)
-    scaled_width = width * fs_scale
-    scaled_height = height * fs_scale
-    # Update the preallocated vertex array in place
-    quad_vertices[0] = fs_offset_x
-    quad_vertices[1] = fs_offset_y
-    quad_vertices[2] = 0.0
-    quad_vertices[3] = 1.0
-    quad_vertices[4] = fs_offset_x + scaled_width
-    quad_vertices[5] = fs_offset_y
-    quad_vertices[6] = 1.0
-    quad_vertices[7] = 1.0
-    quad_vertices[8] = fs_offset_x + scaled_width
-    quad_vertices[9] = fs_offset_y + scaled_height
-    quad_vertices[10] = 1.0
-    quad_vertices[11] = 0.0
-    quad_vertices[12] = fs_offset_x
-    quad_vertices[13] = fs_offset_y + scaled_height
-    quad_vertices[14] = 0.0
-    quad_vertices[15] = 0.0
-    quad_vbo.set_array(quad_vertices)
+    vertices = compute_transformed_quad()
+    quad_vbo.set_array(vertices)
     quad_vbo.bind()
     glEnableVertexAttribArray(blend_shader_position_loc)
     glVertexAttribPointer(blend_shader_position_loc, 2, GL_FLOAT, GL_FALSE, 16, quad_vbo)
@@ -407,16 +439,23 @@ def run_display():
 def display_init(fullscreen=True):
     global fs_scale, fs_offset_x, fs_offset_y, fs_fullscreen_width, fs_fullscreen_height, image_size, quad_vbo, quad_vertices
     w, h = image_size
+    # Compute effective dimensions based on current rotation.
+    if rotation_angle % 180 == 90:
+        effective_w = h
+        effective_h = w
+    else:
+        effective_w = w
+        effective_h = h
     if fullscreen:
         modes = pygame.display.list_modes()
         if not modes:
             raise RuntimeError("No display modes available!")
         fs_fullscreen_width, fs_fullscreen_height = modes[0]
-        scale_x = fs_fullscreen_width / w
-        scale_y = fs_fullscreen_height / h
+        scale_x = fs_fullscreen_width / effective_w
+        scale_y = fs_fullscreen_height / effective_h
         fs_scale = min(scale_x, scale_y)
-        scaled_width = w * fs_scale
-        scaled_height = h * fs_scale
+        scaled_width = effective_w * fs_scale
+        scaled_height = effective_h * fs_scale
         fs_offset_x = int((fs_fullscreen_width - scaled_width) / 2)
         fs_offset_y = int((fs_fullscreen_height - scaled_height) / 2)
         flags = pygame.OPENGL | pygame.DOUBLEBUF | pygame.FULLSCREEN
@@ -427,12 +466,14 @@ def display_init(fullscreen=True):
         viewport_height = fs_fullscreen_height
     else:
         win_width = 400
-        win_height = int(400 * h / w)
-        scale_x = win_width / w
-        scale_y = win_height / h
+        win_height = int(400 * effective_h / effective_w)
+        scale_x = win_width / effective_w
+        scale_y = win_height / effective_h
         win_scale = min(scale_x, scale_y)
-        win_offset_x = int((win_width - (w * win_scale)) / 2)
-        win_offset_y = int((win_height - (h * win_scale)) / 2)
+        scaled_width = effective_w * win_scale
+        scaled_height = effective_h * win_scale
+        fs_offset_x = int((win_width - scaled_width) / 2)
+        fs_offset_y = int((win_height - scaled_height) / 2)
         flags = pygame.OPENGL | pygame.DOUBLEBUF | pygame.RESIZABLE
         pygame.display.set_caption('Windowed Mode')
         pygame.display.set_mode((win_width, win_height), flags, vsync=1)
@@ -440,8 +481,6 @@ def display_init(fullscreen=True):
         viewport_width = win_width
         viewport_height = win_height
         fs_scale = win_scale
-        fs_offset_x = win_offset_x
-        fs_offset_y = win_offset_y
     # Compute an orthographic MVP matrix mapping screen coordinates to normalized device coordinates.
     mvp = np.array([
         [2.0/viewport_width, 0, 0, -1],
