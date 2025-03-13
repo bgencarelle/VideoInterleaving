@@ -7,13 +7,36 @@ clock_mode = CLOCK_MODE
 midi_mode = False
 launch_time = None
 
+# --- New Helper Function ---
+# A simple mapping for common timezone abbreviations.
+# Feel free to extend this dictionary as needed.
+TIMEZONE_OFFSETS = {
+    "EST": -5,
+    "EDT": -4,
+    "CST": -6,
+    "CDT": -5,
+    "MST": -7,
+    "MDT": -6,
+    "PST": -8,
+    "PDT": -7,
+}
+
+def get_timezone(tz_str):
+    """
+    Returns a datetime.timezone object based on the given timezone abbreviation.
+    For example, "EST" returns UTC-5.
+    """
+    if tz_str not in TIMEZONE_OFFSETS:
+        raise ValueError(f"Unknown timezone abbreviation: {tz_str}")
+    offset_hours = TIMEZONE_OFFSETS[tz_str]
+    return datetime.timezone(datetime.timedelta(hours=offset_hours))
+
 def set_launch_time(from_birth=False):
     global launch_time
     if from_birth:
-        fixed_datetime = datetime.datetime(
-            1978, 11, 17, 7, 11,
-            tzinfo=datetime.timezone(datetime.timedelta(hours=-5))
-        )
+        # Here, you can modify the timezone string ("EST") as needed.
+        tz = get_timezone("EST")
+        fixed_datetime = datetime.datetime(1978, 11, 17, 7, 11, tzinfo=tz)
         launch_time = fixed_datetime.timestamp()
     else:
         launch_time = time.time()
