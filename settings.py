@@ -18,6 +18,9 @@ FREE_CLOCK = 255
 
 TEST_MODE = False
 
+INITIAL_ROTATION = 270
+INITIAL_MIRROR = 0
+
 TIMEOUT_SECONDS = 1  # Set the timeout value as needed
 
 CLOCK_BUFFER_SIZE = 50
