@@ -1,3 +1,6 @@
+import os
+
+os.environ['PYOPENGL_ERROR_CHECKING'] = '0'
 import time
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
@@ -5,6 +8,9 @@ import threading
 import pygame.time
 from OpenGL.GL import *
 from OpenGL.GLU import *
+import OpenGL.GL as GL
+GL.glGetError = lambda: 0
+
 
 import calculators
 import midi_control
@@ -17,7 +23,7 @@ import index_client
 
 # Import functions from the new modules
 from settings import (FULLSCREEN_MODE, MIDI_MODE, MTC_CLOCK, MIDI_CLOCK, MIXED_CLOCK, PINGPONG, BUFFER_SIZE,
-                      CLIENT_MODE, FREE_CLOCK, IPS, FPS, CLOCK_MODE, VALID_MODES)
+                      CLIENT_MODE, FREE_CLOCK, IPS, FPS, CLOCK_MODE, TEST_MODE, VALID_MODES)
 from index_calculator import set_launch_time, update_index
 from folder_selector import update_folder_selection
 # Import shared globals
@@ -27,8 +33,8 @@ from globals import control_data_dictionary, folder_dictionary
 import numpy as np
 from OpenGL.arrays import vbo
 
+# Global variables and preallocated vertex array.
 run_mode = True
-
 pause_mode = False
 png_paths_len = 0
 main_folder_path = 0
@@ -41,8 +47,22 @@ text_display = False
 
 texture_dimensions = {}
 
-# Global shader program variable.
+# Global shader program variables and cached uniform/attribute locations.
 blend_shader_program = None
+blend_shader_position_loc = None
+blend_shader_texcoord_loc = None
+blend_shader_tex0_loc = None
+blend_shader_tex1_loc = None
+blend_shader_mvp_loc = None
+
+simple_shader_program = None
+simple_shader_position_loc = None
+simple_shader_texcoord_loc = None
+simple_shader_texture0_loc = None
+simple_shader_mvp_loc = None
+
+# Preallocated vertex array (quad with 4 vertices, each having (x, y, u, v)).
+quad_vertices = None
 # Global VBO for the quad; reusing this reduces per-frame allocations.
 quad_vbo = None
 
@@ -117,55 +137,16 @@ def update_texture(texture_id, new_image):
     w, h = new_image.shape[1], new_image.shape[0]
     expected = texture_dimensions.get(texture_id, (None, None))
     if expected != (w, h):
-        # Reallocate texture storage without providing data
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, None)
         texture_dimensions[texture_id] = (w, h)
-    # Create a PBO
     pbo = glGenBuffers(1)
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo)
     size = new_image.nbytes
-    # Asynchronously upload the new image data to the PBO
     glBufferData(GL_PIXEL_UNPACK_BUFFER, size, new_image, GL_STREAM_DRAW)
-    # Update texture data from the PBO (pointer is now None)
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, None)
-    # Unbind and delete the PBO
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0)
     glDeleteBuffers(1, [pbo])
 
-def display_image(texture_id, width, height, rgba=(1, 1, 1, 1)):
-    """
-    Draws a textured quad using a VBO (the global quad_vbo) to reduce CPU overhead.
-    Uses the global fs_offset_x, fs_offset_y, and fs_scale values for positioning.
-    """
-    glBindTexture(GL_TEXTURE_2D, texture_id)
-    if rgba:
-        glColor4f(*rgba)
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    scaled_width = width * fs_scale
-    scaled_height = height * fs_scale
-    vertices = np.array([
-        fs_offset_x,                fs_offset_y,                 0.0, 1.0,
-        fs_offset_x + scaled_width, fs_offset_y,                 1.0, 1.0,
-        fs_offset_x + scaled_width, fs_offset_y + scaled_height,   1.0, 0.0,
-        fs_offset_x,                fs_offset_y + scaled_height,   0.0, 0.0
-    ], dtype=np.float32)
-    global quad_vbo
-    quad_vbo.set_array(vertices)
-    quad_vbo.bind()
-    glEnableClientState(GL_VERTEX_ARRAY)
-    glVertexPointer(2, GL_FLOAT, 16, quad_vbo)
-    glEnableClientState(GL_TEXTURE_COORD_ARRAY)
-    glTexCoordPointer(2, GL_FLOAT, 16, quad_vbo + 8)
-    glDrawArrays(GL_QUADS, 0, 4)
-    glDisableClientState(GL_VERTEX_ARRAY)
-    glDisableClientState(GL_TEXTURE_COORD_ARRAY)
-    quad_vbo.unbind()
-    if rgba:
-        glColor4f(1, 1, 1, 1)
-        glDisable(GL_BLEND)
-
-# New helper functions for shader creation.
 def compile_shader(source, shader_type):
     shader = glCreateShader(shader_type)
     glShaderSource(shader, source)
@@ -177,14 +158,16 @@ def compile_shader(source, shader_type):
     return shader
 
 def init_blend_shader():
-    global blend_shader_program
+    global blend_shader_program, blend_shader_position_loc, blend_shader_texcoord_loc
+    global blend_shader_tex0_loc, blend_shader_tex1_loc, blend_shader_mvp_loc
     vertex_src = """
     #version 120
     attribute vec2 position;
     attribute vec2 texcoord;
+    uniform mat4 u_MVP;
     varying vec2 v_texcoord;
     void main() {
-        gl_Position = gl_ModelViewProjectionMatrix * vec4(position, 0.0, 1.0);
+        gl_Position = u_MVP * vec4(position, 0.0, 1.0);
         v_texcoord = texcoord;
     }
     """
@@ -210,13 +193,97 @@ def init_blend_shader():
         error = glGetProgramInfoLog(program)
         raise RuntimeError(f"Program link failed: {error}")
     blend_shader_program = program
+    # Cache uniform and attribute locations
+    blend_shader_mvp_loc = glGetUniformLocation(blend_shader_program, "u_MVP")
+    blend_shader_tex0_loc = glGetUniformLocation(blend_shader_program, "texture0")
+    blend_shader_tex1_loc = glGetUniformLocation(blend_shader_program, "texture1")
+    blend_shader_position_loc = glGetAttribLocation(blend_shader_program, "position")
+    blend_shader_texcoord_loc = glGetAttribLocation(blend_shader_program, "texcoord")
+
+def init_simple_shader():
+    global simple_shader_program, simple_shader_position_loc, simple_shader_texcoord_loc
+    global simple_shader_texture0_loc, simple_shader_mvp_loc
+    vertex_src = """
+    #version 120
+    attribute vec2 position;
+    attribute vec2 texcoord;
+    uniform mat4 u_MVP;
+    varying vec2 v_texcoord;
+    void main() {
+        gl_Position = u_MVP * vec4(position, 0.0, 1.0);
+        v_texcoord = texcoord;
+    }
+    """
+    fragment_src = """
+    #version 120
+    uniform sampler2D texture0;
+    varying vec2 v_texcoord;
+    void main() {
+        gl_FragColor = texture2D(texture0, v_texcoord);
+    }
+    """
+    vertex_shader = compile_shader(vertex_src, GL_VERTEX_SHADER)
+    fragment_shader = compile_shader(fragment_src, GL_FRAGMENT_SHADER)
+    program = glCreateProgram()
+    glAttachShader(program, vertex_shader)
+    glAttachShader(program, fragment_shader)
+    glLinkProgram(program)
+    result = glGetProgramiv(program, GL_LINK_STATUS)
+    if not result:
+        error = glGetProgramInfoLog(program)
+        raise RuntimeError(f"Simple shader program link failed: {error}")
+    simple_shader_program = program
+    # Cache uniform and attribute locations
+    simple_shader_mvp_loc = glGetUniformLocation(simple_shader_program, "u_MVP")
+    simple_shader_texture0_loc = glGetUniformLocation(simple_shader_program, "texture0")
+    simple_shader_position_loc = glGetAttribLocation(simple_shader_program, "position")
+    simple_shader_texcoord_loc = glGetAttribLocation(simple_shader_program, "texcoord")
+
+def display_image(texture_id, width, height):
+    """
+    Draws a textured quad using the simple shader program.
+    """
+    scaled_width = width * fs_scale
+    scaled_height = height * fs_scale
+    # Update preallocated quad vertices (each vertex: x, y, u, v)
+    quad_vertices[0] = fs_offset_x
+    quad_vertices[1] = fs_offset_y
+    quad_vertices[2] = 0.0
+    quad_vertices[3] = 1.0
+    quad_vertices[4] = fs_offset_x + scaled_width
+    quad_vertices[5] = fs_offset_y
+    quad_vertices[6] = 1.0
+    quad_vertices[7] = 1.0
+    quad_vertices[8] = fs_offset_x + scaled_width
+    quad_vertices[9] = fs_offset_y + scaled_height
+    quad_vertices[10] = 1.0
+    quad_vertices[11] = 0.0
+    quad_vertices[12] = fs_offset_x
+    quad_vertices[13] = fs_offset_y + scaled_height
+    quad_vertices[14] = 0.0
+    quad_vertices[15] = 0.0
+    # Update VBO with new vertex data
+    quad_vbo.set_array(quad_vertices)
+    quad_vbo.bind()
+    glUseProgram(simple_shader_program)
+    glActiveTexture(GL_TEXTURE0)
+    glBindTexture(GL_TEXTURE_2D, texture_id)
+    glUniform1i(simple_shader_texture0_loc, 0)
+    glEnableVertexAttribArray(simple_shader_position_loc)
+    glVertexAttribPointer(simple_shader_position_loc, 2, GL_FLOAT, GL_FALSE, 16, quad_vbo)
+    glEnableVertexAttribArray(simple_shader_texcoord_loc)
+    glVertexAttribPointer(simple_shader_texcoord_loc, 2, GL_FLOAT, GL_FALSE, 16, quad_vbo + 8)
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4)
+    glDisableVertexAttribArray(simple_shader_position_loc)
+    glDisableVertexAttribArray(simple_shader_texcoord_loc)
+    glUseProgram(0)
+    quad_vbo.unbind()
 
 def overlay_images_fast(texture_id_main, texture_id_float, background_color=(0, 0, 0)):
     """
-    Clears the screen with the background color and draws two textures using a shader.
-    Uses the global quad_vbo to update vertex data, reducing per-frame allocation.
+    Clears the screen with the background color and draws two textures using the blend shader.
     """
-    global image_size, blend_shader_program, quad_vbo
+    global image_size
     width, height = image_size
     glClearColor(background_color[0] / 255.0,
                  background_color[1] / 255.0,
@@ -228,29 +295,36 @@ def overlay_images_fast(texture_id_main, texture_id_float, background_color=(0, 
     glBindTexture(GL_TEXTURE_2D, texture_id_main)
     glActiveTexture(GL_TEXTURE1)
     glBindTexture(GL_TEXTURE_2D, texture_id_float)
-    loc0 = glGetUniformLocation(blend_shader_program, "texture0")
-    loc1 = glGetUniformLocation(blend_shader_program, "texture1")
-    glUniform1i(loc0, 0)
-    glUniform1i(loc1, 1)
+    glUniform1i(blend_shader_tex0_loc, 0)
+    glUniform1i(blend_shader_tex1_loc, 1)
     scaled_width = width * fs_scale
     scaled_height = height * fs_scale
-    vertices = np.array([
-        fs_offset_x,                fs_offset_y,                 0.0, 1.0,
-        fs_offset_x + scaled_width, fs_offset_y,                 1.0, 1.0,
-        fs_offset_x + scaled_width, fs_offset_y + scaled_height,   1.0, 0.0,
-        fs_offset_x,                fs_offset_y + scaled_height,   0.0, 0.0
-    ], dtype=np.float32)
-    quad_vbo.set_array(vertices)
+    # Update the preallocated vertex array in place
+    quad_vertices[0] = fs_offset_x
+    quad_vertices[1] = fs_offset_y
+    quad_vertices[2] = 0.0
+    quad_vertices[3] = 1.0
+    quad_vertices[4] = fs_offset_x + scaled_width
+    quad_vertices[5] = fs_offset_y
+    quad_vertices[6] = 1.0
+    quad_vertices[7] = 1.0
+    quad_vertices[8] = fs_offset_x + scaled_width
+    quad_vertices[9] = fs_offset_y + scaled_height
+    quad_vertices[10] = 1.0
+    quad_vertices[11] = 0.0
+    quad_vertices[12] = fs_offset_x
+    quad_vertices[13] = fs_offset_y + scaled_height
+    quad_vertices[14] = 0.0
+    quad_vertices[15] = 0.0
+    quad_vbo.set_array(quad_vertices)
     quad_vbo.bind()
-    pos_loc = glGetAttribLocation(blend_shader_program, "position")
-    tex_loc = glGetAttribLocation(blend_shader_program, "texcoord")
-    glEnableVertexAttribArray(pos_loc)
-    glVertexAttribPointer(pos_loc, 2, GL_FLOAT, GL_FALSE, 16, quad_vbo)
-    glEnableVertexAttribArray(tex_loc)
-    glVertexAttribPointer(tex_loc, 2, GL_FLOAT, GL_FALSE, 16, quad_vbo + 8)
-    glDrawArrays(GL_QUADS, 0, 4)
-    glDisableVertexAttribArray(pos_loc)
-    glDisableVertexAttribArray(tex_loc)
+    glEnableVertexAttribArray(blend_shader_position_loc)
+    glVertexAttribPointer(blend_shader_position_loc, 2, GL_FLOAT, GL_FALSE, 16, quad_vbo)
+    glEnableVertexAttribArray(blend_shader_texcoord_loc)
+    glVertexAttribPointer(blend_shader_texcoord_loc, 2, GL_FLOAT, GL_FALSE, 16, quad_vbo + 8)
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4)
+    glDisableVertexAttribArray(blend_shader_position_loc)
+    glDisableVertexAttribArray(blend_shader_texcoord_loc)
     quad_vbo.unbind()
     glUseProgram(0)
 
@@ -331,7 +405,7 @@ def run_display():
                 print(f"An error occurred: {e}")
 
 def display_init(fullscreen=True):
-    global fs_scale, fs_offset_x, fs_offset_y, fs_fullscreen_width, fs_fullscreen_height, image_size, quad_vbo
+    global fs_scale, fs_offset_x, fs_offset_y, fs_fullscreen_width, fs_fullscreen_height, image_size, quad_vbo, quad_vertices
     w, h = image_size
     if fullscreen:
         modes = pygame.display.list_modes()
@@ -349,9 +423,8 @@ def display_init(fullscreen=True):
         pygame.display.set_caption('Fullscreen Mode')
         pygame.display.set_mode((fs_fullscreen_width, fs_fullscreen_height), flags, vsync=1)
         glViewport(0, 0, fs_fullscreen_width, fs_fullscreen_height)
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
-        gluOrtho2D(0, fs_fullscreen_width, 0, fs_fullscreen_height)
+        viewport_width = fs_fullscreen_width
+        viewport_height = fs_fullscreen_height
     else:
         win_width = 400
         win_height = int(400 * h / w)
@@ -364,27 +437,42 @@ def display_init(fullscreen=True):
         pygame.display.set_caption('Windowed Mode')
         pygame.display.set_mode((win_width, win_height), flags, vsync=1)
         glViewport(0, 0, win_width, win_height)
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
-        gluOrtho2D(0, win_width, 0, win_height)
+        viewport_width = win_width
+        viewport_height = win_height
         fs_scale = win_scale
         fs_offset_x = win_offset_x
         fs_offset_y = win_offset_y
-    glMatrixMode(GL_MODELVIEW)
-    glLoadIdentity()
+    # Compute an orthographic MVP matrix mapping screen coordinates to normalized device coordinates.
+    mvp = np.array([
+        [2.0/viewport_width, 0, 0, -1],
+        [0, 2.0/viewport_height, 0, -1],
+        [0, 0, -1, 0],
+        [0, 0, 0, 1]
+    ], dtype=np.float32)
+    # Initialize shaders if not already done.
+    if blend_shader_program is None:
+        init_blend_shader()
+    if simple_shader_program is None:
+        init_simple_shader()
+    # Set the MVP matrix for both shader programs.
+    glUseProgram(blend_shader_program)
+    glUniformMatrix4fv(blend_shader_mvp_loc, 1, GL_TRUE, mvp)
+    glUseProgram(simple_shader_program)
+    glUniformMatrix4fv(simple_shader_mvp_loc, 1, GL_TRUE, mvp)
+    glUseProgram(0)
     glEnable(GL_TEXTURE_2D)
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    init_blend_shader()
-    # Create the global quad VBO if not already created.
-    global quad_vbo
+    # Create the global quad VBO and preallocate the vertex array if not already created.
+    global quad_vbo, quad_vertices
     if quad_vbo is None:
-        quad_vbo = vbo.VBO(np.zeros(16, dtype=np.float32), usage=GL_DYNAMIC_DRAW)
+        quad_vertices = np.zeros(16, dtype=np.float32)
+        quad_vbo = vbo.VBO(quad_vertices, usage=GL_DYNAMIC_DRAW)
 
 def display_and_run(clock_source=FREE_CLOCK):
     global png_paths_len, main_folder_path, main_folder_count, \
            float_folder_path, float_folder_count, image_size, aspect_ratio
-    random.seed(time.time())
+    random.seed()
     csv_source, main_folder_path, float_folder_path = calculators.init_all(clock_source)
     print(platform.system(), "midi clock mode is:", CLOCK_MODE)
     main_folder_count = len(main_folder_path[0])

@@ -9,15 +9,11 @@ import mido.backends.pygame
 
 import calculators
 
-MTC_CLOCK = 0
-MIDI_CLOCK = 1
-MIXED_CLOCK = 2
-CLOCK_MODE = 2
-CLOCK_BUFFER_SIZE = 50
-TIMEOUT_SECONDS = 1  # Set the timeout value as needed
+from settings import (MTC_CLOCK, MIDI_CLOCK, MIXED_CLOCK,
+                    CLOCK_BUFFER_SIZE, CLOCK_MODE, TIMEOUT_SECONDS)
+
 
 # globals, sorry not sorry
-clock_mode = CLOCK_MODE  # 0 is mtc, 1 is midi_clock, 2 is hybrid (tempo from midi, rough location from mtc)
 png_paths_len = 0
 clock_counter_sum = 0
 frame_duration = 1
@@ -383,8 +379,6 @@ def handle_mod_wheel(msg):
 
 def midi_control_stuff_main():
     global input_port, png_paths_len
-    # png_paths = calculators.init_all()
-    # png_paths_len = len(png_paths)
     midi_port = select_midi_input()
     input_port = mido.open_input(midi_port)
 
