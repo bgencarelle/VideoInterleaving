@@ -1,17 +1,227 @@
-# This script turns our list of folders into a list of PNG and WEBP files.
+#!/usr/bin/env python
+"""
+make_file_lists.py
+
+This combined script:
+  1. Scans two image directories (MAIN_FOLDER_PATH and FLOAT_FOLDER_PATH, as set in settings.py)
+     recursively to build intermediate CSV files containing folder details.
+  2. Reads these intermediate CSVs, verifies image counts, sorts and interleaves image paths,
+     and then writes the final CSV lists.
+
+The process_files() function is maintained as the main entry point.
+"""
 
 import os
 import re
-from itertools import zip_longest
 import csv
 import sys
 import shutil
-import get_folders_list
-import calculators
+from itertools import zip_longest
+from PIL import Image
+from collections import defaultdict
+
+import settings  # settings.py should define IMAGES_DIR, MAIN_FOLDER_PATH, FLOAT_FOLDER_PATH
+
+
+# ------------------------------
+# Utility functions (shared)
+# ------------------------------
+
+def get_subdirectories(path):
+    """Retrieve all subdirectories within a given path."""
+    subdirs = []
+    for root, dirs, _ in os.walk(path):
+        for d in dirs:
+            subdirs.append(os.path.join(root, d))
+    return subdirs
+
+
+def contains_image_files(path):
+    """Check if a directory contains any PNG or WEBP files."""
+    try:
+        return any(file.lower().endswith(('.png', '.webp')) for file in os.listdir(path))
+    except FileNotFoundError:
+        return False
+
+
+def count_image_files(path):
+    """Count the number of PNG and WEBP files in a directory."""
+    try:
+        return len([file for file in os.listdir(path) if file.lower().endswith(('.png', '.webp'))])
+    except FileNotFoundError:
+        return 0
+
+
+def has_alpha_channel(image):
+    """Determine if an image has an alpha channel."""
+    return image.mode in ('RGBA', 'LA') or (image.mode == 'P' and 'transparency' in image.info)
+
+
+def natural_sort_key(s):
+    """
+    Generates a key for natural sorting of strings containing numbers.
+    """
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
+
+
+def interleave_lists(lists):
+    """
+    Interleaves multiple lists into a single list by alternating elements.
+    """
+    result = []
+    for items in zip_longest(*lists, fillvalue=None):
+        group = [item for item in items if item is not None]
+        result.append(group)
+    return result
+
+
+# ------------------------------
+# Intermediate CSV Creation
+# ------------------------------
+
+def create_folder_csv_files(folder_counts, processed_dir, script_dir):
+    """
+    Create CSV files categorizing folders into main and float groups.
+    The grouping logic remains unchanged: if the folder's basename starts with '255_', it goes into float.
+    """
+    groups = defaultdict(list)
+    float_group = defaultdict(list)
+
+    for folder_info in folder_counts:
+        folder, first_png, width, height, has_alpha, file_count = folder_info
+        folder_relative = os.path.relpath(folder, script_dir)
+        if os.path.basename(folder).startswith('255_'):
+            float_group[file_count].append((folder_relative, first_png, width, height, has_alpha, file_count))
+        else:
+            groups[file_count].append((folder_relative, first_png, width, height, has_alpha, file_count))
+
+    def write_csv(group, file_name_format):
+        for file_count, sub_group in group.items():
+            # Sort the group based on numeric prefix (if any) and then folder name.
+            sub_group.sort(key=lambda x: (
+                int(os.path.basename(x[0]).partition('_')[0]) if os.path.basename(x[0]).partition('_')[
+                    0].isdigit() else float('inf'),
+                os.path.basename(x[0])
+            ))
+            csv_filename = file_name_format.format(file_count)
+            csv_path = os.path.join(processed_dir, csv_filename)
+            with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                for index, (folder_rel, first_png, width, height, has_alpha, file_count) in enumerate(sub_group, 1):
+                    if first_png:
+                        try:
+                            image_path = os.path.join(script_dir, folder_rel, first_png)
+                            with Image.open(image_path) as first_png_image:
+                                file_extension = os.path.splitext(first_png)[1]
+                                if has_alpha:
+                                    # Compare first image channels if possible.
+                                    alpha_match = 'Match' if first_png_image.size == first_png_image.split()[
+                                        -1].size else 'NoMatch'
+                                else:
+                                    alpha_match = 'NoAlpha'
+                        except Exception as e:
+                            print(f"Error processing image {first_png} in folder {folder_rel}: {e}")
+                            alpha_match = 'Error'
+                            file_extension = 'Unknown'
+                    else:
+                        alpha_match = 'NoImage'
+                        file_extension = 'N/A'
+
+                    writer.writerow([
+                        index,
+                        folder_rel,
+                        f"{width}x{height} pixels",
+                        file_count,
+                        'Yes' if has_alpha else 'No',
+                        alpha_match,
+                        file_extension
+                    ])
+            print(f"CSV file created: {csv_path}")
+
+    write_csv(groups, 'main_folder_{}.csv')
+    write_csv(float_group, 'float_folder_{}.csv')
+
+
+def write_folder_list():
+    """
+    Scans the two image directories defined in settings (MAIN_FOLDER_PATH and FLOAT_FOLDER_PATH)
+    recursively for PNG and WEBP files, collects folder details, and writes intermediate CSV files.
+    """
+    # Determine the script's directory
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    processed_dir = os.path.join(script_dir, "folders_processed")
+
+    # Remove old processed directory if it exists
+    if os.path.exists(processed_dir):
+        shutil.rmtree(processed_dir)
+    os.makedirs(processed_dir)
+
+    # Build full paths from settings
+    main_folder_path = os.path.join(script_dir, settings.MAIN_FOLDER_PATH)
+    float_folder_path = os.path.join(script_dir, settings.FLOAT_FOLDER_PATH)
+
+    # Ensure both directories exist
+    for base_path in [main_folder_path, float_folder_path]:
+        if not os.path.exists(base_path) or not os.path.isdir(base_path):
+            print(f"Error: Directory '{base_path}' is missing. Please create it and populate with images.")
+            # Continue scanning the other folder instead of exiting
+
+    # Scan both directories recursively
+    folder_dict = {}
+    folder_key = 1
+    for base_path in [main_folder_path, float_folder_path]:
+        if os.path.exists(base_path) and os.path.isdir(base_path):
+            for subdirectory in [base_path] + get_subdirectories(base_path):
+                if contains_image_files(subdirectory):
+                    folder_dict[folder_key] = subdirectory
+                    folder_key += 1
+
+    if not folder_dict:
+        print("No valid image files were found in the specified directories or their subdirectories.")
+        return
+
+    # Collect folder details (folder, first image, dimensions, alpha flag, image count)
+    total_images = 0
+    folder_counts = []
+
+    for folder in folder_dict.values():
+        image_files = [f for f in os.listdir(folder) if f.lower().endswith(('.png', '.webp'))]
+        if image_files:
+            first_image = image_files[0]
+            try:
+                with Image.open(os.path.join(folder, first_image)) as img:
+                    width, height = img.size
+                    has_alpha = has_alpha_channel(img)
+            except Exception as e:
+                print(f"Error processing image {first_image} in folder {folder}: {e}")
+                first_image = None
+                width, height, has_alpha = 0, 0, False
+            file_count = count_image_files(folder)
+            total_images += file_count
+            folder_counts.append((folder, first_image, width, height, has_alpha, file_count))
+
+    # Save folder count to a text file
+    folder_count_filename = f'folder_count_{total_images}.txt'
+    folder_count_path = os.path.join(processed_dir, folder_count_filename)
+    with open(folder_count_path, 'w', encoding='utf-8') as f:
+        for index, (folder, first_image, width, height, has_alpha, count) in enumerate(folder_counts, 1):
+            folder_rel = os.path.relpath(folder, script_dir)
+            first_image_name = os.path.splitext(os.path.basename(first_image))[0] if first_image else "NoImage"
+            f.write(f"{index}, {folder_rel}, {first_image_name}, {width}x{height} pixels, {count}\n")
+    print(f"Folder count file created: {folder_count_path}")
+
+    # Create intermediate CSV files for main and float folders
+    create_folder_csv_files(folder_counts, processed_dir, script_dir)
+
+
+# ------------------------------
+# Final CSV Creation (Image Lists)
+# ------------------------------
 
 def parse_folder_locations(csv_path):
     """
     Parses the given CSV file to create a dictionary mapping folder numbers to folder paths.
+    Also checks that all folders have the same image count.
     """
     folder_dict = {}
     check_unequal_img_counts(csv_path)
@@ -22,17 +232,16 @@ def parse_folder_locations(csv_path):
             for row in reader:
                 if not row:
                     break
-
                 number, folder = int(row[0]), row[1]
                 if folder:
                     folder_dict[number] = folder
     return folder_dict
 
+
 def find_default_csvs(processed_dir):
     """
     Find exactly two CSV files: float_folder_XXXX.csv and main_folder_XXXX.csv
-    with the same XXXX.
-    Returns the list of paths if found, else None.
+    with the same XXXX. Returns the list of paths if found, else None.
     """
     float_pattern = re.compile(r'^float_folder_(\d{1,30})\.csv$')
     main_pattern = re.compile(r'^main_folder_(\d{1,30})\.csv$')
@@ -43,7 +252,6 @@ def find_default_csvs(processed_dir):
     for file in os.listdir(processed_dir):
         float_match = float_pattern.match(file)
         main_match = main_pattern.match(file)
-
         if float_match:
             float_files[float_match.group(1)] = os.path.join(processed_dir, file)
         if main_match:
@@ -53,42 +261,8 @@ def find_default_csvs(processed_dir):
     for xxxx in float_files:
         if xxxx in main_files:
             return [float_files[xxxx], main_files[xxxx]]
-
     return None
 
-def choose_file(processed_dir):
-    """
-    Allows the user to choose which CSV files to process if the default pair isn't found.
-    """
-    available_files = [f for f in os.listdir(processed_dir) if f.endswith('.csv')]
-
-    if not available_files:  # If no files found
-        print("No CSV files found, running get_folders_list.")
-        get_folders_list.write_folder_list()
-        available_files = [f for f in os.listdir(processed_dir) if f.endswith('.csv')]
-
-    print("Available CSV files:")
-    for i, file in enumerate(available_files):
-        print(f"{i + 1}: {file}")
-
-    if len(available_files) > 2:
-        response = input("Multiple CSV files found. Do you want to process all? (y/n): ").strip().lower()
-        if response == "y":
-            return [os.path.join(processed_dir, f) for f in available_files]
-        else:
-            while True:
-                try:
-                    choice = int(input("Enter the number corresponding to the desired file: ")) - 1
-                    if 0 <= choice < len(available_files):
-                        return [os.path.join(processed_dir, available_files[choice])]
-                    else:
-                        print("Invalid choice. Please enter a valid number.")
-                except ValueError:
-                    print("Invalid input. Please enter a valid number.")
-    elif len(available_files) == 2:
-        return [os.path.join(processed_dir, available_files[0])]
-    else:
-        return []
 
 def check_unequal_img_counts(csv_path):
     """
@@ -102,41 +276,11 @@ def check_unequal_img_counts(csv_path):
             for row in reader:
                 if not row:
                     break
-                img_counts.add(int(row[3]))  # Column 4 has index 3
+                img_counts.add(int(row[3]))  # Column 4 (index 3) is the file count
                 if len(img_counts) > 1:
                     print("error: unequal file count found, please fix before proceeding")
                     sys.exit(0)
 
-def natural_sort_key(s):
-    """
-    Generates a key for natural sorting of strings containing numbers.
-    """
-    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
-
-def interleave_lists(lists):
-    """
-    Interleaves multiple lists into a single list by alternating elements.
-    """
-    result = []
-    for items in zip_longest(*lists, fillvalue=None):
-        group = []
-        for item in items:
-            if item is not None:
-                group.append(item)
-        result.append(group)
-    return result
-
-def write_sorted_images(grouped_image_files, output_folder, csv_path):
-    """
-    Writes the interleaved and sorted image file paths to a new CSV in the output folder.
-    """
-    output_csv_name = f'{os.path.splitext(os.path.basename(csv_path))[0]}_list.csv'
-    with open(os.path.join(output_folder, output_csv_name), 'w', newline='') as f:
-        csv_writer = csv.writer(f)
-        # Enumerate starts at 0
-        for index, group in enumerate(grouped_image_files, start=0):
-            csv_writer.writerow([index] + group)
-    print(f"CSV written to {os.path.join(output_folder, output_csv_name)}")
 
 def sort_image_files(folder_dict):
     """
@@ -150,49 +294,68 @@ def sort_image_files(folder_dict):
         sorted_image_files.append(image_files)
     return sorted_image_files
 
+
+def write_sorted_images(grouped_image_files, output_folder, csv_path):
+    """
+    Writes the interleaved and sorted image file paths to a new CSV in the output folder.
+    """
+    output_csv_name = f'{os.path.splitext(os.path.basename(csv_path))[0]}_list.csv'
+    output_csv_path = os.path.join(output_folder, output_csv_name)
+    with open(output_csv_path, 'w', newline='') as f:
+        csv_writer = csv.writer(f)
+        for index, group in enumerate(grouped_image_files, start=0):
+            csv_writer.writerow([index] + group)
+    print(f"CSV written to {output_csv_path}")
+
+
+# ------------------------------
+# Main Process Function (Interface preserved)
+# ------------------------------
+
 def process_files():
     """
-    Main function to process CSV files and generate interleaved image lists.
+    Main function to:
+      1. Generate intermediate CSV files (folder details) by scanning the image directories.
+      2. Process these CSV files to generate interleaved image lists.
+
+    This function is the main entry point and its interface is preserved.
     """
-    # Determine the script's directory
     script_dir = os.path.dirname(os.path.abspath(__file__))
     processed_dir = os.path.join(script_dir, 'folders_processed')
     generated_dir = os.path.join(script_dir, 'generated_img_lists')
 
-    # Always call get_folders_list.write_folder_list to ensure folders are generated
-    print("Generating folders and CSV files with get_folders_list...")
-    get_folders_list.write_folder_list()
+    # Step 1: Generate intermediate CSV files (folder list details)
+    print("Generating folders and intermediate CSV files...")
+    write_folder_list()
 
-    # Attempt to find default CSVs
+    # Step 2: Find default CSV files generated above
     default_csvs = find_default_csvs(processed_dir)
-
     if default_csvs:
         print("Default CSV files found:")
         for csv_file in default_csvs:
             print(f" - {csv_file}")
         csv_paths = default_csvs
     else:
-        print("No default CSV files were generated. Please check 'get_folders_list' output.")
+        print("No default CSV files were generated. Please check the folder list generation.")
         sys.exit(1)
 
-    # Delete the old files/folder
+    # Delete the old generated_img_lists folder if it exists
     if os.path.exists(generated_dir):
-        # Delete the entire folder and its contents
         shutil.rmtree(generated_dir)
-
-    # Recreate the folder after deleting it
     os.makedirs(generated_dir)
 
+    # For each default CSV file, process it to generate an interleaved image list CSV.
     for csv_path in csv_paths:
         check_unequal_img_counts(csv_path)
         folder_dict = parse_folder_locations(csv_path)
         if not folder_dict:
-            print(f"No accessible files in the 'folders_processed' directory for {csv_path}.")
+            print(f"No accessible files found in the processed CSV: {csv_path}")
             continue  # Skip to the next CSV file
 
         sorted_image_files = sort_image_files(folder_dict)
         grouped_image_files = interleave_lists(sorted_image_files)
-
         write_sorted_images(grouped_image_files, generated_dir, csv_path)
+
+
 if __name__ == "__main__":
     process_files()

@@ -1,6 +1,3 @@
-import os
-import get_folders_list
-import calculators
 import image_display
 import make_file_lists
 from  settings import CLOCK_MODE

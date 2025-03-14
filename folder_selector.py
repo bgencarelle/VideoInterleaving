@@ -1,7 +1,6 @@
 import random
 from globals import control_data_dictionary, folder_dictionary
-from settings import (IPS, CLOCK_MODE, MTC_CLOCK, VALID_MODES,
-                      MIDI_CLOCK, MIXED_CLOCK, CLIENT_MODE, FREE_CLOCK)
+from settings import (IPS, CLOCK_MODE)
 
 
 def update_folder_selection(index, direction, float_folder_count, main_folder_count):
@@ -9,7 +8,7 @@ def update_folder_selection(index, direction, float_folder_count, main_folder_co
     rand_start = 8 * (IPS - (rand_mult * rand_mult // 2))
     main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
 
-    if CLOCK_MODE  == FREE_CLOCK:
+    if CLOCK_MODE  == 255:
         if index <= rand_start * direction or (100 * rand_start < index < 140 * rand_start):
             float_folder = 0
             main_folder = 0
