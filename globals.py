@@ -1,4 +1,6 @@
 # globals.py
+
+from settings import MAIN_FOLDER_PATH, FLOAT_FOLDER_PATH
 control_data_dictionary = {
     'Note_On': (0, 127, 0),
     'Note_Off': (None, None, None),

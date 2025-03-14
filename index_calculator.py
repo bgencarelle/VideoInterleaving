@@ -1,7 +1,7 @@
 import time
 import datetime
 from globals import control_data_dictionary
-from settings import IPS, MTC_CLOCK, MIDI_CLOCK, MIXED_CLOCK, CLIENT_MODE, FREE_CLOCK, VALID_MODES, FROM_BIRTH, CLOCK_MODE
+from settings import IPS, CLIENT_MODE, VALID_MODES, FROM_BIRTH, CLOCK_MODE
 
 clock_mode = CLOCK_MODE
 midi_mode = False

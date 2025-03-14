@@ -36,3 +36,7 @@ VALID_MODES = {
     "CLIENT_MODE": CLIENT_MODE,
     "FREE_CLOCK": FREE_CLOCK,
 }
+
+IMAGES_DIR = "images"
+MAIN_FOLDER_PATH = "images/foreground"
+FLOAT_FOLDER_PATH= "images/floatground"
