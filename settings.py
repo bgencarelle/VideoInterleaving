@@ -55,8 +55,8 @@ VALID_MODES = {
 # Image Directories and Folder Paths
 # -------------------------
 IMAGES_DIR = "images"
-MAIN_FOLDER_PATH = "images/foreground"
-FLOAT_FOLDER_PATH = "images/floatground"
+MAIN_FOLDER_PATH = "images/float"
+FLOAT_FOLDER_PATH = "images/face"
 
 # -------------------------
 # Texture Settings

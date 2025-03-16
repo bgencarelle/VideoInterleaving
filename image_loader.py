@@ -1,8 +1,8 @@
 import cv2
 from collections import deque
-
+from settings import MAIN_FOLDER_PATH, FLOAT_FOLDER_PATH
 class ImageLoader:
-    def __init__(self, main_folder_path="images/foreground", float_folder_path="images/floatground", png_paths_len=0):
+    def __init__(self, main_folder_path=MAIN_FOLDER_PATH, float_folder_path=FLOAT_FOLDER_PATH, png_paths_len=0):
         self.main_folder_path = main_folder_path
         self.float_folder_path = float_folder_path
         self.png_paths_len = png_paths_len
