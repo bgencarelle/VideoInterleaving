@@ -3,7 +3,7 @@
 # -------------------------
 # Display Mode & Performance
 # -------------------------
-FULLSCREEN_MODE = False
+FULLSCREEN_MODE = True
 
 # Frames per Second and Images Per Second (IPS)
 IPS = 30
@@ -29,7 +29,7 @@ TEST_MODE = False
 # -------------------------
 # Image Transformation Settings
 # -------------------------
-INITIAL_ROTATION = 0
+INITIAL_ROTATION = 180
 INITIAL_MIRROR = 0
 
 # -------------------------
