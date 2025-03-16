@@ -4,6 +4,8 @@ from OpenGL.GL import *
 import numpy as np
 from OpenGL.arrays import vbo
 import math
+from ctypes import c_void_p
+import settings  # Import our settings module to get the filter type
 
 # Global variables for shader programs and their cached locations.
 blend_shader_program = None
@@ -34,6 +36,7 @@ _image_size = None
 _rotation_angle = 0
 _mirror_mode = None
 
+
 def set_transform_parameters(fs_scale, fs_offset_x, fs_offset_y, image_size, rotation_angle, mirror_mode):
     """
     Sets the transformation parameters used for computing the quad vertices.
@@ -48,6 +51,7 @@ def set_transform_parameters(fs_scale, fs_offset_x, fs_offset_y, image_size, rot
     _rotation_angle = rotation_angle
     _mirror_mode = mirror_mode
 
+
 def compile_shader(source, shader_type):
     shader = glCreateShader(shader_type)
     glShaderSource(shader, source)
@@ -57,6 +61,7 @@ def compile_shader(source, shader_type):
         error = glGetShaderInfoLog(shader)
         raise RuntimeError(f"Shader compilation failed: {error}")
     return shader
+
 
 def init_blend_shader():
     global blend_shader_program, blend_shader_position_loc, blend_shader_texcoord_loc
@@ -93,6 +98,10 @@ def init_blend_shader():
     if not result:
         error = glGetProgramInfoLog(program)
         raise RuntimeError(f"Program link failed: {error}")
+    # Delete shader objects now that they are linked.
+    glDeleteShader(vertex_shader)
+    glDeleteShader(fragment_shader)
+
     blend_shader_program = program
     # Cache uniform and attribute locations.
     blend_shader_mvp_loc = glGetUniformLocation(blend_shader_program, "u_MVP")
@@ -100,6 +109,7 @@ def init_blend_shader():
     blend_shader_tex1_loc = glGetUniformLocation(blend_shader_program, "texture1")
     blend_shader_position_loc = glGetAttribLocation(blend_shader_program, "position")
     blend_shader_texcoord_loc = glGetAttribLocation(blend_shader_program, "texcoord")
+
 
 def init_simple_shader():
     global simple_shader_program, simple_shader_position_loc, simple_shader_texcoord_loc
@@ -133,6 +143,10 @@ def init_simple_shader():
     if not result:
         error = glGetProgramInfoLog(program)
         raise RuntimeError(f"Simple shader program link failed: {error}")
+    # Delete shader objects now that they are linked.
+    glDeleteShader(vertex_shader)
+    glDeleteShader(fragment_shader)
+
     simple_shader_program = program
     # Cache uniform and attribute locations.
     simple_shader_mvp_loc = glGetUniformLocation(simple_shader_program, "u_MVP")
@@ -140,21 +154,42 @@ def init_simple_shader():
     simple_shader_position_loc = glGetAttribLocation(simple_shader_program, "position")
     simple_shader_texcoord_loc = glGetAttribLocation(simple_shader_program, "texcoord")
 
+
 def create_texture(image):
     """
     Creates and initializes an OpenGL texture from the given image.
-    Uses GL_LINEAR filtering for smoother scaling and sets wrap modes.
+    Uses filtering settings based on the TEXTURE_FILTER_TYPE defined in settings.py.
     """
     texture_id = glGenTextures(1)
     glBindTexture(GL_TEXTURE_2D, texture_id)
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+
+    # Choose filtering parameters based on settings.TEXTURE_FILTER_TYPE.
+    # Acceptable values: "NEAREST", "LINEAR", "MIPMAP".
+    if settings.TEXTURE_FILTER_TYPE == "NEAREST":
+        min_filter = GL_NEAREST
+        mag_filter = GL_NEAREST
+    elif settings.TEXTURE_FILTER_TYPE == "LINEAR":
+        min_filter = GL_LINEAR
+        mag_filter = GL_LINEAR
+    elif settings.TEXTURE_FILTER_TYPE == "MIPMAP":
+        min_filter = GL_LINEAR_MIPMAP_LINEAR
+        mag_filter = GL_LINEAR
+    else:
+        # Default to linear filtering if the value is unrecognized.
+        min_filter = GL_LINEAR
+        mag_filter = GL_LINEAR
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, min_filter)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, mag_filter)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
     w, h = image.shape[1], image.shape[0]
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, image)
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, image)
+    if settings.TEXTURE_FILTER_TYPE == "MIPMAP":
+        glGenerateMipmap(GL_TEXTURE_2D)
     texture_dimensions[texture_id] = (w, h)
     return texture_id
+
 
 def update_texture(texture_id, new_image):
     """
@@ -175,6 +210,7 @@ def update_texture(texture_id, new_image):
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0)
     glDeleteBuffers(1, [pbo])
 
+
 def compute_transformed_quad():
     """
     Computes the quad vertices (with texture coordinates) after applying rotation and mirroring.
@@ -192,10 +228,10 @@ def compute_transformed_quad():
         effective_h = h * _fs_scale
     target_cx = _fs_offset_x + effective_w / 2
     target_cy = _fs_offset_y + effective_h / 2
-    pts = [(-w_scaled/2, -h_scaled/2),
-           (w_scaled/2, -h_scaled/2),
-           (w_scaled/2, h_scaled/2),
-           (-w_scaled/2, h_scaled/2)]
+    pts = [(-w_scaled / 2, -h_scaled / 2),
+           (w_scaled / 2, -h_scaled / 2),
+           (w_scaled / 2, h_scaled / 2),
+           (-w_scaled / 2, h_scaled / 2)]
     rad = math.radians(_rotation_angle)
     cosA = math.cos(rad)
     sinA = math.sin(rad)
@@ -206,16 +242,17 @@ def compute_transformed_quad():
         rotated_pts.append((rx, ry))
     final_pts = [(target_cx + x, target_cy + y) for (x, y) in rotated_pts]
     if _mirror_mode:
-        tex_coords = [(1,1), (0,1), (0,0), (1,0)]
+        tex_coords = [(1, 1), (0, 1), (0, 0), (1, 0)]
     else:
-        tex_coords = [(0,1), (1,1), (1,0), (0,0)]
+        tex_coords = [(0, 1), (1, 1), (1, 0), (0, 0)]
     vertices = np.zeros(16, dtype=np.float32)
     for i in range(4):
-        vertices[i*4 + 0] = final_pts[i][0]
-        vertices[i*4 + 1] = final_pts[i][1]
-        vertices[i*4 + 2] = tex_coords[i][0]
-        vertices[i*4 + 3] = tex_coords[i][1]
+        vertices[i * 4 + 0] = final_pts[i][0]
+        vertices[i * 4 + 1] = final_pts[i][1]
+        vertices[i * 4 + 2] = tex_coords[i][0]
+        vertices[i * 4 + 3] = tex_coords[i][1]
     return vertices
+
 
 def display_image(texture_id):
     """
@@ -230,14 +267,15 @@ def display_image(texture_id):
     glBindTexture(GL_TEXTURE_2D, texture_id)
     glUniform1i(simple_shader_texture0_loc, 0)
     glEnableVertexAttribArray(simple_shader_position_loc)
-    glVertexAttribPointer(simple_shader_position_loc, 2, GL_FLOAT, GL_FALSE, 16, quad_vbo)
+    glVertexAttribPointer(simple_shader_position_loc, 2, GL_FLOAT, GL_FALSE, 16, c_void_p(0))
     glEnableVertexAttribArray(simple_shader_texcoord_loc)
-    glVertexAttribPointer(simple_shader_texcoord_loc, 2, GL_FLOAT, GL_FALSE, 16, quad_vbo + 8)
+    glVertexAttribPointer(simple_shader_texcoord_loc, 2, GL_FLOAT, GL_FALSE, 16, c_void_p(8))
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4)
     glDisableVertexAttribArray(simple_shader_position_loc)
     glDisableVertexAttribArray(simple_shader_texcoord_loc)
     glUseProgram(0)
     quad_vbo.unbind()
+
 
 def overlay_images_fast(texture_id_main, texture_id_float, background_color=(0, 0, 0)):
     """
@@ -261,14 +299,15 @@ def overlay_images_fast(texture_id_main, texture_id_float, background_color=(0, 
     quad_vbo.set_array(vertices)
     quad_vbo.bind()
     glEnableVertexAttribArray(blend_shader_position_loc)
-    glVertexAttribPointer(blend_shader_position_loc, 2, GL_FLOAT, GL_FALSE, 16, quad_vbo)
+    glVertexAttribPointer(blend_shader_position_loc, 2, GL_FLOAT, GL_FALSE, 16, c_void_p(0))
     glEnableVertexAttribArray(blend_shader_texcoord_loc)
-    glVertexAttribPointer(blend_shader_texcoord_loc, 2, GL_FLOAT, GL_FALSE, 16, quad_vbo + 8)
+    glVertexAttribPointer(blend_shader_texcoord_loc, 2, GL_FLOAT, GL_FALSE, 16, c_void_p(8))
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4)
     glDisableVertexAttribArray(blend_shader_position_loc)
     glDisableVertexAttribArray(blend_shader_texcoord_loc)
     quad_vbo.unbind()
     glUseProgram(0)
+
 
 def setup_opengl(mvp):
     """
@@ -286,7 +325,9 @@ def setup_opengl(mvp):
     glUseProgram(simple_shader_program)
     glUniformMatrix4fv(simple_shader_mvp_loc, 1, GL_TRUE, mvp)
     glUseProgram(0)
-    glEnable(GL_TEXTURE_2D)
+    # Removed legacy GL_TEXTURE_2D enabling.
+
+    glEnable(GL_FRAMEBUFFER_SRGB)
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
     if quad_vbo is None:
