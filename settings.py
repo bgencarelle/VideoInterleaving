@@ -29,7 +29,7 @@ TEST_MODE = False
 # -------------------------
 # Image Transformation Settings
 # -------------------------
-INITIAL_ROTATION = 180
+INITIAL_ROTATION = 270
 INITIAL_MIRROR = 0
 
 # -------------------------
