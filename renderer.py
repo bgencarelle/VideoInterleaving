@@ -152,7 +152,11 @@ def create_texture(image):
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
     w, h = image.shape[1], image.shape[0]
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, image)
+    # When creating the texture:
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, image)
+    # Instead of this:
+    #glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, image)
+
     texture_dimensions[texture_id] = (w, h)
     return texture_id
 
@@ -270,6 +274,46 @@ def overlay_images_fast(texture_id_main, texture_id_float, background_color=(0, 
     quad_vbo.unbind()
     glUseProgram(0)
 
+
+def overlay_images_two_pass_like_old(texture_id_main, texture_id_float, background_color=(0, 0, 0)):
+    """
+    Replicates the OLD two-pass layering approach from image_display.py.
+    1) Clears the background color.
+    2) Draws the 'main' texture with pipeline alpha blending.
+    3) Draws the 'float' texture on top, also with pipeline alpha blending.
+
+    This does NOT use the custom blend_shader_program at all.
+    Instead, it relies on the pipeline's glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA).
+
+    Requirements:
+      - If your textures have an alpha channel, it will be honored in these two passes.
+      - The final composite should match the old behavior, including deeper blacks,
+        because there's no single-pass "mix()" that might cause double-blending.
+    """
+    global quad_vbo, _image_size
+    width, height = _image_size
+
+    # 1) Clear the screen with the chosen background color
+    glClearColor(background_color[0] / 255.0,
+                 background_color[1] / 255.0,
+                 background_color[2] / 255.0,
+                 1.0)
+    glClear(GL_COLOR_BUFFER_BIT)
+
+    # 2) Turn on pipeline alpha blending (old-school approach)
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+    # 3) Draw 'main' texture via the simple_shader_program
+    display_image(texture_id_main)  # uses simple_shader_program internally
+
+    # 4) Draw 'float' texture on top, also with pipeline blending
+    display_image(texture_id_float)
+
+    # Optionally turn blending off again (or leave it on if you have more draws):
+    glDisable(GL_BLEND)
+
+
 def setup_opengl(mvp):
     """
     Sets up the OpenGL state by initializing shaders (if not already done),
@@ -286,10 +330,11 @@ def setup_opengl(mvp):
     glUseProgram(simple_shader_program)
     glUniformMatrix4fv(simple_shader_mvp_loc, 1, GL_TRUE, mvp)
     glUseProgram(0)
-    glEnable(GL_FRAMEBUFFER_SRGB)
+    #
     glEnable(GL_TEXTURE_2D)
     glEnable(GL_BLEND)
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
+
     if quad_vbo is None:
         quad_vertices = np.zeros(16, dtype=np.float32)
         quad_vbo = vbo.VBO(quad_vertices, usage=GL_DYNAMIC_DRAW)
