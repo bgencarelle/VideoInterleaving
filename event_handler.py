@@ -1,37 +1,34 @@
-def toggle_fullscreen(current_fullscreen_status):
-    # Lazy import to avoid circular dependency.
-    import image_display
-    new_fullscreen = not current_fullscreen_status
-    image_display.display_init(new_fullscreen)
-    return new_fullscreen
+import pygame
 
-def event_check(fullscreen):
-    import pygame
-    import image_display
-    width, height = image_display.image_size
+def toggle_fullscreen(current_fullscreen_status):
+    return not current_fullscreen_status
+
+def event_check(events, fullscreen, state):
+    width, height = state.image_size
     aspect_ratio_local = width / height
-    for event in pygame.event.get():
+    for event in events:
         if event.type == pygame.QUIT:
-            image_display.run_mode = False
+            state.run_mode = False
         elif event.type == pygame.KEYDOWN:
             if event.key == pygame.K_q:
-                image_display.run_mode = False
+                state.run_mode = False
                 pygame.quit()
-            if event.key == pygame.K_f:
+            elif event.key == pygame.K_f:
                 fullscreen = toggle_fullscreen(fullscreen)
-            if event.key == pygame.K_r:
-                image_display.rotation_angle = (image_display.rotation_angle + 45) % 360
-                image_display.display_init(fullscreen)
-            if event.key == pygame.K_m:
-                image_display.mirror_mode = 1 - image_display.mirror_mode
-                image_display.display_init(fullscreen)
+                state.needs_update = True
+            elif event.key == pygame.K_r:
+                # Update rotation immediately.
+                state.rotation = (state.rotation + 45) % 360
+                state.needs_update = True
+            elif event.key == pygame.K_m:
+                state.mirror = 1 - state.mirror
+                state.needs_update = True
         elif event.type == pygame.VIDEORESIZE:
             new_width, new_height = event.size
             if new_width / new_height > aspect_ratio_local:
                 new_width = int(new_height * aspect_ratio_local)
-                image_display.image_size = (new_width, new_height)
             else:
                 new_height = int(new_width / aspect_ratio_local)
-                image_display.image_size = (new_width, new_height)
-            image_display.display_init(fullscreen)
+            state.image_size = (new_width, new_height)
+            state.needs_update = True
     return fullscreen

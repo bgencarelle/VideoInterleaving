@@ -4,7 +4,7 @@ from  settings import CLOCK_MODE
 
 def main(clock=CLOCK_MODE):
     make_file_lists.process_files()
-    image_display.display_and_run(clock)
+    image_display.run_display(clock)
 
 
 if __name__ == "__main__":
