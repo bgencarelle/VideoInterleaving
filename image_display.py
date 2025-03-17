@@ -45,7 +45,7 @@ def run_display(clock_source=CLOCK_MODE):
     update_folder_selection(index, direction, float_folder_count, main_folder_count)
 
     image_buffer = ImageLoaderBuffer(BUFFER_SIZE)
-    with ThreadPoolExecutor(max_workers=1) as executor:
+    with ThreadPoolExecutor(max_workers=8) as executor:
         main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
         for i in range(BUFFER_SIZE):
             buf_idx = (index + i) % png_paths_len
