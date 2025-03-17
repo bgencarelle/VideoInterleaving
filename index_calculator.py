@@ -65,14 +65,17 @@ def set_clock_mode(mode=None):
 def calculate_free_clock_index(total_images, pingpong=True):
     elapsed = time.time() - launch_time
     if pingpong:
-        period = 2 * (total_images - 1)
+        period = 2 * total_images  # for total_images=5 => period=10
         raw_index = int(elapsed * IPS) % period
-        if raw_index >= total_images:
-            index = period - raw_index
-            direction = -1
-        else:
+
+        if raw_index < total_images:
+            # Forward region
             index = raw_index
             direction = 1
+        else:
+            # Backward region
+            index = (2 * total_images - 1) - raw_index
+            direction = -1
     else:
         index = int(elapsed * IPS) % total_images
         direction = 1
