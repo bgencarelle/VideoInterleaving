@@ -72,7 +72,7 @@ pip install --upgrade pip
 pip install -r requirements.txt
 
 # --------------------------------------------
-# Create runPortrait.sh in the user's HOME directory
+# Create runPortrait.sh in the user's HOME  directory
 # --------------------------------------------
 RUN_SCRIPT_PATH="$HOME/runPortrait.sh"
 echo ">>> Creating $RUN_SCRIPT_PATH..."
