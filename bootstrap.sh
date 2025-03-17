@@ -37,7 +37,21 @@ echo ">>> Project directory: $PROJECT_DIR"
 # --------------------------------------------
 echo ">>> Resetting Git state..."
 git reset --hard
+
+# Capture current commit hash before pull
+OLD_COMMIT=$(git rev-parse HEAD)
+
+# Perform the pull
 git pull
+
+# Capture commit hash after pull
+NEW_COMMIT=$(git rev-parse HEAD)
+
+# If a new commit was pulled, re-run bootstrap.sh using the updated script
+if [ "$OLD_COMMIT" != "$NEW_COMMIT" ]; then
+    echo ">>> New version detected. Re-running bootstrap.sh..."
+    exec "$0"
+fi
 
 # --------------------------------------------
 # Remove old virtual environment (if any)
