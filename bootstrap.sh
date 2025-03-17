@@ -46,7 +46,7 @@ rm -rf .PyIntervenv
 echo ">>> Creating virtual environment..."
 python3 -m venv .PyIntervenv
 
-echo ">>> Activating virtual environment and installing dependencies..."
+echo ">>> Activating virtual environment and installing dependencies.. ."
 source .PyIntervenv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
