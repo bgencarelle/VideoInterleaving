@@ -1,58 +1,63 @@
 #!/usr/bin/env python3
 import os
 import sys
-import concurrent.futures
-from PIL import Image
+import cv2
 import webp
-
+from multiprocessing import Pool
 
 def convert_image(source_file, dest_file):
     """
-    Converts an image to a lossless WebP file with an alpha channel using the official webp library.
-    If the file isn’t a valid image, it is skipped.
+    Opens an image using OpenCV, ensures it has an alpha channel (RGBA),
+    and writes it as a lossless WebP file using the official webp library.
     """
+    # Read image using OpenCV (including alpha if present)
+    img = cv2.imread(source_file, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        print(f"Skipping non-image or unreadable file: {source_file}")
+        return
+
+    # Ensure the image has an alpha channel.
+    # If the image is grayscale, convert to RGBA.
+    # If it is BGR (3 channels), convert to RGBA.
+    # If it is BGRA (4 channels), convert from BGRA to RGBA.
+    if len(img.shape) == 2:
+        img_rgba = cv2.cvtColor(img, cv2.COLOR_GRAY2RGBA)
+    elif img.shape[2] == 3:
+        img_rgba = cv2.cvtColor(img, cv2.COLOR_BGR2RGBA)
+    elif img.shape[2] == 4:
+        img_rgba = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
+    else:
+        print(f"Unexpected image shape: {img.shape} in file {source_file}")
+        return
+
     try:
-        # Open the image using Pillow and always convert to RGBA
-        img = Image.open(source_file).convert("RGBA")
-
-        # Create a WebP picture from the PIL image
-        pic = webp.WebPPicture.from_pil(img)
-        # Set up a configuration with lossless encoding enabled.
-        config = webp.WebPConfig.new(preset=webp.WebPPreset.PHOTO, quality=80)
-        config.lossless = 1  # Enable lossless encoding
-
-        # Encode the image to WebP
-        encoded = pic.encode(config)
-        if encoded is not None:
-            with open(dest_file, "wb") as f:
-                f.write(encoded.buffer())
+        # Write the image using the official webp library.
+        # Using lossless encoding with quality 80.
+        success = webp.imwrite(dest_file, img_rgba, lossless=1, quality=80)
+        if success:
             print(f"Converted: {source_file} -> {dest_file}")
         else:
-            print(f"Failed to encode: {source_file}")
+            print(f"Failed to write: {dest_file}")
     except Exception as e:
         print(f"Error converting {source_file}: {e}")
 
-
-def convert_task(task):
+def process_task(task):
     source_file, dest_file = task
     convert_image(source_file, dest_file)
 
-
 def main(source_directory):
-    # Validate the source directory.
     if not os.path.isdir(source_directory):
         print(f"Error: {source_directory} is not a valid directory.")
         sys.exit(1)
 
-    # Define the destination directory by appending '_webp' to the source folder name.
+    # Define destination directory (mirrored structure)
     abs_source = os.path.abspath(source_directory)
     parent_dir = os.path.dirname(abs_source)
     base_name = os.path.basename(abs_source)
     dest_directory = os.path.join(parent_dir, base_name + "_webp")
-
     print(f"Creating mirrored directory structure in: {dest_directory}")
 
-    # Build a list of conversion tasks and mirror the directory structure.
+    # Build list of tasks (source, destination) and recreate the directory structure.
     tasks = []
     for root, dirs, files in os.walk(source_directory):
         rel_path = os.path.relpath(root, source_directory)
@@ -65,16 +70,14 @@ def main(source_directory):
 
     print(f"Found {len(tasks)} files to process.")
 
-    # Use ProcessPoolExecutor for parallel conversion.
-    with concurrent.futures.ProcessPoolExecutor() as executor:
-        executor.map(convert_task, tasks)
-
+    # Use multiprocessing Pool to process files in parallel.
+    with Pool() as pool:
+        pool.map(process_task, tasks)
 
 if __name__ == "__main__":
-    # Use command-line argument if provided; otherwise, prompt for directory.
+    # Prompt for the source directory if not provided via command-line.
     if len(sys.argv) == 2:
         source_dir = sys.argv[1]
     else:
         source_dir = input("Please enter the source directory: ").strip()
-
     main(source_dir)
