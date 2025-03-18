@@ -8,20 +8,16 @@ import webp
 
 def convert_image(source_file, dest_file):
     """
-    Converts an image to a lossless WebP file using the official webp library.
+    Converts an image to a lossless WebP file with an alpha channel using the official webp library.
     If the file isn’t a valid image, it is skipped.
     """
     try:
-        # Open the image using Pillow
-        img = Image.open(source_file)
-        # Ensure image is in an appropriate mode (RGB or RGBA)
-        if img.mode not in ("RGB", "RGBA"):
-            img = img.convert("RGB")
+        # Open the image using Pillow and always convert to RGBA
+        img = Image.open(source_file).convert("RGBA")
 
         # Create a WebP picture from the PIL image
         pic = webp.WebPPicture.from_pil(img)
         # Set up a configuration with lossless encoding enabled.
-        # You can adjust the quality or preset as needed.
         config = webp.WebPConfig.new(preset=webp.WebPPreset.PHOTO, quality=80)
         config.lossless = 1  # Enable lossless encoding
 
@@ -38,7 +34,6 @@ def convert_image(source_file, dest_file):
 
 
 def convert_task(task):
-    # Unpack task tuple and convert the image.
     source_file, dest_file = task
     convert_image(source_file, dest_file)
 
@@ -76,7 +71,10 @@ def main(source_directory):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: python convert_to_webp.py <source_directory>")
-        sys.exit(1)
-    main(sys.argv[1])
+    # Use command-line argument if provided; otherwise, prompt for directory.
+    if len(sys.argv) == 2:
+        source_dir = sys.argv[1]
+    else:
+        source_dir = input("Please enter the source directory: ").strip()
+
+    main(source_dir)
