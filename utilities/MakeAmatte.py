@@ -12,9 +12,14 @@ transparency_folder = input("Enter the path to the transparency folder: ").strip
 target_folder = input("Enter the path to the target folder (source images): ").strip()
 invert_input = input("Do you want to invert the transparency? (y/n): ").strip().lower()
 invert = invert_input in ("y", "yes")
+test_mode_input = input("Do you want to run in test mode? (y/n): ").strip().lower()
+test_mode = test_mode_input in ("y", "yes")
 
-# Destination root – we append '_snip' to the target folder name.
-dest_root = target_folder.rstrip(os.sep) + "_snip"
+# Destination root – if inverted mode then append _snip_inv, else _snip to the target folder name.
+if invert:
+    dest_root = target_folder.rstrip(os.sep) + "_snip_inv"
+else:
+    dest_root = target_folder.rstrip(os.sep) + "_snip"
 
 # Supported image extensions (including WebP)
 IMG_EXTS = ('.png', '.jpg', '.jpeg', '.webp')
@@ -32,7 +37,7 @@ transparency_paths = [os.path.join(transparency_folder, f) for f in transparency
 def process_file(src_path, file, current_root, transparency_path, invert):
     """
     Process one target image by transferring the alpha channel from the given transparency image.
-    If invert flag is set, the alpha channel is inverted.
+    If the invert flag is set, the alpha channel is inverted.
     """
     try:
         # Open the target image and convert it to RGBA.
@@ -75,6 +80,9 @@ def process_file(src_path, file, current_root, transparency_path, invert):
 
 # --- Process images using ThreadPoolExecutor ---
 tasks = []
+# Flag to track if we've processed the first image (for test mode).
+processed_one = False
+
 with ThreadPoolExecutor() as executor:
     for current_root, dirs, files in os.walk(target_folder):
         sorted_files = sorted([f for f in files if f.lower().endswith(IMG_EXTS)], key=natural_sort_key)
@@ -83,6 +91,13 @@ with ThreadPoolExecutor() as executor:
             src_path = os.path.join(current_root, file)
             transparency_path = transparency_paths[i % len(transparency_paths)]
             tasks.append(executor.submit(process_file, src_path, file, current_root, transparency_path, invert))
+            # If test mode is enabled, process only the first image.
+            if test_mode:
+                processed_one = True
+                break
+        if test_mode and processed_one:
+            break
+
     for future in as_completed(tasks):
         try:
             future.result()
