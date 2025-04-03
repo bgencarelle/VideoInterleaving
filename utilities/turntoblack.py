@@ -1,97 +1,74 @@
+"""
+turntoblack.py
+
+Restores perceptual appearance of images whose alpha masks erased dark RGB data,
+by compositing the image over black and setting full opacity.
+
+Two modes:
+1. Script mode (asks user for input directory)
+2. Callable mode (from another script: turntoblack.process_folder(...))
+"""
+
 import os
-from PIL import Image, features, ImageFilter, ImageChops
+from PIL import Image
 import numpy as np
-from scipy.ndimage import binary_dilation
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Optional
 
-# Check if WebP is supported
-webp_supported = features.check('webp')
-if not webp_supported:
-    print("Warning: WebP support is not available in your Pillow installation.")
-    print("WebP files will be skipped. To process WebP images, please install Pillow with WebP support.")
-    # Remove .webp from supported extensions
-    supported_extensions = ('.png', '.tif', '.tiff')
-else:
-    supported_extensions = ('.png', '.tif', '.tiff', '.webp')
+def recover_image(filepath: str, output_folder: str) -> Optional[str]:
+    try:
+        with Image.open(filepath).convert("RGBA") as img:
+            data = np.array(img)
+            r, g, b, a = data[..., 0], data[..., 1], data[..., 2], data[..., 3]
+            alpha_norm = a.astype(np.float32) / 255.0
 
-# Prompt the user for the input folder path
-input_folder = input("Enter the path to your input folder containing images: ").strip()
+            # Composite RGB over black
+            r_new = (r.astype(np.float32) * alpha_norm).clip(0, 255).astype(np.uint8)
+            g_new = (g.astype(np.float32) * alpha_norm).clip(0, 255).astype(np.uint8)
+            b_new = (b.astype(np.float32) * alpha_norm).clip(0, 255).astype(np.uint8)
 
-# Ensure the input folder exists
-if not os.path.isdir(input_folder):
-    print(f"The folder '{input_folder}' does not exist. Please check the path and try again.")
-    exit(1)
+            new_data = np.stack([r_new, g_new, b_new, np.full_like(a, 255)], axis=-1)
+            out_img = Image.fromarray(new_data, "RGBA")
 
-# Define the output folder by appending '_alpha' to the input folder name
-output_folder = f"{input_folder.rstrip(os.sep)}_alpha"
+            # Save to output
+            os.makedirs(output_folder, exist_ok=True)
+            output_path = os.path.join(output_folder, os.path.basename(filepath))
+            out_img.save(output_path)
+            return output_path
 
-# Create the output folder if it doesn't exist
-if not os.path.exists(output_folder):
-    os.makedirs(output_folder)
+    except Exception as e:
+        print(f"Error processing {filepath}: {e}")
+        return None
 
-# Initialize a counter for processed images
-processed_images = 0
+def process_folder(input_folder: str, output_folder: Optional[str] = None, max_workers: int = 8, dry_run: bool = False):
+    if output_folder is None:
+        output_folder = f"{input_folder}_blackrecovered"
+    os.makedirs(output_folder, exist_ok=True)
 
-# Process each image in the input folder
-for filename in os.listdir(input_folder):
-    file_path = os.path.join(input_folder, filename)
-    if os.path.isfile(file_path) and filename.lower().endswith(supported_extensions):
-        input_path = file_path
-        output_path = os.path.join(output_folder, filename)
+    files = [os.path.join(input_folder, f) for f in os.listdir(input_folder)
+             if f.lower().endswith((".png", ".webp"))]
 
-        print(f"Processing file: {input_path}")
-
-        try:
-            # Open the image and ensure it has an alpha channel
-            img = Image.open(input_path).convert('RGBA')
-            r, g, b, a = img.split()
-
-            # Convert channels to NumPy arrays
-            r_np = np.array(r)
-            g_np = np.array(g)
-            b_np = np.array(b)
-            a_np = np.array(a)
-
-            # Create a mask where alpha > 0 (visible pixels)
-            alpha_mask = a_np > 0
-
-            # Set RGB values to 0 where alpha > 0 (visible pixels become black)
-            r_np[alpha_mask] = 0
-            g_np[alpha_mask] = 0
-            b_np[alpha_mask] = 0
-
-            # Create a soft transition near the border of the alpha channel
-            # Erode the alpha mask to find the inner area
-            eroded_mask = binary_dilation(alpha_mask, iterations=-5)
-            edge_mask = alpha_mask & (~eroded_mask)
-
-            # Reduce alpha values by 25% in the edge area for soft transition
-            a_np[edge_mask] = (a_np[edge_mask] * 0.75).astype(a_np.dtype)
-
-            # Reconstruct the image with modified channels
-            r_new = Image.fromarray(r_np)
-            g_new = Image.fromarray(g_np)
-            b_new = Image.fromarray(b_np)
-            a_new = Image.fromarray(a_np)
-
-            img_new = Image.merge('RGBA', (r_new, g_new, b_new, a_new))
-
-            # Handle WebP alpha saving issue
-            output_extension = os.path.splitext(output_path)[1].lower()
-            if output_extension == '.webp':
-                # Convert to 'RGBa' mode for WebP
-                img_new = img_new.convert('RGBa')
-                img_new.save(output_path, format='WEBP')
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = []
+        for f in files:
+            if dry_run:
+                print(f"Would recover: {f}")
             else:
-                img_new.save(output_path)
+                futures.append(executor.submit(recover_image, f, output_folder))
 
-            print(f"Saved modified image to: {output_path}")
-            processed_images += 1
+        if not dry_run:
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    print(f"Recovered: {os.path.basename(result)}")
 
-        except Exception as e:
-            print(f"Error processing file '{input_path}': {e}")
-
-# Check if any images were processed
-if processed_images == 0:
-    print("No images were processed. Please check if the input folder contains supported image files.")
-else:
-    print(f"Processing complete. {processed_images} images were processed and saved in: {output_folder}")
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1:
+        dry_run = '--dry-run' in sys.argv
+        input_paths = [arg for arg in sys.argv[1:] if not arg.startswith('--')]
+        for input_path in input_paths:
+            process_folder(input_path, max_workers=os.cpu_count(), dry_run=dry_run)
+    else:
+        input_path = input("Enter the path to the folder containing the images: ").strip()
+        process_folder(input_path, max_workers=os.cpu_count())

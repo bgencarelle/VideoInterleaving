@@ -46,7 +46,7 @@ OUTPUT_FOLDER = Path("alpha")
 MODEL = "birefnet-portrait"
 
 def enhance_contrast(image_path: Path, output_path: Path, contrast_factor=CONTRAST_FACTOR):
-    """
+    """ac 
     Opens an image, applies contrast enhancement, and saves it as PNG.
     """
     try:

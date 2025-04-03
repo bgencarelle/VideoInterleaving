@@ -4,11 +4,21 @@ from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
 import threading
 
+
 def overlay_images(image_a_path, image_b_path, output_path_a_over_b, output_path_b_over_a):
-    # Open images
-    image_a = Image.open(image_a_path).convert("RGBA").resize((810, 1080))
-    image_b = Image.open(image_b_path).convert("RGBA").resize((810, 1080))
-    
+    # Open images and convert to RGBA
+    image_a = Image.open(image_a_path).convert("RGBA")
+    image_b = Image.open(image_b_path).convert("RGBA")
+
+    # Determine the target size using the larger dimensions from both images
+    target_width = max(image_a.width, image_b.width)
+    target_height = max(image_a.height, image_b.height)
+    target_size = (target_width, target_height)
+
+    # Resize both images to the target size
+    image_a = image_a.resize(target_size)
+    image_b = image_b.resize(target_size)
+
     # Overlay A over B
     a_over_b = Image.alpha_composite(image_b, image_a)
     print(f"Generating: {output_path_a_over_b}")
@@ -18,6 +28,7 @@ def overlay_images(image_a_path, image_b_path, output_path_a_over_b, output_path
     b_over_a = Image.alpha_composite(image_a, image_b)
     print(f"Generating: {output_path_b_over_a}")
     b_over_a.save(output_path_b_over_a, format="WEBP", quality=99)
+
 
 def prompt_user(prompt_message):
     response = input(f"{prompt_message} (y/n): ").strip().lower()
