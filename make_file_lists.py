@@ -17,7 +17,7 @@ import csv
 import sys
 import shutil
 from itertools import zip_longest
-from PIL import Image
+import cv2  # Replace PIL with OpenCV
 from collections import defaultdict
 
 import settings  # settings.py should define IMAGES_DIR, MAIN_FOLDER_PATH, FLOAT_FOLDER_PATH
@@ -37,24 +37,34 @@ def get_subdirectories(path):
 
 
 def contains_image_files(path):
-    """Check if a directory contains any PNG or WEBP files."""
+    """Check if a directory contains any PNG, WEBP, or JXL files."""
     try:
-        return any(file.lower().endswith(('.png', '.webp')) for file in os.listdir(path))
+        return any(file.lower().endswith(('.png', '.webp', '.jxl')) for file in os.listdir(path))
     except FileNotFoundError:
         return False
 
 
 def count_image_files(path):
-    """Count the number of PNG and WEBP files in a directory."""
+    """Count the number of PNG, WEBP, or JXL files in a directory."""
     try:
-        return len([file for file in os.listdir(path) if file.lower().endswith(('.png', '.webp'))])
+        return len([file for file in os.listdir(path) if file.lower().endswith(('.png', '.webp', '.jxl'))])
     except FileNotFoundError:
         return 0
 
 
-def has_alpha_channel(image):
-    """Determine if an image has an alpha channel."""
-    return image.mode in ('RGBA', 'LA') or (image.mode == 'P' and 'transparency' in image.info)
+def has_alpha_channel(image_path):
+    """Determine if an image (given by path) has an alpha channel using OpenCV."""
+    try:
+        img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            return False  # Image failed to load
+        return img.shape[2] == 4  # Check for 4 channels (RGBA)
+    except cv2.error as e:
+        print(f"OpenCV error checking alpha: {e}")
+        return False
+    except Exception as e:
+        print(f"Error checking alpha channel for {image_path}: {e}")
+        return False
 
 
 def natural_sort_key(s):
@@ -111,12 +121,17 @@ def create_folder_csv_files(folder_counts, processed_dir, script_dir):
                     if first_png:
                         try:
                             image_path = os.path.join(script_dir, folder_rel, first_png)
-                            with Image.open(image_path) as first_png_image:
+                            img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+                            if img is None:
+                                print(f"Error: Could not read image {first_png} in folder {folder_rel} with OpenCV.")
+                                alpha_match = 'Error'
+                                file_extension = 'Unknown'
+                            else:
                                 file_extension = os.path.splitext(first_png)[1]
                                 if has_alpha:
-                                    # Compare first image channels if possible.
-                                    alpha_match = 'Match' if first_png_image.size == first_png_image.split()[
-                                        -1].size else 'NoMatch'
+                                    # OpenCV doesn't directly give "size" of alpha channel; compare channels if possible
+                                    alpha_channels = cv2.split(img)[-1]  # Get alpha channel
+                                    alpha_match = 'Match' if alpha_channels.shape[:2] == img.shape[:2] else 'NoMatch'
                                 else:
                                     alpha_match = 'NoAlpha'
                         except Exception as e:
@@ -145,7 +160,7 @@ def create_folder_csv_files(folder_counts, processed_dir, script_dir):
 def write_folder_list():
     """
     Scans the two image directories defined in settings (MAIN_FOLDER_PATH and FLOAT_FOLDER_PATH)
-    recursively for PNG and WEBP files, collects folder details, and writes intermediate CSV files.
+    recursively for PNG, WEBP, and JXL files, collects folder details, and writes intermediate CSV files.
     """
     # Determine the script's directory
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -185,13 +200,17 @@ def write_folder_list():
     folder_counts = []
 
     for folder in folder_dict.values():
-        image_files = [f for f in os.listdir(folder) if f.lower().endswith(('.png', '.webp'))]
+        image_files = [f for f in os.listdir(folder) if f.lower().endswith(('.png', '.webp', '.jxl'))]
         if image_files:
             first_image = image_files[0]
             try:
-                with Image.open(os.path.join(folder, first_image)) as img:
-                    width, height = img.size
-                    has_alpha = has_alpha_channel(img)
+                img = cv2.imread(os.path.join(folder, first_image), cv2.IMREAD_UNCHANGED)
+                if img is None:
+                    print(f"Error: Could not read image {first_image} in folder {folder} with OpenCV.")
+                    width, height, has_alpha = 0, 0, False
+                else:
+                    height, width = img.shape[:2]  # OpenCV returns height first
+                    has_alpha = has_alpha_channel(os.path.join(folder, first_image))
             except Exception as e:
                 print(f"Error processing image {first_image} in folder {folder}: {e}")
                 first_image = None
@@ -289,7 +308,7 @@ def sort_image_files(folder_dict):
     sorted_image_files = []
     for number in sorted(folder_dict.keys()):
         folder = folder_dict[number]
-        image_files = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(('.png', '.webp'))]
+        image_files = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(('.png', '.webp', '.jxl'))]
         image_files.sort(key=natural_sort_key)
         sorted_image_files.append(image_files)
     return sorted_image_files
