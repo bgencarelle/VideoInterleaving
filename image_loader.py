@@ -19,7 +19,7 @@ class ImageLoader:
         Loads an image from the given path.
         Supported formats: .webp and .png.
         """
-        if image_path.lower().endswith(('.webp', '.png', '.jpg', '.jxl')):
+        if image_path.lower().endswith(('.webp', '.png')):
             image_np = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
             if image_np is None:
                 raise ValueError(f"Failed to load image: {image_path}")
