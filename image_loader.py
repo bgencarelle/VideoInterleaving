@@ -39,16 +39,17 @@ class ImageLoader:
 
 class TripleImageBuffer:
     def __init__(self):
-        # Initialize three slots as (target_index, image_pair) tuples.
+        # Initialize three slots as (index, image_pair) tuples.
+        # Initially, all indices are set to None.
         self.buffers = [(None, None) for _ in range(3)]
         self.front = 0      # Index of the buffer currently being displayed.
         self.pending = None # Index of the newly loaded buffer.
         self.lock = threading.Lock()
 
-    def update(self, target_index, images):
+    def update(self, index, images):
         """
         Called by the producer after loading a new pair of images.
-        Writes (target_index, images) into an idle buffer slot and marks it as pending.
+        Writes (index, images) into an idle buffer slot and marks it as pending.
         """
         with self.lock:
             idle = None
@@ -59,26 +60,28 @@ class TripleImageBuffer:
             if idle is None:
                 # Fallback: if no idle slot is found, override the front buffer.
                 idle = self.front
-            self.buffers[idle] = (target_index, images)
+            self.buffers[idle] = (index, images)
             self.pending = idle
 
     def get(self, current_index):
         """
         Called by the consumer (display loop) to retrieve the latest image pair.
-        If a new pending buffer is available and its target index is within tolerance
+        If a new pending buffer is available and its stored index is within tolerance
         of the current index, it swaps it in as the front buffer.
-        Returns the image pair from the front buffer if its target index is within tolerance;
+        Returns the image pair from the front buffer if its stored index is within tolerance;
         otherwise, returns None.
         """
         tolerance = 1  # Accept buffered images within ±1 of current_index.
         with self.lock:
-            # Check if the pending buffer is close enough.
+            # Check if the pending buffer is available and valid.
             if self.pending is not None:
                 stored_index, _ = self.buffers[self.pending]
-                if abs(stored_index - current_index) <= tolerance:
+                if stored_index is not None and abs(stored_index - current_index) <= tolerance:
                     self.front = self.pending
                     self.pending = None
             stored_index, images = self.buffers[self.front]
+            if stored_index is None:
+                return None
             if abs(stored_index - current_index) <= tolerance:
                 return images
             else:
