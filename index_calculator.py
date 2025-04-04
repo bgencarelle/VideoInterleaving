@@ -6,7 +6,7 @@ from settings import IPS, CLIENT_MODE, VALID_MODES, FROM_BIRTH, CLOCK_MODE
 
 clock_mode = CLOCK_MODE
 midi_mode = False
-launch_time = None
+launch_time = 0.00000000
 
 # --- Helper for timezone offsets ---
 TIMEZONE_OFFSETS = {

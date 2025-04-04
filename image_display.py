@@ -28,7 +28,7 @@ def run_display(clock_source=CLOCK_MODE):
     print("Image size:", state.image_size)
 
     # Create and configure an ImageLoader instance.
-    from image_loader import ImageLoader, TripleImageBuffer
+    from image_loader import ImageLoader, MultiImageBuffer
     image_loader = ImageLoader()
     image_loader.set_paths(main_folder_path, float_folder_path)
     image_loader.set_png_paths_len(png_paths_len)
@@ -45,7 +45,7 @@ def run_display(clock_source=CLOCK_MODE):
     update_folder_selection(index, None, float_folder_count, main_folder_count)
 
     # Initialize the triple buffer.
-    triple_buffer = TripleImageBuffer()
+    triple_buffer = MultiImageBuffer()
 
     # Load the initial image pair synchronously and update the triple buffer.
     main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
