@@ -85,7 +85,7 @@ def run_display(clock_source=CLOCK_MODE):
         # FPS printer function.
         def print_fps(frame_counter, start_time, target_fps):
             elapsed_time = pygame.time.get_ticks() - start_time
-            if elapsed_time >= 1000:  # Every second.
+            if elapsed_time >= 10000:  # Every 30 seconds.
                 actual_fps = frame_counter / (elapsed_time / 1000.0)
                 print("index:", index)
                 print(f"[Display Rate] {actual_fps:.2f} frames per second")
@@ -138,7 +138,7 @@ def run_display(clock_source=CLOCK_MODE):
             renderer.overlay_images_two_pass_like_old(texture_id1, texture_id2, background_color=(9.0, 10.0, 10.0))
 
             pygame.display.flip()
-            print(index)
+            #print(index)
             vid_clock.tick(FPS)
 
             # Update frame counter and print FPS.
