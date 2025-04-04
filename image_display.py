@@ -49,17 +49,17 @@ def run_display(clock_source=CLOCK_MODE):
     # Load the initial image pair synchronously and update the triple buffer.
     main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
     main_image, float_image = image_loader.load_images(index, main_folder, float_folder)
-    triple_buffer.update((main_image, float_image))
+    triple_buffer.update(index, (main_image, float_image))
 
     # Create textures using the initial images.
     texture_id1 = renderer.create_texture(main_image)
     texture_id2 = renderer.create_texture(float_image)
 
     # Define a helper callback to update the triple buffer when asynchronous loading completes.
-    def async_load_callback(fut):
+    def async_load_callback(fut, target_index):
         try:
             result = fut.result()
-            triple_buffer.update(result)
+            triple_buffer.update(target_index, result)
         except Exception as e:
             print("Error in async image load:", e)
 
@@ -67,7 +67,7 @@ def run_display(clock_source=CLOCK_MODE):
     with ThreadPoolExecutor(max_workers=4) as executor:
         next_index = (index + direction) % png_paths_len
         future = executor.submit(image_loader.load_images, next_index, main_folder, float_folder)
-        future.add_done_callback(async_load_callback)
+        future.add_done_callback(lambda fut: async_load_callback(fut, next_index))
 
         # Frame rate measurement initialization.
         frame_counter = 0
@@ -101,22 +101,22 @@ def run_display(clock_source=CLOCK_MODE):
                 update_folder_selection(index, direction, float_folder_count, main_folder_count)
                 main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
 
-                # Retrieve the latest image pair from the triple buffer.
-                result = triple_buffer.get()
+                # Retrieve the latest image pair from the triple buffer,
+                # only using buffered images.
+                result = triple_buffer.get(index)
                 if result is not None:
                     main_image, float_image = result
                     renderer.update_texture(texture_id1, main_image)
                     renderer.update_texture(texture_id2, float_image)
                 else:
-                    # Fallback in case the triple buffer is empty.
-                    main_image, float_image = image_loader.load_images(index, main_folder, float_folder)
-                    renderer.update_texture(texture_id1, main_image)
-                    renderer.update_texture(texture_id2, float_image)
+                    # Print a log when the buffer is missed.
+                    print(f"Buffer missed for index {index}")
+                    # We keep displaying the current textures without updating.
 
                 # Schedule asynchronous loading for the subsequent image pair.
                 next_index = (index + direction) % png_paths_len
                 future = executor.submit(image_loader.load_images, next_index, main_folder, float_folder)
-                future.add_done_callback(async_load_callback)
+                future.add_done_callback(lambda fut: async_load_callback(fut, next_index))
 
             # Render the images (using your preferred overlay method).
             renderer.overlay_images_two_pass_like_old(texture_id1, texture_id2, background_color=(9.0, 10.0, 10.0))
