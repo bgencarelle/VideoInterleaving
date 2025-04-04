@@ -20,7 +20,6 @@ TIMEZONE_OFFSETS = {
     "PDT": -7,
 }
 
-
 def get_timezone(tz_str):
     """
     Returns a datetime.timezone object based on the given timezone abbreviation.
@@ -31,7 +30,6 @@ def get_timezone(tz_str):
     offset_hours = TIMEZONE_OFFSETS[tz_str]
     return datetime.timezone(datetime.timedelta(hours=offset_hours))
 
-
 def set_launch_time(from_birth=False):
     global launch_time
     if from_birth:
@@ -41,9 +39,7 @@ def set_launch_time(from_birth=False):
     else:
         launch_time = time.time()
 
-
 set_launch_time(from_birth=FROM_BIRTH)
-
 
 def set_clock_mode(mode=None):
     global clock_mode, midi_mode
@@ -64,55 +60,60 @@ def set_clock_mode(mode=None):
     midi_mode = True if (clock_mode < CLIENT_MODE) else False
     print("Clock mode set to", list(VALID_MODES.keys())[list(VALID_MODES.values()).index(clock_mode)])
 
-
 def calculate_free_clock_index(total_images, pingpong=True):
     """
     Calculates the current index based on the absolute time elapsed since launch.
-    This method produces an index that is fully determined by the elapsed time,
-    ensuring that different devices starting at the same moment will be synchronized.
+    This method produces an index that is fully determined by elapsed time,
+    ensuring that different devices started at the same moment will be synchronized.
 
-    For pingpong mode, the index follows:
-      0, 1, 2, ... total_images-1, total_images-1, total_images-2, ... 1, 0, and then repeats.
+    For pingpong mode, we set:
+      period = 2 * total_images,
+      and fold the index as follows:
+        If mod_index < total_images:
+          index = mod_index
+        Else:
+          index = (2 * total_images - 1) - mod_index
+
+    This ensures both endpoints (0 and total_images-1) each get repeated once:
+      0,1,2,...,N-1, N-1,N-2,...,1,0,0,1,2,...
     """
     elapsed = time.time() - launch_time
-    # Compute the raw progression as the number of indices advanced.
     raw_index = math.floor(elapsed * IPS)
 
     if pingpong:
-        # With endpoints repeated, period is 2 * total_images.
-        period = 2 * total_images
-        mod_index = raw_index % period
-        if mod_index < total_images:
-            index = mod_index
-            direction = 1
+        # If total_images < 2, there's nothing to ping-pong.
+        if total_images < 2:
+            index = 0
         else:
-            index = (2 * total_images - 1) - mod_index
-            direction = -1
+            # New period to ensure both endpoints repeat.
+            period = 2 * total_images
+            mod_index = raw_index % period
+            if mod_index < total_images:
+                index = mod_index
+            else:
+                index = (2 * total_images - 1) - mod_index
     else:
         index = raw_index % total_images
-        direction = 1
 
-    control_data_dictionary['Index_and_Direction'] = (index, direction)
-    return index, direction
-
+    # No need for a 'direction' value; we store None for compatibility.
+    control_data_dictionary['Index_and_Direction'] = (index, None)
+    return index, None
 
 def update_index(total_images, pingpong=True):
     """
-    Updates the index using MIDI data if in MIDI mode, otherwise uses the free-clock calculation.
-    For MIDI mode, this function calls midi_control.process_midi (or index_client for CLIENT_MODE)
-    and updates the shared control_data_dictionary.
+    Update the index using MIDI data if in MIDI mode; otherwise use the free-clock calculation.
     """
     global control_data_dictionary, clock_mode, midi_mode
     if midi_mode:
         import midi_control
         midi_control.process_midi(clock_mode)
         control_data_dictionary.update(midi_control.midi_data_dictionary)
-        index, direction = control_data_dictionary['Index_and_Direction']
-        return index, direction
+        index, _ = control_data_dictionary['Index_and_Direction']
+        return index, None
     elif clock_mode == CLIENT_MODE:
         import index_client
         control_data_dictionary.update(index_client.midi_data_dictionary)
-        index, direction = control_data_dictionary['Index_and_Direction']
-        return index, direction
+        index, _ = control_data_dictionary['Index_and_Direction']
+        return index, None
     else:
         return calculate_free_clock_index(total_images, pingpong)
