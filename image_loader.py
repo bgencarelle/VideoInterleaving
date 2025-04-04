@@ -1,6 +1,7 @@
 import cv2
-from collections import deque
+import threading
 from settings import MAIN_FOLDER_PATH, FLOAT_FOLDER_PATH
+
 class ImageLoader:
     def __init__(self, main_folder_path=MAIN_FOLDER_PATH, float_folder_path=FLOAT_FOLDER_PATH, png_paths_len=0):
         self.main_folder_path = main_folder_path
@@ -36,20 +37,41 @@ class ImageLoader:
         float_image = self.read_image(self.float_folder_path[index][float_folder])
         return main_image, float_image
 
-class ImageLoaderBuffer:
-    def __init__(self, buffer_size):
-        self.buffer_size = buffer_size
-        self.buffer = deque(maxlen=buffer_size)
+class TripleImageBuffer:
+    def __init__(self):
+        # Initialize three slots; all start as None.
+        self.buffers = [None, None, None]
+        self.front = 0      # Index of the buffer currently being displayed.
+        self.pending = None # Index of the newly loaded buffer.
+        self.lock = threading.Lock()
 
-    def add_image_future(self, index, future, png_paths_len):
-        # Clamp index based on png_paths_len.
-        clamped_index = max(0, min(index, png_paths_len - 1))
-        self.buffer.append((clamped_index, future))
+    def update(self, images):
+        """
+        Called by the producer after loading a new pair of images, for example:
+            (main_image, float_image)
+        This writes the images into an idle buffer slot and marks it as pending.
+        """
+        with self.lock:
+            # Select an idle buffer that is neither the front nor the pending buffer.
+            idle = None
+            for i in range(3):
+                if i != self.front and i != self.pending:
+                    idle = i
+                    break
+            if idle is None:
+                # Fallback: if no idle slot is found, override the front buffer.
+                idle = self.front
+            self.buffers[idle] = images
+            self.pending = idle
 
-    def get_future_for_index(self, index):
-        for item in list(self.buffer):
-            buf_index, future = item
-            if buf_index == index:
-                self.buffer.remove(item)
-                return future
-        return None
+    def get(self):
+        """
+        Called by the consumer (display loop) to retrieve the latest image pair.
+        If a new pending buffer is available, it swaps it in as the front buffer.
+        Returns the image pair stored in the front buffer.
+        """
+        with self.lock:
+            if self.pending is not None:
+                self.front = self.pending
+                self.pending = None
+            return self.buffers[self.front]
