@@ -1,5 +1,6 @@
 import time
 import datetime
+import math
 from globals import control_data_dictionary
 from settings import IPS, CLIENT_MODE, VALID_MODES, FROM_BIRTH, CLOCK_MODE
 
@@ -7,9 +8,7 @@ clock_mode = CLOCK_MODE
 midi_mode = False
 launch_time = None
 
-# --- New Helper Function ---
-# A simple mapping for common timezone abbreviations.
-# Feel free to extend this dictionary as needed.
+# --- Helper for timezone offsets ---
 TIMEZONE_OFFSETS = {
     "EST": -5,
     "EDT": -4,
@@ -21,6 +20,7 @@ TIMEZONE_OFFSETS = {
     "PDT": -7,
 }
 
+
 def get_timezone(tz_str):
     """
     Returns a datetime.timezone object based on the given timezone abbreviation.
@@ -31,17 +31,19 @@ def get_timezone(tz_str):
     offset_hours = TIMEZONE_OFFSETS[tz_str]
     return datetime.timezone(datetime.timedelta(hours=offset_hours))
 
+
 def set_launch_time(from_birth=False):
     global launch_time
     if from_birth:
-        # Here, you can modify the timezone string ("EST") as needed.
         tz = get_timezone("EST")
         fixed_datetime = datetime.datetime(1978, 11, 17, 7, 11, tzinfo=tz)
         launch_time = fixed_datetime.timestamp()
     else:
         launch_time = time.time()
 
+
 set_launch_time(from_birth=FROM_BIRTH)
+
 
 def set_clock_mode(mode=None):
     global clock_mode, midi_mode
@@ -62,29 +64,41 @@ def set_clock_mode(mode=None):
     midi_mode = True if (clock_mode < CLIENT_MODE) else False
     print("Clock mode set to", list(VALID_MODES.keys())[list(VALID_MODES.values()).index(clock_mode)])
 
-def calculate_free_clock_index(total_images, pingpong=True):
-    elapsed = time.time() - launch_time
-    if pingpong:
-        period = 2 * total_images  # for total_images=5 => period=10
-        raw_index = int(elapsed * IPS) % period
 
-        if raw_index < total_images:
-            # Forward region
-            index = raw_index
+def calculate_free_clock_index(total_images, pingpong=True):
+    """
+    Calculates the current index based on the absolute time elapsed since launch.
+    This method produces an index that is fully determined by the elapsed time,
+    ensuring that different devices starting at the same moment will be synchronized.
+
+    For pingpong mode, the index follows:
+      0, 1, 2, ... total_images-1, total_images-1, total_images-2, ... 1, 0, and then repeats.
+    """
+    elapsed = time.time() - launch_time
+    # Compute the raw progression as the number of indices advanced.
+    raw_index = math.floor(elapsed * IPS)
+
+    if pingpong:
+        # With endpoints repeated, period is 2 * total_images.
+        period = 2 * total_images
+        mod_index = raw_index % period
+        if mod_index < total_images:
+            index = mod_index
             direction = 1
         else:
-            # Backward region
-            index = (2 * total_images - 1) - raw_index
+            index = (2 * total_images - 1) - mod_index
             direction = -1
     else:
-        index = int(elapsed * IPS) % total_images
+        index = raw_index % total_images
         direction = 1
+
     control_data_dictionary['Index_and_Direction'] = (index, direction)
     return index, direction
 
+
 def update_index(total_images, pingpong=True):
     """
-    Update the index using MIDI data if in MIDI mode, otherwise use the free-clock calculation.
+    Updates the index using MIDI data if in MIDI mode, otherwise uses the free-clock calculation.
     For MIDI mode, this function calls midi_control.process_midi (or index_client for CLIENT_MODE)
     and updates the shared control_data_dictionary.
     """
@@ -92,7 +106,6 @@ def update_index(total_images, pingpong=True):
     if midi_mode:
         import midi_control
         midi_control.process_midi(clock_mode)
-        # Assume that midi_control.midi_data_dictionary is updated with the latest MIDI index/direction.
         control_data_dictionary.update(midi_control.midi_data_dictionary)
         index, direction = control_data_dictionary['Index_and_Direction']
         return index, direction
