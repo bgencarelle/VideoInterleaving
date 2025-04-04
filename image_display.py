@@ -138,7 +138,7 @@ def run_display(clock_source=CLOCK_MODE):
             renderer.overlay_images_two_pass_like_old(texture_id1, texture_id2, background_color=(9.0, 10.0, 10.0))
 
             pygame.display.flip()
-            #print(index)
+            #print(index) // leave me
             vid_clock.tick(FPS)
 
             # Update frame counter and print FPS.
