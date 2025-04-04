@@ -37,11 +37,11 @@ class ImageLoader:
         float_image = self.read_image(self.float_folder_path[index][float_folder])
         return main_image, float_image
 
-class TripleImageBuffer:
+class MultiImageBuffer:
     def __init__(self):
         # Initialize three slots as (index, image_pair) tuples.
         # Initially, all indices are set to None.
-        self.buffers = [(None, None) for _ in range(3)]
+        self.buffers = [(None, None) for _ in range(6)]
         self.front = 0      # Index of the buffer currently being displayed.
         self.pending = None # Index of the newly loaded buffer.
         self.lock = threading.Lock()
@@ -53,7 +53,7 @@ class TripleImageBuffer:
         """
         with self.lock:
             idle = None
-            for i in range(3):
+            for i in range(6):
                 if i != self.front and i != self.pending:
                     idle = i
                     break
