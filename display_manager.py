@@ -5,7 +5,7 @@ from OpenGL.GL import glViewport  # Added import for glViewport
 from settings import INITIAL_ROTATION, INITIAL_MIRROR, CONNECTED_TO_RCA_HDMI
 
 class DisplayState:
-    def __init__(self, image_size=(1920,1080)):
+    def __init__(self, image_size=(640,480)):
         self.image_size = image_size
         self.rotation = INITIAL_ROTATION  # e.g., 270
         self.mirror = INITIAL_MIRROR        # 0 for normal, 1 for mirrored
