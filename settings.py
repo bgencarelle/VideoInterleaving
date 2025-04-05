@@ -24,14 +24,14 @@ CLIENT_MODE = 3
 FREE_CLOCK = 255
 
 # For testing purposes.
-TEST_MODE = False
+TEST_MODE = True
 
 # -------------------------
 # Image Transformation Settings
 # -------------------------
 INITIAL_ROTATION = 270
 INITIAL_MIRROR = 0
-CONNECTED_TO_RCA_HDMI = True # or False, depending on where you're running it
+CONNECTED_TO_RCA_HDMI = True# or False, depending on where you're running it
 
 # -------------------------
 # Timing and Clock Buffer Parameters
