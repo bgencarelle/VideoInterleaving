@@ -31,6 +31,7 @@ TEST_MODE = False
 # -------------------------
 INITIAL_ROTATION = 270
 INITIAL_MIRROR = 0
+CONNECTED_TO_RCA_HDMI = True  # or False, depending on where you're running it
 
 # -------------------------
 # Timing and Clock Buffer Parameters

@@ -2,10 +2,10 @@ import pygame
 import numpy as np
 import renderer
 from OpenGL.GL import glViewport  # Added import for glViewport
-from settings import INITIAL_ROTATION, INITIAL_MIRROR
+from settings import INITIAL_ROTATION, INITIAL_MIRROR, CONNECTED_TO_RCA_HDMI
 
 class DisplayState:
-    def __init__(self, image_size=(640, 480)):
+    def __init__(self, image_size=(1920,1080)):
         self.image_size = image_size
         self.rotation = INITIAL_ROTATION  # e.g., 270
         self.mirror = INITIAL_MIRROR        # 0 for normal, 1 for mirrored
@@ -38,6 +38,11 @@ def display_init(fullscreen, state):
         if not modes:
             raise RuntimeError("No display modes available!")
         fs_fullscreen_width, fs_fullscreen_height = modes[0]
+        # Inside the fullscreen block
+        if CONNECTED_TO_RCA_HDMI:
+            # Optional override for squashed HDMI displays
+            # e.g., many RCA HDMI inputs report 1920x1080 but squish to 4:3
+            fs_fullscreen_height = int(fs_fullscreen_width * 3 / 4)
         scale_x = fs_fullscreen_width / effective_w
         scale_y = fs_fullscreen_height / effective_h
         fs_scale = min(scale_x, scale_y)
