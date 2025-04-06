@@ -77,7 +77,8 @@ def run_display(clock_source=CLOCK_MODE):
             next_index = index + 1 if index > last_index else index - 1
 
         future = executor.submit(image_loader.load_images, next_index, main_folder, float_folder)
-        future.add_done_callback(lambda fut: async_load_callback(fut, next_index))
+        future.add_done_callback(lambda fut, scheduled_index=next_index: async_load_callback(fut, scheduled_index))
+
 
         # Frame rate measurement initialization.
         frame_counter = 0
