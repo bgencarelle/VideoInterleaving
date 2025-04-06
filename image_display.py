@@ -1,3 +1,4 @@
+#image_display.py
 import os
 
 os.environ['PYOPENGL_ERROR_CHECKING'] = '0'

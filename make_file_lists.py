@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 """
 make_file_lists.py
 
