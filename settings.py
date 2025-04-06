@@ -2,7 +2,7 @@
 # -------------------------
 # Image Directories and Folder Paths
 # settings.py
-IMAGES_DIR = "images_1440"
+IMAGES_DIR = "images_1080"
 
 MAIN_FOLDER_PATH = f"{IMAGES_DIR}/float"
 FLOAT_FOLDER_PATH = f"{IMAGES_DIR}/face"
