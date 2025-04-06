@@ -1,3 +1,4 @@
+#image_loader.py
 import cv2
 import threading
 from settings import MAIN_FOLDER_PATH, FLOAT_FOLDER_PATH, TOLERANCE, BUFFER_RANGE

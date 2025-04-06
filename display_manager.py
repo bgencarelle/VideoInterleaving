@@ -1,3 +1,4 @@
+#display_manager.py
 import pygame
 import numpy as np
 import renderer
