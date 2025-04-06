@@ -1,8 +1,7 @@
-#image_loader.py
 import cv2
 import threading
-from settings import MAIN_FOLDER_PATH, FLOAT_FOLDER_PATH, TOLERANCE, BUFFER_RANGE
-
+from collections import deque
+from settings import MAIN_FOLDER_PATH, FLOAT_FOLDER_PATH, TOLERANCE
 
 class ImageLoader:
     def __init__(self, main_folder_path=MAIN_FOLDER_PATH, float_folder_path=FLOAT_FOLDER_PATH, png_paths_len=0):
@@ -39,52 +38,54 @@ class ImageLoader:
         float_image = self.read_image(self.float_folder_path[index][float_folder])
         return main_image, float_image
 
-class MultiImageBuffer:
-    def __init__(self):
-        # Initialize three slots as (index, image_pair) tuples.
-        # Initially, all indices are set to None.
-        self.buffers = [(None, None) for _ in range(BUFFER_RANGE)]
-        self.front = 0      # Index of the buffer currently being displayed.
-        self.pending = None # Index of the newly loaded buffer.
+
+class FIFOImageBuffer:
+    """
+    A simple FIFO buffer that stores (index, (main_image, float_image)) pairs.
+    The 'index' acts like a simplified presentation timestamp (PTS).
+    """
+
+    def __init__(self, max_size=5):
+        """
+        :param max_size: Maximum number of frames to hold in the queue.
+        """
+        self.queue = deque()
+        self.max_size = max_size
         self.lock = threading.Lock()
 
     def update(self, index, images):
         """
         Called by the producer after loading a new pair of images.
-        Writes (index, images) into an idle buffer slot and marks it as pending.
+        Enqueues (index, images), discarding the oldest entry if full.
         """
         with self.lock:
-            idle = None
-            for i in range(BUFFER_RANGE):
-                if i != self.front and i != self.pending:
-                    idle = i
-                    break
-            if idle is None:
-                # Fallback: if no idle slot is found, override the front buffer.
-                idle = self.front
-            self.buffers[idle] = (index, images)
-            self.pending = idle
+            if len(self.queue) >= self.max_size:
+                self.queue.popleft()  # Discard the oldest if full
+            self.queue.append((index, images))
 
     def get(self, current_index):
         """
-        Called by the consumer (display loop) to retrieve the latest image pair.
-        If a new pending buffer is available and its stored index is within tolerance
-        of the current index, it swaps it in as the front buffer.
-        Returns the image pair from the front buffer if its stored index is within tolerance;
-        otherwise, returns None.
+        Called by the consumer (display loop) to retrieve the best
+        (index, images) pair for the current_index.
+
+        We do the following:
+          1) Discard frames whose index is outside the +/- TOLERANCE window
+             relative to the current_index.
+          2) Return the first valid frame if present.
+          3) Otherwise return None.
         """
-        tolerance = TOLERANCE  # Accept buffered images within ±1 of current_index.
         with self.lock:
-            # Check if the pending buffer is available and valid.
-            if self.pending is not None:
-                stored_index, _ = self.buffers[self.pending]
-                if stored_index is not None and abs(stored_index - current_index) <= tolerance:
-                    self.front = self.pending
-                    self.pending = None
-            stored_index, images = self.buffers[self.front]
-            if stored_index is None:
+            # 1) Discard any frames that are too far from current_index (in either direction).
+            while self.queue and abs(self.queue[0][0] - current_index) > TOLERANCE:
+                self.queue.popleft()
+
+            if not self.queue:
                 return None
-            if abs(stored_index - current_index) <= tolerance:
+
+            # 2) Now check the first frame in the queue
+            stored_index, images = self.queue[0]
+            if abs(stored_index - current_index) <= TOLERANCE:
+                # We do NOT pop it yet so that repeated calls for the same index can still retrieve it.
                 return images
-            else:
-                return None
+
+            return None
