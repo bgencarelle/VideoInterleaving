@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pygame
 import platform
 import calculators
-from settings import (FULLSCREEN_MODE, PINGPONG, FPS, CLOCK_MODE)
+from settings import (FULLSCREEN_MODE, PINGPONG, FPS, CLOCK_MODE, FIFO_LENGTH)
 from index_calculator import update_index
 from folder_selector import update_folder_selection, folder_dictionary
 import renderer
@@ -45,7 +45,7 @@ def run_display(clock_source=CLOCK_MODE):
     update_folder_selection(index, None, float_folder_count, main_folder_count)
 
     # Initialize a FIFO buffer (replaces the old triple buffer).
-    fifo_buffer = FIFOImageBuffer(max_size=5)
+    fifo_buffer = FIFOImageBuffer(max_size=FIFO_LENGTH)
 
     # Load the initial image pair synchronously and add to the FIFO.
     main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
