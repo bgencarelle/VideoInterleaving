@@ -23,6 +23,14 @@ FIFO_LENGTH = 50
 PINGPONG = True
 FROM_BIRTH = True
 
+# For testing purposes.
+TEST_MODE = True
+if TEST_MODE:
+    FRAME_COUNTER_DISPLAY = True # count framerate
+    SHOW_DELTA = True # show the difference compensation in index
+else:
+    FRAME_COUNTER_DISPLAY = False
+    SHOW_DELTA = False
 # -------------------------
 # Clock Mode Constants
 # -------------------------
@@ -32,18 +40,17 @@ MIXED_CLOCK = 2
 CLIENT_MODE = 3
 FREE_CLOCK = 255
 
-# For testing purposes.
-TEST_MODE = True
+
 
 # -------------------------
 # Image Transformation Settings
 # -------------------------
 INITIAL_ROTATION = 270
 INITIAL_MIRROR = 0
-CONNECTED_TO_RCA_HDMI = False# or False, depending on where you're running it
+CONNECTED_TO_RCA_HDMI = False # this is for analog tvs
 
 # -------------------------
-# Timing and Clock Buffer Parameters
+# Timing and Clock Buffer Parameters - midi
 # -------------------------
 TIMEOUT_SECONDS = 1  # Set the timeout value as needed
 CLOCK_BUFFER_SIZE = 50
@@ -61,8 +68,3 @@ VALID_MODES = {
     "FREE_CLOCK": FREE_CLOCK,
 }
 
-
-# -------------------------
-# Texture Settings
-# -------------------------
-TEXTURE_FILTER_TYPE = "LINEAR"  # Options: "NEAREST", "LINEAR", "MIPMAP"
