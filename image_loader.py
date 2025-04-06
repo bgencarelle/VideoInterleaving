@@ -41,8 +41,8 @@ class ImageLoader:
 
 class FIFOImageBuffer:
     """
-    A simple FIFO buffer that stores (index, (main_image, float_image)) pairs.
-    The 'index' acts like a simplified presentation timestamp (PTS).
+    A FIFO buffer that stores (index, (main_image, float_image)) pairs.
+    'index' acts like a simplified presentation timestamp (PTS).
     """
 
     def __init__(self, max_size=5):
@@ -60,32 +60,50 @@ class FIFOImageBuffer:
         """
         with self.lock:
             if len(self.queue) >= self.max_size:
-                self.queue.popleft()  # Discard the oldest if full
+                self.queue.popleft()  # Discard the oldest if at capacity
             self.queue.append((index, images))
 
     def get(self, current_index):
         """
-        Called by the consumer (display loop) to retrieve the best
-        (index, images) pair for the current_index.
+        Called by the consumer (display loop) to retrieve the frame whose index
+        is closest to current_index (while still within +/- TOLERANCE).
 
-        We do the following:
-          1) Discard frames whose index is outside the +/- TOLERANCE window
-             relative to the current_index.
-          2) Return the first valid frame if present.
-          3) Otherwise return None.
+        Returns:
+           (stored_index, main_image, float_image) if a suitable frame is found,
+           else None.
+
+        Steps:
+          1) Discard frames whose index is outside the +/- TOLERANCE window.
+          2) Among remaining frames, find the one with the smallest abs difference.
+          3) Return that frame if within TOLERANCE, otherwise None.
         """
         with self.lock:
             # 1) Discard any frames that are too far from current_index (in either direction).
             while self.queue and abs(self.queue[0][0] - current_index) > TOLERANCE:
                 self.queue.popleft()
 
+            # If the queue is empty after discarding, nothing to display.
             if not self.queue:
                 return None
 
-            # 2) Now check the first frame in the queue
-            stored_index, images = self.queue[0]
-            if abs(stored_index - current_index) <= TOLERANCE:
-                # We do NOT pop it yet so that repeated calls for the same index can still retrieve it.
-                return images
+            # 2) Find the closest frame in the queue.
+            best_diff = float('inf')
+            best_i = -1
+            best_stored_index = None
+            best_images = None
 
-            return None
+            # We won't pop frames here; we only pick the best to display.
+            for i, (stored_index, images) in enumerate(self.queue):
+                diff = abs(stored_index - current_index)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_i = i
+                    best_stored_index = stored_index
+                    best_images = images
+
+            # 3) Check if the best match is within TOLERANCE.
+            if best_diff <= TOLERANCE and best_images is not None:
+                main_image, float_image = best_images
+                return best_stored_index, main_image, float_image
+            else:
+                return None
