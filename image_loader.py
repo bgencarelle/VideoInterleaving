@@ -1,6 +1,7 @@
 import cv2
 import threading
-from settings import MAIN_FOLDER_PATH, FLOAT_FOLDER_PATH
+from settings import MAIN_FOLDER_PATH, FLOAT_FOLDER_PATH, TOLERANCE, BUFFER_RANGE
+
 
 class ImageLoader:
     def __init__(self, main_folder_path=MAIN_FOLDER_PATH, float_folder_path=FLOAT_FOLDER_PATH, png_paths_len=0):
@@ -41,7 +42,7 @@ class MultiImageBuffer:
     def __init__(self):
         # Initialize three slots as (index, image_pair) tuples.
         # Initially, all indices are set to None.
-        self.buffers = [(None, None) for _ in range(6)]
+        self.buffers = [(None, None) for _ in range(BUFFER_RANGE)]
         self.front = 0      # Index of the buffer currently being displayed.
         self.pending = None # Index of the newly loaded buffer.
         self.lock = threading.Lock()
@@ -53,7 +54,7 @@ class MultiImageBuffer:
         """
         with self.lock:
             idle = None
-            for i in range(6):
+            for i in range(BUFFER_RANGE):
                 if i != self.front and i != self.pending:
                     idle = i
                     break
@@ -71,7 +72,7 @@ class MultiImageBuffer:
         Returns the image pair from the front buffer if its stored index is within tolerance;
         otherwise, returns None.
         """
-        tolerance = 1  # Accept buffered images within ±1 of current_index.
+        tolerance = TOLERANCE  # Accept buffered images within ±1 of current_index.
         with self.lock:
             # Check if the pending buffer is available and valid.
             if self.pending is not None:
