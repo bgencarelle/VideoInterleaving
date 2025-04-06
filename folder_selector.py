@@ -13,7 +13,7 @@ def update_folder_selection(index, direction, float_folder_count, main_folder_co
     rand_mult = random.randint(1, 9)
 
     if CLOCK_MODE == 255:
-        if (index < FPS * rand_mult // 3) or (index > 20 * rand_mult and index < 21 * rand_mult):
+        if (index < (FPS * rand_mult) // 3) or ((20 * rand_mult) < index < (21 * rand_mult)):
             float_folder = 0
             main_folder = 0
         else:
@@ -23,7 +23,7 @@ def update_folder_selection(index, direction, float_folder_count, main_folder_co
                 # Reassign rand_mult to a new random value (1 to 12) after a float folder update.
                 rand_mult = random.randint(1, 12)
             # Random main folder update:
-            if index % (2 + FPS * rand_mult + 1) == 0:
+            if index % ((2 + FPS) * (rand_mult + 1)) == 0:
                 main_folder = random.randint(0, main_folder_count - 1)
                 rand_mult = random.randint(1, 9)
     else:
