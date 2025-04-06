@@ -115,7 +115,9 @@ def run_display(clock_source=CLOCK_MODE):
                 # Retrieve the latest image pair from the FIFO.
                 result = fifo_buffer.get(index)
                 if result is not None:
-                    main_image, float_image = result
+                    displayed_index, main_image, float_image = result
+                    difference = index - displayed_index
+                    print(f"[DEBUG] Current index = {index}, Displayed index = {displayed_index}, Diff = {difference}")
                     renderer.update_texture(texture_id1, main_image)
                     renderer.update_texture(texture_id2, float_image)
                 else:
