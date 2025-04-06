@@ -1,4 +1,12 @@
 # settings.py
+# -------------------------
+# Image Directories and Folder Paths
+# settings.py
+IMAGES_DIR = "images_1440"
+
+MAIN_FOLDER_PATH = f"{IMAGES_DIR}/float"
+FLOAT_FOLDER_PATH = f"{IMAGES_DIR}/face"
+
 
 # -------------------------
 # Display Mode & Performance
@@ -54,12 +62,6 @@ VALID_MODES = {
     "FREE_CLOCK": FREE_CLOCK,
 }
 
-# -------------------------
-# Image Directories and Folder Paths
-# -------------------------
-IMAGES_DIR = "images"
-MAIN_FOLDER_PATH = "images/float"
-FLOAT_FOLDER_PATH = "images/face"
 
 # -------------------------
 # Texture Settings
