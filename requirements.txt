@@ -6,3 +6,4 @@ websockets
 pygame
 opencv-python
 PyOpenGl
+psutil
