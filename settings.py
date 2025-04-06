@@ -7,7 +7,6 @@ IMAGES_DIR = "images_1080"
 MAIN_FOLDER_PATH = f"{IMAGES_DIR}/float"
 FLOAT_FOLDER_PATH = f"{IMAGES_DIR}/face"
 
-
 # -------------------------
 # Display Mode & Performance
 # -------------------------
@@ -23,14 +22,20 @@ FIFO_LENGTH = 50
 PINGPONG = True
 FROM_BIRTH = True
 
-# For testing purposes.
 TEST_MODE = True
+
+# web stuff
+HTTP_MONITOR = True  # or True
+WEB_PORT = 1978 # web port is year of birth
+
+# For testing purposes.
 if TEST_MODE:
-    FRAME_COUNTER_DISPLAY = True # count framerate
-    SHOW_DELTA = True # show the difference compensation in index
+    FRAME_COUNTER_DISPLAY = not HTTP_MONITOR  # If the monitor is on, we skip printing
+    SHOW_DELTA = not HTTP_MONITOR
 else:
     FRAME_COUNTER_DISPLAY = False
     SHOW_DELTA = False
+
 # -------------------------
 # Clock Mode Constants
 # -------------------------
