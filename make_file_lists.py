@@ -38,7 +38,7 @@ def get_subdirectories(path):
 def contains_image_files(path):
     """Check if a directory contains any PNG or WEBP files."""
     try:
-        return any(file.lower().endswith(('.png', '.webp')) for file in os.listdir(path))
+        return any(file.lower().endswith(('.png', '.webp','.jpg','jpeg')) for file in os.listdir(path))
     except FileNotFoundError:
         return False
 
@@ -46,7 +46,7 @@ def contains_image_files(path):
 def count_image_files(path):
     """Count the number of PNG and WEBP files in a directory."""
     try:
-        return len([file for file in os.listdir(path) if file.lower().endswith(('.png', '.webp'))])
+        return len([file for file in os.listdir(path) if file.lower().endswith(('.png', '.webp','.jpg','jpeg'))])
     except FileNotFoundError:
         return 0
 
@@ -184,7 +184,7 @@ def write_folder_list():
     folder_counts = []
 
     for folder in folder_dict.values():
-        image_files = [f for f in os.listdir(folder) if f.lower().endswith(('.png', '.webp'))]
+        image_files = [f for f in os.listdir(folder) if f.lower().endswith(('.png', '.webp', '.jpg','.jpeg'))]
         if image_files:
             first_image = image_files[0]
             try:
@@ -288,7 +288,7 @@ def sort_image_files(folder_dict):
     sorted_image_files = []
     for number in sorted(folder_dict.keys()):
         folder = folder_dict[number]
-        image_files = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(('.png', '.webp'))]
+        image_files = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(('.png', '.webp', '.jpeg','.jpg'))]
         image_files.sort(key=natural_sort_key)
         sorted_image_files.append(image_files)
     return sorted_image_files

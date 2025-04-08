@@ -19,9 +19,9 @@ class ImageLoader:
     def read_image(self, image_path):
         """
         Loads an image from the given path.
-        Supported formats: .webp and .png.
+        Supported formats: .webp, .png, .jpg, .jpeg
         """
-        if image_path.lower().endswith(('.webp', '.png')):
+        if image_path.lower().endswith(('.webp', '.png', '.jpg', '.jpeg')):
             image_np = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
             if image_np is None:
                 raise ValueError(f"Failed to load image: {image_path}")
