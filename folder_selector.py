@@ -1,3 +1,4 @@
+import math
 import random
 from globals import control_data_dictionary, folder_dictionary
 from settings import (FPS, CLOCK_MODE)
@@ -14,11 +15,12 @@ def update_folder_selection(index, float_folder_count, main_folder_count):
 
     # Initialize persistent random state
     if 'rand_mult' not in folder_dictionary:
+        random.seed()
         folder_dictionary['rand_mult'] = random.randint(1, 9)
 
     if 'rand_start' not in folder_dictionary:
         rm = folder_dictionary['rand_mult']
-        folder_dictionary['rand_start'] = 4 * (FPS - (rm * rm // 2)) + 30
+        folder_dictionary['rand_start'] = random.randint(FPS, int(3.5 * FPS))
 
     rand_mult = folder_dictionary['rand_mult']
     rand_start = folder_dictionary['rand_start']
@@ -30,15 +32,18 @@ def update_folder_selection(index, float_folder_count, main_folder_count):
             main_folder = 0
         else:
             # Background layer (float folder)
-            if index % (1+ FPS * rand_mult) == 0:
+            if index % ((1+ FPS) * rand_mult) == 0:
                 float_folder = random.randint(1, float_folder_count - 1)
                 #print(float_folder_count,float_folder)
                 folder_dictionary['rand_mult'] = random.randint(1, 12)  # update mult
+                folder_dictionary['rand_start'] = random.randint(FPS, int(3.5 * FPS))
 
             # Foreground layer (main folder)
-            if index % (2 * FPS * rand_mult + 1) == 0:
+            if index % (FPS * (rand_mult + 3)) == 0:
                 main_folder = random.randint(1, main_folder_count - 1)
                 folder_dictionary['rand_mult'] = random.randint(1, 9)  # update mult again
+                folder_dictionary['rand_start'] = random.randint(FPS, int(3.5 * FPS))
+
 
     else:
         # MIDI-driven case (unchanged logic)
