@@ -53,7 +53,10 @@ class RollingIndexCompensator:
 
 
 def run_display(clock_source=CLOCK_MODE):
+    # Create a DisplayState instance and persist fullscreen in the state.
     state = DisplayState()
+    state.fullscreen = FULLSCREEN_MODE
+
     csv_source, main_folder_path, float_folder_path = calculators.init_all(clock_source)
     print(platform.system(), "midi clock mode is:", clock_source)
     main_folder_count = len(main_folder_path[0])
@@ -75,14 +78,16 @@ def run_display(clock_source=CLOCK_MODE):
     image_loader.set_png_paths_len(png_paths_len)
 
     pygame.init()
-    pygame.mouse.set_visible(True)
-    fullscreen = FULLSCREEN_MODE
-    display_init(fullscreen, state)
+    # Initialize the display using the persistent fullscreen flag in state.
+    display_init(state)
+
+    pygame.event.set_grab(False)
+    pygame.mouse.set_visible(False)
     vid_clock = pygame.time.Clock()
 
     index, _ = update_index(png_paths_len, PINGPONG)
     last_index = index
-    update_folder_selection(index, None, float_folder_count, main_folder_count)
+    update_folder_selection(index, float_folder_count, main_folder_count)
 
     fifo_buffer = FIFOImageBufferPatched(max_size=FIFO_LENGTH)
     main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
@@ -93,6 +98,8 @@ def run_display(clock_source=CLOCK_MODE):
     texture_id2 = renderer.create_texture(float_image)
 
     compensator = RollingIndexCompensator(maxlen=10, correction_factor=0.5)
+
+    pygame.mouse.set_visible(False)
 
     def async_load_callback(fut, scheduled_index):
         try:
@@ -127,22 +134,24 @@ def run_display(clock_source=CLOCK_MODE):
                 if print_actual_fps < target_fps - 2:
                     print(f"[Warning] Potential frame drop! Target: {target_fps}, Actual: {actual_fps:.2f}")
                 return 0, pygame.time.get_ticks()
-            return frame_counter, start_time
+            return arg_frame_counter, arg_start_time
 
         while state.run_mode:
             successful_display = False
             events = pygame.event.get()
-            fullscreen = event_check(events, fullscreen, state)
+            # Update the persistent fullscreen state using the new event_check signature.
+            state.fullscreen = event_check(events, state)
 
             if state.needs_update:
-                display_init(fullscreen, state)
+                display_init(state)
+                pygame.mouse.set_visible(False)
                 state.needs_update = False
 
             previous_index = index
             index, _ = update_index(png_paths_len, PINGPONG)
             if index != previous_index:
                 last_index = previous_index
-                update_folder_selection(index, None, float_folder_count, main_folder_count)
+                update_folder_selection(index, float_folder_count, main_folder_count)
                 main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
 
                 compensated_index = compensator.get_compensated_index(index)
@@ -156,7 +165,7 @@ def run_display(clock_source=CLOCK_MODE):
                         print(f"[DEBUG] idx={index}, disp={displayed_index}, Δ={difference}, offset={partial}")
                     renderer.update_texture(texture_id1, main_image)
                     renderer.update_texture(texture_id2, float_image)
-                    successful_display = True  # ✅ Only mark success here
+                    successful_display = True  # Mark as successful display
                 else:
                     print(f"[MISS] FIFO miss for index {index} (Compensated={compensated_index})")
 
@@ -181,7 +190,7 @@ def run_display(clock_source=CLOCK_MODE):
             if FRAME_COUNTER_DISPLAY:
                 frame_counter, start_time = print_fps(frame_counter, start_time, FPS)
 
-            # If monitor is active (TEST_MODE + HTTP_MONITOR), push stats to the web server
+            # If monitor is active (TEST_MODE + HTTP_MONITOR), push stats to the web server.
             if monitor:
                 monitor.update({
                     "index": index,
@@ -189,7 +198,10 @@ def run_display(clock_source=CLOCK_MODE):
                     "offset": compensated_index - index,
                     "fps": actual_fps,
                     "fifo_depth": fifo_buffer.current_depth(),
-                    "successful_frame": successful_display,  # ✅ accurate timing,
+                    "successful_frame": successful_display,
+                    "main_folder": main_folder,
+                    "float_folder": float_folder,
+                    "rand_mult": folder_dictionary['rand_mult'],
                 })
 
     pygame.quit()
