@@ -18,12 +18,13 @@ def update_folder_selection(index, float_folder_count, main_folder_count):
 
     if 'rand_start' not in folder_dictionary:
         rm = folder_dictionary['rand_mult']
-        folder_dictionary['rand_start'] = 4 * (FPS + (rm // 2))
+        folder_dictionary['rand_start'] = 4 * (FPS - (rm * rm // 2)) + 30
 
     rand_mult = folder_dictionary['rand_mult']
     rand_start = folder_dictionary['rand_start']
 
     if CLOCK_MODE == 255:  # Free clock
+        # "Rest zones" where we return to default folders
         if index <= rand_start:
             float_folder = 0
             main_folder = 0
@@ -38,8 +39,6 @@ def update_folder_selection(index, float_folder_count, main_folder_count):
             if index % (2 * FPS * rand_mult + 1) == 0:
                 main_folder = random.randint(1, main_folder_count - 1)
                 folder_dictionary['rand_mult'] = random.randint(1, 9)  # update mult again
-                folder_dictionary['rand_start'] = 4 * (FPS + (rand_start // 2))
-
 
     else:
         # MIDI-driven case (unchanged logic)
