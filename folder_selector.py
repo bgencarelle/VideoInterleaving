@@ -32,7 +32,7 @@ def update_folder_selection(index, float_folder_count, main_folder_count):
             # Background layer (float folder)
             if index % (1+ FPS * rand_mult) == 0:
                 float_folder = random.randint(1, float_folder_count - 1)
-                print(float_folder_count,float_folder)
+                #print(float_folder_count,float_folder)
                 folder_dictionary['rand_mult'] = random.randint(1, 12)  # update mult
 
             # Foreground layer (main folder)
