@@ -39,7 +39,7 @@ def update_folder_selection(index, float_folder_count, main_folder_count):
                 folder_dictionary['rand_start'] = random.randint(FPS, int(3.5 * FPS))
 
             # Foreground layer (main folder)
-            if index % (FPS * (rand_mult + 3)) == 0:
+            if index % (FPS * (rand_mult + 7)) == 0:
                 main_folder = random.randint(1, main_folder_count - 1)
                 folder_dictionary['rand_mult'] = random.randint(1, 9)  # update mult again
                 folder_dictionary['rand_start'] = random.randint(FPS, int(3.5 * FPS))
