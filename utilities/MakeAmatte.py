@@ -3,6 +3,7 @@ import re
 import cv2
 import numpy as np
 from PIL import Image
+import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List
 
@@ -10,18 +11,14 @@ from typing import List
 try:
     from turntoblack import recover_image
 except ImportError:
-    print(
-        "WARNING: Could not import 'recover_image' from 'turntoblack.py'. Make sure it's in the same folder or installed.")
-
+    print("WARNING: Could not import 'recover_image' from 'turntoblack.py'. Make sure it's in the same folder or installed.")
 
 ########################################
 # Natural sort helper
 ########################################
 def natural_sort_key(s: str):
     """Provides a key for natural (human) sorting of filenames."""
-    # breaks string into alpha + numeric chunks for better sorting
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'([0-9]+)', s)]
-
 
 ########################################
 # Channel + alpha utility
@@ -36,13 +33,11 @@ def ensure_four_channels(img: np.ndarray) -> np.ndarray:
         return None
 
     if len(img.shape) == 2:
-        # Grayscale; convert to BGRA with opaque alpha.
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGRA)
     elif img.shape[2] == 3:
         img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
 
     return img
-
 
 ########################################
 # Adjust transparent pixels to black
@@ -61,47 +56,38 @@ def adjust_transparent_pixels_cv2(image: np.ndarray) -> np.ndarray:
     image[mask, 2] = 0  # Red channel
     return image
 
-
 ########################################
-# Process one file: full matte application (with optional recovery)
+# Existing matte application function
 ########################################
 def process_file(
-        src_path: str,
-        file: str,
-        current_root: str,
-        transparency_path: str,
-        target_folder: str,
-        dest_root_normal: str,
-        dest_root_inv: str,
-        recover_first: bool = False,
-        tmp_recover_dir: str = "tmp_blackrecover"
+    src_path: str,
+    file: str,
+    current_root: str,
+    transparency_path: str,
+    target_folder: str,
+    dest_root_normal: str,
+    dest_root_inv: str,
+    recover_first: bool = False,
+    tmp_recover_dir: str = "tmp_blackrecover"
 ) -> None:
     """
     Process one target image using a transparency matte image.
-
     Steps:
-      1) Optionally call recover_image(...) to restore black-based appearance
-         for alpha-lost images.
-      2) Load both target image and transparency image in BGRA.
-      3) Resize transparency to match target.
-      4) Create normal matte (alpha = transparency's alpha).
-      5) Create inverted matte (alpha = 255 - transparency's alpha).
-      6) Ensure fully transparent pixels are (0,0,0,0) in BGRA.
-      7) Convert to RGBA + save lossless WebP in mirrored folder structure.
+      1) Optionally recover black-based appearance (if recover_first is True).
+      2) Load target and transparency images in BGRA.
+      3) Resize transparency image if needed.
+      4) Create normal and inverted mattes.
+      5) Ensure fully transparent pixels are set to (0,0,0,0) in BGRA.
+      6) Convert to RGBA and save as lossless WebP in mirrored folder structures.
     """
     try:
-        # ------------------------------------------
-        # 1) Optionally recover black-based appearance
-        #    for the target image.
-        # ------------------------------------------
+        # Optionally recover black-based appearance
         if recover_first:
             recovered_path = recover_image(src_path, output_folder=tmp_recover_dir)
             if recovered_path:
-                src_path = recovered_path  # override with recovered
+                src_path = recovered_path  # override with recovered image
 
-        # ------------------------------------------
-        # 2) Load target + transparency (BGRA)
-        # ------------------------------------------
+        # Load target and transparency images as BGRA
         target_image = cv2.imread(src_path, cv2.IMREAD_UNCHANGED)
         transparency_image = cv2.imread(transparency_path, cv2.IMREAD_UNCHANGED)
 
@@ -112,9 +98,7 @@ def process_file(
             print(f"Error loading images for {src_path}")
             return
 
-        # ------------------------------------------
-        # 3) Resize transparency if needed
-        # ------------------------------------------
+        # Resize transparency to match the target image if needed
         if (target_image.shape[0], target_image.shape[1]) != (transparency_image.shape[0], transparency_image.shape[1]):
             transparency_image = cv2.resize(
                 transparency_image,
@@ -122,42 +106,33 @@ def process_file(
                 interpolation=cv2.INTER_LANCZOS4
             )
 
-        # Extract alpha from transparency
+        # Extract the alpha channel from the transparency image
         alpha_channel = transparency_image[:, :, 3]
 
-        # ------------------------------------------
-        # 4) Create normal matte
-        # ------------------------------------------
+        # Create normal matte (with transparency alpha)
         normal_image = target_image.copy()
         normal_image[:, :, 3] = alpha_channel
         normal_image = adjust_transparent_pixels_cv2(normal_image)
 
-        # ------------------------------------------
-        # 5) Create inverted matte
-        # ------------------------------------------
+        # Create inverted matte (alpha = 255 - transparency alpha)
         inverted_alpha = 255 - alpha_channel
         inverted_image = target_image.copy()
         inverted_image[:, :, 3] = inverted_alpha
         inverted_image = adjust_transparent_pixels_cv2(inverted_image)
 
-        # ------------------------------------------
-        # 6) Mirror directory structure for outputs
-        # ------------------------------------------
+        # Mirror directory structure for outputs
         rel_path = os.path.relpath(current_root, target_folder)
         dest_dir_normal = os.path.join(dest_root_normal, rel_path)
         dest_dir_inv = os.path.join(dest_root_inv, rel_path)
         os.makedirs(dest_dir_normal, exist_ok=True)
         os.makedirs(dest_dir_inv, exist_ok=True)
 
-        # use the original file's basename with .webp extension
+        # Save files with .webp extension using the original file basename
         base_name = os.path.splitext(file)[0]
         normal_dest_path = os.path.join(dest_dir_normal, base_name + ".webp")
         inv_dest_path = os.path.join(dest_dir_inv, base_name + ".webp")
 
-        # ------------------------------------------
-        # 7) Convert BGRA -> RGBA and save
-        # ------------------------------------------
-        # Normal matte
+        # Convert BGRA -> RGBA and save the normal matte
         try:
             normal_rgba = cv2.cvtColor(normal_image, cv2.COLOR_BGRA2RGBA)
             normal_pil = Image.fromarray(normal_rgba)
@@ -166,7 +141,7 @@ def process_file(
         except Exception as e:
             print(f"Error saving normal image {normal_dest_path}: {e}")
 
-        # Inverted matte
+        # Convert BGRA -> RGBA and save the inverted matte
         try:
             inverted_rgba = cv2.cvtColor(inverted_image, cv2.COLOR_BGRA2RGBA)
             inverted_pil = Image.fromarray(inverted_rgba)
@@ -178,79 +153,94 @@ def process_file(
     except Exception as e:
         print(f"Error processing {src_path}: {e}")
 
-
 ########################################
-# Black recovery only: process one file
+# New: Process file with just black recover
 ########################################
-def black_recover_only(src_path: str, tmp_recover_dir: str = "tmp_blackrecover") -> None:
+def process_file_recover(
+    src_path: str,
+    current_root: str,
+    target_folder: str,
+    dest_root_rec: str,
+    tmp_recover_dir: str = "tmp_blackrecover"
+) -> None:
     """
-    For the given source image, run black recovery and save the result
-    into the temporary recovery folder.
+    Process one file using only the black recovery function.
+    The recovered image is saved in a mirrored directory structure under dest_root_rec.
     """
     try:
         recovered_path = recover_image(src_path, output_folder=tmp_recover_dir)
-        if recovered_path:
-            print(f"Recovered image saved to {recovered_path}")
-        else:
-            print(f"Black recovery failed for {src_path}")
-    except Exception as e:
-        print(f"Error during black recovery for {src_path}: {e}")
+        if not recovered_path:
+            print(f"Recovery failed for {src_path}")
+            return
 
+        # Build mirrored output directory based on the source structure.
+        rel_path = os.path.relpath(current_root, target_folder)
+        dest_dir = os.path.join(dest_root_rec, rel_path)
+        os.makedirs(dest_dir, exist_ok=True)
+
+        base_name = os.path.basename(src_path)
+        dest_path = os.path.join(dest_dir, base_name)
+
+        # Copy the recovered image to the destination.
+        shutil.copy(recovered_path, dest_path)
+        print(f"Saved recovered image to {dest_path}")
+
+    except Exception as e:
+        print(f"Error recovering image {src_path}: {e}")
 
 ########################################
 # Main routine
 ########################################
 def main():
-    # --- Mode Selection ---
-    mode = input(
-        "Select mode:\n"
-        "1) Full processing (transparency matte creation)\n"
-        "2) Black recovery only (using temporary folder output)\n"
-        "Enter 1 or 2: "
-    ).strip()
+    # New prompt: choose processing mode.
+    mode_input = input("Choose mode: (1) Process with transparency matte, (2) Just black recover: ").strip()
 
-    IMG_EXTS = ('.png', '.jpg', '.jpeg', '.webp')
-    tmp_recover_dir = "tmp_blackrecover"  # default temporary folder for recovery
-
-    if mode == "2":
-        # -----------------------------
-        # Black Recovery Only Mode
-        # -----------------------------
-        target_folder = input("Enter the path to the target folder (source images): ").strip()
-        os.makedirs(tmp_recover_dir, exist_ok=True)
+    if mode_input == "2" or mode_input.lower() in ("2", "just black recover", "recover"):
+        # ---- Just Black Recover Mode ----
+        target_folder = input("Enter the path to the source folder (images to recover): ").strip()
+        dest_root_rec = target_folder.rstrip(os.sep) + "_rec"
+        IMG_EXTS = ('.png', '.jpg', '.jpeg', '.webp')
         tasks = []
 
         with ThreadPoolExecutor() as executor:
             for current_root, dirs, files in os.walk(target_folder):
-                for file in files:
-                    if file.lower().endswith(IMG_EXTS):
-                        src_path = os.path.join(current_root, file)
-                        tasks.append(executor.submit(black_recover_only, src_path, tmp_recover_dir))
+                sorted_files = sorted(
+                    [f for f in files if f.lower().endswith(IMG_EXTS)],
+                    key=natural_sort_key
+                )
+                for file in sorted_files:
+                    src_path = os.path.join(current_root, file)
+                    tasks.append(
+                        executor.submit(
+                            process_file_recover,
+                            src_path,
+                            current_root,
+                            target_folder,
+                            dest_root_rec
+                        )
+                    )
             for future in as_completed(tasks):
                 try:
                     future.result()
                 except Exception as e:
-                    print(f"Error in recovery task: {e}")
-
-        print("Black recovery only mode complete.")
-        return
+                    print(f"Error in black recover threaded task: {e}")
+        return  # End program after recover mode.
 
     else:
-        # -----------------------------
-        # Full Processing Mode
-        # -----------------------------
+        # ---- Original Transparency Matte Processing Mode ----
         transparency_folder = input("Enter the path to the transparency folder: ").strip()
         target_folder = input("Enter the path to the target folder (source images): ").strip()
         test_mode_input = input("Do you want to run in test mode? (y/n): ").strip().lower()
         test_mode = test_mode_input in ("y", "yes")
+
         recover_input = input("Recover black-lost alpha first? (y/n): ").strip().lower()
         recover_first = recover_input in ("y", "yes")
 
-        # Destination roots for normal and inverted outputs
+        # Destination roots for normal/inverted outputs.
         dest_root_normal = target_folder.rstrip(os.sep) + "_normal"
         dest_root_inv = target_folder.rstrip(os.sep) + "_inv"
 
-        # Build a sorted list of transparency images
+        IMG_EXTS = ('.png', '.jpg', '.jpeg', '.webp')
         transparency_files = sorted(
             [f for f in os.listdir(transparency_folder) if f.lower().endswith(IMG_EXTS)],
             key=natural_sort_key
@@ -270,7 +260,7 @@ def main():
                 )
                 for i, file in enumerate(sorted_files):
                     src_path = os.path.join(current_root, file)
-                    # Pair transparency images in a round-robin fashion
+                    # Round-robin pairing with transparency images.
                     transparency_path = transparency_paths[i % len(transparency_paths)]
 
                     if test_mode:
@@ -283,8 +273,7 @@ def main():
                             target_folder=target_folder,
                             dest_root_normal=dest_root_normal,
                             dest_root_inv=dest_root_inv,
-                            recover_first=recover_first,
-                            tmp_recover_dir=tmp_recover_dir
+                            recover_first=recover_first
                         )
                         processed_one = True
                         break
@@ -299,20 +288,17 @@ def main():
                                 target_folder,
                                 dest_root_normal,
                                 dest_root_inv,
-                                recover_first,
-                                tmp_recover_dir
+                                recover_first
                             )
                         )
                 if test_mode and processed_one:
                     break
 
-            # Wait for threaded tasks to finish
             for future in as_completed(tasks):
                 try:
                     future.result()
                 except Exception as e:
                     print(f"Error in threaded task: {e}")
-
 
 if __name__ == "__main__":
     main()
