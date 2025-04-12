@@ -15,6 +15,7 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
+
 def recover_image(filepath: str, output_folder: str) -> Optional[str]:
     try:
         with Image.open(filepath).convert("RGBA") as img:
@@ -33,12 +34,20 @@ def recover_image(filepath: str, output_folder: str) -> Optional[str]:
             # Save to output
             os.makedirs(output_folder, exist_ok=True)
             output_path = os.path.join(output_folder, os.path.basename(filepath))
-            out_img.save(output_path)
+
+            # Ensure lossless saving for WebP
+            ext = os.path.splitext(filepath)[1].lower()
+            if ext == ".webp":
+                out_img.save(output_path, "WEBP", lossless=True)
+            else:
+                out_img.save(output_path)
+
             return output_path
 
     except Exception as e:
         print(f"Error processing {filepath}: {e}")
         return None
+
 
 def process_folder(input_folder: str, output_folder: Optional[str] = None, max_workers: int = 8, dry_run: bool = False):
     if output_folder is None:
