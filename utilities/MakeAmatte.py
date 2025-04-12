@@ -10,7 +10,9 @@ from typing import List
 try:
     from turntoblack import recover_image
 except ImportError:
-    print("WARNING: Could not import 'recover_image' from 'turntoblack.py'. Make sure it's in the same folder or installed.")
+    print(
+        "WARNING: Could not import 'recover_image' from 'turntoblack.py'. Make sure it's in the same folder or installed.")
+
 
 ########################################
 # Natural sort helper
@@ -18,8 +20,8 @@ except ImportError:
 def natural_sort_key(s: str):
     """Provides a key for natural (human) sorting of filenames."""
     # breaks string into alpha + numeric chunks for better sorting
-    import re
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'([0-9]+)', s)]
+
 
 ########################################
 # Channel + alpha utility
@@ -41,6 +43,7 @@ def ensure_four_channels(img: np.ndarray) -> np.ndarray:
 
     return img
 
+
 ########################################
 # Adjust transparent pixels to black
 ########################################
@@ -58,19 +61,20 @@ def adjust_transparent_pixels_cv2(image: np.ndarray) -> np.ndarray:
     image[mask, 2] = 0  # Red channel
     return image
 
+
 ########################################
-# Main matte application function
+# Process one file: full matte application (with optional recovery)
 ########################################
 def process_file(
-    src_path: str,
-    file: str,
-    current_root: str,
-    transparency_path: str,
-    target_folder: str,
-    dest_root_normal: str,
-    dest_root_inv: str,
-    recover_first: bool = False,
-    tmp_recover_dir: str = "tmp_blackrecover"
+        src_path: str,
+        file: str,
+        current_root: str,
+        transparency_path: str,
+        target_folder: str,
+        dest_root_normal: str,
+        dest_root_inv: str,
+        recover_first: bool = False,
+        tmp_recover_dir: str = "tmp_blackrecover"
 ) -> None:
     """
     Process one target image using a transparency matte image.
@@ -174,84 +178,141 @@ def process_file(
     except Exception as e:
         print(f"Error processing {src_path}: {e}")
 
+
+########################################
+# Black recovery only: process one file
+########################################
+def black_recover_only(src_path: str, tmp_recover_dir: str = "tmp_blackrecover") -> None:
+    """
+    For the given source image, run black recovery and save the result
+    into the temporary recovery folder.
+    """
+    try:
+        recovered_path = recover_image(src_path, output_folder=tmp_recover_dir)
+        if recovered_path:
+            print(f"Recovered image saved to {recovered_path}")
+        else:
+            print(f"Black recovery failed for {src_path}")
+    except Exception as e:
+        print(f"Error during black recovery for {src_path}: {e}")
+
+
 ########################################
 # Main routine
 ########################################
 def main():
-    # Prompt for user input
-    transparency_folder = input("Enter the path to the transparency folder: ").strip()
-    target_folder = input("Enter the path to the target folder (source images): ").strip()
-    test_mode_input = input("Do you want to run in test mode? (y/n): ").strip().lower()
-    test_mode = test_mode_input in ("y", "yes")
+    # --- Mode Selection ---
+    mode = input(
+        "Select mode:\n"
+        "1) Full processing (transparency matte creation)\n"
+        "2) Black recovery only (using temporary folder output)\n"
+        "Enter 1 or 2: "
+    ).strip()
 
-    recover_input = input("Recover black-lost alpha first? (y/n): ").strip().lower()
-    recover_first = recover_input in ("y", "yes")
-
-    # Destination roots for normal/inverted outputs
-    dest_root_normal = target_folder.rstrip(os.sep) + "_normal"
-    dest_root_inv = target_folder.rstrip(os.sep) + "_inv"
-
-    # Supported image extensions
     IMG_EXTS = ('.png', '.jpg', '.jpeg', '.webp')
+    tmp_recover_dir = "tmp_blackrecover"  # default temporary folder for recovery
 
-    # Build a sorted list of transparency images
-    transparency_files = sorted(
-        [f for f in os.listdir(transparency_folder) if f.lower().endswith(IMG_EXTS)],
-        key=natural_sort_key
-    )
-    if not transparency_files:
-        raise ValueError("No transparency images found in the transparency folder.")
-    transparency_paths = [os.path.join(transparency_folder, f) for f in transparency_files]
+    if mode == "2":
+        # -----------------------------
+        # Black Recovery Only Mode
+        # -----------------------------
+        target_folder = input("Enter the path to the target folder (source images): ").strip()
+        os.makedirs(tmp_recover_dir, exist_ok=True)
+        tasks = []
 
-    tasks = []
-    processed_one = False
+        with ThreadPoolExecutor() as executor:
+            for current_root, dirs, files in os.walk(target_folder):
+                for file in files:
+                    if file.lower().endswith(IMG_EXTS):
+                        src_path = os.path.join(current_root, file)
+                        tasks.append(executor.submit(black_recover_only, src_path, tmp_recover_dir))
+            for future in as_completed(tasks):
+                try:
+                    future.result()
+                except Exception as e:
+                    print(f"Error in recovery task: {e}")
 
-    with ThreadPoolExecutor() as executor:
-        for current_root, dirs, files in os.walk(target_folder):
-            sorted_files = sorted([f for f in files if f.lower().endswith(IMG_EXTS)], key=natural_sort_key)
-            for i, file in enumerate(sorted_files):
-                src_path = os.path.join(current_root, file)
-                # round-robin or sequential pairing
-                transparency_path = transparency_paths[i % len(transparency_paths)]
+        print("Black recovery only mode complete.")
+        return
 
-                if test_mode:
-                    # do just one file for test
-                    print(f"(Test Mode) Would process {file} with {os.path.basename(transparency_path)}")
-                    process_file(
-                        src_path=src_path,
-                        file=file,
-                        current_root=current_root,
-                        transparency_path=transparency_path,
-                        target_folder=target_folder,
-                        dest_root_normal=dest_root_normal,
-                        dest_root_inv=dest_root_inv,
-                        recover_first=recover_first
-                    )
-                    processed_one = True
-                    break
-                else:
-                    tasks.append(
-                        executor.submit(
-                            process_file,
-                            src_path,
-                            file,
-                            current_root,
-                            transparency_path,
-                            target_folder,
-                            dest_root_normal,
-                            dest_root_inv,
-                            recover_first
+    else:
+        # -----------------------------
+        # Full Processing Mode
+        # -----------------------------
+        transparency_folder = input("Enter the path to the transparency folder: ").strip()
+        target_folder = input("Enter the path to the target folder (source images): ").strip()
+        test_mode_input = input("Do you want to run in test mode? (y/n): ").strip().lower()
+        test_mode = test_mode_input in ("y", "yes")
+        recover_input = input("Recover black-lost alpha first? (y/n): ").strip().lower()
+        recover_first = recover_input in ("y", "yes")
+
+        # Destination roots for normal and inverted outputs
+        dest_root_normal = target_folder.rstrip(os.sep) + "_normal"
+        dest_root_inv = target_folder.rstrip(os.sep) + "_inv"
+
+        # Build a sorted list of transparency images
+        transparency_files = sorted(
+            [f for f in os.listdir(transparency_folder) if f.lower().endswith(IMG_EXTS)],
+            key=natural_sort_key
+        )
+        if not transparency_files:
+            raise ValueError("No transparency images found in the transparency folder.")
+        transparency_paths = [os.path.join(transparency_folder, f) for f in transparency_files]
+
+        tasks = []
+        processed_one = False
+
+        with ThreadPoolExecutor() as executor:
+            for current_root, dirs, files in os.walk(target_folder):
+                sorted_files = sorted(
+                    [f for f in files if f.lower().endswith(IMG_EXTS)],
+                    key=natural_sort_key
+                )
+                for i, file in enumerate(sorted_files):
+                    src_path = os.path.join(current_root, file)
+                    # Pair transparency images in a round-robin fashion
+                    transparency_path = transparency_paths[i % len(transparency_paths)]
+
+                    if test_mode:
+                        print(f"(Test Mode) Would process {file} with {os.path.basename(transparency_path)}")
+                        process_file(
+                            src_path=src_path,
+                            file=file,
+                            current_root=current_root,
+                            transparency_path=transparency_path,
+                            target_folder=target_folder,
+                            dest_root_normal=dest_root_normal,
+                            dest_root_inv=dest_root_inv,
+                            recover_first=recover_first,
+                            tmp_recover_dir=tmp_recover_dir
                         )
-                    )
-            if test_mode and processed_one:
-                break
+                        processed_one = True
+                        break
+                    else:
+                        tasks.append(
+                            executor.submit(
+                                process_file,
+                                src_path,
+                                file,
+                                current_root,
+                                transparency_path,
+                                target_folder,
+                                dest_root_normal,
+                                dest_root_inv,
+                                recover_first,
+                                tmp_recover_dir
+                            )
+                        )
+                if test_mode and processed_one:
+                    break
 
-        # Wait for threads
-        for future in as_completed(tasks):
-            try:
-                future.result()
-            except Exception as e:
-                print(f"Error in threaded task: {e}")
+            # Wait for threaded tasks to finish
+            for future in as_completed(tasks):
+                try:
+                    future.result()
+                except Exception as e:
+                    print(f"Error in threaded task: {e}")
+
 
 if __name__ == "__main__":
     main()
