@@ -62,23 +62,35 @@ def add_alpha_channel(image):
 
 def extract_white_patch(rgb, threshold=0.9, alpha=None):
     """
-    Given a normalized RGB image (values in [0,1]), find the largest connected
-    white (or neutral gray) patch and return its average color.
-    Only consider pixels with alpha > 0 (if provided).
+    Given a normalized RGB image (values in [0,1]), apply a Gaussian blur
+    to reduce noise, then find the largest connected white (or neutral gray) patch
+    and return its average color. Only consider pixels with alpha > 0 (if provided).
     """
+    # Apply Gaussian blur to smooth out noise (kernel size can be tuned)
+    blurred_rgb = cv2.GaussianBlur(rgb, (5, 5), 0)
+
+    # Create a mask of pixels that meet the threshold in the blurred image.
     if alpha is not None:
-        mask = np.all(rgb >= threshold, axis=2) & (alpha > 0)
+        mask = np.all(blurred_rgb >= threshold, axis=2) & (alpha > 0)
     else:
-        mask = np.all(rgb >= threshold, axis=2)
+        mask = np.all(blurred_rgb >= threshold, axis=2)
+
     mask = mask.astype(np.uint8)
+
+    # Use connected components to identify contiguous white regions.
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
     if num_labels <= 1:
         return None
+
+    # Identify the largest connected component (skip label 0 which is the background)
     largest_label = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
     white_patch_mask = (labels == largest_label)
+
     if np.count_nonzero(white_patch_mask) == 0:
         return None
+
     return np.mean(rgb[white_patch_mask], axis=0)
+
 
 def compute_scaling_factors(reference_color):
     """
