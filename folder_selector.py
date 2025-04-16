@@ -26,23 +26,32 @@ def update_folder_selection(index, float_folder_count, main_folder_count):
     rand_start = folder_dictionary['rand_start']
 
     if CLOCK_MODE == 255:  # Free clock
-        # "Rest zones" where we return to default folders
+        # Ensure the active cycle flag exists; default it to False.
+        if 'active_cycle' not in folder_dictionary:
+            folder_dictionary['active_cycle'] = False
+
         if index <= rand_start:
+            # "Rest zone": keep both folders at 0 and reset the active cycle flag.
             float_folder = 0
             main_folder = 0
+            folder_dictionary['active_cycle'] = False
+        elif not folder_dictionary['active_cycle']:
+            # Just after the rest zone (first active frame): update both folders once.
+            float_folder = random.randint(1, float_folder_count - 1)
+            main_folder = random.randint(1, main_folder_count - 1)
+            # Update the random parameter for the next cycle.
+            folder_dictionary['rand_mult'] = random.randint(1, 9)
+            folder_dictionary['active_cycle'] = True
         else:
-            # Background layer (float folder)
-            if index % ((1+ FPS) * rand_mult) == 0:
-                float_folder = random.randint(1, float_folder_count - 1)
-                #print(float_folder_count,float_folder)
-                folder_dictionary['rand_mult'] = random.randint(1, 12)  # update mult
+            # Active phase: perform periodic updates.
+            if index % (((rand_mult // 3) + FPS) * rand_mult) == rand_mult // 3 + 2:
+                float_folder = random.randint(0, float_folder_count - 1)
+                folder_dictionary['rand_mult'] = random.randint(1, 12)  # update mult for float_folder
+            if index % (FPS * (rand_mult + rand_mult // 2)) == rand_mult // 4:
+                main_folder = random.randint(1, main_folder_count - 1)
+                folder_dictionary['rand_mult'] = random.randint(1, 9)  # update mult for main_folder
                 folder_dictionary['rand_start'] = random.randint(FPS, int(3.5 * FPS))
 
-            # Foreground layer (main folder)
-            if index % (FPS * (rand_mult + 7)) == 0:
-                main_folder = random.randint(1, main_folder_count - 1)
-                folder_dictionary['rand_mult'] = random.randint(1, 9)  # update mult again
-                folder_dictionary['rand_start'] = random.randint(FPS, int(3.5 * FPS))
 
 
     else:

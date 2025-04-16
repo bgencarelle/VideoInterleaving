@@ -106,7 +106,7 @@ def create_folder_csv_files(folder_counts, processed_dir, script_dir):
             csv_path = os.path.join(processed_dir, csv_filename)
             with open(csv_path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
-                for index, (folder_rel, first_png, width, height, has_alpha, file_count) in enumerate(sub_group, 1):
+                for index, (folder_rel, first_png, width, height, has_alpha, file_count) in enumerate(sub_group, 0):
                     if first_png:
                         try:
                             image_path = os.path.join(script_dir, folder_rel, first_png)
@@ -167,7 +167,7 @@ def write_folder_list():
 
     # Scan both directories recursively
     folder_dict = {}
-    folder_key = 1
+    folder_key = 0
     for base_path in [main_folder_path, float_folder_path]:
         if os.path.exists(base_path) and os.path.isdir(base_path):
             for subdirectory in [base_path] + get_subdirectories(base_path):
@@ -203,7 +203,7 @@ def write_folder_list():
     folder_count_filename = f'folder_count_{total_images}.txt'
     folder_count_path = os.path.join(processed_dir, folder_count_filename)
     with open(folder_count_path, 'w', encoding='utf-8') as f:
-        for index, (folder, first_image, width, height, has_alpha, count) in enumerate(folder_counts, 1):
+        for index, (folder, first_image, width, height, has_alpha, count) in enumerate(folder_counts, 0):
             folder_rel = os.path.relpath(folder, script_dir)
             first_image_name = os.path.splitext(os.path.basename(first_image))[0] if first_image else "NoImage"
             f.write(f"{index}, {folder_rel}, {first_image_name}, {width}x{height} pixels, {count}\n")
