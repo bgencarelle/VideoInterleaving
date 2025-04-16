@@ -40,13 +40,13 @@ def update_folder_selection(index, float_folder_count, main_folder_count):
             float_folder = random.randint(1, float_folder_count - 1)
             main_folder = random.randint(1, main_folder_count - 1)
             # Update the random parameter for the next cycle.
-            folder_dictionary['rand_mult'] = random.randint(1, 9)
+            folder_dictionary['rand_mult'] = random.randint(4, 12)
             folder_dictionary['active_cycle'] = True
         else:
             # Active phase: perform periodic updates.
             if index % (((rand_mult // 3) + FPS) * rand_mult) == rand_mult // 3 + 2:
                 float_folder = random.randint(0, float_folder_count - 1)
-                folder_dictionary['rand_mult'] = random.randint(1, 12)  # update mult for float_folder
+                folder_dictionary['rand_mult'] = random.randint(2, 12)  # update mult for float_folder
             if index % (FPS * (rand_mult + rand_mult // 2)) == rand_mult // 4:
                 main_folder = random.randint(1, main_folder_count - 1)
                 folder_dictionary['rand_mult'] = random.randint(1, 9)  # update mult for main_folder
