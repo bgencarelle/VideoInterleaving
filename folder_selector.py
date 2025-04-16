@@ -38,9 +38,8 @@ def update_folder_selection(index, float_folder_count, main_folder_count):
         elif not folder_dictionary['active_cycle']:
             # Just after the rest zone (first active frame): update both folders once.
             float_folder = random.randint(1, float_folder_count - 1)
-            main_folder = random.randint(1, main_folder_count - 1)
             # Update the random parameter for the next cycle.
-            folder_dictionary['rand_mult'] = random.randint(4, 12)
+            folder_dictionary['rand_mult'] = random.randint(1, 4)
             folder_dictionary['active_cycle'] = True
         else:
             # Active phase: perform periodic updates.
