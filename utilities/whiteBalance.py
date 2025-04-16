@@ -22,11 +22,13 @@ import numpy as np
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+
 # --- Helper Functions ---
 
 def natural_key(string):
     """Return a list of integers and lower-case substrings for natural sorting."""
     return [int(s) if s.isdigit() else s.lower() for s in re.split(r'(\d+)', string)]
+
 
 def safe_relpath(path, start):
     """
@@ -36,6 +38,7 @@ def safe_relpath(path, start):
     if path.startswith(start):
         return path[len(start):].lstrip(os.sep)
     return os.path.basename(path)
+
 
 def add_alpha_channel(image):
     """
@@ -49,7 +52,6 @@ def add_alpha_channel(image):
         image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
     if image.shape[2] == 4:
         return image
-    # If 3-channel, add an alpha channel.
     if image.dtype == np.uint8:
         alpha = np.full((image.shape[0], image.shape[1]), 255, dtype=np.uint8)
     elif image.dtype == np.uint16:
@@ -60,35 +62,26 @@ def add_alpha_channel(image):
     image[:, :, 3] = alpha
     return image
 
+
 def extract_white_patch(rgb, threshold=0.9, alpha=None):
     """
     Given a normalized RGB image (values in [0,1]), apply a Gaussian blur
     to reduce noise, then find the largest connected white (or neutral gray) patch
     and return its average color. Only consider pixels with alpha > 0 (if provided).
     """
-    # Apply Gaussian blur to smooth out noise (kernel size can be tuned)
     blurred_rgb = cv2.GaussianBlur(rgb, (5, 5), 0)
-
-    # Create a mask of pixels that meet the threshold in the blurred image.
     if alpha is not None:
         mask = np.all(blurred_rgb >= threshold, axis=2) & (alpha > 0)
     else:
         mask = np.all(blurred_rgb >= threshold, axis=2)
-
     mask = mask.astype(np.uint8)
-
-    # Use connected components to identify contiguous white regions.
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
     if num_labels <= 1:
         return None
-
-    # Identify the largest connected component (skip label 0 which is the background)
     largest_label = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
     white_patch_mask = (labels == largest_label)
-
     if np.count_nonzero(white_patch_mask) == 0:
         return None
-
     return np.mean(rgb[white_patch_mask], axis=0)
 
 
@@ -100,6 +93,7 @@ def compute_scaling_factors(reference_color):
     with np.errstate(divide='ignore', invalid='ignore'):
         return np.where(reference_color > 0, target / reference_color, 1.0)
 
+
 def load_image_as_rgba(path):
     """
     Load an image with cv2.IMREAD_UNCHANGED and ensure it has 4 channels.
@@ -110,38 +104,40 @@ def load_image_as_rgba(path):
         return None
     return add_alpha_channel(image)
 
+
 def white_balance_image_native(image, white_threshold=0.9, auto_reference=True, reference_color=None):
     """
     White balance an image in native BGRA space.
 
-    Parameters:
-      image: Input image in BGRA order.
-      white_threshold: Threshold to consider a pixel white.
-      auto_reference: If True and no reference_color is given, compute one.
-      reference_color: A 3-element array representing the white reference.
+    If no white patch is found and auto_reference is True, this function falls back to a
+    generic white balance using overall image statistics (the 95th percentile is used here).
 
-    Returns:
-      The white-balanced image in BGRA order.
+    The computed per-channel scaling factors are dampened and clamped to reduce overcorrection.
     """
     if image is None:
         return None
     if image.shape[2] != 4:
         image = add_alpha_channel(image)
-    # Set normalization factor based on dtype.
+
     norm = 255.0 if image.dtype == np.uint8 else 65535.0 if image.dtype == np.uint16 else 1.0
     rgb = image[:, :, :3] / norm
     alpha = image[:, :, 3] / norm
+
     if reference_color is None and auto_reference:
         candidate = extract_white_patch(rgb, threshold=white_threshold, alpha=alpha)
-        if candidate is not None:
-            reference_color = candidate
-        else:
-            return image
-    if reference_color is None:
-        return image
+        if candidate is None:
+            print("No white patch found; applying generic white balance using overall image statistics.")
+            candidate = np.percentile(rgb, 95, axis=(0, 1))
+        reference_color = candidate
+
     scaling_factors = compute_scaling_factors(reference_color)
+    # Dampen the gain: apply only 50% of the computed correction.
+    dampening_factor = 0.5
+    scaling_factors = 1.0 + dampening_factor * (scaling_factors - 1.0)
+    # Clamp to a lower maximum gain to avoid washout.
+    scaling_factors = np.clip(scaling_factors, 1.0, 1.2)
     balanced_rgb = np.clip(rgb * scaling_factors.reshape(1, 1, 3), 0, 1)
-    # Convert back to original dtype.
+
     if image.dtype == np.uint8:
         balanced_rgb = (balanced_rgb * 255).astype(np.uint8)
         alpha_channel = (alpha * 255).astype(np.uint8)
@@ -150,7 +146,9 @@ def white_balance_image_native(image, white_threshold=0.9, auto_reference=True, 
         alpha_channel = (alpha * 65535).astype(np.uint16)
     else:
         alpha_channel = alpha
+
     return np.dstack((balanced_rgb, alpha_channel))
+
 
 def save_lossless_webp(image, out_path):
     """
@@ -161,6 +159,7 @@ def save_lossless_webp(image, out_path):
     except AttributeError:
         pil_img = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA))
         pil_img.save(out_path, "WEBP", lossless=True)
+
 
 # --- Per-Image Processing ---
 
@@ -184,6 +183,7 @@ def process_image(file, input_dir, output_dir, reference_color, white_threshold)
     msg = f"Processed {image_path} -> {out_path}"
     print(msg)
     return msg
+
 
 # --- Per-Folder Processing ---
 
@@ -210,7 +210,9 @@ def process_directory(input_dir, output_root, white_threshold=0.9):
     alpha = ref_image[:, :, 3] / norm
     candidate = extract_white_patch(rgb, threshold=white_threshold, alpha=alpha)
     if candidate is None:
-        return f"No valid white patch found in {ref_image_path}; skipping folder."
+        print(
+            f"No valid white patch found in {ref_image_path}; applying generic white balance using the 95th percentile of the overall image.")
+        candidate = np.percentile(rgb, 95, axis=(0, 1))
     reference_color = candidate
     print(f"In folder '{input_dir}', using '{ref_image_name}' as reference.")
     print(f"Reference white/gray color: {reference_color}")
@@ -221,12 +223,14 @@ def process_directory(input_dir, output_root, white_threshold=0.9):
         futures = {executor.submit(process_image, file, input_dir, output_dir, reference_color, white_threshold): file
                    for file in images}
         for future in as_completed(futures):
-            _ = future.result()  # Each file prints its own status.
+            _ = future.result()
     return f"Finished processing folder: {input_dir}"
+
 
 # --- Main Function ---
 
 BASE_INPUT_FOLDER = None
+
 
 def main():
     """
@@ -252,6 +256,7 @@ def main():
     for d in sorted(dirs_to_process, key=natural_key):
         result = process_directory(d, output_root, white_threshold=0.9)
         print(result)
+
 
 if __name__ == "__main__":
     main()
