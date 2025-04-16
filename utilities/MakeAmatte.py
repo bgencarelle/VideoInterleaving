@@ -13,14 +13,12 @@ except ImportError:
     print(
         "WARNING: Could not import 'recover_image' from 'turntoblack.py'. Make sure it's in the same folder or installed.")
 
-
 ########################################
 # Natural sort helper
 ########################################
 def natural_sort_key(s: str):
     """Provides a key for natural (human) sorting of filenames."""
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'([0-9]+)', s)]
-
 
 ########################################
 # Channel + alpha utility
@@ -41,7 +39,6 @@ def ensure_four_channels(img: np.ndarray) -> np.ndarray:
 
     return img
 
-
 ########################################
 # Adjust transparent pixels to black
 ########################################
@@ -58,7 +55,6 @@ def adjust_transparent_pixels_cv2(image: np.ndarray) -> np.ndarray:
     image[mask, 1] = 0  # Green
     image[mask, 2] = 0  # Red
     return image
-
 
 ########################################
 # Mode 1: Normal matte application function
@@ -160,7 +156,6 @@ def process_file(
     except Exception as e:
         print(f"Error processing {src_path}: {e}")
 
-
 ########################################
 # Mode 2: Black recovery lossless function
 ########################################
@@ -198,7 +193,6 @@ def recover_image_lossless(filepath: str, output_folder: str) -> Optional[str]:
         print(f"Error processing {filepath}: {e}")
         return None
 
-
 def recover_folder_recursive(input_folder: str, output_folder: str, max_workers: int = 8):
     """
     Recursively recovers images (using the lossless black-recovery function),
@@ -223,7 +217,6 @@ def recover_folder_recursive(input_folder: str, output_folder: str, max_workers:
             result = future.result()
             if result:
                 print(f"Recovered: {result}")
-
 
 ########################################
 # Main routine
@@ -272,19 +265,25 @@ def main():
             raise ValueError("No transparency images found in the transparency folder.")
         transparency_paths = [os.path.join(transparency_folder, f) for f in transparency_files]
 
-        tasks = []
-        processed_one = False
+        if test_mode:
+            # In test mode, for each folder we process only the same predetermined files.
+            # These are the 1-based file positions to be processed:
+            test_indices = [20, 80, 140, 200, 260, 320, 380, 440, 500, 1000, 2000]
+            # Convert to zero-based indices:
+            test_indices_zero = [i - 1 for i in test_indices]
 
-        with ThreadPoolExecutor() as executor:
             for current_root, dirs, files in os.walk(target_folder):
                 sorted_files = sorted([f for f in files if f.lower().endswith(IMG_EXTS)], key=natural_sort_key)
-                for i, file in enumerate(sorted_files):
-                    src_path = os.path.join(current_root, file)
-                    # Round-robin pairing of target images with transparency images.
-                    transparency_path = transparency_paths[i % len(transparency_paths)]
-
-                    if test_mode:
-                        print(f"(Test Mode) Would process {file} with {os.path.basename(transparency_path)}")
+                if not sorted_files:
+                    continue  # skip folders with no matching files
+                rel_folder = os.path.relpath(current_root, target_folder)
+                for idx in test_indices_zero:
+                    if idx < len(sorted_files):
+                        file = sorted_files[idx]
+                        src_path = os.path.join(current_root, file)
+                        # Use the same round-robin pairing as before.
+                        transparency_path = transparency_paths[idx % len(transparency_paths)]
+                        print(f"(Test Mode) Processing '{file}' from folder '{rel_folder}' with transparency '{os.path.basename(transparency_path)}'")
                         process_file(
                             src_path=src_path,
                             file=file,
@@ -295,9 +294,15 @@ def main():
                             dest_root_inv=dest_root_inv,
                             recover_first=recover_first
                         )
-                        processed_one = True
-                        break
-                    else:
+        else:
+            tasks = []
+            with ThreadPoolExecutor() as executor:
+                for current_root, dirs, files in os.walk(target_folder):
+                    sorted_files = sorted([f for f in files if f.lower().endswith(IMG_EXTS)], key=natural_sort_key)
+                    for i, file in enumerate(sorted_files):
+                        src_path = os.path.join(current_root, file)
+                        # Round-robin pairing of target images with transparency images.
+                        transparency_path = transparency_paths[i % len(transparency_paths)]
                         tasks.append(
                             executor.submit(
                                 process_file,
@@ -311,16 +316,12 @@ def main():
                                 recover_first
                             )
                         )
-                if test_mode and processed_one:
-                    break
-
-            # Wait for all tasks to complete.
-            for future in as_completed(tasks):
-                try:
-                    future.result()
-                except Exception as e:
-                    print(f"Error in threaded task: {e}")
-
+                # Wait for all tasks to complete.
+                for future in as_completed(tasks):
+                    try:
+                        future.result()
+                    except Exception as e:
+                        print(f"Error in threaded task: {e}")
 
 if __name__ == "__main__":
     main()
