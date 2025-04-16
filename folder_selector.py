@@ -15,7 +15,7 @@ def update_folder_selection(index, float_folder_count, main_folder_count):
 
     # Initialize persistent random state
     if 'rand_mult' not in folder_dictionary:
-        random.seed()
+        #random.seed()
         folder_dictionary['rand_mult'] = random.randint(1, 9)
 
     if 'rand_start' not in folder_dictionary:
@@ -44,10 +44,10 @@ def update_folder_selection(index, float_folder_count, main_folder_count):
             folder_dictionary['active_cycle'] = True
         else:
             # Active phase: perform periodic updates.
-            if index % (((rand_mult // 3) + FPS) * rand_mult) == 7:
+            if index % (((1 + rand_mult // 3) + FPS) * rand_mult) == 7 + rand_mult:
                 float_folder = random.randint(0, float_folder_count - 1)
                 folder_dictionary['rand_mult'] = random.randint(1, 12)  # update mult for float_folder
-            if index % (FPS * (rand_mult + rand_mult // 2)) == 3:
+            if index % (FPS * (1 + (rand_mult + rand_mult // 2))) == 3 + rand_mult:
                 main_folder = random.randint(1, main_folder_count - 1)
                 folder_dictionary['rand_mult'] = random.randint(1, 9)  # update mult for main_folder
                 folder_dictionary['rand_start'] = random.randint(FPS, int(3.5 * FPS))
