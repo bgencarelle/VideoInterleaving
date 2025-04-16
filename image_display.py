@@ -202,6 +202,9 @@ def run_display(clock_source=CLOCK_MODE):
                     "main_folder": main_folder,
                     "float_folder": float_folder,
                     "rand_mult": folder_dictionary['rand_mult'],
+                    # NEW – give the monitor the totals once per tick
+                    "main_folder_count": main_folder_count,
+                    "float_folder_count": float_folder_count,
                 })
 
     pygame.quit()

@@ -9,11 +9,17 @@ import socket
 import platform
 import subprocess
 from collections import deque
+from math import log2  # for entropy calc
 from settings import WEB_PORT
 
+# ---------------------------------------------------------------
+# Configuration --------------------------------------------------
+# ---------------------------------------------------------------
 web_port = WEB_PORT
 
+# Initial payload the browser sees; new keys auto‑appear there.
 monitor_data = {
+    # Fast playback diagnostics
     "index": 0,
     "displayed": 0,
     "delta": 0,
@@ -22,9 +28,19 @@ monitor_data = {
     "staleness_ms": 0,
     "comp_slope": 0,
     "latency_state": "unknown",
-    # System diagnostics:
+    # Folder‑selection probes
+    "main_folder": 0,
+    "float_folder": 0,
+    "rand_mult": 0,
+    "main_covered": "0/0",
+    "float_covered": "0/0",
+    "main_entropy": "0.00",
+    "float_entropy": "0.00",
+    "main_samples": 0,
+    "float_samples": 0,
+    # System diagnostics
     "cpu_percent": 0,
-    "cpu_per_core": [],  # <--- New field for per-core CPU usage
+    "cpu_per_core": [],
     "mem_used": "0 MB",
     "mem_total": "0 MB",
     "script_uptime": "0d 00:00:00",
@@ -42,6 +58,9 @@ monitor_data = {
     "last_error": "",
 }
 
+# ---------------------------------------------------------------
+# HTML template (browser pulls /data 10×/s) ----------------------
+# ---------------------------------------------------------------
 HTML_TEMPLATE = """
 <html>
 <head>
@@ -52,189 +71,213 @@ HTML_TEMPLATE = """
 </head>
 <body>
   <h1>🎧 Live Playback Monitor</h1>
-  <div id="monitor_data">
-    <!-- Monitor data will be updated here -->
-  </div>
+  <div id="monitor_data"></div>
   <script>
     function updateMonitor() {
       fetch('/data')
-        .then(response => response.json())
-        .then(data => {
-          let html = "";
-          for (const [key, value] of Object.entries(data)) {
-            html += `<div><span class='label'>${key}:</span> <span class='value'>${value}</span></div>`;
-          }
-          document.getElementById("monitor_data").innerHTML = html;
-        })
-        .catch(error => console.error('Error fetching monitor data:', error));
+        .then(r => r.json())
+        .then(d => {
+          let html = '';
+          for (const [k, v] of Object.entries(d))
+            html += `<div><span class='label'>${k}:</span> <span class='value'>${v}</span></div>`;
+          document.getElementById('monitor_data').innerHTML = html;
+        });
     }
-
-    // Update monitor data every 2 seconds; adjust as needed.
     setInterval(updateMonitor, 100);
-    </script>
-    // Initial data fetch
     updateMonitor();
   </script>
 </body>
 </html>
 """
 
+# ---------------------------------------------------------------
+# Helper – Shannon entropy normalised to [0,1] ------------------
+# ---------------------------------------------------------------
 
+def _entropy(counts):
+    tot = sum(counts)
+    if tot == 0:
+        return 0.0
+    return -sum((c / tot) * log2(c / tot) for c in counts if c) / log2(len(counts))
+
+# ---------------------------------------------------------------
+# Web server -----------------------------------------------------
+# ---------------------------------------------------------------
 class MonitorHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
-    def log_message(self, format, *args):
-        # Suppress HTTP log messages to terminal
-        return
+    def log_message(self, *_):
+        return  # silence spam
 
     def do_GET(self):
         if self.path == "/":
-            # Send the full HTML page (which uses AJAX to update dynamic parts)
-            response = HTML_TEMPLATE
             self.send_response(200)
             self.send_header("Content-type", "text/html")
             self.end_headers()
-            self.wfile.write(response.encode("utf-8"))
+            self.wfile.write(HTML_TEMPLATE.encode())
         elif self.path == "/data":
-            # Send only the JSON data payload
             self.send_response(200)
             self.send_header("Content-type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps(monitor_data).encode("utf-8"))
+            self.wfile.write(json.dumps(monitor_data).encode())
         else:
             self.send_error(404)
 
 
-def kill_old_server(port=web_port):
-    """Attempt to kill any existing server using the webport."""
+def _kill_old_server(port=web_port):
+    """Kill any previous instance so dev restarts are painless."""
     try:
-        output = subprocess.check_output(
-            ["lsof", "-ti", f":{port}"], stderr=subprocess.DEVNULL
-        ).decode()
-        pids = output.strip().split("\n")
+        pids = subprocess.check_output(["lsof", "-ti", f":{port}"], stderr=subprocess.DEVNULL).decode().split()
         for pid in pids:
-            if pid:
-                os.kill(int(pid), 9)
+            os.kill(int(pid), 9)
     except Exception:
         pass
 
 
-def start_monitor_server():
-    handler = MonitorHTTPRequestHandler
-    print(f"🛰️  Starting monitor on port {web_port}")  # Confirm actual port value
-    with socketserver.TCPServer(("", web_port), handler) as httpd:
+def _serve():
+    with socketserver.TCPServer(("", web_port), MonitorHTTPRequestHandler) as httpd:
+        print(f"🛰️  Monitor on http://localhost:{web_port}")
         httpd.serve_forever()
 
 
 def start_monitor():
-    kill_old_server()  # Kill any existing monitor instance first
-    thread = threading.Thread(target=start_monitor_server, daemon=True)
-    thread.start()
+    _kill_old_server()
+    threading.Thread(target=_serve, daemon=True).start()
     return MonitorUpdater()
 
-
+# ---------------------------------------------------------------
+# Core updater ---------------------------------------------------
+# ---------------------------------------------------------------
 class MonitorUpdater:
+    """Call .update(payload_dict) from your pygame loop."""
+
     def __init__(self):
         self.last_success_time = time.monotonic()
         self.comp_history = []
         self.failed_indices = deque(maxlen=20)
         self.failed_load_count = 0
-        self.script_start_time = time.time()  # Track when the script started
-        # Initialize a timer for heavy (expensive) updates:
-        self.last_heavy_update = 0
-        self.heavy_interval = 0.5  # seconds; adjust as needed
+        self.script_start_time = time.time()
+        # heavy‑telemetry pacing
+        self.last_heavy = 0
+        self.heavy_interval = 0.5
+        # folder hit arrays (lazy‑init when we know N)
+        self.main_hits = None
+        self.float_hits = None
 
+    # -------------------------- helpers -------------------------
     @staticmethod
-    def _format_duration(seconds):
-        days = int(seconds) // 86400
-        hours = (int(seconds) % 86400) // 3600
-        minutes = (int(seconds) % 3600) // 60
-        secs = int(seconds) % 60
-        return f"{days}d {hours:02}:{minutes:02}:{secs:02}"
+    def _fmt_dur(sec):
+        d, h = divmod(int(sec), 86400)
+        h, m = divmod(h, 3600)
+        m, s = divmod(m, 60)
+        return f"{d}d {h:02}:{m:02}:{s:02}"
 
-    def record_load_error(self, index, err):
-        """Called when an async image load fails."""
+    def record_load_error(self, idx, err):
         self.failed_load_count += 1
-        self.failed_indices.append(index)
-        monitor_data["failed_load_count"] = self.failed_load_count
-        monitor_data["failed_indices"] = ",".join(map(str, self.failed_indices))
-        monitor_data["last_error"] = str(err)
+        self.failed_indices.append(idx)
+        monitor_data.update({
+            "failed_load_count": self.failed_load_count,
+            "failed_indices": ",".join(map(str, self.failed_indices)),
+            "last_error": str(err),
+        })
 
+    # -------------------------- update --------------------------
     def update(self, payload):
         now = time.monotonic()
 
-        # ---- Fast, free updates from pygame:
+        # ---------- fast fields ---------------------------------
         idx = payload.get("index", 0)
         displayed = payload.get("displayed", 0)
         delta = idx - displayed
-        offset = payload.get("offset", 0)
         fps = payload.get("fps", 0)
+        offset = payload.get("offset", 0)
 
-        # If we displayed a frame successfully, reset the staleness timer.
-        if payload.get("successful_frame", False):
+        if payload.get("successful_frame"):  # resets staleness timer
             self.last_success_time = now
 
-        # Accept new folder fields from pygame (which are free)
         main_folder = payload.get("main_folder", 0)
         float_folder = payload.get("float_folder", 0)
         rand_mult = payload.get("rand_mult", 0)
 
-        # Update the quick part of monitor_data:
+        # ---------- folder bookkeeping --------------------------
+        N_main = payload.get("main_folder_count")
+        N_float = payload.get("float_folder_count")
+
+        if N_main is not None and self.main_hits is None:
+            self.main_hits = [0] * N_main
+        if N_float is not None and self.float_hits is None:
+            self.float_hits = [0] * N_float
+
+        if self.main_hits and 0 <= main_folder < len(self.main_hits):
+            self.main_hits[main_folder] += 1
+        if self.float_hits and 0 <= float_folder < len(self.float_hits):
+            self.float_hits[float_folder] += 1
+
+        # ---------- quick push to dict --------------------------
         monitor_data.update({
             "index": idx,
             "displayed": displayed,
             "delta": delta,
             "fps": f"{fps:.1f}" if isinstance(fps, float) else fps,
             "fifo_depth": payload.get("fifo_depth", monitor_data["fifo_depth"]),
-            "staleness_ms": f"{(now - self.last_success_time) * 1000:.0f}",
+            "staleness_ms": f"{(now - self.last_success_time)*1000:.0f}",
             "main_folder": main_folder,
             "float_folder": float_folder,
             "rand_mult": rand_mult,
         })
 
-        # Rolling slope update remains fast as it's just arithmetic:
+        # compensation slope (30‑sample window)
         self.comp_history.append(offset)
         if len(self.comp_history) > 30:
             self.comp_history.pop(0)
-        slope = (self.comp_history[-1] - self.comp_history[0]) if len(self.comp_history) >= 2 else 0
-        monitor_data["comp_slope"] = slope
+        if len(self.comp_history) >= 2:
+            monitor_data["comp_slope"] = self.comp_history[-1] - self.comp_history[0]
 
-        if abs(delta) <= 1:
-            state = "Delta synced"
-        elif delta < -1:
-            state = "Delta ahead"
-        else:
-            state = "Delta behind"
-        monitor_data["latency_state"] = state
+        monitor_data["latency_state"] = (
+            "Delta synced" if abs(delta) <= 1 else "Delta ahead" if delta < -1 else "Delta behind"
+        )
 
-        # ---- Heavy (expensive) system telemetry updates:
-        # Only update heavy telemetry if sufficient time has passed:
-        if now - self.last_heavy_update >= self.heavy_interval:
+        # ---------- heavy telemetry every self.heavy_interval ----
+        if now - self.last_heavy >= self.heavy_interval:
             try:
                 vm = psutil.virtual_memory()
                 du = psutil.disk_usage("/")
-                uptime_seconds = time.time() - psutil.boot_time()
+                uptime = time.time() - psutil.boot_time()
                 load = os.getloadavg() if hasattr(os, "getloadavg") else (0.0, 0.0, 0.0)
                 proc = psutil.Process(os.getpid())
 
-                # Gather per-core CPU usage
-                cpu_percents = psutil.cpu_percent(percpu=True)
-                average_cpu = sum(cpu_percents) / len(cpu_percents) if cpu_percents else 0
-
+                cpu_perc = psutil.cpu_percent(percpu=True)
                 monitor_data.update({
-                    "cpu_percent": average_cpu,
-                    "cpu_per_core": [f"{p:.1f}%" for p in cpu_percents],
-                    "mem_used": f"{vm.used // (1024 ** 2)} MB",
-                    "mem_total": f"{vm.total // (1024 ** 2)} MB",
-                    "machine_uptime": self._format_duration(uptime_seconds),
-                    "script_uptime": self._format_duration(time.time() - self.script_start_time),
+                    "cpu_percent": sum(cpu_perc)/len(cpu_perc) if cpu_perc else 0,
+                    "cpu_per_core": [f"{p:.1f}%" for p in cpu_perc],
+                    "mem_used": f"{vm.used//(1024**2)} MB",
+                    "mem_total": f"{vm.total//(1024**2)} MB",
+                    "machine_uptime": self._fmt_dur(uptime),
+                    "script_uptime": self._fmt_dur(time.time() - self.script_start_time),
                     "load_avg": ", ".join(f"{x:.2f}" for x in load),
                     "disk_root": f"{du.percent}%",
                     "threads": threading.active_count(),
                     "proc_count": len(psutil.pids()),
-                    "python_mem_mb": f"{proc.memory_info().rss // (1024 ** 2)} MB"
+                    "python_mem_mb": f"{proc.memory_info().rss//(1024**2)} MB",
                 })
+
+                # folder metrics
+                if self.main_hits:
+                    covered = sum(1 for c in self.main_hits if c)
+                    total = len(self.main_hits)
+                    monitor_data.update({
+                        "main_covered": f"{covered}/{total}",
+                        "main_entropy": f"{_entropy(self.main_hits):.2f}",
+                        "main_samples": sum(self.main_hits),
+                    })
+                if self.float_hits:
+                    covered = sum(1 for c in self.float_hits if c)
+                    total = len(self.float_hits)
+                    monitor_data.update({
+                        "float_covered": f"{covered}/{total}",
+                        "float_entropy": f"{_entropy(self.float_hits):.2f}",
+                        "float_samples": sum(self.float_hits),
+                    })
             except Exception:
                 pass
-            # Reset the heavy update timer
-            self.last_heavy_update = now
+            self.last_heavy = now
 
         return monitor_data
