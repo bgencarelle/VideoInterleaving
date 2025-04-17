@@ -34,6 +34,9 @@ _image_size = None
 _rotation_angle = 0
 _mirror_mode = None
 
+_pbo = None          # reusable pixel buffer
+
+
 def set_transform_parameters(fs_scale, fs_offset_x, fs_offset_y, image_size, rotation_angle, mirror_mode):
     """
     Sets the transformation parameters used for computing the quad vertices.
@@ -161,30 +164,38 @@ def create_texture(image):
     return texture_id
 
 def update_texture(texture_id, new_image):
-    """
-    Updates an existing texture with new image data using a Pixel Buffer Object (PBO)
-    to offload data transfer asynchronously. Reallocates the texture if the dimensions have changed.
-    """
     glBindTexture(GL_TEXTURE_2D, texture_id)
     w, h = new_image.shape[1], new_image.shape[0]
-    expected = texture_dimensions.get(texture_id, (None, None))
-    if expected != (w, h):
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, None)
+    exp = texture_dimensions.get(texture_id, (None, None))
+    if exp != (w, h):
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, None)
         texture_dimensions[texture_id] = (w, h)
-    pbo = glGenBuffers(1)
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo)
-    size = new_image.nbytes
-    glBufferData(GL_PIXEL_UNPACK_BUFFER, size, new_image, GL_STREAM_DRAW)
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, None)
+
+    global _pbo
+    if _pbo is None:
+        _pbo = glGenBuffers(1)
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, _pbo)
+    glBufferData(GL_PIXEL_UNPACK_BUFFER, new_image.nbytes,
+                 new_image, GL_STREAM_DRAW)
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h,
+                    GL_RGBA, GL_UNSIGNED_BYTE, None)
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0)
-    glDeleteBuffers(1, [pbo])
+
 
 def compute_transformed_quad():
     """
     Computes the quad vertices (with texture coordinates) after applying rotation and mirroring.
     Uses the transformation parameters set via set_transform_parameters().
     """
+
+
     global _fs_scale, _fs_offset_x, _fs_offset_y, _image_size, _rotation_angle, _mirror_mode
+    # cache using a tuple of the 6 inputs
+    key = (_fs_scale, _fs_offset_x, _fs_offset_y,
+           _image_size, _rotation_angle, _mirror_mode)
+    if getattr(compute_transformed_quad, "_cache_key", None) == key:
+        return compute_transformed_quad._cache
     w, h = _image_size
     w_scaled = w * _fs_scale
     h_scaled = h * _fs_scale
@@ -219,6 +230,10 @@ def compute_transformed_quad():
         vertices[i*4 + 1] = final_pts[i][1]
         vertices[i*4 + 2] = tex_coords[i][0]
         vertices[i*4 + 3] = tex_coords[i][1]
+    compute_transformed_quad._cache_key = key
+    compute_transformed_quad._cache = vertices
+
+
     return vertices
 
 def display_image(texture_id):
