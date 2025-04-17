@@ -25,12 +25,7 @@ class ImageLoader:
             image_np = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
             if image_np is None:
                 raise ValueError(f"Failed to load image: {image_path}")
-            # Ensure RGBA ordering
-            if image_np.shape[2] == 3:
-                image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGBA)
-            elif image_np.shape[2] == 4:
-                # BGRA -> RGBA by channel swap
-                image_np = image_np[:, :, [2, 1, 0, 3]]
+            image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGBA)
             return image_np
         else:
             raise ValueError("Unsupported image format.")
@@ -38,21 +33,22 @@ class ImageLoader:
     def load_images(self, index, main_folder, float_folder):
         """
         Loads a pair of images from the stored folder paths.
-        Returns a (main_image, float_image) tuple.
         """
         main_image = self.read_image(self.main_folder_path[index][main_folder])
         float_image = self.read_image(self.float_folder_path[index][float_folder])
         return main_image, float_image
 
+
 class FIFOImageBuffer:
     """
     A FIFO buffer that stores (index, (main_image, float_image)) pairs.
     'index' acts like a simplified presentation timestamp (PTS).
-
-    This implementation prunes old entries and finds the closest match without removing it,
-    ensuring no FIFO misses.
     """
+
     def __init__(self, max_size=5):
+        """
+        :param max_size: Maximum number of frames to hold in the queue.
+        """
         self.queue = deque()
         self.max_size = max_size
         self.lock = threading.Lock()
@@ -64,19 +60,50 @@ class FIFOImageBuffer:
         """
         with self.lock:
             if len(self.queue) >= self.max_size:
-                self.queue.popleft()
+                self.queue.popleft()  # Discard the oldest if at capacity
             self.queue.append((index, images))
 
     def get(self, current_index):
+        """
+        Called by the consumer (display loop) to retrieve the frame whose index
+        is closest to current_index (while still within +/- TOLERANCE).
+
+        Returns:
+           (stored_index, main_image, float_image) if a suitable frame is found,
+           else None.
+
+        Steps:
+          1) Discard frames whose index is outside the +/- TOLERANCE window.
+          2) Among remaining frames, find the one with the smallest abs difference.
+          3) Return that frame if within TOLERANCE, otherwise None.
+        """
         with self.lock:
-            # 1) prune only front‑of‑queue out‑of‑tolerance frames
+            # 1) Discard any frames that are too far from current_index (in either direction).
             while self.queue and abs(self.queue[0][0] - current_index) > TOLERANCE:
                 self.queue.popleft()
+
+            # If the queue is empty after discarding, nothing to display.
             if not self.queue:
                 return None
-            # 2) pick closest match (no removal)
-            best_index, (main_img, float_img) = min(
-                self.queue,
-                key=lambda item: abs(item[0] - current_index)
-            )
-        return best_index, main_img, float_img
+
+            # 2) Find the closest frame in the queue.
+            best_diff = float('inf')
+            best_i = -1
+            best_stored_index = None
+            best_images = None
+
+            # We won't pop frames here; we only pick the best to display.
+            for i, (stored_index, images) in enumerate(self.queue):
+                diff = abs(stored_index - current_index)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_i = i
+                    best_stored_index = stored_index
+                    best_images = images
+
+            # 3) Check if the best match is within TOLERANCE.
+            if best_diff <= TOLERANCE and best_images is not None:
+                main_image, float_image = best_images
+                return best_stored_index, main_image, float_image
+            else:
+                return None
