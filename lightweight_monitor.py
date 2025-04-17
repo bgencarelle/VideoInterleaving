@@ -60,6 +60,8 @@ monitor_data = {
     "failed_load_count": 0,
     "failed_indices": "",
     "last_error": "",
+    "fifo_miss_count": 0,  # NEW
+    "last_fifo_miss": -1,  # NEW
 }
 
 # ────────────────────────────────────────────────────────────────
@@ -224,14 +226,15 @@ class MonitorUpdater:
             "index": idx,
             "displayed": displayed,
             "delta": delta,
-            "fps": f"{fps:.1f}" if isinstance(fps,float) else fps,
-            "fifo_depth": payload.get("fifo_depth",monitor_data["fifo_depth"]),
-            "staleness_ms": f"{(now-self.last_success_time)*1000:.0f}",
+            "fps": f"{fps:.1f}" if isinstance(fps, float) else fps,
+            "fifo_depth": payload.get("fifo_depth", monitor_data["fifo_depth"]),
+            "staleness_ms": f"{(now - self.last_success_time) * 1000:.0f}",
             "main_folder": main_folder,
             "float_folder": float_folder,
             "rand_mult": rand_mult,
-            # Update script uptime continuously
-            "script_uptime": self._fmt(now - self.script_start_time),
+            # NEW  ▼▼
+            "fifo_miss_count": payload.get("fifo_miss_count", monitor_data["fifo_miss_count"]),
+            "last_fifo_miss": payload.get("last_fifo_miss", monitor_data["last_fifo_miss"]),
         })
 
         # latency slope
