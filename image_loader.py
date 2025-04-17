@@ -68,30 +68,15 @@ class FIFOImageBuffer:
             self.queue.append((index, images))
 
     def get(self, current_index):
-        """
-        Retrieve the frame whose stored index is closest to current_index,
-        within a tolerance defined in settings. Does NOT remove the returned frame,
-        so get() will always return something if a frame is within tolerance.
-
-        Steps:
-          1) Prune front-of-queue frames outside the TOLERANCE window.
-          2) Snapshot remaining frames and pick the one with minimum |index - current_index|.
-          3) Return that frame if within TOLERANCE, else None.
-        """
-        # Phase 1: prune old frames
         with self.lock:
+            # 1) prune only front‑of‑queue out‑of‑tolerance frames
             while self.queue and abs(self.queue[0][0] - current_index) > TOLERANCE:
                 self.queue.popleft()
-            snapshot = list(self.queue)
-
-        if not snapshot:
-            return None
-
-        # Phase 2: find the closest match
-        best_stored_index, best_images = min(
-            snapshot, key=lambda item: abs(item[0] - current_index)
-        )
-        if abs(best_stored_index - current_index) <= TOLERANCE:
-            main_image, float_image = best_images
-            return best_stored_index, main_image, float_image
-        return None
+            if not self.queue:
+                return None
+            # 2) pick closest match (no removal)
+            best_index, (main_img, float_img) = min(
+                self.queue,
+                key=lambda item: abs(item[0] - current_index)
+            )
+        return best_index, main_img, float_img
