@@ -1,214 +1,172 @@
 import os
-
-os.environ['PYOPENGL_ERROR_CHECKING'] = '0'
+os.environ["PYOPENGL_ERROR_CHECKING"] = "0"
 
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
+import pygame, platform
 
-import pygame
-import platform
 import calculators
 from settings import (
-    FULLSCREEN_MODE,
-    PINGPONG,
-    FPS,
-    CLOCK_MODE,
-    FIFO_LENGTH,
-    FRAME_COUNTER_DISPLAY,
-    SHOW_DELTA,
-    TEST_MODE,
-    HTTP_MONITOR,
+    FULLSCREEN_MODE, PINGPONG, FPS, CLOCK_MODE, FIFO_LENGTH,
+    FRAME_COUNTER_DISPLAY, SHOW_DELTA, TEST_MODE, HTTP_MONITOR,
 )
-from index_calculator import update_index
-from folder_selector import update_folder_selection, folder_dictionary
+from index_calculator  import update_index
+from folder_selector   import update_folder_selection, folder_dictionary
 import renderer
-from event_handler import event_check
-from display_manager import DisplayState, get_aspect_ratio, display_init
+from event_handler     import event_check
+from display_manager   import DisplayState, get_aspect_ratio, display_init
 
-# Decide whether to start the web monitor
+# ───────── optional HTTP monitor ─────────
 monitor = None
 if TEST_MODE and HTTP_MONITOR:
     from lightweight_monitor import start_monitor
     monitor = start_monitor()
 
+# ───────── helper class ─────────
 class RollingIndexCompensator:
-    """
-    Maintains a rolling average of the last N (index - displayed_index) differences
-    and applies a partial offset to slowly push the difference toward zero.
-    """
     def __init__(self, maxlen=10, correction_factor=0.5):
         self.diffs = deque(maxlen=maxlen)
         self.correction_factor = correction_factor
-
-    def update(self, current_index, displayed_index):
-        diff = current_index - displayed_index
-        self.diffs.append(diff)
-
-    def get_compensated_index(self, current_index):
+    def update(self, cur, disp):
+        self.diffs.append(cur - disp)
+    def get(self, cur):
         if not self.diffs:
-            return current_index
-        avg_diff = sum(self.diffs) / len(self.diffs)
-        partial_offset = round(avg_diff * self.correction_factor)
-        return current_index - partial_offset
+            return cur
+        avg = sum(self.diffs) / len(self.diffs)
+        return cur - round(avg * self.correction_factor)
 
-
+# ───────── main entry ─────────
 def run_display(clock_source=CLOCK_MODE):
-    # Create a DisplayState instance and persist fullscreen in the state.
-    state = DisplayState()
-    state.fullscreen = FULLSCREEN_MODE
-
-    csv_source, main_folder_path, float_folder_path = calculators.init_all(clock_source)
+    # basic setup
+    state = DisplayState(); state.fullscreen = FULLSCREEN_MODE
+    _, main_paths, float_paths = calculators.init_all(clock_source)
     print(platform.system(), "midi clock mode is:", clock_source)
-    main_folder_count = len(main_folder_path[0])
-    float_folder_count = len(float_folder_path[0])
-    png_paths_len = len(main_folder_path)
-    aspect_ratio, width, height = get_aspect_ratio(main_folder_path[0][0])
-    state.image_size = (width, height)
-    print("Image size:", state.image_size)
+
+    main_cnt  = len(main_paths[0])
+    float_cnt = len(float_paths[0])
+    png_len   = len(main_paths)
+    _, w, h   = get_aspect_ratio(main_paths[0][0])
+    state.image_size = (w, h); print("Image size:", state.image_size)
 
     from image_loader import ImageLoader, FIFOImageBuffer
-
     class FIFOImageBufferPatched(FIFOImageBuffer):
         def current_depth(self):
-            with self.lock:
-                return len(self.queue)
+            with self.lock: return len(self.queue)
 
-    image_loader = ImageLoader()
-    image_loader.set_paths(main_folder_path, float_folder_path)
-    image_loader.set_png_paths_len(png_paths_len)
+    loader = ImageLoader()
+    loader.set_paths(main_paths, float_paths)
+    loader.set_png_paths_len(png_len)
 
-    pygame.init()
-    # Initialize the display using the persistent fullscreen flag in state.
-    display_init(state)
+    pygame.init(); display_init(state)
+    pygame.event.set_grab(False); pygame.mouse.set_visible(False)
+    vclock = pygame.time.Clock()
 
-    pygame.event.set_grab(False)
-    pygame.mouse.set_visible(False)
-    vid_clock = pygame.time.Clock()
+    index, _  = update_index(png_len, PINGPONG)
+    update_folder_selection(index, float_cnt, main_cnt)
+    fifo      = FIFOImageBufferPatched(max_size=FIFO_LENGTH)
 
-    index, _ = update_index(png_paths_len, PINGPONG)
-    last_index = index
-    update_folder_selection(index, float_folder_count, main_folder_count)
+    # first frame
+    m_fold, f_fold = folder_dictionary['Main_and_Float_Folders']
+    m_img, f_img   = loader.load_images(index, m_fold, f_fold)
+    fifo.update(index, (m_img, f_img))
+    tex1 = renderer.create_texture(m_img)
+    tex2 = renderer.create_texture(f_img)
 
-    fifo_buffer = FIFOImageBufferPatched(max_size=FIFO_LENGTH)
-    main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
-    main_image, float_image = image_loader.load_images(index, main_folder, float_folder)
-    fifo_buffer.update(index, (main_image, float_image))
+    # miss counters
+    fifo_miss_count = 0
+    last_fifo_miss  = -1
 
-    texture_id1 = renderer.create_texture(main_image)
-    texture_id2 = renderer.create_texture(float_image)
+    compensator = RollingIndexCompensator()
+    displayed_index = index      # seed for first monitor packet
 
-    compensator = RollingIndexCompensator(maxlen=10, correction_factor=0.5)
-
-    pygame.mouse.set_visible(False)
-
-    def async_load_callback(fut, scheduled_index):
+    # async helper
+    def async_load_callback(fut, sched_idx):
         try:
-            fut_result = fut.result()
-            fifo_buffer.update(scheduled_index, fut_result)
+            fifo.update(sched_idx, fut.result())
         except Exception as e:
-            print("Error in async image load:", e)
-            if monitor:  # Only record if the monitor is active
-                monitor.record_load_error(scheduled_index, e)
+            print("Async load error:", e)
+            if monitor: monitor.record_load_error(sched_idx, e)
 
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        # Preload the initial next image
-        if index == 0:
-            next_index = index + 1
-        elif index == png_paths_len - 1:
-            next_index = index - 1
-        else:
-            next_index = index + 1 if index > last_index else index - 1
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        def queue_next(idx, last):
+            if idx == 0:                 return 1
+            if idx == png_len - 1:       return idx - 1
+            return idx + 1 if idx > last else idx - 1
 
-        future = executor.submit(image_loader.load_images, next_index, main_folder, float_folder)
-        future.add_done_callback(lambda fut, s_idx=next_index: async_load_callback(fut, s_idx))
+        nxt = queue_next(index, index)
+        pool.submit(loader.load_images, nxt, m_fold, f_fold
+                    ).add_done_callback(lambda fut,s=nxt: async_load_callback(fut,s))
 
-        frame_counter = 0
-        start_time = pygame.time.get_ticks()
+        frame_counter = 0; start_mark = pygame.time.get_ticks()
 
-        def print_fps(arg_frame_counter, arg_start_time, target_fps):
-            elapsed_time = pygame.time.get_ticks() - arg_start_time
-            if elapsed_time >= 10000:
-                print_actual_fps = arg_frame_counter / (elapsed_time / 1000.0)
-                print("index:", index)
-                print(f"[Display Rate] {actual_fps:.2f} frames per second")
-                if print_actual_fps < target_fps - 2:
-                    print(f"[Warning] Potential frame drop! Target: {target_fps}, Actual: {actual_fps:.2f}")
+        def maybe_print_fps(fr_cnt, mark):
+            if not FRAME_COUNTER_DISPLAY: return fr_cnt, mark
+            if (pygame.time.get_ticks()-mark) >= 10_000:
+                fps_val = fr_cnt / 10
+                print(f"index:{index}  [Display Rate] {fps_val:.2f} fps")
+                if fps_val < FPS-2: print("[Warning] frame‑drop suspected")
                 return 0, pygame.time.get_ticks()
-            return arg_frame_counter, arg_start_time
+            return fr_cnt, mark
 
         while state.run_mode:
-            successful_display = False
-            events = pygame.event.get()
-            # Update the persistent fullscreen state using the new event_check signature.
-            state.fullscreen = event_check(events, state)
-
+            # events + fullscreen toggle
+            state.fullscreen = event_check(pygame.event.get(), state)
             if state.needs_update:
-                display_init(state)
-                pygame.mouse.set_visible(False)
+                display_init(state); pygame.mouse.set_visible(False)
                 state.needs_update = False
 
-            previous_index = index
-            index, _ = update_index(png_paths_len, PINGPONG)
-            if index != previous_index:
-                last_index = previous_index
-                update_folder_selection(index, float_folder_count, main_folder_count)
-                main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
+            prev = index
+            index, _ = update_index(png_len, PINGPONG)
+            if index != prev:
+                update_folder_selection(index, float_cnt, main_cnt)
+                m_fold, f_fold = folder_dictionary['Main_and_Float_Folders']
 
-                compensated_index = compensator.get_compensated_index(index)
-                result = fifo_buffer.get(compensated_index)
-                if result is not None:
-                    displayed_index, main_image, float_image = result
-                    compensator.update(index, displayed_index)
+                cmp_idx  = compensator.get(index)
+                hit      = fifo.get(cmp_idx)
+                if hit:
+                    displayed_index, m_img, f_img = hit
                     if SHOW_DELTA:
-                        difference = index - displayed_index
-                        partial = compensated_index - index
-                        print(f"[DEBUG] idx={index}, disp={displayed_index}, Δ={difference}, offset={partial}")
-                    renderer.update_texture(texture_id1, main_image)
-                    renderer.update_texture(texture_id2, float_image)
-                    successful_display = True  # Mark as successful display
+                        diff = index - displayed_index
+                        off  = cmp_idx - index
+                        print(f"[DEBUG] idx={index} disp={displayed_index} Δ={diff} off={off}")
+                    compensator.update(index, displayed_index)
+                    renderer.update_texture(tex1, m_img)
+                    renderer.update_texture(tex2, f_img)
                 else:
-                    print(f"[MISS] FIFO miss for index {index} (Compensated={compensated_index})")
+                    fifo_miss_count += 1
+                    last_fifo_miss  = index
+                    print(f"[MISS] FIFO miss idx={index} (comp={cmp_idx}) total={fifo_miss_count}")
 
-                # Schedule the next preload
-                if index == 0:
-                    next_index = index + 1
-                elif index == png_paths_len - 1:
-                    next_index = index - 1
-                else:
-                    next_index = index + 1 if index > previous_index else index - 1
+                nxt = queue_next(index, prev)
+                pool.submit(loader.load_images, nxt, m_fold, f_fold
+                            ).add_done_callback(lambda fut,s=nxt: async_load_callback(fut,s))
 
-                future = executor.submit(image_loader.load_images, next_index, main_folder, float_folder)
-                future.add_done_callback(lambda fut, s_idx=next_index: async_load_callback(fut, s_idx))
-
-            renderer.overlay_images_two_pass_like_old(texture_id1, texture_id2, background_color=(9.0, 10.0, 10.0))
+            renderer.overlay_images_two_pass_like_old(tex1, tex2)
             pygame.display.flip()
 
-            vid_clock.tick(FPS)
-            actual_fps = vid_clock.get_fps()
+            vclock.tick(FPS)
             frame_counter += 1
+            frame_counter, start_mark = maybe_print_fps(frame_counter, start_mark)
+            actual_fps = vclock.get_fps()
 
-            if FRAME_COUNTER_DISPLAY:
-                frame_counter, start_time = print_fps(frame_counter, start_time, FPS)
-
-            # If monitor is active (TEST_MODE + HTTP_MONITOR), push stats to the web server.
             if monitor:
                 monitor.update({
                     "index": index,
-                    "displayed": displayed_index if 'displayed_index' in locals() else index,
-                    "offset": compensated_index - index,
+                    "displayed": displayed_index,
+                    "offset": cmp_idx - index,
                     "fps": actual_fps,
-                    "fifo_depth": fifo_buffer.current_depth(),
-                    "successful_frame": successful_display,
-                    "main_folder": main_folder,
-                    "float_folder": float_folder,
-                    "rand_mult": folder_dictionary['rand_mult'],
-                    # NEW – give the monitor the totals once per tick
-                    "main_folder_count": main_folder_count,
-                    "float_folder_count": float_folder_count,
+                    "fifo_depth": fifo.current_depth(),
+                    "successful_frame": (hit is not None),
+                    "main_folder": m_fold,
+                    "float_folder": f_fold,
+                    "rand_mult": folder_dictionary["rand_mult"],
+                    "fifo_miss_count": fifo_miss_count,
+                    "last_fifo_miss":  last_fifo_miss,
+                    "main_folder_count":  main_cnt,
+                    "float_folder_count": float_cnt,
                 })
 
     pygame.quit()
-
 
 if __name__ == "__main__":
     run_display(CLOCK_MODE)
