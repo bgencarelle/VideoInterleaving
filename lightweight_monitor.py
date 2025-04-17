@@ -18,7 +18,6 @@ class ReusableTCPServer(socketserver.TCPServer):
 web_port = WEB_PORT
 
 # Initial monitor data with all expected keys
-debug = False
 monitor_data = {
     "index": 0,
     "displayed": 0,
@@ -167,7 +166,7 @@ class MonitorUpdater:
         if payload.get('successful_frame', False):
             self.last_success_time = now
 
-        # quick fields
+        # quick fields from payload (with defaults)
         idx = payload.get('index', 0)
         displayed = payload.get('displayed', 0)
         delta = idx - displayed
@@ -184,72 +183,102 @@ class MonitorUpdater:
 
         # initialize counts
         if mfc and self.main_counts is None:
-            self.main_counts = [0]*mfc
+            self.main_counts = [0] * mfc
         if ffc and self.float_counts is None:
-            self.float_counts = [0]*ffc
-        if self.main_counts and 0<=mf<len(self.main_counts): self.main_counts[mf]+=1
-        if self.float_counts and 0<=ff<len(self.float_counts): self.float_counts[ff]+=1
+            self.float_counts = [0] * ffc
+        if self.main_counts and 0 <= mf < len(self.main_counts):
+            self.main_counts[mf] += 1
+        if self.float_counts and 0 <= ff < len(self.float_counts):
+            self.float_counts[ff] += 1
 
+        # update quick‐stats including FIFO miss counters
         monitor_data.update({
-            'index': idx, 'displayed': displayed, 'delta': delta,
+            'index': idx,
+            'displayed': displayed,
+            'delta': delta,
             'fps': f"{fps:.1f}" if isinstance(fps, float) else fps,
             'fifo_depth': fifo_depth,
-            'staleness_ms': f"{(now-self.last_success_time)*1000:.0f}",
-            'main_folder': mf, 'float_folder': ff, 'rand_mult': rm,
-            'main_folder_count':mfc, 'float_folder_count':ffc,
-            'successful_frame':succ,
-            'fifo_miss_count':fmc, 'last_fifo_miss':lfm
+            'staleness_ms': f"{(now - self.last_success_time) * 1000:.0f}",
+            'main_folder': mf,
+            'float_folder': ff,
+            'rand_mult': rm,
+            'main_folder_count': mfc,
+            'float_folder_count': ffc,
+            'successful_frame': succ,
+            'fifo_miss_count': fmc,
+            'last_fifo_miss': lfm,
         })
 
-        # slope
+        # rolling slope
         self.comp_history.append(delta)
-        if len(self.comp_history)>1:
-            monitor_data['comp_slope']=self.comp_history[-1]-self.comp_history[0]
-        # latency state
-        if abs(delta)<=1: monitor_data['latency_state']='Delta synced'
-        elif delta< -1: monitor_data['latency_state']='Delta ahead'
-        else: monitor_data['latency_state']='Delta behind'
+        if len(self.comp_history) > 1:
+            monitor_data['comp_slope'] = self.comp_history[-1] - self.comp_history[0]
 
-        # heavy updates
-        if now-self.last_heavy_update>=self.heavy_interval:
-            # sys stats cache
-            if now-self.last_sys_stats_time>=self.sys_stats_interval:
+        # latency state
+        if abs(delta) <= 1:
+            monitor_data['latency_state'] = 'Delta synced'
+        elif delta < -1:
+            monitor_data['latency_state'] = 'Delta ahead'
+        else:
+            monitor_data['latency_state'] = 'Delta behind'
+
+        # heavy telemetry & entropy updates
+        if now - self.last_heavy_update >= self.heavy_interval:
+            # cache expensive sys stats every sys_stats_interval
+            if now - self.last_sys_stats_time >= self.sys_stats_interval:
                 try:
-                    vm=psutil.virtual_memory(); du=psutil.disk_usage('/')
-                    upt_sec=time.time()-psutil.boot_time()
-                    load=os.getloadavg() if hasattr(os,'getloadavg') else (0,0,0)
-                    proc=psutil.Process(os.getpid())
-                    self.cached_sys_stats={
-                        'mem_used':f"{vm.used//(1024**2)} MB",
-                        'mem_total':f"{vm.total//(1024**2)} MB",
-                        'machine_uptime':self._fmt_duration(upt_sec),
-                        'load_avg':', '.join(f"{x:.2f}" for x in load),
-                        'disk_root':f"{du.percent}%",
-                        'threads':threading.active_count(),
-                        'proc_count':len(psutil.pids()),
-                        'python_mem_mb':f"{proc.memory_info().rss//(1024**2)} MB"
+                    vm = psutil.virtual_memory()
+                    du = psutil.disk_usage('/')
+                    upt_sec = time.time() - psutil.boot_time()
+                    load = os.getloadavg() if hasattr(os, 'getloadavg') else (0.0, 0.0, 0.0)
+                    proc = psutil.Process(os.getpid())
+                    self.cached_sys_stats = {
+                        'mem_used': f"{vm.used // (1024**2)} MB",
+                        'mem_total': f"{vm.total // (1024**2)} MB",
+                        'machine_uptime': self._fmt_duration(upt_sec),
+                        'load_avg': ', '.join(f"{x:.2f}" for x in load),
+                        'disk_root': f"{du.percent}%",
+                        'threads': threading.active_count(),
+                        'proc_count': len(psutil.pids()),
+                        'python_mem_mb': f"{proc.memory_info().rss // (1024**2)} MB",
                     }
-                except:
+                except Exception:
                     pass
-                self.last_sys_stats_time=now
-            # cpu smoothing
+                self.last_sys_stats_time = now
+
+            # smooth CPU per-core stats
             try:
                 self.cpu_per_core_history.append(psutil.cpu_percent(percpu=True))
-                cores=[sum(c)/len(self.cpu_per_core_history) for c in zip(*self.cpu_per_core_history)]
-                avg_cpu=sum(cores)/len(cores)
-            except:
-                cores=[]; avg_cpu=0
-            monitor_data.update({**self.cached_sys_stats,
-                'cpu_percent':avg_cpu,
-                'cpu_per_core':[f"{p:.1f}%" for p in cores],
-                'script_uptime':self._fmt_duration(now-self.script_start_time)
+                cores = [sum(c) / len(self.cpu_per_core_history) for c in zip(*self.cpu_per_core_history)]
+                avg_cpu = sum(cores) / len(cores)
+            except Exception:
+                cores, avg_cpu = [], 0.0
+
+            monitor_data.update({
+                **self.cached_sys_stats,
+                'cpu_percent': avg_cpu,
+                'cpu_per_core': [f"{p:.1f}%" for p in cores],
+                'script_uptime': self._fmt_duration(now - self.script_start_time),
             })
-            # entropy & coverage
+
+            # folder coverage & entropy
             if self.main_counts:
-                cov=sum(1 for c in self.main_counts if c); tot=len(self.main_counts)
-                monitor_data.update({'main_covered':f"{cov}/{tot}",'main_entropy':f"{_entropy(self.main_counts):.2f}",'main_samples':sum(self.main_counts)})
+                cov = sum(1 for c in self.main_counts if c)
+                tot = len(self.main_counts)
+                monitor_data.update({
+                    'main_covered': f"{cov}/{tot}",
+                    'main_entropy': f"{_entropy(self.main_counts):.2f}",
+                    'main_samples': sum(self.main_counts),
+                })
             if self.float_counts:
-                cov=sum(1 for c in self.float_counts if c); tot=len(self.float_counts)
-                monitor_data.update({'float_covered':f"{cov}/{tot}",'float_entropy':f"{_entropy(self.float_counts):.2f}",'float_samples':sum(self.float_counts)})
-            self.last_heavy_update=now
+                cov = sum(1 for c in self.float_counts if c)
+                tot = len(self.float_counts)
+                monitor_data.update({
+                    'float_covered': f"{cov}/{tot}",
+                    'float_entropy': f"{_entropy(self.float_counts):.2f}",
+                    'float_samples': sum(self.float_counts),
+                })
+
+            self.last_heavy_update = now
+
         return monitor_data
