@@ -87,7 +87,7 @@ def run_display(clock_source=CLOCK_MODE):
             print("Async load error:", e)
             if monitor: monitor.record_load_error(sched_idx, e)
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
         def queue_next(idx, last):
             if idx == 0:                 return 1
             if idx == png_len - 1:       return idx - 1

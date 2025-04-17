@@ -18,7 +18,7 @@ FPS = 60
 
 # Buffer settings: The BUFFER_SIZE is derived from IPS (e.g., 15 if IPS == 60)
 TOLERANCE = 10
-FIFO_LENGTH = 50
+FIFO_LENGTH = 20
 PINGPONG = True
 FROM_BIRTH = True
 
