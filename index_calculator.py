@@ -63,40 +63,25 @@ def set_clock_mode(mode=None):
 
 def calculate_free_clock_index(total_images, pingpong=True):
     """
-    Calculates the current index based on the absolute time elapsed since launch.
-    This method produces an index that is fully determined by elapsed time,
-    ensuring that different devices started at the same moment will be synchronized.
-
-    For pingpong mode, we set:
-      period = 2 * total_images,
-      and fold the index as follows:
-        If mod_index < total_images:
-          index = mod_index
-        Else:
-          index = (2 * total_images - 1) - mod_index
-
-    This ensures both endpoints (0 and total_images-1) each get repeated once:
-      0,1,2,...,N-1, N-1,N-2,...,1,0,0,1,2,...
+    Fast, mirrored ping‑pong index:
+      0,1,2,...,N-1, N-1,N-2,...,1,0, 0,1,2...
     """
-    elapsed = time.time() - launch_time
-    raw_index = math.floor(elapsed * IPS)
+    # 1) Replace Decimal + math.floor with a simple int() cast
+    raw_index = int((time.time() - launch_time) * IPS)
 
-    if pingpong:
-        # If total_images < 2, there's nothing to ping-pong.
-        if total_images < 2:
-            index = 0
+    if pingpong and total_images > 1:
+        period    = 2 * total_images
+        mod_index = raw_index % period
+
+        if mod_index < total_images:
+            # forward ramp: 0 → N-1
+            index = mod_index
         else:
-            # New period to ensure both endpoints repeat.
-            period = 2 * total_images
-            mod_index = raw_index % period
-            if mod_index < total_images:
-                index = mod_index
-            else:
-                index = (2 * total_images - 1) - mod_index
+            # mirrored ramp with double‑pivot at both ends
+            index = (period - 1) - mod_index
     else:
-        index = raw_index % total_images
+        index = raw_index % total_images if total_images > 0 else 0
 
-    # No need for a 'direction' value; we store None for compatibility.
     control_data_dictionary['Index_and_Direction'] = (index, None)
     return index, None
 
