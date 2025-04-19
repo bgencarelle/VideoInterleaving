@@ -52,7 +52,7 @@ FREE_CLOCK = 255
 # -------------------------
 INITIAL_ROTATION = 90
 INITIAL_MIRROR = 0
-CONNECTED_TO_RCA_HDMI = True # this is for analog tvs
+CONNECTED_TO_RCA_HDMI = False # this is for analog tvs
 # In settings.py, add near the other display parameters:
 RCA_HDMI_RESOLUTION = (640, 480)
 LOW_RES_FULLSCREEN = False        # Set to True to force low resolution mode

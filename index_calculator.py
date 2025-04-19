@@ -7,6 +7,8 @@ from settings import IPS, CLIENT_MODE, VALID_MODES, FROM_BIRTH, CLOCK_MODE
 
 clock_mode = CLOCK_MODE
 midi_mode = False
+import midi_control
+import index_client
 launch_time = 0.00000000
 
 # --- Helper for timezone offsets ---
@@ -91,13 +93,11 @@ def update_index(total_images, pingpong=True):
     """
     global control_data_dictionary, clock_mode, midi_mode
     if midi_mode:
-        import midi_control
         midi_control.process_midi(clock_mode)
         control_data_dictionary.update(midi_control.midi_data_dictionary)
         index, _ = control_data_dictionary['Index_and_Direction']
         return index, None
     elif clock_mode == CLIENT_MODE:
-        import index_client
         control_data_dictionary.update(index_client.midi_data_dictionary)
         index, _ = control_data_dictionary['Index_and_Direction']
         return index, None
