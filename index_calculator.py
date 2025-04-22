@@ -3,7 +3,7 @@ import time
 import datetime
 import math
 from globals import control_data_dictionary
-from settings import IPS, CLIENT_MODE, VALID_MODES, FROM_BIRTH, CLOCK_MODE
+from settings import IPS, CLIENT_MODE, VALID_MODES, FROM_BIRTH, CLOCK_MODE, BIRTH_TZ, BIRTH_TIME, TIMEZONE_OFFSETS
 
 clock_mode = CLOCK_MODE
 midi_mode = False
@@ -11,17 +11,6 @@ import midi_control
 import index_client
 launch_time = 0.00000000
 
-# --- Helper for timezone offsets ---
-TIMEZONE_OFFSETS = {
-    "EST": -5,
-    "EDT": -4,
-    "CST": -6,
-    "CDT": -5,
-    "MST": -7,
-    "MDT": -6,
-    "PST": -8,
-    "PDT": -7,
-}
 
 def get_timezone(tz_str):
     """
@@ -35,9 +24,10 @@ def get_timezone(tz_str):
 
 def set_launch_time(from_birth=False):
     global launch_time
+    birth_year, birth_month, birth_day, birth_hour, birth_minute = map(int, BIRTH_TIME.split(", "))
     if from_birth:
-        tz = get_timezone("EST")
-        fixed_datetime = datetime.datetime(1978, 11, 17, 7, 11, tzinfo=tz)
+        tz = get_timezone(BIRTH_TZ)
+        fixed_datetime = datetime.datetime(birth_year, birth_month, birth_day, birth_hour, birth_minute, tzinfo=tz)
         launch_time = fixed_datetime.timestamp()
     else:
         launch_time = time.time()

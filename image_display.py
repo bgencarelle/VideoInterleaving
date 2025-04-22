@@ -130,7 +130,7 @@ def run_display(clock_source=CLOCK_MODE):
             if elapsed_time >= 10000:
                 print_actual_fps = arg_frame_counter / (elapsed_time / 1000.0)
                 print("index:", index)
-                print(f"[Display Rate] {actual_fps:.2f} frames per second")
+                print(f"[Display Rate] {print_actual_fps:.2f} frames per second")
                 if print_actual_fps < target_fps - 2:
                     print(f"[Warning] Potential frame drop! Target: {target_fps}, Actual: {actual_fps:.2f}")
                 return 0, pygame.time.get_ticks()
@@ -195,7 +195,7 @@ def run_display(clock_source=CLOCK_MODE):
                 monitor.update({
                     "index": index,
                     "displayed": displayed_index if 'displayed_index' in locals() else index,
-                    "offset": compensated_index - index,
+                    "delta": index - displayed_index,
                     "fps": actual_fps,
                     "fifo_depth": fifo_buffer.current_depth(),
                     "successful_frame": successful_display,

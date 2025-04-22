@@ -6,15 +6,28 @@ import cv2
 from settings import MAIN_FOLDER_PATH, FLOAT_FOLDER_PATH, TOLERANCE
 
 # --- Load libwebp ---
+import ctypes, ctypes.util
+
 _libwebp = None
-for lib in ("libwebp.so", "libwebp.dylib", "libwebp.dll"):
+libpath  = ctypes.util.find_library("libwebp")
+if libpath:
     try:
-        _libwebp = ctypes.CDLL(lib)
-        break
+        _libwebp = ctypes.CDLL(libpath)
+        print("loaded libwebp")
     except OSError:
-        continue
+        _libwebp = None
+
+# Fallback names if find_library didn’t work:
 if _libwebp is None:
-    raise RuntimeError("Could not load libwebp (libwebp.so / .dylib / .dll)")
+    for name in ("libwebp.so", "libwebp.so.7", "libwebp.dylib", "libwebp.7.1.dylib"):
+        try:
+            _libwebp = ctypes.CDLL(name)
+            break
+        except OSError:
+            continue
+
+if _libwebp is None:
+    raise RuntimeError("Could not load libwebp ")
 
 # Prototype the functions we need
 _libwebp.WebPGetInfo.argtypes = [ctypes.c_char_p, ctypes.c_size_t,
