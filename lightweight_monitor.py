@@ -7,6 +7,8 @@ import os
 import psutil
 import socket
 import platform
+import sys
+import traceback
 from collections import deque
 from math import log2  # for entropy calc
 from settings import WEB_PORT
@@ -60,6 +62,8 @@ monitor_data = {
     "failed_load_count": 0,
     "failed_indices": "",
     "last_error": "",
+    # HTTP server crash log
+    "last_http_crash": "",
 }
 
 HTML_TEMPLATE = """
@@ -118,15 +122,26 @@ class MonitorHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
         else:
             self.send_error(404)
 
+
 def start_monitor():
     t = threading.Thread(target=_serve, daemon=True)
     t.start()
     return MonitorUpdater()
 
+# Serve loop with auto-restart and crash logging
 def _serve():
     print(f"🛰️  Starting monitor on port {web_port}")
-    with ReusableTCPServer(("", web_port), MonitorHTTPRequestHandler) as httpd:
-        httpd.serve_forever()
+    while True:
+        try:
+            with ReusableTCPServer(("", web_port), MonitorHTTPRequestHandler) as httpd:
+                httpd.serve_forever()
+        except Exception:
+            # Capture and store the traceback
+            tb = traceback.format_exc()
+            monitor_data['last_http_crash'] = tb.replace('\n', '<br>')
+            print("️Monitor server crashed; restarting in 1s…", file=sys.stderr)
+            sys.stderr.write(tb)
+            time.sleep(1)
 
 class MonitorUpdater:
     def __init__(self):
@@ -191,7 +206,7 @@ class MonitorUpdater:
         if self.float_counts and 0 <= ff < len(self.float_counts):
             self.float_counts[ff] += 1
 
-        # update quick‐stats including FIFO miss counters
+        # update quick‑stats including FIFO miss counters
         monitor_data.update({
             'index': idx,
             'displayed': displayed,
