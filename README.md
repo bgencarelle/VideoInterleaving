@@ -1,6 +1,25 @@
 # VideoInterleaving
 
-VideoInterleaving is a timecode‑synced image‐sequence renderer designed for high‑performance animation installations. It supports dual‑layer blending, MIDI/MTC synchronization, client‐server WebSocket sync, and real‑time OpenGL rendering.
+VideoInterleaving is a timecode‑synced image‐sequence renderer designed for high‑performance animation installations. It supports dual‑layer blending, MIDI/MTC synchronization, client‑server WebSocket sync, and real‑time OpenGL rendering.
+
+---
+
+## Development Tools
+
+The following tools are used or recommended for building and running **VideoInterleaving** in a stable and precise time-sensitive environment:
+
+- **WebP Library**:
+  - Required for fast decoding of `.webp` image sequences.
+  - Ensure **`libwebp-dev`** is installed on Linux or **`webp`** via Homebrew/Chocolatey.
+- **Chrony** (Linux only):
+  - High-precision NTP client recommended for keeping system time accurate in real-time installations.
+  - Install with:
+    ```bash
+    sudo apt install chrony
+    ```
+  - Ensures stable **FREE_CLOCK** or hybrid clock performance.
+- **Python 3.8+**, OpenGL, and SDL2 for rendering.
+- **requirements.txt** defines all necessary Python packages.
 
 ---
 
@@ -13,13 +32,13 @@ VideoInterleaving is a timecode‑synced image‐sequence renderer designed for 
    ```bash
    sudo apt update
    sudo apt install python3-venv python3-pip libwebp-dev pkg-config libgl1-mesa-dev \
-       libxi-dev libxrandr-dev libxcursor-dev libxinerama-dev
+       libxi-dev libxrandr-dev libxcursor-dev libxinerama-dev chrony
    ```
 
    **Fedora/CentOS:**
    ```bash
    sudo dnf install python3-venv python3-pip libwebp-devel mesa-libGL-devel \
-       libXi-devel libXrandr-devel libXcursor-devel libXinerama-devel
+       libXi-devel libXrandr-devel libXcursor-devel libXinerama-devel chrony
    ```
 
    **macOS (Homebrew):**
