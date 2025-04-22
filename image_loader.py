@@ -17,9 +17,9 @@ if libpath:
     except OSError:
         _libwebp = None
 
-# Fallback names if find_library didn’t work:
+# Fallback names if find_library didn’t work-windows needs to have this manually installed, probably:
 if _libwebp is None:
-    for name in ("libwebp.so", "libwebp.so.7", "libwebp.dylib", "libwebp.7.1.dylib"):
+    for name in ("libwebp.so", "libwebp.so.7", "libwebp-7.dll", "libwebp.dylib", "libwebp.7.1.dylib"):
         try:
             _libwebp = ctypes.CDLL(name)
             break
