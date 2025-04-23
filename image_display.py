@@ -1,4 +1,6 @@
+import datetime
 import os
+import time
 
 os.environ['PYOPENGL_ERROR_CHECKING'] = '0'
 
@@ -64,6 +66,7 @@ def run_display(clock_source=CLOCK_MODE):
     png_paths_len = len(main_folder_path)
     aspect_ratio, width, height = get_aspect_ratio(main_folder_path[0][0])
     state.image_size = (width, height)
+    print("current time is ", datetime.datetime.now())
     print("Image size:", state.image_size)
 
     from image_loader import ImageLoader, FIFOImageBuffer
@@ -167,7 +170,7 @@ def run_display(clock_source=CLOCK_MODE):
                     renderer.update_texture(texture_id2, float_image)
                     successful_display = True  # Mark as successful display
                 else:
-                    print(f"[MISS] FIFO miss for index {index} (Compensated={compensated_index})")
+                    print(f"[MISS] FIFO miss for index {index} (Compensated={compensated_index}) at {displayed_index} at",datetime.datetime.now())
 
                 # Schedule the next preload
                 if index == 0:
