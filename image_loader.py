@@ -5,16 +5,16 @@ import numpy as np
 import cv2
 from settings import MAIN_FOLDER_PATH, FLOAT_FOLDER_PATH, TOLERANCE
 
-# --- Load libwebp ---
+# --- Load libwebp ---- current version is 7, but could change
 _libwebp = None
-for lib in ("libwebp.so", "libwebp.dylib", "libwebp.dll"):
+for lib in ("libwebp.so", "libwebp.dylib", "libwebp-7"):
     try:
         _libwebp = ctypes.CDLL(lib)
         break
     except OSError:
         continue
 if _libwebp is None:
-    raise RuntimeError("Could not load libwebp (libwebp.so / .dylib / .dll)")
+    raise RuntimeError("Could not load libwebp (libwebp.so / .dylib / .dll)-check to see if libwebp is installed")
 
 # Prototype the functions we need
 _libwebp.WebPGetInfo.argtypes = [ctypes.c_char_p, ctypes.c_size_t,
