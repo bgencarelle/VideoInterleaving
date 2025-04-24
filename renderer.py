@@ -214,6 +214,55 @@ def overlay_images_two_pass_like_old(texture_id_main, texture_id_float, backgrou
     display_image(texture_id_float)
 
 
+def overlay_images_blend(texture_id_main, texture_id_float, background_color=(0,0,0)):
+    # 1) CLEAR
+    glClearColor(
+        background_color[0]/255.0,
+        background_color[1]/255.0,
+        background_color[2]/255.0,
+        1.0
+    )
+    glClear(GL_COLOR_BUFFER_BIT)
+
+    # 2) UPDATE QUAD VBO (was missing)
+    verts = compute_transformed_quad()        # recalc position & texcoords
+    quad_vbo.set_array(verts)                 # upload into VBO
+    quad_vbo.bind()
+
+    # 3) BIND BLEND SHADER & MVP (if you didn't already in setup_opengl)
+    glUseProgram(blend_shader_program)
+    # If you only uploaded MVP once in display_init, you can skip this; otherwise:
+    # glUniformMatrix4fv(blend_shader_mvp_loc, 1, GL_TRUE, current_mvp)
+
+    # 4) BIND BOTH TEXTURE UNITS
+    glActiveTexture(GL_TEXTURE0)
+    glBindTexture(GL_TEXTURE_2D, texture_id_main)
+    glUniform1i(blend_shader_tex0_loc, 0)
+
+    glActiveTexture(GL_TEXTURE1)
+    glBindTexture(GL_TEXTURE_2D, texture_id_float)
+    glUniform1i(blend_shader_tex1_loc, 1)
+
+    # 5) SETUP ATTRIBS & DRAW
+    glEnableVertexAttribArray(blend_shader_position_loc)
+    glVertexAttribPointer(
+        blend_shader_position_loc, 2, GL_FLOAT, GL_FALSE, 16, quad_vbo
+    )
+    glEnableVertexAttribArray(blend_shader_texcoord_loc)
+    # note: here we offset by 8 bytes within the same VBO
+    glVertexAttribPointer(
+        blend_shader_texcoord_loc, 2, GL_FLOAT, GL_FALSE, 16, quad_vbo + 8
+    )
+
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4)
+
+    # 6) CLEAN UP
+    glDisableVertexAttribArray(blend_shader_position_loc)
+    glDisableVertexAttribArray(blend_shader_texcoord_loc)
+    glUseProgram(0)
+    quad_vbo.unbind()
+
+
 def setup_opengl(mvp):
     global quad_vbo, quad_vertices
     if blend_shader_program is None: init_blend_shader()
