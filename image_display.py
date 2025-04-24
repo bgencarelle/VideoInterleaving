@@ -183,8 +183,7 @@ def run_display(clock_source=CLOCK_MODE):
                 future = executor.submit(image_loader.load_images, next_index, main_folder, float_folder)
                 future.add_done_callback(lambda fut, s_idx=next_index: async_load_callback(fut, s_idx))
 
-            #renderer.overlay_images_two_pass_like_old(texture_id1, texture_id2, background_color=(9.0, 10.0, 10.0))
-            renderer.overlay_images_blend(texture_id1, texture_id2, background_color=(9.0, 10.0, 10.0))
+            renderer.overlay_images_two_pass_like_old(texture_id1, texture_id2, background_color=(9.0, 10.0, 10.0))
 
             pygame.display.flip()
 
