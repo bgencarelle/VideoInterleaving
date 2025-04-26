@@ -1,39 +1,74 @@
-from OpenGL.GL import *
+import moderngl
 import numpy as np
-from OpenGL.arrays import vbo
 import math
+from settings import ENABLE_SRGB_FRAMEBUFFER  # [Added for sRGB flag access]
 
-# Global variables for shader programs and their cached locations.
-blend_shader_program = None
-blend_shader_position_loc = None
-blend_shader_texcoord_loc = None
-blend_shader_tex0_loc = None
-blend_shader_tex1_loc = None
-blend_shader_mvp_loc = None
+# ModernGL objects and shader program
+ctx = None
+prog = None
+vao = None
+vbo = None
 
-simple_shader_program = None
-simple_shader_position_loc = None
-simple_shader_texcoord_loc = None
-simple_shader_texture0_loc = None
-simple_shader_mvp_loc = None
-
-# Global texture dimensions dictionary.
-texture_dimensions = {}
-
-# Global quad VBO and preallocated vertex array.
-quad_vbo = None
-quad_vertices = None
-
-# Internal globals for transformation parameters.
-_fs_scale = None
-_fs_offset_x = None
-_fs_offset_y = None
-_image_size = None
+# Transformation parameters (set via display_manager)
+_fs_scale = 1.0
+_fs_offset_x = 0.0
+_fs_offset_y = 0.0
+_image_size = (0, 0)    # (width, height) of original image
 _rotation_angle = 0
-_mirror_mode = None
+_mirror_mode = 0
 
+
+def initialize(gl_context):
+    global ctx, prog, vao, vbo
+    ctx = gl_context
+    # Vertex and fragment shader sources
+    vertex_src = """
+        #version 330 core
+        in vec2 position;
+        in vec2 texcoord;
+        uniform mat4 u_MVP;
+        out vec2 v_texcoord;
+        void main() {
+            gl_Position = u_MVP * vec4(position, 0.0, 1.0);
+            v_texcoord = texcoord;
+        }
+    """
+    if ENABLE_SRGB_FRAMEBUFFER:
+        fragment_src = """
+            #version 330 core
+            uniform sampler2D texture0;
+            in vec2 v_texcoord;
+            out vec4 fragColor;
+            void main() {
+                vec4 texColor = texture(texture0, v_texcoord);
+                fragColor = vec4(pow(texColor.rgb, vec3(2.2)), texColor.a);
+            }
+        """
+    else:
+        fragment_src = """
+            #version 330 core
+            uniform sampler2D texture0;
+            in vec2 v_texcoord;
+            out vec4 fragColor;
+            void main() {
+                fragColor = texture(texture0, v_texcoord);
+            }
+        """
+    prog = ctx.program(vertex_shader=vertex_src, fragment_shader=fragment_src)
+
+    # Create a dynamic vertex buffer for 4 vertices (x, y, u, v per vertex)
+    vbo = ctx.buffer(reserve=64)  # 4 vertices * 4 floats * 4 bytes = 64 bytes
+    # Create a VAO with the buffer, describing 2f position + 2f texcoord layout
+    vao = ctx.vertex_array(prog, [(vbo, '2f 2f', 'position', 'texcoord')])
+    # Enable blending for transparency and set blend function (pre-multiplied alpha for alpha channel)
+    ctx.enable(moderngl.BLEND)
+    ctx.blend_func = (
+        moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA,
+        moderngl.ONE, moderngl.ONE_MINUS_SRC_ALPHA
+    )
 
 def set_transform_parameters(fs_scale, fs_offset_x, fs_offset_y, image_size, rotation_angle, mirror_mode):
+    """Update transformation parameters for computing the quad geometry."""
     global _fs_scale, _fs_offset_x, _fs_offset_y, _image_size, _rotation_angle, _mirror_mode
     _fs_scale = fs_scale
     _fs_offset_x = fs_offset_x
@@ -42,190 +77,85 @@ def set_transform_parameters(fs_scale, fs_offset_x, fs_offset_y, image_size, rot
     _rotation_angle = rotation_angle
     _mirror_mode = mirror_mode
 
-
-def compile_shader(source, shader_type):
-    shader = glCreateShader(shader_type)
-    glShaderSource(shader, source)
-    glCompileShader(shader)
-    result = glGetShaderiv(shader, GL_COMPILE_STATUS)
-    if not result:
-        error = glGetShaderInfoLog(shader)
-        raise RuntimeError(f"Shader compilation failed: {error}")
-    return shader
-
-
-def init_blend_shader():
-    global blend_shader_program, blend_shader_position_loc, blend_shader_texcoord_loc
-    global blend_shader_tex0_loc, blend_shader_tex1_loc, blend_shader_mvp_loc
-    vertex_src = """
-    #version 120
-    attribute vec2 position;
-    attribute vec2 texcoord;
-    uniform mat4 u_MVP;
-    varying vec2 v_texcoord;
-    void main() {
-        gl_Position = u_MVP * vec4(position, 0.0, 1.0);
-        v_texcoord = texcoord;
-    }
-    """
-    fragment_src = """
-    #version 120
-    uniform sampler2D texture0;
-    uniform sampler2D texture1;
-    varying vec2 v_texcoord;
-    void main() {
-        vec4 color0 = texture2D(texture0, v_texcoord);
-        vec4 color1 = texture2D(texture1, v_texcoord);
-        gl_FragColor = mix(color0, color1, color1.a);
-    }
-    """
-    vertex_shader = compile_shader(vertex_src, GL_VERTEX_SHADER)
-    fragment_shader = compile_shader(fragment_src, GL_FRAGMENT_SHADER)
-    program = glCreateProgram()
-    glAttachShader(program, vertex_shader)
-    glAttachShader(program, fragment_shader)
-    glLinkProgram(program)
-    result = glGetProgramiv(program, GL_LINK_STATUS)
-    if not result:
-        error = glGetProgramInfoLog(program)
-        raise RuntimeError(f"Program link failed: {error}")
-    blend_shader_program = program
-    blend_shader_mvp_loc = glGetUniformLocation(blend_shader_program, "u_MVP")
-    blend_shader_tex0_loc = glGetUniformLocation(blend_shader_program, "texture0")
-    blend_shader_tex1_loc = glGetUniformLocation(blend_shader_program, "texture1")
-    blend_shader_position_loc = glGetAttribLocation(blend_shader_program, "position")
-    blend_shader_texcoord_loc = glGetAttribLocation(blend_shader_program, "texcoord")
-
-
-def init_simple_shader():
-    global simple_shader_program, simple_shader_position_loc, simple_shader_texcoord_loc
-    global simple_shader_texture0_loc, simple_shader_mvp_loc
-    vertex_src = """
-    #version 120
-    attribute vec2 position;
-    attribute vec2 texcoord;
-    uniform mat4 u_MVP;
-    varying vec2 v_texcoord;
-    void main() {
-        gl_Position = u_MVP * vec4(position, 0.0, 1.0);
-        v_texcoord = texcoord;
-    }
-    """
-    fragment_src = """
-    #version 120
-    uniform sampler2D texture0;
-    varying vec2 v_texcoord;
-    void main() {
-        gl_FragColor = texture2D(texture0, v_texcoord);
-    }
-    """
-    vertex_shader = compile_shader(vertex_src, GL_VERTEX_SHADER)
-    fragment_shader = compile_shader(fragment_src, GL_FRAGMENT_SHADER)
-    program = glCreateProgram()
-    glAttachShader(program, vertex_shader)
-    glAttachShader(program, fragment_shader)
-    glLinkProgram(program)
-    result = glGetProgramiv(program, GL_LINK_STATUS)
-    if not result:
-        error = glGetProgramInfoLog(program)
-        raise RuntimeError(f"Simple shader program link failed: {error}")
-    simple_shader_program = program
-    simple_shader_mvp_loc = glGetUniformLocation(simple_shader_program, "u_MVP")
-    simple_shader_texture0_loc = glGetUniformLocation(simple_shader_program, "texture0")
-    simple_shader_position_loc = glGetAttribLocation(simple_shader_program, "position")
-    simple_shader_texcoord_loc = glGetAttribLocation(simple_shader_program, "texcoord")
-
+def update_mvp(mvp_matrix):
+    """Update the MVP matrix uniform in the shader."""
+    if prog:
+        # Write matrix to uniform (transpose to column-major for OpenGL)
+        prog['u_MVP'].write(mvp_matrix.T.tobytes())
 
 def create_texture(image):
-    texture_id = glGenTextures(1)
-    glBindTexture(GL_TEXTURE_2D, texture_id)
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
-    w, h = image.shape[1], image.shape[0]
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, image)
-    texture_dimensions[texture_id] = (w, h)
-    return texture_id
+    """Create a new GPU texture from a NumPy RGBA image array."""
+    h, w = image.shape[0], image.shape[1]
+    texture = ctx.texture((w, h), 4, data=image.tobytes())
+    texture.filter = (moderngl.LINEAR, moderngl.LINEAR)  # linear filtering
+    texture.repeat_x = False
+    texture.repeat_y = False
+    return texture
 
-
-def update_texture(texture_id, new_image):
-    glBindTexture(GL_TEXTURE_2D, texture_id)
-    w, h = new_image.shape[1], new_image.shape[0]
-    expected = texture_dimensions.get(texture_id, (None, None))
-    if expected != (w, h):
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, None)
-        texture_dimensions[texture_id] = (w, h)
-    # Roll back from PBO update to direct upload for compatibility and reduced stalls
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, new_image)
-
+def update_texture(texture, new_image):
+    """Update an existing texture with a new image (resize if dimensions differ)."""
+    new_h, new_w = new_image.shape[0], new_image.shape[1]
+    if (new_w, new_h) != texture.size:
+        # If size changed, create a new texture
+        texture.release()
+        texture = ctx.texture((new_w, new_h), 4, data=new_image.tobytes())
+        texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        texture.repeat_x = False
+        texture.repeat_y = False
+    else:
+        # Update existing texture content
+        texture.write(new_image.tobytes())
+    return texture
 
 def compute_transformed_quad():
+    """Compute the positions and texture coords of the quad vertices after scaling/rotation."""
     w, h = _image_size
+    # Apply scaling to original image dimensions
     w_scaled = w * _fs_scale
     h_scaled = h * _fs_scale
+    # Determine effective drawn width/height after rotation
     if _rotation_angle % 180 == 90:
-        effective_w, effective_h = h_scaled, w_scaled
+        effective_w = h_scaled
+        effective_h = w_scaled
     else:
-        effective_w, effective_h = w_scaled, h_scaled
-    cx = _fs_offset_x + effective_w / 2
-    cy = _fs_offset_y + effective_h / 2
-    pts = [(-w_scaled/2, -h_scaled/2), (w_scaled/2, -h_scaled/2),
-           (w_scaled/2, h_scaled/2), (-w_scaled/2, h_scaled/2)]
+        effective_w = w_scaled
+        effective_h = h_scaled
+    # Center of the image in screen space
+    cx = _fs_offset_x + effective_w / 2.0
+    cy = _fs_offset_y + effective_h / 2.0
+    # Quad corners centered at (0,0) before rotation
+    corners = [(-w_scaled/2, -h_scaled/2),
+               ( w_scaled/2, -h_scaled/2),
+               ( w_scaled/2,  h_scaled/2),
+               (-w_scaled/2,  h_scaled/2)]
+    # Rotate corners around origin by _rotation_angle (degrees)
     rad = math.radians(_rotation_angle)
     cosA, sinA = math.cos(rad), math.sin(rad)
-    rotated = [(x*cosA - y*sinA, x*sinA + y*cosA) for x,y in pts]
-    final = [(cx + x, cy + y) for x,y in rotated]
-    tex = [(1,1),(0,1),(0,0),(1,0)] if _mirror_mode else [(0,1),(1,1),(1,0),(0,0)]
-    global quad_vertices
-    for i,(vx,vy) in enumerate(final):
-        quad_vertices[i*4 + 0] = vx
-        quad_vertices[i*4 + 1] = vy
-        quad_vertices[i*4 + 2] = tex[i][0]
-        quad_vertices[i*4 + 3] = tex[i][1]
-    return quad_vertices
+    rotated = [(x*cosA - y*sinA, x*sinA + y*cosA) for (x, y) in corners]
+    # Translate rotated corners to screen center (offset)
+    final_positions = [(cx + x, cy + y) for (x, y) in rotated]
+    # Define texture coordinates for each corner (flip horizontally if mirror_mode)
+    if _mirror_mode:
+        tex_coords = [(1.0, 1.0), (0.0, 1.0), (0.0, 0.0), (1.0, 0.0)]
+    else:
+        tex_coords = [(0.0, 1.0), (1.0, 1.0), (1.0, 0.0), (0.0, 0.0)]
+    # Interleave position and texcoord data for 4 vertices
+    data = []
+    for (px, py), (tu, tv) in zip(final_positions, tex_coords):
+        data += [px, py, tu, tv]
+    return np.array(data, dtype=np.float32)
 
-
-def display_image(texture_id):
-    global quad_vbo
-    vertices = compute_transformed_quad()
-    quad_vbo.set_array(vertices)
-    quad_vbo.bind()
-    glUseProgram(simple_shader_program)
-    glActiveTexture(GL_TEXTURE0)
-    glBindTexture(GL_TEXTURE_2D, texture_id)
-    glUniform1i(simple_shader_texture0_loc, 0)
-    glEnableVertexAttribArray(simple_shader_position_loc)
-    glVertexAttribPointer(simple_shader_position_loc, 2, GL_FLOAT, GL_FALSE, 16, quad_vbo)
-    glEnableVertexAttribArray(simple_shader_texcoord_loc)
-    glVertexAttribPointer(simple_shader_texcoord_loc, 2, GL_FLOAT, GL_FALSE, 16, quad_vbo+8)
-    glDrawArrays(GL_TRIANGLE_FAN, 0, 4)
-    glDisableVertexAttribArray(simple_shader_position_loc)
-    glDisableVertexAttribArray(simple_shader_texcoord_loc)
-    glUseProgram(0)
-    quad_vbo.unbind()
-
-
-def overlay_images_two_pass_like_old(texture_id_main, texture_id_float, background_color=(0,0,0)):
-    glClearColor(background_color[0]/255, background_color[1]/255, background_color[2]/255, 1)
-    glClear(GL_COLOR_BUFFER_BIT)
-    # blend state set once at init
-    display_image(texture_id_main)
-    display_image(texture_id_float)
-
-
-def setup_opengl(mvp):
-    global quad_vbo, quad_vertices
-    if blend_shader_program is None: init_blend_shader()
-    if simple_shader_program is None: init_simple_shader()
-    glUseProgram(blend_shader_program)
-    glUniformMatrix4fv(blend_shader_mvp_loc,1,GL_TRUE,mvp)
-    glUseProgram(simple_shader_program)
-    glUniformMatrix4fv(simple_shader_mvp_loc,1,GL_TRUE,mvp)
-    glUseProgram(0)
-    glEnable(GL_TEXTURE_2D)
-    glEnable(GL_BLEND)
-    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
-    if quad_vbo is None:
-        quad_vertices = np.zeros(16, dtype=np.float32)
-        quad_vbo = vbo.VBO(quad_vertices, usage=GL_DYNAMIC_DRAW)
+def overlay_images_two_pass_like_old(main_texture, float_texture, background_color=(0, 0, 0)):
+    """
+    Render the main and float textures with blending (two-pass draw).
+    Clears the screen with the given background color, then draws the main image and overlays the float image.
+    """
+    ctx.clear(background_color[0] / 255.0, background_color[1] / 255.0, background_color[2] / 255.0)
+    # Update VBO with current quad vertex positions and texcoords
+    vbo.write(compute_transformed_quad().tobytes())
+    # Draw main image quad
+    main_texture.use(location=0)
+    vao.render(mode=moderngl.TRIANGLE_FAN)
+    # Draw float image quad (blended on top)
+    float_texture.use(location=0)
+    vao.render(mode=moderngl.TRIANGLE_FAN)

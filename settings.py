@@ -11,6 +11,7 @@ FLOAT_FOLDER_PATH = f"{IMAGES_DIR}/face"
 # Display Mode & Performance
 # -------------------------
 FULLSCREEN_MODE = True
+ENABLE_SRGB_FRAMEBUFFER = True  # Enable/disable sRGB framebuffer correction
 
 # Frames per Second and Images Per Second (IPS)
 IPS = 30
