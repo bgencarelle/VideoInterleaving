@@ -1,121 +1,189 @@
-import pygame
+"""
+display_manager.py – window creation / sizing and GL transform glue
+ModernGL + GLFW version (replaces the legacy pygame/OpenGL path)
+"""
+
+from __future__ import annotations
+
+import glfw
+import moderngl
 import numpy as np
+from OpenGL.GL import (
+    glEnable,
+    glGetError,
+    GL_FRAMEBUFFER_SRGB,
+    GL_INVALID_ENUM,
+)  # only for optional sRGB enabling
+
 import renderer
-from OpenGL.GL import glViewport
-from settings import (INITIAL_ROTATION, INITIAL_MIRROR, CONNECTED_TO_RCA_HDMI,
-                      RCA_HDMI_RESOLUTION, LOW_RES_FULLSCREEN, LOW_RES_FULLSCREEN_RESOLUTION)
+from settings import (
+    INITIAL_ROTATION,
+    INITIAL_MIRROR,
+    CONNECTED_TO_RCA_HDMI,
+    RCA_HDMI_RESOLUTION,
+    LOW_RES_FULLSCREEN,
+    LOW_RES_FULLSCREEN_RESOLUTION,
+    ENABLE_SRGB_FRAMEBUFFER,
+)
 
+# -----------------------------------------------------------------------------#
+# Globals                                                                      #
+# -----------------------------------------------------------------------------#
+window: "glfw._GLFWwindow" | None = None
+ctx: moderngl.Context | None = None
+
+
+# -----------------------------------------------------------------------------#
+# State container (same fields the old code relied on)                          #
+# -----------------------------------------------------------------------------#
 class DisplayState:
-    def __init__(self, image_size=(640, 480)):
-        self.image_size = image_size
-        self.rotation = INITIAL_ROTATION  # e.g., 270
-        self.mirror = INITIAL_MIRROR        # 0 for normal, 1 for mirrored
-        self.fullscreen = True              # Persistent fullscreen flag; modify as needed
-        self.run_mode = True
-        self.needs_update = False
+    def __init__(self, image_size: tuple[int, int] = (640, 480)) -> None:
+        self.image_size = image_size  # (width, height) of *original* image
+        self.rotation = INITIAL_ROTATION  # 0 / 90 / 180 / 270
+        self.mirror = INITIAL_MIRROR  # 0 = normal, 1 = horizontal mirror
+        self.fullscreen = True  # start in fullscreen unless overridden
+        self.run_mode = True  # main loop flag
+        self.needs_update = False  # set by callbacks to trigger re-init
 
-def get_aspect_ratio(image_path):
-    image = pygame.image.load(image_path)
-    w, h = image.get_size()
-    a_ratio = h / w
-    print(f"This is {w} wide and {h} tall, with an aspect ratio of {a_ratio}")
-    return a_ratio, w, h
 
-def display_init(state):
+# -----------------------------------------------------------------------------#
+# Helper – choose a “best” video mode on a monitor                              #
+# -----------------------------------------------------------------------------#
+def _largest_mode(monitor: "glfw._GLFWmonitor"):
+    """Return the largest (area) glfw video mode for the given monitor."""
+    modes = glfw.get_video_modes(monitor)
+    return max(modes, key=lambda m: m.size.width * m.size.height)
+
+
+# -----------------------------------------------------------------------------#
+# Display initialisation / (re-)configuration                                   #
+# -----------------------------------------------------------------------------#
+def display_init(state: DisplayState) -> "glfw._GLFWwindow":
     """
-    Sets up the display and OpenGL parameters based on the current state.
-    In fullscreen mode:
-      - If CONNECTED_TO_RCA_HDMI is True, forces the resolution in RCA_HDMI_RESOLUTION.
-      - Else if LOW_RES_FULLSCREEN is True, forces the resolution in LOW_RES_FULLSCREEN_RESOLUTION.
-      - Otherwise, uses the largest available mode.
-    The image is scaled (with letterboxing) to preserve its aspect ratio.
+    Create (first call) or reconfigure (subsequent calls) the GLFW window,
+    ModernGL context, viewport and renderer transform based on *state*.
+    Returns the active window handle.
     """
-    global fs_scale, fs_offset_x, fs_offset_y, fs_fullscreen_width, fs_fullscreen_height
 
-    # Unpack desired image dimensions from state.
-    w, h = state.image_size
+    global window, ctx
 
-    # Hide the mouse.
-    pygame.mouse.set_visible(False)
+    # ------------------------------------------------------------------#
+    # Derived image geometry                                             #
+    # ------------------------------------------------------------------#
+    img_w, img_h = state.image_size
+    eff_w, eff_h = (img_h, img_w) if state.rotation % 180 == 90 else (img_w, img_h)
 
-    # Swap dimensions when rotation is 90 or 270 degrees.
-    if state.rotation % 180 == 90:
-        effective_w, effective_h = h, w
-    else:
-        effective_w, effective_h = w, h
+    # ------------------------------------------------------------------#
+    # First-time initialisation                                          #
+    # ------------------------------------------------------------------#
+    if window is None:
+        if not glfw.init():
+            raise RuntimeError("GLFW initialisation failed")
 
-    if state.fullscreen:
-        pygame.event.set_grab(True)
-        # Check for forced resolution modes.
-        if CONNECTED_TO_RCA_HDMI:
-            fs_fullscreen_width, fs_fullscreen_height = RCA_HDMI_RESOLUTION
-            caption = "Fullscreen Mode (RCA HDMI forced)"
-        elif LOW_RES_FULLSCREEN:
-            fs_fullscreen_width, fs_fullscreen_height = LOW_RES_FULLSCREEN_RESOLUTION
-            caption = "Fullscreen Mode (Low Resolution Forced)"
+        # Core-profile 3.3 is sufficient for ModernGL + simple 2D shaders
+        glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
+        glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
+        glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
+        glfw.window_hint(glfw.OPENGL_FORWARD_COMPAT, glfw.TRUE)  # macOS
+        glfw.window_hint(glfw.DOUBLEBUFFER, glfw.TRUE)
+        if ENABLE_SRGB_FRAMEBUFFER:
+            glfw.window_hint(glfw.SRGB_CAPABLE, glfw.TRUE)
+
+        # ------ choose initial window size / monitor ------------------#
+        if state.fullscreen:
+            mon = glfw.get_primary_monitor()
+            if CONNECTED_TO_RCA_HDMI:
+                fs_w, fs_h = RCA_HDMI_RESOLUTION
+            elif LOW_RES_FULLSCREEN:
+                fs_w, fs_h = LOW_RES_FULLSCREEN_RESOLUTION
+            else:
+                best = _largest_mode(mon)
+                fs_w, fs_h = best.size.width, best.size.height
+            window = glfw.create_window(fs_w, fs_h, "Fullscreen", mon, None)
         else:
-            # Standard fullscreen: use the largest available mode.
-            modes = pygame.display.list_modes()
-            if not modes:
-                raise RuntimeError("No display modes available!")
-            fs_fullscreen_width, fs_fullscreen_height = modes[0]
-            caption = "Fullscreen Mode"
+            base_w = max(400, eff_w) if eff_w < 400 else 400
+            win_w = base_w
+            win_h = int(win_w * eff_h / eff_w)
+            window = glfw.create_window(win_w, win_h, "Windowed Mode", None, None)
 
-        # Compute scaling to fit the effective image dimensions.
-        scale_x = fs_fullscreen_width / effective_w
-        scale_y = fs_fullscreen_height / effective_h
-        fs_scale = min(scale_x, scale_y)
+        if not window:
+            glfw.terminate()
+            raise RuntimeError("Could not create GLFW window")
 
-        scaled_width = effective_w * fs_scale
-        scaled_height = effective_h * fs_scale
+        glfw.make_context_current(window)
+        glfw.swap_interval(1)  # enable VSync for tear-free timing
+        ctx = moderngl.create_context()
+        renderer.initialize(ctx)
 
-        # Center the image with letterboxing/pillarboxing.
-        fs_offset_x = int((fs_fullscreen_width - scaled_width) / 2)
-        fs_offset_y = int((fs_fullscreen_height - scaled_height) / 2)
+        # Optional: enable automatic sRGB→linear on framebuffer writes
+        if ENABLE_SRGB_FRAMEBUFFER:
+            glEnable(GL_FRAMEBUFFER_SRGB)
+            if glGetError() == GL_INVALID_ENUM:
+                print("⚠️  GL_FRAMEBUFFER_SRGB unsupported – continuing without it")
 
-        flags = pygame.OPENGL | pygame.DOUBLEBUF | pygame.FULLSCREEN
-        pygame.display.set_caption(caption)
-        pygame.display.set_mode((fs_fullscreen_width, fs_fullscreen_height), flags, vsync=1)
-        glViewport(0, 0, fs_fullscreen_width, fs_fullscreen_height)
-        viewport_width = fs_fullscreen_width
-        viewport_height = fs_fullscreen_height
+    # ------------------------------------------------------------------#
+    # Fullscreen ↔ windowed toggling                                     #
+    # ------------------------------------------------------------------#
+    current_monitor = glfw.get_window_monitor(window)
+    if state.fullscreen and current_monitor is None:
+        # → switch to fullscreen
+        mon = glfw.get_primary_monitor()
+        if CONNECTED_TO_RCA_HDMI:
+            fs_w, fs_h = RCA_HDMI_RESOLUTION
+        elif LOW_RES_FULLSCREEN:
+            fs_w, fs_h = LOW_RES_FULLSCREEN_RESOLUTION
+        else:
+            best = _largest_mode(mon)
+            fs_w, fs_h = best.size.width, best.size.height
+        refresh = glfw.get_video_mode(mon).refresh_rate
+        glfw.set_window_monitor(window, mon, 0, 0, fs_w, fs_h, refresh)
+        glfw.set_window_title(window, "Fullscreen")
+    elif not state.fullscreen and current_monitor is not None:
+        # → switch to windowed
+        base_w = max(400, eff_w) if eff_w < 400 else 400
+        win_w = base_w
+        win_h = int(win_w * eff_h / eff_w)
+        glfw.set_window_monitor(window, None, 100, 100, win_w, win_h, 0)
+        glfw.set_window_title(window, "Windowed Mode")
 
-    else:
-        # Windowed mode.
-        pygame.event.set_grab(False)
-        win_width = 400
-        win_height = int(400 * effective_h / effective_w)
-        scale_x = win_width / effective_w
-        scale_y = win_height / effective_h
-        fs_scale = min(scale_x, scale_y)
+    # Keep cursor *hidden* but *not* captured (user can Alt-Tab out)
+    glfw.set_input_mode(window, glfw.CURSOR, glfw.CURSOR_HIDDEN)
 
-        scaled_width = effective_w * fs_scale
-        scaled_height = effective_h * fs_scale
+    # ------------------------------------------------------------------#
+    # Viewport + renderer transform                                      #
+    # ------------------------------------------------------------------#
+    fb_w, fb_h = glfw.get_framebuffer_size(window)
+    ctx.viewport = (0, 0, fb_w, fb_h)
 
-        fs_offset_x = int((win_width - scaled_width) / 2)
-        fs_offset_y = int((win_height - scaled_height) / 2)
+    # Letterbox / pillarbox scaling
+    scale_x = fb_w / eff_w
+    scale_y = fb_h / eff_h
+    scale = min(scale_x, scale_y)
 
-        flags = pygame.OPENGL | pygame.DOUBLEBUF | pygame.RESIZABLE
-        pygame.display.set_caption("Windowed Mode")
-        pygame.display.set_mode((win_width, win_height), flags, vsync=1)
-        glViewport(0, 0, win_width, win_height)
-        viewport_width, viewport_height = win_width, win_height
+    scaled_w = eff_w * scale
+    scaled_h = eff_h * scale
+    offset_x = (fb_w - scaled_w) / 2.0
+    offset_y = (fb_h - scaled_h) / 2.0
 
-    # Build the Model-View-Projection matrix.
-    mvp = np.array([
-        [2.0 / viewport_width, 0, 0, -1],
-        [0, 2.0 / viewport_height, 0, -1],
-        [0, 0, -1, 0],
-        [0, 0, 0, 1]
-    ], dtype=np.float32)
-
-    # Update the renderer with the computed parameters.
     renderer.set_transform_parameters(
-        fs_scale,
-        fs_offset_x,
-        fs_offset_y,
+        scale,
+        offset_x,
+        offset_y,
         state.image_size,
         state.rotation,
-        state.mirror
+        state.mirror,
     )
-    renderer.setup_opengl(mvp)
+
+    # 2D orthographic MVP (pixel-space -> NDC)
+    mvp = np.array(
+        [
+            [2.0 / fb_w, 0, 0, -1],
+            [0, 2.0 / fb_h, 0, -1],
+            [0, 0, -1, 0],
+            [0, 0, 0, 1],
+        ],
+        dtype="f4",
+    )
+    renderer.update_mvp(mvp)
+
+    return window
