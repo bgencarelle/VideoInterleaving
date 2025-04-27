@@ -76,9 +76,7 @@ HTML_TEMPLATE = """
   </style>
 </head>
 <body>
-  <h1>🎧 Live Playback Monitor</h1>
-  <div><a href="/log">View Log</a></div>
-  <div id='monitor_data'></div>
+  <h1>Interleaving Project Live Playback Monitor</h1>
   <script>
     function updateMonitor(){
       fetch('/data')
@@ -96,6 +94,9 @@ HTML_TEMPLATE = """
     updateMonitor();
   </script>
 </body>
+    <br>
+  <div><a href="/log">click for error log</a></div>
+  <div id='monitor_data'></div>
 </html>
 """
 
