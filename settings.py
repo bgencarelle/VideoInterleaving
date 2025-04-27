@@ -1,7 +1,7 @@
 # settings.py
 # -------------------------
 # Image Directories and Folder Paths
-# settings.py
+# -------------------------
 IMAGES_DIR = "images_1080"
 
 MAIN_FOLDER_PATH = f"{IMAGES_DIR}/float"
@@ -11,7 +11,6 @@ FLOAT_FOLDER_PATH = f"{IMAGES_DIR}/face"
 # Display Mode & Performance
 # -------------------------
 FULLSCREEN_MODE = True
-ENABLE_SRGB_FRAMEBUFFER = True  # Enable/disable sRGB framebuffer correction
 
 # Frames per Second and Images Per Second (IPS)
 IPS = 30
@@ -29,20 +28,24 @@ BIRTH_TZ = "EST"
 
 BIRTH_TIME = "1978, 11, 17, 7, 11"
 
-
 TEST_MODE = True
 
 # web stuff
 HTTP_MONITOR = True  # or True
-WEB_PORT = 1978 # web port is year of birth
+WEB_PORT = 1978  # web port is year of birth
 
 # For testing purposes.
 if TEST_MODE:
-    FRAME_COUNTER_DISPLAY = not HTTP_MONITOR  # If the monitor is on, we skip printing
+    FRAME_COUNTER_DISPLAY = not HTTP_MONITOR  # If the monitor is on, skip printing
     SHOW_DELTA = not HTTP_MONITOR
 else:
     FRAME_COUNTER_DISPLAY = False
     SHOW_DELTA = False
+
+# Additional Display Settings
+BACKGROUND_COLOR = (9, 10, 10)       # Background clear color (RGB)
+GAMMA_CORRECTION_ENABLED = False     # Enable gamma correction in fragment shader
+ENABLE_SRGB_FRAMEBUFFER = False      # Request sRGB framebuffer if supported
 
 # -------------------------
 # Clock Mode Constants
@@ -53,15 +56,12 @@ MIXED_CLOCK = 2
 CLIENT_MODE = 3
 FREE_CLOCK = 255
 
-
-
 # -------------------------
 # Image Transformation Settings
 # -------------------------
 INITIAL_ROTATION = 90
 INITIAL_MIRROR = 0
-CONNECTED_TO_RCA_HDMI = False # this is for analog tvs
-# In settings.py, add near the other display parameters:
+CONNECTED_TO_RCA_HDMI = False  # this is for analog TVs
 RCA_HDMI_RESOLUTION = (640, 480)
 LOW_RES_FULLSCREEN = False        # Set to True to force low resolution mode
 LOW_RES_FULLSCREEN_RESOLUTION = (960, 600)
@@ -69,7 +69,7 @@ LOW_RES_FULLSCREEN_RESOLUTION = (960, 600)
 # -------------------------
 # Timing and Clock Buffer Parameters - midi
 # -------------------------
-TIMEOUT_SECONDS = 1  # Set the timeout value as needed
+TIMEOUT_SECONDS = 1  # Set the timeout as needed
 CLOCK_BUFFER_SIZE = 50
 CLOCK_MODE = FREE_CLOCK
 
@@ -101,7 +101,6 @@ TIMEZONE_OFFSETS = {
     "PDT": -7,  # Pacific Daylight Time
     "AKST": -9,  # Alaska Standard Time
     "AKDT": -8,  # Alaska Daylight Time
-    "HST": -10,  # Hawaii Standard Time
 
     # South America
     "ART": -3,  # Argentina Time
@@ -147,4 +146,3 @@ TIMEZONE_OFFSETS = {
     "CHAST": 12.75, # Chatham Standard Time
     "CHADT": 13.75, # Chatham Daylight Time
 }
-

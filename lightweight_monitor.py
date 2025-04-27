@@ -72,24 +72,27 @@ HTML_TEMPLATE = """
   <style>
     body { background:#111; color:#0f0; font-family:monospace; padding:2em; }
     .label{color:#888;margin-right:1em;}
+    a { color:#0f0; }
   </style>
 </head>
 <body>
   <h1>🎧 Live Playback Monitor</h1>
+  <div><a href="/log">View Log</a></div>
   <div id='monitor_data'></div>
   <script>
     function updateMonitor(){
       fetch('/data')
-        .then(r=>r.json())
-        .then(d=>{
-          let html='';
-          for(const [k,v] of Object.entries(d)){
-            html+=`<div><span class='label'>${k}:</span>${v}</div>`;
+        .then(r => r.json())
+        .then(d => {
+          let html = '';
+          for(const [k, v] of Object.entries(d)){
+            html += `<div><span class='label'>${k}:</span>${v}</div>`;
           }
-          document.getElementById('monitor_data').innerHTML=html;
-        }).catch(console.error);
+          document.getElementById('monitor_data').innerHTML = html;
+        })
+        .catch(console.error);
     }
-    setInterval(updateMonitor,100);
+    setInterval(updateMonitor, 100);
     updateMonitor();
   </script>
 </body>
@@ -111,17 +114,27 @@ class MonitorHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/":
             self.send_response(200)
-            self.send_header('Content-type','text/html')
+            self.send_header('Content-type', 'text/html')
             self.end_headers()
             self.wfile.write(HTML_TEMPLATE.encode('utf-8'))
         elif self.path == "/data":
             self.send_response(200)
-            self.send_header('Content-type','application/json')
+            self.send_header('Content-type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps(monitor_data).encode('utf-8'))
+        elif self.path == "/log":
+            try:
+                with open("runtime.log", "rb") as log_file:
+                    log_content = log_file.read()
+            except Exception:
+                self.send_error(404, "Log file not found")
+            else:
+                self.send_response(200)
+                self.send_header('Content-type', 'text/plain; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(log_content)
         else:
             self.send_error(404)
-
 
 def start_monitor():
     t = threading.Thread(target=_serve, daemon=True)
