@@ -11,6 +11,7 @@ FLOAT_FOLDER_PATH = f"{IMAGES_DIR}/face"
 # Display Mode & Performance
 # -------------------------
 FULLSCREEN_MODE = True
+VSYNC = True  # or False, depending on your preference
 
 # Frames per Second and Images Per Second (IPS)
 IPS = 30
