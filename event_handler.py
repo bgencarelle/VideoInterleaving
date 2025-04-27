@@ -10,12 +10,16 @@ def register_callbacks(window, state):
                 state.fullscreen = not state.fullscreen
                 state.needs_update = True  # Trigger re-init (toggle fullscreen)
             elif key == glfw.KEY_R:
-                state.rotation = (state.rotation + 45) % 360
+                state.rotation = (state.rotation + 90) % 360
                 state.needs_update = True  # Update rotation immediately
             elif key == glfw.KEY_M:
                 state.mirror = 0 if state.mirror else 1
                 state.needs_update = True  # Toggle mirror mode
+
     def on_window_size(win, width, height):
+        # If in fullscreen, ignore window resize events
+        if state.fullscreen:
+            return
         # Maintain original aspect ratio when window is resized
         aspect = state.image_size[0] / state.image_size[1]
         if state.rotation % 180 == 90:
@@ -31,5 +35,6 @@ def register_callbacks(window, state):
         # Update state to new window size and flag for recalculation
         state.image_size = (target_w, target_h)
         state.needs_update = True
+
     glfw.set_key_callback(window, on_key)
     glfw.set_window_size_callback(window, on_window_size)
