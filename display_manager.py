@@ -26,6 +26,7 @@ from settings import (
     LOW_RES_FULLSCREEN,
     LOW_RES_FULLSCREEN_RESOLUTION,
     ENABLE_SRGB_FRAMEBUFFER,
+    VSYNC,
     GAMMA_CORRECTION_ENABLED,
 )
 
@@ -131,7 +132,7 @@ def display_init(state: DisplayState) -> "glfw._GLFWwindow":
             raise RuntimeError("Could not create GLFW window")
 
         glfw.make_context_current(window)
-        glfw.swap_interval(1)  # Enable VSync
+        glfw.swap_interval(1 if VSYNC else 0)
 
         # Create ModernGL context with appropriate version requirement
         if is_pi:

@@ -11,11 +11,11 @@ FLOAT_FOLDER_PATH = f"{IMAGES_DIR}/face"
 # Display Mode & Performance
 # -------------------------
 FULLSCREEN_MODE = True
-VSYNC = True  # or False, depending on your preference
+VSYNC = False  # or False, depending on your preference
 
 # Frames per Second and Images Per Second (IPS)
 IPS = 30
-FPS = 60
+FPS = 300
 
 # Buffer settings: The BUFFER_SIZE is derived from IPS (e.g., 15 if IPS == 60)
 TOLERANCE = 10
@@ -43,9 +43,9 @@ else:
     SHOW_DELTA = False
 
 # Additional Display Settings
-BACKGROUND_COLOR = (9, 10, 10)       # Background clear color (RGB)
-GAMMA_CORRECTION_ENABLED = False     # Enable gamma correction in fragment shader
-ENABLE_SRGB_FRAMEBUFFER = False      # Request sRGB framebuffer if supported
+BACKGROUND_COLOR = (4, 4, 4)       # Background clear color (RGB)
+GAMMA_CORRECTION_ENABLED = False    # Enable gamma correction in fragment shader
+ENABLE_SRGB_FRAMEBUFFER = False     # Request sRGB framebuffer if supported
 
 # -------------------------
 # Clock Mode Constants
