@@ -25,48 +25,84 @@ def initialize(gl_context: moderngl.Context) -> None:
     global ctx, prog, vao, vbo
     ctx = gl_context
 
-    # Vertex and fragment shader sources (GLSL 3.3 core)
-    vertex_src = """
-        #version 330 core
-        in vec2 position;
-        in vec2 texcoord;
-        uniform mat4 u_MVP;
-        out vec2 v_texcoord;
-        void main() {
-            gl_Position = u_MVP * vec4(position, 0.0, 1.0);
-            v_texcoord = texcoord;
-        }
-    """
-    if GAMMA_CORRECTION_ENABLED or ENABLE_SRGB_FRAMEBUFFER:
-        # Fragment shader with gamma correction (linearize the texture color)
-        fragment_src = """
-            #version 330 core
-            uniform sampler2D texture0;
-            in vec2 v_texcoord;
-            out vec4 fragColor;
+    is_gles = ctx.version_code < 320  # GL ES typically reports < 320
+
+    if is_gles:
+        # GLSL ES 3.10 compatible shaders
+        vertex_src = """
+            #version 310 es
+            precision mediump float;
+            in vec2 position;
+            in vec2 texcoord;
+            uniform mat4 u_MVP;
+            out vec2 v_texcoord;
             void main() {
-                vec4 texColor = texture(texture0, v_texcoord);
-                fragColor = vec4(pow(texColor.rgb, vec3(2.2)), texColor.a);
+                gl_Position = u_MVP * vec4(position, 0.0, 1.0);
+                v_texcoord = texcoord;
             }
         """
+        if GAMMA_CORRECTION_ENABLED or ENABLE_SRGB_FRAMEBUFFER:
+            fragment_src = """
+                #version 310 es
+                precision mediump float;
+                uniform sampler2D texture0;
+                in vec2 v_texcoord;
+                out vec4 fragColor;
+                void main() {
+                    vec4 texColor = texture(texture0, v_texcoord);
+                    fragColor = vec4(pow(texColor.rgb, vec3(2.2)), texColor.a);
+                }
+            """
+        else:
+            fragment_src = """
+                #version 310 es
+                precision mediump float;
+                uniform sampler2D texture0;
+                in vec2 v_texcoord;
+                out vec4 fragColor;
+                void main() {
+                    fragColor = texture(texture0, v_texcoord);
+                }
+            """
     else:
-        # Fragment shader without gamma correction (use texture color as-is)
-        fragment_src = """
+        # Desktop GLSL 3.30 shaders
+        vertex_src = """
             #version 330 core
-            uniform sampler2D texture0;
-            in vec2 v_texcoord;
-            out vec4 fragColor;
+            in vec2 position;
+            in vec2 texcoord;
+            uniform mat4 u_MVP;
+            out vec2 v_texcoord;
             void main() {
-                fragColor = texture(texture0, v_texcoord);
+                gl_Position = u_MVP * vec4(position, 0.0, 1.0);
+                v_texcoord = texcoord;
             }
         """
+        if GAMMA_CORRECTION_ENABLED or ENABLE_SRGB_FRAMEBUFFER:
+            fragment_src = """
+                #version 330 core
+                uniform sampler2D texture0;
+                in vec2 v_texcoord;
+                out vec4 fragColor;
+                void main() {
+                    vec4 texColor = texture(texture0, v_texcoord);
+                    fragColor = vec4(pow(texColor.rgb, vec3(2.2)), texColor.a);
+                }
+            """
+        else:
+            fragment_src = """
+                #version 330 core
+                uniform sampler2D texture0;
+                in vec2 v_texcoord;
+                out vec4 fragColor;
+                void main() {
+                    fragColor = texture(texture0, v_texcoord);
+                }
+            """
+
     prog = ctx.program(vertex_shader=vertex_src, fragment_shader=fragment_src)
 
-    # Create a dynamic vertex buffer (4 vertices × 4 floats = 16 floats total)
-    vbo = ctx.buffer(reserve=64)  # 16 floats * 4 bytes = 64 bytes
-    # Create a VAO mapping buffer content to shader inputs (vec2 position, vec2 texcoord)
+    vbo = ctx.buffer(reserve=64)
     vao = ctx.vertex_array(prog, [(vbo, '2f 2f', 'position', 'texcoord')])
-    # Enable blending for transparency and set blend function (standard alpha blending)
     ctx.enable(moderngl.BLEND)
     ctx.blend_func = (
         moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA,
