@@ -82,8 +82,7 @@ def display_init(state: DisplayState) -> "glfw._GLFWwindow":
         glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
         glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 1)
         glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_ANY_PROFILE)
-        glfw.window_hint(glfw.OPENGL_FORWARD_COMPAT, glfw.TRUE)  # for macOS
-        glfw.window_hint(glfw.DOUBLEBUFFER, glfw.TRUE)
+        glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.NATIVE_CONTEXT_API)
         if GAMMA_CORRECTION_ENABLED or ENABLE_SRGB_FRAMEBUFFER:
             glfw.window_hint(glfw.SRGB_CAPABLE, glfw.TRUE)
 
