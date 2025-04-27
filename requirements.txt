@@ -7,3 +7,5 @@ pygame
 opencv-python
 PyOpenGl
 psutil
+glfw
+moderngl
