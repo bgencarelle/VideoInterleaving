@@ -14,7 +14,7 @@ FULLSCREEN_MODE = True
 
 # Frames per Second and Images Per Second (IPS)
 IPS = 30
-FPS = 600
+FPS = 60
 
 # Buffer settings: The BUFFER_SIZE is derived from IPS (e.g., 15 if IPS == 60)
 TOLERANCE = 10
