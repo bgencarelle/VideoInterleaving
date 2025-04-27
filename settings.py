@@ -14,7 +14,7 @@ FULLSCREEN_MODE = True
 
 # Frames per Second and Images Per Second (IPS)
 IPS = 30
-FPS = 60
+FPS = 600
 
 # Buffer settings: The BUFFER_SIZE is derived from IPS (e.g., 15 if IPS == 60)
 TOLERANCE = 10
@@ -33,13 +33,12 @@ TEST_MODE = True
 # web stuff
 HTTP_MONITOR = True  # or True
 WEB_PORT = 1978  # web port is year of birth
+FRAME_COUNTER_DISPLAY = True  # If the monitor is on, skip printing
 
 # For testing purposes.
 if TEST_MODE:
-    FRAME_COUNTER_DISPLAY = not HTTP_MONITOR  # If the monitor is on, skip printing
     SHOW_DELTA = not HTTP_MONITOR
 else:
-    FRAME_COUNTER_DISPLAY = False
     SHOW_DELTA = False
 
 # Additional Display Settings

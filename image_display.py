@@ -43,6 +43,7 @@ class RollingIndexCompensator:
 def run_display(clock_source=CLOCK_MODE):
     state = DisplayState()
     state.fullscreen = FULLSCREEN_MODE  # initial fullscreen setting from config
+    last_actual_fps = FPS
 
     # Initialize image paths and get initial image dimensions
     import calculators  # (assuming calculators.init_all is available)
@@ -170,25 +171,28 @@ def run_display(clock_source=CLOCK_MODE):
                 time.sleep(1.0 / FPS - time_since_last if 1.0 / FPS > time_since_last else 0)
             frame_counter += 1
 
-            # Optionally calculate and print FPS every 10 seconds
+            # Always calculate FPS for web updates every second (or 10s)
             elapsed = time.perf_counter() - start_time_sec
-            if FRAME_COUNTER_DISPLAY and elapsed >= 10.0:
+            if elapsed >= 1.0:  # You lowered from 10.0 to 1.0 for quicker updates
                 actual_fps = frame_counter / elapsed
-                print("index:", index)
-                print(f"[Display Rate] {actual_fps:.2f} frames per second")
-                if actual_fps < FPS - 2:
-                    print(f"[Warning] Potential frame drop! Target: {FPS}, Actual: {actual_fps:.2f}")
+                last_actual_fps = actual_fps  # This feeds the web monitor
+
+                if not HTTP_MONITOR:
+                    print("index:", index)
+                    print(f"[Display Rate] {actual_fps:.2f} frames per second")
+                    if actual_fps < FPS - 2:
+                        print(f"[Warning] Potential frame drop! Target: {FPS}, Actual: {actual_fps:.2f}")
+
                 # Reset counter and timer
                 frame_counter = 0
                 start_time_sec = time.perf_counter()
-
             # Update web monitor if active
             if monitor:
                 monitor.update({
                     "index": index,
                     "displayed": displayed_index if 'displayed_index' in locals() else index,
                     "delta": index - (displayed_index if 'displayed_index' in locals() else index),
-                    "fps": FPS if not FRAME_COUNTER_DISPLAY else actual_fps if 'actual_fps' in locals() else FPS,
+                    "fps": last_actual_fps,
                     "fifo_depth": fifo_buffer.current_depth(),
                     "successful_frame": successful_display,
                     "main_folder": main_folder,
