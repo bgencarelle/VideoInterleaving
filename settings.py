@@ -31,7 +31,7 @@ BIRTH_TIME = "1978, 11, 17, 7, 11"
 TEST_MODE = True
 
 # web stuff
-HTTP_MONITOR = False  # or True
+HTTP_MONITOR = True  # or True
 WEB_PORT = 1978  # web port is year of birth
 
 # For testing purposes.
