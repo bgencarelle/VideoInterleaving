@@ -71,24 +71,41 @@ def display_init(state: DisplayState) -> "glfw._GLFWwindow":
     img_w, img_h = state.image_size
     eff_w, eff_h = (img_h, img_w) if state.rotation % 180 == 90 else (img_w, img_h)
 
-    # ------------------------------------------------------------------#
+    # -----------------------------------------------------------------------------
     # First-time initialization
-    # ------------------------------------------------------------------#
+    # -----------------------------------------------------------------------------
     if window is None:
         if not glfw.init():
             raise RuntimeError("GLFW initialization failed")
 
-        # Request an OpenGL 3.3 core profile for ModernGL
-        glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
-        glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
-        glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_ANY_PROFILE)
-        glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.NATIVE_CONTEXT_API)
+        # Detect Raspberry Pi by checking for the Pi model string
+        is_pi = False
+        try:
+            with open('/proc/device-tree/model', 'r') as model_file:
+                if 'Raspberry Pi' in model_file.read():
+                    is_pi = True
+        except FileNotFoundError:
+            pass
+
+        # Set GLFW context hints based on platform
+        if is_pi:
+            # Use OpenGL ES 3.1 via EGL on Raspberry Pi
+            glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_ES_API)
+            glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
+            glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
+            glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 1)
+        else:
+            # Use desktop OpenGL 3.3 core profile elsewhere
+            glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_API)
+            glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.NATIVE_CONTEXT_API)
+            glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
+            glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
+            glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
         if GAMMA_CORRECTION_ENABLED or ENABLE_SRGB_FRAMEBUFFER:
             glfw.window_hint(glfw.SRGB_CAPABLE, glfw.TRUE)
 
-        # Choose initial window size/monitor
+        # Choose initial window size / monitor
         if state.fullscreen:
-            # Fullscreen: use RCA_HDMI or low-res override if set, otherwise best mode
             mon = glfw.get_primary_monitor()
             if CONNECTED_TO_RCA_HDMI:
                 fs_w, fs_h = RCA_HDMI_RESOLUTION
@@ -99,43 +116,43 @@ def display_init(state: DisplayState) -> "glfw._GLFWwindow":
                 fs_w, fs_h = best_mode.size.width, best_mode.size.height
             window = glfw.create_window(fs_w, fs_h, "Fullscreen", mon, None)
         else:
-            # Determine effective image dimensions (swap width/height if rotated 90°/270°)
             rotation_mod = state.rotation % 360
-            if rotation_mod == 90 or rotation_mod == 270:
-                eff_w, eff_h = state.image_size[1], state.image_size[0]  # swapped
+            if rotation_mod in (90, 270):
+                eff_w, eff_h = state.image_size[1], state.image_size[0]
             else:
-                eff_w, eff_h = state.image_size[0], state.image_size[1]  # normal
-
-            # Use this for both initial and toggle window creation
+                eff_w, eff_h = state.image_size[0], state.image_size[1]
             aspect_ratio = eff_w / eff_h
             win_w = 400
             win_h = int(win_w / aspect_ratio)
-
-            # For first-time windowed creation
-            if window is None and not state.fullscreen:
-                window = glfw.create_window(win_w, win_h, "Windowed Mode", None, None)
+            window = glfw.create_window(win_w, win_h, "Windowed Mode", None, None)
 
         if not window:
             glfw.terminate()
             raise RuntimeError("Could not create GLFW window")
 
         glfw.make_context_current(window)
-        glfw.swap_interval(1)  # Enable VSync for smooth timing
-        ctx = moderngl.create_context()
+        glfw.swap_interval(1)  # Enable VSync
+
+        # Create ModernGL context with appropriate version requirement
+        if is_pi:
+            # Pi reports ES 3.1 → version code 3*100 + 1*10 = 310
+            ctx = moderngl.create_context(require=310)
+        else:
+            # Default → require desktop GL 3.3
+            ctx = moderngl.create_context()
         renderer.initialize(ctx)
 
-        # Enable sRGB framebuffer (for gamma correction) if requested
+        # Enable sRGB framebuffer if requested
         if GAMMA_CORRECTION_ENABLED or ENABLE_SRGB_FRAMEBUFFER:
             glEnable(GL_FRAMEBUFFER_SRGB)
             if glGetError() == GL_INVALID_ENUM:
                 print("⚠️  GL_FRAMEBUFFER_SRGB unsupported – continuing without it")
 
-    # ------------------------------------------------------------------#
+    # -----------------------------------------------------------------------------
     # Fullscreen ↔ Windowed toggling
-    # ------------------------------------------------------------------#
+    # -----------------------------------------------------------------------------
     current_monitor = glfw.get_window_monitor(window)
     if state.fullscreen:
-        # Switch from windowed to fullscreen
         mon = glfw.get_primary_monitor()
         if CONNECTED_TO_RCA_HDMI:
             fs_w, fs_h = RCA_HDMI_RESOLUTION
@@ -149,39 +166,33 @@ def display_init(state: DisplayState) -> "glfw._GLFWwindow":
         glfw.set_window_title(window, "Fullscreen")
     else:
         rotation_mod = state.rotation % 360
-        if rotation_mod == 90 or rotation_mod == 270:
-            eff_w, eff_h = state.image_size[1], state.image_size[0]  # swapped
+        if rotation_mod in (90, 270):
+            eff_w, eff_h = state.image_size[1], state.image_size[0]
         else:
-            eff_w, eff_h = state.image_size[0], state.image_size[1]  # normal
-
+            eff_w, eff_h = state.image_size[0], state.image_size[1]
         aspect_ratio = eff_w / eff_h
         win_w = 400
         win_h = int(win_w / aspect_ratio)
-
         glfw.set_window_monitor(window, None, 100, 100, win_w, win_h, 0)
         glfw.set_window_title(window, "Windowed Mode")
 
-    # 💥 FORCE window resize on every rotation change in windowed mode 💥
+    # Force window resize on every rotation change in windowed mode
     if not state.fullscreen:
         fb_w, fb_h = glfw.get_window_size(window)
         if (fb_w, fb_h) != (win_w, win_h):
             glfw.set_window_size(window, win_w, win_h)
-    # Set mouse cursor visibility: hide in fullscreen, show in windowed mode
+
+    # Cursor visibility
     if state.fullscreen:
         glfw.set_input_mode(window, glfw.CURSOR, glfw.CURSOR_HIDDEN)
     else:
         glfw.set_input_mode(window, glfw.CURSOR, glfw.CURSOR_NORMAL)
 
-    # ------------------------------------------------------------------#
-    # Update viewport and renderer transform
-    # ------------------------------------------------------------------#
+    # Update viewport & renderer transform
     fb_w, fb_h = glfw.get_framebuffer_size(window)
     ctx.viewport = (0, 0, fb_w, fb_h)
 
-    # Compute scaling to fit image in window (letterbox or pillarbox)
-    scale_x = fb_w / eff_w
     if state.fullscreen:
-        # Fullscreen: compute letterbox/pillarbox
         scale_x = fb_w / eff_w
         scale_y = fb_h / eff_h
         scale = min(scale_x, scale_y)
@@ -190,10 +201,7 @@ def display_init(state: DisplayState) -> "glfw._GLFWwindow":
         offset_x = (fb_w - scaled_w) / 2.0
         offset_y = (fb_h - scaled_h) / 2.0
     else:
-        # Windowed mode: FORCE scale to fit window exactly
-        scale_x = fb_w / eff_w
-        scale_y = fb_h / eff_h
-        scale = scale_x  # Since fb_w / eff_w == fb_h / eff_h due to window sizing
+        scale = fb_w / eff_w  # windowed ratio is exact
         offset_x = 0
         offset_y = 0
 
@@ -206,13 +214,13 @@ def display_init(state: DisplayState) -> "glfw._GLFWwindow":
         state.mirror,
     )
 
-    # Update 2D orthographic projection matrix (MVP) for new viewport
+    # 2D orthographic projection (MVP)
     mvp = np.array(
         [
             [2.0 / fb_w, 0, 0, -1],
             [0, 2.0 / fb_h, 0, -1],
-            [0, 0, -1, 0],
-            [0, 0, 0, 1],
+            [0, 0, -1,   0],
+            [0, 0,  0,   1],
         ],
         dtype="f4",
     )
