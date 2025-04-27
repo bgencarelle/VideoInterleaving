@@ -104,7 +104,7 @@ def initialize(gl_context: moderngl.Context) -> None:
     vbo = ctx.buffer(reserve=64)
     vao = ctx.vertex_array(prog, [(vbo, '2f 2f', 'position', 'texcoord')])
     ctx.enable(moderngl.BLEND)
-    ctx.blend_func = (
+    ctx.blend = (
         moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA,
         moderngl.ONE, moderngl.ONE_MINUS_SRC_ALPHA
     )
@@ -194,8 +194,20 @@ def overlay_images_two_pass_like_old(main_texture: moderngl.Texture,
     Clear the screen with background_color, then draw the main texture and float texture.
     Uses two-pass rendering (draw main, then overlay float) with blending.
     """
-    # Clear screen to the background color
-    ctx.clear(background_color[0] / 255.0, background_color[1] / 255.0, background_color[2] / 255.0)
+
+    def srgb_to_linear_component(c):
+        return pow(c / 255.0, 2.2)
+
+    if GAMMA_CORRECTION_ENABLED or ENABLE_SRGB_FRAMEBUFFER:
+        # Convert background_color from sRGB to linear before clearing
+        bg_linear = tuple(srgb_to_linear_component(c) for c in background_color)
+        ctx.clear(*bg_linear)
+    else:
+        # No correction needed, treat values as sRGB directly
+        ctx.clear(background_color[0] / 255.0,
+                  background_color[1] / 255.0,
+                  background_color[2] / 255.0)
+
     # Update quad vertex buffer with current geometry
     vbo.write(compute_transformed_quad().tobytes())
     # Draw main image quad

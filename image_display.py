@@ -7,7 +7,8 @@ from collections import deque
 # Ensure PyOpenGL checks are off (not needed with ModernGL, but leaving for safety)
 os.environ['PYOPENGL_ERROR_CHECKING'] = '0'
 
-from settings import (FULLSCREEN_MODE, PINGPONG, FPS, FRAME_COUNTER_DISPLAY, SHOW_DELTA, TEST_MODE, HTTP_MONITOR, CLOCK_MODE)
+from settings import (FULLSCREEN_MODE, PINGPONG, FPS, FRAME_COUNTER_DISPLAY, SHOW_DELTA, TEST_MODE, HTTP_MONITOR,
+                      CLOCK_MODE, BACKGROUND_COLOR)
 from index_calculator import update_index
 from folder_selector import update_folder_selection, folder_dictionary
 from display_manager import DisplayState, display_init
@@ -159,7 +160,7 @@ def run_display(clock_source=CLOCK_MODE):
                 future.add_done_callback(lambda fut, s_idx=next_index: async_load_callback(fut, s_idx))
 
             # Render the current main and float images
-            renderer.overlay_images_two_pass_like_old(main_texture, float_texture, background_color=(9.0, 10.0, 10.0))
+            renderer.overlay_images_two_pass_like_old(main_texture, float_texture, background_color=BACKGROUND_COLOR)
             glfw.swap_buffers(window)  # display the rendered frame
 
             # Throttle frame rate to target FPS
