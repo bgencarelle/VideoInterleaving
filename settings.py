@@ -11,11 +11,11 @@ FLOAT_FOLDER_PATH = f"{IMAGES_DIR}/face"
 # Display Mode & Performance
 # -------------------------
 FULLSCREEN_MODE = True
-VSYNC = False  # or False, depending on your preference
+VSYNC = True  # or False, depending on your preference
 
 # Frames per Second and Images Per Second (IPS)
 IPS = 30
-FPS = 300
+FPS = 60
 
 # Buffer settings: The BUFFER_SIZE is derived from IPS (e.g., 15 if IPS == 60)
 TOLERANCE = 10
