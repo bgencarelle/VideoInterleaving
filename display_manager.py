@@ -79,10 +79,9 @@ def display_init(state: DisplayState) -> "glfw._GLFWwindow":
             raise RuntimeError("GLFW initialization failed")
 
         # Request an OpenGL 3.3 core profile for ModernGL
-        glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
-        glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 1)
-        glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_ANY_PROFILE)
-        glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.NATIVE_CONTEXT_API)
+        glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_API)  # or try OPENGL_ES_API
+        glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)  # Use EGL explicitly
+
         if GAMMA_CORRECTION_ENABLED or ENABLE_SRGB_FRAMEBUFFER:
             glfw.window_hint(glfw.SRGB_CAPABLE, glfw.TRUE)
 
