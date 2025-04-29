@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 """
 make_file_lists.py
 
@@ -38,7 +39,7 @@ def get_subdirectories(path):
 def contains_image_files(path):
     """Check if a directory contains any PNG or WEBP files."""
     try:
-        return any(file.lower().endswith(('.png', '.webp','.jpg','jpeg')) for file in os.listdir(path))
+        return any(file.lower().endswith(('.png', '.webp', '.jpg', 'jpeg')) for file in os.listdir(path))
     except FileNotFoundError:
         return False
 
@@ -46,7 +47,7 @@ def contains_image_files(path):
 def count_image_files(path):
     """Count the number of PNG and WEBP files in a directory."""
     try:
-        return len([file for file in os.listdir(path) if file.lower().endswith(('.png', '.webp','.jpg','jpeg'))])
+        return len([file for file in os.listdir(path) if file.lower().endswith(('.png', '.webp', '.jpg', 'jpeg'))])
     except FileNotFoundError:
         return 0
 
@@ -98,8 +99,7 @@ def create_folder_csv_files(folder_counts, processed_dir, script_dir):
         for file_count, sub_group in group.items():
             # Sort the group based on numeric prefix (if any) and then folder name.
             sub_group.sort(key=lambda x: (
-                int(os.path.basename(x[0]).partition('_')[0]) if os.path.basename(x[0]).partition('_')[
-                    0].isdigit() else float('inf'),
+                int(os.path.basename(x[0]).partition('_')[0]) if os.path.basename(x[0]).partition('_')[0].isdigit() else float('inf'),
                 os.path.basename(x[0])
             ))
             csv_filename = file_name_format.format(file_count)
@@ -113,9 +113,7 @@ def create_folder_csv_files(folder_counts, processed_dir, script_dir):
                             with Image.open(image_path) as first_png_image:
                                 file_extension = os.path.splitext(first_png)[1]
                                 if has_alpha:
-                                    # Compare first image channels if possible.
-                                    alpha_match = 'Match' if first_png_image.size == first_png_image.split()[
-                                        -1].size else 'NoMatch'
+                                    alpha_match = 'Match' if first_png_image.size == first_png_image.split()[-1].size else 'NoMatch'
                                 else:
                                     alpha_match = 'NoAlpha'
                         except Exception as e:
@@ -144,7 +142,7 @@ def create_folder_csv_files(folder_counts, processed_dir, script_dir):
 def write_folder_list():
     """
     Scans the two image directories defined in settings (MAIN_FOLDER_PATH and FLOAT_FOLDER_PATH)
-    recursively for PNG and WEBP files, collects folder details, and writes intermediate CSV files.
+    recursively for PNG, WEBP, JPG, and JPEG files, collects folder details, and writes intermediate CSV files.
     """
     # Determine the script's directory
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -165,39 +163,50 @@ def write_folder_list():
             print(f"Error: Directory '{base_path}' is missing. Please create it and populate with images.")
             # Continue scanning the other folder instead of exiting
 
-    # Scan both directories recursively
-    folder_dict = {}
-    folder_key = 0
-    for base_path in [main_folder_path, float_folder_path]:
-        if os.path.exists(base_path) and os.path.isdir(base_path):
-            for subdirectory in [base_path] + get_subdirectories(base_path):
-                if contains_image_files(subdirectory):
-                    folder_dict[folder_key] = subdirectory
-                    folder_key += 1
+    # Scan MAIN_FOLDER_PATH
+    folder_counts = []
+    total_images = 0
 
-    if not folder_dict:
+    if os.path.exists(main_folder_path) and os.path.isdir(main_folder_path):
+        for subdirectory in [main_folder_path] + get_subdirectories(main_folder_path):
+            if contains_image_files(subdirectory):
+                image_files = [f for f in os.listdir(subdirectory) if f.lower().endswith(('.png', '.webp', '.jpg', '.jpeg'))]
+                if image_files:
+                    first_image = image_files[0]
+                    try:
+                        with Image.open(os.path.join(subdirectory, first_image)) as img:
+                            width, height = img.size
+                            has_alpha = has_alpha_channel(img)
+                    except Exception as e:
+                        print(f"Error processing image {first_image} in folder {subdirectory}: {e}")
+                        first_image = None
+                        width, height, has_alpha = 0, 0, False
+                    file_count = count_image_files(subdirectory)
+                    total_images += file_count
+                    folder_counts.append((subdirectory, first_image, width, height, has_alpha, file_count))
+
+    # Scan FLOAT_FOLDER_PATH
+    if os.path.exists(float_folder_path) and os.path.isdir(float_folder_path):
+        for subdirectory in [float_folder_path] + get_subdirectories(float_folder_path):
+            if contains_image_files(subdirectory):
+                image_files = [f for f in os.listdir(subdirectory) if f.lower().endswith(('.png', '.webp', '.jpg', '.jpeg'))]
+                if image_files:
+                    first_image = image_files[0]
+                    try:
+                        with Image.open(os.path.join(subdirectory, first_image)) as img:
+                            width, height = img.size
+                            has_alpha = has_alpha_channel(img)
+                    except Exception as e:
+                        print(f"Error processing image {first_image} in folder {subdirectory}: {e}")
+                        first_image = None
+                        width, height, has_alpha = 0, 0, False
+                    file_count = count_image_files(subdirectory)
+                    total_images += file_count
+                    folder_counts.append((subdirectory, first_image, width, height, has_alpha, file_count))
+
+    if not folder_counts:
         print("No valid image files were found in the specified directories or their subdirectories.")
         return
-
-    # Collect folder details (folder, first image, dimensions, alpha flag, image count)
-    total_images = 0
-    folder_counts = []
-
-    for folder in folder_dict.values():
-        image_files = [f for f in os.listdir(folder) if f.lower().endswith(('.png', '.webp', '.jpg','.jpeg'))]
-        if image_files:
-            first_image = image_files[0]
-            try:
-                with Image.open(os.path.join(folder, first_image)) as img:
-                    width, height = img.size
-                    has_alpha = has_alpha_channel(img)
-            except Exception as e:
-                print(f"Error processing image {first_image} in folder {folder}: {e}")
-                first_image = None
-                width, height, has_alpha = 0, 0, False
-            file_count = count_image_files(folder)
-            total_images += file_count
-            folder_counts.append((folder, first_image, width, height, has_alpha, file_count))
 
     # Save folder count to a text file
     folder_count_filename = f'folder_count_{total_images}.txt'
@@ -239,28 +248,60 @@ def parse_folder_locations(csv_path):
 
 def find_default_csvs(processed_dir):
     """
-    Find exactly two CSV files: float_folder_XXXX.csv and main_folder_XXXX.csv
-    with the same XXXX. Returns the list of paths if found, else None.
+    Find matching float_folder_XXXX.csv and main_folder_XXXX.csv with the same XXXX.
+    Chooses the largest matching XXXX if multiple exist. Logs details and prints warnings.
     """
-    float_pattern = re.compile(r'^float_folder_(\d{1,30})\.csv$')
-    main_pattern = re.compile(r'^main_folder_(\d{1,30})\.csv$')
+    float_pattern = re.compile(r'^float_folder_(\d+)\.csv$')
+    main_pattern = re.compile(r'^main_folder_(\d+)\.csv$')
 
     float_files = {}
     main_files = {}
 
+    # Collect available CSVs keyed by their numeric suffix
     for file in os.listdir(processed_dir):
         float_match = float_pattern.match(file)
         main_match = main_pattern.match(file)
         if float_match:
-            float_files[float_match.group(1)] = os.path.join(processed_dir, file)
+            count = int(float_match.group(1))
+            float_files[count] = os.path.join(processed_dir, file)
         if main_match:
-            main_files[main_match.group(1)] = os.path.join(processed_dir, file)
+            count = int(main_match.group(1))
+            main_files[count] = os.path.join(processed_dir, file)
 
-    # Find matching XXXX
-    for xxxx in float_files:
-        if xxxx in main_files:
-            return [float_files[xxxx], main_files[xxxx]]
-    return None
+    float_counts = set(float_files.keys())
+    main_counts = set(main_files.keys())
+    matched_counts = float_counts & main_counts
+    unmatched_float = sorted(float_counts - matched_counts)
+    unmatched_main = sorted(main_counts - matched_counts)
+
+    # Log all findings
+    log_path = os.path.join(processed_dir, 'folder_match_log.txt')
+    with open(log_path, 'w', encoding='utf-8') as logf:
+        logf.write(f"Float counts found   : {sorted(float_counts)}\n")
+        logf.write(f"Main counts found    : {sorted(main_counts)}\n")
+        logf.write(f"Matched counts       : {sorted(matched_counts)}\n")
+        if unmatched_float:
+            logf.write(f"Unmatched float only : {unmatched_float}\n")
+        if unmatched_main:
+            logf.write(f"Unmatched main only  : {unmatched_main}\n")
+
+    # Print warnings for any unmatched groups
+    if unmatched_float:
+        print(f"Warning: float CSV counts with no matching main CSV: {unmatched_float}")
+    if unmatched_main:
+        print(f"Warning: main CSV counts with no matching float CSV: {unmatched_main}")
+
+    if not matched_counts:
+        return None
+
+    # Choose the largest matching count if multiple
+    if len(matched_counts) > 1:
+        chosen = max(matched_counts)
+        print(f"Warning: multiple matching folder counts found {sorted(matched_counts)}; selecting largest: {chosen}")
+    else:
+        chosen = matched_counts.pop()
+
+    return [float_files[chosen], main_files[chosen]]
 
 
 def check_unequal_img_counts(csv_path):
@@ -288,7 +329,8 @@ def sort_image_files(folder_dict):
     sorted_image_files = []
     for number in sorted(folder_dict.keys()):
         folder = folder_dict[number]
-        image_files = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(('.png', '.webp', '.jpeg','.jpg'))]
+        image_files = [os.path.join(folder, f) for f in os.listdir(folder)
+                       if f.lower().endswith(('.png', '.webp', '.jpeg', '.jpg'))]
         image_files.sort(key=natural_sort_key)
         sorted_image_files.append(image_files)
     return sorted_image_files
@@ -335,7 +377,7 @@ def process_files():
             print(f" - {csv_file}")
         csv_paths = default_csvs
     else:
-        print("No default CSV files were generated. Please check the folder list generation.")
+        print("No matching CSV pairs found. Please check the folder list generation.")
         sys.exit(1)
 
     # Delete the old generated_img_lists folder if it exists

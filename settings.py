@@ -4,8 +4,8 @@
 # -------------------------
 IMAGES_DIR = "images_1080"
 
-MAIN_FOLDER_PATH = f"{IMAGES_DIR}/float"
-FLOAT_FOLDER_PATH = f"{IMAGES_DIR}/face"
+MAIN_FOLDER_PATH = f"{IMAGES_DIR}/face"
+FLOAT_FOLDER_PATH = f"{IMAGES_DIR}/float"
 
 # -------------------------
 # Display Mode & Performance
