@@ -82,22 +82,42 @@ def interleave_lists(lists):
 def create_folder_csv_files(folder_counts, processed_dir, script_dir):
     """
     Create CSV files categorizing folders into main and float groups.
-    The grouping logic remains unchanged: if the folder's basename starts with '255_', it goes into float.
+
+    Rules:
+      - FLOAT: only folders under FLOAT_FOLDER_PATH whose basename starts with '255_'
+      - MAIN : only folders under MAIN_FOLDER_PATH whose basename starts with a number < 255
     """
-    float_root_abs = os.path.join(script_dir, settings.FLOAT_FOLDER_PATH)  # ← ADD THIS
-    groups = defaultdict(list)
-    float_group = defaultdict(list)
+    main_root_abs  = os.path.join(script_dir, settings.MAIN_FOLDER_PATH)
+    float_root_abs = os.path.join(script_dir, settings.FLOAT_FOLDER_PATH)
+
+    groups = defaultdict(list)       # MAIN
+    float_group = defaultdict(list)  # FLOAT
 
     for folder_info in folder_counts:
         folder, first_png, width, height, has_alpha, file_count = folder_info
+        base = os.path.basename(folder)
         folder_relative = os.path.relpath(folder, script_dir)
-        # NEW logic
+
+        # FLOAT: only '255_' inside float folder
         if folder.startswith(float_root_abs):
-            float_group[file_count].append((folder_relative, first_png, width, height,
-                                            has_alpha, file_count))
-        else:
-            groups[file_count].append((folder_relative, first_png, width, height,
-                                       has_alpha, file_count))
+            if base.startswith("255_"):
+                float_group[file_count].append(
+                    (folder_relative, first_png, width, height, has_alpha, file_count)
+                )
+            continue  # anything else in float root is ignored
+
+        # MAIN: numeric prefix < 255 inside main folder
+        if folder.startswith(main_root_abs):
+            prefix = base.split("_", 1)[0]
+            if prefix.isdigit() and int(prefix) < 255:
+                groups[file_count].append(
+                    (folder_relative, first_png, width, height, has_alpha, file_count)
+                )
+            continue  # anything else in main root is ignored
+
+        # Ignore folders outside both roots
+        continue
+
 
     def write_csv(group, file_name_format):
         for file_count, sub_group in group.items():
