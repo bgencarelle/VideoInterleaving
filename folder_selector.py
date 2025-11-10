@@ -94,6 +94,7 @@ def update_folder_selection(index, float_folder_count, main_folder_count):
             elapsed_main = now - last_main
             if elapsed_main >= min_interval and (math.isclose(( (index % (FPS * (1 + (rand_mult + rand_mult // 2))))), 3 + rand_mult) ):
                 main_folder = folder_dictionary['pre_main'].popleft()
+                #print("main folder is ", main_folder)
                 folder_dictionary['rand_mult']       = rng.randint(1, 9)
                 folder_dictionary['last_main_time']  = now
             elif elapsed_main >= max_interval:

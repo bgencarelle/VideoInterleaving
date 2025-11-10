@@ -84,16 +84,20 @@ def create_folder_csv_files(folder_counts, processed_dir, script_dir):
     Create CSV files categorizing folders into main and float groups.
     The grouping logic remains unchanged: if the folder's basename starts with '255_', it goes into float.
     """
+    float_root_abs = os.path.join(script_dir, settings.FLOAT_FOLDER_PATH)  # ← ADD THIS
     groups = defaultdict(list)
     float_group = defaultdict(list)
 
     for folder_info in folder_counts:
         folder, first_png, width, height, has_alpha, file_count = folder_info
         folder_relative = os.path.relpath(folder, script_dir)
-        if os.path.basename(folder).startswith('255_'):
-            float_group[file_count].append((folder_relative, first_png, width, height, has_alpha, file_count))
+        # NEW logic
+        if folder.startswith(float_root_abs):
+            float_group[file_count].append((folder_relative, first_png, width, height,
+                                            has_alpha, file_count))
         else:
-            groups[file_count].append((folder_relative, first_png, width, height, has_alpha, file_count))
+            groups[file_count].append((folder_relative, first_png, width, height,
+                                       has_alpha, file_count))
 
     def write_csv(group, file_name_format):
         for file_count, sub_group in group.items():
