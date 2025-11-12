@@ -96,7 +96,7 @@ def create_folder_csv_files(folder_counts, processed_dir, script_dir):
         if folder.startswith(float_root_abs):
             float_group[file_count].append((folder_relative, first_png, width, height,
                                             has_alpha, file_count))
-        else if folder.startswith(main_root_abs):
+        elif folder.startswith(main_root_abs):
             groups[file_count].append((folder_relative, first_png, width, height,
                                        has_alpha, file_count))
 
