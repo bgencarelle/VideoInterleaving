@@ -36,7 +36,7 @@ The following tools are used or recommended for building and running **VideoInte
    sudo apt update
    sudo apt install python3-venv python3-dev python3-pip build-essential cmake pkg-config \
        libwebp-dev libsdl2-dev libasound2-dev libgl1-mesa-dev libglu1-mesa-dev \
-       libegl1-mesa-dev mesa-utils chrony
+       libegl1-mesa-dev mesa-utils chrony ninja-build python-is-python3
    ```
 
    **Fedora/CentOS:**
@@ -44,7 +44,7 @@ The following tools are used or recommended for building and running **VideoInte
    ```bash
    sudo dnf install python3-venv python3-pip python3-devel build-essential cmake pkgconfig \
        libwebp-devel SDL2-devel alsa-lib-devel mesa-libGL-devel mesa-libGLU-devel \
-       mesa-libEGL-devel mesa-utils chrony
+       mesa-libEGL-devel mesa-utils chrony ninja-build python-is-python3
    ```
 
    **macOS (Homebrew):**
