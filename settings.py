@@ -2,7 +2,7 @@
 # -------------------------
 # Image Directories and Folder Paths
 # settings.py
-IMAGES_DIR = "images_1080"
+IMAGES_DIR = "images"
 
 MAIN_FOLDER_PATH = f"{IMAGES_DIR}/float"
 FLOAT_FOLDER_PATH = f"{IMAGES_DIR}/face"
@@ -57,7 +57,7 @@ FREE_CLOCK = 255
 # -------------------------
 # Image Transformation Settings
 # -------------------------
-INITIAL_ROTATION = 90
+INITIAL_ROTATION = 0
 INITIAL_MIRROR = 0
 CONNECTED_TO_RCA_HDMI = False # this is for analog tvs
 # In settings.py, add near the other display parameters:
