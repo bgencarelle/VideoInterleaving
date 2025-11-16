@@ -36,7 +36,7 @@ The following tools are used or recommended for building and running **VideoInte
    sudo apt update
    sudo apt install python3-venv python3-dev python3-pip build-essential cmake pkg-config \
        libwebp-dev libsdl2-dev libasound2-dev libgl1-mesa-dev libglu1-mesa-dev \
-       libegl1-mesa-dev chrony
+       libegl1-mesa-dev mesa-utils chrony
    ```
 
    **Fedora/CentOS:**
@@ -44,7 +44,7 @@ The following tools are used or recommended for building and running **VideoInte
    ```bash
    sudo dnf install python3-venv python3-pip python3-devel build-essential cmake pkgconfig \
        libwebp-devel SDL2-devel alsa-lib-devel mesa-libGL-devel mesa-libGLU-devel \
-       mesa-libEGL-devel chrony
+       mesa-libEGL-devel mesa-utils chrony
    ```
 
    **macOS (Homebrew):**
@@ -199,6 +199,9 @@ As of May 2025, only `FREE_CLOCK` mode has been tested and verified in the main 
 Set via `CLOCK_MODE` in `settings.py` or interactively at launch.
 
 ---
+##
+
+NOTE! Use the "forOldStable" branch for any older hardware that isn't playing nice nice with display stuff. 
 
 ## Project Structure
 
