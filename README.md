@@ -26,7 +26,7 @@ The following tools are used or recommended for building and running **VideoInte
 
 ## Prerequisites
 
-1. **Python** 3.8+  (check with `python3 --version`).
+1. **Python** 3.11+  (check with `python3 --version`).
 
 2. **System libraries**
 
@@ -34,7 +34,7 @@ The following tools are used or recommended for building and running **VideoInte
 
    ```bash
    sudo apt update
-   sudo apt install python3-venv python3-dev python3-pip build-essential cmake pkg-config \
+   sudo apt install python3-venv python3-dev python3-pip python3-numpy build-essential cmake pkg-config \
        libwebp-dev libsdl2-dev libasound2-dev libgl1-mesa-dev libglu1-mesa-dev \
        libegl1-mesa-dev mesa-utils chrony ninja-build python-is-python3
    ```
