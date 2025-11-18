@@ -1,6 +1,6 @@
 pillow
 # numpy
-webp
+# webp
 mido[ports-rtmidi]
 websockets
 pygame
