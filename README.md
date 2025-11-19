@@ -67,6 +67,35 @@ The following tools are used or recommended for building and running **VideoInte
 
 4. **Optional MIDI**: a functional MIDI interface or USB-MIDI adapter for `MIDI_CLOCK` or `MTC_CLOCK` modes.
 
+###PI TV out
+
+make sure to set the composite out via sudo raspi-config 
+
+And then append this this to the end of  /boot/firmware/cmdline.txt:
+
+video=Composite-1:720x576@50ie 
+(or 60 if in NTSC land)
+
+next go into 
+/boot/firmware/config.txt
+pick your tv mode:
+
+sdtv_mode=0  (NTSC)
+sdtv_mode=2  (PAL)
+sdtv_aspect=1  (4:3)
+sdtv_aspect=2  (14:9)
+sdtv_aspect=3  (16:9)
+
+optional:
+
+disable_overscan=0
+overscan_left=16
+overscan_right=16
+overscan_top=16
+overscan_bottom=16
+
+
+
 ### Chrony Configuration
 
 If you're in Germany or nearby and want highly reliable time servers, here's a sample configuration used during development. You may adapt it to your region's preferred NTP servers:
