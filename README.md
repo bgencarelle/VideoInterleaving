@@ -71,10 +71,11 @@ The following tools are used or recommended for building and running **VideoInte
 
 make sure to set the composite out via sudo raspi-config 
 
-And then append this this to the end of  /boot/firmware/cmdline.txt:
+And then append this this to the front of  /boot/firmware/cmdline.txt:
 
-video=Composite-1:720x576@50ie 
-(or 60 if in NTSC land)
+video=Composite-1:720x576@50ie,margin_left=30,margin_right=30,margin_top=20,margin_bottom=20,tv_mode=PAL 
+
+(or 60 + NTSC if in NTSC land)
 
 next go into 
 /boot/firmware/config.txt
@@ -86,14 +87,23 @@ sdtv_aspect=1  (4:3)
 sdtv_aspect=2  (14:9)
 sdtv_aspect=3  (16:9)
 
-optional:
 
+This worked for me on a pi 2 for PAL tvs:
+
+# Enable DRM VC4 V3D driver
+dtoverlay=vc4-kms-v3d,composite=1
+max_framebuffers=2
+hdmi_ignore_hotplug=1
+enable_tvout=1
+sdtv_mode=2
+
+
+# Don't have the firmware create an initial video= setting in cmdline.txt.
+# Use the kernel's default instead.
+disable_fw_kms_setup=1
+
+# Disable compensation for displays with overscan
 disable_overscan=0
-overscan_left=16
-overscan_right=16
-overscan_top=16
-overscan_bottom=16
-
 
 
 ### Chrony Configuration
