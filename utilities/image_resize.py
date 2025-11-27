@@ -51,7 +51,7 @@ def run_cwebp(
     quality: int,
     overwrite: bool,
 ) -> None:
-    """Encode a single image to WebP via cwebp with resizing."""
+    """Encode a single image to WebP via cwebp with resizing (optimized settings)."""
     # Ensure destination directory exists
     dest.parent.mkdir(parents=True, exist_ok=True)
 
@@ -60,15 +60,23 @@ def run_cwebp(
         return
 
     # cwebp command:
-    #  -q <quality>       : WebP quality
-    #  -resize 0 <height> : preserve aspect ratio, set height
-    #  -metadata all      : keep EXIF / ICC / XMP where supported
-    #  -quiet             : no stdout spam
+    #  -q <quality>        : WebP quality (kept as given)
+    #  -m 6                : slowest, best compression
+    #  -mt                 : multi-threaded encoding
+    #  -preset photo       : good general preset for photographic images
+    #  -af                 : adaptive filtering (often better quality/size tradeoff)
+    #  -resize 0 <height>  : preserve aspect ratio, set height
+    #  -metadata none      : drop EXIF/ICC/XMP to save bytes (no visual impact)
+    #  -quiet              : no stdout spam
     cmd = [
         "cwebp",
         "-quiet",
+        "-mt",
+        "-preset", "photo",
+        "-m", "6",
+        "-af",
         "-q", str(quality),
-        "-metadata", "all",
+        "-metadata", "none",
     ]
 
     if height > 0:
