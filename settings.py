@@ -134,7 +134,7 @@ TIMEZONE_OFFSETS = {
     # Australia & Oceania
     "AWST": 8,   # Australian Western Standard Time
     "ACST": 9.5, # Australian Central Standard Time
-    "ACDT": 10.5,# Australian Central Daylight Time
+    "ACDT": 10.5,# Australian Central Daylight Time1
     "AEST": 10,  # Australian Eastern Standard Time
     "AEDT": 11,  # Australian Eastern Daylight Time
     "NZST": 12,  # New Zealand Standard Time
@@ -146,3 +146,11 @@ TIMEZONE_OFFSETS = {
     "CHAST": 12.75, # Chatham Standard Time
     "CHADT": 13.75, # Chatham Daylight Time
 }
+#---- AUDIO
+
+# in settings.py (you’ll make this later)
+
+AUDIO_MODE = "preset"        # "preset" or "api"
+AUDIO_PRESET = "hybrid4"     # one of: "product_mod_triad", "midpoint", "hybrid4"
+AUDIO_BASE_OCTAVE = 3        # C3-ish region
+AUDIO_OCTAVE_SPAN = 3        # how many octaves the index can walk through
