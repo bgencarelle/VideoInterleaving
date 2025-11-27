@@ -26,7 +26,7 @@ The following tools are used or recommended for building and running **VideoInte
 
 ## Prerequisites
 
-1. **Python** 3.8+  (check with `python3 --version`).
+1. **Python** 3.11+  (check with `python3 --version`).
 
 2. **System libraries**
 
@@ -36,7 +36,7 @@ The following tools are used or recommended for building and running **VideoInte
    sudo apt update
    sudo apt install python3-venv python3-dev python3-pip build-essential cmake pkg-config \
        libwebp-dev libsdl2-dev libasound2-dev libgl1-mesa-dev libglu1-mesa-dev \
-       libegl1-mesa-dev chrony
+       libegl1-mesa-dev mesa-utils chrony ninja-build python-is-python3
    ```
 
    **Fedora/CentOS:**
@@ -44,7 +44,7 @@ The following tools are used or recommended for building and running **VideoInte
    ```bash
    sudo dnf install python3-venv python3-pip python3-devel build-essential cmake pkgconfig \
        libwebp-devel SDL2-devel alsa-lib-devel mesa-libGL-devel mesa-libGLU-devel \
-       mesa-libEGL-devel chrony
+       mesa-libEGL-devel mesa-utils chrony ninja-build python-is-python3
    ```
 
    **macOS (Homebrew):**
@@ -66,6 +66,45 @@ The following tools are used or recommended for building and running **VideoInte
    ```
 
 4. **Optional MIDI**: a functional MIDI interface or USB-MIDI adapter for `MIDI_CLOCK` or `MTC_CLOCK` modes.
+
+###PI TV out
+
+make sure to set the composite out via sudo raspi-config 
+
+And then append this this to the front of  /boot/firmware/cmdline.txt:
+
+video=Composite-1:720x576@50ie,margin_left=30,margin_right=30,margin_top=20,margin_bottom=20,tv_mode=PAL 
+
+(or 60 + NTSC if in NTSC land)
+
+next go into 
+/boot/firmware/config.txt
+pick your tv mode:
+
+sdtv_mode=0  (NTSC)
+sdtv_mode=2  (PAL)
+sdtv_aspect=1  (4:3)
+sdtv_aspect=2  (14:9)
+sdtv_aspect=3  (16:9)
+
+
+This worked for me on a pi 2 for PAL tvs:
+
+# Enable DRM VC4 V3D driver
+dtoverlay=vc4-kms-v3d,composite=1
+max_framebuffers=2
+hdmi_ignore_hotplug=1
+enable_tvout=1
+sdtv_mode=2
+
+
+# Don't have the firmware create an initial video= setting in cmdline.txt.
+# Use the kernel's default instead.
+disable_fw_kms_setup=1
+
+# Disable compensation for displays with overscan
+disable_overscan=0
+
 
 ### Chrony Configuration
 
@@ -199,6 +238,9 @@ As of May 2025, only `FREE_CLOCK` mode has been tested and verified in the main 
 Set via `CLOCK_MODE` in `settings.py` or interactively at launch.
 
 ---
+##
+
+NOTE! Use the "forOldStable" branch for any older hardware that isn't playing nice nice with display stuff. 
 
 ## Project Structure
 
