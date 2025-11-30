@@ -154,3 +154,11 @@ AUDIO_MODE = "preset"        # "preset" or "api"
 AUDIO_PRESET = "hybrid4"     # one of: "product_mod_triad", "midpoint", "hybrid4"
 AUDIO_BASE_OCTAVE = 3        # C3-ish region
 AUDIO_OCTAVE_SPAN = 3        # how many octaves the index can walk through
+
+# --- SERVER MODE CONFIGURATION ---
+SERVER_MODE = False          # Enable headless streaming
+STREAM_PORT = 8080           # Port for video stream (distinct from monitor port 1978)
+STREAM_HOST = '0.0.0.0'      # Listen on all interfaces
+SERVER_CAPTURE_RATE = 30     # Streaming FPS
+JPEG_QUALITY = 80            # Image quality
+HEADLESS_RES = (1280, 720)   # Resolution for the virtual screen
