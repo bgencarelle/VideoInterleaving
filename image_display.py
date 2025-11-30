@@ -66,64 +66,33 @@ class RollingIndexCompensator:
         return current_index - partial_offset
 
 
-def cpu_composite_frame(main_img, float_img, out_size, background_color=BACKGROUND_COLOR):
+def cpu_composite_frame(main_img, float_img, out_size):
     """
     CPU fallback for headless mode when no GL is available.
 
-    - Keeps the original aspect ratio of the main image.
-    - Scales to fit inside out_size (with letterbox/pillarbox).
-    - Fills the rest with BACKGROUND_COLOR.
-    - Uses 3-channel BGR for JPEG encoding (what OpenCV expects).
+    For now we keep it simple:
+    - Use the main image (ignoring float overlay).
+    - Drop alpha if present.
+    - Resize to HEADLESS_RES.
     """
     if main_img is None:
         return None
 
-    # out_size is (width, height)
-    out_w, out_h = out_size
-
     img = main_img
 
     # Ensure 3-channel BGR for JPEG
-    if img.ndim == 2:
-        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-    elif img.ndim == 3 and img.shape[2] == 4:
-        # BGRA -> BGR
+    if img.ndim == 3 and img.shape[2] == 4:
         img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+    elif img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
-    src_h, src_w = img.shape[:2]
+    out_w, out_h = out_size
+    h, w = img.shape[:2]
 
-    if src_w == 0 or src_h == 0:
-        return None
+    if (w, h) != (out_w, out_h):
+        img = cv2.resize(img, (out_w, out_h), interpolation=cv2.INTER_AREA)
 
-    # --- Compute letterbox/pillarbox scale ---
-    scale = min(out_w / src_w, out_h / src_h)
-    new_w = max(1, int(round(src_w * scale)))
-    new_h = max(1, int(round(src_h * scale)))
-
-    # Resize with aspect preserved
-    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-
-    # --- Prepare background canvas ---
-    canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
-
-    # BACKGROUND_COLOR is in 0–255 RGB terms (like in renderer)
-    # Convert to BGR for OpenCV
-    if max(background_color) <= 1.0:
-        r = int(background_color[0] * 255)
-        g = int(background_color[1] * 255)
-        b = int(background_color[2] * 255)
-    else:
-        r, g, b = background_color
-
-    canvas[:, :] = (b, g, r)
-
-    # --- Center the resized image (pillarbox/letterbox) ---
-    x_off = (out_w - new_w) // 2
-    y_off = (out_h - new_h) // 2
-
-    canvas[y_off:y_off + new_h, x_off:x_off + new_w] = resized
-
-    return canvas
+    return img
 
 
 def run_display(clock_source=CLOCK_MODE):
