@@ -1,11 +1,20 @@
+#image_display.py
 import os, platform, datetime, time
+
 import cv2
-import glfw
+
+import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 
+import settings
+from shared_state import exchange
+
 # Ensure PyOpenGL checks are off (not needed with ModernGL, but leaving for safety)
 os.environ['PYOPENGL_ERROR_CHECKING'] = '0'
+# Only import glfw when we actually do a local window
+if not settings.SERVER_MODE:
+    import glfw
 
 from settings import (FULLSCREEN_MODE, PINGPONG, FPS, FRAME_COUNTER_DISPLAY, SHOW_DELTA, TEST_MODE, HTTP_MONITOR,
                       CLOCK_MODE, FIFO_LENGTH, BACKGROUND_COLOR)
@@ -20,6 +29,7 @@ monitor = None
 if TEST_MODE and HTTP_MONITOR:
     from lightweight_monitor import start_monitor
     monitor = start_monitor()
+
 
 class RollingIndexCompensator:
     """
@@ -45,6 +55,14 @@ def run_display(clock_source=CLOCK_MODE):
     state = DisplayState()
     state.fullscreen = FULLSCREEN_MODE
     last_actual_fps = FPS
+
+    # --- Server capture timing (HEADLESS / SERVER_MODE only) ---
+    # Keep these locals so Python doesn’t try to treat them as globals.
+    last_server_capture = time.time()
+    capture_rate = getattr(settings, 'SERVER_CAPTURE_RATE', 10)  # default 10 FPS
+    capture_interval = 1.0 / capture_rate
+    last_server_capture = time.time()
+
 
     # --- Initialize folders & image size ---
     import calculators
@@ -75,9 +93,11 @@ def run_display(clock_source=CLOCK_MODE):
     image_loader.set_paths(main_folder_path, float_folder_path)
     image_loader.set_png_paths_len(png_paths_len)
 
-    # --- GLFW + ModernGL setup ---
+    # --- Setup Display (Window or Headless) ---
     window = display_init(state)
-    register_callbacks(window, state)
+
+    if not settings.SERVER_MODE:
+        register_callbacks(window, state)
 
     # initial index & folder selection
     index, _ = update_index(png_paths_len, PINGPONG)
@@ -88,6 +108,20 @@ def run_display(clock_source=CLOCK_MODE):
     main_folder, float_folder = folder_dictionary['Main_and_Float_Folders']
     main_image, float_image = image_loader.load_images(index, main_folder, float_folder)
     fifo_buffer.update(index, (main_image, float_image))
+
+    # ---- NEW: push a test frame straight into the exchange ----
+    try:
+        encode_params = [int(cv2.IMWRITE_JPEG_QUALITY),
+                         getattr(settings, 'JPEG_QUALITY', 80)]
+        ok, jpg_bytes = cv2.imencode('.jpg', main_image, encode_params)
+        if ok:
+            print("[TEST] Pushing initial frame to FrameExchange.")
+            exchange.set_frame(jpg_bytes.tobytes())
+        else:
+            print("[TEST] cv2.imencode failed on initial frame.")
+    except Exception as e:
+        print(f"[TEST] Initial frame encode error: {e}")
+    # -----------------------------------------------------------
 
     # create textures
     main_texture = renderer.create_texture(main_image)
@@ -123,16 +157,19 @@ def run_display(clock_source=CLOCK_MODE):
 
         while state.run_mode:
             successful_display = False
-            glfw.poll_events()
-            if not state.run_mode:
-                break
 
-            # handle display reinit
+            # --- 1. Event Polling (Local Only) ---
+            if not settings.SERVER_MODE:
+                glfw.poll_events()
+                if not state.run_mode:
+                    break
+
+            # --- 2. Reinit Check ---
             if state.needs_update:
                 display_init(state)
                 state.needs_update = False
 
-            # update index & images
+            # --- 3. Update Index & Images ---
             prev = index
             index, _ = update_index(png_paths_len, PINGPONG)
 
@@ -166,11 +203,43 @@ def run_display(clock_source=CLOCK_MODE):
                 future = executor.submit(image_loader.load_images, next_index, main_folder, float_folder)
                 future.add_done_callback(lambda fut, s_idx=next_index: async_load_callback(fut, s_idx))
 
-            # draw
-            renderer.overlay_images_two_pass_like_old(main_texture, float_texture, background_color=BACKGROUND_COLOR)
-            glfw.swap_buffers(window)
+            # --- 4. Drawing ---
+            if settings.SERVER_MODE:
+                window.use()  # Bind the virtual framebuffer
 
-            # timing
+            renderer.overlay_images_two_pass_like_old(main_texture, float_texture, background_color=BACKGROUND_COLOR)
+
+            # --- 5. Server Capture ---
+            if settings.SERVER_MODE:
+                now = time.time()
+                # Now 'last_server_capture' is correctly initialized in this scope
+                if now - last_server_capture > capture_interval:
+                    last_server_capture = now
+                    try:
+                        # Read pixels from the FBO
+                        raw_data = window.fbo.read(components=3)
+                        w, h = window.size
+
+                        # Convert to Numpy & Color Correct
+                        img = np.frombuffer(raw_data, dtype=np.uint8).reshape((h, w, 3))
+                        img = cv2.cvtColor(np.flipud(img), cv2.COLOR_RGB2BGR)
+
+                        encode_params = [int(cv2.IMWRITE_JPEG_QUALITY),
+                                         getattr(settings, 'JPEG_QUALITY', 80)]
+                        ok, jpg_bytes = cv2.imencode('.jpg', img, encode_params)
+                        if not ok:
+                            print("[CAPTURE] cv2.imencode failed.")
+                        else:
+                            exchange.set_frame(jpg_bytes.tobytes())
+                            print(f"[CAPTURE] Frame captured and stored at {datetime.datetime.now()}")
+                    except Exception as e:
+                        print(f"[CAPTURE ERROR] {e}")
+
+            # --- 6. Swap Buffers (Local Only) ---
+            if not settings.SERVER_MODE:
+                glfw.swap_buffers(window)
+
+            # --- 7. Timing ---
             now = time.perf_counter()
             dt = now - frame_start
             frame_times.append(dt)
@@ -188,9 +257,9 @@ def run_display(clock_source=CLOCK_MODE):
                 avg = sum(frame_times) / len(frame_times)
                 last_actual_fps = 1.0 / avg if avg > 0 else 0.0
                 if not HTTP_MONITOR:
-                    print(f"[Display Rate] {last_actual_fps:.2f} FPS")
+                    print(f" {last_actual_fps:.2f} FPS")
                     if last_actual_fps < FPS - 2:
-                        print(f"[Warning] Frame drop! Target {FPS}, Got {last_actual_fps:.2f}")
+                        print(f" Frame drop! Target {FPS}, Got {last_actual_fps:.2f}")
 
             # update HTTP monitor
             if monitor:
@@ -208,8 +277,9 @@ def run_display(clock_source=CLOCK_MODE):
                     "float_folder_count": float_folder_count
                 })
 
-            # exit on window close
-            if glfw.window_should_close(window):
+            # exit on window close (Local Only)
+            if not settings.SERVER_MODE and glfw.window_should_close(window):
                 state.run_mode = False
 
-        glfw.terminate()
+        if not settings.SERVER_MODE:
+            glfw.terminate()
