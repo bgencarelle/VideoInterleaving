@@ -59,6 +59,37 @@ class RollingIndexCompensator:
         partial_offset = round(avg_diff * self.correction_factor)
         return current_index - partial_offset
 
+def sharpen_for_stream(frame_bgr: np.ndarray,
+                       amount: float = 0.5,
+                       radius: float = 1.0,
+                       threshold: int = 0) -> np.ndarray:
+    """
+    Simple unsharp mask in BGR space.
+
+    amount   – how strong the sharpening is (0.0 disables)
+    radius   – blur radius (in pixels, via Gaussian sigma)
+    threshold – optional: don't sharpen very low-contrast areas (0 = off)
+    """
+    if amount <= 0.0:
+        return frame_bgr
+
+    # Gaussian blur as the "unsharp" base
+    blurred = cv2.GaussianBlur(frame_bgr, ksize=(0, 0),
+                               sigmaX=radius, sigmaY=radius)
+
+    # Basic unsharp mask: original*(1+amount) + blurred*(-amount)
+    sharpened = cv2.addWeighted(frame_bgr, 1.0 + amount,
+                                blurred, -amount, 0)
+
+    if threshold > 0:
+        # Optional: avoid sharpening noise
+        diff = cv2.absdiff(frame_bgr, blurred)
+        mask = (diff < threshold)
+        # Where mask is True, keep original pixels
+        sharpened = np.where(mask, frame_bgr, sharpened)
+
+    return sharpened
+
 
 def cpu_composite_frame(main_img, float_img):
     """
@@ -170,8 +201,9 @@ def run_display(clock_source=CLOCK_MODE):
         register_callbacks(window, state)
 
     encode_params = [
-        int(cv2.IMWRITE_JPEG_QUALITY),
-        getattr(settings, "JPEG_QUALITY", 80),
+        int(cv2.IMWRITE_JPEG_QUALITY), getattr(settings, "JPEG_QUALITY", 80),
+        int(cv2.IMWRITE_JPEG_OPTIMIZE), 1,
+        int(cv2.IMWRITE_JPEG_PROGRESSIVE), 1,   # if you want progressive
     ]
 
     # --- Initial index & images ---
@@ -320,7 +352,16 @@ def run_display(clock_source=CLOCK_MODE):
                             frame = cpu_composite_frame(current_main_img, current_float_img)
 
                         if frame is not None:
-                            ok, buf = cv2.imencode(".jpg", frame, encode_params)
+                            # OPTIONAL SHARPEN
+                            amt = getattr(settings, "STREAM_SHARPEN_AMOUNT", 0.0)
+                            if amt > 0.0:
+                                radius = getattr(settings, "STREAM_SHARPEN_RADIUS", 1.0)
+                                thresh = getattr(settings, "STREAM_SHARPEN_THRESHOLD", 0)
+                                frame_to_encode = sharpen_for_stream(frame, amt, radius, thresh)
+                            else:
+                                frame_to_encode = frame
+
+                            ok, buf = cv2.imencode(".jpg", frame_to_encode, encode_params)
                             if ok:
                                 exchange.set_frame(buf.tobytes())
                             else:

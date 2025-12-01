@@ -164,3 +164,7 @@ SERVER_CAPTURE_RATE = 25     # Streaming FPS
 JPEG_QUALITY = 90         # Image quality
 HEADLESS_RES = (1024, 768)   # Resolution for the virtual screen
 HEADLESS_BACKEND = "egl"      # or "osmesa"
+# Streaming / JPEG controls
+STREAM_SHARPEN_AMOUNT = 0.5    # 0.0 = off
+STREAM_SHARPEN_RADIUS = .5
+STREAM_SHARPEN_THRESHOLD = 8   # e.g. 4–8 if you want “don’t sharpen noise”
