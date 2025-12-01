@@ -202,8 +202,8 @@ def run_display(clock_source=CLOCK_MODE):
 
     encode_params = [
         int(cv2.IMWRITE_JPEG_QUALITY), getattr(settings, "JPEG_QUALITY", 80),
-        int(cv2.IMWRITE_JPEG_OPTIMIZE), 1,
-        int(cv2.IMWRITE_JPEG_PROGRESSIVE), 1,   # if you want progressive
+        # int(cv2.IMWRITE_JPEG_OPTIMIZE), 1,
+        # int(cv2.IMWRITE_JPEG_PROGRESSIVE), 1,   # if you want progressive
     ]
 
     # --- Initial index & images ---
