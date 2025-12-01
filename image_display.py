@@ -71,62 +71,66 @@ def cpu_composite_frame(main_img, float_img):
     Fast CPU compositing for headless mode.
 
     Assumptions:
+    - Images from ImageLoader are in RGB / RGBA order (GL-friendly).
     - main_img is the opaque base.
-    - float_img may have per-pixel alpha (BGRA) or be fully opaque (BGR).
-    - All images are OpenCV-style BGR/BGRA/GRAY uint8.
+    - float_img may have per-pixel alpha (RGBA) or be fully opaque (RGB).
+    - We composite in RGB and convert once to BGR for JPEG.
     - No resizing. Browser handles scaling/letterboxing.
     """
     if main_img is None:
         return None
 
-    # --- Normalize main to BGR (H x W x 3) ---
+    # --- Normalize main to RGB (H x W x 3) ---
     if main_img.ndim == 2:
-        # grayscale -> BGR
-        main_bgr = cv2.cvtColor(main_img, cv2.COLOR_GRAY2BGR)
+        # grayscale -> RGB
+        main_rgb = cv2.cvtColor(main_img, cv2.COLOR_GRAY2RGB)
     elif main_img.ndim == 3 and main_img.shape[2] == 4:
-        # BGRA -> drop alpha for base
-        main_bgr = main_img[..., :3]
+        # RGBA -> drop alpha for base
+        main_rgb = main_img[..., :3]
     elif main_img.ndim == 3 and main_img.shape[2] == 3:
-        main_bgr = main_img
+        main_rgb = main_img
     else:
         raise ValueError(f"Unsupported main_img shape: {main_img.shape!r}")
 
-    base = main_bgr.astype(np.uint16)  # stay in BGR space
+    base = main_rgb.astype(np.uint16)  # composite in RGB space
 
-    # If there's no float layer, we're done
+    # No float overlay? Just return main frame.
     if float_img is None:
-        return base.astype(np.uint8)
+        out_rgb = np.clip(base, 0, 255).astype(np.uint8)
+        # JPEG expects BGR
+        return out_rgb[..., ::-1]
 
-    # Size mismatch? Just ignore float to avoid a resize cost
+    # Size mismatch? Ignore float for performance.
     if float_img.shape[0] != base.shape[0] or float_img.shape[1] != base.shape[1]:
-        return base.astype(np.uint8)
+        out_rgb = np.clip(base, 0, 255).astype(np.uint8)
+        return out_rgb[..., ::-1]
 
-    # --- Normalize float image, get BGR + optional alpha ---
+    # --- Normalize float to RGB + alpha ---
     if float_img.ndim == 2:
-        # grayscale float: treat as fully opaque
-        float_bgr = cv2.cvtColor(float_img, cv2.COLOR_GRAY2BGR).astype(np.uint16)
+        float_rgb = cv2.cvtColor(float_img, cv2.COLOR_GRAY2RGB).astype(np.uint16)
         alpha = None
     elif float_img.ndim == 3 and float_img.shape[2] == 4:
-        # BGRA: separate color + alpha
-        float_bgr = float_img[..., :3].astype(np.uint16)
-        alpha = float_img[..., 3:4].astype(np.uint16)  # H x W x 1
+        float_rgb = float_img[..., :3].astype(np.uint16)         # RGB
+        alpha    = float_img[..., 3:4].astype(np.uint16)         # (H, W, 1)
     elif float_img.ndim == 3 and float_img.shape[2] == 3:
-        # BGR, fully opaque
-        float_bgr = float_img.astype(np.uint16)
+        float_rgb = float_img.astype(np.uint16)
         alpha = None
     else:
         raise ValueError(f"Unsupported float_img shape: {float_img.shape!r}")
 
     if alpha is None:
-        # fully opaque float: just replace base
-        out = float_bgr
+        # Fully opaque float: just replace base
+        out_rgb16 = float_rgb
     else:
-        # Per-pixel alpha blend: float over main (in BGR space)
+        # Per-pixel alpha blend: float over main, working in RGB
         inv_alpha = 255 - alpha
-        out = (float_bgr * alpha + base * inv_alpha + 127) // 255
+        out_rgb16 = (float_rgb * alpha + base * inv_alpha + 127) // 255
 
-    out = np.clip(out, 0, 255).astype(np.uint8)
-    return out
+    out_rgb = np.clip(out_rgb16, 0, 255).astype(np.uint8)
+
+    # Final swap: RGB -> BGR for JPEG / OpenCV
+    out_bgr = out_rgb[..., ::-1]
+    return out_bgr
 
 
 

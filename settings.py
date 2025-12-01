@@ -15,7 +15,7 @@ VSYNC = True  # or False, depending on your preference
 
 # Frames per Second and Images Per Second (IPS)
 IPS = 30
-FPS = 30
+FPS = 60
 
 # Buffer settings: The BUFFER_SIZE is derived from IPS (e.g., 15 if IPS == 60)
 TOLERANCE = 10
@@ -161,5 +161,5 @@ HEADLESS_USE_GL = False      # new: disable ModernGL headless on VPS
 STREAM_PORT = 8080           # Port for video stream (distinct from monitor port 1978)
 STREAM_HOST = '0.0.0.0'      # Listen on all interfaces
 SERVER_CAPTURE_RATE = 30     # Streaming FPS
-JPEG_QUALITY = 90          # Image quality
+JPEG_QUALITY = 85          # Image quality
 HEADLESS_RES = (1024, 768)   # Resolution for the virtual screen
