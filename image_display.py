@@ -140,9 +140,9 @@ def run_display(clock_source=CLOCK_MODE):
     last_actual_fps = FPS
 
     # --- Server capture timing (HEADLESS / SERVER_MODE only) ---
-    last_server_capture = time.time()
     capture_rate = getattr(settings, "SERVER_CAPTURE_RATE", FPS or 10)
     capture_interval = 1.0 / capture_rate
+    last_server_capture = time.time()
 
     # --- Initialize folders & image size ---
     import calculators
@@ -175,16 +175,28 @@ def run_display(clock_source=CLOCK_MODE):
     image_loader.set_png_paths_len(png_paths_len)
 
     # --- Setup Display / GL usage ---
-    # In SERVER_MODE we go pure CPU: no GL, no Xvfb, no moderngl context.
+    # IMPORTANT: let display_init decide whether we have GL (headless or windowed)
+    window = display_init(state)
+
     if settings.SERVER_MODE:
-        window = None
-        has_gl = False
-        print("[HEADLESS] SERVER_MODE=True, using CPU-only compositing (no GL, no Xvfb).")
+        # In SERVER_MODE, GL is available only if HEADLESS_USE_GL=True
+        has_gl = window is not None
+        if has_gl:
+            print("[HEADLESS] SERVER_MODE: using ModernGL FBO for compositing.")
+        else:
+            print("[HEADLESS] SERVER_MODE: using pure CPU compositing (no GL).")
     else:
-        # Local mode: create an actual GL window
-        window = display_init(state)
+        # Local mode (Mac/dev): we expect a real window + GL
+        if window is None:
+            raise RuntimeError("Local mode requires a GL window, but display_init returned None.")
         has_gl = True
         register_callbacks(window, state)
+
+    # JPEG encode params (single place)
+    encode_params = [
+        int(cv2.IMWRITE_JPEG_QUALITY),
+        getattr(settings, "JPEG_QUALITY", 80),
+    ]
 
     # initial index & folder selection
     index, _ = update_index(png_paths_len, PINGPONG)
@@ -200,15 +212,8 @@ def run_display(clock_source=CLOCK_MODE):
     current_main_img = main_image
     current_float_img = float_image
 
-    # JPEG encode params reused every frame
-    encode_params = [
-        int(cv2.IMWRITE_JPEG_QUALITY),
-        getattr(settings, "JPEG_QUALITY", 80),
-    ]
-
-    # If you ever run local GL mode, we can still keep textures alive
+    # If we ever have GL (local or headless), keep textures alive
     if has_gl:
-        import renderer  # ensure GL renderer is available locally
         main_texture = renderer.create_texture(main_image)
         float_texture = renderer.create_texture(float_image)
 
@@ -225,7 +230,8 @@ def run_display(clock_source=CLOCK_MODE):
                 monitor.record_load_error(scheduled_index, e)
 
     # start preloading next frame
-    with ThreadPoolExecutor(max_workers=6) as executor:
+    max_workers = min(6, (os.cpu_count() or 1))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         if index == 0:
             next_index = 1
         elif index == png_paths_len - 1:
@@ -238,8 +244,9 @@ def run_display(clock_source=CLOCK_MODE):
         # rolling-window timing
         frame_times = deque(maxlen=60)
         frame_start = time.perf_counter()
+        last_captured_index = None  # avoid re-encoding identical frames
 
-        while state.run_mode:
+        while state.run_mode or settings.SERVER_MODE:
             successful_display = False
 
             # --- 1. Event Polling (Local Only) ---
@@ -294,26 +301,37 @@ def run_display(clock_source=CLOCK_MODE):
                 future = executor.submit(image_loader.load_images, next_index, main_folder, float_folder)
                 future.add_done_callback(lambda fut, s_idx=next_index: async_load_callback(fut, s_idx))
 
-            # --- 4. Drawing (local GL only) ---
-            if has_gl and not settings.SERVER_MODE:
+            # --- 4. Drawing (GL path: local *or* headless) ---
+            if has_gl:
                 window.use()
                 renderer.overlay_images_two_pass_like_old(
                     main_texture, float_texture, background_color=BACKGROUND_COLOR
                 )
 
-            # --- 5. Server Capture / Streaming (CPU-only in SERVER_MODE) ---
+            # --- 5. Server Capture / Streaming ---
             if settings.SERVER_MODE:
                 now = time.time()
-                if now - last_server_capture > capture_interval:
+                if (index != last_captured_index) and (now - last_server_capture > capture_interval):
                     last_server_capture = now
+                    last_captured_index = index
+
                     try:
-                        frame = cpu_composite_frame(current_main_img, current_float_img)
+                        if has_gl:
+                            # Headless GL FBO capture path
+                            raw = window.fbo.read(components=3)  # RGB, bottom-up
+                            w, h = window.size
+                            frame = np.frombuffer(raw, dtype=np.uint8).reshape((h, w, 3))
+                            frame = cv2.cvtColor(np.flipud(frame), cv2.COLOR_RGB2BGR)
+                        else:
+                            # Pure CPU compositing path
+                            frame = cpu_composite_frame(current_main_img, current_float_img)
+
                         if frame is not None:
-                            ok, jpg_bytes = cv2.imencode(".jpg", frame, encode_params)
+                            ok, buf = cv2.imencode(".jpg", frame, encode_params)
                             if ok:
-                                exchange.set_frame(jpg_bytes.tobytes())
+                                exchange.set_frame(buf.tobytes())
                             else:
-                                print("[CAPTURE] cv2.imencode failed (CPU path).")
+                                print("[CAPTURE] cv2.imencode failed.")
                     except Exception as e:
                         print(f"[CAPTURE ERROR] {e}")
 
