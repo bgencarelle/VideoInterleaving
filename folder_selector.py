@@ -2,8 +2,13 @@ import math
 import random
 import time
 from collections import deque
+
+from rtmidi.midiconstants import LOCAL_CONTROL
+
 from globals import control_data_dictionary, folder_dictionary
-from settings import FPS, CLOCK_MODE
+from settings import CLOCK_MODE
+LOCAL_CONTROLFPS = 60 #local fps
+
 from utilities.csv_list_maker import main_folder_path
 
 def update_folder_selection(index, float_folder_count, main_folder_count):
@@ -52,7 +57,7 @@ def update_folder_selection(index, float_folder_count, main_folder_count):
         folder_dictionary['rand_mult'] = rng.randint(1, 9)
     if 'rand_start' not in folder_dictionary:
         # rest duration in frames
-        folder_dictionary['rand_start'] = rng.randint(FPS, int(3.5 * FPS))
+        folder_dictionary['rand_start'] = rng.randint(LOCAL_CONTROLFPS, int(3.5 * LOCAL_CONTROLFPS))
 
     rand_mult = folder_dictionary['rand_mult']
     rand_start = folder_dictionary['rand_start']
@@ -66,7 +71,7 @@ def update_folder_selection(index, float_folder_count, main_folder_count):
         if index <= rand_start:
             if folder_dictionary['active_cycle']:
                 # On entering rest, reroll next start
-                folder_dictionary['rand_start'] = rng.randint(FPS, int(3.5 * FPS))
+                folder_dictionary['rand_start'] = rng.randint(LOCAL_CONTROLFPS, int(3.5 * LOCAL_CONTROLFPS))
             folder_dictionary['active_cycle'] = False
             main_folder = 0
             float_folder = 0
@@ -84,15 +89,15 @@ def update_folder_selection(index, float_folder_count, main_folder_count):
         # Periodic active picks
         else:
             # Build jittered time thresholds (in seconds)
-            jitter = rng.uniform(-rand_mult / FPS, rand_mult / FPS)
+            jitter = rng.uniform(-rand_mult / LOCAL_CONTROLFPS, rand_mult / LOCAL_CONTROLFPS)
             min_interval = max(1.0, 1.0 + jitter)
             max_interval = max(min_interval, 20.0 + jitter)
 
             # MAIN trigger
-            interval_main = (FPS * (1 + (rand_mult + rand_mult // 2))) / FPS  # seconds
+            interval_main = (LOCAL_CONTROLFPS * (1 + (rand_mult + rand_mult // 2))) / LOCAL_CONTROLFPS  # seconds
             last_main = folder_dictionary['last_main_time']
             elapsed_main = now - last_main
-            if elapsed_main >= min_interval and (math.isclose(( (index % (FPS * (1 + (rand_mult + rand_mult // 2))))), 3 + rand_mult) ):
+            if elapsed_main >= min_interval and (math.isclose(( (index % (LOCAL_CONTROLFPS * (1 + (rand_mult + rand_mult // 2))))), 3 + rand_mult)):
                 main_folder = folder_dictionary['pre_main'].popleft()
                 #print("main folder is ", main_folder)
                 folder_dictionary['rand_mult']       = rng.randint(1, 9)
@@ -102,10 +107,10 @@ def update_folder_selection(index, float_folder_count, main_folder_count):
                 folder_dictionary['last_main_time'] = now
 
             # FLOAT trigger
-            interval_float = (((1 + rand_mult // 3) + FPS) * rand_mult) / FPS  # seconds
+            interval_float = (((1 + rand_mult // 3) + LOCAL_CONTROLFPS) * rand_mult) / LOCAL_CONTROLFPS  # seconds
             last_float = folder_dictionary['last_float_time']
             elapsed_float = now - last_float
-            if elapsed_float >= min_interval and (math.isclose((index % ((1 + rand_mult // 3 + FPS) * rand_mult)), 7 + rand_mult)):
+            if elapsed_float >= min_interval and (math.isclose((index % ((1 + rand_mult // 3 + LOCAL_CONTROLFPS) * rand_mult)), 7 + rand_mult)):
                 float_folder = folder_dictionary['pre_float'].popleft()
                 folder_dictionary['rand_mult']        = rng.randint(1, 12)
                 folder_dictionary['last_float_time']  = now
