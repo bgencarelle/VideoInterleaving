@@ -13,10 +13,8 @@ import numpy as np
 import settings
 from shared_state import exchange
 
-# Ensure PyOpenGL checks are off (not needed with ModernGL, but leaving for safety)
 os.environ['PYOPENGL_ERROR_CHECKING'] = '0'
 
-# Only import glfw when we actually do a local window
 if not settings.SERVER_MODE:
     import glfw
 
@@ -38,7 +36,7 @@ from display_manager import DisplayState, display_init
 from event_handler import register_callbacks
 import renderer
 
-# Optionally start the lightweight monitor (for HTTP monitoring if enabled)
+
 monitor = None
 if TEST_MODE and HTTP_MONITOR:
     from lightweight_monitor import start_monitor
@@ -46,10 +44,6 @@ if TEST_MODE and HTTP_MONITOR:
 
 
 class RollingIndexCompensator:
-    """
-    Maintains a rolling average of the last N (index - displayed_index) differences,
-    and applies a partial offset to slowly push the difference toward zero.
-    """
     def __init__(self, maxlen=10, correction_factor=0.5):
         self.diffs = deque(maxlen=maxlen)
         self.correction_factor = correction_factor
@@ -68,50 +62,42 @@ class RollingIndexCompensator:
 
 def cpu_composite_frame(main_img, float_img):
     """
-    Fast CPU compositing for headless mode.
+    Fast CPU compositing for headless fallback:
 
-    Assumptions:
-    - Images from ImageLoader are in RGB / RGBA order (GL-friendly).
-    - main_img is the opaque base.
-    - float_img may have per-pixel alpha (RGBA) or be fully opaque (RGB).
-    - We composite in RGB and convert once to BGR for JPEG.
-    - No resizing. Browser handles scaling/letterboxing.
+    - main_img: RGB / RGBA base
+    - float_img: optional RGB / RGBA overlay
+    - No resizing: browser does the scaling.
     """
     if main_img is None:
         return None
 
-    # --- Normalize main to RGB (H x W x 3) ---
+    # main -> RGB
     if main_img.ndim == 2:
-        # grayscale -> RGB
         main_rgb = cv2.cvtColor(main_img, cv2.COLOR_GRAY2RGB)
     elif main_img.ndim == 3 and main_img.shape[2] == 4:
-        # RGBA -> drop alpha for base
         main_rgb = main_img[..., :3]
     elif main_img.ndim == 3 and main_img.shape[2] == 3:
         main_rgb = main_img
     else:
         raise ValueError(f"Unsupported main_img shape: {main_img.shape!r}")
 
-    base = main_rgb.astype(np.uint16)  # composite in RGB space
+    base = main_rgb.astype(np.uint16)
 
-    # No float overlay? Just return main frame.
     if float_img is None:
         out_rgb = np.clip(base, 0, 255).astype(np.uint8)
-        # JPEG expects BGR
         return out_rgb[..., ::-1]
 
-    # Size mismatch? Ignore float for performance.
     if float_img.shape[0] != base.shape[0] or float_img.shape[1] != base.shape[1]:
         out_rgb = np.clip(base, 0, 255).astype(np.uint8)
         return out_rgb[..., ::-1]
 
-    # --- Normalize float to RGB + alpha ---
+    # float -> RGB + alpha
     if float_img.ndim == 2:
         float_rgb = cv2.cvtColor(float_img, cv2.COLOR_GRAY2RGB).astype(np.uint16)
         alpha = None
     elif float_img.ndim == 3 and float_img.shape[2] == 4:
-        float_rgb = float_img[..., :3].astype(np.uint16)         # RGB
-        alpha    = float_img[..., 3:4].astype(np.uint16)         # (H, W, 1)
+        float_rgb = float_img[..., :3].astype(np.uint16)
+        alpha = float_img[..., 3:4].astype(np.uint16)
     elif float_img.ndim == 3 and float_img.shape[2] == 3:
         float_rgb = float_img.astype(np.uint16)
         alpha = None
@@ -119,19 +105,13 @@ def cpu_composite_frame(main_img, float_img):
         raise ValueError(f"Unsupported float_img shape: {float_img.shape!r}")
 
     if alpha is None:
-        # Fully opaque float: just replace base
         out_rgb16 = float_rgb
     else:
-        # Per-pixel alpha blend: float over main, working in RGB
         inv_alpha = 255 - alpha
         out_rgb16 = (float_rgb * alpha + base * inv_alpha + 127) // 255
 
     out_rgb = np.clip(out_rgb16, 0, 255).astype(np.uint8)
-
-    # Final swap: RGB -> BGR for JPEG / OpenCV
-    out_bgr = out_rgb[..., ::-1]
-    return out_bgr
-
+    return out_rgb[..., ::-1]
 
 
 def run_display(clock_source=CLOCK_MODE):
@@ -139,10 +119,11 @@ def run_display(clock_source=CLOCK_MODE):
     state.fullscreen = FULLSCREEN_MODE
     last_actual_fps = FPS
 
-    # --- Server capture timing (HEADLESS / SERVER_MODE only) ---
+    # --- Server capture timing ---
     capture_rate = getattr(settings, "SERVER_CAPTURE_RATE", FPS or 10)
     capture_interval = 1.0 / capture_rate
     last_server_capture = time.time()
+    last_captured_index = None
 
     # --- Initialize folders & image size ---
     import calculators
@@ -151,7 +132,6 @@ def run_display(clock_source=CLOCK_MODE):
     float_folder_count = len(float_folder_path[0])
     png_paths_len = len(main_folder_path)
 
-    # determine initial image size from first main image
     first_image_path = main_folder_path[0][0]
     img0 = cv2.imread(first_image_path, cv2.IMREAD_UNCHANGED)
     if img0 is None:
@@ -162,7 +142,7 @@ def run_display(clock_source=CLOCK_MODE):
     print(platform.system(), "clock mode is:", clock_source)
     print("Image size:", state.image_size)
 
-    # --- Image loader and buffer ---
+    # --- Image loader and FIFO ---
     from image_loader import ImageLoader, FIFOImageBuffer
 
     class FIFOImageBufferPatched(FIFOImageBuffer):
@@ -174,31 +154,27 @@ def run_display(clock_source=CLOCK_MODE):
     image_loader.set_paths(main_folder_path, float_folder_path)
     image_loader.set_png_paths_len(png_paths_len)
 
-    # --- Setup Display / GL usage ---
-    # IMPORTANT: let display_init decide whether we have GL (headless or windowed)
+    # --- Display / GL init (headless or local) ---
     window = display_init(state)
 
     if settings.SERVER_MODE:
-        # In SERVER_MODE, GL is available only if HEADLESS_USE_GL=True
         has_gl = window is not None
         if has_gl:
-            print("[HEADLESS] SERVER_MODE: using ModernGL FBO for compositing.")
+            print("[DISPLAY] SERVER_MODE: using headless ModernGL.")
         else:
-            print("[HEADLESS] SERVER_MODE: using pure CPU compositing (no GL).")
+            print("[DISPLAY] SERVER_MODE: using CPU-only compositing.")
     else:
-        # Local mode (Mac/dev): we expect a real window + GL
         if window is None:
             raise RuntimeError("Local mode requires a GL window, but display_init returned None.")
         has_gl = True
         register_callbacks(window, state)
 
-    # JPEG encode params (single place)
     encode_params = [
         int(cv2.IMWRITE_JPEG_QUALITY),
         getattr(settings, "JPEG_QUALITY", 80),
     ]
 
-    # initial index & folder selection
+    # --- Initial index & images ---
     index, _ = update_index(png_paths_len, PINGPONG)
     last_index = index
     update_folder_selection(index, float_folder_count, main_folder_count)
@@ -207,19 +183,27 @@ def run_display(clock_source=CLOCK_MODE):
     main_folder, float_folder = folder_dictionary["Main_and_Float_Folders"]
     main_image, float_image = image_loader.load_images(index, main_folder, float_folder)
     fifo_buffer.update(index, (main_image, float_image))
+    # In headless GL mode, tell the renderer what the image size is
+    if settings.SERVER_MODE and getattr(settings, "HEADLESS_USE_GL", False):
+        h_img, w_img = main_image.shape[0], main_image.shape[1]
+        renderer.set_transform_parameters(
+            fs_scale=1.0,
+            fs_offset_x=0.0,
+            fs_offset_y=0.0,
+            image_size=(w_img, h_img),
+            rotation_angle=0.0,
+            mirror_mode=0,
+        )
 
-    # track current images for CPU compositing
     current_main_img = main_image
     current_float_img = float_image
 
-    # If we ever have GL (local or headless), keep textures alive
     if has_gl:
         main_texture = renderer.create_texture(main_image)
         float_texture = renderer.create_texture(float_image)
 
     compensator = RollingIndexCompensator(maxlen=10, correction_factor=0.5)
 
-    # preload callback
     def async_load_callback(fut, scheduled_index):
         try:
             result = fut.result()
@@ -229,39 +213,39 @@ def run_display(clock_source=CLOCK_MODE):
             if monitor:
                 monitor.record_load_error(scheduled_index, e)
 
-    # start preloading next frame
     max_workers = min(6, (os.cpu_count() or 1))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # schedule first preload
         if index == 0:
             next_index = 1
         elif index == png_paths_len - 1:
             next_index = index - 1
         else:
             next_index = index + 1 if index > last_index else index - 1
-        future = executor.submit(image_loader.load_images, next_index, main_folder, float_folder)
+
+        future = executor.submit(
+            image_loader.load_images, next_index, main_folder, float_folder
+        )
         future.add_done_callback(lambda fut, s_idx=next_index: async_load_callback(fut, s_idx))
 
-        # rolling-window timing
         frame_times = deque(maxlen=60)
         frame_start = time.perf_counter()
-        last_captured_index = None  # avoid re-encoding identical frames
 
-        while state.run_mode or settings.SERVER_MODE:
+        while (state.run_mode and not settings.SERVER_MODE) or settings.SERVER_MODE:
             successful_display = False
 
-            # --- 1. Event Polling (Local Only) ---
+            # --- 1. Event polling (local only) ---
             if not settings.SERVER_MODE and has_gl:
-                import glfw
                 glfw.poll_events()
                 if not state.run_mode:
                     break
 
-            # --- 2. Reinit Check (local, GL) ---
+            # --- 2. Reinit (local only) ---
             if state.needs_update and not settings.SERVER_MODE and has_gl:
                 display_init(state)
                 state.needs_update = False
 
-            # --- 3. Update Index & Images ---
+            # --- 3. Index & images ---
             prev = index
             index, _ = update_index(png_paths_len, PINGPONG)
 
@@ -298,17 +282,25 @@ def run_display(clock_source=CLOCK_MODE):
                     next_index = index - 1
                 else:
                     next_index = index + 1 if index > prev else index - 1
-                future = executor.submit(image_loader.load_images, next_index, main_folder, float_folder)
+
+                future = executor.submit(
+                    image_loader.load_images, next_index, main_folder, float_folder
+                )
                 future.add_done_callback(lambda fut, s_idx=next_index: async_load_callback(fut, s_idx))
 
-            # --- 4. Drawing (GL path: local *or* headless) ---
+            # --- 4. Drawing ---
             if has_gl:
-                window.use()
+                # In local mode, glfw has already made the context current.
+                # In headless mode, HeadlessWindow.use() binds the FBO.
+                if settings.SERVER_MODE:
+                    window.use()
                 renderer.overlay_images_two_pass_like_old(
-                    main_texture, float_texture, background_color=BACKGROUND_COLOR
+                    main_texture,
+                    float_texture,
+                    background_color=BACKGROUND_COLOR,
                 )
 
-            # --- 5. Server Capture / Streaming ---
+            # --- 5. Capture / streaming (SERVER_MODE only) ---
             if settings.SERVER_MODE:
                 now = time.time()
                 if (index != last_captured_index) and (now - last_server_capture > capture_interval):
@@ -317,13 +309,14 @@ def run_display(clock_source=CLOCK_MODE):
 
                     try:
                         if has_gl:
-                            # Headless GL FBO capture path
+                            # Read back from headless FBO
+                            window.use()
                             raw = window.fbo.read(components=3)  # RGB, bottom-up
                             w, h = window.size
                             frame = np.frombuffer(raw, dtype=np.uint8).reshape((h, w, 3))
                             frame = cv2.cvtColor(np.flipud(frame), cv2.COLOR_RGB2BGR)
                         else:
-                            # Pure CPU compositing path
+                            # CPU fallback
                             frame = cpu_composite_frame(current_main_img, current_float_img)
 
                         if frame is not None:
@@ -335,25 +328,22 @@ def run_display(clock_source=CLOCK_MODE):
                     except Exception as e:
                         print(f"[CAPTURE ERROR] {e}")
 
-            # --- 6. Swap Buffers (local GL only) ---
+            # --- 6. Swap buffers (local only) ---
             if not settings.SERVER_MODE and has_gl:
-                import glfw
                 glfw.swap_buffers(window)
 
-            # --- 7. Timing ---
+            # --- 7. Timing / FPS ---
             now = time.perf_counter()
             dt = now - frame_start
             frame_times.append(dt)
             frame_start = now
 
-            # throttle to FPS
             if FPS:
                 target = 1.0 / FPS
                 to_sleep = target - dt
                 if to_sleep > 0:
                     time.sleep(to_sleep)
 
-            # rolling FPS print
             if len(frame_times) > 1:
                 avg = sum(frame_times) / len(frame_times)
                 last_actual_fps = 1.0 / avg if avg > 0 else 0.0
@@ -362,7 +352,6 @@ def run_display(clock_source=CLOCK_MODE):
                     if last_actual_fps < FPS - 2:
                         print(f" Frame drop! Target {FPS}, Got {last_actual_fps:.2f}")
 
-            # update HTTP monitor
             if monitor:
                 monitor.update(
                     {
@@ -380,13 +369,8 @@ def run_display(clock_source=CLOCK_MODE):
                     }
                 )
 
-            # exit on window close (Local Only)
-            if not settings.SERVER_MODE and has_gl:
-                import glfw
-                if glfw.window_should_close(window):
-                    state.run_mode = False
+            if not settings.SERVER_MODE and has_gl and glfw.window_should_close(window):
+                state.run_mode = False
 
-        # local GL teardown
         if not settings.SERVER_MODE and has_gl:
-            import glfw
             glfw.terminate()

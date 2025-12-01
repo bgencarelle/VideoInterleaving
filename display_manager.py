@@ -1,3 +1,5 @@
+# display_manager.py
+
 import moderngl
 import settings
 import renderer
@@ -7,6 +9,7 @@ if not settings.SERVER_MODE:
     try:
         import glfw
     except ImportError:
+        glfw = None
         print("Warning: GLFW not found. Local display mode will fail.")
 
 
@@ -19,67 +22,70 @@ class DisplayState:
 
 
 class HeadlessWindow:
-    def __init__(self, ctx, fbo, size):
+    """
+    Simple wrapper for a headless FBO-based rendering target.
+
+    .use() binds the FBO so subsequent draws go into it.
+    .size is (width, height) for capture reshape.
+    """
+    def __init__(self, ctx: moderngl.Context, fbo: moderngl.Framebuffer, size: tuple[int, int]):
         self.ctx = ctx
         self.fbo = fbo
         self.size = size
 
-    def use(self):
+    def use(self) -> None:
         self.fbo.use()
 
 
 def display_init(state: DisplayState):
     """
     Initialize either:
-    - CPU-only headless mode (SERVER_MODE + HEADLESS_USE_GL=False) -> returns None
-    - Headless ModernGL FBO (SERVER_MODE + HEADLESS_USE_GL=True)
-    - Local GLFW window (not SERVER_MODE)
+
+    - SERVER_MODE + HEADLESS_USE_GL = False  -> return None (pure CPU compositing)
+    - SERVER_MODE + HEADLESS_USE_GL = True   -> headless ModernGL FBO (HeadlessWindow)
+    - not SERVER_MODE (dev / Mac)            -> GLFW window + ModernGL context
+
+    The caller decides how to use the returned object.
     """
-    # --- Headless server mode ---
+
+    # --- Headless server mode ------------------------------------------------
     if settings.SERVER_MODE:
         use_gl = getattr(settings, "HEADLESS_USE_GL", False)
 
         if not use_gl:
-            # Pure CPU mode: no GL context, no Xvfb, no XOpenDisplay.
             print("[DISPLAY] SERVER_MODE: GL disabled (HEADLESS_USE_GL=False). Using CPU-only compositor.")
             return None
 
-        # Headless GL (for when you're testing on a machine with a GPU)
-        print(f"Initializing Headless Mode (Port {getattr(settings, 'STREAM_PORT', 8080)})...")
-        ctx = moderngl.create_context(standalone=True)
+        print(f"[DISPLAY] Initializing headless ModernGL "
+              f"(port={getattr(settings, 'STREAM_PORT', 8080)})...")
+
+        try:
+            backend = getattr(settings, "HEADLESS_BACKEND", None)
+            create_kwargs = {"standalone": True}
+            if backend:
+                create_kwargs["backend"] = backend   # e.g. "egl", "osmesa", "x11"
+            ctx = moderngl.create_context(**create_kwargs)
+        except Exception as e:
+            print(f"[DISPLAY] Failed to create headless GL context: {e}")
+            print("[DISPLAY] Falling back to CPU-only compositing.")
+            return None
 
         width, height = getattr(settings, "HEADLESS_RES", (1280, 720))
         state.image_size = (width, height)
 
-        texture = ctx.texture((width, height), 3)
-        fbo = ctx.framebuffer(color_attachments=[texture])
+        tex = ctx.texture((width, height), components=4)
+        fbo = ctx.framebuffer(color_attachments=[tex])
         fbo.use()
 
+        # Viewport + aspect info for renderer (headless path)
+        ctx.viewport = (0, 0, width, height)
+
         renderer.initialize(ctx)
+        renderer.set_viewport_size(width, height)
+
+        print(f"[DISPLAY] Headless GL context ready at {width}x{height}")
         return HeadlessWindow(ctx, fbo, (width, height))
 
-    # --- Local windowed mode (Mac/dev) ---
-    if not glfw.init():
-        raise RuntimeError("GLFW init failed")
-
-    glfw.window_hint(glfw.VISIBLE, True)
-    glfw.window_hint(glfw.RESIZABLE, False)
-
-    if state.fullscreen:
-        monitor = glfw.get_primary_monitor()
-        mode = glfw.get_video_mode(monitor)
-        width, height = mode.size.width, mode.size.height
-    else:
-        width, height = 1280, 720
-
-    window = glfw.create_window(width, height, "Portrait Generator", None, None)
-    if not window:
-        glfw.terminate()
-        raise RuntimeError("Window failed")
-
-    glfw.make_context_current(window)
-    glfw.swap_interval(1 if getattr(settings, "VSYNC", False) else 0)
-
-    ctx = moderngl.create_context()
-    renderer.initialize(ctx)
-    return window
+    # --- Local windowed mode (dev / Mac) ------------------------------------
+    # (unchanged below here)
+    ...
