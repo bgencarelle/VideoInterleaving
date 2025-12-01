@@ -247,7 +247,7 @@ def run_display(clock_source=CLOCK_MODE):
 
     #max_workers = min(6, (os.cpu_count() or 1))
 
-    max_workers = 2
+    max_workers = 3
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # schedule first preload
         if index == 0:
