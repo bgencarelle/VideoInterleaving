@@ -93,56 +93,99 @@ def sharpen_for_stream(frame_bgr: np.ndarray,
 
 def cpu_composite_frame(main_img, float_img):
     """
-    Fast CPU compositing for headless fallback:
+    CPU compositing that respects BOTH main and float alpha channels,
+    compositing them over BACKGROUND_COLOR in the same order as the GL path:
 
-    - main_img: RGB / RGBA base
-    - float_img: optional RGB / RGBA overlay
-    - No resizing: browser does the scaling.
+        background -> main_img (alpha) -> float_img (alpha)
+
+    Returns a BGR frame ready for JPEG encoding, or None if nothing to draw.
     """
-    if main_img is None:
+    # Nothing at all?
+    if main_img is None and float_img is None:
         return None
 
-    # main -> RGB
-    if main_img.ndim == 2:
-        main_rgb = cv2.cvtColor(main_img, cv2.COLOR_GRAY2RGB)
-    elif main_img.ndim == 3 and main_img.shape[2] == 4:
-        main_rgb = main_img[..., :3]
-    elif main_img.ndim == 3 and main_img.shape[2] == 3:
-        main_rgb = main_img
-    else:
-        raise ValueError(f"Unsupported main_img shape: {main_img.shape!r}")
+    # --- Helper: normalize to (RGB uint16, alpha uint16 or None) ---
+    def to_rgb_alpha(img):
+        if img is None:
+            return None, None
 
-    base = main_rgb.astype(np.uint16)
+        if img.ndim == 2:
+            # grayscale -> RGB
+            rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB).astype(np.uint16)
+            alpha = None
+        elif img.ndim == 3:
+            if img.shape[2] == 4:
+                # RGBA: keep RGB and per-pixel alpha
+                rgb = img[..., :3].astype(np.uint16)
+                alpha = img[..., 3:4].astype(np.uint16)  # (H, W, 1)
+            elif img.shape[2] == 3:
+                # RGB, treat as fully opaque
+                rgb = img.astype(np.uint16)
+                alpha = None
+            else:
+                raise ValueError(f"Unsupported image shape: {img.shape!r}")
+        else:
+            raise ValueError(f"Unsupported image shape: {img.shape!r}")
 
-    if float_img is None:
-        out_rgb = np.clip(base, 0, 255).astype(np.uint8)
-        return out_rgb[..., ::-1]
+        return rgb, alpha
 
-    if float_img.shape[0] != base.shape[0] or float_img.shape[1] != base.shape[1]:
-        out_rgb = np.clip(base, 0, 255).astype(np.uint8)
-        return out_rgb[..., ::-1]
+    # Decide the reference size from whichever image we have
+    ref = main_img if main_img is not None else float_img
+    h, w = ref.shape[:2]
 
-    # float -> RGB + alpha
-    if float_img.ndim == 2:
-        float_rgb = cv2.cvtColor(float_img, cv2.COLOR_GRAY2RGB).astype(np.uint16)
-        alpha = None
-    elif float_img.ndim == 3 and float_img.shape[2] == 4:
-        float_rgb = float_img[..., :3].astype(np.uint16)
-        alpha = float_img[..., 3:4].astype(np.uint16)
-    elif float_img.ndim == 3 and float_img.shape[2] == 3:
-        float_rgb = float_img.astype(np.uint16)
-        alpha = None
-    else:
-        raise ValueError(f"Unsupported float_img shape: {float_img.shape!r}")
+    # Background color in RGB space (0-255 ints)
+    bg_r, bg_g, bg_b = getattr(settings, "BACKGROUND_COLOR", (4, 4, 4))
 
-    if alpha is None:
-        out_rgb16 = float_rgb
-    else:
-        inv_alpha = 255 - alpha
-        out_rgb16 = (float_rgb * alpha + base * inv_alpha + 127) // 255
+    # Start with background as uint16 RGB
+    base = np.empty((h, w, 3), dtype=np.uint16)
+    base[..., 0] = bg_r
+    base[..., 1] = bg_g
+    base[..., 2] = bg_b
 
-    out_rgb = np.clip(out_rgb16, 0, 255).astype(np.uint8)
-    return out_rgb[..., ::-1]
+    # Normalize both layers
+    main_rgb, main_a = to_rgb_alpha(main_img)
+    float_rgb, float_a = to_rgb_alpha(float_img)
+
+    # If both exist but their sizes don't match, fall back to just main.
+    if main_rgb is not None and float_rgb is not None:
+        if main_rgb.shape[0] != float_rgb.shape[0] or main_rgb.shape[1] != float_rgb.shape[1]:
+            # Preserve previous behavior: ignore the overlay on mismatch
+            float_rgb = None
+            float_a = None
+
+    # Helper: composite "src over dst" with optional alpha
+    def over(dst_rgb16, src_rgb16, alpha):
+        """
+        dst_rgb16, src_rgb16: uint16 RGB
+        alpha: uint16 (H,W,1) in [0..255] or None (=> fully opaque)
+        """
+        if src_rgb16 is None:
+            return dst_rgb16
+
+        if alpha is None:
+            # Fully opaque source: overwrite
+            A = 255
+            alpha_arr = np.full(dst_rgb16.shape[:2] + (1,), A, dtype=np.uint16)
+        else:
+            alpha_arr = alpha
+
+        inv_alpha = 255 - alpha_arr
+        # src_over_dst = src*A + dst*(1-A)
+        out = (src_rgb16 * alpha_arr + dst_rgb16 * inv_alpha + 127) // 255
+        return out
+
+    # 1) main over background
+    if main_rgb is not None:
+        base = over(base, main_rgb, main_a)
+
+    # 2) float over that
+    if float_rgb is not None:
+        base = over(base, float_rgb, float_a)
+
+    # Convert back to uint8 BGR for JPEG encoding
+    out_rgb = np.clip(base, 0, 255).astype(np.uint8)
+    out_bgr = out_rgb[..., ::-1]  # RGB -> BGR
+    return out_bgr
 
 
 def run_display(clock_source=CLOCK_MODE):
