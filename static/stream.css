@@ -4,19 +4,19 @@ html, body {
   height: 100%;
 }
 
-/* Center the image both horizontally and vertically */
+/* Center the image in the viewport */
 body {
   background: black;
   display: flex;
   align-items: center;      /* vertical center */
   justify-content: center;  /* horizontal center */
+  overflow: hidden;         /* hide any tiny overflow */
 }
 
-/* Let the browser scale while keeping aspect ratio + letterboxing */
+/* Image: always fill window height, keep aspect ratio */
 #video {
-  max-width: 100vw;
-  max-height: 100vh;
+  height: 100vh;   /* <-- fill viewport height */
+  width: auto;     /* aspect ratio preserved */
   display: block;
-  object-fit: contain;   /* maintain aspect, black bars where needed */
   background: black;
 }
