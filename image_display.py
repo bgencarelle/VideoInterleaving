@@ -68,97 +68,76 @@ class RollingIndexCompensator:
 
 def cpu_composite_frame(main_img, float_img, out_size):
     """
-    CPU fallback for headless mode:
+    CPU fallback for headless mode, cheaper version:
 
-    - Reproduces the old two-pass blending:
-        clear to BACKGROUND_COLOR
-        draw main with its alpha
-        draw float with its alpha on top
-    - Preserves aspect ratio.
-    - Letter/pillarboxes into out_size.
-    - Ensures 3-channel BGR for JPEG encoding.
+    - BACKGROUND_COLOR -> main (with alpha) -> float (with alpha)
+    - All done in uint8 with integer math (no float32).
+    - Preserves aspect ratio and letter/pillarboxes into out_size.
+    - Returns 3-channel BGR ready for cv2.imencode('.jpg', ...).
     """
     if main_img is None:
         return None
 
-    # --- helpers -------------------------------------------------------------
-    def ensure_rgba(img):
-        """Ensure image is uint8 RGBA (we treat incoming 4ch as RGBA)."""
+    # --- normalize to RGBA (uint8) ------------------------------------------
+    def to_rgba(img):
         if img is None:
             return None
-
         if img.ndim == 3 and img.shape[2] == 4:
-            # Assume already RGBA (this is what ModernGL path uses)
+            # assume already RGBA (this is what your ModernGL path uses)
             return img
-
         if img.ndim == 3 and img.shape[2] == 3:
-            # 3-channel: add opaque alpha
-            h, w = img.shape[:2]
-            alpha = np.full((h, w, 1), 255, dtype=img.dtype)
-            return np.concatenate([img, alpha], axis=2)
-
+            # BGR or RGB… we only care that it's consistent for both;
+            # treat as BGR->RGBA so colors match OpenCV convention.
+            return cv2.cvtColor(img, cv2.COLOR_BGR2RGBA)
         if img.ndim == 2:
-            # grayscale -> RGB -> add alpha
             rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
             h, w = rgb.shape[:2]
-            alpha = np.full((h, w, 1), 255, dtype=rgb.dtype)
+            alpha = np.full((h, w, 1), 255, dtype=np.uint8)
             return np.concatenate([rgb, alpha], axis=2)
+        raise ValueError(f"Unsupported image shape in to_rgba: {img.shape!r}")
 
-        # Fallback: try to force into 4 channels via OpenCV
-        if img.ndim == 3:
-            # try treat as BGR, convert to BGRA, then reorder to RGBA
-            bgra = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
-            # reorder BGRA -> RGBA
-            return bgra[..., [2, 1, 0, 3]]
+    m_rgba = to_rgba(main_img)
+    f_rgba = to_rgba(float_img) if float_img is not None else None
 
-        raise ValueError("Unsupported image shape in cpu_composite_frame: "
-                         f"{img.shape!r}")
+    h0, w0, _ = m_rgba.shape
 
-    # --- ensure we have RGBA for both passes ---------------------------------
-    main_rgba = ensure_rgba(main_img)
-    float_rgba = ensure_rgba(float_img) if float_img is not None else None
+    # If float image exists but size doesn't match, ignore it (cheaper than resizing twice)
+    if f_rgba is not None and f_rgba.shape != m_rgba.shape:
+        f_rgba = None
 
-    h0, w0, _ = main_rgba.shape
-
-    # --- build background in linear-ish RGB ----------------------------------
+    # --- build background (uint16 to avoid overflow) ------------------------
     # BACKGROUND_COLOR is 0–255 RGB
-    bg_r, bg_g, bg_b = [c / 255.0 for c in BACKGROUND_COLOR]
-    bg_rgb = np.array([bg_r, bg_g, bg_b], dtype=np.float32)
-    bg_rgb = np.broadcast_to(bg_rgb, (h0, w0, 3))
+    bg_r, bg_g, bg_b = BACKGROUND_COLOR
+    # broadcast to full frame as uint16
+    bg = np.empty((h0, w0, 3), dtype=np.uint16)
+    bg[..., 0] = bg_r
+    bg[..., 1] = bg_g
+    bg[..., 2] = bg_b
 
-    # convert to float [0,1]
-    m_rgb = main_rgba[..., :3].astype(np.float32) / 255.0
-    m_a   = main_rgba[..., 3:4].astype(np.float32) / 255.0  # keep as (H,W,1)
+    # extract color/alpha as uint16 for safe math
+    m_rgb = m_rgba[..., :3].astype(np.uint16)   # 0..255
+    m_a   = m_rgba[..., 3:4].astype(np.uint16)  # 0..255, shape (H,W,1)
 
-    # First pass: main over background
-    # out = m.rgb * m.a + bg * (1 - m.a)
-    m_comp_rgb = m_rgb * m_a + bg_rgb * (1.0 - m_a)
-    m_comp_a   = m_a + (1.0 - m_a) * 0.0  # alpha of main pass (not super important)
+    # main over background: out = m * a + bg * (255 - a)
+    inv_m_a = 255 - m_a
+    base_rgb = (m_rgb * m_a + bg * inv_m_a + 127) // 255  # +127 for rounding
 
-    # Second pass: float over main_comp (if present and same size)
-    if float_rgba is not None and float_rgba.shape == main_rgba.shape:
-        f_rgb = float_rgba[..., :3].astype(np.float32) / 255.0
-        f_a   = float_rgba[..., 3:4].astype(np.float32) / 255.0
-
-        # standard "over" compositing:
-        # out = f.rgb * f.a + m_comp * (1 - f.a)
-        out_rgb = f_rgb * f_a + m_comp_rgb * (1.0 - f_a)
-        out_a   = f_a + m_comp_a * (1.0 - f_a)
+    # Now overlay float (if present) over base_rgb
+    if f_rgba is not None:
+        f_rgb = f_rgba[..., :3].astype(np.uint16)
+        f_a   = f_rgba[..., 3:4].astype(np.uint16)
+        inv_f_a = 255 - f_a
+        out_rgb = (f_rgb * f_a + base_rgb * inv_f_a + 127) // 255
     else:
-        out_rgb = m_comp_rgb
-        out_a   = m_comp_a
+        out_rgb = base_rgb
 
-    # pack back into RGBA uint8
-    out_rgba = np.clip(
-        np.concatenate([out_rgb, out_a], axis=2) * 255.0,
-        0,
-        255,
-    ).astype(np.uint8)
+    # back to uint8 RGB
+    out_rgb = np.clip(out_rgb, 0, 255).astype(np.uint8)
 
-    # --- convert RGBA -> BGR for OpenCV/JPEG ---------------------------------
-    out_bgr = cv2.cvtColor(out_rgba, cv2.COLOR_RGBA2BGR)
+    # convert RGB -> BGR for OpenCV / JPEG (assume we built RGB order above)
+    out_bgr = out_rgb[..., ::-1]
 
-    # --- letterbox / pillarbox into target canvas ----------------------------
+    # --- letterbox / pillarbox into out_size --------------------------------
     out_w, out_h = out_size
     h, w = out_bgr.shape[:2]
 
