@@ -70,7 +70,10 @@ def cpu_composite_frame(main_img, float_img, out_size):
     """
     CPU fallback for headless mode:
 
-    - Uses main_img only (ignores float_img for now).
+    - Reproduces the old two-pass blending:
+        clear to BACKGROUND_COLOR
+        draw main with its alpha
+        draw float with its alpha on top
     - Preserves aspect ratio.
     - Letter/pillarboxes into out_size.
     - Ensures 3-channel BGR for JPEG encoding.
@@ -78,30 +81,96 @@ def cpu_composite_frame(main_img, float_img, out_size):
     if main_img is None:
         return None
 
-    img = main_img
+    # --- helpers -------------------------------------------------------------
+    def ensure_rgba(img):
+        """Ensure image is uint8 RGBA (we treat incoming 4ch as RGBA)."""
+        if img is None:
+            return None
 
-    # Ensure 3-channel BGR
-    if img.ndim == 3 and img.shape[2] == 4:
-        # Source from cv2.imread is BGRA already
-        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-    elif img.ndim == 2:
-        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        if img.ndim == 3 and img.shape[2] == 4:
+            # Assume already RGBA (this is what ModernGL path uses)
+            return img
 
+        if img.ndim == 3 and img.shape[2] == 3:
+            # 3-channel: add opaque alpha
+            h, w = img.shape[:2]
+            alpha = np.full((h, w, 1), 255, dtype=img.dtype)
+            return np.concatenate([img, alpha], axis=2)
+
+        if img.ndim == 2:
+            # grayscale -> RGB -> add alpha
+            rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+            h, w = rgb.shape[:2]
+            alpha = np.full((h, w, 1), 255, dtype=rgb.dtype)
+            return np.concatenate([rgb, alpha], axis=2)
+
+        # Fallback: try to force into 4 channels via OpenCV
+        if img.ndim == 3:
+            # try treat as BGR, convert to BGRA, then reorder to RGBA
+            bgra = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+            # reorder BGRA -> RGBA
+            return bgra[..., [2, 1, 0, 3]]
+
+        raise ValueError("Unsupported image shape in cpu_composite_frame: "
+                         f"{img.shape!r}")
+
+    # --- ensure we have RGBA for both passes ---------------------------------
+    main_rgba = ensure_rgba(main_img)
+    float_rgba = ensure_rgba(float_img) if float_img is not None else None
+
+    h0, w0, _ = main_rgba.shape
+
+    # --- build background in linear-ish RGB ----------------------------------
+    # BACKGROUND_COLOR is 0–255 RGB
+    bg_r, bg_g, bg_b = [c / 255.0 for c in BACKGROUND_COLOR]
+    bg_rgb = np.array([bg_r, bg_g, bg_b], dtype=np.float32)
+    bg_rgb = np.broadcast_to(bg_rgb, (h0, w0, 3))
+
+    # convert to float [0,1]
+    m_rgb = main_rgba[..., :3].astype(np.float32) / 255.0
+    m_a   = main_rgba[..., 3:4].astype(np.float32) / 255.0  # keep as (H,W,1)
+
+    # First pass: main over background
+    # out = m.rgb * m.a + bg * (1 - m.a)
+    m_comp_rgb = m_rgb * m_a + bg_rgb * (1.0 - m_a)
+    m_comp_a   = m_a + (1.0 - m_a) * 0.0  # alpha of main pass (not super important)
+
+    # Second pass: float over main_comp (if present and same size)
+    if float_rgba is not None and float_rgba.shape == main_rgba.shape:
+        f_rgb = float_rgba[..., :3].astype(np.float32) / 255.0
+        f_a   = float_rgba[..., 3:4].astype(np.float32) / 255.0
+
+        # standard "over" compositing:
+        # out = f.rgb * f.a + m_comp * (1 - f.a)
+        out_rgb = f_rgb * f_a + m_comp_rgb * (1.0 - f_a)
+        out_a   = f_a + m_comp_a * (1.0 - f_a)
+    else:
+        out_rgb = m_comp_rgb
+        out_a   = m_comp_a
+
+    # pack back into RGBA uint8
+    out_rgba = np.clip(
+        np.concatenate([out_rgb, out_a], axis=2) * 255.0,
+        0,
+        255,
+    ).astype(np.uint8)
+
+    # --- convert RGBA -> BGR for OpenCV/JPEG ---------------------------------
+    out_bgr = cv2.cvtColor(out_rgba, cv2.COLOR_RGBA2BGR)
+
+    # --- letterbox / pillarbox into target canvas ----------------------------
     out_w, out_h = out_size
-    h, w = img.shape[:2]
+    h, w = out_bgr.shape[:2]
 
     if w == 0 or h == 0 or out_w == 0 or out_h == 0:
         return None
 
-    # Uniform scale, preserve aspect
     scale = min(out_w / w, out_h / h)
     new_w = int(w * scale)
     new_h = int(h * scale)
 
-    # Resize to fit within the output canvas
-    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    resized = cv2.resize(out_bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-    # Letter/pillarbox into a black canvas
     canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
     x0 = (out_w - new_w) // 2
     y0 = (out_h - new_h) // 2
