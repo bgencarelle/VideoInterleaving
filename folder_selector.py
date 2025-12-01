@@ -6,8 +6,8 @@ from collections import deque
 from rtmidi.midiconstants import LOCAL_CONTROL
 
 from globals import control_data_dictionary, folder_dictionary
-from settings import CLOCK_MODE
-LOCAL_CONTROLFPS = 60 #local fps
+from settings import CLOCK_MODE, IPS
+LOCAL_CONTROLFPS = 2*IPS #local fps
 
 from utilities.csv_list_maker import main_folder_path
 
