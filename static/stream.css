@@ -1,25 +1,22 @@
-/* static/stream.css */
-
 html, body {
   margin: 0;
   padding: 0;
   height: 100%;
-  background: #000;
 }
 
+/* Center the image both horizontally and vertically */
 body {
+  background: black;
   display: flex;
-  justify-content: center;   /* center horizontally */
-  align-items: center;       /* center vertically */
-  background: #000;
+  align-items: center;      /* vertical center */
+  justify-content: center;  /* horizontal center */
 }
 
-/* The MJPEG stream image */
-#stream {
-  max-height: 100vh;   /* scale to fit height */
-  max-width: 100vw;    /* but never exceed width */
-  height: auto;
-  width: auto;
+/* Let the browser scale while keeping aspect ratio + letterboxing */
+#video {
+  max-width: 100vw;
+  max-height: 100vh;
   display: block;
-  background: #000;    /* any transparent areas stay black */
+  object-fit: contain;   /* maintain aspect, black bars where needed */
+  background: black;
 }

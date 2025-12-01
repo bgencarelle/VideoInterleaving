@@ -66,63 +66,72 @@ class RollingIndexCompensator:
         return current_index - partial_offset
 
 
-def cpu_composite_frame(main_img, float_img, out_size):
+def cpu_composite_frame(main_img, float_img):
     """
-    CPU fallback for headless mode, cheaper version:
+    Pure-CPU compositing for headless mode:
 
-    - BACKGROUND_COLOR -> main (with alpha) -> float (with alpha)
-    - All done in uint8 with integer math (no float32).
-    - Preserves aspect ratio and letter/pillarboxes into out_size.
-    - Returns 3-channel BGR ready for cv2.imencode('.jpg', ...).
+    - Take main_img and float_img (both HxWxC, uint8).
+    - Treat them as RGBA if they have 4 channels, or RGB/GRAY with full alpha.
+    - Composite:
+        BACKGROUND_COLOR  ->  main  ->  float
+      using per-pixel alpha.
+    - Return a 3-channel BGR frame, same resolution as the source.
+
+    No resizing. Browser handles scaling and letterboxing.
     """
     if main_img is None:
         return None
 
-    # --- normalize to RGBA (uint8) ------------------------------------------
+    # --- Helpers: normalize to RGBA (RGB order) -----------------------------
     def to_rgba(img):
         if img is None:
             return None
+
+        # 4-channel: assume RGBA as produced for ModernGL
         if img.ndim == 3 and img.shape[2] == 4:
-            # assume already RGBA (this is what your ModernGL path uses)
             return img
+
+        # 3-channel: assume RGB-like; give it full alpha
         if img.ndim == 3 and img.shape[2] == 3:
-            # BGR or RGB… we only care that it's consistent for both;
-            # treat as BGR->RGBA so colors match OpenCV convention.
-            return cv2.cvtColor(img, cv2.COLOR_BGR2RGBA)
+            h, w, _ = img.shape
+            alpha = np.full((h, w, 1), 255, dtype=np.uint8)
+            return np.concatenate([img, alpha], axis=2)
+
+        # grayscale: expand to RGB + alpha
         if img.ndim == 2:
             rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-            h, w = rgb.shape[:2]
+            h, w, _ = rgb.shape
             alpha = np.full((h, w, 1), 255, dtype=np.uint8)
             return np.concatenate([rgb, alpha], axis=2)
+
         raise ValueError(f"Unsupported image shape in to_rgba: {img.shape!r}")
 
     m_rgba = to_rgba(main_img)
     f_rgba = to_rgba(float_img) if float_img is not None else None
 
-    h0, w0, _ = m_rgba.shape
+    h, w, _ = m_rgba.shape
 
-    # If float image exists but size doesn't match, ignore it (cheaper than resizing twice)
+    # If float exists but size differs, ignore it (cheaper than resizing)
     if f_rgba is not None and f_rgba.shape != m_rgba.shape:
         f_rgba = None
 
-    # --- build background (uint16 to avoid overflow) ------------------------
-    # BACKGROUND_COLOR is 0–255 RGB
+    # --- Build background as RGB in uint16 space ---------------------------
+    # BACKGROUND_COLOR is [R, G, B] in 0..255
     bg_r, bg_g, bg_b = BACKGROUND_COLOR
-    # broadcast to full frame as uint16
-    bg = np.empty((h0, w0, 3), dtype=np.uint16)
+    bg = np.empty((h, w, 3), dtype=np.uint16)
     bg[..., 0] = bg_r
     bg[..., 1] = bg_g
     bg[..., 2] = bg_b
 
-    # extract color/alpha as uint16 for safe math
+    # Extract main color/alpha in uint16
     m_rgb = m_rgba[..., :3].astype(np.uint16)   # 0..255
-    m_a   = m_rgba[..., 3:4].astype(np.uint16)  # 0..255, shape (H,W,1)
+    m_a   = m_rgba[..., 3:4].astype(np.uint16)  # 0..255, shape (H, W, 1)
 
-    # main over background: out = m * a + bg * (255 - a)
+    # main over background: base = m * a + bg * (255 - a)
     inv_m_a = 255 - m_a
     base_rgb = (m_rgb * m_a + bg * inv_m_a + 127) // 255  # +127 for rounding
 
-    # Now overlay float (if present) over base_rgb
+    # float over base (if present)
     if f_rgba is not None:
         f_rgb = f_rgba[..., :3].astype(np.uint16)
         f_a   = f_rgba[..., 3:4].astype(np.uint16)
@@ -131,31 +140,13 @@ def cpu_composite_frame(main_img, float_img, out_size):
     else:
         out_rgb = base_rgb
 
-    # back to uint8 RGB
+    # Back to uint8 RGB
     out_rgb = np.clip(out_rgb, 0, 255).astype(np.uint8)
 
-    # convert RGB -> BGR for OpenCV / JPEG (assume we built RGB order above)
+    # OpenCV/JPEG expect BGR, so swap channels
     out_bgr = out_rgb[..., ::-1]
 
-    # --- letterbox / pillarbox into out_size --------------------------------
-    out_w, out_h = out_size
-    h, w = out_bgr.shape[:2]
-
-    if w == 0 or h == 0 or out_w == 0 or out_h == 0:
-        return None
-
-    scale = min(out_w / w, out_h / h)
-    new_w = int(w * scale)
-    new_h = int(h * scale)
-
-    resized = cv2.resize(out_bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
-
-    canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
-    x0 = (out_w - new_w) // 2
-    y0 = (out_h - new_h) // 2
-    canvas[y0:y0 + new_h, x0:x0 + new_w] = resized
-
-    return canvas
+    return out_bgr
 
 
 
@@ -166,7 +157,7 @@ def run_display(clock_source=CLOCK_MODE):
 
     # --- Server capture timing (HEADLESS / SERVER_MODE only) ---
     last_server_capture = time.time()
-    capture_rate = getattr(settings, "SERVER_CAPTURE_RATE", 5)  # encodes/sec
+    capture_rate = getattr(settings, "SERVER_CAPTURE_RATE", FPS or 10)
     capture_interval = 1.0 / capture_rate
 
     # --- Initialize folders & image size ---
@@ -176,7 +167,7 @@ def run_display(clock_source=CLOCK_MODE):
     float_folder_count = len(float_folder_path[0])
     png_paths_len = len(main_folder_path)
 
-    # determine initial image size from the first frame
+    # determine initial image size from first main image
     first_image_path = main_folder_path[0][0]
     img0 = cv2.imread(first_image_path, cv2.IMREAD_UNCHANGED)
     if img0 is None:
@@ -199,25 +190,21 @@ def run_display(clock_source=CLOCK_MODE):
     image_loader.set_paths(main_folder_path, float_folder_path)
     image_loader.set_png_paths_len(png_paths_len)
 
-    # --- Setup Display (Window or Headless) ---
-    window = display_init(state)
-
+    # --- Setup Display / GL usage ---
+    # In SERVER_MODE we go pure CPU: no GL, no Xvfb, no moderngl context.
     if settings.SERVER_MODE:
-        # In SERVER_MODE, window is None when HEADLESS_USE_GL=False
-        has_gl = window is not None
+        window = None
+        has_gl = False
+        print("[HEADLESS] SERVER_MODE=True, using CPU-only compositing (no GL, no Xvfb).")
     else:
+        # Local mode: create an actual GL window
+        window = display_init(state)
         has_gl = True
-        # Local mode: we actually have a window and events
         register_callbacks(window, state)
-
-    if not settings.SERVER_MODE and window is None:
-        raise RuntimeError("Local mode requires a GL window, but display_init returned None.")
 
     # initial index & folder selection
     index, _ = update_index(png_paths_len, PINGPONG)
     last_index = index
-    last_captured_index = None  # track what we've already encoded for streaming
-
     update_folder_selection(index, float_folder_count, main_folder_count)
 
     fifo_buffer = FIFOImageBufferPatched(max_size=FIFO_LENGTH)
@@ -225,35 +212,21 @@ def run_display(clock_source=CLOCK_MODE):
     main_image, float_image = image_loader.load_images(index, main_folder, float_folder)
     fifo_buffer.update(index, (main_image, float_image))
 
-    # track current displayed images (for CPU compositing path)
+    # track current images for CPU compositing
     current_main_img = main_image
     current_float_img = float_image
 
-    # Push an initial frame into the exchange so /video_feed shows something immediately
-    try:
-        headless_res = getattr(settings, "HEADLESS_RES", (state.image_size[0], state.image_size[1]))
-        initial_frame = cpu_composite_frame(main_image, float_image, headless_res)
-        if initial_frame is not None:
-            encode_params = [
-                int(cv2.IMWRITE_JPEG_QUALITY),
-                getattr(settings, "JPEG_QUALITY", 70),
-            ]
-            ok, jpg_bytes = cv2.imencode(".jpg", initial_frame, encode_params)
-            if ok:
-                print("[TEST] Pushing initial frame to FrameExchange.")
-                exchange.set_frame(jpg_bytes.tobytes())
-            else:
-                print("[TEST] cv2.imencode failed on initial frame.")
-    except Exception as e:
-        print(f"[TEST] Initial frame encode error: {e}")
+    # JPEG encode params reused every frame
+    encode_params = [
+        int(cv2.IMWRITE_JPEG_QUALITY),
+        getattr(settings, "JPEG_QUALITY", 80),
+    ]
 
-    # create textures *only* if we have GL (Mac/dev)
+    # If you ever run local GL mode, we can still keep textures alive
     if has_gl:
+        import renderer  # ensure GL renderer is available locally
         main_texture = renderer.create_texture(main_image)
         float_texture = renderer.create_texture(float_image)
-    else:
-        main_texture = None
-        float_texture = None
 
     compensator = RollingIndexCompensator(maxlen=10, correction_factor=0.5)
 
@@ -268,15 +241,13 @@ def run_display(clock_source=CLOCK_MODE):
                 monitor.record_load_error(scheduled_index, e)
 
     # start preloading next frame
-    max_workers = min(4, (os.cpu_count() or 1))
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    with ThreadPoolExecutor(max_workers=6) as executor:
         if index == 0:
             next_index = 1
         elif index == png_paths_len - 1:
             next_index = index - 1
         else:
             next_index = index + 1 if index > last_index else index - 1
-
         future = executor.submit(image_loader.load_images, next_index, main_folder, float_folder)
         future.add_done_callback(lambda fut, s_idx=next_index: async_load_callback(fut, s_idx))
 
@@ -289,11 +260,12 @@ def run_display(clock_source=CLOCK_MODE):
 
             # --- 1. Event Polling (Local Only) ---
             if not settings.SERVER_MODE and has_gl:
+                import glfw
                 glfw.poll_events()
                 if not state.run_mode:
                     break
 
-            # --- 2. Reinit Check ---
+            # --- 2. Reinit Check (local, GL) ---
             if state.needs_update and not settings.SERVER_MODE and has_gl:
                 display_init(state)
                 state.needs_update = False
@@ -312,7 +284,6 @@ def run_display(clock_source=CLOCK_MODE):
                 if result is not None:
                     displayed_index, main_img, float_img = result
                     compensator.update(index, displayed_index)
-
                     current_main_img = main_img
                     current_float_img = float_img
 
@@ -336,54 +307,35 @@ def run_display(clock_source=CLOCK_MODE):
                     next_index = index - 1
                 else:
                     next_index = index + 1 if index > prev else index - 1
-
                 future = executor.submit(image_loader.load_images, next_index, main_folder, float_folder)
                 future.add_done_callback(lambda fut, s_idx=next_index: async_load_callback(fut, s_idx))
 
-            # --- 4. Drawing / compositing ---
+            # --- 4. Drawing (local GL only) ---
             if has_gl and not settings.SERVER_MODE:
-                # Local mode (Mac): draw to real window
+                window.use()
                 renderer.overlay_images_two_pass_like_old(
                     main_texture, float_texture, background_color=BACKGROUND_COLOR
                 )
 
-            # --- 5. Server Capture / Streaming (VPS / SERVER_MODE) ---
+            # --- 5. Server Capture / Streaming (CPU-only in SERVER_MODE) ---
             if settings.SERVER_MODE:
                 now = time.time()
-
-                # Only encode when the frame actually changes, and not more often than SERVER_CAPTURE_RATE
-                if (index != last_captured_index) and (now - last_server_capture >= capture_interval):
+                if now - last_server_capture > capture_interval:
                     last_server_capture = now
-                    last_captured_index = index
-
                     try:
-                        if has_gl:
-                            # GL FBO capture path (if you ever enable HEADLESS_USE_GL=True)
-                            raw_data = window.fbo.read(components=3)
-                            w, h = window.size
-                            img = np.frombuffer(raw_data, dtype=np.uint8).reshape((h, w, 3))
-                            img = cv2.cvtColor(np.flipud(img), cv2.COLOR_RGB2BGR)
-                        else:
-                            # CPU compositing path (VPS, no GL)
-                            headless_res = getattr(settings, "HEADLESS_RES", state.image_size)
-                            img = cpu_composite_frame(current_main_img, current_float_img, headless_res)
-                            if img is None:
-                                continue
-
-                        encode_params = [
-                            int(cv2.IMWRITE_JPEG_QUALITY),
-                            getattr(settings, "JPEG_QUALITY", 70),
-                        ]
-                        ok, jpg_bytes = cv2.imencode(".jpg", img, encode_params)
-                        if ok:
-                            exchange.set_frame(jpg_bytes.tobytes())
-                        else:
-                            print("[CAPTURE] cv2.imencode failed.")
+                        frame = cpu_composite_frame(current_main_img, current_float_img)
+                        if frame is not None:
+                            ok, jpg_bytes = cv2.imencode(".jpg", frame, encode_params)
+                            if ok:
+                                exchange.set_frame(jpg_bytes.tobytes())
+                            else:
+                                print("[CAPTURE] cv2.imencode failed (CPU path).")
                     except Exception as e:
                         print(f"[CAPTURE ERROR] {e}")
 
-            # --- 6. Swap Buffers (Local Only) ---
+            # --- 6. Swap Buffers (local GL only) ---
             if not settings.SERVER_MODE and has_gl:
+                import glfw
                 glfw.swap_buffers(window)
 
             # --- 7. Timing ---
@@ -399,13 +351,12 @@ def run_display(clock_source=CLOCK_MODE):
                 if to_sleep > 0:
                     time.sleep(to_sleep)
 
-            # rolling FPS
+            # rolling FPS print
             if len(frame_times) > 1:
                 avg = sum(frame_times) / len(frame_times)
                 last_actual_fps = 1.0 / avg if avg > 0 else 0.0
-                if not HTTP_MONITOR:
-                    if FRAME_COUNTER_DISPLAY:
-                        print(f"{last_actual_fps:.2f} FPS")
+                if not HTTP_MONITOR and FRAME_COUNTER_DISPLAY:
+                    print(f"{last_actual_fps:.2f} FPS")
                     if last_actual_fps < FPS - 2:
                         print(f" Frame drop! Target {FPS}, Got {last_actual_fps:.2f}")
 
@@ -428,8 +379,12 @@ def run_display(clock_source=CLOCK_MODE):
                 )
 
             # exit on window close (Local Only)
-            if not settings.SERVER_MODE and has_gl and glfw.window_should_close(window):
-                state.run_mode = False
+            if not settings.SERVER_MODE and has_gl:
+                import glfw
+                if glfw.window_should_close(window):
+                    state.run_mode = False
 
+        # local GL teardown
         if not settings.SERVER_MODE and has_gl:
+            import glfw
             glfw.terminate()
