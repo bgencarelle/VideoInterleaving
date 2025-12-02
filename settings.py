@@ -157,12 +157,12 @@ AUDIO_OCTAVE_SPAN = 3        # how many octaves the index can walk through
 
 # --- SERVER MODE CONFIGURATION ---
 SERVER_MODE = True         # Enable headless streaming
-HEADLESS_USE_GL = True    # new: disable ModernGL headless on VPS
+HEADLESS_USE_GL = False    # new: disable ModernGL headless on VPS
 STREAM_PORT = 8080           # Port for video stream (distinct from monitor port 1978)
 STREAM_HOST = '0.0.0.0'      # Listen on all interfaces
 SERVER_CAPTURE_RATE = 30     # Streaming FPS
-JPEG_QUALITY = 85         # Image quality
-HEADLESS_RES = (640, 480)   # Resolution for the virtual screen
+JPEG_QUALITY = 95         # Image quality
+HEADLESS_RES = (640, 640)   # Resolution for the virtual screen
 HEADLESS_BACKEND = "egl"      # "egl" or "osmesa"
 # Streaming / JPEG controls
 STREAM_SHARPEN_AMOUNT = 0.5    # 0.0 = off
