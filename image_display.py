@@ -371,7 +371,7 @@ def run_display(clock_source=CLOCK_MODE):
                 # In headless mode, HeadlessWindow.use() binds the FBO.
                 if settings.SERVER_MODE:
                     window.use()
-                renderer.overlay_images_two_pass_like_old(
+                renderer.overlay_images_single_pass(
                     main_texture,
                     float_texture,
                     background_color=BACKGROUND_COLOR,

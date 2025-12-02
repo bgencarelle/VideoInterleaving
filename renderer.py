@@ -290,35 +290,29 @@ def compute_transformed_quad() -> np.ndarray:
     return np.array(data, dtype=np.float32)
 
 
-def overlay_images_two_pass_like_old(main_texture: moderngl.Texture,
-                                     float_texture: moderngl.Texture,
-                                     background_color: tuple[float, float, float] = (0, 0, 0)) -> None:
+def overlay_images_single_pass(main_texture: moderngl.Texture,
+                               float_texture: moderngl.Texture,
+                               background_color: tuple[int, int, int] = (0, 0, 0)) -> None:
     """
-    Clear the screen with background_color, then draw the main texture and float texture.
-    Uses two-pass rendering (draw main, then overlay float) with blending.
+    Clear with background_color, then draw a single quad sampling both
+    main and float textures in one pass. Much cheaper on llvmpipe than
+    two full-screen passes with blending.
     """
+    global _quad_dirty
 
-    def srgb_to_linear_component(c):
-        return pow(c / 255.0, 2.2)
+    # Clear using cached linear bg color
+    bg_linear = _update_bg_linear(background_color)
+    ctx.clear(*bg_linear)
 
-    if GAMMA_CORRECTION_ENABLED or ENABLE_SRGB_FRAMEBUFFER:
-        # Convert background_color from sRGB to linear before clearing
-        bg_linear = tuple(srgb_to_linear_component(c) for c in background_color)
-        ctx.clear(*bg_linear)
-    else:
-        # No correction needed, treat values as sRGB directly
-        ctx.clear(background_color[0] / 255.0,
-                  background_color[1] / 255.0,
-                  background_color[2] / 255.0)
+    # Update quad data only when something changed
+    if _quad_dirty or _quad_data is None:
+        quad_data = compute_transformed_quad()
+        vbo.write(quad_data.tobytes())
+        _quad_dirty = False
 
-    # Update quad vertex buffer with current geometry
-    quad_data = compute_transformed_quad()
-    vbo.write(quad_data.tobytes())
-
-    # Draw main image quad
+    # Bind textures
     main_texture.use(location=0)
-    vao.render(mode=moderngl.TRIANGLE_FAN)
+    float_texture.use(location=1)
 
-    # Draw float image quad (blended on top)
-    float_texture.use(location=0)
+    # Draw single full-screen quad
     vao.render(mode=moderngl.TRIANGLE_FAN)
