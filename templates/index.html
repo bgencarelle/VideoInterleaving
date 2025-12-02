@@ -7,28 +7,24 @@
   <meta name="color-scheme" content="dark">
   <link rel="stylesheet" href="{{ url_for('static', filename='stream.css') }}">
 </head>
-<body class="contain no-cursor">
+<body class="contain no-cursor rot0">
   <div class="stage">
-    <img id="video" alt="Live MJPEG stream" draggable="false">
+    <img id="video" src="/video_feed" alt="Live MJPEG stream" draggable="false">
   </div>
 
   <div class="ui" role="toolbar" aria-label="Viewer controls">
     <button id="fitToggle" aria-pressed="false" title="Toggle fit (C)">Contain</button>
+    <button id="rotateToggle" title="Rotate (R)">Rotate</button>
     <button id="fsToggle" title="Fullscreen (F)">Fullscreen</button>
   </div>
 
-  <noscript><div class="noscript">JS handles buttons/cursor/reconnect; the stream still loads without it.</div></noscript>
+  <noscript><div class="noscript">JS handles buttons/cursor; the MJPEG stream still loads without it.</div></noscript>
 
   <script>
-    // ===== generate a per-viewer id =====
-    function randHex(n){ const a=new Uint8Array(n/2); crypto.getRandomValues(a); return Array.from(a,b=>b.toString(16).padStart(2,'0')).join(''); }
-    const CID = randHex(16);                      // 64-bit token is plenty
-    const STREAM_URL = '/video_feed?id=' + CID;   // stable id for this tab
-    const ALIVE_URL  = '/stream_alive?id=' + CID;
-
     // ===== UI quick-hide + cursor hide =====
     const body   = document.body;
     const fitBtn = document.getElementById('fitToggle');
+    const rotBtn = document.getElementById('rotateToggle');
     const fsBtn  = document.getElementById('fsToggle');
 
     const UI_HIDE_MS = 600;
@@ -58,67 +54,68 @@
       fitBtn.setAttribute('aria-pressed', mode === 'cover');
       revealUI();
     }
-    function toggleFit() { setFit(body.classList.contains('cover') ? 'contain' : 'cover'); }
-    function toggleFullscreen() {
-      if (!document.fullscreenElement) document.documentElement.requestFullscreen().catch(()=>{});
-      else document.exitFullscreen().catch(()=>{});
+    function toggleFit() {
+      setFit(body.classList.contains('cover') ? 'contain' : 'cover');
+    }
+
+    // Rotation: body has one of rot0/rot90/rot180/rot270
+    const ROT_SEQUENCE = ['rot0','rot90','rot180','rot270'];
+    function currentRotIndex() {
+      return ROT_SEQUENCE.findIndex(c => body.classList.contains(c));
+    }
+    function rotateStep() {
+      const idx = currentRotIndex();
+      const next = ROT_SEQUENCE[(idx + 1) % ROT_SEQUENCE.length];
+      ROT_SEQUENCE.forEach(c => body.classList.remove(c));
+      body.classList.add(next);
       revealUI();
     }
 
-    ['mousemove','pointermove','touchstart','keydown'].forEach(ev =>
+    function toggleFullscreen() {
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch(()=>{});
+      } else {
+        document.exitFullscreen().catch(()=>{});
+      }
+      revealUI();
+    }
+
+    // Show UI briefly on activity
+    ['mousemove','pointermove','touchstart','keydown','resize','orientationchange'].forEach(ev =>
       window.addEventListener(ev, revealUI, {passive:true})
     );
+
+    // Keep UI visible while hovering the toolbar
     const toolbar = document.querySelector('.ui');
-    toolbar.addEventListener('mouseenter', () => { clearTimeout(uiTimer); body.classList.add('ui-visible'); body.classList.remove('no-cursor'); });
+    toolbar.addEventListener('mouseenter', () => {
+      clearTimeout(uiTimer);
+      body.classList.add('ui-visible');
+      body.classList.remove('no-cursor');
+    });
     toolbar.addEventListener('mouseleave', revealUI);
+
+    // Buttons & shortcuts
     fitBtn.addEventListener('click', toggleFit);
+    rotBtn.addEventListener('click', rotateStep);
     fsBtn.addEventListener('click',  toggleFullscreen);
     window.addEventListener('keydown', (e) => {
       if (e.key === 'c' || e.key === 'C') toggleFit();
+      if (e.key === 'r' || e.key === 'R') rotateStep();
       if (e.key === 'f' || e.key === 'F') toggleFullscreen();
     });
     document.addEventListener('dblclick', toggleFullscreen);
 
-    setFit('contain');
+    // Auto-fit: in portrait viewports, default to 'cover' to eliminate letterboxing.
+    function applyAutoFit() {
+      const portrait = window.matchMedia('(orientation: portrait)').matches;
+      setFit(portrait ? 'cover' : 'contain');
+    }
+
+    // Initial state
+    applyAutoFit();
     revealUI();
-
-    // ===== MJPEG: client-specific stall monitor (server heartbeat) =====
-    const STALL_MS = 2000;         // reload if no frame yielded to THIS client for > 2s
-    const POLL_MS  = 500;          // heartbeat poll interval
-    let reloading = false;
-
-    function setImgSrc(bust=false) {
-      const img = document.getElementById('video');
-      const url = STREAM_URL + (bust ? '&t=' + Date.now() : '');
-      img.onload  = null; // not reliable for MJPEG; heartbeat drives logic
-      img.onerror = () => { if (!reloading) { reloading = true; setTimeout(()=>{ setImgSrc(true); reloading = false; }, 800); } };
-      img.src = url;
-    }
-
-    async function pollAlive() {
-      try {
-        const r = await fetch(ALIVE_URL, { cache: 'no-store' });
-        if (!r.ok) throw new Error('bad status');
-        const j = await r.json();
-        // Both 'now' and 'ts' are server monotonic seconds; compare there
-        const idle_ms = (j.now - j.ts) * 1000;
-        if (idle_ms > STALL_MS && !reloading) {
-          reloading = true;
-          setImgSrc(true);                  // reconnect with cache-buster
-          // give it a moment before allowing another reload
-          setTimeout(()=>{ reloading = false; }, 1200);
-        }
-      } catch (_) {
-        // If heartbeat itself fails, try to recover the stream soon
-        if (!reloading) {
-          reloading = true;
-          setTimeout(()=>{ setImgSrc(true); reloading = false; }, 1200);
-        }
-      }
-    }
-
-    setImgSrc(false);                       // initial connect
-    setInterval(pollAlive, POLL_MS);        // begin heartbeat polling
+    window.matchMedia('(orientation: portrait)').addEventListener('change', applyAutoFit);
+    window.addEventListener('resize', applyAutoFit);
   </script>
 </body>
 </html>
