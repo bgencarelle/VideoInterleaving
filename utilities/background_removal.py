@@ -34,7 +34,6 @@ for img in images:
 import threading
 from pathlib import Path
 from io import BytesIO
-
 from PIL import Image, ImageEnhance
 from rembg import new_session, remove
 
