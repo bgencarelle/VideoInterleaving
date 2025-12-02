@@ -35,7 +35,8 @@ from folder_selector import update_folder_selection, folder_dictionary
 from display_manager import DisplayState, display_init
 from event_handler import register_callbacks
 import renderer
-
+from turbojpeg import TurboJPEG
+jpeg = TurboJPEG()
 
 monitor = None
 if TEST_MODE and HTTP_MONITOR:
@@ -366,11 +367,18 @@ def run_display(clock_source=CLOCK_MODE):
                         if frame is not None:
                             frame_to_encode = frame
 
-                            ok, buf = cv2.imencode(".jpg", frame_to_encode, encode_params)
-                            if ok:
-                                exchange.set_frame(buf.tobytes())
-                            else:
-                                print("[CAPTURE] cv2.imencode failed.")
+                            encoded = jpeg.encode(
+                                frame_to_encode,
+                                quality=getattr(settings, "JPEG_QUALITY", 80),
+                               # subsampling=1  # tweak / test
+                            )
+                            exchange.set_frame(encoded)
+
+                            #ok, buf = cv2.imencode(".jpg", frame_to_encode, encode_params)
+                            #if ok:
+                            #    exchange.set_frame(buf.tobytes())
+                            #else:
+                            #    print("[CAPTURE] cv2.imencode failed.")
                     except Exception as e:
                         print(f"[CAPTURE ERROR] {e}")
 
