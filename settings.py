@@ -163,7 +163,7 @@ STREAM_HOST = '0.0.0.0'      # Listen on all interfaces
 SERVER_CAPTURE_RATE = 24     # Streaming FPS
 JPEG_QUALITY = 75         # Image quality
 HEADLESS_RES = (640, 480)   # Resolution for the virtual screen
-HEADLESS_BACKEND = "egl"      # or "osmesa"
+HEADLESS_BACKEND = "egl"      # "egl" or "osmesa"
 # Streaming / JPEG controls
 STREAM_SHARPEN_AMOUNT = 0.5    # 0.0 = off
 STREAM_SHARPEN_RADIUS = .5
