@@ -10,32 +10,40 @@ html, body {
 
 /* Hide cursor when idle (no UI) */
 body.no-cursor,
-body.no-cursor * {
-  cursor: none !important;
-}
+body.no-cursor * { cursor: none !important; }
 
-/* Stage centers the video, no scrollbars */
+/* Stage centers the video and clips overflow */
 .stage {
   position: fixed;
   inset: 0;
   display: grid;
   place-items: center;
-  overflow: hidden;
+  overflow: hidden;          /* critical: clip any transform overflow */
   background: #000;
 }
 
-/* Video fills viewport, preserves AR; switch between contain/cover */
+/* Video always sized to viewport box; object-fit handles cover/contain */
 #video {
-  width: 100vw;
+  width: 100vw;              /* keep the layout box = viewport */
   height: 100vh;
   display: block;
-  object-fit: contain;          /* default via body.contain */
+  object-fit: contain;       /* toggled by body class below */
+  object-position: center;
   background: #000;
+  transform-origin: center center;
 }
-body.cover  #video { object-fit: cover;  }
+
+/* Fit modes */
+body.cover   #video { object-fit: cover;   }
 body.contain #video { object-fit: contain; }
 
-/* Toolbar: quick fade in/out */
+/* Rotation: rotate only; DO NOT swap width/height */
+body.rot0   #video { transform: rotate(0deg); }
+body.rot90  #video { transform: rotate(90deg); }
+body.rot180 #video { transform: rotate(180deg); }
+body.rot270 #video { transform: rotate(270deg); }
+
+/* Toolbar: fast fade in/out */
 .ui {
   position: fixed;
   right: 12px;
@@ -43,8 +51,8 @@ body.contain #video { object-fit: contain; }
   display: flex;
   gap: 8px;
   opacity: 0;
-  pointer-events: none;              /* ignore clicks when hidden */
-  transition: opacity .12s linear;   /* fast fade */
+  pointer-events: none;
+  transition: opacity .12s linear;
   z-index: 10;
 }
 .ui-visible .ui {
@@ -79,7 +87,7 @@ body.contain #video { object-fit: contain; }
   border: 1px solid rgba(255,255,255,.15);
 }
 
-/* Mobile viewport quirk fix */
+/* Mobile viewport quirk fix (optional, harmless fallback) */
 @supports (height: 100svh) {
   #video { height: 100svh; }
 }
