@@ -9,3 +9,5 @@ PyOpenGl
 psutil
 glfw
 moderngl
+flask
+psutil
