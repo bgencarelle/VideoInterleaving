@@ -288,9 +288,9 @@ def run_display(clock_source=CLOCK_MODE):
             if monitor:
                 monitor.record_load_error(scheduled_index, e)
 
-    #max_workers = min(6, (os.cpu_count() or 1))
+    cpu_count = os.cpu_count() or 1
+    max_workers = 1 if cpu_count <= 2 else min(3, cpu_count)
 
-    max_workers = 3
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # schedule first preload
         if index == 0:
