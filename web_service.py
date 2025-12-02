@@ -52,4 +52,3 @@ def start_server():
     host = getattr(settings, 'STREAM_HOST', '127.0.0.1')
     print(f"Video Stream active: http://{host}:{port}")
     app.run(host=host, port=port, threaded=True, debug=False, use_reloader=False)
-g
