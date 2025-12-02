@@ -1,44 +1,82 @@
 """
 renderer.py – ModernGL rendering for main and float images (textured quad)
+Single-pass compositing, tuned for llvmpipe / CPU‐rendered GL.
 """
-import moderngl
-import numpy as np
+
 import math
+import numpy as np
+import moderngl
 from settings import ENABLE_SRGB_FRAMEBUFFER, GAMMA_CORRECTION_ENABLED
 
-# ModernGL context and objects
-ctx: moderngl.Context | None = None
-prog: moderngl.Program | None = None
-vao: moderngl.VertexArray | None = None
-vbo: moderngl.Buffer | None = None
+# ModernGL context and objects (initialized in initialize())
+ctx = None            # type: ignore[assignment]
+prog = None           # type: ignore[assignment]
+vao = None            # type: ignore[assignment]
+vbo = None            # type: ignore[assignment]
 
 # Transformation parameters (set via display_manager or elsewhere)
 _fs_scale: float = 1.0
 _fs_offset_x: float = 0.0
 _fs_offset_y: float = 0.0
-_image_size: tuple[int, int] = (0, 0)   # original image (width, height)
+_image_size: tuple[int, int] = (0, 0)   # (width, height)
 _rotation_angle: float = 0.0
 _mirror_mode: int = 0
+
 # Viewport / FBO size (for headless aspect-correct quad)
 _viewport_size: tuple[int, int] = (0, 0)
 
+# Cached quad data & dirty flag (avoid recomputing every frame)
+_quad_data: np.ndarray | None = None
+_quad_dirty: bool = True
+
+# Cached background clear color in linear space
+_bg_linear_color: tuple[float, float, float] | None = None
+_bg_linear_src: tuple[int, int, int] | None = None
+
+
+def _update_bg_linear(background_color: tuple[int, int, int]) -> tuple[float, float, float]:
+    """
+    Cache the gamma-corrected background color so we don't redo pow()
+    in Python for every frame.
+    """
+    global _bg_linear_color, _bg_linear_src
+
+    if _bg_linear_src == background_color and _bg_linear_color is not None:
+        return _bg_linear_color
+
+    def srgb_to_linear_component(c: int) -> float:
+        return pow(c / 255.0, 2.2)
+
+    if GAMMA_CORRECTION_ENABLED or ENABLE_SRGB_FRAMEBUFFER:
+        _bg_linear_color = tuple(srgb_to_linear_component(c) for c in background_color)
+    else:
+        _bg_linear_color = (
+            background_color[0] / 255.0,
+            background_color[1] / 255.0,
+            background_color[2] / 255.0,
+        )
+
+    _bg_linear_src = background_color
+    return _bg_linear_color
+
+
 def set_viewport_size(width: int, height: int) -> None:
     """Record the viewport (FBO or window) size and set GL viewport."""
-    global _viewport_size
+    global _viewport_size, _quad_dirty
     _viewport_size = (width, height)
+    _quad_dirty = True  # geometry depends on viewport
     if ctx is not None:
         ctx.viewport = (0, 0, width, height)
 
 
 def initialize(gl_context: moderngl.Context) -> None:
-    """Initialize ModernGL shaders, buffer, MVP, and blending state."""
+    """Initialize ModernGL shaders, buffer, MVP, and compositing state."""
     global ctx, prog, vao, vbo
     ctx = gl_context
 
     is_gles = ctx.version_code < 320  # GL ES typically reports < 320
 
     if is_gles:
-        # GLSL ES 3.10 compatible shaders
         vertex_src = """
             #version 310 es
             precision mediump float;
@@ -55,27 +93,44 @@ def initialize(gl_context: moderngl.Context) -> None:
             fragment_src = """
                 #version 310 es
                 precision mediump float;
-                uniform sampler2D texture0;
+                uniform sampler2D texture_main;
+                uniform sampler2D texture_float;
+                uniform vec3 u_bgColor;
                 in vec2 v_texcoord;
                 out vec4 fragColor;
                 void main() {
-                    vec4 texColor = texture(texture0, v_texcoord);
-                    fragColor = vec4(pow(texColor.rgb, vec3(2.2)), texColor.a);
+                    vec4 mainColor  = texture(texture_main,  v_texcoord);
+                    vec4 floatColor = texture(texture_float, v_texcoord);
+
+                    // background -> main(alpha) -> float(alpha)
+                    vec3 color = mix(u_bgColor, mainColor.rgb,  mainColor.a);
+                    color = mix(color, floatColor.rgb, floatColor.a);
+
+                    // apply gamma to final color like old path
+                    color = pow(color, vec3(2.2));
+                    fragColor = vec4(color, 1.0);
                 }
             """
         else:
             fragment_src = """
                 #version 310 es
                 precision mediump float;
-                uniform sampler2D texture0;
+                uniform sampler2D texture_main;
+                uniform sampler2D texture_float;
+                uniform vec3 u_bgColor;
                 in vec2 v_texcoord;
                 out vec4 fragColor;
                 void main() {
-                    fragColor = texture(texture0, v_texcoord);
+                    vec4 mainColor  = texture(texture_main,  v_texcoord);
+                    vec4 floatColor = texture(texture_float, v_texcoord);
+
+                    vec3 color = mix(u_bgColor, mainColor.rgb,  mainColor.a);
+                    color = mix(color, floatColor.rgb, floatColor.a);
+
+                    fragColor = vec4(color, 1.0);
                 }
             """
     else:
-        # Desktop GLSL 3.30 shaders
         vertex_src = """
             #version 330 core
             in vec2 position;
@@ -90,39 +145,61 @@ def initialize(gl_context: moderngl.Context) -> None:
         if GAMMA_CORRECTION_ENABLED or ENABLE_SRGB_FRAMEBUFFER:
             fragment_src = """
                 #version 330 core
-                uniform sampler2D texture0;
+                uniform sampler2D texture_main;
+                uniform sampler2D texture_float;
+                uniform vec3 u_bgColor;
                 in vec2 v_texcoord;
                 out vec4 fragColor;
                 void main() {
-                    vec4 texColor = texture(texture0, v_texcoord);
-                    fragColor = vec4(pow(texColor.rgb, vec3(2.2)), texColor.a);
+                    vec4 mainColor  = texture(texture_main,  v_texcoord);
+                    vec4 floatColor = texture(texture_float, v_texcoord);
+
+                    vec3 color = mix(u_bgColor, mainColor.rgb,  mainColor.a);
+                    color = mix(color, floatColor.rgb, floatColor.a);
+
+                    color = pow(color, vec3(2.2));
+                    fragColor = vec4(color, 1.0);
                 }
             """
         else:
             fragment_src = """
                 #version 330 core
-                uniform sampler2D texture0;
+                uniform sampler2D texture_main;
+                uniform sampler2D texture_float;
+                uniform vec3 u_bgColor;
                 in vec2 v_texcoord;
                 out vec4 fragColor;
                 void main() {
-                    fragColor = texture(texture0, v_texcoord);
+                    vec4 mainColor  = texture(texture_main,  v_texcoord);
+                    vec4 floatColor = texture(texture_float, v_texcoord);
+
+                    vec3 color = mix(u_bgColor, mainColor.rgb,  mainColor.a);
+                    color = mix(color, floatColor.rgb, floatColor.a);
+
+                    fragColor = vec4(color, 1.0);
                 }
             """
 
     prog = ctx.program(vertex_shader=vertex_src, fragment_shader=fragment_src)
 
+    # Small VBO; we overwrite it with quad vertices each time the quad changes.
     vbo = ctx.buffer(reserve=64)
-    vao = ctx.vertex_array(prog, [(vbo, '2f 2f', 'position', 'texcoord')])
+    vao = ctx.vertex_array(prog, [(vbo, "2f 2f", "position", "texcoord")])
 
     # Default MVP = identity so clip-space positions “just work”
     mvp = np.eye(4, dtype="f4")
     prog["u_MVP"].write(mvp.T.tobytes())
 
-    ctx.enable(moderngl.BLEND)
-    ctx.blend = (
-        moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA,
-        moderngl.ONE, moderngl.ONE_MINUS_SRC_ALPHA
-    )
+    # Single-pass shader does its own layering; GL blending not needed
+    ctx.disable(moderngl.BLEND)
+
+    # Bind samplers to texture units 0 and 1
+    prog["texture_main"].value = 0
+    prog["texture_float"].value = 1
+
+    # Initialize bg color uniform to black (will be updated per-frame)
+    if "u_bgColor" in prog:
+        prog["u_bgColor"].value = (0.0, 0.0, 0.0)
 
 
 def set_transform_parameters(fs_scale: float,
@@ -131,14 +208,18 @@ def set_transform_parameters(fs_scale: float,
                              image_size: tuple[int, int],
                              rotation_angle: float,
                              mirror_mode: int) -> None:
-    """Update transformation parameters used for rendering (scale, offsets, etc.)."""
-    global _fs_scale, _fs_offset_x, _fs_offset_y, _image_size, _rotation_angle, _mirror_mode
+    """
+    Update transformation parameters used for rendering (scale, offsets, etc.).
+    Called from display_manager / image_display when layout changes.
+    """
+    global _fs_scale, _fs_offset_x, _fs_offset_y, _image_size, _rotation_angle, _mirror_mode, _quad_dirty
     _fs_scale = fs_scale
     _fs_offset_x = fs_offset_x
     _fs_offset_y = fs_offset_y
     _image_size = image_size
     _rotation_angle = rotation_angle
     _mirror_mode = mirror_mode
+    _quad_dirty = True  # geometry depends on these
 
 
 def update_mvp(mvp_matrix: np.ndarray) -> None:
@@ -150,53 +231,46 @@ def update_mvp(mvp_matrix: np.ndarray) -> None:
 def create_texture(image: np.ndarray) -> moderngl.Texture:
     """Create a new GPU texture from a NumPy RGBA image array."""
     h, w = image.shape[0], image.shape[1]
-    texture = ctx.texture((w, h), 4, data=image.tobytes())
-    texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
-    texture.repeat_x = False
-    texture.repeat_y = False
-    return texture
+    tex = ctx.texture((w, h), 4, data=image.tobytes())
+    tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+    tex.repeat_x = False
+    tex.repeat_y = False
+    return tex
 
 
 def update_texture(texture: moderngl.Texture, new_image: np.ndarray) -> moderngl.Texture:
     """Update an existing texture with a new image (recreate if dimensions differ)."""
     new_h, new_w = new_image.shape[0], new_image.shape[1]
     if (new_w, new_h) != texture.size:
-        # Size changed: release old texture and create a new one
         texture.release()
-        texture = ctx.texture((new_w, new_h), 4, data=new_image.tobytes())
-        texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
-        texture.repeat_x = False
-        texture.repeat_y = False
+        tex = ctx.texture((new_w, new_h), 4, data=new_image.tobytes())
+        tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        tex.repeat_x = False
+        tex.repeat_y = False
+        return tex
     else:
-        # Same size: just update the pixel data
         texture.write(new_image.tobytes())
-    return texture
+        return texture
 
 
 def compute_transformed_quad() -> np.ndarray:
     """
     Compute the positions and texture coordinates of the quad.
 
-    Two modes:
+    Headless mode (viewport known):
+        - Build aspect-correct quad in clip space [-1,1]x[-1,1].
 
-    - Headless / FBO mode (when _viewport_size != (0,0)):
-        Build a clip-space quad in [-1,1]x[-1,1], scaled to preserve
-        the image aspect ratio inside the viewport. Background color
-        fills the letterbox/pillarbox region.
-
-    - Local / legacy mode (when _viewport_size == (0,0)):
-        Use the original pixel-space transform pipeline driven by
-        _fs_scale / offsets / rotation and expect an MVP matrix to be
-        provided via update_mvp().
+    Legacy mode (viewport == (0,0)):
+        - Use original pixel-space pipeline with rotation/scale/offset.
     """
+    global _quad_data
 
     view_w, view_h = _viewport_size
 
-    # --- Headless aspect-correct path (viewport known) ----------------------
+    # --- Headless aspect-correct path (viewport known) ---
     if view_w > 0 and view_h > 0:
         img_w, img_h = _image_size
 
-        # If we somehow don't know the image size, just assume square.
         if img_w <= 0 or img_h <= 0:
             r_tex = 1.0
         else:
@@ -204,20 +278,14 @@ def compute_transformed_quad() -> np.ndarray:
 
         r_view = view_w / view_h
 
-        # Fit image inside viewport, preserving aspect:
-        # - If texture is wider: full width, letterbox top/bottom.
-        # - If texture is taller: full height, pillarbox left/right.
         if r_tex > 0 and r_view > 0:
             if r_tex > r_view:
-                # Wider than viewport
                 x_scale = 1.0
                 y_scale = r_view / r_tex
             else:
-                # Taller than viewport
                 y_scale = 1.0
                 x_scale = r_tex / r_view
         else:
-            # Degenerate: just show full screen
             x_scale = 1.0
             y_scale = 1.0
 
@@ -236,11 +304,11 @@ def compute_transformed_quad() -> np.ndarray:
         data = []
         for (px, py), (tu, tv) in zip(positions, tex_coords):
             data += [px, py, tu, tv]
-        return np.array(data, dtype=np.float32)
+        _quad_data = np.array(data, dtype=np.float32)
+        return _quad_data
 
-    # --- Legacy pixel-space path (local window, using MVP) ------------------
+    # --- Legacy pixel-space path (local window, using MVP) ---
     w, h = _image_size
-    # If we still don't know the image size here, just use full-screen quad.
     if w == 0 or h == 0:
         if _mirror_mode:
             tex_coords = [(1.0, 1.0), (0.0, 1.0), (0.0, 0.0), (1.0, 0.0)]
@@ -255,9 +323,9 @@ def compute_transformed_quad() -> np.ndarray:
         data = []
         for (px, py), (tu, tv) in zip(positions, tex_coords):
             data += [px, py, tu, tv]
-        return np.array(data, dtype=np.float32)
+        _quad_data = np.array(data, dtype=np.float32)
+        return _quad_data
 
-    # Original pixel-space logic
     w_scaled = w * _fs_scale
     h_scaled = h * _fs_scale
     if _rotation_angle % 180 == 90:
@@ -287,7 +355,8 @@ def compute_transformed_quad() -> np.ndarray:
     data = []
     for (px, py), (tu, tv) in zip(final_positions, tex_coords):
         data += [px, py, tu, tv]
-    return np.array(data, dtype=np.float32)
+    _quad_data = np.array(data, dtype=np.float32)
+    return _quad_data
 
 
 def overlay_images_single_pass(main_texture: moderngl.Texture,
@@ -300,8 +369,16 @@ def overlay_images_single_pass(main_texture: moderngl.Texture,
     """
     global _quad_dirty
 
-    # Clear using cached linear bg color
+    # If initialize() hasn't run, do nothing (defensive).
+    if ctx is None or prog is None or vao is None or vbo is None:
+        return
+
+    # Compute / cache background in linear or normalized space
     bg_linear = _update_bg_linear(background_color)
+
+    # Pass background to shader; clear as well (mostly cosmetic, quad covers screen).
+    if "u_bgColor" in prog:
+        prog["u_bgColor"].value = bg_linear
     ctx.clear(*bg_linear)
 
     # Update quad data only when something changed
