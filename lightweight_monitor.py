@@ -147,7 +147,7 @@ def _serve():
     print(f"🛰️  Starting monitor on port {web_port}")
     while True:
         try:
-            with ReusableTCPServer(("", web_port), MonitorHTTPRequestHandler) as httpd:
+            with ReusableTCPServer(("127.0.0.1", web_port), MonitorHTTPRequestHandler) as httpd:
                 httpd.serve_forever()
         except Exception:
             # Capture and store the traceback

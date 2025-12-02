@@ -49,6 +49,7 @@ def video_feed():
 
 def start_server():
     port = getattr(settings, 'STREAM_PORT', 8080)
-    host = getattr(settings, 'STREAM_HOST', '0.0.0.0')
+    host = getattr(settings, 'STREAM_HOST', '127.0.0.1')
     print(f"Video Stream active: http://{host}:{port}")
     app.run(host=host, port=port, threaded=True, debug=False, use_reloader=False)
+g
