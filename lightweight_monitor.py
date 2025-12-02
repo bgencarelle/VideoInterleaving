@@ -67,8 +67,11 @@ monitor_data = {
 }
 
 HTML_TEMPLATE = """
+<!doctype html>
 <html>
 <head>
+  <meta charset="utf-8">
+  <title>Interleaving Project Live Playback Monitor</title>
   <style>
     body { background:#111; color:#0f0; font-family:monospace; padding:2em; }
     .label{color:#888;margin-right:1em;}
@@ -77,28 +80,38 @@ HTML_TEMPLATE = """
 </head>
 <body>
   <h1>Interleaving Project Live Playback Monitor</h1>
+
+  <div><a href="log">click for error log</a></div>
+  <div id="monitor_data"></div>
+
   <script>
-    function updateMonitor(){
-      fetch('/data')
-        .then(r => r.json())
-        .then(d => {
-          let html = '';
-          for(const [k, v] of Object.entries(d)){
-            html += `<div><span class='label'>${k}:</span>${v}</div>`;
-          }
-          document.getElementById('monitor_data').innerHTML = html;
-        })
-        .catch(console.error);
+    function render(d){
+      let html = '';
+      for (const [k, v] of Object.entries(d)) {
+        html += `<div><span class='label'>${k}:</span>${v}</div>`;
+      }
+      const el = document.getElementById('monitor_data');
+      if (el) el.innerHTML = html;
     }
-    setInterval(updateMonitor, 100);
-    updateMonitor();
+
+    function poll(){
+      // RELATIVE path so /monitor/ -> /monitor/data
+      fetch('data', { cache: 'no-store' })
+        .then(r => r.json())
+        .then(render)
+        .catch(() => {});
+    }
+
+    // start after DOM is ready; 10 Hz is plenty
+    document.addEventListener('DOMContentLoaded', () => {
+      poll();
+      setInterval(poll, 100);
+    });
   </script>
 </body>
-    <br>
-  <div><a href="/log">click for error log</a></div>
-  <div id='monitor_data'></div>
 </html>
 """
+
 
 # Compute normalized Shannon entropy (0.0–1.0)
 def _entropy(counts):
@@ -121,8 +134,10 @@ class MonitorHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
         elif self.path == "/data":
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
+            self.send_header('Cache-Control', 'no-store')
             self.end_headers()
             self.wfile.write(json.dumps(monitor_data).encode('utf-8'))
+
         elif self.path == "/log":
             try:
                 with open("runtime.log", "rb") as log_file:
