@@ -11,3 +11,4 @@ glfw
 moderngl
 flask
 psutil
+pyturbojpeg
