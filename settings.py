@@ -15,7 +15,7 @@ VSYNC = True  # or False, depending on your preference
 
 # Frames per Second and Images Per Second (IPS)
 IPS = 30
-FPS = 30
+FPS = 24
 
 # Buffer settings: The BUFFER_SIZE is derived from IPS (e.g., 15 if IPS == 60)
 TOLERANCE = 10
@@ -157,10 +157,10 @@ AUDIO_OCTAVE_SPAN = 3        # how many octaves the index can walk through
 
 # --- SERVER MODE CONFIGURATION ---
 SERVER_MODE = True         # Enable headless streaming
-HEADLESS_USE_GL = True    # new: disable ModernGL headless on VPS
+HEADLESS_USE_GL = True   # new: disable ModernGL headless on VPS
 STREAM_PORT = 8080           # Port for video stream (distinct from monitor port 1978)
 STREAM_HOST = '0.0.0.0'      # Listen on all interfaces
-SERVER_CAPTURE_RATE = 25     # Streaming FPS
+SERVER_CAPTURE_RATE = 24     # Streaming FPS
 JPEG_QUALITY = 85         # Image quality
-HEADLESS_RES = (512, 640)   # Resolution for the virtual screen
-HEADLESS_BACKEND = "egl"      # "egl" or "osmesa"
+HEADLESS_RES = (480, 640)   # Resolution for the virtual screen
+#HEADLESS_BACKEND = "cgl"      # "egl" or "osmesa"
