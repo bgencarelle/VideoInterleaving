@@ -290,10 +290,10 @@ def compute_transformed_quad() -> np.ndarray:
             y_scale = 1.0
 
         positions = [
-            (-x_scale, -y_scale),
-            ( x_scale, -y_scale),
-            ( x_scale,  y_scale),
-            (-x_scale,  y_scale),
+            (-x_scale, y_scale),
+            ( x_scale, y_scale),
+            ( x_scale,  -y_scale),
+            (-x_scale,  -y_scale),
         ]
 
         if _mirror_mode:
@@ -315,10 +315,10 @@ def compute_transformed_quad() -> np.ndarray:
         else:
             tex_coords = [(0.0, 1.0), (1.0, 1.0), (1.0, 0.0), (0.0, 0.0)]
         positions = [
-            (-1.0, -1.0),
-            ( 1.0, -1.0),
-            ( 1.0,  1.0),
-            (-1.0,  1.0),
+            (-1.0, 1.0),
+            ( 1.0, 1.0),
+            ( 1.0,  -1.0),
+            (-1.0,  -1.0),
         ]
         data = []
         for (px, py), (tu, tv) in zip(positions, tex_coords):

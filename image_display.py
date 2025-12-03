@@ -359,7 +359,7 @@ def run_display(clock_source=CLOCK_MODE):
                             raw = window.fbo.read(components=3)  # RGB, bottom-up
                             w, h = window.size
                             frame = np.frombuffer(raw, dtype=np.uint8).reshape((h, w, 3))
-                            frame = cv2.cvtColor(np.flipud(frame), cv2.COLOR_RGB2BGR)
+                            #frame = cv2.cvtColor(np.flipud(frame), cv2.COLOR_RGB2BGR)
                         else:
                             # CPU fallback
                             frame = cpu_composite_frame(current_main_img, current_float_img)
@@ -370,7 +370,7 @@ def run_display(clock_source=CLOCK_MODE):
                             encoded = jpeg.encode(
                                 frame_to_encode,
                                 quality=getattr(settings, "JPEG_QUALITY", 80),
-                               # subsampling=1  # tweak / test
+                                pixel_format=0
                             )
                             exchange.set_frame(encoded)
 
