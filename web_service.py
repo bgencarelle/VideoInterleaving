@@ -32,7 +32,7 @@ def generate_mjpeg_stream(client_id: str):
     print(f"[STREAM] MJPEG client connected id={client_id}")
     try:
         while True:
-            time.sleep(interval)
+            #time.sleep(interval)
             frame_data = exchange.get_frame()
             if not frame_data:
                 continue
