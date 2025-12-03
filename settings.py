@@ -15,7 +15,7 @@ VSYNC = True  # or False, depending on your preference
 
 # Frames per Second and Images Per Second (IPS)
 IPS = 30
-FPS = 30
+FPS = 25
 
 # Buffer settings: The BUFFER_SIZE is derived from IPS (e.g., 15 if IPS == 60)
 TOLERANCE = 10
@@ -163,4 +163,4 @@ STREAM_HOST = '0.0.0.0'      # Listen on all interfaces
 SERVER_CAPTURE_RATE = 24     # Streaming FPS
 JPEG_QUALITY = 85         # Image quality
 HEADLESS_RES = (480, 640)   # Resolution for the virtual screen
-#HEADLESS_BACKEND = "cgl"      # "egl" or "osmesa"
+HEADLESS_BACKEND = "egl"      # "egl" or "osmesa"
