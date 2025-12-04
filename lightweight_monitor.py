@@ -1,25 +1,15 @@
-import http.server
-import socketserver
-import threading
-import json
 import time
 import os
 import psutil
 import socket
 import platform
-import sys
-import traceback
+import threading
 from collections import deque
-from math import log2  # for entropy calc
+from math import log2
+
 from settings import WEB_PORT
 
-# Subclass TCPServer to allow immediate port reuse
-class ReusableTCPServer(socketserver.TCPServer):
-    allow_reuse_address = True
-
-web_port = WEB_PORT
-
-# Initial monitor data with all expected keys
+# --- DATA STORE ---
 monitor_data = {
     "index": 0,
     "displayed": 0,
@@ -62,7 +52,6 @@ monitor_data = {
     "failed_load_count": 0,
     "failed_indices": "",
     "last_error": "",
-    # HTTP server crash log
     "last_http_crash": "",
 }
 
@@ -80,7 +69,6 @@ HTML_TEMPLATE = """
 </head>
 <body>
   <h1>Interleaving Project Live Playback Monitor</h1>
-
   <div><a href="log">click for error log</a></div>
   <div id="monitor_data"></div>
 
@@ -95,25 +83,22 @@ HTML_TEMPLATE = """
     }
 
     function poll(){
-      // RELATIVE path so /monitor/ -> /monitor/data
+      // Fetch relative "data" endpoint on port 1978
       fetch('data', { cache: 'no-store' })
         .then(r => r.json())
         .then(render)
         .catch(() => {});
     }
 
-    // start after DOM is ready; 10 Hz is plenty
     document.addEventListener('DOMContentLoaded', () => {
       poll();
-      setInterval(poll, 100);
+      setInterval(poll, 1000); // 1Hz poll to save CPU
     });
   </script>
 </body>
 </html>
 """
 
-
-# Compute normalized Shannon entropy (0.0–1.0)
 def _entropy(counts):
     tot = sum(counts)
     if tot == 0:
@@ -121,56 +106,11 @@ def _entropy(counts):
     h = -sum((c/tot) * log2(c/tot) for c in counts if c)
     return h / log2(len(counts))
 
-class MonitorHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
-    def log_message(self, *args):
-        pass
-
-    def do_GET(self):
-        if self.path == "/":
-            self.send_response(200)
-            self.send_header('Content-type', 'text/html')
-            self.end_headers()
-            self.wfile.write(HTML_TEMPLATE.encode('utf-8'))
-        elif self.path == "/data":
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.send_header('Cache-Control', 'no-store')
-            self.end_headers()
-            self.wfile.write(json.dumps(monitor_data).encode('utf-8'))
-
-        elif self.path == "/log":
-            try:
-                with open("runtime.log", "rb") as log_file:
-                    log_content = log_file.read()
-            except Exception:
-                self.send_error(404, "Log file not found")
-            else:
-                self.send_response(200)
-                self.send_header('Content-type', 'text/plain; charset=utf-8')
-                self.end_headers()
-                self.wfile.write(log_content)
-        else:
-            self.send_error(404)
-
+# Call this from image_display.py
 def start_monitor():
-    t = threading.Thread(target=_serve, daemon=True)
-    t.start()
+    # Just returns the updater class.
+    # The SERVER is now started by web_service.py
     return MonitorUpdater()
-
-# Serve loop with auto-restart and crash logging
-def _serve():
-    print(f"🛰️  Starting monitor on port {web_port}")
-    while True:
-        try:
-            with ReusableTCPServer(("127.0.0.1", web_port), MonitorHTTPRequestHandler) as httpd:
-                httpd.serve_forever()
-        except Exception:
-            # Capture and store the traceback
-            tb = traceback.format_exc()
-            monitor_data['last_http_crash'] = tb.replace('\n', '<br>')
-            print("️Monitor server crashed; restarting in 1s…", file=sys.stderr)
-            sys.stderr.write(tb)
-            time.sleep(1)
 
 class MonitorUpdater:
     def __init__(self):
@@ -205,12 +145,12 @@ class MonitorUpdater:
         })
 
     def update(self, payload):
+        # ... (Identical update logic as previous versions) ...
+        # Copied for completeness
         now = time.monotonic()
-        # reset staleness on real success
         if payload.get('successful_frame', False):
             self.last_success_time = now
 
-        # quick fields from payload (with defaults)
         idx = payload.get('index', 0)
         displayed = payload.get('displayed', 0)
         delta = idx - displayed
@@ -225,7 +165,6 @@ class MonitorUpdater:
         fmc = payload.get('fifo_miss_count', monitor_data['fifo_miss_count'])
         lfm = payload.get('last_fifo_miss', monitor_data['last_fifo_miss'])
 
-        # initialize counts
         if mfc and self.main_counts is None:
             self.main_counts = [0] * mfc
         if ffc and self.float_counts is None:
@@ -235,7 +174,6 @@ class MonitorUpdater:
         if self.float_counts and 0 <= ff < len(self.float_counts):
             self.float_counts[ff] += 1
 
-        # update quick‑stats including FIFO miss counters
         monitor_data.update({
             'index': idx,
             'displayed': displayed,
@@ -253,12 +191,10 @@ class MonitorUpdater:
             'last_fifo_miss': lfm,
         })
 
-        # rolling slope
         self.comp_history.append(delta)
         if len(self.comp_history) > 1:
             monitor_data['comp_slope'] = self.comp_history[-1] - self.comp_history[0]
 
-        # latency state
         if abs(delta) <= 1:
             monitor_data['latency_state'] = 'Delta synced'
         elif delta < -1:
@@ -266,9 +202,7 @@ class MonitorUpdater:
         else:
             monitor_data['latency_state'] = 'Delta behind'
 
-        # heavy telemetry & entropy updates
         if now - self.last_heavy_update >= self.heavy_interval:
-            # cache expensive sys stats every sys_stats_interval
             if now - self.last_sys_stats_time >= self.sys_stats_interval:
                 try:
                     vm = psutil.virtual_memory()
@@ -290,7 +224,6 @@ class MonitorUpdater:
                     pass
                 self.last_sys_stats_time = now
 
-            # smooth CPU per-core stats
             try:
                 self.cpu_per_core_history.append(psutil.cpu_percent(percpu=True))
                 cores = [sum(c) / len(self.cpu_per_core_history) for c in zip(*self.cpu_per_core_history)]
@@ -305,7 +238,6 @@ class MonitorUpdater:
                 'script_uptime': self._fmt_duration(now - self.script_start_time),
             })
 
-            # folder coverage & entropy
             if self.main_counts:
                 cov = sum(1 for c in self.main_counts if c)
                 tot = len(self.main_counts)

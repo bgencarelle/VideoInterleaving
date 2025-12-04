@@ -24,10 +24,12 @@ body.no-cursor * { cursor: none !important; }
 
 /* Video always sized to viewport box; object-fit handles cover/contain */
 #video {
-  width: 100vw;              /* keep the layout box = viewport */
+  width: 100vw;
   height: 100vh;
+  max-width: 100vw;
+  max-height: 100vh;
   display: block;
-  object-fit: contain;       /* toggled by body class below */
+  object-fit: contain;
   object-position: center;
   background: #000;
   transform-origin: center center;
@@ -37,11 +39,29 @@ body.no-cursor * { cursor: none !important; }
 body.cover   #video { object-fit: cover;   }
 body.contain #video { object-fit: contain; }
 
-/* Rotation: rotate only; DO NOT swap width/height */
-body.rot0   #video { transform: rotate(0deg); }
-body.rot90  #video { transform: rotate(90deg); }
+/* --- ROTATION LOGIC FIX --- */
+/* When 0 or 180, width matches viewport width */
+body.rot0   #video,
+body.rot180 #video {
+  width: 100vw;
+  height: 100vh;
+  max-width: 100vw;
+  max-height: 100vh;
+  transform: rotate(0deg);
+}
 body.rot180 #video { transform: rotate(180deg); }
+
+/* When 90 or 270, SWAP dimensions so the 'height' fills the 'width' */
+body.rot90  #video,
+body.rot270 #video {
+  width: 100vh;      /* Width becomes viewport height */
+  height: 100vw;     /* Height becomes viewport width */
+  max-width: 100vh;
+  max-height: 100vw;
+}
+body.rot90  #video { transform: rotate(90deg); }
 body.rot270 #video { transform: rotate(270deg); }
+/* -------------------------- */
 
 /* Toolbar: fast fade in/out */
 .ui {
@@ -87,7 +107,8 @@ body.rot270 #video { transform: rotate(270deg); }
   border: 1px solid rgba(255,255,255,.15);
 }
 
-/* Mobile viewport quirk fix (optional, harmless fallback) */
+/* Mobile viewport quirk fix */
 @supports (height: 100svh) {
-  #video { height: 100svh; }
+  body.rot0   #video, body.rot180 #video { height: 100svh; max-height: 100svh; }
+  body.rot90  #video, body.rot270 #video { width: 100svh; max-width: 100svh; }
 }
