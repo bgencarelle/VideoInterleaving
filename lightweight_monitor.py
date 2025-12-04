@@ -92,7 +92,7 @@ HTML_TEMPLATE = """
 
     document.addEventListener('DOMContentLoaded', () => {
       poll();
-      setInterval(poll, 1000); // 1Hz poll to save CPU
+      setInterval(poll, 100); // 1Hz poll to save CPU
     });
   </script>
 </body>
