@@ -153,8 +153,8 @@ def cpu_composite_frame(main_img, float_img):
 
     # Convert back to uint8 BGR for JPEG encoding
     out_rgb = np.clip(base, 0, 255).astype(np.uint8)
-    out_bgr = out_rgb[..., ::-1]  # RGB -> BGR
-    return out_bgr
+    #out_bgr = out_rgb[..., ::-1]  # RGB -> BGR
+    return out_rgb
 
 def run_display(clock_source=CLOCK_MODE):
     state = DisplayState()
