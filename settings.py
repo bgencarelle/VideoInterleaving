@@ -164,3 +164,4 @@ SERVER_CAPTURE_RATE = FPS     # Streaming FPS
 JPEG_QUALITY = 85         # Image quality
 HEADLESS_RES = (480, 640)   # Resolution for the virtual screen
 HEADLESS_BACKEND = "egl"      # "egl" or "osmesa"
+MAX_VIEWERS = 20  # Max simultaneous connections
