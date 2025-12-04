@@ -228,7 +228,7 @@ def run_monitor_server():
 
 
 def run_stream_server():
-    host = getattr(settings, 'STREAM_HOST', '0.0.0.0')
+    host = getattr(settings, 'STREAM_HOST', '127.0.0.1')
     port = getattr(settings, 'STREAM_PORT', 8080)
     print(f"🛰️  Stream active on:  http://{host}:{port}")
     httpd = ThreadedTCPServer((host, port), StreamHandler)
