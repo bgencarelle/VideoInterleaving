@@ -8,13 +8,22 @@ import http.server
 from urllib.parse import urlparse, parse_qs
 import mimetypes
 import os
+import socket  # <--- NEW: Needed for TCP Keepalive options
+
 import settings
 from shared_state import exchange
 from lightweight_monitor import monitor_data, HTML_TEMPLATE
 
-# --- HEARTBEAT STATE (For Stream) ---
-_client_heartbeats = {}
+# --- CONFIGURATION ---
+# Default to 20 viewers if not in settings.py
+MAX_VIEWERS = getattr(settings, 'MAX_VIEWERS', 20)
+
+# --- SAFETY STATE ---
 _hb_lock = threading.Lock()
+_client_heartbeats = {}
+
+# The "Bouncer": Limits concurrent connections to MAX_VIEWERS
+_viewer_semaphore = threading.Semaphore(MAX_VIEWERS)
 
 
 def _set_heartbeat(cid):
@@ -44,22 +53,17 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
         pass  # Silence console logs
 
     def do_GET(self):
-        # Root -> HTML
         if self.path == "/":
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.end_headers()
             self.wfile.write(HTML_TEMPLATE.encode('utf-8'))
-
-        # Data -> JSON
         elif self.path == "/data":
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Cache-Control', 'no-store')
             self.end_headers()
             self.wfile.write(json.dumps(monitor_data).encode('utf-8'))
-
-        # Log -> Text
         elif self.path == "/log":
             try:
                 with open("runtime.log", "rb") as f:
@@ -70,7 +74,6 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(content)
             except Exception:
                 self.send_error(404, "Log not found")
-
         else:
             self.send_error(404)
 
@@ -112,12 +115,9 @@ class StreamHandler(http.server.BaseHTTPRequestHandler):
         # 3. Serve CSS (Static Files)
         elif path.startswith("/static/"):
             try:
-                # Remove leading slash and normalize path (handles windows/linux slashes)
-                # url path: /static/stream.css -> file system: static/stream.css
                 clean_path = path.lstrip('/')
                 clean_path = os.path.normpath(clean_path)
 
-                # Security check: Ensure we are still inside the 'static' folder
                 if not clean_path.startswith("static") or ".." in clean_path:
                     self.send_error(403, "Forbidden")
                     return
@@ -131,28 +131,22 @@ class StreamHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(content)
             except FileNotFoundError:
-                print(f"[HTTP] Static file not found: {clean_path}")
+                # print(f"[HTTP] Static file not found: {clean_path}")
                 self.send_error(404, "File not found")
             except Exception as e:
-                print(f"[HTTP] Error serving static: {e}")
+                # print(f"[HTTP] Error serving static: {e}")
                 self.send_error(500)
 
         # 4. Serve Index HTML
         elif path == "/":
             try:
-                # We simply read and serve the file.
-                # Since we updated index.html to use standard paths,
-                # we don't need any complex string replacement here.
                 with open("templates/index.html", "rb") as f:
                     content = f.read()
-
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
                 self.end_headers()
                 self.wfile.write(content)
             except Exception as e:
-                print(f"[HTTP] Error serving template: {e}")
-                # Fallback if template is missing
                 fallback = b"<html><body style='background:black;'><img src='/video_feed'></body></html>"
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html')
@@ -163,16 +157,43 @@ class StreamHandler(http.server.BaseHTTPRequestHandler):
             self.send_error(404)
 
     def _handle_mjpeg_stream(self, cid):
-        # ... (Keep your existing _handle_mjpeg_stream logic exactly as is) ...
-        # (I am omitting it here to save space, but DO NOT delete it from your file)
-        print(f"[STREAM] Client connected: {cid}")
+        print(f"[STREAM] Client connecting: {cid}")
+
+        # --- SAFETY 1: THE BOUNCER (Semaphore) ---
+        # Check if we have room for another viewer
+        if not _viewer_semaphore.acquire(blocking=False):
+            print(f"[STREAM] Rejected {cid}: Server Full ({MAX_VIEWERS} limit)")
+            self.send_error(503, "Server Full")
+            return
+
+        # If we passed the bouncer, we proceed
         _set_heartbeat(cid)
+
+        # --- SAFETY 2: TCP KEEPALIVE (Kick Zombies) ---
+        # Forces OS to kill connection if client vanishes silently
+        try:
+            self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            # Linux/VPS specific options:
+            # Idle for 1 sec, then check every 1 sec, fail after 5 tries
+            if hasattr(socket, 'TCP_KEEPIDLE'):
+                self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 1)
+            if hasattr(socket, 'TCP_KEEPINTVL'):
+                self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 1)
+            if hasattr(socket, 'TCP_KEEPCNT'):
+                self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 5)
+        except Exception:
+            # Windows might not support all options, which is fine
+            pass
 
         self.send_response(200)
         self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
         self.send_header('Cache-Control', 'no-store')
         self.send_header('Pragma', 'no-cache')
         self.end_headers()
+
+        # Pre-calc headers for performance
+        header_bytes = b'--frame\r\nContent-Type: image/jpeg\r\n\r\n'
+        newline = b'\r\n'
 
         try:
             while True:
@@ -182,18 +203,24 @@ class StreamHandler(http.server.BaseHTTPRequestHandler):
 
                 _set_heartbeat(cid)
 
-                header = b'--frame\r\nContent-Type: image/jpeg\r\n\r\n'
-                self.wfile.write(header)
+                self.wfile.write(header_bytes)
                 self.wfile.write(frame_data)
-                self.wfile.write(b'\r\n')
+                self.wfile.write(newline)
+
         except (BrokenPipeError, ConnectionResetError):
             pass
+        except Exception as e:
+            print(f"[STREAM] Error {cid}: {e}")
         finally:
+            # --- SAFETY 1: RETURN THE TOKEN ---
+            _viewer_semaphore.release()
+
             _clear_heartbeat(cid)
             print(f"[STREAM] Client disconnected: {cid}")
 
+
 def run_monitor_server():
-    host = '127.0.0.1'  # Monitor is usually local/tunneled
+    host = '127.0.0.1'
     port = getattr(settings, 'WEB_PORT', 1978)
     print(f"🛰️  Monitor active on: http://{host}:{port}")
     httpd = ThreadedTCPServer((host, port), MonitorHandler)
@@ -209,11 +236,8 @@ def run_stream_server():
 
 
 def start_server():
-    # We start TWO distinct servers on TWO ports
     t_mon = threading.Thread(target=run_monitor_server, daemon=True, name="MonitorServer")
     t_mon.start()
 
     t_str = threading.Thread(target=run_stream_server, daemon=True, name="StreamServer")
     t_str.start()
-
-    # We don't join threads because the main thread continues to run image_display logic

@@ -116,6 +116,31 @@
     revealUI();
     window.matchMedia('(orientation: portrait)').addEventListener('change', applyAutoFit);
     window.addEventListener('resize', applyAutoFit);
+
+        document.addEventListener("visibilitychange", () => {
+      // Only act if the tab just became visible
+      if (document.visibilityState === "visible") {
+        const img = document.getElementById("video");
+
+        // We add a timestamp (?t=...) to bypass the browser cache
+        // and force a brand new TCP connection to the server.
+        const timestamp = new Date().getTime();
+
+        // Preserve the client ID if present in the URL
+        const urlParams = new URLSearchParams(window.location.search);
+        const currentId = urlParams.get('id');
+
+        let newSrc = "/video_feed?t=" + timestamp;
+        if (currentId) {
+            newSrc += "&id=" + currentId;
+        }
+
+        console.log("Tab woke up - refreshing stream connection...");
+        img.src = newSrc;
+      }
+    });
   </script>
 </body>
 </html>
+
+    // ===== AUTO-RECONNECT ON TAB WAKE =====
