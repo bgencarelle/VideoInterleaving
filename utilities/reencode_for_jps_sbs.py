@@ -5,78 +5,70 @@ import time
 from glob import glob
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
-from turbojpeg import TurboJPEG, TJPF_BGR, TJSAMP_420
-
-# --- Global Instance for Workers ---
-# This ensures we only load the C-library once per CPU Core
-_jpeg = None
 
 
-def init_worker():
-    global _jpeg
-    _jpeg = TurboJPEG()
-
-
-def process_file_fastest(file_path, input_root, output_root, quality=90):
-    global _jpeg
+def process_file_final(file_path, input_root, output_root, quality=90):
     try:
-        # 1. Load Image (Unchanged)
+        # 1. Load Image
+        # IMREAD_UNCHANGED lets us see if it has 3 or 4 channels
         img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
-        if img is None: return False, "Load failed"
+
+        if img is None:
+            return False, "Load failed"
 
         h, w = img.shape[:2]
 
-        # 2. Allocate ONE contiguous block of memory
-        # This is faster than stacking/merging arrays
-        sbs = np.empty((h, w * 2, 3), dtype=np.uint8)
-
-        # 3. Fast C++ Memory Operations
-        # We use OpenCV's C++ backend to write directly into the 'sbs' buffer slices
-
-        # Define views into the target buffer
-        left_view = sbs[:, :w]
-        right_view = sbs[:, w:]
+        # 2. Logic to Normalize to [Color | Alpha]
+        # We need to construct two arrays: 'color_bgr' and 'alpha_bgr'
 
         if img.ndim == 2:
-            # Grayscale -> BGR (Left)
-            cv2.cvtColor(img, cv2.COLOR_GRAY2BGR, dst=left_view)
-            # Solid White (Right)
-            right_view[:] = 255
+            # Case: Grayscale (1 Channel)
+            # Color: Convert Gray -> BGR
+            color_bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            # Alpha: Solid White (Fully Visible)
+            alpha_bgr = np.full((h, w, 3), 255, dtype=np.uint8)
 
         elif img.ndim == 3:
             channels = img.shape[2]
-            if channels == 4:
-                # BGRA
-                # Copy BGR to Left
-                left_view[:] = img[:, :, :3]
 
-                # Copy Alpha to Right (Gray -> BGR)
-                # This is much faster than sbs[:,w:,0]=a; sbs[:,w:,1]=a...
-                cv2.cvtColor(img[:, :, 3], cv2.COLOR_GRAY2BGR, dst=right_view)
+            if channels == 4:
+                # Case: BGRA (Has Transparency)
+                # Split channels (Fast in C++)
+                b, g, r, a = cv2.split(img)
+
+                # Recombine BGR
+                color_bgr = cv2.merge([b, g, r])
+
+                # Recombine Alpha into a 3-channel grayscale BGR image
+                # (We need 3 channels to stack it next to the color image)
+                alpha_bgr = cv2.merge([a, a, a])
 
             elif channels == 3:
-                # BGR
-                left_view[:] = img
-                right_view[:] = 255
+                # Case: BGR (No Transparency)
+                color_bgr = img
+                # Alpha: Solid White
+                alpha_bgr = np.full((h, w, 3), 255, dtype=np.uint8)
+
             else:
-                return False, f"Bad channels: {channels}"
+                return False, f"Unsupported channel count: {channels}"
         else:
-            return False, "Bad dimensions"
+            return False, "Unknown dimensions"
 
-        # 4. Turbo Encode
-        # TJSAMP_420 is the standard JPEG speed/quality balance.
-        # It is significantly faster than 4:4:4.
-        encoded_bytes = _jpeg.encode(sbs, quality=quality, pixel_format=TJPF_BGR, jpeg_subsample=TJSAMP_420)
+        # 3. Stack Side-by-Side (Horizontal)
+        # This creates the [Color | Mask] layout
+        sbs = np.hstack([color_bgr, alpha_bgr])
 
-        # 5. Write to disk
+        # 4. Save using OpenCV (Fast C++ I/O)
         rel_path = os.path.relpath(file_path, input_root)
         rel_path_jpg = os.path.splitext(rel_path)[0] + ".jpg"
         out_path = os.path.join(output_root, rel_path_jpg)
 
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        with open(out_path, "wb") as f:
-            f.write(encoded_bytes)
 
+        # cv2.imwrite is faster because it writes to disk from C++ directly
+        success = cv2.imwrite(out_path, sbs, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+
+        if not success: return False, "Write failed"
         return True, None
 
     except Exception as e:
@@ -84,7 +76,7 @@ def process_file_fastest(file_path, input_root, output_root, quality=90):
 
 
 def main():
-    print("--- Maximum Velocity SBS Converter ---")
+    print("--- Final SBS Converter (Fast I/O + Auto-Alpha) ---")
 
     default_input = "images"
     input_dir = input(f"Enter source folder path [default: {default_input}]: ").strip() or default_input
@@ -93,7 +85,7 @@ def main():
         print("Directory not found.")
         return
 
-    default_output = input_dir + "_sbs_fast"
+    default_output = input_dir + "_sbs"
     output_dir = input(f"Enter output folder path [default: {default_output}]: ").strip() or default_output
 
     q_str = input("Quality (1-100) [default: 90]: ").strip()
@@ -111,10 +103,9 @@ def main():
 
     errors = []
 
-    # Initialize workers with the global TurboJPEG instance
-    with ProcessPoolExecutor(max_workers=cpu_count, initializer=init_worker) as executor:
+    with ProcessPoolExecutor(max_workers=cpu_count) as executor:
         futures = {
-            executor.submit(process_file_fastest, f, input_dir, output_dir, quality): f
+            executor.submit(process_file_final, f, input_dir, output_dir, quality): f
             for f in files
         }
 
