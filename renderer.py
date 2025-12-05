@@ -6,7 +6,9 @@ Single-pass compositing, tuned for llvmpipe / CPU‐rendered GL.
 import math
 import numpy as np
 import moderngl
-from settings import ENABLE_SRGB_FRAMEBUFFER, GAMMA_CORRECTION_ENABLED
+import cv2
+from settings import ENABLE_SRGB_FRAMEBUFFER, GAMMA_CORRECTION_ENABLED, BACKGROUND_COLOR
+
 
 # ModernGL context and objects (initialized in initialize())
 ctx = None            # type: ignore[assignment]
@@ -393,3 +395,96 @@ def overlay_images_single_pass(main_texture: moderngl.Texture,
 
     # Draw single full-screen quad
     vao.render(mode=moderngl.TRIANGLE_FAN)
+
+
+def composite_cpu(main_img, float_img):
+    """
+    CPU compositing that respects BOTH main and float alpha channels,
+    compositing them over BACKGROUND_COLOR.
+    Moved from image_display.py to centralize rendering logic.
+    """
+    # Nothing at all?
+    if main_img is None and float_img is None:
+        return None
+
+    # --- Helper: normalize to (RGB uint16, alpha uint16 or None) ---
+    def to_rgb_alpha(img):
+        if img is None:
+            return None, None
+
+        if img.ndim == 2:
+            # grayscale -> RGB
+            rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB).astype(np.uint16)
+            alpha = None
+        elif img.ndim == 3:
+            if img.shape[2] == 4:
+                # RGBA: keep RGB and per-pixel alpha
+                rgb = img[..., :3].astype(np.uint16)
+                alpha = img[..., 3:4].astype(np.uint16)
+            elif img.shape[2] == 3:
+                # RGB, treat as fully opaque
+                rgb = img.astype(np.uint16)
+                alpha = None
+            else:
+                return None, None  # Invalid shape
+        else:
+            return None, None
+
+        return rgb, alpha
+
+    # Decide the reference size
+    ref = main_img if main_img is not None else float_img
+    h, w = ref.shape[:2]
+
+    # Background color in RGB space
+    bg_r, bg_g, bg_b = BACKGROUND_COLOR
+
+    # Start with background as uint16 RGB
+    base = np.empty((h, w, 3), dtype=np.uint16)
+    base[..., 0] = bg_r
+    base[..., 1] = bg_g
+    base[..., 2] = bg_b
+
+    # Normalize both layers
+    main_rgb, main_a = to_rgb_alpha(main_img)
+    float_rgb, float_a = to_rgb_alpha(float_img)
+
+    # Size mismatch check
+    if main_rgb is not None and float_rgb is not None:
+        if main_rgb.shape[:2] != float_rgb.shape[:2]:
+            float_rgb = None
+            float_a = None
+
+    # Helper: composite "src over dst"
+    def over(dst_rgb16, src_rgb16, alpha):
+        if src_rgb16 is None:
+            return dst_rgb16
+
+        if alpha is None:
+            # Fully opaque source: overwrite
+            # Optimization: No math needed, just copy
+            return src_rgb16
+
+        alpha_arr = alpha
+        inv_alpha = 255 - alpha_arr
+
+        # Math: (src * A + dst * (1-A)) / 255
+        # We use uint16 to prevent overflow before division
+        out = (src_rgb16 * alpha_arr + dst_rgb16 * inv_alpha + 127) // 255
+        return out
+
+    # 1) main over background
+    if main_rgb is not None:
+        base = over(base, main_rgb, main_a)
+
+    # 2) float over that
+    if float_rgb is not None:
+        base = over(base, float_rgb, float_a)
+
+    # Convert back to uint8
+    out_rgb = np.clip(base, 0, 255).astype(np.uint8)
+
+    # NOTE: If your image loader returns RGB, TurboJPEG wants RGB (pixel_format=0).
+    # If your image loader returns BGR (OpenCV standard), TurboJPEG wants BGR (pixel_format=1).
+    # This function returns the same color order as input.
+    return out_rgb
