@@ -9,40 +9,68 @@ from tqdm import tqdm
 
 def process_file(file_path, input_root, output_root, quality=90):
     """
-    Reads a WebP file, extracts color/alpha, stacks them side-by-side,
-    and saves as a high-quality JPEG.
+    Reads a WebP file (RGB, RGBA, or Grayscale), normalizes it,
+    stacks color and alpha side-by-side, and saves as JPEG.
     """
     try:
-        # 1. Load WebP (BGRA) - Unchanged flag preserves alpha channel
+        # 1. Load Image
         img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+
         if img is None:
-            return False, "Load failed"
+            return False, "Load failed (unreadable file)"
 
-        # Ensure we have 4 channels (BGRA)
-        if img.ndim != 3 or img.shape[2] != 4:
-            # If it's just RGB or Grayscale, we can't extract alpha reliably
-            # (or it's fully opaque). We could fake it, but better to warn.
-            return False, f"Skipping {file_path}: Not BGRA (Channels: {img.shape[2] if img.ndim == 3 else 1})"
+        h, w = img.shape[:2]
 
-        # 2. Extract channels
-        # OpenCV loads as BGR, Alpha is index 3
-        b, g, r, a = cv2.split(img)
+        # 2. Normalize to Color (BGR) and Alpha (Single Channel)
+        color_bgr = None
+        alpha_single = None
 
-        # 3. Create Side-by-Side canvas (Double Width)
-        # Left: Color (BGR)
-        color_bgr = cv2.merge([b, g, r])
+        # Check dimensions
+        if img.ndim == 2:
+            # Case: Grayscale (1 Channel)
+            # Convert Gray -> BGR
+            color_bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            # Create solid white alpha (Opaque)
+            alpha_single = np.full((h, w), 255, dtype=np.uint8)
 
-        # Right: Alpha (Gray -> BGR for JPEG compatibility)
-        # We assume alpha is single channel. Merging it 3 times creates a grayscale BGR image.
-        alpha_bgr = cv2.merge([a, a, a])
+        elif img.ndim == 3:
+            channels = img.shape[2]
 
-        # Stack horizontally
+            if channels == 4:
+                # Case: BGRA (Has Transparency)
+                b, g, r, a = cv2.split(img)
+                color_bgr = cv2.merge([b, g, r])
+                alpha_single = a
+
+            elif channels == 3:
+                # Case: BGR (No Transparency)
+                color_bgr = img
+                # Create solid white alpha (Opaque)
+                alpha_single = np.full((h, w), 255, dtype=np.uint8)
+
+            elif channels == 2:
+                # Case: Grayscale + Alpha (Rare, but possible)
+                gray, a = cv2.split(img)
+                color_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+                alpha_single = a
+
+            else:
+                return False, f"Unsupported channel count: {channels}"
+
+        else:
+            return False, f"Unknown image dimensions: {img.shape}"
+
+        # 3. Prepare for JPEG Side-by-Side
+        # JPEG does not support 4 channels. We must save visual + alpha as one wide RGB image.
+
+        # Convert single channel alpha to 3-channel grayscale BGR so we can stack it
+        alpha_bgr = cv2.merge([alpha_single, alpha_single, alpha_single])
+
+        # Stack horizontally: [Color | Alpha]
         sbs = np.hstack([color_bgr, alpha_bgr])
 
         # 4. Construct Output Path
-        # Determine relative path to maintain folder structure
         rel_path = os.path.relpath(file_path, input_root)
-        # Change extension to .jpg
         rel_path_jpg = os.path.splitext(rel_path)[0] + ".jpg"
         out_path = os.path.join(output_root, rel_path_jpg)
 
@@ -50,10 +78,12 @@ def process_file(file_path, input_root, output_root, quality=90):
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
         # 5. Save as JPEG
-        # Use high quality to preserve mask details
         success = cv2.imwrite(out_path, sbs, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
 
-        return success, None
+        if not success:
+            return False, "Write failed"
+
+        return True, None
 
     except Exception as e:
         return False, str(e)
@@ -61,7 +91,8 @@ def process_file(file_path, input_root, output_root, quality=90):
 
 def main():
     print("--- Side-by-Side (SBS) JPEG Converter ---")
-    print("Converts WebP (RGBA) -> JPEG (RGB + Alpha Mask side-by-side)")
+    print("Converts WebP/PNG -> JPEG (RGB + Alpha Mask side-by-side)")
+    print("Handles Transparent (RGBA) and Opaque (RGB) automatically.")
 
     # 1. Interactive Input
     default_input = "images"
@@ -82,8 +113,7 @@ def main():
     quality = int(quality_str) if quality_str.isdigit() else 90
 
     print(f"\nScanning '{input_dir}' for .webp files...")
-    # Recursive glob for all webp files
-    # Using recursive=True with ** pattern
+    # You can add "*.png" to this list if you want to convert pngs too
     files = glob(os.path.join(input_dir, "**", "*.webp"), recursive=True)
 
     total_files = len(files)
@@ -99,23 +129,20 @@ def main():
         return
 
     # 2. Parallel Processing
-    # ProcessPoolExecutor is best for CPU-bound tasks like image encoding
-    # It avoids the GIL (Global Interpreter Lock)
     start_time = time.time()
-    cpu_count = os.cpu_count()
+    # Reserve 1 core for OS stability if possible, otherwise use all
+    cpu_count = max(1, (os.cpu_count() or 1))
+
     print(f"\nStarting conversion using {cpu_count} CPU cores...")
 
     errors = []
 
-    with ProcessPoolExecutor() as executor:
-        # Submit all tasks
-        # We map futures to filenames for error reporting
+    with ProcessPoolExecutor(max_workers=cpu_count) as executor:
         futures = {
             executor.submit(process_file, f, input_dir, output_dir, quality): f
             for f in files
         }
 
-        # Use tqdm for a nice progress bar
         for future in tqdm(as_completed(futures), total=total_files, unit="img"):
             file_path = futures[future]
             try:
@@ -137,7 +164,7 @@ def main():
 
     if errors:
         print(f"\n{len(errors)} Errors encountered:")
-        for err in errors[:10]:  # Show first 10
+        for err in errors[:10]:
             print(f" - {err}")
         if len(errors) > 10:
             print(f" ... and {len(errors) - 10} more.")
