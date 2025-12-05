@@ -9,7 +9,7 @@ from turbojpeg import TurboJPEG, TJPF_BGR, TJSAMP_444
 
 
 def process_file_optimized(file_path, input_root, output_root, quality=90):
-    # Initialize TurboJPEG instance inside the process (thread-safe isolation)
+    # Initialize TurboJPEG instance inside  the process (thread-safe isolation)
     jpeg = TurboJPEG()
 
     try:
