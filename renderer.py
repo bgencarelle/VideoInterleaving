@@ -83,7 +83,7 @@ def initialize(gl_context: moderngl.Context) -> None:
         }}
     """
 
-    # Fragment Shader (Universal SBS/Standard)
+    # Fragment Shader (With Noise Gate)
     fragment_src = f"""
         {header}
         uniform sampler2D texture_main;
@@ -111,6 +111,13 @@ def initialize(gl_context: moderngl.Context) -> None:
         void main() {{
             vec4 mainC = sampleLayer(texture_main, u_main_is_sbs, v_texcoord);
             vec4 floatC = sampleLayer(texture_float, u_float_is_sbs, v_texcoord);
+
+            // --- NOISE GATE FIX ---
+            // JPEGs introduce "ringing" noise near sharp edges (values 0.01 - 0.05).
+            // We use smoothstep to safely clamp that low-level noise to 0.0
+            // while preserving the smooth anti-aliased edge.
+            floatC.a = smoothstep(0.05, 0.1, floatC.a); 
+
             vec3 color = mix(u_bgColor, mainC.rgb, mainC.a);
             color = mix(color, floatC.rgb, floatC.a);
             fragColor = vec4(color, 1.0);
@@ -237,7 +244,7 @@ def overlay_images_single_pass(main_texture, float_texture, background_color=(0,
     vao.render(mode=moderngl.TRIANGLE_FAN)
 
 
-# --- HIGH PERFORMANCE CPU COMPOSITOR ---
+# --- HIGH PERFORMANCE CPU COMPOSITOR (WITH NOISE GATE) ---
 def composite_cpu(main_img, float_img, main_is_sbs=False, float_is_sbs=False):
     global _cpu_buffer
 
@@ -252,7 +259,6 @@ def composite_cpu(main_img, float_img, main_is_sbs=False, float_is_sbs=False):
             # Slice: RGB is left, Alpha is right (Red channel)
             return img[:, :mid], img[:, mid:, 0]
         else:
-            # Standard RGBA (Strict Loader guarantees 3 or 4 channels)
             if img.shape[2] == 4:
                 return img[..., :3], img[..., 3]
             else:
@@ -269,53 +275,41 @@ def composite_cpu(main_img, float_img, main_is_sbs=False, float_is_sbs=False):
     else:
         return None
 
-    # 2. Manage Persistent Buffer (Prevent Memory Churn)
-    # Only allocate if buffer is missing or size changed
+    # 2. Manage Persistent Buffer
     if _cpu_buffer is None or _cpu_buffer.shape[:2] != (th, tw):
         _cpu_buffer = np.empty((th, tw, 3), dtype=np.uint8)
 
     # 3. Fill Buffer (Base Layer)
     if m_rgb is not None:
-        # Fast C-level copy into existing memory
         np.copyto(_cpu_buffer, m_rgb)
     else:
         bg_r, bg_g, bg_b = BACKGROUND_COLOR
         _cpu_buffer[:] = (bg_r, bg_g, bg_b)
 
-    # 4. Blend Float Layer (If exists)
+    # 4. Blend Float Layer
     if f_rgb is not None:
-        # Determine overlap area
         fh, fw = f_rgb.shape[:2]
         h, w = min(th, fh), min(tw, fw)
 
-        # Create views into the buffers (zero copy)
         target = _cpu_buffer[:h, :w]
         source = f_rgb[:h, :w]
 
         if f_a is None:
-            # Opaque overlay: Direct memory copy
             target[:] = source
         else:
-            # Alpha Blend
             mask = f_a[:h, :w]
 
-            # Optimization: If we have numexpr, use it. If not, use optimized numpy.
-            # Using uint16 for math to avoid overflow, then casting back.
+            # --- NOISE GATE FIX ---
+            # Remove JPEG artifacts (values < 15) before blending
+            # We copy mask to avoid modifying the cached source image
+            clean_mask = mask.copy()
+            clean_mask[clean_mask < 15] = 0
 
-            # Expand mask to (H, W, 1) for broadcasting
-            alpha = mask[:, :, None].astype(np.uint16)
-
-            # Reading from buffer
+            alpha = clean_mask.astype(np.uint16)[:, :, None]
             src = source.astype(np.uint16)
             dst = target.astype(np.uint16)
 
-            # The Blend Equation: OUT = (SRC * A + DST * (255 - A)) // 255
-            # Doing this in-place on 'dst' is hard without temps in pure numpy.
-            # We accept small temp allocation here for correctness, but it's much smaller than full frame allocs.
-
             blended = (src * alpha + dst * (255 - alpha)) // 255
-
-            # Write back to persistent buffer
             target[:] = blended.astype(np.uint8)
 
     return _cpu_buffer

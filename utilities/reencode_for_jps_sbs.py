@@ -56,6 +56,7 @@ def process_file_final(file_path, input_root, output_root, quality=90):
 
         # 3. Stack Side-by-Side (Horizontal)
         # This creates the [Color | Mask] layout
+        color_bgr[alpha_single == 0] = 0
         sbs = np.hstack([color_bgr, alpha_bgr])
 
         # 4. Save using OpenCV (Fast C++ I/O)
