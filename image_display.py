@@ -14,10 +14,10 @@ from shared_state import exchange
 
 # --- ADAPTIVE OPTIMIZATION ---
 cpu_count = os.cpu_count() or 1
-if settings.SERVER_MODE or cpu_count <= 2:
-    cv2.setNumThreads(0)
-else:
-    cv2.setNumThreads(1)
+#if settings.SERVER_MODE or cpu_count <= 2:
+#    cv2.setNumThreads(0)
+#else:
+#    cv2.setNumThreads(1)
 # -----------------------------
 
 os.environ['PYOPENGL_ERROR_CHECKING'] = '0'
