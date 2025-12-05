@@ -2,7 +2,7 @@
 # -------------------------
 # Image Directories and Folder Paths
 # -------------------------
-IMAGES_DIR = "images"
+IMAGES_DIR = "images_sbs"
 
 MAIN_FOLDER_PATH = f"{IMAGES_DIR}/face"
 FLOAT_FOLDER_PATH = f"{IMAGES_DIR}/float"
@@ -163,5 +163,5 @@ STREAM_HOST = '0.0.0.0'      # Listen on all interfaces
 SERVER_CAPTURE_RATE = FPS     # Streaming FPS
 JPEG_QUALITY = 85         # Image quality
 HEADLESS_RES = (480, 640)   # Resolution for the virtual screen
-HEADLESS_BACKEND = "egl"      # "egl" or "osmesa"
+#HEADLESS_BACKEND = "egl"      # "egl" or "osmesa"
 MAX_VIEWERS = 20 # Max simultaneous connections

@@ -1,5 +1,3 @@
-# image_display.py
-
 import os
 import platform
 import datetime
@@ -10,34 +8,20 @@ from collections import deque
 import cv2
 import numpy as np
 
-# --- RESTORED: Standard Threading ---
-# Removed cv2.setNumThreads(0) so OpenCV can use multicore decoding if needed.
-# This helps distribute load on multi-core devices like the Pi.
-# ------------------------------------
-
 import settings
 from shared_state import exchange
 
 os.environ['PYOPENGL_ERROR_CHECKING'] = '0'
 
-# Conditional import for local mode
 if not settings.SERVER_MODE:
     try:
         import glfw
     except ImportError:
-        print("Warning: GLFW not found. Local mode will fail if enabled.")
+        pass
 
 from settings import (
-    FULLSCREEN_MODE,
-    PINGPONG,
-    FPS,
-    FRAME_COUNTER_DISPLAY,
-    SHOW_DELTA,
-    TEST_MODE,
-    HTTP_MONITOR,
-    CLOCK_MODE,
-    FIFO_LENGTH,
-    BACKGROUND_COLOR,
+    FULLSCREEN_MODE, PINGPONG, FPS, FRAME_COUNTER_DISPLAY, SHOW_DELTA,
+    TEST_MODE, HTTP_MONITOR, CLOCK_MODE, FIFO_LENGTH, BACKGROUND_COLOR,
 )
 from index_calculator import update_index
 from folder_selector import update_folder_selection, folder_dictionary
@@ -60,80 +44,20 @@ class RollingIndexCompensator:
         self.diffs = deque(maxlen=maxlen)
         self.correction_factor = correction_factor
 
-    def update(self, current_index, displayed_index):
-        diff = current_index - displayed_index
-        self.diffs.append(diff)
+    def update(self, current, displayed):
+        self.diffs.append(current - displayed)
 
-    def get_compensated_index(self, current_index):
-        if not self.diffs:
-            return current_index
-        avg_diff = sum(self.diffs) / len(self.diffs)
-        partial_offset = round(avg_diff * self.correction_factor)
-        return current_index - partial_offset
+    def get_compensated_index(self, current):
+        if not self.diffs: return current
+        return current - round((sum(self.diffs) / len(self.diffs)) * self.correction_factor)
 
 
-def cpu_composite_frame(main_img, float_img):
-    """
-    CPU compositing that respects BOTH main and float alpha channels.
-    """
-    if main_img is None and float_img is None:
-        return None
+from image_loader import ImageLoader, FIFOImageBuffer
 
-    def to_rgb_alpha(img):
-        if img is None:
-            return None, None
-        if img.ndim == 2:
-            rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB).astype(np.uint16)
-            alpha = None
-        elif img.ndim == 3:
-            if img.shape[2] == 4:
-                rgb = img[..., :3].astype(np.uint16)
-                alpha = img[..., 3:4].astype(np.uint16)
-            elif img.shape[2] == 3:
-                rgb = img.astype(np.uint16)
-                alpha = None
-            else:
-                raise ValueError(f"Unsupported image shape: {img.shape!r}")
-        else:
-            raise ValueError(f"Unsupported image shape: {img.shape!r}")
-        return rgb, alpha
 
-    # Decide the reference size from whichever image we have
-    ref = main_img if main_img is not None else float_img
-    h, w = ref.shape[:2]
-
-    bg_r, bg_g, bg_b = getattr(settings, "BACKGROUND_COLOR", (4, 4, 4))
-    base = np.empty((h, w, 3), dtype=np.uint16)
-    base[..., 0] = bg_r
-    base[..., 1] = bg_g
-    base[..., 2] = bg_b
-
-    main_rgb, main_a = to_rgb_alpha(main_img)
-    float_rgb, float_a = to_rgb_alpha(float_img)
-
-    if main_rgb is not None and float_rgb is not None:
-        if main_rgb.shape[0] != float_rgb.shape[0] or main_rgb.shape[1] != float_rgb.shape[1]:
-            float_rgb = None
-            float_a = None
-
-    def over(dst_rgb16, src_rgb16, alpha):
-        if src_rgb16 is None:
-            return dst_rgb16
-        if alpha is None:
-            return src_rgb16  # Optimization
-
-        alpha_arr = alpha
-        inv_alpha = 255 - alpha_arr
-        out = (src_rgb16 * alpha_arr + dst_rgb16 * inv_alpha + 127) // 255
-        return out
-
-    if main_rgb is not None:
-        base = over(base, main_rgb, main_a)
-    if float_rgb is not None:
-        base = over(base, float_rgb, float_a)
-
-    out_rgb = np.clip(base, 0, 255).astype(np.uint8)
-    return out_rgb
+class FIFOImageBufferPatched(FIFOImageBuffer):
+    def current_depth(self):
+        with self.lock: return len(self.queue)
 
 
 def run_display(clock_source=CLOCK_MODE):
@@ -141,116 +65,90 @@ def run_display(clock_source=CLOCK_MODE):
     state.fullscreen = FULLSCREEN_MODE
     last_actual_fps = FPS
 
-    # --- Server capture timing ---
     capture_rate = getattr(settings, "SERVER_CAPTURE_RATE", FPS or 10)
     capture_interval = 1.0 / capture_rate
     last_server_capture = time.time()
     last_captured_index = None
 
-    # --- Initialize folders & image size ---
     import calculators
     _, main_folder_path, float_folder_path = calculators.init_all(clock_source)
     main_folder_count = len(main_folder_path[0])
     float_folder_count = len(float_folder_path[0])
     png_paths_len = len(main_folder_path)
 
-    first_image_path = main_folder_path[0][0]
-    img0 = cv2.imread(first_image_path, cv2.IMREAD_UNCHANGED)
-    if img0 is None:
-        raise RuntimeError(f"Unable to load image: {first_image_path}")
-    height, width = img0.shape[:2]
-    state.image_size = (width, height)
+    # --- Phase 2: Dimension Logic ---
+    temp_loader = ImageLoader()
+    temp_loader.set_paths(main_folder_path, float_folder_path)
 
-    print(platform.system(), "clock mode is:", clock_source)
-    print("Image size:", state.image_size)
+    # Load first image to determine window size
+    img0, is_sbs0 = temp_loader.read_image(main_folder_path[0][0])
 
-    # --- Image loader and FIFO ---
-    from image_loader import ImageLoader, FIFOImageBuffer
+    if img0 is None: raise RuntimeError("Failed to load initial image")
 
-    class FIFOImageBufferPatched(FIFOImageBuffer):
-        def current_depth(self):
-            with self.lock:
-                return len(self.queue)
+    h, w = img0.shape[:2]
+    # If initial image is SBS, the visual width is half the texture width
+    if is_sbs0:
+        state.image_size = (w // 2, h)
+    else:
+        state.image_size = (w, h)
 
-    image_loader = ImageLoader()
-    image_loader.set_paths(main_folder_path, float_folder_path)
-    image_loader.set_png_paths_len(png_paths_len)
-
-    # --- Display / GL init ---
-    # This function handles creating the window context.
-    # If !SERVER_MODE, it creates a visible GLFW window.
-    # If SERVER_MODE, it creates a headless FBO (if configured).
+    # Init Window/Context
     window = display_init(state)
 
     if settings.SERVER_MODE:
         has_gl = window is not None
         if has_gl:
-            print("[DISPLAY] SERVER_MODE: using headless ModernGL.")
+            print("[DISPLAY] Headless ModernGL Active")
+            renderer.set_transform_parameters(
+                fs_scale=1.0, fs_offset_x=0.0, fs_offset_y=0.0,
+                image_size=state.image_size, rotation_angle=0.0, mirror_mode=0
+            )
         else:
-            print("[DISPLAY] SERVER_MODE: using CPU-only compositing.")
+            print("[DISPLAY] CPU-only compositing Active")
     else:
-        # LOCAL MODE CHECK
-        if window is None:
-            raise RuntimeError("Local mode requires a GL window, but display_init returned None.")
+        if window is None: raise RuntimeError("Local GL Window Failed")
         has_gl = True
         register_callbacks(window, state)
 
-    # --- Initial index & images ---
     index, _ = update_index(png_paths_len, PINGPONG)
     last_index = index
     update_folder_selection(index, float_folder_count, main_folder_count)
 
-    fifo_buffer = FIFOImageBufferPatched(max_size=FIFO_LENGTH)
-    main_folder, float_folder = folder_dictionary["Main_and_Float_Folders"]
-    main_image, float_image = image_loader.load_images(index, main_folder, float_folder)
-    fifo_buffer.update(index, (main_image, float_image))
+    loader = ImageLoader()
+    loader.set_paths(main_folder_path, float_folder_path)
+    loader.set_png_paths_len(png_paths_len)
 
-    # Configure renderer for headless mode if using GL
-    if settings.SERVER_MODE and getattr(settings, "HEADLESS_USE_GL", False) and has_gl:
-        h_img, w_img = main_image.shape[0], main_image.shape[1]
-        renderer.set_transform_parameters(
-            fs_scale=1.0, fs_offset_x=0.0, fs_offset_y=0.0,
-            image_size=(w_img, h_img), rotation_angle=0.0, mirror_mode=0
-        )
+    fifo = FIFOImageBufferPatched(max_size=FIFO_LENGTH)
 
-    current_main_img = main_image
-    current_float_img = float_image
+    # Load initial frame (returns 4 items)
+    res0 = loader.load_images(index, *folder_dictionary["Main_and_Float_Folders"])
+    fifo.update(index, res0)
+
+    # Unpack initial frame
+    cur_main, cur_float, cur_m_sbs, cur_f_sbs = res0
 
     if has_gl:
-        main_texture = renderer.create_texture(main_image)
-        float_texture = renderer.create_texture(float_image)
+        main_texture = renderer.create_texture(cur_main)
+        float_texture = renderer.create_texture(cur_float)
 
-    compensator = RollingIndexCompensator(maxlen=10, correction_factor=0.5)
+    compensator = RollingIndexCompensator()
 
-    def async_load_callback(fut, scheduled_index):
+    def async_cb(fut, idx):
         try:
-            result = fut.result()
-            fifo_buffer.update(scheduled_index, result)
+            # Result is now (m_img, f_img, m_sbs, f_sbs)
+            fifo.update(idx, fut.result())
         except Exception as e:
-            print("Error in async image load:", e)
-            if monitor:
-                monitor.record_load_error(scheduled_index, e)
+            print("Async Load Error:", e)
+            if monitor: monitor.record_load_error(idx, e)
 
-    # --- RESTORED: Dynamic Workers (The "Old Way") ---
-    # This allows parallel loading (2-6 threads) based on CPU cores.
-    # Essential for Pi to prevent single-core saturation.
+    # Dynamic Workers
     cpu_count = os.cpu_count() or 1
     max_workers = 2 if cpu_count <= 2 else min(6, cpu_count)
-    # -------------------------------------------------
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Schedule first preload
-        if index == 0:
-            next_index = 1
-        elif index == png_paths_len - 1:
-            next_index = index - 1
-        else:
-            next_index = index + 1 if index > last_index else index - 1
-
-        future = executor.submit(
-            image_loader.load_images, next_index, main_folder, float_folder
-        )
-        future.add_done_callback(lambda fut, s_idx=next_index: async_load_callback(fut, s_idx))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        next_idx = 1 if index == 0 else (index - 1 if index == png_paths_len - 1 else index + 1)
+        future = pool.submit(loader.load_images, next_idx, *folder_dictionary["Main_and_Float_Folders"])
+        future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
 
         frame_times = deque(maxlen=60)
         frame_start = time.perf_counter()
@@ -258,72 +156,52 @@ def run_display(clock_source=CLOCK_MODE):
         while (state.run_mode and not settings.SERVER_MODE) or settings.SERVER_MODE:
             successful_display = False
 
-            # 1. Event polling (local only)
             if not settings.SERVER_MODE and has_gl:
                 glfw.poll_events()
-                if not state.run_mode:
-                    break
+                if not state.run_mode: break
 
-            # 2. Reinit (local only)
-            if state.needs_update and not settings.SERVER_MODE and has_gl:
+            if state.needs_update and not settings.SERVER_MODE:
                 display_init(state)
                 state.needs_update = False
 
-            # 3. Index & Images
             prev = index
             index, _ = update_index(png_paths_len, PINGPONG)
 
             if index != prev:
                 last_index = prev
                 update_folder_selection(index, float_folder_count, main_folder_count)
-                main_folder, float_folder = folder_dictionary["Main_and_Float_Folders"]
-                compensated = compensator.get_compensated_index(index)
-                result = fifo_buffer.get(compensated)
 
-                if result is not None:
-                    displayed_index, main_img, float_img = result
-                    compensator.update(index, displayed_index)
-                    current_main_img = main_img
-                    current_float_img = float_img
+                comp_idx = compensator.get_compensated_index(index)
+                res = fifo.get(comp_idx)
 
-                    if SHOW_DELTA:
-                        d = index - displayed_index
-                        off = compensated - index
-                        print(f"[DEBUG] idx={index}, disp={displayed_index}, Δ={d}, offset={off}")
+                if res:
+                    # Unpack 5 items: index + 4 data items
+                    d_idx, m_img, f_img, m_sbs, f_sbs = res
+                    compensator.update(index, d_idx)
 
                     if has_gl:
-                        main_texture = renderer.update_texture(main_texture, main_img)
-                        float_texture = renderer.update_texture(float_texture, float_img)
+                        main_texture = renderer.update_texture(main_texture, m_img)
+                        float_texture = renderer.update_texture(float_texture, f_img)
 
+                    cur_main, cur_float = m_img, f_img
+                    cur_m_sbs, cur_f_sbs = m_sbs, f_sbs
                     successful_display = True
                 else:
-                    if not settings.SERVER_MODE:
-                        print(f"[MISS] FIFO miss for index {index}")
+                    if not settings.SERVER_MODE: print(f"[MISS] {index}")
 
-                # Schedule next
-                if index == 0:
-                    next_index = 1
-                elif index == png_paths_len - 1:
-                    next_index = index - 1
-                else:
-                    next_index = index + 1 if index > prev else index - 1
+                next_idx = 1 if index == 0 else (
+                    index - 1 if index == png_paths_len - 1 else (index + 1 if index > prev else index - 1))
+                future = pool.submit(loader.load_images, next_idx, *folder_dictionary["Main_and_Float_Folders"])
+                future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
 
-                future = executor.submit(
-                    image_loader.load_images, next_index, main_folder, float_folder
-                )
-                future.add_done_callback(lambda fut, s_idx=next_index: async_load_callback(fut, s_idx))
-
-            # 4. Drawing
             if has_gl:
-                if settings.SERVER_MODE:
-                    window.use()
+                if settings.SERVER_MODE: window.use()
+                # Pass flags to Shader
                 renderer.overlay_images_single_pass(
-                    main_texture,
-                    float_texture,
-                    background_color=BACKGROUND_COLOR,
+                    main_texture, float_texture, BACKGROUND_COLOR,
+                    main_is_sbs=cur_m_sbs, float_is_sbs=cur_f_sbs
                 )
 
-            # 5. Capture (SERVER_MODE only)
             if settings.SERVER_MODE:
                 now = time.time()
                 if (index != last_captured_index) and (now - last_server_capture > capture_interval):
@@ -331,63 +209,52 @@ def run_display(clock_source=CLOCK_MODE):
                     last_captured_index = index
                     try:
                         if has_gl:
-                            # GPU Path
                             window.use()
                             raw = window.fbo.read(components=3)
                             w, h = window.size
                             frame = np.frombuffer(raw, dtype=np.uint8).reshape((h, w, 3))
                         else:
-                            # CPU Fallback Path
-                            frame = cpu_composite_frame(current_main_img, current_float_img)
+                            # Pass flags to CPU fallback
+                            frame = renderer.composite_cpu(
+                                cur_main, cur_float,
+                                main_is_sbs=cur_m_sbs, float_is_sbs=cur_f_sbs
+                            )
 
                         if frame is not None:
-                            encoded = jpeg.encode(
-                                frame,
-                                quality=getattr(settings, "JPEG_QUALITY", 80),
-                                pixel_format=0
-                            )
+                            encoded = jpeg.encode(frame, quality=getattr(settings, "JPEG_QUALITY", 80), pixel_format=0)
                             exchange.set_frame(encoded)
                     except Exception as e:
                         print(f"[CAPTURE ERROR] {e}")
 
-            # 6. Swap (local only)
             if not settings.SERVER_MODE and has_gl:
                 glfw.swap_buffers(window)
 
-            # 7. Timing / FPS
             now = time.perf_counter()
             dt = now - frame_start
             frame_times.append(dt)
             frame_start = now
-
             if FPS:
-                to_sleep = (1.0 / FPS) - dt
-                if to_sleep > 0:
-                    time.sleep(to_sleep)
+                s = (1.0 / FPS) - dt
+                if s > 0: time.sleep(s)
 
             if len(frame_times) > 1:
-                avg = sum(frame_times) / len(frame_times)
-                last_actual_fps = 1.0 / avg if avg > 0 else 0.0
-                if not HTTP_MONITOR and FRAME_COUNTER_DISPLAY:
-                    print(f"{last_actual_fps:.2f} FPS")
+                last_actual_fps = 1.0 / (sum(frame_times) / len(frame_times))
+                if not HTTP_MONITOR and FRAME_COUNTER_DISPLAY: print(f"{last_actual_fps:.1f} FPS")
 
             if monitor:
                 monitor.update({
                     "index": index,
-                    "displayed": displayed_index if "displayed_index" in locals() else index,
-                    "delta": index - (displayed_index if "displayed_index" in locals() else index),
-                    "fps": last_actual_fps,
-                    "fifo_depth": fifo_buffer.current_depth(),
+                    "displayed": d_idx if 'd_idx' in locals() else index,
+                    "delta": index - (d_idx if 'd_idx' in locals() else index),
+                    "fps": last_actual_fps, "fifo_depth": fifo.current_depth(),
                     "successful_frame": successful_display,
-                    "main_folder": main_folder,
-                    "float_folder": float_folder,
+                    "main_folder": folder_dictionary["Main_and_Float_Folders"][0],
+                    "float_folder": folder_dictionary["Main_and_Float_Folders"][1],
                     "rand_mult": folder_dictionary.get("rand_mult"),
-                    "main_folder_count": main_folder_count,
-                    "float_folder_count": float_folder_count,
+                    "main_folder_count": main_folder_count, "float_folder_count": float_folder_count
                 })
 
             if not settings.SERVER_MODE and has_gl and glfw.window_should_close(window):
                 state.run_mode = False
 
-        if not settings.SERVER_MODE and has_gl:
-            glfw.terminate()
+        if not settings.SERVER_MODE and has_gl: glfw.terminate()

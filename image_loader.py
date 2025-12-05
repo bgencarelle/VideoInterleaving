@@ -7,44 +7,33 @@ import os
 from settings import MAIN_FOLDER_PATH, FLOAT_FOLDER_PATH, TOLERANCE
 
 # --- TurboJPEG Init ---
-# You already have this installed for the display loop.
-# We use it here to accelerate JPG loading.
-from turbojpeg import TurboJPEG, TJPF_RGBA
+from turbojpeg import TurboJPEG, TJPF_RGBA, TJPF_RGB
 
 jpeg = TurboJPEG()
 
 # --- Load libwebp ---
 _libwebp = None
-# Added common Linux paths for VPS (libwebp.so.7, libwebp.so.6)
+# Common Linux/Mac/Windows paths
 for lib in ("libwebp.so", "libwebp.so.7", "libwebp.so.6", "libwebp.dylib", "libwebp-7.dll"):
     try:
         _libwebp = ctypes.CDLL(lib)
         break
     except OSError:
         continue
+
 if _libwebp is None:
-    raise RuntimeError("Could not load libwebp. Ensure libwebp is installed (apt-get install libwebp-dev or similar).")
+    raise RuntimeError("Could not load libwebp. Ensure libwebp is installed.")
 
 # --- Define ctypes signatures ---
-
-# WebPGetInfo: Reads width/height without decoding
 _libwebp.WebPGetInfo.argtypes = [
-    ctypes.c_char_p,  # data
-    ctypes.c_size_t,  # data_size
-    ctypes.POINTER(ctypes.c_int),  # width ptr
-    ctypes.POINTER(ctypes.c_int)  # height ptr
+    ctypes.c_char_p, ctypes.c_size_t,
+    ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)
 ]
 _libwebp.WebPGetInfo.restype = ctypes.c_int
 
-# WebPDecodeRGBAInto: Decodes DIRECTLY into an existing buffer (Zero-Copy)
-# Signature: uint8_t* WebPDecodeRGBAInto(const uint8_t* data, size_t data_size,
-#                                        uint8_t* output_buffer, size_t output_buffer_size, int output_stride);
 _libwebp.WebPDecodeRGBAInto.argtypes = [
-    ctypes.c_char_p,  # data
-    ctypes.c_size_t,  # data_size
-    ctypes.POINTER(ctypes.c_uint8),  # output_buffer (pointer to numpy array data)
-    ctypes.c_size_t,  # output_buffer_size
-    ctypes.c_int  # output_stride (width * 4)
+    ctypes.c_char_p, ctypes.c_size_t,
+    ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.c_int
 ]
 _libwebp.WebPDecodeRGBAInto.restype = ctypes.POINTER(ctypes.c_uint8)
 
@@ -68,92 +57,82 @@ class ImageLoader:
     def _read_webp(self, image_path):
         """
         Zero-Copy WebP Decoder.
-        Allocates a NumPy array and tells libwebp to write directly into it.
+        Returns: (numpy_array, is_sbs=False)
         """
-        # 1. Read raw bytes (Python manages this memory)
         with open(image_path, "rb") as f:
             data = f.read()
 
-        # 2. Get dimensions
         w = ctypes.c_int()
         h = ctypes.c_int()
-        # Note: ctypes handles 'data' (bytes) as c_char_p directly. No create_string_buffer needed.
         if not _libwebp.WebPGetInfo(data, len(data), ctypes.byref(w), ctypes.byref(h)):
             raise ValueError(f"Invalid WebP header: {image_path}")
 
         width, height = w.value, h.value
-
-        # 3. Allocate NumPy array (H, W, 4) for RGBA
-        # This is fast and managed by Python GC.
+        # WebP is always Standard RGBA in this pipeline
         img = np.empty((height, width, 4), dtype=np.uint8)
 
-        # 4. Get a C-pointer to the NumPy array's data
-        # .ctypes.data_as(...) returns a pointer to the memory block
         out_ptr = img.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
-
-        # Calculate size and stride (4 bytes per pixel for RGBA)
         stride = width * 4
         buf_size = height * stride
 
-        # 5. Decode directly into the array
-        res = _libwebp.WebPDecodeRGBAInto(
-            data, len(data),
-            out_ptr, buf_size, stride
-        )
-
+        res = _libwebp.WebPDecodeRGBAInto(data, len(data), out_ptr, buf_size, stride)
         if not res:
             raise RuntimeError(f"Failed to decode WebP data: {image_path}")
 
-        # 'img' is now populated with pixel data.
-        return img
+        return img, False
 
     def read_image(self, image_path):
         """
-        Loads an image.
-        - .webp: Uses Zero-Copy libwebp (Fastest)
-        - .jpg/.jpeg: Uses TurboJPEG (Fast)
-        - others: Uses OpenCV (Fallback)
+        Loads an image and detects format strategy.
+        Returns: (image_data, is_sbs_bool)
         """
         ext = image_path.split('.')[-1].lower()
 
+        # --- WEBP STRATEGY (Standard RGBA) ---
         if ext == "webp":
             return self._read_webp(image_path)
 
+        # --- JPEG STRATEGY (Side-by-Side) ---
         if ext in ("jpg", "jpeg"):
             try:
                 with open(image_path, "rb") as f:
                     data = f.read()
-                # Decode directly to RGBA to match WebP output
-                return jpeg.decode(data, pixel_format=TJPF_RGBA)
+                # Decode to RGB.
+                # For SBS, visual data is RGB, Alpha mask is encoded in the image structure.
+                # We do NOT want TJPF_RGBA here.
+                img = jpeg.decode(data, pixel_format=TJPF_RGB)
+                return img, True  # is_sbs = True
             except Exception:
-                # If TurboJPEG fails (rare), fall through to OpenCV
                 pass
 
-        # Fallback: OpenCV
+        # --- FALLBACK (OpenCV) ---
         img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
         if img is None:
             raise ValueError(f"Failed to load image: {image_path}")
 
-        # Ensure RGBA consistency
         if img.ndim == 2:
             img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGBA)
         elif img.shape[2] == 3:
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGBA)
         elif img.shape[2] == 4:
-            # OpenCV loads BGRA, we need RGBA
             img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
 
-        return img
+        # IMPORTANT: Fallback must also return the boolean flag
+        return img, False
 
     def load_images(self, index, main_folder, float_folder):
+        """
+        Returns 4 items per frame:
+        (Main_Img, Float_Img, Main_Is_SBS, Float_Is_SBS)
+        """
         mpath = self.main_folder_path[index][main_folder]
         fpath = self.float_folder_path[index][float_folder]
 
-        # These run in the ThreadPoolExecutor from image_display.py
-        # ctypes releases the GIL, so this is truly parallel on Xeons.
-        main_img = self.read_image(mpath)
-        float_img = self.read_image(fpath)
-        return main_img, float_img
+        # Use read_image to get tuples (img, bool)
+        main_img, main_sbs = self.read_image(mpath)
+        float_img, float_sbs = self.read_image(fpath)
+
+        return main_img, float_img, main_sbs, float_sbs
 
 
 class FIFOImageBuffer:
@@ -162,11 +141,14 @@ class FIFOImageBuffer:
         self.max_size = max_size
         self.lock = threading.Lock()
 
-    def update(self, index, images):
+    def update(self, index, data_tuple):
+        """
+        data_tuple is now (main_img, float_img, m_sbs, f_sbs)
+        """
         with self.lock:
             if len(self.queue) >= self.max_size:
                 self.queue.popleft()
-            self.queue.append((index, images))
+            self.queue.append((index, data_tuple))
 
     def get(self, current_index):
         with self.lock:
@@ -174,10 +156,12 @@ class FIFOImageBuffer:
                 self.queue.popleft()
             if not self.queue:
                 return None
-            best_idx, best_imgs = min(
+            best_idx, best_data = min(
                 self.queue,
                 key=lambda item: abs(item[0] - current_index)
             )
             if abs(best_idx - current_index) <= TOLERANCE:
-                return best_idx, best_imgs[0], best_imgs[1]
+                # Unpack the tuple stored in update
+                # Returns: index, m_img, f_img, m_sbs, f_sbs
+                return best_idx, best_data[0], best_data[1], best_data[2], best_data[3]
             return None
