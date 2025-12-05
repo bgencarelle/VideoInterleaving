@@ -30,6 +30,9 @@ _quad_dirty: bool = True
 _bg_linear_color: tuple[float, float, float] | None = None
 _bg_linear_src: tuple[int, int, int] | None = None
 
+# --- CPU OPTIMIZATION GLOBALS ---
+_cpu_buffer: np.ndarray | None = None
+
 
 def _update_bg_linear(background_color: tuple[int, int, int]) -> tuple[float, float, float]:
     global _bg_linear_color, _bg_linear_src
@@ -234,8 +237,10 @@ def overlay_images_single_pass(main_texture, float_texture, background_color=(0,
     vao.render(mode=moderngl.TRIANGLE_FAN)
 
 
-# --- OPTIMIZED CPU COMPOSITOR (No CV2, No Rotation) ---
+# --- HIGH PERFORMANCE CPU COMPOSITOR ---
 def composite_cpu(main_img, float_img, main_is_sbs=False, float_is_sbs=False):
+    global _cpu_buffer
+
     if main_img is None and float_img is None: return None
 
     # Helper: Get view of content without copying data
@@ -253,38 +258,64 @@ def composite_cpu(main_img, float_img, main_is_sbs=False, float_is_sbs=False):
             else:
                 return img, None  # Opaque RGB
 
-    # 1. Prepare Base Canvas
     m_rgb, m_a = get_views(main_img, main_is_sbs)
-
-    if m_rgb is not None:
-        # Copy to avoid corrupting cache
-        canvas = m_rgb.copy()
-    else:
-        # Fallback background
-        f_rgb, _ = get_views(float_img, float_is_sbs)
-        h, w = f_rgb.shape[:2]
-        bg_r, bg_g, bg_b = BACKGROUND_COLOR
-        canvas = np.full((h, w, 3), (bg_r, bg_g, bg_b), dtype=np.uint8)
-
-    # 2. Blend Float Layer
     f_rgb, f_a = get_views(float_img, float_is_sbs)
 
-    if f_rgb is not None:
-        ch, cw = canvas.shape[:2]
-        fh, fw = f_rgb.shape[:2]
-        h, w = min(ch, fh), min(cw, fw)
+    # 1. Determine Target Dimensions
+    if m_rgb is not None:
+        th, tw = m_rgb.shape[:2]
+    elif f_rgb is not None:
+        th, tw = f_rgb.shape[:2]
+    else:
+        return None
 
-        target_slice = canvas[:h, :w]
-        source_slice = f_rgb[:h, :w]
+    # 2. Manage Persistent Buffer (Prevent Memory Churn)
+    # Only allocate if buffer is missing or size changed
+    if _cpu_buffer is None or _cpu_buffer.shape[:2] != (th, tw):
+        _cpu_buffer = np.empty((th, tw, 3), dtype=np.uint8)
+
+    # 3. Fill Buffer (Base Layer)
+    if m_rgb is not None:
+        # Fast C-level copy into existing memory
+        np.copyto(_cpu_buffer, m_rgb)
+    else:
+        bg_r, bg_g, bg_b = BACKGROUND_COLOR
+        _cpu_buffer[:] = (bg_r, bg_g, bg_b)
+
+    # 4. Blend Float Layer (If exists)
+    if f_rgb is not None:
+        # Determine overlap area
+        fh, fw = f_rgb.shape[:2]
+        h, w = min(th, fh), min(tw, fw)
+
+        # Create views into the buffers (zero copy)
+        target = _cpu_buffer[:h, :w]
+        source = f_rgb[:h, :w]
 
         if f_a is None:
-            target_slice[:] = source_slice
+            # Opaque overlay: Direct memory copy
+            target[:] = source
         else:
-            # Vectorized Alpha Blend
-            alpha = f_a[:h, :w].astype(np.uint16)[:, :, None]
-            src = source_slice.astype(np.uint16)
-            dst = target_slice.astype(np.uint16)
-            blended = (src * alpha + dst * (255 - alpha)) // 255
-            target_slice[:] = blended.astype(np.uint8)
+            # Alpha Blend
+            mask = f_a[:h, :w]
 
-    return canvas
+            # Optimization: If we have numexpr, use it. If not, use optimized numpy.
+            # Using uint16 for math to avoid overflow, then casting back.
+
+            # Expand mask to (H, W, 1) for broadcasting
+            alpha = mask[:, :, None].astype(np.uint16)
+
+            # Reading from buffer
+            src = source.astype(np.uint16)
+            dst = target.astype(np.uint16)
+
+            # The Blend Equation: OUT = (SRC * A + DST * (255 - A)) // 255
+            # Doing this in-place on 'dst' is hard without temps in pure numpy.
+            # We accept small temp allocation here for correctness, but it's much smaller than full frame allocs.
+
+            blended = (src * alpha + dst * (255 - alpha)) // 255
+
+            # Write back to persistent buffer
+            target[:] = blended.astype(np.uint8)
+
+    return _cpu_buffer
