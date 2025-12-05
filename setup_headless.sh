@@ -105,7 +105,6 @@ EOF
 )
 elif [ "$HAS_GPU" = true ]; then
     # GENERIC GPU (Intel/Nvidia/AMD): Let the system pick the driver.
-    # We do NOT force llvmpipe.
     ENV_BLOCK=$(cat <<EOF
 # Generic Hardware Acceleration (Auto-detected)
 # No overrides needed; system uses /dev/dri
@@ -255,7 +254,6 @@ fi
 # --------------------------------------------
 echo ">>> 🛡️  Checking Firewall..."
 if command -v ufw >/dev/null; then
-    # Only enable rule if UFW is active or installed
     echo "    Allowing Nginx HTTP traffic..."
     ufw allow 'Nginx Full' >/dev/null 2>&1 || ufw allow 80 >/dev/null 2>&1
 fi
@@ -266,7 +264,15 @@ fi
 echo "----------------------------------------------------"
 echo "✅ Setup Complete!"
 echo ""
-echo "Detected Mode: $(if [ "$IS_PI" = true ]; then echo "Raspberry Pi (Overrides Active)"; elif [ "$HAS_GPU" = true ]; then echo "Hardware Accelerated (Standard GPU)"; else echo "Software Rendering (VPS)"; fi)"
+# Fixed the nested quotes syntax here
+MODE="Software Rendering (VPS)"
+if [ "$IS_PI" = true ]; then
+    MODE="Raspberry Pi (Overrides Active)"
+elif [ "$HAS_GPU" = true ]; then
+    MODE="Hardware Accelerated (Standard GPU)"
+fi
+
+echo "Detected Mode: $MODE"
 echo ""
 echo "To start the service:"
 echo "  systemctl start $SERVICE_NAME"
