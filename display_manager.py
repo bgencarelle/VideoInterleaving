@@ -1,54 +1,106 @@
-# display_manager.py
+"""
+display_manager.py – window creation / sizing and GL transform glue
+ModernGL + GLFW version (replaces the legacy pygame/OpenGL path)
+"""
 
+from __future__ import annotations
+
+import math
 import moderngl
+import numpy as np
 import settings
 import renderer
 
-# Conditional import to prevent crashes on headless servers
+# Conditional import for local mode
 if not settings.SERVER_MODE:
     try:
         import glfw
+        from OpenGL.GL import (
+            glEnable,
+            glGetError,
+            GL_FRAMEBUFFER_SRGB,
+            GL_INVALID_ENUM,
+        )
     except ImportError:
         glfw = None
         print("Warning: GLFW not found. Local display mode will fail.")
 
+from settings import (
+    INITIAL_ROTATION,
+    INITIAL_MIRROR,
+    CONNECTED_TO_RCA_HDMI,
+    RCA_HDMI_RESOLUTION,
+    LOW_RES_FULLSCREEN,
+    LOW_RES_FULLSCREEN_RESOLUTION,
+    ENABLE_SRGB_FRAMEBUFFER,
+    VSYNC,
+    GAMMA_CORRECTION_ENABLED,
+)
 
+# -----------------------------------------------------------------------------
+# Globals
+# -----------------------------------------------------------------------------
+window: "glfw._GLFWwindow" | None = None
+ctx: moderngl.Context | None = None
+
+
+# -----------------------------------------------------------------------------
+# State container
+# -----------------------------------------------------------------------------
 class DisplayState:
-    def __init__(self):
-        self.run_mode = True
-        self.needs_update = False
-        self.fullscreen = False
-        self.image_size = (0, 0)
+    def __init__(self, image_size: tuple[int, int] = (640, 480)) -> None:
+        self.image_size = image_size  # (width, height) of original image
+        self.rotation = INITIAL_ROTATION  # e.g., 0, 90, 180, 270 (in degrees)
+        self.mirror = INITIAL_MIRROR  # 0 = normal, 1 = horizontal mirror
+        self.fullscreen = True  # start in fullscreen unless overridden
+        self.run_mode = True  # main loop flag (False to exit)
+        self.needs_update = False  # set by callbacks to trigger re-init
 
 
+# -----------------------------------------------------------------------------
+# Headless Window Wrapper
+# -----------------------------------------------------------------------------
 class HeadlessWindow:
     """
     Simple wrapper for a headless FBO-based rendering target.
-
-    .use() binds the FBO so subsequent draws go into it.
-    .size is (width, height) for capture reshape.
+    Mimics enough of the GLFW window interface for image_display.py.
     """
+
     def __init__(self, ctx: moderngl.Context, fbo: moderngl.Framebuffer, size: tuple[int, int]):
         self.ctx = ctx
         self.fbo = fbo
-        self.size = size
+        self.size = size  # (width, height)
 
     def use(self) -> None:
         self.fbo.use()
 
 
+# -----------------------------------------------------------------------------
+# Helper – choose the largest-area video mode for a monitor
+# -----------------------------------------------------------------------------
+def _largest_mode(monitor: "glfw._GLFWmonitor"):
+    """Return the glfw video mode with the greatest pixel area for the given monitor."""
+    modes = glfw.get_video_modes(monitor)
+    return max(modes, key=lambda m: m.size.width * m.size.height)
+
+
+# -----------------------------------------------------------------------------
+# Display initialization / reconfiguration
+# -----------------------------------------------------------------------------
 def display_init(state: DisplayState):
     """
-    Initialize either:
+    Create (on first call) or reconfigure (on subsequent calls) the window context.
 
-    - SERVER_MODE + HEADLESS_USE_GL = False  -> return None (pure CPU compositing)
-    - SERVER_MODE + HEADLESS_USE_GL = True   -> headless ModernGL FBO (HeadlessWindow)
-    - not SERVER_MODE (dev / Mac)            -> GLFW window + ModernGL context
-
-    The caller decides how to use the returned object.
+    Returns:
+        - HeadlessWindow object (if SERVER_MODE)
+        - glfw._GLFWwindow object (if Local Mode)
+        - None (if initialization failed or GL disabled)
     """
+    global window, ctx
 
-    # --- Headless server mode ------------------------------------------------
+    # -------------------------------------------------------------------------
+    # 1. SERVER / HEADLESS MODE
+    # -------------------------------------------------------------------------
     if settings.SERVER_MODE:
         use_gl = getattr(settings, "HEADLESS_USE_GL", False)
 
@@ -56,15 +108,20 @@ def display_init(state: DisplayState):
             print("[DISPLAY] SERVER_MODE: GL disabled (HEADLESS_USE_GL=False). Using CPU-only compositor.")
             return None
 
-        print(f"[DISPLAY] Initializing headless ModernGL "
-              f"(port={getattr(settings, 'STREAM_PORT', 8080)})...")
+        print(f"[DISPLAY] Initializing headless ModernGL (port={getattr(settings, 'STREAM_PORT', 8080)})...")
 
         try:
+            # Attempt to create context (Auto-detects EGL/Headless driver)
             backend = getattr(settings, "HEADLESS_BACKEND", None)
             create_kwargs = {"standalone": True}
             if backend:
-                create_kwargs["backend"] = backend   # e.g. "egl", "osmesa", "x11"
+                create_kwargs["backend"] = backend
+
+                # Check for Pi specific version requirement (ES 3.1)
+            # This is handled by environment variables in the service file usually,
+            # but we can add a fallback check here if needed.
             ctx = moderngl.create_context(**create_kwargs)
+
         except Exception as e:
             print(f"[DISPLAY] Failed to create headless GL context: {e}")
             print("[DISPLAY] Falling back to CPU-only compositing.")
@@ -77,7 +134,7 @@ def display_init(state: DisplayState):
         fbo = ctx.framebuffer(color_attachments=[tex])
         fbo.use()
 
-        # Viewport + aspect info for renderer (headless path)
+        # Viewport for headless renderer
         ctx.viewport = (0, 0, width, height)
 
         renderer.initialize(ctx)
@@ -86,6 +143,161 @@ def display_init(state: DisplayState):
         print(f"[DISPLAY] Headless GL context ready at {width}x{height}")
         return HeadlessWindow(ctx, fbo, (width, height))
 
-    # --- Local windowed mode (dev / Mac) ------------------------------------
-    # (unchanged below here)
-    ...
+    # -------------------------------------------------------------------------
+    # 2. LOCAL WINDOWED MODE
+    # -------------------------------------------------------------------------
+
+    # Determine effective image dimensions (swap width/height if rotated 90°/270°)
+    img_w, img_h = state.image_size
+    eff_w, eff_h = (img_h, img_w) if state.rotation % 180 == 90 else (img_w, img_h)
+
+    if window is None:
+        if not glfw.init():
+            raise RuntimeError("GLFW initialization failed")
+
+        # Detect Raspberry Pi for local GL context hints
+        is_pi = False
+        try:
+            with open('/proc/device-tree/model', 'r') as model_file:
+                if 'Raspberry Pi' in model_file.read():
+                    is_pi = True
+        except FileNotFoundError:
+            pass
+
+        # Set GLFW context hints based on platform
+        if is_pi:
+            glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_ES_API)
+            glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
+            glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
+            glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 1)
+        else:
+            glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_API)
+            glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.NATIVE_CONTEXT_API)
+            glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
+            glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
+            glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
+
+        if GAMMA_CORRECTION_ENABLED or ENABLE_SRGB_FRAMEBUFFER:
+            glfw.window_hint(glfw.SRGB_CAPABLE, glfw.TRUE)
+
+        # Choose initial window size / monitor
+        if state.fullscreen:
+            mon = glfw.get_primary_monitor()
+            if CONNECTED_TO_RCA_HDMI:
+                fs_w, fs_h = RCA_HDMI_RESOLUTION
+            elif LOW_RES_FULLSCREEN:
+                fs_w, fs_h = LOW_RES_FULLSCREEN_RESOLUTION
+            else:
+                best_mode = _largest_mode(mon)
+                fs_w, fs_h = best_mode.size.width, best_mode.size.height
+            window = glfw.create_window(fs_w, fs_h, "Fullscreen", mon, None)
+        else:
+            rotation_mod = state.rotation % 360
+            if rotation_mod in (90, 270):
+                eff_w, eff_h = state.image_size[1], state.image_size[0]
+            else:
+                eff_w, eff_h = state.image_size[0], state.image_size[1]
+            aspect_ratio = eff_w / eff_h
+            win_w = 400
+            win_h = int(win_w / aspect_ratio)
+            window = glfw.create_window(win_w, win_h, "Windowed Mode", None, None)
+
+        if not window:
+            glfw.terminate()
+            raise RuntimeError("Could not create GLFW window")
+
+        glfw.make_context_current(window)
+        glfw.swap_interval(1 if VSYNC else 0)
+
+        # Create ModernGL context with appropriate version requirement
+        if is_pi:
+            ctx = moderngl.create_context(require=310)
+        else:
+            ctx = moderngl.create_context()
+        renderer.initialize(ctx)
+
+        # Enable sRGB framebuffer if requested
+        if GAMMA_CORRECTION_ENABLED or ENABLE_SRGB_FRAMEBUFFER:
+            glEnable(GL_FRAMEBUFFER_SRGB)
+            if glGetError() == GL_INVALID_ENUM:
+                print("⚠️  GL_FRAMEBUFFER_SRGB unsupported – continuing without it")
+
+    # -------------------------------------------------------------------------
+    # Fullscreen ↔ Windowed toggling reconfiguration
+    # -------------------------------------------------------------------------
+    current_monitor = glfw.get_window_monitor(window)
+    if state.fullscreen:
+        mon = glfw.get_primary_monitor()
+        if CONNECTED_TO_RCA_HDMI:
+            fs_w, fs_h = RCA_HDMI_RESOLUTION
+        elif LOW_RES_FULLSCREEN:
+            fs_w, fs_h = LOW_RES_FULLSCREEN_RESOLUTION
+        else:
+            best_mode = _largest_mode(mon)
+            fs_w, fs_h = best_mode.size.width, best_mode.size.height
+        refresh = getattr(best_mode, 'refresh_rate', glfw.get_video_mode(mon).refresh_rate)
+        glfw.set_window_monitor(window, mon, 0, 0, fs_w, fs_h, refresh)
+        glfw.set_window_title(window, "Fullscreen")
+    else:
+        rotation_mod = state.rotation % 360
+        if rotation_mod in (90, 270):
+            eff_w, eff_h = state.image_size[1], state.image_size[0]
+        else:
+            eff_w, eff_h = state.image_size[0], state.image_size[1]
+        aspect_ratio = eff_w / eff_h
+        win_w = 400
+        win_h = int(win_w / aspect_ratio)
+        glfw.set_window_monitor(window, None, 100, 100, win_w, win_h, 0)
+        glfw.set_window_title(window, "Windowed Mode")
+
+    # Force window resize on every rotation change in windowed mode
+    if not state.fullscreen:
+        fb_w, fb_h = glfw.get_window_size(window)
+        if (fb_w, fb_h) != (win_w, win_h):
+            glfw.set_window_size(window, win_w, win_h)
+
+    # Cursor visibility
+    if state.fullscreen:
+        glfw.set_input_mode(window, glfw.CURSOR, glfw.CURSOR_HIDDEN)
+    else:
+        glfw.set_input_mode(window, glfw.CURSOR, glfw.CURSOR_NORMAL)
+
+    # Update viewport & renderer transform
+    fb_w, fb_h = glfw.get_framebuffer_size(window)
+    ctx.viewport = (0, 0, fb_w, fb_h)
+
+    if state.fullscreen:
+        scale_x = fb_w / eff_w
+        scale_y = fb_h / eff_h
+        scale = min(scale_x, scale_y)
+        scaled_w = eff_w * scale
+        scaled_h = eff_h * scale
+        offset_x = (fb_w - scaled_w) / 2.0
+        offset_y = (fb_h - scaled_h) / 2.0
+    else:
+        scale = fb_w / eff_w  # windowed ratio is exact
+        offset_x = 0
+        offset_y = 0
+
+    renderer.set_transform_parameters(
+        scale,
+        offset_x,
+        offset_y,
+        state.image_size,
+        state.rotation,
+        state.mirror,
+    )
+
+    # 2D orthographic projection (MVP)
+    mvp = np.array(
+        [
+            [2.0 / fb_w, 0, 0, -1],
+            [0, 2.0 / fb_h, 0, -1],
+            [0, 0, -1, 0],
+            [0, 0, 0, 1],
+        ],
+        dtype="f4",
+    )
+    renderer.update_mvp(mvp)
+
+    return window

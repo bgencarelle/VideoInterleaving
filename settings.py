@@ -156,7 +156,7 @@ AUDIO_BASE_OCTAVE = 3        # C3-ish region
 AUDIO_OCTAVE_SPAN = 3        # how many octaves the index can walk through
 
 # --- SERVER MODE CONFIGURATION ---
-SERVER_MODE = True         # Enable headless streaming
+SERVER_MODE = True        # Enable headless streaming
 HEADLESS_USE_GL = True   # new: disable ModernGL headless on VPS
 STREAM_PORT = 8080           # Port for video stream (distinct from monitor port 1978)
 STREAM_HOST = '0.0.0.0'      # Listen on all interfaces
