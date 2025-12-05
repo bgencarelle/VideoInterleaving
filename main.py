@@ -1,20 +1,42 @@
 # main.py
 import sys
 import threading
+
+# --- RESTORED: Tee Class for Monitor Visibility ---
+class Tee:
+    def __init__(self, stream, log_file):
+        self.stream = stream
+        self.log_file = log_file
+        self.lock = threading.Lock()
+
+    def write(self, data):
+        with self.lock:
+            # Write to systemd/console
+            self.stream.write(data)
+            self.stream.flush()
+            # Write to file for Monitor
+            self.log_file.write(data)
+            self.log_file.flush()
+
+    def flush(self):
+        self.stream.flush()
+        self.log_file.flush()
+
+# Open log file for the web monitor to read
+log_file = open("runtime.log", "w", buffering=1)
+sys.stdout = Tee(sys.stdout, log_file)
+sys.stderr = Tee(sys.stderr, log_file)
+# --------------------------------------------------
+
 import make_file_lists
 import image_display
 import web_service
 from settings import CLOCK_MODE
 
-# --- REMOVED: Tee Class and sys.stdout redirection ---
-# Systemd now handles the logging automatically without locking your CPU.
 
 def start_stream_server():
     """
     Run the MJPEG web server (Flask/Raw) that serves / and /video_feed.
-
-    This is started in a background thread so the main thread can own
-    the OpenGL context for image_display.run_display().
     """
     web_service.start_server()
 
