@@ -3,12 +3,14 @@ set -e  # Exit immediately if a command exits with a non-zero status
 
 # --- CONFIGURATION ---
 PROJECT_DIR=$(pwd)
-VENV_DIR="/root/PyIntervenv"
-SERVICE_NAME="videointerleaving"  # <--- RENAMED
+# CHANGED: Venv is now a hidden folder inside the project directory
+VENV_DIR="$PROJECT_DIR/.venv"
+SERVICE_NAME="videointerleaving"
 USERNAME="root"
 
 echo ">>> 🛰️  Starting Headless Server Setup for $SERVICE_NAME..."
 echo ">>> Project Directory: $PROJECT_DIR"
+echo ">>> Virtual Env Location: $VENV_DIR"
 
 # --------------------------------------------
 # 1. Install System Dependencies
@@ -31,9 +33,16 @@ systemctl enable --now chrony
 # --------------------------------------------
 echo ">>> 🐍 Setting up Python environment..."
 
+# Clean up old venv if it exists in the project folder
 if [ -d "$VENV_DIR" ]; then
-    echo "    Removing old venv..."
+    echo "    Removing existing .venv..."
     rm -rf "$VENV_DIR"
+fi
+
+# Also clean up the OLD global venv if it exists (cleanup)
+if [ -d "/root/PyIntervenv" ]; then
+    echo "    Removing old global /root/PyIntervenv..."
+    rm -rf "/root/PyIntervenv"
 fi
 
 python3 -m venv "$VENV_DIR"
@@ -68,11 +77,11 @@ WorkingDirectory=$PROJECT_DIR
 
 # Environment Tuning
 Environment=GALLIUM_DRIVER=llvmpipe
-Environment=LP_NUM_THREADS=2
-Environment=PYTHONUNBUFFERED=1
-Environment=MALLOC_TRIM_THRESHOLD_=100000
+#Environment=LP_NUM_THREADS=2
+#Environment=PYTHONUNBUFFERED=1
+#Environment=MALLOC_TRIM_THRESHOLD_=100000
 
-# Executing Python directly from venv
+# Executing Python directly from the local project .venv
 ExecStart=$VENV_DIR/bin/python -O main.py
 
 # Auto-restart config
