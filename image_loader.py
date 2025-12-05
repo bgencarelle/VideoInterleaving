@@ -2,12 +2,11 @@ import threading
 from collections import deque
 import ctypes
 import numpy as np
-import cv2
 import os
 from settings import MAIN_FOLDER_PATH, FLOAT_FOLDER_PATH, TOLERANCE
 
 # --- TurboJPEG Init ---
-from turbojpeg import TurboJPEG, TJPF_RGBA, TJPF_RGB
+from turbojpeg import TurboJPEG, TJPF_RGB
 
 jpeg = TurboJPEG()
 
@@ -83,42 +82,29 @@ class ImageLoader:
 
     def read_image(self, image_path):
         """
-        Loads an image and detects format strategy.
+        Strict Loader.
+        Only accepts .webp (Standard) or .jpg/.jpeg (SBS).
         Returns: (image_data, is_sbs_bool)
         """
         ext = image_path.split('.')[-1].lower()
 
-        # --- WEBP STRATEGY (Standard RGBA) ---
+        # --- WEBP STRATEGY (Legacy Standard RGBA) ---
         if ext == "webp":
             return self._read_webp(image_path)
 
-        # --- JPEG STRATEGY (Side-by-Side) ---
+        # --- JPEG STRATEGY (SBS RGB) ---
         if ext in ("jpg", "jpeg"):
-            try:
-                with open(image_path, "rb") as f:
-                    data = f.read()
-                # Decode to RGB.
-                # For SBS, visual data is RGB, Alpha mask is encoded in the image structure.
-                # We do NOT want TJPF_RGBA here.
-                img = jpeg.decode(data, pixel_format=TJPF_RGB)
-                return img, True  # is_sbs = True
-            except Exception:
-                pass
+            # We let TurboJPEG raise an error if the file is corrupt.
+            # This will be caught by the async worker in run_display.
+            with open(image_path, "rb") as f:
+                data = f.read()
 
-        # --- FALLBACK (OpenCV) ---
-        img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-        if img is None:
-            raise ValueError(f"Failed to load image: {image_path}")
+            # pixel_format=TJPF_RGB forces 3 channels even if source is grayscale
+            img = jpeg.decode(data, pixel_format=TJPF_RGB)
+            return img, True  # Always treats JPEGs as SBS
 
-        if img.ndim == 2:
-            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGBA)
-        elif img.shape[2] == 3:
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGBA)
-        elif img.shape[2] == 4:
-            img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
-
-        # IMPORTANT: Fallback must also return the boolean flag
-        return img, False
+        # --- UNSUPPORTED FORMATS ---
+        raise ValueError(f"Unsupported image format: {image_path}. Pipeline only accepts .jpg (SBS) or .webp")
 
     def load_images(self, index, main_folder, float_folder):
         """
@@ -128,7 +114,6 @@ class ImageLoader:
         mpath = self.main_folder_path[index][main_folder]
         fpath = self.float_folder_path[index][float_folder]
 
-        # Use read_image to get tuples (img, bool)
         main_img, main_sbs = self.read_image(mpath)
         float_img, float_sbs = self.read_image(fpath)
 
@@ -143,7 +128,7 @@ class FIFOImageBuffer:
 
     def update(self, index, data_tuple):
         """
-        data_tuple is now (main_img, float_img, m_sbs, f_sbs)
+        data_tuple is (main_img, float_img, m_sbs, f_sbs)
         """
         with self.lock:
             if len(self.queue) >= self.max_size:
@@ -161,7 +146,6 @@ class FIFOImageBuffer:
                 key=lambda item: abs(item[0] - current_index)
             )
             if abs(best_idx - current_index) <= TOLERANCE:
-                # Unpack the tuple stored in update
-                # Returns: index, m_img, f_img, m_sbs, f_sbs
+                # Unpack: index, m_img, f_img, m_sbs, f_sbs
                 return best_idx, best_data[0], best_data[1], best_data[2], best_data[3]
             return None
