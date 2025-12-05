@@ -273,64 +273,69 @@ def overlay_images_single_pass(main_texture, float_texture, background_color=(0,
 
 
 # --- CPU FALLBACK (Updated for Explicit Flags) ---
+# --- OPTIMIZED CPU COMPOSITOR ---
 def composite_cpu(main_img, float_img, main_is_sbs=False, float_is_sbs=False):
     if main_img is None and float_img is None: return None
 
-    def unpack(img, is_sbs):
+    # Helper: Get view of content without copying data if possible
+    def get_views(img, is_sbs):
         if img is None: return None, None
+        h, w = img.shape[:2]
         if is_sbs:
-            # Split SBS JPEG
-            h, w = img.shape[:2]
             mid = w // 2
-            rgb = img[:, :mid].astype(np.uint16)
-            # Alpha is Right half (Grayscale/Blue channel)
-            alpha = img[:, mid:, 0:1].astype(np.uint16)
-            return rgb, alpha
+            # Slice: RGB is left, Alpha is right (Red channel)
+            return img[:, :mid], img[:, mid:, 0]
         else:
-            # Standard WebP/RGBA
+            # Standard RGBA
             if img.ndim == 2:
-                rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB).astype(np.uint16)
-                alpha = None
+                # Convert grayscale to RGB on the fly (rare fallback)
+                return cv2.cvtColor(img, cv2.COLOR_GRAY2RGB), None
             elif img.shape[2] == 4:
-                rgb = img[..., :3].astype(np.uint16)
-                alpha = img[..., 3:4].astype(np.uint16)
-            else:  # RGB Opaque
-                rgb = img.astype(np.uint16)
-                alpha = None
-            return rgb, alpha
+                return img[..., :3], img[..., 3]
+            else:
+                return img, None  # Opaque RGB
 
-    ref_img = main_img if main_img is not None else float_img
+    # 1. Prepare Base Canvas
+    # We try to use the Main Image as the canvas to avoid allocating a new array.
+    m_rgb, m_a = get_views(main_img, main_is_sbs)
 
-    # Determine output size based on whether reference is SBS
-    # If the reference image is SBS, the output canvas width is half the image width.
-    ref_is_sbs = main_is_sbs if main_img is not None else float_is_sbs
-    h, w = ref_img.shape[:2]
-    if ref_is_sbs: w //= 2
+    if m_rgb is not None:
+        # We MUST copy here because we are about to burn the float image into it,
+        # and we don't want to corrupt the source image in the cache.
+        canvas = m_rgb.copy()
+    else:
+        # Fallback: create solid color background
+        f_rgb, _ = get_views(float_img, float_is_sbs)
+        h, w = f_rgb.shape[:2]
+        bg_r, bg_g, bg_b = BACKGROUND_COLOR
+        canvas = np.full((h, w, 3), (bg_r, bg_g, bg_b), dtype=np.uint8)
 
-    bg_r, bg_g, bg_b = BACKGROUND_COLOR
-    base = np.empty((h, w, 3), dtype=np.uint16)
-    base[:] = (bg_r, bg_g, bg_b)
+    # 2. Blend Float Layer
+    f_rgb, f_a = get_views(float_img, float_is_sbs)
 
-    m_rgb, m_a = unpack(main_img, main_is_sbs)
-    f_rgb, f_a = unpack(float_img, float_is_sbs)
+    if f_rgb is not None:
+        # Crop to intersection to handle size mismatches safely
+        ch, cw = canvas.shape[:2]
+        fh, fw = f_rgb.shape[:2]
+        h, w = min(ch, fh), min(cw, fw)
 
-    def blend(dst, src, alpha):
-        if src is None: return dst
+        target_slice = canvas[:h, :w]
+        source_slice = f_rgb[:h, :w]
 
-        # Simple size protection (crop if src is larger, ignore if smaller/mismatch)
-        # ideally we would resize here, but for high-perf video pipeline, strict matching is better
-        sh, sw = src.shape[:2]
-        dh, dw = dst.shape[:2]
+        if f_a is None:
+            # Opaque Overwrite (Fastest)
+            target_slice[:] = source_slice
+        else:
+            # Alpha Blend (Optimized Vector Math)
+            alpha = f_a[:h, :w].astype(np.uint16)[:, :, None]  # Expand to (H,W,1)
 
-        if sh != dh or sw != dw:
-            # If size mismatch, return dst (skip layer) to avoid crash
-            return dst
+            # Cast to uint16 to prevent overflow during math
+            src = source_slice.astype(np.uint16)
+            dst = target_slice.astype(np.uint16)
 
-        if alpha is None: return src
-        inv = 255 - alpha
-        return (src * alpha + dst * inv + 127) // 255
+            # Formula: (Src * A + Dst * (255 - A)) // 255
+            blended = (src * alpha + dst * (255 - alpha)) // 255
 
-    if m_rgb is not None: base = blend(base, m_rgb, m_a)
-    if f_rgb is not None: base = blend(base, f_rgb, f_a)
+            target_slice[:] = blended.astype(np.uint8)
 
-    return np.clip(base, 0, 255).astype(np.uint8)
+    return canvas
