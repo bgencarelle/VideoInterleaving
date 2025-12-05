@@ -207,7 +207,7 @@ server {
         proxy_buffering off;
         proxy_cache off;
         proxy_request_buffering off;
-        proxy_read_timeout 3600s;
+        proxy_read_timeout 7d;
         sendfile off;
         tcp_nodelay on;
         gzip off;

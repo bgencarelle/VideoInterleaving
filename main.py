@@ -1,6 +1,10 @@
 # main.py
 import sys
 import threading
+import make_file_lists
+import image_display
+import web_service
+from settings import CLOCK_MODE
 
 # --- RESTORED: Tee Class for Monitor Visibility ---
 class Tee:
@@ -23,23 +27,20 @@ class Tee:
         self.log_file.flush()
 
 # Open log file for the web monitor to read
-log_file = open("runtime.log", "w", buffering=1)
-sys.stdout = Tee(sys.stdout, log_file)
-sys.stderr = Tee(sys.stderr, log_file)
-# --------------------------------------------------
-
-import make_file_lists
-import image_display
-import web_service
-from settings import CLOCK_MODE
-
+# We use "w" to truncate on restart, ensuring the log doesn't grow infinitely
+# across restarts, though logrotate handles long-running processes.
+try:
+    log_file = open("runtime.log", "w", buffering=1)
+    sys.stdout = Tee(sys.stdout, log_file)
+    sys.stderr = Tee(sys.stderr, log_file)
+except Exception as e:
+    print(f"Failed to setup logging: {e}")
 
 def start_stream_server():
     """
     Run the MJPEG web server (Flask/Raw) that serves / and /video_feed.
     """
     web_service.start_server()
-
 
 def main(clock=CLOCK_MODE):
     # 1. Build/refresh the file lists and CSVs
@@ -57,7 +58,6 @@ def main(clock=CLOCK_MODE):
 
     # 3. Run the display loop (this owns the GL context)
     image_display.run_display(clock)
-
 
 if __name__ == "__main__":
     main()

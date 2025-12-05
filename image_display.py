@@ -12,6 +12,7 @@ import numpy as np
 
 # --- RESTORED: Standard Threading ---
 # Removed cv2.setNumThreads(0) so OpenCV can use multicore decoding if needed.
+# This helps distribute load on multi-core devices like the Pi.
 # ------------------------------------
 
 import settings
@@ -19,8 +20,12 @@ from shared_state import exchange
 
 os.environ['PYOPENGL_ERROR_CHECKING'] = '0'
 
+# Conditional import for local mode
 if not settings.SERVER_MODE:
-    import glfw
+    try:
+        import glfw
+    except ImportError:
+        print("Warning: GLFW not found. Local mode will fail if enabled.")
 
 from settings import (
     FULLSCREEN_MODE,
@@ -93,6 +98,7 @@ def cpu_composite_frame(main_img, float_img):
             raise ValueError(f"Unsupported image shape: {img.shape!r}")
         return rgb, alpha
 
+    # Decide the reference size from whichever image we have
     ref = main_img if main_img is not None else float_img
     h, w = ref.shape[:2]
 
@@ -171,6 +177,9 @@ def run_display(clock_source=CLOCK_MODE):
     image_loader.set_png_paths_len(png_paths_len)
 
     # --- Display / GL init ---
+    # This function handles creating the window context.
+    # If !SERVER_MODE, it creates a visible GLFW window.
+    # If SERVER_MODE, it creates a headless FBO (if configured).
     window = display_init(state)
 
     if settings.SERVER_MODE:
@@ -180,8 +189,9 @@ def run_display(clock_source=CLOCK_MODE):
         else:
             print("[DISPLAY] SERVER_MODE: using CPU-only compositing.")
     else:
+        # LOCAL MODE CHECK
         if window is None:
-            raise RuntimeError("Local mode requires a GL window.")
+            raise RuntimeError("Local mode requires a GL window, but display_init returned None.")
         has_gl = True
         register_callbacks(window, state)
 
@@ -195,7 +205,8 @@ def run_display(clock_source=CLOCK_MODE):
     main_image, float_image = image_loader.load_images(index, main_folder, float_folder)
     fifo_buffer.update(index, (main_image, float_image))
 
-    if settings.SERVER_MODE and getattr(settings, "HEADLESS_USE_GL", False):
+    # Configure renderer for headless mode if using GL
+    if settings.SERVER_MODE and getattr(settings, "HEADLESS_USE_GL", False) and has_gl:
         h_img, w_img = main_image.shape[0], main_image.shape[1]
         renderer.set_transform_parameters(
             fs_scale=1.0, fs_offset_x=0.0, fs_offset_y=0.0,
@@ -221,12 +232,14 @@ def run_display(clock_source=CLOCK_MODE):
                 monitor.record_load_error(scheduled_index, e)
 
     # --- RESTORED: Dynamic Workers (The "Old Way") ---
-    # This allows parallel loading (2-6 threads) based on CPU cores
+    # This allows parallel loading (2-6 threads) based on CPU cores.
+    # Essential for Pi to prevent single-core saturation.
     cpu_count = os.cpu_count() or 1
     max_workers = 2 if cpu_count <= 2 else min(6, cpu_count)
     # -------------------------------------------------
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Schedule first preload
         if index == 0:
             next_index = 1
         elif index == png_paths_len - 1:
@@ -245,15 +258,18 @@ def run_display(clock_source=CLOCK_MODE):
         while (state.run_mode and not settings.SERVER_MODE) or settings.SERVER_MODE:
             successful_display = False
 
+            # 1. Event polling (local only)
             if not settings.SERVER_MODE and has_gl:
                 glfw.poll_events()
                 if not state.run_mode:
                     break
 
+            # 2. Reinit (local only)
             if state.needs_update and not settings.SERVER_MODE and has_gl:
                 display_init(state)
                 state.needs_update = False
 
+            # 3. Index & Images
             prev = index
             index, _ = update_index(png_paths_len, PINGPONG)
 
@@ -284,6 +300,7 @@ def run_display(clock_source=CLOCK_MODE):
                     if not settings.SERVER_MODE:
                         print(f"[MISS] FIFO miss for index {index}")
 
+                # Schedule next
                 if index == 0:
                     next_index = 1
                 elif index == png_paths_len - 1:
@@ -296,6 +313,7 @@ def run_display(clock_source=CLOCK_MODE):
                 )
                 future.add_done_callback(lambda fut, s_idx=next_index: async_load_callback(fut, s_idx))
 
+            # 4. Drawing
             if has_gl:
                 if settings.SERVER_MODE:
                     window.use()
@@ -305,6 +323,7 @@ def run_display(clock_source=CLOCK_MODE):
                     background_color=BACKGROUND_COLOR,
                 )
 
+            # 5. Capture (SERVER_MODE only)
             if settings.SERVER_MODE:
                 now = time.time()
                 if (index != last_captured_index) and (now - last_server_capture > capture_interval):
@@ -312,11 +331,13 @@ def run_display(clock_source=CLOCK_MODE):
                     last_captured_index = index
                     try:
                         if has_gl:
+                            # GPU Path
                             window.use()
                             raw = window.fbo.read(components=3)
                             w, h = window.size
                             frame = np.frombuffer(raw, dtype=np.uint8).reshape((h, w, 3))
                         else:
+                            # CPU Fallback Path
                             frame = cpu_composite_frame(current_main_img, current_float_img)
 
                         if frame is not None:
@@ -329,9 +350,11 @@ def run_display(clock_source=CLOCK_MODE):
                     except Exception as e:
                         print(f"[CAPTURE ERROR] {e}")
 
+            # 6. Swap (local only)
             if not settings.SERVER_MODE and has_gl:
                 glfw.swap_buffers(window)
 
+            # 7. Timing / FPS
             now = time.perf_counter()
             dt = now - frame_start
             frame_times.append(dt)
