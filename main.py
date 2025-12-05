@@ -1,41 +1,17 @@
-#main.py
+# main.py
 import sys
 import threading
-
-# Tee stdout/stderr to a line-buffered runtime.log
-class Tee:
-    def __init__(self, stream, log_file):
-        self.stream = stream
-        self.log_file = log_file
-        self.lock = threading.Lock()
-
-    def write(self, data):
-        with self.lock:
-            self.stream.write(data)
-            self.stream.flush()
-            self.log_file.write(data)
-            self.log_file.flush()
-
-    def flush(self):
-        self.stream.flush()
-        self.log_file.flush()
-
-
-# open in line-buffered mode
-log_file = open("runtime.log", "w", buffering=1)
-sys.stdout = Tee(sys.stdout, log_file)
-sys.stderr = Tee(sys.stderr, log_file)
-
-# Imports after tee so all prints go into runtime.log
 import make_file_lists
 import image_display
 import web_service
 from settings import CLOCK_MODE
 
+# --- REMOVED: Tee Class and sys.stdout redirection ---
+# Systemd now handles the logging automatically without locking your CPU.
 
 def start_stream_server():
     """
-    Run the MJPEG web server (Flask) that serves / and /video_feed.
+    Run the MJPEG web server (Flask/Raw) that serves / and /video_feed.
 
     This is started in a background thread so the main thread can own
     the OpenGL context for image_display.run_display().
