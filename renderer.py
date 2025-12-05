@@ -1,161 +1,557 @@
-import os
-import cv2
+"""
+renderer.py – Unified Rendering Engine (GPU & CPU paths)
+"""
+
+import math
 import numpy as np
-import time
-from glob import glob
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from tqdm import tqdm
+import moderngl
+import cv2
+from settings import ENABLE_SRGB_FRAMEBUFFER, GAMMA_CORRECTION_ENABLED, BACKGROUND_COLOR
 
-def process_file(file_path, input_root, output_root, quality=90):
+# ModernGL context and objects (initialized in initialize())
+ctx = None            # type: ignore[assignment]
+prog = None           # type: ignore[assignment]
+vao = None            # type: ignore[assignment]
+vbo = None            # type: ignore[assignment]
+
+# Transformation parameters (set via display_manager or elsewhere)
+_fs_scale: float = 1.0
+_fs_offset_x: float = 0.0
+_fs_offset_y: float = 0.0
+_image_size: tuple[int, int] = (0, 0)   # (width, height)
+_rotation_angle: float = 0.0
+_mirror_mode: int = 0
+
+# Viewport / FBO size (for headless aspect-correct quad)
+_viewport_size: tuple[int, int] = (0, 0)
+
+# Cached quad data & dirty flag (avoid recomputing every frame)
+_quad_data: np.ndarray | None = None
+_quad_dirty: bool = True
+
+# Cached background clear color in linear space
+_bg_linear_color: tuple[float, float, float] | None = None
+_bg_linear_src: tuple[int, int, int] | None = None
+
+# Tracks shader mode to avoid redundant recompilation/uniform setting
+_current_shader_mode = None  # 'standard' or 'sbs'
+
+def _update_bg_linear(background_color: tuple[int, int, int]) -> tuple[float, float, float]:
     """
-    Reads a WebP file, extracts color/alpha, stacks them side-by-side,
-    and saves as a high-quality JPEG.
-    Handles RGB images (no alpha) by creating a fully opaque mask.
+    Cache the gamma-corrected background color so we don't redo pow()
+    in Python for every frame.
     """
-    try:
-        # 1. Load Image (Any format supported by OpenCV)
-        # IMREAD_UNCHANGED is crucial to get the Alpha channel if it exists
-        img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
-        if img is None:
-            return False, "Load failed"
+    global _bg_linear_color, _bg_linear_src
 
-        h, w = img.shape[:2]
-        
-        # 2. Extract channels
-        if img.ndim == 3 and img.shape[2] == 4:
-            # Standard BGRA (Blue, Green, Red, Alpha)
-            b, g, r, a = cv2.split(img)
-        elif img.ndim == 3 and img.shape[2] == 3:
-            # BGR only (No Alpha) -> Assume Opaque (Alpha = 255)
-            b, g, r = cv2.split(img)
-            # Create a white (255) mask of the same size
-            a = np.full((h, w), 255, dtype=np.uint8)
-        elif img.ndim == 2:
-            # Grayscale -> Treat as BGR + Opaque
-            b = g = r = img
-            a = np.full((h, w), 255, dtype=np.uint8)
-        else:
-            return False, f"Unsupported format: {img.shape}"
+    if _bg_linear_src == background_color and _bg_linear_color is not None:
+        return _bg_linear_color
 
-        # 3. Create Side-by-Side canvas (Double Width)
-        # Left: Color (BGR)
-        color_bgr = cv2.merge([b, g, r])
-        
-        # Right: Alpha (Gray -> BGR for JPEG compatibility)
-        # We merge the single Alpha channel into 3 identical channels
-        # so it stacks cleanly with the 3-channel Color image.
-        alpha_bgr = cv2.merge([a, a, a])
+    def srgb_to_linear_component(c: int) -> float:
+        return pow(c / 255.0, 2.2)
 
-        # Stack horizontally: [Color | Alpha]
-        sbs = np.hstack([color_bgr, alpha_bgr])
-
-        # 4. Construct Output Path
-        rel_path = os.path.relpath(file_path, input_root)
-        # Force extension to .jpg
-        rel_path_jpg = os.path.splitext(rel_path)[0] + ".jpg"
-        out_path = os.path.join(output_root, rel_path_jpg)
-
-        # Ensure output dir exists
-        os.makedirs(os.path.dirname(out_path), exist_ok=True)
-
-        # 5. Save as JPEG
-        # Use high quality (default 90) to minimize compression artifacts in the mask
-        success = cv2.imwrite(out_path, sbs, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
-        
-        return success, None
-
-    except Exception as e:
-        return False, str(e)
-
-def main():
-    print("--- Side-by-Side (SBS) JPEG Converter ---")
-    print("Converts WebP/PNG (RGBA) -> JPEG (RGB + Alpha Mask side-by-side)")
-    print("Handles missing alpha channels by assuming full opacity.")
-    
-    # 1. Interactive Input
-    default_input = "images"
-    input_dir = input(f"Enter source folder path [default: {default_input}]: ").strip()
-    if not input_dir:
-        input_dir = default_input
-
-    if not os.path.isdir(input_dir):
-        print(f"Error: Directory '{input_dir}' not found.")
-        return
-
-    default_output = input_dir + "_sbs"
-    output_dir = input(f"Enter output folder path [default: {default_output}]: ").strip()
-    if not output_dir:
-        output_dir = default_output
-
-    quality_str = input("Enter JPEG Quality (1-100) [default: 90]: ").strip()
-    quality = int(quality_str) if quality_str.isdigit() else 90
-
-    print(f"\nScanning '{input_dir}' for image files...")
-    # Recursive glob for common image formats
-    # Note: We scan for webp, png, jpg, etc. to be versatile
-    extensions = ("*.webp", "*.png", "*.jpg", "*.jpeg")
-    files = []
-    for ext in extensions:
-        files.extend(glob(os.path.join(input_dir, "**", ext), recursive=True))
-    
-    # Remove duplicates if any (case sensitivity)
-    files = sorted(list(set(files)))
-    
-    total_files = len(files)
-    print(f"Found {total_files} files to process.")
-    
-    if total_files == 0:
-        print("Nothing to do.")
-        return
-
-    confirm = input("Start conversion? (y/n): ").strip().lower()
-    if confirm != 'y':
-        print("Aborted.")
-        return
-
-    # 2. Parallel Processing
-    start_time = time.time()
-    cpu_count = os.cpu_count() or 1
-    # Leave one core free for system stability if high core count
-    workers = max(1, cpu_count - 1) if cpu_count > 4 else cpu_count
-    
-    print(f"\nStarting conversion using {workers} CPU cores...")
-
-    errors = []
-    
-    with ProcessPoolExecutor(max_workers=workers) as executor:
-        futures = {
-            executor.submit(process_file, f, input_dir, output_dir, quality): f 
-            for f in files
-        }
-
-        for future in tqdm(as_completed(futures), total=total_files, unit="img"):
-            file_path = futures[future]
-            try:
-                success, error_msg = future.result()
-                if not success:
-                    errors.append(f"{file_path}: {error_msg}")
-            except Exception as e:
-                errors.append(f"{file_path}: Crash - {e}")
-
-    end_time = time.time()
-    duration = end_time - start_time
-    
-    print("\n" + "="*40)
-    print(f"Processing Complete!")
-    print(f"Time taken: {duration:.2f} seconds")
-    if duration > 0:
-        print(f"Average speed: {total_files / duration:.1f} fps")
-    print(f"Output saved to: {output_dir}")
-    
-    if errors:
-        print(f"\n{len(errors)} Errors encountered:")
-        for err in errors[:10]:
-            print(f" - {err}")
-        if len(errors) > 10:
-            print(f" ... and {len(errors) - 10} more.")
+    if GAMMA_CORRECTION_ENABLED or ENABLE_SRGB_FRAMEBUFFER:
+        _bg_linear_color = tuple(srgb_to_linear_component(c) for c in background_color)
     else:
-        print("0 Errors.")
+        _bg_linear_color = (
+            background_color[0] / 255.0,
+            background_color[1] / 255.0,
+            background_color[2] / 255.0,
+        )
 
-if __name__ == "__main__":
-    main()
+    _bg_linear_src = background_color
+    return _bg_linear_color
+
+
+def set_viewport_size(width: int, height: int) -> None:
+    """Record the viewport (FBO or window) size and set GL viewport."""
+    global _viewport_size, _quad_dirty
+    _viewport_size = (width, height)
+    _quad_dirty = True  # geometry depends on viewport
+    if ctx is not None:
+        ctx.viewport = (0, 0, width, height)
+
+
+def initialize(gl_context: moderngl.Context) -> None:
+    """Initialize ModernGL shaders, buffer, MVP, and compositing state."""
+    global ctx, prog, vao, vbo, _current_shader_mode
+    ctx = gl_context
+
+    # We start by initializing the standard shader
+    _compile_shader('standard')
+
+    # Small VBO; we overwrite it with quad vertices each time the quad changes.
+    vbo = ctx.buffer(reserve=64)
+    vao = ctx.vertex_array(prog, [(vbo, "2f 2f", "position", "texcoord")])
+
+    # Default MVP = identity so clip-space positions “just work”
+    mvp = np.eye(4, dtype="f4")
+    prog["u_MVP"].write(mvp.T.tobytes())
+
+    # Single-pass shader does its own layering; GL blending not needed
+    ctx.disable(moderngl.BLEND)
+
+    # Bind samplers to texture units 0 and 1
+    if "texture_main" in prog:
+        prog["texture_main"].value = 0
+    if "texture_float" in prog:
+        prog["texture_float"].value = 1
+
+    # Initialize bg color uniform to black (will be updated per-frame)
+    if "u_bgColor" in prog:
+        prog["u_bgColor"].value = (0.0, 0.0, 0.0)
+
+def _compile_shader(mode='standard'):
+    """
+    Compiles the appropriate shader program based on mode:
+    - 'standard': Standard texture sampling (WebP/RGBA)
+    - 'sbs': Side-by-Side JPEG sampling (Left=RGB, Right=Alpha)
+    """
+    global prog, _current_shader_mode, vao, vbo
+
+    if _current_shader_mode == mode and prog is not None:
+        return
+
+    is_gles = ctx.version_code < 320
+
+    # Vertex Shader is common
+    if is_gles:
+        vertex_src = """
+            #version 310 es
+            precision mediump float;
+            in vec2 position;
+            in vec2 texcoord;
+            uniform mat4 u_MVP;
+            out vec2 v_texcoord;
+            void main() {
+                gl_Position = u_MVP * vec4(position, 0.0, 1.0);
+                v_texcoord = texcoord;
+            }
+        """
+    else:
+        vertex_src = """
+            #version 330 core
+            in vec2 position;
+            in vec2 texcoord;
+            uniform mat4 u_MVP;
+            out vec2 v_texcoord;
+            void main() {
+                gl_Position = u_MVP * vec4(position, 0.0, 1.0);
+                v_texcoord = texcoord;
+            }
+        """
+
+    # Fragment Shader selection
+    if mode == 'sbs':
+        # Side-by-Side JPEG Logic
+        # Maps uv [0,1] -> Left Half [0, 0.5] for Color, Right Half [0.5, 1.0] for Mask
+        if is_gles:
+            fragment_src = """
+                #version 310 es
+                precision mediump float;
+                uniform sampler2D texture_main;
+                uniform sampler2D texture_float;
+                uniform vec3 u_bgColor;
+                in vec2 v_texcoord;
+                out vec4 fragColor;
+                void main() {
+                    // Coordinates for Left Half (Color)
+                    vec2 uv_color = vec2(v_texcoord.x * 0.5, v_texcoord.y);
+                    // Coordinates for Right Half (Mask)
+                    vec2 uv_mask  = vec2((v_texcoord.x * 0.5) + 0.5, v_texcoord.y);
+
+                    // Sample Main
+                    vec4 mainC = texture(texture_main, uv_color);
+                    float mainA = texture(texture_main, uv_mask).r;
+
+                    // Sample Float
+                    vec4 floatC = texture(texture_float, uv_color);
+                    float floatA = texture(texture_float, uv_mask).r;
+
+                    // Compositing Logic
+                    vec3 color = mix(u_bgColor, mainC.rgb, mainA);
+                    color = mix(color, floatC.rgb, floatA);
+
+                    fragColor = vec4(color, 1.0);
+                }
+            """
+        else:
+            fragment_src = """
+                #version 330 core
+                uniform sampler2D texture_main;
+                uniform sampler2D texture_float;
+                uniform vec3 u_bgColor;
+                in vec2 v_texcoord;
+                out vec4 fragColor;
+                void main() {
+                    vec2 uv_color = vec2(v_texcoord.x * 0.5, v_texcoord.y);
+                    vec2 uv_mask  = vec2((v_texcoord.x * 0.5) + 0.5, v_texcoord.y);
+
+                    vec4 mainC = texture(texture_main, uv_color);
+                    float mainA = texture(texture_main, uv_mask).r;
+
+                    vec4 floatC = texture(texture_float, uv_color);
+                    float floatA = texture(texture_float, uv_mask).r;
+
+                    vec3 color = mix(u_bgColor, mainC.rgb, mainA);
+                    color = mix(color, floatC.rgb, floatA);
+
+                    fragColor = vec4(color, 1.0);
+                }
+            """
+    else:
+        # Standard RGBA Logic
+        if is_gles:
+            fragment_src = """
+                #version 310 es
+                precision mediump float;
+                uniform sampler2D texture_main;
+                uniform sampler2D texture_float;
+                uniform vec3 u_bgColor;
+                in vec2 v_texcoord;
+                out vec4 fragColor;
+                void main() {
+                    vec4 mainColor  = texture(texture_main,  v_texcoord);
+                    vec4 floatColor = texture(texture_float, v_texcoord);
+                    vec3 color = mix(u_bgColor, mainColor.rgb,  mainColor.a);
+                    color = mix(color, floatColor.rgb, floatColor.a);
+                    fragColor = vec4(color, 1.0);
+                }
+            """
+        else:
+            fragment_src = """
+                #version 330 core
+                uniform sampler2D texture_main;
+                uniform sampler2D texture_float;
+                uniform vec3 u_bgColor;
+                in vec2 v_texcoord;
+                out vec4 fragColor;
+                void main() {
+                    vec4 mainColor  = texture(texture_main,  v_texcoord);
+                    vec4 floatColor = texture(texture_float, v_texcoord);
+                    vec3 color = mix(u_bgColor, mainColor.rgb,  mainColor.a);
+                    color = mix(color, floatColor.rgb, floatColor.a);
+                    fragColor = vec4(color, 1.0);
+                }
+            """
+
+    # Compile and link
+    prog = ctx.program(vertex_shader=vertex_src, fragment_shader=fragment_src)
+
+    # Re-bind uniforms since program is new
+    if "texture_main" in prog: prog["texture_main"].value = 0
+    if "texture_float" in prog: prog["texture_float"].value = 1
+
+    # Re-create VAO with new program (VBO can stay)
+    if vbo:
+        vao = ctx.vertex_array(prog, [(vbo, "2f 2f", "position", "texcoord")])
+
+    _current_shader_mode = mode
+    # Note: MVP and BgColor will be updated in next draw call
+
+def set_transform_parameters(fs_scale: float,
+                             fs_offset_x: float,
+                             fs_offset_y: float,
+                             image_size: tuple[int, int],
+                             rotation_angle: float,
+                             mirror_mode: int) -> None:
+    """
+    Update transformation parameters used for rendering (scale, offsets, etc.).
+    Called from display_manager / image_display when layout changes.
+    """
+    global _fs_scale, _fs_offset_x, _fs_offset_y, _image_size, _rotation_angle, _mirror_mode, _quad_dirty
+    _fs_scale = fs_scale
+    _fs_offset_x = fs_offset_x
+    _fs_offset_y = fs_offset_y
+    _image_size = image_size
+    _rotation_angle = rotation_angle
+    _mirror_mode = mirror_mode
+    _quad_dirty = True  # geometry depends on these
+
+
+def update_mvp(mvp_matrix: np.ndarray) -> None:
+    """Update the MVP matrix uniform for the shader (called when viewport changes)."""
+    if prog is not None and "u_MVP" in prog:
+        prog["u_MVP"].write(mvp_matrix.T.tobytes())  # column-major for OpenGL
+
+
+def create_texture(image: np.ndarray) -> moderngl.Texture:
+    """Create a new GPU texture from a NumPy RGBA image array."""
+    h, w = image.shape[0], image.shape[1]
+    # For SBS JPEGs, channels=3 (RGB). For WebP, channels=4 (RGBA).
+    components = image.shape[2] if image.ndim == 3 else 1
+
+    tex = ctx.texture((w, h), components, data=image.tobytes())
+    tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+    tex.repeat_x = False
+    tex.repeat_y = False
+    return tex
+
+
+def update_texture(texture: moderngl.Texture, new_image: np.ndarray) -> moderngl.Texture:
+    """Update an existing texture with a new image (recreate if dimensions/channels differ)."""
+    new_h, new_w = new_image.shape[0], new_image.shape[1]
+    new_c = new_image.shape[2] if new_image.ndim == 3 else 1
+
+    if (new_w, new_h) != texture.size or new_c != texture.components:
+        texture.release()
+        tex = ctx.texture((new_w, new_h), new_c, data=new_image.tobytes())
+        tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        tex.repeat_x = False
+        tex.repeat_y = False
+        return tex
+    else:
+        texture.write(new_image.tobytes())
+        return texture
+
+
+def compute_transformed_quad() -> np.ndarray:
+    """
+    Compute the positions and texture coordinates of the quad.
+
+    Headless mode (viewport known):
+        - Build aspect-correct quad in clip space [-1,1]x[-1,1].
+
+    Legacy mode (viewport == (0,0)):
+        - Use original pixel-space pipeline with rotation/scale/offset.
+    """
+    global _quad_data
+
+    view_w, view_h = _viewport_size
+
+    # --- Headless aspect-correct path (viewport known) ---
+    if view_w > 0 and view_h > 0:
+        # Note: For SBS images, image_size passed here should be the "visual" size
+        # (half-width), but currently image_display passes full texture size.
+        # We rely on the Shader to squash coordinates, so the geometry stays standard.
+        img_w, img_h = _image_size
+
+        if img_w <= 0 or img_h <= 0:
+            r_tex = 1.0
+        else:
+            r_tex = img_w / img_h
+
+        r_view = view_w / view_h
+
+        if r_tex > 0 and r_view > 0:
+            if r_tex > r_view:
+                x_scale = 1.0
+                y_scale = r_view / r_tex
+            else:
+                y_scale = 1.0
+                x_scale = r_tex / r_view
+        else:
+            x_scale = 1.0
+            y_scale = 1.0
+
+        # FLIPPED Y for correct headless readout (Standard GL is bottom-left origin)
+        positions = [
+            (-x_scale,  y_scale), # Top-Left vertex -> Screen Bottom-Left
+            ( x_scale,  y_scale),
+            ( x_scale, -y_scale),
+            (-x_scale, -y_scale),
+        ]
+
+        # Use standard 0..1 UVs. The shader handles SBS mapping.
+        if _mirror_mode:
+            tex_coords = [(1.0, 1.0), (0.0, 1.0), (0.0, 0.0), (1.0, 0.0)]
+        else:
+            tex_coords = [(0.0, 1.0), (1.0, 1.0), (1.0, 0.0), (0.0, 0.0)]
+
+        data = []
+        for (px, py), (tu, tv) in zip(positions, tex_coords):
+            data += [px, py, tu, tv]
+        _quad_data = np.array(data, dtype=np.float32)
+        return _quad_data
+
+    # --- Legacy pixel-space path (local window, using MVP) ---
+    w, h = _image_size
+    if w == 0 or h == 0:
+        if _mirror_mode:
+            tex_coords = [(1.0, 1.0), (0.0, 1.0), (0.0, 0.0), (1.0, 0.0)]
+        else:
+            tex_coords = [(0.0, 1.0), (1.0, 1.0), (1.0, 0.0), (0.0, 0.0)]
+        positions = [
+            (-1.0, 1.0),
+            ( 1.0, 1.0),
+            ( 1.0,  -1.0),
+            (-1.0,  -1.0),
+        ]
+        data = []
+        for (px, py), (tu, tv) in zip(positions, tex_coords):
+            data += [px, py, tu, tv]
+        _quad_data = np.array(data, dtype=np.float32)
+        return _quad_data
+
+    w_scaled = w * _fs_scale
+    h_scaled = h * _fs_scale
+    if _rotation_angle % 180 == 90:
+        effective_w = h_scaled
+        effective_h = w_scaled
+    else:
+        effective_w = w_scaled
+        effective_h = h_scaled
+
+    cx = _fs_offset_x + effective_w / 2.0
+    cy = _fs_offset_y + effective_h / 2.0
+    corners = [(-w_scaled / 2, -h_scaled / 2),
+               ( w_scaled / 2, -h_scaled / 2),
+               ( w_scaled / 2,  h_scaled / 2),
+               (-w_scaled / 2,  h_scaled / 2)]
+
+    rad = math.radians(_rotation_angle)
+    cosA, sinA = math.cos(rad), math.sin(rad)
+    rotated = [(x * cosA - y * sinA, x * sinA + y * cosA) for (x, y) in corners]
+    final_positions = [(cx + x, cy + y) for (x, y) in rotated]
+
+    if _mirror_mode:
+        tex_coords = [(1.0, 1.0), (0.0, 1.0), (0.0, 0.0), (1.0, 0.0)]
+    else:
+        tex_coords = [(0.0, 1.0), (1.0, 1.0), (1.0, 0.0), (0.0, 0.0)]
+
+    data = []
+    for (px, py), (tu, tv) in zip(final_positions, tex_coords):
+        data += [px, py, tu, tv]
+    _quad_data = np.array(data, dtype=np.float32)
+    return _quad_data
+
+
+def overlay_images_single_pass(main_texture: moderngl.Texture,
+                               float_texture: moderngl.Texture,
+                               background_color: tuple[int, int, int] = (0, 0, 0),
+                               use_sbs_mode: bool = False) -> None:
+    """
+    Clear with background_color, then draw a single quad sampling both
+    main and float textures.
+
+    use_sbs_mode: If True, switches shader to 'sbs' (Side-by-Side JPEG) mode.
+                  If False, uses 'standard' (RGBA) mode.
+    """
+    global _quad_dirty
+
+    # If initialize() hasn't run, do nothing (defensive).
+    if ctx is None or vao is None or vbo is None:
+        return
+
+    # Switch shader if needed
+    target_mode = 'sbs' if use_sbs_mode else 'standard'
+    _compile_shader(target_mode)
+
+    # Compute / cache background in linear or normalized space
+    bg_linear = _update_bg_linear(background_color)
+
+    # Pass background to shader; clear as well.
+    if prog and "u_bgColor" in prog:
+        prog["u_bgColor"].value = bg_linear
+    ctx.clear(*bg_linear)
+
+    # Update quad data only when something changed
+    if _quad_dirty or _quad_data is None:
+        quad_data = compute_transformed_quad()
+        vbo.write(quad_data.tobytes())
+        _quad_dirty = False
+
+    # Bind textures
+    main_texture.use(location=0)
+    float_texture.use(location=1)
+
+    # Draw single full-screen quad
+    vao.render(mode=moderngl.TRIANGLE_FAN)
+
+
+# --- CPU Rendering Path ------------------------------------------
+
+def composite_cpu(main_img, float_img):
+    """
+    CPU compositing that respects BOTH main and float alpha channels,
+    compositing them over BACKGROUND_COLOR.
+    Now handles Side-by-Side (SBS) JPEG unpacking.
+    """
+    # Nothing at all?
+    if main_img is None and float_img is None:
+        return None
+
+    # --- Helper: normalize to (RGB uint16, alpha uint16 or None) ---
+    def to_rgb_alpha(img):
+        if img is None:
+            return None, None
+
+        # Check for Side-by-Side JPEG (Width = 2 * Height roughly, no alpha channel)
+        # This is a heuristic. Ideally pass a flag, but shape is reliable here.
+        h, w = img.shape[:2]
+        is_sbs = (img.ndim == 3 and img.shape[2] == 3 and w >= 2 * h) # Rough check
+
+        if is_sbs:
+            # Split SBS: Left=Color, Right=Alpha(Gray)
+            mid = w // 2
+            color_part = img[:, :mid]
+            alpha_part = img[:, mid:]
+
+            rgb = color_part.astype(np.uint16)
+            # Alpha part is BGR, but it's grayscale, so take Blue channel (0)
+            alpha = alpha_part[..., 0:1].astype(np.uint16)
+            return rgb, alpha
+
+        # Standard processing
+        if img.ndim == 2:
+            rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB).astype(np.uint16)
+            alpha = None
+        elif img.ndim == 3:
+            if img.shape[2] == 4:
+                # RGBA: keep RGB and per-pixel alpha
+                rgb = img[..., :3].astype(np.uint16)
+                alpha = img[..., 3:4].astype(np.uint16)
+            elif img.shape[2] == 3:
+                # RGB, treat as fully opaque
+                rgb = img.astype(np.uint16)
+                alpha = None
+            else:
+                return None, None
+        else:
+            return None, None
+
+        return rgb, alpha
+
+    # Decide the reference size based on the color part (half width if SBS)
+    # We essentially peek at to_rgb_alpha result to get size
+    ref_rgb, _ = to_rgb_alpha(main_img if main_img is not None else float_img)
+    if ref_rgb is None: return None
+    h, w = ref_rgb.shape[:2]
+
+    # Background color in RGB space
+    bg_r, bg_g, bg_b = BACKGROUND_COLOR
+
+    # Start with background as uint16 RGB
+    base = np.empty((h, w, 3), dtype=np.uint16)
+    base[..., 0] = bg_r
+    base[..., 1] = bg_g
+    base[..., 2] = bg_b
+
+    # Normalize both layers
+    main_rgb, main_a = to_rgb_alpha(main_img)
+    float_rgb, float_a = to_rgb_alpha(float_img)
+
+    # Helper: composite "src over dst"
+    def over(dst_rgb16, src_rgb16, alpha):
+        if src_rgb16 is None:
+            return dst_rgb16
+
+        # Resizing safety check
+        if src_rgb16.shape[:2] != dst_rgb16.shape[:2]:
+             return dst_rgb16
+
+        if alpha is None:
+            return src_rgb16
+
+        alpha_arr = alpha
+        inv_alpha = 255 - alpha_arr
+        out = (src_rgb16 * alpha_arr + dst_rgb16 * inv_alpha + 127) // 255
+        return out
+
+    if main_rgb is not None:
+        base = over(base, main_rgb, main_a)
+
+    if float_rgb is not None:
+        base = over(base, float_rgb, float_a)
+
+    out_rgb = np.clip(base, 0, 255).astype(np.uint8)
+    return out_rgb
