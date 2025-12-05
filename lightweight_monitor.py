@@ -121,7 +121,7 @@ class MonitorUpdater:
         self.script_start_time = time.monotonic()
         self.last_heavy_update = 0
         self.heavy_interval = 5.0
-        self.sys_stats_interval = 2.0
+        self.sys_stats_interval = 6.0
         self.last_sys_stats_time = 0
         self.cached_sys_stats = {}
         self.cpu_per_core_history = deque(maxlen=5)
