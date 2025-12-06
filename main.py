@@ -6,7 +6,6 @@ import threading
 # 1. Import Settings FIRST so we can patch them
 import settings
 
-
 # -----------------------------------------------------------------------------
 # CONFIGURATION OVERRIDE LOGIC
 # -----------------------------------------------------------------------------
@@ -28,19 +27,30 @@ def configure_runtime():
 
     args = parser.parse_args()
 
-    # 1. Apply Mode Override
+    # 1. Apply Mode Override & Namespace Folders (CRITICAL FOR PARALLEL RUNS)
     if args.mode == "ascii":
         print(">> CLI OVERRIDE: Mode set to ASCII")
         settings.ASCII_MODE = True
         settings.SERVER_MODE = False
+        # Namespace Data Folders
+        settings.PROCESSED_DIR = "folders_processed_ascii"
+        settings.GENERATED_LISTS_DIR = "generated_img_lists_ascii"
+
     elif args.mode == "web":
         print(">> CLI OVERRIDE: Mode set to WEB (MJPEG)")
         settings.ASCII_MODE = False
         settings.SERVER_MODE = True
+        # Namespace Data Folders
+        settings.PROCESSED_DIR = "folders_processed_web"
+        settings.GENERATED_LISTS_DIR = "generated_img_lists_web"
+
     elif args.mode == "local":
         print(">> CLI OVERRIDE: Mode set to LOCAL")
         settings.ASCII_MODE = False
         settings.SERVER_MODE = False
+        # Namespace Data Folders
+        settings.PROCESSED_DIR = "folders_processed_local"
+        settings.GENERATED_LISTS_DIR = "generated_img_lists_local"
 
     # 2. Apply Directory Override
     if args.dir:
