@@ -3,6 +3,7 @@ display_manager.py – Window creation, sizing, and GL context management.
 """
 from __future__ import annotations
 import moderngl
+import numpy as np  # <--- Added missing import
 import settings
 import renderer
 
@@ -85,9 +86,7 @@ def display_init(state: DisplayState):
             print(f"[DISPLAY] Failed to create headless GL context: {e}")
             return None
 
-        # --- FIX: Respect HEADLESS_RES ---
-        # We use the settings resolution for the container (FBO).
-        # renderer.py will handle scaling the content (state.image_size) to fit inside.
+        # --- Respect HEADLESS_RES ---
         width, height = getattr(settings, "HEADLESS_RES", (1280, 720))
 
         tex = ctx.texture((width, height), components=4)
