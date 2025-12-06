@@ -3,13 +3,12 @@ import random
 import time
 from collections import deque
 
-from rtmidi.midiconstants import LOCAL_CONTROL
+#from rtmidi.midiconstants import LOCAL_CONTROL
 
 from globals import control_data_dictionary, folder_dictionary
 from settings import CLOCK_MODE, IPS
 LOCAL_CONTROLFPS = 2*IPS #local fps
 
-from utilities.csv_list_maker import main_folder_path
 
 def update_folder_selection(index, float_folder_count, main_folder_count):
     """
