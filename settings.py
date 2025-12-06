@@ -182,7 +182,7 @@ ASCII_CONTRAST = 1.0
 ASCII_SATURATION = 1.1
 ASCII_BRIGHTNESS = 1.1
 ASCII_GAMMA = 0.75
-ASCII_PADDING_CHAR = "_"     # <--- NEW: Character for pillar/letterboxing
+ASCII_PADDING_CHAR = " "     # <--- NEW: Character for pillar/letterboxing
 
 # --- THE GENCARELLE PALETTE ---
 ASCII_PALETTE = "MB8NG9SEaemvyznocrtlj17i. "
