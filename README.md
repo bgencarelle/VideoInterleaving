@@ -1,268 +1,226 @@
-VideoInterleaving is a timecode-synced image-sequence renderer designed for high-performance animation installations. It supports dual-layer blending, MIDI/MTC synchronization, client-server WebSocket sync, and real-time OpenGL rendering.
+```markdown
+# VideoInterleaving
+
+**VideoInterleaving** is a timecode-synced image-sequence renderer designed for high-performance animation installations. It supports dual-layer blending, MIDI/MTC synchronization, real-time OpenGL rendering, and multi-format streaming (MJPEG & ASCII).
+
+It is designed to run on everything from high-end workstations to headless Raspberry Pis and remote VPS instances.
 
 ---
 
-## Development Tools
+## Key Features
 
-The following tools are used or recommended for building and running **VideoInterleaving** in a stable and precise time-sensitive environment:
-
-* **WebP Library**:
-
-  * Required for fast decoding of `.webp` image sequences.
-  * Ensure `is installed on Linux or` via Homebrew/Chocolatey.
-* **Chrony** (Linux only):
-
-  * High-precision NTP client recommended for keeping system time accurate in real-time installations.
-  * Install with:
-
-    ```bash
-    sudo apt install chrony
-    ```
-  * Ensures stable **FREE\_CLOCK** or hybrid clock performance.
-* **Python 3.8+**, OpenGL, and SDL2 for rendering.
-* **requirements.txt** defines all necessary Python packages.
+* **Dual-Layer Compositing**: Blends a "Main" face layer with a "Float" overlay layer in real-time.
+* **Multi-Mode Output**:
+    * **Local Window**: GPU-accelerated OpenGL display (GLFW).
+    * **Web Stream**: Low-latency MJPEG stream for browsers.
+    * **ASCII Stream**: Real-time text-mode video over Telnet/TCP.
+* **Performance First**: Uses Side-by-Side (SBS) JPEGs and TurboJPEG for maximum throughput on low-power CPUs.
+* **Sync**: Supports free-running, MIDI, MTC, and Client/Server index synchronization.
 
 ---
 
-## Prerequisites
+## 1. Prerequisites
 
-1. **Python** 3.11+  (check with `python3 --version`).
+### System Libraries
 
-2. **System libraries**
-
-   **Debian/Ubuntu/Raspbian:**
-
-   ```bash
-   sudo apt update
-   sudo apt install python3-venv python3-dev python3-pip build-essential cmake pkg-config \
-       libwebp-dev libsdl2-dev libasound2-dev libgl1-mesa-dev libglu1-mesa-dev \
-       libegl1-mesa-dev mesa-utils chrony ninja-build python-is-python3
-   ```
-
-   **Fedora/CentOS:**
-
-   ```bash
-   sudo dnf install python3-venv python3-pip python3-devel build-essential cmake pkgconfig \
-       libwebp-devel SDL2-devel alsa-lib-devel mesa-libGL-devel mesa-libGLU-devel \
-       mesa-libEGL-devel mesa-utils chrony ninja-build python-is-python3
-   ```
-
-   **macOS (Homebrew):**
-
-   ```bash
-   brew install python webp pkg-config sdl2 chrony
-   ```
-
-   **Windows (Chocolatey):**
-
-   ```powershell
-   choco install python webp sdl2 chrony
-   ```
-
-3. **Git**:
-
-   ```bash
-   git --version
-   ```
-
-4. **Optional MIDI**: a functional MIDI interface or USB-MIDI adapter for `MIDI_CLOCK` or `MTC_CLOCK` modes.
-
-###PI TV out
-
-make sure to set the composite out via sudo raspi-config 
-
-And then append this this to the front of  /boot/firmware/cmdline.txt:
-
-video=Composite-1:720x576@50ie,margin_left=30,margin_right=30,margin_top=20,margin_bottom=20,tv_mode=PAL 
-
-(or 60 + NTSC if in NTSC land)
-
-next go into 
-/boot/firmware/config.txt
-pick your tv mode:
-
-sdtv_mode=0  (NTSC)
-sdtv_mode=2  (PAL)
-sdtv_aspect=1  (4:3)
-sdtv_aspect=2  (14:9)
-sdtv_aspect=3  (16:9)
-
-
-This worked for me on a pi 2 for PAL tvs:
-
-# Enable DRM VC4 V3D driver
-dtoverlay=vc4-kms-v3d,composite=1
-max_framebuffers=2
-hdmi_ignore_hotplug=1
-enable_tvout=1
-sdtv_mode=2
-
-
-# Don't have the firmware create an initial video= setting in cmdline.txt.
-# Use the kernel's default instead.
-disable_fw_kms_setup=1
-
-# Disable compensation for displays with overscan
-disable_overscan=0
-
-
-### Chrony Configuration
-
-If you're in Germany or nearby and want highly reliable time servers, here's a sample configuration used during development. You may adapt it to your region's preferred NTP servers:
-
-Edit `/etc/chrony/chrony.conf` (Linux) to include:
-
-```conf
-# Primary Tier 1 German time servers (Physikalisch-Technische Bundesanstalt)
-server ptbtime1.ptb.de iburst prefer
-server ptbtime2.ptb.de iburst
-server ptbtime3.ptb.de iburst
-
-# Additional reliable European pool servers
-server de.pool.ntp.org iburst
-server 0.europe.pool.ntp.org iburst
-server 1.europe.pool.ntp.org iburst
-
-# Do not use DHCP-pushed NTP servers
-# Ensure this directive is commented out or the directory does not exist:
-# sourcedir /run/chrony-dhcp
+**Debian/Ubuntu/Raspbian:**
+```bash
+sudo apt update
+sudo apt install python3-venv python3-dev python3-pip build-essential cmake pkg-config \
+    libwebp-dev libsdl2-dev libasound2-dev libgl1-mesa-dev libglu1-mesa-dev \
+    libegl1-mesa-dev mesa-utils chrony ninja-build python-is-python3 \
+    libjpeg-dev
 ```
 
----
+**Fedora/CentOS:**
 
-## Setup & Running
+Bash
+```bash
+sudo dnf install python3-venv python3-pip python3-devel build-essential cmake pkgconfig \
+    libwebp-devel SDL2-devel alsa-lib-devel mesa-libGL-devel mesa-libGLU-devel \
+    mesa-libEGL-devel mesa-utils chrony ninja-build python-is-python3 libjpeg-turbo-devel
+```
 
-1. **Clone & prepare the repository**
+**macOS (Homebrew):**
 
-   ```bash
-   git clone https://github.com/bgencarelle/VideoInterleaving.git
-   mv VideoInterleaving pyInter
-   cd pyInter
-   ```
+Bash
+```bash
+brew install python webp pkg-config sdl2 chrony jpeg-turbo
+```
 
-2. **Bootstrap environment**
+### Python Environment
 
-   ```bash
-   ./bootstrap.sh
-   ```
+Clone the repo:
 
-   * Pay close attention to any error messages and follow the prompts to install missing dependencies.
+Bash
+```bash
+git clone https://github.com/bgencarelle/VideoInterleaving.git
+cd VideoInterleaving
+```
 
-3. **Create & activate a Python venv**
+Create venv:
 
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate    # Linux/macOS
-   .venv\Scripts\activate      # Windows PowerShell
-   ```
+Bash
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
 
-4. **Install Python dependencies**
+Install Dependencies:
 
-   ```bash
-   pip install --upgrade pip
-   pip install -r requirements.txt
-   ```
+Bash
+```bash
+pip install --upgrade pip
+pip install -r requirements.txt
+```
 
-5. **Prepare your image sequences**
+## 2. Image Preparation (Crucial)
 
-   * Organize your frames into two parallel folder trees:
+To achieve high framerates on low-end hardware, this engine uses a custom Side-by-Side (SBS) JPEG format instead of RGBA WebP or PNG.
 
-     ```text
-     images/main/<frame_number>/*.webp
-     images/float/<frame_number>/*.webp
-     ```
-   * The player auto-scans the `images/` folders and regenerates `csv` lists on each run. Only use:
+Left Half: Color Data (RGB)  
+Right Half: Alpha Mask (Grayscale)
 
-     ```bash
-     python make_file_lists.py
-     ```
+How to Convert Your Images: We provide a multi-core converter tool that takes your existing folder of WebP/PNGs and generates the optimized SBS JPEGs.
 
-     if you manually add or remove folders.
+Bash
+```bash
+python tools/convert_to_sbs_fixed.py
+# Follow the prompts to select your source 'images' folder.
+# It will create a new folder (e.g., 'images_sbs') automatically.
+```
 
-6. **Launch the player**
+Note: Ensure your `settings.py` or CLI arguments point to this new `_sbs` folder.
 
-   ```bash
-   source .venv/bin/activate
-   python main.py
-   ```
+## 3. Running the Player
 
-   Or use the convenience script:
+You can configure the player via `settings.py` (defaults) or override them at runtime using CLI arguments.
 
-   ```bash
-   bash launchInterleavingScript.sh
-   ```
+### The CLI Way (Recommended)
 
----
+1. **Start the Web Stream (MJPEG):**
 
-## Convenience Launchers
+Bash
+```bash
+python main.py --mode web --dir ./images_sbs
+```
 
-* \`\` (in `$HOME`): Activates the venv, changes to the project directory, and runs `main.py`.
+View at: `http://<IP>:8080`  
+Monitor: `http://<IP>:1978`
 
-* \`\` (in project root):
+2. **Start the ASCII Stream (Telnet):**
 
-  ```bash
-  #!/bin/bash
-  set -e
-  # Change to project dir
-  cd "$HOME/pyInter"
-  # Activate venv
-  source .PyIntervenv/bin/activate
-  # Run the player
-  python main.py
-  ```
+Bash
+```bash
+python main.py --mode ascii --dir ./images_tiny
+```
 
----
+Connect via Terminal: `telnet <IP> 2323` or `nc <IP> 2323`
 
-## HTTP Monitor (Webserver)
+Note: Use smaller resolution images (e.g., 150px wide) for ASCII to save CPU.
 
-When `TEST_MODE=True` and `HTTP_MONITOR=True` in `settings.py`, a lightweight HTTP server runs on startup:
+3. **Start Local Mode (Windowed):**
 
-* **Port:** configured by `WEB_PORT` (default: 8000)
-* **Access:** `http://localhost:<WEB_PORT>/`
-* **Dashboard:** live FPS, FIFO stats/misses, folder coverage/entropy, CPU/memory usage, error logs.
+Bash
+```bash
+python main.py --mode local --dir ./images_sbs
+```
 
----
+### The `settings.py` Way (Legacy)
 
-## Clock Modes
+Edit `settings.py` to set your defaults:
 
-As of May 2025, only `FREE_CLOCK` mode has been tested and verified in the main branch. Other modes (`MIDI_CLOCK`, `MTC_CLOCK`, `MIXED_CLOCK`, `CLIENT_MODE`) are present in the codebase but should be considered experimental until further testing.
+Python
+```python
+SERVER_MODE = True       # Web Stream
+ASCII_MODE = False       # ASCII Stream (Overrides SERVER_MODE if True)
+IMAGES_DIR = "images_sbs"
+```
 
-| Mode         | Constant | Description                  |
-| ------------ | -------- | ---------------------------- |
-| FREE\_CLOCK  | 255      | System-time driven ping-pong |
-| MIDI\_CLOCK  | 1        | Sync to MIDI clock pulses    |
-| MTC\_CLOCK   | 0        | SMPTE-style timecode sync    |
-| MIXED\_CLOCK | 2        | Experimental MIDI + MTC      |
-| CLIENT\_MODE | 3        | WebSocket index sync         |
+Then simply run:
 
-Set via `CLOCK_MODE` in `settings.py` or interactively at launch.
+Bash
+```bash
+python main.py
+```
 
----
-##
+## 4. ASCII Mode Details
 
-NOTE! Use the "forOldStable" branch for any older hardware that isn't playing nice nice with display stuff. 
+The ASCII engine is a dedicated render path that converts video frames into colored ANSI text characters.
+
+Connecting: Standard `telnet` works, but `netcat` (`nc`) often provides a smoother frame rate.
+
+Bash
+```bash
+# Auto-reconnect loop for digital signage displays
+while true; do nc 192.168.1.50 2323; sleep 1; done
+```
+
+Configuration (`settings.py`):
+
+- `ASCII_WIDTH` / `HEIGHT`: Resolution of the text grid (e.g., 80x40).
+- `ASCII_COLOR`: Enable/Disable ANSI color codes.
+- `ASCII_FONT_RATIO`: Corrects aspect ratio for non-square terminal characters (default `0.55`).
+
+Artistic Tweaks:
+
+- `ASCII_SATURATION`: Boost color intensity.
+- `ASCII_GAMMA`: Lift mid-tones for better visibility on dark terminals.
+- `ASCII_PALETTE`: Custom character set sorted by visual density.
+
+## 5. Hardware Configuration
+
+### Raspberry Pi (Composite Out)
+
+To output correctly to CRT TVs via the 3.5mm jack:
+
+Enable Composite via `sudo raspi-config`.
+
+Edit `/boot/firmware/cmdline.txt` (add to start of line):
+
+Plaintext
+```plaintext
+video=Composite-1:720x576@50ie,margin_left=30,margin_right=30,margin_top=20,margin_bottom=20,tv_mode=PAL
+```
+
+Edit `/boot/firmware/config.txt`:
+
+Ini, TOML
+```ini
+dtoverlay=vc4-kms-v3d,composite=1
+enable_tvout=1
+sdtv_mode=2  # 0=NTSC, 2=PAL
+```
+
+### Precision Timing (Chrony)
+
+For installations requiring frame-perfect sync across multiple machines, installing `chrony` is highly recommended.
+
+Linux Install:
+
+Bash
+```bash
+sudo apt install chrony
+```
+
+(See `chrony.conf` sample in repo for PTB/German time server config.)
 
 ## Project Structure
 
-* **main.py** / **image\_display.py** – entrypoint, threading, FIFO, monitor hooks
-* **renderer.py** – OpenGL shader & draw routines
-* **image\_loader.py** – WebP C API loader + OpenCV fallback; FIFOImageBuffer
-* **index\_calculator.py** – ping-pong & clock math
-* **folder\_selector.py** – random folder selection logic
-* **event\_handler.py** – Pygame event mapping
-* **display\_manager.py** – display init & aspect-ratio logic
-* **index\_client.py** / **index\_server.py** – WebSocket sync modes
-* **make\_file\_lists.py** – scans folders, writes CSV lists
-* **bootstrap.sh** / **runPortrait.sh** / **launchInterleavingScript.sh** – setup & launch scripts
-* **lightweight\_monitor.py** – HTTP dashboard (TEST\_MODE)
-* **settings.py** – configuration constants
-* **requirements.txt** – Python dependencies
-* **utilities/** – helper scripts and tools that may be useful for developing or preprocessing your own image sequences
-
----
+`main.py`: Entry point. Parses CLI args and launches threads.  
+`renderer.py`: The Unified Rendering Engine. Handles OpenGL (Shader) and CPU (NumPy) compositing.  
+`display_manager.py`: Manages window creation (GLFW or Headless FBO) and GL context.  
+`image_display.py`: The main loop. Manages time, loading, and feeding the renderer.  
+`image_loader.py`: High-speed TurboJPEG loader with FIFO buffering.  
+`web_service.py`: Flask-less HTTP server for MJPEG streaming and System Monitoring.  
+`ascii_server.py`: Raw TCP server for Telnet streaming.  
+`ascii_converter.py`: Vectorized image-to-text conversion engine.  
+`settings.py`: Global configuration constants.  
+`tools/`: Helper scripts (e.g., `convert_to_sbs_fixed.py`).
 
 ## License
 
-MIT License. See [LICENSE](LICENSE).
+MIT License. See LICENSE.
 
-*© 2025 Ben Gencarelle*
+© 2025 Ben Gencarelle
+```
