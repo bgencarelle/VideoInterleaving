@@ -172,13 +172,13 @@ ASCII_MODE = True
 ASCII_COLOR = True
 ASCII_PORT = 2323
 ASCII_HOST = '127.0.0.1'
-ASCII_WIDTH = 64
+ASCII_WIDTH = 80
 ASCII_HEIGHT = 64
 ASCII_FPS = 15
-ASCII_FONT_RATIO = 0.75
+ASCII_FONT_RATIO = 0.5
 
 # --- ARTISTIC TWEAKS ---
-ASCII_CONTRAST   = 1.1   # tiny bit of punch
+ASCII_CONTRAST   = 1.0   # tiny bit of punch
 ASCII_SATURATION = 0.9   # slightly muted color
 ASCII_BRIGHTNESS = 1.0   # handled in HSV
 ASCII_GAMMA      = 1.0   # neutral given your LUT definition
@@ -186,4 +186,6 @@ ASCII_GAMMA      = 1.0   # neutral given your LUT definition
 ASCII_PADDING_CHAR = " "     # <--- NEW: Character for pillar/letterboxing
 
 # --- THE GENCARELLE PALETTE ---
-ASCII_PALETTE = "MWB8GRDNHESAVTOLPmevncray97stji1-/., "
+ASCII_PALETTE_LIGHT = "MWB8GRDNHESAVTOLPmevncray97stji1-/., "
+ASCII_PALETTE_DARK = " ,.1ijts79yarcnvemCPLOTVASEHNDRG8BWM"
+ASCII_PALETTE = ASCII_PALETTE_LIGHT

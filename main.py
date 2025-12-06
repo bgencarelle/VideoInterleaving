@@ -28,7 +28,7 @@ def configure_runtime():
 
     args = parser.parse_args()
 
-    # Apply Mode Override
+    # 1. Apply Mode Override
     if args.mode == "ascii":
         print(">> CLI OVERRIDE: Mode set to ASCII")
         settings.ASCII_MODE = True
@@ -42,7 +42,7 @@ def configure_runtime():
         settings.ASCII_MODE = False
         settings.SERVER_MODE = False
 
-    # Apply Directory Override
+    # 2. Apply Directory Override
     if args.dir:
         abs_path = os.path.abspath(args.dir)
         if not os.path.isdir(abs_path):
@@ -51,11 +51,27 @@ def configure_runtime():
 
         print(f">> CLI OVERRIDE: Images set to {abs_path}")
         settings.IMAGES_DIR = abs_path
-
-        # We must re-derive the subpaths because settings.py logic has already run
-        # This assumes your folder structure is always /face and /float inside the root
         settings.MAIN_FOLDER_PATH = os.path.join(abs_path, "face")
         settings.FLOAT_FOLDER_PATH = os.path.join(abs_path, "float")
+
+    # 3. AUTOMATIC PORT OFFSETTING
+    # Base Port comes from settings.py (Default 1978)
+    base_port = getattr(settings, 'WEB_PORT', 1978)
+
+    if settings.ASCII_MODE:
+        # ASCII: Base + 2 (e.g. 1980)
+        settings.WEB_PORT = base_port + 2
+        print(f">> PORT CONFIG: Monitor shifted to {settings.WEB_PORT} (ASCII Mode)")
+
+    elif settings.SERVER_MODE:
+        # WEB: Keep Base (e.g. 1978) - Compatibility Mode
+        settings.WEB_PORT = base_port
+        print(f">> PORT CONFIG: Monitor on default {settings.WEB_PORT} (Web Mode)")
+
+    else:
+        # LOCAL: Base + 1 (e.g. 1979) - Avoids clash if Web is also running
+        settings.WEB_PORT = base_port + 1
+        print(f">> PORT CONFIG: Monitor shifted to {settings.WEB_PORT} (Local Mode)")
 
 
 # Run configuration immediately
@@ -63,12 +79,9 @@ configure_runtime()
 
 # -----------------------------------------------------------------------------
 # STANDARD IMPORTS
-# (Now safe to import because settings are patched)
 # -----------------------------------------------------------------------------
 import make_file_lists
 import image_display
-# We import these conditionally in main() or let the modules handle flags,
-# but importing them here is safe now.
 import web_service
 import ascii_server
 from settings import CLOCK_MODE
@@ -101,18 +114,15 @@ except Exception as e:
 
 
 def main(clock=CLOCK_MODE):
-    # 1. Build File Lists (Uses the potentially overridden folder)
+    # 1. Build File Lists
     make_file_lists.process_files()
 
-    # Determine if Monitor is wanted (Global setting)
     want_monitor = getattr(settings, 'HTTP_MONITOR', True)
 
-    # 2. Determine Mode (Mutually Exclusive)
+    # 2. Determine Mode
     if getattr(settings, 'ASCII_MODE', False):
         # --- PATH A: ASCII MODE ---
         print("MODE: ASCII Telnet Server")
-
-        # 1. Start Telnet
         server_thread = threading.Thread(
             target=ascii_server.start_server,
             daemon=True,
@@ -120,21 +130,17 @@ def main(clock=CLOCK_MODE):
         )
         server_thread.start()
 
-        # 2. Start Monitor ONLY (No MJPEG)
         if want_monitor:
             web_service.start_server(monitor=True, stream=False)
 
     elif getattr(settings, 'SERVER_MODE', False):
         # --- PATH B: WEB MODE ---
         print("MODE: MJPEG Web Server")
-
-        # Start Monitor AND MJPEG
         web_service.start_server(monitor=want_monitor, stream=True)
 
     else:
         # --- PATH C: LOCAL MODE ---
         print("MODE: Local Standalone")
-        # Optional: Monitor locally
         if want_monitor:
             web_service.start_server(monitor=True, stream=False)
 
