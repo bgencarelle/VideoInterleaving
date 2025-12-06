@@ -1,13 +1,77 @@
 import sys
+import os
+import argparse
 import threading
+
+# 1. Import Settings FIRST so we can patch them
+import settings
+
+
+# -----------------------------------------------------------------------------
+# CONFIGURATION OVERRIDE LOGIC
+# -----------------------------------------------------------------------------
+def configure_runtime():
+    parser = argparse.ArgumentParser(description="Video Interleaving Server")
+
+    # Mode Override
+    parser.add_argument(
+        "--mode",
+        choices=["web", "ascii", "local"],
+        help="Force a specific output mode (overrides settings.py)"
+    )
+
+    # Directory Override
+    parser.add_argument(
+        "--dir",
+        help="Path to image source folder (overrides settings.py)"
+    )
+
+    args = parser.parse_args()
+
+    # Apply Mode Override
+    if args.mode == "ascii":
+        print(">> CLI OVERRIDE: Mode set to ASCII")
+        settings.ASCII_MODE = True
+        settings.SERVER_MODE = False
+    elif args.mode == "web":
+        print(">> CLI OVERRIDE: Mode set to WEB (MJPEG)")
+        settings.ASCII_MODE = False
+        settings.SERVER_MODE = True
+    elif args.mode == "local":
+        print(">> CLI OVERRIDE: Mode set to LOCAL")
+        settings.ASCII_MODE = False
+        settings.SERVER_MODE = False
+
+    # Apply Directory Override
+    if args.dir:
+        abs_path = os.path.abspath(args.dir)
+        if not os.path.isdir(abs_path):
+            print(f"❌ ERROR: Directory not found: {abs_path}")
+            sys.exit(1)
+
+        print(f">> CLI OVERRIDE: Images set to {abs_path}")
+        settings.IMAGES_DIR = abs_path
+
+        # We must re-derive the subpaths because settings.py logic has already run
+        # This assumes your folder structure is always /face and /float inside the root
+        settings.MAIN_FOLDER_PATH = os.path.join(abs_path, "face")
+        settings.FLOAT_FOLDER_PATH = os.path.join(abs_path, "float")
+
+
+# Run configuration immediately
+configure_runtime()
+
+# -----------------------------------------------------------------------------
+# STANDARD IMPORTS
+# (Now safe to import because settings are patched)
+# -----------------------------------------------------------------------------
 import make_file_lists
 import image_display
-import settings
-from settings import CLOCK_MODE
-
-# --- Output Modules ---
+# We import these conditionally in main() or let the modules handle flags,
+# but importing them here is safe now.
 import web_service
 import ascii_server
+from settings import CLOCK_MODE
 
 
 class Tee:
@@ -37,7 +101,7 @@ except Exception as e:
 
 
 def main(clock=CLOCK_MODE):
-    # 1. Build File Lists
+    # 1. Build File Lists (Uses the potentially overridden folder)
     make_file_lists.process_files()
 
     # Determine if Monitor is wanted (Global setting)
@@ -70,7 +134,7 @@ def main(clock=CLOCK_MODE):
     else:
         # --- PATH C: LOCAL MODE ---
         print("MODE: Local Standalone")
-        # Optional: You might want the monitor locally too?
+        # Optional: Monitor locally
         if want_monitor:
             web_service.start_server(monitor=True, stream=False)
 
