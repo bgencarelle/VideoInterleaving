@@ -5,6 +5,10 @@ renderer.py – Unified Rendering Engine (GPU & CPU paths)
 import math
 import numpy as np
 import moderngl
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 from settings import ENABLE_SRGB_FRAMEBUFFER, GAMMA_CORRECTION_ENABLED, BACKGROUND_COLOR
 
 # ModernGL context and objects
@@ -66,11 +70,9 @@ def initialize(gl_context: moderngl.Context) -> None:
     global ctx, prog, vao, vbo
     ctx = gl_context
 
-    # Handle GLES (Raspberry Pi / Mobile) vs Desktop GL
     is_gles = ctx.version_code < 330
     header = "#version 310 es\nprecision mediump float;" if is_gles else "#version 330 core"
 
-    # Vertex Shader
     vertex_src = f"""
         {header}
         in vec2 position;
@@ -83,7 +85,6 @@ def initialize(gl_context: moderngl.Context) -> None:
         }}
     """
 
-    # Fragment Shader (With Noise Gate)
     fragment_src = f"""
         {header}
         uniform sampler2D texture_main;
@@ -102,6 +103,7 @@ def initialize(gl_context: moderngl.Context) -> None:
                 vec2 uv_mask  = vec2((uv.x * 0.5) + 0.5, uv.y);
                 vec3 color = texture(tex, uv_color).rgb;
                 float alpha = texture(tex, uv_mask).r;
+                if (alpha < 0.05) alpha = 0.0;
                 return vec4(color, alpha);
             }} else {{
                 return texture(tex, uv);
@@ -111,12 +113,6 @@ def initialize(gl_context: moderngl.Context) -> None:
         void main() {{
             vec4 mainC = sampleLayer(texture_main, u_main_is_sbs, v_texcoord);
             vec4 floatC = sampleLayer(texture_float, u_float_is_sbs, v_texcoord);
-
-            // --- NOISE GATE FIX ---
-            // JPEGs introduce "ringing" noise near sharp edges (values 0.01 - 0.05).
-            // We use smoothstep to safely clamp that low-level noise to 0.0
-            // while preserving the smooth anti-aliased edge.
-            floatC.a = smoothstep(0.05, 0.1, floatC.a); 
 
             vec3 color = mix(u_bgColor, mainC.rgb, mainC.a);
             color = mix(color, floatC.rgb, floatC.a);
@@ -131,6 +127,7 @@ def initialize(gl_context: moderngl.Context) -> None:
     mvp = np.eye(4, dtype="f4")
     prog["u_MVP"].write(mvp.T.tobytes())
     ctx.disable(moderngl.BLEND)
+
     prog["texture_main"].value = 0
     prog["texture_float"].value = 1
     prog["u_bgColor"].value = (0.0, 0.0, 0.0)
@@ -180,27 +177,36 @@ def compute_transformed_quad():
     global _quad_data
     view_w, view_h = _viewport_size
 
-    # Logic for Headless/Web aspect ratio correctness
+    # Headless / Web: Letterbox inside viewport
     if view_w > 0 and view_h > 0:
         img_w, img_h = _image_size
-        r_tex = (img_w / img_h) if img_h > 0 else 1.0
-        r_view = (view_w / view_h) if view_h > 0 else 1.0
 
-        if r_tex > r_view:
-            x_scale, y_scale = 1.0, r_view / r_tex
+        target_aspect = view_w / view_h
+        image_aspect = (img_w / img_h) if img_h > 0 else 1.0
+
+        if image_aspect > target_aspect:
+            x_scale = 1.0
+            y_scale = target_aspect / image_aspect
         else:
-            x_scale, y_scale = r_tex / r_view, 1.0
+            x_scale = image_aspect / target_aspect
+            y_scale = 1.0
 
-        positions = [(-x_scale, y_scale), (x_scale, y_scale), (x_scale, -y_scale), (-x_scale, -y_scale)]
-        tex_coords = [(1.0, 1.0), (0.0, 1.0), (0.0, 0.0), (1.0, 0.0)] if _mirror_mode else [(0.0, 1.0), (1.0, 1.0),
-                                                                                            (1.0, 0.0), (0.0, 0.0)]
+        # Flip Y for Headless
+        positions = [
+            (-x_scale, y_scale), (x_scale, y_scale),
+            (x_scale, -y_scale), (-x_scale, -y_scale)
+        ]
+        tex_coords = [(0.0, 1.0), (1.0, 1.0), (1.0, 0.0), (0.0, 0.0)]
+        if _mirror_mode:
+            tex_coords = [(1.0, 1.0), (0.0, 1.0), (0.0, 0.0), (1.0, 0.0)]
+
         data = []
         for (px, py), (tu, tv) in zip(positions, tex_coords):
             data += [px, py, tu, tv]
         _quad_data = np.array(data, dtype=np.float32)
         return _quad_data
 
-    # Standard Local Window logic
+    # Local: Standard fit
     w, h = _image_size
     if w == 0 or h == 0:
         return np.array([-1, 1, 0, 1, 1, 1, 1, 1, 1, -1, 1, 0, -1, -1, 0, 0], dtype=np.float32)
@@ -244,13 +250,13 @@ def overlay_images_single_pass(main_texture, float_texture, background_color=(0,
     vao.render(mode=moderngl.TRIANGLE_FAN)
 
 
-# --- HIGH PERFORMANCE CPU COMPOSITOR (WITH NOISE GATE) ---
+# --- CPU COMPOSITOR (Fixed Alpha Blending for Main Layer) ---
 def composite_cpu(main_img, float_img, main_is_sbs=False, float_is_sbs=False):
     global _cpu_buffer
 
     if main_img is None and float_img is None: return None
 
-    # Helper: Get view of content without copying data
+    # Helper: Get view of content
     def get_views(img, is_sbs):
         if img is None: return None, None
         h, w = img.shape[:2]
@@ -259,7 +265,9 @@ def composite_cpu(main_img, float_img, main_is_sbs=False, float_is_sbs=False):
             # Slice: RGB is left, Alpha is right (Red channel)
             return img[:, :mid], img[:, mid:, 0]
         else:
-            if img.shape[2] == 4:
+            if img.ndim == 2:
+                return (cv2.cvtColor(img, cv2.COLOR_GRAY2RGB) if cv2 else img), None
+            elif img.shape[2] == 4:
                 return img[..., :3], img[..., 3]
             else:
                 return img, None  # Opaque RGB
@@ -278,15 +286,44 @@ def composite_cpu(main_img, float_img, main_is_sbs=False, float_is_sbs=False):
     # 2. Manage Persistent Buffer
     if _cpu_buffer is None or _cpu_buffer.shape[:2] != (th, tw):
         _cpu_buffer = np.empty((th, tw, 3), dtype=np.uint8)
-
-    # 3. Fill Buffer (Base Layer)
-    if m_rgb is not None:
-        np.copyto(_cpu_buffer, m_rgb)
-    else:
+        # Init with BG color (this happens only on resize/start)
         bg_r, bg_g, bg_b = BACKGROUND_COLOR
         _cpu_buffer[:] = (bg_r, bg_g, bg_b)
 
-    # 4. Blend Float Layer
+    # 3. Apply Main Layer
+    # We must treat Main exactly like Float: Blend it over the background
+    if m_rgb is not None:
+        # Reset buffer to BG Color for this frame
+        # (Faster than re-allocating)
+        bg_r, bg_g, bg_b = BACKGROUND_COLOR
+        _cpu_buffer[:] = (bg_r, bg_g, bg_b)
+
+        if m_a is None:
+            # Opaque: Just copy
+            np.copyto(_cpu_buffer, m_rgb)
+        else:
+            # Alpha Blend Main Layer
+            # This fixes the "garbage background" issue for SBS JPEGs
+            target = _cpu_buffer # The background
+            source = m_rgb
+            mask = m_a
+
+            # Noise Gate
+            alpha_clean = np.where(mask < 15, 0, mask)
+
+            alpha = alpha_clean[:, :, None].astype(np.int16)
+            src = source.astype(np.int16)
+            dst = target.astype(np.int16)
+
+            blended = (src * alpha + dst * (255 - alpha)) // 255
+            _cpu_buffer[:] = blended.astype(np.uint8)
+
+    else:
+        # No main image? Just clear to background
+        bg_r, bg_g, bg_b = BACKGROUND_COLOR
+        _cpu_buffer[:] = (bg_r, bg_g, bg_b)
+
+    # 4. Apply Float Layer
     if f_rgb is not None:
         fh, fw = f_rgb.shape[:2]
         h, w = min(th, fh), min(tw, fw)
@@ -299,15 +336,13 @@ def composite_cpu(main_img, float_img, main_is_sbs=False, float_is_sbs=False):
         else:
             mask = f_a[:h, :w]
 
-            # --- NOISE GATE FIX ---
-            # Remove JPEG artifacts (values < 15) before blending
-            # We copy mask to avoid modifying the cached source image
-            clean_mask = mask.copy()
-            clean_mask[clean_mask < 15] = 0
+            # Noise Gate
+            alpha_clean = np.where(mask < 15, 0, mask)
 
-            alpha = clean_mask.astype(np.uint16)[:, :, None]
-            src = source.astype(np.uint16)
-            dst = target.astype(np.uint16)
+            # Blend
+            alpha = alpha_clean[:, :, None].astype(np.int16)
+            src = source.astype(np.int16)
+            dst = target.astype(np.int16)
 
             blended = (src * alpha + dst * (255 - alpha)) // 255
             target[:] = blended.astype(np.uint8)
