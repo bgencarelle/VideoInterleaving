@@ -162,26 +162,26 @@ STREAM_PORT = 8080           # Port for video stream (distinct from monitor port
 STREAM_HOST = '127.0.0.1'      # Listen on all interfaces
 SERVER_CAPTURE_RATE = FPS     # Streaming FPS
 JPEG_QUALITY = 85         # Image quality
-HEADLESS_RES = (54, 54)   # Resolution for the virtual screen
+HEADLESS_RES = (400, 54)   # Resolution for the virtual screen
 #HEADLESS_BACKEND = "egl"      # "egl"
 MAX_VIEWERS = 20 # Max simultaneous connections
 
 
 # --- ASCII MODE SETTINGS ---
-ASCII_MODE = False
+ASCII_MODE = True
 ASCII_COLOR = True
 ASCII_PORT = 2323
 ASCII_HOST = '0.0.0.0'
-ASCII_WIDTH = 80
+ASCII_WIDTH = 60
 ASCII_HEIGHT = 60
 ASCII_FPS = 15
-ASCII_FONT_RATIO = 0.75
+ASCII_FONT_RATIO = 0.55
 
 # --- ARTISTIC TWEAKS ---
 ASCII_CONTRAST = 1.9
 ASCII_SATURATION = 0.99
-ASCII_BRIGHTNESS = 1.0
-ASCII_GAMMA = .5
+ASCII_BRIGHTNESS = 1.5
+ASCII_GAMMA = .7
 ASCII_PADDING_CHAR = " "     # <--- NEW: Character for pillar/letterboxing
 
 # --- THE GENCARELLE PALETTE ---
