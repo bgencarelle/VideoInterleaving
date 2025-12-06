@@ -264,10 +264,16 @@ def run_display(clock_source=CLOCK_MODE):
                         w_fbo, h_fbo = window.size
                         frame = np.frombuffer(raw, dtype=np.uint8).reshape((h_fbo, w_fbo, 3))
                     else:
-                        # Pure CPU Composite
+                    # Pure CPU Composite
+                    # Determine target size if in Server Mode
+                        tgt_size = None
+                        if is_web:
+                            tgt_size = getattr(settings, "HEADLESS_RES", (480, 640))
+
                         frame = renderer.composite_cpu(
                             cur_main, cur_float,
-                            main_is_sbs=cur_m_sbs, float_is_sbs=cur_f_sbs
+                            main_is_sbs=cur_m_sbs, float_is_sbs=cur_f_sbs,
+                            target_size=tgt_size  # <--- Pass the resolution here
                         )
 
                     # 2. Output Data (Mutually Exclusive)

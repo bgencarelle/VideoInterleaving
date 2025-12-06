@@ -162,7 +162,7 @@ STREAM_PORT = 8080           # Port for video stream (distinct from monitor port
 STREAM_HOST = '127.0.0.1'      # Listen on all interfaces
 SERVER_CAPTURE_RATE = FPS     # Streaming FPS
 JPEG_QUALITY = 85         # Image quality
-HEADLESS_RES = (540, 540)   # Resolution for the virtual screen
+HEADLESS_RES = (54, 54)   # Resolution for the virtual screen
 #HEADLESS_BACKEND = "egl"      # "egl"
 MAX_VIEWERS = 20 # Max simultaneous connections
 

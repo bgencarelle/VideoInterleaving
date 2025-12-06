@@ -250,8 +250,8 @@ def overlay_images_single_pass(main_texture, float_texture, background_color=(0,
     vao.render(mode=moderngl.TRIANGLE_FAN)
 
 
-# --- CPU COMPOSITOR (Fixed Alpha Blending for Main Layer) ---
-def composite_cpu(main_img, float_img, main_is_sbs=False, float_is_sbs=False):
+# --- CPU COMPOSITOR (Fixed Aspect Ratio & Alpha) ---
+def composite_cpu(main_img, float_img, main_is_sbs=False, float_is_sbs=False, target_size=None):
     global _cpu_buffer
 
     if main_img is None and float_img is None: return None
@@ -275,7 +275,7 @@ def composite_cpu(main_img, float_img, main_is_sbs=False, float_is_sbs=False):
     m_rgb, m_a = get_views(main_img, main_is_sbs)
     f_rgb, f_a = get_views(float_img, float_is_sbs)
 
-    # 1. Determine Target Dimensions
+    # 1. Determine Source Dimensions
     if m_rgb is not None:
         th, tw = m_rgb.shape[:2]
     elif f_rgb is not None:
@@ -283,45 +283,32 @@ def composite_cpu(main_img, float_img, main_is_sbs=False, float_is_sbs=False):
     else:
         return None
 
-    # 2. Manage Persistent Buffer
+    # 2. Manage Buffer (Source Resolution)
+    # We always render at source res first for pixel-perfect math
     if _cpu_buffer is None or _cpu_buffer.shape[:2] != (th, tw):
         _cpu_buffer = np.empty((th, tw, 3), dtype=np.uint8)
-        # Init with BG color (this happens only on resize/start)
         bg_r, bg_g, bg_b = BACKGROUND_COLOR
         _cpu_buffer[:] = (bg_r, bg_g, bg_b)
 
     # 3. Apply Main Layer
-    # We must treat Main exactly like Float: Blend it over the background
-    if m_rgb is not None:
-        # Reset buffer to BG Color for this frame
-        # (Faster than re-allocating)
-        bg_r, bg_g, bg_b = BACKGROUND_COLOR
-        _cpu_buffer[:] = (bg_r, bg_g, bg_b)
+    # Reset to BG each frame
+    bg_r, bg_g, bg_b = BACKGROUND_COLOR
+    _cpu_buffer[:] = (bg_r, bg_g, bg_b)
 
+    if m_rgb is not None:
         if m_a is None:
-            # Opaque: Just copy
             np.copyto(_cpu_buffer, m_rgb)
         else:
-            # Alpha Blend Main Layer
-            # This fixes the "garbage background" issue for SBS JPEGs
-            target = _cpu_buffer # The background
+            target = _cpu_buffer
             source = m_rgb
             mask = m_a
-
-            # Noise Gate
             alpha_clean = np.where(mask < 15, 0, mask)
-
             alpha = alpha_clean[:, :, None].astype(np.int16)
             src = source.astype(np.int16)
             dst = target.astype(np.int16)
 
             blended = (src * alpha + dst * (255 - alpha)) // 255
             _cpu_buffer[:] = blended.astype(np.uint8)
-
-    else:
-        # No main image? Just clear to background
-        bg_r, bg_g, bg_b = BACKGROUND_COLOR
-        _cpu_buffer[:] = (bg_r, bg_g, bg_b)
 
     # 4. Apply Float Layer
     if f_rgb is not None:
@@ -335,16 +322,38 @@ def composite_cpu(main_img, float_img, main_is_sbs=False, float_is_sbs=False):
             target[:] = source
         else:
             mask = f_a[:h, :w]
-
-            # Noise Gate
             alpha_clean = np.where(mask < 15, 0, mask)
-
-            # Blend
             alpha = alpha_clean[:, :, None].astype(np.int16)
             src = source.astype(np.int16)
             dst = target.astype(np.int16)
-
             blended = (src * alpha + dst * (255 - alpha)) // 255
             target[:] = blended.astype(np.uint8)
+
+    # 5. Final Resize (Letterboxed)
+    # If target_size provided, we scale and CENTER the image instead of stretching.
+    if target_size is not None and cv2 is not None:
+        target_w, target_h = target_size
+
+        # Don't resize if already matches
+        if (tw, th) == (target_w, target_h):
+            return _cpu_buffer
+
+        # Calculate Aspect-Preserving Scale
+        scale = min(target_w / tw, target_h / th)
+        new_w = int(tw * scale)
+        new_h = int(th * scale)
+
+        # Resize Content
+        resized = cv2.resize(_cpu_buffer, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+        # Create Black Canvas
+        canvas = np.full((target_h, target_w, 3), (bg_r, bg_g, bg_b), dtype=np.uint8)
+
+        # Center Paste
+        y_off = (target_h - new_h) // 2
+        x_off = (target_w - new_w) // 2
+        canvas[y_off:y_off+new_h, x_off:x_off+new_w] = resized
+
+        return canvas
 
     return _cpu_buffer
