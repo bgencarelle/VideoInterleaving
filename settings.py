@@ -2,8 +2,7 @@
 # -------------------------
 # Image Directories and Folder Paths
 # -------------------------
-IMAGES_DIR = ("150_91")
-
+IMAGES_DIR = ("images")
 MAIN_FOLDER_PATH = f"{IMAGES_DIR}/face"
 FLOAT_FOLDER_PATH = f"{IMAGES_DIR}/float"
 
