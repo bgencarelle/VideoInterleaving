@@ -66,7 +66,7 @@ def display_init(state: DisplayState):
     global window, ctx
 
     # --- PATH A: SERVER / HEADLESS MODE ---
-    if settings.SERVER_MODE:
+    if settings.SERVER_MODE or getattr(settings, 'ASCII_MODE', False):
         use_gl = getattr(settings, "HEADLESS_USE_GL", False)
         if not use_gl:
             print("[DISPLAY] SERVER_MODE: GL disabled. Using CPU compositor.")
