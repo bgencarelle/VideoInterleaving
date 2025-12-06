@@ -39,10 +39,11 @@ fi
 echo ">>> 📦 Installing system dependencies..."
 apt-get update
 # Dependencies for Python, GL, WebP, Nginx, and Firewall management
+# Added 'libjpeg-dev' which is often needed for pillow/turbojpeg compilation
 apt-get install -y \
     python3-venv python3-dev python3-pip build-essential \
     libwebp-dev libgl1-mesa-dev libglu1-mesa-dev libegl1-mesa-dev mesa-utils \
-    chrony ninja-build python-is-python3 nginx ufw
+    chrony ninja-build python-is-python3 nginx ufw libjpeg-dev
 
 # --------------------------------------------
 # 3. Permissions & Groups (Critical for GPU access)
@@ -85,7 +86,8 @@ pip install -r requirements.txt
 # 6. Generate Folder Lists
 # --------------------------------------------
 echo ">>> 📂 Generating file lists..."
-python make_file_lists.py
+# Run using the new venv python
+"$VENV_DIR/bin/python" make_file_lists.py
 
 # --------------------------------------------
 # 7. Setup Systemd Service (Universal Adaptive)
@@ -256,6 +258,14 @@ echo ">>> 🛡️  Checking Firewall..."
 if command -v ufw >/dev/null; then
     echo "    Allowing Nginx HTTP traffic..."
     ufw allow 'Nginx Full' >/dev/null 2>&1 || ufw allow 80 >/dev/null 2>&1
+
+    # NEW: Allow ASCII Telnet Port
+    echo "    Allowing ASCII Telnet (Port 2323)..."
+    ufw allow 2323/tcp >/dev/null 2>&1
+
+    # Optional: Allow 1978/8080 direct access if Nginx dies?
+    # ufw allow 8080/tcp
+    # ufw allow 1978/tcp
 fi
 
 # --------------------------------------------
@@ -264,7 +274,7 @@ fi
 echo "----------------------------------------------------"
 echo "✅ Setup Complete!"
 echo ""
-# Fixed the nested quotes syntax here
+
 MODE="Software Rendering (VPS)"
 if [ "$IS_PI" = true ]; then
     MODE="Raspberry Pi (Overrides Active)"
