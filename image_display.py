@@ -28,6 +28,7 @@ from folder_selector import update_folder_selection, folder_dictionary
 from display_manager import DisplayState, display_init
 from event_handler import register_callbacks
 import renderer
+import ascii_converter  # <--- NEW IMPORT
 
 # TurboJPEG for Encoding Server Streams
 from turbojpeg import TurboJPEG
@@ -81,6 +82,13 @@ def run_display(clock_source=CLOCK_MODE):
     last_server_capture = time.time()
     last_captured_index = None
 
+    # Identify Modes
+    is_ascii = getattr(settings, 'ASCII_MODE', False)
+    # Force Web Mode OFF if Ascii Mode is ON to match main.py exclusivity
+    is_web = getattr(settings, 'SERVER_MODE', False) and not is_ascii
+    # Headless if either server mode is active
+    is_headless = is_web or is_ascii
+
     import calculators
     _, main_folder_path, float_folder_path = calculators.init_all(clock_source)
     main_folder_count = len(main_folder_path[0])
@@ -113,14 +121,14 @@ def run_display(clock_source=CLOCK_MODE):
     if window is None:
         # Fallback / Server CPU Mode / ASCII Mode
         has_gl = False
-        mode_name = "SERVER" if settings.SERVER_MODE else "LOCAL-CPU"
-        print(f"[DISPLAY] {mode_name}: Using CPU-only compositing (TurboJPEG Optimized)")
+        mode_name = "ASCII" if is_ascii else ("WEB-SERVER" if is_web else "LOCAL-CPU")
+        print(f"[DISPLAY] {mode_name}: Using CPU-only compositing")
     else:
         # ModernGL Mode (Headless or Local)
         has_gl = True
         # Only register keyboard/mouse callbacks if it's a real local window
         # (HeadlessWindow is a custom class, not a glfw object)
-        if not settings.SERVER_MODE and glfw:
+        if not is_headless and glfw:
             register_callbacks(window, state)
 
     # 4. Loader & Buffer Init
@@ -175,16 +183,17 @@ def run_display(clock_source=CLOCK_MODE):
         # ---------------------------------------------------------------------
         # MAIN EXECUTION LOOP
         # ---------------------------------------------------------------------
-        while (state.run_mode and not settings.SERVER_MODE) or settings.SERVER_MODE:
+        # Loop continues if Local Mode OR (Web OR Ascii) is active
+        while (state.run_mode and not is_headless) or is_headless:
             successful_display = False
 
             # A. Poll Events (Local GL only)
-            if not settings.SERVER_MODE and has_gl and glfw:
+            if not is_headless and has_gl and glfw:
                 glfw.poll_events()
                 if not state.run_mode: break
 
             # B. Handle Window Re-init (Local GL only)
-            if state.needs_update and not settings.SERVER_MODE and has_gl:
+            if state.needs_update and not is_headless and has_gl:
                 display_init(state)
                 state.needs_update = False
 
@@ -214,7 +223,7 @@ def run_display(clock_source=CLOCK_MODE):
                     cur_m_sbs, cur_f_sbs = m_sbs, f_sbs
                     successful_display = True
                 else:
-                    if not settings.SERVER_MODE: print(f"[MISS] {index}")
+                    if not is_headless: print(f"[MISS] {index}")
 
                 # Queue next frame
                 next_idx = 1 if index == 0 else (
@@ -224,8 +233,8 @@ def run_display(clock_source=CLOCK_MODE):
 
             # D. Render Phase
             if has_gl:
-                # If Server GL Mode, bind the FBO
-                if settings.SERVER_MODE:
+                # If Headless GL Mode, bind the FBO
+                if is_headless:
                     window.use()
 
                 # Draw
@@ -234,24 +243,21 @@ def run_display(clock_source=CLOCK_MODE):
                     main_is_sbs=cur_m_sbs, float_is_sbs=cur_f_sbs
                 )
 
-            # E. Output / Capture Phase (Server or CPU-Local)
-            # This block runs if we are streaming OR if we have no GPU (ASCII/CPU mode)
+            # E. Output / Capture Phase (Web, Ascii, or Local-CPU)
             should_capture = False
 
-            if settings.SERVER_MODE:
-                # Throttled capture for web stream
+            if is_headless or not has_gl:
+                # Throttled capture for stream modes
                 now = time.time()
                 if (index != last_captured_index) and (now - last_server_capture > capture_interval):
                     should_capture = True
                     last_server_capture = now
                     last_captured_index = index
-            elif not has_gl:
-                # Local CPU mode (e.g. ASCII): Process every frame essentially
-                should_capture = True
 
             if should_capture:
                 try:
                     frame = None
+                    # 1. Get Raw Data
                     if has_gl:
                         # Readback from GPU
                         raw = window.fbo.read(components=3)
@@ -264,22 +270,25 @@ def run_display(clock_source=CLOCK_MODE):
                             main_is_sbs=cur_m_sbs, float_is_sbs=cur_f_sbs
                         )
 
-                    # Output Handling
+                    # 2. Output Data (Mutually Exclusive)
                     if frame is not None:
-                        if settings.SERVER_MODE:
-                            # Encode to JPEG for stream
+                        if is_web:
+                            # Encode to JPEG for Web Stream
                             encoded = jpeg.encode(frame, quality=getattr(settings, "JPEG_QUALITY", 80), pixel_format=0)
                             exchange.set_frame(encoded)
+                        elif is_ascii:
+                            # Convert to String for Telnet Stream
+                            text_frame = ascii_converter.to_ascii(frame)
+                            exchange.set_frame(text_frame)
                         else:
-                            # LOCAL CPU PLACEHOLDER
-                            # This is where you would call: ascii_printer.render(frame)
+                            # Local CPU placeholder
                             pass
 
                 except Exception as e:
                     print(f"[CAPTURE ERROR] {e}")
 
             # F. Swap Buffers (Local GL Only)
-            if not settings.SERVER_MODE and has_gl and glfw:
+            if not is_headless and has_gl and glfw:
                 glfw.swap_buffers(window)
                 if glfw.window_should_close(window):
                     state.run_mode = False
@@ -311,8 +320,8 @@ def run_display(clock_source=CLOCK_MODE):
                     "main_folder_count": main_folder_count, "float_folder_count": float_folder_count
                 })
 
-            if not settings.SERVER_MODE and has_gl and glfw and glfw.window_should_close(window):
+            if not is_headless and has_gl and glfw and glfw.window_should_close(window):
                 state.run_mode = False
 
-        if not settings.SERVER_MODE and has_gl and glfw:
+        if not is_headless and has_gl and glfw:
             glfw.terminate()

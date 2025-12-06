@@ -2,7 +2,7 @@
 # -------------------------
 # Image Directories and Folder Paths
 # -------------------------
-IMAGES_DIR = ("images_sbs")
+IMAGES_DIR = ("150_91")
 
 MAIN_FOLDER_PATH = f"{IMAGES_DIR}/face"
 FLOAT_FOLDER_PATH = f"{IMAGES_DIR}/float"
@@ -157,11 +157,32 @@ AUDIO_OCTAVE_SPAN = 3        # how many octaves the index can walk through
 
 # --- SERVER MODE CONFIGURATION ---
 SERVER_MODE = True       # Enable headless streaming
-HEADLESS_USE_GL = False   # new: disable ModernGL headless on VPS
+HEADLESS_USE_GL =True   # new: disable ModernGL headless on VPS
 STREAM_PORT = 8080           # Port for video stream (distinct from monitor port 1978)
 STREAM_HOST = '127.0.0.1'      # Listen on all interfaces
 SERVER_CAPTURE_RATE = FPS     # Streaming FPS
 JPEG_QUALITY = 85         # Image quality
 HEADLESS_RES = (480, 640)   # Resolution for the virtual screen
-HEADLESS_BACKEND = "egl"      # "egl"
+#HEADLESS_BACKEND = "egl"      # "egl"
 MAX_VIEWERS = 20 # Max simultaneous connections
+
+
+# --- ASCII MODE SETTINGS ---
+ASCII_MODE = True
+ASCII_COLOR = True
+ASCII_PORT = 2323
+ASCII_HOST = '0.0.0.0'
+ASCII_WIDTH = 120
+ASCII_HEIGHT = 60
+ASCII_FPS = 15
+ASCII_FONT_RATIO = 0.55
+
+# --- ARTISTIC TWEAKS ---
+ASCII_CONTRAST = 1.0
+ASCII_SATURATION = 1.1
+ASCII_BRIGHTNESS = 1.1
+ASCII_GAMMA = 0.75
+ASCII_PADDING_CHAR = "_"     # <--- NEW: Character for pillar/letterboxing
+
+# --- THE GENCARELLE PALETTE ---
+ASCII_PALETTE = "MB8NG9SEaemvyznocrtlj17i. "

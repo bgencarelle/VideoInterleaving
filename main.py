@@ -1,12 +1,15 @@
-# main.py
 import sys
 import threading
 import make_file_lists
 import image_display
-import web_service
+import settings
 from settings import CLOCK_MODE
 
-# --- RESTORED: Tee Class for Monitor Visibility ---
+# --- Output Modules ---
+import web_service
+import ascii_server
+
+
 class Tee:
     def __init__(self, stream, log_file):
         self.stream = stream
@@ -15,10 +18,8 @@ class Tee:
 
     def write(self, data):
         with self.lock:
-            # Write to systemd/console
             self.stream.write(data)
             self.stream.flush()
-            # Write to file for Monitor
             self.log_file.write(data)
             self.log_file.flush()
 
@@ -26,9 +27,7 @@ class Tee:
         self.stream.flush()
         self.log_file.flush()
 
-# Open log file for the web monitor to read
-# We use "w" to truncate on restart, ensuring the log doesn't grow infinitely
-# across restarts, though logrotate handles long-running processes.
+
 try:
     log_file = open("runtime.log", "w", buffering=1)
     sys.stdout = Tee(sys.stdout, log_file)
@@ -36,28 +35,48 @@ try:
 except Exception as e:
     print(f"Failed to setup logging: {e}")
 
-def start_stream_server():
-    """
-    Run the MJPEG web server (Flask/Raw) that serves / and /video_feed.
-    """
-    web_service.start_server()
 
 def main(clock=CLOCK_MODE):
-    # 1. Build/refresh the file lists and CSVs
+    # 1. Build File Lists
     make_file_lists.process_files()
 
-    # 2. Start the MJPEG server on STREAM_PORT in the background
-    server_thread = threading.Thread(
-        target=start_stream_server,
-        daemon=True,
-        name="MJPEG-WebServer",
-    )
-    server_thread.start()
+    # Determine if Monitor is wanted (Global setting)
+    want_monitor = getattr(settings, 'HTTP_MONITOR', True)
 
-    print("🛰️  MJPEG server thread started (see web_service for port).")
+    # 2. Determine Mode (Mutually Exclusive)
+    if getattr(settings, 'ASCII_MODE', False):
+        # --- PATH A: ASCII MODE ---
+        print("MODE: ASCII Telnet Server")
 
-    # 3. Run the display loop (this owns the GL context)
+        # 1. Start Telnet
+        server_thread = threading.Thread(
+            target=ascii_server.start_server,
+            daemon=True,
+            name="ASCII-TelnetServer"
+        )
+        server_thread.start()
+
+        # 2. Start Monitor ONLY (No MJPEG)
+        if want_monitor:
+            web_service.start_server(monitor=True, stream=False)
+
+    elif getattr(settings, 'SERVER_MODE', False):
+        # --- PATH B: WEB MODE ---
+        print("MODE: MJPEG Web Server")
+
+        # Start Monitor AND MJPEG
+        web_service.start_server(monitor=want_monitor, stream=True)
+
+    else:
+        # --- PATH C: LOCAL MODE ---
+        print("MODE: Local Standalone")
+        # Optional: You might want the monitor locally too?
+        if want_monitor:
+            web_service.start_server(monitor=True, stream=False)
+
+    # 3. Start Display Engine
     image_display.run_display(clock)
+
 
 if __name__ == "__main__":
     main()
