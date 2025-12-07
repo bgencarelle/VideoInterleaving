@@ -112,16 +112,16 @@ ASCII_MODE = False
 ASCII_COLOR = True
 ASCII_PORT = 2323
 ASCII_HOST = '0.0.0.0'
-ASCII_WIDTH = 400
-ASCII_HEIGHT = int(ASCII_WIDTH / 1.333)
+ASCII_WIDTH = 120
+ASCII_HEIGHT = 80
 ASCII_FPS = 15
-ASCII_FONT_RATIO = 0.5
+ASCII_FONT_RATIO = .50
 
 # --- ARTISTIC TWEAKS ---
-ASCII_CONTRAST   = 1.0   # tiny bit of punch
-ASCII_SATURATION = 0.9   # slightly muted color
-ASCII_BRIGHTNESS = 1.0   # handled in HSV
-ASCII_GAMMA      = 1.0   # neutral given your LUT definition
+ASCII_CONTRAST   = 1.4   # tiny bit of punch
+ASCII_SATURATION = 1.0   # slightly muted color
+ASCII_BRIGHTNESS = 1.5   # handled in HSV
+ASCII_GAMMA      = 1.0  # neutral given your LUT definition
 
 ASCII_PADDING_CHAR = " "     # <--- NEW: Character for pillar/letterboxing
 
