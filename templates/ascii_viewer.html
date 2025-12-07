@@ -63,9 +63,21 @@
     }
 
     // --- 4. WEBSOCKET ---
-    function connect() {
+function connect() {
       const protocol = location.protocol === 'https:' ? 'wss://' : 'ws://';
-      const wsUrl = protocol + location.hostname + ":" + WS_PORT;
+      let wsUrl;
+
+      // LOGIC: Are we running on standard web ports (80/443)?
+      // If location.port is empty, it means port 80 (HTTP) or 443 (HTTPS).
+      if (location.port === "" || location.port === "80" || location.port === "443") {
+          // PRODUCTION (Nginx): Use the routed tunnel
+          wsUrl = protocol + location.hostname + "/ascii_ws/";
+          console.log("Environment: Production (Nginx Proxy)");
+      } else {
+          // LOCAL (Port 1980): Connect directly to the WebSocket port
+          wsUrl = protocol + location.hostname + ":" + WS_PORT;
+          console.log("Environment: Local (Direct Port)");
+      }
 
       const ws = new WebSocket(wsUrl);
       ws.binaryType = "arraybuffer";
