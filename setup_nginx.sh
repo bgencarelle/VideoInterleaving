@@ -6,7 +6,7 @@ NGINX_CONF="/etc/nginx/sites-available/videointerleaving"
 LINK_CONF="/etc/nginx/sites-enabled/videointerleaving"
 PROJECT_DIR=$(pwd)
 
-echo ">>> 🌐 Starting Nginx Web Server Setup..."
+echo ">>> 🌐Starting Nginx Web Server Setup..."
 
 # 1. Install Nginx
 if ! command -v nginx >/dev/null; then
