@@ -3,7 +3,7 @@ display_manager.py – Window creation, sizing, and GL context management.
 """
 from __future__ import annotations
 import moderngl
-import numpy as np  # <--- Added missing import
+import numpy as np
 import settings
 import renderer
 
@@ -66,14 +66,19 @@ def display_init(state: DisplayState):
     global window, ctx
 
     # --- PATH A: SERVER / HEADLESS MODE ---
-    if settings.SERVER_MODE or getattr(settings, 'ASCII_MODE', False):
+    is_server = settings.SERVER_MODE
+    is_ascii = getattr(settings, 'ASCII_MODE', False)
+
+    # Enable GL for BOTH Server and ASCII
+    if is_server or is_ascii:
         use_gl = getattr(settings, "HEADLESS_USE_GL", False)
+
         if not use_gl:
-            print("[DISPLAY] SERVER_MODE: GL disabled. Using CPU compositor.")
+            print(f"[DISPLAY] {'ASCII' if is_ascii else 'SERVER'} MODE: GL disabled. Using CPU compositor.")
             return None
 
         if not _GLFW_AVAILABLE:
-            print("[DISPLAY] SERVER_MODE: GL libs missing. Fallback to CPU.")
+            print(f"[DISPLAY] GL libs missing. Fallback to CPU.")
             return None
 
         try:
@@ -86,8 +91,20 @@ def display_init(state: DisplayState):
             print(f"[DISPLAY] Failed to create headless GL context: {e}")
             return None
 
-        # --- Respect HEADLESS_RES ---
-        width, height = getattr(settings, "HEADLESS_RES", (1280, 720))
+        # --- SMART RESOLUTION SELECTION ---
+        if is_ascii:
+            # OPTIMIZATION: Render directly to tiny ASCII dimensions.
+            # GPU does the downscaling/blending instantly.
+            # CPU reads back a tiny buffer (fast!).
+            w = getattr(settings, 'ASCII_WIDTH', 120)
+            h = getattr(settings, 'ASCII_HEIGHT', 60)
+            # Ensure even numbers for alignment safety
+            width = w if w % 2 == 0 else w + 1
+            height = h if h % 2 == 0 else h + 1
+            print(f"[DISPLAY] Optimized ASCII Render Target: {width}x{height}")
+        else:
+            # Web Mode: Use high-quality resolution
+            width, height = getattr(settings, "HEADLESS_RES", (1280, 720))
 
         tex = ctx.texture((width, height), components=4)
         fbo = ctx.framebuffer(color_attachments=[tex])
@@ -97,13 +114,14 @@ def display_init(state: DisplayState):
 
         renderer.initialize(ctx)
 
-        # Pass both Container Size (Viewport) and Content Size (Image)
+        # Pass Container Size (FBO) and Content Size (Source Image)
+        # The renderer handles aspect-ratio letterboxing automatically.
         renderer.set_transform_parameters(
             fs_scale=1.0, fs_offset_x=0.0, fs_offset_y=0.0,
-            image_size=state.image_size, # The actual image dimensions
+            image_size=state.image_size,
             rotation_angle=0.0, mirror_mode=0
         )
-        renderer.set_viewport_size(width, height) # The container dimensions
+        renderer.set_viewport_size(width, height)
 
         print(f"[DISPLAY] Headless GL ready: {width}x{height}")
         return HeadlessWindow(ctx, fbo, (width, height))
@@ -181,7 +199,6 @@ def display_init(state: DisplayState):
         refresh = getattr(best, 'refresh_rate', 60)
         glfw.set_window_monitor(window, mon, 0, 0, fs_w, fs_h, refresh)
     else:
-        # Switch back logic if needed
         pass
 
     fb_w, fb_h = glfw.get_framebuffer_size(window)
