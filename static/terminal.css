@@ -15,29 +15,35 @@ body {
   height: 100%;
   position: relative;
   background: #000;
-  overflow: hidden;
+
+  /* Flexbox centers the terminal container */
+  display: flex;
+  justify-content: center;
+  align-items: center;
 }
 
-/* --- THE TERMINAL --- */
+/* --- THE TERMINAL CONTAINER --- */
 #terminal {
-  /* We position this MANUALLY in JS to guarantee exact placement */
-  position: absolute;
+  /* Flexbox handles the position. We only control scale. */
+  transform-origin: center center;
   will-change: transform;
+  /* Background black to prevent any sub-pixel bleeding */
+  background-color: #000;
+}
 
-  /* IMPORTANT: Scale from the very top-left corner.
-     This prevents the 'shrinking to center' effect. */
-  transform-origin: 0 0;
-
-  box-shadow: 0 0 50px rgba(0,0,0,0.8);
+/* --- THE RED BOX FIX --- */
+/* We apply the border to the SCREEN, not the wrapper.
+   This ensures it matches the grid size exactly. */
+.xterm-screen {
+    border: 1px solid red;
+    box-sizing: content-box;
+    /* Ensure it sits above the viewport so the border is visible */
+    position: relative;
+    z-index: 10;
 }
 
 /* --- CLEANUP --- */
-/* Hide scrollbars on the terminal viewport */
-.xterm-viewport { 
-    overflow: hidden !important; 
-}
-/* Remove default margins from the internal screen */
-.xterm-screen { 
-    margin: 0 !important; 
-    padding: 0 !important; 
+/* Hide the scrollbar viewport entirely */
+.xterm-viewport {
+    overflow: hidden !important;
 }
