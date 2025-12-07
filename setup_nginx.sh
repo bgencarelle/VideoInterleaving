@@ -36,17 +36,15 @@ server {
     add_header Referrer-Policy "no-referrer-when-downgrade" always;
 
     # --- Root for Static Files ---
-    # Points to your current project directory so it can find 'static/' and your html
     root $PROJECT_DIR;
     index index.html;
 
     # --- Redirects ---
     location = /monitor { return 301 /monitor/; }
     location = /monitor_ascii { return 301 /monitor_ascii/; }
-    location = /ascii { return 301 /ascii/; }  <-- ADD THIS LINE
+    location = /ascii { return 301 /ascii/; }
 
     # --- 1. Main Stream (Web Mode) ---
-    # Maps http://domain.com/ -> Port 8080
     location / {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
@@ -56,7 +54,6 @@ server {
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
 
-        # Streaming Optimizations
         proxy_buffering off;
         proxy_cache off;
         proxy_request_buffering off;
@@ -67,7 +64,6 @@ server {
     }
 
     # --- 2. Web Monitor Dashboard ---
-    # Maps http://domain.com/monitor/ -> Port 1978
     location /monitor/ {
         proxy_pass http://127.0.0.1:1978/;
         proxy_http_version 1.1;
@@ -75,13 +71,11 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
-
         proxy_buffering off;
         proxy_read_timeout 3600s;
     }
 
     # --- 3. ASCII Monitor Dashboard ---
-    # Maps http://domain.com/monitor_ascii/ -> Port 1980
     location /monitor_ascii/ {
         proxy_pass http://127.0.0.1:1980/;
         proxy_http_version 1.1;
@@ -89,37 +83,31 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
-
         proxy_buffering off;
         proxy_read_timeout 3600s;
     }
 
-# --- 4. ASCII Viewer Page (HTML) ---
-    # Proxy to Python so it can render {{ASCII_WIDTH}} templates
+    # --- 4. ASCII Viewer Page (Proxied to Python) ---
+    # This ensures {{ASCII_WIDTH}} templates are rendered correctly
     location /ascii/ {
-        proxy_pass http://127.0.0.1:1980/ascii; # Note the specific path
+        proxy_pass http://127.0.0.1:1980/ascii;
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        # Disable buffering so Python handles the serving speed
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
         proxy_buffering off;
     }
 
     # --- 5. Static Assets ---
-    # Maps http://domain.com/static/ -> $PROJECT_DIR/static/
-    # This allows your viewer to load xterm.js and css
     location /static/ {
         alias $PROJECT_DIR/static/;
         expires 30d;
     }
 
     # --- 6. ASCII WebSocket Tunnel ---
-    # Maps http://domain.com/ascii_ws/ -> Local Port 2324
-    # This acts as the SSL bridge. Your JS should connect to /ascii_ws/
     location /ascii_ws/ {
         proxy_pass http://127.0.0.1:2324/;
         proxy_http_version 1.1;
 
-        # WEBSOCKET HEADERS
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "Upgrade";
         proxy_set_header Host \$host;
@@ -148,7 +136,6 @@ systemctl reload nginx
 if command -v ufw >/dev/null; then
     echo "    Updating Firewall rules..."
     ufw allow 'Nginx Full' >/dev/null 2>&1
-    # Allow direct access ports just in case
     ufw allow 2323/tcp >/dev/null 2>&1
     ufw allow 2324/tcp >/dev/null 2>&1
 fi
