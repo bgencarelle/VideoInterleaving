@@ -4,9 +4,17 @@ set -e
 # --- CONFIGURATION ---
 PROJECT_DIR=$(pwd)
 VENV_DIR="$PROJECT_DIR/.venv"
-USERNAME="root" # Change this if you aren't running as root user
 
-echo ">>> 🛰️  Starting Application Setup (Hardware & Services)..."
+# Detect real user if running via sudo, otherwise default to current user
+if [ "$SUDO_USER" ]; then
+    USERNAME="$SUDO_USER"
+else
+    USERNAME=$(whoami)
+fi
+
+echo ">>> 🛰️  Starting Application Setup..."
+echo "    Running as User: $USERNAME"
+echo "    Project Dir:     $PROJECT_DIR"
 
 # --------------------------------------------
 # 1. Hardware Detection
@@ -16,10 +24,10 @@ HAS_GPU=false
 if [ -d "/dev/dri" ]; then HAS_GPU=true; fi
 if grep -q "Raspberry Pi" /proc/device-tree/model 2>/dev/null; then IS_PI=true; HAS_GPU=true; fi
 
-echo "    Hardware Detected: GPU=$HAS_GPU | Pi=$IS_PI"
+echo "    Hardware: GPU=$HAS_GPU | Pi=$IS_PI"
 
 # --------------------------------------------
-# 2. System Dependencies
+# 2. Dependencies
 # --------------------------------------------
 echo ">>> 📦 Installing system libraries..."
 apt-get update -qq
@@ -37,18 +45,18 @@ fi
 # 3. Python Environment
 # --------------------------------------------
 echo ">>> 🐍 Setting up Python venv..."
+# Create venv with ownership of the real user, not root
 if [ -d "$VENV_DIR" ]; then rm -rf "$VENV_DIR"; fi
-python3 -m venv "$VENV_DIR"
-source "$VENV_DIR/bin/activate"
-pip install --upgrade pip wheel
-pip install -r requirements.txt
+sudo -u "$USERNAME" python3 -m venv "$VENV_DIR"
+
+# Install requirements inside the venv
+# We use full path to pip to ensure we use the venv's pip
+sudo -u "$USERNAME" "$VENV_DIR/bin/pip" install --upgrade pip wheel
+sudo -u "$USERNAME" "$VENV_DIR/bin/pip" install -r requirements.txt
 
 # --------------------------------------------
-# 4. Generate Lists & Logrotate
+# 4. Logrotate
 # --------------------------------------------
-echo ">>> 📂 Generating file lists..."
-"$VENV_DIR/bin/python" make_file_lists.py
-
 echo ">>> 📜 Configuring Logrotate..."
 cat <<EOF > "/etc/logrotate.d/videointerleaving"
 $PROJECT_DIR/*.log {
@@ -66,7 +74,6 @@ EOF
 # --------------------------------------------
 echo ">>> ⚙️  Creating Systemd Services..."
 
-# Determine Environment Variables based on Hardware
 if [ "$IS_PI" = true ]; then
     ENV_BLOCK="Environment=MESA_GL_VERSION_OVERRIDE=3.3\nEnvironment=MESA_GLSL_VERSION_OVERRIDE=330"
 elif [ "$HAS_GPU" = true ]; then
@@ -86,7 +93,6 @@ User=$USERNAME
 WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_BLOCK
-# Web Mode (Port 8080 Stream, 1978 Monitor)
 ExecStart=$VENV_DIR/bin/python -O main.py --mode web
 Restart=always
 RestartSec=3
@@ -108,7 +114,6 @@ User=$USERNAME
 WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_BLOCK
-# ASCII Mode (Port 2323 Telnet, 1980 Monitor)
 ExecStart=$VENV_DIR/bin/python -O main.py --mode ascii
 Restart=always
 RestartSec=3
@@ -119,17 +124,41 @@ StandardError=append:$PROJECT_DIR/vi-ascii.log
 WantedBy=multi-user.target
 EOF
 
+# --- SERVICE 3: LOCAL MODE (vi-local) ---
+cat <<EOF > "/etc/systemd/system/vi-local.service"
+[Unit]
+Description=VideoInterleaving (Local GUI)
+After=network.target graphical.target
+
+[Service]
+User=$USERNAME
+WorkingDirectory=$PROJECT_DIR
+Environment=PYTHONUNBUFFERED=1
+Environment=DISPLAY=:0
+$ENV_BLOCK
+ExecStart=$VENV_DIR/bin/python -O main.py --mode local
+Restart=always
+RestartSec=3
+StandardOutput=append:$PROJECT_DIR/vi-local.log
+StandardError=append:$PROJECT_DIR/vi-local.log
+
+[Install]
+WantedBy=graphical.target
+EOF
+
 systemctl daemon-reload
 
 # --------------------------------------------
-# 6. Basic Firewall (App Ports Only)
+# 6. Firewall
 # --------------------------------------------
-# We open 2323 here because it is a direct TCP port, not HTTP/Nginx
 if command -v ufw >/dev/null; then
     ufw allow 2323/tcp >/dev/null 2>&1
 fi
 
 echo "----------------------------------------------------"
 echo "✅ App Setup Complete."
-echo "   Run './setup_nginx.sh' next to configure web access."
+echo ""
+echo "👉 Web Mode:   systemctl enable --now vi-web"
+echo "👉 ASCII Mode: systemctl enable --now vi-ascii"
+echo "👉 Local Mode: systemctl enable --now vi-local"
 echo "----------------------------------------------------"
