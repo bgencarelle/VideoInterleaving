@@ -12,4 +12,4 @@ moderngl
 flask
 psutil
 pyturbojpeg
-simplewebsocketserver
+SimpleWebsocketServer
