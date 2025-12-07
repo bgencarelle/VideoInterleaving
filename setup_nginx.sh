@@ -7,15 +7,13 @@ LINK_CONF="/etc/nginx/sites-enabled/videointerleaving"
 
 echo ">>> 🌐 Starting Nginx Web Server Setup..."
 
-# 1. Install Nginx if missing
+# 1. Install Nginx
 if ! command -v nginx >/dev/null; then
     echo "    Installing Nginx..."
     apt-get update -qq && apt-get install -y nginx
 fi
 
 # 2. Ask for Domain Name
-#    We need this to configure the server_name properly.
-#    If you just press ENTER, it defaults to "_" (catch-all), which works for IP access.
 echo ""
 echo "----------------------------------------------------------------"
 read -p "Enter your domain name (e.g., mysite.com) or press ENTER for default: " DOMAIN_INPUT
@@ -24,7 +22,6 @@ echo "----------------------------------------------------------------"
 echo "    Using Server Name: $DOMAIN_NAME"
 
 # 3. Create Nginx Configuration
-#    This maps the external URLs to your internal Python ports.
 cat <<EOF > "$NGINX_CONF"
 server {
     listen 80 default_server;
@@ -37,12 +34,13 @@ server {
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header Referrer-Policy "no-referrer-when-downgrade" always;
 
-    # --- Redirects (Fix trailing slash issues) ---
+    # --- Redirects ---
     location = /monitor { return 301 /monitor/; }
     location = /monitor_ascii { return 301 /monitor_ascii/; }
+    location = /ascii { return 301 /ascii/; }
 
     # --- 1. Main Stream (Web Mode) ---
-    # Maps http://domain.com/ -> Local Port 8080
+    # Maps http://domain.com/ -> Port 8080
     location / {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
@@ -55,62 +53,64 @@ server {
         # Streaming Optimizations
         proxy_buffering off;
         proxy_cache off;
-        proxy_request_buffering off;
         proxy_read_timeout 7d;
-        sendfile off;
         tcp_nodelay on;
-        gzip off;
     }
 
     # --- 2. Web Monitor Dashboard ---
-    # Maps http://domain.com/monitor/ -> Local Port 1978
+    # Maps http://domain.com/monitor/ -> Port 1978
     location /monitor/ {
         proxy_pass http://127.0.0.1:1978/;
         proxy_http_version 1.1;
-        proxy_set_header Connection "";
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-
         proxy_buffering off;
         proxy_read_timeout 3600s;
     }
 
     # --- 3. ASCII Monitor Dashboard ---
-    # Maps http://domain.com/monitor_ascii/ -> Local Port 1980
+    # Maps http://domain.com/monitor_ascii/ -> Port 1980
     location /monitor_ascii/ {
         proxy_pass http://127.0.0.1:1980/;
         proxy_http_version 1.1;
-        proxy_set_header Connection "";
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-
         proxy_buffering off;
         proxy_read_timeout 3600s;
+    }
+
+    # --- 4. ASCII Web Stream (WebSocket) ---
+    # Maps http://domain.com/ascii/ -> Port 2324
+    location /ascii/ {
+        proxy_pass http://127.0.0.1:2324/;
+        proxy_http_version 1.1;
+
+        # WEBSOCKET HEADERS (Required for this to work)
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "Upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+
+        proxy_read_timeout 7d;
+        proxy_buffering off;
     }
 }
 EOF
 
 # 4. Enable the Site
 echo "    Linking configuration..."
-# Remove default if it exists to avoid port 80 conflicts
 if [ -f /etc/nginx/sites-enabled/default ]; then
     rm /etc/nginx/sites-enabled/default
 fi
 ln -sf "$NGINX_CONF" "$LINK_CONF"
 
-# 5. Test Configuration
+# 5. Test and Reload
 echo "    Testing Nginx syntax..."
 nginx -t
-
-# 6. Reload Nginx
 echo "    Reloading Nginx..."
 systemctl reload nginx
 
-# 7. Configure Firewall (UFW)
+# 6. Firewall
 if command -v ufw >/dev/null; then
     echo "    Updating Firewall rules..."
     ufw allow 'Nginx Full' >/dev/null 2>&1
@@ -120,18 +120,13 @@ echo ""
 echo "================================================================"
 echo "✅ Nginx Setup Complete!"
 echo "================================================================"
-echo "   - Web Stream:   http://$DOMAIN_NAME/"
-echo "   - Web Monitor:  http://$DOMAIN_NAME/monitor/"
+echo "   - Web Stream:    http://$DOMAIN_NAME/"
+echo "   - Web Monitor:   http://$DOMAIN_NAME/monitor/"
+echo "   - ASCII Stream:  http://$DOMAIN_NAME/ascii/"
 echo "   - ASCII Monitor: http://$DOMAIN_NAME/monitor_ascii/"
 echo ""
-
 if [ "$DOMAIN_NAME" != "_" ]; then
     echo "🔒 TO ENABLE HTTPS (SSL):"
-    echo "   Run this command now to generate your certificate:"
     echo "   sudo certbot --nginx -d $DOMAIN_NAME"
-else
-    echo "⚠️  NOTE: You did not provide a domain name."
-    echo "   HTTPS (SSL) cannot be generated for an IP address."
-    echo "   If you want SSL later, re-run this script with a domain."
 fi
-echo "================================================================"s
+echo "================================================================"
