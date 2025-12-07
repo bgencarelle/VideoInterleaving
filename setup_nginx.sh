@@ -4,6 +4,7 @@ set -e
 # --- CONFIGURATION ---
 NGINX_CONF="/etc/nginx/sites-available/videointerleaving"
 LINK_CONF="/etc/nginx/sites-enabled/videointerleaving"
+PROJECT_DIR=$(pwd)
 
 echo ">>> 🌐 Starting Nginx Web Server Setup..."
 
@@ -34,10 +35,14 @@ server {
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header Referrer-Policy "no-referrer-when-downgrade" always;
 
+    # --- Root for Static Files ---
+    # Points to your current project directory so it can find 'static/' and your html
+    root $PROJECT_DIR;
+    index index.html;
+
     # --- Redirects ---
     location = /monitor { return 301 /monitor/; }
     location = /monitor_ascii { return 301 /monitor_ascii/; }
-    location = /ascii { return 301 /ascii/; }
 
     # --- 1. Main Stream (Web Mode) ---
     # Maps http://domain.com/ -> Port 8080
@@ -53,8 +58,11 @@ server {
         # Streaming Optimizations
         proxy_buffering off;
         proxy_cache off;
+        proxy_request_buffering off;
         proxy_read_timeout 7d;
+        sendfile off;
         tcp_nodelay on;
+        gzip off;
     }
 
     # --- 2. Web Monitor Dashboard ---
@@ -64,6 +72,9 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+
         proxy_buffering off;
         proxy_read_timeout 3600s;
     }
@@ -75,17 +86,37 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+
         proxy_buffering off;
         proxy_read_timeout 3600s;
     }
 
-    # --- 4. ASCII Web Stream (WebSocket) ---
-    # Maps http://domain.com/ascii/ -> Port 2324
+    # --- 4. ASCII Viewer Page (HTML) ---
+    # Maps http://domain.com/ascii/ -> Your 'ascii_viewer.html' file
+    # We use 'try_files' to find the viewer wherever you named it.
     location /ascii/ {
+        try_files /ascii_viewer.html /templates/ascii_viewer.html =404;
+        add_header Cache-Control "no-cache";
+    }
+
+    # --- 5. Static Assets ---
+    # Maps http://domain.com/static/ -> $PROJECT_DIR/static/
+    # This allows your viewer to load xterm.js and css
+    location /static/ {
+        alias $PROJECT_DIR/static/;
+        expires 30d;
+    }
+
+    # --- 6. ASCII WebSocket Tunnel ---
+    # Maps http://domain.com/ascii_ws/ -> Local Port 2324
+    # This acts as the SSL bridge. Your JS should connect to /ascii_ws/
+    location /ascii_ws/ {
         proxy_pass http://127.0.0.1:2324/;
         proxy_http_version 1.1;
 
-        # WEBSOCKET HEADERS (Required for this to work)
+        # WEBSOCKET HEADERS
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "Upgrade";
         proxy_set_header Host \$host;
@@ -114,6 +145,9 @@ systemctl reload nginx
 if command -v ufw >/dev/null; then
     echo "    Updating Firewall rules..."
     ufw allow 'Nginx Full' >/dev/null 2>&1
+    # Allow direct access ports just in case
+    ufw allow 2323/tcp >/dev/null 2>&1
+    ufw allow 2324/tcp >/dev/null 2>&1
 fi
 
 echo ""
@@ -122,7 +156,7 @@ echo "✅ Nginx Setup Complete!"
 echo "================================================================"
 echo "   - Web Stream:    http://$DOMAIN_NAME/"
 echo "   - Web Monitor:   http://$DOMAIN_NAME/monitor/"
-echo "   - ASCII Stream:  http://$DOMAIN_NAME/ascii/"
+echo "   - ASCII Viewer:  http://$DOMAIN_NAME/ascii/"
 echo "   - ASCII Monitor: http://$DOMAIN_NAME/monitor_ascii/"
 echo ""
 if [ "$DOMAIN_NAME" != "_" ]; then
