@@ -4,8 +4,9 @@
   <meta charset="utf-8">
   <title>VideoInterleaving Terminal</title>
 
-  <link rel="stylesheet" href="/static/xterm.css" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 
+  <link rel="stylesheet" href="/static/xterm.css" />
   <link rel="stylesheet" href="/static/terminal.css" />
 
   <script src="/static/xterm.js" onerror="alert('CRITICAL ERROR: /static/xterm.js not found.')"></script>
@@ -19,7 +20,9 @@
   <script>
     const WS_PORT = 2324;
 
-    // --- 1. CONFIGURATION (Strictly from Settings) ---
+    // --- 1. CONFIGURATION ---
+    // Python will replace these values. If Nginx serves this raw, it falls back to 80x24.
+    // NOTE: The Nginx fix below is required for this to work on the web!
     const COLS = parseInt("{{ASCII_WIDTH}}") || 80;
     const ROWS = parseInt("{{ASCII_HEIGHT}}") || 24;
 
@@ -42,16 +45,19 @@
 
     term.open(document.getElementById('terminal'));
 
-    // --- 3. SCALING LOGIC ---
+    // --- 3. ROBUST SCALING LOGIC ---
     function fitToScreen() {
       const termEl = document.getElementById('terminal');
-      // Verify screen element exists (this is what has the width/height)
+      // The .xterm-screen element is created by xterm.js and holds the actual canvas/dom
       const screenEl = termEl.querySelector('.xterm-screen');
-      if (!screenEl) return;
+
+      if (!screenEl) return false;
 
       const srcW = screenEl.clientWidth;
       const srcH = screenEl.clientHeight;
-      if (srcW < 1 || srcH < 1) return;
+
+      // If dimensions are 0, the CSS or Font hasn't loaded yet. Abort.
+      if (srcW < 1 || srcH < 1) return false;
 
       const targetW = window.innerWidth;
       const targetH = window.innerHeight;
@@ -60,15 +66,25 @@
       const scale = Math.min(targetW / srcW, targetH / srcH);
 
       termEl.style.transform = `scale(${scale})`;
+      return true;
+    }
+
+    // A recursive safer fit that waits for valid dimensions
+    function safeFit() {
+        if (fitToScreen()) {
+            console.log("Terminal scaled successfully.");
+        } else {
+            console.log("Waiting for layout...");
+            requestAnimationFrame(safeFit);
+        }
     }
 
     // --- 4. WEBSOCKET ---
-function connect() {
+    function connect() {
       const protocol = location.protocol === 'https:' ? 'wss://' : 'ws://';
       let wsUrl;
 
       // LOGIC: Are we running on standard web ports (80/443)?
-      // If location.port is empty, it means port 80 (HTTP) or 443 (HTTPS).
       if (location.port === "" || location.port === "80" || location.port === "443") {
           // PRODUCTION (Nginx): Use the routed tunnel
           wsUrl = protocol + location.hostname + "/ascii_ws/";
@@ -84,6 +100,7 @@ function connect() {
 
       ws.onopen = () => {
         term.reset();
+        // Trigger a re-fit on connection just in case
         setTimeout(fitToScreen, 50);
       };
 
@@ -91,16 +108,24 @@ function connect() {
         term.write(ev.data);
       };
 
-      ws.onclose = () => setTimeout(connect, 2000);
+      ws.onclose = () => {
+        console.warn("Connection lost. Reconnecting in 2s...");
+        setTimeout(connect, 2000);
+      };
+
       ws.onerror = () => ws.close();
     }
 
-    // --- START ---
+    // --- STARTUP SEQUENCE ---
     window.addEventListener('resize', () => requestAnimationFrame(fitToScreen));
-    setTimeout(() => {
-        fitToScreen();
+
+    // Wait for Fonts (Courier New) to be ready before doing math
+    document.fonts.ready.then(() => {
+        console.log("Fonts loaded.");
         connect();
-    }, 100);
+        // Start checking for valid dimensions to trigger the first scale
+        requestAnimationFrame(safeFit);
+    });
   </script>
 </body>
 </html>
