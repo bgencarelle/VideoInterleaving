@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>VideoInterleaving Terminal</title>
+
+  <link rel="stylesheet" href="/static/xterm.css" />
+  <link rel="stylesheet" href="/static/terminal.css" />
+
+  <script src="/static/xterm.js"></script>
+</head>
+<body>
+
+  <div id="terminal-stage">
+    <div id="terminal"></div>
+  </div>
+
+  <script>
+    const WS_PORT = 2324;
+    // Template variables injected by server
+    const COLS = parseInt("{{ASCII_WIDTH}}") || 90;
+    const ROWS = parseInt("{{ASCII_HEIGHT}}") || 60;
+
+    // Exact pixels from the top edge
+    const TOP_OFFSET_PX = 25;
+
+    // Safety margin for sides/bottom
+    const MARGIN_PX = 25;
+
+    // --- 1. INITIALIZE ---
+    if (typeof Terminal === 'undefined') {
+        document.body.innerHTML = '<h2 style="color:red;text-align:center">Error: xterm.js not found in /static/</h2>';
+        throw "Missing Library";
+    }
+
+    // Initialize xterm with exact dimensions matchings Python settings
+    const term = new Terminal({
+      cols: COLS,
+      rows: ROWS,
+      fontFamily: 'Courier New, monospace',
+      fontSize: 14,
+      lineHeight: 1.0,
+      cursorBlink: false,
+      disableStdin: true,
+      theme: { background: '#000000', foreground: '#e6e6e6' },
+      allowTransparency: true
+    });
+
+    term.open(document.getElementById('terminal'));
+
+    // --- 2. THE "TOP-ANCHOR" SCALING LOGIC ---
+    function fitToScreen() {
+      const termEl = document.getElementById('terminal');
+      const screenEl = document.querySelector('.xterm-screen');
+
+      if (!screenEl) return;
+
+      // 1. Measure the canvas (The true size of the terminal)
+      const contentW = screenEl.clientWidth;
+      const contentH = screenEl.clientHeight;
+      if (contentW === 0 || contentH === 0) return;
+
+      // 2. Measure the Window
+      const windowW = window.innerWidth;
+      const windowH = window.innerHeight;
+
+      // 3. Calculate Available Space
+      // Width: Full window minus safety margins on left/right
+      const availW = windowW - (MARGIN_PX * 2);
+      // Height: Full window minus Top Offset and Bottom Margin
+      const availH = windowH - TOP_OFFSET_PX - MARGIN_PX;
+
+      // 4. Calculate Scale (Contain)
+      const scale = Math.min(availW / contentW, availH / contentH);
+
+      // 5. Calculate Center Position
+      // How wide is the terminal after scaling?
+      const scaledW = contentW * scale;
+      // Calculate 'left' to center it: (WindowWidth - ScaledWidth) / 2
+      const leftPos = (windowW - scaledW) / 2;
+
+      // 6. APPLY
+      // We explicitly set Top and Left using pixels.
+      // transform-origin is '0 0' (CSS), so it grows from that exact point.
+      termEl.style.transform = `scale(${scale})`;
+      termEl.style.top = `${TOP_OFFSET_PX}px`;
+      termEl.style.left = `${leftPos}px`;
+    }
+
+    // --- 3. CONNECTION ---
+    function connect() {
+      const protocol = location.protocol === 'https:' ? 'wss://' : 'ws://';
+      const wsUrl = protocol + location.hostname + ":" + WS_PORT;
+      const ws = new WebSocket(wsUrl);
+      ws.binaryType = "arraybuffer";
+
+      ws.onopen = () => {
+        term.reset();
+        // Delay slightly to allow DOM to settle before calculating fit
+        setTimeout(fitToScreen, 50);
+      };
+
+      ws.onmessage = (ev) => {
+        // Simple write; Python handles cursor positioning/clearing
+        term.write(ev.data);
+      };
+
+      ws.onclose = () => {
+        // Auto-reconnect
+        setTimeout(connect, 2000);
+      };
+
+      ws.onerror = () => ws.close();
+    }
+
+    // --- START ---
+    window.addEventListener('resize', () => requestAnimationFrame(fitToScreen));
+    setTimeout(() => { fitToScreen(); connect(); }, 100);
+  </script>
+</body>
+</html>

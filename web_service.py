@@ -47,11 +47,13 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.end_headers()
             self.wfile.write(HTML_TEMPLATE.encode('utf-8'))
+
         elif self.path == "/data":
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps(monitor_data).encode('utf-8'))
+
         elif self.path == "/log":
             try:
                 with open("runtime.log", "rb") as f:
@@ -62,9 +64,49 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(content)
             except:
                 self.send_error(404)
+
+        # --- NEW: Serve Static Files (Added this block) ---
+        elif self.path.startswith("/static/"):
+            try:
+                # Security: Prevent directory traversal
+                clean_path = os.path.normpath(self.path.lstrip('/')).replace('\\', '/')
+                if not clean_path.startswith("static") or ".." in clean_path:
+                    self.send_error(403)
+                    return
+
+                # Serve file
+                with open(clean_path, "rb") as f:
+                    content = f.read()
+
+                mime, _ = mimetypes.guess_type(clean_path)
+                self.send_response(200)
+                self.send_header('Content-Type', mime or 'application/octet-stream')
+                self.end_headers()
+                self.wfile.write(content)
+            except:
+                self.send_error(404)
+        # --------------------------------------------------
+
+        elif self.path == "/ascii":
+            try:
+                with open("templates/ascii_viewer.html", "r", encoding="utf-8") as f:
+                    content = f.read()
+
+                # Inject Settings
+                cols = getattr(settings, 'ASCII_WIDTH', 120)
+                rows = getattr(settings, 'ASCII_HEIGHT', 96)
+                content = content.replace("{{ASCII_WIDTH}}", str(cols))
+                content = content.replace("{{ASCII_HEIGHT}}", str(rows))
+
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(content.encode('utf-8'))
+            except Exception as e:
+                print(f"Error serving ASCII viewer: {e}")
+                self.send_error(404)
         else:
             self.send_error(404)
-
 
 class StreamHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):

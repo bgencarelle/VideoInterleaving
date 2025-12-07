@@ -2,145 +2,144 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Broadcast Stream</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="color-scheme" content="dark">
-  <link rel="stylesheet" href="/static/stream.css">
+  <title>VideoInterleaving Terminal</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+
   <style>
-    /* Overlay for the Waiting Room */
-    #waiting-room {
-      position: fixed; inset: 0;
-      background: rgba(10, 10, 10, 0.95);
-      color: #0f0;
-      display: none; /* Hidden by default */
-      flex-direction: column;
-      align-items: center; justify-content: center;
-      z-index: 100;
-      font-family: monospace;
-      text-align: center;
+    /* --- LAYOUT RESET --- */
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background-color: #000;
+      height: 100vh;
+      width: 100vw;
+      overflow: hidden;
     }
-    #waiting-room.active { display: flex; }
-    .status-box { border: 1px solid #333; padding: 20px; border-radius: 8px; background: #000; }
-    .count-large { font-size: 2em; font-weight: bold; margin: 10px 0; }
-    .spinner { margin-top: 15px; width: 20px; height: 20px; border: 2px solid #0f0; border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite; display: inline-block; }
-    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* --- THE CONTAINER (The Screen) --- */
+    /* This element is ALWAYS the size of the browser window */
+    #terminal-stage {
+      width: 100%;
+      height: 100%;
+      position: absolute;
+      top: 0; left: 0;
+
+      /* Flexbox forces the scaled terminal to float in the center */
+      display: flex;
+      justify-content: center;
+      align-items: center;
+
+      background: #000;
+      overflow: hidden;
+    }
+
+    /* --- THE CONTENT (The Fixed Grid) --- */
+    /* We do NOT set width/height here. xterm.js sets it based on COLS/ROWS.
+       We just handle the scaling transformation. */
+    #terminal {
+      /* Origin center ensures it scales evenly from the middle */
+      transform-origin: center center;
+      will-change: transform;
+
+      /* Block pointer events so user can't select text */
+      pointer-events: none;
+
+      /* Remove block gaps */
+      line-height: 0;
+    }
+
+    /* --- VISUALS --- */
+    .xterm-viewport, .xterm-screen {
+        margin: 0 !important;
+        padding: 0 !important;
+        overflow: hidden !important;
+    }
+
+    .xterm-screen canvas {
+      filter: contrast(1.15) brightness(1.2) drop-shadow(0 0 3px rgba(200, 255, 200, 0.4));
+    }
+
+    .crt-overlay {
+      position: fixed; inset: 0; pointer-events: none; z-index: 999;
+      background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%);
+      background-size: 100% 4px;
+      opacity: 0.5;
+    }
   </style>
+
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
 </head>
-<body class="contain no-cursor rot0">
+<body>
 
-  <div id="waiting-room">
-    <div class="status-box">
-      <div>SYSTEM FULL</div>
-      <div class="count-large" id="slot-counter">-- / --</div>
-      <div>Waiting for a slot...</div>
-      <div class="spinner"></div>
-    </div>
-  </div>
+  <div class="crt-overlay"></div>
 
-  <div class="stage">
-    <img id="video" src="" alt="Connecting..." draggable="false" onerror="handleStreamError()">
-  </div>
-
-  <div class="ui" role="toolbar" aria-label="Viewer controls">
-    <button id="fitToggle" aria-pressed="false">Contain</button>
-    <button id="rotateToggle">Rotate</button>
-    <button id="fsToggle">Fullscreen</button>
+  <div id="terminal-stage">
+    <div id="terminal"></div>
   </div>
 
   <script>
-    const img = document.getElementById("video");
-    const waitingOverlay = document.getElementById("waiting-room");
-    const slotCounter = document.getElementById("slot-counter");
-    let pollingInterval = null;
+    const WS_PORT = 2324;
+    const COLS = parseInt("{{ASCII_WIDTH}}");
+    const ROWS = parseInt("{{ASCII_HEIGHT}}");
 
-    // 1. Initial Load
-    startStream();
+    // 1. Initialize Fixed Grid
+    const term = new Terminal({
+      cols: COLS,
+      rows: ROWS,
+      fontFamily: '"Share Tech Mono", "Courier New", monospace',
+      fontSize: 14,
+      lineHeight: 1.0,
+      cursorBlink: false,
+      disableStdin: true,
+      theme: { background: '#000000', foreground: '#e6e6e6' },
+      allowTransparency: true,
+      scrollback: 0
+    });
 
-    function startStream() {
-      // Add timestamp to break cache
-      img.src = "/video_feed?t=" + new Date().getTime();
-    }
+    term.open(document.getElementById('terminal'));
 
-    // 2. Triggered if Server returns 503 (or connection dies)
-    function handleStreamError() {
-      console.log("Stream failed (503 or dropped). Entering waiting room...");
-      enterWaitingRoom();
-    }
+    // 2. The "Object-Fit: Contain" Logic
+    function fitToScreen() {
+      const stage = document.getElementById('terminal-stage');
+      const termEl = document.getElementById('terminal');
+      const canvas = document.querySelector('.xterm-screen canvas');
 
-    function enterWaitingRoom() {
-      waitingOverlay.classList.add("active");
-      img.style.display = 'none'; // Hide broken image icon
-
-      // Start polling stats immediately
-      pollStats();
-      if (!pollingInterval) {
-        pollingInterval = setInterval(pollStats, 2000); // Check every 2 seconds
+      if (!canvas) {
+          requestAnimationFrame(fitToScreen);
+          return;
       }
+
+      // Reset to measure true size
+      termEl.style.transform = 'none';
+
+      // A. Measure the Container (Window)
+      const stageW = stage.clientWidth;
+      const stageH = stage.clientHeight;
+
+      // B. Measure the Content (The fixed text grid)
+      // canvas.width is physical pixels; divide by ratio to get CSS pixels
+      const contentW = canvas.width / window.devicePixelRatio;
+      const contentH = canvas.height / window.devicePixelRatio;
+
+      if (contentW === 0 || contentH === 0) return;
+
+      // C. Calculate Scale
+      const scaleX = stageW / contentW;
+      const scaleY = stageH / contentH;
+
+      // "Contain" means use the smaller scale so nothing is cut off
+      const scale = Math.min(scaleX, scaleY);
+
+      // D. Apply to the Inner Element
+      termEl.style.transform = `scale(${scale})`;
     }
 
-    function pollStats() {
-      fetch('/stats')
-        .then(r => r.json())
-        .then(data => {
-          // Update the UI counter
-          slotCounter.innerText = `${data.current} / ${data.max}`;
-
-          // If a slot is free, try to reconnect!
-          if (!data.full) {
-            console.log("Slot found! Reconnecting...");
-            leaveWaitingRoom();
-          }
-        })
-        .catch(e => console.log("Stats poll error", e));
-    }
-
-    function leaveWaitingRoom() {
-      clearInterval(pollingInterval);
-      pollingInterval = null;
-      waitingOverlay.classList.remove("active");
-      img.style.display = 'block';
-      startStream(); // Reload the image source
-    }
-
-    // --- Tab Wake Logic (Keep this) ---
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") {
-        // If we aren't already waiting, refresh the stream
-        if (!waitingOverlay.classList.contains("active")) {
-           startStream();
-        }
-      }
-    });
-
-    // --- Standard UI Logic ---
-    const body = document.body;
-    const fitBtn = document.getElementById('fitToggle');
-    const rotBtn = document.getElementById('rotateToggle');
-    const fsBtn  = document.getElementById('fsToggle');
-
-    function toggleFit() {
-      const isCover = body.classList.contains('cover');
-      body.classList.toggle('cover', !isCover);
-      body.classList.toggle('contain', isCover);
-      fitBtn.textContent = !isCover ? 'Cover' : 'Contain';
-    }
-    fitBtn.addEventListener('click', toggleFit);
-
-    const ROT_SEQUENCE = ['rot0','rot90','rot180','rot270'];
-    rotBtn.addEventListener('click', () => {
-      const idx = ROT_SEQUENCE.findIndex(c => body.classList.contains(c));
-      body.classList.remove(...ROT_SEQUENCE);
-      body.classList.add(ROT_SEQUENCE[(idx + 1) % 4]);
-    });
-
-    fsBtn.addEventListener('click', () => {
-      if (!document.fullscreenElement) document.documentElement.requestFullscreen();
-      else document.exitFullscreen();
-    });
-
-    // Auto-fit on load
-    if (window.matchMedia('(orientation: portrait)').matches) toggleFit();
-
-  </script>
-</body>
-</html>
+    function connect() {
+      const protocol = location.protocol === 'https:' ? 'wss://' : 'ws://';
+      const wsUrl = protocol + location.hostname + ":" + WS_PORT;
+      const socket

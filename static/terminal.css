@@ -1,0 +1,43 @@
+/* static/terminal.css */
+
+/* --- RESET --- */
+body {
+  margin: 0;
+  background: #000;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+/* --- THE STAGE --- */
+#terminal-stage {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  background: #000;
+  overflow: hidden;
+}
+
+/* --- THE TERMINAL --- */
+#terminal {
+  /* We position this MANUALLY in JS to guarantee exact placement */
+  position: absolute;
+  will-change: transform;
+
+  /* IMPORTANT: Scale from the very top-left corner.
+     This prevents the 'shrinking to center' effect. */
+  transform-origin: 0 0;
+
+  box-shadow: 0 0 50px rgba(0,0,0,0.8);
+}
+
+/* --- CLEANUP --- */
+/* Hide scrollbars on the terminal viewport */
+.xterm-viewport { 
+    overflow: hidden !important; 
+}
+/* Remove default margins from the internal screen */
+.xterm-screen { 
+    margin: 0 !important; 
+    padding: 0 !important; 
+}
