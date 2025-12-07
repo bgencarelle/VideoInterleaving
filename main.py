@@ -94,6 +94,7 @@ import make_file_lists
 import image_display
 import web_service
 import ascii_server
+import ascii_web_server  # <--- NEW IMPORT for WebSocket support
 from settings import CLOCK_MODE
 
 
@@ -132,14 +133,25 @@ def main(clock=CLOCK_MODE):
     # 2. Determine Mode
     if getattr(settings, 'ASCII_MODE', False):
         # --- PATH A: ASCII MODE ---
-        print("MODE: ASCII Telnet Server")
-        server_thread = threading.Thread(
+        print("MODE: ASCII Server (Telnet + WebSocket)")
+
+        # 1. Start Telnet (Raw TCP on Port 2323)
+        t_telnet = threading.Thread(
             target=ascii_server.start_server,
             daemon=True,
             name="ASCII-TelnetServer"
         )
-        server_thread.start()
+        t_telnet.start()
 
+        # 2. Start WebSocket (Browser support on Port 2324)
+        t_ws = threading.Thread(
+            target=ascii_web_server.start_server,
+            daemon=True,
+            name="ASCII-WebSocketServer"
+        )
+        t_ws.start()
+
+        # 3. Start Monitor (Monitor + HTML Viewer on Port 1980)
         if want_monitor:
             web_service.start_server(monitor=True, stream=False)
 
