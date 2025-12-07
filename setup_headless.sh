@@ -1,152 +1,114 @@
 #!/bin/bash
-set -e  # Exit immediately if a command exits with a non-zero status
+set -e
 
 # --- CONFIGURATION ---
 PROJECT_DIR=$(pwd)
 VENV_DIR="$PROJECT_DIR/.venv"
 SERVICE_NAME="videointerleaving"
-USERNAME="root"  # Change to 'ubuntu' or 'pi' if not running as root
+USERNAME="root"
 
-echo ">>> 🛰️  Starting Universal Headless Setup for $SERVICE_NAME..."
-echo ">>> Project Directory: $PROJECT_DIR"
+echo ">>> 🛰️  Starting Universal Headless Setup..."
 
 # --------------------------------------------
-# 1. Hardware & GPU Detection
+# 0. SELECT INSTANCE MODE
 # --------------------------------------------
-echo ">>> 🔍 Scanning Hardware..."
+echo "Select Instance Mode:"
+echo "  1) Web Stream (MJPEG)"
+echo "  2) ASCII Stream (Telnet)"
+echo "  3) Local / Default"
+read -p "Enter choice [1-3]: " MODE_CHOICE
 
+# Base Port from typical settings (change if your settings.py differs)
+BASE_PORT=1978
+
+case $MODE_CHOICE in
+    1)
+        INSTANCE_MODE="web"
+        PY_ARGS="--mode web"
+        # Web stays on Default Base Port
+        MONITOR_PORT=$BASE_PORT
+        ;;
+    2)
+        INSTANCE_MODE="ascii"
+        PY_ARGS="--mode ascii"
+        # ASCII gets +2
+        MONITOR_PORT=$((BASE_PORT + 2))
+        ;;
+    *)
+        INSTANCE_MODE="local"
+        PY_ARGS="--mode local"
+        # Local gets +1
+        MONITOR_PORT=$((BASE_PORT + 1))
+        ;;
+esac
+
+echo ">>> Selected Mode: $INSTANCE_MODE"
+echo ">>> Monitor Port:  $MONITOR_PORT"
+
+# --------------------------------------------
+# 1. Hardware Detection
+# --------------------------------------------
 IS_PI=false
 HAS_GPU=false
-
-# Check for Direct Rendering Infrastructure (DRI)
-if [ -d "/dev/dri" ]; then
-    HAS_GPU=true
-    echo "    ✅ GPU/DRI detected (Hardware Acceleration Available)."
-else
-    echo "    ⚠️  No GPU detected. Will use CPU Software Rendering."
-fi
-
-# Check specifically for Raspberry Pi (needs extra driver hints)
-if grep -q "Raspberry Pi" /proc/device-tree/model 2>/dev/null; then
-    IS_PI=true
-    HAS_GPU=true # Pi implies GPU
-    echo "    🍓 Raspberry Pi Model detected."
-fi
+if [ -d "/dev/dri" ]; then HAS_GPU=true; fi
+if grep -q "Raspberry Pi" /proc/device-tree/model 2>/dev/null; then IS_PI=true; HAS_GPU=true; fi
 
 # --------------------------------------------
-# 2. Install System Dependencies
+# 2. Dependencies
 # --------------------------------------------
 echo ">>> 📦 Installing system dependencies..."
 apt-get update
-# Dependencies for Python, GL, WebP, Nginx, and Firewall management
-# Added 'libjpeg-dev' which is often needed for pillow/turbojpeg compilation
-apt-get install -y \
-    python3-venv python3-dev python3-pip build-essential \
+apt-get install -y python3-venv python3-dev python3-pip build-essential \
     libwebp-dev libgl1-mesa-dev libglu1-mesa-dev libegl1-mesa-dev mesa-utils \
     chrony ninja-build python-is-python3 nginx ufw libjpeg-dev
 
-# --------------------------------------------
-# 3. Permissions & Groups (Critical for GPU access)
-# --------------------------------------------
 if [ "$HAS_GPU" = true ] && [ "$USERNAME" != "root" ]; then
-    echo ">>> 🔑 Adding user $USERNAME to video/render groups..."
     usermod -aG video,render "$USERNAME" || true
 fi
 
 # --------------------------------------------
-# 4. Configure Chrony
-# --------------------------------------------
-echo ">>> ⏱️  Configuring Chrony..."
-systemctl enable --now chrony
-
-# --------------------------------------------
-# 5. Python Virtual Environment
+# 3. Python Env
 # --------------------------------------------
 echo ">>> 🐍 Setting up Python environment..."
-
-# Clean up old venv if it exists in the project folder
-if [ -d "$VENV_DIR" ]; then
-    rm -rf "$VENV_DIR"
-fi
-
-# Clean up legacy global path
-if [ -d "/root/PyIntervenv" ]; then
-    rm -rf "/root/PyIntervenv"
-fi
-
+if [ -d "$VENV_DIR" ]; then rm -rf "$VENV_DIR"; fi
 python3 -m venv "$VENV_DIR"
 source "$VENV_DIR/bin/activate"
-
-echo "    Installing requirements..."
-pip install --upgrade pip
-pip install wheel
+pip install --upgrade pip wheel
 pip install -r requirements.txt
 
 # --------------------------------------------
-# 6. Generate Folder Lists
+# 4. Generate Lists
 # --------------------------------------------
 echo ">>> 📂 Generating file lists..."
-# Run using the new venv python
 "$VENV_DIR/bin/python" make_file_lists.py
 
 # --------------------------------------------
-# 7. Setup Systemd Service (Universal Adaptive)
+# 5. Systemd Service
 # --------------------------------------------
 echo ">>> ⚙️  Creating Systemd Service ($SERVICE_NAME)..."
-
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
-# -- Build Environment Variables Block --
 if [ "$IS_PI" = true ]; then
-    # RASPBERRY PI: Force Desktop GL 3.3 context on VideoCore drivers
-    ENV_BLOCK=$(cat <<EOF
-# Pi Hardware Acceleration
-Environment=MESA_GL_VERSION_OVERRIDE=3.3
-Environment=MESA_GLSL_VERSION_OVERRIDE=330
-EOF
-)
+    ENV_BLOCK="Environment=MESA_GL_VERSION_OVERRIDE=3.3\nEnvironment=MESA_GLSL_VERSION_OVERRIDE=330"
 elif [ "$HAS_GPU" = true ]; then
-    # GENERIC GPU (Intel/Nvidia/AMD): Let the system pick the driver.
-    ENV_BLOCK=$(cat <<EOF
-# Generic Hardware Acceleration (Auto-detected)
-# No overrides needed; system uses /dev/dri
-EOF
-)
+    ENV_BLOCK="# Generic GPU Auto-detect"
 else
-    # VPS / NO GPU: Force Software Rasterizer
-    ENV_BLOCK=$(cat <<EOF
-# CPU Software Rendering (llvmpipe)
-Environment=GALLIUM_DRIVER=llvmpipe
-# Environment=LP_NUM_THREADS=2
-EOF
-)
+    ENV_BLOCK="Environment=GALLIUM_DRIVER=llvmpipe"
 fi
 
-# -- Write Service File --
 cat <<EOF > "$SERVICE_FILE"
 [Unit]
-Description=VideoInterleaving Headless Stream
+Description=VideoInterleaving ($INSTANCE_MODE)
 After=network.target
 
 [Service]
 User=$USERNAME
 WorkingDirectory=$PROJECT_DIR
-
-# Common Env Tuning
 Environment=PYTHONUNBUFFERED=1
-# Environment=MALLOC_TRIM_THRESHOLD_=100000
-
-# Hardware Specific Env
 $ENV_BLOCK
-
-# Executing Python directly from the local project .venv
-ExecStart=$VENV_DIR/bin/python -O main.py
-
-# Auto-restart config
+ExecStart=$VENV_DIR/bin/python -O main.py $PY_ARGS
 Restart=always
 RestartSec=3
-
-# Logging
 StandardOutput=append:$PROJECT_DIR/systemd_out.log
 StandardError=append:$PROJECT_DIR/systemd_err.log
 
@@ -158,12 +120,9 @@ systemctl daemon-reload
 systemctl enable "$SERVICE_NAME"
 
 # --------------------------------------------
-# 8. Setup Logrotate
+# 6. Logrotate
 # --------------------------------------------
-echo ">>> 📝 Configuring Logrotate..."
-
 LOGROTATE_FILE="/etc/logrotate.d/$SERVICE_NAME"
-
 cat <<EOF > "$LOGROTATE_FILE"
 $PROJECT_DIR/runtime.log {
     daily
@@ -176,15 +135,16 @@ $PROJECT_DIR/runtime.log {
 }
 EOF
 
-# Verify config
-logrotate -d "$LOGROTATE_FILE" > /dev/null 2>&1
-
 # --------------------------------------------
-# 9. Setup Nginx Reverse Proxy
+# 7. Nginx Proxy (Dynamic Port)
 # --------------------------------------------
 echo ">>> 🌐 Configuring Nginx..."
-
 NGINX_CONF="/etc/nginx/sites-available/$SERVICE_NAME"
+
+# Note: We configure the video stream logic conditionally.
+# If in ASCII mode, proxying / to 8080 is pointless, but we leave it
+# standard for simplicity (it just won't connect).
+# The important part is the MONITOR port matching the python script.
 
 cat <<EOF > "$NGINX_CONF"
 server {
@@ -192,104 +152,48 @@ server {
     listen [::]:80 default_server;
     server_name _;
 
-    # Redirect /monitor -> /monitor/
     location = /monitor { return 301 /monitor/; }
 
-    # Main Stream (Port 8080)
+    # Main Stream (Only active if Web Mode)
     location / {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
         proxy_set_header Connection "";
-        proxy_set_header Host              \$host;
-        proxy_set_header X-Real-IP         \$remote_addr;
-        proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-
-        # Streaming Optimizations
         proxy_buffering off;
         proxy_cache off;
-        proxy_request_buffering off;
         proxy_read_timeout 7d;
-        sendfile off;
-        tcp_nodelay on;
-        gzip off;
     }
 
-    # Monitor Dashboard (Port 1978)
+    # Monitor Dashboard (Dynamically Assigned Port)
     location /monitor/ {
-        proxy_pass http://127.0.0.1:1978/;
+        proxy_pass http://127.0.0.1:$MONITOR_PORT/;
         proxy_http_version 1.1;
         proxy_set_header Connection "";
-        proxy_set_header Host              \$host;
-        proxy_set_header X-Real-IP         \$remote_addr;
-        proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-
         proxy_buffering off;
         proxy_cache off;
-        proxy_request_buffering off;
-        proxy_read_timeout 3600s;
     }
-
-    client_max_body_size 20M;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header Referrer-Policy "no-referrer-when-downgrade" always;
 }
 EOF
 
-# Enable Site & Disable Default
 rm -f /etc/nginx/sites-enabled/default
 ln -sf "$NGINX_CONF" "/etc/nginx/sites-enabled/$SERVICE_NAME"
-
-# Test Nginx Config
-nginx -t > /dev/null 2>&1
-if [ $? -eq 0 ]; then
-    echo "    Nginx config valid. Reloading..."
-    systemctl reload nginx
-else
-    echo "    WARNING: Nginx config failed. Check $NGINX_CONF manually."
-fi
+systemctl reload nginx || echo "Warning: Nginx reload failed."
 
 # --------------------------------------------
-# 10. Firewall Configuration (UFW)
+# 8. Firewall
 # --------------------------------------------
-echo ">>> 🛡️  Checking Firewall..."
 if command -v ufw >/dev/null; then
-    echo "    Allowing Nginx HTTP traffic..."
-    ufw allow 'Nginx Full' >/dev/null 2>&1 || ufw allow 80 >/dev/null 2>&1
-
-    # NEW: Allow ASCII Telnet Port
-    echo "    Allowing ASCII Telnet (Port 2323)..."
-    ufw allow 2323/tcp >/dev/null 2>&1
-
-    # Optional: Allow 1978/8080 direct access if Nginx dies?
-    # ufw allow 8080/tcp
-    # ufw allow 1978/tcp
+    echo ">>> 🛡️  Updating Firewall..."
+    ufw allow 80/tcp >/dev/null 2>&1
+    # If ASCII mode, open Telnet port
+    if [ "$INSTANCE_MODE" == "ascii" ]; then
+        echo "    Opening Port 2323 for Telnet..."
+        ufw allow 2323/tcp >/dev/null 2>&1
+    fi
 fi
 
-# --------------------------------------------
-# 11. Final Instructions
-# --------------------------------------------
 echo "----------------------------------------------------"
-echo "✅ Setup Complete!"
-echo ""
-
-MODE="Software Rendering (VPS)"
-if [ "$IS_PI" = true ]; then
-    MODE="Raspberry Pi (Overrides Active)"
-elif [ "$HAS_GPU" = true ]; then
-    MODE="Hardware Accelerated (Standard GPU)"
-fi
-
-echo "Detected Mode: $MODE"
-echo ""
-echo "To start the service:"
-echo "  systemctl start $SERVICE_NAME"
-echo ""
-echo "To view status:"
-echo "  systemctl status $SERVICE_NAME"
-echo ""
-echo "To follow logs:"
-echo "  journalctl -u $SERVICE_NAME -f"
+echo "✅ Setup Complete for [$INSTANCE_MODE] mode!"
+echo "   Monitor Port: $MONITOR_PORT"
+echo "   Start: systemctl start $SERVICE_NAME"
 echo "----------------------------------------------------"
