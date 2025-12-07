@@ -43,6 +43,7 @@ server {
     # --- Redirects ---
     location = /monitor { return 301 /monitor/; }
     location = /monitor_ascii { return 301 /monitor_ascii/; }
+    location = /ascii { return 301 /ascii/; }  <-- ADD THIS LINE
 
     # --- 1. Main Stream (Web Mode) ---
     # Maps http://domain.com/ -> Port 8080
@@ -93,12 +94,14 @@ server {
         proxy_read_timeout 3600s;
     }
 
-    # --- 4. ASCII Viewer Page (HTML) ---
-    # Maps http://domain.com/ascii/ -> Your 'ascii_viewer.html' file
-    # We use 'try_files' to find the viewer wherever you named it.
+# --- 4. ASCII Viewer Page (HTML) ---
+    # Proxy to Python so it can render {{ASCII_WIDTH}} templates
     location /ascii/ {
-        try_files /ascii_viewer.html /templates/ascii_viewer.html =404;
-        add_header Cache-Control "no-cache";
+        proxy_pass http://127.0.0.1:1980/ascii; # Note the specific path
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        # Disable buffering so Python handles the serving speed
+        proxy_buffering off;
     }
 
     # --- 5. Static Assets ---
