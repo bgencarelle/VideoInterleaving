@@ -6,6 +6,7 @@ import threading
 # 1. Import Settings FIRST so we can patch them
 import settings
 
+
 # -----------------------------------------------------------------------------
 # CONFIGURATION OVERRIDE LOGIC
 # -----------------------------------------------------------------------------
@@ -27,32 +28,44 @@ def configure_runtime():
 
     args = parser.parse_args()
 
-    # 1. Apply Mode Override & Namespace Folders (CRITICAL FOR PARALLEL RUNS)
+    # --- 1. Apply Mode & Namespace Folders ---
     if args.mode == "ascii":
         print(">> CLI OVERRIDE: Mode set to ASCII")
         settings.ASCII_MODE = True
         settings.SERVER_MODE = False
-        # Namespace Data Folders
         settings.PROCESSED_DIR = "folders_processed_ascii"
         settings.GENERATED_LISTS_DIR = "generated_img_lists_ascii"
+
+        # Explicit Ports for ASCII Mode (Matches Nginx /monitor_ascii/)
+        settings.WEB_PORT = 1980  # Monitor Dashboard
+        settings.TELNET_PORT = 2323  # Raw TCP Telnet
+        settings.WEBSOCKET_PORT = 2324  # ASCII WebSocket (Optional)
+        print(f">> PORTS: Monitor={settings.WEB_PORT}, Telnet={settings.TELNET_PORT}")
 
     elif args.mode == "web":
         print(">> CLI OVERRIDE: Mode set to WEB (MJPEG)")
         settings.ASCII_MODE = False
         settings.SERVER_MODE = True
-        # Namespace Data Folders
         settings.PROCESSED_DIR = "folders_processed_web"
         settings.GENERATED_LISTS_DIR = "generated_img_lists_web"
+
+        # Explicit Ports for Web Mode (Matches Nginx / and /monitor/)
+        settings.WEB_PORT = 1978  # Monitor Dashboard
+        settings.STREAM_PORT = 8080  # MJPEG Stream
+        print(f">> PORTS: Monitor={settings.WEB_PORT}, Stream={settings.STREAM_PORT}")
 
     elif args.mode == "local":
         print(">> CLI OVERRIDE: Mode set to LOCAL")
         settings.ASCII_MODE = False
         settings.SERVER_MODE = False
-        # Namespace Data Folders
         settings.PROCESSED_DIR = "folders_processed_local"
         settings.GENERATED_LISTS_DIR = "generated_img_lists_local"
 
-    # 2. Apply Directory Override
+        # Local Mode defaults (Safe ports that won't clash)
+        settings.WEB_PORT = 8888
+        print(f">> PORTS: Monitor={settings.WEB_PORT} (Local)")
+
+    # --- 2. Apply Directory Override ---
     if args.dir:
         abs_path = os.path.abspath(args.dir)
         if not os.path.isdir(abs_path):
@@ -63,25 +76,6 @@ def configure_runtime():
         settings.IMAGES_DIR = abs_path
         settings.MAIN_FOLDER_PATH = os.path.join(abs_path, "face")
         settings.FLOAT_FOLDER_PATH = os.path.join(abs_path, "float")
-
-    # 3. AUTOMATIC PORT OFFSETTING
-    # Base Port comes from settings.py (Default 1978)
-    base_port = getattr(settings, 'WEB_PORT', 1978)
-
-    if settings.ASCII_MODE:
-        # ASCII: Base + 2 (e.g. 1980)
-        settings.WEB_PORT = base_port + 2
-        print(f">> PORT CONFIG: Monitor shifted to {settings.WEB_PORT} (ASCII Mode)")
-
-    elif settings.SERVER_MODE:
-        # WEB: Keep Base (e.g. 1978) - Compatibility Mode
-        settings.WEB_PORT = base_port
-        print(f">> PORT CONFIG: Monitor on default {settings.WEB_PORT} (Web Mode)")
-
-    else:
-        # LOCAL: Base + 1 (e.g. 1979) - Avoids clash if Web is also running
-        settings.WEB_PORT = base_port + 1
-        print(f">> PORT CONFIG: Monitor shifted to {settings.WEB_PORT} (Local Mode)")
 
 
 # Run configuration immediately
@@ -94,7 +88,7 @@ import make_file_lists
 import image_display
 import web_service
 import ascii_server
-import ascii_web_server  # <--- NEW IMPORT for WebSocket support
+import ascii_web_server
 from settings import CLOCK_MODE
 
 
@@ -135,7 +129,7 @@ def main(clock=CLOCK_MODE):
         # --- PATH A: ASCII MODE ---
         print("MODE: ASCII Server (Telnet + WebSocket)")
 
-        # 1. Start Telnet (Raw TCP on Port 2323)
+        # 1. Start Telnet (Port 2323)
         t_telnet = threading.Thread(
             target=ascii_server.start_server,
             daemon=True,
@@ -143,7 +137,7 @@ def main(clock=CLOCK_MODE):
         )
         t_telnet.start()
 
-        # 2. Start WebSocket (Browser support on Port 2324)
+        # 2. Start WebSocket (Port 2324)
         t_ws = threading.Thread(
             target=ascii_web_server.start_server,
             daemon=True,
@@ -151,13 +145,16 @@ def main(clock=CLOCK_MODE):
         )
         t_ws.start()
 
-        # 3. Start Monitor (Monitor + HTML Viewer on Port 1980)
+        # 3. Start Monitor (Port 1980)
         if want_monitor:
+            print(f"Starting Monitor on port {settings.WEB_PORT}...")
+            # Ensure web_service uses the updated settings.WEB_PORT
             web_service.start_server(monitor=True, stream=False)
 
     elif getattr(settings, 'SERVER_MODE', False):
         # --- PATH B: WEB MODE ---
         print("MODE: MJPEG Web Server")
+        # Ensure web_service uses settings.STREAM_PORT (8080) and settings.WEB_PORT (1978)
         web_service.start_server(monitor=want_monitor, stream=True)
 
     else:
