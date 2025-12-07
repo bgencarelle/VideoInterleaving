@@ -4,46 +4,9 @@ set -e
 # --- CONFIGURATION ---
 PROJECT_DIR=$(pwd)
 VENV_DIR="$PROJECT_DIR/.venv"
-SERVICE_NAME="videointerleaving"
 USERNAME="root"
 
-echo ">>> 🛰️  Starting Universal Headless Setup..."
-
-# --------------------------------------------
-# 0. SELECT INSTANCE MODE
-# --------------------------------------------
-echo "Select Instance Mode:"
-echo "  1) Web Stream (MJPEG)"
-echo "  2) ASCII Stream (Telnet)"
-echo "  3) Local / Default"
-read -p "Enter choice [1-3]: " MODE_CHOICE
-
-# Base Port from typical settings (change if your settings.py differs)
-BASE_PORT=1978
-
-case $MODE_CHOICE in
-    1)
-        INSTANCE_MODE="web"
-        PY_ARGS="--mode web"
-        # Web stays on Default Base Port
-        MONITOR_PORT=$BASE_PORT
-        ;;
-    2)
-        INSTANCE_MODE="ascii"
-        PY_ARGS="--mode ascii"
-        # ASCII gets +2
-        MONITOR_PORT=$((BASE_PORT + 2))
-        ;;
-    *)
-        INSTANCE_MODE="local"
-        PY_ARGS="--mode local"
-        # Local gets +1
-        MONITOR_PORT=$((BASE_PORT + 1))
-        ;;
-esac
-
-echo ">>> Selected Mode: $INSTANCE_MODE"
-echo ">>> Monitor Port:  $MONITOR_PORT"
+echo ">>> 🛰️  Starting Non-Interactive Universal Setup..."
 
 # --------------------------------------------
 # 1. Hardware Detection
@@ -53,13 +16,18 @@ HAS_GPU=false
 if [ -d "/dev/dri" ]; then HAS_GPU=true; fi
 if grep -q "Raspberry Pi" /proc/device-tree/model 2>/dev/null; then IS_PI=true; HAS_GPU=true; fi
 
+echo "    Hardware: GPU=$HAS_GPU | Pi=$IS_PI"
+
 # --------------------------------------------
 # 2. Dependencies
 # --------------------------------------------
 echo ">>> 📦 Installing system dependencies..."
 apt-get update
-apt-get install -y python3-venv python3-dev python3-pip build-essential \
-    libwebp-dev libgl1-mesa-dev libglu1-mesa-dev libegl1-mesa-dev mesa-utils \
+# Added 'libgbm-dev' (Critical for Headless EGL on Pi)
+apt-get install -y \
+    python3-venv python3-dev python3-pip build-essential \
+    libwebp-dev libgl1-mesa-dev libglu1-mesa-dev libegl1-mesa-dev \
+    libgbm-dev mesa-utils \
     chrony ninja-build python-is-python3 nginx ufw libjpeg-dev
 
 if [ "$HAS_GPU" = true ] && [ "$USERNAME" != "root" ]; then
@@ -79,15 +47,15 @@ pip install -r requirements.txt
 # --------------------------------------------
 # 4. Generate Lists
 # --------------------------------------------
-echo ">>> 📂 Generating file lists..."
+echo ">>> 📂 Generating file lists (Default/Local)..."
 "$VENV_DIR/bin/python" make_file_lists.py
 
 # --------------------------------------------
-# 5. Systemd Service
+# 5. Create Systemd Services (WEB & ASCII)
 # --------------------------------------------
-echo ">>> ⚙️  Creating Systemd Service ($SERVICE_NAME)..."
-SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+echo ">>> ⚙️  Creating Services..."
 
+# Env block logic
 if [ "$IS_PI" = true ]; then
     ENV_BLOCK="Environment=MESA_GL_VERSION_OVERRIDE=3.3\nEnvironment=MESA_GLSL_VERSION_OVERRIDE=330"
 elif [ "$HAS_GPU" = true ]; then
@@ -96,9 +64,10 @@ else
     ENV_BLOCK="Environment=GALLIUM_DRIVER=llvmpipe"
 fi
 
-cat <<EOF > "$SERVICE_FILE"
+# --- SERVICE 1: WEB MODE (vi-web) ---
+cat <<EOF > "/etc/systemd/system/vi-web.service"
 [Unit]
-Description=VideoInterleaving ($INSTANCE_MODE)
+Description=VideoInterleaving (Web Stream)
 After=network.target
 
 [Service]
@@ -106,45 +75,65 @@ User=$USERNAME
 WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py $PY_ARGS
+# Web Mode (Port 8080 Stream, 1978 Monitor)
+ExecStart=$VENV_DIR/bin/python -O main.py --mode web
 Restart=always
 RestartSec=3
-StandardOutput=append:$PROJECT_DIR/systemd_out.log
-StandardError=append:$PROJECT_DIR/systemd_err.log
+StandardOutput=append:$PROJECT_DIR/vi-web.log
+StandardError=append:$PROJECT_DIR/vi-web.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# --- SERVICE 2: ASCII MODE (vi-ascii) ---
+cat <<EOF > "/etc/systemd/system/vi-ascii.service"
+[Unit]
+Description=VideoInterleaving (ASCII Telnet)
+After=network.target
+
+[Service]
+User=$USERNAME
+WorkingDirectory=$PROJECT_DIR
+Environment=PYTHONUNBUFFERED=1
+$ENV_BLOCK
+# ASCII Mode (Port 2323 Telnet, 1980 Monitor)
+ExecStart=$VENV_DIR/bin/python -O main.py --mode ascii
+Restart=always
+RestartSec=3
+StandardOutput=append:$PROJECT_DIR/vi-ascii.log
+StandardError=append:$PROJECT_DIR/vi-ascii.log
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable "$SERVICE_NAME"
 
 # --------------------------------------------
 # 6. Logrotate
 # --------------------------------------------
-LOGROTATE_FILE="/etc/logrotate.d/$SERVICE_NAME"
-cat <<EOF > "$LOGROTATE_FILE"
-$PROJECT_DIR/runtime.log {
+cat <<EOF > "/etc/logrotate.d/videointerleaving"
+$PROJECT_DIR/*.log {
     daily
-    rotate 7
+    rotate 5
     compress
     missingok
-    notifempty
     copytruncate
     size 10M
 }
 EOF
 
 # --------------------------------------------
-# 7. Nginx Proxy (Dynamic Port)
+# 7. Nginx Proxy (Universal)
 # --------------------------------------------
 echo ">>> 🌐 Configuring Nginx..."
-NGINX_CONF="/etc/nginx/sites-available/$SERVICE_NAME"
+NGINX_CONF="/etc/nginx/sites-available/videointerleaving"
 
-# Note: We configure the video stream logic conditionally.
-# If in ASCII mode, proxying / to 8080 is pointless, but we leave it
-# standard for simplicity (it just won't connect).
-# The important part is the MONITOR port matching the python script.
+# We configure Nginx to support BOTH.
+# Web Stream -> root
+# Web Monitor -> /monitor/
+# ASCII Monitor -> /monitor_ascii/
 
 cat <<EOF > "$NGINX_CONF"
 server {
@@ -152,9 +141,7 @@ server {
     listen [::]:80 default_server;
     server_name _;
 
-    location = /monitor { return 301 /monitor/; }
-
-    # Main Stream (Only active if Web Mode)
+    # -- WEB MODE (Service: vi-web) --
     location / {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
@@ -163,37 +150,47 @@ server {
         proxy_cache off;
         proxy_read_timeout 7d;
     }
-
-    # Monitor Dashboard (Dynamically Assigned Port)
     location /monitor/ {
-        proxy_pass http://127.0.0.1:$MONITOR_PORT/;
+        proxy_pass http://127.0.0.1:1978/;
         proxy_http_version 1.1;
         proxy_set_header Connection "";
         proxy_buffering off;
-        proxy_cache off;
+    }
+
+    # -- ASCII MODE (Service: vi-ascii) --
+    # Telnet is direct (Port 2323), but we proxy the monitor here
+    location /monitor_ascii/ {
+        proxy_pass http://127.0.0.1:1980/;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_buffering off;
     }
 }
 EOF
 
 rm -f /etc/nginx/sites-enabled/default
-ln -sf "$NGINX_CONF" "/etc/nginx/sites-enabled/$SERVICE_NAME"
-systemctl reload nginx || echo "Warning: Nginx reload failed."
+ln -sf "$NGINX_CONF" "/etc/nginx/sites-enabled/videointerleaving"
+systemctl reload nginx || echo "Warning: Nginx reload failed (check logs)."
 
 # --------------------------------------------
 # 8. Firewall
 # --------------------------------------------
 if command -v ufw >/dev/null; then
     echo ">>> 🛡️  Updating Firewall..."
-    ufw allow 80/tcp >/dev/null 2>&1
-    # If ASCII mode, open Telnet port
-    if [ "$INSTANCE_MODE" == "ascii" ]; then
-        echo "    Opening Port 2323 for Telnet..."
-        ufw allow 2323/tcp >/dev/null 2>&1
-    fi
+    ufw allow 80/tcp >/dev/null 2>&1    # Web Stream + Monitors
+    ufw allow 2323/tcp >/dev/null 2>&1  # ASCII Telnet
 fi
 
 echo "----------------------------------------------------"
-echo "✅ Setup Complete for [$INSTANCE_MODE] mode!"
-echo "   Monitor Port: $MONITOR_PORT"
-echo "   Start: systemctl start $SERVICE_NAME"
+echo "✅ Setup Complete. Tools are ready."
+echo ""
+echo "👉 To run WEB Mode:"
+echo "   systemctl enable --now vi-web"
+echo ""
+echo "👉 To run ASCII Mode:"
+echo "   systemctl enable --now vi-ascii"
+echo ""
+echo "You can view the monitors at:"
+echo "   http://<IP>/monitor/       (Web Mode)"
+echo "   http://<IP>/monitor_ascii/ (ASCII Mode)"
 echo "----------------------------------------------------"
