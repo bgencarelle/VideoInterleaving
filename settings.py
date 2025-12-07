@@ -103,7 +103,7 @@ STREAM_HOST = '127.0.0.1'      # Listen on all interfaces
 SERVER_CAPTURE_RATE = FPS     # Streaming FPS
 JPEG_QUALITY = 85         # Image quality
 HEADLESS_RES = (480, 640)   # Resolution for the virtual screen
-#HEADLESS_BACKEND = "egl"     # "egl"
+HEADLESS_BACKEND = "egl"     # "egl"
 MAX_VIEWERS = 20 # Max simultaneous connections
 
 
@@ -118,7 +118,7 @@ ASCII_FPS = 15
 ASCII_FONT_RATIO = .50
 
 # --- ARTISTIC TWEAKS ---
-ASCII_CONTRAST   = 1.4   # tiny bit of punch
+ASCII_CONTRAST   = 1.3   # tiny bit of punch
 ASCII_SATURATION = 1.0   # slightly muted color
 ASCII_BRIGHTNESS = 1.5   # handled in HSV
 ASCII_GAMMA      = 1.0  # neutral given your LUT definition
