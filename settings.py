@@ -118,10 +118,10 @@ ASCII_FPS = 15
 ASCII_FONT_RATIO = .50
 
 # --- ARTISTIC TWEAKS ---
-ASCII_CONTRAST   = 1.3  # tiny bit of punch
+ASCII_CONTRAST   = 1.2  # tiny bit of punch
 ASCII_SATURATION = .8   # slightly muted color
-ASCII_BRIGHTNESS = 1.4   # handled in HSV
-ASCII_GAMMA      = .9  # neutral given your LUT definition
+ASCII_BRIGHTNESS = 1.3   # handled in HSV
+ASCII_GAMMA      = .7  # neutral given your LUT definition
 
 ASCII_PADDING_CHAR = " "     # <--- NEW: Character for pillar/letterboxing
 
