@@ -127,5 +127,29 @@
         requestAnimationFrame(safeFit);
     });
   </script>
+
+  <!-- HIDE MOUSE AFTER A COUPLE OF SECONDS OF INACTIVITY -->
+  <script>
+    (function () {
+      let hideTimeout;
+
+      function resetCursorTimer() {
+        // show cursor immediately on activity
+        document.body.classList.remove('hide-cursor');
+
+        clearTimeout(hideTimeout);
+        hideTimeout = setTimeout(() => {
+          document.body.classList.add('hide-cursor');
+        }, 2000); // 2000 ms = 2 seconds
+      }
+
+      ['mousemove', 'mousedown', 'keydown', 'touchstart'].forEach(eventName => {
+        window.addEventListener(eventName, resetCursorTimer, { passive: true });
+      });
+
+      // start the initial timer
+      resetCursorTimer();
+    })();
+  </script>
 </body>
 </html>
