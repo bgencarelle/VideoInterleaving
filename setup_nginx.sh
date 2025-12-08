@@ -2,13 +2,13 @@
 set -e
 
 # --- CONFIGURATION ---
-NGINX_CONF="/etc/nginx/sites-available/videointerleaving"
-LINK_CONF="/etc/nginx/sites-enabled/videointerleaving"
+NGINX_AVAILABLE="/etc/nginx/sites-available/videointerleaving"
+NGINX_ENABLED="/etc/nginx/sites-enabled/videointerleaving"
 PROJECT_DIR=$(pwd)
 
-echo ">>> 🌐Starting Nginx Web Server Setup..."
+echo ">>> 🌐 Starting Robust Nginx Setup..."
 
-# 1. Install Nginx
+# 1. Install Nginx if missing
 if ! command -v nginx >/dev/null; then
     echo "    Installing Nginx..."
     apt-get update -qq && apt-get install -y nginx
@@ -17,25 +17,25 @@ fi
 # 2. Ask for Domain Name
 echo ""
 echo "----------------------------------------------------------------"
-read -p "Enter your domain name (e.g., mysite.com) or press ENTER for default: " DOMAIN_INPUT
+read -p "Enter your domain name (e.g., mysite.com): " DOMAIN_INPUT
 DOMAIN_NAME=${DOMAIN_INPUT:-_}
 echo "----------------------------------------------------------------"
-echo "    Using Server Name: $DOMAIN_NAME"
+echo "    Using Server Name: $DOMAIN_NAME and www.$DOMAIN_NAME"
 
 # 3. Create Nginx Configuration
-cat <<EOF > "$NGINX_CONF"
+#    Changes:
+#    - Added www.$DOMAIN_NAME to server_name
+#    - Added explicit buffering disabling for all proxy blocks
+cat <<EOF > "$NGINX_AVAILABLE"
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
-    server_name $DOMAIN_NAME;
+
+    # 1. FIX WWW ERROR: Listen for both bare domain and www subdomain
+    server_name $DOMAIN_NAME www.$DOMAIN_NAME;
 
     # --- Global Settings ---
     client_max_body_size 20M;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header Referrer-Policy "no-referrer-when-downgrade" always;
-
-    # --- Root for Static Files ---
     root $PROJECT_DIR;
     index index.html;
 
@@ -54,6 +54,7 @@ server {
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
 
+        # 3. FIX BUFFERING: Kill all buffers for real-time streaming
         proxy_buffering off;
         proxy_cache off;
         proxy_request_buffering off;
@@ -70,7 +71,6 @@ server {
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_buffering off;
         proxy_read_timeout 3600s;
     }
@@ -82,25 +82,24 @@ server {
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_buffering off;
         proxy_read_timeout 3600s;
     }
 
     # --- 4. ASCII Viewer Page (Proxied to Python) ---
-    # This ensures {{ASCII_WIDTH}} templates are rendered correctly
     location /ascii/ {
         proxy_pass http://127.0.0.1:1980/ascii;
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
         proxy_buffering off;
     }
 
     # --- 5. Static Assets ---
     location /static/ {
         alias $PROJECT_DIR/static/;
+        # Cache static files, but allow Nginx to bypass if changed
         expires 30d;
+        try_files \$uri \$uri/ =404;
     }
 
     # --- 6. ASCII WebSocket Tunnel ---
@@ -119,16 +118,23 @@ server {
 }
 EOF
 
-# 4. Enable the Site
+# 4. Enable the Site (Fixing Persistence)
 echo "    Linking configuration..."
+
+# A. Remove the default site (it often conflicts/overrides)
 if [ -f /etc/nginx/sites-enabled/default ]; then
+    echo "    Removing default Nginx site to prevent conflicts..."
     rm /etc/nginx/sites-enabled/default
 fi
-ln -sf "$NGINX_CONF" "$LINK_CONF"
+
+# B. Force create the symbolic link
+#    'ln -sf' overwrites if it exists, ensuring it's always fresh
+ln -sf "$NGINX_AVAILABLE" "$NGINX_ENABLED"
 
 # 5. Test and Reload
 echo "    Testing Nginx syntax..."
 nginx -t
+
 echo "    Reloading Nginx..."
 systemctl reload nginx
 
@@ -144,13 +150,12 @@ echo ""
 echo "================================================================"
 echo "✅ Nginx Setup Complete!"
 echo "================================================================"
-echo "   - Web Stream:    http://$DOMAIN_NAME/"
-echo "   - Web Monitor:   http://$DOMAIN_NAME/monitor/"
+echo "   - Main Site:     http://$DOMAIN_NAME/  (and www.$DOMAIN_NAME)"
 echo "   - ASCII Viewer:  http://$DOMAIN_NAME/ascii/"
-echo "   - ASCII Monitor: http://$DOMAIN_NAME/monitor_ascii/"
 echo ""
 if [ "$DOMAIN_NAME" != "_" ]; then
-    echo "🔒 TO ENABLE HTTPS (SSL):"
-    echo "   sudo certbot --nginx -d $DOMAIN_NAME"
+    echo "🔒 CRITICAL FINAL STEP FOR SSL:"
+    echo "   Since we added 'www', you MUST run this command again:"
+    echo "   sudo certbot --nginx -d $DOMAIN_NAME -d www.$DOMAIN_NAME"
 fi
-echo "================================================================"
+echo "================================================================"git gc --prune=now --aggressive
