@@ -15,7 +15,7 @@ VSYNC = True  # or False, depending on your preference
 
 # Frames per Second and Images Per Second (IPS)
 IPS = 30
-FPS = 30
+FPS = 25
 
 # Buffer settings: The BUFFER_SIZE is derived from IPS (e.g., 15 if IPS == 60)
 TOLERANCE = 10
@@ -101,7 +101,7 @@ HEADLESS_USE_GL = True   # new: disable ModernGL headless on VPS
 STREAM_PORT = 8080           # Port for video stream (distinct from monitor port 1978)
 STREAM_HOST = '127.0.0.1'      # Listen on all interfaces
 SERVER_CAPTURE_RATE = FPS     # Streaming FPS
-JPEG_QUALITY = 85         # Image quality
+JPEG_QUALITY = 80# Image quality
 HEADLESS_RES = (480, 640)   # Resolution for the virtual screen
 HEADLESS_BACKEND = "egl"     # "egl"
 MAX_VIEWERS = 20 # Max simultaneous connections
@@ -112,14 +112,14 @@ ASCII_MODE = False
 ASCII_COLOR = True
 ASCII_PORT = 2323
 ASCII_HOST = '0.0.0.0'
-ASCII_WIDTH = 120
-ASCII_HEIGHT = 80
+ASCII_WIDTH = 90
+ASCII_HEIGHT = 60
 ASCII_FPS = 15
 ASCII_FONT_RATIO = .50
 
 # --- ARTISTIC TWEAKS ---
-ASCII_CONTRAST   = 1.3   # tiny bit of punch
-ASCII_SATURATION = 1.0   # slightly muted color
+ASCII_CONTRAST   = 1.3  # tiny bit of punch
+ASCII_SATURATION = .8   # slightly muted color
 ASCII_BRIGHTNESS = 1.4   # handled in HSV
 ASCII_GAMMA      = .9  # neutral given your LUT definition
 
