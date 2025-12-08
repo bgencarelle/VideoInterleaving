@@ -9,6 +9,7 @@ from urllib.parse import urlparse, parse_qs
 import mimetypes
 import os
 import socket
+import sys
 import settings
 from shared_state import exchange
 from lightweight_monitor import monitor_data, HTML_TEMPLATE
@@ -32,6 +33,66 @@ def _clear_heartbeat(cid):
             del _client_heartbeats[cid]
 
 
+def get_real_ip(handler):
+    """Extracts the real IP from Nginx headers or falls back to socket address."""
+    # 1. Try X-Real-IP (Standard Nginx)
+    real_ip = handler.headers.get('X-Real-IP')
+
+    # 2. Try X-Forwarded-For (Standard Proxy Chain)
+    if not real_ip:
+        forwarded = handler.headers.get('X-Forwarded-For')
+        if forwarded:
+            real_ip = forwarded.split(',')[0].strip()
+
+    # 3. Fallback to direct connection
+    if not real_ip:
+        real_ip = handler.client_address[0]
+
+    return real_ip
+
+
+def _serve_static_file(handler):
+    """Helper to serve static files safely and handle query strings."""
+    try:
+        # 1. Strip Query Strings (Fixes the xterm.js?v=1 404 error)
+        parsed_path = urlparse(handler.path).path
+
+        # 2. Clean Path
+        rel_path = parsed_path.lstrip('/')
+        clean_path = os.path.normpath(rel_path).replace('\\', '/')
+
+        # 3. Security Check
+        if not clean_path.startswith("static") or ".." in clean_path:
+            handler.send_error(403)
+            return
+
+        # 4. Existence Check
+        if not os.path.isfile(clean_path):
+            handler.send_error(404)
+            return
+
+        # 5. Serve
+        with open(clean_path, "rb") as f:
+            content = f.read()
+
+        mime, _ = mimetypes.guess_type(clean_path)
+        handler.send_response(200)
+
+        # Force charset for text files to satisfy browsers
+        if mime and (mime.startswith("text/") or mime == "application/javascript"):
+            handler.send_header('Content-Type', f'{mime}; charset=utf-8')
+        else:
+            handler.send_header('Content-Type', mime or 'application/octet-stream')
+
+        handler.send_header('Content-Length', len(content))
+        handler.end_headers()
+        handler.wfile.write(content)
+
+    except Exception as e:
+        # print(f"Static serve error: {e}") 
+        handler.send_error(404)
+
+
 class ThreadedTCPServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -39,9 +100,17 @@ class ThreadedTCPServer(socketserver.ThreadingTCPServer):
 
 class MonitorHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
-        pass
+        # Nginx-aware logging
+        ip = get_real_ip(self)
+        sys.stderr.write("%s - - [%s] %s\n" %
+                         (ip, self.log_date_time_string(), format % args))
 
     def do_GET(self):
+        # Handle static files first (Monitor usually loads /static/style.css)
+        if self.path.startswith("/static/"):
+            _serve_static_file(self)
+            return
+
         if self.path == "/":
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
@@ -56,43 +125,27 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
 
         elif self.path == "/log":
             try:
+                # Safely read only the last 64KB to prevent RAM explosion
+                log_size = os.path.getsize("runtime.log")
+                read_size = 64 * 1024
+
                 with open("runtime.log", "rb") as f:
-                    content = f.read()
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/plain')
-                self.end_headers()
-                self.wfile.write(content)
-            except:
-                self.send_error(404)
-
-        # --- NEW: Serve Static Files (Added this block) ---
-        elif self.path.startswith("/static/"):
-            try:
-                # Security: Prevent directory traversal
-                clean_path = os.path.normpath(self.path.lstrip('/')).replace('\\', '/')
-                if not clean_path.startswith("static") or ".." in clean_path:
-                    self.send_error(403)
-                    return
-
-                # Serve file
-                with open(clean_path, "rb") as f:
+                    if log_size > read_size:
+                        f.seek(-read_size, os.SEEK_END)
                     content = f.read()
 
-                mime, _ = mimetypes.guess_type(clean_path)
                 self.send_response(200)
-                self.send_header('Content-Type', mime or 'application/octet-stream')
+                self.send_header('Content-Type', 'text/plain; charset=utf-8')
                 self.end_headers()
                 self.wfile.write(content)
-            except:
-                self.send_error(404)
-        # --------------------------------------------------
+            except Exception:
+                self.send_error(404, "Log file missing")
 
         elif self.path == "/ascii":
             try:
                 with open("templates/ascii_viewer.html", "r", encoding="utf-8") as f:
                     content = f.read()
 
-                # Inject Settings
                 cols = getattr(settings, 'ASCII_WIDTH', 120)
                 rows = getattr(settings, 'ASCII_HEIGHT', 96)
                 content = content.replace("{{ASCII_WIDTH}}", str(cols))
@@ -103,14 +156,19 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(content.encode('utf-8'))
             except Exception as e:
-                print(f"Error serving ASCII viewer: {e}")
                 self.send_error(404)
         else:
             self.send_error(404)
 
+
 class StreamHandler(http.server.BaseHTTPRequestHandler):
+    timeout = 5
+
     def log_message(self, format, *args):
-        pass
+        # Nginx-aware logging
+        ip = get_real_ip(self)
+        sys.stderr.write("%s - - [%s] %s\n" %
+                         (ip, self.log_date_time_string(), format % args))
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -120,6 +178,7 @@ class StreamHandler(http.server.BaseHTTPRequestHandler):
         if path == "/video_feed":
             cid = query.get('id', [None])[0] or uuid.uuid4().hex
             self._handle_mjpeg_stream(cid)
+
         elif path == "/stats":
             with _count_lock:
                 data = {"current": _current_viewer_count, "max": MAX_VIEWERS,
@@ -128,22 +187,10 @@ class StreamHandler(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps(data).encode('utf-8'))
+
         elif path.startswith("/static/"):
-            # --- FIX: Static File Handler ---
-            try:
-                clean_path = os.path.normpath(path.lstrip('/')).replace('\\', '/')
-                if not clean_path.startswith("static") or ".." in clean_path:
-                    self.send_error(403)
-                    return
-                with open(clean_path, "rb") as f:
-                    content = f.read()
-                mime, _ = mimetypes.guess_type(clean_path)
-                self.send_response(200)
-                self.send_header('Content-Type', mime or 'application/octet-stream')
-                self.end_headers()
-                self.wfile.write(content)
-            except:
-                self.send_error(404)
+            _serve_static_file(self)
+
         elif path == "/":
             try:
                 with open("templates/index.html", "rb") as f:
@@ -159,9 +206,11 @@ class StreamHandler(http.server.BaseHTTPRequestHandler):
 
     def _handle_mjpeg_stream(self, cid):
         global _current_viewer_count
+
         if not _viewer_semaphore.acquire(blocking=False):
             self.send_error(503, "Server Full")
             return
+
         with _count_lock:
             _current_viewer_count += 1
         _set_heartbeat(cid)
@@ -171,23 +220,48 @@ class StreamHandler(http.server.BaseHTTPRequestHandler):
         except:
             pass
 
+        # Send Headers (Generic multipart)
         self.send_response(200)
         self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
-        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+        self.send_header('Pragma', 'no-cache')
         self.end_headers()
 
-        header = b'--frame\r\nContent-Type: image/jpeg\r\n\r\n'
+        header = b'--frame\r\n'
         newline = b'\r\n'
 
         try:
             while True:
-                frame_data = exchange.get_frame()
-                if not frame_data or not isinstance(frame_data, bytes): continue
+                # 1. BLOCKING WAIT (Saves Bandwidth)
+                raw_payload = exchange.get_frame()
+
+                if not raw_payload or not isinstance(raw_payload, bytes):
+                    break
+
+                # 2. Check for Prefix (WebP vs JPEG)
+                # Ensure we have at least 1 byte
+                if len(raw_payload) < 1: continue
+
+                fmt_byte = raw_payload[0:1]
+                frame_data = raw_payload[1:]
+
+                if fmt_byte == b'w':
+                    ctype = b'Content-Type: image/webp\r\n\r\n'
+                else:
+                    ctype = b'Content-Type: image/jpeg\r\n\r\n'
+
                 _set_heartbeat(cid)
-                self.wfile.write(header)
-                self.wfile.write(frame_data)
-                self.wfile.write(newline)
-        except:
+
+                # 3. Send Frame
+                try:
+                    self.wfile.write(header)
+                    self.wfile.write(ctype)
+                    self.wfile.write(frame_data)
+                    self.wfile.write(newline)
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    break
+        except Exception:
             pass
         finally:
             _viewer_semaphore.release()
