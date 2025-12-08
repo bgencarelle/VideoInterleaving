@@ -32,6 +32,33 @@ def _clear_heartbeat(cid):
             del _client_heartbeats[cid]
 
 
+def _serve_static_file(handler, path_prefix="/static/"):
+    """Helper to serve static files safely and avoid code duplication."""
+    try:
+        # Security: Prevent directory traversal
+        clean_path = os.path.normpath(handler.path.lstrip('/')).replace('\\', '/')
+
+        # Ensure path starts with static and doesn't contain parent directory references
+        if not clean_path.startswith("static") or ".." in clean_path:
+            handler.send_error(403)
+            return
+
+        if not os.path.exists(clean_path):
+            handler.send_error(404)
+            return
+
+        with open(clean_path, "rb") as f:
+            content = f.read()
+
+        mime, _ = mimetypes.guess_type(clean_path)
+        handler.send_response(200)
+        handler.send_header('Content-Type', mime or 'application/octet-stream')
+        handler.end_headers()
+        handler.wfile.write(content)
+    except:
+        handler.send_error(404)
+
+
 class ThreadedTCPServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -56,36 +83,23 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
 
         elif self.path == "/log":
             try:
+                log_size = os.path.getsize("runtime.log")
+                read_size = 64 * 1024  # Read last 64KB
+
                 with open("runtime.log", "rb") as f:
+                    if log_size > read_size:
+                        f.seek(-read_size, os.SEEK_END)
                     content = f.read()
+
                 self.send_response(200)
-                self.send_header('Content-Type', 'text/plain')
+                self.send_header('Content-Type', 'text/plain; charset=utf-8')
                 self.end_headers()
                 self.wfile.write(content)
-            except:
-                self.send_error(404)
+            except Exception:
+                self.send_error(404, "Log file not found or empty")
 
-        # --- NEW: Serve Static Files (Added this block) ---
         elif self.path.startswith("/static/"):
-            try:
-                # Security: Prevent directory traversal
-                clean_path = os.path.normpath(self.path.lstrip('/')).replace('\\', '/')
-                if not clean_path.startswith("static") or ".." in clean_path:
-                    self.send_error(403)
-                    return
-
-                # Serve file
-                with open(clean_path, "rb") as f:
-                    content = f.read()
-
-                mime, _ = mimetypes.guess_type(clean_path)
-                self.send_response(200)
-                self.send_header('Content-Type', mime or 'application/octet-stream')
-                self.end_headers()
-                self.wfile.write(content)
-            except:
-                self.send_error(404)
-        # --------------------------------------------------
+            _serve_static_file(self)
 
         elif self.path == "/ascii":
             try:
@@ -108,7 +122,10 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
+
 class StreamHandler(http.server.BaseHTTPRequestHandler):
+    timeout = 5  # Kill connections that stall for >5s
+
     def log_message(self, format, *args):
         pass
 
@@ -129,21 +146,7 @@ class StreamHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(data).encode('utf-8'))
         elif path.startswith("/static/"):
-            # --- FIX: Static File Handler ---
-            try:
-                clean_path = os.path.normpath(path.lstrip('/')).replace('\\', '/')
-                if not clean_path.startswith("static") or ".." in clean_path:
-                    self.send_error(403)
-                    return
-                with open(clean_path, "rb") as f:
-                    content = f.read()
-                mime, _ = mimetypes.guess_type(clean_path)
-                self.send_response(200)
-                self.send_header('Content-Type', mime or 'application/octet-stream')
-                self.end_headers()
-                self.wfile.write(content)
-            except:
-                self.send_error(404)
+            _serve_static_file(self)
         elif path == "/":
             try:
                 with open("templates/index.html", "rb") as f:
@@ -159,21 +162,26 @@ class StreamHandler(http.server.BaseHTTPRequestHandler):
 
     def _handle_mjpeg_stream(self, cid):
         global _current_viewer_count
+
+        # 1. Acquire Slot
         if not _viewer_semaphore.acquire(blocking=False):
             self.send_error(503, "Server Full")
             return
+
         with _count_lock:
             _current_viewer_count += 1
         _set_heartbeat(cid)
 
         try:
+            # 2. Setup Socket
             self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         except:
             pass
 
         self.send_response(200)
         self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
-        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+        self.send_header('Pragma', 'no-cache')
         self.end_headers()
 
         header = b'--frame\r\nContent-Type: image/jpeg\r\n\r\n'
@@ -181,13 +189,34 @@ class StreamHandler(http.server.BaseHTTPRequestHandler):
 
         try:
             while True:
-                frame_data = exchange.get_frame()
-                if not frame_data or not isinstance(frame_data, bytes): continue
+                # 4. BLOCKING WAIT
+                raw_payload = exchange.get_frame()  # Renamed to raw_payload
+
+                if not raw_payload or not isinstance(raw_payload, bytes):
+                    break
+
+                # NEW: Detect Format Byte
+                fmt_byte = raw_payload[0:1]  # Get first byte
+                frame_data = raw_payload[1:]  # Get actual image data
+
+                # Determine Content-Type dynamically
+                if fmt_byte == b'w':
+                    ctype = b'Content-Type: image/webp\r\n\r\n'
+                else:
+                    ctype = b'Content-Type: image/jpeg\r\n\r\n'
+
                 _set_heartbeat(cid)
-                self.wfile.write(header)
-                self.wfile.write(frame_data)
-                self.wfile.write(newline)
-        except:
+
+                # 5. Write and Flush
+                try:
+                    self.wfile.write(b'--frame\r\n')  # Boundary
+                    self.wfile.write(ctype)  # Dynamic Type
+                    self.wfile.write(frame_data)
+                    self.wfile.write(newline)
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    break
+        except Exception:
             pass
         finally:
             _viewer_semaphore.release()

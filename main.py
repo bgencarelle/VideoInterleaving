@@ -36,10 +36,9 @@ def configure_runtime():
         settings.PROCESSED_DIR = "folders_processed_ascii"
         settings.GENERATED_LISTS_DIR = "generated_img_lists_ascii"
 
-        # Explicit Ports for ASCII Mode (Matches Nginx /monitor_ascii/)
-        settings.WEB_PORT = 1980  # Monitor Dashboard
-        settings.TELNET_PORT = 2323  # Raw TCP Telnet
-        settings.WEBSOCKET_PORT = 2324  # ASCII WebSocket (Optional)
+        settings.WEB_PORT = 1980
+        settings.TELNET_PORT = 2323
+        settings.WEBSOCKET_PORT = 2324
         print(f">> PORTS: Monitor={settings.WEB_PORT}, Telnet={settings.TELNET_PORT}")
 
     elif args.mode == "web":
@@ -49,9 +48,8 @@ def configure_runtime():
         settings.PROCESSED_DIR = "folders_processed_web"
         settings.GENERATED_LISTS_DIR = "generated_img_lists_web"
 
-        # Explicit Ports for Web Mode (Matches Nginx / and /monitor/)
-        settings.WEB_PORT = 1978  # Monitor Dashboard
-        settings.STREAM_PORT = 8080  # MJPEG Stream
+        settings.WEB_PORT = 1978
+        settings.STREAM_PORT = 8080
         print(f">> PORTS: Monitor={settings.WEB_PORT}, Stream={settings.STREAM_PORT}")
 
     elif args.mode == "local":
@@ -61,7 +59,6 @@ def configure_runtime():
         settings.PROCESSED_DIR = "folders_processed_local"
         settings.GENERATED_LISTS_DIR = "generated_img_lists_local"
 
-        # Local Mode defaults (Safe ports that won't clash)
         settings.WEB_PORT = 8888
         print(f">> PORTS: Monitor={settings.WEB_PORT} (Local)")
 
@@ -93,6 +90,11 @@ from settings import CLOCK_MODE
 
 
 class Tee:
+    """
+    Optimized Logger: Redirects stdout/stderr to both console and file.
+    Removed aggressive flushing to prevent I/O bottlenecks.
+    """
+
     def __init__(self, stream, log_file):
         self.stream = stream
         self.log_file = log_file
@@ -100,18 +102,25 @@ class Tee:
 
     def write(self, data):
         with self.lock:
+            # Console Write
             self.stream.write(data)
-            self.stream.flush()
+            # File Write (Buffered by Python, safe)
             self.log_file.write(data)
-            self.log_file.flush()
+
+            # Only flush console on newlines to keep it snappy for the user
+            # File flushing is handled by buffering=1 (line buffering) in open()
+            if '\n' in data:
+                self.stream.flush()
 
     def flush(self):
-        self.stream.flush()
-        self.log_file.flush()
+        with self.lock:
+            self.stream.flush()
+            self.log_file.flush()
 
 
+# Setup Logging with Line Buffering
 try:
-    log_file = open("runtime.log", "w", buffering=1)
+    log_file = open("runtime.log", "w", buffering=1, encoding='utf-8')
     sys.stdout = Tee(sys.stdout, log_file)
     sys.stderr = Tee(sys.stderr, log_file)
 except Exception as e:
@@ -126,45 +135,37 @@ def main(clock=CLOCK_MODE):
 
     # 2. Determine Mode
     if getattr(settings, 'ASCII_MODE', False):
-        # --- PATH A: ASCII MODE ---
         print("MODE: ASCII Server (Telnet + WebSocket)")
+        threading.Thread(target=ascii_server.start_server, daemon=True, name="ASCII-Telnet").start()
+        threading.Thread(target=ascii_web_server.start_server, daemon=True, name="ASCII-WS").start()
 
-        # 1. Start Telnet (Port 2323)
-        t_telnet = threading.Thread(
-            target=ascii_server.start_server,
-            daemon=True,
-            name="ASCII-TelnetServer"
-        )
-        t_telnet.start()
-
-        # 2. Start WebSocket (Port 2324)
-        t_ws = threading.Thread(
-            target=ascii_web_server.start_server,
-            daemon=True,
-            name="ASCII-WebSocketServer"
-        )
-        t_ws.start()
-
-        # 3. Start Monitor (Port 1980)
         if want_monitor:
             print(f"Starting Monitor on port {settings.WEB_PORT}...")
-            # Ensure web_service uses the updated settings.WEB_PORT
             web_service.start_server(monitor=True, stream=False)
 
     elif getattr(settings, 'SERVER_MODE', False):
-        # --- PATH B: WEB MODE ---
         print("MODE: MJPEG Web Server")
-        # Ensure web_service uses settings.STREAM_PORT (8080) and settings.WEB_PORT (1978)
         web_service.start_server(monitor=want_monitor, stream=True)
 
     else:
-        # --- PATH C: LOCAL MODE ---
         print("MODE: Local Standalone")
         if want_monitor:
             web_service.start_server(monitor=True, stream=False)
 
     # 3. Start Display Engine
-    image_display.run_display(clock)
+    # Wrapped in try/except for clean exit on Ctrl+C
+    try:
+        image_display.run_display(clock)
+    except KeyboardInterrupt:
+        print("\n[MAIN] Shutdown requested via Ctrl+C")
+    except Exception as e:
+        print(f"\n[MAIN] Crash: {e}")
+    finally:
+        print("[MAIN] Exiting...")
+        # Tee might have locked stdout, so we just let the OS close files
+        # but explicit flush helps ensure log integrity
+        sys.stdout.flush()
+        sys.stderr.flush()
 
 
 if __name__ == "__main__":

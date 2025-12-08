@@ -19,6 +19,13 @@ try:
 except ImportError:
     glfw = None
 
+# --- NEW: Check for OpenCV for WebP encoding support ---
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+# -----------------------------------------------------
+
 from settings import (
     FULLSCREEN_MODE, PINGPONG, FPS, FRAME_COUNTER_DISPLAY, SHOW_DELTA,
     TEST_MODE, HTTP_MONITOR, CLOCK_MODE, FIFO_LENGTH, BACKGROUND_COLOR,
@@ -28,7 +35,7 @@ from folder_selector import update_folder_selection, folder_dictionary
 from display_manager import DisplayState, display_init
 from event_handler import register_callbacks
 import renderer
-import ascii_converter  # <--- NEW IMPORT
+import ascii_converter
 
 # TurboJPEG for Encoding Server Streams
 from turbojpeg import TurboJPEG
@@ -183,7 +190,6 @@ def run_display(clock_source=CLOCK_MODE):
         # ---------------------------------------------------------------------
         # MAIN EXECUTION LOOP
         # ---------------------------------------------------------------------
-        # Loop continues if Local Mode OR (Web OR Ascii) is active
         while (state.run_mode and not is_headless) or is_headless:
             successful_display = False
 
@@ -233,11 +239,7 @@ def run_display(clock_source=CLOCK_MODE):
 
             # D. Render Phase
             if has_gl:
-                # If Headless GL Mode, bind the FBO
-                if is_headless:
-                    window.use()
-
-                # Draw
+                if is_headless: window.use()
                 renderer.overlay_images_single_pass(
                     main_texture, float_texture, BACKGROUND_COLOR,
                     main_is_sbs=cur_m_sbs, float_is_sbs=cur_f_sbs
@@ -247,7 +249,6 @@ def run_display(clock_source=CLOCK_MODE):
             should_capture = False
 
             if is_headless or not has_gl:
-                # Throttled capture for stream modes
                 now = time.time()
                 if (index != last_captured_index) and (now - last_server_capture > capture_interval):
                     should_capture = True
@@ -259,13 +260,10 @@ def run_display(clock_source=CLOCK_MODE):
                     frame = None
                     # 1. Get Raw Data
                     if has_gl:
-                        # Readback from GPU
                         raw = window.fbo.read(components=3)
                         w_fbo, h_fbo = window.size
                         frame = np.frombuffer(raw, dtype=np.uint8).reshape((h_fbo, w_fbo, 3))
                     else:
-                    # Pure CPU Composite
-                    # Determine target size if in Server Mode
                         tgt_size = None
                         if is_web:
                             tgt_size = getattr(settings, "HEADLESS_RES", (480, 640))
@@ -273,21 +271,28 @@ def run_display(clock_source=CLOCK_MODE):
                         frame = renderer.composite_cpu(
                             cur_main, cur_float,
                             main_is_sbs=cur_m_sbs, float_is_sbs=cur_f_sbs,
-                            target_size=tgt_size  # <--- Pass the resolution here
+                            target_size=tgt_size
                         )
 
                     # 2. Output Data (Mutually Exclusive)
                     if frame is not None:
                         if is_web:
-                            # Encode to JPEG for Web Stream
-                            encoded = jpeg.encode(frame, quality=getattr(settings, "JPEG_QUALITY", 80), pixel_format=0)
-                            exchange.set_frame(encoded)
+                            # --- SMART ENCODING SWITCH ---
+                            # Use WebP (cv2) if available for low bandwidth,
+                            # else fall back to TurboJPEG for speed.
+                            if cv2 is not None:
+                                _, enc = cv2.imencode('.webp', frame, [cv2.IMWRITE_WEBP_QUALITY, 55])
+                                # Prefix 'w' indicates WebP
+                                exchange.set_frame(b'w' + enc.tobytes())
+                            else:
+                                enc = jpeg.encode(frame, quality=getattr(settings, "JPEG_QUALITY", 55), pixel_format=0)
+                                # Prefix 'j' indicates JPEG
+                                exchange.set_frame(b'j' + enc)
+
                         elif is_ascii:
-                            # Convert to String for Telnet Stream
                             text_frame = ascii_converter.to_ascii(frame)
                             exchange.set_frame(text_frame)
                         else:
-                            # Local CPU placeholder
                             pass
 
                 except Exception as e:
