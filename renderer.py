@@ -36,7 +36,7 @@ _bg_linear_src: tuple[int, int, int] | None = None
 
 # --- CPU OPTIMIZATION GLOBALS ---
 _cpu_buffer: np.ndarray | None = None
-
+_cached_canvas: np.ndarray | None = None
 
 def _update_bg_linear(background_color: tuple[int, int, int]) -> tuple[float, float, float]:
     global _bg_linear_color, _bg_linear_src
@@ -252,7 +252,7 @@ def overlay_images_single_pass(main_texture, float_texture, background_color=(0,
 
 # --- CPU COMPOSITOR (Fixed Aspect Ratio & Alpha) ---
 def composite_cpu(main_img, float_img, main_is_sbs=False, float_is_sbs=False, target_size=None):
-    global _cpu_buffer
+    global _cpu_buffer, _cached_canvas
 
     if main_img is None and float_img is None: return None
 
@@ -262,7 +262,6 @@ def composite_cpu(main_img, float_img, main_is_sbs=False, float_is_sbs=False, ta
         h, w = img.shape[:2]
         if is_sbs:
             mid = w // 2
-            # Slice: RGB is left, Alpha is right (Red channel)
             return img[:, :mid], img[:, mid:, 0]
         else:
             if img.ndim == 2:
@@ -270,7 +269,7 @@ def composite_cpu(main_img, float_img, main_is_sbs=False, float_is_sbs=False, ta
             elif img.shape[2] == 4:
                 return img[..., :3], img[..., 3]
             else:
-                return img, None  # Opaque RGB
+                return img, None
 
     m_rgb, m_a = get_views(main_img, main_is_sbs)
     f_rgb, f_a = get_views(float_img, float_is_sbs)
@@ -283,30 +282,25 @@ def composite_cpu(main_img, float_img, main_is_sbs=False, float_is_sbs=False, ta
     else:
         return None
 
-    # 2. Manage Buffer (Source Resolution)
-    # We always render at source res first for pixel-perfect math
+    # 2. Manage Source Buffer (Lazy Instantiation)
     if _cpu_buffer is None or _cpu_buffer.shape[:2] != (th, tw):
         _cpu_buffer = np.empty((th, tw, 3), dtype=np.uint8)
         bg_r, bg_g, bg_b = BACKGROUND_COLOR
         _cpu_buffer[:] = (bg_r, bg_g, bg_b)
 
-    # 3. Apply Main Layer
-    # Reset to BG each frame
+    # Reset Background
     bg_r, bg_g, bg_b = BACKGROUND_COLOR
     _cpu_buffer[:] = (bg_r, bg_g, bg_b)
 
+    # 3. Apply Main Layer
     if m_rgb is not None:
         if m_a is None:
             np.copyto(_cpu_buffer, m_rgb)
         else:
-            target = _cpu_buffer
-            source = m_rgb
-            mask = m_a
-            alpha_clean = np.where(mask < 15, 0, mask)
-            alpha = alpha_clean[:, :, None].astype(np.int16)
-            src = source.astype(np.int16)
-            dst = target.astype(np.int16)
-
+            alpha = np.where(m_a < 15, 0, m_a)[:, :, None].astype(np.int16)
+            src = m_rgb.astype(np.int16)
+            dst = _cpu_buffer.astype(np.int16)
+            # Standard Alpha Blending
             blended = (src * alpha + dst * (255 - alpha)) // 255
             _cpu_buffer[:] = blended.astype(np.uint8)
 
@@ -314,46 +308,46 @@ def composite_cpu(main_img, float_img, main_is_sbs=False, float_is_sbs=False, ta
     if f_rgb is not None:
         fh, fw = f_rgb.shape[:2]
         h, w = min(th, fh), min(tw, fw)
-
         target = _cpu_buffer[:h, :w]
         source = f_rgb[:h, :w]
 
         if f_a is None:
             target[:] = source
         else:
-            mask = f_a[:h, :w]
-            alpha_clean = np.where(mask < 15, 0, mask)
-            alpha = alpha_clean[:, :, None].astype(np.int16)
+            alpha = np.where(f_a[:h, :w] < 15, 0, f_a[:h, :w])[:, :, None].astype(np.int16)
             src = source.astype(np.int16)
             dst = target.astype(np.int16)
             blended = (src * alpha + dst * (255 - alpha)) // 255
             target[:] = blended.astype(np.uint8)
 
-    # 5. Final Resize (Letterboxed)
-    # If target_size provided, we scale and CENTER the image instead of stretching.
+    # 5. Final Resize (Letterboxed) with CACHING
     if target_size is not None and cv2 is not None:
         target_w, target_h = target_size
 
-        # Don't resize if already matches
         if (tw, th) == (target_w, target_h):
             return _cpu_buffer
 
-        # Calculate Aspect-Preserving Scale
+        # A. Calculate Aspect-Preserving Scale
         scale = min(target_w / tw, target_h / th)
         new_w = int(tw * scale)
         new_h = int(th * scale)
 
-        # Resize Content
+        # B. Resize Content (Fastest linear interpolation)
         resized = cv2.resize(_cpu_buffer, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
 
-        # Create Black Canvas
-        canvas = np.full((target_h, target_w, 3), (bg_r, bg_g, bg_b), dtype=np.uint8)
+        # C. Manage Canvas Cache (The Memory Fix)
+        # Only allocate a new array if dimensions changed or it doesn't exist
+        if _cached_canvas is None or _cached_canvas.shape[:2] != (target_h, target_w):
+            _cached_canvas = np.full((target_h, target_w, 3), (bg_r, bg_g, bg_b), dtype=np.uint8)
+        else:
+            # Fast fill existing array with background color
+            _cached_canvas[:] = (bg_r, bg_g, bg_b)
 
-        # Center Paste
+        # D. Center Paste
         y_off = (target_h - new_h) // 2
         x_off = (target_w - new_w) // 2
-        canvas[y_off:y_off+new_h, x_off:x_off+new_w] = resized
+        _cached_canvas[y_off:y_off+new_h, x_off:x_off+new_w] = resized
 
-        return canvas
+        return _cached_canvas
 
     return _cpu_buffer
