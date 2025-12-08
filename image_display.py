@@ -26,6 +26,10 @@ from settings import (
     TEST_MODE, HTTP_MONITOR, CLOCK_MODE, FIFO_LENGTH, BACKGROUND_COLOR,
     WEBP_STREAMING, WEBP_QUALITY, JPEG_QUALITY
 )
+
+# Check for optional lossless setting, default to False if missing
+WEBP_LOSSLESS = getattr(settings, 'WEBP_LOSSLESS', False)
+
 from index_calculator import update_index
 from folder_selector import update_folder_selection, folder_dictionary
 from display_manager import DisplayState, display_init
@@ -89,6 +93,14 @@ def run_display(clock_source=CLOCK_MODE):
     is_web = getattr(settings, 'SERVER_MODE', False) and not is_ascii
     # Headless if either server mode is active
     is_headless = is_web or is_ascii
+
+    # --- NEW: LOGGING ---
+    if is_web:
+        mode_str = "WEBP" if WEBP_STREAMING else "MJPEG"
+        qual_str = "LOSSLESS" if (
+                    WEBP_STREAMING and WEBP_LOSSLESS) else f"Q={WEBP_QUALITY if WEBP_STREAMING else JPEG_QUALITY}"
+        print(f"[DISPLAY] Stream Encoder: {mode_str} ({qual_str})")
+    # --------------------
 
     import calculators
     _, main_folder_path, float_folder_path = calculators.init_all(clock_source)
@@ -260,25 +272,26 @@ def run_display(clock_source=CLOCK_MODE):
                     # 2. Encode Data
                     if frame is not None:
                         if is_web:
-                            # Strict toggle based on settings.py
                             if WEBP_STREAMING:
                                 # --- WEBP ENCODING ---
+                                # Create WebPPicture from numpy
+                                # Assuming renderer gives RGB. We pass it directly.
+                                pic = webp.WebPPicture.from_numpy(frame)
 
-                                # 1. SWAP CHANNELS (RGB <-> BGR)
-                                # np.ascontiguousarray is CRITICAL when using ::-1 slicing
-                                # otherwise the C-library for WebP might read strided memory incorrectly.
-                                frame_swapped = np.ascontiguousarray(frame[..., ::-1])
+                                # --- NEW: Lossless Logic ---
+                                if WEBP_LOSSLESS:
+                                    # Lossless mode ignores 'quality'
+                                    config = webp.WebPConfig.new(preset=webp.WebPPreset.PHOTO, quality=100)
+                                    config.lossless = 1
+                                else:
+                                    config = webp.WebPConfig.new(preset=webp.WebPPreset.PHOTO, quality=WEBP_QUALITY)
+                                    config.lossless = 0
 
-                                # 2. Encode
-                                pic = webp.WebPPicture.from_numpy(frame_swapped)
-                                config = webp.WebPConfig.new(preset=webp.WebPPreset.PHOTO, quality=WEBP_QUALITY)
-
-                                # 3. Buffer
+                                # Encode to memory buffer
                                 buf = pic.encode(config).buffer()
                                 exchange.set_frame(b'w' + bytes(buf))
                             else:
                                 # --- JPEG ENCODING ---
-                                # TurboJPEG handles RGB natively
                                 enc = jpeg.encode(frame, quality=JPEG_QUALITY, pixel_format=0)
                                 exchange.set_frame(b'j' + enc)
 
