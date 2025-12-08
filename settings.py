@@ -106,6 +106,12 @@ HEADLESS_RES = (400, 533)   # Resolution for the virtual screen
 HEADLESS_BACKEND = "egl"     # "egl"
 MAX_VIEWERS = 20 # Max simultaneous connections
 
+# Streaming Format Toggle
+# True = WebP (Bandwidth efficient, requires 'webp' lib)
+# False = JPEG (CPU efficient, uses TurboJPEG)
+WEBP_STREAMING = True
+WEBP_QUALITY = 55
+JPEG_QUALITY = 55
 
 # --- ASCII MODE SETTINGS ---
 ASCII_MODE = False
