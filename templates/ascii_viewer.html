@@ -21,7 +21,7 @@
     const WS_PORT = 2324;
 
     // --- 1. CONFIGURATION ---
-    // Python will replace these values. If Nginx serves this raw, it falls back to 80x24.
+    // Python will replace these  values. If Nginx serves this raw, it falls back to 80x24.
     // NOTE: The Nginx fix below is required for this to work on the web!
     const COLS = parseInt("{{ASCII_WIDTH}}") || 80;
     const ROWS = parseInt("{{ASCII_HEIGHT}}") || 24;
