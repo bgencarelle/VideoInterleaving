@@ -5,6 +5,8 @@ from collections import deque
 import threading
 
 import numpy as np
+import webp  # Strict Requirement: pip install webp
+from turbojpeg import TurboJPEG  # Strict Requirement: pip install PyTurboJPEG
 
 import settings
 from shared_state import exchange
@@ -19,16 +21,10 @@ try:
 except ImportError:
     glfw = None
 
-# --- NEW: Check for OpenCV for WebP encoding support ---
-try:
-    import cv2
-except ImportError:
-    cv2 = None
-# -----------------------------------------------------
-
 from settings import (
     FULLSCREEN_MODE, PINGPONG, FPS, FRAME_COUNTER_DISPLAY, SHOW_DELTA,
     TEST_MODE, HTTP_MONITOR, CLOCK_MODE, FIFO_LENGTH, BACKGROUND_COLOR,
+    WEBP_STREAMING, WEBP_QUALITY, JPEG_QUALITY
 )
 from index_calculator import update_index
 from folder_selector import update_folder_selection, folder_dictionary
@@ -37,9 +33,7 @@ from event_handler import register_callbacks
 import renderer
 import ascii_converter
 
-# TurboJPEG for Encoding Server Streams
-from turbojpeg import TurboJPEG
-
+# Initialize Encoders
 jpeg = TurboJPEG()
 
 monitor = None
@@ -107,7 +101,6 @@ def run_display(clock_source=CLOCK_MODE):
     temp_loader.set_paths(main_folder_path, float_folder_path)
 
     # Load first image to determine window size
-    # We must handle the tuple return (img, is_sbs)
     img0, is_sbs0 = temp_loader.read_image(main_folder_path[0][0])
 
     if img0 is None:
@@ -133,14 +126,11 @@ def run_display(clock_source=CLOCK_MODE):
     else:
         # ModernGL Mode (Headless or Local)
         has_gl = True
-        # Only register keyboard/mouse callbacks if it's a real local window
-        # (HeadlessWindow is a custom class, not a glfw object)
         if not is_headless and glfw:
             register_callbacks(window, state)
 
     # 4. Loader & Buffer Init
     index, _ = update_index(png_paths_len, PINGPONG)
-    last_index = index
     update_folder_selection(index, float_folder_count, main_folder_count)
 
     loader = ImageLoader()
@@ -208,7 +198,6 @@ def run_display(clock_source=CLOCK_MODE):
             index, _ = update_index(png_paths_len, PINGPONG)
 
             if index != prev:
-                last_index = prev
                 update_folder_selection(index, float_folder_count, main_folder_count)
 
                 comp_idx = compensator.get_compensated_index(index)
@@ -228,8 +217,6 @@ def run_display(clock_source=CLOCK_MODE):
                     cur_main, cur_float = m_img, f_img
                     cur_m_sbs, cur_f_sbs = m_sbs, f_sbs
                     successful_display = True
-                else:
-                    if not is_headless: print(f"[MISS] {index}")
 
                 # Queue next frame
                 next_idx = 1 if index == 0 else (
@@ -245,9 +232,8 @@ def run_display(clock_source=CLOCK_MODE):
                     main_is_sbs=cur_m_sbs, float_is_sbs=cur_f_sbs
                 )
 
-            # E. Output / Capture Phase (Web, Ascii, or Local-CPU)
+            # E. Output / Capture Phase
             should_capture = False
-
             if is_headless or not has_gl:
                 now = time.time()
                 if (index != last_captured_index) and (now - last_server_capture > capture_interval):
@@ -264,36 +250,41 @@ def run_display(clock_source=CLOCK_MODE):
                         w_fbo, h_fbo = window.size
                         frame = np.frombuffer(raw, dtype=np.uint8).reshape((h_fbo, w_fbo, 3))
                     else:
-                        tgt_size = None
-                        if is_web:
-                            tgt_size = getattr(settings, "HEADLESS_RES", (480, 640))
-
+                        tgt_size = getattr(settings, "HEADLESS_RES", (480, 640)) if is_web else None
                         frame = renderer.composite_cpu(
                             cur_main, cur_float,
                             main_is_sbs=cur_m_sbs, float_is_sbs=cur_f_sbs,
                             target_size=tgt_size
                         )
 
-                    # 2. Output Data (Mutually Exclusive)
+                    # 2. Encode Data
                     if frame is not None:
                         if is_web:
-                            # --- SMART ENCODING SWITCH ---
-                            # Use WebP (cv2) if available for low bandwidth,
-                            # else fall back to TurboJPEG for speed.
-                            if cv2 is not None:
-                                _, enc = cv2.imencode('.webp', frame, [cv2.IMWRITE_WEBP_QUALITY, 55])
-                                # Prefix 'w' indicates WebP
-                                exchange.set_frame(b'w' + enc.tobytes())
+                            # Strict toggle based on settings.py
+                            if WEBP_STREAMING:
+                                # --- WEBP ENCODING ---
+
+                                # 1. SWAP CHANNELS (RGB <-> BGR)
+                                # np.ascontiguousarray is CRITICAL when using ::-1 slicing
+                                # otherwise the C-library for WebP might read strided memory incorrectly.
+                                frame_swapped = np.ascontiguousarray(frame[..., ::-1])
+
+                                # 2. Encode
+                                pic = webp.WebPPicture.from_numpy(frame_swapped)
+                                config = webp.WebPConfig.new(preset=webp.WebPPreset.PHOTO, quality=WEBP_QUALITY)
+
+                                # 3. Buffer
+                                buf = pic.encode(config).buffer()
+                                exchange.set_frame(b'w' + bytes(buf))
                             else:
-                                enc = jpeg.encode(frame, quality=getattr(settings, "JPEG_QUALITY", 55), pixel_format=0)
-                                # Prefix 'j' indicates JPEG
+                                # --- JPEG ENCODING ---
+                                # TurboJPEG handles RGB natively
+                                enc = jpeg.encode(frame, quality=JPEG_QUALITY, pixel_format=0)
                                 exchange.set_frame(b'j' + enc)
 
                         elif is_ascii:
                             text_frame = ascii_converter.to_ascii(frame)
                             exchange.set_frame(text_frame)
-                        else:
-                            pass
 
                 except Exception as e:
                     print(f"[CAPTURE ERROR] {e}")
@@ -320,15 +311,10 @@ def run_display(clock_source=CLOCK_MODE):
             # H. Monitor Update
             if monitor:
                 monitor.update({
-                    "index": index,
-                    "displayed": d_idx if 'd_idx' in locals() else index,
-                    "delta": index - (d_idx if 'd_idx' in locals() else index),
-                    "fps": last_actual_fps, "fifo_depth": fifo.current_depth(),
+                    "index": index, "fps": last_actual_fps, "fifo_depth": fifo.current_depth(),
                     "successful_frame": successful_display,
                     "main_folder": folder_dictionary["Main_and_Float_Folders"][0],
-                    "float_folder": folder_dictionary["Main_and_Float_Folders"][1],
-                    "rand_mult": folder_dictionary.get("rand_mult"),
-                    "main_folder_count": main_folder_count, "float_folder_count": float_folder_count
+                    "float_folder": folder_dictionary["Main_and_Float_Folders"][1]
                 })
 
             if not is_headless and has_gl and glfw and glfw.window_should_close(window):
