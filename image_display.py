@@ -92,6 +92,77 @@ class FIFOImageBufferPatched(FIFOImageBuffer):
 
 
 # -----------------------------------------------------------------------------
+# WORKER FUNCTION (Runs in Background Threads)
+# -----------------------------------------------------------------------------
+
+def load_and_render_frame(loader, index, main_folder, float_folder):
+    """
+    Loads images AND performs the heavy ASCII merging/string-generation
+    in the background thread. Returns the final string if ASCII.
+    """
+    # 1. Load Data
+    m_img, f_img, m_sbs, f_sbs = loader.load_images(index, main_folder, float_folder)
+
+    # 2. Check for ASCII Data
+    if isinstance(m_img, dict):
+        try:
+            # --- MERGE LAYERS ---
+            if isinstance(f_img, dict):
+                f_chars = f_img["chars"]
+                # Determine mask based on byte vs str type
+                if f_chars.dtype.kind == 'S':
+                    mask = (f_chars != b' ')
+                else:
+                    mask = (f_chars != ' ')
+
+                final_chars = m_img["chars"].copy()
+                final_colors = m_img["colors"].copy()
+
+                # Numpy masking is fast
+                final_chars[mask] = f_chars[mask]
+                final_colors[mask] = f_img["colors"][mask]
+            else:
+                final_chars = m_img["chars"]
+                final_colors = m_img["colors"]
+
+            # --- DOWNSCALE (STRIDE) ---
+            baked_h, baked_w = final_chars.shape
+            target_w = getattr(settings, 'ASCII_WIDTH', baked_w)
+            target_h = getattr(settings, 'ASCII_HEIGHT', baked_h)
+
+            step_x = max(1, baked_w // target_w)
+            step_y = max(1, baked_h // target_h)
+
+            if step_x > 1 or step_y > 1:
+                final_chars = final_chars[::step_y, ::step_x]
+                final_colors = final_colors[::step_y, ::step_x]
+
+            # --- RENDER TO STRING ---
+            # Cast bytes to string if needed
+            if final_chars.dtype.kind == 'S':
+                final_chars = final_chars.astype(str)
+
+            # Look up ANSI codes and combine
+            # This is the most expensive CPU part, now done in a thread!
+            color_strings = ANSI_LUT[final_colors]
+            image_grid = np.char.add(color_strings, final_chars)
+
+            rows = ["".join(row) for row in image_grid]
+            ascii_string = "\r\n".join(rows) + RESET_CODE
+
+            # Return the String as the "Image"
+            return ascii_string, None, False, False
+
+        except Exception as e:
+            # If render fails, return None or log
+            print(f"ASCII Render Error: {e}")
+            return None, None, False, False
+
+    # 3. Standard Image Return
+    return m_img, f_img, m_sbs, f_sbs
+
+
+# -----------------------------------------------------------------------------
 # MAIN LOOP
 # -----------------------------------------------------------------------------
 
@@ -142,7 +213,6 @@ def run_display(clock_source=CLOCK_MODE):
     if isinstance(img0, dict):
         h, w = img0['chars'].shape
         state.image_size = (w, h)
-        # Force headless/ascii behavior implicitly if we loaded .npz/.npy
         has_gl = False
         is_headless = True
     else:
@@ -153,7 +223,6 @@ def run_display(clock_source=CLOCK_MODE):
             state.image_size = (w, h)
 
     # 3. Initialize Window
-    # If we detected .npz data, display_init will return None (or we skip it)
     if isinstance(img0, dict):
         window = None
         has_gl = False
@@ -180,16 +249,16 @@ def run_display(clock_source=CLOCK_MODE):
 
     fifo = FIFOImageBufferPatched(max_size=FIFO_LENGTH)
 
-    res0 = loader.load_images(index, *folder_dictionary["Main_and_Float_Folders"])
+    # Pre-load using the NEW helper directly for the first frame
+    res0 = load_and_render_frame(loader, index, *folder_dictionary["Main_and_Float_Folders"])
     fifo.update(index, res0)
 
-    # Initialize these for the loop scope (Prevents 'cur_main' crash if FIFO misses on first frame)
     cur_main, cur_float, cur_m_sbs, cur_f_sbs = None, None, False, False
 
-    # Textures (Only if GL and NOT ASCII dict)
     main_texture = None
     float_texture = None
-    if has_gl and not isinstance(res0[0], dict):
+    # Only create textures if NOT ascii string and GL active
+    if has_gl and not isinstance(res0[0], str):
         main_texture = renderer.create_texture(res0[0])
         float_texture = renderer.create_texture(res0[1])
 
@@ -203,11 +272,13 @@ def run_display(clock_source=CLOCK_MODE):
 
     # 5. Thread Pool
     cpu_count = os.cpu_count() or 1
-    max_workers = 2 if cpu_count <= 2 else min(6, cpu_count)
+    # Increase workers slightly since we are doing more CPU work in them now
+    max_workers = min(8, cpu_count + 2)
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         next_idx = 1 if index == 0 else (index - 1 if index == png_paths_len - 1 else index + 1)
-        future = pool.submit(loader.load_images, next_idx, *folder_dictionary["Main_and_Float_Folders"])
+        # Use the NEW worker function
+        future = pool.submit(load_and_render_frame, loader, next_idx, *folder_dictionary["Main_and_Float_Folders"])
         future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
 
         frame_times = deque(maxlen=60)
@@ -243,69 +314,22 @@ def run_display(clock_source=CLOCK_MODE):
                     cur_m_sbs = m_sbs
                     cur_f_sbs = f_sbs
 
-                    # --- [NEW] PRE-BAKED ASCII PATH ---
-                    if isinstance(m_img, dict):
-                        # 1. Merge Layers (Background + Foreground)
-                        # Transparency defined as space ' '
-                        # Check for 'S' type (Bytes) and decode if necessary for comparison
-                        f_is_bytes = False
-                        if isinstance(f_img, dict):
-                            f_chars = f_img["chars"]
-                            if f_chars.dtype.kind == 'S':
-                                # Compare against bytes space b' '
-                                mask = (f_chars != b' ')
-                            else:
-                                # Compare against string space ' '
-                                mask = (f_chars != ' ')
-
-                            final_chars = m_img["chars"].copy()
-                            final_colors = m_img["colors"].copy()
-                            final_chars[mask] = f_chars[mask]
-                            final_colors[mask] = f_img["colors"][mask]
-                        else:
-                            # If float is missing/invalid/standard-img, just use main
-                            final_chars = m_img["chars"]
-                            final_colors = m_img["colors"]
-
-                        # 2. DYNAMIC DOWNSCALING
-                        # Get baked dimensions
-                        baked_h, baked_w = final_chars.shape
-                        target_w = getattr(settings, 'ASCII_WIDTH', baked_w)
-                        target_h = getattr(settings, 'ASCII_HEIGHT', baked_h)
-
-                        # Calculate Step (Stride)
-                        step_x = max(1, baked_w // target_w)
-                        step_y = max(1, baked_h // target_h)
-
-                        if step_x > 1 or step_y > 1:
-                            final_chars = final_chars[::step_y, ::step_x]
-                            final_colors = final_colors[::step_y, ::step_x]
-
-                        # 3. TYPE CORRECTION & RENDER
-                        # If chars are Bytes (S1), cast to Unicode (U1) so we can add to color strings
-                        if final_chars.dtype.kind == 'S':
-                            final_chars = final_chars.astype(str)
-
-                        # Vectorized string addition: ColorCode + Char
-                        color_strings = ANSI_LUT[final_colors]
-                        image_grid = np.char.add(color_strings, final_chars)
-
-                        # Join rows
-                        rows = ["".join(row) for row in image_grid]
-                        ascii_out = "\r\n".join(rows) + RESET_CODE
-
-                        # 4. Output to Exchange
-                        exchange.set_frame(ascii_out)
+                    # --- [OPTIMIZED] PRE-BAKED ASCII PATH ---
+                    # Check if the worker thread already returned a String
+                    if isinstance(m_img, str):
+                        # It's already rendered! Just send it.
+                        exchange.set_frame(m_img)
                         successful_display = True
                         last_displayed_index = d_idx
 
-                        # 5. Trigger Next Load
+                        # Trigger Next Load
                         next_idx = 1 if index == 0 else (
                             index - 1 if index == png_paths_len - 1 else (index + 1 if index > prev else index - 1))
-                        future = pool.submit(loader.load_images, next_idx, *folder_dictionary["Main_and_Float_Folders"])
+                        future = pool.submit(load_and_render_frame, loader, next_idx,
+                                             *folder_dictionary["Main_and_Float_Folders"])
                         future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
 
-                        # 6. Timing & Loop (Skip Rendering)
+                        # Timing
                         now = time.perf_counter()
                         dt = now - frame_start
                         frame_times.append(dt)
@@ -314,11 +338,9 @@ def run_display(clock_source=CLOCK_MODE):
                             s = (1.0 / FPS) - dt
                             if s > 0: time.sleep(s)
 
-                        # Recalculate FPS immediately for Monitor
                         if len(frame_times) > 1:
                             last_actual_fps = 1.0 / (sum(frame_times) / len(frame_times))
 
-                        # UPDATE MONITOR BEFORE CONTINUING
                         if monitor:
                             monitor.update({
                                 "index": index,
@@ -335,10 +357,10 @@ def run_display(clock_source=CLOCK_MODE):
                                 "last_fifo_miss": last_fifo_miss
                             })
 
-                        # SKIP REMAINDER OF LOOP (GL & Capture)
                         continue
-                        # ----------------------------------
+                    # ----------------------------------------
 
+                    # GL Texture Update (Only for non-string)
                     if has_gl:
                         main_texture = renderer.update_texture(main_texture, m_img)
                         float_texture = renderer.update_texture(float_texture, f_img)
@@ -349,14 +371,14 @@ def run_display(clock_source=CLOCK_MODE):
                     if not is_headless: print(f"[MISS] {index}")
                     fifo_miss_count += 1
                     last_fifo_miss = index
-                    # Note: cur_main retains previous value if MISS happens
 
                 next_idx = 1 if index == 0 else (
                     index - 1 if index == png_paths_len - 1 else (index + 1 if index > prev else index - 1))
-                future = pool.submit(loader.load_images, next_idx, *folder_dictionary["Main_and_Float_Folders"])
+                future = pool.submit(load_and_render_frame, loader, next_idx,
+                                     *folder_dictionary["Main_and_Float_Folders"])
                 future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
 
-            # Render (Skipped if ASCII path taken)
+            # Render (GL)
             if has_gl:
                 if is_headless: window.use()
                 renderer.overlay_images_single_pass(
@@ -364,7 +386,7 @@ def run_display(clock_source=CLOCK_MODE):
                     main_is_sbs=cur_m_sbs, float_is_sbs=cur_f_sbs
                 )
 
-            # Capture (Skipped if ASCII path taken or cur_main is invalid)
+            # Capture (Only for Images/Headless Web)
             should_capture = False
             if is_headless or not has_gl:
                 now = time.time()
@@ -374,10 +396,11 @@ def run_display(clock_source=CLOCK_MODE):
                     last_captured_index = index
 
             if should_capture:
-                # Safety check: Don't enter here if we are holding a dict
-                # (should be caught by continue above, but prevents crashes if flow changes)
-                if isinstance(cur_main, dict):
+                # If m_img is a string, we already handled it.
+                if isinstance(cur_main, str):
                     pass
+                elif isinstance(cur_main, dict):
+                    pass  # Should be caught by str check, but just in case
                 elif cur_main is not None:
                     try:
                         frame = None
@@ -396,27 +419,21 @@ def run_display(clock_source=CLOCK_MODE):
                         if frame is not None:
                             if is_web:
                                 if WEBP_STREAMING:
-                                    # --- WEBP ---
                                     pic = webp.WebPPicture.from_numpy(frame)
-
                                     if WEBP_LOSSLESS:
-                                        # Lossless mode ignores quality, sets lossless flag
                                         config = webp.WebPConfig.new(preset=webp.WebPPreset.PHOTO, quality=100)
                                         config.lossless = 1
                                     else:
-                                        # Lossy mode
                                         config = webp.WebPConfig.new(preset=webp.WebPPreset.PHOTO, quality=WEBP_QUALITY)
                                         config.lossless = 0
-
                                     buf = pic.encode(config).buffer()
                                     exchange.set_frame(b'w' + bytes(buf))
                                 else:
-                                    # --- JPEG ---
                                     enc = jpeg.encode(frame, quality=JPEG_QUALITY, pixel_format=0)
                                     exchange.set_frame(b'j' + enc)
 
                             elif is_ascii:
-                                # Fallback Realtime ASCII (if not using .npz files)
+                                # Fallback (Live Conversion)
                                 text_frame = ascii_converter.to_ascii(frame)
                                 exchange.set_frame(text_frame)
 
@@ -440,7 +457,6 @@ def run_display(clock_source=CLOCK_MODE):
                 last_actual_fps = 1.0 / (sum(frame_times) / len(frame_times))
                 if not HTTP_MONITOR and FRAME_COUNTER_DISPLAY: print(f"{last_actual_fps:.1f} FPS")
 
-            # --- RESTORED MONITOR HOOKS (Standard Path) ---
             if monitor:
                 monitor.update({
                     "index": index,
@@ -456,7 +472,6 @@ def run_display(clock_source=CLOCK_MODE):
                     "fifo_miss_count": fifo_miss_count,
                     "last_fifo_miss": last_fifo_miss
                 })
-            # ------------------------------
 
             if not is_headless and has_gl and glfw and glfw.window_should_close(window):
                 state.run_mode = False
