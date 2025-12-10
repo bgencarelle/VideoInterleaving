@@ -6,7 +6,14 @@ import cv2
 from concurrent.futures import ProcessPoolExecutor
 from PIL import Image  # Requires: pip install pillow
 
+import os, sys
+
+ROOT = os.path.dirname(os.path.dirname(__file__))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
 import settings
+
 
 # --- 1. GLOBAL CONSTANTS ---
 _raw_chars = getattr(settings, 'ASCII_PALETTE', 'MB8NG9SEaemvyznocrtlj17i. ')
