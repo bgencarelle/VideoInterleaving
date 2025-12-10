@@ -138,6 +138,7 @@ def main(clock=CLOCK_MODE):
         print("MODE: ASCII Server (Telnet + WebSocket)")
         threading.Thread(target=ascii_server.start_server, daemon=True, name="ASCII-Telnet").start()
         threading.Thread(target=ascii_web_server.start_server, daemon=True, name="ASCII-WS").start()
+ #       web_service.start_server(monitor=want_monitor, stream=True)
 
         if want_monitor:
             print(f"Starting Monitor on port {settings.WEB_PORT}...")

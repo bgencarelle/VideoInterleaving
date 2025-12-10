@@ -19,7 +19,7 @@ import shutil
 from itertools import zip_longest
 from PIL import Image
 from collections import defaultdict
-import numpy as np  # [ADDED] Needed to read .npz headers
+import numpy as np  # [ADDED] Needed to read .npy headers
 
 import settings
 
@@ -43,14 +43,14 @@ def get_subdirectories(path):
 
 def contains_image_files(path):
     try:
-        return any(f.lower().endswith(('.png', '.webp', '.jpg', 'jpeg', '.npz')) for f in os.listdir(path))
+        return any(f.lower().endswith(('.png', '.webp', '.jpg', 'jpeg', '.npy')) for f in os.listdir(path))
     except FileNotFoundError:
         return False
 
 
 def count_image_files(path):
     try:
-        return len([f for f in os.listdir(path) if f.lower().endswith(('.png', '.webp', '.npz', '.jpg', 'jpeg'))])
+        return len([f for f in os.listdir(path) if f.lower().endswith(('.png', '.webp', '.npy', '.jpg', 'jpeg'))])
     except FileNotFoundError:
         return 0
 
@@ -123,7 +123,7 @@ def scan_directory_recursive(base_path, script_dir, folder_type):
         if not contains_image_files(subdir):
             continue
 
-        image_files = [f for f in os.listdir(subdir) if f.lower().endswith(('.png', '.webp', '.npz', '.jpg', '.jpeg'))]
+        image_files = [f for f in os.listdir(subdir) if f.lower().endswith(('.png', '.webp', '.npy', '.jpg', '.jpeg'))]
         if not image_files:
             continue
 
@@ -136,20 +136,16 @@ def scan_directory_recursive(base_path, script_dir, folder_type):
         try:
             file_path = os.path.join(subdir, first_image)
 
-            # --- [CHANGED] Detect File Type ---
-            if first_image.lower().endswith('.npz'):
-                # Handle ASCII Asset
+            if first_image.lower().endswith('.npy'):
                 try:
                     data = np.load(file_path)
-                    # .npz chars shape is (Height, Width)
-                    h_arr, w_arr = data['chars'].shape
+                    # Shape is (2, H, W) -> H, W are indices 1, 2
+                    _, h_arr, w_arr = data.shape
                     width, height = int(w_arr), int(h_arr)
-
-                    # Detect Alpha: Check if any characters are a space ' '
-                    # (This aligns with our baker logic where alpha pixels become spaces)
-                    has_alpha = bool(np.any(data['chars'] == ' '))
+                    # Check for spaces in layer 0 (Chars)
+                    has_alpha = bool(np.any(data[0].view('S1') == b' '))
                 except Exception as e:
-                    print(f"Error reading NPZ {first_image}: {e}")
+                    print(f"Error reading npy {first_image}: {e}")
                     raise e
             else:
                 # Handle Standard Image (PIL)
@@ -294,7 +290,7 @@ def sort_image_files(folder_dict):
     for num in sorted(folder_dict.keys()):
         folder = folder_dict[num]
         imgs = [os.path.join(folder, x) for x in os.listdir(folder)
-                if x.lower().endswith(('.png', '.npz', '.webp', '.jpg', '.jpeg'))]
+                if x.lower().endswith(('.png', '.npy', '.webp', '.jpg', '.jpeg'))]
         imgs.sort(key=natural_sort_key)
         sorted_files.append(imgs)
     return sorted_files
