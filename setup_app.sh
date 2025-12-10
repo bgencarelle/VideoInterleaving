@@ -37,7 +37,7 @@ sudo apt install -y python3-venv python3-dev python3-pip build-essential cmake p
     libjpeg-dev
 
 if [ "$HAS_GPU" = true ] && [ "$USERNAME" != "root" ]; then
-    usermod -aG video,render "$USERNAME" || true
+    sudo usermod -aG video,render "$USERNAME" || true
 fi
 
 # --------------------------------------------
@@ -145,13 +145,13 @@ StandardError=append:$PROJECT_DIR/vi-local.log
 WantedBy=graphical.target
 EOF
 
-systemctl daemon-reload
+sudo systemctl daemon-reload
 
 # --------------------------------------------
 # 6. Firewall
 # --------------------------------------------
 if command -v ufw >/dev/null; then
-    ufw allow 2323/tcp >/dev/null 2>&1
+    sudo ufw allow 2323/tcp >/dev/null 2>&1
 fi
 
 echo "----------------------------------------------------"
