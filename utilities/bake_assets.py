@@ -6,6 +6,10 @@ import cv2
 from concurrent.futures import ProcessPoolExecutor
 from PIL import Image
 
+ROOT = os.path.dirname(os.path.dirname(__file__))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
 import settings
 
 # --- 1. GLOBAL CONSTANTS ---
