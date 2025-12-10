@@ -9,7 +9,7 @@ from constantStorage.display_constants import *
 # -------------------------
 # Image Directories and Folder Paths
 # -------------------------
-IMAGES_DIR = ("images")
+IMAGES_DIR = ("imageStorage/150_91")
 MAIN_FOLDER_PATH = f"{IMAGES_DIR}/face"
 FLOAT_FOLDER_PATH = f"{IMAGES_DIR}/float"
 
@@ -47,7 +47,7 @@ else:
 MIDI_MODE = False
 
 # --- SERVER MODE CONFIGURATION ---
-SERVER_MODE = False       # Enable headless streaming
+SERVER_MODE = True      # Enable headless streaming
 HEADLESS_USE_GL = True   # new: disable ModernGL headless on VPS
 SERVER_CAPTURE_RATE = FPS     # Streaming FPS
 

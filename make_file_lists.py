@@ -19,6 +19,7 @@ import shutil
 from itertools import zip_longest
 from PIL import Image
 from collections import defaultdict
+import numpy as np  # [ADDED] Needed to read .npz headers
 
 import settings
 
@@ -42,14 +43,14 @@ def get_subdirectories(path):
 
 def contains_image_files(path):
     try:
-        return any(f.lower().endswith(('.png', '.webp', '.jpg', 'jpeg')) for f in os.listdir(path))
+        return any(f.lower().endswith(('.png', '.webp', '.jpg', 'jpeg', '.npz')) for f in os.listdir(path))
     except FileNotFoundError:
         return False
 
 
 def count_image_files(path):
     try:
-        return len([f for f in os.listdir(path) if f.lower().endswith(('.png', '.webp', '.jpg', 'jpeg'))])
+        return len([f for f in os.listdir(path) if f.lower().endswith(('.png', '.webp', '.npz', '.jpg', 'jpeg'))])
     except FileNotFoundError:
         return 0
 
@@ -114,28 +115,48 @@ def scan_directory_recursive(base_path, script_dir, folder_type):
 
     for subdir in dirs_to_scan:
         # 1. STRICT FILTER: Check name before scanning content
-        # We skip the root check if scanning recursively, but usually root isn't numbered.
-        # We only check leaf folders that actually contain images.
         if subdir != base_path:
             if not check_folder_prefix(subdir, folder_type):
-                # Silently ignore 999_ or wrong types
                 continue
 
         # 2. Check for images
         if not contains_image_files(subdir):
             continue
 
-        image_files = [f for f in os.listdir(subdir) if f.lower().endswith(('.png', '.webp', '.jpg', '.jpeg'))]
+        image_files = [f for f in os.listdir(subdir) if f.lower().endswith(('.png', '.webp', '.npz', '.jpg', '.jpeg'))]
         if not image_files:
             continue
 
+        # Sort to ensure consistent "First Image" logic
+        image_files.sort(key=natural_sort_key)
         first_image = image_files[0]
+
         width, height, has_alpha = 0, 0, False
 
         try:
-            with Image.open(os.path.join(subdir, first_image)) as img:
-                width, height = img.size
-                has_alpha = has_alpha_channel(img)
+            file_path = os.path.join(subdir, first_image)
+
+            # --- [CHANGED] Detect File Type ---
+            if first_image.lower().endswith('.npz'):
+                # Handle ASCII Asset
+                try:
+                    data = np.load(file_path)
+                    # .npz chars shape is (Height, Width)
+                    h_arr, w_arr = data['chars'].shape
+                    width, height = int(w_arr), int(h_arr)
+
+                    # Detect Alpha: Check if any characters are a space ' '
+                    # (This aligns with our baker logic where alpha pixels become spaces)
+                    has_alpha = bool(np.any(data['chars'] == ' '))
+                except Exception as e:
+                    print(f"Error reading NPZ {first_image}: {e}")
+                    raise e
+            else:
+                # Handle Standard Image (PIL)
+                with Image.open(file_path) as img:
+                    width, height = img.size
+                    has_alpha = has_alpha_channel(img)
+
         except Exception as e:
             print(f"Error processing image {first_image} in {subdir}: {e}")
             first_image = None
@@ -273,7 +294,7 @@ def sort_image_files(folder_dict):
     for num in sorted(folder_dict.keys()):
         folder = folder_dict[num]
         imgs = [os.path.join(folder, x) for x in os.listdir(folder)
-                if x.lower().endswith(('.png', '.webp', '.jpg', '.jpeg'))]
+                if x.lower().endswith(('.png', '.npz', '.webp', '.jpg', '.jpeg'))]
         imgs.sort(key=natural_sort_key)
         sorted_files.append(imgs)
     return sorted_files

@@ -35,12 +35,19 @@ BACKGROUND_COLOR = getattr(settings, 'BACKGROUND_COLOR', (0, 0, 0))
 
 # Streaming Settings
 WEBP_STREAMING = getattr(settings, 'WEBP_STREAMING', False)
-WEBP_LOSSLESS = getattr(settings, 'WEBP_LOSSLESS', False)  # New setting
+WEBP_LOSSLESS = getattr(settings, 'WEBP_LOSSLESS', False)
 WEBP_QUALITY = getattr(settings, 'WEBP_QUALITY', 55)
 JPEG_QUALITY = getattr(settings, 'JPEG_QUALITY', 55)
 SERVER_CAPTURE_RATE = getattr(settings, "SERVER_CAPTURE_RATE", FPS or 10)
 HEADLESS_RES = getattr(settings, "HEADLESS_RES", (480, 640))
-# ---------------------------------------------------
+
+# --- ASCII PRE-BAKE CONSTANTS ---
+# Pre-calculate LUTs once for the merger/renderer
+_ansi_colors = [f"\033[38;5;{i}m" for i in range(256)]
+_ansi_colors[16] = "\033[38;5;235m"  # Black crush fix
+ANSI_LUT = np.array(_ansi_colors)
+RESET_CODE = "\033[0m"
+# --------------------------------
 
 from index_calculator import update_index
 from folder_selector import update_folder_selection, folder_dictionary
@@ -113,7 +120,7 @@ def run_display(clock_source=CLOCK_MODE):
     if is_web:
         mode_str = "WEBP" if WEBP_STREAMING else "MJPEG"
         qual_str = "LOSSLESS" if (
-                    WEBP_STREAMING and WEBP_LOSSLESS) else f"Q={WEBP_QUALITY if WEBP_STREAMING else JPEG_QUALITY}"
+                WEBP_STREAMING and WEBP_LOSSLESS) else f"Q={WEBP_QUALITY if WEBP_STREAMING else JPEG_QUALITY}"
         print(f"[DISPLAY] Stream Encoder: {mode_str} ({qual_str})")
     # --------------------
 
@@ -131,23 +138,37 @@ def run_display(clock_source=CLOCK_MODE):
     if img0 is None:
         raise RuntimeError("Failed to load initial image.")
 
-    h, w = img0.shape[:2]
-    if is_sbs0:
-        state.image_size = (w // 2, h)
-    else:
+    # [CHANGE] ASCII Dict detection for initialization
+    if isinstance(img0, dict):
+        h, w = img0['chars'].shape
         state.image_size = (w, h)
+        # Force headless/ascii behavior implicitly if we loaded .npz
+        has_gl = False
+        is_headless = True
+    else:
+        h, w = img0.shape[:2]
+        if is_sbs0:
+            state.image_size = (w // 2, h)
+        else:
+            state.image_size = (w, h)
 
     # 3. Initialize Window
-    window = display_init(state)
-
-    if window is None:
+    # If we detected .npz data, display_init will return None (or we skip it)
+    if isinstance(img0, dict):
+        window = None
         has_gl = False
-        mode_name = "ASCII" if is_ascii else ("WEB-SERVER" if is_web else "LOCAL-CPU")
-        print(f"[DISPLAY] {mode_name}: Using CPU-only compositing")
+        print(f"[DISPLAY] Pre-baked ASCII Mode Detected (GL Disabled)")
     else:
-        has_gl = True
-        if not is_headless and glfw:
-            register_callbacks(window, state)
+        window = display_init(state)
+
+        if window is None:
+            has_gl = False
+            mode_name = "ASCII" if is_ascii else ("WEB-SERVER" if is_web else "LOCAL-CPU")
+            print(f"[DISPLAY] {mode_name}: Using CPU-only compositing")
+        else:
+            has_gl = True
+            if not is_headless and glfw:
+                register_callbacks(window, state)
 
     # 4. Loader & Buffer Init
     index, _ = update_index(png_paths_len, PINGPONG)
@@ -161,14 +182,16 @@ def run_display(clock_source=CLOCK_MODE):
 
     res0 = loader.load_images(index, *folder_dictionary["Main_and_Float_Folders"])
     fifo.update(index, res0)
-    cur_main, cur_float, cur_m_sbs, cur_f_sbs = res0
 
-    # Textures
+    # Initialize these for the loop scope (Prevents 'cur_main' crash if FIFO misses on first frame)
+    cur_main, cur_float, cur_m_sbs, cur_f_sbs = None, None, False, False
+
+    # Textures (Only if GL and NOT ASCII dict)
     main_texture = None
     float_texture = None
-    if has_gl:
-        main_texture = renderer.create_texture(cur_main)
-        float_texture = renderer.create_texture(cur_float)
+    if has_gl and not isinstance(res0[0], dict):
+        main_texture = renderer.create_texture(res0[0])
+        float_texture = renderer.create_texture(res0[1])
 
     compensator = RollingIndexCompensator()
 
@@ -176,7 +199,6 @@ def run_display(clock_source=CLOCK_MODE):
         try:
             fifo.update(idx, fut.result())
         except Exception as e:
-            print("Async Load Error:", e)
             if monitor: monitor.record_load_error(idx, e)
 
     # 5. Thread Pool
@@ -215,25 +237,99 @@ def run_display(clock_source=CLOCK_MODE):
                     d_idx, m_img, f_img, m_sbs, f_sbs = res
                     compensator.update(index, d_idx)
 
+                    # Update loop pointers
+                    cur_main = m_img
+                    cur_float = f_img
+                    cur_m_sbs = m_sbs
+                    cur_f_sbs = f_sbs
+
+                    # --- [NEW] PRE-BAKED ASCII PATH ---
+                    if isinstance(m_img, dict):
+                        # 1. Merge Layers (Background + Foreground)
+                        # Transparency defined as space ' '
+                        if isinstance(f_img, dict):
+                            mask = (f_img["chars"] != ' ')
+                            final_chars = m_img["chars"].copy()
+                            final_colors = m_img["colors"].copy()
+                            final_chars[mask] = f_img["chars"][mask]
+                            final_colors[mask] = f_img["colors"][mask]
+                        else:
+                            # If float is missing/invalid/standard-img, just use main
+                            final_chars = m_img["chars"]
+                            final_colors = m_img["colors"]
+
+                        # 2. Render to String (Color + Char) using LUT
+                        # Vectorized string addition: ColorCode + Char
+                        color_strings = ANSI_LUT[final_colors]
+                        image_grid = np.char.add(color_strings, final_chars)
+
+                        # Join rows
+                        rows = ["".join(row) for row in image_grid]
+                        ascii_out = "\r\n".join(rows) + RESET_CODE
+
+                        # 3. Output to Exchange
+                        exchange.set_frame(ascii_out)
+                        successful_display = True
+                        last_displayed_index = d_idx
+
+                        # 4. Trigger Next Load
+                        next_idx = 1 if index == 0 else (
+                            index - 1 if index == png_paths_len - 1 else (index + 1 if index > prev else index - 1))
+                        future = pool.submit(loader.load_images, next_idx, *folder_dictionary["Main_and_Float_Folders"])
+                        future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
+
+                        # 5. Timing & Loop (Skip Rendering)
+                        now = time.perf_counter()
+                        dt = now - frame_start
+                        frame_times.append(dt)
+                        frame_start = now
+                        if FPS:
+                            s = (1.0 / FPS) - dt
+                            if s > 0: time.sleep(s)
+
+                        # Recalculate FPS immediately for Monitor
+                        if len(frame_times) > 1:
+                            last_actual_fps = 1.0 / (sum(frame_times) / len(frame_times))
+
+                        # --- CRITICAL FIX: UPDATE MONITOR BEFORE CONTINUING ---
+                        if monitor:
+                            monitor.update({
+                                "index": index,
+                                "displayed": last_displayed_index,
+                                "fps": last_actual_fps,
+                                "fifo_depth": fifo.current_depth(),
+                                "successful_frame": True,
+                                "main_folder": folder_dictionary["Main_and_Float_Folders"][0],
+                                "float_folder": folder_dictionary["Main_and_Float_Folders"][1],
+                                "rand_mult": folder_dictionary.get("rand_mult"),
+                                "main_folder_count": main_folder_count,
+                                "float_folder_count": float_folder_count,
+                                "fifo_miss_count": fifo_miss_count,
+                                "last_fifo_miss": last_fifo_miss
+                            })
+
+                        # SKIP REMAINDER OF LOOP (GL & Capture)
+                        continue
+                        # ----------------------------------
+
                     if has_gl:
                         main_texture = renderer.update_texture(main_texture, m_img)
                         float_texture = renderer.update_texture(float_texture, f_img)
 
-                    cur_main, cur_float = m_img, f_img
-                    cur_m_sbs, cur_f_sbs = m_sbs, f_sbs
                     successful_display = True
                     last_displayed_index = d_idx
                 else:
                     if not is_headless: print(f"[MISS] {index}")
                     fifo_miss_count += 1
                     last_fifo_miss = index
+                    # Note: cur_main retains previous value if MISS happens
 
                 next_idx = 1 if index == 0 else (
                     index - 1 if index == png_paths_len - 1 else (index + 1 if index > prev else index - 1))
                 future = pool.submit(loader.load_images, next_idx, *folder_dictionary["Main_and_Float_Folders"])
                 future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
 
-            # Render
+            # Render (Skipped if ASCII path taken)
             if has_gl:
                 if is_headless: window.use()
                 renderer.overlay_images_single_pass(
@@ -241,7 +337,7 @@ def run_display(clock_source=CLOCK_MODE):
                     main_is_sbs=cur_m_sbs, float_is_sbs=cur_f_sbs
                 )
 
-            # Capture
+            # Capture (Skipped if ASCII path taken or cur_main is invalid)
             should_capture = False
             if is_headless or not has_gl:
                 now = time.time()
@@ -251,48 +347,54 @@ def run_display(clock_source=CLOCK_MODE):
                     last_captured_index = index
 
             if should_capture:
-                try:
-                    frame = None
-                    if has_gl:
-                        raw = window.fbo.read(components=3)
-                        w_fbo, h_fbo = window.size
-                        frame = np.frombuffer(raw, dtype=np.uint8).reshape((h_fbo, w_fbo, 3))
-                    else:
-                        tgt_size = HEADLESS_RES if is_web else None
-                        frame = renderer.composite_cpu(
-                            cur_main, cur_float,
-                            main_is_sbs=cur_m_sbs, float_is_sbs=cur_f_sbs,
-                            target_size=tgt_size
-                        )
+                # Safety check: Don't enter here if we are holding a dict
+                # (should be caught by continue above, but prevents crashes if flow changes)
+                if isinstance(cur_main, dict):
+                    pass
+                elif cur_main is not None:
+                    try:
+                        frame = None
+                        if has_gl:
+                            raw = window.fbo.read(components=3)
+                            w_fbo, h_fbo = window.size
+                            frame = np.frombuffer(raw, dtype=np.uint8).reshape((h_fbo, w_fbo, 3))
+                        else:
+                            tgt_size = HEADLESS_RES if is_web else None
+                            frame = renderer.composite_cpu(
+                                cur_main, cur_float,
+                                main_is_sbs=cur_m_sbs, float_is_sbs=cur_f_sbs,
+                                target_size=tgt_size
+                            )
 
-                    if frame is not None:
-                        if is_web:
-                            if WEBP_STREAMING:
-                                # --- WEBP ---
-                                pic = webp.WebPPicture.from_numpy(frame)
+                        if frame is not None:
+                            if is_web:
+                                if WEBP_STREAMING:
+                                    # --- WEBP ---
+                                    pic = webp.WebPPicture.from_numpy(frame)
 
-                                if WEBP_LOSSLESS:
-                                    # Lossless mode ignores quality, sets lossless flag
-                                    config = webp.WebPConfig.new(preset=webp.WebPPreset.PHOTO, quality=100)
-                                    config.lossless = 1
+                                    if WEBP_LOSSLESS:
+                                        # Lossless mode ignores quality, sets lossless flag
+                                        config = webp.WebPConfig.new(preset=webp.WebPPreset.PHOTO, quality=100)
+                                        config.lossless = 1
+                                    else:
+                                        # Lossy mode
+                                        config = webp.WebPConfig.new(preset=webp.WebPPreset.PHOTO, quality=WEBP_QUALITY)
+                                        config.lossless = 0
+
+                                    buf = pic.encode(config).buffer()
+                                    exchange.set_frame(b'w' + bytes(buf))
                                 else:
-                                    # Lossy mode
-                                    config = webp.WebPConfig.new(preset=webp.WebPPreset.PHOTO, quality=WEBP_QUALITY)
-                                    config.lossless = 0
+                                    # --- JPEG ---
+                                    enc = jpeg.encode(frame, quality=JPEG_QUALITY, pixel_format=0)
+                                    exchange.set_frame(b'j' + enc)
 
-                                buf = pic.encode(config).buffer()
-                                exchange.set_frame(b'w' + bytes(buf))
-                            else:
-                                # --- JPEG ---
-                                enc = jpeg.encode(frame, quality=JPEG_QUALITY, pixel_format=0)
-                                exchange.set_frame(b'j' + enc)
+                            elif is_ascii:
+                                # Fallback Realtime ASCII (if not using .npz files)
+                                text_frame = ascii_converter.to_ascii(frame)
+                                exchange.set_frame(text_frame)
 
-                        elif is_ascii:
-                            text_frame = ascii_converter.to_ascii(frame)
-                            exchange.set_frame(text_frame)
-
-                except Exception as e:
-                    print(f"[CAPTURE ERROR] {e}")
+                    except Exception as e:
+                        print(f"[CAPTURE ERROR] {e}")
 
             if not is_headless and has_gl and glfw:
                 glfw.swap_buffers(window)
@@ -311,18 +413,16 @@ def run_display(clock_source=CLOCK_MODE):
                 last_actual_fps = 1.0 / (sum(frame_times) / len(frame_times))
                 if not HTTP_MONITOR and FRAME_COUNTER_DISPLAY: print(f"{last_actual_fps:.1f} FPS")
 
-            # --- RESTORED MONITOR HOOKS ---
+            # --- RESTORED MONITOR HOOKS (Standard Path) ---
             if monitor:
                 monitor.update({
                     "index": index,
-                    # Fallback to current index if d_idx is stale/undefined
                     "displayed": last_displayed_index,
                     "fps": last_actual_fps,
                     "fifo_depth": fifo.current_depth(),
                     "successful_frame": successful_display,
                     "main_folder": folder_dictionary["Main_and_Float_Folders"][0],
                     "float_folder": folder_dictionary["Main_and_Float_Folders"][1],
-                    # Re-added the missing stats
                     "rand_mult": folder_dictionary.get("rand_mult"),
                     "main_folder_count": main_folder_count,
                     "float_folder_count": float_folder_count,
