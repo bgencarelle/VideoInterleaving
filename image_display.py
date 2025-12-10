@@ -138,11 +138,11 @@ def run_display(clock_source=CLOCK_MODE):
     if img0 is None:
         raise RuntimeError("Failed to load initial image.")
 
-    # [CHANGE] ASCII Dict detection for initialization
+    # ASCII Dict detection for initialization
     if isinstance(img0, dict):
         h, w = img0['chars'].shape
         state.image_size = (w, h)
-        # Force headless/ascii behavior implicitly if we loaded .npz
+        # Force headless/ascii behavior implicitly if we loaded .npz/.npy
         has_gl = False
         is_headless = True
     else:
@@ -247,18 +247,45 @@ def run_display(clock_source=CLOCK_MODE):
                     if isinstance(m_img, dict):
                         # 1. Merge Layers (Background + Foreground)
                         # Transparency defined as space ' '
+                        # Check for 'S' type (Bytes) and decode if necessary for comparison
+                        f_is_bytes = False
                         if isinstance(f_img, dict):
-                            mask = (f_img["chars"] != ' ')
+                            f_chars = f_img["chars"]
+                            if f_chars.dtype.kind == 'S':
+                                # Compare against bytes space b' '
+                                mask = (f_chars != b' ')
+                            else:
+                                # Compare against string space ' '
+                                mask = (f_chars != ' ')
+
                             final_chars = m_img["chars"].copy()
                             final_colors = m_img["colors"].copy()
-                            final_chars[mask] = f_img["chars"][mask]
+                            final_chars[mask] = f_chars[mask]
                             final_colors[mask] = f_img["colors"][mask]
                         else:
                             # If float is missing/invalid/standard-img, just use main
                             final_chars = m_img["chars"]
                             final_colors = m_img["colors"]
 
-                        # 2. Render to String (Color + Char) using LUT
+                        # 2. DYNAMIC DOWNSCALING
+                        # Get baked dimensions
+                        baked_h, baked_w = final_chars.shape
+                        target_w = getattr(settings, 'ASCII_WIDTH', baked_w)
+                        target_h = getattr(settings, 'ASCII_HEIGHT', baked_h)
+
+                        # Calculate Step (Stride)
+                        step_x = max(1, baked_w // target_w)
+                        step_y = max(1, baked_h // target_h)
+
+                        if step_x > 1 or step_y > 1:
+                            final_chars = final_chars[::step_y, ::step_x]
+                            final_colors = final_colors[::step_y, ::step_x]
+
+                        # 3. TYPE CORRECTION & RENDER
+                        # If chars are Bytes (S1), cast to Unicode (U1) so we can add to color strings
+                        if final_chars.dtype.kind == 'S':
+                            final_chars = final_chars.astype(str)
+
                         # Vectorized string addition: ColorCode + Char
                         color_strings = ANSI_LUT[final_colors]
                         image_grid = np.char.add(color_strings, final_chars)
@@ -267,18 +294,18 @@ def run_display(clock_source=CLOCK_MODE):
                         rows = ["".join(row) for row in image_grid]
                         ascii_out = "\r\n".join(rows) + RESET_CODE
 
-                        # 3. Output to Exchange
+                        # 4. Output to Exchange
                         exchange.set_frame(ascii_out)
                         successful_display = True
                         last_displayed_index = d_idx
 
-                        # 4. Trigger Next Load
+                        # 5. Trigger Next Load
                         next_idx = 1 if index == 0 else (
                             index - 1 if index == png_paths_len - 1 else (index + 1 if index > prev else index - 1))
                         future = pool.submit(loader.load_images, next_idx, *folder_dictionary["Main_and_Float_Folders"])
                         future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
 
-                        # 5. Timing & Loop (Skip Rendering)
+                        # 6. Timing & Loop (Skip Rendering)
                         now = time.perf_counter()
                         dt = now - frame_start
                         frame_times.append(dt)
@@ -291,7 +318,7 @@ def run_display(clock_source=CLOCK_MODE):
                         if len(frame_times) > 1:
                             last_actual_fps = 1.0 / (sum(frame_times) / len(frame_times))
 
-                        # --- CRITICAL FIX: UPDATE MONITOR BEFORE CONTINUING ---
+                        # UPDATE MONITOR BEFORE CONTINUING
                         if monitor:
                             monitor.update({
                                 "index": index,
