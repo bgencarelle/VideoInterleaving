@@ -30,12 +30,11 @@ echo "    Hardware: GPU=$HAS_GPU | Pi=$IS_PI"
 # 2. Dependencies
 # --------------------------------------------
 echo ">>> 📦 Installing system libraries..."
-apt-get update -qq
-apt-get install -y \
-    python3-venv python3-dev python3-pip build-essential \
-    libwebp-dev libgl1-mesa-dev libglu1-mesa-dev libegl1-mesa-dev \
-    libgbm-dev mesa-utils \
-    chrony ninja-build python-is-python3 libjpeg-dev ufw
+sudo apt update -qq
+sudo apt install -y python3-venv python3-dev python3-pip build-essential cmake pkg-config \
+    libwebp-dev libsdl2-dev libasound2-dev libgl1-mesa-dev libglu1-mesa-dev \
+    libegl1-mesa-dev mesa-utils chrony ninja-build python-is-python3 \
+    libjpeg-dev
 
 if [ "$HAS_GPU" = true ] && [ "$USERNAME" != "root" ]; then
     usermod -aG video,render "$USERNAME" || true
