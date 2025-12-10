@@ -20,21 +20,21 @@ for lib in ("libwebp.so", "libwebp.so.7", "libwebp.so.6", "libwebp.dylib", "libw
     except OSError:
         continue
 
-if _libwebp is None:
-    raise RuntimeError("Could not load libwebp. Ensure libwebp is installed.")
+# We allow running without libwebp if only using .npz, but warn if methods called.
 
 # --- Define ctypes signatures ---
-_libwebp.WebPGetInfo.argtypes = [
-    ctypes.c_char_p, ctypes.c_size_t,
-    ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)
-]
-_libwebp.WebPGetInfo.restype = ctypes.c_int
+if _libwebp:
+    _libwebp.WebPGetInfo.argtypes = [
+        ctypes.c_char_p, ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)
+    ]
+    _libwebp.WebPGetInfo.restype = ctypes.c_int
 
-_libwebp.WebPDecodeRGBAInto.argtypes = [
-    ctypes.c_char_p, ctypes.c_size_t,
-    ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.c_int
-]
-_libwebp.WebPDecodeRGBAInto.restype = ctypes.POINTER(ctypes.c_uint8)
+    _libwebp.WebPDecodeRGBAInto.argtypes = [
+        ctypes.c_char_p, ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.c_int
+    ]
+    _libwebp.WebPDecodeRGBAInto.restype = ctypes.POINTER(ctypes.c_uint8)
 
 
 class ImageLoader:
@@ -58,6 +58,9 @@ class ImageLoader:
         Zero-Copy WebP Decoder.
         Returns: (numpy_array, is_sbs=False)
         """
+        if _libwebp is None:
+            raise RuntimeError("libwebp not loaded. Cannot decode .webp files.")
+
         with open(image_path, "rb") as f:
             data = f.read()
 
@@ -83,10 +86,19 @@ class ImageLoader:
     def read_image(self, image_path):
         """
         Strict Loader.
-        Only accepts .webp (Standard) or .jpg/.jpeg (SBS).
-        Returns: (image_data, is_sbs_bool)
+        Accepts:
+        1. .npz (Pre-baked ASCII) -> Returns ({dict}, False)
+        2. .webp (Standard) -> Returns (np.array, False)
+        3. .jpg/.jpeg (SBS) -> Returns (np.array, True)
         """
         ext = image_path.split('.')[-1].lower()
+
+        # --- ASCII ASSET STRATEGY ---
+        if ext == "npz":
+            # Load the pre-baked compressed arrays
+            data = np.load(image_path)
+            # Return dict structure. Not SBS.
+            return {'chars': data['chars'], 'colors': data['colors']}, False
 
         # --- WEBP STRATEGY (Legacy Standard RGBA) ---
         if ext == "webp":
@@ -104,7 +116,7 @@ class ImageLoader:
             return img, True  # Always treats JPEGs as SBS
 
         # --- UNSUPPORTED FORMATS ---
-        raise ValueError(f"Unsupported image format: {image_path}. Pipeline only accepts .jpg (SBS) or .webp")
+        raise ValueError(f"Unsupported image format: {image_path}. Pipeline accepts .npz, .jpg (SBS), or .webp")
 
     def load_images(self, index, main_folder, float_folder):
         """
