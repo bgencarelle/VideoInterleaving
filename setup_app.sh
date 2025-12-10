@@ -57,7 +57,7 @@ sudo -u "$USERNAME" "$VENV_DIR/bin/pip" install -r requirements.txt
 # 4. Logrotate
 # --------------------------------------------
 echo ">>> 📜 Configuring Logrotate..."
-cat <<EOF > "/etc/logrotate.d/videointerleaving"
+sudo cat <<EOF > "/etc/logrotate.d/videointerleaving"
 $PROJECT_DIR/*.log {
     daily
     rotate 5
@@ -82,7 +82,7 @@ else
 fi
 
 # --- SERVICE 1: WEB MODE (vi-web) ---
-cat <<EOF > "/etc/systemd/system/vi-web.service"
+sudo cat <<EOF > "/etc/systemd/system/vi-web.service"
 [Unit]
 Description=VideoInterleaving (Web Stream)
 After=network.target
@@ -103,7 +103,7 @@ WantedBy=multi-user.target
 EOF
 
 # --- SERVICE 2: ASCII MODE (vi-ascii) ---
-cat <<EOF > "/etc/systemd/system/vi-ascii.service"
+sudo cat <<EOF > "/etc/systemd/system/vi-ascii.service"
 [Unit]
 Description=VideoInterleaving (ASCII Telnet)
 After=network.target
@@ -124,7 +124,7 @@ WantedBy=multi-user.target
 EOF
 
 # --- SERVICE 3: LOCAL MODE (vi-local) ---
-cat <<EOF > "/etc/systemd/system/vi-local.service"
+sudo cat <<EOF > "/etc/systemd/system/vi-local.service"
 [Unit]
 Description=VideoInterleaving (Local GUI)
 After=network.target graphical.target
