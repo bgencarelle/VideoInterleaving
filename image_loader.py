@@ -2,69 +2,28 @@ import threading
 from collections import deque
 import ctypes
 import numpy as np
+import os
 from settings import MAIN_FOLDER_PATH, FLOAT_FOLDER_PATH, TOLERANCE
 
 from turbojpeg import TurboJPEG, TJPF_RGB
-from ctypes.util import find_library
 
 jpeg = TurboJPEG()
 
-# ---------------------------------------------------------------------
-# libwebp dynamic loader (fast path for .webp decoding)
-# ---------------------------------------------------------------------
-
 _libwebp = None
-
-# 1) Try system/loader default using ctypes.util.find_library
-libname = find_library("webp")
-_candidate_libs = []
-
-if libname:
-    # On macOS this often returns something like "libwebp.dylib" or a full path.
-    _candidate_libs.append(libname)
-
-# 2) Fallback: common bare names
-_candidate_libs.extend([
-    "libwebp.so",
-    "libwebp.so.7",
-    "libwebp.so.6",
-    "libwebp.dylib",
-    "libwebp-7.dll",
-])
-
-# 3) Fallback: common Homebrew locations (Apple Silicon / Intel)
-_candidate_libs.extend([
-    "/opt/homebrew/opt/webp/lib/libwebp.dylib",   # Apple Silicon default
-    "/usr/local/opt/webp/lib/libwebp.dylib",      # Intel default
-])
-
-for lib in _candidate_libs:
+for lib in ("libwebp.so", "libwebp.so.7", "libwebp.so.6", "libwebp.dylib", "libwebp-7.dll"):
     try:
         _libwebp = ctypes.CDLL(lib)
-        # Uncomment this if you want to see which one hits:
-        # print(f"[IMAGE_LOADER] Using libwebp from: {lib}")
         break
     except OSError:
         continue
 
 if _libwebp:
-    _libwebp.WebPGetInfo.argtypes = [
-        ctypes.c_char_p,
-        ctypes.c_size_t,
-        ctypes.POINTER(ctypes.c_int),
-        ctypes.POINTER(ctypes.c_int),
-    ]
+    _libwebp.WebPGetInfo.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_int),
+                                     ctypes.POINTER(ctypes.c_int)]
     _libwebp.WebPGetInfo.restype = ctypes.c_int
-
-    _libwebp.WebPDecodeRGBAInto.argtypes = [
-        ctypes.c_char_p,
-        ctypes.c_size_t,
-        ctypes.POINTER(ctypes.c_uint8),
-        ctypes.c_size_t,
-        ctypes.c_int,
-    ]
+    _libwebp.WebPDecodeRGBAInto.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_uint8),
+                                            ctypes.c_size_t, ctypes.c_int]
     _libwebp.WebPDecodeRGBAInto.restype = ctypes.POINTER(ctypes.c_uint8)
-
 
 
 class ImageLoader:
@@ -96,22 +55,43 @@ class ImageLoader:
     def read_image(self, image_path):
         ext = image_path.split('.')[-1].lower()
 
-        # --- OPTIMIZED NPY PATH (Uncompressed) ---
-        if ext == "npy":
-            # Load raw memory block (2, H, W)
-            stack = np.load(image_path)
+        # --- [INSERTED] Hybrid Asset Support ---
+        if ext == "spy":
+            # Raw Memory Map (Fastest)
+            return np.load(image_path, mmap_mode='r'), False
 
-            # Layer 0 is Chars (uint8), View as S1 (Bytes/Char)
-            # This is a metadata change only, zero CPU cost
+        if ext == "spz":
+            # Compressed Archive
+            with np.load(image_path) as data:
+                # Key is 'image' from our baker, or fallback 'arr_0'
+                key = 'image' if 'image' in data else 'arr_0'
+                return data[key], False
+
+        if ext == "npy":
+            # ASCII Stack
+            stack = np.load(image_path, mmap_mode='r')
             chars = stack[0].view('S1')
             colors = stack[1]
-
             return {'chars': chars, 'colors': colors}, False
+        # ---------------------------------------
 
-        # --- LEGACY NPZ PATH (Compressed) ---
+        # --- NPZ PATH (Smart Handling: Headless vs Legacy) ---
         if ext == "npz":
-            data = np.load(image_path)
-            return {'chars': data['chars'], 'colors': data['colors']}, False
+            # We must load the archive to check keys
+            with np.load(image_path) as data:
+                # 1. HEADLESS IMAGE? (Look for 'image' key)
+                if 'image' in data:
+                    return data['image'], False
+
+                # 2. LEGACY ASCII? (Look for 'chars' and 'colors')
+                elif 'chars' in data and 'colors' in data:
+                    return {'chars': data['chars'], 'colors': data['colors']}, False
+
+                # 3. GENERIC FALLBACK
+                else:
+                    # Just grab the first array found (usually 'arr_0')
+                    key = data.files[0]
+                    return data[key], False
 
         # --- STANDARD IMAGES ---
         if ext == "webp": return self._read_webp(image_path)
