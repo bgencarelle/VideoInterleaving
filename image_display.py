@@ -5,7 +5,7 @@ from collections import deque
 import threading
 
 import numpy as np
-import webp  # Strict Requirement: pip install webp
+#import webp  # Strict Requirement: pip install webp
 from turbojpeg import TurboJPEG  # Strict Requirement: pip install PyTurboJPEG
 
 import settings
@@ -34,9 +34,6 @@ FIFO_LENGTH = getattr(settings, 'FIFO_LENGTH', 30)
 BACKGROUND_COLOR = getattr(settings, 'BACKGROUND_COLOR', (0, 0, 0))
 
 # Streaming Settings
-WEBP_STREAMING = getattr(settings, 'WEBP_STREAMING', False)
-WEBP_LOSSLESS = getattr(settings, 'WEBP_LOSSLESS', False)
-WEBP_QUALITY = getattr(settings, 'WEBP_QUALITY', 55)
 JPEG_QUALITY = getattr(settings, 'JPEG_QUALITY', 55)
 SERVER_CAPTURE_RATE = getattr(settings, "SERVER_CAPTURE_RATE", FPS or 10)
 HEADLESS_RES = getattr(settings, "HEADLESS_RES", (480, 640))
@@ -189,9 +186,8 @@ def run_display(clock_source=CLOCK_MODE):
 
     # --- LOGGING ---
     if is_web:
-        mode_str = "WEBP" if WEBP_STREAMING else "MJPEG"
-        qual_str = "LOSSLESS" if (
-                WEBP_STREAMING and WEBP_LOSSLESS) else f"Q={WEBP_QUALITY if WEBP_STREAMING else JPEG_QUALITY}"
+        mode_str = "MJPEG"
+        qual_str = JPEG_QUALITY
         print(f"[DISPLAY] Stream Encoder: {mode_str} ({qual_str})")
     # --------------------
 
@@ -418,17 +414,6 @@ def run_display(clock_source=CLOCK_MODE):
 
                         if frame is not None:
                             if is_web:
-                                if WEBP_STREAMING:
-                                    pic = webp.WebPPicture.from_numpy(frame)
-                                    if WEBP_LOSSLESS:
-                                        config = webp.WebPConfig.new(preset=webp.WebPPreset.PHOTO, quality=100)
-                                        config.lossless = 1
-                                    else:
-                                        config = webp.WebPConfig.new(preset=webp.WebPPreset.PHOTO, quality=WEBP_QUALITY)
-                                        config.lossless = 0
-                                    buf = pic.encode(config).buffer()
-                                    exchange.set_frame(b'w' + bytes(buf))
-                                else:
                                     enc = jpeg.encode(frame, quality=JPEG_QUALITY, pixel_format=0)
                                     exchange.set_frame(b'j' + enc)
 

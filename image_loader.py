@@ -2,28 +2,69 @@ import threading
 from collections import deque
 import ctypes
 import numpy as np
-import os
 from settings import MAIN_FOLDER_PATH, FLOAT_FOLDER_PATH, TOLERANCE
 
 from turbojpeg import TurboJPEG, TJPF_RGB
+from ctypes.util import find_library
 
 jpeg = TurboJPEG()
 
+# ---------------------------------------------------------------------
+# libwebp dynamic loader (fast path for .webp decoding)
+# ---------------------------------------------------------------------
+
 _libwebp = None
-for lib in ("libwebp.so", "libwebp.so.7", "libwebp.so.6", "libwebp.dylib", "libwebp-7.dll"):
+
+# 1) Try system/loader default using ctypes.util.find_library
+libname = find_library("webp")
+_candidate_libs = []
+
+if libname:
+    # On macOS this often returns something like "libwebp.dylib" or a full path.
+    _candidate_libs.append(libname)
+
+# 2) Fallback: common bare names
+_candidate_libs.extend([
+    "libwebp.so",
+    "libwebp.so.7",
+    "libwebp.so.6",
+    "libwebp.dylib",
+    "libwebp-7.dll",
+])
+
+# 3) Fallback: common Homebrew locations (Apple Silicon / Intel)
+_candidate_libs.extend([
+    "/opt/homebrew/opt/webp/lib/libwebp.dylib",   # Apple Silicon default
+    "/usr/local/opt/webp/lib/libwebp.dylib",      # Intel default
+])
+
+for lib in _candidate_libs:
     try:
         _libwebp = ctypes.CDLL(lib)
+        # Uncomment this if you want to see which one hits:
+        # print(f"[IMAGE_LOADER] Using libwebp from: {lib}")
         break
     except OSError:
         continue
 
 if _libwebp:
-    _libwebp.WebPGetInfo.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_int),
-                                     ctypes.POINTER(ctypes.c_int)]
+    _libwebp.WebPGetInfo.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+    ]
     _libwebp.WebPGetInfo.restype = ctypes.c_int
-    _libwebp.WebPDecodeRGBAInto.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_uint8),
-                                            ctypes.c_size_t, ctypes.c_int]
+
+    _libwebp.WebPDecodeRGBAInto.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.c_size_t,
+        ctypes.c_int,
+    ]
     _libwebp.WebPDecodeRGBAInto.restype = ctypes.POINTER(ctypes.c_uint8)
+
 
 
 class ImageLoader:

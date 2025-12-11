@@ -48,10 +48,13 @@ MIDI_MODE = False
 
 # --- SERVER MODE CONFIGURATION ---
 SERVER_MODE = True      # Enable headless streaming
-HEADLESS_USE_GL = True   # new: disable ModernGL headless on VPS
-SERVER_CAPTURE_RATE = FPS     # Streaming FPS
+HEADLESS_USE_GL = True  # new: disable ModernGL headless on VPS
+SERVER_CAPTURE_RATE = FPS / 2   #  FPS by 2
 
 # --- ASCII MODE SETTINGS ---
 ASCII_MODE = False
 ASCII_COLOR = True
+ASCII_FPS = SERVER_CAPTURE_RATE / 2
 
+JPEG_QUALITY = 80# Image quality
+HEADLESS_RES = (400, 533)   # Resolution for the virtual screen
