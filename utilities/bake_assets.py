@@ -6,19 +6,21 @@ import cv2
 from concurrent.futures import ProcessPoolExecutor
 from PIL import Image
 
-ROOT = os.path.dirname(os.path.dirname(__file__))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
+# --- 1. SETUP PATHS ---
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
 import settings
 
-# --- 1. GLOBAL CONSTANTS ---
+# --- 2. CONSTANTS ---
 _raw_chars = getattr(settings, 'ASCII_PALETTE', 'MB8NG9SEaemvyznocrtlj17i. ')
-# FORCE S1 (1-byte string) so we can cast to uint8 easily
 CHARS = np.asarray(list(_raw_chars), dtype='S1')
 
 _gamma_val = getattr(settings, 'ASCII_GAMMA', 1.0)
 GAMMA_LUT = np.array([((i / 255.0) ** _gamma_val) * 255 for i in range(256)], dtype=np.uint8)
+
+HEADLESS_RES = getattr(settings, 'HEADLESS_RES', (640, 480))
 
 
 def load_image_rgba(filepath):
@@ -27,101 +29,94 @@ def load_image_rgba(filepath):
             if img.mode != 'RGBA':
                 img = img.convert('RGBA')
             return np.array(img)
-    except Exception:
+    except:
         return None
 
 
-def image_to_stacked_array(frame_rgba):
-    """
-    Converts RGBA -> Stacked (2, H, W) uint8 array.
-    Layer 0: Char ASCII codes
-    Layer 1: Color IDs
-    """
-    if frame_rgba is None: return None
-
-    # --- GEOMETRY ---
+# --- GENERATORS ---
+def generate_ascii_stack(frame_rgba):
     max_cols = getattr(settings, 'ASCII_WIDTH', 90)
     max_rows = getattr(settings, 'ASCII_HEIGHT', 60)
     font_ratio = getattr(settings, 'ASCII_FONT_RATIO', 0.5)
 
     h, w = frame_rgba.shape[:2]
     scale = max(max_cols / w, max_rows / (h * font_ratio))
-    new_w, new_h = int(w * scale), int(h * scale * font_ratio)
-    new_w, new_h = max(1, new_w), max(1, new_h)
+    nw, nh = max(1, int(w * scale)), max(1, int(h * scale * font_ratio))
 
-    # Resize & Crop
     interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LANCZOS4
-    frame_resized = cv2.resize(frame_rgba, (new_w, new_h), interpolation=interp)
+    frame = cv2.resize(frame_rgba, (nw, nh), interpolation=interp)
 
-    x_off = (new_w - max_cols) // 2
-    y_off = (new_h - max_rows) // 2
-    frame = frame_resized[y_off:y_off + max_rows, x_off:x_off + max_cols]
+    dx, dy = (nw - max_cols) // 2, (nh - max_rows) // 2
+    frame = frame[dy:dy + max_rows, dx:dx + max_cols]
 
-    # Split
-    rgb = frame[:, :, :3].astype(float)
-    alpha = frame[:, :, 3]
+    rgb, alpha = frame[:, :, :3].astype(float), frame[:, :, 3]
 
-    # --- COLOR GRADING ---
     contrast = getattr(settings, 'ASCII_CONTRAST', 1.0)
-    bright_mult = getattr(settings, 'ASCII_BRIGHTNESS', 1.0)
+    bright = getattr(settings, 'ASCII_BRIGHTNESS', 1.0)
+    sat = getattr(settings, 'ASCII_SATURATION', 1.0)
 
     if contrast != 1.0: rgb = (rgb - 128.0) * contrast + 128.0
-    if bright_mult != 1.0: rgb = rgb * bright_mult
+    if bright != 1.0: rgb *= bright
     rgb = np.clip(rgb, 0, 255).astype(np.uint8)
 
-    # Saturation
-    sat_mult = getattr(settings, 'ASCII_SATURATION', 1.0)
-    if sat_mult != 1.0:
+    if sat != 1.0:
         hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV).astype(float)
-        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * sat_mult, 0, 255)
-        frame_boosted = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
-    else:
-        frame_boosted = rgb
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * sat, 0, 255)
+        rgb = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
 
-    # --- MAPPING ---
-    gray = cv2.cvtColor(frame_boosted, cv2.COLOR_RGB2GRAY)
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     gray = cv2.LUT(gray, GAMMA_LUT)
     indices = ((255 - gray) / 255 * (len(CHARS) - 1)).astype(int)
 
-    # CHARS GRID (S1 type)
     char_grid = CHARS[indices]
+    char_grid[alpha < 50] = b' '
 
-    # Apply Transparency (Space char)
-    alpha_mask = alpha < 50
-    char_grid[alpha_mask] = b' '  # Note the b for bytes
+    small = rgb.astype(int)
+    c_ids = 16 + (36 * (small[:, :, 0] * 5 // 255)) + (6 * (small[:, :, 1] * 5 // 255)) + (small[:, :, 2] * 5 // 255)
 
-    # COLOR ID GRID (uint8)
-    small = frame_boosted.astype(int)
-    r, g, b = small[:, :, 0], small[:, :, 1], small[:, :, 2]
-    color_ids = 16 + (36 * (r * 5 // 255)) + (6 * (g * 5 // 255)) + (b * 5 // 255)
-
-    # --- OPTIMIZATION: STACKING ---
-    # Convert Chars (S1) -> uint8
-    chars_uint8 = char_grid.view(np.uint8)
-    colors_uint8 = color_ids.astype(np.uint8)
-
-    # Stack into shape (2, H, W)
-    # This creates a single contiguous block of memory
-    return np.stack([chars_uint8, colors_uint8], axis=0)
+    return np.stack([char_grid.view(np.uint8), c_ids.astype(np.uint8)], axis=0)
 
 
-def process_file(args):
-    src, dest = args
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
+def generate_headless_img(frame_rgba, posterize=False):
+    # 1. Resize
+    resized = cv2.resize(frame_rgba, HEADLESS_RES, interpolation=cv2.INTER_AREA)
 
-    # Check if target exists to skip? (Optional)
-    # if os.path.exists(dest): return None
+    # 2. Optimize Channels (Strip Alpha if opaque)
+    if resized.shape[2] == 4 and np.min(resized[:, :, 3]) == 255:
+        final_img = resized[:, :, :3]
+    else:
+        final_img = resized
+
+    # 3. Posterize (Entropy Reduction)
+    if posterize:
+        if final_img.shape[2] == 4:
+            rgb = final_img[:, :, :3]
+            alpha = final_img[:, :, 3]
+            rgb = np.bitwise_and(rgb, 0xFC)  # Zero out lowest 2 bits
+            final_img = np.dstack((rgb, alpha))
+        else:
+            final_img = np.bitwise_and(final_img, 0xFE)
+
+    return final_img
+
+
+def process_hybrid(args):
+    src, ascii_dest, img_dest, do_posterize = args
+
+    os.makedirs(os.path.dirname(ascii_dest), exist_ok=True)
+    os.makedirs(os.path.dirname(img_dest), exist_ok=True)
 
     img = load_image_rgba(src)
     if img is None: return f"Load Error: {src}"
 
     try:
-        # Get the stacked array
-        packed_data = image_to_stacked_array(img)
+        # 1. ASCII (.npy)
+        np.save(ascii_dest, generate_ascii_stack(img))
 
-        # Save as RAW .npy (Uncompressed)
-        # This is much faster to read later
-        np.save(dest, packed_data)
+        # 2. HEADLESS (.npz)
+        optimized_img = generate_headless_img(img, posterize=do_posterize)
+        np.savez_compressed(img_dest, image=optimized_img)
+
         return None
     except Exception as e:
         return f"Error {src}: {e}"
@@ -135,14 +130,39 @@ def get_directory_interactive(prompt_text):
 
 
 def main():
-    print("--- RECURSIVE ASCII BAKER (Ultra-Fast .npy format) ---")
+    print("--- HYBRID ASSET BAKER (v6 Interactive) ---")
+
     input_root = get_directory_interactive("Enter SOURCE root directory: ")
     while not os.path.isdir(input_root):
         print("Invalid directory.")
         input_root = get_directory_interactive("Enter SOURCE root directory: ")
 
-    default_out = input_root.rstrip(os.sep) + "_npy"
-    output_root = input(f"Enter OUTPUT root directory [default: {default_out}]: ").strip() or default_out
+    # OPTIMIZATION SWITCH
+    opt_choice = input("Enable bit-depth reduction (smaller files, slightly lossy)? [Y/n]: ").strip().lower()
+    do_posterize = opt_choice != 'n'
+
+    suffix = "_opt" if do_posterize else ""
+
+    # Clean input path to get base name
+    clean_path = input_root.rstrip(os.sep)
+
+    # 1. ASCII Naming: Name_WxH_ascii
+    w_asc = getattr(settings, 'ASCII_WIDTH', 90)
+    h_asc = getattr(settings, 'ASCII_HEIGHT', 60)
+    ascii_root = f"{clean_path}_{w_asc}x{h_asc}_ascii"
+
+    # 2. Headless Naming: Name_WxH_headless[_opt]
+    w_head, h_head = HEADLESS_RES
+    headless_root = f"{clean_path}_{w_head}x{h_head}_headless{suffix}"
+
+    print(f"\nConfiguration:")
+    print(f"  Posterization: {'ENABLED' if do_posterize else 'DISABLED'}")
+    print(f"\nOutputs:")
+    print(f"  ASCII    (.npy) -> {ascii_root}")
+    print(f"  HEADLESS (.npz) -> {headless_root}")
+
+    confirm = input("\nProceed? [Y/n]: ").lower()
+    if confirm == 'n': return
 
     tasks = []
     valid_exts = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
@@ -153,26 +173,39 @@ def main():
             if file.lower().endswith(valid_exts):
                 src = os.path.join(root, file)
                 rel = os.path.relpath(src, input_root)
-                # Change extension to .npy
-                dest = os.path.join(output_root, os.path.splitext(rel)[0] + ".npy")
-                tasks.append((src, dest))
+
+                # ASCII DEST
+                d_npy = os.path.join(ascii_root, os.path.splitext(rel)[0])
+
+                # HEADLESS DEST
+                d_npz = os.path.join(headless_root, os.path.splitext(rel)[0])
+
+                tasks.append((src, d_npy, d_npz, do_posterize))
 
     total = len(tasks)
     if not total: return print("No images found.")
 
-    print(f"Baking {total} images to '{output_root}'...")
-    print("Using .npy format (Uncompressed) for maximum read speed.\n")
-
+    print(f"Baking {total} images using {os.cpu_count()} cores...")
     start = time.time()
     errors = []
+    processed_count = 0
+
     with ProcessPoolExecutor() as ex:
-        results = ex.map(process_file, tasks)
-        for i, res in enumerate(results):
+        futures = {ex.submit(process_hybrid, t): t for t in tasks}
+        for future in futures:
+            res = future.result()
+            processed_count += 1
             if res: errors.append(res)
-            sys.stdout.write(f"\r[ {i + 1}/{total} ] {((i + 1) / total) * 100:5.1f}%")
+
+            percent = (processed_count / total) * 100
+            bar_len = 30
+            filled = int(bar_len * processed_count // total)
+            bar = '█' * filled + '-' * (bar_len - filled)
+            sys.stdout.write(f'\rProgress: |{bar}| {percent:.1f}% ({processed_count}/{total})')
             sys.stdout.flush()
 
-    print(f"\n\nDone in {time.time() - start:.2f}s. Errors: {len(errors)}")
+    print(f"\n\nDone in {time.time() - start:.2f}s.")
+    print(f"Errors: {len(errors)}")
     if errors:
         for e in errors: print(e)
 
