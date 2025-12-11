@@ -19,7 +19,7 @@ import shutil
 from itertools import zip_longest
 from PIL import Image
 from collections import defaultdict
-import numpy as np  # [ADDED] Needed to read .npy headers
+import numpy as np  # [ADDED]
 
 import settings
 
@@ -43,14 +43,18 @@ def get_subdirectories(path):
 
 def contains_image_files(path):
     try:
-        return any(f.lower().endswith(('.png', '.webp', '.jpg', 'jpeg', '.npy')) for f in os.listdir(path))
+        # [MODIFIED] Added new extensions
+        valid = ('.png', '.webp', '.jpg', 'jpeg', '.npy', '.npz', '.spz', '.spy')
+        return any(f.lower().endswith(valid) for f in os.listdir(path))
     except FileNotFoundError:
         return False
 
 
 def count_image_files(path):
     try:
-        return len([f for f in os.listdir(path) if f.lower().endswith(('.png', '.webp', '.npy', '.jpg', 'jpeg'))])
+        # [MODIFIED] Added new extensions
+        valid = ('.png', '.webp', '.jpg', 'jpeg', '.npy', '.npz', '.spz', '.spy')
+        return len([f for f in os.listdir(path) if f.lower().endswith(valid)])
     except FileNotFoundError:
         return 0
 
@@ -117,13 +121,17 @@ def scan_directory_recursive(base_path, script_dir, folder_type):
         # 1. STRICT FILTER: Check name before scanning content
         if subdir != base_path:
             if not check_folder_prefix(subdir, folder_type):
+                # Silently ignore 999_ or wrong types
                 continue
 
         # 2. Check for images
         if not contains_image_files(subdir):
             continue
 
-        image_files = [f for f in os.listdir(subdir) if f.lower().endswith(('.png', '.webp', '.npy', '.jpg', '.jpeg'))]
+        # [MODIFIED] Added extensions to list comprehension
+        valid = ('.png', '.webp', '.jpg', 'jpeg', '.npy', '.npz', '.spz', '.spy')
+        image_files = [f for f in os.listdir(subdir) if f.lower().endswith(valid)]
+
         if not image_files:
             continue
 
@@ -135,20 +143,46 @@ def scan_directory_recursive(base_path, script_dir, folder_type):
 
         try:
             file_path = os.path.join(subdir, first_image)
+            ext = first_image.split('.')[-1].lower()
 
-            if first_image.lower().endswith('.npy'):
-                try:
-                    data = np.load(file_path)
-                    # Shape is (2, H, W) -> H, W are indices 1, 2
-                    _, h_arr, w_arr = data.shape
+            # --- [INSERTED] Handle New Types ---
+            if ext == 'npy':
+                # ASCII Stack
+                data = np.load(file_path, mmap_mode='r')
+                if data.ndim == 3 and data.shape[0] == 2:
+                    width, height = int(data.shape[2]), int(data.shape[1])
+                    has_alpha = True
+                else:
+                    width, height = data.shape[1], data.shape[0]
+                    has_alpha = False
+
+            elif ext in ('spz', 'npz'):
+                # Compressed Image
+                with np.load(file_path) as archive:
+                    if 'image' in archive:
+                        img = archive['image']
+                    elif 'chars' in archive:
+                        img = archive['chars']  # Legacy
+                    else:
+                        img = archive[archive.files[0]]
+
+                    if img.ndim == 3:
+                        h_arr, w_arr = img.shape[:2]
+                        has_alpha = (img.shape[2] == 4)
+                    else:
+                        h_arr, w_arr = img.shape
+                        has_alpha = False
                     width, height = int(w_arr), int(h_arr)
-                    # Check for spaces in layer 0 (Chars)
-                    has_alpha = bool(np.any(data[0].view('S1') == b' '))
-                except Exception as e:
-                    print(f"Error reading npy {first_image}: {e}")
-                    raise e
+
+            elif ext == 'spy':
+                # Raw Image
+                img = np.load(file_path, mmap_mode='r')
+                h_arr, w_arr = img.shape[:2]
+                width, height = int(w_arr), int(h_arr)
+                has_alpha = (img.shape[2] == 4) if img.ndim == 3 else False
+
+            # --- [ORIGINAL] Standard Images ---
             else:
-                # Handle Standard Image (PIL)
                 with Image.open(file_path) as img:
                     width, height = img.size
                     has_alpha = has_alpha_channel(img)
@@ -289,8 +323,11 @@ def sort_image_files(folder_dict):
     sorted_files = []
     for num in sorted(folder_dict.keys()):
         folder = folder_dict[num]
-        imgs = [os.path.join(folder, x) for x in os.listdir(folder)
-                if x.lower().endswith(('.png', '.npy', '.webp', '.jpg', '.jpeg'))]
+
+        # [MODIFIED] Added extensions
+        valid = ('.png', '.webp', '.jpg', 'jpeg', '.npy', '.npz', '.spz', '.spy')
+        imgs = [os.path.join(folder, x) for x in os.listdir(folder) if x.lower().endswith(valid)]
+
         imgs.sort(key=natural_sort_key)
         sorted_files.append(imgs)
     return sorted_files
