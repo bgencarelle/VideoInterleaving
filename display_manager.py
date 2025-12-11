@@ -6,6 +6,8 @@ import moderngl
 import numpy as np
 import settings
 import renderer
+import sys
+import os
 
 # --- Conditional Imports ---
 _GLFW_AVAILABLE = False
@@ -18,7 +20,7 @@ try:
 except ImportError:
     glfw = None
     if not settings.SERVER_MODE:
-        print("Warning: GLFW/PyOpenGL not found. System will run in CPU-only mode.")
+        print("Warning: GLFW/PyOpenGL not found. Local window creation will fail.")
 
 from settings import (
     INITIAL_ROTATION, INITIAL_MIRROR, CONNECTED_TO_RCA_HDMI,
@@ -47,6 +49,9 @@ class HeadlessWindow:
     def use(self) -> None:
         self.fbo.use()
 
+    def swap_buffers(self):
+        pass
+
 def _largest_mode(monitor):
     if not glfw: return None
     modes = glfw.get_video_modes(monitor)
@@ -57,56 +62,91 @@ def _log_renderer_info(ctx):
         info = ctx.info
         renderer_name = info.get('GL_RENDERER', 'Unknown')
         print(f"[DISPLAY] GL Context: {renderer_name}")
-        if "llvmpipe" in renderer_name.lower():
-            print("[DISPLAY] ⚠️  Software Rasterizer Detected (High CPU).")
+        if "llvmpipe" in renderer_name.lower() or "softpipe" in renderer_name.lower():
+            print("[DISPLAY] ℹ️  Using Software Rasterizer (Optimized CPU Rendering).")
     except:
         pass
 
+def _check_is_pi():
+    """Detect Raspberry Pi to enforce GLES contexts."""
+    try:
+        if os.path.exists('/proc/device-tree/model'):
+            with open('/proc/device-tree/model', 'r') as m:
+                if 'Raspberry Pi' in m.read():
+                    return True
+    except:
+        pass
+    return False
+
 def display_init(state: DisplayState):
     global window, ctx
+
+    is_pi = _check_is_pi()
+    if is_pi:
+        print("[DISPLAY] Hardware: Raspberry Pi detected (Enforcing GLES 3.1)")
 
     # --- PATH A: SERVER / HEADLESS MODE ---
     is_server = settings.SERVER_MODE
     is_ascii = getattr(settings, 'ASCII_MODE', False)
 
-    # Enable GL for BOTH Server and ASCII
     if is_server or is_ascii:
         use_gl = getattr(settings, "HEADLESS_USE_GL", False)
 
         if not use_gl:
-            print(f"[DISPLAY] {'ASCII' if is_ascii else 'SERVER'} MODE: GL disabled. Using CPU compositor.")
-            return None
+            print("❌ CONFIG ERROR: HEADLESS_USE_GL must be True in settings.py for performance.")
+            sys.exit(1)
 
-        if not _GLFW_AVAILABLE:
-            print(f"[DISPLAY] GL libs missing. Fallback to CPU.")
-            return None
+        # --- BACKEND WATERFALL STRATEGY ---
+        preferred = getattr(settings, "HEADLESS_BACKEND", None)
+        backends_to_try = []
 
-        try:
-            backend = getattr(settings, "HEADLESS_BACKEND", None)
-            create_kwargs = {"standalone": True}
-            if backend: create_kwargs["backend"] = backend
-            ctx = moderngl.create_context(**create_kwargs)
-            _log_renderer_info(ctx)
-        except Exception as e:
-            print(f"[DISPLAY] Failed to create headless GL context: {e}")
-            return None
+        if preferred: backends_to_try.append(preferred)
+        if 'egl' not in backends_to_try: backends_to_try.append('egl')
+        if 'osmesa' not in backends_to_try: backends_to_try.append('osmesa')
+        if None not in backends_to_try: backends_to_try.append(None)
+
+        context_created = False
+        last_error = None
+
+        print("[DISPLAY] Initializing Headless GL...")
+
+        for backend in backends_to_try:
+            try:
+                create_kwargs = {"standalone": True}
+                if backend: create_kwargs["backend"] = backend
+
+                # --- PI FIX: REQUEST GLES 3.1 ---
+                if is_pi:
+                    create_kwargs["require"] = 310
+
+                ctx = moderngl.create_context(**create_kwargs)
+                context_created = True
+                _log_renderer_info(ctx)
+                break
+            except Exception as e:
+                last_error = e
+                continue
+
+        if not context_created:
+            print("\n" + "!"*60)
+            print("❌ HEADLESS GL CONTEXT FAILED")
+            print("All requested backends failed to initialize.")
+            print(f"Last Error: {last_error}")
+            print("Tip: If on Pi, ensure 'libgles2-mesa-dev' is installed.")
+            print("!"*60 + "\n")
+            sys.exit(1)
 
         # --- SMART RESOLUTION SELECTION ---
         if is_ascii:
-            # OPTIMIZATION: Render directly to tiny ASCII dimensions.
-            # GPU does the downscaling/blending instantly.
-            # CPU reads back a tiny buffer (fast!).
             w = getattr(settings, 'ASCII_WIDTH', 120)
             h = getattr(settings, 'ASCII_HEIGHT', 60)
-            # Ensure even numbers for alignment safety
             width = w if w % 2 == 0 else w + 1
             height = h if h % 2 == 0 else h + 1
             print(f"[DISPLAY] Optimized ASCII Render Target: {width}x{height}")
         else:
-            # Web Mode: Use high-quality resolution
-            width, height = getattr(settings, "HEADLESS_RES", (1280, 720))
+            width, height = getattr(settings, "HEADLESS_RES", (640, 480))
 
-        tex = ctx.texture((width, height), components=4)
+        tex = ctx.texture((width, height), components=3)
         fbo = ctx.framebuffer(color_attachments=[tex])
         fbo.use()
 
@@ -114,8 +154,6 @@ def display_init(state: DisplayState):
 
         renderer.initialize(ctx)
 
-        # Pass Container Size (FBO) and Content Size (Source Image)
-        # The renderer handles aspect-ratio letterboxing automatically.
         renderer.set_transform_parameters(
             fs_scale=1.0, fs_offset_x=0.0, fs_offset_y=0.0,
             image_size=state.image_size,
@@ -128,20 +166,18 @@ def display_init(state: DisplayState):
 
     # --- PATH B: LOCAL WINDOWED MODE ---
     if not _GLFW_AVAILABLE:
-        return None
+        print("❌ ERROR: GLFW/PyOpenGL not installed. Cannot open local window.")
+        sys.exit(1)
 
     img_w, img_h = state.image_size
     eff_w, eff_h = (img_h, img_w) if state.rotation % 180 == 90 else (img_w, img_h)
 
     if window is None:
-        if not glfw.init(): return None
+        if not glfw.init():
+            print("❌ ERROR: GLFW Init failed.")
+            sys.exit(1)
 
-        is_pi = False
-        try:
-            with open('/proc/device-tree/model', 'r') as m:
-                if 'Raspberry Pi' in m.read(): is_pi = True
-        except: pass
-
+        # Apply Pi Hints for Window creation
         if is_pi:
             glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_ES_API)
             glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
@@ -172,13 +208,17 @@ def display_init(state: DisplayState):
 
         if not window:
             glfw.terminate()
-            return None
+            print("❌ ERROR: Window creation failed.")
+            sys.exit(1)
 
         glfw.make_context_current(window)
         glfw.swap_interval(1 if VSYNC else 0)
 
-        if is_pi: ctx = moderngl.create_context(require=310)
-        else: ctx = moderngl.create_context()
+        # Apply Pi Hints for Context creation
+        if is_pi:
+            ctx = moderngl.create_context(require=310)
+        else:
+            ctx = moderngl.create_context()
 
         _log_renderer_info(ctx)
         renderer.initialize(ctx)
