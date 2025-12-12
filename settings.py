@@ -30,18 +30,12 @@ FIFO_LENGTH = 30
 # Run mode stuff
 PINGPONG = True
 FROM_BIRTH = True
-TEST_MODE = True
 
 # web stuff
 HTTP_MONITOR = True  # or True
 WEB_PORT = BIRTH_YEAR  # web port is year of birth
 FRAME_COUNTER_DISPLAY = True  # If the monitor is on, skip printing
 
-# For testing purposes.
-if TEST_MODE:
-    SHOW_DELTA = not HTTP_MONITOR
-else:
-    SHOW_DELTA = False
 
 # If using MIDI-based clock mode.
 MIDI_MODE = False
