@@ -3,13 +3,10 @@
 <head>
   <meta charset="utf-8">
   <title>VideoInterleaving Terminal</title>
-
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-
   <link rel="stylesheet" href="/static/xterm.css" />
   <link rel="stylesheet" href="/static/terminal.css" />
-
-  <script src="/static/xterm.js" onerror="alert('CRITICAL ERROR: /static/xterm.js not found.')"></script>
+  <script src="/static/xterm.js"></script>
 </head>
 <body>
 
@@ -20,135 +17,144 @@
   <script>
     const WS_PORT = 2324;
 
-    // --- 1. CONFIGURATION ---
-    // Python will replace these  values. If Nginx serves this raw, it falls back to 80x24.
-    // NOTE: The Nginx fix below is required for this to work on the web!
+    // --- SETTINGS ---
     const COLS = parseInt("{{ASCII_WIDTH}}") || 80;
     const ROWS = parseInt("{{ASCII_HEIGHT}}") || 24;
+    const TARGET_PIXEL_RATIO = parseFloat("{{ASCII_FONT_RATIO}}") || 0.5;
 
-    // --- 2. SETUP TERMINAL ---
-    if (typeof Terminal === 'undefined') {
-        throw new Error("xterm.js library missing");
+    // Ideal Ratio of the whole image
+    const IMAGE_ASPECT_RATIO = (COLS * TARGET_PIXEL_RATIO) / ROWS;
+
+    if (typeof Terminal === 'undefined') throw new Error("xterm.js missing");
+
+    // --- 1. MEASURE FONT ---
+    function measureFont(fontFamily, fontSize) {
+        const span = document.createElement('span');
+        span.style.fontFamily = fontFamily;
+        span.style.fontSize = fontSize + 'px';
+        span.style.visibility = 'hidden';
+        span.style.whiteSpace = 'nowrap';
+        span.textContent = 'M'.repeat(20);
+        document.body.appendChild(span);
+        const w = span.getBoundingClientRect().width / 20;
+        const h = span.getBoundingClientRect().height;
+        document.body.removeChild(span);
+        return { w, h };
     }
 
-    const term = new Terminal({
-      cols: COLS,
-      rows: ROWS,
-      fontFamily: 'Courier New, monospace',
-      fontSize: 14,
-      lineHeight: 1.0,
-      cursorBlink: false,
-      disableStdin: true,
-      theme: { background: '#000000', foreground: '#e6e6e6' },
-      allowTransparency: false
-    });
+    // --- 2. INIT ---
+    function initTerminal() {
+        const FONT_SIZE = 12;
+        const FONT_FAMILY = 'Unscii, monospace';
 
-    term.open(document.getElementById('terminal'));
+        const m = measureFont(FONT_FAMILY, FONT_SIZE);
 
-    // --- 3. ROBUST SCALING LOGIC ---
-    function fitToScreen() {
-      const termEl = document.getElementById('terminal');
-      // The .xterm-screen element is created by xterm.js and holds the actual canvas/dom
-      const screenEl = termEl.querySelector('.xterm-screen');
+        // Solver: Create scanlines to match target ratio
+        let lh = m.w / (m.h * TARGET_PIXEL_RATIO);
+        if (lh < 0.8) lh = 0.8;
 
-      if (!screenEl) return false;
+        console.log(`[Solver] LH: ${lh.toFixed(3)}`);
 
-      const srcW = screenEl.clientWidth;
-      const srcH = screenEl.clientHeight;
+        const term = new Terminal({
+            cols: COLS, rows: ROWS,
+            fontFamily: FONT_FAMILY,
+            fontSize: FONT_SIZE,
+            lineHeight: lh,
+            letterSpacing: 0,
+            cursorBlink: false, disableStdin: true,
+            theme: { background: '#000000', foreground: '#e6e6e6' },
+            allowTransparency: false
+        });
 
-      // If dimensions are 0, the CSS or Font hasn't loaded yet. Abort.
-      if (srcW < 1 || srcH < 1) return false;
+        term.open(document.getElementById('terminal'));
 
-      const targetW = window.innerWidth;
-      const targetH = window.innerHeight;
-
-      // Scale to fit screen edges
-      const scale = Math.min(targetW / srcW, targetH / srcH);
-
-      termEl.style.transform = `scale(${scale})`;
-      return true;
+        setupFit(term);
+        connect(term);
     }
 
-    // A recursive safer fit that waits for valid dimensions
-    function safeFit() {
-        if (fitToScreen()) {
-            console.log("Terminal scaled successfully.");
-        } else {
-            console.log("Waiting for layout...");
-            requestAnimationFrame(safeFit);
-        }
-    }
+    // --- 3. FIT TO SCREEN (FIXED) ---
+    function setupFit(term) {
+        const fitToScreen = () => {
+            const termEl = document.getElementById('terminal');
+            const screenEl = termEl.querySelector('.xterm-screen');
 
-    // --- 4. WEBSOCKET ---
-    function connect() {
-      const protocol = location.protocol === 'https:' ? 'wss://' : 'ws://';
-      let wsUrl;
+            // [FIX] Use clientWidth (Unscaled dimensions) instead of getBoundingClientRect
+            if (!screenEl || screenEl.clientWidth < 1) return false;
 
-      // LOGIC: Are we running on standard web ports (80/443)?
-      if (location.port === "" || location.port === "80" || location.port === "443") {
-          // PRODUCTION (Nginx): Use the routed tunnel
-          wsUrl = protocol + location.hostname + "/ascii_ws/";
-          console.log("Environment: Production (Nginx Proxy)");
-      } else {
-          // LOCAL (Port 1980): Connect directly to the WebSocket port
-          wsUrl = protocol + location.hostname + ":" + WS_PORT;
-          console.log("Environment: Local (Direct Port)");
-      }
+            const srcW = screenEl.clientWidth;
+            const srcH = screenEl.clientHeight;
 
-      const ws = new WebSocket(wsUrl);
-      ws.binaryType = "arraybuffer";
+            const winW = window.innerWidth;
+            const winH = window.innerHeight;
 
-      ws.onopen = () => {
-        term.reset();
-        // Trigger a re-fit on connection just in case
-        setTimeout(fitToScreen, 50);
-      };
+            // 1. Calculate Target Box (Perfect Aspect Ratio)
+            let targetW, targetH;
+            const windowRatio = winW / winH;
 
-      ws.onmessage = (ev) => {
-        term.write(ev.data);
-      };
+            if (windowRatio > IMAGE_ASPECT_RATIO) {
+                // Window is wider: Height limits us
+                targetH = winH;
+                targetW = targetH * IMAGE_ASPECT_RATIO;
+            } else {
+                // Window is taller: Width limits us
+                targetW = winW;
+                targetH = targetW / IMAGE_ASPECT_RATIO;
+            }
 
-      ws.onclose = () => {
-        console.warn("Connection lost. Reconnecting in 2s...");
-        setTimeout(connect, 2000);
-      };
+            // 2. Safety Margin (99% size)
+            // Keeps it from touching edges and triggering scrollbars
+            targetW *= 0.99;
+            targetH *= 0.99;
 
-      ws.onerror = () => ws.close();
-    }
+            // 3. Calculate Scale
+            // We force the Unscaled Source to match the Target Box
+            const scaleX = targetW / srcW;
+            const scaleY = targetH / srcH;
 
-    // --- STARTUP SEQUENCE ---
-    window.addEventListener('resize', () => requestAnimationFrame(fitToScreen));
+            // 4. Apply
+            termEl.style.transform = `scale(${scaleX}, ${scaleY})`;
 
-    // Wait for Fonts (Courier New) to be ready before doing math
-    document.fonts.ready.then(() => {
-        console.log("Fonts loaded.");
-        connect();
-        // Start checking for valid dimensions to trigger the first scale
+            return true;
+        };
+
+        const safeFit = () => { if (!fitToScreen()) requestAnimationFrame(safeFit); };
+        window.addEventListener('resize', () => requestAnimationFrame(fitToScreen));
         requestAnimationFrame(safeFit);
-    });
-  </script>
+        term.fitFn = safeFit;
+    }
 
-  <!-- HIDE MOUSE AFTER A COUPLE OF SECONDS OF INACTIVITY -->
-  <script>
+    // --- 4. CONNECTION ---
+    function connect(term) {
+        const protocol = location.protocol === 'https:' ? 'wss://' : 'ws://';
+        const wsUrl = (location.port === "" || location.port === "80" || location.port === "443")
+            ? protocol + location.hostname + "/ascii_ws/"
+            : protocol + location.hostname + ":" + WS_PORT;
+
+        const ws = new WebSocket(wsUrl);
+        ws.binaryType = "arraybuffer";
+
+        ws.onopen = () => {
+            term.reset();
+            setTimeout(term.fitFn, 50);
+        };
+        ws.onmessage = (ev) => term.write(ev.data);
+        ws.onclose = () => setTimeout(() => connect(term), 1000);
+        ws.onerror = () => ws.close();
+    }
+
+    // --- BOOT ---
+    document.fonts.load("16px Unscii").then(() => initTerminal()).catch(() => initTerminal());
+
     (function () {
-      let hideTimeout;
-
-      function resetCursorTimer() {
-        // show cursor immediately on activity
+      let t;
+      function reset() {
         document.body.classList.remove('hide-cursor');
-
-        clearTimeout(hideTimeout);
-        hideTimeout = setTimeout(() => {
-          document.body.classList.add('hide-cursor');
-        }, 2000); // 2000 ms = 2 seconds
+        clearTimeout(t);
+        t = setTimeout(() => document.body.classList.add('hide-cursor'), 2000);
       }
-
-      ['mousemove', 'mousedown', 'keydown', 'touchstart'].forEach(eventName => {
-        window.addEventListener(eventName, resetCursorTimer, { passive: true });
-      });
-
-      // start the initial timer
-      resetCursorTimer();
+      ['mousemove', 'mousedown', 'keydown', 'touchstart'].forEach(e =>
+        window.addEventListener(e, reset, { passive: true }));
+      reset();
     })();
   </script>
 </body>
