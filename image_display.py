@@ -26,9 +26,6 @@ FULLSCREEN_MODE = getattr(settings, 'FULLSCREEN_MODE', True)
 PINGPONG = getattr(settings, 'PINGPONG', False)
 FPS = getattr(settings, 'FPS', 30)
 FRAME_COUNTER_DISPLAY = getattr(settings, 'FRAME_COUNTER_DISPLAY', True)
-SHOW_DELTA = getattr(settings, 'SHOW_DELTA', False)
-TEST_MODE = getattr(settings, 'TEST_MODE', False)
-HTTP_MONITOR = getattr(settings, 'HTTP_MONITOR', True)
 CLOCK_MODE = getattr(settings, 'CLOCK_MODE', 0)
 FIFO_LENGTH = getattr(settings, 'FIFO_LENGTH', 30)
 BACKGROUND_COLOR = getattr(settings, 'BACKGROUND_COLOR', (0, 0, 0))
@@ -56,11 +53,9 @@ import ascii_converter
 # Initialize Encoders
 jpeg = TurboJPEG()
 
-monitor = None
-if TEST_MODE and HTTP_MONITOR:
-    from lightweight_monitor import start_monitor
+from lightweight_monitor import start_monitor
 
-    monitor = start_monitor()
+monitor = start_monitor()
 
 
 # -----------------------------------------------------------------------------
@@ -440,7 +435,7 @@ def run_display(clock_source=CLOCK_MODE):
 
             if len(frame_times) > 1:
                 last_actual_fps = 1.0 / (sum(frame_times) / len(frame_times))
-                if not HTTP_MONITOR and FRAME_COUNTER_DISPLAY: print(f"{last_actual_fps:.1f} FPS")
+                #print(f"{last_actual_fps:.1f} FPS")
 
             if monitor:
                 monitor.update({
