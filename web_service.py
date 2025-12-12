@@ -21,6 +21,12 @@ _current_viewer_count = 0
 _count_lock = threading.Lock()
 _viewer_semaphore = threading.Semaphore(MAX_VIEWERS)
 
+# Pre-calculated headers for efficiency
+HEADER_BOUNDARY = b'--frame\r\n'
+HEADER_NEWLINE = b'\r\n'
+HEADER_CTYPE_JPEG = b'Content-Type: image/jpeg\r\n\r\n'
+HEADER_CTYPE_WEBP = b'Content-Type: image/webp\r\n\r\n'
+
 
 def _set_heartbeat(cid):
     with _hb_lock:
@@ -35,50 +41,37 @@ def _clear_heartbeat(cid):
 
 def get_real_ip(handler):
     """Extracts the real IP from Nginx headers or falls back to socket address."""
-    # 1. Try X-Real-IP (Standard Nginx)
     real_ip = handler.headers.get('X-Real-IP')
-
-    # 2. Try X-Forwarded-For (Standard Proxy Chain)
     if not real_ip:
         forwarded = handler.headers.get('X-Forwarded-For')
         if forwarded:
             real_ip = forwarded.split(',')[0].strip()
-
-    # 3. Fallback to direct connection
     if not real_ip:
         real_ip = handler.client_address[0]
-
     return real_ip
 
 
 def _serve_static_file(handler):
     """Helper to serve static files safely and handle query strings."""
     try:
-        # 1. Strip Query Strings (Fixes the xterm.js?v=1 404 error)
         parsed_path = urlparse(handler.path).path
-
-        # 2. Clean Path
         rel_path = parsed_path.lstrip('/')
         clean_path = os.path.normpath(rel_path).replace('\\', '/')
 
-        # 3. Security Check
         if not clean_path.startswith("static") or ".." in clean_path:
             handler.send_error(403)
             return
 
-        # 4. Existence Check
         if not os.path.isfile(clean_path):
             handler.send_error(404)
             return
 
-        # 5. Serve
         with open(clean_path, "rb") as f:
             content = f.read()
 
         mime, _ = mimetypes.guess_type(clean_path)
         handler.send_response(200)
 
-        # Force charset for text files to satisfy browsers
         if mime and (mime.startswith("text/") or mime == "application/javascript"):
             handler.send_header('Content-Type', f'{mime}; charset=utf-8')
         else:
@@ -88,8 +81,7 @@ def _serve_static_file(handler):
         handler.end_headers()
         handler.wfile.write(content)
 
-    except Exception as e:
-        # print(f"Static serve error: {e}") 
+    except Exception:
         handler.send_error(404)
 
 
@@ -98,15 +90,27 @@ class ThreadedTCPServer(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 
-class MonitorHandler(http.server.BaseHTTPRequestHandler):
+class OptimizedHandlerMixin:
+    """Mixin to handle logging suppression and DNS optimization."""
+
+    def address_string(self):
+        # Disable reverse DNS lookups (major speedup)
+        return str(self.client_address[0])
+
     def log_message(self, format, *args):
-        # Nginx-aware logging
+        # 1. Quiet Mode: Filter out noise
+        # Don't log poll requests (/stats, /data) or static files
+        if self.path in ['/stats', '/data'] or self.path.startswith('/static/'):
+            return
+
+        # 2. Nginx-aware logging for everything else
         ip = get_real_ip(self)
         sys.stderr.write("%s - - [%s] %s\n" %
                          (ip, self.log_date_time_string(), format % args))
 
+
+class MonitorHandler(OptimizedHandlerMixin, http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        # Handle static files first (Monitor usually loads /static/style.css)
         if self.path.startswith("/static/"):
             _serve_static_file(self)
             return
@@ -125,11 +129,12 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
 
         elif self.path == "/log":
             try:
-                # Safely read only the last 64KB to prevent RAM explosion
-                log_size = os.path.getsize("runtime.log")
+                # USE THE PATH FROM SETTINGS
+                log_path = getattr(settings, 'LOG_FILE_PATH', 'runtime.log')
+                log_size = os.path.getsize(log_path)
                 read_size = 64 * 1024
 
-                with open("runtime.log", "rb") as f:
+                with open(log_path, "rb") as f:
                     if log_size > read_size:
                         f.seek(-read_size, os.SEEK_END)
                     content = f.read()
@@ -148,27 +153,25 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
 
                 cols = getattr(settings, 'ASCII_WIDTH', 120)
                 rows = getattr(settings, 'ASCII_HEIGHT', 96)
+                # [NEW] Pass the ratio so frontend can calculate spacing
+                ratio = getattr(settings, 'ASCII_FONT_RATIO', 0.5)
+
                 content = content.replace("{{ASCII_WIDTH}}", str(cols))
                 content = content.replace("{{ASCII_HEIGHT}}", str(rows))
+                content = content.replace("{{ASCII_FONT_RATIO}}", str(ratio))
 
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
                 self.end_headers()
                 self.wfile.write(content.encode('utf-8'))
-            except Exception as e:
+            except Exception:
                 self.send_error(404)
         else:
             self.send_error(404)
 
-
-class StreamHandler(http.server.BaseHTTPRequestHandler):
-    timeout = 5
-
-    def log_message(self, format, *args):
-        # Nginx-aware logging
-        ip = get_real_ip(self)
-        sys.stderr.write("%s - - [%s] %s\n" %
-                         (ip, self.log_date_time_string(), format % args))
+class StreamHandler(OptimizedHandlerMixin, http.server.BaseHTTPRequestHandler):
+    # Optimization: Increase timeout to prevent disconnects on lag
+    timeout = 30
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -216,48 +219,46 @@ class StreamHandler(http.server.BaseHTTPRequestHandler):
         _set_heartbeat(cid)
 
         try:
+            # 1. Keepalive (Detect broken pipes)
             self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            # 2. No Delay (Disable Nagle's Algorithm) - CRITICAL for streaming latency
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         except:
             pass
 
-        # Send Headers (Generic multipart)
         self.send_response(200)
         self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
         self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
         self.send_header('Pragma', 'no-cache')
         self.end_headers()
 
-        header = b'--frame\r\n'
-        newline = b'\r\n'
-
         try:
             while True:
-                # 1. BLOCKING WAIT (Saves Bandwidth)
+                # 1. BLOCKING WAIT
                 raw_payload = exchange.get_frame()
 
                 if not raw_payload or not isinstance(raw_payload, bytes):
                     break
 
-                # 2. Check for Prefix (WebP vs JPEG)
-                # Ensure we have at least 1 byte
                 if len(raw_payload) < 1: continue
 
                 fmt_byte = raw_payload[0:1]
                 frame_data = raw_payload[1:]
 
+                # 2. Use Pre-calculated Headers
                 if fmt_byte == b'w':
-                    ctype = b'Content-Type: image/webp\r\n\r\n'
+                    ctype = HEADER_CTYPE_WEBP
                 else:
-                    ctype = b'Content-Type: image/jpeg\r\n\r\n'
+                    ctype = HEADER_CTYPE_JPEG
 
                 _set_heartbeat(cid)
 
                 # 3. Send Frame
                 try:
-                    self.wfile.write(header)
+                    self.wfile.write(HEADER_BOUNDARY)
                     self.wfile.write(ctype)
                     self.wfile.write(frame_data)
-                    self.wfile.write(newline)
+                    self.wfile.write(HEADER_NEWLINE)
                     self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
                     break

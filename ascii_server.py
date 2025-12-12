@@ -6,13 +6,16 @@ import settings
 from shared_state import exchange
 
 # --- CONFIGURATION ---
-# Default to 0.0.0.0 to allow external connections (Required for LAN access)
 HOST = getattr(settings, 'ASCII_HOST', '0.0.0.0')
 PORT = getattr(settings, 'ASCII_PORT', 2323)
 MAX_CLIENTS = getattr(settings, 'MAX_VIEWERS', 20)
 
-# Semaphore to prevent CPU overload from too many active telnet sessions
 _sem = threading.Semaphore(MAX_CLIENTS)
+
+# Pre-encoded ANSI bytes to save CPU during the loop
+ANSI_CLEAR = b"\033[?25l\033[2J"
+ANSI_HOME = b"\033[H"
+ANSI_SHOW_CURSOR = b"\033[?25h"
 
 
 class ThreadedTCPServer(socketserver.ThreadingTCPServer):
@@ -22,21 +25,27 @@ class ThreadedTCPServer(socketserver.ThreadingTCPServer):
 
 class AsciiHandler(socketserver.BaseRequestHandler):
     def handle(self):
-        # 1. Capacity Check (From your code)
+        # 1. Capacity Check
         if not _sem.acquire(blocking=False):
-            print(f"[ASCII] Rejected connection from {self.client_address}: Server Full")
+            print(f"[ASCII] Rejected {self.client_address}: Server Full")
             try:
                 self.request.sendall(b"Server Full. Try again later.\r\n")
             except:
                 pass
             return
 
-        print(f"[ASCII] Client connected: {self.client_address} ({_sem._value + 1} slots left)")
+        print(f"[ASCII] Client connected: {self.client_address}")
 
         try:
-            # 2. TCP Keepalive (Crucial for detecting dropped WiFi connections)
+            # 2. Socket Optimization
+            # Keepalive: Detect dropped WiFi/Internet connections
             self.request.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            # Linux-specific tuning (detect dead connection in ~60 seconds)
+
+            # NoDelay: CRITICAL for ASCII animation. Disables Nagle's algo
+            # to prevent buffering small packets (reduces stutter).
+            self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+            # Linux-specific Keepalive tuning (approx 60s timeout)
             if hasattr(socket, 'TCP_KEEPIDLE'):
                 self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 10)
             if hasattr(socket, 'TCP_KEEPINTVL'):
@@ -44,55 +53,56 @@ class AsciiHandler(socketserver.BaseRequestHandler):
             if hasattr(socket, 'TCP_KEEPCNT'):
                 self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 5)
 
-            # 3. ANSI Setup: Hide Cursor + Clear Screen
-            self.request.sendall(b"\033[?25l\033[2J")
+            # 3. Setup Terminal
+            self.request.sendall(ANSI_CLEAR)
 
-            fps = getattr(settings, 'ASCII_FPS', 15)
-            interval = 1.0 / fps
-            last_frame_time = 0
+            # Timing setup
+            target_fps = getattr(settings, 'ASCII_FPS', 15)
+            min_interval = 1.0 / target_fps
+            last_send_time = 0
 
             while True:
-                # Rate Limiting
-                now = time.monotonic()
-                if now - last_frame_time < interval:
-                    time.sleep(0.01)
-                    continue
-
-                # Blocking wait logic handled by main loop timing,
-                # here we just grab the latest available frame.
+                # 4. Blocking Wait (0% CPU usage)
+                # Waits for the main display loop to signal a new frame
                 frame_data = exchange.get_frame()
 
                 if not frame_data:
-                    time.sleep(0.05)
+                    break
+
+                # 5. Rate Limiting (Frame Skip)
+                # If frames are coming too fast, skip sending to save bandwidth
+                now = time.monotonic()
+                if now - last_send_time < min_interval:
                     continue
 
-                # Defensive coding: Convert bytes to string if needed
-                text = frame_data
-                if isinstance(frame_data, bytes):
-                    try:
-                        text = frame_data.decode('utf-8', errors='ignore')
-                    except:
-                        continue
+                # 6. Payload Construction
+                try:
+                    if isinstance(frame_data, bytes):
+                        # Optimization: If it's already bytes, don't decode/encode
+                        payload = ANSI_HOME + frame_data
+                    else:
+                        # Standard String Path
+                        # Combine Home + Text and encode once
+                        payload = (f"\033[H{frame_data}").encode('utf-8', errors='ignore')
 
-                # 4. Construct Payload: Home Cursor + Text
-                payload = f"\033[H{text}".encode('utf-8', errors='ignore')
-                self.request.sendall(payload)
+                    self.request.sendall(payload)
+                    last_send_time = now
 
-                last_frame_time = now
+                except (BrokenPipeError, ConnectionResetError):
+                    break
+                except Exception as e:
+                    print(f"[ASCII] Send Error: {e}")
+                    break
 
-        except (BrokenPipeError, ConnectionResetError):
-            # Normal disconnection
-            pass
         except Exception as e:
-            print(f"[ASCII] Error handling client {self.client_address}: {e}")
+            print(f"[ASCII] Connection Error: {e}")
+
         finally:
-            # 5. Cleanup
+            # 7. Cleanup
             try:
-                # Restore Cursor
-                self.request.sendall(b"\033[?25h")
+                self.request.sendall(ANSI_SHOW_CURSOR)
             except:
                 pass
-
             _sem.release()
             print(f"[ASCII] Client disconnected: {self.client_address}")
 

@@ -1,16 +1,20 @@
 import threading
-import time
+import sys
+import socket
 import settings
 from shared_state import exchange
 from SimpleWebSocketServer import SimpleWebSocketServer, WebSocket
 
 # Configuration
 HOST = getattr(settings, 'ASCII_HOST', '0.0.0.0')
-PORT = 2324  # Dedicated WebSocket Port
+PORT = 2324
 MAX_CLIENTS = getattr(settings, 'MAX_VIEWERS', 20)
 
 _sem = threading.Semaphore(MAX_CLIENTS)
 clients = []
+
+ANSI_CLEAR = "\033[?25l\033[2J"
+ANSI_HOME = "\033[H"
 
 
 class AsciiWebSocket(WebSocket):
@@ -19,10 +23,18 @@ class AsciiWebSocket(WebSocket):
             self.close()
             return
 
-        print(f"[WS] Client connected: {self.address}")
-        clients.append(self)
-        # Clear Screen ANSI
-        self.sendMessage("\033[?25l\033[2J")
+        try:
+            # Keep the OS buffer small too, just in case
+            self.client.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+            # Disable Nagle for instant updates
+            self.client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+            print(f"[WS] Client connected: {self.address}")
+            clients.append(self)
+            self.sendMessage(ANSI_CLEAR)
+        except Exception as e:
+            print(f"[WS] Handshake Error: {e}")
+            self.close()
 
     def handleClose(self):
         if self in clients:
@@ -36,50 +48,43 @@ class AsciiWebSocket(WebSocket):
 
 def broadcast_loop():
     """Pushes frames to all connected WS clients."""
-    fps = getattr(settings, 'ASCII_FPS', 15)
-    interval = 1.0 / fps
-    last_frame_time = 0
-
     while True:
-        now = time.monotonic()
-        if now - last_frame_time < interval:
-            time.sleep(0.01)
-            continue
-
+        # Blocking Wait
         frame_data = exchange.get_frame()
+
         if not frame_data:
-            time.sleep(0.05)
             continue
 
-        # Decode bytes to string for WebSocket
-        if isinstance(frame_data, bytes):
-            try:
+        try:
+            if isinstance(frame_data, bytes):
                 text = frame_data.decode('utf-8', errors='ignore')
-            except:
-                continue
-        else:
-            text = frame_data
-
-        # Payload: Home Cursor + Text
-        payload = f"\033[H{text}"
+            else:
+                text = frame_data
+            payload = ANSI_HOME + text
+        except Exception:
+            continue
 
         # Broadcast
         for client in list(clients):
             try:
-                client.sendMessage(payload)
-            except:
-                pass
+                # --- THE "LEAKY BUCKET" FIX ---
+                # Check the internal library buffer.
+                # If 'sendq' has data, the client is lagging (tab hidden).
+                # Skip this frame for this specific client.
+                if hasattr(client, 'sendq') and client.sendq:
+                    continue
 
-        last_frame_time = now
+                # If buffer is empty, send the new frame
+                client.sendMessage(payload)
+
+            except Exception:
+                client.close()
 
 
 def start_server():
     print(f"🕸️  ASCII WebSocket Server started on {HOST}:{PORT}")
-
-    # Background broadcaster
     t = threading.Thread(target=broadcast_loop, daemon=True, name="WS-Broadcaster")
     t.start()
 
-    # Main Server Loop
     server = SimpleWebSocketServer(HOST, PORT, AsciiWebSocket)
     server.serveforever()
