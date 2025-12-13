@@ -51,4 +51,4 @@ ASCII_COLOR = True
 ASCII_FPS = SERVER_CAPTURE_RATE // 2
 
 JPEG_QUALITY = 80# Image quality
-HEADLESS_RES = (400, 533)   # Resolution for the virtual screen
+HEADLESS_RES = (480, 640)   # Resolution for the virtual screen
