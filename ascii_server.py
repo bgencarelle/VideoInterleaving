@@ -6,7 +6,7 @@ import settings
 from shared_state import exchange
 
 # --- CONFIGURATION ---
-HOST = getattr(settings, 'ASCII_HOST', '0.0.0.0')
+HOST = getattr(settings, 'ASCII_HOST', '127.0.0.1')
 PORT = getattr(settings, 'ASCII_PORT', 2323)
 MAX_CLIENTS = getattr(settings, 'MAX_VIEWERS', 20)
 

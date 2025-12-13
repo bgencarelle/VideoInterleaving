@@ -4,7 +4,7 @@ import settings
 from lightweight_monitor import monitor_data
 
 # --- CONFIGURATION ---
-HOST = '0.0.0.0'
+HOST = '127.0.0.1'
 # Default to 2301 (The standard ASCII Monitor port) if not patched by main.py
 PORT = getattr(settings, 'WEB_PORT', 2301)
 

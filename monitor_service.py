@@ -167,5 +167,5 @@ class ThreadedTCPServer(socketserver.ThreadingTCPServer):
 
 if __name__ == "__main__":
     print(f"[Hub] Unified Monitor running on http://localhost:{PORT}")
-    server = ThreadedTCPServer(('0.0.0.0', PORT), MonitorHubHandler)
+    server = ThreadedTCPServer(('127.0.0.1', PORT), MonitorHubHandler)
     server.serve_forever()

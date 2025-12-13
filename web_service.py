@@ -273,13 +273,13 @@ class StreamHandler(OptimizedHandlerMixin, http.server.BaseHTTPRequestHandler):
 
 def run_monitor_server():
     port = getattr(settings, 'WEB_PORT', 1978)
-    httpd = ThreadedTCPServer(('0.0.0.0', port), MonitorHandler)
+    httpd = ThreadedTCPServer(('127.0.0.1', port), MonitorHandler)
     httpd.serve_forever()
 
 
 def run_stream_server():
     port = getattr(settings, 'STREAM_PORT', 8080)
-    httpd = ThreadedTCPServer((getattr(settings, 'STREAM_HOST', '0.0.0.0'), port), StreamHandler)
+    httpd = ThreadedTCPServer((getattr(settings, 'STREAM_HOST', '127.0.0.1'), port), StreamHandler)
     httpd.serve_forever()
 
 

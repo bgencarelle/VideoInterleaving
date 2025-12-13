@@ -21,7 +21,7 @@ def is_port_free(port):
     """Returns True if the port is available."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         try:
-            s.bind(('0.0.0.0', port))
+            s.bind(('127.0.0.1', port))
             return True
         except socket.error:
             return False

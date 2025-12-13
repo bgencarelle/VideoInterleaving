@@ -6,7 +6,7 @@ from shared_state import exchange
 from SimpleWebSocketServer import SimpleWebSocketServer, WebSocket
 
 # Configuration
-HOST = getattr(settings, 'ASCII_HOST', '0.0.0.0')
+HOST = getattr(settings, 'ASCII_HOST', '127.0.0.1')
 PORT = 2324
 MAX_CLIENTS = getattr(settings, 'MAX_VIEWERS', 20)
 
