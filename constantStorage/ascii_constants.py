@@ -1,6 +1,6 @@
 #ascii_constants.py - configuration for ascii web and telnet modes.
 
-ASCII_PORT = 2300
+ASCII_PORT = 2323
 ASCII_HOST = '127.0.0.1'
 ASCII_WIDTH = 90
 ASCII_HEIGHT = 60

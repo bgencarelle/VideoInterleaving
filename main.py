@@ -8,7 +8,8 @@ import socket
 import settings
 
 # --- CONSTANTS ---
-RESERVED_PORTS = {2323, 2324}
+# [CHANGE] Updated reserved ports to the new 24xx range
+RESERVED_PORTS = {2423, 2424}
 SYSTEM_PORTS_LIMIT = 1024
 LOGS_DIR = "logs"
 CACHE_DIR = "_cache"
@@ -20,7 +21,7 @@ CACHE_DIR = "_cache"
 def is_port_free(port):
     """Returns True if the port is available."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        # [FIX 1] Allow reusing the address if it's in TIME_WAIT from a recent shutdown
+        # [FIX] Allow reusing the address if it's in TIME_WAIT from a recent shutdown
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(('127.0.0.1', port))
@@ -46,8 +47,9 @@ def validate_ascii_port(port):
         sys.exit(1)
 
     if port in RESERVED_PORTS or (port + 1) in RESERVED_PORTS:
-        print(f"❌ ERROR: Ports 2323/2324 are RESERVED for 'asciiweb' mode.")
-        print(f"   -> Please use the default (2300) or specify a different range.")
+        # [CHANGE] Updated error message to reflect new ports
+        print(f"❌ ERROR: Ports 2423/2424 are RESERVED for 'asciiweb' mode.")
+        print(f"   -> Please use the default (2323) or specify a different range.")
         sys.exit(1)
 
 
@@ -99,9 +101,10 @@ def configure_runtime():
     elif args.mode == "local":
         primary_port = 8888
     elif args.mode == "ascii":
-        primary_port = args.port or 2300
-    elif args.mode == "asciiweb":
         primary_port = args.port or 2323
+    elif args.mode == "asciiweb":
+        # [CHANGE] Default updated to 2423
+        primary_port = args.port or 2423
 
     # 3. Dynamic Naming & Cache Setup
     source_name = os.path.basename(os.path.normpath(settings.IMAGES_DIR)).replace(" ", "_")
@@ -147,15 +150,14 @@ def configure_runtime():
         require_ports([settings.ASCII_PORT, settings.WEB_PORT])
 
     elif args.mode == "asciiweb":
-        # [FIX 2] Removed validate_ascii_port(primary_port) here.
-        # It's okay for asciiweb mode to use the reserved asciiweb ports.
+        # [NOTE] Validation skipped here so asciiweb can use its own reserved ports
 
         print(f">> MODE: ASCII-WEB (WebSocket) [{source_name}]")
         settings.ASCII_MODE = True
         settings.SERVER_MODE = False
         settings.WEB_PORT = 1980
 
-        # Specific Logic: If default 2323, WebSocket is 2324.
+        # Specific Logic: If default 2423, WebSocket is 2424.
         settings.WEBSOCKET_PORT = primary_port + 1
 
         print(f">> PORTS: Viewer={settings.WEB_PORT}, WebSocket={settings.WEBSOCKET_PORT}")

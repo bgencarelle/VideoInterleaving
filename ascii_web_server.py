@@ -7,7 +7,7 @@ from SimpleWebSocketServer import SimpleWebSocketServer, WebSocket
 
 # Configuration
 HOST = getattr(settings, 'ASCII_HOST', '127.0.0.1')
-PORT = 2324
+PORT = 2424
 MAX_CLIENTS = getattr(settings, 'MAX_VIEWERS', 20)
 
 _sem = threading.Semaphore(MAX_CLIENTS)
