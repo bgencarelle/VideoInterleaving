@@ -11,7 +11,7 @@ import settings
 RESERVED_PORTS = {2323, 2324}
 SYSTEM_PORTS_LIMIT = 1024
 LOGS_DIR = "logs"
-CACHE_DIR = "_cache"  # <--- New Clean Home for generated files
+CACHE_DIR = "_cache"
 
 
 # -----------------------------------------------------------------------------
@@ -20,6 +20,8 @@ CACHE_DIR = "_cache"  # <--- New Clean Home for generated files
 def is_port_free(port):
     """Returns True if the port is available."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        # [FIX 1] Allow reusing the address if it's in TIME_WAIT from a recent shutdown
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(('127.0.0.1', port))
             return True
@@ -105,7 +107,6 @@ def configure_runtime():
     source_name = os.path.basename(os.path.normpath(settings.IMAGES_DIR)).replace(" ", "_")
     suffix = f"{source_name}_{args.mode}_{primary_port}"
 
-    # [CHANGE] Prepend CACHE_DIR to keep root clean
     settings.PROCESSED_DIR = os.path.join(CACHE_DIR, f"folders_processed_{suffix}")
     settings.GENERATED_LISTS_DIR = os.path.join(CACHE_DIR, f"generated_lists_{suffix}")
 
@@ -146,15 +147,15 @@ def configure_runtime():
         require_ports([settings.ASCII_PORT, settings.WEB_PORT])
 
     elif args.mode == "asciiweb":
-        validate_ascii_port(primary_port)
+        # [FIX 2] Removed validate_ascii_port(primary_port) here.
+        # It's okay for asciiweb mode to use the reserved asciiweb ports.
+
         print(f">> MODE: ASCII-WEB (WebSocket) [{source_name}]")
         settings.ASCII_MODE = True
         settings.SERVER_MODE = False
         settings.WEB_PORT = 1980
-        settings.WEBSOCKET_PORT = args.port or 2324
 
         # Specific Logic: If default 2323, WebSocket is 2324.
-        # If user overrode port (e.g. 2400), WebSocket is 2401.
         settings.WEBSOCKET_PORT = primary_port + 1
 
         print(f">> PORTS: Viewer={settings.WEB_PORT}, WebSocket={settings.WEBSOCKET_PORT}")
@@ -209,8 +210,6 @@ def main(clock=CLOCK_MODE):
     lists_exist = False
     script_dir = os.path.dirname(os.path.abspath(__file__))
     gen_dir_full = os.path.join(script_dir, settings.GENERATED_LISTS_DIR)
-
-    # Note: make_file_lists uses os.makedirs(), so it handles creating _cache automatically.
 
     if os.path.exists(gen_dir_full) and os.listdir(gen_dir_full):
         lists_exist = True
