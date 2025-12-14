@@ -3,7 +3,7 @@ import time
 from collections import deque
 
 import mido
-import mido.backends.rtmidi
+#import mido.backends.rtmidi
 import mido.backends.backend
 #import mido.backends.pygame
 
