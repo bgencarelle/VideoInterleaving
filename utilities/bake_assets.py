@@ -1,8 +1,7 @@
 import os
 import sys
-import time
 import numpy as np
-import cv2
+from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
 from PIL import Image
 
@@ -13,113 +12,9 @@ if ROOT_DIR not in sys.path:
 
 import settings
 
-# --- 2. CONSTANTS ---
-_raw_chars = getattr(settings, 'ASCII_PALETTE', 'MB8NG9SEaemvyznocrtlj17i. ')
-CHARS = np.asarray(list(_raw_chars), dtype='S1')
-
-_gamma_val = getattr(settings, 'ASCII_GAMMA', 1.0)
-GAMMA_LUT = np.array([((i / 255.0) ** _gamma_val) * 255 for i in range(256)], dtype=np.uint8)
-
+# Force RGBA for consistency (Main + Float compatibility)
+CHANNELS = 4
 HEADLESS_RES = getattr(settings, 'HEADLESS_RES', (640, 480))
-
-
-def load_image_rgba(filepath):
-    try:
-        with Image.open(filepath) as img:
-            if img.mode != 'RGBA':
-                img = img.convert('RGBA')
-            return np.array(img)
-    except:
-        return None
-
-
-# --- GENERATORS ---
-def generate_ascii_stack(frame_rgba):
-    max_cols = getattr(settings, 'ASCII_WIDTH', 90)
-    max_rows = getattr(settings, 'ASCII_HEIGHT', 60)
-    font_ratio = getattr(settings, 'ASCII_FONT_RATIO', 0.5)
-
-    h, w = frame_rgba.shape[:2]
-    scale = max(max_cols / w, max_rows / (h * font_ratio))
-    nw, nh = max(1, int(w * scale)), max(1, int(h * scale * font_ratio))
-
-    interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LANCZOS4
-    frame = cv2.resize(frame_rgba, (nw, nh), interpolation=interp)
-
-    dx, dy = (nw - max_cols) // 2, (nh - max_rows) // 2
-    frame = frame[dy:dy + max_rows, dx:dx + max_cols]
-
-    rgb, alpha = frame[:, :, :3].astype(float), frame[:, :, 3]
-
-    contrast = getattr(settings, 'ASCII_CONTRAST', 1.0)
-    bright = getattr(settings, 'ASCII_BRIGHTNESS', 1.0)
-    sat = getattr(settings, 'ASCII_SATURATION', 1.0)
-
-    if contrast != 1.0: rgb = (rgb - 128.0) * contrast + 128.0
-    if bright != 1.0: rgb *= bright
-    rgb = np.clip(rgb, 0, 255).astype(np.uint8)
-
-    if sat != 1.0:
-        hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV).astype(float)
-        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * sat, 0, 255)
-        rgb = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
-
-    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-    gray = cv2.LUT(gray, GAMMA_LUT)
-    indices = ((255 - gray) / 255 * (len(CHARS) - 1)).astype(int)
-
-    char_grid = CHARS[indices]
-    char_grid[alpha < 50] = b' '
-
-    small = rgb.astype(int)
-    c_ids = 16 + (36 * (small[:, :, 0] * 5 // 255)) + (6 * (small[:, :, 1] * 5 // 255)) + (small[:, :, 2] * 5 // 255)
-
-    return np.stack([char_grid.view(np.uint8), c_ids.astype(np.uint8)], axis=0)
-
-
-def generate_headless_img(frame_rgba, posterize=False):
-    # 1. Resize
-    resized = cv2.resize(frame_rgba, HEADLESS_RES, interpolation=cv2.INTER_AREA)
-
-    # 2. Optimize Channels (Strip Alpha if opaque)
-    if resized.shape[2] == 4 and np.min(resized[:, :, 3]) == 255:
-        final_img = resized[:, :, :3]
-    else:
-        final_img = resized
-
-    # 3. Posterize (Entropy Reduction)
-    if posterize:
-        if final_img.shape[2] == 4:
-            rgb = final_img[:, :, :3]
-            alpha = final_img[:, :, 3]
-            rgb = np.bitwise_and(rgb, 0xFC)  # Zero out lowest 2 bits
-            final_img = np.dstack((rgb, alpha))
-        else:
-            final_img = np.bitwise_and(final_img, 0xFE)
-
-    return final_img
-
-
-def process_hybrid(args):
-    src, ascii_dest, img_dest, do_posterize = args
-
-    os.makedirs(os.path.dirname(ascii_dest), exist_ok=True)
-    os.makedirs(os.path.dirname(img_dest), exist_ok=True)
-
-    img = load_image_rgba(src)
-    if img is None: return f"Load Error: {src}"
-
-    try:
-        # 1. ASCII (.npy)
-        np.save(ascii_dest, generate_ascii_stack(img))
-
-        # 2. HEADLESS (.npz)
-        optimized_img = generate_headless_img(img, posterize=do_posterize)
-        np.savez_compressed(img_dest, image=optimized_img)
-
-        return None
-    except Exception as e:
-        return f"Error {src}: {e}"
 
 
 def get_directory_interactive(prompt_text):
@@ -129,86 +24,110 @@ def get_directory_interactive(prompt_text):
         print("Please enter a path.")
 
 
+def process_folder_to_slab(args):
+    """
+    Reads all images in a folder, resizes them, and writes them
+    into a single pre-allocated .npy slab file.
+    """
+    src_folder, dest_file = args
+    src_path = Path(src_folder)
+
+    # 1. Gather Files
+    valid = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+    files = sorted([p for p in src_path.iterdir() if p.is_file() and p.suffix.lower() in valid])
+
+    if not files:
+        return f"Skipped (No images): {src_folder}"
+
+    count = len(files)
+    w, h = HEADLESS_RES
+
+    # 2. Pre-allocate Memory Mapped File
+    # This creates the full file on disk instantly filled with zeros
+    os.makedirs(os.path.dirname(dest_file), exist_ok=True)
+
+    try:
+        # Shape: (Frames, Height, Width, RGBA)
+        slab = np.lib.format.open_memmap(
+            dest_file,
+            mode='w+',
+            dtype=np.uint8,
+            shape=(count, h, w, CHANNELS)
+        )
+
+        # 3. Fill the Slab
+        for i, fp in enumerate(files):
+            with Image.open(fp) as im:
+                # Convert & Resize
+                im = im.convert('RGBA')
+                im = im.resize((w, h), Image.NEAREST)  # Nearest is fastest, use BILINEAR for quality
+
+                # Write directly to disk-backed memory
+                slab[i] = np.asarray(im)
+
+        # Flush changes to disk
+        slab.flush()
+        return None  # Success
+
+    except Exception as e:
+        return f"Error processing {src_folder}: {e}"
+
+
 def main():
-    print("--- HYBRID ASSET BAKER (v6 Interactive) ---")
+    print("--- SLAB BAKER (High Performance Memmap) ---")
+    print(f"Target Resolution: {HEADLESS_RES} (RGBA)")
+    print("This will pack folders into single .npy files for instant seeking.\n")
 
     input_root = get_directory_interactive("Enter SOURCE root directory: ")
     while not os.path.isdir(input_root):
         print("Invalid directory.")
         input_root = get_directory_interactive("Enter SOURCE root directory: ")
 
-    # OPTIMIZATION SWITCH
-    opt_choice = input("Enable bit-depth reduction (smaller files, slightly lossy)? [Y/n]: ").strip().lower()
-    do_posterize = opt_choice != 'n'
-
-    suffix = "_opt" if do_posterize else ""
-
-    # Clean input path to get base name
     clean_path = input_root.rstrip(os.sep)
+    output_root = f"{clean_path}_slab"
 
-    # 1. ASCII Naming: Name_WxH_ascii
-    w_asc = getattr(settings, 'ASCII_WIDTH', 90)
-    h_asc = getattr(settings, 'ASCII_HEIGHT', 60)
-    ascii_root = f"{clean_path}_{w_asc}x{h_asc}_ascii"
-
-    # 2. Headless Naming: Name_WxH_headless[_opt]
-    w_head, h_head = HEADLESS_RES
-    headless_root = f"{clean_path}_{w_head}x{h_head}_headless{suffix}"
-
-    print(f"\nConfiguration:")
-    print(f"  Posterization: {'ENABLED' if do_posterize else 'DISABLED'}")
-    print(f"\nOutputs:")
-    print(f"  ASCII    (.npy) -> {ascii_root}")
-    print(f"  HEADLESS (.npz) -> {headless_root}")
-
-    confirm = input("\nProceed? [Y/n]: ").lower()
-    if confirm == 'n': return
+    print(f"\nSource: {input_root}")
+    print(f"Dest:   {output_root}")
 
     tasks = []
-    valid_exts = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
-    print(f"\nScanning '{input_root}'...")
 
+    print("Scanning folders...")
     for root, dirs, files in os.walk(input_root):
-        for file in files:
-            if file.lower().endswith(valid_exts):
-                src = os.path.join(root, file)
-                rel = os.path.relpath(src, input_root)
+        # Check if this folder contains images
+        has_images = any(f.lower().endswith(('.png', '.jpg', '.webp')) for f in files)
 
-                # ASCII DEST
-                d_npy = os.path.join(ascii_root, os.path.splitext(rel)[0])
-
-                # HEADLESS DEST
-                d_npz = os.path.join(headless_root, os.path.splitext(rel)[0])
-
-                tasks.append((src, d_npy, d_npz, do_posterize))
+        if has_images:
+            rel_path = os.path.relpath(root, input_root)
+            dest_file = os.path.join(output_root, rel_path, "frames.npy")
+            tasks.append((root, dest_file))
 
     total = len(tasks)
-    if not total: return print("No images found.")
+    if total == 0:
+        print("No image folders found.")
+        return
 
-    print(f"Baking {total} images using {os.cpu_count()} cores...")
+    print(f"Found {total} folders to pack. Starting bake...")
+
     start = time.time()
     errors = []
-    processed_count = 0
 
+    # Run in parallel
     with ProcessPoolExecutor() as ex:
-        futures = {ex.submit(process_hybrid, t): t for t in tasks}
-        for future in futures:
-            res = future.result()
-            processed_count += 1
+        for i, res in enumerate(ex.map(process_folder_to_slab, tasks)):
             if res: errors.append(res)
 
-            percent = (processed_count / total) * 100
-            bar_len = 30
-            filled = int(bar_len * processed_count // total)
-            bar = '█' * filled + '-' * (bar_len - filled)
-            sys.stdout.write(f'\rProgress: |{bar}| {percent:.1f}% ({processed_count}/{total})')
+            # Simple progress
+            percent = ((i + 1) / total) * 100
+            sys.stdout.write(f"\rProgress: {percent:.1f}% ({i + 1}/{total})")
             sys.stdout.flush()
 
     print(f"\n\nDone in {time.time() - start:.2f}s.")
-    print(f"Errors: {len(errors)}")
     if errors:
+        print(f"Errors ({len(errors)}):")
         for e in errors: print(e)
 
 
 if __name__ == "__main__":
+    import time
+
     main()

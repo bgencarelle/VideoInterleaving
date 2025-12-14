@@ -9,11 +9,18 @@ class FrameExchange:
     def set_frame(self, frame_bytes):
         with self.condition:
             self.frame = frame_bytes
-            self.condition.notify_all()  # Wake up all Flask threads  # Wake up all Flask threads
+            self.condition.notify_all()  # Wake up all waiting threads
 
-    def get_frame(self):
+    def get_frame(self, timeout=None):
+        """
+        Wait for a new frame.
+        If timeout is set (seconds) and expires, returns None.
+        """
         with self.condition:
-            self.condition.wait()
+            # wait() returns True if notified, False if timed out
+            notified = self.condition.wait(timeout=timeout)
+            if not notified:
+                return None
             return self.frame
 
 exchange = FrameExchange()

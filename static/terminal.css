@@ -1,5 +1,13 @@
 /* static/terminal.css */
 
+/* --- CUSTOM FONT --- */
+@font-face {
+  font-family: 'Unscii';
+  src: url('/static/unscii-16.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+}
+
 /* --- RESET --- */
 body {
   margin: 0;
@@ -7,6 +15,7 @@ body {
   height: 100vh;
   width: 100vw;
   overflow: hidden;
+  touch-action: none;
 }
 
 /* --- THE STAGE --- */
@@ -15,8 +24,6 @@ body {
   height: 100%;
   position: relative;
   background: #000;
-
-  /* Flexbox centers the terminal container */
   display: flex;
   justify-content: center;
   align-items: center;
@@ -24,32 +31,30 @@ body {
 
 /* --- THE TERMINAL CONTAINER --- */
 #terminal {
-  /* Flexbox handles the position. We only control scale. */
   transform-origin: center center;
   will-change: transform;
-  /* Background black to prevent any sub-pixel bleeding */
   background-color: #000;
 }
 
-/* --- THE RED BOX FIX --- */
-/* We apply the border to the SCREEN, not the wrapper.
-   This ensures it matches the grid size exactly. */
+/* --- XTERM INTERNAL FIXES --- */
 .xterm-screen {
-    border: 3px transparent;
+    border: 2px solid transparent;
     box-sizing: content-box;
-    /* Ensure it sits above the viewport so the border is visible */
     position: relative;
     z-index: 10;
 }
 
-/* --- CLEANUP --- */
-/* Hide the scrollbar viewport entirely */
+/* [OPTIONAL] Force sharp pixel scaling for the Unscii font */
+.xterm-screen canvas {
+    image-rendering: -moz-crisp-edges;
+    image-rendering: -webkit-optimize-contrast;
+    image-rendering: crisp-edges;
+    image-rendering: pixelated;
+}
 .xterm-viewport {
     overflow: hidden !important;
 }
 
-/* --- HIDE CURSOR AFTER IDLE --- */
-body.hide-cursor,
-body.hide-cursor * {
-  cursor: none !important;
-}
+/* --- HIDE CURSOR --- */
+body.hide-cursor { cursor: none !important; }
+body.hide-cursor * { cursor: none !important; pointer-events: none; }
