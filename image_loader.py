@@ -9,22 +9,9 @@ from turbojpeg import TurboJPEG, TJPF_RGB
 
 jpeg = TurboJPEG()
 
-_libwebp = None
-for lib in ("libwebp.so", "libwebp.so.7", "libwebp.so.6", "libwebp.dylib", "libwebp-7.dll"):
-    try:
-        _libwebp = ctypes.CDLL(lib)
-        break
-    except OSError:
-        continue
+from libwebp_loader import init_libwebp
 
-if _libwebp:
-    _libwebp.WebPGetInfo.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_int),
-                                     ctypes.POINTER(ctypes.c_int)]
-    _libwebp.WebPGetInfo.restype = ctypes.c_int
-    _libwebp.WebPDecodeRGBAInto.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_uint8),
-                                            ctypes.c_size_t, ctypes.c_int]
-    _libwebp.WebPDecodeRGBAInto.restype = ctypes.POINTER(ctypes.c_uint8)
-
+_libwebp = init_libwebp(verbose=False)
 
 class ImageLoader:
     def __init__(self, main_folder_path=MAIN_FOLDER_PATH, float_folder_path=FLOAT_FOLDER_PATH, png_paths_len=0):
