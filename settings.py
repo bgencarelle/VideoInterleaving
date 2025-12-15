@@ -53,4 +53,4 @@ ASCII_WIDTH = 90
 ASCII_HEIGHT = 60
 
 JPEG_QUALITY = 80# Image quality
-HEADLESS_RES = (480, 640)   # Resolution for the virtual screen
+HEADLESS_RES = (450, 600)   # Resolution for the virtual screen
