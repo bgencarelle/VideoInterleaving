@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width,initial-scale=1"/>
+    <title>3x1 Seamless Fade (4 Sources)</title>
+    <style>
+        :root {
+            --gap: 14px;
+            --pad: 14px;
+            --radius: 14px;
+            --bg: #000000;
+            /* Unified Panel Background: Pure Black to match video content */
+            --panel: #000000;
+        }
+
+        html, body {
+            height: 100%;
+            margin: 0;
+            background: var(--bg);
+            overflow: hidden;
+        }
+
+        .grid {
+            height: 100vh;
+            display: grid;
+            /* 3 Equal Columns */
+            grid-template-columns: 1fr 1fr 1fr;
+            grid-template-rows: 1fr;
+            gap: var(--gap);
+            padding: var(--pad);
+            box-sizing: border-box;
+        }
+
+        .panel {
+            overflow: hidden;
+            border-radius: var(--radius);
+            background: var(--panel);
+            position: relative;
+            /* Optional: Border to help visualize the grid if everything is black */
+            border: 1px solid #000;
+        }
+
+        .panel > img, .panel > iframe {
+            width: 100%;
+            height: 100%;
+            border: 0;
+            display: block;
+            object-fit: contain;
+            background: #000;
+        }
+
+        /* --- MIXER STAGE --- */
+        #mixer-stage {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            background: #000;
+            overflow: hidden;
+        }
+
+        .mix-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+
+            /* Essential for solid transitions */
+            background: #000 !important;
+            will-change: opacity;
+
+            /* Default state: Transparent */
+            opacity: 0;
+            transition: opacity 3000ms ease-in-out;
+        }
+    </style>
+</head>
+<body>
+<div class="grid">
+
+    <div class="panel">
+        <img src="https://gencarelle.fun/video_feed"/>
+    </div>
+
+    <div class="panel">
+        <img src="https://testing.gencarelle.fun/video_feed"/>
+    </div>
+
+    <div class="panel">
+        <div id="mixer-stage">
+            <iframe class="mix-layer" id="src-0" src="https://gencarelle.fun/ascii"
+                    style="opacity: 1; z-index: 10;"></iframe>
+
+            <iframe class="mix-layer" id="src-1" src="https://testing.gencarelle.fun/ascii"
+                    style="z-index: 0;"></iframe>
+
+            <img class="mix-layer" id="src-2" src="https://gencarelle.fun/video_feed" style="z-index: 0;"/>
+
+            <img class="mix-layer" id="src-3" src="https://testing.gencarelle.fun/video_feed" style="z-index: 0;"/>
+        </div>
+    </div>
+
+</div>
+
+<script>
+    /* --- CONFIG --- */
+    const SHOW_TIME = 4000;     // Time to stay static (ms)
+    const FADE_DURATION = 3000; // Duration of the fade (ms) - Must match CSS
+
+    const LAYERS = [
+        document.getElementById('src-0'),
+        document.getElementById('src-1'),
+        document.getElementById('src-2'),
+        document.getElementById('src-3')
+    ];
+
+    let currentIdx = 0;
+
+    function triggerNextFade() {
+        // 1. Pick Random Next Layer (Different from current)
+        let nextIdx;
+        do {
+            nextIdx = Math.floor(Math.random() * LAYERS.length);
+        } while (nextIdx === currentIdx);
+
+        const currentEl = LAYERS[currentIdx];
+        const nextEl = LAYERS[nextIdx];
+
+        // 2. Setup the "Next" slide
+        // Place it physically ON TOP of the stack (Z-Index 20 vs 10)
+        nextEl.style.zIndex = 20;
+        currentEl.style.zIndex = 10;
+
+        // Reset others to bottom to ensure they don't block
+        LAYERS.forEach((el, i) => {
+            if (i !== currentIdx && i !== nextIdx) {
+                el.style.zIndex = 0;
+                el.style.opacity = 0;
+            }
+        });
+
+        // Force Reflow
+        void nextEl.offsetWidth;
+
+        // 3. Animate the Fade (0 -> 1)
+        nextEl.style.opacity = 1;
+
+        // 4. Cleanup after fade finishes
+        setTimeout(() => {
+            // Hide the old layer
+            currentEl.style.opacity = 0;
+            currentEl.style.zIndex = 0;
+
+            // The "Next" is now the "Current"
+            nextEl.style.zIndex = 10;
+            currentIdx = nextIdx;
+
+            // Loop
+            setTimeout(triggerNextFade, SHOW_TIME);
+        }, FADE_DURATION);
+    }
+
+    // Start the cycle after initial delay
+    setTimeout(triggerNextFade, SHOW_TIME);
+</script>
+</body>
+</html>

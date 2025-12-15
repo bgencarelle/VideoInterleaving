@@ -11,7 +11,7 @@
 /* --- RESET --- */
 body {
   margin: 0;
-  background: #000;
+  background: #000; /* Force Black Page Background */
   height: 100vh;
   width: 100vw;
   overflow: hidden;
@@ -23,7 +23,7 @@ body {
   width: 100%;
   height: 100%;
   position: relative;
-  background: #000;
+  background: #000; /* Force Black Stage Background */
   display: flex;
   justify-content: center;
   align-items: center;
@@ -33,7 +33,7 @@ body {
 #terminal {
   transform-origin: center center;
   will-change: transform;
-  background-color: #000;
+  background-color: #000; /* Force Black Terminal Background */
 }
 
 /* --- XTERM INTERNAL FIXES --- */
