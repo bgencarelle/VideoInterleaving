@@ -115,9 +115,9 @@ def display_init(state: DisplayState):
                 create_kwargs = {"standalone": True}
                 if backend: create_kwargs["backend"] = backend
 
-                # --- PI FIX: REQUEST GLES 3.1 ---
+                # --- PI FIX: REQUEST GLES 2 for old stuff ---
                 if is_pi:
-                    create_kwargs["require"] = 310
+                    create_kwargs["require"] = 200
 
                 ctx = moderngl.create_context(**create_kwargs)
                 context_created = True
@@ -181,8 +181,8 @@ def display_init(state: DisplayState):
         if is_pi:
             glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_ES_API)
             glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
-            glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
-            glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 1)
+            glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 2)
+            glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 0)
         else:
             glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_API)
             glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.NATIVE_CONTEXT_API)
@@ -216,7 +216,7 @@ def display_init(state: DisplayState):
 
         # Apply Pi Hints for Context creation
         if is_pi:
-            ctx = moderngl.create_context(require=310)
+            ctx = moderngl.create_context(require=200)
         else:
             ctx = moderngl.create_context()
 

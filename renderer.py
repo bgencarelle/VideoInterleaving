@@ -70,17 +70,36 @@ def initialize(gl_context: moderngl.Context) -> None:
     global ctx, prog, vao, vbo
     ctx = gl_context
 
-    is_gles = ctx.version_code < 330
+    # Detect version: GLES 2.0 (version_code 200) vs GLES 3.0+
+    is_legacy = ctx.version_code < 300
 
-    # [FIX] Downgraded to 300 es to support Raspberry Pi VC4 Driver
-    header = "#version 300 es\nprecision mediump float;" if is_gles else "#version 330 core"
+    if is_legacy:
+        # --- GLES 2.0 / Legacy Syntax ---
+        header = "#version 100\nprecision mediump float;"
+        # Maps ModernGL 3.0 keywords back to 2.0
+        v_in = "attribute"
+        v_out = "varying"
+        f_in = "varying"
+        # GLES 2.0 has no specific output declaration, it uses gl_FragColor
+        f_out_decl = ""
+        f_out_set = "gl_FragColor ="
+        tex_func = "texture2D"
+    else:
+        # --- GLES 3.0+ / Modern Syntax ---
+        header = "#version 300 es\nprecision mediump float;" if ctx.version_code < 330 else "#version 330 core"
+        v_in = "in"
+        v_out = "out"
+        f_in = "in"
+        f_out_decl = "out vec4 fragColor;"
+        f_out_set = "fragColor ="
+        tex_func = "texture"
 
     vertex_src = f"""
         {header}
-        in vec2 position;
-        in vec2 texcoord;
+        {v_in} vec2 position;
+        {v_in} vec2 texcoord;
         uniform mat4 u_MVP;
-        out vec2 v_texcoord;
+        {v_out} vec2 v_texcoord;
         void main() {{
             gl_Position = u_MVP * vec4(position, 0.0, 1.0);
             v_texcoord = texcoord;
@@ -96,19 +115,19 @@ def initialize(gl_context: moderngl.Context) -> None:
         uniform bool u_main_is_sbs;
         uniform bool u_float_is_sbs;
 
-        in vec2 v_texcoord;
-        out vec4 fragColor;
+        {f_in} vec2 v_texcoord;
+        {f_out_decl}
 
         vec4 sampleLayer(sampler2D tex, bool is_sbs, vec2 uv) {{
             if (is_sbs) {{
                 vec2 uv_color = vec2(uv.x * 0.5, uv.y);
                 vec2 uv_mask  = vec2((uv.x * 0.5) + 0.5, uv.y);
-                vec3 color = texture(tex, uv_color).rgb;
-                float alpha = texture(tex, uv_mask).r;
+                vec3 color = {tex_func}(tex, uv_color).rgb;
+                float alpha = {tex_func}(tex, uv_mask).r;
                 if (alpha < 0.05) alpha = 0.0;
                 return vec4(color, alpha);
             }} else {{
-                return texture(tex, uv);
+                return {tex_func}(tex, uv);
             }}
         }}
 
@@ -118,12 +137,14 @@ def initialize(gl_context: moderngl.Context) -> None:
 
             vec3 color = mix(u_bgColor, mainC.rgb, mainC.a);
             color = mix(color, floatC.rgb, floatC.a);
-            fragColor = vec4(color, 1.0);
+            {f_out_set} vec4(color, 1.0);
         }}
     """
 
     prog = ctx.program(vertex_shader=vertex_src, fragment_shader=fragment_src)
     vbo = ctx.buffer(reserve=64)
+
+    # Format detection is automatic in ModernGL usually, but '2f 2f' is standard
     vao = ctx.vertex_array(prog, [(vbo, "2f 2f", "position", "texcoord")])
 
     mvp = np.eye(4, dtype="f4")
@@ -135,7 +156,6 @@ def initialize(gl_context: moderngl.Context) -> None:
     prog["u_bgColor"].value = (0.0, 0.0, 0.0)
     prog["u_main_is_sbs"].value = False
     prog["u_float_is_sbs"].value = False
-
 
 def set_transform_parameters(fs_scale, fs_offset_x, fs_offset_y, image_size, rotation_angle, mirror_mode):
     global _fs_scale, _fs_offset_x, _fs_offset_y, _image_size, _rotation_angle, _mirror_mode, _quad_dirty
