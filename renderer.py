@@ -1,5 +1,6 @@
 """
-renderer.py – Unified Rendering Engine (GPU & CPU paths)
+renderer.py – Universal Rendering Engine
+Adapts to Mac (Core 3.3+), Pi 4 (ES 3.0), and Pi Zero (ES 2.0) automatically.
 """
 
 import math
@@ -70,42 +71,55 @@ def initialize(gl_context: moderngl.Context) -> None:
     global ctx, prog, vao, vbo
     ctx = gl_context
 
-    # --- VERSION DETECTION LOGIC ---
-    # Pi Zero / GLES 2.0 (version_code 200) vs Modern GLES 3.0+
-    is_legacy = ctx.version_code < 300
+    # --- UNIVERSAL SHADER GENERATOR ---
+    # 1. Mac/PC (Core Profile) -> #version 330 core
+    # 2. Pi 4/5 (GLES 3)       -> #version 300 es
+    # 3. Pi Zero (GLES 2)      -> #version 100
 
-    if is_legacy:
-        # --- GLES 2.0 / Legacy Syntax ---
-        header = "#version 100\nprecision mediump float;"
-        # Maps ModernGL 3.0 keywords back to 2.0
-        v_in = "attribute"
-        v_out = "varying"
-        f_in = "varying"
-        f_out_decl = ""  # GLES 2.0 uses built-in gl_FragColor
-        f_out_set = "gl_FragColor ="
-        tex_func = "texture2D"
+    version = ctx.version_code
+
+    if version >= 330:
+        # Mac M-Series / PC
+        header = "#version 330 core"
+        in_kw = "in"
+        out_kw = "out"
+        frag_out_decl = "out vec4 fragColor;"
+        frag_out_set = "fragColor ="
+        tex_fn = "texture"
+        precision = "" # Desktop usually doesn't need precision
+    elif version >= 300:
+        # Pi 4 / 5
+        header = "#version 300 es\nprecision mediump float;"
+        in_kw = "in"
+        out_kw = "out"
+        frag_out_decl = "out vec4 fragColor;"
+        frag_out_set = "fragColor ="
+        tex_fn = "texture"
+        precision = "precision mediump float;"
     else:
-        # --- GLES 3.0+ / Modern Syntax ---
-        header = "#version 300 es\nprecision mediump float;" if ctx.version_code < 330 else "#version 330 core"
-        v_in = "in"
-        v_out = "out"
-        f_in = "in"
-        f_out_decl = "out vec4 fragColor;"
-        f_out_set = "fragColor ="
-        tex_func = "texture"
+        # Pi Zero / Legacy (The "Old Code" style)
+        header = "#version 100\nprecision mediump float;"
+        in_kw = "attribute"
+        out_kw = "varying"
+        frag_out_decl = "" # GLES 2 uses built-in gl_FragColor
+        frag_out_set = "gl_FragColor ="
+        tex_fn = "texture2D"
+        precision = "precision mediump float;"
 
+    # Vertex Shader
     vertex_src = f"""
         {header}
-        {v_in} vec2 position;
-        {v_in} vec2 texcoord;
+        {in_kw} vec2 position;
+        {in_kw} vec2 texcoord;
         uniform mat4 u_MVP;
-        {v_out} vec2 v_texcoord;
+        {out_kw} vec2 v_texcoord;
         void main() {{
             gl_Position = u_MVP * vec4(position, 0.0, 1.0);
             v_texcoord = texcoord;
         }}
     """
 
+    # Fragment Shader
     fragment_src = f"""
         {header}
         uniform sampler2D texture_main;
@@ -115,19 +129,19 @@ def initialize(gl_context: moderngl.Context) -> None:
         uniform bool u_main_is_sbs;
         uniform bool u_float_is_sbs;
 
-        {f_in} vec2 v_texcoord;
-        {f_out_decl}
+        {in_kw} vec2 v_texcoord;
+        {frag_out_decl}
 
         vec4 sampleLayer(sampler2D tex, bool is_sbs, vec2 uv) {{
             if (is_sbs) {{
                 vec2 uv_color = vec2(uv.x * 0.5, uv.y);
                 vec2 uv_mask  = vec2((uv.x * 0.5) + 0.5, uv.y);
-                vec3 color = {tex_func}(tex, uv_color).rgb;
-                float alpha = {tex_func}(tex, uv_mask).r;
+                vec3 color = {tex_fn}(tex, uv_color).rgb;
+                float alpha = {tex_fn}(tex, uv_mask).r;
                 if (alpha < 0.05) alpha = 0.0;
                 return vec4(color, alpha);
             }} else {{
-                return {tex_func}(tex, uv);
+                return {tex_fn}(tex, uv);
             }}
         }}
 
@@ -137,14 +151,15 @@ def initialize(gl_context: moderngl.Context) -> None:
 
             vec3 color = mix(u_bgColor, mainC.rgb, mainC.a);
             color = mix(color, floatC.rgb, floatC.a);
-            {f_out_set} vec4(color, 1.0);
+            {frag_out_set} vec4(color, 1.0);
         }}
     """
 
     prog = ctx.program(vertex_shader=vertex_src, fragment_shader=fragment_src)
     vbo = ctx.buffer(reserve=64)
 
-    # "2f 2f" is standard float packing for (x,y) position and (u,v) UVs
+    # ModernGL automatically maps "2f 2f" to the shader attributes based on order or name
+    # We use explicit naming to be safe across versions
     vao = ctx.vertex_array(prog, [(vbo, "2f 2f", "position", "texcoord")])
 
     mvp = np.eye(4, dtype="f4")

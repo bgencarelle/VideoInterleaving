@@ -61,14 +61,15 @@ def _log_renderer_info(ctx):
     try:
         info = ctx.info
         renderer_name = info.get('GL_RENDERER', 'Unknown')
-        print(f"[DISPLAY] GL Context: {renderer_name}")
+        version_code = ctx.version_code
+        print(f"[DISPLAY] GL Context: {renderer_name} (Version {version_code})")
         if "llvmpipe" in renderer_name.lower() or "softpipe" in renderer_name.lower():
             print("[DISPLAY] ℹ️  Using Software Rasterizer (Optimized CPU Rendering).")
     except:
         pass
 
 def _check_is_pi():
-    """Detect Raspberry Pi to enforce GLES contexts."""
+    """Detect Raspberry Pi."""
     try:
         if os.path.exists('/proc/device-tree/model'):
             with open('/proc/device-tree/model', 'r') as m:
@@ -82,8 +83,6 @@ def display_init(state: DisplayState):
     global window, ctx
 
     is_pi = _check_is_pi()
-    if is_pi:
-        print("[DISPLAY] Hardware: Raspberry Pi detected (Enforcing GLES 3.1)")
 
     # --- PATH A: SERVER / HEADLESS MODE ---
     is_server = settings.SERVER_MODE
@@ -102,8 +101,10 @@ def display_init(state: DisplayState):
 
         if preferred: backends_to_try.append(preferred)
         if 'egl' not in backends_to_try: backends_to_try.append('egl')
-        if 'osmesa' not in backends_to_try: backends_to_try.append('osmesa')
-        if None not in backends_to_try: backends_to_try.append(None)
+
+        # Don't try X11 on Pi headless
+        if not is_pi:
+            if None not in backends_to_try: backends_to_try.append(None)
 
         context_created = False
         last_error = None
@@ -111,30 +112,35 @@ def display_init(state: DisplayState):
         print("[DISPLAY] Initializing Headless GL...")
 
         for backend in backends_to_try:
-            try:
-                create_kwargs = {"standalone": True}
-                if backend: create_kwargs["backend"] = backend
+            # Waterfall version requests:
+            # 1. Try Default (Works on Mac/PC)
+            # 2. Try 200 (Works on Pi Zero 2)
+            version_attempts = [None]
+            if is_pi:
+                version_attempts = [310, 200]
 
-                # --- PI FIX: REQUEST GLES 2 for old stuff ---
-                if is_pi:
-                    create_kwargs["require"] = 200
+            for req_ver in version_attempts:
+                try:
+                    create_kwargs = {"standalone": True}
+                    if backend: create_kwargs["backend"] = backend
+                    if req_ver: create_kwargs["require"] = req_ver
 
-                ctx = moderngl.create_context(**create_kwargs)
-                context_created = True
-                _log_renderer_info(ctx)
-                break
-            except Exception as e:
-                last_error = e
-                continue
+                    ctx = moderngl.create_context(**create_kwargs)
+                    context_created = True
+                    _log_renderer_info(ctx)
+                    break
+                except Exception as e:
+                    last_error = e
+
+            if context_created: break
 
         if not context_created:
             print("\n" + "!"*60)
-            print("❌ HEADLESS GL CONTEXT FAILED")
-            print("All requested backends failed to initialize.")
-            print(f"Last Error: {last_error}")
-            print("Tip: If on Pi, ensure 'libgles2-mesa-dev' is installed.")
+            print("⚠️  HEADLESS GL CONTEXT FAILED")
+            print(f"    Error: {last_error}")
+            print("    -> Falling back to CPU Compositor.")
             print("!"*60 + "\n")
-            sys.exit(1)
+            return None
 
         # --- SMART RESOLUTION SELECTION ---
         if is_ascii:
@@ -214,9 +220,12 @@ def display_init(state: DisplayState):
         glfw.make_context_current(window)
         glfw.swap_interval(1 if VSYNC else 0)
 
-        # Apply Pi Hints for Context creation
+        # Context Creation Logic
         if is_pi:
-            ctx = moderngl.create_context(require=200)
+            try:
+                ctx = moderngl.create_context(require=200)
+            except:
+                ctx = moderngl.create_context()
         else:
             ctx = moderngl.create_context()
 
