@@ -49,6 +49,8 @@ SERVER_CAPTURE_RATE = FPS // 2   #  FPS by 2
 ASCII_MODE = False
 ASCII_COLOR = True
 ASCII_FPS = SERVER_CAPTURE_RATE
+ASCII_WIDTH = 90
+ASCII_HEIGHT = 60
 
 JPEG_QUALITY = 80# Image quality
 HEADLESS_RES = (480, 640)   # Resolution for the virtual screen
