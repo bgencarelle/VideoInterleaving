@@ -63,8 +63,6 @@ def _log_renderer_info(ctx):
         renderer_name = info.get('GL_RENDERER', 'Unknown')
         version_code = ctx.version_code
         print(f"[DISPLAY] GL Context: {renderer_name} (Version {version_code})")
-        if "llvmpipe" in renderer_name.lower() or "softpipe" in renderer_name.lower():
-            print("[DISPLAY] ℹ️  Using Software Rasterizer (Optimized CPU Rendering).")
     except:
         pass
 
@@ -95,45 +93,36 @@ def display_init(state: DisplayState):
             print("❌ CONFIG ERROR: HEADLESS_USE_GL must be True in settings.py for performance.")
             sys.exit(1)
 
-        # --- BACKEND WATERFALL STRATEGY ---
-        preferred = getattr(settings, "HEADLESS_BACKEND", None)
-        backends_to_try = []
+        # --- CONTEXT CREATION STRATEGY ---
+        # 1. Try EGL without version (Let driver decide)
+        # 2. Try EGL with version 200 (Force Pi Zero compatibility)
+        # 3. Try Default/Standalone (For Mac/PC dev)
 
-        if preferred: backends_to_try.append(preferred)
-        if 'egl' not in backends_to_try: backends_to_try.append('egl')
-
-        # Don't try X11/None on Pi headless (it causes hard crashes)
-        if not is_pi:
-            if None not in backends_to_try: backends_to_try.append(None)
+        attempts = [
+            {"standalone": True, "backend": "egl"},                 # Best for Pi 4/5
+            {"standalone": True, "backend": "egl", "require": 200}, # Explicit for Pi Zero
+            {"standalone": True},                                   # Fallback for Mac/PC
+        ]
 
         context_created = False
         last_error = None
 
         print("[DISPLAY] Initializing Headless GL...")
 
-        for backend in backends_to_try:
-            # Waterfall version requests:
-            # 1. Try Default (Best for Mac/PC)
-            # 2. Try 200 (Required for Pi Zero 2)
-            version_attempts = [None]
-            if is_pi:
-                # If we are on Pi, specifically try 200 (ES 2.0)
-                version_attempts = [200, None]
+        for kwargs in attempts:
+            try:
+                # Skip EGL on non-Linux unless specified
+                if kwargs.get('backend') == 'egl' and sys.platform == 'darwin':
+                    continue
 
-            for req_ver in version_attempts:
-                try:
-                    create_kwargs = {"standalone": True}
-                    if backend: create_kwargs["backend"] = backend
-                    if req_ver: create_kwargs["require"] = req_ver
-
-                    ctx = moderngl.create_context(**create_kwargs)
-                    context_created = True
-                    _log_renderer_info(ctx)
-                    break
-                except Exception as e:
-                    last_error = e
-
-            if context_created: break
+                ctx = moderngl.create_context(**kwargs)
+                context_created = True
+                _log_renderer_info(ctx)
+                break
+            except Exception as e:
+                last_error = e
+                # print(f"DEBUG: Attempt failed {kwargs}: {e}")
+                continue
 
         if not context_created:
             print("\n" + "!"*60)
@@ -184,13 +173,15 @@ def display_init(state: DisplayState):
             print("❌ ERROR: GLFW Init failed.")
             sys.exit(1)
 
-        # Apply Pi Hints for Window creation
+        # --- WINDOW HINTS ---
         if is_pi:
+            # Raspberry Pi: Request ES 2.0
             glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_ES_API)
             glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
             glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 2)
             glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 0)
         else:
+            # Desktop (Mac/PC): Request Core 3.3
             glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_API)
             glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.NATIVE_CONTEXT_API)
             glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
@@ -221,15 +212,19 @@ def display_init(state: DisplayState):
         glfw.make_context_current(window)
         glfw.swap_interval(1 if VSYNC else 0)
 
-        # Context Creation Logic
-        if is_pi:
-            try:
-                # Pi Zero 2 needs this explicit call
+        # --- LOCAL CONTEXT CREATION ---
+        # Try relaxed creation first
+        try:
+            if is_pi:
+                # Force ES 2.0 context object for Pi
                 ctx = moderngl.create_context(require=200)
-            except:
+            else:
+                # Desktop default
                 ctx = moderngl.create_context()
-        else:
-            ctx = moderngl.create_context()
+        except Exception as e:
+            print(f"❌ Local GL Context Failed: {e}")
+            glfw.terminate()
+            sys.exit(1)
 
         _log_renderer_info(ctx)
         renderer.initialize(ctx)
