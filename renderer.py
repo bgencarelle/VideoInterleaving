@@ -70,7 +70,8 @@ def initialize(gl_context: moderngl.Context) -> None:
     global ctx, prog, vao, vbo
     ctx = gl_context
 
-    # Detect version: GLES 2.0 (version_code 200) vs GLES 3.0+
+    # --- VERSION DETECTION LOGIC ---
+    # Pi Zero / GLES 2.0 (version_code 200) vs Modern GLES 3.0+
     is_legacy = ctx.version_code < 300
 
     if is_legacy:
@@ -80,8 +81,7 @@ def initialize(gl_context: moderngl.Context) -> None:
         v_in = "attribute"
         v_out = "varying"
         f_in = "varying"
-        # GLES 2.0 has no specific output declaration, it uses gl_FragColor
-        f_out_decl = ""
+        f_out_decl = ""  # GLES 2.0 uses built-in gl_FragColor
         f_out_set = "gl_FragColor ="
         tex_func = "texture2D"
     else:
@@ -144,7 +144,7 @@ def initialize(gl_context: moderngl.Context) -> None:
     prog = ctx.program(vertex_shader=vertex_src, fragment_shader=fragment_src)
     vbo = ctx.buffer(reserve=64)
 
-    # Format detection is automatic in ModernGL usually, but '2f 2f' is standard
+    # "2f 2f" is standard float packing for (x,y) position and (u,v) UVs
     vao = ctx.vertex_array(prog, [(vbo, "2f 2f", "position", "texcoord")])
 
     mvp = np.eye(4, dtype="f4")
@@ -156,6 +156,7 @@ def initialize(gl_context: moderngl.Context) -> None:
     prog["u_bgColor"].value = (0.0, 0.0, 0.0)
     prog["u_main_is_sbs"].value = False
     prog["u_float_is_sbs"].value = False
+
 
 def set_transform_parameters(fs_scale, fs_offset_x, fs_offset_y, image_size, rotation_angle, mirror_mode):
     global _fs_scale, _fs_offset_x, _fs_offset_y, _image_size, _rotation_angle, _mirror_mode, _quad_dirty
