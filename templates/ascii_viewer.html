@@ -7,6 +7,12 @@
   <link rel="stylesheet" href="/static/xterm.css" />
   <link rel="stylesheet" href="/static/terminal.css" />
   <script src="/static/xterm.js"></script>
+  <style>
+    /* [NEW] Force the page background to be transparent so the underlying video shows through */
+    html, body, #terminal-stage, #terminal {
+        background: transparent !important;
+    }
+  </style>
 </head>
 <body>
 
@@ -62,8 +68,10 @@
             lineHeight: lh,
             letterSpacing: 0,
             cursorBlink: false, disableStdin: true,
-            theme: { background: '#000000', foreground: '#e6e6e6' },
-            allowTransparency: false
+            // [CHANGED] Background is now fully transparent
+            theme: { background: 'rgba(0,0,0,0)', foreground: '#e6e6e6' },
+            // [CHANGED] Enable transparency rendering
+            allowTransparency: true
         });
 
         term.open(document.getElementById('terminal'));

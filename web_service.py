@@ -100,6 +100,45 @@ def _serve_static_file(handler):
         handler.send_error(404)
 
 
+def _serve_dynamic_template(handler):
+    """
+    Tries to map /pagename to templates/pagename.html
+    Returns True if successful, False if file not found.
+    """
+    try:
+        # 1. Decode and clean the path
+        raw_path = urlparse(handler.path).path
+        decoded_path = unquote(raw_path)
+        # Remove leading slash and normalize
+        clean_path = os.path.normpath(decoded_path.lstrip('/')).replace('\\', '/')
+
+        # 2. Security: Prevent Directory Traversal
+        if "/../" in f"/{clean_path}/" or clean_path.startswith(".."):
+            return False
+
+        # 3. Construct target file path (e.g., /about -> templates/about.html)
+        # Note: We enforce the .html extension so users can't read source code files
+        target_file = os.path.join("templates", f"{clean_path}.html")
+
+        # 4. If file exists, serve it
+        if os.path.isfile(target_file):
+            with open(target_file, "rb") as f:
+                content = f.read()
+
+            handler.send_response(200)
+            handler.send_header('Content-Type', 'text/html; charset=utf-8')
+            handler.send_header('Content-Length', str(len(content)))
+            handler.end_headers()
+            handler.wfile.write(content)
+            return True
+
+    except Exception as e:
+        # Fail silently so the main handler can send 404
+        pass
+
+    return False
+
+
 class ThreadedTCPServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -222,6 +261,11 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
                 self.wfile.write(content.encode('utf-8'))
             except Exception:
                 self.send_error(404)
+
+        # [NEW] Dynamic Template Fallback
+        elif _serve_dynamic_template(self):
+            return
+
         else:
             self.send_error(404)
 
@@ -261,6 +305,11 @@ class StreamHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
                 self.wfile.write(content)
             except:
                 self.send_error(404)
+
+        # [NEW] Dynamic Template Fallback
+        elif _serve_dynamic_template(self):
+            return
+
         else:
             self.send_error(404)
 
