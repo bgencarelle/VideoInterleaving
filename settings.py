@@ -9,7 +9,7 @@ from constantStorage.display_constants import *
 # -------------------------
 # Image Directories and Folder Paths
 # -------------------------
-IMAGES_DIR = ("images")
+IMAGES_DIR = ("images_sbs")
 MAIN_FOLDER_PATH = f"{IMAGES_DIR}/face"
 FLOAT_FOLDER_PATH = f"{IMAGES_DIR}/float"
 
@@ -48,7 +48,7 @@ SERVER_CAPTURE_RATE = FPS // 2   #  FPS by 2
 # --- ASCII MODE SETTINGS ---
 ASCII_MODE = False
 ASCII_COLOR = True
-ASCII_FPS = SERVER_CAPTURE_RATE // 2
+ASCII_FPS = SERVER_CAPTURE_RATE
 
 JPEG_QUALITY = 80# Image quality
 HEADLESS_RES = (480, 640)   # Resolution for the virtual screen

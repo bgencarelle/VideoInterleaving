@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width,initial-scale=1"/>
+    <title>3x2 Mixed Streams Animated</title>
+    <style>
+        :root {
+            --gap: 14px;
+            --pad: 14px;
+            --radius: 14px;
+            --bg: #000000;
+            --panel: #11151b;
+            --border: rgba(0, 0, 0, 0%);
+        }
+
+        html, body {
+            height: 100%;
+            margin: 0;
+            background: var(--bg);
+        }
+
+        .grid {
+            height: 100vh;
+            display: grid;
+            /* 3 Columns, 2 Rows */
+            grid-template-columns: 1fr 1fr 1fr;
+            grid-template-rows: 1fr 1fr;
+            gap: var(--gap);
+            padding: var(--pad);
+            box-sizing: border-box;
+            grid-template-areas:
+        "mjA  mixA  ascA"
+        "mjB  mixB  ascB";
+        }
+
+        .panel {
+            overflow: hidden;
+            border-radius: var(--radius);
+            background: var(--panel);
+            border: 1px transparent var(--border);
+            position: relative; /* Necessary for absolute positioning inside */
+        }
+
+        /* Standard full-size content */
+        .panel > iframe,
+        .panel > img {
+            width: 100%;
+            height: 100%;
+            display: block;
+            border: 0;
+            background: #000;
+            object-fit: contain;
+        }
+
+        /* --- Overlay Logic for Middle Column --- */
+        .overlay-container {
+            position: relative;
+        }
+
+        /* The base video layer */
+        .overlay-container img.base-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 1;
+        }
+
+        /* Define the animation keyframes */
+        @keyframes modulateTransparency {
+            0% {
+                opacity: 0.01; /* Almost invisible (99% transparent) */
+            }
+            100% {
+                opacity: 0.99; /* Almost solid (1% transparent) */
+            }
+        }
+
+        /* The ascii overlay layer */
+        .overlay-container iframe.overlay-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 2;
+            pointer-events: none; /* Let clicks pass through to video if needed */
+            background: transparent; /* Ensure iframe background doesn't block video */
+
+            /* Set initial opacity */
+            opacity: 0.01;
+
+            /* Apply animation: name | duration | timing-function | iteration-count | direction */
+            /* 60s to go from 1% to 99%, then 60s back to 1% */
+            animation: modulateTransparency 60s linear infinite alternate;
+        }
+
+        /* Grid Area Assignments */
+        .area-mjA {
+            grid-area: mjA;
+        }
+
+        .area-mixA {
+            grid-area: mixA;
+        }
+
+        .area-ascA {
+            grid-area: ascA;
+        }
+
+        .area-mjB {
+            grid-area: mjB;
+        }
+
+        .area-mixB {
+            grid-area: mixB;
+        }
+
+        .area-ascB {
+            grid-area: ascB;
+        }
+
+    </style>
+</head>
+<body>
+<div class="grid">
+
+    <div class="panel area-mjA">
+        <img src="https://gencarelle.fun/video_feed" alt="mjpeg gencarelle"/>
+    </div>
+
+    <div class="panel area-mixA overlay-container">
+        <img class="base-layer" src="https://gencarelle.fun/video_feed" alt="base"/>
+        <iframe class="overlay-layer" src="https://gencarelle.fun/ascii" allow="autoplay"></iframe>
+    </div>
+
+    <div class="panel area-ascA">
+        <iframe src="https://gencarelle.fun/ascii" allow="autoplay"></iframe>
+    </div>
+
+
+    <div class="panel area-mjB">
+        <img src="https://testing.gencarelle.fun/video_feed" alt="mjpeg testing"/>
+    </div>
+
+    <div class="panel area-mixB overlay-container">
+        <img class="base-layer" src="https://testing.gencarelle.fun/video_feed" alt="base"/>
+        <iframe class="overlay-layer" src="https://testing.gencarelle.fun/ascii" allow="autoplay"></iframe>
+    </div>
+
+    <div class="panel area-ascB">
+        <iframe src="https://testing.gencarelle.fun/ascii" allow="autoplay"></iframe>
+    </div>
+
+</div>
+</body>
+</html>
