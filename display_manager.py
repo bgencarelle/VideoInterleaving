@@ -102,7 +102,7 @@ def display_init(state: DisplayState):
         if preferred: backends_to_try.append(preferred)
         if 'egl' not in backends_to_try: backends_to_try.append('egl')
 
-        # Don't try X11 on Pi headless
+        # Don't try X11/None on Pi headless (it causes hard crashes)
         if not is_pi:
             if None not in backends_to_try: backends_to_try.append(None)
 
@@ -113,11 +113,12 @@ def display_init(state: DisplayState):
 
         for backend in backends_to_try:
             # Waterfall version requests:
-            # 1. Try Default (Works on Mac/PC)
-            # 2. Try 200 (Works on Pi Zero 2)
+            # 1. Try Default (Best for Mac/PC)
+            # 2. Try 200 (Required for Pi Zero 2)
             version_attempts = [None]
             if is_pi:
-                version_attempts = [310, 200]
+                # If we are on Pi, specifically try 200 (ES 2.0)
+                version_attempts = [200, None]
 
             for req_ver in version_attempts:
                 try:
@@ -223,6 +224,7 @@ def display_init(state: DisplayState):
         # Context Creation Logic
         if is_pi:
             try:
+                # Pi Zero 2 needs this explicit call
                 ctx = moderngl.create_context(require=200)
             except:
                 ctx = moderngl.create_context()

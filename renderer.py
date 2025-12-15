@@ -78,33 +78,29 @@ def initialize(gl_context: moderngl.Context) -> None:
 
     version = ctx.version_code
 
-    if version >= 330:
-        # Mac M-Series / PC
-        header = "#version 330 core"
-        in_kw = "in"
-        out_kw = "out"
-        frag_out_decl = "out vec4 fragColor;"
-        frag_out_set = "fragColor ="
-        tex_fn = "texture"
-        precision = "" # Desktop usually doesn't need precision
-    elif version >= 300:
-        # Pi 4 / 5
-        header = "#version 300 es\nprecision mediump float;"
-        in_kw = "in"
-        out_kw = "out"
-        frag_out_decl = "out vec4 fragColor;"
-        frag_out_set = "fragColor ="
-        tex_fn = "texture"
-        precision = "precision mediump float;"
-    else:
-        # Pi Zero / Legacy (The "Old Code" style)
+    # Defaults (Core Profile / Desktop)
+    header = "#version 330 core"
+    in_kw = "in"
+    out_kw = "out"
+    frag_out_decl = "out vec4 fragColor;"
+    frag_out_set = "fragColor ="
+    tex_fn = "texture"
+
+    # Adaptation Logic
+    if version < 300:
+        # Legacy / Pi Zero (GLES 2.0)
         header = "#version 100\nprecision mediump float;"
         in_kw = "attribute"
         out_kw = "varying"
         frag_out_decl = "" # GLES 2 uses built-in gl_FragColor
         frag_out_set = "gl_FragColor ="
         tex_fn = "texture2D"
-        precision = "precision mediump float;"
+    elif version < 330:
+        # Pi 4 (GLES 3.0 / 3.1)
+        header = "#version 300 es\nprecision mediump float;"
+        # Keywords stay modern (in/out) for ES 3.0
+
+    print(f"[RENDERER] Adapting to GL Version {version}. Using: {header.splitlines()[0]}")
 
     # Vertex Shader
     vertex_src = f"""
@@ -155,7 +151,12 @@ def initialize(gl_context: moderngl.Context) -> None:
         }}
     """
 
-    prog = ctx.program(vertex_shader=vertex_src, fragment_shader=fragment_src)
+    try:
+        prog = ctx.program(vertex_shader=vertex_src, fragment_shader=fragment_src)
+    except Exception as e:
+        print(f"❌ Shader Compilation Failed:\n{e}")
+        raise e
+
     vbo = ctx.buffer(reserve=64)
 
     # ModernGL automatically maps "2f 2f" to the shader attributes based on order or name
