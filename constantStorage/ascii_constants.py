@@ -5,10 +5,10 @@ ASCII_HOST = '0.0.0.0'
 ASCII_FONT_RATIO = .5
 
 # --- ARTISTIC TWEAKS ---
-ASCII_CONTRAST   = 1.  # tiny bit of punch
-ASCII_SATURATION = 1   # slightly muted color
-ASCII_BRIGHTNESS = 1.0   # handled in HSV
-ASCII_GAMMA      = 1  # neutral given your LUT definition
+ASCII_CONTRAST   = 1.2  # tiny bit of punch
+ASCII_SATURATION = .9   # slightly muted color
+ASCII_BRIGHTNESS = 1.4   # handled in HSV
+ASCII_GAMMA      = .9  # neutral given your LUT definition
 
 ASCII_PADDING_CHAR = " "     # <--- NEW: Character for pillar/letterboxing
 
