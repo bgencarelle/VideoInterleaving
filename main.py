@@ -1,3 +1,4 @@
+import traceback
 import sys
 import os
 import argparse
@@ -240,12 +241,14 @@ def main(clock=CLOCK_MODE):
         web_service.start_server(monitor=True, stream=False)
 
     # 3. Start Display Engine
+        # 3. Start Display Engine
     try:
         image_display.run_display(clock)
     except KeyboardInterrupt:
         print("\n[MAIN] Shutdown requested via Ctrl+C")
-    except Exception as e:
-        print(f"\n[MAIN] Crash: {e}")
+    except Exception:  # Remove 'as e'
+        print("\n[MAIN] CRASH DETAILS:")
+        traceback.print_exc()  # <--- This prints the file and line number
     finally:
         print("[MAIN] Exiting...")
         sys.stdout.flush()
