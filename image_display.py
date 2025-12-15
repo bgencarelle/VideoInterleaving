@@ -13,7 +13,7 @@ import settings
 from shared_state import exchange
 
 # Clean up console noise from ModernGL on some systems
-#os.environ['PYOPENGL_ERROR_CHECKING'] = '0'
+os.environ['PYOPENGL_ERROR_CHECKING'] = '0'
 
 # Conditional import logic handled by display_manager,
 # but we need glfw here for event polling if it exists.
