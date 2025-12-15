@@ -1,20 +1,45 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <title>VideoInterleaving Terminal</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <link rel="stylesheet" href="/static/xterm.css" />
-  <link rel="stylesheet" href="/static/terminal.css" />
-  <script src="/static/xterm.js"></script>
+    <meta charset="utf-8">
+    <title>VideoInterleaving Terminal</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <link rel="stylesheet" href="/static/xterm.css"/>
+    <link rel="stylesheet" href="/static/terminal.css"/>
+    <script src="/static/xterm.js"></script>
+
+    <style>
+        /* [CRITICAL FIX] Force black background immediately to prevent white borders/flashes */
+        html, body {
+            background-color: #000000 !important;
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            width: 100%;
+            overflow: hidden;
+        }
+
+        #terminal-stage {
+            background-color: #000000 !important;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        #terminal {
+            background-color: #000000 !important;
+        }
+    </style>
 </head>
 <body>
 
-  <div id="terminal-stage">
+<div id="terminal-stage">
     <div id="terminal"></div>
-  </div>
+</div>
 
-  <script>
+<script>
     const WS_PORT = 2324;
 
     // --- SETTINGS ---
@@ -22,7 +47,6 @@
     const ROWS = parseInt("{{ASCII_HEIGHT}}") || 24;
     const TARGET_PIXEL_RATIO = parseFloat("{{ASCII_FONT_RATIO}}") || 0.5;
 
-    // Ideal Ratio of the whole image
     const IMAGE_ASPECT_RATIO = (COLS * TARGET_PIXEL_RATIO) / ROWS;
 
     if (typeof Terminal === 'undefined') throw new Error("xterm.js missing");
@@ -39,7 +63,7 @@
         const w = span.getBoundingClientRect().width / 20;
         const h = span.getBoundingClientRect().height;
         document.body.removeChild(span);
-        return { w, h };
+        return {w, h};
     }
 
     // --- 2. INIT ---
@@ -49,11 +73,8 @@
 
         const m = measureFont(FONT_FAMILY, FONT_SIZE);
 
-        // Solver: Create scanlines to match target ratio
         let lh = m.w / (m.h * TARGET_PIXEL_RATIO);
         if (lh < 0.8) lh = 0.8;
-
-        console.log(`[Solver] LH: ${lh.toFixed(3)}`);
 
         const term = new Terminal({
             cols: COLS, rows: ROWS,
@@ -62,9 +83,8 @@
             lineHeight: lh,
             letterSpacing: 0,
             cursorBlink: false, disableStdin: true,
-            // [CHANGED] Force Solid Black Background
-            theme: { background: '#000000', foreground: '#e6e6e6' },
-            // [CHANGED] Disable transparency for solid wiping
+            // Ensure theme background matches the page background
+            theme: {background: '#000000', foreground: '#e6e6e6'},
             allowTransparency: false
         });
 
@@ -74,7 +94,7 @@
         connect(term);
     }
 
-    // --- 3. FIT TO SCREEN (FIXED) ---
+    // --- 3. FIT TO SCREEN ---
     function setupFit(term) {
         const fitToScreen = () => {
             const termEl = document.getElementById('terminal');
@@ -88,7 +108,7 @@
             const winW = window.innerWidth;
             const winH = window.innerHeight;
 
-            // 1. Calculate Target Box (Perfect Aspect Ratio)
+            // Calculate Target Box
             let targetW, targetH;
             const windowRatio = winW / winH;
 
@@ -100,21 +120,20 @@
                 targetH = targetW / IMAGE_ASPECT_RATIO;
             }
 
-            // 2. Safety Margin (99% size)
             targetW *= 0.99;
             targetH *= 0.99;
 
-            // 3. Calculate Scale
             const scaleX = targetW / srcW;
             const scaleY = targetH / srcH;
 
-            // 4. Apply
             termEl.style.transform = `scale(${scaleX}, ${scaleY})`;
 
             return true;
         };
 
-        const safeFit = () => { if (!fitToScreen()) requestAnimationFrame(safeFit); };
+        const safeFit = () => {
+            if (!fitToScreen()) requestAnimationFrame(safeFit);
+        };
         window.addEventListener('resize', () => requestAnimationFrame(fitToScreen));
         requestAnimationFrame(safeFit);
         term.fitFn = safeFit;
@@ -124,8 +143,8 @@
     function connect(term) {
         const protocol = location.protocol === 'https:' ? 'wss://' : 'ws://';
         const wsUrl = (location.port === "" || location.port === "80" || location.port === "443")
-            ? protocol + location.hostname + "/ascii_ws/"
-            : protocol + location.hostname + ":" + WS_PORT;
+                ? protocol + location.hostname + "/ascii_ws/"
+                : protocol + location.hostname + ":" + WS_PORT;
 
         const ws = new WebSocket(wsUrl);
         ws.binaryType = "arraybuffer";
@@ -139,20 +158,21 @@
         ws.onerror = () => ws.close();
     }
 
-    // --- BOOT ---
     document.fonts.load("16px Unscii").then(() => initTerminal()).catch(() => initTerminal());
 
     (function () {
-      let t;
-      function reset() {
-        document.body.classList.remove('hide-cursor');
-        clearTimeout(t);
-        t = setTimeout(() => document.body.classList.add('hide-cursor'), 2000);
-      }
-      ['mousemove', 'mousedown', 'keydown', 'touchstart'].forEach(e =>
-        window.addEventListener(e, reset, { passive: true }));
-      reset();
+        let t;
+
+        function reset() {
+            document.body.classList.remove('hide-cursor');
+            clearTimeout(t);
+            t = setTimeout(() => document.body.classList.add('hide-cursor'), 2000);
+        }
+
+        ['mousemove', 'mousedown', 'keydown', 'touchstart'].forEach(e =>
+                window.addEventListener(e, reset, {passive: true}));
+        reset();
     })();
-  </script>
+</script>
 </body>
 </html>
