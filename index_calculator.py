@@ -8,7 +8,7 @@ from settings import IPS, CLIENT_MODE, VALID_MODES, FROM_BIRTH, CLOCK_MODE, BIRT
 clock_mode = CLOCK_MODE
 midi_mode = False
 import midi_control
-import index_client
+#import index_client
 launch_time = 0.00000000
 
 
@@ -85,10 +85,6 @@ def update_index(total_images, pingpong=True):
     if midi_mode:
         midi_control.process_midi(clock_mode)
         control_data_dictionary.update(midi_control.midi_data_dictionary)
-        index, _ = control_data_dictionary['Index_and_Direction']
-        return index, None
-    elif clock_mode == CLIENT_MODE:
-        control_data_dictionary.update(index_client.midi_data_dictionary)
         index, _ = control_data_dictionary['Index_and_Direction']
         return index, None
     else:
