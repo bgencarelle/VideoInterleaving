@@ -33,7 +33,7 @@ FROM_BIRTH = True
 
 # web stuff
 HTTP_MONITOR = True  # or True
-WEB_PORT = BIRTH_YEAR  # web port is year of birth
+# WEB_PORT is now managed by server_config.py - do not set here
 FRAME_COUNTER_DISPLAY = True  # If the monitor is on, skip printing
 
 
