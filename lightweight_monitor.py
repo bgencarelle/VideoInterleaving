@@ -7,8 +7,6 @@ import threading
 from collections import deque
 from math import log2
 
-from settings import WEB_PORT
-
 # --- DATA STORE ---
 monitor_data = {
     "index": 0,

@@ -40,7 +40,7 @@
 </div>
 
 <script>
-    const WS_PORT = 2324;
+    const WS_PORT = parseInt("{{WEBSOCKET_PORT}}") || 2424;
 
     // --- SETTINGS ---
     const COLS = parseInt("{{ASCII_WIDTH}}") || 80;

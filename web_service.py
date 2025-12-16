@@ -251,10 +251,19 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
                 cols = getattr(settings, 'ASCII_WIDTH', 120)
                 rows = getattr(settings, 'ASCII_HEIGHT', 96)
                 ratio = getattr(settings, 'ASCII_FONT_RATIO', 0.5)
+                # Get WebSocket port from config (for asciiweb mode)
+                try:
+                    ws_port = get_config().get_ascii_websocket_port()
+                    if ws_port is None:
+                        ws_port = getattr(settings, 'WEBSOCKET_PORT', 2424)
+                except RuntimeError:
+                    # Config not initialized yet, use settings fallback
+                    ws_port = getattr(settings, 'WEBSOCKET_PORT', 2424)
 
                 content = content.replace("{{ASCII_WIDTH}}", str(cols))
                 content = content.replace("{{ASCII_HEIGHT}}", str(rows))
                 content = content.replace("{{ASCII_FONT_RATIO}}", str(ratio))
+                content = content.replace("{{WEBSOCKET_PORT}}", str(ws_port))
 
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
