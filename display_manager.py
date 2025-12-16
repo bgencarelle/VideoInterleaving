@@ -199,6 +199,7 @@ def display_init(state: DisplayState):
             else:
                 best = _largest_mode(mon)
                 fs_w, fs_h = best.size.width, best.size.height
+            glfw.window_hint(glfw.AUTO_ICONIFY, glfw.FALSE)
             window = glfw.create_window(fs_w, fs_h, "Fullscreen", mon, None)
         else:
             aspect = eff_w / eff_h
@@ -225,6 +226,9 @@ def display_init(state: DisplayState):
 
         if GAMMA_CORRECTION_ENABLED or ENABLE_SRGB_FRAMEBUFFER:
             glEnable(GL_FRAMEBUFFER_SRGB)
+
+        if glfw and window is not None:
+            glfw.set_input_mode(window, glfw.CURSOR, glfw.CURSOR_HIDDEN)
 
     current_monitor = glfw.get_window_monitor(window)
     if state.fullscreen:
