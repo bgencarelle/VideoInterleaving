@@ -4,10 +4,10 @@ import socket
 import settings
 from shared_state import exchange
 from SimpleWebSocketServer import SimpleWebSocketServer, WebSocket
+from server_config import get_config
 
 # Configuration
 HOST = getattr(settings, 'ASCII_HOST', '127.0.0.1')
-PORT = 2424
 MAX_CLIENTS = getattr(settings, 'MAX_VIEWERS', 20)
 
 _sem = threading.Semaphore(MAX_CLIENTS)
@@ -82,9 +82,12 @@ def broadcast_loop():
 
 
 def start_server():
-    print(f"🕸️  ASCII WebSocket Server started on {HOST}:{PORT}")
+    port = get_config().get_ascii_websocket_port()
+    if port is None:
+        raise RuntimeError("ASCII WebSocket port not configured for current mode")
+    print(f"🕸️  ASCII WebSocket Server started on {HOST}:{port}")
     t = threading.Thread(target=broadcast_loop, daemon=True, name="WS-Broadcaster")
     t.start()
 
-    server = SimpleWebSocketServer(HOST, PORT, AsciiWebSocket)
+    server = SimpleWebSocketServer(HOST, port, AsciiWebSocket)
     server.serveforever()
