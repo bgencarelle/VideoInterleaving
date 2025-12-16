@@ -7,6 +7,7 @@ import socket
 
 # 1. Import Settings FIRST so we can patch them
 import settings
+from server_config import ServerConfig, get_config, MODE_WEB, MODE_LOCAL, MODE_ASCII, MODE_ASCIIWEB
 
 # --- CONSTANTS ---
 # [CHANGE] Updated reserved ports to the new 24xx range
@@ -96,15 +97,15 @@ def configure_runtime():
         settings.MAIN_FOLDER_PATH = os.path.join(abs_path, "face")
         settings.FLOAT_FOLDER_PATH = os.path.join(abs_path, "float")
 
-    # 2. Determine Primary Port
+    # 2. Determine Primary Port (for ASCII modes)
     if args.mode == "web":
-        primary_port = 8080
+        primary_port = None  # Not used in web mode
     elif args.mode == "local":
-        primary_port = 8888
+        primary_port = None  # Not used in local mode
     elif args.mode == "ascii":
         primary_port = args.port or 2323
     elif args.mode == "asciiweb":
-        # [CHANGE] Default updated to 2423
+        # Default updated to 2423
         primary_port = args.port or 2423
 
     # 3. Dynamic Naming & Cache Setup
@@ -122,47 +123,59 @@ def configure_runtime():
     settings.LOG_FILE_PATH = log_path
 
     # --- MODE SWITCHING ---
-
+    # Initialize ServerConfig with the selected mode
+    config = get_config()
+    
     if args.mode == "web":
         if args.port:
-            print("⚠️  WARNING: --port argument ignored in WEB mode. Using fixed port 8080.")
+            print("⚠️  WARNING: --port argument ignored in WEB mode. Using fixed ports.")
         print(f">> MODE: WEB (MJPEG) [{source_name}]")
         settings.ASCII_MODE = False
         settings.SERVER_MODE = True
-        settings.WEB_PORT = 1978
-        settings.STREAM_PORT = 8080
-        require_ports([settings.WEB_PORT, settings.STREAM_PORT])
+        config.set_mode(MODE_WEB)
+        ports = config.get_ports()
+        print(f">> PORTS: Monitor={ports.monitor}, Stream={ports.stream}")
+        require_ports(ports.get_all_ports())
+        # Update settings for backward compatibility
+        settings.WEB_PORT = ports.monitor
+        settings.STREAM_PORT = ports.stream
 
     elif args.mode == "local":
         print(f">> MODE: LOCAL (Window) [{source_name}]")
         settings.ASCII_MODE = False
         settings.SERVER_MODE = False
-        settings.WEB_PORT = 8888
-        require_ports([settings.WEB_PORT])
+        config.set_mode(MODE_LOCAL)
+        ports = config.get_ports()
+        print(f">> PORTS: Monitor={ports.monitor}")
+        require_ports(ports.get_all_ports())
+        # Update settings for backward compatibility
+        settings.WEB_PORT = ports.monitor
 
     elif args.mode == "ascii":
         validate_ascii_port(primary_port)
         print(f">> MODE: ASCII (Telnet) [{source_name}] @ {primary_port}")
         settings.ASCII_MODE = True
         settings.SERVER_MODE = False
-        settings.ASCII_PORT = primary_port
-        settings.WEB_PORT = primary_port + 1
-        print(f">> PORTS: Telnet={settings.ASCII_PORT}, Monitor={settings.WEB_PORT}")
-        require_ports([settings.ASCII_PORT, settings.WEB_PORT])
+        config.set_mode(MODE_ASCII, primary_port=primary_port)
+        ports = config.get_ports()
+        print(f">> PORTS: Telnet={ports.ascii_telnet}, Monitor={ports.monitor}")
+        require_ports(ports.get_all_ports())
+        # Update settings for backward compatibility
+        settings.ASCII_PORT = ports.ascii_telnet
+        settings.WEB_PORT = ports.monitor
 
     elif args.mode == "asciiweb":
         # [NOTE] Validation skipped here so asciiweb can use its own reserved ports
-
         print(f">> MODE: ASCII-WEB (WebSocket) [{source_name}]")
         settings.ASCII_MODE = True
         settings.SERVER_MODE = False
-        settings.WEB_PORT = 1980
-
-        # Specific Logic: If default 2423, WebSocket is 2424.
-        settings.WEBSOCKET_PORT = primary_port + 1
-
-        print(f">> PORTS: Viewer={settings.WEB_PORT}, WebSocket={settings.WEBSOCKET_PORT}")
-        require_ports([settings.WEB_PORT, settings.WEBSOCKET_PORT])
+        config.set_mode(MODE_ASCIIWEB, primary_port=primary_port)
+        ports = config.get_ports()
+        print(f">> PORTS: Viewer={ports.monitor}, WebSocket={ports.ascii_websocket}")
+        require_ports(ports.get_all_ports())
+        # Update settings for backward compatibility
+        settings.WEB_PORT = ports.monitor
+        settings.WEBSOCKET_PORT = ports.ascii_websocket
 
     return args, log_path
 

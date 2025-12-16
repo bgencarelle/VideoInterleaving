@@ -13,6 +13,7 @@ import sys
 import settings
 from shared_state import exchange
 from lightweight_monitor import monitor_data, HTML_TEMPLATE
+from server_config import get_config
 
 MAX_VIEWERS = getattr(settings, 'MAX_VIEWERS', 20)
 _hb_lock = threading.Lock()
@@ -393,7 +394,7 @@ class StreamHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
 
 
 def run_monitor_server():
-    port = getattr(settings, 'WEB_PORT', 1978)
+    port = get_config().get_monitor_port()
     # Default to 127.0.0.1 (Localhost only) for security.
     host = getattr(settings, 'WEB_HOST', '127.0.0.1')
     httpd = ThreadedTCPServer((host, port), MonitorHandler)
@@ -402,7 +403,9 @@ def run_monitor_server():
 
 
 def run_stream_server():
-    port = getattr(settings, 'STREAM_PORT', 8080)
+    port = get_config().get_stream_port()
+    if port is None:
+        raise RuntimeError("Stream port not configured for current mode")
     # Default to 0.0.0.0 (Public) for the stream.
     host = getattr(settings, 'STREAM_HOST', '0.0.0.0')
     httpd = ThreadedTCPServer((host, port), StreamHandler)

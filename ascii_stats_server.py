@@ -2,11 +2,10 @@ import socketserver
 import time
 import settings
 from lightweight_monitor import monitor_data
+from server_config import get_config
 
 # --- CONFIGURATION ---
 HOST = '127.0.0.1'
-# Default to 2301 (The standard ASCII Monitor port) if not patched by main.py
-PORT = getattr(settings, 'WEB_PORT', 2301)
 
 
 class ThreadedTCPServer(socketserver.ThreadingTCPServer):
@@ -88,8 +87,10 @@ class StatsHandler(socketserver.BaseRequestHandler):
 
 
 def start_server():
-    # Double check settings in case main.py patched it
-    current_port = getattr(settings, 'WEB_PORT', 2301)
-    print(f"📊 Telnet Monitor started on port {current_port}")
-    server = ThreadedTCPServer((HOST, current_port), StatsHandler)
+    port = get_config().get_ascii_monitor_port()
+    if port is None:
+        # Fallback to monitor port if ascii_monitor not set
+        port = get_config().get_monitor_port()
+    print(f"📊 Telnet Monitor started on port {port}")
+    server = ThreadedTCPServer((HOST, port), StatsHandler)
     server.serve_forever()

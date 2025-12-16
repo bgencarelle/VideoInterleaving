@@ -4,10 +4,10 @@ import threading
 import time
 import settings
 from shared_state import exchange
+from server_config import get_config
 
 # --- CONFIGURATION ---
 HOST = getattr(settings, 'ASCII_HOST', '127.0.0.1')
-PORT = getattr(settings, 'ASCII_PORT', 2323)
 MAX_CLIENTS = getattr(settings, 'MAX_VIEWERS', 20)
 
 _sem = threading.Semaphore(MAX_CLIENTS)
@@ -108,6 +108,9 @@ class AsciiHandler(socketserver.BaseRequestHandler):
 
 
 def start_server():
-    print(f"📠 ASCII Telnet Server started on {HOST}:{PORT}")
-    server = ThreadedTCPServer((HOST, PORT), AsciiHandler)
+    port = get_config().get_ascii_telnet_port()
+    if port is None:
+        raise RuntimeError("ASCII telnet port not configured for current mode")
+    print(f"📠 ASCII Telnet Server started on {HOST}:{port}")
+    server = ThreadedTCPServer((HOST, port), AsciiHandler)
     server.serve_forever()
