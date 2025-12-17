@@ -30,11 +30,23 @@ echo "    Hardware: GPU=$HAS_GPU | Pi=$IS_PI"
 # 2. Dependencies
 # --------------------------------------------
 echo ">>> 📦 Installing system libraries..."
+
+# Check if system-requirements.txt exists
+if [ ! -f "$PROJECT_DIR/system-requirements.txt" ]; then
+    echo "❌ ERROR: system-requirements.txt not found in $PROJECT_DIR"
+    exit 1
+fi
+
+# Read system packages (skip comments and empty lines)
+SYSTEM_PACKAGES=$(grep -v '^#' "$PROJECT_DIR/system-requirements.txt" | grep -v '^$' | tr '\n' ' ')
+
+if [ -z "$SYSTEM_PACKAGES" ]; then
+    echo "❌ ERROR: No packages found in system-requirements.txt"
+    exit 1
+fi
+
 sudo apt update -qq
-sudo apt install -y python3-venv python3-dev python3-pip build-essential cmake pkg-config \
-    libwebp-dev libsdl2-dev libasound2-dev libgl1-mesa-dev libglu1-mesa-dev \
-    libegl1-mesa-dev mesa-utils chrony ninja-build python-is-python3 \
-    libjpeg-dev
+sudo apt install -y $SYSTEM_PACKAGES
 
 if [ "$HAS_GPU" = true ] && [ "$USERNAME" != "root" ]; then
     sudo usermod -aG video,render "$USERNAME" || true
@@ -44,14 +56,22 @@ fi
 # 3. Python Environment
 # --------------------------------------------
 echo ">>> 🐍 Setting up Python venv..."
+
+# Check if requirements.txt exists
+if [ ! -f "$PROJECT_DIR/requirements.txt" ]; then
+    echo "❌ ERROR: requirements.txt not found in $PROJECT_DIR"
+    exit 1
+fi
+
+# Create venv with system-site-packages enabled (allows access to system-installed Python packages)
 # Create venv with ownership of the real user, not root
 if [ -d "$VENV_DIR" ]; then rm -rf "$VENV_DIR"; fi
-sudo -u "$USERNAME" python3 -m venv "$VENV_DIR"
+sudo -u "$USERNAME" python3 -m venv --system-site-packages "$VENV_DIR"
 
 # Install requirements inside the venv
 # We use full path to pip to ensure we use the venv's pip
 sudo -u "$USERNAME" "$VENV_DIR/bin/pip" install --upgrade pip wheel
-sudo -u "$USERNAME" "$VENV_DIR/bin/pip" install -r requirements.txt
+sudo -u "$USERNAME" "$VENV_DIR/bin/pip" install -r "$PROJECT_DIR/requirements.txt"
 
 # --------------------------------------------
 # 4. Logrotate
@@ -69,7 +89,105 @@ $PROJECT_DIR/*.log {
 EOF
 
 # --------------------------------------------
-# 5. Systemd Services
+# 5. Display Detection Functions
+# --------------------------------------------
+
+detect_display() {
+    # Check Wayland
+    if [ -n "$WAYLAND_DISPLAY" ] || [ "$XDG_SESSION_TYPE" = "wayland" ]; then
+        echo "wayland"
+        return
+    fi
+    
+    # Check X11
+    if [ -n "$DISPLAY" ]; then
+        echo "x11"
+        return
+    fi
+    
+    # Check for X11 socket
+    if [ -S "/tmp/.X11-unix/X0" ]; then
+        echo "x11"
+        return
+    fi
+    
+    # Check for other X11 sockets
+    for socket in /tmp/.X11-unix/X*; do
+        if [ -S "$socket" ]; then
+            echo "x11"
+            return
+        fi
+    done
+    
+    # Check framebuffer (Pi)
+    if [ -c "/dev/fb0" ]; then
+        echo "framebuffer"
+        return
+    fi
+    
+    # Default fallback
+    echo "x11"
+}
+
+get_user_display() {
+    local user=$1
+    local display=""
+    
+    # Try to get DISPLAY from systemd user session
+    if command -v loginctl >/dev/null 2>&1; then
+        local session=$(loginctl list-sessions --user="$user" --no-legend 2>/dev/null | head -n1 | awk '{print $1}')
+        if [ -n "$session" ]; then
+            display=$(loginctl show-session "$session" -p Display --value 2>/dev/null || echo "")
+        fi
+    fi
+    
+    # Fallback: check for X11 sockets
+    if [ -z "$display" ]; then
+        if [ -S "/tmp/.X11-unix/X0" ]; then
+            display=":0"
+        else
+            # Find first available X socket
+            for socket in /tmp/.X11-unix/X*; do
+                if [ -S "$socket" ]; then
+                    local num=$(basename "$socket" | sed 's/X//')
+                    display=":$num"
+                    break
+                fi
+            done
+        fi
+    fi
+    
+    # Final fallback
+    if [ -z "$display" ]; then
+        display=":0"
+    fi
+    
+    echo "$display"
+}
+
+get_xauthority() {
+    local user=$1
+    local xauth_path=""
+    
+    # Try user's home directory
+    local home_dir=$(eval echo ~$user)
+    if [ -f "$home_dir/.Xauthority" ]; then
+        xauth_path="$home_dir/.Xauthority"
+    fi
+    
+    # Try systemd session
+    if [ -z "$xauth_path" ] && command -v loginctl >/dev/null 2>&1; then
+        local session=$(loginctl list-sessions --user="$user" --no-legend 2>/dev/null | head -n1 | awk '{print $1}')
+        if [ -n "$session" ]; then
+            xauth_path=$(loginctl show-session "$session" -p XAuthority --value 2>/dev/null || echo "")
+        fi
+    fi
+    
+    echo "$xauth_path"
+}
+
+# --------------------------------------------
+# 6. Systemd Services
 # --------------------------------------------
 echo ">>> ⚙️  Creating Systemd Services..."
 
@@ -79,6 +197,27 @@ elif [ "$HAS_GPU" = true ]; then
     ENV_BLOCK="# Generic GPU Auto-detect"
 else
     ENV_BLOCK="Environment=GALLIUM_DRIVER=llvmpipe"
+fi
+
+# Detect display environment
+DISPLAY_TYPE=$(detect_display)
+DISPLAY_VAR=$(get_user_display "$USERNAME")
+XAUTH_PATH=$(get_xauthority "$USERNAME")
+
+# Build display environment block based on detected type
+if [ "$DISPLAY_TYPE" = "wayland" ]; then
+    WAYLAND_DISPLAY_VAR=${WAYLAND_DISPLAY:-wayland-0}
+    USER_UID=$(id -u "$USERNAME")
+    ENV_DISPLAY="Environment=WAYLAND_DISPLAY=$WAYLAND_DISPLAY_VAR
+Environment=XDG_RUNTIME_DIR=/run/user/$USER_UID"
+elif [ "$DISPLAY_TYPE" = "x11" ]; then
+    ENV_DISPLAY="Environment=DISPLAY=$DISPLAY_VAR"
+    if [ -n "$XAUTH_PATH" ]; then
+        ENV_DISPLAY="$ENV_DISPLAY
+Environment=XAUTHORITY=$XAUTH_PATH"
+    fi
+else
+    ENV_DISPLAY="# Framebuffer mode - no DISPLAY needed"
 fi
 
 # --- SERVICE 1: WEB MODE (vi-web) ---
@@ -133,7 +272,7 @@ After=network.target graphical.target
 User=$USERNAME
 WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
-Environment=DISPLAY=:0
+$ENV_DISPLAY
 $ENV_BLOCK
 ExecStart=$VENV_DIR/bin/python -O main.py --mode local
 Restart=always
@@ -148,7 +287,7 @@ EOF
 sudo systemctl daemon-reload
 
 # --------------------------------------------
-# 6. Firewall
+# 7. Firewall
 # --------------------------------------------
 if command -v ufw >/dev/null; then
     sudo ufw allow 2323/tcp >/dev/null 2>&1

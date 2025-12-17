@@ -23,4 +23,7 @@ class FrameExchange:
                 return None
             return self.frame
 
-exchange = FrameExchange()
+# Separate exchanges for web and ASCII to prevent frame format conflicts
+exchange = FrameExchange()  # Legacy: single exchange (backward compatibility, not used by servers)
+exchange_web = FrameExchange()  # Web stream (JPEG/WebP frames) - used by web_service.py
+exchange_ascii = FrameExchange()  # ASCII servers (text frames) - used by ascii_server.py and ascii_web_server.py

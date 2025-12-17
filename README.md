@@ -21,12 +21,39 @@ It is designed to run on everything from high-end workstations to headless Raspb
 
 ## 1. Prerequisites
 
-### System Libraries
-----
+### Automated Setup (Recommended)
+
+The `setup_app.sh` script handles all dependencies and systemd service configuration automatically:
+
+```bash
+git clone https://github.com/bgencarelle/VideoInterleaving.git
+cd VideoInterleaving
+sudo ./setup_app.sh
+```
+
+This script will:
+- Install all system packages from `system-requirements.txt`
+- Create a Python virtual environment with `--system-site-packages` enabled
+- Install all Python packages from `requirements.txt`
+- Auto-detect your display environment (X11/Wayland/framebuffer)
+- Create systemd services for web, ASCII, and local modes
+
+### Manual Setup
+
+#### System Libraries
+
 **Debian/Ubuntu/Raspbian:**
+
+System packages are listed in `system-requirements.txt`. Install them with:
 
 ```bash
 sudo apt update
+sudo apt install $(grep -v '^#' system-requirements.txt | tr '\n' ' ')
+```
+
+Or manually:
+
+```bash
 sudo apt install python3-venv python3-dev python3-pip build-essential cmake pkg-config \
     libwebp-dev libsdl2-dev libasound2-dev libgl1-mesa-dev libglu1-mesa-dev \
     libegl1-mesa-dev mesa-utils chrony ninja-build python-is-python3 \
@@ -35,7 +62,6 @@ sudo apt install python3-venv python3-dev python3-pip build-essential cmake pkg-
 
 **Fedora/CentOS:**
 
-Bash
 ```bash
 sudo dnf install python3-venv python3-pip python3-devel build-essential cmake pkgconfig \
     libwebp-devel SDL2-devel alsa-lib-devel mesa-libGL-devel mesa-libGLU-devel \
@@ -44,32 +70,28 @@ sudo dnf install python3-venv python3-pip python3-devel build-essential cmake pk
 
 **macOS (Homebrew):**
 
-Bash
 ```bash
 brew install python webp pkg-config sdl2 chrony jpeg-turbo 
 ```
 
-### Python Environment
+#### Python Environment
 
 Clone the repo:
 
-Bash
 ```bash
 git clone https://github.com/bgencarelle/VideoInterleaving.git
 cd VideoInterleaving
 ```
 
-Create venv:
+Create venv with system-site-packages (allows access to system-installed Python packages):
 
-Bash
 ```bash
-python3 -m venv .venv
+python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
 ```
 
 Install Dependencies:
 
-Bash
 ```bash
 pip install --upgrade pip
 pip install -r requirements.txt

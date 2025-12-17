@@ -11,7 +11,7 @@ import os
 import socket
 import sys
 import settings
-from shared_state import exchange
+from shared_state import exchange_web
 from lightweight_monitor import monitor_data, HTML_TEMPLATE
 from server_config import get_config
 
@@ -356,7 +356,7 @@ class StreamHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
         try:
             while True:
                 # Poll every 1.0s to check for new frames OR stall conditions
-                raw_payload = exchange.get_frame(timeout=1.0)
+                raw_payload = exchange_web.get_frame(timeout=1.0)
 
                 if raw_payload is None:
                     # No frame arrived in the last second. Check if we have stalled.

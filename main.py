@@ -7,7 +7,7 @@ import socket
 
 # 1. Import Settings FIRST so we can patch them
 import settings
-from server_config import ServerConfig, get_config, MODE_WEB, MODE_LOCAL, MODE_ASCII, MODE_ASCIIWEB, MODE_ALL
+from server_config import ServerConfig, get_config, MODE_WEB, MODE_LOCAL, MODE_ASCII, MODE_ASCIIWEB
 
 # --- CONSTANTS ---
 # [CHANGE] Updated reserved ports to the new 24xx range
@@ -63,9 +63,9 @@ def configure_runtime():
 
     parser.add_argument(
         "--mode",
-        choices=["web", "ascii", "asciiweb", "local", "all"],
+        choices=["web", "ascii", "asciiweb", "local"],
         default="local",
-        help="Operating Mode (default: local). 'all' runs all servers simultaneously."
+        help="Operating Mode (default: local)"
     )
 
     parser.add_argument(
@@ -107,8 +107,6 @@ def configure_runtime():
     elif args.mode == "asciiweb":
         # Default updated to 2423
         primary_port = args.port or 2423
-    elif args.mode == "all":
-        primary_port = None  # Not used in all mode (uses defaults)
 
     # 3. Dynamic Naming & Cache Setup
     source_name = os.path.basename(os.path.normpath(settings.IMAGES_DIR)).replace(" ", "_")
@@ -177,24 +175,6 @@ def configure_runtime():
         require_ports(ports.get_all_ports())
         # Update settings for backward compatibility
         settings.WEB_PORT = ports.monitor
-        settings.WEBSOCKET_PORT = ports.ascii_websocket
-
-    elif args.mode == "all":
-        if args.port:
-            print("⚠️  WARNING: --port argument ignored in ALL mode. Using fixed ports.")
-        print(f">> MODE: ALL (All Servers) [{source_name}]")
-        settings.ASCII_MODE = True  # Enable ASCII for ASCII servers
-        settings.SERVER_MODE = True  # Enable server mode for web stream
-        config.set_mode(MODE_ALL)
-        ports = config.get_ports()
-        print(f">> PORTS: Web Monitor={ports.monitor}, Stream={ports.stream}")
-        print(f">>        ASCII Telnet={ports.ascii_telnet}, ASCII Stats={ports.ascii_monitor}")
-        print(f">>        ASCIIWEB WebSocket={ports.ascii_websocket}")
-        require_ports(ports.get_all_ports())
-        # Update settings for backward compatibility
-        settings.WEB_PORT = ports.monitor
-        settings.STREAM_PORT = ports.stream
-        settings.ASCII_PORT = ports.ascii_telnet
         settings.WEBSOCKET_PORT = ports.ascii_websocket
 
     return args, log_path
@@ -273,20 +253,7 @@ def main(clock=CLOCK_MODE):
     elif mode == "local":
         web_service.start_server(monitor=True, stream=False)
 
-    elif mode == "all":
-        # Start all servers simultaneously
-        print(">> Starting all servers...")
-        # Web servers (monitor + stream)
-        web_service.start_server(monitor=True, stream=True)
-        # ASCII servers (telnet + stats)
-        threading.Thread(target=ascii_server.start_server, daemon=True, name="ASCII-Telnet").start()
-        threading.Thread(target=ascii_stats_server.start_server, daemon=True, name="ASCII-Stats").start()
-        # ASCIIWEB server (websocket)
-        threading.Thread(target=ascii_web_server.start_server, daemon=True, name="ASCII-WS").start()
-        print(">> All servers started!")
-
     # 3. Start Display Engine
-        # 3. Start Display Engine
     try:
         image_display.run_display(clock)
     except KeyboardInterrupt:
