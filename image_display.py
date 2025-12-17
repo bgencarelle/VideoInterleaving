@@ -10,7 +10,7 @@ import numpy as np
 from turbojpeg import TurboJPEG  # Strict Requirement: pip install PyTurboJPEG
 
 import settings
-from shared_state import exchange
+from shared_state import exchange, exchange_web, exchange_ascii
 
 # Clean up console noise from ModernGL on some systems
 os.environ['PYOPENGL_ERROR_CHECKING'] = '0'
@@ -233,6 +233,7 @@ def run_display(clock_source=CLOCK_MODE):
 
     # 4. Loader & Buffer Init
     index, _ = update_index(png_paths_len, PINGPONG)
+    
     update_folder_selection(index, float_folder_count, main_folder_count)
 
     loader = ImageLoader()
@@ -242,7 +243,8 @@ def run_display(clock_source=CLOCK_MODE):
     fifo = FIFOImageBufferPatched(max_size=FIFO_LENGTH)
 
     # Pre-load using the NEW helper directly for the first frame
-    res0 = load_and_render_frame(loader, index, *folder_dictionary["Main_and_Float_Folders"])
+    initial_folders = folder_dictionary["Main_and_Float_Folders"]
+    res0 = load_and_render_frame(loader, index, *initial_folders)
     fifo.update(index, res0)
 
     cur_main, cur_float, cur_m_sbs, cur_f_sbs = None, None, False, False
@@ -270,7 +272,8 @@ def run_display(clock_source=CLOCK_MODE):
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         next_idx = 1 if index == 0 else (index - 1 if index == png_paths_len - 1 else index + 1)
         # Use the NEW worker function
-        future = pool.submit(load_and_render_frame, loader, next_idx, *folder_dictionary["Main_and_Float_Folders"])
+        folders = folder_dictionary["Main_and_Float_Folders"]
+        future = pool.submit(load_and_render_frame, loader, next_idx, *folders)
         future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
 
         frame_times = deque(maxlen=60)
@@ -310,15 +313,21 @@ def run_display(clock_source=CLOCK_MODE):
                     # Check if the worker thread already returned a String
                     if isinstance(m_img, str):
                         # It's already rendered! Just send it.
-                        exchange.set_frame(m_img)
+                        # Pre-baked ASCII should only occur in ASCII mode, but handle edge cases
+                        if is_ascii:
+                            # ASCII mode: send to ASCII exchange
+                            exchange_ascii.set_frame(m_img)
+                        # Legacy exchange for backward compatibility (only if not in web mode)
+                        if not is_web:
+                            exchange.set_frame(m_img)
                         successful_display = True
                         last_displayed_index = d_idx
 
                         # Trigger Next Load
                         next_idx = 1 if index == 0 else (
                             index - 1 if index == png_paths_len - 1 else (index + 1 if index > prev else index - 1))
-                        future = pool.submit(load_and_render_frame, loader, next_idx,
-                                             *folder_dictionary["Main_and_Float_Folders"])
+                        folders = folder_dictionary["Main_and_Float_Folders"]
+                        future = pool.submit(load_and_render_frame, loader, next_idx, *folders)
                         future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
 
                         # Timing
@@ -334,15 +343,16 @@ def run_display(clock_source=CLOCK_MODE):
                             last_actual_fps = 1.0 / (sum(frame_times) / len(frame_times))
 
                         if monitor:
+                            fd = folder_dictionary
                             monitor.update({
                                 "index": index,
                                 "displayed": last_displayed_index,
                                 "fps": last_actual_fps,
                                 "fifo_depth": fifo.current_depth(),
                                 "successful_frame": True,
-                                "main_folder": folder_dictionary["Main_and_Float_Folders"][0],
-                                "float_folder": folder_dictionary["Main_and_Float_Folders"][1],
-                                "rand_mult": folder_dictionary.get("rand_mult"),
+                                "main_folder": fd["Main_and_Float_Folders"][0],
+                                "float_folder": fd["Main_and_Float_Folders"][1],
+                                "rand_mult": fd.get("rand_mult"),
                                 "main_folder_count": main_folder_count,
                                 "float_folder_count": float_folder_count,
                                 "fifo_miss_count": fifo_miss_count,
@@ -366,8 +376,8 @@ def run_display(clock_source=CLOCK_MODE):
 
                 next_idx = 1 if index == 0 else (
                     index - 1 if index == png_paths_len - 1 else (index + 1 if index > prev else index - 1))
-                future = pool.submit(load_and_render_frame, loader, next_idx,
-                                     *folder_dictionary["Main_and_Float_Folders"])
+                folders = folder_dictionary["Main_and_Float_Folders"]
+                future = pool.submit(load_and_render_frame, loader, next_idx, *folders)
                 future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
 
             # Render (GL)
@@ -397,11 +407,29 @@ def run_display(clock_source=CLOCK_MODE):
                     try:
                         frame = None
                         if has_gl:
-                            raw = window.fbo.read(components=3)
-                            w_fbo, h_fbo = window.size
-                            frame = np.frombuffer(raw, dtype=np.uint8).reshape((h_fbo, w_fbo, 3))
+                            # Only HeadlessWindow has .fbo and .size attributes
+                            # In windowed mode, window is a raw glfw object without these attributes
+                            # This should only execute in headless mode (should_capture check above ensures this)
+                            if hasattr(window, 'fbo') and hasattr(window, 'size'):
+                                raw = window.fbo.read(components=3)
+                                w_fbo, h_fbo = window.size
+                                frame = np.frombuffer(raw, dtype=np.uint8).reshape((h_fbo, w_fbo, 3))
+                                # In headless mode, resize to HEADLESS_RES
+                                if is_headless and frame is not None:
+                                    import cv2
+                                    frame = cv2.resize(frame, HEADLESS_RES, interpolation=cv2.INTER_LINEAR)
+                            else:
+                                # Windowed mode - shouldn't reach here due to should_capture logic
+                                # But add safety check to prevent AttributeError
+                                print("[WARNING] Attempted FBO read in windowed mode - skipping capture")
                         else:
-                            tgt_size = HEADLESS_RES if is_web else None
+                            # Always use HEADLESS_RES for headless rendering (web/ASCII modes)
+                            # This matches settings.py HEADLESS_RES = (450, 600)
+                            if is_headless:
+                                tgt_size = HEADLESS_RES
+                            else:
+                                tgt_size = None  # Local mode: full resolution
+                            
                             frame = renderer.composite_cpu(
                                 cur_main, cur_float,
                                 main_is_sbs=cur_m_sbs, float_is_sbs=cur_f_sbs,
@@ -410,13 +438,15 @@ def run_display(clock_source=CLOCK_MODE):
 
                         if frame is not None:
                             if is_web:
-                                    enc = jpeg.encode(frame, quality=JPEG_QUALITY, pixel_format=0)
-                                    exchange.set_frame(b'j' + enc)
-
+                                # Web only: use web exchange (and legacy for backward compat)
+                                enc = jpeg.encode(frame, quality=JPEG_QUALITY, pixel_format=0)
+                                exchange_web.set_frame(b'j' + enc)
+                                exchange.set_frame(b'j' + enc)  # Legacy compatibility
                             elif is_ascii:
-                                # Fallback (Live Conversion)
+                                # ASCII only: use ASCII exchange (and legacy for backward compat)
                                 text_frame = ascii_converter.to_ascii(frame)
-                                exchange.set_frame(text_frame)
+                                exchange_ascii.set_frame(text_frame)
+                                exchange.set_frame(text_frame)  # Legacy compatibility
 
                     except Exception as e:
                         print(f"[CAPTURE ERROR] {e}")
@@ -439,15 +469,16 @@ def run_display(clock_source=CLOCK_MODE):
                 #print(f"{last_actual_fps:.1f} FPS")
 
             if monitor:
+                fd = folder_dictionary
                 monitor.update({
                     "index": index,
                     "displayed": last_displayed_index,
                     "fps": last_actual_fps,
                     "fifo_depth": fifo.current_depth(),
                     "successful_frame": successful_display,
-                    "main_folder": folder_dictionary["Main_and_Float_Folders"][0],
-                    "float_folder": folder_dictionary["Main_and_Float_Folders"][1],
-                    "rand_mult": folder_dictionary.get("rand_mult"),
+                    "main_folder": fd["Main_and_Float_Folders"][0],
+                    "float_folder": fd["Main_and_Float_Folders"][1],
+                    "rand_mult": fd.get("rand_mult"),
                     "main_folder_count": main_folder_count,
                     "float_folder_count": float_folder_count,
                     "fifo_miss_count": fifo_miss_count,

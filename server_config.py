@@ -14,7 +14,6 @@ MODE_WEB = "web"
 MODE_LOCAL = "local"
 MODE_ASCII = "ascii"
 MODE_ASCIIWEB = "asciiweb"
-MODE_ALL = "all"
 
 
 @dataclass
@@ -50,13 +49,13 @@ class ServerConfig:
     to existing settings.py values.
     """
     
-    # Default port values - clean defaults for each mode
-    DEFAULT_MONITOR_PORT = 1978  # Web mode monitor
-    DEFAULT_STREAM_PORT = 8080  # Web mode stream
-    DEFAULT_ASCII_TELNET_PORT = 2323  # ASCII mode telnet
-    DEFAULT_ASCII_WEBSOCKET_PORT = 2424  # ASCIIWEB mode websocket
-    DEFAULT_LOCAL_PORT = 8888  # Local mode monitor
-    DEFAULT_ASCIIWEB_MONITOR_PORT = 1980  # ASCIIWEB mode monitor
+    # Default port values (backward compatible with existing code)
+    DEFAULT_MONITOR_PORT = 1978  # From BIRTH_YEAR
+    DEFAULT_STREAM_PORT = 8080
+    DEFAULT_ASCII_TELNET_PORT = 2323
+    DEFAULT_ASCII_WEBSOCKET_PORT = 2424
+    DEFAULT_LOCAL_PORT = 8888
+    DEFAULT_ASCIIWEB_MONITOR_PORT = 1980
 
     def __init__(self):
         """Initialize with backward compatibility to settings.py."""
@@ -75,8 +74,7 @@ class ServerConfig:
         
         if mode == MODE_WEB:
             # Web mode: Monitor on 1978, Stream on 8080
-            # Always use defaults, ignore legacy settings.WEB_PORT
-            monitor = self.DEFAULT_MONITOR_PORT
+            monitor = getattr(settings, 'WEB_PORT', self.DEFAULT_MONITOR_PORT)
             stream = getattr(settings, 'STREAM_PORT', self.DEFAULT_STREAM_PORT)
             self._current_config = PortConfig(
                 monitor=monitor,
@@ -85,8 +83,7 @@ class ServerConfig:
             
         elif mode == MODE_LOCAL:
             # Local mode: Monitor only on 8888
-            # Always use default, ignore any legacy settings.WEB_PORT
-            monitor = self.DEFAULT_LOCAL_PORT
+            monitor = getattr(settings, 'WEB_PORT', self.DEFAULT_LOCAL_PORT)
             self._current_config = PortConfig(
                 monitor=monitor
             )
@@ -108,8 +105,7 @@ class ServerConfig:
             
         elif mode == MODE_ASCIIWEB:
             # ASCIIWEB mode: Monitor on 1980, WebSocket on primary_port+1 (default 2424)
-            # Always use default, ignore any legacy settings.WEB_PORT
-            monitor = self.DEFAULT_ASCIIWEB_MONITOR_PORT
+            monitor = getattr(settings, 'WEB_PORT', self.DEFAULT_ASCIIWEB_MONITOR_PORT)
             
             if primary_port is None:
                 websocket_port = getattr(settings, 'WEBSOCKET_PORT', self.DEFAULT_ASCII_WEBSOCKET_PORT)
@@ -120,19 +116,6 @@ class ServerConfig:
                 monitor=monitor,
                 ascii_websocket=websocket_port
             )
-            
-        elif mode == MODE_ALL:
-            # ALL mode: Run all servers simultaneously
-            # Uses default ports for each service (no conflicts)
-            self._current_config = PortConfig(
-                monitor=self.DEFAULT_MONITOR_PORT,  # Web monitor: 1978
-                stream=self.DEFAULT_STREAM_PORT,  # Web stream: 8080
-                ascii_telnet=self.DEFAULT_ASCII_TELNET_PORT,  # ASCII telnet: 2323
-                ascii_monitor=self.DEFAULT_ASCII_TELNET_PORT + 1,  # ASCII stats: 2324
-                ascii_websocket=self.DEFAULT_ASCII_WEBSOCKET_PORT,  # ASCIIWEB websocket: 2424
-            )
-            # Note: ASCIIWEB monitor uses 1980, but we'll use the web monitor (1978) for that
-            
         else:
             raise ValueError(f"Unknown mode: {mode}")
 

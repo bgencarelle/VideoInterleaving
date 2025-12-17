@@ -2,7 +2,7 @@ import threading
 import sys
 import socket
 import settings
-from shared_state import exchange
+from shared_state import exchange_ascii
 from SimpleWebSocketServer import SimpleWebSocketServer, WebSocket
 from server_config import get_config
 
@@ -50,7 +50,7 @@ def broadcast_loop():
     """Pushes frames to all connected WS clients."""
     while True:
         # Blocking Wait
-        frame_data = exchange.get_frame()
+        frame_data = exchange_ascii.get_frame()
 
         if not frame_data:
             continue

@@ -235,12 +235,14 @@ def display_init(state: DisplayState):
         mon = glfw.get_primary_monitor()
         if CONNECTED_TO_RCA_HDMI:
             fs_w, fs_h = RCA_HDMI_RESOLUTION
+            refresh = 60  # Default refresh rate
         elif LOW_RES_FULLSCREEN:
             fs_w, fs_h = LOW_RES_FULLSCREEN_RESOLUTION
+            refresh = 60  # Default refresh rate
         else:
             best = _largest_mode(mon)
             fs_w, fs_h = best.size.width, best.size.height
-        refresh = getattr(best, 'refresh_rate', 60)
+            refresh = getattr(best, 'refresh_rate', 60)
         glfw.set_window_monitor(window, mon, 0, 0, fs_w, fs_h, refresh)
     else:
         pass

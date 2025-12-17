@@ -3,7 +3,7 @@ import socket
 import threading
 import time
 import settings
-from shared_state import exchange
+from shared_state import exchange_ascii
 from server_config import get_config
 
 # --- CONFIGURATION ---
@@ -64,7 +64,7 @@ class AsciiHandler(socketserver.BaseRequestHandler):
             while True:
                 # 4. Blocking Wait (0% CPU usage)
                 # Waits for the main display loop to signal a new frame
-                frame_data = exchange.get_frame()
+                frame_data = exchange_ascii.get_frame()
 
                 if not frame_data:
                     break

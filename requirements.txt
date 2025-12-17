@@ -9,6 +9,5 @@ PyOpenGl
 psutil
 glfw
 moderngl
-psutil
 pyturbojpeg
 SimpleWebsocketServer
