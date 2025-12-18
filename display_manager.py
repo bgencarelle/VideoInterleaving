@@ -330,9 +330,9 @@ def _try_hidden_glfw_headless_legacy(require_codes: list[int | None], is_pi: boo
                 version_str = vb.decode("utf-8", errors="replace") if vb else None
                 if version_str:
                     import re
-                    m = re.search(r"OpenGL ES\\s*([0-9]+)\\.([0-9]+)", version_str)
+                    m = re.search(r"OpenGL ES\s*([0-9]+)\.([0-9]+)", version_str)
                     if not m:
-                        m = re.search(r"^\\s*([0-9]+)\\.([0-9]+)", version_str)
+                        m = re.search(r"^\s*([0-9]+)\.([0-9]+)", version_str)
                     if m:
                         major, minor = int(m.group(1)), int(m.group(2))
                         version_code = (major * 100) + (minor * 10)
@@ -637,9 +637,9 @@ def display_init(state: DisplayState):
             version_str = version_bytes.decode("utf-8", errors="replace") if version_bytes else None
             if version_str:
                 import re
-                m = re.search(r"OpenGL ES\\s*([0-9]+)\\.([0-9]+)", version_str)
+                m = re.search(r"OpenGL ES\s*([0-9]+)\.([0-9]+)", version_str)
                 if not m:
-                    m = re.search(r"^\\s*([0-9]+)\\.([0-9]+)", version_str)
+                    m = re.search(r"^\s*([0-9]+)\.([0-9]+)", version_str)
                 if m:
                     major, minor = int(m.group(1)), int(m.group(2))
                     version_code = (major * 100) + (minor * 10)
@@ -660,28 +660,12 @@ def display_init(state: DisplayState):
             ctx = None
             print("[DISPLAY] Renderer backend: legacy (PyOpenGL)")
         else:
-            last_error = None
-            backend_kwargs = {}
-            if os.environ.get("WAYLAND_DISPLAY") or os.environ.get("XDG_SESSION_TYPE") == "wayland":
-                backend_kwargs = {"backend": "egl"}
-
-            for require_code in require_codes:
-                attempt_version = _format_gl_version(require_code) if require_code is not None else "default"
-                print(f"[DISPLAY] Local ModernGL attempt: ver={attempt_version}")
-                try:
-                    if require_code is None:
-                        ctx = moderngl.create_context(**backend_kwargs)
-                    else:
-                        ctx = moderngl.create_context(require=require_code, **backend_kwargs)
-                    break
-                except Exception as e:
-                    last_error = e
-                    ctx = None
-                    print(f"[DISPLAY] Local ModernGL attempt failed (ver={attempt_version}): {e}")
-                    continue
-
-            if ctx is None:
-                print(f"❌ ERROR: Failed to create ModernGL context: {last_error}")
+            try:
+                # Wrap the *current* context created by GLFW.
+                # Use require=300 so GLES 3.0 contexts are accepted as ModernGL-capable.
+                ctx = moderngl.create_context(require=300)
+            except Exception as e:
+                print(f"❌ ERROR: Failed to wrap current context with ModernGL: {e}")
                 print("Tip: Set FORCE_LEGACY_GL=1 to force the PyOpenGL legacy backend.")
                 sys.exit(1)
 
