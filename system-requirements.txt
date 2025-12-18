@@ -17,7 +17,7 @@ python3-numpy
 python3-opencv
 python3-psutil
 python3-websockets
-python3-pyopengl
+python3-opengl
 python3-moderngl
 
 # Image and media libraries
@@ -40,4 +40,3 @@ libasound2-dev
 # System utilities
 chrony
 dnsutils
-
