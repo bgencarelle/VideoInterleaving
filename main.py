@@ -217,6 +217,7 @@ try:
     log_file = open(log_filename, "w", buffering=1, encoding='utf-8')
     sys.stdout = Tee(sys.stdout, log_file)
     sys.stderr = Tee(sys.stderr, log_file)
+    print(f"[MAIN] Logging to {log_filename}")
 except Exception as e:
     print(f"⚠️  Logging setup failed: {e}")
 
@@ -226,6 +227,8 @@ def main(clock=CLOCK_MODE):
     lists_exist = False
     script_dir = os.path.dirname(os.path.abspath(__file__))
     gen_dir_full = os.path.join(script_dir, settings.GENERATED_LISTS_DIR)
+
+    print(f"[MAIN] Mode={cli_args.mode} | Images={settings.IMAGES_DIR} | Cache={settings.GENERATED_LISTS_DIR}")
 
     if os.path.exists(gen_dir_full) and os.listdir(gen_dir_full):
         lists_exist = True
