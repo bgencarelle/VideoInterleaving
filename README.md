@@ -210,6 +210,9 @@ Optional overrides:
 - Force legacy renderer: `FORCE_LEGACY_GL=1`
 - Force GLES version attempts: `PI_GLES_REQUIRE=200` (or `300`, `310`)
 
+Wayland note:
+- In local mode on Wayland, fullscreen uses a borderless fullscreen-sized window (not a mode-setting fullscreen) to reduce compositor/session crashes on some drivers.
+
 Edit `/boot/firmware/cmdline.txt` (add to start of line):
 
 Plaintext
