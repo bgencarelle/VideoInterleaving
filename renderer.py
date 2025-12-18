@@ -237,7 +237,9 @@ def initialize_legacy() -> None:
     # Default MVP: identity
     if _legacy_mvp_loc is not None:
         mvp = np.eye(4, dtype="f4")
-        gl.glUniformMatrix4fv(_legacy_mvp_loc, 1, gl.GL_TRUE, mvp)
+        mat = np.ascontiguousarray(mvp.T, dtype="f4")
+        # NOTE: On OpenGL ES 2.0, transpose must be GL_FALSE.
+        gl.glUniformMatrix4fv(_legacy_mvp_loc, 1, gl.GL_FALSE, mat)
     gl.glUseProgram(0)
 
 
@@ -441,7 +443,9 @@ def update_mvp(mvp_matrix):
         gl = _lazy_import_gl()
         gl.glUseProgram(_legacy_program)
         if _legacy_mvp_loc is not None:
-            gl.glUniformMatrix4fv(_legacy_mvp_loc, 1, gl.GL_TRUE, mvp_matrix.astype("f4"))
+            mat = np.ascontiguousarray(mvp_matrix.T, dtype="f4")
+            # NOTE: On OpenGL ES 2.0, transpose must be GL_FALSE.
+            gl.glUniformMatrix4fv(_legacy_mvp_loc, 1, gl.GL_FALSE, mat)
         gl.glUseProgram(0)
         return
 
@@ -454,6 +458,8 @@ def create_texture(image: np.ndarray) -> moderngl.Texture:
         if _legacy_program is None:
             initialize_legacy()
         gl = _lazy_import_gl()
+        # Critical for RGB uploads (3 bytes/px) on many drivers.
+        gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
         tex_id = gl.glGenTextures(1)
         gl.glBindTexture(gl.GL_TEXTURE_2D, tex_id)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
@@ -481,6 +487,7 @@ def create_texture(image: np.ndarray) -> moderngl.Texture:
 def update_texture(texture: moderngl.Texture, new_image: np.ndarray) -> moderngl.Texture:
     if _backend == "legacy":
         gl = _lazy_import_gl()
+        gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
         tex_id = int(texture)  # type: ignore[arg-type]
         h, w = new_image.shape[:2]
         components = 1 if new_image.ndim == 2 else new_image.shape[2]
