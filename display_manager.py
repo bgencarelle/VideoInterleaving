@@ -258,16 +258,17 @@ def display_init(state: DisplayState):
 
         # Apply Pi Hints for Window creation
         if is_pi:
-            # Pi 2/3 (VC4) generally cannot do GLES 3.1; try a small fallback list.
+            # Pi 2/3 (VC4) generally cannot do GLES 3.1; try a small fallback list (including None).
             window_created = False
             last_error = None
-            for require_code in (c for c in require_codes if c is not None):
+            for require_code in require_codes:
                 try:
                     glfw.default_window_hints()
                     glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_ES_API)
                     glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
-                    glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, require_code // 100)
-                    glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, (require_code % 100) // 10)
+                    if require_code is not None:
+                        glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, require_code // 100)
+                        glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, (require_code % 100) // 10)
 
                     if state.fullscreen:
                         mon = glfw.get_primary_monitor()
@@ -288,7 +289,10 @@ def display_init(state: DisplayState):
 
                     if window:
                         window_created = True
-                        print(f"[DISPLAY] Local Window: Requested GLES {_format_gl_version(require_code)}")
+                        if require_code is None:
+                            print("[DISPLAY] Local Window: Requested GLES (no version hint)")
+                        else:
+                            print(f"[DISPLAY] Local Window: Requested GLES {_format_gl_version(require_code)}")
                         break
                 except Exception as e:
                     last_error = e
