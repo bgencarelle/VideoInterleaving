@@ -1,5 +1,5 @@
 # Packages without system equivalents - install via pip
-webp
+#webp
 mido
 glfw  # Python bindings - requires libglfw3-dev system package (installed via system-requirements.txt)
 PyTurboJPEG
