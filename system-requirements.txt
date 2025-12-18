@@ -1,0 +1,31 @@
+# System Requirements (Debian/Ubuntu/Raspbian)
+# Install via: sudo apt install $(grep -v '^#' system-requirements.txt | tr '\n' ' ')
+
+# Python and build tools
+python3-venv
+python3-dev
+python3-pip
+build-essential
+cmake
+pkg-config
+ninja-build
+python-is-python3
+
+# Image and media libraries
+libwebp-dev
+libjpeg-dev
+
+# OpenGL and graphics libraries
+libgl1-mesa-dev
+libglu1-mesa-dev
+libegl1-mesa-dev
+mesa-utils
+
+# Audio and input libraries
+libsdl2-dev
+libasound2-dev
+
+# System utilities
+chrony
+dnsutils
+
