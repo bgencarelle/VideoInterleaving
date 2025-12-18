@@ -35,6 +35,17 @@ from settings import (
 window = None
 ctx = None
 
+def _is_wayland_session() -> bool:
+    return bool(os.environ.get("WAYLAND_DISPLAY") or os.environ.get("XDG_SESSION_TYPE") == "wayland")
+
+
+def _session_label() -> str:
+    if _is_wayland_session():
+        return "wayland"
+    if os.environ.get("DISPLAY"):
+        return "x11"
+    return "unknown"
+
 class DisplayState:
     def __init__(self, image_size: tuple[int, int] = (640, 480)) -> None:
         self.image_size = image_size
@@ -380,6 +391,8 @@ def display_init(state: DisplayState):
 
     pi_model = _pi_model()
     is_pi = pi_model is not None
+    is_wayland = _is_wayland_session()
+    print(f"[DISPLAY] Session: {_session_label()}")
     detected_es = _detect_es_version()
     require_codes = _es_require_codes(detected_es)
 
@@ -552,6 +565,17 @@ def display_init(state: DisplayState):
                     best = _largest_mode(mon)
                     fs_w, fs_h = best.size.width, best.size.height
                 glfw.window_hint(glfw.AUTO_ICONIFY, glfw.FALSE)
+                # Wayland + some KMS stacks/drivers are fragile with mode-setting fullscreen.
+                # Prefer a borderless "fullscreen-sized window" to avoid session drops.
+                if is_wayland:
+                    glfw.window_hint(glfw.DECORATED, glfw.FALSE)
+                    win = glfw.create_window(fs_w, fs_h, "Fullscreen", None, None)
+                    if win:
+                        try:
+                            glfw.set_window_pos(win, 0, 0)
+                        except Exception:
+                            pass
+                    return win
                 return glfw.create_window(fs_w, fs_h, "Fullscreen", mon, None)
 
             aspect = eff_w / eff_h
@@ -684,22 +708,29 @@ def display_init(state: DisplayState):
         if glfw and window is not None:
             glfw.set_input_mode(window, glfw.CURSOR, glfw.CURSOR_HIDDEN)
 
-    current_monitor = glfw.get_window_monitor(window)
-    if state.fullscreen:
-        mon = glfw.get_primary_monitor()
-        if CONNECTED_TO_RCA_HDMI:
-            fs_w, fs_h = RCA_HDMI_RESOLUTION
-            refresh = 60  # Default refresh rate
-        elif LOW_RES_FULLSCREEN:
-            fs_w, fs_h = LOW_RES_FULLSCREEN_RESOLUTION
-            refresh = 60  # Default refresh rate
+    # Fullscreen toggling:
+    # - On Wayland, avoid set_window_monitor (can trigger compositor/device resets). We use borderless sizing above.
+    # - On other platforms, only change monitor state when needed.
+    if not is_wayland:
+        current_monitor = glfw.get_window_monitor(window)
+        if state.fullscreen:
+            mon = glfw.get_primary_monitor()
+            if current_monitor != mon:
+                if CONNECTED_TO_RCA_HDMI:
+                    fs_w, fs_h = RCA_HDMI_RESOLUTION
+                    refresh = 60  # Default refresh rate
+                elif LOW_RES_FULLSCREEN:
+                    fs_w, fs_h = LOW_RES_FULLSCREEN_RESOLUTION
+                    refresh = 60  # Default refresh rate
+                else:
+                    best = _largest_mode(mon)
+                    fs_w, fs_h = best.size.width, best.size.height
+                    refresh = getattr(best, 'refresh_rate', 60)
+                glfw.set_window_monitor(window, mon, 0, 0, fs_w, fs_h, refresh)
         else:
-            best = _largest_mode(mon)
-            fs_w, fs_h = best.size.width, best.size.height
-            refresh = getattr(best, 'refresh_rate', 60)
-        glfw.set_window_monitor(window, mon, 0, 0, fs_w, fs_h, refresh)
-    else:
-        pass
+            if current_monitor is not None:
+                # Restore to a small window; actual sizing will be re-derived below via framebuffer size.
+                glfw.set_window_monitor(window, None, 100, 100, 400, 300, 0)
 
     fb_w, fb_h = glfw.get_framebuffer_size(window)
     if renderer.using_legacy_gl():
