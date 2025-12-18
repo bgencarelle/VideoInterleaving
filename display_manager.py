@@ -146,7 +146,9 @@ def _parse_eglinfo_es_version() -> tuple[int, int] | None:
     if not eglinfo:
         return None
     try:
-        out = subprocess.check_output([eglinfo, "-B"], text=True, stderr=subprocess.STDOUT, timeout=5)
+        # eglinfo can exit non-zero if *any* platform probe fails (e.g. X11), even if it prints valid ES info.
+        res = subprocess.run([eglinfo, "-B"], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10)
+        out = res.stdout or ""
     except Exception:
         return None
 
@@ -185,13 +187,21 @@ def _es_require_codes(detected_es: tuple[int, int] | None) -> list[int | None]:
         except Exception:
             pass
 
-    attempts = [310, 300, 200, None]
     if detected_es:
         major, minor = detected_es
         detected_code = (major * 100) + (minor * 10)
-        # Insert detected first if it's not already there; keep high-to-low order otherwise.
-        if detected_code not in attempts:
-            attempts.insert(0, detected_code)
+        # If we can detect the max ES version, don't waste time probing higher versions.
+        if detected_code >= 310:
+            attempts = [310, 300, 200, None]
+        elif detected_code >= 300:
+            attempts = [300, 200, None]
+        elif detected_code >= 200:
+            attempts = [200, None]
+        else:
+            attempts = [None]
+    else:
+        # Unknown capability: probe high→low.
+        attempts = [310, 300, 200, None]
     # Remove dupes while preserving order
     seen = set()
     unique_attempts = []
@@ -401,6 +411,24 @@ def display_init(state: DisplayState):
             height = h if h % 2 == 0 else h + 1
         else:
             width, height = getattr(settings, "HEADLESS_RES", (640, 480))
+
+        force_legacy = os.environ.get("FORCE_LEGACY_GL") in {"1", "true", "TRUE", "yes", "YES"}
+        prefer_legacy_headless = force_legacy or (detected_es is not None and (detected_es[0], detected_es[1]) < (3, 0))
+        if prefer_legacy_headless:
+            print("[DISPLAY] Headless renderer: legacy (detected GLES < 3.0 or FORCE_LEGACY_GL=1)")
+            legacy_window = _try_hidden_glfw_headless_legacy(require_codes, is_pi, (width, height))
+            if legacy_window is None:
+                print("❌ HEADLESS LEGACY GL CONTEXT FAILED. Exiting.")
+                sys.exit(1)
+            renderer.initialize_legacy()
+            renderer.set_transform_parameters(
+                fs_scale=1.0, fs_offset_x=0.0, fs_offset_y=0.0,
+                image_size=state.image_size,
+                rotation_angle=0.0, mirror_mode=0
+            )
+            renderer.set_viewport_size(width, height)
+            print(f"[DISPLAY] Headless legacy GL ready: {width}x{height}")
+            return legacy_window
 
         # --- BACKEND WATERFALL STRATEGY ---
         preferred = getattr(settings, "HEADLESS_BACKEND", None)

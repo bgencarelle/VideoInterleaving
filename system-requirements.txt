@@ -32,6 +32,7 @@ libgles-dev
 libglvnd-dev
 libglfw3-dev
 mesa-utils
+mesa-utils-extra
 
 # Audio and input libraries
 libsdl2-dev
