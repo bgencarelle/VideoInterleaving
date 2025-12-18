@@ -148,6 +148,66 @@ def _es_require_codes(detected_es: tuple[int, int] | None) -> list[int | None]:
         unique_attempts.append(code)
     return unique_attempts
 
+
+def _try_hidden_glfw_headless(require_codes: list[int | None], is_pi: bool):
+    """
+    Fallback: create a tiny invisible GLFW window to get a GL context on Wayland/X.
+    Useful when standalone EGL fails (e.g., Pi 2 VC4 + Wayland).
+    """
+    if not _GLFW_AVAILABLE:
+        return None, None
+
+    if not glfw.init():
+        return None, None
+
+    window = None
+    ctx_local = None
+    last_error = None
+
+    for require_code in require_codes:
+        attempt_version = _format_gl_version(require_code) if require_code is not None else "default"
+        print(f"[DISPLAY] Hidden GLFW headless attempt: GLES={attempt_version}")
+        try:
+            glfw.default_window_hints()
+            glfw.window_hint(glfw.VISIBLE, glfw.FALSE)
+            glfw.window_hint(glfw.AUTO_ICONIFY, glfw.FALSE)
+            if is_pi:
+                glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_ES_API)
+                glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
+                if require_code is not None:
+                    glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, require_code // 100)
+                    glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, (require_code % 100) // 10)
+            else:
+                glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_API)
+                glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.NATIVE_CONTEXT_API)
+
+            window = glfw.create_window(64, 64, "Headless GL", None, None)
+            if not window:
+                raise RuntimeError("GLFW window creation failed")
+
+            glfw.make_context_current(window)
+            glfw.swap_interval(0)
+
+            if require_code is None:
+                ctx_local = moderngl.create_context()
+            else:
+                ctx_local = moderngl.create_context(require=require_code)
+
+            print(f"[DISPLAY] Hidden GLFW headless: created GLES={attempt_version}")
+            break
+        except Exception as e:
+            last_error = e
+            ctx_local = None
+            if window:
+                glfw.destroy_window(window)
+                window = None
+            print(f"[DISPLAY] Hidden GLFW headless failed (GLES={attempt_version}): {e}")
+            continue
+
+    if ctx_local is None:
+        glfw.terminate()
+    return ctx_local, window
+
 def display_init(state: DisplayState):
     global window, ctx
 
@@ -187,6 +247,7 @@ def display_init(state: DisplayState):
 
         context_created = False
         last_error = None
+        hidden_window = None
 
         print("[DISPLAY] Initializing Headless GL...")
 
@@ -222,7 +283,13 @@ def display_init(state: DisplayState):
             print(f"Last Error: {last_error}")
             print("Tip: If on Pi, ensure 'libgles2-mesa-dev' is installed.")
             print("!"*60 + "\n")
-            sys.exit(1)
+            # Wayland/VC4 often needs a real surface; try a hidden GLFW window as a last resort.
+            ctx_hidden, win_hidden = _try_hidden_glfw_headless(require_codes, is_pi)
+            if ctx_hidden is None:
+                print("❌ HEADLESS GL CONTEXT FAILED (after hidden GLFW fallback). Exiting.")
+                sys.exit(1)
+            ctx = ctx_hidden
+            hidden_window = win_hidden
 
         # --- SMART RESOLUTION SELECTION ---
         if is_ascii:
