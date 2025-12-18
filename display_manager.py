@@ -69,21 +69,56 @@ def _log_renderer_info(ctx):
 
 def _check_is_pi():
     """Detect Raspberry Pi to enforce GLES contexts."""
+    return _pi_model() is not None
+
+
+def _pi_model() -> str | None:
     try:
-        if os.path.exists('/proc/device-tree/model'):
-            with open('/proc/device-tree/model', 'r') as m:
-                if 'Raspberry Pi' in m.read():
-                    return True
-    except:
+        if os.path.exists("/proc/device-tree/model"):
+            with open("/proc/device-tree/model", "r") as m:
+                model = m.read().strip().replace("\x00", "")
+                if "Raspberry Pi" in model:
+                    return model
+    except Exception:
         pass
-    return False
+    return None
+
+
+def _format_gl_version(require_code: int) -> str:
+    major = require_code // 100
+    minor = (require_code % 100) // 10
+    return f"{major}.{minor}"
+
+
+def _pi_require_codes(pi_model: str | None) -> list[int | None]:
+    """
+    ModernGL uses integer "require" codes (e.g. 310 for GLES 3.1).
+    Pi 2/3 (VC4) typically top out at GLES 3.0; Pi 4+ can do 3.1.
+    """
+    override = getattr(settings, "PI_GLES_REQUIRE", None) or os.environ.get("PI_GLES_REQUIRE")
+    if override is not None:
+        try:
+            return [int(override), None]
+        except Exception:
+            pass
+
+    if not pi_model:
+        return [None]
+
+    # Conservative defaults: prefer ES 3.0 on VC4-era Pis; allow ES 3.1 on Pi 4/5.
+    if "Raspberry Pi 4" in pi_model or "Raspberry Pi 5" in pi_model:
+        return [310, 300, None]
+
+    return [300, None]
 
 def display_init(state: DisplayState):
     global window, ctx
 
-    is_pi = _check_is_pi()
+    pi_model = _pi_model()
+    is_pi = pi_model is not None
+    pi_require_codes = _pi_require_codes(pi_model) if is_pi else [None]
     if is_pi:
-        print("[DISPLAY] Hardware: Raspberry Pi detected (Enforcing GLES 3.1)")
+        print(f"[DISPLAY] Hardware: {pi_model}")
 
     # --- PATH A: SERVER / HEADLESS MODE ---
     is_server = settings.SERVER_MODE
@@ -111,21 +146,25 @@ def display_init(state: DisplayState):
         print("[DISPLAY] Initializing Headless GL...")
 
         for backend in backends_to_try:
-            try:
-                create_kwargs = {"standalone": True}
-                if backend: create_kwargs["backend"] = backend
+            for require_code in (pi_require_codes if is_pi else [None]):
+                try:
+                    create_kwargs = {"standalone": True}
+                    if backend:
+                        create_kwargs["backend"] = backend
+                    if require_code is not None:
+                        create_kwargs["require"] = require_code
 
-                # --- PI FIX: REQUEST GLES 3.1 ---
-                if is_pi:
-                    create_kwargs["require"] = 310
-
-                ctx = moderngl.create_context(**create_kwargs)
-                context_created = True
-                _log_renderer_info(ctx)
+                    ctx = moderngl.create_context(**create_kwargs)
+                    context_created = True
+                    if require_code is not None:
+                        print(f"[DISPLAY] Headless GL: Requested GLES {_format_gl_version(require_code)}")
+                    _log_renderer_info(ctx)
+                    break
+                except Exception as e:
+                    last_error = e
+                    continue
+            if context_created:
                 break
-            except Exception as e:
-                last_error = e
-                continue
 
         if not context_created:
             print("\n" + "!"*60)
@@ -179,10 +218,47 @@ def display_init(state: DisplayState):
 
         # Apply Pi Hints for Window creation
         if is_pi:
-            glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_ES_API)
-            glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
-            glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
-            glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 1)
+            # Pi 2/3 (VC4) generally cannot do GLES 3.1; try a small fallback list.
+            window_created = False
+            last_error = None
+            for require_code in (c for c in pi_require_codes if c is not None):
+                try:
+                    glfw.default_window_hints()
+                    glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_ES_API)
+                    glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
+                    glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, require_code // 100)
+                    glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, (require_code % 100) // 10)
+
+                    if state.fullscreen:
+                        mon = glfw.get_primary_monitor()
+                        if CONNECTED_TO_RCA_HDMI:
+                            fs_w, fs_h = RCA_HDMI_RESOLUTION
+                        elif LOW_RES_FULLSCREEN:
+                            fs_w, fs_h = LOW_RES_FULLSCREEN_RESOLUTION
+                        else:
+                            best = _largest_mode(mon)
+                            fs_w, fs_h = best.size.width, best.size.height
+                        glfw.window_hint(glfw.AUTO_ICONIFY, glfw.FALSE)
+                        window = glfw.create_window(fs_w, fs_h, "Fullscreen", mon, None)
+                    else:
+                        aspect = eff_w / eff_h
+                        win_w = 400
+                        win_h = int(win_w / aspect)
+                        window = glfw.create_window(win_w, win_h, "Windowed Mode", None, None)
+
+                    if window:
+                        window_created = True
+                        print(f"[DISPLAY] Local Window: Requested GLES {_format_gl_version(require_code)}")
+                        break
+                except Exception as e:
+                    last_error = e
+                    window = None
+                    continue
+
+            if not window_created:
+                print(f"❌ ERROR: Pi window creation failed: {last_error}")
+                glfw.terminate()
+                sys.exit(1)
         else:
             glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_API)
             glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.NATIVE_CONTEXT_API)
@@ -190,22 +266,23 @@ def display_init(state: DisplayState):
             glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
             glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
 
-        if state.fullscreen:
-            mon = glfw.get_primary_monitor()
-            if CONNECTED_TO_RCA_HDMI:
-                fs_w, fs_h = RCA_HDMI_RESOLUTION
-            elif LOW_RES_FULLSCREEN:
-                fs_w, fs_h = LOW_RES_FULLSCREEN_RESOLUTION
+        if not is_pi:
+            if state.fullscreen:
+                mon = glfw.get_primary_monitor()
+                if CONNECTED_TO_RCA_HDMI:
+                    fs_w, fs_h = RCA_HDMI_RESOLUTION
+                elif LOW_RES_FULLSCREEN:
+                    fs_w, fs_h = LOW_RES_FULLSCREEN_RESOLUTION
+                else:
+                    best = _largest_mode(mon)
+                    fs_w, fs_h = best.size.width, best.size.height
+                glfw.window_hint(glfw.AUTO_ICONIFY, glfw.FALSE)
+                window = glfw.create_window(fs_w, fs_h, "Fullscreen", mon, None)
             else:
-                best = _largest_mode(mon)
-                fs_w, fs_h = best.size.width, best.size.height
-            glfw.window_hint(glfw.AUTO_ICONIFY, glfw.FALSE)
-            window = glfw.create_window(fs_w, fs_h, "Fullscreen", mon, None)
-        else:
-            aspect = eff_w / eff_h
-            win_w = 400
-            win_h = int(win_w / aspect)
-            window = glfw.create_window(win_w, win_h, "Windowed Mode", None, None)
+                aspect = eff_w / eff_h
+                win_w = 400
+                win_h = int(win_w / aspect)
+                window = glfw.create_window(win_w, win_h, "Windowed Mode", None, None)
 
         if not window:
             glfw.terminate()
@@ -217,7 +294,23 @@ def display_init(state: DisplayState):
 
         # Apply Pi Hints for Context creation
         if is_pi:
-            ctx = moderngl.create_context(require=310)
+            last_error = None
+            for require_code in pi_require_codes:
+                try:
+                    if require_code is None:
+                        ctx = moderngl.create_context()
+                        print("[DISPLAY] Local GL: Requested default context")
+                    else:
+                        ctx = moderngl.create_context(require=require_code)
+                        print(f"[DISPLAY] Local GL: Requested GLES {_format_gl_version(require_code)}")
+                    break
+                except Exception as e:
+                    last_error = e
+                    ctx = None
+                    continue
+            if ctx is None:
+                print(f"❌ ERROR: Failed to create Pi GL context: {last_error}")
+                sys.exit(1)
         else:
             ctx = moderngl.create_context()
 
