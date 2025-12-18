@@ -117,7 +117,7 @@ get_packages_for_platform() {
             # From system-requirements.txt (Debian/Ubuntu/Raspbian)
             echo "python3-venv python3-dev python3-pip build-essential cmake pkg-config \
                   ninja-build python-is-python3 python3-pil python3-numpy python3-opencv \
-                  python3-psutil python3-websockets python3-pyopengl python3-moderngl \
+                  python3-psutil python3-websockets python3-opengl python3-moderngl \
                   libwebp-dev libjpeg-dev libgl1-mesa-dev libglu1-mesa-dev libegl1-mesa-dev \
                   libgles-dev libglvnd-dev libglfw3-dev mesa-utils \
                   libsdl2-dev libasound2-dev chrony dnsutils"
