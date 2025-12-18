@@ -119,7 +119,7 @@ get_packages_for_platform() {
                   ninja-build python-is-python3 python3-pil python3-numpy python3-opencv \
                   python3-psutil python3-websockets python3-opengl python3-moderngl \
                   libwebp-dev libjpeg-dev libgl1-mesa-dev libglu1-mesa-dev libegl1-mesa-dev \
-                  libgles-dev libglvnd-dev libglfw3-dev mesa-utils \
+                  libgles-dev libglvnd-dev libglfw3-dev mesa-utils mesa-utils-extra \
                   libsdl2-dev libasound2-dev chrony dnsutils"
             ;;
         rhel)
