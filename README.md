@@ -199,6 +199,17 @@ To output correctly to CRT TVs via the 3.5mm jack:
 
 Enable Composite via `sudo raspi-config`.
 
+### Legacy GPUs (GLES 2.0 / GL 2.1)
+
+Some systems (e.g. Raspberry Pi 2 / older iGPUs / restricted drivers) only expose GLES 2.0 / OpenGL 2.1.
+In these cases the app automatically switches to a legacy PyOpenGL renderer for local window mode.
+
+For headless streaming on Wayland where standalone EGL contexts fail, the app will also fall back to a hidden GLFW window + legacy FBO capture path.
+
+Optional overrides:
+- Force legacy renderer: `FORCE_LEGACY_GL=1`
+- Force GLES version attempts: `PI_GLES_REQUIRE=200` (or `300`, `310`)
+
 Edit `/boot/firmware/cmdline.txt` (add to start of line):
 
 Plaintext
