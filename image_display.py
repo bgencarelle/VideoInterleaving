@@ -490,3 +490,8 @@ def run_display(clock_source=CLOCK_MODE):
 
         if not is_headless and has_gl and glfw:
             glfw.terminate()
+        if is_headless and has_gl and window is not None and hasattr(window, "close"):
+            try:
+                window.close()
+            except Exception as e:
+                print(f"[DISPLAY] Headless window cleanup failed: {e}")
