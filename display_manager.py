@@ -8,6 +8,9 @@ import settings
 import renderer
 import sys
 import os
+import re
+import shutil
+import subprocess
 
 # --- Conditional Imports ---
 _GLFW_AVAILABLE = False
@@ -84,16 +87,42 @@ def _pi_model() -> str | None:
     return None
 
 
+def _parse_eglinfo_es_version() -> tuple[int, int] | None:
+    eglinfo = shutil.which("eglinfo")
+    if not eglinfo:
+        return None
+    try:
+        out = subprocess.check_output([eglinfo, "-B"], text=True, stderr=subprocess.STDOUT, timeout=5)
+    except Exception:
+        return None
+
+    match = re.search(r"OpenGL ES profile version:\s*OpenGL ES\s*([0-9]+)\.([0-9]+)", out)
+    if not match:
+        return None
+    try:
+        return int(match.group(1)), int(match.group(2))
+    except Exception:
+        return None
+
+
+def _detect_es_version() -> tuple[int, int] | None:
+    """
+    Detects the available OpenGL ES version by parsing eglinfo.
+    Returns (major, minor) or None if undetectable.
+    """
+    return _parse_eglinfo_es_version()
+
+
 def _format_gl_version(require_code: int) -> str:
     major = require_code // 100
     minor = (require_code % 100) // 10
     return f"{major}.{minor}"
 
 
-def _pi_require_codes(pi_model: str | None) -> list[int | None]:
+def _es_require_codes(pi_model: str | None, detected_es: tuple[int, int] | None) -> list[int | None]:
     """
     ModernGL uses integer "require" codes (e.g. 310 for GLES 3.1).
-    Pi 2/3 (VC4) typically top out at GLES 3.0; Pi 4+ can do 3.1.
+    Prefer the detected GLES version; fall back to conservative Pi defaults.
     """
     override = getattr(settings, "PI_GLES_REQUIRE", None) or os.environ.get("PI_GLES_REQUIRE")
     if override is not None:
@@ -101,6 +130,11 @@ def _pi_require_codes(pi_model: str | None) -> list[int | None]:
             return [int(override), None]
         except Exception:
             pass
+
+    if detected_es:
+        major, minor = detected_es
+        require_code = (major * 100) + (minor * 10)
+        return [require_code, None]
 
     if not pi_model:
         return [None]
@@ -116,9 +150,15 @@ def display_init(state: DisplayState):
 
     pi_model = _pi_model()
     is_pi = pi_model is not None
-    pi_require_codes = _pi_require_codes(pi_model) if is_pi else [None]
+    detected_es = _detect_es_version()
+    require_codes = _es_require_codes(pi_model if is_pi else None, detected_es)
+
     if is_pi:
         print(f"[DISPLAY] Hardware: {pi_model}")
+    if detected_es:
+        print(f"[DISPLAY] GLES capability detected: {detected_es[0]}.{detected_es[1]} (via eglinfo)")
+    elif is_pi:
+        print("[DISPLAY] GLES capability not detected via eglinfo; using Pi defaults.")
 
     # --- PATH A: SERVER / HEADLESS MODE ---
     is_server = settings.SERVER_MODE
@@ -146,7 +186,7 @@ def display_init(state: DisplayState):
         print("[DISPLAY] Initializing Headless GL...")
 
         for backend in backends_to_try:
-            for require_code in (pi_require_codes if is_pi else [None]):
+            for require_code in require_codes:
                 try:
                     create_kwargs = {"standalone": True}
                     if backend:
@@ -221,7 +261,7 @@ def display_init(state: DisplayState):
             # Pi 2/3 (VC4) generally cannot do GLES 3.1; try a small fallback list.
             window_created = False
             last_error = None
-            for require_code in (c for c in pi_require_codes if c is not None):
+            for require_code in (c for c in require_codes if c is not None):
                 try:
                     glfw.default_window_hints()
                     glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_ES_API)
@@ -295,7 +335,7 @@ def display_init(state: DisplayState):
         # Apply Pi Hints for Context creation
         if is_pi:
             last_error = None
-            for require_code in pi_require_codes:
+            for require_code in require_codes:
                 try:
                     if require_code is None:
                         ctx = moderngl.create_context()

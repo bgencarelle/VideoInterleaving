@@ -70,57 +70,106 @@ def initialize(gl_context: moderngl.Context) -> None:
     global ctx, prog, vao, vbo
     ctx = gl_context
 
-    is_gles = ctx.version_code < 330
+    version_code = ctx.version_code
+    is_gles = version_code < 330
+    is_gles2 = is_gles and version_code < 300
 
-    # [FIX] Downgraded to 300 es to support Raspberry Pi VC4 Driver
-    header = "#version 300 es\nprecision mediump float;" if is_gles else "#version 330 core"
+    if is_gles2:
+        vertex_src = """
+            #version 100
+            attribute vec2 position;
+            attribute vec2 texcoord;
+            uniform mat4 u_MVP;
+            varying vec2 v_texcoord;
+            void main() {
+                gl_Position = u_MVP * vec4(position, 0.0, 1.0);
+                v_texcoord = texcoord;
+            }
+        """
 
-    vertex_src = f"""
-        {header}
-        in vec2 position;
-        in vec2 texcoord;
-        uniform mat4 u_MVP;
-        out vec2 v_texcoord;
-        void main() {{
-            gl_Position = u_MVP * vec4(position, 0.0, 1.0);
-            v_texcoord = texcoord;
-        }}
-    """
+        fragment_src = """
+            #version 100
+            precision mediump float;
+            uniform sampler2D texture_main;
+            uniform sampler2D texture_float;
+            uniform vec3 u_bgColor;
 
-    fragment_src = f"""
-        {header}
-        uniform sampler2D texture_main;
-        uniform sampler2D texture_float;
-        uniform vec3 u_bgColor;
+            uniform bool u_main_is_sbs;
+            uniform bool u_float_is_sbs;
 
-        uniform bool u_main_is_sbs;
-        uniform bool u_float_is_sbs;
+            varying vec2 v_texcoord;
 
-        in vec2 v_texcoord;
-        out vec4 fragColor;
+            vec4 sampleLayer(sampler2D tex, bool is_sbs, vec2 uv) {
+                if (is_sbs) {
+                    vec2 uv_color = vec2(uv.x * 0.5, uv.y);
+                    vec2 uv_mask  = vec2((uv.x * 0.5) + 0.5, uv.y);
+                    vec3 color = texture2D(tex, uv_color).rgb;
+                    float alpha = texture2D(tex, uv_mask).r;
+                    if (alpha < 0.05) alpha = 0.0;
+                    return vec4(color, alpha);
+                } else {
+                    return texture2D(tex, uv);
+                }
+            }
 
-        vec4 sampleLayer(sampler2D tex, bool is_sbs, vec2 uv) {{
-            if (is_sbs) {{
-                vec2 uv_color = vec2(uv.x * 0.5, uv.y);
-                vec2 uv_mask  = vec2((uv.x * 0.5) + 0.5, uv.y);
-                vec3 color = texture(tex, uv_color).rgb;
-                float alpha = texture(tex, uv_mask).r;
-                if (alpha < 0.05) alpha = 0.0;
-                return vec4(color, alpha);
-            }} else {{
-                return texture(tex, uv);
+            void main() {
+                vec4 mainC = sampleLayer(texture_main, u_main_is_sbs, v_texcoord);
+                vec4 floatC = sampleLayer(texture_float, u_float_is_sbs, v_texcoord);
+
+                vec3 color = mix(u_bgColor, mainC.rgb, mainC.a);
+                color = mix(color, floatC.rgb, floatC.a);
+                gl_FragColor = vec4(color, 1.0);
+            }
+        """
+    else:
+        header = "#version 300 es\nprecision mediump float;" if is_gles else "#version 330 core"
+
+        vertex_src = f"""
+            {header}
+            in vec2 position;
+            in vec2 texcoord;
+            uniform mat4 u_MVP;
+            out vec2 v_texcoord;
+            void main() {{
+                gl_Position = u_MVP * vec4(position, 0.0, 1.0);
+                v_texcoord = texcoord;
             }}
-        }}
+        """
 
-        void main() {{
-            vec4 mainC = sampleLayer(texture_main, u_main_is_sbs, v_texcoord);
-            vec4 floatC = sampleLayer(texture_float, u_float_is_sbs, v_texcoord);
+        fragment_src = f"""
+            {header}
+            uniform sampler2D texture_main;
+            uniform sampler2D texture_float;
+            uniform vec3 u_bgColor;
 
-            vec3 color = mix(u_bgColor, mainC.rgb, mainC.a);
-            color = mix(color, floatC.rgb, floatC.a);
-            fragColor = vec4(color, 1.0);
-        }}
-    """
+            uniform bool u_main_is_sbs;
+            uniform bool u_float_is_sbs;
+
+            in vec2 v_texcoord;
+            out vec4 fragColor;
+
+            vec4 sampleLayer(sampler2D tex, bool is_sbs, vec2 uv) {{
+                if (is_sbs) {{
+                    vec2 uv_color = vec2(uv.x * 0.5, uv.y);
+                    vec2 uv_mask  = vec2((uv.x * 0.5) + 0.5, uv.y);
+                    vec3 color = texture(tex, uv_color).rgb;
+                    float alpha = texture(tex, uv_mask).r;
+                    if (alpha < 0.05) alpha = 0.0;
+                    return vec4(color, alpha);
+                }} else {{
+                    return texture(tex, uv);
+                }}
+            }}
+
+            void main() {{
+                vec4 mainC = sampleLayer(texture_main, u_main_is_sbs, v_texcoord);
+                vec4 floatC = sampleLayer(texture_float, u_float_is_sbs, v_texcoord);
+
+                vec3 color = mix(u_bgColor, mainC.rgb, mainC.a);
+                color = mix(color, floatC.rgb, floatC.a);
+                fragColor = vec4(color, 1.0);
+            }}
+        """
 
     prog = ctx.program(vertex_shader=vertex_src, fragment_shader=fragment_src)
     vbo = ctx.buffer(reserve=64)
