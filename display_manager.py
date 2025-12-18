@@ -119,10 +119,10 @@ def _format_gl_version(require_code: int) -> str:
     return f"{major}.{minor}"
 
 
-def _es_require_codes(pi_model: str | None, detected_es: tuple[int, int] | None) -> list[int | None]:
+def _es_require_codes(detected_es: tuple[int, int] | None) -> list[int | None]:
     """
     ModernGL uses integer "require" codes (e.g. 310 for GLES 3.1).
-    Prefer the detected GLES version; fall back to conservative Pi defaults.
+    Try higher versions first, then fall back.
     """
     override = getattr(settings, "PI_GLES_REQUIRE", None) or os.environ.get("PI_GLES_REQUIRE")
     if override is not None:
@@ -131,19 +131,22 @@ def _es_require_codes(pi_model: str | None, detected_es: tuple[int, int] | None)
         except Exception:
             pass
 
+    attempts = [310, 300, 200, None]
     if detected_es:
         major, minor = detected_es
-        require_code = (major * 100) + (minor * 10)
-        return [require_code, None]
-
-    if not pi_model:
-        return [None]
-
-    # Conservative defaults: prefer ES 3.0 on VC4-era Pis; allow ES 3.1 on Pi 4/5.
-    if "Raspberry Pi 4" in pi_model or "Raspberry Pi 5" in pi_model:
-        return [310, 300, None]
-
-    return [300, None]
+        detected_code = (major * 100) + (minor * 10)
+        # Insert detected first if it's not already there; keep high-to-low order otherwise.
+        if detected_code not in attempts:
+            attempts.insert(0, detected_code)
+    # Remove dupes while preserving order
+    seen = set()
+    unique_attempts = []
+    for code in attempts:
+        if code in seen:
+            continue
+        seen.add(code)
+        unique_attempts.append(code)
+    return unique_attempts
 
 def display_init(state: DisplayState):
     global window, ctx
@@ -151,14 +154,16 @@ def display_init(state: DisplayState):
     pi_model = _pi_model()
     is_pi = pi_model is not None
     detected_es = _detect_es_version()
-    require_codes = _es_require_codes(pi_model if is_pi else None, detected_es)
+    require_codes = _es_require_codes(detected_es)
 
     if is_pi:
         print(f"[DISPLAY] Hardware: {pi_model}")
     if detected_es:
         print(f"[DISPLAY] GLES capability detected: {detected_es[0]}.{detected_es[1]} (via eglinfo)")
     elif is_pi:
-        print("[DISPLAY] GLES capability not detected via eglinfo; using Pi defaults.")
+        print("[DISPLAY] GLES capability not detected via eglinfo; trying GLES versions high→low.")
+    else:
+        print("[DISPLAY] GLES capability not detected; trying GLES versions high→low.")
 
     # --- PATH A: SERVER / HEADLESS MODE ---
     is_server = settings.SERVER_MODE
@@ -187,6 +192,9 @@ def display_init(state: DisplayState):
 
         for backend in backends_to_try:
             for require_code in require_codes:
+                attempt_backend = backend or "auto"
+                attempt_version = _format_gl_version(require_code) if require_code is not None else "default"
+                print(f"[DISPLAY] Headless attempt: backend={attempt_backend}, GLES={attempt_version}")
                 try:
                     create_kwargs = {"standalone": True}
                     if backend:
@@ -202,6 +210,7 @@ def display_init(state: DisplayState):
                     break
                 except Exception as e:
                     last_error = e
+                    print(f"[DISPLAY] Headless attempt failed ({attempt_backend}, GLES={attempt_version}): {e}")
                     continue
             if context_created:
                 break
@@ -262,6 +271,8 @@ def display_init(state: DisplayState):
             window_created = False
             last_error = None
             for require_code in require_codes:
+                attempt_version = _format_gl_version(require_code) if require_code is not None else "default"
+                print(f"[DISPLAY] Local Window attempt: GLES={attempt_version}")
                 try:
                     glfw.default_window_hints()
                     glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_ES_API)
@@ -297,6 +308,7 @@ def display_init(state: DisplayState):
                 except Exception as e:
                     last_error = e
                     window = None
+                    print(f"[DISPLAY] Local Window attempt failed (GLES={attempt_version}): {e}")
                     continue
 
             if not window_created:
@@ -340,17 +352,18 @@ def display_init(state: DisplayState):
         if is_pi:
             last_error = None
             for require_code in require_codes:
+                attempt_version = _format_gl_version(require_code) if require_code is not None else "default"
+                print(f"[DISPLAY] Local GL attempt: GLES={attempt_version}")
                 try:
                     if require_code is None:
                         ctx = moderngl.create_context()
-                        print("[DISPLAY] Local GL: Requested default context")
                     else:
                         ctx = moderngl.create_context(require=require_code)
-                        print(f"[DISPLAY] Local GL: Requested GLES {_format_gl_version(require_code)}")
                     break
                 except Exception as e:
                     last_error = e
                     ctx = None
+                    print(f"[DISPLAY] Local GL attempt failed (GLES={attempt_version}): {e}")
                     continue
             if ctx is None:
                 print(f"❌ ERROR: Failed to create Pi GL context: {last_error}")
