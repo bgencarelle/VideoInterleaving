@@ -7,7 +7,7 @@ websockets
 opencv-python
 PyOpenGl
 psutil
-glfw
+glfw  # Python bindings - requires libglfw3-dev system package (installed via system-requirements.txt)
 moderngl
 pyturbojpeg
 SimpleWebsocketServer

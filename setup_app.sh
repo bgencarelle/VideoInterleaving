@@ -117,20 +117,22 @@ get_packages_for_platform() {
             # From system-requirements.txt (Debian/Ubuntu/Raspbian)
             echo "python3-venv python3-dev python3-pip build-essential cmake pkg-config \
                   ninja-build python-is-python3 libwebp-dev libjpeg-dev \
-                  libgl1-mesa-dev libglu1-mesa-dev libegl1-mesa-dev mesa-utils \
+                  libgl1-mesa-dev libglu1-mesa-dev libegl1-mesa-dev libgles-dev \
+                  libglvnd-dev libglfw3-dev mesa-utils \
                   libsdl2-dev libasound2-dev chrony dnsutils"
             ;;
         rhel)
             # From README.md (Fedora/CentOS)
             echo "python3 python3-pip python3-devel gcc gcc-c++ make cmake pkgconfig \
                   libwebp-devel libjpeg-turbo-devel SDL2-devel alsa-lib-devel \
-                  mesa-libGL-devel mesa-libGLU-devel mesa-libEGL-devel mesa-utils \
+                  mesa-libGL-devel mesa-libGLU-devel mesa-libEGL-devel mesa-libGLES-devel \
+                  libglvnd-devel glfw-devel mesa-utils \
                   chrony ninja-build bind-utils"
             ;;
         arch)
             # Arch Linux equivalents
             echo "python python-pip base-devel cmake pkg-config ninja \
-                  libwebp libjpeg-turbo sdl2 alsa-lib mesa glu \
+                  libwebp libjpeg-turbo sdl2 alsa-lib mesa glu glfw \
                   chrony bind-tools"
             ;;
         macos)

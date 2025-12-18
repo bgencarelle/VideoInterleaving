@@ -19,6 +19,9 @@ libjpeg-dev
 libgl1-mesa-dev
 libglu1-mesa-dev
 libegl1-mesa-dev
+libgles-dev
+libglvnd-dev
+libglfw3-dev
 mesa-utils
 
 # Audio and input libraries
