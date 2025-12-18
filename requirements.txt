@@ -1,13 +1,6 @@
-pillow
-numpy
+# Packages without system equivalents - install via pip
 webp
 mido
-websockets
-#pygame
-opencv-python
-PyOpenGl
-psutil
 glfw  # Python bindings - requires libglfw3-dev system package (installed via system-requirements.txt)
-moderngl
 pyturbojpeg
 SimpleWebsocketServer

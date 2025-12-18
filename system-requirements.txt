@@ -11,6 +11,15 @@ pkg-config
 ninja-build
 python-is-python3
 
+# Python packages (system-installed)
+python3-pil
+python3-numpy
+python3-opencv
+python3-psutil
+python3-websockets
+python3-pyopengl
+python3-moderngl
+
 # Image and media libraries
 libwebp-dev
 libjpeg-dev
