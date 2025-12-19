@@ -7,7 +7,8 @@ import threading
 
 import numpy as np
 #import webp  # Strict Requirement: pip install webp
-from turbojpeg import TurboJPEG  # Strict Requirement: pip install PyTurboJPEG
+from turbojpeg import TJPF_RGB
+from turbojpeg_loader import get_turbojpeg
 
 import settings
 from shared_state import exchange, exchange_web, exchange_ascii
@@ -51,8 +52,8 @@ from event_handler import register_callbacks
 import renderer
 import ascii_converter
 
-# Initialize Encoders
-jpeg = TurboJPEG()
+# Initialize Encoders (strict TurboJPEG; will raise if native lib is missing)
+jpeg = get_turbojpeg()
 
 from lightweight_monitor import start_monitor
 
@@ -123,24 +124,41 @@ def load_and_render_frame(loader, index, main_folder, float_folder):
             target_w = getattr(settings, 'ASCII_WIDTH', baked_w)
             target_h = getattr(settings, 'ASCII_HEIGHT', baked_h)
 
-            step_x = max(1, baked_w // target_w)
-            step_y = max(1, baked_h // target_h)
+            # Skip downscaling if already at target size
+            if baked_w == target_w and baked_h == target_h:
+                # No downscaling needed, use arrays directly
+                pass
+            else:
+                step_x = max(1, baked_w // target_w)
+                step_y = max(1, baked_h // target_h)
 
-            if step_x > 1 or step_y > 1:
-                final_chars = final_chars[::step_y, ::step_x]
-                final_colors = final_colors[::step_y, ::step_x]
+                if step_x > 1 or step_y > 1:
+                    final_chars = final_chars[::step_y, ::step_x]
+                    final_colors = final_colors[::step_y, ::step_x]
 
-            # --- RENDER TO STRING ---
-            # Cast bytes to string if needed
-            if final_chars.dtype.kind == 'S':
-                final_chars = final_chars.astype(str)
-
+            # --- RENDER TO STRING (OPTIMIZED) ---
             # Look up ANSI codes and combine
             # This is the most expensive CPU part, now done in a thread!
             color_strings = ANSI_LUT[final_colors]
-            image_grid = np.char.add(color_strings, final_chars)
-
-            rows = ["".join(row) for row in image_grid]
+            
+            # Optimize string building: avoid full array conversion, build strings efficiently
+            if final_chars.dtype.kind == 'S':
+                # Bytes array: decode row by row to avoid full array conversion
+                # Pre-allocate list for rows (faster than list comprehension with join)
+                rows = []
+                for i in range(final_chars.shape[0]):
+                    # Decode bytes row to string once
+                    row_chars = final_chars[i].tobytes().decode('latin-1')  # Fast decode
+                    row_colors = color_strings[i]
+                    # Build string efficiently: join ANSI codes with chars
+                    row_str = ''.join(c + ch for c, ch in zip(row_colors, row_chars))
+                    rows.append(row_str)
+            else:
+                # Already string/unicode array - use numpy char operations (optimized)
+                image_grid = np.char.add(color_strings, final_chars)
+                # Optimize: use list comprehension but avoid nested joins
+                rows = [''.join(row) for row in image_grid]
+            
             ascii_string = "\r\n".join(rows) + RESET_CODE
 
             # Return the String as the "Image"
@@ -201,18 +219,24 @@ def run_display(clock_source=CLOCK_MODE):
     if img0 is None:
         raise RuntimeError("Failed to load initial image.")
 
+    # Store original source dimensions for aspect ratio calculation (ASCII mode)
+    source_image_size = None
+    
     # ASCII Dict detection for initialization
     if isinstance(img0, dict):
         h, w = img0['chars'].shape
         state.image_size = (w, h)
         has_gl = False
         is_headless = True
+        source_image_size = (w, h)  # Store for aspect ratio
     else:
         h, w = img0.shape[:2]
         if is_sbs0:
             state.image_size = (w // 2, h)
+            source_image_size = (w // 2, h)  # Store actual image size (not SBS)
         else:
             state.image_size = (w, h)
+            source_image_size = (w, h)  # Store for aspect ratio
 
     # 3. Initialize Window
     if isinstance(img0, dict):
@@ -439,12 +463,17 @@ def run_display(clock_source=CLOCK_MODE):
                         if frame is not None:
                             if is_web:
                                 # Web only: use web exchange (and legacy for backward compat)
-                                enc = jpeg.encode(frame, quality=JPEG_QUALITY, pixel_format=0)
+                                enc = jpeg.encode(frame, quality=JPEG_QUALITY, pixel_format=TJPF_RGB)
                                 exchange_web.set_frame(b'j' + enc)
                                 exchange.set_frame(b'j' + enc)  # Legacy compatibility
                             elif is_ascii:
                                 # ASCII only: use ASCII exchange (and legacy for backward compat)
-                                text_frame = ascii_converter.to_ascii(frame)
+                                # Calculate source aspect ratio for correct scaling
+                                source_aspect = None
+                                if source_image_size is not None:
+                                    src_w, src_h = source_image_size
+                                    source_aspect = src_w / src_h if src_h > 0 else 1.0
+                                text_frame = ascii_converter.to_ascii(frame, source_aspect_ratio=source_aspect)
                                 exchange_ascii.set_frame(text_frame)
                                 exchange.set_frame(text_frame)  # Legacy compatibility
 

@@ -213,6 +213,9 @@ Optional overrides:
 Wayland note:
 - In local mode on Wayland, fullscreen uses a borderless fullscreen-sized window (not a mode-setting fullscreen) to reduce compositor/session crashes on some drivers.
 
+TurboJPEG note:
+- If you see `unable to locate turbojpeg library automatically`, install `libturbojpeg0` (Debian/Raspbian) or set `TURBOJPEG_LIB=/path/to/libturbojpeg.so.0`.
+
 Edit `/boot/firmware/cmdline.txt` (add to start of line):
 
 Plaintext

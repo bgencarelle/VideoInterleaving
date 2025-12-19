@@ -5,9 +5,10 @@ import numpy as np
 import os
 from settings import MAIN_FOLDER_PATH, FLOAT_FOLDER_PATH, TOLERANCE
 
-from turbojpeg import TurboJPEG, TJPF_RGB
+from turbojpeg import TJPF_RGB
+from turbojpeg_loader import get_turbojpeg
 
-jpeg = TurboJPEG()
+jpeg = get_turbojpeg()
 
 from libwebp_loader import init_libwebp
 
@@ -83,6 +84,8 @@ class ImageLoader:
         # --- STANDARD IMAGES ---
         if ext == "webp": return self._read_webp(image_path)
         if ext in ("jpg", "jpeg"):
+            # TurboJPEG decode: TJPF_RGB is fastest format, decode happens in worker thread
+            # This is optimal - no unnecessary copies, uses native library
             with open(image_path, "rb") as f: data = f.read()
             return jpeg.decode(data, pixel_format=TJPF_RGB), True
 

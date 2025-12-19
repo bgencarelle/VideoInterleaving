@@ -23,6 +23,7 @@ python3-moderngl
 # Image and media libraries
 libwebp-dev
 libjpeg-dev
+libturbojpeg0
 
 # OpenGL and graphics libraries
 libgl1-mesa-dev
