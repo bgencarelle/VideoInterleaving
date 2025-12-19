@@ -2,6 +2,7 @@
 import time
 import datetime
 import math
+import decimal
 from globals import control_data_dictionary
 from settings import IPS, CLIENT_MODE, VALID_MODES, FROM_BIRTH, CLOCK_MODE, BIRTH_TZ, BIRTH_TIME, TIMEZONE_OFFSETS
 
@@ -10,6 +11,10 @@ midi_mode = False
 import midi_control
 #import index_client
 launch_time = 0.00000000
+
+# Module-level variables for MIDI clock modes (set by make_file_lists.initialize_image_lists)
+png_paths_len = 0
+frame_duration = 1.0
 
 
 def get_timezone(tz_str):
@@ -76,6 +81,29 @@ def calculate_free_clock_index(total_images, pingpong=True):
 
     control_data_dictionary['Index_and_Direction'] = (index, None)
     return index, None
+
+def calculate_midi_clock_index(frame_counter, png_paths_len_param=None, frame_duration_param=None):
+    """
+    Calculate index from frame counter for MIDI clock modes.
+    Uses module-level variables if parameters not provided (for backward compatibility).
+    """
+    # Use parameters if provided, otherwise fall back to module-level variables
+    png_len = png_paths_len_param if png_paths_len_param is not None else png_paths_len
+    frame_dur = frame_duration_param if frame_duration_param is not None else frame_duration
+    
+    scale_ref = 4.0
+    frame_scale = scale_ref / frame_dur
+    progress = (decimal.Decimal(frame_counter * frame_scale)) % (png_len * 2)
+    if progress < png_len:
+        index = int(progress.quantize(decimal.Decimal('1.000'), rounding=decimal.ROUND_HALF_UP))
+        direction = 1
+    else:
+        index = int((decimal.Decimal(png_len * 2) - progress).quantize(decimal.Decimal('1.000'),
+                                                                         rounding=decimal.ROUND_HALF_UP))
+        direction = -1
+    index = max(0, min(index, png_len))
+    return index, direction
+
 
 def update_index(total_images, pingpong=True):
     """

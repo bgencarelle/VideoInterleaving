@@ -132,7 +132,8 @@ def _log_renderer_info(ctx):
         print(f"[DISPLAY] GL Context: {renderer_name}")
         if "llvmpipe" in renderer_name.lower() or "softpipe" in renderer_name.lower():
             print("[DISPLAY] ℹ️  Using Software Rasterizer (Optimized CPU Rendering).")
-    except:
+    except (AttributeError, KeyError, TypeError) as e:
+        # GL context info may not be available on all platforms
         pass
 
 def _check_is_pi():
@@ -463,23 +464,23 @@ def display_init(state: DisplayState):
                 attempt_backend = backend or "auto"
                 attempt_version = _format_gl_version(require_code) if require_code is not None else "default"
                 print(f"[DISPLAY] Headless attempt: backend={attempt_backend}, GLES={attempt_version}")
-                try:
-                    create_kwargs = {"standalone": True}
-                    if backend:
-                        create_kwargs["backend"] = backend
-                    if require_code is not None:
-                        create_kwargs["require"] = require_code
+            try:
+                create_kwargs = {"standalone": True}
+                if backend:
+                    create_kwargs["backend"] = backend
+                if require_code is not None:
+                    create_kwargs["require"] = require_code
 
-                    ctx = moderngl.create_context(**create_kwargs)
-                    context_created = True
-                    if require_code is not None:
-                        print(f"[DISPLAY] Headless GL: Requested GLES {_format_gl_version(require_code)}")
-                    _log_renderer_info(ctx)
-                    break
-                except Exception as e:
-                    last_error = e
-                    print(f"[DISPLAY] Headless attempt failed ({attempt_backend}, GLES={attempt_version}): {e}")
-                    continue
+                ctx = moderngl.create_context(**create_kwargs)
+                context_created = True
+                if require_code is not None:
+                    print(f"[DISPLAY] Headless GL: Requested GLES {_format_gl_version(require_code)}")
+                _log_renderer_info(ctx)
+                break
+            except Exception as e:
+                last_error = e
+                print(f"[DISPLAY] Headless attempt failed ({attempt_backend}, GLES={attempt_version}): {e}")
+                continue
             if context_created:
                 break
 
@@ -549,7 +550,35 @@ def display_init(state: DisplayState):
     img_w, img_h = state.image_size
     eff_w, eff_h = (img_h, img_w) if state.rotation % 180 == 90 else (img_w, img_h)
 
-    if window is None:
+    # If window exists and we're just updating (e.g., fullscreen toggle), handle it specially for Wayland
+    if window is not None and is_wayland:
+        # Wayland: Just update window properties without recreating
+        if state.fullscreen:
+            mon = glfw.get_primary_monitor()
+            if CONNECTED_TO_RCA_HDMI:
+                fs_w, fs_h = RCA_HDMI_RESOLUTION
+            elif LOW_RES_FULLSCREEN:
+                fs_w, fs_h = LOW_RES_FULLSCREEN_RESOLUTION
+            else:
+                best = _largest_mode(mon)
+                fs_w, fs_h = best.size.width, best.size.height
+            current_w, current_h = glfw.get_window_size(window)
+            if current_w != fs_w or current_h != fs_h:
+                glfw.set_window_size(window, fs_w, fs_h)
+                try:
+                    glfw.set_window_pos(window, 0, 0)
+                except Exception:
+                    pass
+            glfw.set_window_attrib(window, glfw.DECORATED, glfw.FALSE)
+        else:
+            glfw.set_window_attrib(window, glfw.DECORATED, glfw.TRUE)
+            win_w = 400
+            win_h = int(win_w / (eff_w / eff_h)) if eff_h > 0 else 300
+            current_w, current_h = glfw.get_window_size(window)
+            if current_w != win_w or current_h != win_h:
+                glfw.set_window_size(window, win_w, win_h)
+        # Continue to framebuffer size calculation below
+    elif window is None:
         if not glfw.init():
             print("❌ ERROR: GLFW Init failed.")
             sys.exit(1)
@@ -570,11 +599,7 @@ def display_init(state: DisplayState):
                 if is_wayland:
                     glfw.window_hint(glfw.DECORATED, glfw.FALSE)
                     win = glfw.create_window(fs_w, fs_h, "Fullscreen", None, None)
-                    if win:
-                        try:
-                            glfw.set_window_pos(win, 0, 0)
-                        except Exception:
-                            pass
+                    # Note: Wayland doesn't support set_window_pos(), so we skip it
                     return win
                 return glfw.create_window(fs_w, fs_h, "Fullscreen", mon, None)
 
@@ -708,29 +733,58 @@ def display_init(state: DisplayState):
         if glfw and window is not None:
             glfw.set_input_mode(window, glfw.CURSOR, glfw.CURSOR_HIDDEN)
 
-    # Fullscreen toggling:
-    # - On Wayland, avoid set_window_monitor (can trigger compositor/device resets). We use borderless sizing above.
-    # - On other platforms, only change monitor state when needed.
-    if not is_wayland:
-        current_monitor = glfw.get_window_monitor(window)
-        if state.fullscreen:
-            mon = glfw.get_primary_monitor()
-            if current_monitor != mon:
+    # Fullscreen toggling (only if window already exists):
+    # - On Wayland, avoid set_window_monitor (can trigger compositor/device resets). 
+    #   Instead, resize the existing window and toggle decoration.
+    # - On other platforms, use set_window_monitor for proper fullscreen.
+    if window is not None:
+        if is_wayland:
+            # Wayland: Resize existing window and toggle decoration
+            current_w, current_h = glfw.get_window_size(window)
+            if state.fullscreen:
+                mon = glfw.get_primary_monitor()
                 if CONNECTED_TO_RCA_HDMI:
                     fs_w, fs_h = RCA_HDMI_RESOLUTION
-                    refresh = 60  # Default refresh rate
                 elif LOW_RES_FULLSCREEN:
                     fs_w, fs_h = LOW_RES_FULLSCREEN_RESOLUTION
-                    refresh = 60  # Default refresh rate
                 else:
                     best = _largest_mode(mon)
                     fs_w, fs_h = best.size.width, best.size.height
-                    refresh = getattr(best, 'refresh_rate', 60)
-                glfw.set_window_monitor(window, mon, 0, 0, fs_w, fs_h, refresh)
+                # Only resize if size changed
+                if current_w != fs_w or current_h != fs_h:
+                    glfw.set_window_size(window, fs_w, fs_h)
+                    # Note: Wayland doesn't support set_window_pos(), so we skip it
+                # Ensure borderless
+                glfw.set_window_attrib(window, glfw.DECORATED, glfw.FALSE)
+            else:
+                # Windowed mode: restore decoration and resize
+                glfw.set_window_attrib(window, glfw.DECORATED, glfw.TRUE)
+                # Resize to windowed size based on image aspect
+                win_w = 400
+                win_h = int(win_w / (eff_w / eff_h)) if eff_h > 0 else 300
+                if current_w != win_w or current_h != win_h:
+                    glfw.set_window_size(window, win_w, win_h)
         else:
-            if current_monitor is not None:
-                # Restore to a small window; actual sizing will be re-derived below via framebuffer size.
-                glfw.set_window_monitor(window, None, 100, 100, 400, 300, 0)
+            # Non-Wayland: Use set_window_monitor for proper fullscreen
+            current_monitor = glfw.get_window_monitor(window)
+            if state.fullscreen:
+                mon = glfw.get_primary_monitor()
+                if current_monitor != mon:
+                    if CONNECTED_TO_RCA_HDMI:
+                        fs_w, fs_h = RCA_HDMI_RESOLUTION
+                        refresh = 60  # Default refresh rate
+                    elif LOW_RES_FULLSCREEN:
+                        fs_w, fs_h = LOW_RES_FULLSCREEN_RESOLUTION
+                        refresh = 60  # Default refresh rate
+                    else:
+                        best = _largest_mode(mon)
+                        fs_w, fs_h = best.size.width, best.size.height
+                        refresh = getattr(best, 'refresh_rate', 60)
+                    glfw.set_window_monitor(window, mon, 0, 0, fs_w, fs_h, refresh)
+            else:
+                if current_monitor is not None:
+                    # Restore to a small window; actual sizing will be re-derived below via framebuffer size.
+                    glfw.set_window_monitor(window, None, 100, 100, 400, 300, 0)
 
     fb_w, fb_h = glfw.get_framebuffer_size(window)
     if renderer.using_legacy_gl():
