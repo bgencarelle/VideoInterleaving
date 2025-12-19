@@ -243,8 +243,17 @@ def initialize_legacy() -> None:
     gl.glUseProgram(0)
 
 
-def _legacy_gl_formats(image: np.ndarray) -> tuple[int, int, bytes]:
+def _as_contiguous_u8(image: np.ndarray) -> np.ndarray:
+    if image.dtype != np.uint8:
+        image = image.astype(np.uint8, copy=False)
+    if not image.flags["C_CONTIGUOUS"]:
+        image = np.ascontiguousarray(image)
+    return image
+
+
+def _legacy_gl_formats(image: np.ndarray) -> tuple[int, int, np.ndarray]:
     gl = _lazy_import_gl()
+    image = _as_contiguous_u8(image)
     if image.ndim == 2:
         fmt = gl.GL_LUMINANCE
         internal = gl.GL_LUMINANCE
@@ -258,8 +267,7 @@ def _legacy_gl_formats(image: np.ndarray) -> tuple[int, int, bytes]:
             internal = gl.GL_RGBA
         else:
             raise ValueError(f"Unsupported channel count: {channels}")
-    data = np.ascontiguousarray(image).tobytes()
-    return internal, fmt, data
+    return internal, fmt, image
 
 def _update_bg_linear(background_color: tuple[int, int, int]) -> tuple[float, float, float]:
     global _bg_linear_color, _bg_linear_src
@@ -468,8 +476,8 @@ def create_texture(image: np.ndarray) -> moderngl.Texture:
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
 
         h, w = image.shape[:2]
-        internal, fmt, data = _legacy_gl_formats(image)
-        gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, internal, w, h, 0, fmt, gl.GL_UNSIGNED_BYTE, data)
+        internal, fmt, pixels = _legacy_gl_formats(image)
+        gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, internal, w, h, 0, fmt, gl.GL_UNSIGNED_BYTE, pixels)
 
         components = 1 if image.ndim == 2 else image.shape[2]
         _legacy_texture_dims[tex_id] = (w, h, components)
@@ -479,7 +487,8 @@ def create_texture(image: np.ndarray) -> moderngl.Texture:
     components = 3 if (image.ndim == 3 and image.shape[2] == 3) else 4
     if image.ndim == 2:
         components = 1
-    tex = ctx.texture((w, h), components, data=image.tobytes())
+    image = _as_contiguous_u8(image)
+    tex = ctx.texture((w, h), components, data=memoryview(image))
     tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
     return tex
 
@@ -489,21 +498,23 @@ def update_texture(texture: moderngl.Texture, new_image: np.ndarray) -> moderngl
         gl = _lazy_import_gl()
         gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
         tex_id = int(texture)  # type: ignore[arg-type]
+        new_image = _as_contiguous_u8(new_image)
         h, w = new_image.shape[:2]
         components = 1 if new_image.ndim == 2 else new_image.shape[2]
         expected = _legacy_texture_dims.get(tex_id)
 
         gl.glBindTexture(gl.GL_TEXTURE_2D, tex_id)
-        internal, fmt, data = _legacy_gl_formats(new_image)
+        internal, fmt, pixels = _legacy_gl_formats(new_image)
 
         if expected != (w, h, components):
-            gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, internal, w, h, 0, fmt, gl.GL_UNSIGNED_BYTE, data)
+            gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, internal, w, h, 0, fmt, gl.GL_UNSIGNED_BYTE, pixels)
             _legacy_texture_dims[tex_id] = (w, h, components)
             return tex_id  # type: ignore[return-value]
 
-        gl.glTexSubImage2D(gl.GL_TEXTURE_2D, 0, 0, 0, w, h, fmt, gl.GL_UNSIGNED_BYTE, data)
+        gl.glTexSubImage2D(gl.GL_TEXTURE_2D, 0, 0, 0, w, h, fmt, gl.GL_UNSIGNED_BYTE, pixels)
         return tex_id  # type: ignore[return-value]
 
+    new_image = _as_contiguous_u8(new_image)
     new_h, new_w = new_image.shape[:2]
     new_c = 3 if (new_image.ndim == 3 and new_image.shape[2] == 3) else 4
     if new_image.ndim == 2:
@@ -512,7 +523,7 @@ def update_texture(texture: moderngl.Texture, new_image: np.ndarray) -> moderngl
     if (new_w, new_h) != texture.size or new_c != texture.components:
         texture.release()
         return create_texture(new_image)
-    texture.write(new_image.tobytes())
+    texture.write(memoryview(new_image))
     return texture
 
 

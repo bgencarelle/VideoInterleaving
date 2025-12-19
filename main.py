@@ -85,6 +85,12 @@ def configure_runtime():
         help="Force a rebuild of image lists (Default: Reuse existing lists if found)"
     )
 
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Override hosts to '0.0.0.0' for network testing (default: '127.0.0.1')"
+    )
+
     args = parser.parse_args()
 
     # 1. Apply Directory Override
@@ -176,6 +182,13 @@ def configure_runtime():
         # Update settings for backward compatibility
         settings.WEB_PORT = ports.monitor
         settings.WEBSOCKET_PORT = ports.ascii_websocket
+
+    # Apply --test flag: Override hosts to '0.0.0.0' for network testing
+    if args.test:
+        settings.WEB_HOST = '0.0.0.0'
+        settings.ASCII_HOST = '0.0.0.0'
+        # STREAM_HOST already defaults to '0.0.0.0', no change needed
+        print("⚠️  TEST MODE: Servers will bind to '0.0.0.0' (accessible from network)")
 
     return args, log_path
 

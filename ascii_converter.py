@@ -15,8 +15,12 @@ RESET_CODE = "\033[0m"
 _gamma_val = getattr(settings, 'ASCII_GAMMA', 1.0)
 GAMMA_LUT = np.array([((i / 255.0) ** _gamma_val) * 255 for i in range(256)], dtype=np.uint8)
 
+# Cache for grayscale conversion (reuse buffer if frame size doesn't change)
+_gray_cache = None
+_gray_cache_size = None
 
-def to_ascii(frame):
+
+def to_ascii(frame, source_aspect_ratio=None):
     """
     Converts a frame to ASCII using a 'Cover' (Zoom/Crop) scaling method.
     Includes Contrast, RGB Brightness, and Saturation adjustments.
@@ -31,15 +35,24 @@ def to_ascii(frame):
 
     # --- 2. CALCULATE GEOMETRY (COVER Scaling) ---
     h, w = frame.shape[:2]
+    
+    # Adjust font_ratio if source aspect ratio is provided (for aspect ratio matching)
+    adjusted_font_ratio = font_ratio
+    if source_aspect_ratio is not None:
+        # Calculate target aspect ratio
+        target_aspect = (max_cols * font_ratio) / max_rows
+        # Adjust font_ratio to match source aspect ratio
+        if source_aspect_ratio != target_aspect:
+            adjusted_font_ratio = font_ratio * (source_aspect_ratio / target_aspect)
 
     # Calculate scale needed to fully COVER the terminal area
     scale_x = max_cols / w
-    scale_y = max_rows / (h * font_ratio)
+    scale_y = max_rows / (h * adjusted_font_ratio)
     scale = max(scale_x, scale_y)
 
     # Calculate oversized dimensions
     new_w = int(w * scale)
-    new_h = int(h * scale * font_ratio)
+    new_h = int(h * scale * adjusted_font_ratio)
 
     new_w = max(1, new_w)
     new_h = max(1, new_h)
@@ -84,8 +97,14 @@ def to_ascii(frame):
         frame_boosted = rgb_graded
 
     # --- Step C & D: Map and Compose ---
-    gray = cv2.cvtColor(frame_boosted, cv2.COLOR_RGB2GRAY)
-    gray = cv2.LUT(gray, GAMMA_LUT)
+    # Cache grayscale conversion buffer if frame size hasn't changed
+    global _gray_cache, _gray_cache_size
+    if _gray_cache is None or _gray_cache_size != frame_cropped.shape[:2]:
+        _gray_cache = np.empty(frame_cropped.shape[:2], dtype=np.uint8)
+        _gray_cache_size = frame_cropped.shape[:2]
+    
+    cv2.cvtColor(frame_boosted, cv2.COLOR_RGB2GRAY, dst=_gray_cache)
+    gray = cv2.LUT(_gray_cache, GAMMA_LUT)
 
     # Map brightness to character index
     # (255 - gray) flips it so Bright Pixels -> Low Index (Dense Chars)
@@ -93,17 +112,19 @@ def to_ascii(frame):
     char_array = CHARS[indices]
 
     if getattr(settings, 'ASCII_COLOR', False):
-        small_frame = frame_boosted.astype(int)
-        r, g, b = small_frame[:, :, 0], small_frame[:, :, 1], small_frame[:, :, 2]
-
-        # xterm-256 color mapping
+        # Optimize color mapping: use vectorized operations
+        r, g, b = frame_boosted[:, :, 0], frame_boosted[:, :, 1], frame_boosted[:, :, 2]
+        
+        # Vectorized xterm-256 color mapping (faster than nested loops)
         ansi_ids = 16 + (36 * (r * 5 // 255)) + (6 * (g * 5 // 255)) + (b * 5 // 255)
+        ansi_ids = ansi_ids.astype(np.uint8)
 
         # Combine ANSI Color Code + Character
         image_grid = np.char.add(ANSI_LUT[ansi_ids], char_array)
     else:
         image_grid = char_array
 
-    # --- 4. OUTPUT ---
-    rows = ["".join(row) for row in image_grid]
+    # --- 4. OUTPUT (OPTIMIZED) ---
+    # Optimize string building: use list comprehension with join (already efficient)
+    rows = [''.join(row) for row in image_grid]
     return "\r\n".join(rows).strip() + RESET_CODE
