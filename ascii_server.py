@@ -30,8 +30,9 @@ class AsciiHandler(socketserver.BaseRequestHandler):
             print(f"[ASCII] Rejected {self.client_address}: Server Full")
             try:
                 self.request.sendall(b"Server Full. Try again later.\r\n")
-            except:
-                pass
+            except (BrokenPipeError, ConnectionResetError, OSError) as e:
+                # Connection may be closed before we can send rejection message
+                print(f"[ASCII] Could not send rejection message: {e}")
             return
 
         print(f"[ASCII] Client connected: {self.client_address}")
@@ -101,7 +102,8 @@ class AsciiHandler(socketserver.BaseRequestHandler):
             # 7. Cleanup
             try:
                 self.request.sendall(ANSI_SHOW_CURSOR)
-            except:
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                # Connection already closed, cursor restore not needed
                 pass
             _sem.release()
             print(f"[ASCII] Client disconnected: {self.client_address}")

@@ -205,8 +205,8 @@ def run_display(clock_source=CLOCK_MODE):
         print(f"[DISPLAY] Stream Encoder: {mode_str} ({qual_str})")
     # --------------------
 
-    import calculators
-    _, main_folder_path, float_folder_path = calculators.init_all(clock_source)
+    import make_file_lists
+    _, main_folder_path, float_folder_path = make_file_lists.initialize_image_lists(clock_source)
     main_folder_count = len(main_folder_path[0])
     float_folder_count = len(float_folder_path[0])
     png_paths_len = len(main_folder_path)

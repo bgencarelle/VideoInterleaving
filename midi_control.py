@@ -7,7 +7,7 @@ import mido
 import mido.backends.backend
 #import mido.backends.pygame
 
-import calculators
+import index_calculator
 
 from settings import (MTC_CLOCK, MIDI_CLOCK, MIXED_CLOCK,
                     CLOCK_BUFFER_SIZE, CLOCK_MODE, TIMEOUT_SECONDS)
@@ -131,7 +131,8 @@ def process_mtc(msg):
             clock_counter(0)
             clock_counter(clock_frame_ratio * total_frames)
         if clock_mode == MTC_CLOCK:
-            index, index_direction = calculators.calculate_index(total_frames)
+            index, index_direction = index_calculator.calculate_midi_clock_index(
+                total_frames, index_calculator.png_paths_len, index_calculator.frame_duration)
             midi_data_dictionary['Index_and_Direction'] = (index, index_direction)
         clock_counter_sum = clock_counter()
         if total_frames >= 4:
@@ -272,10 +273,12 @@ def handle_clock(msg):
     # Your original code
     clock_counter(1)
     if clock_mode == MIDI_CLOCK:
-        index, index_direction = calculators.calculate_index(clock_counter())
+        index, index_direction = index_calculator.calculate_midi_clock_index(
+            clock_counter(), index_calculator.png_paths_len, index_calculator.frame_duration)
         midi_data_dictionary['Index_and_Direction'] = (index, index_direction)
     elif clock_mode == MIXED_CLOCK:
-        index, index_direction = calculators.calculate_index(clock_counter() * clock_frame_ratio)
+        index, index_direction = index_calculator.calculate_midi_clock_index(
+            clock_counter() * clock_frame_ratio, index_calculator.png_paths_len, index_calculator.frame_duration)
         midi_data_dictionary['Index_and_Direction'] = (index, index_direction)
     # print(f'clock counter: {clock_counter()}, Index: {index * index_direction}')
 

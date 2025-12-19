@@ -23,6 +23,7 @@ class AsciiWebSocket(WebSocket):
             self.close()
             return
 
+        sem_acquired = True
         try:
             # Keep the OS buffer small too, just in case
             self.client.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
@@ -31,12 +32,17 @@ class AsciiWebSocket(WebSocket):
 
             print(f"[WS] Client connected: {self.address}")
             clients.append(self)
+            sem_acquired = False  # Client added, handleClose will release semaphore
             self.sendMessage(ANSI_CLEAR)
         except Exception as e:
             print(f"[WS] Handshake Error: {e}")
+            if sem_acquired:
+                # Cleanup if we acquired semaphore but failed to add client
+                _sem.release()
             self.close()
 
     def handleClose(self):
+        # Ensure cleanup even if called multiple times
         if self in clients:
             clients.remove(self)
             _sem.release()
@@ -65,6 +71,7 @@ def broadcast_loop():
             continue
 
         # Broadcast
+        dead_clients = []
         for client in list(clients):
             try:
                 # --- THE "LEAKY BUCKET" FIX ---
@@ -77,8 +84,24 @@ def broadcast_loop():
                 # If buffer is empty, send the new frame
                 client.sendMessage(payload)
 
-            except Exception:
+            except (BrokenPipeError, ConnectionResetError, OSError) as e:
+                # Connection error - mark for cleanup
+                print(f"[WS] Client {getattr(client, 'address', 'unknown')} connection error: {e}")
+                dead_clients.append(client)
+            except Exception as e:
+                # Unexpected error - log and mark for cleanup
+                print(f"[WS] Unexpected error sending to client {getattr(client, 'address', 'unknown')}: {e}")
+                dead_clients.append(client)
+        
+        # Clean up dead clients
+        for client in dead_clients:
+            try:
+                if client in clients:
+                    clients.remove(client)
+                    _sem.release()
                 client.close()
+            except Exception as e:
+                print(f"[WS] Error cleaning up dead client: {e}")
 
 
 def start_server():

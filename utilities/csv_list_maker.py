@@ -1,18 +1,9 @@
 import csv
-import calculators
+import make_file_lists
 import random
 import time
 import argparse
 from datetime import datetime
-
-
-def get_image_names_from_csv(file_path):
-    global png_paths_len
-    with open(file_path, 'r') as csvfile:
-        csv_reader = csv.reader(csvfile)
-        png_paths = [row for row in csv_reader]  # Include all rows for consistent indexing
-        png_paths_len = len(png_paths)
-    return png_paths
 
 
 def load_images(index, main_folder, float_folder):
@@ -79,9 +70,11 @@ def main_csv_test(cycles):
     global png_paths_len, main_folder_path, main_folder_count, float_folder_path, float_folder_count
 
     random.seed()
-    csv_source, main_folder_path, float_folder_path = calculators.init_all()
+    # Use FREE_CLOCK mode for this utility (default)
+    from constantStorage.midi_constants import FREE_CLOCK
+    csv_source, main_folder_path, float_folder_path = make_file_lists.initialize_image_lists(FREE_CLOCK)
     if not (main_folder_path and float_folder_path):
-        raise ValueError("Failed to load paths from calculators.init_all(). Ensure the function returns valid paths.")
+        raise ValueError("Failed to load paths from make_file_lists.initialize_image_lists(). Ensure the function returns valid paths.")
 
     png_paths_len = len(main_folder_path)
     main_folder_count = len(main_folder_path[0]) if png_paths_len > 0 else 0

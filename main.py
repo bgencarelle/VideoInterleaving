@@ -226,10 +226,15 @@ class Tee:
             self.log_file.flush()
 
 
+# Store original streams and log file for cleanup
+_original_stdout = sys.stdout
+_original_stderr = sys.stderr
+_log_file = None
+
 try:
-    log_file = open(log_filename, "w", buffering=1, encoding='utf-8')
-    sys.stdout = Tee(sys.stdout, log_file)
-    sys.stderr = Tee(sys.stderr, log_file)
+    _log_file = open(log_filename, "w", buffering=1, encoding='utf-8')
+    sys.stdout = Tee(sys.stdout, _log_file)
+    sys.stderr = Tee(sys.stderr, _log_file)
     print(f"[MAIN] Logging to {log_filename}")
 except Exception as e:
     print(f"⚠️  Logging setup failed: {e}")
@@ -274,13 +279,24 @@ def main(clock=CLOCK_MODE):
         image_display.run_display(clock)
     except KeyboardInterrupt:
         print("\n[MAIN] Shutdown requested via Ctrl+C")
-    except Exception:  # Remove 'as e'
-        print("\n[MAIN] CRASH DETAILS:")
-        traceback.print_exc()  # <--- This prints the file and line number
+    except Exception as e:
+        print(f"\n[MAIN] CRASH DETAILS: {e}")
+        traceback.print_exc()
     finally:
         print("[MAIN] Exiting...")
+        # Ensure all output is flushed before closing
         sys.stdout.flush()
         sys.stderr.flush()
+        # Restore original streams
+        sys.stdout = _original_stdout
+        sys.stderr = _original_stderr
+        # Close log file
+        if _log_file is not None:
+            try:
+                _log_file.flush()
+                _log_file.close()
+            except Exception as e:
+                _original_stderr.write(f"⚠️  Error closing log file: {e}\n")
 
 
 if __name__ == "__main__":

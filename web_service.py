@@ -240,7 +240,8 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
                     self.wfile.write(content)
                 else:
                     self.send_error(404, "Log file not found")
-            except Exception:
+            except Exception as e:
+                print(f"[Web] Error serving log file: {e}", file=sys.stderr)
                 self.send_error(500)
 
         elif self.path == "/ascii":
@@ -313,7 +314,8 @@ class StreamHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
                 self.end_headers()
                 self.wfile.write(content)
-            except:
+            except (IOError, OSError) as e:
+                print(f"[Web] Error serving index.html: {e}", file=sys.stderr)
                 self.send_error(404)
 
         # [NEW] Dynamic Template Fallback
@@ -339,7 +341,9 @@ class StreamHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
             self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             # 2. No Delay (Disable Nagle's Algorithm) - CRITICAL for streaming latency
             self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        except:
+        except (OSError, AttributeError) as e:
+            # Socket options may fail on some platforms or if connection is already closed
+            # This is non-critical, so we silently continue
             pass
 
         self.send_response(200)
@@ -360,12 +364,17 @@ class StreamHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
 
                 if raw_payload is None:
                     # No frame arrived in the last second. Check if we have stalled.
-                    if time.monotonic() - last_frame_time > stall_timeout:
+                    elapsed = time.monotonic() - last_frame_time
+                    if elapsed > stall_timeout:
                         # Producer is dead/stuck. Break loop to free the slot.
+                        print(f"[Stream] Client {cid}: Stall timeout ({elapsed:.1f}s > {stall_timeout}s). Disconnecting.")
                         break
+                    # Frames are coming slowly but not stalled - continue waiting
+                    # Don't send anything, just wait for next frame
                     continue
 
                 if not isinstance(raw_payload, bytes) or len(raw_payload) < 1:
+                    print(f"[Stream] Client {cid}: Invalid frame payload (type={type(raw_payload)}, len={len(raw_payload) if hasattr(raw_payload, '__len__') else 'N/A'})")
                     continue
 
                 # Valid frame received, update watchdog
@@ -373,6 +382,11 @@ class StreamHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
 
                 fmt_byte = raw_payload[0:1]
                 frame_data = raw_payload[1:]
+
+                # Validate frame data
+                if len(frame_data) == 0:
+                    print(f"[Stream] Client {cid}: Empty frame data, skipping")
+                    continue
 
                 # 2. Determine Header Type
                 if fmt_byte == b'w':
@@ -383,18 +397,26 @@ class StreamHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
                 _set_heartbeat(cid)
 
                 # 3. Send Frame
-                self.wfile.write(HEADER_BOUNDARY)
-                self.wfile.write(ctype)
-                self.wfile.write(frame_data)
-                self.wfile.write(HEADER_NEWLINE)
-                self.wfile.flush()
+                try:
+                    self.wfile.write(HEADER_BOUNDARY)
+                    self.wfile.write(ctype)
+                    self.wfile.write(frame_data)
+                    self.wfile.write(HEADER_NEWLINE)
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError) as write_err:
+                    # Connection closed during write - normal disconnect
+                    print(f"[Stream] Client {cid}: Write error: {write_err}")
+                    break
 
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, socket.timeout):
-            # Normal disconnect
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, socket.timeout, OSError):
+            # Normal disconnect or network error
             pass
         except Exception as e:
-            # Log unusual errors
+            # Log unusual errors with traceback for debugging
+            import traceback
             print(f"[Stream Error] {e}", file=sys.stderr)
+            print(f"[Stream Error] Traceback:", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
         finally:
             _viewer_semaphore.release()
             with _count_lock:
