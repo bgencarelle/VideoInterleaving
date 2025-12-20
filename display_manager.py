@@ -120,10 +120,27 @@ class LegacyHeadlessWindow:
                 glfw.terminate()
             self._glfw_window = None
 
+def _current_mode(monitor):
+    if not glfw:
+        return None
+    try:
+        return glfw.get_video_mode(monitor)
+    except Exception:
+        return None
+
+
 def _largest_mode(monitor):
-    if not glfw: return None
+    if not glfw:
+        return None
     modes = glfw.get_video_modes(monitor)
     return max(modes, key=lambda m: m.size.width * m.size.height)
+
+
+def _preferred_fullscreen_mode(monitor):
+    mode = _current_mode(monitor)
+    if mode:
+        return mode
+    return _largest_mode(monitor)
 
 def _log_renderer_info(ctx):
     try:
@@ -560,7 +577,7 @@ def display_init(state: DisplayState):
             elif LOW_RES_FULLSCREEN:
                 fs_w, fs_h = LOW_RES_FULLSCREEN_RESOLUTION
             else:
-                best = _largest_mode(mon)
+                best = _preferred_fullscreen_mode(mon)
                 fs_w, fs_h = best.size.width, best.size.height
             current_w, current_h = glfw.get_window_size(window)
             if current_w != fs_w or current_h != fs_h:
@@ -588,7 +605,7 @@ def display_init(state: DisplayState):
                 elif LOW_RES_FULLSCREEN:
                     fs_w, fs_h = LOW_RES_FULLSCREEN_RESOLUTION
                 else:
-                    best = _largest_mode(mon)
+                    best = _preferred_fullscreen_mode(mon)
                     fs_w, fs_h = best.size.width, best.size.height
                 glfw.window_hint(glfw.AUTO_ICONIFY, glfw.FALSE)
                 # Try actual fullscreen first (even on Wayland)
@@ -752,7 +769,7 @@ def display_init(state: DisplayState):
                 elif LOW_RES_FULLSCREEN:
                     fs_w, fs_h = LOW_RES_FULLSCREEN_RESOLUTION
                 else:
-                    best = _largest_mode(mon)
+                    best = _preferred_fullscreen_mode(mon)
                     fs_w, fs_h = best.size.width, best.size.height
                 # Only resize if size changed
                 if current_w != fs_w or current_h != fs_h:
@@ -781,7 +798,7 @@ def display_init(state: DisplayState):
                         fs_w, fs_h = LOW_RES_FULLSCREEN_RESOLUTION
                         refresh = 60  # Default refresh rate
                     else:
-                        best = _largest_mode(mon)
+                        best = _preferred_fullscreen_mode(mon)
                         fs_w, fs_h = best.size.width, best.size.height
                         refresh = getattr(best, 'refresh_rate', 60)
                     glfw.set_window_monitor(window, mon, 0, 0, fs_w, fs_h, refresh)
