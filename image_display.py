@@ -181,7 +181,7 @@ def run_display(clock_source=CLOCK_MODE):
     # 1. State Setup
     state = DisplayState()
     state.fullscreen = FULLSCREEN_MODE
-    last_actual_fps = FPS
+    last_actual_fps = 0.0  # Initialize to 0, will be calculated from actual frame times
 
     capture_rate = SERVER_CAPTURE_RATE
     capture_interval = 1.0 / capture_rate
@@ -363,8 +363,15 @@ def run_display(clock_source=CLOCK_MODE):
                             s = (1.0 / FPS) - dt
                             if s > 0: time.sleep(s)
 
-                        if len(frame_times) > 1:
-                            last_actual_fps = 1.0 / (sum(frame_times) / len(frame_times))
+                        # Calculate FPS from frame times (handle both single and multiple frames)
+                        if len(frame_times) >= 1:
+                            if len(frame_times) == 1:
+                                # Single frame: use that frame's time directly
+                                last_actual_fps = 1.0 / dt if dt > 0 else 0.0
+                            else:
+                                # Multiple frames: use average frame time
+                                avg_frame_time = sum(frame_times) / len(frame_times)
+                                last_actual_fps = 1.0 / avg_frame_time if avg_frame_time > 0 else 0.0
 
                         if monitor:
                             fd = folder_dictionary
@@ -493,8 +500,15 @@ def run_display(clock_source=CLOCK_MODE):
                 s = (1.0 / FPS) - dt
                 if s > 0: time.sleep(s)
 
-            if len(frame_times) > 1:
-                last_actual_fps = 1.0 / (sum(frame_times) / len(frame_times))
+            # Calculate FPS from frame times (handle both single and multiple frames)
+            if len(frame_times) >= 1:
+                if len(frame_times) == 1:
+                    # Single frame: use that frame's time directly
+                    last_actual_fps = 1.0 / dt if dt > 0 else 0.0
+                else:
+                    # Multiple frames: use average frame time
+                    avg_frame_time = sum(frame_times) / len(frame_times)
+                    last_actual_fps = 1.0 / avg_frame_time if avg_frame_time > 0 else 0.0
                 #print(f"{last_actual_fps:.1f} FPS")
 
             if monitor:
