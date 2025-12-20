@@ -255,6 +255,42 @@ def run_display(clock_source=CLOCK_MODE):
             if not is_headless and glfw:
                 register_callbacks(window, state)
 
+    def _get_screen_size(window_obj):
+        if window_obj is None:
+            return None
+        if hasattr(window_obj, "size"):
+            return window_obj.size
+        if glfw:
+            try:
+                monitor = glfw.get_window_monitor(window_obj) or glfw.get_primary_monitor()
+                if monitor:
+                    mode = glfw.get_video_mode(monitor)
+                    if mode:
+                        return (mode.size.width, mode.size.height)
+                return glfw.get_framebuffer_size(window_obj)
+            except Exception:
+                return None
+        return None
+
+    screen_size = _get_screen_size(window)
+    if screen_size is None and source_image_size is not None:
+        src_w, src_h = source_image_size
+        if is_ascii:
+            screen_size = (
+                getattr(settings, "ASCII_WIDTH", src_w),
+                getattr(settings, "ASCII_HEIGHT", src_h),
+            )
+        elif is_headless:
+            screen_size = HEADLESS_RES
+
+    if source_image_size is not None:
+        src_w, src_h = source_image_size
+        if screen_size is not None:
+            scr_w, scr_h = screen_size
+            print(f"[DISPLAY] Source image: {src_w}x{src_h} | Screen: {scr_w}x{scr_h}")
+        else:
+            print(f"[DISPLAY] Source image: {src_w}x{src_h} | Screen: unknown")
+
     # 4. Loader & Buffer Init
     index, _ = update_index(png_paths_len, PINGPONG)
     
