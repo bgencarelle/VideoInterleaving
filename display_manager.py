@@ -565,10 +565,7 @@ def display_init(state: DisplayState):
             current_w, current_h = glfw.get_window_size(window)
             if current_w != fs_w or current_h != fs_h:
                 glfw.set_window_size(window, fs_w, fs_h)
-                try:
-                    glfw.set_window_pos(window, 0, 0)
-                except Exception:
-                    pass
+                # Note: Wayland doesn't support set_window_pos(), so we skip it
             glfw.set_window_attrib(window, glfw.DECORATED, glfw.FALSE)
         else:
             glfw.set_window_attrib(window, glfw.DECORATED, glfw.TRUE)
@@ -594,12 +591,19 @@ def display_init(state: DisplayState):
                     best = _largest_mode(mon)
                     fs_w, fs_h = best.size.width, best.size.height
                 glfw.window_hint(glfw.AUTO_ICONIFY, glfw.FALSE)
-                # Wayland + some KMS stacks/drivers are fragile with mode-setting fullscreen.
-                # Prefer a borderless "fullscreen-sized window" to avoid session drops.
+                # Try actual fullscreen first (even on Wayland)
+                # Fall back to borderless window if fullscreen fails
                 if is_wayland:
+                    try:
+                        # Attempt actual fullscreen on Wayland
+                        win = glfw.create_window(fs_w, fs_h, "Fullscreen", mon, None)
+                        if win:
+                            return win
+                    except Exception as e:
+                        print(f"[DISPLAY] Wayland fullscreen failed: {e}, falling back to borderless window")
+                    # Fallback: borderless fullscreen-sized window
                     glfw.window_hint(glfw.DECORATED, glfw.FALSE)
                     win = glfw.create_window(fs_w, fs_h, "Fullscreen", None, None)
-                    # Note: Wayland doesn't support set_window_pos(), so we skip it
                     return win
                 return glfw.create_window(fs_w, fs_h, "Fullscreen", mon, None)
 
