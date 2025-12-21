@@ -51,6 +51,7 @@ _emails
 /documents
 /spreadsheets
 /presentations
+/utilities
 /databases
 /emails
 /img
@@ -66,3 +67,8 @@ _emails
 /images_lists_generated
 /images_lists_processed
 /images_*
+/logs
+/images_*
+/__pycache__/
+/.idea
+/
