@@ -15,14 +15,11 @@ RESET_CODE = "\033[0m"
 _gamma_val = getattr(settings, 'ASCII_GAMMA', 1.0)
 GAMMA_LUT = np.array([((i / 255.0) ** _gamma_val) * 255 for i in range(256)], dtype=np.uint8)
 
-# Cache for grayscale conversion (reuse buffer if frame size doesn't change)
-_gray_cache = None
-_gray_cache_size = None
-
 
 def to_ascii(frame, source_aspect_ratio=None):
     """
-    Converts a frame to ASCII using a 'Cover' (Zoom/Crop) scaling method.
+    Converts a frame to ASCII using a 'Fit' (Letterbox/Pillarbox) scaling method.
+    Scales image to fit within terminal bounds while preserving aspect ratio.
     Includes Contrast, RGB Brightness, and Saturation adjustments.
     """
     if frame is None:
@@ -32,42 +29,50 @@ def to_ascii(frame, source_aspect_ratio=None):
     max_cols = getattr(settings, 'ASCII_WIDTH', 90)
     max_rows = getattr(settings, 'ASCII_HEIGHT', 60)
     font_ratio = getattr(settings, 'ASCII_FONT_RATIO', 0.5)
+    padding_char = getattr(settings, 'ASCII_PADDING_CHAR', ' ')
 
-    # --- 2. CALCULATE GEOMETRY (COVER Scaling) ---
+    # --- 2. CALCULATE GEOMETRY (FIT Scaling) ---
     h, w = frame.shape[:2]
     
-    # Adjust font_ratio if source aspect ratio is provided (for aspect ratio matching)
-    adjusted_font_ratio = font_ratio
+    # Use source_aspect_ratio if provided (from first frame), otherwise calculate from current frame
     if source_aspect_ratio is not None:
-        # Calculate target aspect ratio
-        target_aspect = (max_cols * font_ratio) / max_rows
-        # Adjust font_ratio to match source aspect ratio
-        if source_aspect_ratio != target_aspect:
-            adjusted_font_ratio = font_ratio * (source_aspect_ratio / target_aspect)
+        image_aspect = source_aspect_ratio
+    else:
+        image_aspect = w / h if h > 0 else 1.0
+    
+    # Calculate terminal display aspect ratio (accounting for font ratio)
+    terminal_aspect = (max_cols * font_ratio) / max_rows if max_rows > 0 else 1.0
+    
+    # Calculate effective font ratio to match image aspect ratio
+    effective_font_ratio = font_ratio * (image_aspect / terminal_aspect) if terminal_aspect > 0 else font_ratio
 
-    # Calculate scale needed to fully COVER the terminal area
-    scale_x = max_cols / w
-    scale_y = max_rows / (h * adjusted_font_ratio)
-    scale = max(scale_x, scale_y)
+    # Calculate scale to FIT (not cover) - use min to ensure image fits within bounds
+    scale_x = max_cols / w if w > 0 else 1.0
+    scale_y = max_rows / (h * effective_font_ratio) if h > 0 else 1.0
+    scale = min(scale_x, scale_y)  # FIT instead of COVER
 
-    # Calculate oversized dimensions
-    new_w = int(w * scale)
-    new_h = int(h * scale * adjusted_font_ratio)
+    # Calculate scaled dimensions that fit within terminal bounds
+    scaled_w = int(w * scale)
+    scaled_h = int(h * scale * effective_font_ratio)
+    
+    # Ensure minimum size
+    scaled_w = max(1, scaled_w)
+    scaled_h = max(1, scaled_h)
 
-    new_w = max(1, new_w)
-    new_h = max(1, new_h)
+    # --- 3. RESIZE IMAGE ---
+    # Resize frame to the calculated scaled size
+    frame_resized = cv2.resize(frame, (scaled_w, scaled_h), interpolation=cv2.INTER_NEAREST)
 
-    # --- 3. RESIZE AND CROP PIXELS ---
-    # Resize frame to the calculated oversized grid
-    # Use INTER_NEAREST for speed in realtime, or INTER_LINEAR if affordable
-    frame_resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
-
-    # Calculate offset to extract the center max_cols x max_rows area
-    x_off = (new_w - max_cols) // 2
-    y_off = (new_h - max_rows) // 2
-
-    # Crop the pixel array down to the exact final size before processing
-    frame_cropped = frame_resized[y_off: y_off + max_rows, x_off: x_off + max_cols]
+    # --- 4. ADD LETTERBOXING/PILLARBOXING ---
+    # Calculate padding (letterbox = top/bottom, pillarbox = left/right)
+    pad_x = (max_cols - scaled_w) // 2
+    pad_y = (max_rows - scaled_h) // 2
+    
+    # Create padded frame with background color (black)
+    frame_cropped = np.zeros((max_rows, max_cols, 3), dtype=np.uint8)
+    
+    # Place resized image in center
+    frame_cropped[pad_y:pad_y + scaled_h, pad_x:pad_x + scaled_w] = frame_resized
 
     # --- Step B: Color Grading ---
     # Convert to float for math
@@ -97,14 +102,8 @@ def to_ascii(frame, source_aspect_ratio=None):
         frame_boosted = rgb_graded
 
     # --- Step C & D: Map and Compose ---
-    # Cache grayscale conversion buffer if frame size hasn't changed
-    global _gray_cache, _gray_cache_size
-    if _gray_cache is None or _gray_cache_size != frame_cropped.shape[:2]:
-        _gray_cache = np.empty(frame_cropped.shape[:2], dtype=np.uint8)
-        _gray_cache_size = frame_cropped.shape[:2]
-    
-    cv2.cvtColor(frame_boosted, cv2.COLOR_RGB2GRAY, dst=_gray_cache)
-    gray = cv2.LUT(_gray_cache, GAMMA_LUT)
+    gray = cv2.cvtColor(frame_boosted, cv2.COLOR_RGB2GRAY)
+    gray = cv2.LUT(gray, GAMMA_LUT)
 
     # Map brightness to character index
     # (255 - gray) flips it so Bright Pixels -> Low Index (Dense Chars)
@@ -112,19 +111,17 @@ def to_ascii(frame, source_aspect_ratio=None):
     char_array = CHARS[indices]
 
     if getattr(settings, 'ASCII_COLOR', False):
-        # Optimize color mapping: use vectorized operations
-        r, g, b = frame_boosted[:, :, 0], frame_boosted[:, :, 1], frame_boosted[:, :, 2]
-        
-        # Vectorized xterm-256 color mapping (faster than nested loops)
+        small_frame = frame_boosted.astype(int)
+        r, g, b = small_frame[:, :, 0], small_frame[:, :, 1], small_frame[:, :, 2]
+
+        # xterm-256 color mapping
         ansi_ids = 16 + (36 * (r * 5 // 255)) + (6 * (g * 5 // 255)) + (b * 5 // 255)
-        ansi_ids = ansi_ids.astype(np.uint8)
 
         # Combine ANSI Color Code + Character
         image_grid = np.char.add(ANSI_LUT[ansi_ids], char_array)
     else:
         image_grid = char_array
 
-    # --- 4. OUTPUT (OPTIMIZED) ---
-    # Optimize string building: use list comprehension with join (already efficient)
-    rows = [''.join(row) for row in image_grid]
-    return "\r\n".join(rows).strip() + RESET_CODE
+    # --- 4. OUTPUT ---
+    rows = ["".join(row) for row in image_grid]
+    return "\r\n".join(rows) + RESET_CODE
