@@ -119,22 +119,38 @@ def load_and_render_frame(loader, index, main_folder, float_folder):
                 final_chars = m_img["chars"]
                 final_colors = m_img["colors"]
 
-            # --- DOWNSCALE (STRIDE) ---
+            # --- RESAMPLE + PAD (FIT TO TARGET GRID) ---
             baked_h, baked_w = final_chars.shape
-            target_w = getattr(settings, 'ASCII_WIDTH', baked_w)
-            target_h = getattr(settings, 'ASCII_HEIGHT', baked_h)
+            target_w = int(getattr(settings, 'ASCII_WIDTH', baked_w))
+            target_h = int(getattr(settings, 'ASCII_HEIGHT', baked_h))
+            target_w = max(1, target_w)
+            target_h = max(1, target_h)
 
-            # Skip downscaling if already at target size
-            if baked_w == target_w and baked_h == target_h:
-                # No downscaling needed, use arrays directly
-                pass
-            else:
-                step_x = max(1, baked_w // target_w)
-                step_y = max(1, baked_h // target_h)
+            if baked_w != target_w or baked_h != target_h:
+                scale = min(target_w / baked_w, target_h / baked_h)
+                scaled_w = max(1, int(baked_w * scale))
+                scaled_h = max(1, int(baked_h * scale))
 
-                if step_x > 1 or step_y > 1:
-                    final_chars = final_chars[::step_y, ::step_x]
-                    final_colors = final_colors[::step_y, ::step_x]
+                if scaled_w != baked_w or scaled_h != baked_h:
+                    row_idx = np.linspace(0, baked_h - 1, scaled_h).astype(np.int32)
+                    col_idx = np.linspace(0, baked_w - 1, scaled_w).astype(np.int32)
+                    final_chars = final_chars[np.ix_(row_idx, col_idx)]
+                    final_colors = final_colors[np.ix_(row_idx, col_idx)]
+
+                if scaled_w != target_w or scaled_h != target_h:
+                    pad_x = (target_w - scaled_w) // 2
+                    pad_y = (target_h - scaled_h) // 2
+                    padding_char = getattr(settings, 'ASCII_PADDING_CHAR', ' ')
+                    if final_chars.dtype.kind == 'S':
+                        pad_value = padding_char.encode('latin-1')[:1]
+                    else:
+                        pad_value = padding_char
+                    padded_chars = np.full((target_h, target_w), pad_value, dtype=final_chars.dtype)
+                    padded_colors = np.full((target_h, target_w), 16, dtype=final_colors.dtype)
+                    padded_chars[pad_y:pad_y + scaled_h, pad_x:pad_x + scaled_w] = final_chars
+                    padded_colors[pad_y:pad_y + scaled_h, pad_x:pad_x + scaled_w] = final_colors
+                    final_chars = padded_chars
+                    final_colors = padded_colors
 
             # --- RENDER TO STRING (OPTIMIZED) ---
             # Look up ANSI codes and combine
@@ -221,6 +237,7 @@ def run_display(clock_source=CLOCK_MODE):
 
     # Store original source dimensions for aspect ratio calculation (ASCII mode)
     source_image_size = None
+    source_aspect_ratio = None
     
     # ASCII Dict detection for initialization
     if isinstance(img0, dict):
@@ -237,6 +254,12 @@ def run_display(clock_source=CLOCK_MODE):
         else:
             state.image_size = (w, h)
             source_image_size = (w, h)  # Store for aspect ratio
+    
+    # Calculate source aspect ratio from first frame (for ASCII modes)
+    # This ensures consistent aspect ratio across all frames
+    if source_image_size is not None:
+        src_w, src_h = source_image_size
+        source_aspect_ratio = src_w / src_h if src_h > 0 else 1.0
 
     # 3. Initialize Window
     if isinstance(img0, dict):
@@ -481,8 +504,8 @@ def run_display(clock_source=CLOCK_MODE):
                                 raw = window.fbo.read(components=3)
                                 w_fbo, h_fbo = window.size
                                 frame = np.frombuffer(raw, dtype=np.uint8).reshape((h_fbo, w_fbo, 3))
-                                # In headless mode, resize to HEADLESS_RES
-                                if is_headless and frame is not None:
+                                # In web mode, resize to HEADLESS_RES
+                                if is_web and frame is not None:
                                     import cv2
                                     frame = cv2.resize(frame, HEADLESS_RES, interpolation=cv2.INTER_LINEAR)
                             else:
@@ -490,9 +513,9 @@ def run_display(clock_source=CLOCK_MODE):
                                 # But add safety check to prevent AttributeError
                                 print("[WARNING] Attempted FBO read in windowed mode - skipping capture")
                         else:
-                            # Always use HEADLESS_RES for headless rendering (web/ASCII modes)
-                            # This matches settings.py HEADLESS_RES = (450, 600)
-                            if is_headless:
+                            # Use HEADLESS_RES only for web rendering
+                            # ASCII mode uses its own ASCII_WIDTH/ASCII_HEIGHT sizing.
+                            if is_web:
                                 tgt_size = HEADLESS_RES
                             else:
                                 tgt_size = None  # Local mode: full resolution
@@ -511,12 +534,8 @@ def run_display(clock_source=CLOCK_MODE):
                                 exchange.set_frame(b'j' + enc)  # Legacy compatibility
                             elif is_ascii:
                                 # ASCII only: use ASCII exchange (and legacy for backward compat)
-                                # Calculate source aspect ratio for correct scaling
-                                source_aspect = None
-                                if source_image_size is not None:
-                                    src_w, src_h = source_image_size
-                                    source_aspect = src_w / src_h if src_h > 0 else 1.0
-                                text_frame = ascii_converter.to_ascii(frame, source_aspect_ratio=source_aspect)
+                                # Pass source aspect ratio calculated from first frame
+                                text_frame = ascii_converter.to_ascii(frame, source_aspect_ratio=source_aspect_ratio)
                                 exchange_ascii.set_frame(text_frame)
                                 exchange.set_frame(text_frame)  # Legacy compatibility
 
