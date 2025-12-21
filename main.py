@@ -131,7 +131,7 @@ def configure_runtime():
     # --- MODE SWITCHING ---
     # Initialize ServerConfig with the selected mode
     config = get_config()
-    
+
     if args.mode == "web":
         if args.port:
             print("⚠️  WARNING: --port argument ignored in WEB mode. Using fixed ports.")
@@ -274,7 +274,7 @@ def main(clock=CLOCK_MODE):
     elif mode == "local":
         web_service.start_server(monitor=True, stream=False)
 
-    # 3. Start Display Engine
+        # 3. Start Display Engine
     try:
         image_display.run_display(clock)
     except KeyboardInterrupt:

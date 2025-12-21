@@ -16,11 +16,16 @@ _gamma_val = getattr(settings, 'ASCII_GAMMA', 1.0)
 GAMMA_LUT = np.array([((i / 255.0) ** _gamma_val) * 255 for i in range(256)], dtype=np.uint8)
 
 
-def to_ascii(frame, source_aspect_ratio=None):
+def to_ascii(frame, source_aspect_ratio=None, mode=None):
     """
-    Converts a frame to ASCII using a 'Fit' (Letterbox/Pillarbox) scaling method.
-    Scales image to fit within terminal bounds while preserving aspect ratio.
+    Converts a frame to ASCII by filling one dimension and padding the other.
+    Scales image to fill either width or height completely, then pads the other dimension.
     Includes Contrast, RGB Brightness, and Saturation adjustments.
+    
+    Args:
+        frame: Input image frame (numpy array)
+        source_aspect_ratio: Aspect ratio from first frame (w/h) for consistency
+        mode: 'telnet' or 'web' - determines font ratio handling (default: None for backward compatibility)
     """
     if frame is None:
         return ""
@@ -31,48 +36,77 @@ def to_ascii(frame, source_aspect_ratio=None):
     font_ratio = getattr(settings, 'ASCII_FONT_RATIO', 0.5)
     padding_char = getattr(settings, 'ASCII_PADDING_CHAR', ' ')
 
-    # --- 2. CALCULATE GEOMETRY (FIT Scaling) ---
+    # --- 2. CALCULATE GEOMETRY (FIT Scaling, Then Padding) ---
     h, w = frame.shape[:2]
     
-    # Use source_aspect_ratio if provided (from first frame), otherwise calculate from current frame
+    # 1. Get image aspect ratio (from source if available, otherwise from current frame)
     if source_aspect_ratio is not None:
         image_aspect = source_aspect_ratio
     else:
         image_aspect = w / h if h > 0 else 1.0
     
-    # Calculate terminal display aspect ratio (accounting for font ratio)
-    terminal_aspect = (max_cols * font_ratio) / max_rows if max_rows > 0 else 1.0
+    # 2. Calculate FIT scaling to fit inside ASCII dimensions while maintaining display aspect ratio
+    # We want the DISPLAYED aspect ratio to match the image aspect ratio
+    # Display aspect = (scaled_w * font_ratio) / scaled_h = image_aspect
+    # And: scaled_w <= max_cols, scaled_h <= max_rows
+    # We want to FILL one dimension completely to optimize space usage
     
-    # Calculate effective font ratio to match image aspect ratio
-    effective_font_ratio = font_ratio * (image_aspect / terminal_aspect) if terminal_aspect > 0 else font_ratio
-
-    # Calculate scale to FIT (not cover) - use min to ensure image fits within bounds
-    scale_x = max_cols / w if w > 0 else 1.0
-    scale_y = max_rows / (h * effective_font_ratio) if h > 0 else 1.0
-    scale = min(scale_x, scale_y)  # FIT instead of COVER
-
-    # Calculate scaled dimensions that fit within terminal bounds
-    scaled_w = int(w * scale)
-    scaled_h = int(h * scale * effective_font_ratio)
+    # Option 1: Fill width completely
+    # scaled_w = max_cols
+    # (max_cols * font_ratio) / scaled_h = image_aspect
+    # scaled_h = (max_cols * font_ratio) / image_aspect
+    scaled_h_if_fill_width = (max_cols * font_ratio) / image_aspect if image_aspect > 0 else max_rows
     
-    # Ensure minimum size
-    scaled_w = max(1, scaled_w)
-    scaled_h = max(1, scaled_h)
+    # Option 2: Fill height completely
+    # scaled_h = max_rows
+    # (scaled_w * font_ratio) / max_rows = image_aspect
+    # scaled_w = (max_rows * image_aspect) / font_ratio
+    scaled_w_if_fill_height = (max_rows * image_aspect) / font_ratio if font_ratio > 0 else max_cols
+    
+    # Use FIT: choose the option that fits within both bounds AND fills one dimension
+    if scaled_h_if_fill_width <= max_rows:
+        # Filling width fits - use this to maximize width usage
+        scaled_w_pixels = max_cols
+        scaled_h_pixels = int((max_cols * font_ratio) / image_aspect) if image_aspect > 0 else max_rows
+        # Calculate the actual scale factor used
+        scale = scaled_w_pixels / w if w > 0 else 1.0
+    else:
+        # Must fit height instead - fill height completely
+        scaled_h_pixels = max_rows
+        scaled_w_pixels = int((max_rows * image_aspect) / font_ratio) if font_ratio > 0 else max_cols
+        # Calculate the actual scale factor used
+        scale = scaled_h_pixels / h if h > 0 else 1.0
+    
+    # Clamp to terminal bounds (safety check)
+    scaled_w_pixels = max(1, min(scaled_w_pixels, max_cols))
+    scaled_h_pixels = max(1, min(scaled_h_pixels, max_rows))
+    
+    # 3. Calculate padding (centered, in pixels)
+    pad_x = (max_cols - scaled_w_pixels) // 2
+    pad_y = (max_rows - scaled_h_pixels) // 2
+
+    # Debug: Print aspect ratio calculations
+    terminal_raw_aspect = max_cols / max_rows if max_rows > 0 else 1.0
+    terminal_display_aspect = (max_cols * font_ratio) / max_rows if max_rows > 0 else 1.0
+    actual_scaled_display_aspect = (scaled_w_pixels * font_ratio) / scaled_h_pixels if scaled_h_pixels > 0 else 1.0
+    print(f"[ASCII] Image aspect: {image_aspect:.4f} | Terminal raw: {terminal_raw_aspect:.4f} | "
+          f"Terminal display: {terminal_display_aspect:.4f} | "
+          f"Scaled dimensions: {scaled_w_pixels}x{scaled_h_pixels} (display aspect: {actual_scaled_display_aspect:.4f})")
 
     # --- 3. RESIZE IMAGE ---
-    # Resize frame to the calculated scaled size
-    frame_resized = cv2.resize(frame, (scaled_w, scaled_h), interpolation=cv2.INTER_NEAREST)
+    # Resize frame to pixel dimensions
+    frame_resized = cv2.resize(frame, (scaled_w_pixels, scaled_h_pixels), interpolation=cv2.INTER_NEAREST)
 
-    # --- 4. ADD LETTERBOXING/PILLARBOXING ---
-    # Calculate padding (letterbox = top/bottom, pillarbox = left/right)
-    pad_x = (max_cols - scaled_w) // 2
-    pad_y = (max_rows - scaled_h) // 2
-    
+    # --- 4. ADD PADDING ---
     # Create padded frame with background color (black)
+    # frame_cropped is a pixel array: (max_rows, max_cols, 3)
+    # Each pixel will become one character in the ASCII output
     frame_cropped = np.zeros((max_rows, max_cols, 3), dtype=np.uint8)
     
     # Place resized image in center
-    frame_cropped[pad_y:pad_y + scaled_h, pad_x:pad_x + scaled_w] = frame_resized
+    # frame_resized has shape (scaled_h_pixels, scaled_w_pixels, 3)
+    # The slice must match frame_resized dimensions exactly
+    frame_cropped[pad_y:pad_y + scaled_h_pixels, pad_x:pad_x + scaled_w_pixels] = frame_resized
 
     # --- Step B: Color Grading ---
     # Convert to float for math
