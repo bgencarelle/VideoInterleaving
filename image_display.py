@@ -12,6 +12,7 @@ from turbojpeg_loader import get_turbojpeg
 
 import settings
 from shared_state import exchange, exchange_web, exchange_ascii
+from server_config import get_config, MODE_ASCII, MODE_ASCIIWEB
 
 # Clean up console noise from ModernGL on some systems
 os.environ['PYOPENGL_ERROR_CHECKING'] = '0'
@@ -89,10 +90,17 @@ class FIFOImageBufferPatched(FIFOImageBuffer):
 # WORKER FUNCTION (Runs in Background Threads)
 # -----------------------------------------------------------------------------
 
-def load_and_render_frame(loader, index, main_folder, float_folder):
+def load_and_render_frame(loader, index, main_folder, float_folder, source_aspect_ratio=None):
     """
     Loads images AND performs the heavy ASCII merging/string-generation
     in the background thread. Returns the final string if ASCII.
+    
+    Args:
+        loader: ImageLoader instance
+        index: Frame index
+        main_folder: Main folder path
+        float_folder: Float folder path
+        source_aspect_ratio: Source image aspect ratio (w/h) for consistent scaling
     """
     # 1. Load Data
     m_img, f_img, m_sbs, f_sbs = loader.load_images(index, main_folder, float_folder)
@@ -119,38 +127,73 @@ def load_and_render_frame(loader, index, main_folder, float_folder):
                 final_chars = m_img["chars"]
                 final_colors = m_img["colors"]
 
-            # --- RESAMPLE + PAD (FIT TO TARGET GRID) ---
+            # --- RESAMPLE + PAD (FIT Scaling, Then Padding) ---
             baked_h, baked_w = final_chars.shape
             target_w = int(getattr(settings, 'ASCII_WIDTH', baked_w))
             target_h = int(getattr(settings, 'ASCII_HEIGHT', baked_h))
+            font_ratio = getattr(settings, 'ASCII_FONT_RATIO', 0.5)
             target_w = max(1, target_w)
             target_h = max(1, target_h)
 
-            if baked_w != target_w or baked_h != target_h:
-                scale = min(target_w / baked_w, target_h / baked_h)
-                scaled_w = max(1, int(baked_w * scale))
-                scaled_h = max(1, int(baked_h * scale))
+            # 1. Get image aspect ratio (from source if available, otherwise from baked dimensions)
+            if source_aspect_ratio is not None:
+                image_aspect = source_aspect_ratio
+            else:
+                # Calculate baked aspect ratio (accounting for font ratio)
+                baked_aspect = (baked_w * font_ratio) / baked_h if baked_h > 0 else 1.0
+                image_aspect = baked_aspect
+            
+            # 2. Calculate FIT scaling to fit inside target dimensions
+            # For pre-baked ASCII, we work directly with character grid dimensions
+            # Calculate scale factors for both dimensions
+            scale_x = target_w / baked_w if baked_w > 0 else 1.0
+            scale_y = target_h / baked_h if baked_h > 0 else 1.0
+            
+            # Use FIT scaling: min scale ensures baked ASCII fits within both dimensions
+            scale = min(scale_x, scale_y)
+            
+            # 3. Calculate scaled dimensions based on FIT scale
+            # This preserves the aspect ratio of the baked ASCII
+            scaled_w = int(baked_w * scale)
+            scaled_h = int(baked_h * scale)
+            
+            # Ensure minimum size and clamp to maximum bounds
+            scaled_w = max(1, min(scaled_w, target_w))
+            scaled_h = max(1, min(scaled_h, target_h))
+            
+            # Debug: Print aspect ratio calculations for pre-baked
+            terminal_aspect = (target_w * font_ratio) / target_h if target_h > 0 else 1.0
+            baked_display_aspect = (baked_w * font_ratio) / baked_h if baked_h > 0 else 1.0
+            actual_scaled_aspect = (scaled_w * font_ratio) / scaled_h if scaled_h > 0 else 1.0
+            print(f"[ASCII-PREBAKED] Image aspect: {image_aspect:.4f} | Terminal aspect: {terminal_aspect:.4f} | "
+                  f"Baked display aspect: {baked_display_aspect:.4f} | "
+                  f"Calculated scaled aspect (to maintain): {image_aspect:.4f} | "
+                  f"Actual scaled dimensions: {scaled_w}x{scaled_h} (aspect: {actual_scaled_aspect:.4f})")
+            
+            # 4. Calculate padding (centered)
+            pad_x = (target_w - scaled_w) // 2
+            pad_y = (target_h - scaled_h) // 2
 
-                if scaled_w != baked_w or scaled_h != baked_h:
-                    row_idx = np.linspace(0, baked_h - 1, scaled_h).astype(np.int32)
-                    col_idx = np.linspace(0, baked_w - 1, scaled_w).astype(np.int32)
-                    final_chars = final_chars[np.ix_(row_idx, col_idx)]
-                    final_colors = final_colors[np.ix_(row_idx, col_idx)]
+            # Resample if needed
+            if scaled_w != baked_w or scaled_h != baked_h:
+                row_idx = np.linspace(0, baked_h - 1, scaled_h).astype(np.int32)
+                col_idx = np.linspace(0, baked_w - 1, scaled_w).astype(np.int32)
+                final_chars = final_chars[np.ix_(row_idx, col_idx)]
+                final_colors = final_colors[np.ix_(row_idx, col_idx)]
 
-                if scaled_w != target_w or scaled_h != target_h:
-                    pad_x = (target_w - scaled_w) // 2
-                    pad_y = (target_h - scaled_h) // 2
-                    padding_char = getattr(settings, 'ASCII_PADDING_CHAR', ' ')
-                    if final_chars.dtype.kind == 'S':
-                        pad_value = padding_char.encode('latin-1')[:1]
-                    else:
-                        pad_value = padding_char
-                    padded_chars = np.full((target_h, target_w), pad_value, dtype=final_chars.dtype)
-                    padded_colors = np.full((target_h, target_w), 16, dtype=final_colors.dtype)
-                    padded_chars[pad_y:pad_y + scaled_h, pad_x:pad_x + scaled_w] = final_chars
-                    padded_colors[pad_y:pad_y + scaled_h, pad_x:pad_x + scaled_w] = final_colors
-                    final_chars = padded_chars
-                    final_colors = padded_colors
+            # Apply padding if needed (only one dimension will have padding)
+            if pad_x > 0 or pad_y > 0:
+                padding_char = getattr(settings, 'ASCII_PADDING_CHAR', ' ')
+                if final_chars.dtype.kind == 'S':
+                    pad_value = padding_char.encode('latin-1')[:1]
+                else:
+                    pad_value = padding_char
+                padded_chars = np.full((target_h, target_w), pad_value, dtype=final_chars.dtype)
+                padded_colors = np.full((target_h, target_w), 16, dtype=final_colors.dtype)
+                padded_chars[pad_y:pad_y + scaled_h, pad_x:pad_x + scaled_w] = final_chars
+                padded_colors[pad_y:pad_y + scaled_h, pad_x:pad_x + scaled_w] = final_colors
+                final_chars = padded_chars
+                final_colors = padded_colors
 
             # --- RENDER TO STRING (OPTIMIZED) ---
             # Look up ANSI codes and combine
@@ -311,6 +354,13 @@ def run_display(clock_source=CLOCK_MODE):
         if screen_size is not None:
             scr_w, scr_h = screen_size
             print(f"[DISPLAY] Source image: {src_w}x{src_h} | Screen: {scr_w}x{scr_h}")
+            
+            # Debug: Aspect ratio calculations
+            if is_ascii:
+                font_ratio = getattr(settings, 'ASCII_FONT_RATIO', 0.5)
+                image_aspect = src_w / src_h if src_h > 0 else 1.0
+                terminal_aspect = (scr_w * font_ratio) / scr_h if scr_h > 0 else 1.0
+                print(f"[DISPLAY] Image aspect ratio: {image_aspect:.4f} | Terminal aspect ratio: {terminal_aspect:.4f} (font_ratio={font_ratio})")
         else:
             print(f"[DISPLAY] Source image: {src_w}x{src_h} | Screen: unknown")
 
@@ -327,7 +377,7 @@ def run_display(clock_source=CLOCK_MODE):
 
     # Pre-load using the NEW helper directly for the first frame
     initial_folders = folder_dictionary["Main_and_Float_Folders"]
-    res0 = load_and_render_frame(loader, index, *initial_folders)
+    res0 = load_and_render_frame(loader, index, *initial_folders, source_aspect_ratio=source_aspect_ratio)
     fifo.update(index, res0)
 
     cur_main, cur_float, cur_m_sbs, cur_f_sbs = None, None, False, False
@@ -356,7 +406,7 @@ def run_display(clock_source=CLOCK_MODE):
         next_idx = 1 if index == 0 else (index - 1 if index == png_paths_len - 1 else index + 1)
         # Use the NEW worker function
         folders = folder_dictionary["Main_and_Float_Folders"]
-        future = pool.submit(load_and_render_frame, loader, next_idx, *folders)
+        future = pool.submit(load_and_render_frame, loader, next_idx, *folders, source_aspect_ratio=source_aspect_ratio)
         future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
 
         frame_times = deque(maxlen=60)
@@ -410,7 +460,7 @@ def run_display(clock_source=CLOCK_MODE):
                         next_idx = 1 if index == 0 else (
                             index - 1 if index == png_paths_len - 1 else (index + 1 if index > prev else index - 1))
                         folders = folder_dictionary["Main_and_Float_Folders"]
-                        future = pool.submit(load_and_render_frame, loader, next_idx, *folders)
+                        future = pool.submit(load_and_render_frame, loader, next_idx, *folders, source_aspect_ratio=source_aspect_ratio)
                         future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
 
                         # Timing
@@ -467,7 +517,7 @@ def run_display(clock_source=CLOCK_MODE):
                 next_idx = 1 if index == 0 else (
                     index - 1 if index == png_paths_len - 1 else (index + 1 if index > prev else index - 1))
                 folders = folder_dictionary["Main_and_Float_Folders"]
-                future = pool.submit(load_and_render_frame, loader, next_idx, *folders)
+                future = pool.submit(load_and_render_frame, loader, next_idx, *folders, source_aspect_ratio=source_aspect_ratio)
                 future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
 
             # Render (GL)
@@ -534,8 +584,21 @@ def run_display(clock_source=CLOCK_MODE):
                                 exchange.set_frame(b'j' + enc)  # Legacy compatibility
                             elif is_ascii:
                                 # ASCII only: use ASCII exchange (and legacy for backward compat)
-                                # Pass source aspect ratio calculated from first frame
-                                text_frame = ascii_converter.to_ascii(frame, source_aspect_ratio=source_aspect_ratio)
+                                # Determine mode (telnet vs web) for proper font ratio handling
+                                try:
+                                    config = get_config()
+                                    current_mode = config._current_mode if hasattr(config, '_current_mode') else None
+                                    if current_mode == MODE_ASCIIWEB:
+                                        ascii_mode = 'web'
+                                    elif current_mode == MODE_ASCII:
+                                        ascii_mode = 'telnet'
+                                    else:
+                                        ascii_mode = None  # Fallback to default behavior
+                                except (RuntimeError, AttributeError):
+                                    ascii_mode = None
+                                
+                                # Pass source aspect ratio and mode calculated from first frame
+                                text_frame = ascii_converter.to_ascii(frame, source_aspect_ratio=source_aspect_ratio, mode=ascii_mode)
                                 exchange_ascii.set_frame(text_frame)
                                 exchange.set_frame(text_frame)  # Legacy compatibility
 

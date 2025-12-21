@@ -703,72 +703,72 @@ def composite_cpu(main_img, float_img, main_is_sbs=False, float_is_sbs=False, ta
         bg_r, bg_g, bg_b = BACKGROUND_COLOR
         _cpu_buffer[:] = (bg_r, bg_g, bg_b)
 
-        # 3. Apply Main Layer
-        if m_rgb is not None:
-            if m_a is None:
-                np.copyto(_cpu_buffer, m_rgb)
-            else:
-                # OPTIMIZED BLEND: Integer Math to avoid float casting
-                mask = m_a > 0
-                if np.any(mask):
-                    alpha = m_a[mask][:, None].astype(np.uint16)
-                    src = m_rgb[mask].astype(np.uint16)
-                    dst = _cpu_buffer[mask].astype(np.uint16)
+    # 3. Apply Main Layer
+    if m_rgb is not None:
+        if m_a is None:
+            np.copyto(_cpu_buffer, m_rgb)
+        else:
+            # OPTIMIZED BLEND: Integer Math to avoid float casting
+            mask = m_a > 0
+            if np.any(mask):
+                alpha = m_a[mask][:, None].astype(np.uint16)
+                src = m_rgb[mask].astype(np.uint16)
+                dst = _cpu_buffer[mask].astype(np.uint16)
 
-                    blended = (src * alpha + dst * (255 - alpha)) // 255
-                    _cpu_buffer[mask] = blended.astype(np.uint8)
+                blended = (src * alpha + dst * (255 - alpha)) // 255
+                _cpu_buffer[mask] = blended.astype(np.uint8)
 
-        # 4. Apply Float Layer
-        if f_rgb is not None:
-            fh, fw = f_rgb.shape[:2]
-            h, w = min(th, fh), min(tw, fw)
+    # 4. Apply Float Layer
+    if f_rgb is not None:
+        fh, fw = f_rgb.shape[:2]
+        h, w = min(th, fh), min(tw, fw)
 
-            # Define views for cropping
-            target_view = _cpu_buffer[:h, :w]
-            source_view = f_rgb[:h, :w]
+        # Define views for cropping
+        target_view = _cpu_buffer[:h, :w]
+        source_view = f_rgb[:h, :w]
 
-            if f_a is None:
-                target_view[:] = source_view
-            else:
-                alpha_view = f_a[:h, :w]
-                mask = alpha_view > 0
-                if np.any(mask):
-                    alpha = alpha_view[mask][:, None].astype(np.uint16)
-                    src = source_view[mask].astype(np.uint16)
-                    dst = target_view[mask].astype(np.uint16)
+        if f_a is None:
+            target_view[:] = source_view
+        else:
+            alpha_view = f_a[:h, :w]
+            mask = alpha_view > 0
+            if np.any(mask):
+                alpha = alpha_view[mask][:, None].astype(np.uint16)
+                src = source_view[mask].astype(np.uint16)
+                dst = target_view[mask].astype(np.uint16)
 
-                    blended = (src * alpha + dst * (255 - alpha)) // 255
-                    target_view[mask] = blended.astype(np.uint8)
+                blended = (src * alpha + dst * (255 - alpha)) // 255
+                target_view[mask] = blended.astype(np.uint8)
 
-        # 5. Final Resize (Letterboxed) with CACHING
-        if target_size is not None and cv2 is not None:
-            target_w, target_h = target_size
+    # 5. Final Resize (Letterboxed) with CACHING
+    if target_size is not None and cv2 is not None:
+        target_w, target_h = target_size
 
-            if (tw, th) == (target_w, target_h):
-                # Return a copy to avoid holding the lock
-                return _cpu_buffer.copy()
-
-            # Calculate Scale
-            scale = min(target_w / tw, target_h / th)
-            new_w = int(tw * scale)
-            new_h = int(th * scale)
-
-            # Fast Resize
-            resized = cv2.resize(_cpu_buffer, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-
-            # Cache Canvas
-            if _cached_canvas is None or _cached_canvas.shape[:2] != (target_h, target_w):
-                _cached_canvas = np.full((target_h, target_w, 3), (bg_r, bg_g, bg_b), dtype=np.uint8)
-            else:
-                _cached_canvas[:] = (bg_r, bg_g, bg_b)
-
-            # Center Paste
-            y_off = (target_h - new_h) // 2
-            x_off = (target_w - new_w) // 2
-            _cached_canvas[y_off:y_off + new_h, x_off:x_off + new_w] = resized
-
+        if (tw, th) == (target_w, target_h):
             # Return a copy to avoid holding the lock
-            return _cached_canvas.copy()
+            return _cpu_buffer.copy()
+
+        # Calculate Scale
+        scale = min(target_w / tw, target_h / th)
+        new_w = int(tw * scale)
+        new_h = int(th * scale)
+
+        # Fast Resize
+        resized = cv2.resize(_cpu_buffer, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+        # Cache Canvas
+        if _cached_canvas is None or _cached_canvas.shape[:2] != (target_h, target_w):
+            _cached_canvas = np.full((target_h, target_w, 3), (bg_r, bg_g, bg_b), dtype=np.uint8)
+        else:
+            _cached_canvas[:] = (bg_r, bg_g, bg_b)
+
+        # Center Paste
+        y_off = (target_h - new_h) // 2
+        x_off = (target_w - new_w) // 2
+        _cached_canvas[y_off:y_off + new_h, x_off:x_off + new_w] = resized
 
         # Return a copy to avoid holding the lock
-        return _cpu_buffer.copy()
+        return _cached_canvas.copy()
+
+    # Return a copy to avoid holding the lock
+    return _cpu_buffer.copy()
