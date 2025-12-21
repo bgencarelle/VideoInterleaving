@@ -75,6 +75,9 @@
 
         let lh = m.w / (m.h * TARGET_PIXEL_RATIO);
         if (lh < 0.8) lh = 0.8;
+        const cellW = m.w;
+        const cellH = m.h * lh;
+        const imageAspectRatio = (COLS * cellW) / (ROWS * cellH);
 
         const term = new Terminal({
             cols: COLS, rows: ROWS,
@@ -90,12 +93,12 @@
 
         term.open(document.getElementById('terminal'));
 
-        setupFit(term);
+        setupFit(term, imageAspectRatio);
         connect(term);
     }
 
     // --- 3. FIT TO SCREEN ---
-    function setupFit(term) {
+    function setupFit(term, imageAspectRatio) {
         const fitToScreen = () => {
             const termEl = document.getElementById('terminal');
             const screenEl = termEl.querySelector('.xterm-screen');
@@ -104,29 +107,23 @@
 
             const srcW = screenEl.clientWidth;
             const srcH = screenEl.clientHeight;
-
             const winW = window.innerWidth;
             const winH = window.innerHeight;
 
-            // Calculate Target Box
-            let targetW, targetH;
+            let targetW;
+            let targetH;
             const windowRatio = winW / winH;
 
-            if (windowRatio > IMAGE_ASPECT_RATIO) {
+            if (windowRatio > imageAspectRatio) {
                 targetH = winH;
-                targetW = targetH * IMAGE_ASPECT_RATIO;
+                targetW = targetH * imageAspectRatio;
             } else {
                 targetW = winW;
-                targetH = targetW / IMAGE_ASPECT_RATIO;
+                targetH = targetW / imageAspectRatio;
             }
 
-            targetW *= 0.99;
-            targetH *= 0.99;
-
-            const scaleX = targetW / srcW;
-            const scaleY = targetH / srcH;
-
-            termEl.style.transform = `scale(${scaleX}, ${scaleY})`;
+            const scale = Math.min(targetW / srcW, targetH / srcH);
+            termEl.style.transform = `scale(${scale})`;
 
             return true;
         };
