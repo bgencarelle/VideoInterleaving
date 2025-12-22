@@ -38,6 +38,7 @@ body {
 
 /* --- XTERM INTERNAL FIXES --- */
 .xterm-screen {
+    border: none;
     box-sizing: content-box;
     position: relative;
     z-index: 10;
