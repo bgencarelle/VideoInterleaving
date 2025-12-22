@@ -79,7 +79,7 @@
         
         const cellW = m.w;
         const cellH = m.h * lh;
-        const imageAspectRatio = (COLS * cellW) / (ROWS * cellH);
+        const imageAspectRatio = IMAGE_ASPECT_RATIO;
 
         const term = new Terminal({
             cols: COLS, rows: ROWS,
