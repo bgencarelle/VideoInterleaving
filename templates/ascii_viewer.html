@@ -102,28 +102,36 @@
         const fitToScreen = () => {
             const termEl = document.getElementById('terminal');
             const screenEl = termEl.querySelector('.xterm-screen');
+            const stageEl = document.getElementById('terminal-stage');
 
             if (!screenEl || screenEl.clientWidth < 1) return false;
 
             const srcW = screenEl.clientWidth;
             const srcH = screenEl.clientHeight;
-            const winW = window.innerWidth;
-            const winH = window.innerHeight;
+            
+            // Use the terminal-stage container dimensions (works for both standalone and iframe)
+            const containerW = stageEl.clientWidth || window.innerWidth;
+            const containerH = stageEl.clientHeight || window.innerHeight;
 
             let targetW;
             let targetH;
-            const windowRatio = winW / winH;
+            const containerRatio = containerW / containerH;
 
-            if (windowRatio > imageAspectRatio) {
-                targetH = winH;
+            if (containerRatio > imageAspectRatio) {
+                targetH = containerH;
                 targetW = targetH * imageAspectRatio;
             } else {
-                targetW = winW;
+                targetW = containerW;
                 targetH = targetW / imageAspectRatio;
             }
 
             const scale = Math.min(targetW / srcW, targetH / srcH);
             termEl.style.transform = `scale(${scale})`;
+            
+            // Ensure terminal-stage centers properly
+            stageEl.style.display = 'flex';
+            stageEl.style.justifyContent = 'center';
+            stageEl.style.alignItems = 'center';
 
             return true;
         };
