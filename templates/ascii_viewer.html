@@ -77,10 +77,6 @@
         let lh = m.w / (m.h * TARGET_PIXEL_RATIO);
         if (lh < 0.8) lh = 0.8;
 
-        const cellW = m.w;
-        const cellH = m.h * lh;
-        const imageAspectRatio = IMAGE_ASPECT_RATIO;
-
         const term = new Terminal({
             cols: COLS, rows: ROWS,
             fontFamily: FONT_FAMILY,
@@ -95,12 +91,12 @@
 
         term.open(document.getElementById('terminal'));
 
-        setupFit(term, imageAspectRatio, cellW, cellH);
+        setupFit(term);
         connect(term);
     }
 
     // --- 3. FIT TO SCREEN ---
-    function setupFit(term, imageAspectRatio, cellW, cellH) {
+    function setupFit(term) {
         const fitToScreen = () => {
             const termEl = document.getElementById('terminal');
             const screenEl = termEl.querySelector('.xterm-screen');
@@ -112,33 +108,26 @@
             const containerW = stageEl.clientWidth || window.innerWidth;
             const containerH = stageEl.clientHeight || window.innerHeight;
 
-            const naturalW = cellW * COLS;
-            const naturalH = cellH * ROWS;
-            const desiredCellW = cellH * TARGET_PIXEL_RATIO;
-
-            // Adjust width scaling so that each cell respects the target pixel ratio
-            const aspectScaleX = desiredCellW / cellW;
-            const aspectScaleY = 1;
-
-            const adjustedW = naturalW * aspectScaleX;
-            const adjustedH = naturalH * aspectScaleY;
+            // Measure the live grid so we match the actual DOM cell geometry
+            const naturalW = screenEl.clientWidth;
+            const naturalH = screenEl.clientHeight;
 
             let targetW;
             let targetH;
             const containerRatio = containerW / containerH;
 
-            if (containerRatio > imageAspectRatio) {
+            if (containerRatio > IMAGE_ASPECT_RATIO) {
                 targetH = containerH;
-                targetW = targetH * imageAspectRatio;
+                targetW = targetH * IMAGE_ASPECT_RATIO;
             } else {
                 targetW = containerW;
-                targetH = targetW / imageAspectRatio;
+                targetH = targetW / IMAGE_ASPECT_RATIO;
             }
 
-            const baseScale = Math.min(targetW / adjustedW, targetH / adjustedH);
-
-            const scaleX = baseScale * aspectScaleX;
-            const scaleY = baseScale * aspectScaleY;
+            // Match the original anisotropic fit (2cccb67) while
+            // using the actual terminal dimensions to avoid subtle aspect drift.
+            const scaleX = targetW / naturalW;
+            const scaleY = targetH / naturalH;
 
             termEl.style.transform = `scale(${scaleX}, ${scaleY})`;
             
