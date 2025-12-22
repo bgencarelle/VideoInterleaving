@@ -46,7 +46,6 @@
     const COLS = parseInt("{{ASCII_WIDTH}}") || 80;
     const ROWS = parseInt("{{ASCII_HEIGHT}}") || 24;
     const TARGET_PIXEL_RATIO = parseFloat("{{ASCII_FONT_RATIO}}") || 0.5;
-    const SOURCE_IMAGE_ASPECT_RATIO = "{{SOURCE_IMAGE_ASPECT_RATIO}}" ? parseFloat("{{SOURCE_IMAGE_ASPECT_RATIO}}") : null;
 
     const IMAGE_ASPECT_RATIO = (COLS * TARGET_PIXEL_RATIO) / ROWS;
 
@@ -74,25 +73,9 @@
 
         const m = measureFont(FONT_FAMILY, FONT_SIZE);
 
-        // Calculate base line height from font ratio
+        // Calculate line height from font ratio to match target pixel ratio
         let lh = m.w / (m.h * TARGET_PIXEL_RATIO);
         if (lh < 0.8) lh = 0.8;
-        
-        // Adjust line height to match source image aspect ratio if provided
-        if (SOURCE_IMAGE_ASPECT_RATIO !== null && SOURCE_IMAGE_ASPECT_RATIO > 0) {
-            const cellW = m.w;
-            const currentDisplayAspect = (COLS * cellW) / (ROWS * m.h * lh);
-            
-            // Calculate adjustment factor to match source image aspect ratio
-            const aspectAdjustment = SOURCE_IMAGE_ASPECT_RATIO / currentDisplayAspect;
-            
-            // Adjust line height: if source is wider, reduce line height; if taller, increase
-            lh = lh / aspectAdjustment;
-            
-            // Keep within reasonable bounds
-            if (lh < 0.8) lh = 0.8;
-            if (lh > 2.0) lh = 2.0;
-        }
         
         const cellW = m.w;
         const cellH = m.h * lh;
