@@ -80,4 +80,4 @@ def to_ascii(frame):
     # --- 4. OUTPUT ---
     # Output is already guaranteed to be exactly max_rows tall.
     rows = ["".join(row) for row in image_grid]
-    return "\r\n".join(rows).strip() + RESET_CODE
+    return "\r\n".join(rows) + RESET_CODE
