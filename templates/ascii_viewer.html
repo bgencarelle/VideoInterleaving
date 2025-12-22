@@ -123,6 +123,11 @@
                 targetH = targetW / IMAGE_ASPECT_RATIO;
             }
 
+            // Add a tiny margin to avoid compounded shrink from borders or rounding
+            const margin = 0.995;
+            targetW *= margin;
+            targetH *= margin;
+
             // Apply anisotropic scaling directly from measured cell geometry so
             // the final grid matches the desired aspect ratio without extra
             // width-only adjustments that could introduce slight stretching.
