@@ -134,7 +134,11 @@
             const scaleX = targetW / naturalW;
             const scaleY = targetH / naturalH;
 
-            termEl.style.transform = `scale(${scaleX}, ${scaleY})`;
+            // Uniformly scale the natural grid to fit the container.
+            // This keeps the terminal's native aspect ratio intact while
+            // letting CSS scaling drive the size to fill the window.
+            const scale = Math.min(containerW / naturalW, containerH / naturalH);
+            termEl.style.transform = `scale(${scale})`;
             
             // Ensure terminal-stage centers properly
             stageEl.style.display = 'flex';
