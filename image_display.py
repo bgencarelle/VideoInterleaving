@@ -127,46 +127,19 @@ def load_and_render_frame(loader, index, main_folder, float_folder, source_aspec
                 final_chars = m_img["chars"]
                 final_colors = m_img["colors"]
 
-            # --- RESAMPLE + PAD (Fill One Dimension, Pad the Other) ---
+            # --- RESAMPLE USING COVER/CROP (Fill and Trim) ---
             baked_h, baked_w = final_chars.shape
-            target_w = int(getattr(settings, 'ASCII_WIDTH', baked_w))
-            target_h = int(getattr(settings, 'ASCII_HEIGHT', baked_h))
-            font_ratio = getattr(settings, 'ASCII_FONT_RATIO', 0.5)
-            target_w = max(1, target_w)
-            target_h = max(1, target_h)
+            target_w = max(1, int(getattr(settings, 'ASCII_WIDTH', baked_w)))
+            target_h = max(1, int(getattr(settings, 'ASCII_HEIGHT', baked_h)))
 
-            # 1. Get image aspect ratio (from source if available, otherwise from baked dimensions)
-            if source_aspect_ratio is not None:
-                image_aspect = source_aspect_ratio
-            else:
-                # Calculate baked aspect ratio (accounting for font ratio)
-                baked_aspect = (baked_w * font_ratio) / baked_h if baked_h > 0 else 1.0
-                image_aspect = baked_aspect
-            
-            # 2. Calculate terminal display aspect ratio
-            terminal_aspect = (target_w * font_ratio) / target_h if target_h > 0 else 1.0
-            
-            # 3. Determine which dimension to fill (Fill One Dimension, Pad the Other)
-            # For pre-baked ASCII, we work directly with character grid dimensions
-            if image_aspect > terminal_aspect:
-                # Image is wider: fill width, pad height
-                scale = target_w / baked_w if baked_w > 0 else 1.0
-                scaled_w = target_w
-                scaled_h = int(baked_h * scale)
-                pad_x = 0
-                pad_y = (target_h - scaled_h) // 2
-            else:
-                # Image is taller: fill height, pad width
-                scale = target_h / baked_h if baked_h > 0 else 1.0
-                scaled_w = int(baked_w * scale)
-                scaled_h = target_h
-                pad_x = (target_w - scaled_w) // 2
-                pad_y = 0
-            
-            # Ensure minimum size and clamp to maximum bounds
-            scaled_w = max(1, min(scaled_w, target_w))
-            scaled_h = max(1, min(scaled_h, target_h))
-            
+            # Scale enough to cover the target grid, then crop the center
+            scale_x = target_w / baked_w if baked_w > 0 else 1.0
+            scale_y = target_h / baked_h if baked_h > 0 else 1.0
+            scale = max(scale_x, scale_y)
+
+            scaled_w = max(target_w, int(round(baked_w * scale)))
+            scaled_h = max(target_h, int(round(baked_h * scale)))
+
             # Resample if needed
             if scaled_w != baked_w or scaled_h != baked_h:
                 row_idx = np.linspace(0, baked_h - 1, scaled_h).astype(np.int32)
@@ -174,19 +147,11 @@ def load_and_render_frame(loader, index, main_folder, float_folder, source_aspec
                 final_chars = final_chars[np.ix_(row_idx, col_idx)]
                 final_colors = final_colors[np.ix_(row_idx, col_idx)]
 
-            # Apply padding if needed (only one dimension will have padding)
-            if pad_x > 0 or pad_y > 0:
-                padding_char = getattr(settings, 'ASCII_PADDING_CHAR', ' ')
-                if final_chars.dtype.kind == 'S':
-                    pad_value = padding_char.encode('latin-1')[:1]
-                else:
-                    pad_value = padding_char
-                padded_chars = np.full((target_h, target_w), pad_value, dtype=final_chars.dtype)
-                padded_colors = np.full((target_h, target_w), 16, dtype=final_colors.dtype)
-                padded_chars[pad_y:pad_y + scaled_h, pad_x:pad_x + scaled_w] = final_chars
-                padded_colors[pad_y:pad_y + scaled_h, pad_x:pad_x + scaled_w] = final_colors
-                final_chars = padded_chars
-                final_colors = padded_colors
+            # Center-crop to the exact output dimensions
+            x_off = max(0, (final_chars.shape[1] - target_w) // 2)
+            y_off = max(0, (final_chars.shape[0] - target_h) // 2)
+            final_chars = final_chars[y_off : y_off + target_h, x_off : x_off + target_w]
+            final_colors = final_colors[y_off : y_off + target_h, x_off : x_off + target_w]
 
             # --- RENDER TO STRING (OPTIMIZED) ---
             # Look up ANSI codes and combine
