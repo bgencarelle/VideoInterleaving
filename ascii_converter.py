@@ -29,6 +29,7 @@ def to_ascii(frame):
     font_ratio = getattr(settings, 'ASCII_FONT_RATIO', 0.5)
 
     sat_mult = getattr(settings, 'ASCII_SATURATION', 1.0)
+    contrast_mult = getattr(settings, 'ASCII_CONTRAST', 1.0)
     bright_mult = getattr(settings, 'ASCII_BRIGHTNESS', 1.0)
 
     # --- 2. CALCULATE GEOMETRY (COVER Scaling) ---
@@ -58,6 +59,15 @@ def to_ascii(frame):
     frame_cropped = frame_resized[y_off : y_off + max_rows, x_off : x_off + max_cols]
 
     # --- Step B: Color Grading (Now on the final max_cols x max_rows pixel count) ---
+    # Apply RGB-domain contrast/brightness before converting to HSV (pre-2cccb67 behavior)
+    if contrast_mult != 1.0 or bright_mult != 1.0:
+        frame_cropped = frame_cropped.astype(float)
+        if contrast_mult != 1.0:
+            frame_cropped = (frame_cropped - 127.5) * contrast_mult + 127.5
+        if bright_mult != 1.0:
+            frame_cropped *= bright_mult
+        frame_cropped = np.clip(frame_cropped, 0, 255).astype(np.uint8)
+
     hsv = cv2.cvtColor(frame_cropped, cv2.COLOR_RGB2HSV).astype(float)
     if sat_mult != 1.0: hsv[:, :, 1] = np.clip(hsv[:, :, 1] * sat_mult, 0, 255)
     if bright_mult != 1.0: hsv[:, :, 2] = np.clip(hsv[:, :, 2] * bright_mult, 0, 255)
