@@ -599,3 +599,4 @@ def run_display(clock_source=CLOCK_MODE):
                 window.close()
             except Exception as e:
                 print(f"[DISPLAY] Headless window cleanup failed: {e}")
+
