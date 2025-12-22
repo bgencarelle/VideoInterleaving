@@ -84,7 +84,11 @@ class ToAsciiPreHsvAdjustmentsTest(unittest.TestCase):
         frame = np.array([[[100, 100, 100]]], dtype=np.uint8)
         ascii_frame = ascii_converter.to_ascii(frame)
 
-        self.assertEqual(ascii_frame, f"a{ascii_converter.RESET_CODE}")
+        # Brightness should lighten the mapped character (toward index 0) even without
+        # the legacy HSV value multiplier. For a mid-gray pixel (100) with a 1.5x
+        # brightness boost, the output should shift from the middle of the palette to
+        # the next brighter glyph.
+        self.assertEqual(ascii_frame, f"b{ascii_converter.RESET_CODE}")
 
 
 if __name__ == "__main__":

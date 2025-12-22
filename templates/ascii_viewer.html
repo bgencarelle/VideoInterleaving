@@ -77,10 +77,6 @@
         let lh = m.w / (m.h * TARGET_PIXEL_RATIO);
         if (lh < 0.8) lh = 0.8;
 
-        const cellW = m.w;
-        const cellH = m.h * lh;
-        const imageAspectRatio = IMAGE_ASPECT_RATIO;
-
         const term = new Terminal({
             cols: COLS, rows: ROWS,
             fontFamily: FONT_FAMILY,
@@ -95,12 +91,12 @@
 
         term.open(document.getElementById('terminal'));
 
-        setupFit(term, imageAspectRatio, cellW, cellH);
+        setupFit(term);
         connect(term);
     }
 
     // --- 3. FIT TO SCREEN ---
-    function setupFit(term, imageAspectRatio, cellW, cellH) {
+    function setupFit(term) {
         const fitToScreen = () => {
             const termEl = document.getElementById('terminal');
             const screenEl = termEl.querySelector('.xterm-screen');
@@ -112,35 +108,15 @@
             const containerW = stageEl.clientWidth || window.innerWidth;
             const containerH = stageEl.clientHeight || window.innerHeight;
 
-            const naturalW = cellW * COLS;
-            const naturalH = cellH * ROWS;
-            const desiredCellW = cellH * TARGET_PIXEL_RATIO;
+            // Measure the live grid so we match the actual DOM cell geometry
+            const naturalW = screenEl.clientWidth;
+            const naturalH = screenEl.clientHeight;
 
-            // Adjust width scaling so that each cell respects the target pixel ratio
-            const aspectScaleX = desiredCellW / cellW;
-            const aspectScaleY = 1;
-
-            const adjustedW = naturalW * aspectScaleX;
-            const adjustedH = naturalH * aspectScaleY;
-
-            let targetW;
-            let targetH;
-            const containerRatio = containerW / containerH;
-
-            if (containerRatio > imageAspectRatio) {
-                targetH = containerH;
-                targetW = targetH * imageAspectRatio;
-            } else {
-                targetW = containerW;
-                targetH = targetW / imageAspectRatio;
-            }
-
-            const baseScale = Math.min(targetW / adjustedW, targetH / adjustedH);
-
-            const scaleX = baseScale * aspectScaleX;
-            const scaleY = baseScale * aspectScaleY;
-
-            termEl.style.transform = `scale(${scaleX}, ${scaleY})`;
+            // Uniformly scale the natural grid to fit the container.
+            // This keeps the terminal's native aspect ratio intact while
+            // letting CSS scaling drive the size to fill the window.
+            const scale = Math.min(containerW / naturalW, containerH / naturalH);
+            termEl.style.transform = `scale(${scale})`;
             
             // Ensure terminal-stage centers properly
             stageEl.style.display = 'flex';
