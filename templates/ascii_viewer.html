@@ -67,6 +67,9 @@
     }
 
     // --- 2. INIT ---
+    // Store cell dimensions for use in setupFit
+    let cellW, cellH;
+
     function initTerminal() {
         const FONT_SIZE = 12;
         const FONT_FAMILY = 'Unscii, monospace';
@@ -76,6 +79,10 @@
         // Calculate line height from font ratio to match target pixel ratio
         let lh = m.w / (m.h * TARGET_PIXEL_RATIO);
         if (lh < 0.8) lh = 0.8;
+
+        // Calculate cell dimensions from font measurements
+        cellW = m.w;
+        cellH = m.h * lh;
 
         const term = new Terminal({
             cols: COLS, rows: ROWS,

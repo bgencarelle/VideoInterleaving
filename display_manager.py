@@ -481,23 +481,23 @@ def display_init(state: DisplayState):
                 attempt_backend = backend or "auto"
                 attempt_version = _format_gl_version(require_code) if require_code is not None else "default"
                 print(f"[DISPLAY] Headless attempt: backend={attempt_backend}, GLES={attempt_version}")
-            try:
-                create_kwargs = {"standalone": True}
-                if backend:
-                    create_kwargs["backend"] = backend
-                if require_code is not None:
-                    create_kwargs["require"] = require_code
+                try:
+                    create_kwargs = {"standalone": True}
+                    if backend:
+                        create_kwargs["backend"] = backend
+                    if require_code is not None:
+                        create_kwargs["require"] = require_code
 
-                ctx = moderngl.create_context(**create_kwargs)
-                context_created = True
-                if require_code is not None:
-                    print(f"[DISPLAY] Headless GL: Requested GLES {_format_gl_version(require_code)}")
-                _log_renderer_info(ctx)
-                break
-            except Exception as e:
-                last_error = e
-                print(f"[DISPLAY] Headless attempt failed ({attempt_backend}, GLES={attempt_version}): {e}")
-                continue
+                    ctx = moderngl.create_context(**create_kwargs)
+                    context_created = True
+                    if require_code is not None:
+                        print(f"[DISPLAY] Headless GL: Requested GLES {_format_gl_version(require_code)}")
+                    _log_renderer_info(ctx)
+                    break
+                except Exception as e:
+                    last_error = e
+                    print(f"[DISPLAY] Headless attempt failed ({attempt_backend}, GLES={attempt_version}): {e}")
+                    continue
             if context_created:
                 break
 

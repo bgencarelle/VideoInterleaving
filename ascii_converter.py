@@ -29,14 +29,7 @@ def to_ascii(frame):
     font_ratio = getattr(settings, 'ASCII_FONT_RATIO', 0.5)
 
     sat_mult = getattr(settings, 'ASCII_SATURATION', 1.0)
-    contrast_mult = getattr(settings, 'ASCII_CONTRAST', 1.0)
     bright_mult = getattr(settings, 'ASCII_BRIGHTNESS', 1.0)
-
-    use_contrast = getattr(settings, 'ASCII_ENABLE_CONTRAST', False)
-    use_rgb_brightness = getattr(settings, 'ASCII_ENABLE_RGB_BRIGHTNESS', False)
-    rgb_brightness = np.array(getattr(settings, 'ASCII_RGB_BRIGHTNESS', (1.0, 1.0, 1.0)), dtype=float)
-    if rgb_brightness.shape != (3,):
-        rgb_brightness = np.ones(3, dtype=float)
 
     # --- 2. CALCULATE GEOMETRY (COVER Scaling) ---
     h, w = frame.shape[:2]
@@ -64,15 +57,10 @@ def to_ascii(frame):
     # [CHANGE] Crop the pixel array down to the exact final size before processing
     frame_cropped = frame_resized[y_off : y_off + max_rows, x_off : x_off + max_cols]
 
-    # Apply optional pre-HSV grading for ASCII output (single stage like 2cccb67)
-    graded_frame = frame_cropped
-    pre_hsv_adjustment = False
-
-
     # --- Step B: Color Grading (Now on the final max_cols x max_rows pixel count) ---
-    hsv = cv2.cvtColor(graded_frame, cv2.COLOR_RGB2HSV).astype(float)
+    hsv = cv2.cvtColor(frame_cropped, cv2.COLOR_RGB2HSV).astype(float)
     if sat_mult != 1.0: hsv[:, :, 1] = np.clip(hsv[:, :, 1] * sat_mult, 0, 255)
-    if bright_mult != 1.0 and not pre_hsv_adjustment:
+    if bright_mult != 1.0:
         hsv[:, :, 2] = np.clip(hsv[:, :, 2] * bright_mult, 0, 255)
     frame_boosted = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
 
