@@ -5,6 +5,10 @@ No padding is applied; the scaled image always fills the terminal grid and any
 overflow is cropped symmetrically.
 """
 
+import pytest
+
+pytestmark = pytest.mark.skip(reason="Utility script; run directly instead of under pytest")
+
 
 def test_ascii_scaling(image_w, image_h, terminal_cols, terminal_rows, font_ratio=0.5, test_name=""):
     print("=" * 80)
