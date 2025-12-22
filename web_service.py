@@ -252,6 +252,9 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
                 cols = getattr(settings, 'ASCII_WIDTH', 120)
                 rows = getattr(settings, 'ASCII_HEIGHT', 96)
                 ratio = getattr(settings, 'ASCII_FONT_RATIO', 0.5)
+                # Get source image aspect ratio for line spacing adjustment (optional setting)
+                source_aspect_ratio = getattr(settings, 'ASCII_SOURCE_IMAGE_ASPECT_RATIO', None)
+                
                 # Get WebSocket port from config (for asciiweb mode)
                 try:
                     ws_port = get_config().get_ascii_websocket_port()
@@ -265,6 +268,10 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
                 content = content.replace("{{ASCII_HEIGHT}}", str(rows))
                 content = content.replace("{{ASCII_FONT_RATIO}}", str(ratio))
                 content = content.replace("{{WEBSOCKET_PORT}}", str(ws_port))
+                if source_aspect_ratio is not None:
+                    content = content.replace("{{SOURCE_IMAGE_ASPECT_RATIO}}", str(source_aspect_ratio))
+                else:
+                    content = content.replace("{{SOURCE_IMAGE_ASPECT_RATIO}}", "")
 
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
