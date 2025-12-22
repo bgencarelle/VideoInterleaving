@@ -64,7 +64,7 @@ def to_ascii(frame):
     # [CHANGE] Crop the pixel array down to the exact final size before processing
     frame_cropped = frame_resized[y_off : y_off + max_rows, x_off : x_off + max_cols]
 
-    # Apply optional pre-HSV grading for ASCII output
+    # Apply optional pre-HSV grading for ASCII output (single stage like 2cccb67)
     graded_frame = frame_cropped
     pre_hsv_adjustment = False
     if CONTRAST_LUT is not None:
@@ -72,7 +72,7 @@ def to_ascii(frame):
         pre_hsv_adjustment = True
     if _apply_rgb_brightness and not np.allclose(_rgb_brightness, 1.0):
         graded_frame = np.clip(
-            graded_frame.astype(np.float32) * _rgb_brightness.reshape(1, 1, 3),
+            graded_frame.astype(np.float32) * rgb_brightness.reshape(1, 1, 3),
             0,
             255,
         ).astype(np.uint8)
