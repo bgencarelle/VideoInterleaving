@@ -76,7 +76,7 @@
         // Calculate line height from font ratio to match target pixel ratio
         let lh = m.w / (m.h * TARGET_PIXEL_RATIO);
         if (lh < 0.8) lh = 0.8;
-        
+
         const cellW = m.w;
         const cellH = m.h * lh;
         const imageAspectRatio = IMAGE_ASPECT_RATIO;
@@ -95,12 +95,12 @@
 
         term.open(document.getElementById('terminal'));
 
-        setupFit(term, imageAspectRatio);
+        setupFit(term, imageAspectRatio, cellW, cellH);
         connect(term);
     }
 
     // --- 3. FIT TO SCREEN ---
-    function setupFit(term, imageAspectRatio) {
+    function setupFit(term, imageAspectRatio, cellW, cellH) {
         const fitToScreen = () => {
             const termEl = document.getElementById('terminal');
             const screenEl = termEl.querySelector('.xterm-screen');
@@ -108,12 +108,20 @@
 
             if (!screenEl || screenEl.clientWidth < 1) return false;
 
-            const srcW = screenEl.clientWidth;
-            const srcH = screenEl.clientHeight;
-            
             // Use the terminal-stage container dimensions (works for both standalone and iframe)
             const containerW = stageEl.clientWidth || window.innerWidth;
             const containerH = stageEl.clientHeight || window.innerHeight;
+
+            const naturalW = cellW * COLS;
+            const naturalH = cellH * ROWS;
+            const desiredCellW = cellH * TARGET_PIXEL_RATIO;
+
+            // Adjust width scaling so that each cell respects the target pixel ratio
+            const aspectScaleX = desiredCellW / cellW;
+            const aspectScaleY = 1;
+
+            const adjustedW = naturalW * aspectScaleX;
+            const adjustedH = naturalH * aspectScaleY;
 
             let targetW;
             let targetH;
@@ -127,8 +135,12 @@
                 targetH = targetW / imageAspectRatio;
             }
 
-            const scale = Math.min(targetW / srcW, targetH / srcH);
-            termEl.style.transform = `scale(${scale})`;
+            const baseScale = Math.min(targetW / adjustedW, targetH / adjustedH);
+
+            const scaleX = baseScale * aspectScaleX;
+            const scaleY = baseScale * aspectScaleY;
+
+            termEl.style.transform = `scale(${scaleX}, ${scaleY})`;
             
             // Ensure terminal-stage centers properly
             stageEl.style.display = 'flex';
