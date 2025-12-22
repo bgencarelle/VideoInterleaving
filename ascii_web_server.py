@@ -1,5 +1,4 @@
 import threading
-import sys
 import socket
 import settings
 from shared_state import exchange_ascii

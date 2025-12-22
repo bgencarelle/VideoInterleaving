@@ -15,17 +15,6 @@ RESET_CODE = "\033[0m"
 _gamma_val = getattr(settings, 'ASCII_GAMMA', 1.0)
 GAMMA_LUT = np.array([((i / 255.0) ** _gamma_val) * 255 for i in range(256)], dtype=np.uint8)
 
-_apply_contrast = getattr(settings, 'ASCII_ENABLE_CONTRAST', False)
-_contrast_factor = getattr(settings, 'ASCII_CONTRAST', 1.0)
-CONTRAST_LUT = None
-if _apply_contrast and _contrast_factor != 1.0:
-    CONTRAST_LUT = np.clip(((np.arange(256) - 128) * _contrast_factor) + 128, 0, 255).astype(np.uint8)
-
-_apply_rgb_brightness = getattr(settings, 'ASCII_ENABLE_RGB_BRIGHTNESS', False)
-_rgb_brightness = np.array(getattr(settings, 'ASCII_RGB_BRIGHTNESS', (1.0, 1.0, 1.0)), dtype=float)
-if _rgb_brightness.shape != (3,):
-    _rgb_brightness = np.ones(3, dtype=float)
-
 def to_ascii(frame):
     """
     Converts a frame to ASCII using a 'Cover' (Zoom/Crop) scaling method.
@@ -42,6 +31,12 @@ def to_ascii(frame):
     sat_mult = getattr(settings, 'ASCII_SATURATION', 1.0)
     contrast_mult = getattr(settings, 'ASCII_CONTRAST', 1.0)
     bright_mult = getattr(settings, 'ASCII_BRIGHTNESS', 1.0)
+
+    use_contrast = getattr(settings, 'ASCII_ENABLE_CONTRAST', False)
+    use_rgb_brightness = getattr(settings, 'ASCII_ENABLE_RGB_BRIGHTNESS', False)
+    rgb_brightness = np.array(getattr(settings, 'ASCII_RGB_BRIGHTNESS', (1.0, 1.0, 1.0)), dtype=float)
+    if rgb_brightness.shape != (3,):
+        rgb_brightness = np.ones(3, dtype=float)
 
     # --- 2. CALCULATE GEOMETRY (COVER Scaling) ---
     h, w = frame.shape[:2]
