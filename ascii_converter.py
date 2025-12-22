@@ -71,19 +71,23 @@ def to_ascii(frame):
 
     # Apply optional pre-HSV grading for ASCII output
     graded_frame = frame_cropped
+    pre_hsv_adjustment = False
     if CONTRAST_LUT is not None:
         graded_frame = cv2.LUT(graded_frame, CONTRAST_LUT)
+        pre_hsv_adjustment = True
     if _apply_rgb_brightness and not np.allclose(_rgb_brightness, 1.0):
         graded_frame = np.clip(
             graded_frame.astype(np.float32) * _rgb_brightness.reshape(1, 1, 3),
             0,
             255,
         ).astype(np.uint8)
+        pre_hsv_adjustment = True
 
     # --- Step B: Color Grading (Now on the final max_cols x max_rows pixel count) ---
     hsv = cv2.cvtColor(graded_frame, cv2.COLOR_RGB2HSV).astype(float)
     if sat_mult != 1.0: hsv[:, :, 1] = np.clip(hsv[:, :, 1] * sat_mult, 0, 255)
-    if bright_mult != 1.0: hsv[:, :, 2] = np.clip(hsv[:, :, 2] * bright_mult, 0, 255)
+    if bright_mult != 1.0 and not pre_hsv_adjustment:
+        hsv[:, :, 2] = np.clip(hsv[:, :, 2] * bright_mult, 0, 255)
     frame_boosted = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
 
     # --- Step C & D: Map and Compose ---
