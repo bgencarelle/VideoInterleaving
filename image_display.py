@@ -127,7 +127,7 @@ def load_and_render_frame(loader, index, main_folder, float_folder, source_aspec
                 final_chars = m_img["chars"]
                 final_colors = m_img["colors"]
 
-            # --- RESAMPLE + PAD (FIT Scaling, Then Padding) ---
+            # --- RESAMPLE + PAD (Fill One Dimension, Pad the Other) ---
             baked_h, baked_w = final_chars.shape
             target_w = int(getattr(settings, 'ASCII_WIDTH', baked_w))
             target_h = int(getattr(settings, 'ASCII_HEIGHT', baked_h))
@@ -143,37 +143,30 @@ def load_and_render_frame(loader, index, main_folder, float_folder, source_aspec
                 baked_aspect = (baked_w * font_ratio) / baked_h if baked_h > 0 else 1.0
                 image_aspect = baked_aspect
             
-            # 2. Calculate FIT scaling to fit inside target dimensions
+            # 2. Calculate terminal display aspect ratio
+            terminal_aspect = (target_w * font_ratio) / target_h if target_h > 0 else 1.0
+            
+            # 3. Determine which dimension to fill (Fill One Dimension, Pad the Other)
             # For pre-baked ASCII, we work directly with character grid dimensions
-            # Calculate scale factors for both dimensions
-            scale_x = target_w / baked_w if baked_w > 0 else 1.0
-            scale_y = target_h / baked_h if baked_h > 0 else 1.0
-            
-            # Use FIT scaling: min scale ensures baked ASCII fits within both dimensions
-            scale = min(scale_x, scale_y)
-            
-            # 3. Calculate scaled dimensions based on FIT scale
-            # This preserves the aspect ratio of the baked ASCII
-            scaled_w = int(baked_w * scale)
-            scaled_h = int(baked_h * scale)
+            if image_aspect > terminal_aspect:
+                # Image is wider: fill width, pad height
+                scale = target_w / baked_w if baked_w > 0 else 1.0
+                scaled_w = target_w
+                scaled_h = int(baked_h * scale)
+                pad_x = 0
+                pad_y = (target_h - scaled_h) // 2
+            else:
+                # Image is taller: fill height, pad width
+                scale = target_h / baked_h if baked_h > 0 else 1.0
+                scaled_w = int(baked_w * scale)
+                scaled_h = target_h
+                pad_x = (target_w - scaled_w) // 2
+                pad_y = 0
             
             # Ensure minimum size and clamp to maximum bounds
             scaled_w = max(1, min(scaled_w, target_w))
             scaled_h = max(1, min(scaled_h, target_h))
             
-            # Debug: Print aspect ratio calculations for pre-baked
-            terminal_aspect = (target_w * font_ratio) / target_h if target_h > 0 else 1.0
-            baked_display_aspect = (baked_w * font_ratio) / baked_h if baked_h > 0 else 1.0
-            actual_scaled_aspect = (scaled_w * font_ratio) / scaled_h if scaled_h > 0 else 1.0
-            print(f"[ASCII-PREBAKED] Image aspect: {image_aspect:.4f} | Terminal aspect: {terminal_aspect:.4f} | "
-                  f"Baked display aspect: {baked_display_aspect:.4f} | "
-                  f"Calculated scaled aspect (to maintain): {image_aspect:.4f} | "
-                  f"Actual scaled dimensions: {scaled_w}x{scaled_h} (aspect: {actual_scaled_aspect:.4f})")
-            
-            # 4. Calculate padding (centered)
-            pad_x = (target_w - scaled_w) // 2
-            pad_y = (target_h - scaled_h) // 2
-
             # Resample if needed
             if scaled_w != baked_w or scaled_h != baked_h:
                 row_idx = np.linspace(0, baked_h - 1, scaled_h).astype(np.int32)
@@ -583,22 +576,7 @@ def run_display(clock_source=CLOCK_MODE):
                                 exchange_web.set_frame(b'j' + enc)
                                 exchange.set_frame(b'j' + enc)  # Legacy compatibility
                             elif is_ascii:
-                                # ASCII only: use ASCII exchange (and legacy for backward compat)
-                                # Determine mode (telnet vs web) for proper font ratio handling
-                                try:
-                                    config = get_config()
-                                    current_mode = config._current_mode if hasattr(config, '_current_mode') else None
-                                    if current_mode == MODE_ASCIIWEB:
-                                        ascii_mode = 'web'
-                                    elif current_mode == MODE_ASCII:
-                                        ascii_mode = 'telnet'
-                                    else:
-                                        ascii_mode = None  # Fallback to default behavior
-                                except (RuntimeError, AttributeError):
-                                    ascii_mode = None
-                                
-                                # Pass source aspect ratio and mode calculated from first frame
-                                text_frame = ascii_converter.to_ascii(frame, source_aspect_ratio=source_aspect_ratio, mode=ascii_mode)
+                                text_frame = ascii_converter.to_ascii(frame)
                                 exchange_ascii.set_frame(text_frame)
                                 exchange.set_frame(text_frame)  # Legacy compatibility
 
