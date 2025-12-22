@@ -108,9 +108,8 @@
             const containerW = stageEl.clientWidth || window.innerWidth;
             const containerH = stageEl.clientHeight || window.innerHeight;
 
-            // Measure the live grid so we match the actual DOM cell geometry
-            const naturalW = screenEl.clientWidth;
-            const naturalH = screenEl.clientHeight;
+            const naturalW = cellW * COLS;
+            const naturalH = cellH * ROWS;
 
             let targetW;
             let targetH;
@@ -124,8 +123,9 @@
                 targetH = targetW / IMAGE_ASPECT_RATIO;
             }
 
-            // Match the original anisotropic fit (2cccb67) while
-            // using the actual terminal dimensions to avoid subtle aspect drift.
+            // Apply anisotropic scaling directly from measured cell geometry so
+            // the final grid matches the desired aspect ratio without extra
+            // width-only adjustments that could introduce slight stretching.
             const scaleX = targetW / naturalW;
             const scaleY = targetH / naturalH;
 
