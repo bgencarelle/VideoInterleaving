@@ -40,6 +40,7 @@ def to_ascii(frame):
     font_ratio = getattr(settings, 'ASCII_FONT_RATIO', 0.5)
 
     sat_mult = getattr(settings, 'ASCII_SATURATION', 1.0)
+    contrast_mult = getattr(settings, 'ASCII_CONTRAST', 1.0)
     bright_mult = getattr(settings, 'ASCII_BRIGHTNESS', 1.0)
 
     # --- 2. CALCULATE GEOMETRY (COVER Scaling) ---
@@ -102,4 +103,4 @@ def to_ascii(frame):
     # --- 4. OUTPUT ---
     # Output is already guaranteed to be exactly max_rows tall.
     rows = ["".join(row) for row in image_grid]
-    return "\r\n".join(rows).strip() + RESET_CODE
+    return "\r\n".join(rows) + RESET_CODE
