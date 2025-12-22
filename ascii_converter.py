@@ -15,17 +15,6 @@ RESET_CODE = "\033[0m"
 _gamma_val = getattr(settings, 'ASCII_GAMMA', 1.0)
 GAMMA_LUT = np.array([((i / 255.0) ** _gamma_val) * 255 for i in range(256)], dtype=np.uint8)
 
-_apply_contrast = getattr(settings, 'ASCII_ENABLE_CONTRAST', False)
-_contrast_factor = getattr(settings, 'ASCII_CONTRAST', 1.0)
-CONTRAST_LUT = None
-if _apply_contrast and _contrast_factor != 1.0:
-    CONTRAST_LUT = np.clip(((np.arange(256) - 128) * _contrast_factor) + 128, 0, 255).astype(np.uint8)
-
-_apply_rgb_brightness = getattr(settings, 'ASCII_ENABLE_RGB_BRIGHTNESS', False)
-_rgb_brightness = np.array(getattr(settings, 'ASCII_RGB_BRIGHTNESS', (1.0, 1.0, 1.0)), dtype=float)
-if _rgb_brightness.shape != (3,):
-    _rgb_brightness = np.ones(3, dtype=float)
-
 def to_ascii(frame):
     """
     Converts a frame to ASCII using a 'Cover' (Zoom/Crop) scaling method.
@@ -42,6 +31,12 @@ def to_ascii(frame):
     sat_mult = getattr(settings, 'ASCII_SATURATION', 1.0)
     contrast_mult = getattr(settings, 'ASCII_CONTRAST', 1.0)
     bright_mult = getattr(settings, 'ASCII_BRIGHTNESS', 1.0)
+
+    use_contrast = getattr(settings, 'ASCII_ENABLE_CONTRAST', False)
+    use_rgb_brightness = getattr(settings, 'ASCII_ENABLE_RGB_BRIGHTNESS', False)
+    rgb_brightness = np.array(getattr(settings, 'ASCII_RGB_BRIGHTNESS', (1.0, 1.0, 1.0)), dtype=float)
+    if rgb_brightness.shape != (3,):
+        rgb_brightness = np.ones(3, dtype=float)
 
     # --- 2. CALCULATE GEOMETRY (COVER Scaling) ---
     h, w = frame.shape[:2]
@@ -69,22 +64,26 @@ def to_ascii(frame):
     # [CHANGE] Crop the pixel array down to the exact final size before processing
     frame_cropped = frame_resized[y_off : y_off + max_rows, x_off : x_off + max_cols]
 
-    # Apply optional pre-HSV grading for ASCII output
-    graded_frame = frame_cropped
-    if CONTRAST_LUT is not None:
-        graded_frame = cv2.LUT(graded_frame, CONTRAST_LUT)
-    if _apply_rgb_brightness and not np.allclose(_rgb_brightness, 1.0):
-        graded_frame = np.clip(
-            graded_frame.astype(np.float32) * _rgb_brightness.reshape(1, 1, 3),
-            0,
-            255,
-        ).astype(np.uint8)
+    # Apply optional pre-HSV grading for ASCII output (single stage like 2cccb67)
+    graded_frame = frame_cropped.astype(np.float32)
+
+    if use_contrast and contrast_mult != 1.0:
+        graded_frame = (graded_frame - 128.0) * contrast_mult + 128.0
+
+    if use_rgb_brightness and not np.allclose(rgb_brightness, 1.0):
+        graded_frame = graded_frame * rgb_brightness.reshape(1, 1, 3)
+    elif bright_mult != 1.0:
+        graded_frame = graded_frame * bright_mult
+
+    graded_frame = np.clip(graded_frame, 0, 255).astype(np.uint8)
 
     # --- Step B: Color Grading (Now on the final max_cols x max_rows pixel count) ---
-    hsv = cv2.cvtColor(graded_frame, cv2.COLOR_RGB2HSV).astype(float)
-    if sat_mult != 1.0: hsv[:, :, 1] = np.clip(hsv[:, :, 1] * sat_mult, 0, 255)
-    if bright_mult != 1.0: hsv[:, :, 2] = np.clip(hsv[:, :, 2] * bright_mult, 0, 255)
-    frame_boosted = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
+    if sat_mult != 1.0:
+        hsv = cv2.cvtColor(graded_frame, cv2.COLOR_RGB2HSV).astype(float)
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * sat_mult, 0, 255)
+        graded_frame = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
+
+    frame_boosted = graded_frame
 
     # --- Step C & D: Map and Compose ---
     gray = cv2.cvtColor(frame_boosted, cv2.COLOR_RGB2GRAY)
