@@ -4,7 +4,6 @@ import json
 import http.server
 import socketserver
 import os
-import glob
 import sys
 
 PORT = 1978

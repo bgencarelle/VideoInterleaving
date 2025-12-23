@@ -3,11 +3,11 @@ import socket
 import threading
 import time
 import settings
-from shared_state import exchange
+from shared_state import exchange_ascii
+from server_config import get_config
 
 # --- CONFIGURATION ---
 HOST = getattr(settings, 'ASCII_HOST', '127.0.0.1')
-PORT = getattr(settings, 'ASCII_PORT', 2323)
 MAX_CLIENTS = getattr(settings, 'MAX_VIEWERS', 20)
 
 _sem = threading.Semaphore(MAX_CLIENTS)
@@ -30,8 +30,9 @@ class AsciiHandler(socketserver.BaseRequestHandler):
             print(f"[ASCII] Rejected {self.client_address}: Server Full")
             try:
                 self.request.sendall(b"Server Full. Try again later.\r\n")
-            except:
-                pass
+            except (BrokenPipeError, ConnectionResetError, OSError) as e:
+                # Connection may be closed before we can send rejection message
+                print(f"[ASCII] Could not send rejection message: {e}")
             return
 
         print(f"[ASCII] Client connected: {self.client_address}")
@@ -64,7 +65,7 @@ class AsciiHandler(socketserver.BaseRequestHandler):
             while True:
                 # 4. Blocking Wait (0% CPU usage)
                 # Waits for the main display loop to signal a new frame
-                frame_data = exchange.get_frame()
+                frame_data = exchange_ascii.get_frame()
 
                 if not frame_data:
                     break
@@ -101,13 +102,17 @@ class AsciiHandler(socketserver.BaseRequestHandler):
             # 7. Cleanup
             try:
                 self.request.sendall(ANSI_SHOW_CURSOR)
-            except:
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                # Connection already closed, cursor restore not needed
                 pass
             _sem.release()
             print(f"[ASCII] Client disconnected: {self.client_address}")
 
 
 def start_server():
-    print(f"📠 ASCII Telnet Server started on {HOST}:{PORT}")
-    server = ThreadedTCPServer((HOST, PORT), AsciiHandler)
+    port = get_config().get_ascii_telnet_port()
+    if port is None:
+        raise RuntimeError("ASCII telnet port not configured for current mode")
+    print(f"📠 ASCII Telnet Server started on {HOST}:{port}")
+    server = ThreadedTCPServer((HOST, port), AsciiHandler)
     server.serve_forever()

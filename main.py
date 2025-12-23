@@ -7,6 +7,7 @@ import socket
 
 # 1. Import Settings FIRST so we can patch them
 import settings
+from server_config import ServerConfig, get_config, MODE_WEB, MODE_LOCAL, MODE_ASCII, MODE_ASCIIWEB
 
 # --- CONSTANTS ---
 # [CHANGE] Updated reserved ports to the new 24xx range
@@ -84,6 +85,12 @@ def configure_runtime():
         help="Force a rebuild of image lists (Default: Reuse existing lists if found)"
     )
 
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Override hosts to '0.0.0.0' for network testing (default: '127.0.0.1')"
+    )
+
     args = parser.parse_args()
 
     # 1. Apply Directory Override
@@ -96,15 +103,15 @@ def configure_runtime():
         settings.MAIN_FOLDER_PATH = os.path.join(abs_path, "face")
         settings.FLOAT_FOLDER_PATH = os.path.join(abs_path, "float")
 
-    # 2. Determine Primary Port
+    # 2. Determine Primary Port (for ASCII modes)
     if args.mode == "web":
-        primary_port = 8080
+        primary_port = None  # Not used in web mode
     elif args.mode == "local":
-        primary_port = 8888
+        primary_port = None  # Not used in local mode
     elif args.mode == "ascii":
         primary_port = args.port or 2323
     elif args.mode == "asciiweb":
-        # [CHANGE] Default updated to 2423
+        # Default updated to 2423
         primary_port = args.port or 2423
 
     # 3. Dynamic Naming & Cache Setup
@@ -122,47 +129,66 @@ def configure_runtime():
     settings.LOG_FILE_PATH = log_path
 
     # --- MODE SWITCHING ---
+    # Initialize ServerConfig with the selected mode
+    config = get_config()
 
     if args.mode == "web":
         if args.port:
-            print("⚠️  WARNING: --port argument ignored in WEB mode. Using fixed port 8080.")
+            print("⚠️  WARNING: --port argument ignored in WEB mode. Using fixed ports.")
         print(f">> MODE: WEB (MJPEG) [{source_name}]")
         settings.ASCII_MODE = False
         settings.SERVER_MODE = True
-        settings.WEB_PORT = 1978
-        settings.STREAM_PORT = 8080
-        require_ports([settings.WEB_PORT, settings.STREAM_PORT])
+        config.set_mode(MODE_WEB)
+        ports = config.get_ports()
+        print(f">> PORTS: Monitor={ports.monitor}, Stream={ports.stream}")
+        require_ports(ports.get_all_ports())
+        # Update settings for backward compatibility
+        settings.WEB_PORT = ports.monitor
+        settings.STREAM_PORT = ports.stream
 
     elif args.mode == "local":
         print(f">> MODE: LOCAL (Window) [{source_name}]")
         settings.ASCII_MODE = False
         settings.SERVER_MODE = False
-        settings.WEB_PORT = 8888
-        require_ports([settings.WEB_PORT])
+        config.set_mode(MODE_LOCAL)
+        ports = config.get_ports()
+        print(f">> PORTS: Monitor={ports.monitor}")
+        require_ports(ports.get_all_ports())
+        # Update settings for backward compatibility
+        settings.WEB_PORT = ports.monitor
 
     elif args.mode == "ascii":
         validate_ascii_port(primary_port)
         print(f">> MODE: ASCII (Telnet) [{source_name}] @ {primary_port}")
         settings.ASCII_MODE = True
         settings.SERVER_MODE = False
-        settings.ASCII_PORT = primary_port
-        settings.WEB_PORT = primary_port + 1
-        print(f">> PORTS: Telnet={settings.ASCII_PORT}, Monitor={settings.WEB_PORT}")
-        require_ports([settings.ASCII_PORT, settings.WEB_PORT])
+        config.set_mode(MODE_ASCII, primary_port=primary_port)
+        ports = config.get_ports()
+        print(f">> PORTS: Telnet={ports.ascii_telnet}, Monitor={ports.monitor}")
+        require_ports(ports.get_all_ports())
+        # Update settings for backward compatibility
+        settings.ASCII_PORT = ports.ascii_telnet
+        settings.WEB_PORT = ports.monitor
 
     elif args.mode == "asciiweb":
         # [NOTE] Validation skipped here so asciiweb can use its own reserved ports
-
         print(f">> MODE: ASCII-WEB (WebSocket) [{source_name}]")
         settings.ASCII_MODE = True
         settings.SERVER_MODE = False
-        settings.WEB_PORT = 1980
+        config.set_mode(MODE_ASCIIWEB, primary_port=primary_port)
+        ports = config.get_ports()
+        print(f">> PORTS: Viewer={ports.monitor}, WebSocket={ports.ascii_websocket}")
+        require_ports(ports.get_all_ports())
+        # Update settings for backward compatibility
+        settings.WEB_PORT = ports.monitor
+        settings.WEBSOCKET_PORT = ports.ascii_websocket
 
-        # Specific Logic: If default 2423, WebSocket is 2424.
-        settings.WEBSOCKET_PORT = primary_port + 1
-
-        print(f">> PORTS: Viewer={settings.WEB_PORT}, WebSocket={settings.WEBSOCKET_PORT}")
-        require_ports([settings.WEB_PORT, settings.WEBSOCKET_PORT])
+    # Apply --test flag: Override hosts to '0.0.0.0' for network testing
+    if args.test:
+        settings.WEB_HOST = '0.0.0.0'
+        settings.ASCII_HOST = '0.0.0.0'
+        # STREAM_HOST already defaults to '0.0.0.0', no change needed
+        print("⚠️  TEST MODE: Servers will bind to '0.0.0.0' (accessible from network)")
 
     return args, log_path
 
@@ -200,10 +226,16 @@ class Tee:
             self.log_file.flush()
 
 
+# Store original streams and log file for cleanup
+_original_stdout = sys.stdout
+_original_stderr = sys.stderr
+_log_file = None
+
 try:
-    log_file = open(log_filename, "w", buffering=1, encoding='utf-8')
-    sys.stdout = Tee(sys.stdout, log_file)
-    sys.stderr = Tee(sys.stderr, log_file)
+    _log_file = open(log_filename, "w", buffering=1, encoding='utf-8')
+    sys.stdout = Tee(sys.stdout, _log_file)
+    sys.stderr = Tee(sys.stderr, _log_file)
+    print(f"[MAIN] Logging to {log_filename}")
 except Exception as e:
     print(f"⚠️  Logging setup failed: {e}")
 
@@ -213,6 +245,8 @@ def main(clock=CLOCK_MODE):
     lists_exist = False
     script_dir = os.path.dirname(os.path.abspath(__file__))
     gen_dir_full = os.path.join(script_dir, settings.GENERATED_LISTS_DIR)
+
+    print(f"[MAIN] Mode={cli_args.mode} | Images={settings.IMAGES_DIR} | Cache={settings.GENERATED_LISTS_DIR}")
 
     if os.path.exists(gen_dir_full) and os.listdir(gen_dir_full):
         lists_exist = True
@@ -240,19 +274,29 @@ def main(clock=CLOCK_MODE):
     elif mode == "local":
         web_service.start_server(monitor=True, stream=False)
 
-    # 3. Start Display Engine
         # 3. Start Display Engine
     try:
         image_display.run_display(clock)
     except KeyboardInterrupt:
         print("\n[MAIN] Shutdown requested via Ctrl+C")
-    except Exception:  # Remove 'as e'
-        print("\n[MAIN] CRASH DETAILS:")
-        traceback.print_exc()  # <--- This prints the file and line number
+    except Exception as e:
+        print(f"\n[MAIN] CRASH DETAILS: {e}")
+        traceback.print_exc()
     finally:
         print("[MAIN] Exiting...")
+        # Ensure all output is flushed before closing
         sys.stdout.flush()
         sys.stderr.flush()
+        # Restore original streams
+        sys.stdout = _original_stdout
+        sys.stderr = _original_stderr
+        # Close log file
+        if _log_file is not None:
+            try:
+                _log_file.flush()
+                _log_file.close()
+            except Exception as e:
+                _original_stderr.write(f"⚠️  Error closing log file: {e}\n")
 
 
 if __name__ == "__main__":

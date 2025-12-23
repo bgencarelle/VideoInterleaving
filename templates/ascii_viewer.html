@@ -40,7 +40,7 @@
 </div>
 
 <script>
-    const WS_PORT = 2324;
+    const WS_PORT = parseInt("{{WEBSOCKET_PORT}}") || 2424;
 
     // --- SETTINGS ---
     const COLS = parseInt("{{ASCII_WIDTH}}") || 80;
@@ -67,14 +67,22 @@
     }
 
     // --- 2. INIT ---
+    // Store cell dimensions for use in setupFit
+    let cellW, cellH;
+
     function initTerminal() {
         const FONT_SIZE = 12;
         const FONT_FAMILY = 'Unscii, monospace';
 
         const m = measureFont(FONT_FAMILY, FONT_SIZE);
 
+        // Calculate line height from font ratio to match target pixel ratio
         let lh = m.w / (m.h * TARGET_PIXEL_RATIO);
         if (lh < 0.8) lh = 0.8;
+
+        // Calculate cell dimensions from font measurements
+        cellW = m.w;
+        cellH = m.h * lh;
 
         const term = new Terminal({
             cols: COLS, rows: ROWS,
@@ -99,34 +107,50 @@
         const fitToScreen = () => {
             const termEl = document.getElementById('terminal');
             const screenEl = termEl.querySelector('.xterm-screen');
+            const stageEl = document.getElementById('terminal-stage');
 
             if (!screenEl || screenEl.clientWidth < 1) return false;
 
-            const srcW = screenEl.clientWidth;
-            const srcH = screenEl.clientHeight;
+            // Use the terminal-stage container dimensions (works for both standalone and iframe)
+            const containerW = stageEl.clientWidth || window.innerWidth;
+            const containerH = stageEl.clientHeight || window.innerHeight;
 
-            const winW = window.innerWidth;
-            const winH = window.innerHeight;
+            const naturalW = cellW * COLS;
+            const naturalH = cellH * ROWS;
 
-            // Calculate Target Box
-            let targetW, targetH;
-            const windowRatio = winW / winH;
+            let targetW;
+            let targetH;
+            const containerRatio = containerW / containerH;
 
-            if (windowRatio > IMAGE_ASPECT_RATIO) {
-                targetH = winH;
+            if (containerRatio > IMAGE_ASPECT_RATIO) {
+                targetH = containerH;
                 targetW = targetH * IMAGE_ASPECT_RATIO;
             } else {
-                targetW = winW;
+                targetW = containerW;
                 targetH = targetW / IMAGE_ASPECT_RATIO;
             }
 
-            targetW *= 0.99;
-            targetH *= 0.99;
+            // Add a tiny margin to avoid compounded shrink from borders or rounding
+            const margin = 0.995;
+            targetW *= margin;
+            targetH *= margin;
 
-            const scaleX = targetW / srcW;
-            const scaleY = targetH / srcH;
+            // Apply anisotropic scaling directly from measured cell geometry so
+            // the final grid matches the desired aspect ratio without extra
+            // width-only adjustments that could introduce slight stretching.
+            const scaleX = targetW / naturalW;
+            const scaleY = targetH / naturalH;
 
-            termEl.style.transform = `scale(${scaleX}, ${scaleY})`;
+            // Uniformly scale the natural grid to fit the container.
+            // This keeps the terminal's native aspect ratio intact while
+            // letting CSS scaling drive the size to fill the window.
+            const scale = Math.min(containerW / naturalW, containerH / naturalH);
+            termEl.style.transform = `scale(${scale})`;
+            
+            // Ensure terminal-stage centers properly
+            stageEl.style.display = 'flex';
+            stageEl.style.justifyContent = 'center';
+            stageEl.style.alignItems = 'center';
 
             return true;
         };

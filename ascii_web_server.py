@@ -1,13 +1,12 @@
 import threading
-import sys
 import socket
 import settings
-from shared_state import exchange
+from shared_state import exchange_ascii
 from SimpleWebSocketServer import SimpleWebSocketServer, WebSocket
+from server_config import get_config
 
 # Configuration
 HOST = getattr(settings, 'ASCII_HOST', '127.0.0.1')
-PORT = 2424
 MAX_CLIENTS = getattr(settings, 'MAX_VIEWERS', 20)
 
 _sem = threading.Semaphore(MAX_CLIENTS)
@@ -23,6 +22,7 @@ class AsciiWebSocket(WebSocket):
             self.close()
             return
 
+        sem_acquired = True
         try:
             # Keep the OS buffer small too, just in case
             self.client.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
@@ -31,12 +31,17 @@ class AsciiWebSocket(WebSocket):
 
             print(f"[WS] Client connected: {self.address}")
             clients.append(self)
+            sem_acquired = False  # Client added, handleClose will release semaphore
             self.sendMessage(ANSI_CLEAR)
         except Exception as e:
             print(f"[WS] Handshake Error: {e}")
+            if sem_acquired:
+                # Cleanup if we acquired semaphore but failed to add client
+                _sem.release()
             self.close()
 
     def handleClose(self):
+        # Ensure cleanup even if called multiple times
         if self in clients:
             clients.remove(self)
             _sem.release()
@@ -50,7 +55,7 @@ def broadcast_loop():
     """Pushes frames to all connected WS clients."""
     while True:
         # Blocking Wait
-        frame_data = exchange.get_frame()
+        frame_data = exchange_ascii.get_frame()
 
         if not frame_data:
             continue
@@ -65,6 +70,7 @@ def broadcast_loop():
             continue
 
         # Broadcast
+        dead_clients = []
         for client in list(clients):
             try:
                 # --- THE "LEAKY BUCKET" FIX ---
@@ -77,14 +83,33 @@ def broadcast_loop():
                 # If buffer is empty, send the new frame
                 client.sendMessage(payload)
 
-            except Exception:
+            except (BrokenPipeError, ConnectionResetError, OSError) as e:
+                # Connection error - mark for cleanup
+                print(f"[WS] Client {getattr(client, 'address', 'unknown')} connection error: {e}")
+                dead_clients.append(client)
+            except Exception as e:
+                # Unexpected error - log and mark for cleanup
+                print(f"[WS] Unexpected error sending to client {getattr(client, 'address', 'unknown')}: {e}")
+                dead_clients.append(client)
+        
+        # Clean up dead clients
+        for client in dead_clients:
+            try:
+                if client in clients:
+                    clients.remove(client)
+                    _sem.release()
                 client.close()
+            except Exception as e:
+                print(f"[WS] Error cleaning up dead client: {e}")
 
 
 def start_server():
-    print(f"🕸️  ASCII WebSocket Server started on {HOST}:{PORT}")
+    port = get_config().get_ascii_websocket_port()
+    if port is None:
+        raise RuntimeError("ASCII WebSocket port not configured for current mode")
+    print(f"🕸️  ASCII WebSocket Server started on {HOST}:{port}")
     t = threading.Thread(target=broadcast_loop, daemon=True, name="WS-Broadcaster")
     t.start()
 
-    server = SimpleWebSocketServer(HOST, PORT, AsciiWebSocket)
+    server = SimpleWebSocketServer(HOST, port, AsciiWebSocket)
     server.serveforever()

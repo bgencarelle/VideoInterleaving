@@ -33,7 +33,7 @@ FROM_BIRTH = True
 
 # web stuff
 HTTP_MONITOR = True  # or True
-WEB_PORT = BIRTH_YEAR  # web port is year of birth
+# WEB_PORT is now managed by server_config.py - do not set here
 FRAME_COUNTER_DISPLAY = True  # If the monitor is on, skip printing
 
 
@@ -51,6 +51,6 @@ ASCII_COLOR = True
 ASCII_FPS = SERVER_CAPTURE_RATE // 2
 ASCII_WIDTH = 90
 ASCII_HEIGHT = 60
-
+ASCII_SOURCE_IMAGE_ASPECT_RATIO = 1.333333333
 JPEG_QUALITY = 80# Image quality
 HEADLESS_RES = (450, 600)   # Resolution for the virtual screen

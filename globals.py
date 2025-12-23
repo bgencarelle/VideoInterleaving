@@ -9,6 +9,7 @@ control_data_dictionary = {
     'BPM': 120,
 }
 
+# Folder dictionary for folder selection
 folder_dictionary = {
     'Main_and_Float_Folders': (0, 0),
 }

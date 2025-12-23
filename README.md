@@ -21,12 +21,39 @@ It is designed to run on everything from high-end workstations to headless Raspb
 
 ## 1. Prerequisites
 
-### System Libraries
-----
+### Automated Setup (Recommended)
+
+The `setup_app.sh` script handles all dependencies and systemd service configuration automatically:
+
+```bash
+git clone https://github.com/bgencarelle/VideoInterleaving.git
+cd VideoInterleaving
+sudo ./setup_app.sh
+```
+
+This script will:
+- Install all system packages from `system-requirements.txt`
+- Create a Python virtual environment with `--system-site-packages` enabled
+- Install all Python packages from `requirements.txt`
+- Auto-detect your display environment (X11/Wayland/framebuffer)
+- Create systemd services for web, ASCII, and local modes
+
+### Manual Setup
+
+#### System Libraries
+
 **Debian/Ubuntu/Raspbian:**
+
+System packages are listed in `system-requirements.txt`. Install them with:
 
 ```bash
 sudo apt update
+sudo apt install $(grep -v '^#' system-requirements.txt | tr '\n' ' ')
+```
+
+Or manually:
+
+```bash
 sudo apt install python3-venv python3-dev python3-pip build-essential cmake pkg-config \
     libwebp-dev libsdl2-dev libasound2-dev libgl1-mesa-dev libglu1-mesa-dev \
     libegl1-mesa-dev mesa-utils chrony ninja-build python-is-python3 \
@@ -35,7 +62,6 @@ sudo apt install python3-venv python3-dev python3-pip build-essential cmake pkg-
 
 **Fedora/CentOS:**
 
-Bash
 ```bash
 sudo dnf install python3-venv python3-pip python3-devel build-essential cmake pkgconfig \
     libwebp-devel SDL2-devel alsa-lib-devel mesa-libGL-devel mesa-libGLU-devel \
@@ -44,32 +70,28 @@ sudo dnf install python3-venv python3-pip python3-devel build-essential cmake pk
 
 **macOS (Homebrew):**
 
-Bash
 ```bash
 brew install python webp pkg-config sdl2 chrony jpeg-turbo 
 ```
 
-### Python Environment
+#### Python Environment
 
 Clone the repo:
 
-Bash
 ```bash
 git clone https://github.com/bgencarelle/VideoInterleaving.git
 cd VideoInterleaving
 ```
 
-Create venv:
+Create venv with system-site-packages (allows access to system-installed Python packages):
 
-Bash
 ```bash
-python3 -m venv .venv
+python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
 ```
 
 Install Dependencies:
 
-Bash
 ```bash
 pip install --upgrade pip
 pip install -r requirements.txt
@@ -176,6 +198,23 @@ Artistic Tweaks:
 To output correctly to CRT TVs via the 3.5mm jack:
 
 Enable Composite via `sudo raspi-config`.
+
+### Legacy GPUs (GLES 2.0 / GL 2.1)
+
+Some systems (e.g. Raspberry Pi 2 / older iGPUs / restricted drivers) only expose GLES 2.0 / OpenGL 2.1.
+In these cases the app automatically switches to a legacy PyOpenGL renderer for local window mode.
+
+For headless streaming on Wayland where standalone EGL contexts fail, the app will also fall back to a hidden GLFW window + legacy FBO capture path.
+
+Optional overrides:
+- Force legacy renderer: `FORCE_LEGACY_GL=1`
+- Force GLES version attempts: `PI_GLES_REQUIRE=200` (or `300`, `310`)
+
+Wayland note:
+- In local mode on Wayland, fullscreen uses a borderless fullscreen-sized window (not a mode-setting fullscreen) to reduce compositor/session crashes on some drivers.
+
+TurboJPEG note:
+- If you see `unable to locate turbojpeg library automatically`, install `libturbojpeg0` (Debian/Raspbian) or set `TURBOJPEG_LIB=/path/to/libturbojpeg.so.0`.
 
 Edit `/boot/firmware/cmdline.txt` (add to start of line):
 

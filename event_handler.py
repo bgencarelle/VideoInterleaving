@@ -1,7 +1,14 @@
-import glfw
+try:
+    import glfw
+except ImportError:
+    glfw = None
 
 def register_callbacks(window, state):
     """Register GLFW callbacks for key presses and window resize to update state."""
+    if glfw is None:
+        # GLFW not available - skip event handling (e.g., headless mode or Pi 2 without GLFW)
+        return
+    
     def on_key(win, key, scancode, action, mods):
         if action == glfw.PRESS:
             if key == glfw.KEY_Q or key == glfw.KEY_ESCAPE:

@@ -11,8 +11,9 @@ import os
 import socket
 import sys
 import settings
-from shared_state import exchange
+from shared_state import exchange_web
 from lightweight_monitor import monitor_data, HTML_TEMPLATE
+from server_config import get_config
 
 MAX_VIEWERS = getattr(settings, 'MAX_VIEWERS', 20)
 _hb_lock = threading.Lock()
@@ -239,7 +240,8 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
                     self.wfile.write(content)
                 else:
                     self.send_error(404, "Log file not found")
-            except Exception:
+            except Exception as e:
+                print(f"[Web] Error serving log file: {e}", file=sys.stderr)
                 self.send_error(500)
 
         elif self.path == "/ascii":
@@ -250,13 +252,24 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
                 cols = getattr(settings, 'ASCII_WIDTH', 120)
                 rows = getattr(settings, 'ASCII_HEIGHT', 96)
                 ratio = getattr(settings, 'ASCII_FONT_RATIO', 0.5)
+                # Get WebSocket port from config (for asciiweb mode)
+                try:
+                    ws_port = get_config().get_ascii_websocket_port()
+                    if ws_port is None:
+                        ws_port = getattr(settings, 'WEBSOCKET_PORT', 2424)
+                except RuntimeError:
+                    # Config not initialized yet, use settings fallback
+                    ws_port = getattr(settings, 'WEBSOCKET_PORT', 2424)
 
                 content = content.replace("{{ASCII_WIDTH}}", str(cols))
                 content = content.replace("{{ASCII_HEIGHT}}", str(rows))
                 content = content.replace("{{ASCII_FONT_RATIO}}", str(ratio))
+                content = content.replace("{{WEBSOCKET_PORT}}", str(ws_port))
 
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+                self.send_header('Pragma', 'no-cache')
                 self.end_headers()
                 self.wfile.write(content.encode('utf-8'))
             except Exception:
@@ -303,7 +316,8 @@ class StreamHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
                 self.end_headers()
                 self.wfile.write(content)
-            except:
+            except (IOError, OSError) as e:
+                print(f"[Web] Error serving index.html: {e}", file=sys.stderr)
                 self.send_error(404)
 
         # [NEW] Dynamic Template Fallback
@@ -329,7 +343,9 @@ class StreamHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
             self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             # 2. No Delay (Disable Nagle's Algorithm) - CRITICAL for streaming latency
             self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        except:
+        except (OSError, AttributeError) as e:
+            # Socket options may fail on some platforms or if connection is already closed
+            # This is non-critical, so we silently continue
             pass
 
         self.send_response(200)
@@ -346,16 +362,21 @@ class StreamHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
         try:
             while True:
                 # Poll every 1.0s to check for new frames OR stall conditions
-                raw_payload = exchange.get_frame(timeout=1.0)
+                raw_payload = exchange_web.get_frame(timeout=1.0)
 
                 if raw_payload is None:
                     # No frame arrived in the last second. Check if we have stalled.
-                    if time.monotonic() - last_frame_time > stall_timeout:
+                    elapsed = time.monotonic() - last_frame_time
+                    if elapsed > stall_timeout:
                         # Producer is dead/stuck. Break loop to free the slot.
+                        print(f"[Stream] Client {cid}: Stall timeout ({elapsed:.1f}s > {stall_timeout}s). Disconnecting.")
                         break
+                    # Frames are coming slowly but not stalled - continue waiting
+                    # Don't send anything, just wait for next frame
                     continue
 
                 if not isinstance(raw_payload, bytes) or len(raw_payload) < 1:
+                    print(f"[Stream] Client {cid}: Invalid frame payload (type={type(raw_payload)}, len={len(raw_payload) if hasattr(raw_payload, '__len__') else 'N/A'})")
                     continue
 
                 # Valid frame received, update watchdog
@@ -363,6 +384,11 @@ class StreamHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
 
                 fmt_byte = raw_payload[0:1]
                 frame_data = raw_payload[1:]
+
+                # Validate frame data
+                if len(frame_data) == 0:
+                    print(f"[Stream] Client {cid}: Empty frame data, skipping")
+                    continue
 
                 # 2. Determine Header Type
                 if fmt_byte == b'w':
@@ -373,18 +399,26 @@ class StreamHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
                 _set_heartbeat(cid)
 
                 # 3. Send Frame
-                self.wfile.write(HEADER_BOUNDARY)
-                self.wfile.write(ctype)
-                self.wfile.write(frame_data)
-                self.wfile.write(HEADER_NEWLINE)
-                self.wfile.flush()
+                try:
+                    self.wfile.write(HEADER_BOUNDARY)
+                    self.wfile.write(ctype)
+                    self.wfile.write(frame_data)
+                    self.wfile.write(HEADER_NEWLINE)
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError) as write_err:
+                    # Connection closed during write - normal disconnect
+                    print(f"[Stream] Client {cid}: Write error: {write_err}")
+                    break
 
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, socket.timeout):
-            # Normal disconnect
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, socket.timeout, OSError):
+            # Normal disconnect or network error
             pass
         except Exception as e:
-            # Log unusual errors
+            # Log unusual errors with traceback for debugging
+            import traceback
             print(f"[Stream Error] {e}", file=sys.stderr)
+            print(f"[Stream Error] Traceback:", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
         finally:
             _viewer_semaphore.release()
             with _count_lock:
@@ -393,7 +427,7 @@ class StreamHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
 
 
 def run_monitor_server():
-    port = getattr(settings, 'WEB_PORT', 1978)
+    port = get_config().get_monitor_port()
     # Default to 127.0.0.1 (Localhost only) for security.
     host = getattr(settings, 'WEB_HOST', '127.0.0.1')
     httpd = ThreadedTCPServer((host, port), MonitorHandler)
@@ -402,7 +436,9 @@ def run_monitor_server():
 
 
 def run_stream_server():
-    port = getattr(settings, 'STREAM_PORT', 8080)
+    port = get_config().get_stream_port()
+    if port is None:
+        raise RuntimeError("Stream port not configured for current mode")
     # Default to 0.0.0.0 (Public) for the stream.
     host = getattr(settings, 'STREAM_HOST', '0.0.0.0')
     httpd = ThreadedTCPServer((host, port), StreamHandler)
