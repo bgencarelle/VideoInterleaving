@@ -52,5 +52,5 @@ ASCII_FPS = SERVER_CAPTURE_RATE // 2
 ASCII_WIDTH = 90
 ASCII_HEIGHT = 60
 ASCII_SOURCE_IMAGE_ASPECT_RATIO = 1.333333333
-JPEG_QUALITY = 80# Image quality
-HEADLESS_RES = (450, 600)   # Resolution for the virtual screen
+JPEG_QUALITY = 85# Image quality
+HEADLESS_RES = (480, 600)   # Resolution for the virtual screen
