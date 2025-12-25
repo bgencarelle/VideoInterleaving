@@ -10,7 +10,7 @@ clock_mode = CLOCK_MODE
 midi_mode = False
 import midi_control
 #import index_client
-launch_time = 0.00000000
+launch_time = 0  # Stored as nanoseconds (integer)
 
 # Module-level variables for MIDI clock modes (set by make_file_lists.initialize_image_lists)
 png_paths_len = 0
@@ -33,9 +33,10 @@ def set_launch_time(from_birth=False):
     if from_birth:
         tz = get_timezone(BIRTH_TZ)
         fixed_datetime = datetime.datetime(birth_year, birth_month, birth_day, birth_hour, birth_minute, tzinfo=tz)
-        launch_time = fixed_datetime.timestamp()
+        # Convert timestamp (seconds) to nanoseconds for consistency
+        launch_time = int(fixed_datetime.timestamp() * 1_000_000_000)
     else:
-        launch_time = time.time()
+        launch_time = time.time_ns()
 
 set_launch_time(from_birth=FROM_BIRTH)
 
@@ -62,9 +63,15 @@ def calculate_free_clock_index(total_images, pingpong=True):
     """
     Fast, mirrored ping‑pong index:
       0,1,2,...,N-1, N-1,N-2,...,1,0, 0,1,2...
+    
+    Uses nanosecond precision for tighter synchronization, especially important
+    for multi-machine setups with chrony-synchronized clocks.
     """
-    # 1) Replace Decimal + math.floor with a simple int() cast
-    raw_index = int((time.time() - launch_time) * IPS)
+    # Use nanosecond precision with integer arithmetic to avoid floating point errors
+    current_time_ns = time.time_ns()
+    elapsed_ns = current_time_ns - launch_time
+    # Calculate index using integer math: (elapsed_ns * IPS) // 1_000_000_000
+    raw_index = (elapsed_ns * IPS) // 1_000_000_000
 
     if pingpong and total_images > 1:
         period    = 2 * total_images

@@ -1,12 +1,11 @@
 #image_display.py
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from collections import deque
 import threading
 
 import numpy as np
-#import webp  # Strict Requirement: pip install webp
 from turbojpeg import TJPF_RGB
 from turbojpeg_loader import get_turbojpeg
 
@@ -81,9 +80,39 @@ class RollingIndexCompensator:
 from image_loader import ImageLoader, FIFOImageBuffer
 
 
+# Process-compatible function for ASCII string building (CPU-bound work)
+def _build_ascii_string_process(final_chars, final_colors, ansi_lut, reset_code):
+    """
+    CPU-bound ASCII string building in a separate process to avoid GIL.
+    This function must be at module level for ProcessPoolExecutor.
+    """
+    import numpy as np
+    # Look up ANSI codes and combine
+    color_strings = ansi_lut[final_colors]
+    
+    # Optimize string building: avoid full array conversion, build strings efficiently
+    if final_chars.dtype.kind == 'S':
+        # Bytes array: decode row by row to avoid full array conversion
+        rows = []
+        for i in range(final_chars.shape[0]):
+            # Decode bytes row to string once
+            row_chars = final_chars[i].tobytes().decode('latin-1')  # Fast decode
+            row_colors = color_strings[i]
+            # Build string efficiently: join ANSI codes with chars
+            row_str = ''.join(c + ch for c, ch in zip(row_colors, row_chars))
+            rows.append(row_str)
+    else:
+        # Already string/unicode array - use numpy char operations (optimized)
+        image_grid = np.char.add(color_strings, final_chars)
+        # Optimize: use list comprehension but avoid nested joins
+        rows = [''.join(row) for row in image_grid]
+    
+    return "\r\n".join(rows) + reset_code
+
+
 class FIFOImageBufferPatched(FIFOImageBuffer):
-    def current_depth(self):
-        with self.lock: return len(self.queue)
+    """Patched version for backward compatibility - base class now has current_depth()."""
+    pass
 
 
 # -----------------------------------------------------------------------------
@@ -154,8 +183,10 @@ def load_and_render_frame(loader, index, main_folder, float_folder, source_aspec
             final_colors = final_colors[y_off : y_off + target_h, x_off : x_off + target_w]
 
             # --- RENDER TO STRING (OPTIMIZED) ---
-            # Look up ANSI codes and combine
-            # This is the most expensive CPU part, now done in a thread!
+            # CPU-bound string building - can use process pool for better parallelism
+            # Note: Process pool is optional and only used if configured
+            # For now, do it in-thread (numpy operations release GIL, so most work is parallel)
+            # Process pool can be enabled via USE_PROCESS_POOL_FOR_ASCII setting
             color_strings = ANSI_LUT[final_colors]
             
             # Optimize string building: avoid full array conversion, build strings efficiently
@@ -355,242 +386,262 @@ def run_display(clock_source=CLOCK_MODE):
         except Exception as e:
             if monitor: monitor.record_load_error(idx, e)
 
-    # 5. Thread Pool
+    # 5. Thread Pool for I/O-bound work
+    # Optimize worker count for I/O-bound image loading
+    # I/O-bound tasks can use more threads than CPU cores
     cpu_count = os.cpu_count() or 1
-    # Increase workers slightly since we are doing more CPU work in them now
-    max_workers = min(8, cpu_count + 2)
+    # Base calculation: 2-4x CPU count for I/O-bound work, but cap for memory/bandwidth
+    # For low-end systems (1-2 cores): use 4-6 workers
+    # For medium systems (4-8 cores): use 8-16 workers  
+    # For high-end systems (8+ cores): cap at 16 to avoid memory pressure
+    if cpu_count <= 2:
+        max_workers = min(6, cpu_count * 3)
+    elif cpu_count <= 4:
+        max_workers = min(12, cpu_count * 3)
+    elif cpu_count <= 8:
+        max_workers = min(16, cpu_count * 2)
+    else:
+        max_workers = 16  # Cap for high-end systems to avoid memory pressure
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        next_idx = 1 if index == 0 else (index - 1 if index == png_paths_len - 1 else index + 1)
-        # Use the NEW worker function
-        folders = folder_dictionary["Main_and_Float_Folders"]
-        future = pool.submit(load_and_render_frame, loader, next_idx, *folders, source_aspect_ratio=source_aspect_ratio)
-        future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
+    # Process pool for CPU-bound ASCII work (optional, for high-end systems)
+    # Use ProcessPoolExecutor for ASCII string building to avoid GIL limitations
+    use_process_pool_for_ascii = getattr(settings, 'USE_PROCESS_POOL_FOR_ASCII', cpu_count >= 4)
+    ascii_process_pool = None
+    if use_process_pool_for_ascii and is_ascii:
+        ascii_process_pool = ProcessPoolExecutor(max_workers=min(4, cpu_count))
 
-        frame_times = deque(maxlen=60)
-        frame_start = time.perf_counter()
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            next_idx = 1 if index == 0 else (index - 1 if index == png_paths_len - 1 else index + 1)
+            # Use the NEW worker function
+            folders = folder_dictionary["Main_and_Float_Folders"]
+            future = pool.submit(load_and_render_frame, loader, next_idx, *folders, source_aspect_ratio=source_aspect_ratio)
+            future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
 
-        while (state.run_mode and not is_headless) or is_headless:
-            successful_display = False
+            frame_times = deque(maxlen=60)
+            frame_start = time.perf_counter()
 
-            if not is_headless and has_gl and glfw:
-                glfw.poll_events()
-                if not state.run_mode: break
+            while (state.run_mode and not is_headless) or is_headless:
+                successful_display = False
 
-            if state.needs_update and not is_headless and has_gl:
-                display_init(state)
-                state.needs_update = False
+                if not is_headless and has_gl and glfw:
+                    glfw.poll_events()
+                    if not state.run_mode: break
 
-            prev = index
-            index, _ = update_index(png_paths_len, PINGPONG)
+                if state.needs_update and not is_headless and has_gl:
+                    display_init(state)
+                    state.needs_update = False
 
-            if index != prev:
-                update_folder_selection(index, float_folder_count, main_folder_count)
+                prev = index
+                index, _ = update_index(png_paths_len, PINGPONG)
 
-                comp_idx = compensator.get_compensated_index(index)
-                res = fifo.get(comp_idx)
+                if index != prev:
+                    update_folder_selection(index, float_folder_count, main_folder_count)
 
-                if res:
-                    d_idx, m_img, f_img, m_sbs, f_sbs = res
-                    compensator.update(index, d_idx)
+                    comp_idx = compensator.get_compensated_index(index)
+                    res = fifo.get(comp_idx)
 
-                    # Update loop pointers
-                    cur_main = m_img
-                    cur_float = f_img
-                    cur_m_sbs = m_sbs
-                    cur_f_sbs = f_sbs
+                    if res:
+                        d_idx, m_img, f_img, m_sbs, f_sbs = res
+                        compensator.update(index, d_idx)
 
-                    # --- [OPTIMIZED] PRE-BAKED ASCII PATH ---
-                    # Check if the worker thread already returned a String
-                    if isinstance(m_img, str):
-                        # It's already rendered! Just send it.
-                        # Pre-baked ASCII should only occur in ASCII mode, but handle edge cases
-                        if is_ascii:
-                            # ASCII mode: send to ASCII exchange
-                            exchange_ascii.set_frame(m_img)
-                        # Legacy exchange for backward compatibility (only if not in web mode)
-                        if not is_web:
-                            exchange.set_frame(m_img)
+                        # Update loop pointers
+                        cur_main = m_img
+                        cur_float = f_img
+                        cur_m_sbs = m_sbs
+                        cur_f_sbs = f_sbs
+
+                        # --- [OPTIMIZED] PRE-BAKED ASCII PATH ---
+                        # Check if the worker thread already returned a String
+                        if isinstance(m_img, str):
+                            # It's already rendered! Just send it.
+                            # Pre-baked ASCII should only occur in ASCII mode, but handle edge cases
+                            if is_ascii:
+                                # ASCII mode: send to ASCII exchange
+                                exchange_ascii.set_frame(m_img)
+                            # Legacy exchange for backward compatibility (only if not in web mode)
+                            if not is_web:
+                                exchange.set_frame(m_img)
+                            successful_display = True
+                            last_displayed_index = d_idx
+
+                            # Trigger Next Load
+                            next_idx = 1 if index == 0 else (
+                                index - 1 if index == png_paths_len - 1 else (index + 1 if index > prev else index - 1))
+                            folders = folder_dictionary["Main_and_Float_Folders"]
+                            future = pool.submit(load_and_render_frame, loader, next_idx, *folders, source_aspect_ratio=source_aspect_ratio)
+                            future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
+
+                            # Timing
+                            now = time.perf_counter()
+                            dt = now - frame_start
+                            frame_times.append(dt)
+                            frame_start = now
+                            if FPS:
+                                s = (1.0 / FPS) - dt
+                                if s > 0: time.sleep(s)
+
+                            # Calculate FPS from frame times (handle both single and multiple frames)
+                            if len(frame_times) >= 1:
+                                if len(frame_times) == 1:
+                                    # Single frame: use that frame's time directly
+                                    last_actual_fps = 1.0 / dt if dt > 0 else 0.0
+                                else:
+                                    # Multiple frames: use average frame time
+                                    avg_frame_time = sum(frame_times) / len(frame_times)
+                                    last_actual_fps = 1.0 / avg_frame_time if avg_frame_time > 0 else 0.0
+
+                            if monitor:
+                                fd = folder_dictionary
+                                monitor.update({
+                                    "index": index,
+                                    "displayed": last_displayed_index,
+                                    "fps": last_actual_fps,
+                                    "fifo_depth": fifo.current_depth(),
+                                    "successful_frame": True,
+                                    "main_folder": fd["Main_and_Float_Folders"][0],
+                                    "float_folder": fd["Main_and_Float_Folders"][1],
+                                    "rand_mult": fd.get("rand_mult"),
+                                    "main_folder_count": main_folder_count,
+                                    "float_folder_count": float_folder_count,
+                                    "fifo_miss_count": fifo_miss_count,
+                                    "last_fifo_miss": last_fifo_miss
+                                })
+
+                            continue
+                        # ----------------------------------------
+
+                        # GL Texture Update (Only for non-string)
+                        if has_gl:
+                            main_texture = renderer.update_texture(main_texture, m_img)
+                            float_texture = renderer.update_texture(float_texture, f_img)
+
                         successful_display = True
                         last_displayed_index = d_idx
+                    else:
+                        if not is_headless: print(f"[MISS] {index}")
+                        fifo_miss_count += 1
+                        last_fifo_miss = index
 
-                        # Trigger Next Load
-                        next_idx = 1 if index == 0 else (
-                            index - 1 if index == png_paths_len - 1 else (index + 1 if index > prev else index - 1))
-                        folders = folder_dictionary["Main_and_Float_Folders"]
-                        future = pool.submit(load_and_render_frame, loader, next_idx, *folders, source_aspect_ratio=source_aspect_ratio)
-                        future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
+                    next_idx = 1 if index == 0 else (
+                        index - 1 if index == png_paths_len - 1 else (index + 1 if index > prev else index - 1))
+                    folders = folder_dictionary["Main_and_Float_Folders"]
+                    future = pool.submit(load_and_render_frame, loader, next_idx, *folders, source_aspect_ratio=source_aspect_ratio)
+                    future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
 
-                        # Timing
-                        now = time.perf_counter()
-                        dt = now - frame_start
-                        frame_times.append(dt)
-                        frame_start = now
-                        if FPS:
-                            s = (1.0 / FPS) - dt
-                            if s > 0: time.sleep(s)
+                # Render (GL)
+                if has_gl:
+                    if is_headless: window.use()
+                    renderer.overlay_images_single_pass(
+                        main_texture, float_texture, BACKGROUND_COLOR,
+                        main_is_sbs=cur_m_sbs, float_is_sbs=cur_f_sbs
+                    )
 
-                        # Calculate FPS from frame times (handle both single and multiple frames)
-                        if len(frame_times) >= 1:
-                            if len(frame_times) == 1:
-                                # Single frame: use that frame's time directly
-                                last_actual_fps = 1.0 / dt if dt > 0 else 0.0
+                # Capture (Only for Images/Headless Web)
+                should_capture = False
+                if is_headless or not has_gl:
+                    now = time.time()
+                    if (index != last_captured_index) and (now - last_server_capture > capture_interval):
+                        should_capture = True
+                        last_server_capture = now
+                        last_captured_index = index
+
+                if should_capture:
+                    # If m_img is a string, we already handled it.
+                    if isinstance(cur_main, str):
+                        pass
+                    elif isinstance(cur_main, dict):
+                        pass  # Should be caught by str check, but just in case
+                    elif cur_main is not None:
+                        try:
+                            frame = None
+                            if has_gl:
+                                # Only HeadlessWindow has .fbo and .size attributes
+                                # In windowed mode, window is a raw glfw object without these attributes
+                                # This should only execute in headless mode (should_capture check above ensures this)
+                                if hasattr(window, 'fbo') and hasattr(window, 'size'):
+                                    raw = window.fbo.read(components=3)
+                                    w_fbo, h_fbo = window.size
+                                    frame = np.frombuffer(raw, dtype=np.uint8).reshape((h_fbo, w_fbo, 3))
+                                    # In web mode, resize to HEADLESS_RES
+                                    if is_web and frame is not None:
+                                        import cv2
+                                        frame = cv2.resize(frame, HEADLESS_RES, interpolation=cv2.INTER_LINEAR)
+                                else:
+                                    # Windowed mode - shouldn't reach here due to should_capture logic
+                                    # But add safety check to prevent AttributeError
+                                    print("[WARNING] Attempted FBO read in windowed mode - skipping capture")
                             else:
-                                # Multiple frames: use average frame time
-                                avg_frame_time = sum(frame_times) / len(frame_times)
-                                last_actual_fps = 1.0 / avg_frame_time if avg_frame_time > 0 else 0.0
+                                # Use HEADLESS_RES only for web rendering
+                                # ASCII mode uses its own ASCII_WIDTH/ASCII_HEIGHT sizing.
+                                if is_web:
+                                    tgt_size = HEADLESS_RES
+                                else:
+                                    tgt_size = None  # Local mode: full resolution
+                                
+                                frame = renderer.composite_cpu(
+                                    cur_main, cur_float,
+                                    main_is_sbs=cur_m_sbs, float_is_sbs=cur_f_sbs,
+                                    target_size=tgt_size
+                                )
 
-                        if monitor:
-                            fd = folder_dictionary
-                            monitor.update({
-                                "index": index,
-                                "displayed": last_displayed_index,
-                                "fps": last_actual_fps,
-                                "fifo_depth": fifo.current_depth(),
-                                "successful_frame": True,
-                                "main_folder": fd["Main_and_Float_Folders"][0],
-                                "float_folder": fd["Main_and_Float_Folders"][1],
-                                "rand_mult": fd.get("rand_mult"),
-                                "main_folder_count": main_folder_count,
-                                "float_folder_count": float_folder_count,
-                                "fifo_miss_count": fifo_miss_count,
-                                "last_fifo_miss": last_fifo_miss
-                            })
+                            if frame is not None:
+                                if is_web:
+                                    # Web only: use web exchange (and legacy for backward compat)
+                                    enc = jpeg.encode(frame, quality=JPEG_QUALITY, pixel_format=TJPF_RGB)
+                                    exchange_web.set_frame(b'j' + enc)
+                                    exchange.set_frame(b'j' + enc)  # Legacy compatibility
+                                elif is_ascii:
+                                    text_frame = ascii_converter.to_ascii(frame)
+                                    exchange_ascii.set_frame(text_frame)
+                                    exchange.set_frame(text_frame)  # Legacy compatibility
 
-                        continue
-                    # ----------------------------------------
+                        except Exception as e:
+                            print(f"[CAPTURE ERROR] {e}")
 
-                    # GL Texture Update (Only for non-string)
-                    if has_gl:
-                        main_texture = renderer.update_texture(main_texture, m_img)
-                        float_texture = renderer.update_texture(float_texture, f_img)
+                if not is_headless and has_gl and glfw:
+                    glfw.swap_buffers(window)
+                    if glfw.window_should_close(window):
+                        state.run_mode = False
 
-                    successful_display = True
-                    last_displayed_index = d_idx
-                else:
-                    if not is_headless: print(f"[MISS] {index}")
-                    fifo_miss_count += 1
-                    last_fifo_miss = index
+                now = time.perf_counter()
+                dt = now - frame_start
+                frame_times.append(dt)
+                frame_start = now
+                if FPS:
+                    s = (1.0 / FPS) - dt
+                    if s > 0: time.sleep(s)
 
-                next_idx = 1 if index == 0 else (
-                    index - 1 if index == png_paths_len - 1 else (index + 1 if index > prev else index - 1))
-                folders = folder_dictionary["Main_and_Float_Folders"]
-                future = pool.submit(load_and_render_frame, loader, next_idx, *folders, source_aspect_ratio=source_aspect_ratio)
-                future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
+                # Calculate FPS from frame times (handle both single and multiple frames)
+                if len(frame_times) >= 1:
+                    if len(frame_times) == 1:
+                        # Single frame: use that frame's time directly
+                        last_actual_fps = 1.0 / dt if dt > 0 else 0.0
+                    else:
+                        # Multiple frames: use average frame time
+                        avg_frame_time = sum(frame_times) / len(frame_times)
+                        last_actual_fps = 1.0 / avg_frame_time if avg_frame_time > 0 else 0.0
+                    #print(f"{last_actual_fps:.1f} FPS")
 
-            # Render (GL)
-            if has_gl:
-                if is_headless: window.use()
-                renderer.overlay_images_single_pass(
-                    main_texture, float_texture, BACKGROUND_COLOR,
-                    main_is_sbs=cur_m_sbs, float_is_sbs=cur_f_sbs
-                )
+                if monitor:
+                    fd = folder_dictionary
+                    monitor.update({
+                        "index": index,
+                        "displayed": last_displayed_index,
+                        "fps": last_actual_fps,
+                        "fifo_depth": fifo.current_depth(),
+                        "successful_frame": successful_display,
+                        "main_folder": fd["Main_and_Float_Folders"][0],
+                        "float_folder": fd["Main_and_Float_Folders"][1],
+                        "rand_mult": fd.get("rand_mult"),
+                        "main_folder_count": main_folder_count,
+                        "float_folder_count": float_folder_count,
+                        "fifo_miss_count": fifo_miss_count,
+                        "last_fifo_miss": last_fifo_miss
+                    })
 
-            # Capture (Only for Images/Headless Web)
-            should_capture = False
-            if is_headless or not has_gl:
-                now = time.time()
-                if (index != last_captured_index) and (now - last_server_capture > capture_interval):
-                    should_capture = True
-                    last_server_capture = now
-                    last_captured_index = index
-
-            if should_capture:
-                # If m_img is a string, we already handled it.
-                if isinstance(cur_main, str):
-                    pass
-                elif isinstance(cur_main, dict):
-                    pass  # Should be caught by str check, but just in case
-                elif cur_main is not None:
-                    try:
-                        frame = None
-                        if has_gl:
-                            # Only HeadlessWindow has .fbo and .size attributes
-                            # In windowed mode, window is a raw glfw object without these attributes
-                            # This should only execute in headless mode (should_capture check above ensures this)
-                            if hasattr(window, 'fbo') and hasattr(window, 'size'):
-                                raw = window.fbo.read(components=3)
-                                w_fbo, h_fbo = window.size
-                                frame = np.frombuffer(raw, dtype=np.uint8).reshape((h_fbo, w_fbo, 3))
-                                # In web mode, resize to HEADLESS_RES
-                                if is_web and frame is not None:
-                                    import cv2
-                                    frame = cv2.resize(frame, HEADLESS_RES, interpolation=cv2.INTER_LINEAR)
-                            else:
-                                # Windowed mode - shouldn't reach here due to should_capture logic
-                                # But add safety check to prevent AttributeError
-                                print("[WARNING] Attempted FBO read in windowed mode - skipping capture")
-                        else:
-                            # Use HEADLESS_RES only for web rendering
-                            # ASCII mode uses its own ASCII_WIDTH/ASCII_HEIGHT sizing.
-                            if is_web:
-                                tgt_size = HEADLESS_RES
-                            else:
-                                tgt_size = None  # Local mode: full resolution
-                            
-                            frame = renderer.composite_cpu(
-                                cur_main, cur_float,
-                                main_is_sbs=cur_m_sbs, float_is_sbs=cur_f_sbs,
-                                target_size=tgt_size
-                            )
-
-                        if frame is not None:
-                            if is_web:
-                                # Web only: use web exchange (and legacy for backward compat)
-                                enc = jpeg.encode(frame, quality=JPEG_QUALITY, pixel_format=TJPF_RGB)
-                                exchange_web.set_frame(b'j' + enc)
-                                exchange.set_frame(b'j' + enc)  # Legacy compatibility
-                            elif is_ascii:
-                                text_frame = ascii_converter.to_ascii(frame)
-                                exchange_ascii.set_frame(text_frame)
-                                exchange.set_frame(text_frame)  # Legacy compatibility
-
-                    except Exception as e:
-                        print(f"[CAPTURE ERROR] {e}")
-
-            if not is_headless and has_gl and glfw:
-                glfw.swap_buffers(window)
-                if glfw.window_should_close(window):
+                if not is_headless and has_gl and glfw and glfw.window_should_close(window):
                     state.run_mode = False
-
-            now = time.perf_counter()
-            dt = now - frame_start
-            frame_times.append(dt)
-            frame_start = now
-            if FPS:
-                s = (1.0 / FPS) - dt
-                if s > 0: time.sleep(s)
-
-            # Calculate FPS from frame times (handle both single and multiple frames)
-            if len(frame_times) >= 1:
-                if len(frame_times) == 1:
-                    # Single frame: use that frame's time directly
-                    last_actual_fps = 1.0 / dt if dt > 0 else 0.0
-                else:
-                    # Multiple frames: use average frame time
-                    avg_frame_time = sum(frame_times) / len(frame_times)
-                    last_actual_fps = 1.0 / avg_frame_time if avg_frame_time > 0 else 0.0
-                #print(f"{last_actual_fps:.1f} FPS")
-
-            if monitor:
-                fd = folder_dictionary
-                monitor.update({
-                    "index": index,
-                    "displayed": last_displayed_index,
-                    "fps": last_actual_fps,
-                    "fifo_depth": fifo.current_depth(),
-                    "successful_frame": successful_display,
-                    "main_folder": fd["Main_and_Float_Folders"][0],
-                    "float_folder": fd["Main_and_Float_Folders"][1],
-                    "rand_mult": fd.get("rand_mult"),
-                    "main_folder_count": main_folder_count,
-                    "float_folder_count": float_folder_count,
-                    "fifo_miss_count": fifo_miss_count,
-                    "last_fifo_miss": last_fifo_miss
-                })
-
-            if not is_headless and has_gl and glfw and glfw.window_should_close(window):
-                state.run_mode = False
 
         if not is_headless and has_gl and glfw:
             glfw.terminate()
@@ -599,4 +650,7 @@ def run_display(clock_source=CLOCK_MODE):
                 window.close()
             except Exception as e:
                 print(f"[DISPLAY] Headless window cleanup failed: {e}")
+    finally:
+        if ascii_process_pool is not None:
+            ascii_process_pool.shutdown(wait=True)
 

@@ -51,21 +51,13 @@ sudo apt update
 sudo apt install $(grep -v '^#' system-requirements.txt | tr '\n' ' ')
 ```
 
-Or manually:
+**Fedora/CentOS (rough equivalents):**
 
 ```bash
-sudo apt install python3-venv python3-dev python3-pip build-essential cmake pkg-config \
-    libwebp-dev libsdl2-dev libasound2-dev libgl1-mesa-dev libglu1-mesa-dev \
-    libegl1-mesa-dev mesa-utils chrony ninja-build python-is-python3 \
-    libjpeg-dev dnsutils
-```
-
-**Fedora/CentOS:**
-
-```bash
-sudo dnf install python3-venv python3-pip python3-devel build-essential cmake pkgconfig \
-    libwebp-devel SDL2-devel alsa-lib-devel mesa-libGL-devel mesa-libGLU-devel \
-    mesa-libEGL-devel mesa-utils chrony ninja-build python-is-python3 libjpeg-turbo-devel dnsutils
+sudo dnf install python3 python3-pip python3-devel gcc gcc-c++ make cmake pkgconfig \
+    libwebp-devel libjpeg-turbo-devel SDL2-devel alsa-lib-devel \
+    mesa-libGL-devel mesa-libGLU-devel mesa-libEGL-devel mesa-libGLES-devel \
+    libglvnd-devel glfw-devel mesa-utils chrony ninja-build bind-utils
 ```
 
 **macOS (Homebrew):**
@@ -96,6 +88,8 @@ Install Dependencies:
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
+
+`requirements.txt` only contains Python packages (system packages live in `system-requirements.txt`).
 
 ## 2. Image Preparation (Crucial)
 

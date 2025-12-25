@@ -104,11 +104,34 @@ class FIFOImageBuffer:
         self.queue = deque()
         self.max_size = max_size
         self.lock = threading.Lock()
+        self.dropped_count = 0  # Track dropped frames due to backpressure
+        self.total_updates = 0  # Track total update attempts
+
+    def is_full(self):
+        """Check if buffer is at capacity (thread-safe)."""
+        with self.lock:
+            return len(self.queue) >= self.max_size
+
+    def current_depth(self):
+        """Get current buffer depth (thread-safe)."""
+        with self.lock:
+            return len(self.queue)
 
     def update(self, index, data_tuple):
+        """
+        Update buffer with new frame data.
+        Implements backpressure: drops oldest frame if buffer is full.
+        Returns True if frame was added, False if dropped due to backpressure.
+        """
         with self.lock:
-            if len(self.queue) >= self.max_size: self.queue.popleft()
+            self.total_updates += 1
+            dropped = False
+            if len(self.queue) >= self.max_size:
+                self.queue.popleft()
+                self.dropped_count += 1
+                dropped = True
             self.queue.append((index, data_tuple))
+            return not dropped
 
     def get(self, current_index):
         with self.lock:
@@ -119,3 +142,14 @@ class FIFOImageBuffer:
             if abs(best_idx - current_index) <= TOLERANCE:
                 return best_idx, best_data[0], best_data[1], best_data[2], best_data[3]
             return None
+
+    def get_stats(self):
+        """Get buffer statistics (thread-safe)."""
+        with self.lock:
+            return {
+                'depth': len(self.queue),
+                'max_size': self.max_size,
+                'dropped_count': self.dropped_count,
+                'total_updates': self.total_updates,
+                'drop_rate': self.dropped_count / max(1, self.total_updates)
+            }

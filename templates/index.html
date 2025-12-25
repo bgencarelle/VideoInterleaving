@@ -97,6 +97,25 @@
       startStream();
     }
 
+    // Auto-resume when page becomes visible (user returns to tab)
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) {
+        // Page became visible - resume stream if it's not already running
+        if (!img.src || img.complete === false || img.naturalWidth === 0) {
+          console.log("Page visible - resuming stream");
+          resume();
+        }
+      }
+    });
+
+    // Auto-resume on page load/reload
+    window.addEventListener('load', () => {
+      // Ensure stream starts on page load
+      if (!img.src) {
+        startStream();
+      }
+    });
+
     // --- UI Logic ---
     const body = document.body;
     document.getElementById('fitToggle').onclick = () => {

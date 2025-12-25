@@ -11,6 +11,9 @@ import os
 import re
 import shutil
 import subprocess
+import json
+from pathlib import Path
+from typing import Optional
 
 # --- Conditional Imports ---
 _GLFW_AVAILABLE = False
@@ -34,6 +37,19 @@ from settings import (
 
 window = None
 ctx = None
+
+# Backend usage tracking
+_BACKEND_USAGE_LOG: Optional[Path] = None
+_BACKEND_USAGE_DATA = {
+    'headless_legacy_used': False,
+    'headless_backends_tried': [],
+    'headless_backend_success': None,
+    'headless_fallback_used': False,
+    'local_window_backend': None,
+    'local_legacy_used': False,
+    'session_type': None,
+    'hardware_type': None,
+}
 
 def _is_wayland_session() -> bool:
     return bool(os.environ.get("WAYLAND_DISPLAY") or os.environ.get("XDG_SESSION_TYPE") == "wayland")
@@ -121,6 +137,10 @@ class LegacyHeadlessWindow:
             self._glfw_window = None
 
 def _current_mode(monitor):
+    """
+    Get the current video mode of the monitor.
+    Returns the resolution currently in use by the display.
+    """
     if not glfw:
         return None
     try:
@@ -130,6 +150,10 @@ def _current_mode(monitor):
 
 
 def _largest_mode(monitor):
+    """
+    Get the largest available video mode for the monitor.
+    Used as fallback only if current mode is unavailable.
+    """
     if not glfw:
         return None
     modes = glfw.get_video_modes(monitor)
@@ -137,9 +161,18 @@ def _largest_mode(monitor):
 
 
 def _preferred_fullscreen_mode(monitor):
+    """
+    Get the preferred fullscreen video mode.
+    Always prefers the CURRENT resolution to avoid display resolution changes.
+    Falls back to largest mode only if current mode is unavailable.
+    
+    On Linux (X11/Wayland), this ensures we use the current display resolution,
+    preventing unwanted resolution changes on low-end systems.
+    """
     mode = _current_mode(monitor)
     if mode:
         return mode
+    # Fallback: only used if current mode unavailable (should be rare)
     return _largest_mode(monitor)
 
 def _log_renderer_info(ctx):
@@ -404,13 +437,44 @@ def _try_hidden_glfw_headless_legacy(require_codes: list[int | None], is_pi: boo
     glfw.terminate()
     return None
 
+def _log_backend_usage():
+    """Log backend usage to file for analysis."""
+    global _BACKEND_USAGE_LOG, _BACKEND_USAGE_DATA
+    if _BACKEND_USAGE_LOG is None:
+        log_path = Path.home() / ".videointerleaving_backend_usage.json"
+        _BACKEND_USAGE_LOG = log_path
+    try:
+        # Read existing data if any
+        if _BACKEND_USAGE_LOG.exists():
+            with open(_BACKEND_USAGE_LOG, 'r') as f:
+                existing = json.load(f)
+                # Merge with current session data
+                for key in _BACKEND_USAGE_DATA:
+                    if key not in existing:
+                        existing[key] = _BACKEND_USAGE_DATA[key]
+                    elif isinstance(existing[key], list) and isinstance(_BACKEND_USAGE_DATA[key], list):
+                        existing[key].extend(_BACKEND_USAGE_DATA[key])
+                _BACKEND_USAGE_DATA = existing
+        # Write updated data
+        with open(_BACKEND_USAGE_LOG, 'w') as f:
+            json.dump(_BACKEND_USAGE_DATA, f, indent=2)
+    except Exception as e:
+        # Don't fail if logging fails
+        pass
+
 def display_init(state: DisplayState):
     global window, ctx
 
     pi_model = _pi_model()
     is_pi = pi_model is not None
     is_wayland = _is_wayland_session()
-    print(f"[DISPLAY] Session: {_session_label()}")
+    session_label = _session_label()
+    print(f"[DISPLAY] Session: {session_label}")
+    
+    # Track session info
+    _BACKEND_USAGE_DATA['session_type'] = session_label
+    _BACKEND_USAGE_DATA['hardware_type'] = pi_model if is_pi else 'unknown'
+    
     detected_es = _detect_es_version()
     require_codes = _es_require_codes(detected_es)
 
@@ -447,6 +511,7 @@ def display_init(state: DisplayState):
         prefer_legacy_headless = force_legacy or (detected_es is not None and (detected_es[0], detected_es[1]) < (3, 0))
         if prefer_legacy_headless:
             print("[DISPLAY] Headless renderer: legacy (detected GLES < 3.0 or FORCE_LEGACY_GL=1)")
+            _BACKEND_USAGE_DATA['headless_legacy_used'] = True
             legacy_window = _try_hidden_glfw_headless_legacy(require_codes, is_pi, (width, height))
             if legacy_window is None:
                 print("❌ HEADLESS LEGACY GL CONTEXT FAILED. Exiting.")
@@ -459,6 +524,7 @@ def display_init(state: DisplayState):
             )
             renderer.set_viewport_size(width, height)
             print(f"[DISPLAY] Headless legacy GL ready: {width}x{height}")
+            _log_backend_usage()
             return legacy_window
 
         # --- BACKEND WATERFALL STRATEGY ---
@@ -480,24 +546,27 @@ def display_init(state: DisplayState):
             for require_code in require_codes:
                 attempt_backend = backend or "auto"
                 attempt_version = _format_gl_version(require_code) if require_code is not None else "default"
+                attempt_str = f"{attempt_backend}:{attempt_version}"
                 print(f"[DISPLAY] Headless attempt: backend={attempt_backend}, GLES={attempt_version}")
-                try:
-                    create_kwargs = {"standalone": True}
-                    if backend:
-                        create_kwargs["backend"] = backend
-                    if require_code is not None:
-                        create_kwargs["require"] = require_code
+                _BACKEND_USAGE_DATA['headless_backends_tried'].append(attempt_str)
+            try:
+                create_kwargs = {"standalone": True}
+                if backend:
+                    create_kwargs["backend"] = backend
+                if require_code is not None:
+                    create_kwargs["require"] = require_code
 
-                    ctx = moderngl.create_context(**create_kwargs)
-                    context_created = True
-                    if require_code is not None:
-                        print(f"[DISPLAY] Headless GL: Requested GLES {_format_gl_version(require_code)}")
-                    _log_renderer_info(ctx)
-                    break
-                except Exception as e:
-                    last_error = e
-                    print(f"[DISPLAY] Headless attempt failed ({attempt_backend}, GLES={attempt_version}): {e}")
-                    continue
+                ctx = moderngl.create_context(**create_kwargs)
+                context_created = True
+                _BACKEND_USAGE_DATA['headless_backend_success'] = attempt_str
+                if require_code is not None:
+                    print(f"[DISPLAY] Headless GL: Requested GLES {_format_gl_version(require_code)}")
+                _log_renderer_info(ctx)
+                break
+            except Exception as e:
+                last_error = e
+                print(f"[DISPLAY] Headless attempt failed ({attempt_backend}, GLES={attempt_version}): {e}")
+                continue
             if context_created:
                 break
 
@@ -509,17 +578,19 @@ def display_init(state: DisplayState):
             print("Tip: If on Pi, ensure 'libgles2-mesa-dev' is installed.")
             print("!"*60 + "\n")
             # Wayland/VC4 often needs a real surface; try a hidden GLFW window as a last resort.
+            _BACKEND_USAGE_DATA['headless_fallback_used'] = True
             ctx_hidden, win_hidden = _try_hidden_glfw_headless(require_codes, is_pi, (width, height))
             if ctx_hidden is not None:
                 ctx = ctx_hidden
                 hidden_window = win_hidden
+                _BACKEND_USAGE_DATA['headless_backend_success'] = "hidden_glfw"
             else:
                 legacy_window = _try_hidden_glfw_headless_legacy(require_codes, is_pi, (width, height))
                 if legacy_window is None:
                     print("❌ HEADLESS GL CONTEXT FAILED (after hidden GLFW fallback). Exiting.")
                     sys.exit(1)
-
                 # Legacy GPU headless: use PyOpenGL backend and render into legacy FBO
+                _BACKEND_USAGE_DATA['headless_legacy_used'] = True
                 renderer.initialize_legacy()
                 renderer.set_transform_parameters(
                     fs_scale=1.0, fs_offset_x=0.0, fs_offset_y=0.0,
@@ -528,6 +599,7 @@ def display_init(state: DisplayState):
                 )
                 renderer.set_viewport_size(width, height)
                 print(f"[DISPLAY] Headless legacy GL ready: {width}x{height}")
+                _log_backend_usage()
                 return legacy_window
 
         if is_ascii:
@@ -557,6 +629,7 @@ def display_init(state: DisplayState):
                 finally:
                     glfw.terminate()
             hw._cleanup = _cleanup_hidden
+        _log_backend_usage()
         return hw
 
     # --- PATH B: LOCAL WINDOWED MODE ---
@@ -728,20 +801,25 @@ def display_init(state: DisplayState):
         if force_legacy or (version_code is not None and version_code < 300):
             renderer.initialize_legacy()
             ctx = None
+            _BACKEND_USAGE_DATA['local_legacy_used'] = True
+            _BACKEND_USAGE_DATA['local_window_backend'] = 'legacy'
             print("[DISPLAY] Renderer backend: legacy (PyOpenGL)")
         else:
             try:
                 # Wrap the *current* context created by GLFW.
                 # Use require=300 so GLES 3.0 contexts are accepted as ModernGL-capable.
                 ctx = moderngl.create_context(require=300)
+                _BACKEND_USAGE_DATA['local_window_backend'] = 'moderngl'
             except Exception as e:
                 print(f"❌ ERROR: Failed to wrap current context with ModernGL: {e}")
                 print("Tip: Set FORCE_LEGACY_GL=1 to force the PyOpenGL legacy backend.")
                 sys.exit(1)
 
-            _log_renderer_info(ctx)
-            renderer.initialize(ctx)
-            print("[DISPLAY] Renderer backend: moderngl")
+        _log_renderer_info(ctx)
+        renderer.initialize(ctx)
+        print("[DISPLAY] Renderer backend: moderngl")
+        
+        _log_backend_usage()
 
         if GAMMA_CORRECTION_ENABLED or ENABLE_SRGB_FRAMEBUFFER:
             try:
@@ -786,7 +864,9 @@ def display_init(state: DisplayState):
                 if current_w != win_w or current_h != win_h:
                     glfw.set_window_size(window, win_w, win_h)
         else:
-            # Non-Wayland: Use set_window_monitor for proper fullscreen
+            # Non-Wayland (X11): Use set_window_monitor for proper fullscreen
+            # On Linux X11, set_window_monitor with current resolution does NOT change display resolution
+            # This is safe for low-end Linux systems - window goes fullscreen at current resolution
             current_monitor = glfw.get_window_monitor(window)
             if state.fullscreen:
                 mon = glfw.get_primary_monitor()
@@ -798,6 +878,8 @@ def display_init(state: DisplayState):
                         fs_w, fs_h = LOW_RES_FULLSCREEN_RESOLUTION
                         refresh = 60  # Default refresh rate
                     else:
+                        # Use current resolution to avoid display resolution changes
+                        # _preferred_fullscreen_mode() returns current mode, which is safe on Linux
                         best = _preferred_fullscreen_mode(mon)
                         fs_w, fs_h = best.size.width, best.size.height
                         refresh = getattr(best, 'refresh_rate', 60)

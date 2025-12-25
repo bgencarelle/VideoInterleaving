@@ -108,42 +108,50 @@ detect_os() {
     echo "$os|$pkg_manager|$pkg_update_cmd|$pkg_install_cmd|$needs_sudo"
 }
 
+read_pkg_file() {
+    # Reads a package list file, stripping comments/blank lines.
+    local file="$1"
+    if [ ! -f "$file" ]; then
+        echo ""
+        return
+    fi
+    sed 's/#.*$//' "$file" | sed '/^[[:space:]]*$/d'
+}
+
 # Get platform-specific packages based on README.md instructions
 get_packages_for_platform() {
     local os=$1
-    
+    local pkg_list=""
+
     case "$os" in
         debian)
-            # From system-requirements.txt (Debian/Ubuntu/Raspbian)
-            echo "python3-venv python3-dev python3-pip build-essential cmake pkg-config \
-                  ninja-build python-is-python3 python3-pil python3-numpy python3-opencv \
-                  python3-psutil python3-websockets python3-opengl python3-moderngl \
-                  libwebp-dev libjpeg-dev libturbojpeg0 libgl1-mesa-dev libglu1-mesa-dev libegl1-mesa-dev \
-                  libgles-dev libglvnd-dev libglfw3-dev mesa-utils mesa-utils-extra \
-                  libsdl2-dev libasound2-dev chrony dnsutils"
+            # Preferred: read from system-requirements.txt (Debian/Ubuntu/Raspbian)
+            pkg_list=$(read_pkg_file "$PROJECT_DIR/system-requirements.txt")
             ;;
         rhel)
             # From README.md (Fedora/CentOS)
-            echo "python3 python3-pip python3-devel gcc gcc-c++ make cmake pkgconfig \
-                  libwebp-devel libjpeg-turbo-devel SDL2-devel alsa-lib-devel \
-                  mesa-libGL-devel mesa-libGLU-devel mesa-libEGL-devel mesa-libGLES-devel \
-                  libglvnd-devel glfw-devel mesa-utils \
-                  chrony ninja-build bind-utils"
+            pkg_list="python3 python3-pip python3-devel gcc gcc-c++ make cmake pkgconfig \
+libwebp-devel libjpeg-turbo-devel SDL2-devel alsa-lib-devel \
+mesa-libGL-devel mesa-libGLU-devel mesa-libEGL-devel mesa-libGLES-devel \
+libglvnd-devel glfw-devel mesa-utils \
+chrony ninja-build bind-utils"
             ;;
         arch)
             # Arch Linux equivalents
-            echo "python python-pip base-devel cmake pkg-config ninja \
-                  libwebp libjpeg-turbo sdl2 alsa-lib mesa glu glfw \
-                  chrony bind-tools"
+            pkg_list="python python-pip base-devel cmake pkg-config ninja \
+libwebp libjpeg-turbo sdl2 alsa-lib mesa glu glfw \
+chrony bind-tools"
             ;;
         macos)
             # From README.md (macOS/Homebrew) - minimal set
-            echo "python webp pkg-config sdl2 chrony jpeg-turbo"
+            pkg_list="python webp pkg-config sdl2 chrony jpeg-turbo"
             ;;
         *)
-            echo ""
+            pkg_list=""
             ;;
     esac
+
+    echo "$pkg_list"
 }
 
 # Install system packages
