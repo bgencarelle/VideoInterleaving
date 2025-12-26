@@ -675,9 +675,9 @@ backup_systemd_service() {
     local service_name=$1
     if [ -f "/etc/systemd/system/$service_name" ]; then
         local backup_dir="/etc/systemd/system/videointerleaving-backups"
-        mkdir -p "$backup_dir"
+        sudo mkdir -p "$backup_dir" 2>/dev/null || true
         local timestamp=$(date +%Y%m%d_%H%M%S)
-        cp "/etc/systemd/system/$service_name" "$backup_dir/$service_name.$timestamp" 2>/dev/null || true
+        sudo cp "/etc/systemd/system/$service_name" "$backup_dir/$service_name.$timestamp" 2>/dev/null || true
         log_verbose "Backed up $service_name to $backup_dir/$service_name.$timestamp"
     fi
 }
@@ -1029,8 +1029,76 @@ EOF
         log_warning "Note: For GUI applications, user service is recommended. Use: systemctl --user enable --now vi-local.service"
 
         log_info "Reloading systemd daemon..."
-sudo systemctl daemon-reload
+        sudo systemctl daemon-reload
         log_success "Systemd daemon reloaded"
+        
+        # Restart services that existed before (they were updated)
+        log_info "Restarting updated services..."
+        services_restarted=0
+        
+        # Check and restart each service if it existed
+        if [ "$WEB_SERVICE_EXISTS" = true ]; then
+            if sudo systemctl is-enabled --quiet vi-web.service 2>/dev/null; then
+                log_info "Restarting vi-web.service..."
+                if sudo systemctl restart vi-web.service 2>/dev/null; then
+                    log_success "vi-web.service restarted"
+                    services_restarted=$((services_restarted + 1))
+                else
+                    log_warning "Failed to restart vi-web.service (may not be running)"
+                fi
+            fi
+        fi
+        
+        if [ "$ASCII_SERVICE_EXISTS" = true ]; then
+            if sudo systemctl is-enabled --quiet vi-ascii.service 2>/dev/null; then
+                log_info "Restarting vi-ascii.service..."
+                if sudo systemctl restart vi-ascii.service 2>/dev/null; then
+                    log_success "vi-ascii.service restarted"
+                    services_restarted=$((services_restarted + 1))
+                else
+                    log_warning "Failed to restart vi-ascii.service (may not be running)"
+                fi
+            fi
+        fi
+        
+        if [ "$ASCIIWEB_SERVICE_EXISTS" = true ]; then
+            if sudo systemctl is-enabled --quiet vi-asciiweb.service 2>/dev/null; then
+                log_info "Restarting vi-asciiweb.service..."
+                if sudo systemctl restart vi-asciiweb.service 2>/dev/null; then
+                    log_success "vi-asciiweb.service restarted"
+                    services_restarted=$((services_restarted + 1))
+                else
+                    log_warning "Failed to restart vi-asciiweb.service (may not be running)"
+                fi
+            fi
+        fi
+        
+        if [ "$LOCAL_SERVICE_EXISTS" = true ]; then
+            if sudo systemctl is-enabled --quiet vi-local.service 2>/dev/null; then
+                log_info "Restarting vi-local.service (system service)..."
+                if sudo systemctl restart vi-local.service 2>/dev/null; then
+                    log_success "vi-local.service (system) restarted"
+                    services_restarted=$((services_restarted + 1))
+                else
+                    log_warning "Failed to restart vi-local.service (system) (may not be running)"
+                fi
+            fi
+            
+            # Also restart user service for local mode if it exists
+            USER_HOME=$(eval echo ~"$USERNAME" 2>/dev/null || getent passwd "$USERNAME" 2>/dev/null | cut -d: -f6 || echo "")
+            if [ -n "$USER_HOME" ] && [ -f "$USER_HOME/.config/systemd/user/vi-local.service" ]; then
+                log_info "Restarting user service vi-local.service..."
+                if systemctl --user is-enabled --quiet vi-local.service 2>/dev/null; then
+                    systemctl --user restart vi-local.service 2>/dev/null && log_success "User vi-local.service restarted" || log_warning "Failed to restart user vi-local.service"
+                fi
+            fi
+        fi
+        
+        if [ "$services_restarted" -gt 0 ]; then
+            log_success "Restarted $services_restarted service(s)"
+        else
+            log_info "No services were restarted (either new services or not enabled)"
+        fi
     fi
     
     echo ""

@@ -505,7 +505,10 @@ def display_init(state: DisplayState):
             width = w if w % 2 == 0 else w + 1
             height = h if h % 2 == 0 else h + 1
         else:
-            width, height = getattr(settings, "HEADLESS_RES", (640, 480))
+            # Always use HEADLESS_RES from settings - do not calculate from image size
+            headless_res = getattr(settings, "HEADLESS_RES", (640, 480))
+            width, height = headless_res
+            print(f"[DISPLAY] Using HEADLESS_RES from settings.py: {width}x{height}")
 
         force_legacy = os.environ.get("FORCE_LEGACY_GL") in {"1", "true", "TRUE", "yes", "YES"}
         prefer_legacy_headless = force_legacy or (detected_es is not None and (detected_es[0], detected_es[1]) < (3, 0))
@@ -883,7 +886,7 @@ def display_init(state: DisplayState):
                         best = _preferred_fullscreen_mode(mon)
                         fs_w, fs_h = best.size.width, best.size.height
                         refresh = getattr(best, 'refresh_rate', 60)
-                    glfw.set_window_monitor(window, mon, 0, 0, fs_w, fs_h, refresh)
+                        glfw.set_window_monitor(window, mon, 0, 0, fs_w, fs_h, refresh)
             else:
                 if current_monitor is not None:
                     # Restore to a small window; actual sizing will be re-derived below via framebuffer size.
