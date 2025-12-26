@@ -252,15 +252,9 @@ def _es_require_codes(detected_es: tuple[int, int] | None) -> list[int | None]:
     if detected_es:
         major, minor = detected_es
         detected_code = (major * 100) + (minor * 10)
-        # If we can detect the max ES version, don't waste time probing higher versions.
-        if detected_code >= 310:
-            attempts = [310, 300, 200, None]
-        elif detected_code >= 300:
-            attempts = [300, 200, None]
-        elif detected_code >= 200:
-            attempts = [200, None]
-        else:
-            attempts = [None]
+        # Use the detected version directly - no need to test lower versions
+        # ModernGL will fall back automatically if needed
+        attempts = [detected_code]
     else:
         # Unknown capability: probe high→low.
         attempts = [310, 300, 200, None]
@@ -481,7 +475,9 @@ def display_init(state: DisplayState):
     if is_pi:
         print(f"[DISPLAY] Hardware: {pi_model}")
     if detected_es:
-        print(f"[DISPLAY] GLES capability detected: {detected_es[0]}.{detected_es[1]} (via eglinfo)")
+        major, minor = detected_es
+        detected_code = (major * 100) + (minor * 10)
+        print(f"[DISPLAY] GLES capability detected: {major}.{minor} (via eglinfo) - will use GLES {major}.{minor}")
     elif is_pi:
         print("[DISPLAY] GLES capability not detected via eglinfo; trying GLES versions high→low.")
     else:
@@ -507,8 +503,14 @@ def display_init(state: DisplayState):
         else:
             # Always use HEADLESS_RES from settings - do not calculate from image size
             headless_res = getattr(settings, "HEADLESS_RES", (640, 480))
+            # Debug: Check if HEADLESS_RES is actually a tuple
+            if not isinstance(headless_res, tuple) or len(headless_res) != 2:
+                print(f"[DISPLAY] ⚠️ WARNING: HEADLESS_RES is not a valid tuple: {headless_res} (type: {type(headless_res)})")
+                headless_res = (640, 480)
             width, height = headless_res
-            print(f"[DISPLAY] Using HEADLESS_RES from settings.py: {width}x{height}")
+            # Debug: Print the actual value from settings
+            actual_settings_value = getattr(settings, "HEADLESS_RES", None)
+            print(f"[DISPLAY] Using HEADLESS_RES from settings.py: {width}x{height} (raw value: {actual_settings_value})")
 
         force_legacy = os.environ.get("FORCE_LEGACY_GL") in {"1", "true", "TRUE", "yes", "YES"}
         prefer_legacy_headless = force_legacy or (detected_es is not None and (detected_es[0], detected_es[1]) < (3, 0))
@@ -552,26 +554,28 @@ def display_init(state: DisplayState):
                 attempt_str = f"{attempt_backend}:{attempt_version}"
                 print(f"[DISPLAY] Headless attempt: backend={attempt_backend}, GLES={attempt_version}")
                 _BACKEND_USAGE_DATA['headless_backends_tried'].append(attempt_str)
-            try:
-                create_kwargs = {"standalone": True}
-                if backend:
-                    create_kwargs["backend"] = backend
-                if require_code is not None:
-                    create_kwargs["require"] = require_code
+                try:
+                    create_kwargs = {"standalone": True}
+                    if backend:
+                        create_kwargs["backend"] = backend
+                    if require_code is not None:
+                        create_kwargs["require"] = require_code
 
-                ctx = moderngl.create_context(**create_kwargs)
-                context_created = True
-                _BACKEND_USAGE_DATA['headless_backend_success'] = attempt_str
-                if require_code is not None:
-                    print(f"[DISPLAY] Headless GL: Requested GLES {_format_gl_version(require_code)}")
-                _log_renderer_info(ctx)
-                break
-            except Exception as e:
-                last_error = e
-                print(f"[DISPLAY] Headless attempt failed ({attempt_backend}, GLES={attempt_version}): {e}")
-                continue
+                    ctx = moderngl.create_context(**create_kwargs)
+                    context_created = True
+                    _BACKEND_USAGE_DATA['headless_backend_success'] = attempt_str
+                    if require_code is not None:
+                        print(f"[DISPLAY] ✅ Headless GL: Successfully created GLES {_format_gl_version(require_code)} context")
+                    else:
+                        print(f"[DISPLAY] ✅ Headless GL: Successfully created default context")
+                    _log_renderer_info(ctx)
+                    break  # Success - exit inner loop
+                except Exception as e:
+                    last_error = e
+                    print(f"[DISPLAY] Headless attempt failed ({attempt_backend}, GLES={attempt_version}): {e}")
+                    continue  # Try next version
             if context_created:
-                break
+                break  # Success - exit outer loop
 
         if not context_created:
             print("\n" + "!"*60)
