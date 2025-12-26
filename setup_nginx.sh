@@ -713,7 +713,7 @@ fi
 if command -v ufw >/dev/null 2>&1; then
     log_step "🔥 Configuring Firewall..."
     
-    local firewall_rules=(
+    firewall_rules=(
         "Nginx Full:Nginx Full"
         "1978/tcp:Monitor (WEB mode)"
         "1980/tcp:Monitor (ASCIIWEB mode)"
@@ -726,14 +726,14 @@ if command -v ufw >/dev/null 2>&1; then
     
     if [ "$DRY_RUN" = true ]; then
         for rule_info in "${firewall_rules[@]}"; do
-            local rule=$(echo "$rule_info" | cut -d: -f1)
-            local desc=$(echo "$rule_info" | cut -d: -f2)
+            rule=$(echo "$rule_info" | cut -d: -f1)
+            desc=$(echo "$rule_info" | cut -d: -f2)
             log_info "[DRY-RUN] Would run: ufw allow $rule  # $desc"
         done
     else
-        local added_count=0
+        added_count=0
         for rule_info in "${firewall_rules[@]}"; do
-            local rule=$(echo "$rule_info" | cut -d: -f1)
+            rule=$(echo "$rule_info" | cut -d: -f1)
             # Check if rule already exists
             if ufw status | grep -q "$rule"; then
                 log_verbose "Firewall rule for $rule already exists"

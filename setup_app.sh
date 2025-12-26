@@ -387,9 +387,9 @@ install_system_packages "$OS" "$PKG_MANAGER" "$PKG_UPDATE" "$PKG_INSTALL" "$NEED
 # Add user to video/render groups (Linux only)
 if [[ "$OSTYPE" == "linux-gnu"* ]] && [ "$HAS_GPU" = true ] && [ "$USERNAME" != "root" ]; then
     # Check if user is already in groups
-    local user_groups=$(groups "$USERNAME" 2>/dev/null || id -Gn "$USERNAME" 2>/dev/null || echo "")
-    local needs_video=false
-    local needs_render=false
+    user_groups=$(groups "$USERNAME" 2>/dev/null || id -Gn "$USERNAME" 2>/dev/null || echo "")
+    needs_video=false
+    needs_render=false
     
     if ! echo "$user_groups" | grep -q "\bvideo\b"; then
         needs_video=true
