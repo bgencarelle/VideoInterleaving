@@ -1,11 +1,13 @@
 #!/bin/bash
 
 # --- CRITICAL: SUDO CHECK FIRST ---
-# Check if running as root or with sudo BEFORE doing anything else
+# Check if running as root, if not, re-exec with sudo
 if [ "$(id -u)" -ne 0 ]; then
-    echo "❌ ERROR: This script must be run as root or with sudo" >&2
-    echo "❌ Please run: sudo $0 $*" >&2
-    exit 1
+    echo "⚠️  Not running as root. Attempting to elevate with sudo..."
+    # Use absolute path to script to handle spaces and special characters
+    SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
+    exec sudo "$SCRIPT_PATH" "$@"
+    exit $?
 fi
 
 set -euo pipefail

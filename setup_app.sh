@@ -722,6 +722,7 @@ Environment=XAUTHORITY=$XAUTH_PATH"
     # Check which services exist
     WEB_SERVICE_EXISTS=false
     ASCII_SERVICE_EXISTS=false
+    ASCIIWEB_SERVICE_EXISTS=false
     LOCAL_SERVICE_EXISTS=false
     
     if check_systemd_service_exists "vi-web.service"; then
@@ -731,6 +732,10 @@ Environment=XAUTHORITY=$XAUTH_PATH"
     if check_systemd_service_exists "vi-ascii.service"; then
         ASCII_SERVICE_EXISTS=true
         log_info "Existing vi-ascii.service found"
+    fi
+    if check_systemd_service_exists "vi-asciiweb.service"; then
+        ASCIIWEB_SERVICE_EXISTS=true
+        log_info "Existing vi-asciiweb.service found"
     fi
     if check_systemd_service_exists "vi-local.service"; then
         LOCAL_SERVICE_EXISTS=true
@@ -792,13 +797,41 @@ WantedBy=multi-user.target
 EOF
         echo "[DRY-RUN] ---"
         echo ""
+        if [ "$ASCIIWEB_SERVICE_EXISTS" = true ]; then
+            log_info "[DRY-RUN] Would update /etc/systemd/system/vi-asciiweb.service"
+        else
+            log_info "[DRY-RUN] Would create /etc/systemd/system/vi-asciiweb.service"
+        fi
+        echo "[DRY-RUN] ---"
+        cat <<EOF | sed 's/^/[DRY-RUN] /'
+[Unit]
+Description=VideoInterleaving (ASCII WebSocket)
+After=network.target
+
+[Service]
+User=$USERNAME
+WorkingDirectory=$PROJECT_DIR
+Environment=PYTHONUNBUFFERED=1
+$ENV_BLOCK
+ExecStart=$VENV_DIR/bin/python -O main.py --mode asciiweb
+Restart=always
+RestartSec=3
+StandardOutput=append:$PROJECT_DIR/vi-asciiweb.log
+StandardError=append:$PROJECT_DIR/vi-asciiweb.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        echo "[DRY-RUN] ---"
+        echo ""
         if [ "$LOCAL_SERVICE_EXISTS" = true ]; then
             log_info "[DRY-RUN] Would update /etc/systemd/system/vi-local.service"
         else
             log_info "[DRY-RUN] Would create /etc/systemd/system/vi-local.service"
         fi
         echo "[DRY-RUN] ---"
-        log_info "[DRY-RUN] Would create user service at: /home/$USERNAME/.config/systemd/user/vi-local.service"
+        USER_HOME=$(eval echo ~"$USERNAME" 2>/dev/null || getent passwd "$USERNAME" 2>/dev/null | cut -d: -f6 || echo "/home/$USERNAME")
+        log_info "[DRY-RUN] Would create user service at: $USER_HOME/.config/systemd/user/vi-local.service"
         log_info "[DRY-RUN] Would create system service at: /etc/systemd/system/vi-local.service"
         cat <<EOF | sed 's/^/[DRY-RUN] /'
 [Unit]
@@ -831,9 +864,22 @@ EOF
         if [ "$ASCII_SERVICE_EXISTS" = true ]; then
             backup_systemd_service "vi-ascii.service"
         fi
+        if [ "$ASCIIWEB_SERVICE_EXISTS" = true ]; then
+            backup_systemd_service "vi-asciiweb.service"
+        fi
         if [ "$LOCAL_SERVICE_EXISTS" = true ]; then
             backup_systemd_service "vi-local.service"
         fi
+        
+        # Stop services before rewriting (good practice)
+        # Only stop if services are actually running to avoid errors on low-end systems
+        log_info "Stopping existing services before update..."
+        for service in vi-web vi-ascii vi-asciiweb vi-local; do
+            # Check if service is active (with sudo for permissions) and stop if running
+            if sudo systemctl is-active --quiet "$service.service" 2>/dev/null; then
+                sudo systemctl stop "$service.service" 2>/dev/null || true
+            fi
+        done
         
         # Create/update services
         if [ "$WEB_SERVICE_EXISTS" = true ]; then
@@ -888,6 +934,32 @@ WantedBy=multi-user.target
 EOF
         log_success "vi-ascii.service created/updated"
 
+        if [ "$ASCIIWEB_SERVICE_EXISTS" = true ]; then
+            log_info "Updating vi-asciiweb.service..."
+        else
+            log_info "Creating vi-asciiweb.service..."
+        fi
+        sudo tee "/etc/systemd/system/vi-asciiweb.service" > /dev/null <<EOF
+[Unit]
+Description=VideoInterleaving (ASCII WebSocket)
+After=network.target
+
+[Service]
+User=$USERNAME
+WorkingDirectory=$PROJECT_DIR
+Environment=PYTHONUNBUFFERED=1
+$ENV_BLOCK
+ExecStart=$VENV_DIR/bin/python -O main.py --mode asciiweb
+Restart=always
+RestartSec=3
+StandardOutput=append:$PROJECT_DIR/vi-asciiweb.log
+StandardError=append:$PROJECT_DIR/vi-asciiweb.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        log_success "vi-asciiweb.service created/updated"
+
         if [ "$LOCAL_SERVICE_EXISTS" = true ]; then
             log_info "Updating vi-local.service..."
         else
@@ -895,8 +967,12 @@ EOF
         fi
         # Local mode service - use user service for better GUI compatibility
         # Systemd user services work better for GUI applications
-        USER_SERVICE_DIR="/home/$USERNAME/.config/systemd/user"
-        if [ "$DRY_RUN" = false ] && [ -d "/home/$USERNAME" ]; then
+        USER_HOME=$(eval echo ~"$USERNAME" 2>/dev/null || getent passwd "$USERNAME" 2>/dev/null | cut -d: -f6 || echo "")
+        if [ -z "$USER_HOME" ]; then
+            USER_HOME="/home/$USERNAME"  # Fallback to default
+        fi
+        USER_SERVICE_DIR="$USER_HOME/.config/systemd/user"
+        if [ "$DRY_RUN" = false ] && [ -d "$USER_HOME" ]; then
             log_info "Creating user service for local mode (better GUI compatibility)..."
             mkdir -p "$USER_SERVICE_DIR"
             
@@ -961,6 +1037,7 @@ sudo systemctl daemon-reload
     log_info "To enable and start services, run:"
     echo "   👉 Web Mode:   systemctl enable --now vi-web"
     echo "   👉 ASCII Mode: systemctl enable --now vi-ascii"
+    echo "   👉 ASCIIWEB Mode: systemctl enable --now vi-asciiweb"
     echo "   👉 Local Mode (recommended): systemctl --user enable --now vi-local"
     echo "   👉 Local Mode (fallback):    systemctl enable --now vi-local"
     echo ""
@@ -968,9 +1045,9 @@ sudo systemctl daemon-reload
 else
     log_step "⚙️  Skipping Systemd Services (not available on this system)"
     if [ "$OS" = "macos" ]; then
-        log_info "On macOS, run manually: $VENV_DIR/bin/python -O main.py --mode <web|ascii|local>"
+        log_info "On macOS, run manually: $VENV_DIR/bin/python -O main.py --mode <web|ascii|asciiweb|local>"
     else
-        log_info "Run manually: $VENV_DIR/bin/python -O main.py --mode <web|ascii|local>"
+        log_info "Run manually: $VENV_DIR/bin/python -O main.py --mode <web|ascii|asciiweb|local>"
     fi
 fi
 
@@ -1045,7 +1122,7 @@ else
     fi
     
     if [[ "$OSTYPE" == "linux-gnu"* ]] && command -v systemctl >/dev/null 2>&1; then
-        if [ "$WEB_SERVICE_EXISTS" = true ] || [ "$ASCII_SERVICE_EXISTS" = true ] || [ "$LOCAL_SERVICE_EXISTS" = true ]; then
+        if [ "$WEB_SERVICE_EXISTS" = true ] || [ "$ASCII_SERVICE_EXISTS" = true ] || [ "$ASCIIWEB_SERVICE_EXISTS" = true ] || [ "$LOCAL_SERVICE_EXISTS" = true ]; then
             echo "   ✅ Updated systemd services"
         else
             echo "   ✅ Created systemd services"
