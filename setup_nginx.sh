@@ -4,9 +4,20 @@
 # Check if running as root, if not, re-exec with sudo
 if [ "$(id -u)" -ne 0 ]; then
     echo "⚠️  Not running as root. Attempting to elevate with sudo..."
+    echo "   (You may be prompted for your password)"
     # Use absolute path to script to handle spaces and special characters
-    SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
+    if command -v readlink >/dev/null 2>&1; then
+        SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null)"
+    fi
+    if [ -z "$SCRIPT_PATH" ] || [ ! -f "$SCRIPT_PATH" ]; then
+        # Fallback: construct absolute path manually
+        SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+        SCRIPT_NAME="$(basename "$0")"
+        SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_NAME"
+    fi
+    # Preserve all arguments and re-exec with sudo
     exec sudo "$SCRIPT_PATH" "$@"
+    # Should never reach here, but just in case:
     exit $?
 fi
 
@@ -282,6 +293,11 @@ if ! command -v nginx >/dev/null 2>&1; then
         log_info "[DRY-RUN] Would install nginx and certbot"
     else
         # Detect package manager
+        # Note: We should be root at this point, but add explicit check
+        if [ "$(id -u)" -ne 0 ]; then
+            log_error "Script must run as root for package installation"
+            exit 1
+        fi
         if command -v apt-get >/dev/null 2>&1; then
             apt-get update -qq
             apt-get install -y nginx python3-certbot-nginx
@@ -304,6 +320,10 @@ else
         if [ "$DRY_RUN" = true ]; then
             log_info "[DRY-RUN] Would install python3-certbot-nginx"
         else
+            if [ "$(id -u)" -ne 0 ]; then
+                log_error "Script must run as root for package installation"
+                exit 1
+            fi
             if command -v apt-get >/dev/null 2>&1; then
                 apt-get install -y python3-certbot-nginx
             elif command -v yum >/dev/null 2>&1; then
