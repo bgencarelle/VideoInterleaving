@@ -53,6 +53,14 @@ log_step() {
     echo ">>> $*"
 }
 
+# --- EARLY SUDO CHECK ---
+# Check if running as root or with sudo BEFORE doing anything
+if [ "$(id -u)" -ne 0 ]; then
+    log_error "This script must be run as root or with sudo"
+    log_error "Please run: sudo $0 $*"
+    exit 1
+fi
+
 log_step "🌐 Starting Robust Nginx Setup..."
 if [ "$DRY_RUN" = true ]; then
     log_warning "DRY RUN MODE - No changes will be made"
@@ -117,14 +125,6 @@ preflight_validation() {
     local warnings=0
     
     log_step "🔍 Running Pre-flight Validation..."
-    
-    # Check if running as root or with sudo
-    if [ "$(id -u)" -ne 0 ]; then
-        log_error "This script must be run as root or with sudo"
-        errors=$((errors + 1))
-    else
-        log_success "Running with appropriate privileges"
-    fi
     
     # Check if nginx is installed
     if ! command -v nginx >/dev/null 2>&1; then
@@ -353,8 +353,28 @@ fi
 
 log_info "Using Server Name: $DOMAIN_NAME and www.$DOMAIN_NAME"
 
-# 4. Backup existing config if it exists
+# 4. Remove old site configuration and backup existing config
 SSL_BLOCK=""
+
+# Remove old symlink in sites-enabled (if it exists)
+if [ -L "$NGINX_ENABLED" ] || [ -f "$NGINX_ENABLED" ]; then
+    log_step "🗑️  Removing old site configuration..."
+    if [ "$DRY_RUN" = true ]; then
+        log_info "[DRY-RUN] Would remove old symlink: $NGINX_ENABLED"
+    else
+        # Check if it's a symlink pointing to a different location
+        if [ -L "$NGINX_ENABLED" ]; then
+            current_target=$(readlink "$NGINX_ENABLED")
+            if [ "$current_target" != "$NGINX_AVAILABLE" ]; then
+                log_info "Removing old symlink pointing to: $current_target"
+            fi
+        fi
+        rm -f "$NGINX_ENABLED"
+        log_success "Old site configuration removed"
+    fi
+fi
+
+# Backup existing config if it exists
 if [ -f "$NGINX_AVAILABLE" ]; then
     log_step "💾 Backing up existing configuration..."
     if [ "$DRY_RUN" = true ]; then
@@ -577,7 +597,7 @@ EOF
     log_success "Nginx configuration created/updated"
 fi
 
-# 6. Enable the Site (Fixing Persistence)
+# 6. Enable the Site
 log_info "Linking configuration..."
 
 # A. Remove the default site (it often conflicts/overrides)
@@ -586,13 +606,13 @@ if [ -f /etc/nginx/sites-enabled/default ]; then
         log_info "[DRY-RUN] Would remove /etc/nginx/sites-enabled/default"
     else
         log_info "Removing default Nginx site to prevent conflicts..."
-        rm /etc/nginx/sites-enabled/default
+        rm -f /etc/nginx/sites-enabled/default
         log_success "Default site removed"
     fi
 fi
 
-# B. Force create the symbolic link
-#    'ln -sf' overwrites if it exists, ensuring it's always fresh
+# B. Create the symbolic link
+#    Old symlink was already removed in step 4, so this creates a fresh one
 if [ "$DRY_RUN" = true ]; then
     log_info "[DRY-RUN] Would create symlink: $NGINX_ENABLED -> $NGINX_AVAILABLE"
 else
