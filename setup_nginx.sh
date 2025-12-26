@@ -183,8 +183,8 @@ preflight_validation() {
         port80_in_use=false
         port80_process=""
         
-        if command -v netstat >/dev/null 2>&1; then
-            if netstat -tuln 2>/dev/null | grep -q ":80 "; then
+    if command -v netstat >/dev/null 2>&1; then
+        if netstat -tuln 2>/dev/null | grep -q ":80 "; then
                 port80_in_use=true
                 port80_process=$(netstat -tulpn 2>/dev/null | grep ":80 " | head -1 | awk '{print $7}' || echo "unknown")
             fi
@@ -364,17 +364,17 @@ else
     if [ "$DRY_RUN" = true ]; then
         DOMAIN_NAME="${EXISTING_DOMAIN:-example.com}"
         log_info "[DRY-RUN] Would prompt for domain name (using: $DOMAIN_NAME for preview)"
+else
+    echo ""
+    echo "----------------------------------------------------------------"
+    if [ -n "$EXISTING_DOMAIN" ]; then
+        read -p "Enter your domain name [current: $EXISTING_DOMAIN]: " DOMAIN_INPUT
     else
-        echo ""
-        echo "----------------------------------------------------------------"
-        if [ -n "$EXISTING_DOMAIN" ]; then
-            read -p "Enter your domain name [current: $EXISTING_DOMAIN]: " DOMAIN_INPUT
-        else
-            read -p "Enter your domain name (e.g., mysite.com): " DOMAIN_INPUT
-        fi
-        DOMAIN_NAME=${DOMAIN_INPUT:-${EXISTING_DOMAIN:-_}}
-        echo "----------------------------------------------------------------"
+        read -p "Enter your domain name (e.g., mysite.com): " DOMAIN_INPUT
     fi
+    DOMAIN_NAME=${DOMAIN_INPUT:-${EXISTING_DOMAIN:-_}}
+    echo "----------------------------------------------------------------"
+fi
 fi
 
 # Validate domain name format
@@ -425,10 +425,10 @@ if [ -f "$NGINX_AVAILABLE" ]; then
     if [ "$DRY_RUN" = true ]; then
         log_info "[DRY-RUN] Would backup $NGINX_AVAILABLE"
     else
-        BACKUP_DIR="/etc/nginx/sites-available/videointerleaving-backups"
-        mkdir -p "$BACKUP_DIR"
+    BACKUP_DIR="/etc/nginx/sites-available/videointerleaving-backups"
+    mkdir -p "$BACKUP_DIR"
         timestamp=$(date +%Y%m%d_%H%M%S)
-        cp "$NGINX_AVAILABLE" "$BACKUP_DIR/videointerleaving.conf.$timestamp"
+    cp "$NGINX_AVAILABLE" "$BACKUP_DIR/videointerleaving.conf.$timestamp"
         log_success "Backup saved to $BACKUP_DIR/videointerleaving.conf.$timestamp"
         # Verify backup was created
         if [ ! -f "$BACKUP_DIR/videointerleaving.conf.$timestamp" ]; then
@@ -682,7 +682,7 @@ fi
 if [ "$DRY_RUN" = true ]; then
     log_info "[DRY-RUN] Would create symlink: $NGINX_ENABLED -> $NGINX_AVAILABLE"
 else
-    ln -sf "$NGINX_AVAILABLE" "$NGINX_ENABLED"
+ln -sf "$NGINX_AVAILABLE" "$NGINX_ENABLED"
     log_success "Configuration enabled"
 fi
 
@@ -717,11 +717,8 @@ if command -v ufw >/dev/null 2>&1; then
         "Nginx Full:Nginx Full"
         "1978/tcp:Monitor (WEB mode)"
         "1980/tcp:Monitor (ASCIIWEB mode)"
-        "2323/tcp:ASCII Telnet"
-        "2324/tcp:ASCII Monitor (ASCII mode)"
         "2424/tcp:ASCII WebSocket (ASCIIWEB mode)"
         "8080/tcp:Web stream"
-        "8888/tcp:Monitor (LOCAL mode)"
     )
     
     if [ "$DRY_RUN" = true ]; then
@@ -779,9 +776,9 @@ echo "   - Main Site:     http://$DOMAIN_NAME/  (and www.$DOMAIN_NAME)"
 echo "   - ASCII Viewer:  http://$DOMAIN_NAME/ascii/"
 
 if [ "$DOMAIN_NAME" != "_" ] && [ "$DRY_RUN" = false ]; then
-    echo ""
+echo ""
     log_warning "CRITICAL FINAL STEP FOR SSL:"
     log_info "Since we added 'www', you MUST run this command again:"
     echo "   sudo certbot --nginx -d $DOMAIN_NAME -d www.$DOMAIN_NAME"
 fi
-echo "================================================================"
+    echo "================================================================"
