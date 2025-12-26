@@ -156,6 +156,9 @@ def configure_runtime():
         require_ports(ports.get_all_ports())
         # Update settings for backward compatibility
         settings.WEB_PORT = ports.monitor
+        # Local mode always uses --test flag for network monitoring
+        args.test = True
+        print(">> Local mode: Enabling --test flag for network monitoring")
 
     elif args.mode == "ascii":
         validate_ascii_port(primary_port)
