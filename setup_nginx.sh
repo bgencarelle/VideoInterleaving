@@ -244,6 +244,27 @@ check_ssl_configured() {
     return 1
 }
 
+# Extract SSL block from first server block only (HTTPS block)
+extract_ssl_from_first_server_block() {
+    local config_file="$1"
+    # Use awk to extract SSL lines only from first server block
+    # Match lines that are SSL-related and within the first server block
+    awk '
+        /^server \{/ { 
+            if (block_count == 0) {
+                in_first_block=1
+            }
+            block_count++
+        }
+        /^\}/ && in_first_block { 
+            in_first_block=0
+        }
+        in_first_block && /listen.*443|ssl_certificate|ssl_certificate_key|include.*letsencrypt|ssl_dhparam/ {
+            print $0
+        }
+    ' "$config_file" 2>/dev/null | sed 's/^/    /' || echo ""
+}
+
 # Check if site is enabled
 check_site_enabled() {
     if [ -L "$NGINX_ENABLED" ] && [ -f "$NGINX_ENABLED" ]; then
@@ -356,6 +377,7 @@ log_info "Using Server Name: $DOMAIN_NAME and www.$DOMAIN_NAME"
 
 # 4. Remove old site configuration and backup existing config
 SSL_BLOCK=""
+SSL_ENABLED=false
 
 # Remove old symlink in sites-enabled (if it exists)
 if [ -L "$NGINX_ENABLED" ] || [ -f "$NGINX_ENABLED" ]; then
@@ -386,13 +408,26 @@ if [ -f "$NGINX_AVAILABLE" ]; then
         timestamp=$(date +%Y%m%d_%H%M%S)
         cp "$NGINX_AVAILABLE" "$BACKUP_DIR/videointerleaving.conf.$timestamp"
         log_success "Backup saved to $BACKUP_DIR/videointerleaving.conf.$timestamp"
+        # Verify backup was created
+        if [ ! -f "$BACKUP_DIR/videointerleaving.conf.$timestamp" ]; then
+            log_warning "Backup may have failed, but continuing..."
+        fi
     fi
     
     # Extract SSL settings if present (Certbot managed)
     if check_ssl_configured; then
         log_info "Preserving SSL configuration (Certbot managed)..."
-        # Extract SSL-related lines including Certbot comments
-        SSL_BLOCK=$(grep -E "^\s*(listen\s+\[::\]:443|listen\s+443|ssl_certificate|ssl_certificate_key|include.*letsencrypt|ssl_dhparam)" "$NGINX_AVAILABLE" 2>/dev/null | sed 's/^/    /' || echo "")
+        # Extract SSL-related lines from FIRST server block only (HTTPS block)
+        SSL_BLOCK=$(extract_ssl_from_first_server_block "$NGINX_AVAILABLE")
+        if [ -n "$SSL_BLOCK" ]; then
+            SSL_ENABLED=true
+            log_verbose "Extracted SSL block from first server block"
+        else
+            SSL_ENABLED=false
+            log_warning "SSL detected but extraction failed, will be recreated by Certbot"
+        fi
+    else
+        SSL_ENABLED=false
     fi
 fi
 
@@ -412,7 +447,9 @@ if [ "$DRY_RUN" = true ]; then
 server {
     # 1. FIX WWW ERROR: Listen for both bare domain and www subdomain
     server_name $DOMAIN_NAME www.$DOMAIN_NAME;
-${SSL_BLOCK:-}
+$([ "$SSL_ENABLED" != "true" ] && echo "    # Listen directives (HTTP only - removed when SSL is configured)")
+$([ "$SSL_ENABLED" != "true" ] && echo "    listen 80 default_server;")
+$([ "$SSL_ENABLED" != "true" ] && echo "    listen [::]:80 default_server;")
 
     # --- Global Settings ---
     client_max_body_size 20M;
@@ -496,6 +533,7 @@ ${SSL_BLOCK:-}
         proxy_read_timeout 7d;
         proxy_buffering off;
     }
+${SSL_BLOCK:-}
 }
 EOF
     echo "[DRY-RUN] ---"
@@ -504,12 +542,9 @@ else
 server {
     # 1. FIX WWW ERROR: Listen for both bare domain and www subdomain
     server_name $DOMAIN_NAME www.$DOMAIN_NAME;
-${SSL_BLOCK:-}
-
-    # Listen directives
-    # Note: If SSL is configured, Certbot will add listen 443 and manage redirects
-    listen 80 default_server;
-    listen [::]:80 default_server;
+$([ "$SSL_ENABLED" != "true" ] && echo "    # Listen directives (HTTP only - removed when SSL is configured)")
+$([ "$SSL_ENABLED" != "true" ] && echo "    listen 80 default_server;")
+$([ "$SSL_ENABLED" != "true" ] && echo "    listen [::]:80 default_server;")
 
     # --- Global Settings ---
     client_max_body_size 20M;
@@ -593,9 +628,17 @@ ${SSL_BLOCK:-}
         proxy_read_timeout 7d;
         proxy_buffering off;
     }
+${SSL_BLOCK:-}
 }
 EOF
-    log_success "Nginx configuration created/updated"
+    # Verify config was written successfully
+    if [ -f "$NGINX_AVAILABLE" ] && [ -s "$NGINX_AVAILABLE" ]; then
+        log_success "Nginx configuration created/updated"
+        log_verbose "Config file size: $(wc -l < "$NGINX_AVAILABLE") lines"
+    else
+        log_error "Failed to write Nginx configuration file"
+        exit 1
+    fi
 fi
 
 # 6. Enable the Site
