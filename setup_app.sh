@@ -454,11 +454,11 @@ if check_venv_valid; then
     
     # Check if requirements are up to date
     if [ -f "$PROJECT_DIR/requirements.txt" ]; then
-        local req_hash=$(md5sum "$PROJECT_DIR/requirements.txt" 2>/dev/null | awk '{print $1}' || echo "")
-        local venv_req_hash_file="$VENV_DIR/.requirements_hash"
+        req_hash=$(md5sum "$PROJECT_DIR/requirements.txt" 2>/dev/null | awk '{print $1}' || echo "")
+        venv_req_hash_file="$VENV_DIR/.requirements_hash"
         
         if [ -f "$venv_req_hash_file" ]; then
-            local stored_hash=$(cat "$venv_req_hash_file" 2>/dev/null || echo "")
+            stored_hash=$(cat "$venv_req_hash_file" 2>/dev/null || echo "")
             if [ "$req_hash" != "$stored_hash" ]; then
                 log_info "requirements.txt has changed - venv will be updated"
                 VENV_NEEDS_UPDATE=true
@@ -1058,14 +1058,14 @@ if command -v ufw >/dev/null 2>&1; then
     log_step "🔥 Configuring Firewall..."
     
     # Check if firewall is active
-    local firewall_status=$(ufw status 2>/dev/null | head -1 || echo "inactive")
+    firewall_status=$(ufw status 2>/dev/null | head -1 || echo "inactive")
     if echo "$firewall_status" | grep -q "inactive"; then
         log_warning "UFW firewall is inactive"
     else
         log_success "UFW firewall is active"
     fi
     
-    local ports_to_add=(
+    ports_to_add=(
         "1978/tcp:Monitor (WEB mode)"
         "1980/tcp:Monitor (ASCIIWEB mode)"
         "2323/tcp:ASCII Telnet"
@@ -1078,14 +1078,14 @@ if command -v ufw >/dev/null 2>&1; then
     
     if [ "$DRY_RUN" = true ]; then
         for port_info in "${ports_to_add[@]}"; do
-            local port=$(echo "$port_info" | cut -d: -f1)
-            local desc=$(echo "$port_info" | cut -d: -f2)
+            port=$(echo "$port_info" | cut -d: -f1)
+            desc=$(echo "$port_info" | cut -d: -f2)
             log_info "[DRY-RUN] Would run: sudo ufw allow $port  # $desc"
         done
     else
-        local added_count=0
+        added_count=0
         for port_info in "${ports_to_add[@]}"; do
-            local port=$(echo "$port_info" | cut -d: -f1)
+            port=$(echo "$port_info" | cut -d: -f1)
             # Check if rule already exists
             if ufw status | grep -q "$port"; then
                 log_verbose "Firewall rule for $port already exists"
