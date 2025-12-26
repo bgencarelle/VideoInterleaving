@@ -1,4 +1,13 @@
 #!/bin/bash
+
+# --- CRITICAL: SUDO CHECK FIRST ---
+# Check if running as root or with sudo BEFORE doing anything else
+if [ "$(id -u)" -ne 0 ]; then
+    echo "❌ ERROR: This script must be run as root or with sudo" >&2
+    echo "❌ Please run: sudo $0 $*" >&2
+    exit 1
+fi
+
 set -euo pipefail
 
 # --- CONFIGURATION ---
@@ -52,14 +61,6 @@ log_step() {
     echo ""
     echo ">>> $*"
 }
-
-# --- EARLY SUDO CHECK ---
-# Check if running as root or with sudo BEFORE doing anything
-if [ "$(id -u)" -ne 0 ]; then
-    log_error "This script must be run as root or with sudo"
-    log_error "Please run: sudo $0 $*"
-    exit 1
-fi
 
 log_step "🌐 Starting Robust Nginx Setup..."
 if [ "$DRY_RUN" = true ]; then
