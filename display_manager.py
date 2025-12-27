@@ -813,32 +813,6 @@ def display_init(state: DisplayState):
     img_w, img_h = state.image_size
     eff_w, eff_h = (img_h, img_w) if state.rotation % 180 == 90 else (img_w, img_h)
 
-    # --- DISPLAY RESOLUTION OPTIMIZATION ---
-    # If image is smaller than display, optimize resolution to avoid upscaling
-    if getattr(settings, 'AUTO_OPTIMIZE_DISPLAY_RESOLUTION', True):
-        try:
-            monitor = glfw.get_primary_monitor()
-            if monitor:
-                current_mode = _current_mode(monitor)
-                if current_mode:
-                    optimal_mode = _find_optimal_display_mode((img_w, img_h), current_mode)
-                    if optimal_mode:
-                        opt_w = optimal_mode.size.width
-                        opt_h = optimal_mode.size.height
-                        curr_w = current_mode.size.width
-                        curr_h = current_mode.size.height
-                        if opt_w != curr_w or opt_h != curr_h:
-                            print(f"[DISPLAY] Image ({img_w}x{img_h}) smaller than display ({curr_w}x{curr_h})")
-                            print(f"[DISPLAY] Optimizing to {opt_w}x{opt_h} to avoid upscaling")
-                            if _change_display_resolution(optimal_mode):
-                                # Wait a moment for resolution change to take effect
-                                import time
-                                time.sleep(0.5)
-                            else:
-                                print(f"[DISPLAY] ⚠️  Resolution change failed, continuing with current resolution")
-        except Exception as e:
-            print(f"[DISPLAY] ⚠️  Resolution optimization failed: {e}, continuing with current resolution")
-
     # If window exists and we're just updating (e.g., fullscreen toggle), handle it specially for Wayland
     if window is not None and is_wayland:
         # Wayland: Just update window properties without recreating
@@ -868,6 +842,33 @@ def display_init(state: DisplayState):
         if not glfw.init():
             print("❌ ERROR: GLFW Init failed.")
             sys.exit(1)
+
+        # --- DISPLAY RESOLUTION OPTIMIZATION ---
+        # If image is smaller than display, optimize resolution to avoid upscaling
+        # This must happen AFTER GLFW is initialized but BEFORE windows are created
+        if getattr(settings, 'AUTO_OPTIMIZE_DISPLAY_RESOLUTION', True):
+            try:
+                monitor = glfw.get_primary_monitor()
+                if monitor:
+                    current_mode = _current_mode(monitor)
+                    if current_mode:
+                        optimal_mode = _find_optimal_display_mode((img_w, img_h), current_mode)
+                        if optimal_mode:
+                            opt_w = optimal_mode.size.width
+                            opt_h = optimal_mode.size.height
+                            curr_w = current_mode.size.width
+                            curr_h = current_mode.size.height
+                            if opt_w != curr_w or opt_h != curr_h:
+                                print(f"[DISPLAY] Image ({img_w}x{img_h}) smaller than display ({curr_w}x{curr_h})")
+                                print(f"[DISPLAY] Optimizing to {opt_w}x{opt_h} to avoid upscaling")
+                                if _change_display_resolution(optimal_mode):
+                                    # Wait a moment for resolution change to take effect
+                                    import time
+                                    time.sleep(0.5)
+                                else:
+                                    print(f"[DISPLAY] ⚠️  Resolution change failed, continuing with current resolution")
+            except Exception as e:
+                print(f"[DISPLAY] ⚠️  Resolution optimization failed: {e}, continuing with current resolution")
 
         def _create_window_for_hints() -> object | None:
             if state.fullscreen:
