@@ -4,6 +4,7 @@ import os
 import argparse
 import threading
 import socket
+import atexit
 
 # 1. Import Settings FIRST so we can patch them
 import settings
@@ -244,6 +245,13 @@ except Exception as e:
 
 
 def main(clock=CLOCK_MODE):
+    # Register cleanup handler for display resolution restoration
+    try:
+        from display_manager import _restore_display_resolution
+        atexit.register(_restore_display_resolution)
+    except ImportError:
+        pass  # display_manager may not be imported yet
+    
     # 1. Process Files (Reuse Logic)
     lists_exist = False
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -287,6 +295,13 @@ def main(clock=CLOCK_MODE):
         traceback.print_exc()
     finally:
         print("[MAIN] Exiting...")
+        # Restore display resolution if it was changed
+        try:
+            from display_manager import _restore_display_resolution
+            _restore_display_resolution()
+        except Exception as e:
+            # Don't fail if restoration fails
+            pass
         # Ensure all output is flushed before closing
         sys.stdout.flush()
         sys.stderr.flush()

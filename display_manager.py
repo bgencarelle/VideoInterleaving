@@ -33,6 +33,7 @@ from settings import (
     INITIAL_ROTATION, INITIAL_MIRROR, CONNECTED_TO_RCA_HDMI,
     RCA_HDMI_RESOLUTION, LOW_RES_FULLSCREEN, LOW_RES_FULLSCREEN_RESOLUTION,
     ENABLE_SRGB_FRAMEBUFFER, VSYNC, GAMMA_CORRECTION_ENABLED,
+    AUTO_OPTIMIZE_DISPLAY_RESOLUTION, RESTORE_DISPLAY_ON_EXIT,
 )
 
 window = None
@@ -120,6 +121,9 @@ class LegacyHeadlessWindow:
 
     def use(self) -> None:
         from OpenGL import GL as gl  # type: ignore
+        # CRITICAL: Make GLFW context current for PyOpenGL to work
+        if glfw and self._glfw_window:
+            glfw.make_context_current(self._glfw_window)
         self.fbo.use()
         w, h = self.size
         gl.glViewport(0, 0, w, h)
@@ -174,6 +178,168 @@ def _preferred_fullscreen_mode(monitor):
         return mode
     # Fallback: only used if current mode unavailable (should be rare)
     return _largest_mode(monitor)
+
+
+# Global storage for original display resolution (for restoration)
+_original_display_resolution = None
+_original_display_output = None
+
+
+def _find_optimal_display_mode(image_size: tuple[int, int], current_mode) -> Optional[object]:
+    """
+    Find the optimal display mode that matches the image size.
+    
+    Args:
+        image_size: (width, height) of the source image
+        current_mode: Current display mode object from GLFW
+    
+    Returns:
+        Optimal mode object or None if no suitable mode found
+    """
+    if not glfw or current_mode is None:
+        return None
+    
+    img_w, img_h = image_size
+    current_w = current_mode.size.width
+    current_h = current_mode.size.height
+    current_aspect = current_w / current_h if current_h > 0 else 1.0
+    
+    # Only optimize if image is smaller than current display
+    if img_w >= current_w or img_h >= current_h:
+        return None
+    
+    # Get all available modes
+    monitor = glfw.get_primary_monitor()
+    if monitor is None:
+        return None
+    
+    try:
+        all_modes = glfw.get_video_modes(monitor)
+    except Exception:
+        return None
+    
+    if not all_modes:
+        return None
+    
+    # Filter modes by aspect ratio (within tolerance)
+    aspect_tolerance = 0.01
+    matching_modes = []
+    
+    for mode in all_modes:
+        mode_w = mode.size.width
+        mode_h = mode.size.height
+        mode_aspect = mode_w / mode_h if mode_h > 0 else 1.0
+        
+        # Check aspect ratio match
+        if abs(mode_aspect - current_aspect) > aspect_tolerance:
+            continue
+        
+        # Check that mode fits image and is smaller than current
+        if (mode_w >= img_w and mode_h >= img_h and 
+            mode_w <= current_w and mode_h <= current_h):
+            matching_modes.append(mode)
+    
+    if not matching_modes:
+        return None
+    
+    # Select mode with smallest area (closest to image size)
+    best_mode = min(matching_modes, key=lambda m: m.size.width * m.size.height)
+    return best_mode
+
+
+def _get_xrandr_output() -> Optional[str]:
+    """Detect the primary X11 display output name using xrandr."""
+    try:
+        result = subprocess.run(
+            ["xrandr"], 
+            capture_output=True, 
+            text=True, 
+            timeout=5,
+            check=False
+        )
+        if result.returncode != 0:
+            return None
+        
+        # Find first connected output
+        for line in result.stdout.split('\n'):
+            if ' connected' in line:
+                # Extract output name (first word)
+                parts = line.split()
+                if parts:
+                    return parts[0]
+    except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+        pass
+    return None
+
+
+def _change_display_resolution(mode) -> bool:
+    """
+    Change display resolution using xrandr (X11) or DRM/KMS (Wayland/headless).
+    
+    Args:
+        mode: GLFW video mode object with new resolution
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    global _original_display_resolution, _original_display_output
+    
+    if mode is None:
+        return False
+    
+    new_w = mode.size.width
+    new_h = mode.size.height
+    
+    # Store original resolution for restoration
+    if _original_display_resolution is None:
+        current_mode = _current_mode(glfw.get_primary_monitor())
+        if current_mode:
+            _original_display_resolution = (current_mode.size.width, current_mode.size.height)
+            _original_display_output = _get_xrandr_output()
+    
+    # Try xrandr first (X11)
+    output = _get_xrandr_output()
+    if output:
+        try:
+            # Change resolution using xrandr
+            cmd = ["xrandr", "--output", output, "--mode", f"{new_w}x{new_h}"]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=False)
+            if result.returncode == 0:
+                print(f"[DISPLAY] Changed display resolution to {new_w}x{new_h} using xrandr")
+                return True
+            else:
+                print(f"[DISPLAY] ⚠️  xrandr failed: {result.stderr}")
+        except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+            print(f"[DISPLAY] ⚠️  Failed to change resolution via xrandr: {e}")
+    
+    # TODO: Add DRM/KMS support for Wayland/headless
+    # For now, xrandr is the primary method (most common on Pi with desktop)
+    
+    return False
+
+
+def _restore_display_resolution() -> None:
+    """Restore original display resolution if it was changed."""
+    global _original_display_resolution, _original_display_output
+    
+    if _original_display_resolution is None or _original_display_output is None:
+        return
+    
+    if not getattr(settings, 'RESTORE_DISPLAY_ON_EXIT', True):
+        return
+    
+    orig_w, orig_h = _original_display_resolution
+    output = _original_display_output
+    
+    try:
+        cmd = ["xrandr", "--output", output, "--mode", f"{orig_w}x{orig_h}"]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=False)
+        if result.returncode == 0:
+            print(f"[DISPLAY] Restored display resolution to {orig_w}x{orig_h}")
+        else:
+            print(f"[DISPLAY] ⚠️  Failed to restore resolution: {result.stderr}")
+    except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+        print(f"[DISPLAY] ⚠️  Error restoring resolution: {e}")
 
 def _log_renderer_info(ctx):
     try:
@@ -554,26 +720,26 @@ def display_init(state: DisplayState):
                 attempt_str = f"{attempt_backend}:{attempt_version}"
                 print(f"[DISPLAY] Headless attempt: backend={attempt_backend}, GLES={attempt_version}")
                 _BACKEND_USAGE_DATA['headless_backends_tried'].append(attempt_str)
-                try:
-                    create_kwargs = {"standalone": True}
-                    if backend:
-                        create_kwargs["backend"] = backend
-                    if require_code is not None:
-                        create_kwargs["require"] = require_code
+            try:
+                create_kwargs = {"standalone": True}
+                if backend:
+                    create_kwargs["backend"] = backend
+                if require_code is not None:
+                    create_kwargs["require"] = require_code
 
-                    ctx = moderngl.create_context(**create_kwargs)
-                    context_created = True
-                    _BACKEND_USAGE_DATA['headless_backend_success'] = attempt_str
-                    if require_code is not None:
-                        print(f"[DISPLAY] ✅ Headless GL: Successfully created GLES {_format_gl_version(require_code)} context")
-                    else:
-                        print(f"[DISPLAY] ✅ Headless GL: Successfully created default context")
-                    _log_renderer_info(ctx)
-                    break  # Success - exit inner loop
-                except Exception as e:
-                    last_error = e
-                    print(f"[DISPLAY] Headless attempt failed ({attempt_backend}, GLES={attempt_version}): {e}")
-                    continue  # Try next version
+                ctx = moderngl.create_context(**create_kwargs)
+                context_created = True
+                _BACKEND_USAGE_DATA['headless_backend_success'] = attempt_str
+                if require_code is not None:
+                    print(f"[DISPLAY] ✅ Headless GL: Successfully created GLES {_format_gl_version(require_code)} context")
+                else:
+                    print(f"[DISPLAY] ✅ Headless GL: Successfully created default context")
+                _log_renderer_info(ctx)
+                break  # Success - exit inner loop
+            except Exception as e:
+                last_error = e
+                print(f"[DISPLAY] Headless attempt failed ({attempt_backend}, GLES={attempt_version}): {e}")
+                continue  # Try next version
             if context_created:
                 break  # Success - exit outer loop
 
@@ -646,6 +812,32 @@ def display_init(state: DisplayState):
 
     img_w, img_h = state.image_size
     eff_w, eff_h = (img_h, img_w) if state.rotation % 180 == 90 else (img_w, img_h)
+
+    # --- DISPLAY RESOLUTION OPTIMIZATION ---
+    # If image is smaller than display, optimize resolution to avoid upscaling
+    if getattr(settings, 'AUTO_OPTIMIZE_DISPLAY_RESOLUTION', True):
+        try:
+            monitor = glfw.get_primary_monitor()
+            if monitor:
+                current_mode = _current_mode(monitor)
+                if current_mode:
+                    optimal_mode = _find_optimal_display_mode((img_w, img_h), current_mode)
+                    if optimal_mode:
+                        opt_w = optimal_mode.size.width
+                        opt_h = optimal_mode.size.height
+                        curr_w = current_mode.size.width
+                        curr_h = current_mode.size.height
+                        if opt_w != curr_w or opt_h != curr_h:
+                            print(f"[DISPLAY] Image ({img_w}x{img_h}) smaller than display ({curr_w}x{curr_h})")
+                            print(f"[DISPLAY] Optimizing to {opt_w}x{opt_h} to avoid upscaling")
+                            if _change_display_resolution(optimal_mode):
+                                # Wait a moment for resolution change to take effect
+                                import time
+                                time.sleep(0.5)
+                            else:
+                                print(f"[DISPLAY] ⚠️  Resolution change failed, continuing with current resolution")
+        except Exception as e:
+            print(f"[DISPLAY] ⚠️  Resolution optimization failed: {e}, continuing with current resolution")
 
     # If window exists and we're just updating (e.g., fullscreen toggle), handle it specially for Wayland
     if window is not None and is_wayland:
@@ -888,9 +1080,9 @@ def display_init(state: DisplayState):
                         # Use current resolution to avoid display resolution changes
                         # _preferred_fullscreen_mode() returns current mode, which is safe on Linux
                         best = _preferred_fullscreen_mode(mon)
-                        fs_w, fs_h = best.size.width, best.size.height
-                        refresh = getattr(best, 'refresh_rate', 60)
-                        glfw.set_window_monitor(window, mon, 0, 0, fs_w, fs_h, refresh)
+                    fs_w, fs_h = best.size.width, best.size.height
+                    refresh = getattr(best, 'refresh_rate', 60)
+                    glfw.set_window_monitor(window, mon, 0, 0, fs_w, fs_h, refresh)
             else:
                 if current_monitor is not None:
                     # Restore to a small window; actual sizing will be re-derived below via framebuffer size.
