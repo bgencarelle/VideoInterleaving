@@ -23,6 +23,7 @@ class AsciiWebSocket(WebSocket):
             return
 
         sem_acquired = True
+        client_added = False
         try:
             # Keep the OS buffer small too, just in case
             self.client.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
@@ -31,12 +32,18 @@ class AsciiWebSocket(WebSocket):
 
             print(f"[WS] Client connected: {self.address}")
             clients.append(self)
+            client_added = True
             sem_acquired = False  # Client added, handleClose will release semaphore
             self.sendMessage(ANSI_CLEAR)
         except Exception as e:
             print(f"[WS] Handshake Error: {e}")
-            if sem_acquired:
-                # Cleanup if we acquired semaphore but failed to add client
+            # Cleanup: remove client from list if it was added, and release semaphore
+            if client_added:
+                if self in clients:
+                    clients.remove(self)
+                _sem.release()
+            elif sem_acquired:
+                # Semaphore acquired but client not added - release it
                 _sem.release()
             self.close()
 

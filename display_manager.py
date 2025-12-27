@@ -1081,8 +1081,8 @@ def display_init(state: DisplayState):
                         # Use current resolution to avoid display resolution changes
                         # _preferred_fullscreen_mode() returns current mode, which is safe on Linux
                         best = _preferred_fullscreen_mode(mon)
-                    fs_w, fs_h = best.size.width, best.size.height
-                    refresh = getattr(best, 'refresh_rate', 60)
+                        fs_w, fs_h = best.size.width, best.size.height
+                        refresh = getattr(best, 'refresh_rate', 60)
                     glfw.set_window_monitor(window, mon, 0, 0, fs_w, fs_h, refresh)
             else:
                 if current_monitor is not None:
