@@ -235,13 +235,43 @@ _original_stdout = sys.stdout
 _original_stderr = sys.stderr
 _log_file = None
 
+# Check if running under systemd (stdout/stderr already redirected)
+# In this case, we should be more careful about additional redirection
+_is_systemd = os.environ.get('INVOCATION_ID') is not None
+
 try:
+    # Ensure logs directory exists
+    log_dir = os.path.dirname(log_filename)
+    if log_dir and not os.path.exists(log_dir):
+        os.makedirs(log_dir, exist_ok=True)
+    
     _log_file = open(log_filename, "w", buffering=1, encoding='utf-8')
-    sys.stdout = Tee(sys.stdout, _log_file)
-    sys.stderr = Tee(sys.stderr, _log_file)
-    print(f"[MAIN] Logging to {log_filename}")
+    
+    # Only use Tee if not running under systemd (systemd already handles redirection)
+    # Under systemd, just write to the log file directly for additional logging
+    if _is_systemd:
+        # Under systemd, stdout/stderr are already redirected by systemd
+        # We'll just keep a reference to the log file for explicit logging
+        pass
+    else:
+        # Not under systemd, use Tee to duplicate output
+        sys.stdout = Tee(sys.stdout, _log_file)
+        sys.stderr = Tee(sys.stderr, _log_file)
+    
+    # Write initial log message (use original stderr if systemd to avoid issues)
+    if _is_systemd:
+        _original_stderr.write(f"[MAIN] Logging to {log_filename}\n")
+        _log_file.write(f"[MAIN] Logging to {log_filename}\n")
+        _log_file.flush()
+    else:
+        print(f"[MAIN] Logging to {log_filename}")
 except Exception as e:
-    print(f"⚠️  Logging setup failed: {e}")
+    # Use original stderr to avoid recursion if stdout/stderr are broken
+    try:
+        _original_stderr.write(f"⚠️  Logging setup failed: {e}\n")
+        _original_stderr.flush()
+    except Exception:
+        pass  # If even stderr is broken, we can't do anything
 
 
 def main(clock=CLOCK_MODE):
