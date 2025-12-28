@@ -390,22 +390,14 @@ def run_display(clock_source=CLOCK_MODE):
     # Optimize worker count for I/O-bound image loading
     # I/O-bound tasks can use more threads than CPU cores
     cpu_count = os.cpu_count() or 1
-    # Base calculation: 2-4x CPU count for I/O-bound work, but cap for memory/bandwidth
-    # For low-end systems (1-2 cores): use 4-6 workers
-    # For medium systems (4-8 cores): use 8-16 workers  
-    # For high-end systems (8+ cores): cap at 16 to avoid memory pressure
-    if cpu_count <= 2:
-        max_workers = min(6, cpu_count * 3)
-    elif cpu_count <= 4:
-        max_workers = min(12, cpu_count * 3)
-    elif cpu_count <= 8:
-        max_workers = min(16, cpu_count * 2)
-    else:
-        max_workers = 16  # Cap for high-end systems to avoid memory pressure
+    # Conservative formula that works well across all devices
+    # Reverted from aggressive tiered scaling to universal formula
+    max_workers = min(8, cpu_count + 2)
 
-    # Process pool for CPU-bound ASCII work (optional, for high-end systems)
+    # Process pool for CPU-bound ASCII work (optional, opt-in only)
     # Use ProcessPoolExecutor for ASCII string building to avoid GIL limitations
-    use_process_pool_for_ascii = getattr(settings, 'USE_PROCESS_POOL_FOR_ASCII', cpu_count >= 4)
+    # Disabled by default - users can opt-in via settings if needed
+    use_process_pool_for_ascii = getattr(settings, 'USE_PROCESS_POOL_FOR_ASCII', False)
     ascii_process_pool = None
     if use_process_pool_for_ascii and is_ascii:
         ascii_process_pool = ProcessPoolExecutor(max_workers=min(4, cpu_count))

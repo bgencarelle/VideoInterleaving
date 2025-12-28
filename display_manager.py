@@ -864,7 +864,7 @@ def display_init(state: DisplayState):
                                 if _change_display_resolution(optimal_mode):
                                     # Wait a moment for resolution change to take effect
                                     import time
-                                    time.sleep(0.5)
+                                    time.sleep(0.1)  # Reduced from 0.5s for faster startup
                                 else:
                                     print(f"[DISPLAY] ⚠️  Resolution change failed, continuing with current resolution")
             except Exception as e:

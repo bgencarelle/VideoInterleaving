@@ -833,19 +833,46 @@ EOF
         USER_HOME=$(eval echo ~"$USERNAME" 2>/dev/null || getent passwd "$USERNAME" 2>/dev/null | cut -d: -f6 || echo "/home/$USERNAME")
         log_info "[DRY-RUN] Would create user service at: $USER_HOME/.config/systemd/user/vi-local.service"
         log_info "[DRY-RUN] Would create system service at: /etc/systemd/system/vi-local.service"
+        echo "[DRY-RUN] User service:"
         cat <<EOF | sed 's/^/[DRY-RUN] /'
 [Unit]
 Description=VideoInterleaving (Local GUI)
-After=network.target graphical.target
+After=graphical.target
+Type=simple
 
 [Service]
-User=$USERNAME
 WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_DISPLAY
 $ENV_BLOCK
 ExecStart=$VENV_DIR/bin/python -O main.py --mode local --test
 Restart=always
+RestartSec=3
+StandardOutput=append:$PROJECT_DIR/vi-local.log
+StandardError=append:$PROJECT_DIR/vi-local.log
+
+[Install]
+WantedBy=default.target
+EOF
+        echo "[DRY-RUN] ---"
+        echo ""
+        echo "[DRY-RUN] System service:"
+        cat <<EOF | sed 's/^/[DRY-RUN] /'
+[Unit]
+Description=VideoInterleaving (Local GUI) - System Service
+After=display-manager.service
+Wants=graphical.target
+Type=simple
+
+[Service]
+Type=simple
+User=$USERNAME
+WorkingDirectory=$PROJECT_DIR
+Environment=PYTHONUNBUFFERED=1
+$ENV_DISPLAY
+$ENV_BLOCK
+ExecStart=$VENV_DIR/bin/python -O main.py --mode local --test
+Restart=on-failure
 RestartSec=3
 StandardOutput=append:$PROJECT_DIR/vi-local.log
 StandardError=append:$PROJECT_DIR/vi-local.log
@@ -980,7 +1007,8 @@ EOF
             cat <<EOF > "$USER_SERVICE_DIR/vi-local.service"
 [Unit]
 Description=VideoInterleaving (Local GUI)
-After=graphical-session.target
+After=graphical.target
+Type=simple
 
 [Service]
 WorkingDirectory=$PROJECT_DIR
@@ -1006,8 +1034,9 @@ EOF
         sudo tee "/etc/systemd/system/vi-local.service" > /dev/null <<EOF
 [Unit]
 Description=VideoInterleaving (Local GUI) - System Service
-After=network.target graphical.target
+After=display-manager.service
 Wants=graphical.target
+Type=simple
 
 [Service]
 Type=simple
@@ -1029,7 +1058,7 @@ EOF
         log_warning "Note: For GUI applications, user service is recommended. Use: systemctl --user enable --now vi-local.service"
 
         log_info "Reloading systemd daemon..."
-        sudo systemctl daemon-reload
+sudo systemctl daemon-reload
         log_success "Systemd daemon reloaded"
         
         # Restart services that existed before (they were updated)
