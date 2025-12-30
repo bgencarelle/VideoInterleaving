@@ -49,7 +49,8 @@ _BACKEND_USAGE_DATA = {
     'local_window_backend': None,
     'local_legacy_used': False,
     'session_type': None,
-    'hardware_type': None,
+    'hardware_type': None,  # Deprecated: use 'driver' instead
+    'driver': None,
 }
 
 def _is_wayland_session() -> bool:
@@ -160,8 +161,13 @@ def _largest_mode(monitor):
     """
     if not glfw:
         return None
-    modes = glfw.get_video_modes(monitor)
-    return max(modes, key=lambda m: m.size.width * m.size.height)
+    try:
+        modes = glfw.get_video_modes(monitor)
+        if not modes:
+            return None
+        return max(modes, key=lambda m: m.size.width * m.size.height)
+    except Exception:
+        return None
 
 
 def _preferred_fullscreen_mode(monitor):
@@ -346,27 +352,157 @@ def _log_renderer_info(ctx):
         info = ctx.info
         renderer_name = info.get('GL_RENDERER', 'Unknown')
         print(f"[DISPLAY] GL Context: {renderer_name}")
+        
+        # Detect and store driver info
+        driver = _detect_gl_driver(ctx)
+        if driver:
+            _BACKEND_USAGE_DATA['driver'] = driver
+            print(f"[DISPLAY] Driver detected: {driver}")
+        else:
+            _BACKEND_USAGE_DATA['driver'] = 'unknown'
+        
         if "llvmpipe" in renderer_name.lower() or "softpipe" in renderer_name.lower():
             print("[DISPLAY] ℹ️  Using Software Rasterizer (Optimized CPU Rendering).")
     except (AttributeError, KeyError, TypeError) as e:
         # GL context info may not be available on all platforms
         pass
 
-def _check_is_pi():
-    """Detect Raspberry Pi to enforce GLES contexts."""
-    return _pi_model() is not None
+# Cached EGL availability detection
+_egl_available_cache: Optional[bool] = None
 
 
-def _pi_model() -> str | None:
+def _detect_egl_available() -> bool:
+    """
+    Test if EGL backend is available by attempting to create a test context.
+    Caches result to avoid repeated tests.
+    """
+    global _egl_available_cache
+    if _egl_available_cache is not None:
+        return _egl_available_cache
+    
     try:
-        if os.path.exists("/proc/device-tree/model"):
-            with open("/proc/device-tree/model", "r") as m:
-                model = m.read().strip().replace("\x00", "")
-                if "Raspberry Pi" in model:
-                    return model
+        # Try to create a minimal ModernGL context with EGL backend
+        test_ctx = moderngl.create_context(standalone=True, backend="egl")
+        test_ctx.release()
+        _egl_available_cache = True
+        return True
+    except Exception:
+        _egl_available_cache = False
+        return False
+
+
+def _detect_gl_driver(gl_context=None) -> str | None:
+    """
+    Query GL_RENDERER to identify driver type.
+    Should be called with an existing GL context (ModernGL or PyOpenGL).
+    
+    Returns driver name (vc4, v3d, panfrost, llvmpipe, softpipe, iris, anv, radeonsi, etc.)
+    or None if detection fails.
+    """
+    try:
+        # If we have a ModernGL context, try to get info
+        if gl_context is not None and hasattr(gl_context, 'info'):
+            renderer_name = gl_context.info.get('GL_RENDERER', '')
+            if renderer_name:
+                renderer_lower = renderer_name.lower()
+                # Check for known drivers
+                if 'vc4' in renderer_lower:
+                    return 'vc4'
+                elif 'v3d' in renderer_lower:
+                    return 'v3d'
+                elif 'panfrost' in renderer_lower:
+                    return 'panfrost'
+                elif 'llvmpipe' in renderer_lower:
+                    return 'llvmpipe'
+                elif 'softpipe' in renderer_lower:
+                    return 'softpipe'
+                elif 'iris' in renderer_lower:
+                    return 'iris'
+                elif 'anv' in renderer_lower:
+                    return 'anv'
+                elif 'radeonsi' in renderer_lower or 'radeon' in renderer_lower:
+                    return 'radeonsi'
+                elif 'nouveau' in renderer_lower:
+                    return 'nouveau'
+                elif 'nvidia' in renderer_lower:
+                    return 'nvidia'
+        
+        # Try PyOpenGL path if available (context must be current)
+        if _GLFW_AVAILABLE:
+            try:
+                from OpenGL import GL as gl
+                renderer_bytes = gl.glGetString(gl.GL_RENDERER)
+                if renderer_bytes:
+                    renderer_str = renderer_bytes.decode("utf-8", errors="replace").lower()
+                    if 'vc4' in renderer_str:
+                        return 'vc4'
+                    elif 'v3d' in renderer_str:
+                        return 'v3d'
+                    elif 'panfrost' in renderer_str:
+                        return 'panfrost'
+                    elif 'llvmpipe' in renderer_str:
+                        return 'llvmpipe'
+                    elif 'softpipe' in renderer_str:
+                        return 'softpipe'
+                    elif 'iris' in renderer_str:
+                        return 'iris'
+                    elif 'anv' in renderer_str:
+                        return 'anv'
+                    elif 'radeonsi' in renderer_str or 'radeon' in renderer_str:
+                        return 'radeonsi'
+                    elif 'nouveau' in renderer_str:
+                        return 'nouveau'
+                    elif 'nvidia' in renderer_str:
+                        return 'nvidia'
+            except Exception:
+                pass
     except Exception:
         pass
+    
     return None
+
+
+def _should_use_egl_backend(driver: str | None = None, detected_es: tuple[int, int] | None = None) -> bool:
+    """
+    Determine if EGL backend should be used based on:
+    - EGL availability
+    - Driver type (prefer EGL for vc4, v3d, panfrost, and on Wayland)
+    - GLES version detection
+    """
+    # Check EGL availability first
+    if not _detect_egl_available():
+        return False
+    
+    # Prefer EGL for GLES-only drivers
+    if driver in ('vc4', 'v3d', 'panfrost'):
+        return True
+    
+    # Prefer EGL on Wayland
+    if _is_wayland_session():
+        return True
+    
+    # If GLES is detected, EGL is typically needed
+    if detected_es is not None:
+        return True
+    
+    return False
+
+
+def _should_use_gles_api(driver: str | None = None, detected_es: tuple[int, int] | None = None) -> bool:
+    """
+    Determine if GLES API should be used based on:
+    - Detected GLES version
+    - Driver type (vc4, v3d, panfrost are GLES-only)
+    """
+    # GLES-only drivers require GLES API
+    if driver in ('vc4', 'v3d', 'panfrost'):
+        return True
+    
+    # If GLES version is detected, use GLES API
+    if detected_es is not None:
+        return True
+    
+    return False
 
 
 def _parse_eglinfo_es_version() -> tuple[int, int] | None:
@@ -408,7 +544,10 @@ def _es_require_codes(detected_es: tuple[int, int] | None) -> list[int | None]:
     ModernGL uses integer "require" codes (e.g. 310 for GLES 3.1).
     Try higher versions first, then fall back.
     """
-    override = getattr(settings, "PI_GLES_REQUIRE", None) or os.environ.get("PI_GLES_REQUIRE")
+    # Support both new and legacy environment variable names for backward compatibility
+    override = (getattr(settings, "GLES_REQUIRE_OVERRIDE", None) or 
+                os.environ.get("GLES_REQUIRE_OVERRIDE") or 
+                os.environ.get("PI_GLES_REQUIRE"))  # Legacy support
     if override is not None:
         try:
             return [int(override), None]
@@ -418,9 +557,16 @@ def _es_require_codes(detected_es: tuple[int, int] | None) -> list[int | None]:
     if detected_es:
         major, minor = detected_es
         detected_code = (major * 100) + (minor * 10)
-        # Use the detected version directly - no need to test lower versions
-        # ModernGL will fall back automatically if needed
-        attempts = [detected_code]
+        # Start with detected version, but include fallbacks in case detection is optimistic
+        # or actual capabilities are lower than reported
+        if detected_code >= 310:
+            attempts = [310, 300, 200, None]
+        elif detected_code >= 300:
+            attempts = [300, 200, None]
+        elif detected_code >= 200:
+            attempts = [200, None]
+        else:
+            attempts = [detected_code, None]
     else:
         # Unknown capability: probe high→low.
         attempts = [310, 300, 200, None]
@@ -435,10 +581,10 @@ def _es_require_codes(detected_es: tuple[int, int] | None) -> list[int | None]:
     return unique_attempts
 
 
-def _try_hidden_glfw_headless(require_codes: list[int | None], is_pi: bool, size: tuple[int, int]):
+def _try_hidden_glfw_headless(require_codes: list[int | None], use_egl: bool, use_gles: bool, size: tuple[int, int]):
     """
     Fallback: create a tiny invisible GLFW window to get a GL context on Wayland/X.
-    Useful when standalone EGL fails (e.g., Pi 2 VC4 + Wayland).
+    Useful when standalone EGL fails (e.g., VC4 + Wayland).
     """
     if not _GLFW_AVAILABLE:
         return None, None
@@ -450,7 +596,7 @@ def _try_hidden_glfw_headless(require_codes: list[int | None], is_pi: bool, size
     ctx_local = None
     last_error = None
 
-    backend_kwargs = {"backend": "egl"} if is_pi else {}
+    backend_kwargs = {"backend": "egl"} if use_egl else {}
 
     for require_code in require_codes:
         attempt_version = _format_gl_version(require_code) if require_code is not None else "default"
@@ -459,7 +605,7 @@ def _try_hidden_glfw_headless(require_codes: list[int | None], is_pi: bool, size
             glfw.default_window_hints()
             glfw.window_hint(glfw.VISIBLE, glfw.FALSE)
             glfw.window_hint(glfw.AUTO_ICONIFY, glfw.FALSE)
-            if is_pi:
+            if use_gles:
                 glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_ES_API)
                 glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
                 if require_code is not None:
@@ -467,7 +613,10 @@ def _try_hidden_glfw_headless(require_codes: list[int | None], is_pi: bool, size
                     glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, (require_code % 100) // 10)
             else:
                 glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_API)
-                glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.NATIVE_CONTEXT_API)
+                if use_egl or _is_wayland_session():
+                    glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
+                else:
+                    glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.NATIVE_CONTEXT_API)
 
             w, h = size
             window = glfw.create_window(w, h, "Headless GL", None, None)
@@ -502,7 +651,7 @@ def _try_hidden_glfw_headless(require_codes: list[int | None], is_pi: bool, size
     return ctx_local, window
 
 
-def _try_hidden_glfw_headless_legacy(require_codes: list[int | None], is_pi: bool, size: tuple[int, int]):
+def _try_hidden_glfw_headless_legacy(require_codes: list[int | None], use_gles: bool, size: tuple[int, int]):
     """
     Creates a tiny hidden GLFW window and uses the raw OpenGL context (PyOpenGL path).
     Returns a LegacyHeadlessWindow if a legacy (GL2.x/GLES2) context is created.
@@ -522,7 +671,7 @@ def _try_hidden_glfw_headless_legacy(require_codes: list[int | None], is_pi: boo
             glfw.default_window_hints()
             glfw.window_hint(glfw.VISIBLE, glfw.FALSE)
             glfw.window_hint(glfw.AUTO_ICONIFY, glfw.FALSE)
-            if is_pi:
+            if use_gles:
                 glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_ES_API)
                 glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
                 if require_code is not None:
@@ -530,7 +679,7 @@ def _try_hidden_glfw_headless_legacy(require_codes: list[int | None], is_pi: boo
                     glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, (require_code % 100) // 10)
             else:
                 glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_API)
-                if os.environ.get("WAYLAND_DISPLAY") or os.environ.get("XDG_SESSION_TYPE") == "wayland":
+                if _is_wayland_session():
                     glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
                 else:
                     glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.NATIVE_CONTEXT_API)
@@ -625,29 +774,28 @@ def _log_backend_usage():
 def display_init(state: DisplayState):
     global window, ctx
 
-    pi_model = _pi_model()
-    is_pi = pi_model is not None
     is_wayland = _is_wayland_session()
     session_label = _session_label()
     print(f"[DISPLAY] Session: {session_label}")
     
     # Track session info
     _BACKEND_USAGE_DATA['session_type'] = session_label
-    _BACKEND_USAGE_DATA['hardware_type'] = pi_model if is_pi else 'unknown'
     
     detected_es = _detect_es_version()
     require_codes = _es_require_codes(detected_es)
+    
+    # Determine backend and API preferences based on driver/GL capabilities
+    # Note: Driver detection will happen after context creation, so we use
+    # detected GLES version and EGL availability for initial decisions
+    use_egl_backend = _should_use_egl_backend(None, detected_es)
+    use_gles_api = _should_use_gles_api(None, detected_es)
 
-    if is_pi:
-        print(f"[DISPLAY] Hardware: {pi_model}")
     if detected_es:
         major, minor = detected_es
         detected_code = (major * 100) + (minor * 10)
         print(f"[DISPLAY] GLES capability detected: {major}.{minor} (via eglinfo) - will use GLES {major}.{minor}")
-    elif is_pi:
-        print("[DISPLAY] GLES capability not detected via eglinfo; trying GLES versions high→low.")
     else:
-        print("[DISPLAY] GLES capability not detected; trying GLES versions high→low.")
+        print("[DISPLAY] GLES capability not detected via eglinfo; trying GLES versions high→low.")
 
     # --- PATH A: SERVER / HEADLESS MODE ---
     is_server = settings.SERVER_MODE
@@ -683,7 +831,7 @@ def display_init(state: DisplayState):
         if prefer_legacy_headless:
             print("[DISPLAY] Headless renderer: legacy (detected GLES < 3.0 or FORCE_LEGACY_GL=1)")
             _BACKEND_USAGE_DATA['headless_legacy_used'] = True
-            legacy_window = _try_hidden_glfw_headless_legacy(require_codes, is_pi, (width, height))
+            legacy_window = _try_hidden_glfw_headless_legacy(require_codes, use_gles_api, (width, height))
             if legacy_window is None:
                 print("❌ HEADLESS LEGACY GL CONTEXT FAILED. Exiting.")
                 sys.exit(1)
@@ -720,26 +868,26 @@ def display_init(state: DisplayState):
                 attempt_str = f"{attempt_backend}:{attempt_version}"
                 print(f"[DISPLAY] Headless attempt: backend={attempt_backend}, GLES={attempt_version}")
                 _BACKEND_USAGE_DATA['headless_backends_tried'].append(attempt_str)
-            try:
-                create_kwargs = {"standalone": True}
-                if backend:
-                    create_kwargs["backend"] = backend
-                if require_code is not None:
-                    create_kwargs["require"] = require_code
+                try:
+                    create_kwargs = {"standalone": True}
+                    if backend:
+                        create_kwargs["backend"] = backend
+                    if require_code is not None:
+                        create_kwargs["require"] = require_code
 
-                ctx = moderngl.create_context(**create_kwargs)
-                context_created = True
-                _BACKEND_USAGE_DATA['headless_backend_success'] = attempt_str
-                if require_code is not None:
-                    print(f"[DISPLAY] ✅ Headless GL: Successfully created GLES {_format_gl_version(require_code)} context")
-                else:
-                    print(f"[DISPLAY] ✅ Headless GL: Successfully created default context")
-                _log_renderer_info(ctx)
-                break  # Success - exit inner loop
-            except Exception as e:
-                last_error = e
-                print(f"[DISPLAY] Headless attempt failed ({attempt_backend}, GLES={attempt_version}): {e}")
-                continue  # Try next version
+                    ctx = moderngl.create_context(**create_kwargs)
+                    context_created = True
+                    _BACKEND_USAGE_DATA['headless_backend_success'] = attempt_str
+                    if require_code is not None:
+                        print(f"[DISPLAY] ✅ Headless GL: Successfully created GLES {_format_gl_version(require_code)} context")
+                    else:
+                        print(f"[DISPLAY] ✅ Headless GL: Successfully created default context")
+                    _log_renderer_info(ctx)
+                    break  # Success - exit inner loop
+                except Exception as e:
+                    last_error = e
+                    print(f"[DISPLAY] Headless attempt failed ({attempt_backend}, GLES={attempt_version}): {e}")
+                    continue  # Try next version
             if context_created:
                 break  # Success - exit outer loop
 
@@ -752,13 +900,13 @@ def display_init(state: DisplayState):
             print("!"*60 + "\n")
             # Wayland/VC4 often needs a real surface; try a hidden GLFW window as a last resort.
             _BACKEND_USAGE_DATA['headless_fallback_used'] = True
-            ctx_hidden, win_hidden = _try_hidden_glfw_headless(require_codes, is_pi, (width, height))
+            ctx_hidden, win_hidden = _try_hidden_glfw_headless(require_codes, use_egl_backend, use_gles_api, (width, height))
             if ctx_hidden is not None:
                 ctx = ctx_hidden
                 hidden_window = win_hidden
                 _BACKEND_USAGE_DATA['headless_backend_success'] = "hidden_glfw"
             else:
-                legacy_window = _try_hidden_glfw_headless_legacy(require_codes, is_pi, (width, height))
+                legacy_window = _try_hidden_glfw_headless_legacy(require_codes, use_gles_api, (width, height))
                 if legacy_window is None:
                     print("❌ HEADLESS GL CONTEXT FAILED (after hidden GLFW fallback). Exiting.")
                     sys.exit(1)
@@ -824,7 +972,12 @@ def display_init(state: DisplayState):
                 fs_w, fs_h = LOW_RES_FULLSCREEN_RESOLUTION
             else:
                 best = _preferred_fullscreen_mode(mon)
-                fs_w, fs_h = best.size.width, best.size.height
+                if best is None:
+                    # Fallback: use current window size if mode detection fails
+                    current_w, current_h = glfw.get_window_size(window)
+                    fs_w, fs_h = current_w, current_h
+                else:
+                    fs_w, fs_h = best.size.width, best.size.height
             current_w, current_h = glfw.get_window_size(window)
             if current_w != fs_w or current_h != fs_h:
                 glfw.set_window_size(window, fs_w, fs_h)
@@ -879,7 +1032,11 @@ def display_init(state: DisplayState):
                     fs_w, fs_h = LOW_RES_FULLSCREEN_RESOLUTION
                 else:
                     best = _preferred_fullscreen_mode(mon)
-                    fs_w, fs_h = best.size.width, best.size.height
+                    if best is None:
+                        # Fallback: use default resolution if mode detection fails
+                        fs_w, fs_h = 1920, 1080
+                    else:
+                        fs_w, fs_h = best.size.width, best.size.height
                 glfw.window_hint(glfw.AUTO_ICONIFY, glfw.FALSE)
                 # Try actual fullscreen first (even on Wayland)
                 # Fall back to borderless window if fullscreen fails
@@ -995,6 +1152,15 @@ def display_init(state: DisplayState):
                 renderer_str = renderer_str.decode("utf-8", errors="replace") if renderer_str else "Unknown"
                 print(f"[DISPLAY] GL_VERSION: {version_str}")
                 print(f"[DISPLAY] GL_RENDERER: {renderer_str}")
+                
+                # Detect and store driver info
+                # In local mode, ctx may be None if using legacy renderer, so use PyOpenGL path
+                driver = _detect_gl_driver(ctx if ctx is not None else None)
+                if driver:
+                    _BACKEND_USAGE_DATA['driver'] = driver
+                    print(f"[DISPLAY] Driver detected: {driver}")
+                else:
+                    _BACKEND_USAGE_DATA['driver'] = 'unknown'
             except Exception:
                 pass
 
@@ -1015,9 +1181,9 @@ def display_init(state: DisplayState):
                 print("Tip: Set FORCE_LEGACY_GL=1 to force the PyOpenGL legacy backend.")
                 sys.exit(1)
 
-        _log_renderer_info(ctx)
-        renderer.initialize(ctx)
-        print("[DISPLAY] Renderer backend: moderngl")
+            _log_renderer_info(ctx)
+            renderer.initialize(ctx)
+            print("[DISPLAY] Renderer backend: moderngl")
         
         _log_backend_usage()
 
@@ -1048,7 +1214,12 @@ def display_init(state: DisplayState):
                     fs_w, fs_h = LOW_RES_FULLSCREEN_RESOLUTION
                 else:
                     best = _preferred_fullscreen_mode(mon)
-                    fs_w, fs_h = best.size.width, best.size.height
+                    if best is None:
+                        # Fallback: use current window size if mode detection fails
+                        current_w, current_h = glfw.get_window_size(window)
+                        fs_w, fs_h = current_w, current_h
+                    else:
+                        fs_w, fs_h = best.size.width, best.size.height
                 # Only resize if size changed
                 if current_w != fs_w or current_h != fs_h:
                     glfw.set_window_size(window, fs_w, fs_h)
@@ -1081,19 +1252,25 @@ def display_init(state: DisplayState):
                         # Use current resolution to avoid display resolution changes
                         # _preferred_fullscreen_mode() returns current mode, which is safe on Linux
                         best = _preferred_fullscreen_mode(mon)
-                        fs_w, fs_h = best.size.width, best.size.height
-                        refresh = getattr(best, 'refresh_rate', 60)
+                        if best is None:
+                            # Fallback: use current window size if mode detection fails
+                            current_w, current_h = glfw.get_window_size(window)
+                            fs_w, fs_h = current_w, current_h
+                            refresh = 60  # Default refresh rate
+                        else:
+                            fs_w, fs_h = best.size.width, best.size.height
+                            refresh = getattr(best, 'refresh_rate', 60)
                     glfw.set_window_monitor(window, mon, 0, 0, fs_w, fs_h, refresh)
             else:
                 if current_monitor is not None:
                     # Restore to a small window; actual sizing will be re-derived below via framebuffer size.
                     glfw.set_window_monitor(window, None, 100, 100, 400, 300, 0)
 
-    fb_w, fb_h = glfw.get_framebuffer_size(window)
-    if renderer.using_legacy_gl():
-        glViewport(0, 0, fb_w, fb_h)
-    else:
-        ctx.viewport = (0, 0, fb_w, fb_h)
+        fb_w, fb_h = glfw.get_framebuffer_size(window)
+        if renderer.using_legacy_gl():
+            glViewport(0, 0, fb_w, fb_h)
+        else:
+            ctx.viewport = (0, 0, fb_w, fb_h)
 
     if state.fullscreen:
         scale_x = fb_w / eff_w

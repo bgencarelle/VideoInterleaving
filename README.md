@@ -202,7 +202,7 @@ For headless streaming on Wayland where standalone EGL contexts fail, the app wi
 
 Optional overrides:
 - Force legacy renderer: `FORCE_LEGACY_GL=1`
-- Force GLES version attempts: `PI_GLES_REQUIRE=200` (or `300`, `310`)
+- Force GLES version attempts: `GLES_REQUIRE_OVERRIDE=200` (or `300`, `310`)
 
 Wayland note:
 - In local mode on Wayland, fullscreen uses a borderless fullscreen-sized window (not a mode-setting fullscreen) to reduce compositor/session crashes on some drivers.

@@ -359,17 +359,12 @@ install_system_packages() {
 # --------------------------------------------
 # 1. Hardware Detection (Linux only)
 # --------------------------------------------
-IS_PI=false
 HAS_GPU=false
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-if [ -d "/dev/dri" ]; then HAS_GPU=true; fi
-    if grep -q "Raspberry Pi" /proc/device-tree/model 2>/dev/null 2>&1; then 
-        IS_PI=true
-        HAS_GPU=true
-    fi
+    if [ -d "/dev/dri" ]; then HAS_GPU=true; fi
 fi
 
-echo "    Hardware: GPU=$HAS_GPU | Pi=$IS_PI"
+echo "    Hardware: GPU=$HAS_GPU"
 
 # Detect OS and package manager
 OS_INFO=$(detect_os)
@@ -689,7 +684,7 @@ if [[ "$OSTYPE" == "linux-gnu"* ]] && command -v systemctl >/dev/null 2>&1 && [ 
     log_step "⚙️  Creating/Updating Systemd Services..."
 
     # Build GPU environment block
-if [ "$IS_PI" = true ]; then
+if [ "$HAS_GPU" = true ]; then
         ENV_BLOCK="Environment=MESA_GL_VERSION_OVERRIDE=3.3
 Environment=MESA_GLSL_VERSION_OVERRIDE=330"
 elif [ "$HAS_GPU" = true ]; then

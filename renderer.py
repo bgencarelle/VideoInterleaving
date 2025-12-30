@@ -10,6 +10,7 @@ import json
 import numpy as np
 import moderngl
 from pathlib import Path
+from datetime import datetime
 try:
     import cv2
 except ImportError:
@@ -88,7 +89,7 @@ def _track_legacy_usage(function_name: str):
                 data = {
                     'legacy_backend': True,
                     'functions_used': list(_legacy_functions_used),
-                    'timestamp': str(Path.home())  # Simple timestamp placeholder
+                    'timestamp': datetime.now().isoformat()  # ISO 8601 timestamp
                 }
                 if log_path.exists():
                     with open(log_path, 'r') as f:

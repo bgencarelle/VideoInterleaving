@@ -24,6 +24,7 @@ class AsciiWebSocket(WebSocket):
 
         sem_acquired = True
         client_added = False
+        sem_released = False  # Track if semaphore was already released
         try:
             # Keep the OS buffer small too, just in case
             self.client.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
@@ -42,16 +43,22 @@ class AsciiWebSocket(WebSocket):
                 if self in clients:
                     clients.remove(self)
                 _sem.release()
+                sem_released = True  # Mark semaphore as released
             elif sem_acquired:
                 # Semaphore acquired but client not added - release it
                 _sem.release()
+                sem_released = True  # Mark semaphore as released
             self.close()
+            # Store flag so handleClose knows not to release again
+            self._sem_released_in_exception = sem_released
 
     def handleClose(self):
         # Ensure cleanup even if called multiple times
         if self in clients:
             clients.remove(self)
-            _sem.release()
+            # Only release semaphore if it wasn't already released in exception handler or broadcast cleanup
+            if not getattr(self, '_sem_released_in_exception', False) and not getattr(self, '_sem_released_in_broadcast', False):
+                _sem.release()
             print(f"[WS] Client disconnected: {self.address}")
 
     def handleMessage(self):
@@ -105,6 +112,8 @@ def broadcast_loop():
                 if client in clients:
                     clients.remove(client)
                     _sem.release()
+                    # Mark that semaphore was released so handleClose() doesn't release again
+                    client._sem_released_in_broadcast = True
                 client.close()
             except Exception as e:
                 print(f"[WS] Error cleaning up dead client: {e}")
