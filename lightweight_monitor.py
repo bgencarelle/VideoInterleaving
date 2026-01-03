@@ -7,6 +7,13 @@ import threading
 from collections import deque
 from math import log2
 
+# Try to import ASCII dimensions (may not be available in all modes)
+try:
+    from shared_state import get_ascii_dimensions
+    _ascii_dims_available = True
+except ImportError:
+    _ascii_dims_available = False
+
 # --- DATA STORE ---
 monitor_data = {
     "index": 0,
@@ -51,6 +58,9 @@ monitor_data = {
     "failed_indices": "",
     "last_error": "",
     "last_http_crash": "",
+    # ASCII dimensions (if in ASCII mode)
+    "ascii_width": 0,
+    "ascii_height": 0,
 }
 
 HTML_TEMPLATE = """
@@ -63,6 +73,80 @@ HTML_TEMPLATE = """
     body { background:#111; color:#0f0; font-family:monospace; padding:2em; }
     .label{color:#888;margin-right:1em;}
     a { color:#0f0; }
+    .control-panel {
+      margin-top: 2em;
+      padding: 1em;
+      border: 1px solid #333;
+      background: #0a0a0a;
+    }
+    .control-panel h2 {
+      margin-top: 0;
+      color: #0f0;
+      border-bottom: 1px solid #333;
+      padding-bottom: 0.5em;
+    }
+    .dim-controls {
+      display: flex;
+      gap: 1em;
+      align-items: center;
+      margin: 1em 0;
+    }
+    .dim-controls input {
+      background: #111;
+      border: 1px solid #333;
+      color: #0f0;
+      padding: 0.5em;
+      font-family: monospace;
+      width: 80px;
+    }
+    .dim-controls button {
+      background: #0f0;
+      color: #000;
+      border: none;
+      padding: 0.5em 1em;
+      font-family: monospace;
+      cursor: pointer;
+      font-weight: bold;
+    }
+    .dim-controls button:hover {
+      background: #0a0;
+    }
+    .presets {
+      display: flex;
+      gap: 0.5em;
+      flex-wrap: wrap;
+      margin: 1em 0;
+    }
+    .preset-btn {
+      background: #222;
+      color: #0f0;
+      border: 1px solid #333;
+      padding: 0.5em 1em;
+      font-family: monospace;
+      cursor: pointer;
+    }
+    .preset-btn:hover {
+      background: #333;
+      border-color: #0f0;
+    }
+    .status-message {
+      margin-top: 1em;
+      padding: 0.5em;
+      font-size: 0.9em;
+    }
+    .status-message.success {
+      color: #0f0;
+      background: #003300;
+    }
+    .status-message.error {
+      color: #f00;
+      background: #330000;
+    }
+    .current-dims {
+      color: #0f0;
+      font-weight: bold;
+      margin: 0.5em 0;
+    }
   </style>
 </head>
 <body>
@@ -70,7 +154,26 @@ HTML_TEMPLATE = """
   <div><a href="log">click for error log</a></div>
   <div id="monitor_data"></div>
 
+  <div class="control-panel" id="ascii-controls" style="display:none;">
+    <h2>ASCII Terminal Dimensions</h2>
+    <div class="current-dims" id="current-dims">Loading...</div>
+    <div class="dim-controls">
+      <label>Width: <input type="number" id="width-input" min="1" max="500" value="90"></label>
+      <label>Height: <input type="number" id="height-input" min="1" max="500" value="60"></label>
+      <button onclick="applyDimensions()">Apply</button>
+    </div>
+    <div class="presets">
+      <button class="preset-btn" onclick="setPreset(30, 20)">30×20</button>
+      <button class="preset-btn" onclick="setPreset(90, 60)">90×60</button>
+      <button class="preset-btn" onclick="setPreset(300, 200)">300×200</button>
+      <button class="preset-btn" onclick="setPreset(500, 300)">500×300</button>
+    </div>
+    <div class="status-message" id="status-message" style="display:none;"></div>
+  </div>
+
   <script>
+    let dimensionPollInterval = null;
+
     function render(d){
       let html = '';
       for (const [k, v] of Object.entries(d)) {
@@ -88,9 +191,121 @@ HTML_TEMPLATE = """
         .catch(() => {});
     }
 
+    // ASCII Dimension Control Functions
+    async function getDimensions() {
+      try {
+        const r = await fetch('/ascii/size', { cache: 'no-store' });
+        if (r.ok) {
+          return await r.json();
+        }
+        return null;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    async function setDimensions(width, height) {
+      try {
+        const r = await fetch('/ascii/size', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({width, height})
+        });
+        if (r.ok) {
+          return await r.json();
+        } else {
+          const error = await r.json().catch(() => ({error: 'Unknown error'}));
+          throw new Error(error.error || 'Failed to set dimensions');
+        }
+      } catch (e) {
+        throw e;
+      }
+    }
+
+    function updateDimensionDisplay(dims) {
+      if (!dims) return;
+      const currentEl = document.getElementById('current-dims');
+      const widthInput = document.getElementById('width-input');
+      const heightInput = document.getElementById('height-input');
+      
+      if (currentEl) {
+        currentEl.textContent = `Current: ${dims.width} cols × ${dims.height} rows`;
+      }
+      if (widthInput) widthInput.value = dims.width;
+      if (heightInput) heightInput.value = dims.height;
+    }
+
+    function showStatus(message, isError = false) {
+      const statusEl = document.getElementById('status-message');
+      if (statusEl) {
+        statusEl.textContent = message;
+        statusEl.className = 'status-message ' + (isError ? 'error' : 'success');
+        statusEl.style.display = 'block';
+        setTimeout(() => {
+          statusEl.style.display = 'none';
+        }, 3000);
+      }
+    }
+
+    async function applyDimensions() {
+      const widthInput = document.getElementById('width-input');
+      const heightInput = document.getElementById('height-input');
+      
+      if (!widthInput || !heightInput) return;
+      
+      const width = parseInt(widthInput.value);
+      const height = parseInt(heightInput.value);
+      
+      if (isNaN(width) || isNaN(height) || width < 1 || height < 1) {
+        showStatus('Invalid dimensions. Must be positive numbers.', true);
+        return;
+      }
+      
+      try {
+        const result = await setDimensions(width, height);
+        if (result) {
+          updateDimensionDisplay(result);
+          showStatus(`✓ Dimensions updated to ${result.width}×${result.height}`);
+        }
+      } catch (e) {
+        showStatus(`Error: ${e.message}`, true);
+      }
+    }
+
+    function setPreset(width, height) {
+      const widthInput = document.getElementById('width-input');
+      const heightInput = document.getElementById('height-input');
+      
+      if (widthInput) widthInput.value = width;
+      if (heightInput) heightInput.value = height;
+      applyDimensions();
+    }
+
+    async function pollDimensions() {
+      const dims = await getDimensions();
+      if (dims) {
+        // Show controls if dimensions endpoint is available (ASCII mode active)
+        const controlsEl = document.getElementById('ascii-controls');
+        if (controlsEl) {
+          controlsEl.style.display = 'block';
+        }
+        updateDimensionDisplay(dims);
+      } else {
+        // Hide controls if not in ASCII mode
+        const controlsEl = document.getElementById('ascii-controls');
+        if (controlsEl) {
+          controlsEl.style.display = 'none';
+        }
+      }
+    }
+
     document.addEventListener('DOMContentLoaded', () => {
       poll();
-      setInterval(poll, 100); // 1Hz poll to save CPU
+      setInterval(poll, 100); // Poll monitor data
+      
+      // Poll dimensions and show/hide controls
+      pollDimensions();
+      dimensionPollInterval = setInterval(pollDimensions, 2000); // Poll dimensions every 2 seconds
     });
   </script>
 </body>
@@ -98,11 +313,36 @@ HTML_TEMPLATE = """
 """
 
 def _entropy(counts):
+    """
+    Calculate normalized Shannon entropy for folder selection distribution.
+    
+    Normalizes by the maximum achievable entropy for ALL available folders,
+    not just the folders that have been used. This measures randomness across
+    the full set of available folders and shows progress toward using all folders.
+    
+    Returns a value between 0.0 (completely ordered or few folders used) and 1.0
+    (maximally random across all available folders).
+    
+    - Early in run: Low entropy (few folders used)
+    - Mid run: Increasing entropy (more folders used)
+    - Late run: High entropy (all folders used randomly)
+    """
     tot = sum(counts)
     if tot == 0:
         return 0.0
-    h = -sum((c/tot) * log2(c/tot) for c in counts if c)
-    return h / log2(len(counts))
+    
+    n = len(counts)  # Total folders available
+    if n <= 1:
+        return 0.0
+    
+    # Calculate raw Shannon entropy (only sum over non-zero bins)
+    h = -sum((c / tot) * log2(c / tot) for c in counts if c > 0)
+    
+    # Normalize by maximum entropy for ALL folders
+    # This measures randomness across the full set of available folders
+    max_h = log2(n)
+    
+    return h / max_h if max_h > 0 else 0.0
 
 # Call this from image_display.py
 def start_monitor():
@@ -252,6 +492,21 @@ class MonitorUpdater:
                     'float_entropy': f"{_entropy(self.float_counts):.2f}",
                     'float_samples': sum(self.float_counts),
                 })
+
+            # Update ASCII dimensions if available
+            if _ascii_dims_available:
+                try:
+                    dims = get_ascii_dimensions()
+                    monitor_data.update({
+                        'ascii_width': dims.get_width(),
+                        'ascii_height': dims.get_height(),
+                    })
+                except Exception:
+                    # ASCII dimensions not available or error
+                    monitor_data.update({
+                        'ascii_width': 0,
+                        'ascii_height': 0,
+                    })
 
             self.last_heavy_update = now
 

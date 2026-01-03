@@ -1266,11 +1266,11 @@ def display_init(state: DisplayState):
                     # Restore to a small window; actual sizing will be re-derived below via framebuffer size.
                     glfw.set_window_monitor(window, None, 100, 100, 400, 300, 0)
 
-        fb_w, fb_h = glfw.get_framebuffer_size(window)
-        if renderer.using_legacy_gl():
-            glViewport(0, 0, fb_w, fb_h)
-        else:
-            ctx.viewport = (0, 0, fb_w, fb_h)
+    fb_w, fb_h = glfw.get_framebuffer_size(window)
+    if renderer.using_legacy_gl():
+        glViewport(0, 0, fb_w, fb_h)
+    else:
+        ctx.viewport = (0, 0, fb_w, fb_h)
 
     if state.fullscreen:
         scale_x = fb_w / eff_w

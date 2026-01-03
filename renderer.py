@@ -868,3 +868,11 @@ def composite_cpu(main_img, float_img, main_is_sbs=False, float_is_sbs=False, ta
             return _cached_canvas.copy()
 
     return working_buffer
+
+
+def clear_cpu_caches():
+    """Clear CPU compositor caches. Called when ASCII dimensions change to prevent stale data."""
+    global _cpu_buffer, _cached_canvas
+    with _cpu_buffer_lock:
+        _cpu_buffer = None
+        _cached_canvas = None

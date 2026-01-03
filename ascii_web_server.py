@@ -62,7 +62,18 @@ class AsciiWebSocket(WebSocket):
             print(f"[WS] Client disconnected: {self.address}")
 
     def handleMessage(self):
-        pass
+        """Handle incoming WebSocket messages (e.g., dimension change requests)."""
+        try:
+            import json
+            data = json.loads(self.data)
+            if data.get('type') == 'resize':
+                # Client requesting dimension change (optional feature)
+                # For now, we'll let the server control dimensions via HTTP API
+                # This could be extended to allow client-initiated changes
+                pass
+        except (json.JSONDecodeError, AttributeError, KeyError):
+            # Not a JSON message or not a resize command - ignore
+            pass
 
 
 def broadcast_loop():
@@ -91,8 +102,8 @@ def broadcast_loop():
                 # Check the internal library buffer.
                 # If 'sendq' has data, the client is lagging (tab hidden).
                 # Skip this frame for this specific client.
-                if hasattr(client, 'sendq') and client.sendq:
-                    continue
+                # if hasattr(client, 'sendq') and client.sendq:
+                #     continue
 
                 # If buffer is empty, send the new frame
                 client.sendMessage(payload)
@@ -117,6 +128,40 @@ def broadcast_loop():
                 client.close()
             except Exception as e:
                 print(f"[WS] Error cleaning up dead client: {e}")
+
+
+def broadcast_dimension_change(width, height):
+    """Broadcast dimension change to all connected WebSocket clients."""
+    try:
+        import json
+        message = json.dumps({
+            "type": "resize",
+            "cols": width,
+            "rows": height
+        })
+        # Broadcast to all clients
+        dead_clients = []
+        for client in list(clients):
+            try:
+                client.sendMessage(message)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                dead_clients.append(client)
+            except Exception as e:
+                print(f"[WS] Error broadcasting dimension change: {e}")
+                dead_clients.append(client)
+        
+        # Clean up dead clients
+        for client in dead_clients:
+            try:
+                if client in clients:
+                    clients.remove(client)
+                    _sem.release()
+                    client._sem_released_in_broadcast = True
+                client.close()
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"[WS] Error in broadcast_dimension_change: {e}")
 
 
 def start_server():
