@@ -1094,11 +1094,9 @@ def display_init(state: DisplayState):
                         glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, (version_code % 100) // 10)
                 else:
                     glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_API)
-                    # On Wayland, EGL is usually the working path even for desktop GL.
-                    if os.environ.get("WAYLAND_DISPLAY") or os.environ.get("XDG_SESSION_TYPE") == "wayland":
-                        glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
-                    else:
-                        glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.NATIVE_CONTEXT_API)
+                    # Try EGL first even on X11 for better compatibility, fall back to native if needed
+                    # Some systems (especially with Mesa) have better EGL support
+                    glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
                     if version_code is not None:
                         glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, version_code // 100)
                         glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, (version_code % 100) // 10)
