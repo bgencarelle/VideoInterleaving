@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-white_balance_native_sequential_optimized.py
+White Balance Correction
 
-This module processes images in their native BGRA space with white balancing,
+Processes images in their native BGRA space with white balancing,
 using the 30th image (or the last one if fewer than 30 exist) in each folder as
 the white reference. It computes per-channel scaling factors from a white/neutral
 patch and then applies these factors to all images in the folder.
@@ -11,16 +11,20 @@ The output images are saved as lossless WebP. The full‐resolution input image 
 output without resizing.
 
 This version preserves the source folder structure and processes directories
-sequentially (while processing images concurrently). It’s optimized by removing
-redundant conversions and prints a message for each file as it is finished.
+sequentially (while processing images concurrently).
 """
 
+import argparse
+import logging
 import os
 import re
+import sys
 import cv2
 import numpy as np
+from pathlib import Path
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Optional, Tuple
 
 
 # --- Helper Functions ---
@@ -163,31 +167,31 @@ def save_lossless_webp(image, out_path):
 
 # --- Per-Image Processing ---
 
-def process_image(file, input_dir, output_dir, reference_color, white_threshold):
+def process_image(file: str, input_dir: Path, output_dir: Path, reference_color: np.ndarray, white_threshold: float) -> str:
     """
     Process a single image: white balance it and save as lossless WebP.
-    Prints a message when finished.
+    Returns a status message.
     """
-    image_path = os.path.join(input_dir, file)
-    image = load_image_as_rgba(image_path)
+    image_path = input_dir / file
+    image = load_image_as_rgba(str(image_path))
     if image is None:
         msg = f"Error reading {image_path}"
-        print(msg)
+        logging.error(msg)
         return msg
     balanced_image = white_balance_image_native(
         image, white_threshold=white_threshold, auto_reference=False, reference_color=reference_color
     )
-    base_name = os.path.splitext(file)[0]
-    out_path = os.path.join(output_dir, base_name + ".webp")
-    save_lossless_webp(balanced_image, out_path)
+    base_name = Path(file).stem
+    out_path = output_dir / f"{base_name}.webp"
+    save_lossless_webp(balanced_image, str(out_path))
     msg = f"Processed {image_path} -> {out_path}"
-    print(msg)
+    logging.debug(msg)
     return msg
 
 
 # --- Per-Folder Processing ---
 
-def process_directory(input_dir, output_root, white_threshold=0.9):
+def process_directory(input_dir: Path, output_root: Path, base_input_folder: Path, white_threshold: float = 0.9, workers: Optional[int] = None) -> str:
     """
     Process all images in a directory:
       - Compute a white reference from the 30th (or last) file.
@@ -201,8 +205,8 @@ def process_directory(input_dir, output_root, white_threshold=0.9):
         return f"No supported images found in {input_dir}"
     sorted_images = sorted(images, key=natural_key)
     ref_image_name = sorted_images[29] if len(sorted_images) >= 30 else sorted_images[-1]
-    ref_image_path = os.path.join(input_dir, ref_image_name)
-    ref_image = load_image_as_rgba(ref_image_path)
+    ref_image_path = input_dir / ref_image_name
+    ref_image = load_image_as_rgba(str(ref_image_path))
     if ref_image is None:
         return f"Error reading reference image {ref_image_path}; skipping folder."
     norm = 255.0 if ref_image.dtype == np.uint8 else 65535.0 if ref_image.dtype == np.uint16 else 1.0
@@ -210,16 +214,18 @@ def process_directory(input_dir, output_root, white_threshold=0.9):
     alpha = ref_image[:, :, 3] / norm
     candidate = extract_white_patch(rgb, threshold=white_threshold, alpha=alpha)
     if candidate is None:
-        print(
+        logging.warning(
             f"No valid white patch found in {ref_image_path}; applying generic white balance using the 95th percentile of the overall image.")
         candidate = np.percentile(rgb, 95, axis=(0, 1))
     reference_color = candidate
-    print(f"In folder '{input_dir}', using '{ref_image_name}' as reference.")
-    print(f"Reference white/gray color: {reference_color}")
-    rel_path = safe_relpath(input_dir, BASE_INPUT_FOLDER)
-    output_dir = os.path.join(output_root, rel_path)
-    os.makedirs(output_dir, exist_ok=True)
-    with ThreadPoolExecutor() as executor:
+    logging.info(f"In folder '{input_dir}', using '{ref_image_name}' as reference.")
+    logging.info(f"Reference white/gray color: {reference_color}")
+    rel_path = safe_relpath(str(input_dir), str(base_input_folder))
+    output_dir = output_root / rel_path
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    max_workers = workers or os.cpu_count() or 1
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(process_image, file, input_dir, output_dir, reference_color, white_threshold): file
                    for file in images}
         for future in as_completed(futures):
@@ -229,33 +235,101 @@ def process_directory(input_dir, output_root, white_threshold=0.9):
 
 # --- Main Function ---
 
-BASE_INPUT_FOLDER = None
+def setup_logging(log_level: str = "INFO") -> None:
+    """Setup logging configuration."""
+    numeric_level = getattr(logging, log_level.upper(), None)
+    if not isinstance(numeric_level, int):
+        raise ValueError(f"Invalid log level: {log_level}")
+    
+    logging.basicConfig(
+        level=numeric_level,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[logging.StreamHandler()]
+    )
 
 
-def main():
+def parse_arguments() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Apply white balance correction to images using per-folder reference images."
+    )
+    parser.add_argument(
+        "-i", "--input-dir",
+        type=str,
+        required=True,
+        help="Input folder path containing images to process"
+    )
+    parser.add_argument(
+        "-o", "--output-dir",
+        type=str,
+        default=None,
+        help="Output folder path (default: {input_dir}_wb)"
+    )
+    parser.add_argument(
+        "-t", "--white-threshold",
+        type=float,
+        default=0.9,
+        help="White patch detection threshold (0.0-1.0, default: 0.9)"
+    )
+    parser.add_argument(
+        "-w", "--workers",
+        type=int,
+        default=None,
+        help="Number of parallel workers per folder (default: CPU count)"
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Logging level (default: INFO)"
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
     """
     Standalone entry point.
-    Prompts for an input folder, gathers all subdirectories containing supported images,
+    Processes all subdirectories containing supported images,
     and processes each directory sequentially.
-    The output folder structure is preserved and a message is printed when each folder is finished.
+    The output folder structure is preserved.
     """
-    global BASE_INPUT_FOLDER
-    BASE_INPUT_FOLDER = input("Enter the path to the input folder: ").strip()
-    if not os.path.isdir(BASE_INPUT_FOLDER):
-        print("The provided path is not a valid directory.")
-        return
-    parent_dir = os.path.dirname(BASE_INPUT_FOLDER)
-    folder_name = os.path.basename(BASE_INPUT_FOLDER)
-    output_root = os.path.join(parent_dir, folder_name + "_wb")
-    os.makedirs(output_root, exist_ok=True)
-    dirs_to_process = []
+    args = parse_arguments()
+    
+    # Setup logging
+    setup_logging(args.log_level)
+    
+    base_input_folder = Path(args.input_dir).expanduser().resolve()
+    if not base_input_folder.is_dir():
+        logging.error(f"The provided path is not a valid directory: {base_input_folder}")
+        sys.exit(1)
+    
+    if args.output_dir:
+        output_root = Path(args.output_dir).expanduser().resolve()
+    else:
+        parent_dir = base_input_folder.parent
+        folder_name = base_input_folder.name
+        output_root = parent_dir / f"{folder_name}_wb"
+    
+    output_root.mkdir(parents=True, exist_ok=True)
+    
+    dirs_to_process: list[Path] = []
     supported_extensions = ('.png', '.jpg', '.jpeg', '.tiff', '.bmp', '.webp')
-    for root, dirs, files in os.walk(BASE_INPUT_FOLDER):
+    for root, dirs, files in os.walk(base_input_folder):
         if any(file.lower().endswith(supported_extensions) for file in files):
-            dirs_to_process.append(root)
-    for d in sorted(dirs_to_process, key=natural_key):
-        result = process_directory(d, output_root, white_threshold=0.9)
-        print(result)
+            dirs_to_process.append(Path(root))
+    
+    if not dirs_to_process:
+        logging.warning(f"No directories with supported images found in {base_input_folder}")
+        sys.exit(0)
+    
+    logging.info(f"Found {len(dirs_to_process)} directory(ies) to process")
+    logging.info(f"Output root: {output_root}")
+    logging.info(f"White threshold: {args.white_threshold}")
+    
+    for d in sorted(dirs_to_process, key=lambda p: natural_key(str(p))):
+        result = process_directory(d, output_root, base_input_folder, white_threshold=args.white_threshold, workers=args.workers)
+        logging.info(result)
 
 
 if __name__ == "__main__":

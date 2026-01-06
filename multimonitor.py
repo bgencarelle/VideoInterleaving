@@ -352,8 +352,8 @@ def check_mode_status(mode):
             telnet_online = check_port('127.0.0.1', ports['telnet'])
             status['servers']['Telnet'] = {'online': telnet_online, 'port': ports['telnet']}
             
-            # Check stats monitor server
-            stats_online, stats_data = check_http_endpoint('127.0.0.1', ports['monitor'], '/data')
+            # Check stats monitor server (TCP/Telnet server, not HTTP)
+            stats_online = check_port('127.0.0.1', ports['monitor'])
             status['servers']['Stats'] = {'online': stats_online, 'port': ports['monitor']}
             
             if telnet_online or stats_online:

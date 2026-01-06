@@ -84,13 +84,13 @@
             z-index: 2;
             pointer-events: none; /* Let clicks pass through to video if needed */
             background: transparent; /* Ensure iframe background doesn't block video */
-
-            /* Set initial opacity */
             opacity: 0.01;
-
-            /* Apply animation: name | duration | timing-function | iteration-count | direction */
-            /* 60s to go from 1% to 99%, then 60s back to 1% */
             animation: modulateTransparency 60s linear infinite alternate;
+            width: 100%;
+            height: 100%;
+            border: 0;
+            max-width: 100%;
+            max-height: 100%;
         }
 
         /* Grid Area Assignments */
@@ -129,11 +129,11 @@
 
     <div class="panel area-mixA overlay-container">
         <img class="base-layer" src="https://gencarelle.fun/video_feed" alt="base"/>
-        <iframe class="overlay-layer" src="https://gencarelle.fun/ascii" allow="autoplay"></iframe>
+        <iframe class="overlay-layer" src="https://gencarelle.fun/ascii" allow="autoplay" scrolling="no"></iframe>
     </div>
 
     <div class="panel area-ascA">
-        <iframe src="https://gencarelle.fun/ascii" allow="autoplay"></iframe>
+        <iframe src="https://gencarelle.fun/ascii" allow="autoplay" scrolling="no"></iframe>
     </div>
 
 
@@ -143,11 +143,11 @@
 
     <div class="panel area-mixB overlay-container">
         <img class="base-layer" src="https://testing.gencarelle.fun/video_feed" alt="base"/>
-        <iframe class="overlay-layer" src="https://testing.gencarelle.fun/ascii" allow="autoplay"></iframe>
+        <iframe class="overlay-layer" src="https://testing.gencarelle.fun/ascii" allow="autoplay" scrolling="no"></iframe>
     </div>
 
     <div class="panel area-ascB">
-        <iframe src="https://testing.gencarelle.fun/ascii" allow="autoplay"></iframe>
+        <iframe src="https://testing.gencarelle.fun/ascii" allow="autoplay" scrolling="no"></iframe>
     </div>
 
 </div>

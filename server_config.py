@@ -73,7 +73,7 @@ class ServerConfig:
         self._current_mode = mode
         
         if mode == MODE_WEB:
-            # Web mode: Monitor on 1978, Stream on 8080
+            # Web mode: Use settings if available, otherwise defaults
             monitor = getattr(settings, 'WEB_PORT', self.DEFAULT_MONITOR_PORT)
             stream = getattr(settings, 'STREAM_PORT', self.DEFAULT_STREAM_PORT)
             self._current_config = PortConfig(
@@ -82,7 +82,7 @@ class ServerConfig:
             )
             
         elif mode == MODE_LOCAL:
-            # Local mode: Monitor only on 8888
+            # Local mode: Use settings if available, otherwise defaults
             monitor = getattr(settings, 'WEB_PORT', self.DEFAULT_LOCAL_PORT)
             self._current_config = PortConfig(
                 monitor=monitor
@@ -104,7 +104,7 @@ class ServerConfig:
             )
             
         elif mode == MODE_ASCIIWEB:
-            # ASCIIWEB mode: Monitor on 1980, WebSocket on primary_port+1 (default 2424)
+            # ASCIIWEB mode: Use settings if available, otherwise defaults
             monitor = getattr(settings, 'WEB_PORT', self.DEFAULT_ASCIIWEB_MONITOR_PORT)
             
             if primary_port is None:

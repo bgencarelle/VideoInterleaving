@@ -1,16 +1,18 @@
 <!doctype html>
 <html lang="en">
+
 <head>
     <meta charset="utf-8">
     <title>VideoInterleaving Terminal</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <link rel="stylesheet" href="/static/xterm.css"/>
-    <link rel="stylesheet" href="/static/terminal.css"/>
+    <link rel="stylesheet" href="/static/xterm.css" />
+    <link rel="stylesheet" href="/static/terminal.css" />
     <script src="/static/xterm.js"></script>
 
     <style>
         /* [CRITICAL FIX] Force black background immediately to prevent white borders/flashes */
-        html, body {
+        html,
+        body {
             background-color: #000000 !important;
             margin: 0;
             padding: 0;
@@ -33,170 +35,222 @@
         }
     </style>
 </head>
+
 <body>
 
-<div id="terminal-stage">
-    <div id="terminal"></div>
-</div>
+    <div id="terminal-stage">
+        <div id="terminal"></div>
+    </div>
 
-<script>
-    const WS_PORT = parseInt("{{WEBSOCKET_PORT}}") || 2424;
+    <script>
+        const WS_PORT = parseInt("{{WEBSOCKET_PORT}}") || 2424;
 
-    // --- SETTINGS ---
-    const COLS = parseInt("{{ASCII_WIDTH}}") || 80;
-    const ROWS = parseInt("{{ASCII_HEIGHT}}") || 24;
-    const TARGET_PIXEL_RATIO = parseFloat("{{ASCII_FONT_RATIO}}") || 0.5;
+        // --- SETTINGS ---
+        let COLS = parseInt("{{ASCII_WIDTH}}") || 80;
+        let ROWS = parseInt("{{ASCII_HEIGHT}}") || 24;
+        const TARGET_PIXEL_RATIO = parseFloat("{{ASCII_FONT_RATIO}}") || 0.5;
 
-    const IMAGE_ASPECT_RATIO = (COLS * TARGET_PIXEL_RATIO) / ROWS;
+        // Calculate aspect ratio dynamically based on current dimensions
+        function getImageAspectRatio() {
+            return (COLS * TARGET_PIXEL_RATIO) / ROWS;
+        }
+        let IMAGE_ASPECT_RATIO = getImageAspectRatio();
 
-    if (typeof Terminal === 'undefined') throw new Error("xterm.js missing");
+        if (typeof Terminal === 'undefined') throw new Error("xterm.js missing");
 
-    // --- 1. MEASURE FONT ---
-    function measureFont(fontFamily, fontSize) {
-        const span = document.createElement('span');
-        span.style.fontFamily = fontFamily;
-        span.style.fontSize = fontSize + 'px';
-        span.style.visibility = 'hidden';
-        span.style.whiteSpace = 'nowrap';
-        span.textContent = 'M'.repeat(20);
-        document.body.appendChild(span);
-        const w = span.getBoundingClientRect().width / 20;
-        const h = span.getBoundingClientRect().height;
-        document.body.removeChild(span);
-        return {w, h};
-    }
+        // --- 1. MEASURE FONT ---
+        function measureFont(fontFamily, fontSize) {
+            const span = document.createElement('span');
+            span.style.fontFamily = fontFamily;
+            span.style.fontSize = fontSize + 'px';
+            span.style.visibility = 'hidden';
+            span.style.whiteSpace = 'nowrap';
+            span.textContent = 'M'.repeat(20);
+            document.body.appendChild(span);
+            const w = span.getBoundingClientRect().width / 20;
+            const h = span.getBoundingClientRect().height;
+            document.body.removeChild(span);
+            return { w, h };
+        }
 
-    // --- 2. INIT ---
-    // Store cell dimensions for use in setupFit
-    let cellW, cellH;
+        // --- 2. INIT ---
+        // Store cell dimensions for use in setupFit
+        let cellW, cellH;
+        let term; // Store terminal instance globally for resize operations
 
-    function initTerminal() {
-        const FONT_SIZE = 12;
-        const FONT_FAMILY = 'Unscii, monospace';
+        function initTerminal() {
+            const FONT_SIZE = 12;
+            const FONT_FAMILY = 'Unscii, monospace';
 
-        const m = measureFont(FONT_FAMILY, FONT_SIZE);
+            const m = measureFont(FONT_FAMILY, FONT_SIZE);
 
-        // Calculate line height from font ratio to match target pixel ratio
-        let lh = m.w / (m.h * TARGET_PIXEL_RATIO);
-        if (lh < 0.8) lh = 0.8;
+            // Calculate line height from font ratio to match target pixel ratio
+            let lh = m.w / (m.h * TARGET_PIXEL_RATIO);
+            if (lh < 0.8) lh = 0.8;
 
-        // Calculate cell dimensions from font measurements
-        cellW = m.w;
-        cellH = m.h * lh;
+            // Calculate cell dimensions from font measurements
+            cellW = m.w;
+            cellH = m.h * lh;
 
-        const term = new Terminal({
-            cols: COLS, rows: ROWS,
-            fontFamily: FONT_FAMILY,
-            fontSize: FONT_SIZE,
-            lineHeight: lh,
-            letterSpacing: 0,
-            cursorBlink: false, disableStdin: true,
-            // Ensure theme background matches the page background
-            theme: {background: '#000000', foreground: '#e6e6e6'},
-            allowTransparency: false
-        });
+            term = new Terminal({
+                cols: COLS, rows: ROWS,
+                fontFamily: FONT_FAMILY,
+                fontSize: FONT_SIZE,
+                lineHeight: lh,
+                letterSpacing: 0,
+                cursorBlink: false, disableStdin: true,
+                // Ensure theme background matches the page background
+                theme: { background: '#000000', foreground: '#e6e6e6' },
+                allowTransparency: false
+            });
 
-        term.open(document.getElementById('terminal'));
+            term.open(document.getElementById('terminal'));
 
-        setupFit(term);
-        connect(term);
-    }
+            // Wait for terminal to be fully rendered before setting up scaling
+            // This ensures cellW and cellH are accurate and the terminal is sized correctly
+            setTimeout(() => {
+                setupFit(term);
+            }, 100);
 
-    // --- 3. FIT TO SCREEN ---
-    function setupFit(term) {
-        const fitToScreen = () => {
-            const termEl = document.getElementById('terminal');
-            const screenEl = termEl.querySelector('.xterm-screen');
-            const stageEl = document.getElementById('terminal-stage');
+            connect(term);
+        }
 
-            if (!screenEl || screenEl.clientWidth < 1) return false;
+        // Function to handle dimension changes
+        function handleDimensionChange(newCols, newRows) {
+            if (!term) return;
 
-            // Use the terminal-stage container dimensions (works for both standalone and iframe)
-            const containerW = stageEl.clientWidth || window.innerWidth;
-            const containerH = stageEl.clientHeight || window.innerHeight;
+            // Update dimensions
+            COLS = newCols;
+            ROWS = newRows;
+            IMAGE_ASPECT_RATIO = getImageAspectRatio();
 
-            const naturalW = cellW * COLS;
-            const naturalH = cellH * ROWS;
+            // Resize terminal
+            term.resize(newCols, newRows);
 
-            let targetW;
-            let targetH;
-            const containerRatio = containerW / containerH;
-
-            if (containerRatio > IMAGE_ASPECT_RATIO) {
-                targetH = containerH;
-                targetW = targetH * IMAGE_ASPECT_RATIO;
-            } else {
-                targetW = containerW;
-                targetH = targetW / IMAGE_ASPECT_RATIO;
+            // Recalculate and apply scaling to maintain window size
+            if (term.fitFn) {
+                setTimeout(term.fitFn, 50);
             }
+        }
 
-            // Add a tiny margin to avoid compounded shrink from borders or rounding
-            const margin = 0.995;
-            targetW *= margin;
-            targetH *= margin;
+        // --- 3. FIT TO SCREEN ---
+        function setupFit(term) {
+            const fitToScreen = () => {
+                const termEl = document.getElementById('terminal');
+                const screenEl = termEl.querySelector('.xterm-screen');
+                const stageEl = document.getElementById('terminal-stage');
 
-            // Apply anisotropic scaling directly from measured cell geometry so
-            // the final grid matches the desired aspect ratio without extra
-            // width-only adjustments that could introduce slight stretching.
-            const scaleX = targetW / naturalW;
-            const scaleY = targetH / naturalH;
+                if (!screenEl || screenEl.clientWidth < 1) return false;
 
-            // Uniformly scale the natural grid to fit the container.
-            // This keeps the terminal's native aspect ratio intact while
-            // letting CSS scaling drive the size to fill the window.
-            const scale = Math.min(containerW / naturalW, containerH / naturalH);
-            termEl.style.transform = `scale(${scale})`;
-            
-            // Ensure terminal-stage centers properly
-            stageEl.style.display = 'flex';
-            stageEl.style.justifyContent = 'center';
-            stageEl.style.alignItems = 'center';
+                // Use viewport dimensions directly for accurate scaling
+                const containerW = window.innerWidth;
+                const containerH = window.innerHeight;
 
-            return true;
-        };
+                // Calculate natural dimensions from cell size and terminal dimensions
+                // This matches what the ASCII conversion uses (COLS x ROWS from settings/runtime)
+                const naturalW = cellW * COLS;
+                const naturalH = cellH * ROWS;
 
-        const safeFit = () => {
-            if (!fitToScreen()) requestAnimationFrame(safeFit);
-        };
-        window.addEventListener('resize', () => requestAnimationFrame(fitToScreen));
-        requestAnimationFrame(safeFit);
-        term.fitFn = safeFit;
-    }
+                // Ensure natural dimensions are valid
+                if (naturalW <= 0 || naturalH <= 0 || containerW <= 0 || containerH <= 0) {
+                    return false;
+                }
 
-    // --- 4. CONNECTION ---
-    function connect(term) {
-        const protocol = location.protocol === 'https:' ? 'wss://' : 'ws://';
-        const wsUrl = (location.port === "" || location.port === "80" || location.port === "443")
+                // Calculate scale to fill the viewport
+                const scale = Math.min(containerW / naturalW, containerH / naturalH);
+
+                // Ensure scale is valid
+                if (scale <= 0 || !isFinite(scale)) {
+                    return false;
+                }
+
+                // Set terminal element to natural size (before scaling)
+                termEl.style.width = naturalW + 'px';
+                termEl.style.height = naturalH + 'px';
+                termEl.style.position = 'relative';
+                termEl.style.margin = '0 auto';
+
+                // Apply scaling transform - this scales the terminal to fill the window
+                termEl.style.transform = `scale(${scale})`;
+                termEl.style.transformOrigin = 'center center';
+
+                // Ensure terminal-stage centers properly and fills viewport
+                stageEl.style.display = 'flex';
+                stageEl.style.justifyContent = 'center';
+                stageEl.style.alignItems = 'center';
+                stageEl.style.width = '100vw';
+                stageEl.style.height = '100vh';
+                stageEl.style.position = 'fixed';
+                stageEl.style.top = '0';
+                stageEl.style.left = '0';
+
+                return true;
+            };
+
+            const safeFit = () => {
+                if (!fitToScreen()) requestAnimationFrame(safeFit);
+            };
+            window.addEventListener('resize', () => requestAnimationFrame(fitToScreen));
+            requestAnimationFrame(safeFit);
+            term.fitFn = safeFit;
+        }
+
+        // --- 4. CONNECTION ---
+        function connect(term) {
+            const protocol = location.protocol === 'https:' ? 'wss://' : 'ws://';
+            const wsUrl = (location.port === "" || location.port === "80" || location.port === "443")
                 ? protocol + location.hostname + "/ascii_ws/"
                 : protocol + location.hostname + ":" + WS_PORT;
 
-        const ws = new WebSocket(wsUrl);
-        ws.binaryType = "arraybuffer";
+            const ws = new WebSocket(wsUrl);
+            ws.binaryType = "arraybuffer";
+            connectedWS = ws;
 
-        ws.onopen = () => {
-            term.reset();
-            setTimeout(term.fitFn, 50);
-        };
-        ws.onmessage = (ev) => term.write(ev.data);
-        ws.onclose = () => setTimeout(() => connect(term), 1000);
-        ws.onerror = () => ws.close();
-    }
-
-    document.fonts.load("16px Unscii").then(() => initTerminal()).catch(() => initTerminal());
-
-    (function () {
-        let t;
-
-        function reset() {
-            document.body.classList.remove('hide-cursor');
-            clearTimeout(t);
-            t = setTimeout(() => document.body.classList.add('hide-cursor'), 2000);
+            ws.onopen = () => {
+                term.reset();
+                setTimeout(term.fitFn, 50);
+            };
+            ws.onmessage = (ev) => term.write(ev.data);
+            ws.onclose = () => {
+                connectedWS = null;
+                setTimeout(() => connect(term), 1000);
+            }
+            ws.onerror = () => ws.close();
         }
 
-        ['mousemove', 'mousedown', 'keydown', 'touchstart'].forEach(e =>
-                window.addEventListener(e, reset, {passive: true}));
-        reset();
-    })();
-</script>
+        document.fonts.load("16px Unscii").then(() => initTerminal()).catch(() => initTerminal());
+
+        (function () {
+            let t;
+            const wsRef = { current: null }; // Hacky ref to access WS from event listener if needed
+
+            function reset() {
+                document.body.classList.remove('hide-cursor');
+                clearTimeout(t);
+                t = setTimeout(() => document.body.classList.add('hide-cursor'), 2000);
+            }
+
+            ['mousemove', 'mousedown', 'keydown', 'touchstart'].forEach(e =>
+                window.addEventListener(e, reset, { passive: true }));
+            reset();
+
+            // Key Controls
+            window.addEventListener('keydown', (e) => {
+                if (!connectedWS || connectedWS.readyState !== WebSocket.OPEN) return;
+
+                if (e.key === 't' || e.key === 'T') {
+                    connectedWS.send("CMD_TOGGLE_TEST");
+                } else if (e.key === ']') {
+                    connectedWS.send("CMD_RATIO_INC");
+                } else if (e.key === '[') {
+                    connectedWS.send("CMD_RATIO_DEC");
+                }
+            });
+        })();
+
+        // Internal var to expose WS to key listener
+        let connectedWS = null;
+    </script>
 </body>
+
 </html>
