@@ -14,3 +14,9 @@ CONNECTED_TO_RCA_HDMI = False  # this is for analog TVs
 RCA_HDMI_RESOLUTION = (640, 480)
 LOW_RES_FULLSCREEN = False        # Set to True to force low resolution mode
 LOW_RES_FULLSCREEN_RESOLUTION = (960, 600)
+
+# -------------------------
+# Display Resolution Optimization
+# -------------------------
+AUTO_OPTIMIZE_DISPLAY_RESOLUTION = True  # Automatically change display resolution to match small images
+RESTORE_DISPLAY_ON_EXIT = True  # Restore original display resolution when application exits

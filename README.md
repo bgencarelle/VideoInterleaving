@@ -51,21 +51,13 @@ sudo apt update
 sudo apt install $(grep -v '^#' system-requirements.txt | tr '\n' ' ')
 ```
 
-Or manually:
+**Fedora/CentOS (rough equivalents):**
 
 ```bash
-sudo apt install python3-venv python3-dev python3-pip build-essential cmake pkg-config \
-    libwebp-dev libsdl2-dev libasound2-dev libgl1-mesa-dev libglu1-mesa-dev \
-    libegl1-mesa-dev mesa-utils chrony ninja-build python-is-python3 \
-    libjpeg-dev dnsutils
-```
-
-**Fedora/CentOS:**
-
-```bash
-sudo dnf install python3-venv python3-pip python3-devel build-essential cmake pkgconfig \
-    libwebp-devel SDL2-devel alsa-lib-devel mesa-libGL-devel mesa-libGLU-devel \
-    mesa-libEGL-devel mesa-utils chrony ninja-build python-is-python3 libjpeg-turbo-devel dnsutils
+sudo dnf install python3 python3-pip python3-devel gcc gcc-c++ make cmake pkgconfig \
+    libwebp-devel libjpeg-turbo-devel SDL2-devel alsa-lib-devel \
+    mesa-libGL-devel mesa-libGLU-devel mesa-libEGL-devel mesa-libGLES-devel \
+    libglvnd-devel glfw-devel mesa-utils chrony ninja-build bind-utils
 ```
 
 **macOS (Homebrew):**
@@ -96,6 +88,8 @@ Install Dependencies:
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
+
+`requirements.txt` only contains Python packages (system packages live in `system-requirements.txt`).
 
 ## 2. Image Preparation (Crucial)
 
@@ -208,13 +202,35 @@ For headless streaming on Wayland where standalone EGL contexts fail, the app wi
 
 Optional overrides:
 - Force legacy renderer: `FORCE_LEGACY_GL=1`
-- Force GLES version attempts: `PI_GLES_REQUIRE=200` (or `300`, `310`)
+- Force GLES version attempts: `GLES_REQUIRE_OVERRIDE=200` (or `300`, `310`)
 
 Wayland note:
 - In local mode on Wayland, fullscreen uses a borderless fullscreen-sized window (not a mode-setting fullscreen) to reduce compositor/session crashes on some drivers.
 
 TurboJPEG note:
 - If you see `unable to locate turbojpeg library automatically`, install `libturbojpeg0` (Debian/Raspbian) or set `TURBOJPEG_LIB=/path/to/libturbojpeg.so.0`.
+
+### Performance Optimization for Low-Power Devices
+
+For Raspberry Pi Zero 2 W and similar low-power devices, consider these optimizations in `settings.py`:
+
+**Memory Optimization:**
+- `FIFO_LENGTH = 10-15` (default: 30) - Reduces memory usage by limiting pre-loaded frames
+- Lower values reduce memory footprint but may cause frame drops if loading is slow
+
+**Encoding/Decoding Performance:**
+- `JPEG_QUALITY = 40-50` (default: 55) - Lower quality = faster encode/decode
+- Balance between quality and performance based on your needs
+
+**Frame Rate:**
+- `FPS = 20-25` (default: 30) - Lower target FPS reduces CPU load
+- `SERVER_CAPTURE_RATE = 10-15` (default: matches FPS) - Lower capture rate for web streaming
+
+**Additional Tips:**
+- Use pre-encoded SBS JPEGs (already optimized format)
+- Disable frame counter if not needed: `FRAME_COUNTER_DISPLAY = False`
+- Reduce image resolution if possible (smaller images = faster processing)
+- Ensure images are properly encoded (corrupted JPEGs will show errors)
 
 Edit `/boot/firmware/cmdline.txt` (add to start of line):
 

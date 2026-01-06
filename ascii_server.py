@@ -95,6 +95,9 @@ class AsciiHandler(socketserver.BaseRequestHandler):
                     print(f"[ASCII] Send Error: {e}")
                     break
 
+        except (ConnectionResetError, BrokenPipeError):
+            # Client disconnected gracefully or abruptly
+            pass
         except Exception as e:
             print(f"[ASCII] Connection Error: {e}")
 

@@ -6,7 +6,6 @@ from collections import deque
 import threading
 
 import numpy as np
-#import webp  # Strict Requirement: pip install webp
 from turbojpeg import TJPF_RGB
 from turbojpeg_loader import get_turbojpeg
 
@@ -82,8 +81,8 @@ from image_loader import ImageLoader, FIFOImageBuffer
 
 
 class FIFOImageBufferPatched(FIFOImageBuffer):
-    def current_depth(self):
-        with self.lock: return len(self.queue)
+    """Patched version for backward compatibility - base class now has current_depth()."""
+    pass
 
 
 # -----------------------------------------------------------------------------
@@ -155,7 +154,6 @@ def load_and_render_frame(loader, index, main_folder, float_folder, source_aspec
 
             # --- RENDER TO STRING (OPTIMIZED) ---
             # Look up ANSI codes and combine
-            # This is the most expensive CPU part, now done in a thread!
             color_strings = ANSI_LUT[final_colors]
             
             # Optimize string building: avoid full array conversion, build strings efficiently
@@ -212,7 +210,15 @@ def run_display(clock_source=CLOCK_MODE):
 
     # Identify Modes
     is_ascii = getattr(settings, 'ASCII_MODE', False)
-    is_web = getattr(settings, 'SERVER_MODE', False) and not is_ascii
+    server_mode = getattr(settings, 'SERVER_MODE', False)
+    
+    # Warn if both modes are set (configuration conflict)
+    if server_mode and is_ascii:
+        print("⚠️  WARNING: Both SERVER_MODE and ASCII_MODE are enabled in settings.py")
+        print("   -> ASCII mode will take precedence, web mode will be disabled")
+        print("   -> This may indicate a configuration error")
+    
+    is_web = server_mode and not is_ascii
     is_headless = is_web or is_ascii
 
     # --- LOGGING ---
@@ -355,9 +361,12 @@ def run_display(clock_source=CLOCK_MODE):
         except Exception as e:
             if monitor: monitor.record_load_error(idx, e)
 
-    # 5. Thread Pool
+    # 5. Thread Pool for I/O-bound work
+    # Optimize worker count for I/O-bound image loading
+    # I/O-bound tasks can use more threads than CPU cores
     cpu_count = os.cpu_count() or 1
-    # Increase workers slightly since we are doing more CPU work in them now
+    # Conservative formula that works well across all devices
+    # Reverted from aggressive tiered scaling to universal formula
     max_workers = min(8, cpu_count + 2)
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:

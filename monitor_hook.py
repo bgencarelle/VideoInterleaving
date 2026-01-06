@@ -11,10 +11,36 @@ import settings
 
 
 def _entropy(counts):
+    """
+    Calculate normalized Shannon entropy for folder selection distribution.
+    
+    Normalizes by the maximum achievable entropy for ALL available folders,
+    not just the folders that have been used. This measures randomness across
+    the full set of available folders and shows progress toward using all folders.
+    
+    Returns a value between 0.0 (completely ordered or few folders used) and 1.0
+    (maximally random across all available folders).
+    
+    - Early in run: Low entropy (few folders used)
+    - Mid run: Increasing entropy (more folders used)
+    - Late run: High entropy (all folders used randomly)
+    """
     tot = sum(counts)
-    if tot == 0: return 0.0
-    h = -sum((c / tot) * log2(c / tot) for c in counts if c)
-    return h / log2(len(counts))
+    if tot == 0:
+        return 0.0
+    
+    n = len(counts)  # Total folders available
+    if n <= 1:
+        return 0.0
+    
+    # Calculate raw Shannon entropy (only sum over non-zero bins)
+    h = -sum((c / tot) * log2(c / tot) for c in counts if c > 0)
+    
+    # Normalize by maximum entropy for ALL folders
+    # This measures randomness across the full set of available folders
+    max_h = log2(n)
+    
+    return h / max_h if max_h > 0 else 0.0
 
 
 class DetailedFileMonitor:

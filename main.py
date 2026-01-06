@@ -4,6 +4,8 @@ import os
 import argparse
 import threading
 import socket
+import atexit
+import shutil
 
 # 1. Import Settings FIRST so we can patch them
 import settings
@@ -114,6 +116,26 @@ def configure_runtime():
         # Default updated to 2423
         primary_port = args.port or 2423
 
+    # 2.5. Clean up existing cache directories for this instance
+    # Determine instance identifier pattern
+    if args.mode in ("web", "local"):
+        instance_pattern = f"_{args.mode}_"  # Match any port
+    else:
+        # ASCII modes: match specific port
+        instance_pattern = f"_{args.mode}_{primary_port}"
+
+    # Clean up existing cache directories for this instance
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    cache_base = os.path.join(script_dir, CACHE_DIR)
+
+    if os.path.exists(cache_base):
+        for item in os.listdir(cache_base):
+            if (item.startswith("folders_processed_") or item.startswith("generated_lists_")) and instance_pattern in item:
+                full_path = os.path.join(cache_base, item)
+                if os.path.isdir(full_path):
+                    shutil.rmtree(full_path)
+                    print(f">> Deleted old cache: {item}")
+
     # 3. Dynamic Naming & Cache Setup
     source_name = os.path.basename(os.path.normpath(settings.IMAGES_DIR)).replace(" ", "_")
     suffix = f"{source_name}_{args.mode}_{primary_port}"
@@ -156,6 +178,9 @@ def configure_runtime():
         require_ports(ports.get_all_ports())
         # Update settings for backward compatibility
         settings.WEB_PORT = ports.monitor
+        # Local mode always uses --test flag for network monitoring
+        args.test = True
+        print(">> Local mode: Enabling --test flag for network monitoring")
 
     elif args.mode == "ascii":
         validate_ascii_port(primary_port)
@@ -231,16 +256,53 @@ _original_stdout = sys.stdout
 _original_stderr = sys.stderr
 _log_file = None
 
+# Check if running under systemd (stdout/stderr already redirected)
+# In this case, we should be more careful about additional redirection
+_is_systemd = os.environ.get('INVOCATION_ID') is not None
+
 try:
+    # Ensure logs directory exists
+    log_dir = os.path.dirname(log_filename)
+    if log_dir and not os.path.exists(log_dir):
+        os.makedirs(log_dir, exist_ok=True)
+    
     _log_file = open(log_filename, "w", buffering=1, encoding='utf-8')
-    sys.stdout = Tee(sys.stdout, _log_file)
-    sys.stderr = Tee(sys.stderr, _log_file)
-    print(f"[MAIN] Logging to {log_filename}")
+    
+    # Only use Tee if not running under systemd (systemd already handles redirection)
+    # Under systemd, just write to the log file directly for additional logging
+    if _is_systemd:
+        # Under systemd, stdout/stderr are already redirected by systemd
+        # We'll just keep a reference to the log file for explicit logging
+        pass
+    else:
+        # Not under systemd, use Tee to duplicate output
+        sys.stdout = Tee(sys.stdout, _log_file)
+        sys.stderr = Tee(sys.stderr, _log_file)
+    
+    # Write initial log message (use original stderr if systemd to avoid issues)
+    if _is_systemd:
+        _original_stderr.write(f"[MAIN] Logging to {log_filename}\n")
+        _log_file.write(f"[MAIN] Logging to {log_filename}\n")
+        _log_file.flush()
+    else:
+        print(f"[MAIN] Logging to {log_filename}")
 except Exception as e:
-    print(f"⚠️  Logging setup failed: {e}")
+    # Use original stderr to avoid recursion if stdout/stderr are broken
+    try:
+        _original_stderr.write(f"⚠️  Logging setup failed: {e}\n")
+        _original_stderr.flush()
+    except Exception:
+        pass  # If even stderr is broken, we can't do anything
 
 
 def main(clock=CLOCK_MODE):
+    # Register cleanup handler for display resolution restoration
+    try:
+        from display_manager import _restore_display_resolution
+        atexit.register(_restore_display_resolution)
+    except ImportError:
+        pass  # display_manager may not be imported yet
+    
     # 1. Process Files (Reuse Logic)
     lists_exist = False
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -284,6 +346,13 @@ def main(clock=CLOCK_MODE):
         traceback.print_exc()
     finally:
         print("[MAIN] Exiting...")
+        # Restore display resolution if it was changed
+        try:
+            from display_manager import _restore_display_resolution
+            _restore_display_resolution()
+        except Exception as e:
+            # Don't fail if restoration fails
+            pass
         # Ensure all output is flushed before closing
         sys.stdout.flush()
         sys.stderr.flush()

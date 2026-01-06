@@ -1,16 +1,30 @@
+"""
+Side-by-Side JPEG Converter
+
+Converts WebP/PNG images to JPEG format with side-by-side layout:
+RGB image on the left, alpha mask on the right.
+Useful for formats that don't support alpha channels natively.
+"""
+import argparse
+import logging
 import os
+import sys
 import cv2
 import numpy as np
 import time
-from glob import glob
+from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
+from typing import Tuple, Optional
 
 
-def process_file(file_path, input_root, output_root, quality=90):
+def process_file(file_path: Path, input_root: Path, output_root: Path, quality: int = 90) -> Tuple[bool, Optional[str]]:
     """
     Reads a WebP/PNG file, ensures it has an alpha mask (generating one if missing),
     stacks them side-by-side, and saves as a high-quality JPEG.
+    
+    Returns:
+        Tuple of (success: bool, error_message: Optional[str])
     """
     try:
         # 1. Load Image
@@ -60,15 +74,15 @@ def process_file(file_path, input_root, output_root, quality=90):
         sbs = np.hstack([color_bgr, alpha_bgr])
 
         # 5. Construct Output Path
-        rel_path = os.path.relpath(file_path, input_root)
-        rel_path_jpg = os.path.splitext(rel_path)[0] + ".jpg"
-        out_path = os.path.join(output_root, rel_path_jpg)
+        rel_path = file_path.relative_to(input_root)
+        rel_path_jpg = rel_path.with_suffix(".jpg")
+        out_path = output_root / rel_path_jpg
 
         # Ensure output dir exists
-        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
 
         # 6. Save as JPEG
-        success = cv2.imwrite(out_path, sbs, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+        success = cv2.imwrite(str(out_path), sbs, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
 
         if not success:
             return False, "Write failed"
@@ -79,59 +93,108 @@ def process_file(file_path, input_root, output_root, quality=90):
         return False, str(e)
 
 
-def main():
-    print("--- Side-by-Side (SBS) JPEG Converter (Fixed) ---")
-    print("Converts WebP/PNG -> JPEG (RGB + Alpha Mask side-by-side)")
+def setup_logging(log_level: str = "INFO") -> None:
+    """Setup logging configuration."""
+    numeric_level = getattr(logging, log_level.upper(), None)
+    if not isinstance(numeric_level, int):
+        raise ValueError(f"Invalid log level: {log_level}")
+    
+    logging.basicConfig(
+        level=numeric_level,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[logging.StreamHandler()]
+    )
 
-    # 1. Interactive Input
-    default_input = "images"
-    input_dir = input(f"Enter source folder path [default: {default_input}]: ").strip()
-    if not input_dir:
-        input_dir = default_input
 
-    # FORCE ABSOLUTE PATH to avoid 'missing file' errors
-    input_dir = os.path.abspath(input_dir)
+def parse_arguments() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Convert WebP/PNG images to JPEG with side-by-side RGB+Alpha layout."
+    )
+    parser.add_argument(
+        "-i", "--input-dir",
+        type=str,
+        required=True,
+        help="Source folder path containing WebP/PNG images"
+    )
+    parser.add_argument(
+        "-o", "--output-dir",
+        type=str,
+        default=None,
+        help="Output folder path (default: {input_dir}_sbs)"
+    )
+    parser.add_argument(
+        "-q", "--quality",
+        type=int,
+        default=90,
+        choices=range(1, 101),
+        help="JPEG quality (1-100, default: 90)"
+    )
+    parser.add_argument(
+        "-w", "--workers",
+        type=int,
+        default=None,
+        help="Number of parallel workers (default: CPU count)"
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Logging level (default: INFO)"
+    )
+    return parser.parse_args()
 
-    if not os.path.isdir(input_dir):
-        print(f"Error: Directory '{input_dir}' not found.")
-        return
 
-    default_output = input_dir + "_sbs"
-    output_dir = input(f"Enter output folder path [default: {default_output}]: ").strip()
-    if not output_dir:
-        output_dir = default_output
-
-    # FORCE ABSOLUTE PATH
-    output_dir = os.path.abspath(output_dir)
-
-    quality_str = input("Enter JPEG Quality (1-100) [default: 90]: ").strip()
-    quality = int(quality_str) if quality_str.isdigit() else 90
-
-    print(f"\nScanning '{input_dir}' for .webp files...")
-    files = glob(os.path.join(input_dir, "**", "*.webp"), recursive=True)
-
+def main() -> None:
+    """Main entry point."""
+    args = parse_arguments()
+    
+    # Setup logging
+    setup_logging(args.log_level)
+    
+    # Resolve paths
+    input_dir = Path(args.input_dir).expanduser().resolve()
+    if not input_dir.is_dir():
+        logging.error(f"Directory '{input_dir}' not found.")
+        sys.exit(1)
+    
+    if args.output_dir:
+        output_dir = Path(args.output_dir).expanduser().resolve()
+    else:
+        output_dir = input_dir.parent / f"{input_dir.name}_sbs"
+    
+    # Find files
+    logging.info(f"Scanning '{input_dir}' for .webp files...")
+    files = list(input_dir.rglob("*.webp"))
     total_files = len(files)
-    print(f"Found {total_files} files to process.")
 
     if total_files == 0:
-        print("Nothing to do.")
-        return
-
-    confirm = input("Start conversion? (y/n): ").strip().lower()
-    if confirm != 'y':
-        print("Aborted.")
-        return
-
-    # 2. Parallel Processing
+        logging.warning("No .webp files found. Nothing to do.")
+        sys.exit(0)
+    
+    logging.info(f"Found {total_files} file(s) to process.")
+    
+    # Determine workers
+    if args.workers:
+        workers = args.workers
+        if workers < 1:
+            logging.error("Worker count must be >= 1")
+            sys.exit(1)
+    else:
+        workers = max(1, os.cpu_count() or 1)
+    
+    logging.info(f"Starting conversion using {workers} CPU core(s)...")
+    logging.info(f"Output directory: {output_dir}")
+    logging.info(f"JPEG quality: {args.quality}")
+    
+    # Parallel Processing
     start_time = time.time()
-    cpu_count = max(1, os.cpu_count())
-    print(f"\nStarting conversion using {cpu_count} CPU cores...")
+    errors: list[str] = []
 
-    errors = []
-
-    with ProcessPoolExecutor(max_workers=cpu_count) as executor:
+    with ProcessPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(process_file, f, input_dir, output_dir, quality): f
+            executor.submit(process_file, f, input_dir, output_dir, args.quality): f
             for f in files
         }
 
@@ -147,19 +210,21 @@ def main():
     end_time = time.time()
     duration = end_time - start_time
 
-    print("\n" + "=" * 40)
-    print(f"Processing Complete!")
-    print(f"Time taken: {duration:.2f} seconds")
+    logging.info("=" * 40)
+    logging.info("Processing Complete!")
+    logging.info(f"Time taken: {duration:.2f} seconds")
     if duration > 0:
-        print(f"Average speed: {total_files / duration:.1f} fps")
-    print(f"Output saved to: {output_dir}")
+        logging.info(f"Average speed: {total_files / duration:.1f} fps")
+    logging.info(f"Output saved to: {output_dir}")
 
     if errors:
-        print(f"\n{len(errors)} Errors encountered:")
+        logging.warning(f"{len(errors)} error(s) encountered:")
         for err in errors[:10]:
-            print(f" - {err}")
+            logging.warning(f"  - {err}")
+        if len(errors) > 10:
+            logging.warning(f"  ... and {len(errors) - 10} more errors")
     else:
-        print("0 Errors.")
+        logging.info("0 errors.")
 
 
 if __name__ == "__main__":

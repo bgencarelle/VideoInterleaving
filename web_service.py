@@ -430,9 +430,18 @@ def run_monitor_server():
     port = get_config().get_monitor_port()
     # Default to 127.0.0.1 (Localhost only) for security.
     host = getattr(settings, 'WEB_HOST', '127.0.0.1')
-    httpd = ThreadedTCPServer((host, port), MonitorHandler)
-    print(f">> Monitor running on {host}:{port}")
-    httpd.serve_forever()
+    try:
+        httpd = ThreadedTCPServer((host, port), MonitorHandler)
+        print(f">> Monitor running on {host}:{port}")
+        httpd.serve_forever()
+    except OSError as e:
+        if e.errno == 98:  # Address already in use
+            print(f"❌ ERROR: Port {port} is already in use")
+            print(f"   -> Is another instance running?")
+            print(f"   -> Try: sudo systemctl stop vi-web")
+            print(f"   -> Or check: sudo lsof -i :{port}")
+            raise
+        raise
 
 
 def run_stream_server():
@@ -441,9 +450,18 @@ def run_stream_server():
         raise RuntimeError("Stream port not configured for current mode")
     # Default to 0.0.0.0 (Public) for the stream.
     host = getattr(settings, 'STREAM_HOST', '0.0.0.0')
-    httpd = ThreadedTCPServer((host, port), StreamHandler)
-    print(f">> Stream running on {host}:{port}")
-    httpd.serve_forever()
+    try:
+        httpd = ThreadedTCPServer((host, port), StreamHandler)
+        print(f">> Stream running on {host}:{port}")
+        httpd.serve_forever()
+    except OSError as e:
+        if e.errno == 98:  # Address already in use
+            print(f"❌ ERROR: Port {port} is already in use")
+            print(f"   -> Is another instance running?")
+            print(f"   -> Try: sudo systemctl stop vi-web")
+            print(f"   -> Or check: sudo lsof -i :{port}")
+            raise
+        raise
 
 
 def start_server(monitor=True, stream=True):

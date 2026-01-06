@@ -12,6 +12,9 @@ import index_calculator
 from settings import (MTC_CLOCK, MIDI_CLOCK, MIXED_CLOCK,
                     CLOCK_BUFFER_SIZE, CLOCK_MODE, TIMEOUT_SECONDS)
 
+# Convert timeout constants to nanoseconds once at module level
+TIMEOUT_NS = int(TIMEOUT_SECONDS * 1_000_000_000)
+FRAME_TIMEOUT_NS = int(0.2 * 1_000_000_000)  # 200ms in nanoseconds
 
 # globals, sorry not sorry
 png_paths_len = 0
@@ -234,16 +237,20 @@ def handle_clock(msg):
         handle_clock.last_total_frames = None
         handle_clock.last_total_frames_time = None
 
-    current_time = time.time()
+    # Use monotonic_ns() for interval measurements - not affected by system clock adjustments
+    # Provides nanosecond precision for tighter sync and better jitter measurement
+    current_time_ns = time.monotonic_ns()
 
     # Check if the timeout has been exceeded
-    if handle_clock.last_clock_time is not None and current_time - handle_clock.last_clock_time > TIMEOUT_SECONDS:
+    if handle_clock.last_clock_time is not None and current_time_ns - handle_clock.last_clock_time > TIMEOUT_NS:
         clock_counter(0)
         total_frames = 0
         print("Clock messages stopped.")
     else:
         if handle_clock.last_clock_time is not None:
-            clock_interval = current_time - handle_clock.last_clock_time
+            # Calculate interval in nanoseconds, then convert to seconds for BPM calculation
+            clock_interval_ns = current_time_ns - handle_clock.last_clock_time
+            clock_interval = clock_interval_ns / 1_000_000_000  # Convert to seconds
 
             if len(handle_clock.clock_intervals) == CLOCK_BUFFER_SIZE:
                 # Remove the oldest interval from the sum
@@ -258,17 +265,18 @@ def handle_clock(msg):
                 midi_data_dictionary['BPM'] = bpm
                 # print(f"BPM: {bpm:.2f}")
 
-    handle_clock.last_clock_time = current_time
+    handle_clock.last_clock_time = current_time_ns
 
     # Check if total_frames has not changed in 200ms
     if clock_mode == MTC_CLOCK:
         if handle_clock.last_total_frames is not None and handle_clock.last_total_frames == total_frames\
-                and current_time - handle_clock.last_total_frames_time > 0.2:
+                and handle_clock.last_total_frames_time is not None\
+                and current_time_ns - handle_clock.last_total_frames_time > FRAME_TIMEOUT_NS:
             clock_counter(0)
             print("Total frames haven't changed in 200ms. Clock reset to zero.")
         else:
             handle_clock.last_total_frames = total_frames
-            handle_clock.last_total_frames_time = current_time
+            handle_clock.last_total_frames_time = current_time_ns
 
     # Your original code
     clock_counter(1)

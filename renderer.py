@@ -6,8 +6,11 @@ import math
 import os
 import ctypes
 import threading
+import json
 import numpy as np
 import moderngl
+from pathlib import Path
+from datetime import datetime
 try:
     import cv2
 except ImportError:
@@ -48,6 +51,11 @@ _cpu_buffer: np.ndarray | None = None
 _cached_canvas: np.ndarray | None = None
 _cpu_buffer_lock = threading.Lock()  # Thread safety for buffer operations
 
+# --- TEXTURE POOL (Pre-allocated textures for common sizes) ---
+_texture_pool: dict[tuple[int, int, int], list] = {}  # (width, height, components) -> list of textures
+_texture_pool_lock = threading.Lock()
+_MAX_POOL_SIZE = 4  # Max textures per size in pool
+
 # --- LEGACY (PyOpenGL) PROGRAM OBJECTS ---
 _legacy_program: int | None = None
 _legacy_vbo: int | None = None
@@ -61,9 +69,37 @@ _legacy_pos_loc: int | None = None
 _legacy_uv_loc: int | None = None
 _legacy_texture_dims: dict[int, tuple[int, int, int]] = {}
 
+# Usage tracking for legacy paths
+_legacy_usage_tracked = False
+_legacy_functions_used = set()
+
 
 def using_legacy_gl() -> bool:
     return _backend == "legacy"
+
+def _track_legacy_usage(function_name: str):
+    """Track usage of legacy GL functions for dead code analysis."""
+    global _legacy_usage_tracked
+    if _backend == "legacy":
+        _legacy_functions_used.add(function_name)
+        if not _legacy_usage_tracked:
+            _legacy_usage_tracked = True
+            try:
+                log_path = Path.home() / ".videointerleaving_renderer_usage.json"
+                data = {
+                    'legacy_backend': True,
+                    'functions_used': list(_legacy_functions_used),
+                    'timestamp': datetime.now().isoformat()  # ISO 8601 timestamp
+                }
+                if log_path.exists():
+                    with open(log_path, 'r') as f:
+                        existing = json.load(f)
+                        existing['functions_used'] = list(set(existing.get('functions_used', []) + list(_legacy_functions_used)))
+                        data = existing
+                with open(log_path, 'w') as f:
+                    json.dump(data, f, indent=2)
+            except Exception:
+                pass  # Don't fail if logging fails
 
 
 def _lazy_import_gl():
@@ -112,6 +148,7 @@ def initialize_legacy() -> None:
     global _legacy_tex_main_loc, _legacy_tex_float_loc, _legacy_pos_loc, _legacy_uv_loc
 
     _backend = "legacy"
+    _track_legacy_usage("initialize_legacy")
     gl = _lazy_import_gl()
 
     # Try GLES2 shader first; fall back to GLSL 1.20 (desktop GL 2.1).
@@ -448,6 +485,7 @@ def set_transform_parameters(fs_scale, fs_offset_x, fs_offset_y, image_size, rot
 
 def update_mvp(mvp_matrix):
     if _backend == "legacy":
+        _track_legacy_usage("update_mvp")
         if _legacy_program is None:
             initialize_legacy()
         gl = _lazy_import_gl()
@@ -465,6 +503,7 @@ def update_mvp(mvp_matrix):
 
 def create_texture(image: np.ndarray) -> moderngl.Texture:
     if _backend == "legacy":
+        _track_legacy_usage("create_texture")
         if _legacy_program is None:
             initialize_legacy()
         gl = _lazy_import_gl()
@@ -495,8 +534,48 @@ def create_texture(image: np.ndarray) -> moderngl.Texture:
     return tex
 
 
-def update_texture(texture: moderngl.Texture, new_image: np.ndarray) -> moderngl.Texture:
+def _get_texture_from_pool(width: int, height: int, components: int):
+    """Get a texture from the pool if available, or return None."""
     if _backend == "legacy":
+        return None  # Legacy path doesn't use texture pool
+    key = (width, height, components)
+    with _texture_pool_lock:
+        if key in _texture_pool and _texture_pool[key]:
+            return _texture_pool[key].pop()
+    return None
+
+def _return_texture_to_pool(texture: moderngl.Texture):
+    """Return a texture to the pool for reuse."""
+    if _backend == "legacy" or ctx is None:
+        return
+    try:
+        w, h = texture.size
+        components = texture.components
+        key = (w, h, components)
+        with _texture_pool_lock:
+            if key not in _texture_pool:
+                _texture_pool[key] = []
+            if len(_texture_pool[key]) < _MAX_POOL_SIZE:
+                _texture_pool[key].append(texture)
+            else:
+                texture.release()  # Pool full, release texture
+    except Exception:
+        texture.release()  # On error, just release
+
+def update_texture(texture: moderngl.Texture, new_image: np.ndarray) -> moderngl.Texture:
+    """
+    Update texture with new image data.
+    
+    Note on async uploads: ModernGL's texture.write() is synchronous but optimized.
+    For true async uploads with PBO (Pixel Buffer Objects), we would need to use
+    lower-level OpenGL calls, which is beyond ModernGL's API. The texture pool
+    helps reduce allocation overhead, and using memoryview() avoids unnecessary copies.
+    
+    Future enhancement: Implement PBO-based async uploads using raw OpenGL for
+    high-end systems where texture upload time is a bottleneck.
+    """
+    if _backend == "legacy":
+        _track_legacy_usage("update_texture")
         gl = _lazy_import_gl()
         gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
         tex_id = int(texture)  # type: ignore[arg-type]
@@ -522,9 +601,21 @@ def update_texture(texture: moderngl.Texture, new_image: np.ndarray) -> moderngl
     if new_image.ndim == 2:
         new_c = 1
 
+    # Check if we need a new texture
     if (new_w, new_h) != texture.size or new_c != texture.components:
-        texture.release()
+        # Return old texture to pool
+        _return_texture_to_pool(texture)
+        # Try to get from pool first
+        pooled_tex = _get_texture_from_pool(new_w, new_h, new_c)
+        if pooled_tex is not None:
+            # Use memoryview to avoid copy - ModernGL is already optimized for this
+            pooled_tex.write(memoryview(new_image))
+            return pooled_tex
+        # Create new if pool is empty
         return create_texture(new_image)
+    
+    # Use memoryview to avoid copy - ModernGL handles this efficiently
+    # Note: This is synchronous but optimized. For async uploads, PBO support would be needed.
     texture.write(memoryview(new_image))
     return texture
 
@@ -592,6 +683,7 @@ def overlay_images_single_pass(main_texture, float_texture, background_color=(0,
                                main_is_sbs=False, float_is_sbs=False):
     global _quad_dirty
     if _backend == "legacy":
+        _track_legacy_usage("overlay_images_single_pass")
         if _legacy_program is None or _legacy_vbo is None:
             initialize_legacy()
         gl = _lazy_import_gl()
@@ -693,60 +785,64 @@ def composite_cpu(main_img, float_img, main_is_sbs=False, float_is_sbs=False, ta
     else:
         return None
 
-    # Thread-safe buffer management
+    bg_r, bg_g, bg_b = BACKGROUND_COLOR
+
+    # Thread-safe buffer management - minimize lock scope
+    # Allocate/check buffer size within lock, then do compositing work
     with _cpu_buffer_lock:
         # 2. Manage Source Buffer (Lazy Instantiation)
         if _cpu_buffer is None or _cpu_buffer.shape[:2] != (th, tw):
             _cpu_buffer = np.empty((th, tw, 3), dtype=np.uint8)
 
         # Fast Background Fill
-        bg_r, bg_g, bg_b = BACKGROUND_COLOR
         _cpu_buffer[:] = (bg_r, bg_g, bg_b)
 
-    # 3. Apply Main Layer
-    if m_rgb is not None:
-        if m_a is None:
-            np.copyto(_cpu_buffer, m_rgb)
-        else:
-            # OPTIMIZED BLEND: Integer Math to avoid float casting
-            mask = m_a > 0
-            if np.any(mask):
-                alpha = m_a[mask][:, None].astype(np.uint16)
-                src = m_rgb[mask].astype(np.uint16)
-                dst = _cpu_buffer[mask].astype(np.uint16)
+        # 3. Apply Main Layer (within lock for thread safety)
+        if m_rgb is not None:
+            if m_a is None:
+                np.copyto(_cpu_buffer, m_rgb)
+            else:
+                # OPTIMIZED BLEND: Integer Math to avoid float casting
+                mask = m_a > 0
+                if np.any(mask):
+                    alpha = m_a[mask][:, None].astype(np.uint16)
+                    src = m_rgb[mask].astype(np.uint16)
+                    dst = _cpu_buffer[mask].astype(np.uint16)
 
-                blended = (src * alpha + dst * (255 - alpha)) // 255
-                _cpu_buffer[mask] = blended.astype(np.uint8)
+                    blended = (src * alpha + dst * (255 - alpha)) // 255
+                    _cpu_buffer[mask] = blended.astype(np.uint8)
 
-    # 4. Apply Float Layer
-    if f_rgb is not None:
-        fh, fw = f_rgb.shape[:2]
-        h, w = min(th, fh), min(tw, fw)
+        # 4. Apply Float Layer (within lock for thread safety)
+        if f_rgb is not None:
+            fh, fw = f_rgb.shape[:2]
+            h, w = min(th, fh), min(tw, fw)
 
-        # Define views for cropping
-        target_view = _cpu_buffer[:h, :w]
-        source_view = f_rgb[:h, :w]
+            # Define views for cropping
+            target_view = _cpu_buffer[:h, :w]
+            source_view = f_rgb[:h, :w]
 
-        if f_a is None:
-            target_view[:] = source_view
-        else:
-            alpha_view = f_a[:h, :w]
-            mask = alpha_view > 0
-            if np.any(mask):
-                alpha = alpha_view[mask][:, None].astype(np.uint16)
-                src = source_view[mask].astype(np.uint16)
-                dst = target_view[mask].astype(np.uint16)
+            if f_a is None:
+                target_view[:] = source_view
+            else:
+                alpha_view = f_a[:h, :w]
+                mask = alpha_view > 0
+                if np.any(mask):
+                    alpha = alpha_view[mask][:, None].astype(np.uint16)
+                    src = source_view[mask].astype(np.uint16)
+                    dst = target_view[mask].astype(np.uint16)
 
-                blended = (src * alpha + dst * (255 - alpha)) // 255
-                target_view[mask] = blended.astype(np.uint8)
+                    blended = (src * alpha + dst * (255 - alpha)) // 255
+                    target_view[mask] = blended.astype(np.uint8)
 
-    # 5. Final Resize (Letterboxed) with CACHING
+        # Make a working copy for resize operations (releases lock early)
+        working_buffer = _cpu_buffer.copy()
+
+    # 5. Final Resize (Letterboxed) with CACHING (outside lock)
     if target_size is not None and cv2 is not None:
         target_w, target_h = target_size
 
         if (tw, th) == (target_w, target_h):
-            # Return a copy to avoid holding the lock
-            return _cpu_buffer.copy()
+            return working_buffer
 
         # Calculate Scale
         scale = min(target_w / tw, target_h / th)
@@ -754,21 +850,29 @@ def composite_cpu(main_img, float_img, main_is_sbs=False, float_is_sbs=False, ta
         new_h = int(th * scale)
 
         # Fast Resize
-        resized = cv2.resize(_cpu_buffer, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        resized = cv2.resize(working_buffer, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
 
-        # Cache Canvas
-        if _cached_canvas is None or _cached_canvas.shape[:2] != (target_h, target_w):
-            _cached_canvas = np.full((target_h, target_w, 3), (bg_r, bg_g, bg_b), dtype=np.uint8)
-        else:
-            _cached_canvas[:] = (bg_r, bg_g, bg_b)
+        # Cache Canvas (minimal lock scope for cache management)
+        with _cpu_buffer_lock:
+            if _cached_canvas is None or _cached_canvas.shape[:2] != (target_h, target_w):
+                _cached_canvas = np.full((target_h, target_w, 3), (bg_r, bg_g, bg_b), dtype=np.uint8)
+            else:
+                _cached_canvas[:] = (bg_r, bg_g, bg_b)
 
-        # Center Paste
-        y_off = (target_h - new_h) // 2
-        x_off = (target_w - new_w) // 2
-        _cached_canvas[y_off:y_off + new_h, x_off:x_off + new_w] = resized
+            # Center Paste
+            y_off = (target_h - new_h) // 2
+            x_off = (target_w - new_w) // 2
+            _cached_canvas[y_off:y_off + new_h, x_off:x_off + new_w] = resized
 
-        # Return a copy to avoid holding the lock
-        return _cached_canvas.copy()
+            # Return a copy
+            return _cached_canvas.copy()
 
-    # Return a copy to avoid holding the lock
-    return _cpu_buffer.copy()
+    return working_buffer
+
+
+def clear_cpu_caches():
+    """Clear CPU compositor caches. Called when ASCII dimensions change to prevent stale data."""
+    global _cpu_buffer, _cached_canvas
+    with _cpu_buffer_lock:
+        _cpu_buffer = None
+        _cached_canvas = None

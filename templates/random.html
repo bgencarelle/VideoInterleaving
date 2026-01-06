@@ -70,14 +70,12 @@
             height: 100%;
             object-fit: contain;
             border: 0;
-
-            /* CRITICAL: This ensures that if the iframe content is transparent
-               or hasn't loaded, we see BLACK, not the browser default white. */
             background-color: #000000 !important;
-
             will-change: opacity;
             opacity: 0;
             transition: opacity 3000ms ease-in-out;
+            max-width: 100%;
+            max-height: 100%;
         }
     </style>
 </head>
@@ -95,10 +93,10 @@
     <div class="panel">
         <div id="mixer-stage">
             <iframe class="mix-layer" id="src-0" src="https://gencarelle.fun/ascii"
-                    style="opacity: 1; z-index: 10;"></iframe>
+                    scrolling="no" style="opacity: 1; z-index: 10;"></iframe>
 
             <iframe class="mix-layer" id="src-1" src="https://testing.gencarelle.fun/ascii"
-                    style="z-index: 0;"></iframe>
+                    scrolling="no" style="z-index: 0;"></iframe>
 
             <img class="mix-layer" id="src-2" src="https://gencarelle.fun/video_feed" style="z-index: 0;"/>
 
