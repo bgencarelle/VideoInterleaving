@@ -5,6 +5,7 @@ import argparse
 import threading
 import socket
 import atexit
+import shutil
 
 # 1. Import Settings FIRST so we can patch them
 import settings
@@ -114,6 +115,26 @@ def configure_runtime():
     elif args.mode == "asciiweb":
         # Default updated to 2423
         primary_port = args.port or 2423
+
+    # 2.5. Clean up existing cache directories for this instance
+    # Determine instance identifier pattern
+    if args.mode in ("web", "local"):
+        instance_pattern = f"_{args.mode}_"  # Match any port
+    else:
+        # ASCII modes: match specific port
+        instance_pattern = f"_{args.mode}_{primary_port}"
+
+    # Clean up existing cache directories for this instance
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    cache_base = os.path.join(script_dir, CACHE_DIR)
+
+    if os.path.exists(cache_base):
+        for item in os.listdir(cache_base):
+            if (item.startswith("folders_processed_") or item.startswith("generated_lists_")) and instance_pattern in item:
+                full_path = os.path.join(cache_base, item)
+                if os.path.isdir(full_path):
+                    shutil.rmtree(full_path)
+                    print(f">> Deleted old cache: {item}")
 
     # 3. Dynamic Naming & Cache Setup
     source_name = os.path.basename(os.path.normpath(settings.IMAGES_DIR)).replace(" ", "_")
