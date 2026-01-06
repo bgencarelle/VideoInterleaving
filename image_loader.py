@@ -87,7 +87,12 @@ class ImageLoader:
             # TurboJPEG decode: TJPF_RGB is fastest format, decode happens in worker thread
             # This is optimal - no unnecessary copies, uses native library
             with open(image_path, "rb") as f: data = f.read()
-            return jpeg.decode(data, pixel_format=TJPF_RGB), True
+            try:
+                return jpeg.decode(data, pixel_format=TJPF_RGB), True
+            except Exception as e:
+                print(f"[JPEG ERROR] Failed to decode: {image_path}")
+                print(f"  Error: {e}")
+                raise  # Re-raise to maintain existing error handling
 
         raise ValueError(f"Unsupported: {image_path}")
 

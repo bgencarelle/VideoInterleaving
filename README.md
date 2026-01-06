@@ -210,6 +210,28 @@ Wayland note:
 TurboJPEG note:
 - If you see `unable to locate turbojpeg library automatically`, install `libturbojpeg0` (Debian/Raspbian) or set `TURBOJPEG_LIB=/path/to/libturbojpeg.so.0`.
 
+### Performance Optimization for Low-Power Devices
+
+For Raspberry Pi Zero 2 W and similar low-power devices, consider these optimizations in `settings.py`:
+
+**Memory Optimization:**
+- `FIFO_LENGTH = 10-15` (default: 30) - Reduces memory usage by limiting pre-loaded frames
+- Lower values reduce memory footprint but may cause frame drops if loading is slow
+
+**Encoding/Decoding Performance:**
+- `JPEG_QUALITY = 40-50` (default: 55) - Lower quality = faster encode/decode
+- Balance between quality and performance based on your needs
+
+**Frame Rate:**
+- `FPS = 20-25` (default: 30) - Lower target FPS reduces CPU load
+- `SERVER_CAPTURE_RATE = 10-15` (default: matches FPS) - Lower capture rate for web streaming
+
+**Additional Tips:**
+- Use pre-encoded SBS JPEGs (already optimized format)
+- Disable frame counter if not needed: `FRAME_COUNTER_DISPLAY = False`
+- Reduce image resolution if possible (smaller images = faster processing)
+- Ensure images are properly encoded (corrupted JPEGs will show errors)
+
 Edit `/boot/firmware/cmdline.txt` (add to start of line):
 
 Plaintext
