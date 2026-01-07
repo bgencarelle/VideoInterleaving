@@ -3,6 +3,7 @@ import time
 import settings
 from lightweight_monitor import monitor_data
 from server_config import get_config
+from shared_state import ascii_client_count
 
 # --- CONFIGURATION ---
 HOST = '127.0.0.1'
@@ -47,6 +48,9 @@ class StatsHandler(socketserver.BaseRequestHandler):
                 output = [
                     f"{BOLD}=== ASCII STREAM MONITOR ==={RESET}",
                     f"Time: {time.strftime('%H:%M:%S')}",
+                    f"",
+                    f"{CYAN}[ CLIENTS ]{RESET}",
+                    f" Active:      {ascii_client_count.get_count()} / {getattr(settings, 'MAX_VIEWERS', 20)}",
                     f"",
                     f"{CYAN}[ PERFORMANCE ]{RESET}",
                     f" FPS:         {d.get('fps', 0)}",

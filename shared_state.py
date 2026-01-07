@@ -27,3 +27,26 @@ class FrameExchange:
 exchange = FrameExchange()  # Legacy: single exchange (backward compatibility, not used by servers)
 exchange_web = FrameExchange()  # Web stream (JPEG/WebP frames) - used by web_service.py
 exchange_ascii = FrameExchange()  # ASCII servers (text frames) - used by ascii_server.py and ascii_web_server.py
+
+
+class ClientCounter:
+    """Thread-safe counter for active clients."""
+    def __init__(self):
+        self._count = 0
+        self._lock = threading.Lock()
+
+    def increment(self):
+        with self._lock:
+            self._count += 1
+
+    def decrement(self):
+        with self._lock:
+            self._count = max(0, self._count - 1)
+
+    def get_count(self):
+        with self._lock:
+            return self._count
+
+
+# Global counter for ASCII Telnet clients
+ascii_client_count = ClientCounter()
