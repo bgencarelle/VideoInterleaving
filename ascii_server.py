@@ -1,9 +1,10 @@
 import socketserver
 import socket
+import sys
 import threading
 import time
 import settings
-from shared_state import exchange_ascii
+from shared_state import exchange_ascii, ascii_client_count
 from server_config import get_config
 
 # --- CONFIGURATION ---
@@ -35,7 +36,8 @@ class AsciiHandler(socketserver.BaseRequestHandler):
                 print(f"[ASCII] Could not send rejection message: {e}")
             return
 
-        print(f"[ASCII] Client connected: {self.client_address}")
+        ascii_client_count.increment()
+        print(f"[ASCII] Client connected: {self.client_address} (Total: {ascii_client_count.get_count()})")
 
         try:
             # 2. Socket Optimization
@@ -49,6 +51,9 @@ class AsciiHandler(socketserver.BaseRequestHandler):
             # Linux-specific Keepalive tuning (approx 60s timeout)
             if hasattr(socket, 'TCP_KEEPIDLE'):
                 self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 10)
+            elif hasattr(socket, 'TCP_KEEPALIVE') and sys.platform == 'darwin':
+                # macOS uses TCP_KEEPALIVE for the idle time (seconds)
+                self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPALIVE, 10)
             if hasattr(socket, 'TCP_KEEPINTVL'):
                 self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
             if hasattr(socket, 'TCP_KEEPCNT'):
@@ -109,7 +114,8 @@ class AsciiHandler(socketserver.BaseRequestHandler):
                 # Connection already closed, cursor restore not needed
                 pass
             _sem.release()
-            print(f"[ASCII] Client disconnected: {self.client_address}")
+            ascii_client_count.decrement()
+            print(f"[ASCII] Client disconnected: {self.client_address} (Total: {ascii_client_count.get_count()})")
 
 
 def start_server():
