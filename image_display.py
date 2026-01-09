@@ -47,7 +47,7 @@ RESET_CODE = "\033[0m"
 
 from index_calculator import update_index
 from folder_selector import update_folder_selection, folder_dictionary
-from display_manager import DisplayState, display_init
+from display_manager import DisplayState, display_init, _is_wayland_session
 from event_handler import register_callbacks
 import renderer
 import ascii_converter
@@ -378,6 +378,7 @@ def run_display(clock_source=CLOCK_MODE):
 
         frame_times = deque(maxlen=60)
         frame_start = time.perf_counter()
+        fullscreen_check_counter = 0  # Counter for periodic fullscreen verification
 
         while (state.run_mode and not is_headless) or is_headless:
             successful_display = False
@@ -385,6 +386,40 @@ def run_display(clock_source=CLOCK_MODE):
             if not is_headless and has_gl and glfw:
                 glfw.poll_events()
                 if not state.run_mode: break
+
+                # Periodic fullscreen verification (every 60 frames, ~1 second at 60fps)
+                fullscreen_check_counter += 1
+                if fullscreen_check_counter >= 60:
+                    fullscreen_check_counter = 0
+                    if state.fullscreen and window is not None:
+                        is_wayland = _is_wayland_session()
+                        fullscreen_lost = False
+                        
+                        if is_wayland:
+                            # Wayland: Check if window size is significantly smaller than monitor size
+                            try:
+                                window_w, window_h = glfw.get_window_size(window)
+                                primary_monitor = glfw.get_primary_monitor()
+                                if primary_monitor:
+                                    mode = glfw.get_video_mode(primary_monitor)
+                                    if mode:
+                                        monitor_w, monitor_h = mode.size.width, mode.size.height
+                                        # If window is less than 80% of monitor size, fullscreen was lost
+                                        if window_w < monitor_w * 0.8 or window_h < monitor_h * 0.8:
+                                            fullscreen_lost = True
+                            except Exception:
+                                pass  # Ignore errors in check
+                        else:
+                            # X11: Check if window is no longer on a monitor
+                            try:
+                                current_monitor = glfw.get_window_monitor(window)
+                                if current_monitor is None:
+                                    fullscreen_lost = True
+                            except Exception:
+                                pass  # Ignore errors in check
+                        
+                        if fullscreen_lost:
+                            state.needs_update = True
 
             if state.needs_update and not is_headless and has_gl:
                 display_init(state)
