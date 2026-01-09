@@ -1117,7 +1117,7 @@ def display_init(state: DisplayState):
                         glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
                     else:
                         # X11: Try EGL first for better compatibility, fall back to native if needed
-                    glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
+                        glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
                     if version_code is not None:
                         glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, version_code // 100)
                         glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, (version_code % 100) // 10)
