@@ -151,7 +151,7 @@ HTML_TEMPLATE = """
 </head>
 <body>
   <h1>Interleaving Project Live Playback Monitor</h1>
-  <div><a href="log">click for error log</a></div>
+  <div><a href="/log">click for error log</a></div>
   <div id="monitor_data"></div>
 
   <div class="control-panel" id="ascii-controls" style="display:none;">
