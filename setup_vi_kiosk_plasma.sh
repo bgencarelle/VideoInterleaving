@@ -80,6 +80,12 @@ set -euo pipefail
 APP_DIR="$HOME/VideoInterleaving"
 VENV_PY="$APP_DIR/.venv/bin/python"
 LOG="/var/log/videointerleaving.log"
+RESTART_DELAY=3
+
+# Logging function - always append to log file
+log_msg() {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >>"$LOG" 2>&1
+}
 
 # Set Wayland environment variables explicitly
 export XDG_SESSION_TYPE=wayland
@@ -100,21 +106,47 @@ done
 
 # Change to app directory
 cd "$APP_DIR" || {
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Cannot cd to $APP_DIR" >>"$LOG" 2>&1
+  log_msg "ERROR: Cannot cd to $APP_DIR"
   exit 1
 }
 
 # Verify Python executable exists
 if [ ! -x "$VENV_PY" ]; then
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Python not found at $VENV_PY" >>"$LOG" 2>&1
+  log_msg "ERROR: Python not found at $VENV_PY"
   exit 1
 fi
 
 # Small delay to ensure Plasma compositor is fully ready
 sleep 2
 
-# Unbuffered so logs are real-time and crash context is preserved
-exec "$VENV_PY" -u main.py --mode local >>"$LOG" 2>&1
+# Main restart loop (no systemd needed)
+restart_count=0
+while true; do
+  if [ $restart_count -gt 0 ]; then
+    log_msg "Restarting application (attempt #$restart_count)..."
+    sleep "$RESTART_DELAY"
+  else
+    log_msg "Starting VideoInterleaving application..."
+  fi
+  
+  # Run Python with unbuffered output, redirecting BOTH stdout and stderr to log
+  # Use exec to replace shell process, but we can't do that in a loop, so we run it normally
+  # This ensures all output (including from Tee class) goes to the log file
+  set +e  # Don't exit on error, we want to check exit code
+  "$VENV_PY" -u main.py --mode local >>"$LOG" 2>&1
+  exit_code=$?
+  set -e
+  
+  if [ $exit_code -eq 0 ]; then
+    log_msg "Application exited normally (code: $exit_code)"
+    # Exit on clean shutdown, don't restart
+    break
+  else
+    log_msg "Application crashed or was killed (exit code: $exit_code) - will restart"
+    restart_count=$((restart_count + 1))
+    # Continue loop to restart
+  fi
+done
 EOF
 
 chmod 0755 "$WRAPPER_PATH"
@@ -167,6 +199,10 @@ Type=simple
 ExecStart=$WRAPPER_PATH
 Restart=always
 RestartSec=5
+# Use 'process' mode to track the Python process directly (after exec in wrapper)
+KillMode=process
+# Ensure systemd detects when the main process exits
+RemainAfterExit=no
 StandardOutput=append:$LOG_PATH
 StandardError=append:$LOG_PATH
 Environment="XDG_SESSION_TYPE=wayland"
@@ -179,11 +215,31 @@ EOF
 chown "$TARGET_USER":"$TARGET_USER" "$SERVICE_FILE"
 chmod 0644 "$SERVICE_FILE"
 
-# Enable the service (requires user session, will be done on next login)
+# Try to enable and start the service if user session is available
 info "Systemd user service created at: $SERVICE_FILE"
-info "To enable the service, run as $TARGET_USER:"
-info "  systemctl --user enable videointerleaving.service"
-info "  systemctl --user start videointerleaving.service"
+if command -v systemctl >/dev/null 2>&1; then
+    # Check if we can access user systemd (requires user session)
+    if sudo -u "$TARGET_USER" systemctl --user daemon-reload 2>/dev/null; then
+        info "Enabling and starting systemd user service..."
+        if sudo -u "$TARGET_USER" systemctl --user enable videointerleaving.service 2>/dev/null; then
+            info "Service enabled"
+            if sudo -u "$TARGET_USER" systemctl --user start videointerleaving.service 2>/dev/null; then
+                info "Service started"
+            else
+                info "Service created but could not start (may need user to log in first)"
+            fi
+        else
+            info "Service created but could not enable (may need user to log in first)"
+        fi
+    else
+        info "User systemd not available (user may need to log in first)"
+        info "To enable the service later, run as $TARGET_USER:"
+        info "  systemctl --user enable videointerleaving.service"
+        info "  systemctl --user start videointerleaving.service"
+    fi
+else
+    info "systemctl not available - service file created but not enabled"
+fi
 
 info "Done."
 echo

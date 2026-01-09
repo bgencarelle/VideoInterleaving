@@ -241,14 +241,31 @@ class Tee:
 
     def write(self, data):
         with self.lock:
-            self.stream.write(data)
-            self.log_file.write(data)
-            if '\n' in data: self.stream.flush()
+            try:
+                self.stream.write(data)
+                self.stream.flush()  # Always flush stream to ensure output
+            except (BrokenPipeError, OSError):
+                # Stream might be closed (e.g., redirected and closed), continue anyway
+                pass
+            try:
+                self.log_file.write(data)
+                # Flush log file frequently to ensure it's written, especially when running remotely
+                if '\n' in data or len(data) > 0:
+                    self.log_file.flush()
+            except Exception:
+                # If log file write fails, at least we tried
+                pass
 
     def flush(self):
         with self.lock:
-            self.stream.flush()
-            self.log_file.flush()
+            try:
+                self.stream.flush()
+            except (BrokenPipeError, OSError):
+                pass
+            try:
+                self.log_file.flush()
+            except Exception:
+                pass
 
 
 # Store original streams and log file for cleanup
@@ -268,16 +285,12 @@ try:
     
     _log_file = open(log_filename, "w", buffering=1, encoding='utf-8')
     
-    # Only use Tee if not running under systemd (systemd already handles redirection)
-    # Under systemd, just write to the log file directly for additional logging
-    if _is_systemd:
-        # Under systemd, stdout/stderr are already redirected by systemd
-        # We'll just keep a reference to the log file for explicit logging
-        pass
-    else:
-        # Not under systemd, use Tee to duplicate output
-        sys.stdout = Tee(sys.stdout, _log_file)
-        sys.stderr = Tee(sys.stderr, _log_file)
+    # Always use Tee to capture all output to both terminal and log file
+    # This works whether stdout/stderr are redirected or not
+    # If stdout/stderr are already redirected (e.g., by wrapper script), 
+    # Tee will write to both the redirected stream and the log file
+    sys.stdout = Tee(sys.stdout, _log_file)
+    sys.stderr = Tee(sys.stderr, _log_file)
     
     # Write initial log message (use original stderr if systemd to avoid issues)
     if _is_systemd:
