@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <title>Video/ASCII Mix Viewer</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="/static/xterm.css">
+    <link rel="stylesheet" href="/static/terminal.css">
+    <script src="/static/xterm.js"></script>
+
+    <style>
+        :root {
+            --bg: #000000;
+        }
+
+        html,
+        body {
+            height: 100%;
+            margin: 0;
+            background-color: var(--bg);
+            overflow: hidden;
+        }
+
+        /* MIXER STAGE */
+        #mixer-stage {
+            position: relative;
+            width: 100%;
+            height: 100vh;
+            background-color: #000000;
+            overflow: hidden;
+        }
+
+        /* MIX LAYERS */
+        .mix-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #000000 !important;
+            will-change: opacity;
+            opacity: 0;
+            transition: opacity 4000ms ease-in-out;
+        }
+
+        /* Video layer (img) */
+        #video-layer {
+            object-fit: contain;
+            border: 0;
+        }
+
+        /* ASCII layer (iframe) */
+        #ascii-layer {
+            border: 0;
+        }
+
+        /* Status Counter */
+        #status-counter {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: rgba(0, 255, 0, 0.2);
+            border: 1px solid #0f0;
+            color: #0f0;
+            padding: 10px 15px;
+            font-family: monospace;
+            font-size: 14px;
+            font-weight: bold;
+            border-radius: 4px;
+            z-index: 1000;
+            text-align: right;
+            line-height: 1.5;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="mixer-stage">
+        <!-- Video Layer (Remote) -->
+        <img class="mix-layer" id="video-layer" src="https://gencarelle.fun/video_feed"
+            style="opacity: 1; z-index: 10;">
+
+        <!-- ASCII Layer (Local) -->
+        <iframe class="mix-layer" id="ascii-layer" src="/ascii" scrolling="no" style="z-index: 0;"></iframe>
+    </div>
+
+    <!-- Status Counter -->
+    <div id="status-counter">
+        <div id="current-view">VIDEO</div>
+        <div id="cycle-count">Cycle: 0</div>
+    </div>
+
+    <script>
+        /* --- CONFIG --- */
+        const SHOW_TIME = 8000;      // How long to show each layer (ms)
+        const FADE_DURATION = 4000;  // Fade transition time (ms)
+
+        const LAYERS = [
+            document.getElementById('video-layer'),
+            document.getElementById('ascii-layer')
+        ];
+
+        let currentIdx = 0;
+        let cycleCount = 0;
+
+        // Layer names for display
+        const LAYER_NAMES = ['VIDEO', 'ASCII'];
+
+        // UI Elements
+        const currentViewEl = document.getElementById('current-view');
+        const cycleCountEl = document.getElementById('cycle-count');
+
+        // Update status display
+        function updateStatus() {
+            currentViewEl.textContent = LAYER_NAMES[currentIdx];
+            cycleCountEl.textContent = `Cycle: ${cycleCount}`;
+        }
+
+        function triggerNextFade() {
+            // 1. Pick Next Layer (alternate between the two)
+            let nextIdx;
+            do {
+                nextIdx = Math.floor(Math.random() * LAYERS.length);
+            } while (nextIdx === currentIdx);
+
+            const currentEl = LAYERS[currentIdx];
+            const nextEl = LAYERS[nextIdx];
+
+            // 2. Setup (Place next layer on top)
+            nextEl.style.zIndex = 20;
+            currentEl.style.zIndex = 10;
+
+            // Reset others
+            LAYERS.forEach((el, i) => {
+                if (i !== currentIdx && i !== nextIdx) {
+                    el.style.zIndex = 0;
+                    el.style.opacity = 0;
+                }
+            });
+
+            // Force Reflow
+            void nextEl.offsetWidth;
+
+            // 3. Animate (Fade In)
+            nextEl.style.opacity = 1;
+
+            // 4. Cleanup after fade completes
+            setTimeout(() => {
+                currentEl.style.opacity = 0;
+                currentEl.style.zIndex = 0;
+                nextEl.style.zIndex = 10;
+                currentIdx = nextIdx;
+                cycleCount++;
+
+                // Update status display
+                updateStatus();
+
+                // Schedule next fade
+                setTimeout(triggerNextFade, SHOW_TIME);
+            }, FADE_DURATION);
+        }
+
+        // Initialize status display
+        updateStatus();
+
+        // Start the fade cycle
+        setTimeout(triggerNextFade, SHOW_TIME);
+    </script>
+</body>
+
+</html>

@@ -64,6 +64,10 @@ def _session_label() -> str:
         return "x11"
     return "unknown"
 
+
+def _is_macos() -> bool:
+    return sys.platform == 'darwin'
+
 class DisplayState:
     def __init__(self, image_size: tuple[int, int] = (640, 480)) -> None:
         self.image_size = image_size
@@ -1094,9 +1098,15 @@ def display_init(state: DisplayState):
                         glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, (version_code % 100) // 10)
                 else:
                     glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_API)
-                    # Try EGL first even on X11 for better compatibility, fall back to native if needed
-                    # Some systems (especially with Mesa) have better EGL support
-                    glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
+                    # macOS doesn't support EGL, use NATIVE_CONTEXT_API
+                    # On Linux, try EGL first for better compatibility (especially with Mesa)
+                    if _is_macos():
+                        glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.NATIVE_CONTEXT_API)
+                    elif _is_wayland_session():
+                        glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
+                    else:
+                        # X11: Try EGL first for better compatibility, fall back to native if needed
+                        glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
                     if version_code is not None:
                         glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, version_code // 100)
                         glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, (version_code % 100) // 10)
@@ -1107,6 +1117,13 @@ def display_init(state: DisplayState):
                 if window:
                     window_created = True
                     break
+                else:
+                    # glfw.create_window() can return None without raising an exception
+                    error_msg = f"GLFW window creation returned None (api={api}, ver={attempt_version})"
+                    last_error = RuntimeError(error_msg)
+                    window = None
+                    print(f"[DISPLAY] Local Window attempt failed: {error_msg}")
+                    continue
             except Exception as e:
                 last_error = e
                 window = None

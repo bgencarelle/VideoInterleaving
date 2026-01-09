@@ -1,4 +1,5 @@
 # settings.py
+import os
 from constantStorage.bio_constants import *
 from constantStorage.midi_constants import *
 from constantStorage.timezones import *
@@ -9,7 +10,14 @@ from constantStorage.display_constants import *
 # -------------------------
 # Image Directories and Folder Paths
 # -------------------------
-IMAGES_DIR = ("images_sbs")
+# Use images_sbs if it exists, otherwise fall back to images
+if os.path.exists("images_sbs"):
+    IMAGES_DIR = "images_sbs"
+elif os.path.exists("images"):
+    IMAGES_DIR = "images"
+else:
+    # Default to images_sbs if neither exists (will error later if truly missing)
+    IMAGES_DIR = "images_sbs"
 MAIN_FOLDER_PATH = f"{IMAGES_DIR}/face"
 FLOAT_FOLDER_PATH = f"{IMAGES_DIR}/float"
 
@@ -48,7 +56,7 @@ SERVER_CAPTURE_RATE = FPS // 2   #  FPS by 2
 # --- ASCII MODE SETTINGS ---
 ASCII_MODE = False
 ASCII_COLOR = True
-ASCII_FPS = SERVER_CAPTURE_RATE // 2
+ASCII_FPS = SERVER_CAPTURE_RATE 
 ASCII_WIDTH = 90 # keep aspect ratio 3:2
 ASCII_HEIGHT = 60
 ASCII_SOURCE_IMAGE_ASPECT_RATIO = 1.333333333
