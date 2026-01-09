@@ -63,11 +63,8 @@ info "Log: $LOG_PATH"
 [[ -f "$MAIN_PY_CHECK" ]] || die "Missing: $MAIN_PY_CHECK"
 [[ -x "$VENV_PY_CHECK" ]] || die "Missing venv python: $VENV_PY_CHECK"
 
-# Verify Plasma/Wayland environment
-if [[ -z "${WAYLAND_DISPLAY:-}" ]] && [[ "${XDG_SESSION_TYPE:-}" != "wayland" ]]; then
-  info "Warning: WAYLAND_DISPLAY not set and XDG_SESSION_TYPE is not 'wayland'."
-  info "This script is for Plasma Wayland, but continuing anyway..."
-fi
+# Note: Script works with both X11 and Wayland Plasma sessions
+# The wrapper script will auto-detect the session type
 
 # 1) Create wrapper script (IMPORTANT: uses $HOME at runtime)
 info "Creating wrapper script..."
@@ -87,18 +84,55 @@ log_msg() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >>"$LOG" 2>&1
 }
 
-# Set Wayland environment variables explicitly
-export XDG_SESSION_TYPE=wayland
-export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+# Auto-detect session type (X11 or Wayland) and set environment accordingly
+if [ -n "${WAYLAND_DISPLAY:-}" ] || [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
+  # Wayland session detected
+  export XDG_SESSION_TYPE=wayland
+  export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  SESSION_TYPE="wayland"
+  log_msg "Detected Wayland session"
+else
+  # X11 session (or default to X11)
+  if [ -n "${DISPLAY:-}" ]; then
+    export DISPLAY="${DISPLAY}"
+    export XDG_SESSION_TYPE=x11
+    SESSION_TYPE="x11"
+    log_msg "Detected X11 session (DISPLAY=${DISPLAY})"
+  else
+    # Fallback: try to detect X11 display
+    if [ -S "/tmp/.X11-unix/X0" ] 2>/dev/null; then
+      export DISPLAY=":0"
+      export XDG_SESSION_TYPE=x11
+      SESSION_TYPE="x11"
+      log_msg "Detected X11 session (fallback to :0)"
+    else
+      # Default to X11 if nothing detected
+      export DISPLAY=":0"
+      export XDG_SESSION_TYPE=x11
+      SESSION_TYPE="x11"
+      log_msg "No session detected, defaulting to X11"
+    fi
+  fi
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+fi
 
 # Wait for Plasma session to be ready (max 30 seconds)
+# Works for both X11 and Wayland
 MAX_WAIT=30
 WAITED=0
 while [ $WAITED -lt $MAX_WAIT ]; do
-  if [ -S "${XDG_RUNTIME_DIR}/wayland-${WAYLAND_DISPLAY#wayland-}" ] 2>/dev/null || \
-     [ -n "${WAYLAND_DISPLAY:-}" ] && command -v kwin_wayland >/dev/null 2>&1; then
-    break
+  if [ "$SESSION_TYPE" = "wayland" ]; then
+    # Check for Wayland socket or kwin_wayland
+    if [ -S "${XDG_RUNTIME_DIR}/wayland-${WAYLAND_DISPLAY#wayland-}" ] 2>/dev/null || \
+       [ -n "${WAYLAND_DISPLAY:-}" ] && command -v kwin_wayland >/dev/null 2>&1; then
+      break
+    fi
+  else
+    # Check for X11 display
+    if [ -n "${DISPLAY:-}" ] && command -v xset >/dev/null 2>&1 && xset q >/dev/null 2>&1; then
+      break
+    fi
   fi
   sleep 1
   WAITED=$((WAITED + 1))
@@ -174,7 +208,7 @@ NoDisplay=false
 Hidden=false
 X-KDE-Autostart-enabled=true
 X-KDE-StartupNotify=false
-X-KDE-Wayland-Enable=true
+# Works with both X11 and Wayland Plasma sessions
 EOF
 
 chown "$TARGET_USER":"$TARGET_USER" "$DESKTOP_FILE"
@@ -205,8 +239,8 @@ KillMode=process
 RemainAfterExit=no
 StandardOutput=append:$LOG_PATH
 StandardError=append:$LOG_PATH
-Environment="XDG_SESSION_TYPE=wayland"
-Environment="WAYLAND_DISPLAY=wayland-0"
+# Environment will be auto-detected by wrapper script (X11 or Wayland)
+# Don't force Wayland - let the wrapper detect the session type
 
 [Install]
 WantedBy=default.target
@@ -243,7 +277,124 @@ fi
 
 info "Done."
 echo
-echo "Setup complete! Two autostart methods have been configured:"
+echo "================================================================"
+echo "AUTOSTART VERIFICATION"
+echo "================================================================"
+echo
+echo "Checking all autostart configurations..."
+echo
+
+# Check desktop entry
+if [ -f "$DESKTOP_FILE" ]; then
+  echo "✅ Plasma .desktop autostart: $DESKTOP_FILE"
+  echo "   Status: EXISTS"
+  if grep -q "X-KDE-Autostart-enabled=true" "$DESKTOP_FILE" 2>/dev/null; then
+    echo "   Autostart: ENABLED"
+  else
+    echo "   Autostart: DISABLED (check file)"
+  fi
+else
+  echo "❌ Plasma .desktop autostart: $DESKTOP_FILE"
+  echo "   Status: NOT FOUND"
+fi
+echo
+
+# Check systemd user service
+if [ -f "$SERVICE_FILE" ]; then
+  echo "✅ Systemd user service: $SERVICE_FILE"
+  echo "   Status: EXISTS"
+  if command -v systemctl >/dev/null 2>&1; then
+    if sudo -u "$TARGET_USER" systemctl --user is-enabled videointerleaving.service >/dev/null 2>&1; then
+      echo "   Enabled: YES"
+    else
+      echo "   Enabled: NO (run: systemctl --user enable videointerleaving.service)"
+    fi
+    if sudo -u "$TARGET_USER" systemctl --user is-active videointerleaving.service >/dev/null 2>&1; then
+      echo "   Running: YES"
+    else
+      echo "   Running: NO"
+    fi
+  else
+    echo "   Note: systemctl not available to check status"
+  fi
+else
+  echo "❌ Systemd user service: $SERVICE_FILE"
+  echo "   Status: NOT FOUND"
+fi
+echo
+
+# Check for other autostart locations that might conflict
+echo "Checking for other autostart mechanisms..."
+echo
+
+# Check system-wide autostart
+SYSTEM_AUTOSTART="/etc/xdg/autostart/videointerleaving.desktop"
+if [ -f "$SYSTEM_AUTOSTART" ]; then
+  echo "⚠️  WARNING: System-wide autostart found: $SYSTEM_AUTOSTART"
+  echo "   This may conflict with user autostart!"
+fi
+
+# Check other common autostart locations
+OTHER_DESKTOP="$TARGET_HOME/.config/autostart-scripts/videointerleaving"
+if [ -f "$OTHER_DESKTOP" ] || [ -d "$OTHER_DESKTOP" ]; then
+  echo "⚠️  WARNING: Other autostart found: $OTHER_DESKTOP"
+fi
+
+# Check for shell autostart files that might launch the app
+SHELL_PROFILES=(
+  "$TARGET_HOME/.bashrc"
+  "$TARGET_HOME/.bash_profile"
+  "$TARGET_HOME/.profile"
+  "$TARGET_HOME/.zshrc"
+  "$TARGET_HOME/.xprofile"
+  "$TARGET_HOME/.xinitrc"
+)
+
+FOUND_IN_PROFILE=false
+for profile in "${SHELL_PROFILES[@]}"; do
+  if [ -f "$profile" ] && grep -q "VideoInterleaving\|videointerleaving\|main.py.*mode local" "$profile" 2>/dev/null; then
+    if [ "$FOUND_IN_PROFILE" = false ]; then
+      echo "⚠️  WARNING: Found VideoInterleaving references in shell profiles:"
+      FOUND_IN_PROFILE=true
+    fi
+    echo "   - $profile"
+  fi
+done
+
+# Check for other systemd services
+OTHER_SERVICES=(
+  "/etc/systemd/system/videointerleaving.service"
+  "/etc/systemd/user/videointerleaving.service"
+  "$TARGET_HOME/.config/systemd/user/vi-local.service"
+)
+
+FOUND_OTHER_SERVICE=false
+for svc in "${OTHER_SERVICES[@]}"; do
+  if [ -f "$svc" ]; then
+    if [ "$FOUND_OTHER_SERVICE" = false ]; then
+      echo "⚠️  WARNING: Other systemd services found:"
+      FOUND_OTHER_SERVICE=true
+    fi
+    echo "   - $svc"
+    if command -v systemctl >/dev/null 2>&1; then
+      if systemctl is-enabled "$(basename "$svc")" >/dev/null 2>&1 || \
+         sudo -u "$TARGET_USER" systemctl --user is-enabled "$(basename "$svc")" >/dev/null 2>&1; then
+        echo "     Status: ENABLED (may conflict!)"
+      fi
+    fi
+  fi
+done
+
+if [ "$FOUND_IN_PROFILE" = false ] && [ "$FOUND_OTHER_SERVICE" = false ] && [ ! -f "$SYSTEM_AUTOSTART" ]; then
+  echo "✅ No conflicting autostart mechanisms found"
+fi
+
+echo
+echo "================================================================"
+echo "SUMMARY"
+echo "================================================================"
+echo
+echo "Autostart methods configured:"
 echo "  1. Plasma .desktop autostart: $DESKTOP_FILE"
 echo "  2. Systemd user service: $SERVICE_FILE"
 echo

@@ -600,7 +600,8 @@ def _try_hidden_glfw_headless(require_codes: list[int | None], use_egl: bool, us
     ctx_local = None
     last_error = None
 
-    backend_kwargs = {"backend": "egl"} if use_egl else {}
+    # macOS doesn't support EGL backend, use empty kwargs
+    backend_kwargs = {"backend": "egl"} if use_egl and not _is_macos() else {}
 
     for require_code in require_codes:
         attempt_version = _format_gl_version(require_code) if require_code is not None else "default"
@@ -617,10 +618,15 @@ def _try_hidden_glfw_headless(require_codes: list[int | None], use_egl: bool, us
                     glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, (require_code % 100) // 10)
             else:
                 glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_API)
-                if use_egl or _is_wayland_session():
+                # macOS doesn't support EGL, use NATIVE_CONTEXT_API
+                # On Linux, try EGL first for better compatibility (especially with Mesa)
+                if _is_macos():
+                    glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.NATIVE_CONTEXT_API)
+                elif use_egl or _is_wayland_session():
                     glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
                 else:
-                    glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.NATIVE_CONTEXT_API)
+                    # X11: Try EGL first for better compatibility, fall back to native if needed
+                    glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
 
             w, h = size
             window = glfw.create_window(w, h, "Headless GL", None, None)
@@ -683,10 +689,15 @@ def _try_hidden_glfw_headless_legacy(require_codes: list[int | None], use_gles: 
                     glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, (require_code % 100) // 10)
             else:
                 glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_API)
-                if _is_wayland_session():
+                # macOS doesn't support EGL, use NATIVE_CONTEXT_API
+                # On Linux, try EGL first for better compatibility (especially with Mesa)
+                if _is_macos():
+                    glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.NATIVE_CONTEXT_API)
+                elif _is_wayland_session():
                     glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
                 else:
-                    glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.NATIVE_CONTEXT_API)
+                    # X11: Try EGL first for better compatibility, fall back to native if needed
+                    glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
 
             w, h = size
             window = glfw.create_window(w, h, "Headless Legacy GL", None, None)
@@ -1106,7 +1117,7 @@ def display_init(state: DisplayState):
                         glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
                     else:
                         # X11: Try EGL first for better compatibility, fall back to native if needed
-                    glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
+                        glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
                     if version_code is not None:
                         glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, version_code // 100)
                         glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, (version_code % 100) // 10)
