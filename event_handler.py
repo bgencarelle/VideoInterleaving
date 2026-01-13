@@ -24,8 +24,33 @@ def register_callbacks(window, state):
                 state.needs_update = True  # Mirror mode
 
     def on_window_size(win, width, height):
-        if not state.fullscreen:
-            # Trigger reconfiguration but don't adjust anything directly
+        if state.fullscreen:
+            # Check if fullscreen was lost (OS kicked us out)
+            try:
+                from display_manager import _is_wayland_session
+                is_wayland = _is_wayland_session()
+                
+                if is_wayland:
+                    # Wayland: Compare window size to monitor size
+                    # If window is significantly smaller (< 90% of monitor), fullscreen was lost
+                    primary_monitor = glfw.get_primary_monitor()
+                    if primary_monitor:
+                        mode = glfw.get_video_mode(primary_monitor)
+                        if mode:
+                            monitor_w, monitor_h = mode.size.width, mode.size.height
+                            # Only restore if window is clearly smaller than monitor (not just a small difference)
+                            if width < monitor_w * 0.9 or height < monitor_h * 0.9:
+                                state.needs_update = True
+                else:
+                    # X11: Check if window is no longer on a monitor
+                    current_monitor = glfw.get_window_monitor(win)
+                    if current_monitor is None:
+                        # Window not on monitor = fullscreen lost
+                        state.needs_update = True
+            except Exception:
+                pass  # Ignore errors - don't break on callback errors
+        else:
+            # Windowed mode: trigger reconfiguration for normal resize
             state.needs_update = True
 
     glfw.set_key_callback(window, on_key)

@@ -1053,6 +1053,9 @@ def display_init(state: DisplayState):
                     else:
                         fs_w, fs_h = best.size.width, best.size.height
                 glfw.window_hint(glfw.AUTO_ICONIFY, glfw.FALSE)
+                # Additional hints to prevent fullscreen loss on monitor disconnect
+                glfw.window_hint(glfw.RESIZABLE, glfw.FALSE)  # Prevent window resizing
+                glfw.window_hint(glfw.FLOATING, glfw.FALSE)  # Keep window managed
                 # Try actual fullscreen first (even on Wayland)
                 # Fall back to borderless window if fullscreen fails
                 if is_wayland:

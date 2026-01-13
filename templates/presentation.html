@@ -73,13 +73,36 @@
             max-width: 100%;
             max-height: 100%;
         }
+        
+        /* Ensure iframes fill container completely with minimum spacing */
+        /* The iframe should match the image aspect ratio, not the terminal aspect ratio */
+        iframe.mix-layer {
+            /* Override mix-layer positioning for iframes */
+            position: absolute;
+            left: 0;
+            top: 0;
+            /* Fill container completely */
+            width: 100%;
+            height: 100%;
+            /* Ensure minimum size - fill at least 100% of container */
+            min-width: 100%;
+            min-height: 100%;
+            max-width: 100%;
+            max-height: 100%;
+            margin: 0;
+            padding: 0;
+            display: block;
+            /* Remove any default spacing */
+            border: 0;
+            box-sizing: border-box;
+        }
     </style>
 </head>
 <body>
 <div class="grid">
 
     <div class="panel">
-        <img src="https://testing.gencarelle.fun/video_feed"/>
+        <img src="/video_feed"/>
     </div>
 
     <div class="panel">
@@ -93,7 +116,7 @@
     <div class="panel">
         <div id="mixer-stage">
             <!-- ASCII layers -->
-            <iframe class="mix-layer" id="src-0" src="https://testing.gencarelle.fun/ascii"
+            <iframe class="mix-layer" id="src-0" src="/ascii"
                     scrolling="no" style="opacity: 1; z-index: 10;"></iframe>
 
             <iframe class="mix-layer" id="src-1" src="https://testing2.gencarelle.fun/ascii"
@@ -103,7 +126,7 @@
                     scrolling="no" style="z-index: 0;"></iframe>
 
             <!-- video_feed layers -->
-            <img class="mix-layer" id="src-2" src="https://testing.gencarelle.fun/video_feed" style="z-index: 0;"/>
+            <img class="mix-layer" id="src-2" src="/video_feed" style="z-index: 0;"/>
 
             <img class="mix-layer" id="src-3" src="https://testing2.gencarelle.fun/video_feed" style="z-index: 0;"/>
 
@@ -172,6 +195,56 @@
 
     // Start
     setTimeout(triggerNextFade, SHOW_TIME);
+
+    /* --- SCALE ASCII IFRAMES TO MATCH VIDEO_FEED SIZE --- */
+    function scaleAsciiToVideoSize() {
+        // Find a video_feed image to measure (use the first one in mixer-stage)
+        const videoImg = document.querySelector('#mixer-stage .mix-layer[src*="video_feed"]');
+        if (!videoImg) return;
+        
+        // Wait for image to load if not already loaded
+        if (!videoImg.complete) {
+            videoImg.addEventListener('load', scaleAsciiToVideoSize);
+            return;
+        }
+        
+        // Get actual rendered dimensions of the video image
+        const videoRect = videoImg.getBoundingClientRect();
+        const mixerStage = document.getElementById('mixer-stage');
+        const stageRect = mixerStage.getBoundingClientRect();
+        
+        // Calculate the scale factor needed
+        // Video uses object-fit: contain, so we need to match its actual size
+        const scaleX = videoRect.width / stageRect.width;
+        const scaleY = videoRect.height / stageRect.height;
+        
+        // Apply scaling to all ASCII iframes
+        document.querySelectorAll('#mixer-stage iframe.mix-layer').forEach(iframe => {
+            // Create a frame container that matches video size
+            iframe.style.width = videoRect.width + 'px';
+            iframe.style.height = videoRect.height + 'px';
+            iframe.style.left = ((stageRect.width - videoRect.width) / 2) + 'px';
+            iframe.style.top = ((stageRect.height - videoRect.height) / 2) + 'px';
+            iframe.style.transform = 'none';
+            iframe.style.transformOrigin = 'center center';
+        });
+    }
+
+    // Scale on load and resize
+    window.addEventListener('load', () => {
+        // Wait a bit for images to render
+        setTimeout(scaleAsciiToVideoSize, 100);
+    });
+    window.addEventListener('resize', scaleAsciiToVideoSize);
+    
+    // Also scale when video images load
+    document.querySelectorAll('#mixer-stage .mix-layer[src*="video_feed"]').forEach(img => {
+        if (img.complete) {
+            scaleAsciiToVideoSize();
+        } else {
+            img.addEventListener('load', scaleAsciiToVideoSize);
+        }
+    });
 </script>
 </body>
 </html>

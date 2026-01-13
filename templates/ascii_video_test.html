@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width,initial-scale=1"/>
+    <title>ASCII/Video Fade Test</title>
+    <style>
+        :root {
+            --bg: #000000;
+        }
+
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg);
+            overflow: hidden;
+        }
+
+        #container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background-color: var(--bg);
+        }
+
+        .layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            border: 0;
+            margin: 0;
+            padding: 0;
+            opacity: 0;
+            transition: opacity 1000ms ease-in-out;
+            will-change: opacity;
+        }
+
+        .layer.active {
+            opacity: 1;
+        }
+
+        #ascii-layer {
+            background-color: #000000;
+        }
+
+        #video-layer {
+            object-fit: contain;
+            background-color: #000000;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <iframe id="ascii-layer" class="layer" src="/ascii" scrolling="no"></iframe>
+        <img id="video-layer" class="layer" src="https://testing.gencarelle.fun/video_feed" alt="Video feed"/>
+    </div>
+
+    <script>
+        const ASCII_LAYER = document.getElementById('ascii-layer');
+        const VIDEO_LAYER = document.getElementById('video-layer');
+        const FADE_DURATION = 2300; // 1 second per fade
+        let isAsciiVisible = true;
+
+        function toggleFade() {
+            if (isAsciiVisible) {
+                // Fade from ASCII to Video
+                ASCII_LAYER.classList.remove('active');
+                VIDEO_LAYER.classList.add('active');
+                isAsciiVisible = false;
+            } else {
+                // Fade from Video to ASCII
+                VIDEO_LAYER.classList.remove('active');
+                ASCII_LAYER.classList.add('active');
+                isAsciiVisible = true;
+            }
+        }
+
+        // Initialize: start with ASCII visible
+        ASCII_LAYER.classList.add('active');
+
+        // Start fading: 1 fade per second
+        setInterval(toggleFade, FADE_DURATION);
+    </script>
+</body>
+</html>

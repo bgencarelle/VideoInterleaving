@@ -47,7 +47,7 @@ RESET_CODE = "\033[0m"
 
 from index_calculator import update_index
 from folder_selector import update_folder_selection, folder_dictionary
-from display_manager import DisplayState, display_init
+from display_manager import DisplayState, display_init, _is_wayland_session
 from event_handler import register_callbacks
 import renderer
 import ascii_converter
