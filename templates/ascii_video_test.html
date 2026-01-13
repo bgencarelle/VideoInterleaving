@@ -91,7 +91,7 @@
             if (!cw || !ch) return;
 
             // Determine aspect ratio of the video feed
-            let videoAR = 1.5; // Default 3:2 to avoid zero-size containers
+            let videoAR = 1.3333; // Default 4:3
             if (VIDEO_LAYER.naturalWidth > 0 && VIDEO_LAYER.naturalHeight > 0) {
                 videoAR = VIDEO_LAYER.naturalWidth / VIDEO_LAYER.naturalHeight;
             }
