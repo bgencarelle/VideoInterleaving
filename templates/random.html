@@ -27,7 +27,7 @@
         .grid {
             height: 100vh;
             display: grid;
-            grid-template-columns: 1fr 1fr 1fr;
+            grid-template-columns: 1fr 1fr 1fr 1fr 1fr;
             grid-template-rows: 1fr;
             gap: var(--gap);
             padding: var(--pad);
@@ -117,21 +117,37 @@
         </div>
 
         <div class="panel">
+            <img src="https://testing.gencarelle.fun/video_feed" />
+        </div>
+
+        <div class="panel">
             <img src="https://testing2.gencarelle.fun/video_feed" />
         </div>
 
         <div class="panel">
+            <img src="https://testing3.gencarelle.fun/video_feed" />
+        </div>
+
+        <div class="panel">
             <div id="mixer-stage">
+                <!-- Local -->
                 <iframe class="mix-layer" id="src-0" src="/ascii" scrolling="no"
                     style="opacity: 1; z-index: 10;"></iframe>
+                <img class="mix-layer" id="src-1" src="/video_feed" />
 
-                <iframe class="mix-layer" id="src-1" src="https://testing2.gencarelle.fun/ascii" scrolling="no"
-                    style="z-index: 0;"></iframe>
+                <!-- Testing -->
+                <iframe class="mix-layer" id="src-2" src="https://testing.gencarelle.fun/ascii" scrolling="no"></iframe>
+                <img class="mix-layer" id="src-3" src="https://testing.gencarelle.fun/video_feed" />
 
-                <img class="mix-layer" id="src-2" src="/video_feed" style="z-index: 0;" />
+                <!-- Testing2 -->
+                <iframe class="mix-layer" id="src-4" src="https://testing2.gencarelle.fun/ascii"
+                    scrolling="no"></iframe>
+                <img class="mix-layer" id="src-5" src="https://testing2.gencarelle.fun/video_feed" />
 
-                <img class="mix-layer" id="src-3" src="https://testing2.gencarelle.fun/video_feed"
-                    style="z-index: 0;" />
+                <!-- Testing3 -->
+                <iframe class="mix-layer" id="src-6" src="https://testing3.gencarelle.fun/ascii"
+                    scrolling="no"></iframe>
+                <img class="mix-layer" id="src-7" src="https://testing3.gencarelle.fun/video_feed" />
             </div>
         </div>
 
@@ -145,8 +161,12 @@
         const LAYERS = [
             document.getElementById('src-0'),
             document.getElementById('src-1'),
-            //document.getElementById('src-2'),
-            document.getElementById('src-3')
+            document.getElementById('src-2'),
+            document.getElementById('src-3'),
+            document.getElementById('src-4'),
+            document.getElementById('src-5'),
+            document.getElementById('src-6'),
+            document.getElementById('src-7')
         ];
 
         let currentIdx = 0;
