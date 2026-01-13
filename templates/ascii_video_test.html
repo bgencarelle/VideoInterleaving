@@ -1,15 +1,17 @@
 <!doctype html>
 <html lang="en">
+
 <head>
-    <meta charset="utf-8"/>
-    <meta name="viewport" content="width=device-width,initial-scale=1"/>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>ASCII/Video Fade Test</title>
     <style>
         :root {
             --bg: #000000;
         }
 
-        html, body {
+        html,
+        body {
             height: 100%;
             margin: 0;
             padding: 0;
@@ -54,37 +56,53 @@
         }
     </style>
 </head>
+
 <body>
     <div id="container">
         <iframe id="ascii-layer" class="layer" src="/ascii" scrolling="no"></iframe>
-        <img id="video-layer" class="layer" src="https://testing.gencarelle.fun/video_feed" alt="Video feed"/>
+        <img id="video-layer" class="layer" src="/video_feed" alt="Video feed" />
     </div>
 
     <script>
         const ASCII_LAYER = document.getElementById('ascii-layer');
         const VIDEO_LAYER = document.getElementById('video-layer');
-        const FADE_DURATION = 2300; // 1 second per fade
         let isAsciiVisible = true;
 
-        function toggleFade() {
+        function getRandomTime(min, max) {
+            return Math.floor(Math.random() * (max - min + 1) + min);
+        }
+
+        function triggerFade() {
+            // 1. Randomize fade duration (1-3 seconds)
+            const fadeDuration = getRandomTime(1000, 3000);
+            ASCII_LAYER.style.transitionDuration = `${fadeDuration}ms`;
+            VIDEO_LAYER.style.transitionDuration = `${fadeDuration}ms`;
+
+            // 2. Toggle visibility
             if (isAsciiVisible) {
-                // Fade from ASCII to Video
                 ASCII_LAYER.classList.remove('active');
                 VIDEO_LAYER.classList.add('active');
                 isAsciiVisible = false;
             } else {
-                // Fade from Video to ASCII
                 VIDEO_LAYER.classList.remove('active');
                 ASCII_LAYER.classList.add('active');
                 isAsciiVisible = true;
             }
+
+            // 3. Schedule next fade (random wait time 1-3 seconds after fade completes)
+            // Or maybe 1-3 seconds total display time? 
+            // The prompt says "1-3 second random fade" which might mean the fade itself.
+            // I'll assume display time is also random 1-3s.
+            const displayTime = getRandomTime(1000, 3000);
+            setTimeout(triggerFade, fadeDuration + displayTime);
         }
 
         // Initialize: start with ASCII visible
         ASCII_LAYER.classList.add('active');
 
-        // Start fading: 1 fade per second
-        setInterval(toggleFade, FADE_DURATION);
+        // Start the loop
+        setTimeout(triggerFade, getRandomTime(1000, 3000));
     </script>
 </body>
+
 </html>
