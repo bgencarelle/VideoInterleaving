@@ -40,26 +40,19 @@
             opacity: 0;
             transition: opacity 1000ms ease-in-out;
             will-change: opacity;
+            object-fit: contain;
+            background-color: #000000;
         }
 
         .layer.active {
             opacity: 1;
-        }
-
-        #ascii-layer {
-            background-color: #000000;
-        }
-
-        #video-layer {
-            object-fit: contain;
-            background-color: #000000;
         }
     </style>
 </head>
 
 <body>
     <div id="container">
-        <iframe id="ascii-layer" class="layer" src="/ascii" scrolling="no"></iframe>
+        <iframe id="ascii-layer" class="layer" src="/ascii_mjpeg" scrolling="no"></iframe>
         <img id="video-layer" class="layer" src="/video_feed" alt="Video feed" />
     </div>
 
@@ -72,13 +65,52 @@
             return Math.floor(Math.random() * (max - min + 1) + min);
         }
 
+        /* --- DYNAMIC SCALING LOGIC --- */
+        function computeContainRect(containerW, containerH, contentAR) {
+            const containerAR = containerW / containerH;
+            let w, h;
+            if (containerAR > contentAR) {
+                h = containerH;
+                w = h * contentAR;
+            } else {
+                w = containerW;
+                h = w / contentAR;
+            }
+            return {
+                width: w,
+                height: h,
+                left: (containerW - w) / 2,
+                top: (containerH - h) / 2
+            };
+        }
+
+        function scaleLayers() {
+            const container = document.getElementById('container');
+            const cw = container.clientWidth;
+            const ch = container.clientHeight;
+            if (!cw || !ch) return;
+
+            // Determine aspect ratio of the video feed
+            let videoAR = 1.3333; // Default 4:3
+            if (VIDEO_LAYER.naturalWidth > 0 && VIDEO_LAYER.naturalHeight > 0) {
+                videoAR = VIDEO_LAYER.naturalWidth / VIDEO_LAYER.naturalHeight;
+            }
+
+            const r = computeContainRect(cw, ch, videoAR);
+
+            [ASCII_LAYER, VIDEO_LAYER].forEach(el => {
+                el.style.width = r.width + 'px';
+                el.style.height = r.height + 'px';
+                el.style.left = r.left + 'px';
+                el.style.top = r.top + 'px';
+            });
+        }
+
         function triggerFade() {
-            // 1. Randomize fade duration (1-3 seconds)
             const fadeDuration = getRandomTime(1000, 3000);
             ASCII_LAYER.style.transitionDuration = `${fadeDuration}ms`;
             VIDEO_LAYER.style.transitionDuration = `${fadeDuration}ms`;
 
-            // 2. Toggle visibility
             if (isAsciiVisible) {
                 ASCII_LAYER.classList.remove('active');
                 VIDEO_LAYER.classList.add('active');
@@ -89,16 +121,23 @@
                 isAsciiVisible = true;
             }
 
-            // 3. Schedule next fade (random wait time 1-3 seconds after fade completes)
-            // Or maybe 1-3 seconds total display time? 
-            // The prompt says "1-3 second random fade" which might mean the fade itself.
-            // I'll assume display time is also random 1-3s.
             const displayTime = getRandomTime(1000, 3000);
             setTimeout(triggerFade, fadeDuration + displayTime);
         }
 
         // Initialize: start with ASCII visible
         ASCII_LAYER.classList.add('active');
+
+        // Scaling listeners
+        window.addEventListener('load', scaleLayers);
+        window.addEventListener('resize', scaleLayers);
+        // Also poll briefly to catch video metadata load
+        let scaleTries = 0;
+        const scaleTimer = setInterval(() => {
+            scaleLayers();
+            scaleTries++;
+            if (scaleTries > 20) clearInterval(scaleTimer);
+        }, 200);
 
         // Start the loop
         setTimeout(triggerFade, getRandomTime(1000, 3000));
