@@ -26,6 +26,18 @@
             width: 100vw;
             height: 100vh;
             background-color: var(--bg);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        #stage {
+            position: relative;
+            /* Dimensions will be set by JS based on video aspect ratio */
+            width: 100%;
+            height: 100%;
+            background-color: var(--bg);
+            overflow: hidden;
         }
 
         .layer {
@@ -40,30 +52,29 @@
             opacity: 0;
             transition: opacity 1000ms ease-in-out;
             will-change: opacity;
-        }
-
-        .layer.active {
-            opacity: 1;
-        }
-
-        #ascii-layer {
             background-color: #000000;
         }
 
         #video-layer {
             object-fit: contain;
-            background-color: #000000;
+        }
+
+        .layer.active {
+            opacity: 1;
         }
     </style>
 </head>
 
 <body>
     <div id="container">
-        <iframe id="ascii-layer" class="layer" src="/ascii_mjpeg" scrolling="no"></iframe>
-        <img id="video-layer" class="layer" src="/video_feed" alt="Video feed" />
+        <div id="stage">
+            <img id="video-layer" class="layer" src="/video_feed" alt="Video feed" />
+            <iframe id="ascii-layer" class="layer" src="/ascii" scrolling="no"></iframe>
+        </div>
     </div>
 
     <script>
+        const STAGE = document.getElementById('stage');
         const ASCII_LAYER = document.getElementById('ascii-layer');
         const VIDEO_LAYER = document.getElementById('video-layer');
         let isAsciiVisible = true;
@@ -72,33 +83,79 @@
             return Math.floor(Math.random() * (max - min + 1) + min);
         }
 
+        /* --- STAGE SCALING LOGIC --- */
+        function scaleStage() {
+            const container = document.getElementById('container');
+            const cw = container.clientWidth;
+            const ch = container.clientHeight;
+            if (!cw || !ch) return;
+
+            // Determine aspect ratio of the video feed
+            let videoAR = 1.5; // Default 3:2 to avoid zero-size containers
+            if (VIDEO_LAYER.naturalWidth > 0 && VIDEO_LAYER.naturalHeight > 0) {
+                videoAR = VIDEO_LAYER.naturalWidth / VIDEO_LAYER.naturalHeight;
+            }
+
+            const containerAR = cw / ch;
+            let finalW, finalH;
+
+            if (containerAR > videoAR) {
+                // Container is wider than video: fit height
+                finalH = ch;
+                finalW = finalH * videoAR;
+            } else {
+                // Container is taller than video (mobile): fit width
+                finalW = cw;
+                finalH = finalW / videoAR;
+            }
+
+            STAGE.style.width = Math.floor(finalW) + 'px';
+            STAGE.style.height = Math.floor(finalH) + 'px';
+        }
+
         function triggerFade() {
-            // 1. Randomize fade duration (1-3 seconds)
             const fadeDuration = getRandomTime(1000, 3000);
             ASCII_LAYER.style.transitionDuration = `${fadeDuration}ms`;
             VIDEO_LAYER.style.transitionDuration = `${fadeDuration}ms`;
 
-            // 2. Toggle visibility
             if (isAsciiVisible) {
+                // Switch to Video
                 ASCII_LAYER.classList.remove('active');
                 VIDEO_LAYER.classList.add('active');
+                // Ensure z-index follows visibility to prevent iframe interaction blocks
+                ASCII_LAYER.style.zIndex = 10;
+                VIDEO_LAYER.style.zIndex = 20;
                 isAsciiVisible = false;
             } else {
+                // Switch to ASCII
                 VIDEO_LAYER.classList.remove('active');
                 ASCII_LAYER.classList.add('active');
+                VIDEO_LAYER.style.zIndex = 10;
+                ASCII_LAYER.style.zIndex = 20;
                 isAsciiVisible = true;
             }
 
-            // 3. Schedule next fade (random wait time 1-3 seconds after fade completes)
-            // Or maybe 1-3 seconds total display time? 
-            // The prompt says "1-3 second random fade" which might mean the fade itself.
-            // I'll assume display time is also random 1-3s.
             const displayTime = getRandomTime(1000, 3000);
             setTimeout(triggerFade, fadeDuration + displayTime);
         }
 
-        // Initialize: start with ASCII visible
+        // Initialize: start with ASCII visible and on top
         ASCII_LAYER.classList.add('active');
+        ASCII_LAYER.style.zIndex = 20;
+        VIDEO_LAYER.style.zIndex = 10;
+
+        // Scaling listeners
+        window.addEventListener('load', scaleStage);
+        window.addEventListener('resize', scaleStage);
+
+        // Polling loop to catch video metadata and handle dynamic resizing
+        let scaleTries = 0;
+        const scaleTimer = setInterval(() => {
+            scaleStage();
+            scaleTries++;
+            // Poll for a while on load, then slow down
+            if (scaleTries > 30) clearInterval(scaleTimer);
+        }, 300);
 
         // Start the loop
         setTimeout(triggerFade, getRandomTime(1000, 3000));
