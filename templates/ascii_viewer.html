@@ -145,7 +145,7 @@
         function setupFit(term) {
             // Detect iframe context
             const isInIframe = window.self !== window.top;
-
+            
             const fitToScreen = () => {
                 const termEl = document.getElementById('terminal');
                 const screenEl = termEl.querySelector('.xterm-screen');
@@ -171,27 +171,24 @@
                 const imageAspectRatio = (COLS * TARGET_PIXEL_RATIO) / ROWS;
                 const containerAspectRatio = containerW / containerH;
 
-                // Calculate scale to fill the container
-                let scaleX, scaleY;
-
-                if (isInIframe) {
-                    // [STRETCH-TO-FILL] In an iframe, we force the terminal to match the iframe exactly.
-                    // This ensures pixel-perfect alignment with the video layer in the parent.
-                    scaleX = containerW / actualW;
-                    scaleY = containerH / actualH;
+                // Calculate scale to fill the container while maintaining image aspect ratio
+                let scale;
+                if (containerAspectRatio > imageAspectRatio) {
+                    // Container is wider - scale based on height
+                    scale = containerH / actualH;
                 } else {
-                    // [UNIFORM] Standalone: keep the image aspect ratio
-                    const scale = (containerAspectRatio > imageAspectRatio)
-                        ? (containerH / actualH)
-                        : (containerW / actualW);
-                    scaleX = scale;
-                    scaleY = scale;
+                    // Container is taller - scale based on width
+                    scale = containerW / actualW;
                 }
 
                 // Ensure scale is valid
-                if (scaleX <= 0 || !isFinite(scaleX) || scaleY <= 0 || !isFinite(scaleY)) {
+                if (scale <= 0 || !isFinite(scale)) {
                     return false;
                 }
+
+                // Calculate scaled dimensions
+                const scaledW = actualW * scale;
+                const scaledH = actualH * scale;
 
                 // Set terminal element to its natural rendered size
                 termEl.style.width = actualW + 'px';
@@ -201,8 +198,8 @@
                 termEl.style.display = 'block';
                 termEl.style.flexShrink = '0';
 
-                // Apply scaling transform
-                termEl.style.transform = `scale(${scaleX}, ${scaleY})`;
+                // Apply scaling transform - this scales the terminal to fill the container
+                termEl.style.transform = `scale(${scale})`;
                 termEl.style.transformOrigin = 'center center';
 
                 // Adjust terminal-stage positioning based on context
@@ -210,7 +207,7 @@
                 stageEl.style.justifyContent = 'center';
                 stageEl.style.alignItems = 'center';
                 stageEl.style.overflow = 'hidden'; // Prevent scaled content from overflowing
-
+                
                 if (isInIframe) {
                     // In iframe: fill the iframe completely
                     // The iframe itself should be sized to match the image aspect ratio by the parent
@@ -218,7 +215,7 @@
                     document.documentElement.style.height = '100%';
                     document.body.style.width = '100%';
                     document.body.style.height = '100%';
-
+                    
                     // Stage fills the body
                     stageEl.style.width = '100%';
                     stageEl.style.height = '100%';

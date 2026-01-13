@@ -26,26 +26,14 @@
             width: 100vw;
             height: 100vh;
             background-color: var(--bg);
-            display: flex;
-            justify-content: center;
-            align-items: center;
-        }
-
-        #stage {
-            position: relative;
-            /* Dimensions will be set by JS based on video aspect ratio */
-            width: 100%;
-            height: 100%;
-            background-color: var(--bg);
-            overflow: hidden;
         }
 
         .layer {
             position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
+            /* Center the layers manually */
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
             border: 0;
             margin: 0;
             padding: 0;
@@ -56,7 +44,8 @@
         }
 
         #video-layer {
-            object-fit: contain;
+            /* Since we manually calculate the containing box, we use fill to avoid browser-added margins */
+            object-fit: fill;
         }
 
         .layer.active {
@@ -67,14 +56,12 @@
 
 <body>
     <div id="container">
-        <div id="stage">
-            <img id="video-layer" class="layer" src="/video_feed" alt="Video feed" />
-            <iframe id="ascii-layer" class="layer" src="/ascii" scrolling="no"></iframe>
-        </div>
+        <!-- Reordered: Video behind, ASCII in front -->
+        <img id="video-layer" class="layer" src="/video_feed" alt="Video feed" />
+        <iframe id="ascii-layer" class="layer" src="/ascii" scrolling="no"></iframe>
     </div>
 
     <script>
-        const STAGE = document.getElementById('stage');
         const ASCII_LAYER = document.getElementById('ascii-layer');
         const VIDEO_LAYER = document.getElementById('video-layer');
         let isAsciiVisible = true;
@@ -83,8 +70,8 @@
             return Math.floor(Math.random() * (max - min + 1) + min);
         }
 
-        /* --- STAGE SCALING LOGIC --- */
-        function scaleStage() {
+        /* --- UNIFIED SCALING LOGIC --- */
+        function scaleLayers() {
             const container = document.getElementById('container');
             const cw = container.clientWidth;
             const ch = container.clientHeight;
@@ -109,8 +96,14 @@
                 finalH = finalW / videoAR;
             }
 
-            STAGE.style.width = Math.floor(finalW) + 'px';
-            STAGE.style.height = Math.floor(finalH) + 'px';
+            // Apply IDENTICAL dimensions to both layers
+            const wStr = Math.floor(finalW) + 'px';
+            const hStr = Math.floor(finalH) + 'px';
+
+            [ASCII_LAYER, VIDEO_LAYER].forEach(el => {
+                el.style.width = wStr;
+                el.style.height = hStr;
+            });
         }
 
         function triggerFade() {
@@ -145,13 +138,13 @@
         VIDEO_LAYER.style.zIndex = 10;
 
         // Scaling listeners
-        window.addEventListener('load', scaleStage);
-        window.addEventListener('resize', scaleStage);
+        window.addEventListener('load', scaleLayers);
+        window.addEventListener('resize', scaleLayers);
 
         // Polling loop to catch video metadata and handle dynamic resizing
         let scaleTries = 0;
         const scaleTimer = setInterval(() => {
-            scaleStage();
+            scaleLayers();
             scaleTries++;
             // Poll for a while on load, then slow down
             if (scaleTries > 30) clearInterval(scaleTimer);
