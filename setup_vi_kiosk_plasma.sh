@@ -275,6 +275,89 @@ else
     info "systemctl not available - service file created but not enabled"
 fi
 
+# 5) Configure Kiosk Protection (prevent logout/shutdown)
+info "Configuring kiosk protection to prevent quitting..."
+
+# KDE Action Restrictions - disable logout and related actions
+KDEGLOBALS_FILE="$TARGET_HOME/.config/kdeglobals"
+mkdir -p "$(dirname "$KDEGLOBALS_FILE")"
+
+# Check if file exists and has KDE Action Restrictions section
+if [ -f "$KDEGLOBALS_FILE" ] && grep -q "^\[KDE Action Restrictions" "$KDEGLOBALS_FILE" 2>/dev/null; then
+    # Section exists, update it
+    info "Updating existing KDE Action Restrictions..."
+    # Remove old restrictions if they exist
+    sed -i '/^\[KDE Action Restrictions/,/^\[/ { /^logout=/d; /^action\/lock_screen=/d; /^action\/start_new_session=/d; /^action\/switch_user=/d; /^run_command=/d; }' "$KDEGLOBALS_FILE" 2>/dev/null || true
+    # Add new restrictions after the section header
+    sed -i '/^\[KDE Action Restrictions/a logout=false\naction/lock_screen=false\naction/start_new_session=false\naction/switch_user=false\nrun_command=false' "$KDEGLOBALS_FILE" 2>/dev/null || true
+else
+    # Section doesn't exist, append it
+    info "Creating KDE Action Restrictions..."
+    cat >>"$KDEGLOBALS_FILE" <<'KDEEOF'
+
+[KDE Action Restrictions][$i]
+logout=false
+action/lock_screen=false
+action/start_new_session=false
+action/switch_user=false
+run_command=false
+KDEEOF
+fi
+
+chown "$TARGET_USER":"$TARGET_USER" "$KDEGLOBALS_FILE"
+chmod 0644 "$KDEGLOBALS_FILE"
+info "Created/updated KDE Action Restrictions: $KDEGLOBALS_FILE"
+
+# Polkit rules - disable shutdown/reboot at system level
+# Using 90- prefix ensures this rule runs after default rules (lexicographic ordering)
+POLKIT_RULES_DIR="/etc/polkit-1/rules.d"
+POLKIT_RULES_FILE="$POLKIT_RULES_DIR/90-disable-shutdown.rules"
+
+mkdir -p "$POLKIT_RULES_DIR"
+
+cat >"$POLKIT_RULES_FILE" <<'POLKITEOF'
+// Disable shutdown, reboot, and halt actions for kiosk mode
+// This rule blocks all power management actions including ignore-inhibit variants
+// Rules are processed lexicographically - 90- prefix ensures this runs after defaults
+polkit.addRule(function(action, subject) {
+    if (action.id === "org.freedesktop.login1.power-off" ||
+        action.id === "org.freedesktop.login1.power-off-multiple-sessions" ||
+        action.id === "org.freedesktop.login1.power-off-ignore-inhibit" ||
+        action.id === "org.freedesktop.login1.reboot" ||
+        action.id === "org.freedesktop.login1.reboot-multiple-sessions" ||
+        action.id === "org.freedesktop.login1.reboot-ignore-inhibit" ||
+        action.id === "org.freedesktop.login1.halt" ||
+        action.id === "org.freedesktop.login1.halt-multiple-sessions" ||
+        action.id === "org.freedesktop.login1.halt-ignore-inhibit") {
+        return polkit.Result.NO;
+    }
+});
+POLKITEOF
+
+chmod 0644 "$POLKIT_RULES_FILE"
+info "Created polkit rules: $POLKIT_RULES_FILE"
+
+# Note: Keyboard shortcuts configuration
+# In Plasma 6, keyboard shortcuts are managed via ~/.config/kglobalshortcutsrc
+# The format is: [Component]Action=primary,alternate,description
+# To disable shortcuts, set them to: Action=none,none,Description
+# 
+# Common shortcuts to disable for kiosk mode:
+# - Alt+F4 (close window): [kwin]Window Close=none,none,Window Close
+# - Ctrl+Alt+Del (logout): [org.kde.plasmashell]Lock Session=none,none,Lock Session
+# - Alt+Tab (window switching): [kwin]Walk Through Windows=none,none,Walk Through Windows
+#
+# IMPORTANT: Keyboard shortcuts should be configured manually via:
+#   System Settings > Shortcuts > (select category) > (disable specific shortcuts)
+# 
+# Editing kglobalshortcutsrc directly while Plasma is running may cause changes
+# to be overwritten. It's recommended to configure shortcuts via System Settings
+# or edit the file while logged out of Plasma.
+info "Keyboard shortcuts: Configure manually via System Settings > Shortcuts"
+info "  Recommended to disable: Alt+F4, Ctrl+Alt+Del, Alt+Tab"
+info "Kiosk protection configured. Note: Some keyboard shortcuts may need manual"
+info "  configuration via System Settings > Shortcuts > Session Management"
+
 info "Done."
 echo
 echo "================================================================"

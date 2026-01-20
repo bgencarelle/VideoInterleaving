@@ -72,6 +72,17 @@ cat >"$WRAPPER_PATH" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Ensure HOME is set - use fallback if not available
+if [ -z "${HOME:-}" ]; then
+  export HOME="$(getent passwd "$(id -u)" | cut -d: -f6)"
+fi
+
+# Verify HOME is valid
+if [ -z "$HOME" ] || [ ! -d "$HOME" ]; then
+  echo "ERROR: Cannot determine home directory" >&2
+  exit 1
+fi
+
 APP_DIR="$HOME/VideoInterleaving"
 VENV_PY="$APP_DIR/.venv/bin/python"
 LOG="/var/log/videointerleaving.log"

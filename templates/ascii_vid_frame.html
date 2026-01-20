@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ASCII Video Frame Grid</title>
+    <style>
+      :root {
+        --bg: #000000;
+        --ink: #f5f5f5;
+        --accent: #f2a900;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Georgia", "Times New Roman", serif;
+        color: var(--ink);
+        background: var(--bg);
+        min-height: 100vh;
+        position: relative;
+      }
+
+      header {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        padding: 10px 14px;
+        opacity: 0;
+        transition: opacity 0.2s ease;
+        background: rgba(0, 0, 0, 0.65);
+        z-index: 2;
+      }
+
+      header:hover,
+      header:focus-within {
+        opacity: 1;
+      }
+
+      .site-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 14px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        font-size: 14px;
+      }
+
+      .site-list a {
+        color: var(--accent);
+        text-decoration: none;
+        border-bottom: 1px solid transparent;
+      }
+
+      .site-list a:hover {
+        border-bottom-color: var(--accent);
+      }
+
+      .frames {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-rows: repeat(2, minmax(0, 1fr));
+        gap: 0;
+        padding: 0;
+        height: 100vh;
+      }
+
+      .frame {
+        border: 0;
+        background: #000;
+        min-height: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+      }
+
+      .stage {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        background: #000;
+        overflow: hidden;
+      }
+
+      .layer {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        border: 0;
+        margin: 0;
+        padding: 0;
+        opacity: 0;
+        transition: opacity 1000ms ease-in-out;
+        will-change: opacity;
+        background-color: #000000;
+      }
+
+      .layer.active {
+        opacity: 1;
+      }
+
+      .video-layer {
+        object-fit: contain;
+      }
+
+      @media (max-width: 900px) {
+        .frames {
+          grid-template-columns: minmax(0, 1fr);
+          grid-template-rows: repeat(4, minmax(120px, 1fr));
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <ul class="site-list" id="site-list"></ul>
+    </header>
+    <section class="frames" id="frames"></section>
+
+    <script>
+      const sites = [
+        { name: "testing", base: "https://testing.gencarelle.fun" },
+        { name: "testing2", base: "https://testing2.gencarelle.fun" },
+        { name: "testing3", base: "https://testing3.gencarelle.fun" },
+        { name: "testing4", base: "https://testing4.gencarelle.fun" }
+      ];
+
+      const listEl = document.getElementById("site-list");
+      const framesEl = document.getElementById("frames");
+      const frameStates = [];
+
+      function getRandomTime(min, max) {
+        return Math.floor(Math.random() * (max - min + 1) + min);
+      }
+
+      function scaleStage(state) {
+        const cw = state.frame.clientWidth;
+        const ch = state.frame.clientHeight;
+        if (!cw || !ch) return;
+
+        let videoAR = 1.5;
+        if (state.video.naturalWidth > 0 && state.video.naturalHeight > 0) {
+          videoAR = state.video.naturalWidth / state.video.naturalHeight;
+        }
+
+        const containerAR = cw / ch;
+        let finalW;
+        let finalH;
+
+        if (containerAR > videoAR) {
+          finalH = ch;
+          finalW = finalH * videoAR;
+        } else {
+          finalW = cw;
+          finalH = finalW / videoAR;
+        }
+
+        state.stage.style.width = Math.floor(finalW) + "px";
+        state.stage.style.height = Math.floor(finalH) + "px";
+      }
+
+      function triggerFade(state) {
+        const fadeDuration = getRandomTime(1000, 3000);
+        state.ascii.style.transitionDuration = `${fadeDuration}ms`;
+        state.video.style.transitionDuration = `${fadeDuration}ms`;
+
+        if (state.isAsciiVisible) {
+          state.ascii.classList.remove("active");
+          state.video.classList.add("active");
+          state.ascii.style.zIndex = 10;
+          state.video.style.zIndex = 20;
+          state.isAsciiVisible = false;
+        } else {
+          state.video.classList.remove("active");
+          state.ascii.classList.add("active");
+          state.video.style.zIndex = 10;
+          state.ascii.style.zIndex = 20;
+          state.isAsciiVisible = true;
+        }
+
+        const displayTime = getRandomTime(1000, 3000);
+        setTimeout(() => triggerFade(state), fadeDuration + displayTime);
+      }
+
+      sites.forEach((site) => {
+        const listItem = document.createElement("li");
+        const link = document.createElement("a");
+        link.href = `${site.base}/ascii_video_test`;
+        link.textContent = site.name;
+        link.target = "_blank";
+        link.rel = "noopener";
+        listItem.appendChild(link);
+        listEl.appendChild(listItem);
+
+        const frame = document.createElement("div");
+        frame.className = "frame";
+
+        const stage = document.createElement("div");
+        stage.className = "stage";
+
+        const video = document.createElement("img");
+        video.className = "layer video-layer";
+        video.src = `${site.base}/video_feed`;
+        video.alt = `${site.name} video feed`;
+
+        const ascii = document.createElement("iframe");
+        ascii.className = "layer ascii-layer";
+        ascii.src = `${site.base}/ascii`;
+        ascii.title = `${site.name} ascii`;
+        ascii.scrolling = "no";
+
+        stage.appendChild(video);
+        stage.appendChild(ascii);
+        frame.appendChild(stage);
+        framesEl.appendChild(frame);
+
+        frameStates.push({
+          frame,
+          stage,
+          video,
+          ascii,
+          isAsciiVisible: true
+        });
+      });
+
+      frameStates.forEach((state) => {
+        state.ascii.classList.add("active");
+        state.ascii.style.zIndex = 20;
+        state.video.style.zIndex = 10;
+
+        scaleStage(state);
+        state.video.addEventListener("load", () => scaleStage(state));
+
+        let scaleTries = 0;
+        const scaleTimer = setInterval(() => {
+          scaleStage(state);
+          scaleTries++;
+          if (scaleTries > 30) clearInterval(scaleTimer);
+        }, 300);
+
+        setTimeout(() => triggerFade(state), getRandomTime(1000, 3000));
+      });
+
+      window.addEventListener("resize", () => {
+        frameStates.forEach((state) => scaleStage(state));
+      });
+    </script>
+  </body>
+</html>
