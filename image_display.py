@@ -284,9 +284,6 @@ def run_display(clock_source=CLOCK_MODE):
             has_gl = True
             if not is_headless and glfw:
                 register_callbacks(window, state)
-                # Jiggle mouse to help compositors grab focus (especially Wayland)
-                from event_handler import jiggle_mouse_for_focus
-                jiggle_mouse_for_focus(window)
 
     def _get_screen_size(window_obj):
         if window_obj is None:
@@ -384,6 +381,9 @@ def run_display(clock_source=CLOCK_MODE):
         
         # Counter for periodic mouse hiding (every 60 frames ~= 2 seconds at 30fps)
         cursor_hide_counter = 0
+        
+        # Flag to ensure mouse jiggle only happens once after first frame render
+        mouse_jiggled = False
 
         while (state.run_mode and not is_headless) or is_headless:
             successful_display = False
@@ -569,6 +569,13 @@ def run_display(clock_source=CLOCK_MODE):
                 glfw.swap_buffers(window)
                 if glfw.window_should_close(window):
                     state.run_mode = False
+                
+                # Jiggle mouse after first frame render to help compositors grab focus (especially Wayland)
+                # This must happen after swap_buffers when window is visible and has focus
+                if not mouse_jiggled:
+                    from event_handler import jiggle_mouse_for_focus
+                    jiggle_mouse_for_focus(window)
+                    mouse_jiggled = True
                 
                 # Periodically hide cursor to ensure it stays hidden across different compositors
                 # Every 60 frames (~2 seconds at 30fps)
