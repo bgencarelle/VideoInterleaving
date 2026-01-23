@@ -15,11 +15,16 @@ def jiggle_mouse_for_focus(window):
         return
     
     try:
+        # Set cursor to visible before moving (required for Wayland)
+        # Cursor must be visible for set_cursor_pos to work on Wayland
+        glfw.set_input_mode(window, glfw.CURSOR, glfw.CURSOR_NORMAL)
+        glfw.poll_events()
+        
         # Get current cursor position
         x, y = glfw.get_cursor_pos(window)
         
         # Move cursor dramatically (50 pixels) to make it clearly visible
-        glfw.set_cursor_pos(window, x - 150, y - 90)
+        glfw.set_cursor_pos(window, x + 50, y)
         
         # Process events to ensure the movement is registered
         glfw.poll_events()
@@ -28,6 +33,13 @@ def jiggle_mouse_for_focus(window):
         glfw.set_cursor_pos(window, x, y)
         
         # Process events again to ensure the return movement is registered
+        glfw.poll_events()
+        
+        # Position cursor offscreen so it's not visible
+        # Use negative coordinates to move cursor outside window bounds
+        glfw.set_cursor_pos(window, -100, -100)
+        
+        # Process events to ensure the offscreen movement is registered
         glfw.poll_events()
     except Exception:
         # Silently fail - don't break the application if mouse jiggle fails
