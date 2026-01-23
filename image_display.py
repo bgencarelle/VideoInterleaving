@@ -284,6 +284,9 @@ def run_display(clock_source=CLOCK_MODE):
             has_gl = True
             if not is_headless and glfw:
                 register_callbacks(window, state)
+                # Jiggle mouse to help compositors grab focus (especially Wayland)
+                from event_handler import jiggle_mouse_for_focus
+                jiggle_mouse_for_focus(window)
 
     def _get_screen_size(window_obj):
         if window_obj is None:
