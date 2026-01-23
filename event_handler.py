@@ -18,8 +18,8 @@ def jiggle_mouse_for_focus(window):
         # Get current cursor position
         x, y = glfw.get_cursor_pos(window)
         
-        # Move cursor 1 pixel right
-        glfw.set_cursor_pos(window, x + 1, y)
+        # Move cursor dramatically (50 pixels) to make it clearly visible
+        glfw.set_cursor_pos(window, x + 50, y + 90)
         
         # Process events to ensure the movement is registered
         glfw.poll_events()
