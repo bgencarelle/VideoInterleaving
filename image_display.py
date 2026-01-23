@@ -47,7 +47,7 @@ RESET_CODE = "\033[0m"
 
 from index_calculator import update_index
 from folder_selector import update_folder_selection, folder_dictionary
-from display_manager import DisplayState, display_init, _is_wayland_session
+from display_manager import DisplayState, display_init, _is_wayland_session, _hide_cursor_reliable
 from event_handler import register_callbacks
 import renderer
 import ascii_converter
@@ -378,6 +378,9 @@ def run_display(clock_source=CLOCK_MODE):
 
         frame_times = deque(maxlen=60)
         frame_start = time.perf_counter()
+        
+        # Counter for periodic mouse hiding (every 60 frames ~= 2 seconds at 30fps)
+        cursor_hide_counter = 0
 
         while (state.run_mode and not is_headless) or is_headless:
             successful_display = False
@@ -387,8 +390,10 @@ def run_display(clock_source=CLOCK_MODE):
                 if not state.run_mode: break
 
             if state.needs_update and not is_headless and has_gl:
-                display_init(state)
+                window = display_init(state)
                 state.needs_update = False
+                if window is not None:
+                    _hide_cursor_reliable(window)
 
             prev = index
             index, _ = update_index(png_paths_len, PINGPONG)
@@ -561,6 +566,13 @@ def run_display(clock_source=CLOCK_MODE):
                 glfw.swap_buffers(window)
                 if glfw.window_should_close(window):
                     state.run_mode = False
+                
+                # Periodically hide cursor to ensure it stays hidden across different compositors
+                # Every 60 frames (~2 seconds at 30fps)
+                cursor_hide_counter += 1
+                if cursor_hide_counter >= 60:
+                    _hide_cursor_reliable(window)
+                    cursor_hide_counter = 0
 
             now = time.perf_counter()
             dt = now - frame_start

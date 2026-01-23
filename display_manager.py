@@ -786,6 +786,36 @@ def _log_backend_usage():
         # Don't fail if logging fails
         pass
 
+
+def _hide_cursor_reliable(window_obj):
+    """
+    Reliably hide the mouse cursor using a toggle approach.
+    Sets cursor to visible first, then immediately to hidden for better
+    reliability across different OS compositors (X11, Wayland, macOS).
+    
+    Args:
+        window_obj: GLFW window object or None (no-op for headless windows)
+    """
+    if not _GLFW_AVAILABLE or window_obj is None:
+        return
+    
+    # Check if this is a headless window (doesn't have GLFW window attributes)
+    if not hasattr(window_obj, '__class__'):
+        return
+    
+    # Skip headless window types
+    if isinstance(window_obj, (HeadlessWindow, LegacyHeadlessWindow, LegacyHeadlessFBO)):
+        return
+    
+    try:
+        # Toggle approach: set to visible first, then hidden
+        # This helps ensure the compositor processes the state change
+        glfw.set_input_mode(window_obj, glfw.CURSOR, glfw.CURSOR_NORMAL)
+        glfw.set_input_mode(window_obj, glfw.CURSOR, glfw.CURSOR_HIDDEN)
+    except Exception:
+        # Silently fail - don't break the application if cursor hiding fails
+        pass
+
 def display_init(state: DisplayState):
     global window, ctx
 
@@ -1225,7 +1255,7 @@ def display_init(state: DisplayState):
                 pass
 
         if glfw and window is not None:
-            glfw.set_input_mode(window, glfw.CURSOR, glfw.CURSOR_HIDDEN)
+            _hide_cursor_reliable(window)
 
     # Fullscreen toggling (only if window already exists):
     # - On Wayland, avoid set_window_monitor (can trigger compositor/device resets). 
@@ -1253,8 +1283,10 @@ def display_init(state: DisplayState):
                 if current_w != fs_w or current_h != fs_h:
                     glfw.set_window_size(window, fs_w, fs_h)
                     # Note: Wayland doesn't support set_window_pos(), so we skip it
+                    _hide_cursor_reliable(window)
                 # Ensure borderless
                 glfw.set_window_attrib(window, glfw.DECORATED, glfw.FALSE)
+                _hide_cursor_reliable(window)
             else:
                 # Windowed mode: restore decoration and resize
                 glfw.set_window_attrib(window, glfw.DECORATED, glfw.TRUE)
@@ -1263,6 +1295,7 @@ def display_init(state: DisplayState):
                 win_h = int(win_w / (eff_w / eff_h)) if eff_h > 0 else 300
                 if current_w != win_w or current_h != win_h:
                     glfw.set_window_size(window, win_w, win_h)
+                    _hide_cursor_reliable(window)
         else:
             # Non-Wayland (X11): Use set_window_monitor for proper fullscreen
             # On Linux X11, set_window_monitor with current resolution does NOT change display resolution
@@ -1290,10 +1323,12 @@ def display_init(state: DisplayState):
                             fs_w, fs_h = best.size.width, best.size.height
                             refresh = getattr(best, 'refresh_rate', 60)
                     glfw.set_window_monitor(window, mon, 0, 0, fs_w, fs_h, refresh)
+                    _hide_cursor_reliable(window)
             else:
                 if current_monitor is not None:
                     # Restore to a small window; actual sizing will be re-derived below via framebuffer size.
                     glfw.set_window_monitor(window, None, 100, 100, 400, 300, 0)
+                    _hide_cursor_reliable(window)
 
     fb_w, fb_h = glfw.get_framebuffer_size(window)
     if renderer.using_legacy_gl():
@@ -1324,9 +1359,5 @@ def display_init(state: DisplayState):
         [0, 0, 0, 1]
     ], dtype="f4")
     renderer.update_mvp(mvp)
-
-    # Ensure cursor is hidden (for both new windows and window updates)
-    if glfw and window is not None:
-        glfw.set_input_mode(window, glfw.CURSOR, glfw.CURSOR_HIDDEN)
 
     return window
