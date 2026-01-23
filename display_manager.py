@@ -812,6 +812,15 @@ def _hide_cursor_reliable(window_obj):
         # This helps ensure the compositor processes the state change
         glfw.set_input_mode(window_obj, glfw.CURSOR, glfw.CURSOR_NORMAL)
         glfw.set_input_mode(window_obj, glfw.CURSOR, glfw.CURSOR_HIDDEN)
+        
+        # On Linux, use wlrctl to help hide cursor (especially for Wayland/labwc)
+        if sys.platform.startswith('linux'):
+            try:
+                subprocess.run(['wlrctl', 'pointer', 'click', 'left'], 
+                             check=False, timeout=2)
+            except Exception:
+                # Silently fail - don't break if wlrctl is not available
+                pass
     except Exception:
         # Silently fail - don't break the application if cursor hiding fails
         pass

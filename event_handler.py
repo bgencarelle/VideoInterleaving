@@ -3,8 +3,6 @@ try:
 except ImportError:
     glfw = None
 
-import subprocess
-
 def jiggle_mouse_for_focus(window):
     """
     Jiggle mouse cursor slightly to help compositors grab window focus.
@@ -13,25 +11,6 @@ def jiggle_mouse_for_focus(window):
     Args:
         window: GLFW window object or None (no-op if invalid)
     """
-    # Check if we're on Wayland (where GLFW set_cursor_pos doesn't work)
-    try:
-        from display_manager import _is_wayland_session
-        is_wayland = _is_wayland_session()
-    except ImportError:
-        is_wayland = False
-    
-    if is_wayland:
-        # Use wlrctl for Wayland (labwc, etc.)
-        # wlrctl pointer click left works to make the mouse disappear on labwc
-        try:
-            subprocess.run(['wlrctl', 'pointer', 'click', 'left'], 
-                         check=False, timeout=2)
-        except Exception:
-            # Silently fail - don't break the application if wlrctl fails
-            pass
-        return
-    
-    # Use GLFW approach for X11/macOS
     if glfw is None or window is None:
         return
     
