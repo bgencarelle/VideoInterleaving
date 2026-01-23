@@ -3,6 +3,36 @@ try:
 except ImportError:
     glfw = None
 
+def jiggle_mouse_for_focus(window):
+    """
+    Jiggle mouse cursor slightly to help compositors grab window focus.
+    Useful for Wayland and other compositors that need mouse movement to grab focus.
+    
+    Args:
+        window: GLFW window object or None (no-op if invalid)
+    """
+    if glfw is None or window is None:
+        return
+    
+    try:
+        # Get current cursor position
+        x, y = glfw.get_cursor_pos(window)
+        
+        # Move cursor 1 pixel right
+        glfw.set_cursor_pos(window, x + 1, y)
+        
+        # Process events to ensure the movement is registered
+        glfw.poll_events()
+        
+        # Move cursor back to original position
+        glfw.set_cursor_pos(window, x, y)
+        
+        # Process events again to ensure the return movement is registered
+        glfw.poll_events()
+    except Exception:
+        # Silently fail - don't break the application if mouse jiggle fails
+        pass
+
 def register_callbacks(window, state):
     """Register GLFW callbacks for key presses and window resize to update state."""
     if glfw is None:
