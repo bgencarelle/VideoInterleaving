@@ -42,3 +42,6 @@ libasound2-dev
 # System utilities
 chrony
 dnsutils
+
+# Wayland utilities
+wlrctl
