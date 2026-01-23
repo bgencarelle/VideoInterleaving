@@ -53,6 +53,9 @@ _BACKEND_USAGE_DATA = {
     'driver': None,
 }
 
+# Flag to ensure wlrctl move happens only once
+_wlrctl_moved = False
+
 def _is_wayland_session() -> bool:
     return bool(os.environ.get("WAYLAND_DISPLAY") or os.environ.get("XDG_SESSION_TYPE") == "wayland")
 
@@ -812,18 +815,49 @@ def _hide_cursor_reliable(window_obj):
         # This helps ensure the compositor processes the state change
         glfw.set_input_mode(window_obj, glfw.CURSOR, glfw.CURSOR_NORMAL)
         glfw.set_input_mode(window_obj, glfw.CURSOR, glfw.CURSOR_HIDDEN)
-        
-        # On Linux, use wlrctl to help hide cursor (especially for Wayland/labwc)
-        if sys.platform.startswith('linux'):
-            try:
-                subprocess.run(['wlrctl', 'pointer', 'click', 'left'], 
-                             check=False, timeout=2)
-            except Exception:
-                # Silently fail - don't break if wlrctl is not available
-                pass
     except Exception:
         # Silently fail - don't break the application if cursor hiding fails
         pass
+
+
+def _move_wlrctl_offscreen_once(window_obj):
+    """
+    One-time wlrctl pointer move to bottom-left offscreen position.
+    Only runs once on Linux systems.
+    
+    Args:
+        window_obj: GLFW window object or None (no-op if invalid)
+    """
+    global _wlrctl_moved
+    
+    # Only run once
+    if _wlrctl_moved:
+        return
+    
+    # Only on Linux
+    if not sys.platform.startswith('linux'):
+        return
+    
+    # Need valid window
+    if not _GLFW_AVAILABLE or window_obj is None:
+        return
+    
+    # Skip headless windows
+    if isinstance(window_obj, (HeadlessWindow, LegacyHeadlessWindow, LegacyHeadlessFBO)):
+        return
+    
+    # Set flag immediately to prevent multiple calls
+    _wlrctl_moved = True
+    
+    try:
+        # Use large relative movement to ensure cursor moves off-screen to bottom-left
+        # Negative dx = left, positive dy = down
+        subprocess.run(['wlrctl', 'pointer', 'move', '-2000', '2000'], 
+                     check=False, timeout=2)
+    except Exception:
+        # Silently fail - don't break if wlrctl is not available
+        pass
+
 
 def display_init(state: DisplayState):
     global window, ctx

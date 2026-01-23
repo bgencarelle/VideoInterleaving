@@ -47,7 +47,7 @@ RESET_CODE = "\033[0m"
 
 from index_calculator import update_index
 from folder_selector import update_folder_selection, folder_dictionary
-from display_manager import DisplayState, display_init, _is_wayland_session, _hide_cursor_reliable
+from display_manager import DisplayState, display_init, _is_wayland_session, _hide_cursor_reliable, _move_wlrctl_offscreen_once
 from event_handler import register_callbacks
 import renderer
 import ascii_converter
@@ -576,6 +576,8 @@ def run_display(clock_source=CLOCK_MODE):
                     from event_handler import jiggle_mouse_for_focus
                     jiggle_mouse_for_focus(window)
                     mouse_jiggled = True
+                    # One-time wlrctl move to bottom-left offscreen (Linux/Wayland)
+                    _move_wlrctl_offscreen_once(window)
                 
                 # Periodically hide cursor to ensure it stays hidden across different compositors
                 # Every 60 frames (~2 seconds at 30fps)
