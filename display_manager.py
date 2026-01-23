@@ -1325,4 +1325,8 @@ def display_init(state: DisplayState):
     ], dtype="f4")
     renderer.update_mvp(mvp)
 
+    # Ensure cursor is hidden (for both new windows and window updates)
+    if glfw and window is not None:
+        glfw.set_input_mode(window, glfw.CURSOR, glfw.CURSOR_HIDDEN)
+
     return window
