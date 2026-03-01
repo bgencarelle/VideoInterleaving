@@ -210,7 +210,7 @@ console=serial0,115200 console=tty1 root=PARTUUID=ce063a65-02 rootfstype=ext4 fs
 ```
 
 **3. Wayland Display Initialization**
-To force the correct output resolution in a Wayland environment (like Sway or Wayfire), run the appropriate `wlr-randr` command before launching the app:
+To force the correct output resolution in a Wayland environment (like Sway or Wayfire), run the appropriate `wlr-randr` command before launching the app. This can be edited in  ~/.config/labwc/autostart after running sudo setup_vi_kiosk_wayland.sh :
 
 * **For HDMI:**
   ```bash
