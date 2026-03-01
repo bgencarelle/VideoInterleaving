@@ -2,6 +2,6 @@
 #webp
 mido
 glfw  # Python bindings - requires libglfw3-dev system package (installed via system-requirements.txt)
-PyTurboJPEG
+PyTurboJPEG==1.8.2
 SimpleWebsocketServer
 PyOpenGL  # Legacy renderer fallback (GLES2 / GL2.1)
