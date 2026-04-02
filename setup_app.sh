@@ -329,23 +329,23 @@ remap_packages_for_platform() {
                 if apt-cache show "$pkg" >/dev/null 2>&1; then
                     remapped="$remapped $pkg"
                 elif apt-cache show libjpeg62-turbo-dev >/dev/null 2>&1; then
-                    log_info "Remapping $pkg -> libjpeg62-turbo-dev"
+                    log_info "Remapping $pkg -> libjpeg62-turbo-dev" >&2
                     remapped="$remapped libjpeg62-turbo-dev"
                 elif apt-cache show libjpeg-turbo8-dev >/dev/null 2>&1; then
-                    log_info "Remapping $pkg -> libjpeg-turbo8-dev"
+                    log_info "Remapping $pkg -> libjpeg-turbo8-dev" >&2
                     remapped="$remapped libjpeg-turbo8-dev"
                 elif apt-cache show libjpeg-dev >/dev/null 2>&1; then
-                    log_info "Remapping $pkg -> libjpeg-dev (generic fallback)"
+                    log_info "Remapping $pkg -> libjpeg-dev (generic fallback)" >&2
                     remapped="$remapped libjpeg-dev"
                 else
-                    log_warning "No libjpeg-turbo package found for: $pkg — skipping"
+                    log_warning "No libjpeg-turbo package found for: $pkg — skipping" >&2
                 fi
                 ;;
             wlrctl)
                 if apt-cache show wlrctl >/dev/null 2>&1; then
                     remapped="$remapped wlrctl"
                 else
-                    log_warning "wlrctl not available in repos — skipping (build from source if needed)"
+                    log_warning "wlrctl not available in repos — skipping (build from source if needed)" >&2
                 fi
                 ;;
             *)
