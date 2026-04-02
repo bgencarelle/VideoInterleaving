@@ -317,6 +317,47 @@ chrony bind-tools certbot certbot-nginx"
     echo "$pkg_list"
 }
 
+# Remap package names for compatibility across Debian-based distros
+# (e.g., Armbian on Tinkerboard S uses different names than Debian Trixie on Pi)
+remap_packages_for_platform() {
+    local packages="$1"
+    local remapped=""
+
+    for pkg in $packages; do
+        case "$pkg" in
+            libturbojpeg0|libturbojpeg0-dev)
+                if apt-cache show "$pkg" >/dev/null 2>&1; then
+                    remapped="$remapped $pkg"
+                elif apt-cache show libjpeg62-turbo-dev >/dev/null 2>&1; then
+                    log_info "Remapping $pkg -> libjpeg62-turbo-dev"
+                    remapped="$remapped libjpeg62-turbo-dev"
+                elif apt-cache show libjpeg-turbo8-dev >/dev/null 2>&1; then
+                    log_info "Remapping $pkg -> libjpeg-turbo8-dev"
+                    remapped="$remapped libjpeg-turbo8-dev"
+                elif apt-cache show libjpeg-dev >/dev/null 2>&1; then
+                    log_info "Remapping $pkg -> libjpeg-dev (generic fallback)"
+                    remapped="$remapped libjpeg-dev"
+                else
+                    log_warning "No libjpeg-turbo package found for: $pkg — skipping"
+                fi
+                ;;
+            wlrctl)
+                if apt-cache show wlrctl >/dev/null 2>&1; then
+                    remapped="$remapped wlrctl"
+                else
+                    log_warning "wlrctl not available in repos — skipping (build from source if needed)"
+                fi
+                ;;
+            *)
+                remapped="$remapped $pkg"
+                ;;
+        esac
+    done
+
+    # Trim leading whitespace
+    echo "$remapped" | sed 's/^ *//'
+}
+
 # Install system packages
 install_system_packages() {
     local os=$1
@@ -333,6 +374,23 @@ install_system_packages() {
         echo "⚠️  WARNING: No packages defined for platform: $os"
         return
     fi
+
+    # Remap package names for Debian-based distros (handles Armbian, etc.)
+    if [ "$pkg_manager" = "apt" ]; then
+        # Update package lists first so apt-cache is accurate
+        if [ "$DRY_RUN" = false ]; then
+            if [ "$needs_sudo" = "true" ]; then
+                sudo $update_cmd || true
+            else
+                $update_cmd || true
+            fi
+        fi
+        packages=$(remap_packages_for_platform "$packages")
+        if [ -z "$packages" ]; then
+            log_warning "No installable packages remain after remapping"
+            return
+        fi
+    fi
     
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would run: $update_cmd"
@@ -345,9 +403,11 @@ install_system_packages() {
         return
     fi
     
-    # Update package lists
+    # Install packages (update already done above for apt)
     if [ "$needs_sudo" = "true" ]; then
-        sudo $update_cmd || true
+        if [ "$pkg_manager" != "apt" ]; then
+            sudo $update_cmd || true
+        fi
         sudo $install_cmd $packages
     else
         # Homebrew doesn't need sudo
