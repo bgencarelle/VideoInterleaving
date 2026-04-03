@@ -44,7 +44,7 @@ def get_subdirectories(path):
 def contains_image_files(path):
     try:
         # [MODIFIED] Added new extensions
-        valid = ('.png', '.webp', '.jpg', 'jpeg', '.npy', '.npz', '.spz', '.spy')
+        valid = ('.png', '.webp', '.jpg', '.jpeg', '.npy', '.npz', '.spz', '.spy')
         return any(f.lower().endswith(valid) for f in os.listdir(path))
     except FileNotFoundError:
         return False
@@ -53,7 +53,7 @@ def contains_image_files(path):
 def count_image_files(path):
     try:
         # [MODIFIED] Added new extensions
-        valid = ('.png', '.webp', '.jpg', 'jpeg', '.npy', '.npz', '.spz', '.spy')
+        valid = ('.png', '.webp', '.jpg', '.jpeg', '.npy', '.npz', '.spz', '.spy')
         return len([f for f in os.listdir(path) if f.lower().endswith(valid)])
     except FileNotFoundError:
         return 0
@@ -129,7 +129,7 @@ def scan_directory_recursive(base_path, script_dir, folder_type):
             continue
 
         # [MODIFIED] Added extensions to list comprehension
-        valid = ('.png', '.webp', '.jpg', 'jpeg', '.npy', '.npz', '.spz', '.spy')
+        valid = ('.png', '.webp', '.jpg', '.jpeg', '.npy', '.npz', '.spz', '.spy')
         image_files = [f for f in os.listdir(subdir) if f.lower().endswith(valid)]
 
         if not image_files:
@@ -325,7 +325,7 @@ def sort_image_files(folder_dict):
         folder = folder_dict[num]
 
         # [MODIFIED] Added extensions
-        valid = ('.png', '.webp', '.jpg', 'jpeg', '.npy', '.npz', '.spz', '.spy')
+        valid = ('.png', '.webp', '.jpg', '.jpeg', '.npy', '.npz', '.spz', '.spy')
         imgs = [os.path.join(folder, x) for x in os.listdir(folder) if x.lower().endswith(valid)]
 
         imgs.sort(key=natural_sort_key)
