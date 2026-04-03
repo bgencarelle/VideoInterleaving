@@ -260,19 +260,49 @@ def _find_optimal_display_mode(image_size: tuple[int, int], current_mode) -> Opt
     return best_mode
 
 
-def _get_xrandr_output() -> Optional[str]:
-    """Detect the primary X11 display output name using xrandr."""
+def _get_display_output() -> Optional[str]:
+    """Detect the primary display output name using the appropriate tool."""
+    if _is_wayland_session():
+        return _get_wlr_randr_output()
+    return _get_xrandr_output()
+
+
+def _get_wlr_randr_output() -> Optional[str]:
+    """Detect the primary Wayland display output name using wlr-randr."""
     try:
         result = subprocess.run(
-            ["xrandr"], 
-            capture_output=True, 
-            text=True, 
+            ["wlr-randr"],
+            capture_output=True,
+            text=True,
             timeout=5,
             check=False
         )
         if result.returncode != 0:
             return None
-        
+        # wlr-randr output lines: non-indented lines are output names
+        for line in result.stdout.split('\n'):
+            if line and not line.startswith(' '):
+                parts = line.split()
+                if parts:
+                    return parts[0]
+    except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+        pass
+    return None
+
+
+def _get_xrandr_output() -> Optional[str]:
+    """Detect the primary X11 display output name using xrandr."""
+    try:
+        result = subprocess.run(
+            ["xrandr"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False
+        )
+        if result.returncode != 0:
+            return None
+
         # Find first connected output
         for line in result.stdout.split('\n'):
             if ' connected' in line:
@@ -287,65 +317,74 @@ def _get_xrandr_output() -> Optional[str]:
 
 def _change_display_resolution(mode) -> bool:
     """
-    Change display resolution using xrandr (X11) or DRM/KMS (Wayland/headless).
-    
+    Change display resolution using wlr-randr (Wayland) or xrandr (X11).
+
     Args:
         mode: GLFW video mode object with new resolution
-    
+
     Returns:
         True if successful, False otherwise
     """
     global _original_display_resolution, _original_display_output
-    
+
     if mode is None:
         return False
-    
+
     new_w = mode.size.width
     new_h = mode.size.height
-    
+
     # Store original resolution for restoration
     if _original_display_resolution is None:
         current_mode = _current_mode(glfw.get_primary_monitor())
         if current_mode:
             _original_display_resolution = (current_mode.size.width, current_mode.size.height)
-            _original_display_output = _get_xrandr_output()
-    
-    # Try xrandr first (X11)
-    output = _get_xrandr_output()
-    if output:
-        try:
-            # Change resolution using xrandr
-            cmd = ["xrandr", "--output", output, "--mode", f"{new_w}x{new_h}"]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=False)
-            if result.returncode == 0:
-                print(f"[DISPLAY] Changed display resolution to {new_w}x{new_h} using xrandr")
-                return True
-            else:
-                print(f"[DISPLAY] ⚠️  xrandr failed: {result.stderr}")
-        except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
-            print(f"[DISPLAY] ⚠️  Failed to change resolution via xrandr: {e}")
-    
-    # TODO: Add DRM/KMS support for Wayland/headless
-    # For now, xrandr is the primary method (most common on Pi with desktop)
-    
+            _original_display_output = _get_display_output()
+
+    output = _get_display_output()
+    if not output:
+        return False
+
+    if _is_wayland_session():
+        tool = "wlr-randr"
+        cmd = ["wlr-randr", "--output", output, "--mode", f"{new_w}x{new_h}"]
+    else:
+        tool = "xrandr"
+        cmd = ["xrandr", "--output", output, "--mode", f"{new_w}x{new_h}"]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=False)
+        if result.returncode == 0:
+            print(f"[DISPLAY] Changed display resolution to {new_w}x{new_h} using {tool}")
+            return True
+        else:
+            print(f"[DISPLAY] ⚠️  {tool} failed: {result.stderr}")
+    except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+        print(f"[DISPLAY] ⚠️  Failed to change resolution via {tool}: {e}")
+
     return False
 
 
 def _restore_display_resolution() -> None:
     """Restore original display resolution if it was changed."""
     global _original_display_resolution, _original_display_output
-    
+
     if _original_display_resolution is None or _original_display_output is None:
         return
-    
+
     if not getattr(settings, 'RESTORE_DISPLAY_ON_EXIT', True):
         return
-    
+
     orig_w, orig_h = _original_display_resolution
     output = _original_display_output
-    
-    try:
+
+    if _is_wayland_session():
+        tool = "wlr-randr"
+        cmd = ["wlr-randr", "--output", output, "--mode", f"{orig_w}x{orig_h}"]
+    else:
+        tool = "xrandr"
         cmd = ["xrandr", "--output", output, "--mode", f"{orig_w}x{orig_h}"]
+
+    try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=False)
         if result.returncode == 0:
             print(f"[DISPLAY] Restored display resolution to {orig_w}x{orig_h}")
@@ -359,7 +398,7 @@ def _log_renderer_info(ctx):
         info = ctx.info
         renderer_name = info.get('GL_RENDERER', 'Unknown')
         print(f"[DISPLAY] GL Context: {renderer_name}")
-        
+
         # Detect and store driver info
         driver = _detect_gl_driver(ctx)
         if driver:
@@ -367,7 +406,7 @@ def _log_renderer_info(ctx):
             print(f"[DISPLAY] Driver detected: {driver}")
         else:
             _BACKEND_USAGE_DATA['driver'] = 'unknown'
-        
+
         if "llvmpipe" in renderer_name.lower() or "softpipe" in renderer_name.lower():
             print("[DISPLAY] ℹ️  Using Software Rasterizer (Optimized CPU Rendering).")
     except (AttributeError, KeyError, TypeError) as e:
@@ -386,7 +425,7 @@ def _detect_egl_available() -> bool:
     global _egl_available_cache
     if _egl_available_cache is not None:
         return _egl_available_cache
-    
+
     try:
         # Try to create a minimal ModernGL context with EGL backend
         test_ctx = moderngl.create_context(standalone=True, backend="egl")
@@ -402,7 +441,7 @@ def _detect_gl_driver(gl_context=None) -> str | None:
     """
     Query GL_RENDERER to identify driver type.
     Should be called with an existing GL context (ModernGL or PyOpenGL).
-    
+
     Returns driver name (vc4, v3d, panfrost, llvmpipe, softpipe, iris, anv, radeonsi, etc.)
     or None if detection fails.
     """
@@ -433,7 +472,7 @@ def _detect_gl_driver(gl_context=None) -> str | None:
                     return 'nouveau'
                 elif 'nvidia' in renderer_lower:
                     return 'nvidia'
-        
+
         # Try PyOpenGL path if available (context must be current)
         if _GLFW_AVAILABLE:
             try:
@@ -465,7 +504,7 @@ def _detect_gl_driver(gl_context=None) -> str | None:
                 pass
     except Exception:
         pass
-    
+
     return None
 
 
@@ -479,19 +518,19 @@ def _should_use_egl_backend(driver: str | None = None, detected_es: tuple[int, i
     # Check EGL availability first
     if not _detect_egl_available():
         return False
-    
+
     # Prefer EGL for GLES-only drivers
     if driver in ('vc4', 'v3d', 'panfrost'):
         return True
-    
+
     # Prefer EGL on Wayland
     if _is_wayland_session():
         return True
-    
+
     # If GLES is detected, EGL is typically needed
     if detected_es is not None:
         return True
-    
+
     return False
 
 
@@ -504,11 +543,11 @@ def _should_use_gles_api(driver: str | None = None, detected_es: tuple[int, int]
     # GLES-only drivers require GLES API
     if driver in ('vc4', 'v3d', 'panfrost'):
         return True
-    
+
     # If GLES version is detected, use GLES API
     if detected_es is not None:
         return True
-    
+
     return False
 
 
@@ -552,8 +591,8 @@ def _es_require_codes(detected_es: tuple[int, int] | None) -> list[int | None]:
     Try higher versions first, then fall back.
     """
     # Support both new and legacy environment variable names for backward compatibility
-    override = (getattr(settings, "GLES_REQUIRE_OVERRIDE", None) or 
-                os.environ.get("GLES_REQUIRE_OVERRIDE") or 
+    override = (getattr(settings, "GLES_REQUIRE_OVERRIDE", None) or
+                os.environ.get("GLES_REQUIRE_OVERRIDE") or
                 os.environ.get("PI_GLES_REQUIRE"))  # Legacy support
     if override is not None:
         try:
@@ -795,21 +834,21 @@ def _hide_cursor_reliable(window_obj):
     Reliably hide the mouse cursor using a toggle approach.
     Sets cursor to visible first, then immediately to hidden for better
     reliability across different OS compositors (X11, Wayland, macOS).
-    
+
     Args:
         window_obj: GLFW window object or None (no-op for headless windows)
     """
     if not _GLFW_AVAILABLE or window_obj is None:
         return
-    
+
     # Check if this is a headless window (doesn't have GLFW window attributes)
     if not hasattr(window_obj, '__class__'):
         return
-    
+
     # Skip headless window types
     if isinstance(window_obj, (HeadlessWindow, LegacyHeadlessWindow, LegacyHeadlessFBO)):
         return
-    
+
     try:
         # Toggle approach: set to visible first, then hidden
         # This helps ensure the compositor processes the state change
@@ -824,35 +863,35 @@ def _move_wlrctl_offscreen_once(window_obj):
     """
     One-time wlrctl pointer move to bottom-left offscreen position.
     Only runs once on Linux systems.
-    
+
     Args:
         window_obj: GLFW window object or None (no-op if invalid)
     """
     global _wlrctl_moved
-    
+
     # Only run once
     if _wlrctl_moved:
         return
-    
+
     # Only on Linux
     if not sys.platform.startswith('linux'):
         return
-    
+
     # Need valid window
     if not _GLFW_AVAILABLE or window_obj is None:
         return
-    
+
     # Skip headless windows
     if isinstance(window_obj, (HeadlessWindow, LegacyHeadlessWindow, LegacyHeadlessFBO)):
         return
-    
+
     # Set flag immediately to prevent multiple calls
     _wlrctl_moved = True
-    
+
     try:
         # Use large relative movement to ensure cursor moves off-screen to bottom-left
         # Negative dx = left, positive dy = down
-        subprocess.run(['wlrctl', 'pointer', 'move', '-2000', '2000'], 
+        subprocess.run(['wlrctl', 'pointer', 'move', '-2000', '2000'],
                      check=False, timeout=2)
     except Exception:
         # Silently fail - don't break if wlrctl is not available
@@ -865,13 +904,13 @@ def display_init(state: DisplayState):
     is_wayland = _is_wayland_session()
     session_label = _session_label()
     print(f"[DISPLAY] Session: {session_label}")
-    
+
     # Track session info
     _BACKEND_USAGE_DATA['session_type'] = session_label
-    
+
     detected_es = _detect_es_version()
     require_codes = _es_require_codes(detected_es)
-    
+
     # Determine backend and API preferences based on driver/GL capabilities
     # Note: Driver detection will happen after context creation, so we use
     # detected GLES version and EGL availability for initial decisions
@@ -1254,7 +1293,7 @@ def display_init(state: DisplayState):
                 renderer_str = renderer_str.decode("utf-8", errors="replace") if renderer_str else "Unknown"
                 print(f"[DISPLAY] GL_VERSION: {version_str}")
                 print(f"[DISPLAY] GL_RENDERER: {renderer_str}")
-                
+
                 # Detect and store driver info
                 # In local mode, ctx may be None if using legacy renderer, so use PyOpenGL path
                 driver = _detect_gl_driver(ctx if ctx is not None else None)
@@ -1286,7 +1325,7 @@ def display_init(state: DisplayState):
             _log_renderer_info(ctx)
             renderer.initialize(ctx)
             print("[DISPLAY] Renderer backend: moderngl")
-        
+
         _log_backend_usage()
 
         if GAMMA_CORRECTION_ENABLED or ENABLE_SRGB_FRAMEBUFFER:
@@ -1301,7 +1340,7 @@ def display_init(state: DisplayState):
             _hide_cursor_reliable(window)
 
     # Fullscreen toggling (only if window already exists):
-    # - On Wayland, avoid set_window_monitor (can trigger compositor/device resets). 
+    # - On Wayland, avoid set_window_monitor (can trigger compositor/device resets).
     #   Instead, resize the existing window and toggle decoration.
     # - On other platforms, use set_window_monitor for proper fullscreen.
     if window is not None:
