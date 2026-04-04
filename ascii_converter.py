@@ -9,11 +9,33 @@ CHARS = np.asarray(list(_raw_chars))
 # 2. COLOR & GAMMA TABLES
 _ansi_colors = [f"\033[38;5;{i}m" for i in range(256)]
 _ansi_colors[16] = "\033[38;5;235m"
-ANSI_LUT = np.array(_ansi_colors)
+ANSI_LUT = _ansi_colors  # Keep as plain list for indexed access in row builder
 RESET_CODE = "\033[0m"
 
 _gamma_val = getattr(settings, 'ASCII_GAMMA', 1.0)
 GAMMA_LUT = np.array([((i / 255.0) ** _gamma_val) * 255 for i in range(256)], dtype=np.uint8)
+
+
+def _build_colored_rows(ansi_ids, char_array, max_rows, max_cols):
+    """
+    Build output rows with run-length color encoding.
+    Only emits a color escape when the color changes from the previous character.
+    """
+    rows = []
+    for r in range(max_rows):
+        parts = []
+        last_id = -1
+        id_row = ansi_ids[r]
+        ch_row = char_array[r]
+        for c in range(max_cols):
+            cid = id_row[c]
+            if cid != last_id:
+                parts.append(ANSI_LUT[cid])
+                last_id = cid
+            parts.append(ch_row[c])
+        rows.append("".join(parts))
+    return rows
+
 
 def to_ascii(frame):
     """
@@ -74,11 +96,9 @@ def to_ascii(frame):
         small_frame = frame_boosted.astype(int)
         r, g, b = small_frame[:,:,0], small_frame[:,:,1], small_frame[:,:,2]
         ansi_ids = 16 + (36 * (r * 5 // 255)) + (6 * (g * 5 // 255)) + (b * 5 // 255)
-        image_grid = np.char.add(ANSI_LUT[ansi_ids], char_array)
+        rows = _build_colored_rows(ansi_ids, char_array, max_rows, max_cols)
     else:
-        image_grid = char_array
+        rows = ["".join(row) for row in char_array]
 
     # --- 4. OUTPUT ---
-    # Output is already guaranteed to be exactly max_rows tall.
-    rows = ["".join(row) for row in image_grid]
     return "\r\n".join(rows) + RESET_CODE
