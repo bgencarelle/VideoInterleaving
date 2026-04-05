@@ -56,8 +56,8 @@ SERVER_CAPTURE_RATE = FPS // 2   #  FPS by 2
 # --- ASCII MODE SETTINGS ---
 ASCII_MODE = False
 ASCII_COLOR = True
-ASCII_COLOR_BLUR = 0  # 0 = off, odd integer = blur strength (3, 5, 7)
-ASCII_FPS = SERVER_CAPTURE_RATE 
+ASCII_COLOR_BLUR = 11  # 0 = off, odd integer = blur strength (3, 5, 7)
+ASCII_FPS = SERVER_CAPTURE_RATE // 2 
 ASCII_WIDTH = 90 # keep aspect ratio 3:2
 ASCII_HEIGHT = 60
 ASCII_SOURCE_IMAGE_ASPECT_RATIO = 1.333333333
