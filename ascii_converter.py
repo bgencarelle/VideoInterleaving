@@ -93,7 +93,16 @@ def to_ascii(frame):
     char_array = CHARS[indices]
 
     if getattr(settings, 'ASCII_COLOR', False):
-        small_frame = frame_boosted.astype(int)
+        # Optional: blur color channels to create longer same-color runs.
+        # Characters (detail) stay sharp — only the color tinting is softened.
+        # 0 = off, odd integer = kernel size (3 = subtle, 5 = moderate, 7 = heavy)
+        color_blur = getattr(settings, 'ASCII_COLOR_BLUR', 0)
+        if color_blur > 0:
+            color_source = cv2.GaussianBlur(frame_boosted, (color_blur, color_blur), 0)
+        else:
+            color_source = frame_boosted
+
+        small_frame = color_source.astype(int)
         r, g, b = small_frame[:,:,0], small_frame[:,:,1], small_frame[:,:,2]
         ansi_ids = 16 + (36 * (r * 5 // 255)) + (6 * (g * 5 // 255)) + (b * 5 // 255)
         rows = _build_colored_rows(ansi_ids, char_array, max_rows, max_cols)
