@@ -9,7 +9,7 @@ import shutil
 
 # 1. Import Settings FIRST so we can patch them
 import settings
-from server_config import ServerConfig, get_config, MODE_WEB, MODE_LOCAL, MODE_ASCII, MODE_ASCIIWEB
+from server_config import ServerConfig, get_config, MODE_WEB, MODE_LOCAL, MODE_ASCII, MODE_ASCIIWEB, MODE_SCOPE
 
 # --- CONSTANTS ---
 # [CHANGE] Updated reserved ports to the new 24xx range
@@ -65,7 +65,7 @@ def configure_runtime():
 
     parser.add_argument(
         "--mode",
-        choices=["web", "ascii", "asciiweb", "local"],
+        choices=["web", "ascii", "asciiweb", "local", "scope"],
         default="local",
         help="Operating Mode (default: local)"
     )
@@ -80,6 +80,52 @@ def configure_runtime():
         "--dir",
         help="Path to image source folder (overrides settings.py)"
     )
+
+    # --- Options for --mode scope (XY output on the sound card) ---
+    parser.add_argument("--xy-dir", help="Baked XY libraries (default: settings.XY_DIR)")
+    parser.add_argument("--scope-raster", action="store_true",
+                        help="Scope: scanline/dwell mode instead of vector line art")
+    parser.add_argument("--scope-realtime", action="store_true",
+                        help="Scope: stream continuously so index changes land "
+                             "within a row instead of at a trace boundary (raster only)")
+    parser.add_argument("--scope-fps", type=int, help="Scope trace rate (default: IPS)")
+    parser.add_argument("--scope-samples", type=int, help="Scope samples per trace")
+    parser.add_argument("--scope-trim", type=float,
+                        help="Scope raster: drop cells dimmer than this (0.08-0.16 "
+                             "reduces stray lines on dark backgrounds). "
+                             "Default: settings.SCOPE_TRIM")
+    parser.add_argument("--scope-gamma", type=float,
+                        help="Default: settings.SCOPE_GAMMA")
+    parser.add_argument("--scope-density", type=float,
+                        help="Default: settings.SCOPE_DENSITY")
+    parser.add_argument("--scope-rows", type=int)
+    parser.add_argument("--scope-mix", nargs="?", type=float, const=120.0,
+                        metavar="HZ",
+                        help="Scope: alternate raster and vector every trace at "
+                             "this rate (default 120). Above flicker fusion the "
+                             "phosphor sums them: raster gives tone, vector gives "
+                             "outline.")
+    parser.add_argument("--scope-mix-duty", type=float, default=None,
+                        help="Scope: fraction of mixed passes spent on raster "
+                             "(0.6-0.8 if the vector outline overpowers the tone)")
+    parser.add_argument("--scope-sweep", choices=("alternate", "palindrome", "retrace"),
+                        default=None,
+                        help="Scope raster: alternate (default) chains one-way "
+                             "sweeps with no flyback; palindrome is safe when "
+                             "traces repeat; retrace shows the CRT flyback")
+    parser.add_argument("--scope-min-feature", type=float, default=None,
+                        help="Scope vector: shortest stroke kept by the occlusion cull")
+    parser.add_argument("--device", "--scope-device", dest="scope_device",
+                        help="Audio output: index or name fragment, e.g. "
+                             "--device Scarlett. Prefer the name over an index: "
+                             "PortAudio indices reshuffle when hardware is "
+                             "plugged or unplugged.")
+    parser.add_argument("--ask", "--scope-ask", dest="scope_ask",
+                        action="store_true",
+                        help="Choose the audio output interactively. Only "
+                             "prompts when more than one output exists, and "
+                             "only when there is a terminal -- safe to leave in "
+                             "a kiosk launch script.")
 
     parser.add_argument(
         "--rebuild",
@@ -104,12 +150,38 @@ def configure_runtime():
         settings.IMAGES_DIR = abs_path
         settings.MAIN_FOLDER_PATH = os.path.join(abs_path, "face")
         settings.FLOAT_FOLDER_PATH = os.path.join(abs_path, "float")
+        # settings computed XY_DIR at import time from the DEFAULT images dir,
+        # so it is stale once --dir moves us. Re-derive unless --xy-dir won.
+        if not args.xy_dir:
+            settings.XY_DIR = settings._find_xy_dir(abs_path)
+
+    if args.xy_dir:
+        abs_xy = os.path.abspath(args.xy_dir)
+        if not os.path.isdir(abs_xy):
+            print(f"❌ ERROR: XY directory not found: {abs_xy}")
+            print("   -> Bake it: python utilities/convert_to_xy.py -i <images> -o " + abs_xy)
+            sys.exit(1)
+        settings.XY_DIR = abs_xy
+
+    # Scope options only mean anything in scope mode; say so rather than
+    # silently ignoring them.
+    if args.mode != "scope":
+        _short = {"scope_ask": "--ask", "scope_device": "--device"}
+        used = [_short.get(a, f"--{a.replace('_', '-')}") for a in vars(args)
+                if a.startswith("scope_") and getattr(args, a) not in (None, False)]
+        if args.xy_dir:
+            used.append("--xy-dir")
+        if used:
+            print(f"⚠️  {', '.join(used)} ignored: these apply to --mode scope. "
+                  f"Each mode in VideoInterleaving runs standalone.")
 
     # 2. Determine Primary Port (for ASCII modes)
     if args.mode == "web":
         primary_port = None  # Not used in web mode
     elif args.mode == "local":
         primary_port = None  # Not used in local mode
+    elif args.mode == "scope":
+        primary_port = None  # Not used in scope mode
     elif args.mode == "ascii":
         primary_port = args.port or 2323
     elif args.mode == "asciiweb":
@@ -118,7 +190,14 @@ def configure_runtime():
 
     # 2.5. Clean up existing cache directories for this instance
     # Determine instance identifier pattern
-    if args.mode in ("web", "local"):
+    if args.mode == "scope":
+        # Scope only: key the pattern on source AND mode, so two scope
+        # instances running different image trees never delete each other's
+        # lists.  source_name is computed below, so derive it locally here
+        # rather than moving upstream code around.
+        _src = os.path.basename(os.path.normpath(settings.IMAGES_DIR)).replace(" ", "_")
+        instance_pattern = f"_{_src}_{args.mode}_"
+    elif args.mode in ("web", "local"):
         instance_pattern = f"_{args.mode}_"  # Match any port
     else:
         # ASCII modes: match specific port
@@ -130,7 +209,8 @@ def configure_runtime():
 
     if os.path.exists(cache_base):
         for item in os.listdir(cache_base):
-            if (item.startswith("folders_processed_") or item.startswith("generated_lists_")) and instance_pattern in item:
+            if (item.startswith("folders_processed_") or item.startswith(
+                    "generated_lists_")) and instance_pattern in item:
                 full_path = os.path.join(cache_base, item)
                 if os.path.isdir(full_path):
                     shutil.rmtree(full_path)
@@ -182,6 +262,68 @@ def configure_runtime():
         args.test = True
         print(">> Local mode: Enabling --test flag for network monitoring")
 
+    elif args.mode == "scope":
+        if args.port:
+            print("⚠️  WARNING: --port ignored in SCOPE mode.")
+        print(f">> MODE: SCOPE (XY audio) [{source_name}]")
+        settings.ASCII_MODE = False
+        settings.SERVER_MODE = False
+        settings.SCOPE_MODE = True
+        config.set_mode(MODE_SCOPE)
+        ports = config.get_ports()
+        require_ports(ports.get_all_ports())
+        settings.WEB_PORT = ports.monitor
+
+        # Publish CLI overrides into settings; scope_display reads settings,
+        # exactly as the other modes read ASCII_MODE / SERVER_MODE.
+        if args.scope_raster:
+            settings.SCOPE_RASTER = True
+        if args.scope_realtime:
+            settings.SCOPE_REALTIME = True
+        if args.scope_fps:
+            settings.SCOPE_FPS = args.scope_fps
+        if args.scope_samples:
+            settings.SCOPE_SAMPLES = args.scope_samples
+        if args.scope_trim is not None:
+            settings.SCOPE_TRIM = args.scope_trim
+        if args.scope_gamma is not None:
+            settings.SCOPE_GAMMA = args.scope_gamma
+        if args.scope_density is not None:
+            settings.SCOPE_DENSITY = args.scope_density
+        if args.scope_rows:
+            settings.SCOPE_ROWS = args.scope_rows
+        if args.scope_min_feature is not None:
+            settings.SCOPE_MIN_FEATURE = args.scope_min_feature
+        if args.scope_sweep:
+            settings.SCOPE_SWEEP = args.scope_sweep
+        if args.scope_mix:
+            settings.SCOPE_MIX = args.scope_mix
+        if args.scope_mix_duty is not None:
+            settings.SCOPE_MIX_DUTY = args.scope_mix_duty
+        # Resolve the audio device NOW, before file lists are built and before
+        # stdout is wrapped. Prompting from deep inside run_scope meant the
+        # question appeared after a long silence, so it read as a hang.
+        if args.scope_ask or args.scope_device:
+            from scope_out import choose_device as _choose, scrub as _scrub
+            # argv is decoded with surrogateescape, so a stray byte in shell
+            # history arrives as a lone surrogate and breaks any later encode
+            args.scope_device = _scrub(args.scope_device)
+            settings.SCOPE_DEVICE = _choose(ask=args.scope_ask,
+                                            device=args.scope_device)
+            import sounddevice as _sd
+            try:
+                _name = _scrub(_sd.query_devices(settings.SCOPE_DEVICE)["name"]) \
+                    if settings.SCOPE_DEVICE is not None else "system default"
+            except Exception:
+                _name = str(settings.SCOPE_DEVICE)
+            print(f">> AUDIO OUT: {_name}")
+            # Explicit flag: scope_display must NOT re-resolve, or the choice
+            # silently reverts to the system default.
+            settings.SCOPE_DEVICE_RESOLVED = True
+        settings.SCOPE_DEVICE_SPEC = None
+        settings.SCOPE_ASK = False
+        print(f">> XY LIBRARIES: {getattr(settings, 'XY_DIR', 'images_xy')}")
+
     elif args.mode == "ascii":
         validate_ascii_port(primary_port)
         print(f">> MODE: ASCII (Telnet) [{source_name}] @ {primary_port}")
@@ -225,7 +367,17 @@ cli_args, log_filename = configure_runtime()
 # STANDARD IMPORTS
 # -----------------------------------------------------------------------------
 import make_file_lists
-import image_display
+
+# Imported here, as upstream, so startup behaviour for the existing modes is
+# unchanged.  The failure is only DEFERRED (not skipped) so that scope mode --
+# which needs neither TurboJPEG nor GL -- can still run on a box without them.
+try:
+    import image_display
+
+    _image_display_error = None
+except Exception as _e:  # pragma: no cover - environment dependent
+    image_display = None
+    _image_display_error = _e
 import web_service
 import ascii_server
 import ascii_stats_server
@@ -282,16 +434,16 @@ try:
     log_dir = os.path.dirname(log_filename)
     if log_dir and not os.path.exists(log_dir):
         os.makedirs(log_dir, exist_ok=True)
-    
+
     _log_file = open(log_filename, "w", buffering=1, encoding='utf-8')
-    
+
     # Always use Tee to capture all output to both terminal and log file
     # This works whether stdout/stderr are redirected or not
-    # If stdout/stderr are already redirected (e.g., by wrapper script), 
+    # If stdout/stderr are already redirected (e.g., by wrapper script),
     # Tee will write to both the redirected stream and the log file
     sys.stdout = Tee(sys.stdout, _log_file)
     sys.stderr = Tee(sys.stderr, _log_file)
-    
+
     # Write initial log message (use original stderr if systemd to avoid issues)
     if _is_systemd:
         _original_stderr.write(f"[MAIN] Logging to {log_filename}\n")
@@ -315,7 +467,7 @@ def main(clock=CLOCK_MODE):
         atexit.register(_restore_display_resolution)
     except ImportError:
         pass  # display_manager may not be imported yet
-    
+
     # 1. Process Files (Reuse Logic)
     lists_exist = False
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -349,9 +501,20 @@ def main(clock=CLOCK_MODE):
     elif mode == "local":
         web_service.start_server(monitor=True, stream=False)
 
+    elif mode == "scope":
+        pass  # No servers: output goes to the audio device
+
         # 3. Start Display Engine
     try:
-        image_display.run_display(clock)
+        if mode == "scope":
+            # Standalone, like every other mode: audio only. No GL context, no
+            # TurboJPEG, no ImageLoader, no FIFO.
+            import scope_display
+            scope_display.run_scope(clock)
+        else:
+            if image_display is None:
+                raise _image_display_error
+            image_display.run_display(clock)
     except KeyboardInterrupt:
         print("\n[MAIN] Shutdown requested via Ctrl+C")
     except Exception as e:

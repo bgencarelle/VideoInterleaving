@@ -5,3 +5,4 @@ glfw  # Python bindings - requires libglfw3-dev system package (installed via sy
 PyTurboJPEG==1.8.2
 SimpleWebsocketServer
 PyOpenGL  # Legacy renderer fallback (GLES2 / GL2.1)
+sounddevice  # Scope mode XY audio output - needs libportaudio2 (see system-requirements.txt)

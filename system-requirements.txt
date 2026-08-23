@@ -38,6 +38,7 @@ mesa-utils-extra
 # Audio and input libraries
 libsdl2-dev
 libasound2-dev
+libportaudio2
 
 # System utilities
 chrony

@@ -21,6 +21,25 @@ else:
 MAIN_FOLDER_PATH = f"{IMAGES_DIR}/face"
 FLOAT_FOLDER_PATH = f"{IMAGES_DIR}/float"
 
+# XY vector/raster libraries for scope mode, baked by utilities/convert_to_xy.py.
+# The baker mirrors the source tree, so face/ and float/ folders line up by index.
+# Search the same way IMAGES_DIR is found, plus the "<source>_xy" convention --
+# a tree called 150_91 bakes to 150_91_xy, which none of the fixed names catch.
+def _find_xy_dir(images_dir):
+    import glob
+    base = os.path.basename(os.path.normpath(images_dir))
+    for cand in (f"{images_dir}_xy", f"{base}_xy", "images_xy", "images_sbs_xy"):
+        if os.path.isdir(cand):
+            return cand
+    # last resort: a single unambiguous *_xy directory in the working dir
+    found = [d for d in glob.glob("*_xy") if os.path.isdir(d)]
+    if len(found) == 1:
+        return found[0]
+    return f"{images_dir}_xy"          # nonexistent, but a useful error message
+
+
+XY_DIR = _find_xy_dir(IMAGES_DIR)
+
 # -------------------------
 # Display Mode & Performance
 # -------------------------
@@ -29,7 +48,7 @@ VSYNC = True  # or False, depending on your preference
 
 # Frames per Second and Images Per Second (IPS)
 IPS = 30
-FPS = 60
+FPS = 30
 
 # Buffer settings: The BUFFER_SIZE is derived from IPS (e.g., 15 if IPS == 60)
 TOLERANCE = 10
@@ -63,3 +82,17 @@ ASCII_HEIGHT = 40
 ASCII_SOURCE_IMAGE_ASPECT_RATIO = 1.333333333
 JPEG_QUALITY = 75# Image quality
 HEADLESS_RES = (480, 600)   # Resolution for the virtual screen
+
+# --- SCOPE MODE (XY output via the sound card) ---
+# Scope refresh defaults to IPS: one trace per index maximises samples per
+# trace, which is the entire resolution budget (samples = rate / fps).
+SCOPE_MODE = False
+SCOPE_FPS = None          # None -> follow IPS
+SCOPE_MIN_FEATURE = 0.02  # vector: shortest stroke kept by the occlusion cull
+SCOPE_TRIM = 0.02         # raster: drop cells dimmer than this from the sweep
+SCOPE_GAMMA = 2.2         # raster contrast
+SCOPE_DENSITY = 1.0       # raster samples per cell (1.0 = finest)
+SCOPE_SWEEP = "alternate" # alternate | palindrome | retrace
+SCOPE_ROWS = None         # raster scanline count (None = auto from budget)
+SCOPE_MIX = None          # Hz to alternate raster/vector (None = off)
+SCOPE_MIX_DUTY = 0.5      # fraction of mixed passes spent on raster

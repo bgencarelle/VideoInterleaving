@@ -14,6 +14,7 @@ MODE_WEB = "web"
 MODE_LOCAL = "local"
 MODE_ASCII = "ascii"
 MODE_ASCIIWEB = "asciiweb"
+MODE_SCOPE = "scope"
 
 
 @dataclass
@@ -56,6 +57,7 @@ class ServerConfig:
     DEFAULT_ASCII_WEBSOCKET_PORT = 2424
     DEFAULT_LOCAL_PORT = 8888
     DEFAULT_ASCIIWEB_MONITOR_PORT = 1980
+    DEFAULT_SCOPE_MONITOR_PORT = 8890
 
     def __init__(self):
         """Initialize with backward compatibility to settings.py."""
@@ -67,7 +69,7 @@ class ServerConfig:
         Set the current server mode and optional primary port override.
         
         Args:
-            mode: One of MODE_WEB, MODE_LOCAL, MODE_ASCII, MODE_ASCIIWEB
+            mode: One of MODE_WEB, MODE_LOCAL, MODE_ASCII, MODE_ASCIIWEB, MODE_SCOPE
             primary_port: Optional port override (used for ASCII modes)
         """
         self._current_mode = mode
@@ -116,6 +118,12 @@ class ServerConfig:
                 monitor=monitor,
                 ascii_websocket=websocket_port
             )
+        elif mode == MODE_SCOPE:
+            # Scope mode serves no streams; the monitor port is reserved for
+            # consistency and future lightweight_monitor use.
+            monitor = getattr(settings, 'WEB_PORT', self.DEFAULT_SCOPE_MONITOR_PORT)
+            self._current_config = PortConfig(monitor=monitor)
+
         else:
             raise ValueError(f"Unknown mode: {mode}")
 
