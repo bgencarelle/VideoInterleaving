@@ -99,6 +99,20 @@ def configure_runtime():
     parser.add_argument("--scope-density", type=float,
                         help="Default: settings.SCOPE_DENSITY")
     parser.add_argument("--scope-rows", type=int)
+    parser.add_argument("--scope-lowpass", type=float, metavar="HZ",
+                        help="Low-pass the XY output at this corner, to emulate "
+                             "a softer DAC or a physical RC filter. Try 800-8000; "
+                             "see scope_lowpass.py to audition it first.")
+    parser.add_argument("--scope-oversample", type=int, metavar="N",
+                        help="Anti-alias the beam path: generate N x samples, "
+                             "bandlimit, decimate. Fixes aliasing when the grid "
+                             "is finer than the sample rate; on smooth content "
+                             "the difference is small. 4 is plenty.")
+    parser.add_argument("--scope-no-autofit", action="store_true",
+                        help="Scope raster: size the grid to the whole frame "
+                             "instead of to the cells that survive trim "
+                             "(autofit is on by default and is usually a 2x "
+                             "resolution win on a dark background)")
     parser.add_argument("--scope-mix", nargs="?", type=float, const=120.0,
                         metavar="HZ",
                         help="Scope: alternate raster and vector every trace at "
@@ -292,6 +306,12 @@ def configure_runtime():
             settings.SCOPE_DENSITY = args.scope_density
         if args.scope_rows:
             settings.SCOPE_ROWS = args.scope_rows
+        if args.scope_no_autofit:
+            settings.SCOPE_AUTOFIT = False
+        if args.scope_lowpass:
+            settings.SCOPE_LOWPASS = args.scope_lowpass
+        if args.scope_oversample:
+            settings.SCOPE_OVERSAMPLE = args.scope_oversample
         if args.scope_min_feature is not None:
             settings.SCOPE_MIN_FEATURE = args.scope_min_feature
         if args.scope_sweep:

@@ -48,7 +48,7 @@ VSYNC = True  # or False, depending on your preference
 
 # Frames per Second and Images Per Second (IPS)
 IPS = 30
-FPS = 30
+FPS = 60
 
 # Buffer settings: The BUFFER_SIZE is derived from IPS (e.g., 15 if IPS == 60)
 TOLERANCE = 10
@@ -76,7 +76,7 @@ SERVER_CAPTURE_RATE = FPS // 2   #  FPS by 2
 ASCII_MODE = False
 ASCII_COLOR = True
 ASCII_COLOR_BLUR = 7  # 0 = off, odd integer = blur strength (3, 5, 7)
-ASCII_FPS = SERVER_CAPTURE_RATE // 2 
+ASCII_FPS = SERVER_CAPTURE_RATE // 2
 ASCII_WIDTH = 60 # keep aspect ratio 3:2
 ASCII_HEIGHT = 40
 ASCII_SOURCE_IMAGE_ASPECT_RATIO = 1.333333333
@@ -92,6 +92,16 @@ SCOPE_MIN_FEATURE = 0.02  # vector: shortest stroke kept by the occlusion cull
 SCOPE_TRIM = 0.02         # raster: drop cells dimmer than this from the sweep
 SCOPE_GAMMA = 2.2         # raster contrast
 SCOPE_DENSITY = 1.0       # raster samples per cell (1.0 = finest)
+SCOPE_LOWPASS = None      # Hz; emulate a softer output chain (Pi headphone
+                          # jack, cheap codec, or a physical RC filter).
+                          # None = off. See scope_lowpass.py.
+SCOPE_OVERSAMPLE = 1      # anti-alias the path: generate N x samples, bandlimit,
+                          # decimate. Correct in principle, but measured only a
+                          # 5.6% change on portrait content -- the dwell profile
+                          # is already mostly below Nyquist. Costs ~10% CPU at 4.
+SCOPE_AUTOFIT = True      # size the grid against cells that survive trim,
+                          # not the whole rectangle -- roughly doubles the
+                          # usable grid on a subject over a dark background
 SCOPE_SWEEP = "alternate" # alternate | palindrome | retrace
 SCOPE_ROWS = None         # raster scanline count (None = auto from budget)
 SCOPE_MIX = None          # Hz to alternate raster/vector (None = off)
