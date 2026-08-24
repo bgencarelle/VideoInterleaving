@@ -108,6 +108,10 @@ def configure_runtime():
                              "bandlimit, decimate. Fixes aliasing when the grid "
                              "is finer than the sample rate; on smooth content "
                              "the difference is small. 4 is plenty.")
+    parser.add_argument("--scope-list-from-images", action="store_true",
+                        help="Build the folder manifest by scanning the images "
+                             "instead of reading it from the bake. Only needed "
+                             "for a bake made before manifests were supported.")
     parser.add_argument("--scope-no-autofit", action="store_true",
                         help="Scope raster: size the grid to the whole frame "
                              "instead of to the cells that survive trim "
@@ -308,6 +312,8 @@ def configure_runtime():
             settings.SCOPE_ROWS = args.scope_rows
         if args.scope_no_autofit:
             settings.SCOPE_AUTOFIT = False
+        if args.scope_list_from_images:
+            settings.SCOPE_LIST_FROM_IMAGES = True
         if args.scope_lowpass:
             settings.SCOPE_LOWPASS = args.scope_lowpass
         if args.scope_oversample:
@@ -498,7 +504,22 @@ def main(clock=CLOCK_MODE):
     if os.path.exists(gen_dir_full) and os.listdir(gen_dir_full):
         lists_exist = True
 
-    if cli_args.rebuild or not lists_exist:
+    # Scope mode reads its folder manifest from the bake and never opens an
+    # image, so the image scan is pure startup cost for it.  Skipped only when
+    # the bake can actually supply the manifest; every other mode is untouched.
+    _scope_has_manifest = False
+    if cli_args.mode == "scope" and not getattr(settings, "SCOPE_LIST_FROM_IMAGES", False):
+        _xy = getattr(settings, "XY_DIR", None)
+        if _xy and os.path.isdir(_xy):
+            for _root, _dirs, _files in os.walk(_xy):
+                if "frame_starts.npy" in _files:
+                    _scope_has_manifest = True
+                    break
+
+    if _scope_has_manifest:
+        print(">> Skipping image scan: scope mode takes its manifest from the "
+              "bake (--scope-list-from-images to override)")
+    elif cli_args.rebuild or not lists_exist:
         print(">> Building file lists...")
         make_file_lists.process_files()
     else:

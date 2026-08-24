@@ -25,6 +25,8 @@ import shutil
 import time
 from pathlib import Path
 
+import numpy as np
+
 import settings
 
 from scope_out import Scope, choose_device
@@ -41,7 +43,8 @@ def _bootstrap():
     """Only used when running this file directly: does what main.py's
     configure_runtime() would otherwise do."""
     ap = argparse.ArgumentParser(description="Scope mode (XY audio output)")
-    ap.add_argument("--dir", help="image source folder (overrides settings.py)")
+    ap.add_argument("--dir", help="image source folder. Optional: scope mode "
+                    "reads its manifest from the bake and never opens an image.")
     ap.add_argument("--xy-dir", help="baked XY libraries")
     ap.add_argument("--rebuild", action="store_true",
                     help="force rebuild of image lists")
@@ -115,6 +118,66 @@ def _folder_to_library_dir(image_path, xy_root):
     return os.path.join(xy_root, rel)
 
 
+def _manifest_from_xy(xy_root):
+    """
+    Build the folder manifest from the BAKED tree instead of the images.
+
+    Scope mode never opens an image -- it needs only the folder order, the
+    folder counts and the frame count.  The bake mirrors the source tree, so
+    it already carries all three, and reading them here avoids rescanning tens
+    of thousands of files at every launch.  It also means a scope-only machine
+    does not need the source images on disk at all.
+
+    make_file_lists' OWN ordering functions are reused rather than
+    reimplemented: folder_selector indexes into this order, so a divergence
+    would silently pair the wrong folders.
+
+    Returns (frames, main_dirs, float_dirs) or None if the tree cannot supply it.
+    """
+    from make_file_lists import natural_sort_key, check_folder_prefix
+
+    root = Path(xy_root)
+    if not root.is_dir():
+        return None
+    libs = sorted({p.parent for p in root.rglob("frame_starts.npy")},
+                  key=lambda p: natural_sort_key(str(p)))
+    if not libs:
+        return None
+
+    mains, floats = [], []
+    for d in libs:
+        parts = d.relative_to(root).parts
+        kind = "float" if "float" in parts else "main"
+        if not check_folder_prefix(str(d), kind):
+            continue                      # same rule the list builder applies
+        (floats if kind == "float" else mains).append(d)
+    if not mains or not floats:
+        return None
+
+    mains.sort(key=lambda p: natural_sort_key(p.name))
+    floats.sort(key=lambda p: natural_sort_key(p.name))
+    try:
+        frames = len(np.load(mains[0] / "frame_starts.npy")) - 1
+    except Exception:
+        return None
+    return frames, mains, floats
+
+
+def _open_dirs(dirs, layer_name, expected_frames):
+    libs = []
+    for i, d in enumerate(dirs):
+        try:
+            lib = XYLibrary(d)
+            if len(lib) != expected_frames:
+                print(f"[SCOPE] warning: {layer_name} folder {i}: {len(lib)} "
+                      f"baked frames vs {expected_frames} expected ({d})")
+            libs.append(lib)
+        except Exception as e:
+            print(f"[SCOPE] warning: {layer_name} folder {i}: {d} ({e})")
+            libs.append(None)
+    return libs
+
+
 def _open_layer(paths_by_index, xy_root, layer_name, expected_frames):
     libs = []
     for f in range(len(paths_by_index[0])):
@@ -173,17 +236,31 @@ def run_scope(clock_source=None):
     if mix_hz:
         fps = int(round(mix_hz))        # the switch rate IS the trace rate
 
-    # --- libraries: same list init as every mode, so folder numbering matches
-    #     what folder_selector indexes into, by construction ---
-    _, main_paths, float_paths = make_file_lists.initialize_image_lists(clock_source)
-    png_paths_len = len(main_paths)
-    main_folder_count = len(main_paths[0])
-    float_folder_count = len(float_paths[0])
-
+    # --- libraries ---
+    # Prefer the baked tree: it carries the same folder names in the same
+    # order, so it can supply the manifest without rescanning the images.
+    # Fall back to the image lists when the bake predates this or the tree
+    # cannot be read.
     xy_root = _xy_root()
     print(f"[SCOPE] XY libraries: {xy_root}")
-    main_libs = _open_layer(main_paths, xy_root, "main", png_paths_len)
-    float_libs = _open_layer(float_paths, xy_root, "float", png_paths_len)
+    manifest = None
+    if not getattr(settings, "SCOPE_LIST_FROM_IMAGES", False):
+        manifest = _manifest_from_xy(xy_root)
+
+    if manifest is not None:
+        png_paths_len, main_dirs, float_dirs = manifest
+        main_folder_count = len(main_dirs)
+        float_folder_count = len(float_dirs)
+        print(f"[SCOPE] manifest from the bake (images not read)")
+        main_libs = _open_dirs(main_dirs, "main", png_paths_len)
+        float_libs = _open_dirs(float_dirs, "float", png_paths_len)
+    else:
+        _, main_paths, float_paths = make_file_lists.initialize_image_lists(clock_source)
+        png_paths_len = len(main_paths)
+        main_folder_count = len(main_paths[0])
+        float_folder_count = len(float_paths[0])
+        main_libs = _open_layer(main_paths, xy_root, "main", png_paths_len)
+        float_libs = _open_layer(float_paths, xy_root, "float", png_paths_len)
     if not any(l is not None for l in main_libs + float_libs):
         raise RuntimeError(
             f"No XY libraries found under '{xy_root}'. Run:\n"
@@ -282,6 +359,23 @@ def run_scope(clock_source=None):
               "and a repeated one-way sweep shows a flyback. "
               "Consider SCOPE_SWEEP='palindrome'.")
 
+    # --- live controls ---
+    # Everything below is adjustable while watching the scope; restarting to
+    # try a different trim is useless when the thing you are judging is a beam.
+    live_state = dict(trim=trim, density=density, gamma=gamma, rows=rows,
+                      lowpass=lowpass, raster=use_raster, sweep=sweep_mode,
+                      autofit=autofit)
+    keys = term = None
+    try:
+        from scope_controls import KeyMap, Terminal, as_flags
+        term = Terminal()
+        if term.enabled:
+            keys = KeyMap(live_state)
+            print("[SCOPE] live controls active -- h for keys, p to print "
+                  "flags, q to quit")
+    except Exception:
+        pass
+
     # --- loop ---
     tick = 1.0 / max(2 * IPS, 2 * fps)
     prev_index = -1
@@ -292,7 +386,37 @@ def run_scope(clock_source=None):
     last_report = time.time()
 
     with scope:
+      try:
         while True:
+            if keys is not None:
+                for ch in term.read():
+                    if keys.feed(ch) and keys.message:
+                        print(keys.message, flush=True)
+                        keys.message = ""
+                if keys.quit:
+                    break
+                if keys.dirty:
+                    keys.dirty = False
+                    trim = live_state["trim"]; density = live_state["density"]
+                    rows = live_state["rows"]; autofit = live_state["autofit"]
+                    use_raster = live_state["raster"]
+                    if use_raster or mix_hz:
+                        try:
+                            cal = calibrate(main_libs, float_libs,
+                                            scope.samples_per_frame,
+                                            density=density, trim=trim, rows=rows)
+                            spc = scope.samples_per_frame / max(
+                                cal["grid_rows"] * cal["grid_cols"], 1)
+                            print(f"  grid {cal['grid_cols']}x{cal['grid_rows']} "
+                                  f"({spc:.2f} samples/cell)"
+                                  + ("  <-- below 0.3, expect flecking"
+                                     if spc < 0.3 else ""), flush=True)
+                        except Exception as e:
+                            print(f"  recalibration failed: {e}", flush=True)
+                    prev_key = None          # force a redraw with the new values
+                gamma = live_state["gamma"]; lowpass = live_state["lowpass"]
+                sweep_mode = live_state["sweep"]
+
             index, _ = update_index(png_paths_len, PINGPONG)
             if index != prev_index:
                 # sole caller of the stateful selector in this mode
@@ -334,6 +458,9 @@ def run_scope(clock_source=None):
                     print(f"[SCOPE] {drawn} traces, {dropped} indices skipped "
                           f"({dropped / max(drawn + dropped, 1):.0%})")
             time.sleep(tick)
+      finally:
+        if term is not None:
+            term.restore()
 
 
 def _emit(scope, ml, fl, index, as_raster, sweep, sweep_mode,
