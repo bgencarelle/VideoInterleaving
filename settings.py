@@ -99,6 +99,9 @@ SCOPE_OVERSAMPLE = 1      # anti-alias the path: generate N x samples, bandlimit
                           # decimate. Correct in principle, but measured only a
                           # 5.6% change on portrait content -- the dwell profile
                           # is already mostly below Nyquist. Costs ~10% CPU at 4.
+SCOPE_BUFFER_BLOCKS = 6   # realtime mode: 256-sample blocks queued ahead of the
+                          # audio callback. Higher survives slower machines;
+                          # each block is ~2.7 ms of added latency at 96 kHz.
 SCOPE_AUTOFIT = True      # size the grid against cells that survive trim,
                           # not the whole rectangle -- roughly doubles the
                           # usable grid on a subject over a dark background

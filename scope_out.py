@@ -208,6 +208,37 @@ def choose_device(ask=False, device=None, stream=None):
     return None
 
 
+def lowpass_frame(frame, samplerate, cutoff_hz, taper_hz=0.0):
+    """
+    Band-limit one looping frame, circularly.
+
+    The frame repeats forever, so it is genuinely periodic and an FFT filter is
+    exact here -- no edge transient, and the loop stays seamless.  An IIR run
+    linearly over the buffer would leave a discontinuity at the wrap.
+
+    cutoff_hz : everything above this is removed.
+    taper_hz  : width of a raised-cosine rolloff above the cutoff.  0 gives a
+                brick wall, which is harsher than any real filter but shows the
+                limit cleanly; a few kHz is closer to real hardware.
+
+    This is the honest test of whether a grid is really being drawn: the
+    preview interpolates between samples and models no bandwidth limit, so
+    detail can look present that no signal path could carry.
+    """
+    n = len(frame)
+    if not cutoff_hz or cutoff_hz <= 0 or n < 8:
+        return np.asarray(frame, dtype=np.float32)
+    F = np.fft.rfft(np.asarray(frame, dtype=np.float64), axis=0)
+    freqs = np.fft.rfftfreq(n, 1.0 / float(samplerate))
+    if taper_hz and taper_hz > 0:
+        x = np.clip((cutoff_hz + taper_hz - freqs) / float(taper_hz), 0.0, 1.0)
+        gain = 0.5 - 0.5 * np.cos(np.pi * x)          # raised cosine
+    else:
+        gain = (freqs <= cutoff_hz).astype(np.float64)
+    out = np.fft.irfft(F * gain[:, None], n=n, axis=0)
+    return np.ascontiguousarray(out, dtype=np.float32)
+
+
 def from_screen(points, width, height):
     """Pixel coords -> [-1, 1], aspect preserved, origin at centre."""
     p = np.asarray(points, dtype=np.float64).reshape(-1, 2)
@@ -271,6 +302,95 @@ def rasterize(polylines, n=SAMPLES_PER_FRAME):
     return np.ascontiguousarray(out, dtype=np.float32)
 
 
+class BufferedSource:
+    """
+    Run a sample generator on a worker thread, feeding a ring buffer that the
+    audio callback drains.
+
+    Generating inside the callback means the WORST-CASE generation time has to
+    fit the block deadline; miss it once and the stream underruns.  With a
+    producer thread only the AVERAGE has to keep up, and the ring absorbs the
+    jitter -- the same reason the video path prefetches into a FIFO.
+
+    Depth is a real trade-off, not free headroom: every buffered sample is a
+    sample of latency between a state change and the beam showing it, and low
+    latency is the entire point of realtime mode.  A few blocks is plenty.
+
+    On underflow the last sample is HELD, never zeroed: zero on both channels
+    parks the beam at screen centre, which is a bright stationary dot.
+    """
+
+    def __init__(self, source, blocksize=256, depth=6, channels=2):
+        self.source = source
+        self.blocksize = int(blocksize)
+        self.capacity = self.blocksize * max(2, int(depth))
+        self._buf = np.zeros((self.capacity, channels), dtype=np.float32)
+        self._w = 0                  # samples written, monotonic
+        self._r = 0                  # samples read, monotonic
+        self._last = np.zeros(channels, dtype=np.float32)
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self.underruns = 0
+        self.blocks_made = 0
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name="scope-source")
+        self._thread.start()
+
+    def _run(self):
+        while not self._stop.is_set():
+            with self._lock:
+                free = self.capacity - (self._w - self._r)
+            if free < self.blocksize:
+                self._wake.wait(0.002)
+                self._wake.clear()
+                continue
+            try:
+                chunk = self.source(self.blocksize)
+            except Exception:
+                chunk = np.tile(self._last, (self.blocksize, 1))
+            chunk = np.asarray(chunk, dtype=np.float32)
+            with self._lock:
+                start = self._w % self.capacity
+                end = start + len(chunk)
+                if end <= self.capacity:
+                    self._buf[start:end] = chunk
+                else:
+                    cut = self.capacity - start
+                    self._buf[start:] = chunk[:cut]
+                    self._buf[:end - self.capacity] = chunk[cut:]
+                self._w += len(chunk)
+                self.blocks_made += 1
+
+    def __call__(self, n):
+        """Called from the audio callback: a copy out of the ring, nothing more."""
+        out = np.empty((n, 2), dtype=np.float32)
+        with self._lock:
+            avail = self._w - self._r
+            take = min(n, avail)
+            if take:
+                start = self._r % self.capacity
+                end = start + take
+                if end <= self.capacity:
+                    out[:take] = self._buf[start:end]
+                else:
+                    cut = self.capacity - start
+                    out[:cut] = self._buf[start:]
+                    out[cut:take] = self._buf[:end - self.capacity]
+                self._r += take
+                self._last = out[take - 1].copy()
+        if take < n:
+            out[take:] = self._last      # hold position; never park at centre
+            self.underruns += 1
+        self._wake.set()
+        return out
+
+    def close(self):
+        self._stop.set()
+        self._wake.set()
+        self._thread.join(timeout=0.5)
+
+
 class Scope:
     """Continuously loops the current frame out of an audio device.
 
@@ -283,7 +403,8 @@ class Scope:
     """
 
     def __init__(self, device=None, samplerate=None, fps=FPS, samples=None,
-                 invert_y=True, swap_xy=False, source=None):
+                 invert_y=True, swap_xy=False, source=None,
+                 lowpass_hz=None, lowpass_taper=0.0):
         """
         samples : path length per trace -- the REAL parameter.  Refresh is not
                   set independently; it falls out as rate/samples, because the
@@ -298,6 +419,10 @@ class Scope:
             info = sd.query_devices(device, "output")
             samplerate = int(info["default_samplerate"]) or SAMPLE_RATE
         self.source = source
+        # Optional band-limit applied to every frame before it reaches the DAC,
+        # so hardware sees exactly what the offline comparison shows.
+        self.lowpass_hz = lowpass_hz
+        self.lowpass_taper = lowpass_taper
         self.samplerate = samplerate
         self.samples_per_frame = (max(64, int(samples)) if samples
                                   else max(64, round(samplerate / fps)))
@@ -352,7 +477,11 @@ class Scope:
         """
         if self._pending is not None:
             self.frames_dropped += 1
-        self._pending = np.ascontiguousarray(frame, dtype=np.float32)
+        f = np.ascontiguousarray(frame, dtype=np.float32)
+        if self.lowpass_hz:
+            f = lowpass_frame(f, self.samplerate, self.lowpass_hz,
+                              self.lowpass_taper)
+        self._pending = f
 
     def show(self, polylines):
         """Call this once per drawn frame from your render loop."""

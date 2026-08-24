@@ -29,7 +29,7 @@ import numpy as np
 
 import settings
 
-from scope_out import Scope, choose_device
+from scope_out import Scope, choose_device, BufferedSource
 from scope_bake import XYLibrary, merge, raster_frame, SweepSource, calibrate
 try:
     from scope_lowpass import lowpass_circular
@@ -226,6 +226,10 @@ def run_scope(clock_source=None):
     device_spec = getattr(settings, "SCOPE_DEVICE_SPEC", None)
     ask = getattr(settings, "SCOPE_ASK", False)
 
+    if realtime:
+        _d = getattr(settings, "SCOPE_BUFFER_BLOCKS", 6)
+        print(f"[SCOPE] realtime: generated on a worker thread, {_d} x 256 "
+              "sample ring")
     if realtime and not use_raster:
         print("[SCOPE] realtime applies to raster only (vector frames have no "
               "positional correspondence); ignoring.")
@@ -289,8 +293,27 @@ def run_scope(clock_source=None):
         probe = Scope(fps=fps, samples=samples, device=dev)
         n_pass = probe.samples_per_frame
         probe.stream.close()
-        source = SweepSource(lambda: live, n_pass, gamma=gamma, trim=trim,
-                             density=density, rows=rows)
+        # Calibrate HERE, before the generator is built: it needs the same
+        # grid and levels frame mode uses, or the two modes render the same
+        # content differently.
+        try:
+            cal = calibrate(main_libs, float_libs, n_pass,
+                            density=density, trim=trim, rows=rows)
+        except Exception as e:
+            print(f"[SCOPE] calibration skipped ({e})")
+            cal = {}
+        if cal:
+            _spc = n_pass / max(cal["grid_rows"] * cal["grid_cols"], 1)
+            print(f"[SCOPE] grid {cal['grid_cols']}x{cal['grid_rows']} "
+                  f"({_spc:.2f} samples/cell), calibrated once")
+        gen = SweepSource(lambda: live, n_pass, gamma=gamma, trim=trim,
+                          density=density, rows=rows, **(cal or {}))
+        # Generate on a worker thread rather than in the audio callback: only
+        # the AVERAGE has to keep up, and the ring absorbs the spikes.  Depth
+        # is latency, and low latency is the point of realtime mode, so keep
+        # it small.
+        source = BufferedSource(gen, blocksize=256,
+                                depth=getattr(settings, "SCOPE_BUFFER_BLOCKS", 6))
     scope = Scope(fps=fps, samples=samples, device=dev, source=source)
 
     # The baked thumbnail is a hard ceiling on scanlines; clamping silently
@@ -321,7 +344,7 @@ def run_scope(clock_source=None):
         _dev_name = "?"
     print(f"[SCOPE] output: {_dev_name}")
 
-    if use_raster or mix_hz:
+    if (use_raster or mix_hz) and not cal:
         try:
             cal = calibrate(main_libs, float_libs, scope.samples_per_frame,
                             density=density, trim=trim, rows=rows)
@@ -358,6 +381,33 @@ def run_scope(clock_source=None):
         print(f"[SCOPE] note: {fps} traces/sec > {IPS} ips means traces repeat, "
               "and a repeated one-way sweep shows a flyback. "
               "Consider SCOPE_SWEEP='palindrome'.")
+
+    # Measure the real per-frame cost once, so a slow machine says so up front
+    # instead of quietly dropping traces.  The budget is one index period.
+    if use_raster or mix_hz:
+        try:
+            import time as _t
+            ml0 = next((l for l in main_libs if l is not None), None)
+            fl0 = next((l for l in float_libs if l is not None), None)
+            if ml0 is not None:
+                for _ in range(3):
+                    raster_frame(ml0, 0, fl0, 0, scope.samples_per_frame,
+                                 gamma=gamma, trim=trim, density=density,
+                                 rows=rows, close=False, **cal)
+                _t0 = _t.perf_counter()
+                for _k in range(10):
+                    raster_frame(ml0, _k, fl0, _k, scope.samples_per_frame,
+                                 gamma=gamma, trim=trim, density=density,
+                                 rows=rows, close=False, **cal)
+                _ms = (_t.perf_counter() - _t0) / 10 * 1000.0
+                _budget = 1000.0 / max(IPS, 1)
+                print(f"[SCOPE] {_ms:.1f} ms per frame, budget {_budget:.1f} ms "
+                      f"({_ms / _budget:.0%} of one index period)")
+                if _ms > 0.7 * _budget:
+                    print("[SCOPE] tight: raise --scope-density, lower "
+                          "--scope-fps, or drop --scope-oversample")
+        except Exception:
+            pass
 
     # --- live controls ---
     # Everything below is adjustable while watching the scope; restarting to
@@ -457,10 +507,16 @@ def run_scope(clock_source=None):
                 if drawn and dropped:
                     print(f"[SCOPE] {drawn} traces, {dropped} indices skipped "
                           f"({dropped / max(drawn + dropped, 1):.0%})")
+                if source is not None and getattr(source, "underruns", 0):
+                    print(f"[SCOPE] {source.underruns} audio underruns -- the "
+                          "generator is not keeping up; raise "
+                          "SCOPE_BUFFER_BLOCKS or use frame mode")
             time.sleep(tick)
       finally:
         if term is not None:
             term.restore()
+        if source is not None and hasattr(source, "close"):
+            source.close()
 
 
 def _emit(scope, ml, fl, index, as_raster, sweep, sweep_mode,

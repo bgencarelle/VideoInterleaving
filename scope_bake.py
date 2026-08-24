@@ -220,8 +220,33 @@ class SweepSource:
     the raster/vector mode itself, which always finishes the pass it is in.
     """
 
-    def __init__(self, state_fn, samples_per_pass, gamma=2.2, floor=0.012,
-                 trim=0.02, density=1.0, rows=None, bbox=None, level=0.9):
+    def __init__(self, state_fn=None, samples_per_pass=1600, gamma=2.2,
+                 floor=0.012, trim=0.02, density=1.0, rows=None, bbox=None,
+                 level=0.9, grid_rows=None, grid_cols=None, levels=None,
+                 lum_fn=None, auto_levels=0.0):
+        """
+        lum_fn      : optional callable returning an (H, W) float array in
+                      0..1 -- any live source (screen grab, camera, video,
+                      a buffer you drew).  Supplied instead of state_fn, it
+                      decouples this generator from the baked libraries and
+                      makes the scope a general low-resolution display.
+        auto_levels : seconds of time constant for adapting the tone mapping
+                      to unknown content.  Live input cannot be pre-scanned,
+                      but adapting per frame is what caused the flecking, so
+                      this is a deliberately SLOW exponential average -- a few
+                      seconds, not a few frames.  0 disables.
+        """
+        self.lum_fn = lum_fn
+        self.auto_levels = float(auto_levels)
+        self._lv = None                     # running (lo, hi)
+        self._lum_shape = None
+        # grid_rows/grid_cols/levels come from calibrate(), exactly as in
+        # raster_frame.  Without them this path computes its own grid and a
+        # per-frame stretch, so realtime looked different from frame mode --
+        # fewer rows and drifting levels.
+        self.grid_rows = grid_rows
+        self.grid_cols = grid_cols
+        self.levels = levels
         self.state_fn = state_fn
         self.n_pass = max(64, int(samples_per_pass))
         self.gamma, self.floor, self.trim = gamma, floor, trim
@@ -229,6 +254,7 @@ class SweepSource:
         self.level = level
         self._out = np.zeros((0, 2), np.float32)
         self._plan = None
+        self._budgets = None
         self._row_i = 0
         self._reverse = False
         self._last = None
@@ -236,6 +262,54 @@ class SweepSource:
         self._grid = None
         self.passes = 0
         self.row_switches = 0
+
+    def _live(self):
+        """Grid + axes for a live luminance source."""
+        lum = np.asarray(self.lum_fn(), dtype=np.float32)
+        if lum.ndim == 3:
+            lum = lum.mean(axis=2)
+        if lum.max() > 1.5:
+            lum = lum / 255.0
+        h, w = lum.shape
+        if self._grid is None or self._lum_shape != (h, w):
+            self._lum_shape = (h, w)
+            aspect = h / float(w)
+            if self.grid_rows and self.grid_cols:
+                rws, cls = int(self.grid_rows), int(self.grid_cols)
+            else:
+                cells = max(64.0, self.n_pass / max(self.density, 0.25))
+                cls = max(8, int(np.sqrt(cells / max(aspect, 1e-6))))
+                rws = max(6, int(round(cls * aspect)))
+            rws, cls = min(rws, h), min(cls, w)
+            sx = 1.0 if w >= h else w / float(h)
+            sy = 1.0 if h >= w else h / float(w)
+            self._axes = (np.linspace(-sx, sx, cls, dtype=np.float32),
+                          -np.linspace(-sy, sy, rws, dtype=np.float32))
+            self._dims = (rws, cls)
+        rws, cls = self._dims
+        g = _box(lum, rws, cls)
+
+        if self.levels is not None:
+            lo, hi = self.levels
+        elif self.auto_levels > 0:
+            lit = g[g > 0.01]
+            if lit.size > 16:
+                lo_n, hi_n = np.percentile(lit, 2), np.percentile(lit, 98)
+                if self._lv is None:
+                    self._lv = (lo_n, hi_n)
+                else:
+                    # slow: a few seconds, so the picture cannot breathe
+                    a = min(1.0, (self.n_pass / 48000.0) / self.auto_levels)
+                    self._lv = (self._lv[0] + a * (lo_n - self._lv[0]),
+                                self._lv[1] + a * (hi_n - self._lv[1]))
+            lo, hi = self._lv if self._lv else (0.0, 1.0)
+        else:
+            lo, hi = 0.0, 1.0
+        if hi > lo:
+            g = np.clip((g - lo) / (hi - lo), 0.0, 1.0)
+        xs, ys = self._axes
+        self._grid = (g, xs, ys)
+        return self._grid
 
     # -- geometry -------------------------------------------------------
     def _composite(self, st):
@@ -268,19 +342,27 @@ class SweepSource:
 
         h, w = lum.shape
         aspect = h / float(w)
-        cells = max(64.0, self.n_pass / max(self.density, 0.25))
-        if self.rows_override:
-            rws = int(self.rows_override); cls = max(8, int(cells / rws))
+        if self.grid_rows and self.grid_cols:
+            rws, cls = int(self.grid_rows), int(self.grid_cols)
         else:
-            cls = max(8, int(np.sqrt(cells / max(aspect, 1e-6))))
-            rws = max(6, int(round(cls * aspect)))
-        g = _box(lum, rws, cls)
+            cells = max(64.0, self.n_pass / max(self.density, 0.25))
+            if self.rows_override:
+                rws = int(self.rows_override); cls = max(8, int(cells / rws))
+            else:
+                cls = max(8, int(np.sqrt(cells / max(aspect, 1e-6))))
+                rws = max(6, int(round(cls * aspect)))
+        g = _box(lum, min(rws, h), min(cls, w))
         rws, cls = g.shape
-        lit = g[g > 0.01]
-        if lit.size > 16:
-            lo, hi = np.percentile(lit, 2), np.percentile(lit, 98)
+        if self.levels is not None:
+            lo, hi = self.levels
             if hi > lo:
                 g = np.clip((g - lo) / (hi - lo), 0.0, 1.0)
+        else:
+            lit = g[g > 0.01]
+            if lit.size > 16:
+                lo, hi = np.percentile(lit, 2), np.percentile(lit, 98)
+                if hi > lo:
+                    g = np.clip((g - lo) / (hi - lo), 0.0, 1.0)
         sx = 1.0 if w >= h else w / float(h)
         sy = 1.0 if h >= w else h / float(w)
         self._grid_key = key
@@ -288,22 +370,40 @@ class SweepSource:
         return self._grid
 
     def _start_pass(self, st):
-        grid = self._composite(st)
+        grid = self._live() if self.lum_fn is not None else self._composite(st)
         if grid is None:
             return False
         g, xs, ys = grid
         seq = list(range(g.shape[0]))
         if self._reverse:
             seq = seq[::-1]
+
+        # Allocate each row a share of the pass proportional to how much light
+        # it carries.  Equal shares give a dim wide row the same beam time as a
+        # bright narrow one, which flattens the tone and blooms the edges --
+        # that is why realtime used to look unlike frame mode.
+        wsum = np.zeros(len(seq), dtype=np.float64)
+        for k, r in enumerate(seq):
+            row = g[r]
+            lit = row[row > self.trim] if self.trim > 0 else row
+            if lit.size > 1:
+                wsum[k] = float((np.maximum(lit[1:], self.floor) ** self.gamma).sum())
+        total = wsum.sum()
+        if total <= 0:
+            self._budgets = np.full(len(seq), max(2, self.n_pass // max(len(seq), 1)))
+        else:
+            share = wsum / total * self.n_pass
+            self._budgets = np.maximum(2, np.round(share)).astype(int)
+
         self._plan = seq
         self._row_i = 0
         self.passes += 1
         return True
 
     def _row_samples(self, st, r, budget):
-        """Points+weights for one row of the CURRENT index, chained from the
+        """Points+weights for one row of the CURRENT source, chained from the
         beam's present position."""
-        grid = self._composite(st)
+        grid = self._grid if self.lum_fn is not None else self._composite(st)
         if grid is None:
             return None
         g, xs, ys = grid
@@ -333,13 +433,13 @@ class SweepSource:
     # -- audio callback interface --------------------------------------
     def __call__(self, n):
         while len(self._out) < n:
-            st = self.state_fn()
+            st = self.state_fn() if self.state_fn is not None else None
             if self._plan is None or self._row_i >= len(self._plan):
                 self._reverse = not self._reverse
                 if not self._start_pass(st):
                     return np.zeros((n, 2), np.float32)
-            nrows = max(1, len(self._plan))
-            budget = max(2, self.n_pass // nrows)
+            budget = int(self._budgets[self._row_i]) if self._budgets is not None \
+                else max(2, self.n_pass // max(len(self._plan), 1))
             before = self._grid_key
             chunk = self._row_samples(st, self._plan[self._row_i], budget)
             if before is not None and self._grid_key != before:
@@ -521,6 +621,12 @@ def content_bbox(libs, samples=24, thresh=0.06, pad=0.01):
             min(1.0, x1 + pad), min(1.0, y1 + pad))
 
 
+# hoisted: these were being allocated once per row per frame and showed in the
+# profile.  They are read-only, so one shared copy is safe.
+_TRAVEL_W = np.float32([1e-3])
+_TRAVEL_T = np.ones(1, dtype=bool)
+
+
 def raster_frame(main_lib, main_idx, float_lib, float_idx, n,
                  gamma=2.2, floor=0.012, level=0.9, rows=None, cols=None,
                  density=1.0, trim=0.02, stretch=True, bbox=None, autofit=True,
@@ -597,7 +703,32 @@ def raster_frame(main_lib, main_idx, float_lib, float_idx, n,
         x0, y0, x1, y1 = bbox
         lum = lum[int(y0 * hh):max(int(y1 * hh), int(y0 * hh) + 1),
                   int(x0 * ww):max(int(x1 * ww), int(x0 * ww) + 1)]
+    return render_luma(lum, n, gamma=gamma, floor=floor, level=level,
+                       rows=rows, cols=cols, density=density, trim=trim,
+                       stretch=stretch, bbox=bbox, autofit=autofit,
+                       oversample=oversample, grid_rows=grid_rows,
+                       grid_cols=grid_cols, levels=levels, fields=fields,
+                       field=field, palindrome=palindrome, reverse=reverse,
+                       start=start, close=close, overscan=overscan)
 
+
+def render_luma(lum, n, gamma=2.2, floor=0.012, level=0.9, rows=None,
+                cols=None, density=1.0, trim=0.02, stretch=True, bbox=None,
+                autofit=True, oversample=1, grid_rows=None, grid_cols=None,
+                levels=None, fields=1, field=0, palindrome=False,
+                reverse=False, start=None, close=None, overscan=1.0):
+    """
+    Render a luminance image to XY samples.  This is the whole display engine:
+    everything above it just decides what the image is.
+
+    lum: 2D float array in [0,1].  Anything that can produce one of those --
+    a video frame, a screen grab, a plot -- can be drawn on a scope with this.
+
+    Beam sweeps rows and lingers where the image is bright, so brightness is
+    dwell time; that is how a 2-channel DAC with no intensity input paints
+    greyscale.  See raster_frame for the VideoInterleaving compositing that
+    feeds it.
+    """
     h, w = lum.shape
     aspect = h / float(w)
     if density < 0.25:
@@ -665,50 +796,70 @@ def raster_frame(main_lib, main_idx, float_lib, float_idx, n,
     # Build the serpentine row by row, keeping only the lit span of each row.
     # Empty rows are skipped outright; the beam jumps to the next row of
     # content, and that jump is weighted low so it stays dim.
-    # Build explicit PER-SEGMENT weights and travel flags.  The earlier
-    # point-indexed version was off by one: the travel flag landed on a
-    # zero-length duplicate point while the real travel segment inherited a
-    # full row-cell weight, so travel was never actually dimmed.
-    pts_list, segW, segT = [], [], []
-    prev = None if start is None else np.asarray(start, dtype=np.float64)
+    # Build the sweep row by row, appending whole ARRAYS rather than points.
+    # The per-point version cost ~29k list appends per frame and dominated the
+    # profile; assembling per row is the same geometry in ~1/300th the calls.
+    #
+    # Segment layout: within a row of K points there are K-1 drawn segments;
+    # between rows there is exactly one travel segment, weighted low so the
+    # beam crosses fast and dim.
+    row_pts, row_w, row_t = [], [], []
+    prev = None if start is None else np.asarray(start, dtype=np.float32)
     fields = max(1, int(fields))
     row_seq = list(range(int(field) % fields, rows, fields))
     if reverse:
         row_seq = row_seq[::-1]
 
+    # one masked reduction for the whole grid beats flatnonzero per row
+    if trim > 0:
+        lit_mask = g > trim
+        any_lit = lit_mask.any(axis=1)
+        first_lit = lit_mask.argmax(axis=1)
+        last_lit = cols - 1 - lit_mask[:, ::-1].argmax(axis=1)
+    else:
+        any_lit = None
+
     for r in row_seq:
         row = g[r]
-        idx = np.flatnonzero(row > trim) if trim > 0 else np.arange(len(row))
-        if idx.size == 0:
-            continue
-        a, b = int(idx[0]), int(idx[-1]) + 1
-        seg_x, seg_v = xs[a:b], row[a:b]
+        if any_lit is not None:
+            if not any_lit[r]:
+                continue
+            a0, b0 = int(first_lit[r]), int(last_lit[r]) + 1
+        else:
+            a0, b0 = 0, cols
+        seg_x = xs[a0:b0]
+        seg_v = row[a0:b0]
         if prev is None:
             flip = ((r % 2) == 1) if not reverse else ((r % 2) == 0)
         else:
             flip = abs(seg_x[-1] - prev[0]) < abs(seg_x[0] - prev[0])
         if flip:
-            seg_x, seg_v = seg_x[::-1], seg_v[::-1]
-        pts = np.stack([seg_x, np.full(seg_x.shape, ys[r])], axis=1)
-        w_row = np.maximum(seg_v, floor)
+            seg_x = seg_x[::-1]
+            seg_v = seg_v[::-1]
 
-        if not pts_list:
-            pts_list.append(pts[0])
-        else:
-            pts_list.append(pts[0])          # travel INTO this row
-            segW.append(1e-3)
-            segT.append(True)
-        for k in range(1, len(pts)):
-            pts_list.append(pts[k])
-            segW.append(float(w_row[k]))
-            segT.append(False)
+        k = seg_x.shape[0]
+        pts = np.empty((k, 2), dtype=np.float32)
+        pts[:, 0] = seg_x
+        pts[:, 1] = ys[r]
+        w_in = np.maximum(seg_v[1:], floor).astype(np.float32)
+
+        if row_pts:                                   # travel into this row
+            row_w.append(_TRAVEL_W)
+            row_t.append(_TRAVEL_T)
+        row_pts.append(pts)
+        row_w.append(w_in)
+        row_t.append(np.zeros(k - 1, dtype=bool))
         prev = pts[-1]
 
-    if len(pts_list) < 2:
+    if not row_pts:
         return None
-    P = np.vstack(pts_list)
-    wgt = np.maximum(np.asarray(segW, dtype=np.float64), 1e-9) ** gamma
-    trav = np.asarray(segT, dtype=bool)
+    P = np.concatenate(row_pts, axis=0)
+    wgt = np.concatenate(row_w) if row_w else np.ones(max(len(P) - 1, 1), np.float32)
+    trav = np.concatenate(row_t) if row_t else np.zeros(max(len(P) - 1, 1), bool)
+    if len(wgt) != len(P) - 1:                        # defensive; shapes should agree
+        wgt = np.resize(wgt, max(len(P) - 1, 1))
+        trav = np.resize(trav, max(len(P) - 1, 1))
+    wgt = np.maximum(wgt, 1e-9) ** gamma
 
     if close is None:
         close = not (reverse or start is not None)
