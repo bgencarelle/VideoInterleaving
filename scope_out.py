@@ -11,6 +11,11 @@ Scope setup: XY / "Format XY" mode, both inputs DC-coupled if available,
 import re
 import sys
 import threading
+
+try:
+    import settings as settings_mod
+except Exception:                    # usable standalone, outside the repo
+    settings_mod = None
 import numpy as np
 import sounddevice as sd
 
@@ -302,6 +307,50 @@ def rasterize(polylines, n=SAMPLES_PER_FRAME):
     return np.ascontiguousarray(out, dtype=np.float32)
 
 
+def precompensate_hpf(frame, corner_hz, samplerate, max_boost=8.0, level=LEVEL):
+    """
+    Pre-emphasise the frame to cancel the output's AC coupling.
+
+    Headphone and line outputs are AC coupled: a series capacitor forms a
+    single-pole high-pass, typically cornering somewhere around 5-50 Hz.  That
+    is fatal here because the VERTICAL SWEEP REPEATS AT THE TRACE RATE -- 30 Hz
+    at 30 fps -- so the sweep's fundamental sits right on the corner.  The
+    result is not a slight tilt: the picture collapses into a funnel, because
+    the slow envelope of both sweeps is attenuated and phase-shifted.
+
+    The frame repeats, so its spectrum is exactly the harmonics of
+    samplerate/len(frame), and the correction is exact rather than approximate:
+    a single-pole high-pass H(f) = jf/(jf+fc) is inverted by multiplying each
+    harmonic by (1 + fc/(jf)).  Bin 0 is genuinely lost -- no amount of
+    pre-emphasis restores true DC through a capacitor -- but the image does not
+    need DC, only the harmonics.
+
+    max_boost caps the low-frequency gain so a badly mismatched corner cannot
+    blow the amplitude up; the result is renormalised to `level` afterwards, so
+    the trade shows up as reduced headroom rather than clipping.
+    """
+    frame = np.asarray(frame, dtype=np.float64)
+    n = len(frame)
+    if not corner_hz or corner_hz <= 0 or n < 4:
+        return frame.astype(np.float32)
+    f = np.fft.rfftfreq(n, d=1.0 / samplerate)
+    corr = np.ones(len(f), dtype=complex)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        corr[1:] = 1.0 + corner_hz / (1j * f[1:])
+    mag = np.abs(corr)
+    over = mag > max_boost
+    corr[over] = corr[over] / mag[over] * max_boost
+    corr[0] = 0.0                       # DC cannot pass; do not try
+
+    out = np.empty_like(frame)
+    for c in range(frame.shape[1]):
+        out[:, c] = np.fft.irfft(np.fft.rfft(frame[:, c]) * corr, n=n)
+    peak = np.abs(out).max()
+    if peak > 0:
+        out *= level / peak
+    return out.astype(np.float32)
+
+
 class BufferedSource:
     """
     Run a sample generator on a worker thread, feeding a ring buffer that the
@@ -404,7 +453,7 @@ class Scope:
 
     def __init__(self, device=None, samplerate=None, fps=FPS, samples=None,
                  invert_y=True, swap_xy=False, source=None,
-                 lowpass_hz=None, lowpass_taper=0.0):
+                 lowpass_hz=None, lowpass_taper=0.0, blocksize=512):
         """
         samples : path length per trace -- the REAL parameter.  Refresh is not
                   set independently; it falls out as rate/samples, because the
@@ -433,9 +482,16 @@ class Scope:
         self.frames_drawn = 0     # complete traces emitted
         self.frames_dropped = 0   # indices superseded before they were drawn
         warn_if_builtin(device)
+        # An explicit blocksize matters: with latency="low" and blocksize
+        # unset, PortAudio picks the smallest buffer the device allows, so the
+        # audio thread wakes ~1500 times a second and takes the GIL each time.
+        # 512 frames is ~5 ms at 96 kHz -- far below the trace period, and a
+        # third the wakeups.
+        self.blocksize = int(blocksize or 0)
         self.stream = sd.OutputStream(
             samplerate=samplerate, channels=2, dtype="float32",
-            device=device, latency="low", callback=self._callback)
+            device=device, blocksize=self.blocksize,
+            latency="low", callback=self._callback)
 
     def _callback(self, outdata, frames, time_info, status):
         # Continuous source: content follows the clock in real time, with no

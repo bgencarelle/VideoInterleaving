@@ -192,12 +192,14 @@ def _box(img, rows, cols):
     ys = (np.arange(rows + 1) * h) // rows
     xs = (np.arange(cols + 1) * w) // cols
     ys[-1], xs[-1] = h, w
-    c = np.pad(img.cumsum(0).cumsum(1), ((1, 0), (1, 0)))
+    img = np.asarray(img, dtype=np.float32)
+    c = np.pad(img.cumsum(0, dtype=np.float32).cumsum(1, dtype=np.float32),
+               ((1, 0), (1, 0)))
     y0, y1, x0, x1 = ys[:-1], ys[1:], xs[:-1], xs[1:]
     total = (c[np.ix_(y1, x1)] - c[np.ix_(y0, x1)]
              - c[np.ix_(y1, x0)] + c[np.ix_(y0, x0)])
     area = np.outer(np.maximum(y1 - y0, 1), np.maximum(x1 - x0, 1))
-    return total / area
+    return (total / area).astype(np.float32)
 
 
 class SweepSource:
@@ -631,6 +633,7 @@ def raster_frame(main_lib, main_idx, float_lib, float_idx, n,
                  gamma=2.2, floor=0.012, level=0.9, rows=None, cols=None,
                  density=1.0, trim=0.02, stretch=True, bbox=None, autofit=True,
                  oversample=1, grid_rows=None, grid_cols=None, levels=None,
+                 lum=None,
                  fields=1, field=0, palindrome=False, reverse=False, start=None,
                  close=None, overscan=1.0):
     """
@@ -678,14 +681,33 @@ def raster_frame(main_lib, main_idx, float_lib, float_idx, n,
                 index must get `fields` traces or you see half a picture.
                 Buys refresh rate (less flicker), never resolution.
     """
+    if lum is not None:
+        # live source: skip the library composite entirely.  Lets any array
+        # drive the same vectorised whole-trace builder frame mode uses, which
+        # is far cheaper than generating row by row.
+        lum = np.asarray(lum, dtype=np.float32)
+        if lum.ndim == 3:
+            lum = lum.mean(axis=2)
+        if lum.max() > 1.5:
+            lum = lum / 255.0
+        return render_luma(lum, n, gamma=gamma, floor=floor, level=level,
+                           rows=rows, cols=cols, density=density, trim=trim,
+                           stretch=stretch, bbox=bbox, autofit=autofit,
+                           oversample=oversample, grid_rows=grid_rows,
+                           grid_cols=grid_cols, levels=levels, fields=fields,
+                           field=field, palindrome=palindrome, reverse=reverse,
+                           start=start, close=close, overscan=overscan)
+
     tm = main_lib.thumb(main_idx) if main_lib is not None and len(main_lib) else None
     tf = float_lib.thumb(float_idx) if float_lib is not None and len(float_lib) else None
     if tm is None and tf is None:
         return None
 
     def split(t):
-        return (t[..., 0].astype(np.float64) / 255.0,
-                t[..., 1].astype(np.float64) / 255.0)
+        # float32: the DAC is 16-bit and the tube resolves ~9, so float64 here
+        # is double the memory traffic for precision nothing can display
+        return (t[..., 0].astype(np.float32) * np.float32(1.0 / 255.0),
+                t[..., 1].astype(np.float32) * np.float32(1.0 / 255.0))
 
     if tf is not None and tm is not None and tf.shape[:2] == tm.shape[:2]:
         lf, af = split(tf)
@@ -698,11 +720,6 @@ def raster_frame(main_lib, main_idx, float_lib, float_idx, n,
         lm, am = split(tm)
         lum = lm * am
 
-    if bbox is not None:                       # crop to the subject so the
-        hh, ww = lum.shape                     # budget is spent on content
-        x0, y0, x1, y1 = bbox
-        lum = lum[int(y0 * hh):max(int(y1 * hh), int(y0 * hh) + 1),
-                  int(x0 * ww):max(int(x1 * ww), int(x0 * ww) + 1)]
     return render_luma(lum, n, gamma=gamma, floor=floor, level=level,
                        rows=rows, cols=cols, density=density, trim=trim,
                        stretch=stretch, bbox=bbox, autofit=autofit,
@@ -881,6 +898,9 @@ def render_luma(lum, n, gamma=2.2, floor=0.012, level=0.9, rows=None,
     # deliberately not mean-centred: the output AC-couples anyway, and
     # subtracting a content-dependent mean would double the brightness drift
     return np.ascontiguousarray(out, dtype=np.float32)
+
+
+
 
 
 def _inside(points, loops):

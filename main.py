@@ -99,6 +99,12 @@ def configure_runtime():
     parser.add_argument("--scope-density", type=float,
                         help="Default: settings.SCOPE_DENSITY")
     parser.add_argument("--scope-rows", type=int)
+    parser.add_argument("--scope-dc-comp", type=float, metavar="HZ",
+                        help="Cancel the output's AC coupling. Headphone jacks "
+                             "high-pass around 20-50 Hz and the vertical sweep "
+                             "runs at the trace rate, so the image funnels. Set "
+                             "this to the corner frequency; start at 30 and "
+                             "adjust until the sides are parallel.")
     parser.add_argument("--scope-lowpass", type=float, metavar="HZ",
                         help="Low-pass the XY output at this corner, to emulate "
                              "a softer DAC or a physical RC filter. Try 800-8000; "
@@ -316,6 +322,8 @@ def configure_runtime():
             settings.SCOPE_LIST_FROM_IMAGES = True
         if args.scope_lowpass:
             settings.SCOPE_LOWPASS = args.scope_lowpass
+        if args.scope_dc_comp:
+            settings.SCOPE_DC_COMP = args.scope_dc_comp
         if args.scope_oversample:
             settings.SCOPE_OVERSAMPLE = args.scope_oversample
         if args.scope_min_feature is not None:

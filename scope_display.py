@@ -29,7 +29,7 @@ import numpy as np
 
 import settings
 
-from scope_out import Scope, choose_device, BufferedSource
+from scope_out import Scope, choose_device, BufferedSource, precompensate_hpf
 from scope_bake import XYLibrary, merge, raster_frame, SweepSource, calibrate
 try:
     from scope_lowpass import lowpass_circular
@@ -219,6 +219,7 @@ def run_scope(clock_source=None):
     rows = getattr(settings, "SCOPE_ROWS", None)
     autofit = getattr(settings, "SCOPE_AUTOFIT", True)
     lowpass = getattr(settings, "SCOPE_LOWPASS", None)
+    dc_comp = getattr(settings, "SCOPE_DC_COMP", None)
     oversample = int(getattr(settings, "SCOPE_OVERSAMPLE", 1) or 1)
     sweep_mode = getattr(settings, "SCOPE_SWEEP", "alternate")
     mix_hz = getattr(settings, "SCOPE_MIX", None)
@@ -314,7 +315,8 @@ def run_scope(clock_source=None):
         # it small.
         source = BufferedSource(gen, blocksize=256,
                                 depth=getattr(settings, "SCOPE_BUFFER_BLOCKS", 6))
-    scope = Scope(fps=fps, samples=samples, device=dev, source=source)
+    scope = Scope(fps=fps, samples=samples, device=dev, source=source,
+                  blocksize=getattr(settings, "SCOPE_BLOCKSIZE", 512))
 
     # The baked thumbnail is a hard ceiling on scanlines; clamping silently
     # would look like the row setting being ignored.
@@ -371,6 +373,10 @@ def run_scope(clock_source=None):
         print(f"[SCOPE] mix duty {mix_duty:.2f} "
               f"({mix_duty * mix_hz:.0f} raster + {(1 - mix_duty) * mix_hz:.0f} "
               f"vector passes/sec)")
+    if dc_comp:
+        print(f"[SCOPE] AC-coupling pre-compensation at {dc_comp:.0f} Hz "
+              "(restores shape; costs amplitude, make it up on the scope's "
+              "volts/div)")
     if lowpass:
         print(f"[SCOPE] low-pass {lowpass:.0f} Hz in the output path "
               "(emulating a softer DAC / RC filter)")
@@ -494,11 +500,11 @@ def run_scope(clock_source=None):
                     last_push = now
                     _emit(scope, ml, fl, index, frame_raster, sweep, sweep_mode,
                           gamma, trim, density, rows, min_feature, autofit,
-                          lowpass, oversample, cal)
+                          lowpass, oversample, cal, dc_comp)
                 else:
                     _emit(scope, ml, fl, index, use_raster, sweep, sweep_mode,
                           gamma, trim, density, rows, min_feature, autofit,
-                          lowpass, oversample, cal)
+                          lowpass, oversample, cal, dc_comp)
                 prev_key = key
 
             if now - last_report >= 60.0:
@@ -521,7 +527,7 @@ def run_scope(clock_source=None):
 
 def _emit(scope, ml, fl, index, as_raster, sweep, sweep_mode,
           gamma, trim, density, rows, min_feature, autofit=True, lowpass=None,
-          oversample=1, cal=None):
+          oversample=1, cal=None, dc_comp=None, samplerate=48000):
     n = scope.samples_per_frame
     if as_raster:
         frame = raster_frame(
@@ -538,6 +544,8 @@ def _emit(scope, ml, fl, index, as_raster, sweep, sweep_mode,
                 sweep["end"] = frame[-1]
             if lowpass and lowpass_circular is not None:
                 frame = lowpass_circular(frame, lowpass, scope.samplerate)
+            if dc_comp:
+                frame = precompensate_hpf(frame, dc_comp, scope.samplerate)
             scope.show_frame(frame)
     else:
         # empty -> safe idle circle, never a parked dot
