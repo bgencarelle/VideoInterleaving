@@ -325,6 +325,14 @@ def precompensate_hpf(frame, corner_hz, samplerate, max_boost=8.0, level=LEVEL):
     pre-emphasis restores true DC through a capacitor -- but the image does not
     need DC, only the harmonics.
 
+    ONLY USE THIS IF YOU CAN SEE THE DISTORTION.  A virtual device (BlackHole,
+    a loopback, an interface's digital output) has no coupling capacitor, and
+    much of this correction is a PHASE shift -- at the fundamental it rotates
+    the vertical sweep 45 degrees against the horizontal.  On a path that needs
+    it, that cancels; on a path that does not, it shears the picture.  Run
+    `python scope_out.py --calibrate` first and leave this off if the test
+    square is already square.
+
     max_boost caps the low-frequency gain so a badly mismatched corner cannot
     blow the amplitude up; the result is renormalised to `level` afterwards, so
     the trade shows up as reduced headroom rather than clipping.
@@ -557,24 +565,72 @@ class Scope:
         self.stream.close()
 
 
+def calibration_frame(n, level=LEVEL):
+    """A square with a centre cross and corner ticks.
+
+    Deliberately a SQUARE and not a picture: AC coupling shows up as the
+    vertical sides splaying into a funnel and the horizontal sides bowing,
+    which is obvious on a known shape and easy to miss on a face.
+    """
+    s = 0.75 * level
+    box = np.array([[-s, -s], [s, -s], [s, s], [-s, s], [-s, -s]])
+    cross_h = np.array([[-s * 0.25, 0.0], [s * 0.25, 0.0]])
+    cross_v = np.array([[0.0, -s * 0.25], [0.0, s * 0.25]])
+    return rasterize([box, cross_h, cross_v], n)
+
+
 if __name__ == "__main__":
+    import argparse
     import math
     import time
 
-    th = np.linspace(0, 2 * np.pi, 128, endpoint=False)
-    circle = np.stack([0.6 * np.cos(th), 0.6 * np.sin(th)], axis=1)
-    circle = np.vstack([circle, circle[:1]])
-    s = 0.35
-    square = np.array([[-s, -s], [s, -s], [s, s], [-s, s], [-s, -s]])
+    ap = argparse.ArgumentParser(
+        description="Scope output bench. Draws a test pattern so you can set "
+                    "up the physical chain before any content is involved.")
+    ap.add_argument("--calibrate", action="store_true",
+                    help="draw a square instead of the spinning demo, for "
+                         "checking AC-coupling distortion")
+    ap.add_argument("--dc-comp", type=float, metavar="HZ",
+                    help="AC-coupling pre-compensation to try. Leave unset "
+                         "first: if the square is square, your output is DC "
+                         "coupled and this would only distort it.")
+    ap.add_argument("--fps", type=int, default=FPS)
+    ap.add_argument("--device")
+    ap.add_argument("--ask", action="store_true")
+    args = ap.parse_args()
 
-    with Scope() as scope:
+    scope = Scope(fps=args.fps,
+                  device=choose_device(ask=args.ask, device=args.device))
+    n = scope.samples_per_frame
+    print(f"[BENCH] {n} samples/trace @ {scope.samplerate} Hz "
+          f"({args.fps} traces/sec)")
+    if args.calibrate:
+        print("[BENCH] square + centre cross.")
+        print("        Sides parallel and corners at 90 deg -> DC coupled, "
+              "leave --dc-comp off.")
+        print("        Sides splayed into a funnel           -> AC coupled, "
+              "raise --dc-comp until they are parallel.")
+        if args.dc_comp:
+            print(f"[BENCH] pre-compensating at {args.dc_comp:g} Hz")
+
+    with scope:
         t0 = time.time()
         try:
             while True:
-                a = time.time() - t0
-                c, sn = math.cos(a), math.sin(a)
-                rot = square @ np.array([[c, -sn], [sn, c]])
-                scope.show([circle, rot])
+                if args.calibrate:
+                    frame = calibration_frame(n)
+                    if args.dc_comp:
+                        frame = precompensate_hpf(frame, args.dc_comp,
+                                                  scope.samplerate)
+                    scope.show_frame(frame)
+                else:
+                    a = time.time() - t0
+                    th = np.linspace(0, 2 * np.pi, 96, endpoint=False)
+                    circle = np.stack([0.6 * np.cos(th), 0.6 * np.sin(th)], 1)
+                    circle = np.vstack([circle, circle[:1]])
+                    sq = 0.35 * np.array([[-1, -1], [1, -1], [1, 1], [-1, 1], [-1, -1]])
+                    c, sn = math.cos(a), math.sin(a)
+                    scope.show([circle, sq @ np.array([[c, -sn], [sn, c]])])
                 time.sleep(1 / 30)
         except KeyboardInterrupt:
             pass
