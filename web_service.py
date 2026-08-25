@@ -203,6 +203,34 @@ class RobustHandlerMixin:
             print(f"⚠️ [Web Error] {e}", file=sys.stderr)
 
 
+def _scope_size(path, default=384):
+    """?size=N, clamped. 384 is ~2.8 ms a frame; 700 is ~14 ms."""
+    try:
+        q = parse_qs(urlparse(path).query)
+        return max(128, min(768, int(q.get("size", [default])[0])))
+    except Exception:
+        return default
+
+
+def _scope_jpeg(size, pts=None, quality=70):
+    """Render the parked trace to JPEG bytes, or None if there is nothing."""
+    try:
+        import cv2
+        from scope_out import Scope
+        from scope_bake import preview_frame
+        if pts is None:
+            Scope.want_tap(3.0)
+            _, pts = Scope.read_tap()
+        if pts is None:
+            return None
+        img = preview_frame(pts, size=size)
+        ok, buf = cv2.imencode(".jpg", img[:, :, ::-1],
+                               [cv2.IMWRITE_JPEG_QUALITY, quality])
+        return buf.tobytes() if ok else None
+    except Exception:
+        return None
+
+
 class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
     # Short timeout to prevent Slow Loris attacks on control pages
     timeout = 5
@@ -223,6 +251,21 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps(monitor_data).encode('utf-8'))
+
+        elif self.path.startswith("/scope/stream.mjpg"):
+            self._scope_mjpeg()
+
+        elif self.path.startswith("/scope/frame.jpg"):
+            # Single still, for anything that will not hold a connection open.
+            blob = _scope_jpeg(_scope_size(self.path))
+            if blob is None:
+                self.send_response(204); self.end_headers(); return
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(blob)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(blob)
 
         elif self.path == "/log":
             try:
@@ -281,6 +324,64 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
 
         else:
             self.send_error(404)
+
+    def _scope_mjpeg(self):
+        """multipart/x-mixed-replace, same shape as StreamHandler.
+
+        Rendering runs HERE, on the request thread, not in the audio path.  A
+        slow client or a heavy size setting therefore costs frames on the
+        preview and nothing at all on the trace deadline.
+        """
+        size = _scope_size(self.path)
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type",
+                             "multipart/x-mixed-replace; boundary=frame")
+            self.send_header("Cache-Control",
+                             "no-store, no-cache, must-revalidate, max-age=0")
+            self.send_header("Pragma", "no-cache")
+            self.end_headers()
+        except (OSError, AttributeError):
+            return
+
+        last_seq = -1
+        idle = 0.0
+        try:
+            from scope_out import Scope
+        except Exception:
+            return
+        try:
+            while True:
+                Scope.want_tap(3.0)          # holding the connection IS the ask
+                seq, pts = Scope.read_tap()
+                if pts is None or seq == last_seq:
+                    time.sleep(0.02)
+                    idle += 0.02
+                    if idle > 30.0:          # nothing is producing; let go
+                        return
+                    continue
+                idle = 0.0
+                last_seq = seq
+                blob = _scope_jpeg(size, pts)
+                if blob is None:
+                    continue
+                try:
+                    self.wfile.write(HEADER_BOUNDARY)
+                    self.wfile.write(HEADER_CTYPE_JPEG)
+                    self.wfile.write(blob)
+                    self.wfile.write(HEADER_NEWLINE)
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError,
+                        ConnectionAbortedError, OSError):
+                    return
+                # Cap the preview well under the trace rate. The picture only
+                # changes at IPS anyway, and this is the CPU knob.
+                time.sleep(1.0 / max(getattr(settings, "SCOPE_PREVIEW_FPS", 12), 1))
+        except (BrokenPipeError, ConnectionResetError,
+                ConnectionAbortedError, socket.timeout, OSError):
+            return
+        except Exception as e:
+            print(f"[Scope preview] {e}", file=sys.stderr)
 
     def do_POST(self):
         """Control endpoints.

@@ -66,11 +66,42 @@
     .status-message.error { color:#f00; background:#330000; }
     .current-dims { color:#0f0; font-weight:bold; margin:0.5em 0; }
     .warn { color:#fa0; }
+    .scope-wrap { margin:1em 0; }
+    #scope-img {
+      background:#000;
+      border:1px solid #333;
+      max-width:100%;
+      display:block;
+    }
+    .scope-meta { color:#888; margin-top:0.5em; font-size:0.9em; }
+    .scope-meta label { color:#0f0; margin-right:1em; cursor:pointer; }
   </style>
 </head>
 <body>
   <h1>Interleaving Project Scope Monitor</h1>
   <div><a href="/">&larr; main monitor</a> &nbsp;|&nbsp; <a href="/log">log</a></div>
+
+  <h2 class="section">Output</h2>
+  <!-- Live preview of the trace the beam is drawing. Mirrors the phosphor
+       model in test_scope_pair.py's render_trace(): additive blending so
+       overlapping and slow-moving beam positions accumulate brightness, which
+       is what makes dwell read as tone, plus the same green tint and a decay
+       between frames standing in for phosphor persistence. -->
+  <div class="scope-wrap">
+    <img id="scope-img" alt="scope output" width="384" height="384">
+    <div class="scope-meta">
+      <label><input type="checkbox" id="preview-on" checked> live preview</label>
+      <label>size
+        <select id="preview-size">
+          <option value="256">256</option>
+          <option value="384" selected>384</option>
+          <option value="512">512</option>
+          <option value="700">700</option>
+        </select>
+      </label>
+      <span id="preview-note"></span>
+    </div>
+  </div>
 
   <h2 class="section">Scope</h2>
   <div id="scope_data">Loading&hellip;</div>
@@ -271,6 +302,52 @@
       el.className = "status-message " + (isError ? "error" : "success");
       el.style.display = "block";
     }
+
+    // ---------------------------------------------------------------- preview
+    // MJPEG, same transport as the main web mode. The server runs
+    // scope_bake.preview_frame() -- the phosphor model test_scope_pair.py
+    // already used -- and sends JPEGs.
+    //
+    // The earlier version sent raw points and drew a polyline here, which
+    // could not work: dwell IS the brightness, and a stroked path gives every
+    // segment the same brightness however many samples were on it. What came
+    // out was an outline of the scanlines with the retrace diagonals as the
+    // brightest thing on screen. Splatting each sample so they accumulate is
+    // the whole algorithm, and it belongs where the samples are.
+    //
+    // Holding the connection open IS the request to capture. Close the page
+    // and the tap switches itself off within about three seconds.
+    const img = document.getElementById("scope-img");
+    const onBox = document.getElementById("preview-on");
+    const sizeSel = document.getElementById("preview-size");
+
+    function note(t) { document.getElementById("preview-note").textContent = t; }
+
+    function startPreview() {
+      const s = sizeSel.value;
+      img.width = img.height = Number(s);
+      // cache-buster: without it a reconnect can be served the dead stream
+      img.src = "scope/stream.mjpg?size=" + s + "&t=" + Date.now();
+      note("");
+    }
+
+    function stopPreview() {
+      img.removeAttribute("src");
+      note("preview off");
+    }
+
+    onBox.onchange = () => onBox.checked ? startPreview() : stopPreview();
+    sizeSel.onchange = () => { if (onBox.checked) startPreview(); };
+    img.onerror = () => note("preview unavailable");
+
+    // A hidden tab keeps an MJPEG connection open and the tap alive, so drop
+    // it and pick it up again on return.
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) { img.removeAttribute("src"); }
+      else if (onBox.checked) { startPreview(); }
+    });
+
+    startPreview();
 
     function poll() {
       // Relative "data", matching HTML_TEMPLATE, so the page works unchanged

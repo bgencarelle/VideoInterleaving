@@ -522,6 +522,46 @@ def apply_overscan(P, W, travel, overscan, level=0.9, travel_frac=0.12):
     return np.vstack(new_P), np.asarray(new_W, dtype=np.float64)
 
 
+def preview_frame(samples, size=384, spot=1.2, exposure=1.0, budget=20000):
+    """Simulated scope screen: splat beam positions, blur, tonemap, tint green.
+
+    THE SPLAT IS THE POINT.  Dwell is brightness -- render_luma spends more
+    SAMPLES on brighter cells, it does not vary any intensity value.  So the
+    image only appears if each sample deposits energy independently and they
+    accumulate.  Drawing the path as a connected polyline instead gives every
+    segment the same brightness regardless of how many samples were on it,
+    which throws the whole picture away and leaves an outline of the rows.
+
+    Canonical implementation.  test_scope_pair.render_trace() delegates here
+    rather than keeping a second copy -- SweepSource and raster_frame already
+    demonstrated what happens when one algorithm has two implementations.
+    """
+    import cv2
+    samples = np.asarray(samples, dtype=np.float32)
+    n = len(samples)
+    if n == 0:
+        return np.zeros((size, size, 3), np.uint8)
+    # Interpolate up when the path is short, so consecutive samples land on
+    # adjacent pixels instead of leaving the line dotted.
+    k = int(np.clip(budget // max(n, 1), 1, 24))
+    if k > 1:
+        t = np.arange(n)
+        ti = np.linspace(0, n - 1, n * k)
+        x = np.interp(ti, t, samples[:, 0])
+        y = np.interp(ti, t, samples[:, 1])
+    else:
+        x, y = samples[:, 0], samples[:, 1]
+    px = np.clip(((x + 1) * 0.5 * (size - 1)).astype(np.int32), 0, size - 1)
+    py = np.clip(((1 - y) * 0.5 * (size - 1)).astype(np.int32), 0, size - 1)
+    acc = np.bincount(py * size + px, minlength=size * size).reshape(size, size)
+    acc = cv2.GaussianBlur(acc.astype(np.float32), (0, 0), spot)
+    lit = acc[acc > 0]
+    gain = exposure * 2.5 / max(float(np.percentile(lit, 75)), 1e-6) if lit.size else 1.0
+    v = 1.0 - np.exp(-acc * gain)
+    img = np.stack([v * 0.35, v * 1.0, v * 0.25], axis=-1) + 0.03
+    return (np.clip(img, 0, 1) * 255).astype(np.uint8)
+
+
 def calibrate(main_libs, float_libs, n_samples, density=1.0, trim=0.02,
               rows=None, cols=None, bbox=None, frames=24, fields=1):
     """

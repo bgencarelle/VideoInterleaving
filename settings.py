@@ -87,6 +87,10 @@ HEADLESS_RES = (480, 600)   # Resolution for the virtual screen
 # Scope refresh defaults to IPS: one trace per index maximises samples per
 # trace, which is the entire resolution budget (samples = rate / fps).
 SCOPE_MODE = False
+SCOPE_PREVIEW_FPS = 12    # /scope/stream.mjpg frame rate. THE cpu knob for
+                          # the web preview, together with ?size=. Rendering
+                          # runs on the request thread, so this never costs the
+                          # trace deadline -- but on a Pi keep it low.
 SCOPE_DEVICE = None       # audio output: name FRAGMENT ("Scarlett", "hw:1")
                           # or index. Prefer the name -- PortAudio indices
                           # reshuffle when hardware is plugged or unplugged, so

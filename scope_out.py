@@ -11,6 +11,7 @@ Scope setup: XY / "Format XY" mode, both inputs DC-coupled if available,
 import re
 import sys
 import threading
+import time
 
 try:
     import settings as settings_mod
@@ -541,6 +542,49 @@ class Scope:
         """
         return self._pending is None
 
+    # --- optional preview tap -------------------------------------------
+    # Every render path lands in show_frame(): show() rasterises then calls it,
+    # and raster mode calls it directly.  So one hook here catches raster,
+    # vector, mix and the lowpass variants without touching any of them.
+    #
+    # Gated on demand.  _tap_until is pushed forward by each /scope/trace
+    # request, so with nobody watching the page this costs one float compare
+    # per trace and nothing else.  An installation running unattended for weeks
+    # must not pay for a preview no one is looking at.
+    _tap_until = 0.0
+    _tap = {"seq": 0, "data": None}
+    _tap_lock = threading.Lock()
+
+    @classmethod
+    def want_tap(cls, seconds=3.0):
+        """Ask for preview frames for the next few seconds. Returns nothing."""
+        cls._tap_until = time.monotonic() + seconds
+
+    @classmethod
+    def read_tap(cls):
+        """(seq, (n,2) float32 array) of the latest trace, or (0, None)."""
+        with cls._tap_lock:
+            return cls._tap["seq"], cls._tap["data"]
+
+    def _capture(self, frame):
+        """Park a copy of the trace. Deliberately does NO rendering.
+
+        Every sample is kept and nothing is decimated, because dwell is the
+        image: brightness comes from how many samples land in a cell, so
+        dropping every other one discards exactly the information the picture
+        is made of.  A 3200x2 float32 copy is 25 KB and a few microseconds.
+
+        Rendering happens on the HTTP thread instead, so the cost lands on
+        whoever is watching rather than on the loop that has to hit a trace
+        deadline every 16 ms.
+        """
+        if len(frame) == 0:
+            return
+        pts = np.array(frame, dtype=np.float32, copy=True) / max(LEVEL, 1e-9)
+        with Scope._tap_lock:
+            Scope._tap["seq"] += 1
+            Scope._tap["data"] = pts
+
     def show_frame(self, frame):
         """Queue a raw (n, 2) sample frame for the next frame boundary.
 
@@ -551,6 +595,11 @@ class Scope:
         """
         if self._pending is not None:
             self.frames_dropped += 1
+        if Scope._tap_until > time.monotonic():
+            try:
+                self._capture(frame)
+            except Exception:
+                pass                       # a preview must never break audio
         f = np.ascontiguousarray(frame, dtype=np.float32)
         if self.lowpass_hz:
             f = lowpass_frame(f, self.samplerate, self.lowpass_hz,

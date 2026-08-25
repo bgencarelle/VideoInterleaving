@@ -113,27 +113,15 @@ def advance(index, direction, frames, pingpong=True):
 # ---------------------------------------------------------------- phosphor sim
 
 def render_trace(samples, size=700, spot=1.2, exposure=1.0, budget=20000):
-    """Simulated scope screen: splat beam positions (dwell = brightness),
-    blur to a spot, tonemap, tint green."""
-    import cv2
-    n = len(samples)
-    k = int(np.clip(budget // max(n, 1), 1, 24))
-    if k > 1:
-        t = np.arange(n)
-        ti = np.linspace(0, n - 1, n * k)
-        x = np.interp(ti, t, samples[:, 0])
-        y = np.interp(ti, t, samples[:, 1])
-    else:
-        x, y = samples[:, 0], samples[:, 1]
-    px = np.clip(((x + 1) * 0.5 * (size - 1)).astype(np.int32), 0, size - 1)
-    py = np.clip(((1 - y) * 0.5 * (size - 1)).astype(np.int32), 0, size - 1)
-    acc = np.bincount(py * size + px, minlength=size * size).reshape(size, size)
-    acc = cv2.GaussianBlur(acc.astype(np.float32), (0, 0), spot)
-    lit = acc[acc > 0]
-    gain = exposure * 2.5 / max(float(np.percentile(lit, 75)), 1e-6) if lit.size else 1.0
-    v = 1.0 - np.exp(-acc * gain)
-    img = np.stack([v * 0.35, v * 1.0, v * 0.25], axis=-1) + 0.03
-    return (np.clip(img, 0, 1) * 255).astype(np.uint8)
+    """Delegates to scope_bake.preview_frame -- the canonical phosphor model.
+
+    Was a second copy of that algorithm. The web preview needs the same one,
+    and two implementations of one algorithm is the mistake SweepSource and
+    raster_frame already made.
+    """
+    from scope_bake import preview_frame
+    return preview_frame(samples, size=size, spot=spot,
+                         exposure=exposure, budget=budget)
 
 
 def annotate(img, text):
