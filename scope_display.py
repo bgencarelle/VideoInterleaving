@@ -30,8 +30,9 @@ import numpy as np
 
 import settings
 
-from scope_out import Scope, choose_device, BufferedSource
-from scope_bake import XYLibrary, merge, raster_frame, SweepSource, calibrate
+from scope_out import Scope, choose_device, BufferedSource, precompensate_hpf
+from scope_bake import (XYLibrary, merge, SweepSource, calibrate,
+                        composite_luma, TraceEmitter)
 try:
     from scope_lowpass import lowpass_circular
 except Exception:            # optional tool; absence must not break the mode
@@ -313,6 +314,8 @@ def run_scope(clock_source=None):
     oversample = int(getattr(settings, "SCOPE_OVERSAMPLE", 1) or 1)
     sweep_mode = getattr(settings, "SCOPE_SWEEP", "alternate")
     fields = max(1, int(getattr(settings, "SCOPE_FIELDS", 1) or 1))
+    dc_comp = getattr(settings, "SCOPE_DC_COMP", None)
+    border = float(getattr(settings, "SCOPE_BORDER", 0.0) or 0.0)
     mix_hz = getattr(settings, "SCOPE_MIX", None)
     mix_duty = min(1.0, max(0.0, getattr(settings, "SCOPE_MIX_DUTY", 0.5)))
     device_spec = getattr(settings, "SCOPE_DEVICE_SPEC", None)
@@ -525,6 +528,10 @@ def run_scope(clock_source=None):
           f"{scope.samples_per_frame} samples/trace @ {scope.samplerate} Hz "
           f"({_trace_hz:.0f} passes/sec) | "
           f"latency ~{scope.stream.latency * 1000:.0f} ms")
+    if dc_comp:
+        print(f"[SCOPE] DC compensation at {dc_comp:.0f} Hz -- flat regions "
+              "hold instead of sagging, at the cost of amplitude. Raise the "
+              "scope's gain to compensate.")
     if fields > 1:
         print(f"[SCOPE] refresh {_trace_hz:.0f} Hz, picture "
               f"{_trace_hz / fields:.0f} Hz "
@@ -562,15 +569,20 @@ def run_scope(clock_source=None):
             ml0 = next((l for l in main_libs if l is not None), None)
             fl0 = next((l for l in float_libs if l is not None), None)
             if ml0 is not None:
+                # Measure the REAL path. A probe that times something the
+                # program never runs is worse than no probe.
+                _pe = TraceEmitter(
+                    scope.samplerate, scope.samples_per_frame,
+                    gamma=gamma, trim=trim, density=density, rows=rows,
+                    fields=fields, border=border, oversample=oversample,
+                    sweep=sweep_mode, autofit=autofit,
+                    grid=((cal["grid_rows"], cal["grid_cols"]) if cal else None),
+                    levels=(cal.get("levels") if cal else None))
                 for _ in range(3):
-                    raster_frame(ml0, 0, fl0, 0, scope.samples_per_frame,
-                                 gamma=gamma, trim=trim, density=density,
-                                 rows=rows, close=False, **cal)
+                    _pe.emit(composite_luma(ml0, 0, fl0, 0))
                 _t0 = _t.perf_counter()
                 for _k in range(10):
-                    raster_frame(ml0, _k, fl0, _k, scope.samples_per_frame,
-                                 gamma=gamma, trim=trim, density=density,
-                                 rows=rows, close=False, **cal)
+                    _pe.emit(composite_luma(ml0, _k, fl0, _k))
                 _ms = (_t.perf_counter() - _t0) / 10 * 1000.0
                 _budget = 1000.0 / max(scope.samplerate / scope.samples_per_frame, 1)
                 print(f"[SCOPE] {_ms:.1f} ms per trace, budget {_budget:.1f} ms "
@@ -644,6 +656,17 @@ def run_scope(clock_source=None):
     prev_index = -1
     prev_key = None
     duty_acc = 0.0
+    # One emitter, shared with scope_screen.py. Tuning and sweep state live on
+    # the object so neither caller keeps its own copy -- that divergence is
+    # what test_scope_parity.py exists to catch.
+    emitter = TraceEmitter(
+        scope.samplerate, scope.samples_per_frame,
+        gamma=gamma, trim=trim, density=density, rows=rows, fields=fields,
+        border=border, oversample=oversample, sweep=sweep_mode,
+        dc_comp=dc_comp, autofit=autofit,
+        grid=((cal["grid_rows"], cal["grid_cols"]) if cal else None),
+        levels=(cal.get("levels") if cal else None))
+
     field_i = 0                     # free-running; survives a slipped deadline
     mix_field_i = 0                 # advances only on the RASTER traces of mix
     sweep = {"rev": False, "end": None}
@@ -679,6 +702,18 @@ def run_scope(clock_source=None):
                     scope, cal, sweep = _swap_device(
                         scope, _want, source, fps, samples,
                         main_libs, float_libs, density, trim, rows, fields)
+                    # The emitter owns the chain and the geometry, so it has to
+                    # be rebuilt, not just reset: a new device can mean a new
+                    # sample rate, which changes samples_per_frame and with it
+                    # the grid. Reusing the old one would keep drawing to the
+                    # previous device's budget.
+                    emitter = TraceEmitter(
+                        scope.samplerate, scope.samples_per_frame,
+                        gamma=gamma, trim=trim, density=density, rows=rows,
+                        fields=fields, border=border, oversample=oversample,
+                        sweep=sweep_mode, dc_comp=dc_comp, autofit=autofit,
+                        grid=((cal["grid_rows"], cal["grid_cols"]) if cal else None),
+                        levels=(cal.get("levels") if cal else None))
                     with _device_lock:
                         _device_request["message"] = f"now on {_dev_name_of(scope)}"
                     _dev_name = _dev_name_of(scope)
@@ -738,6 +773,19 @@ def run_scope(clock_source=None):
                     prev_key = None          # force a redraw with the new values
                 gamma = live_state["gamma"]; lowpass = live_state["lowpass"]
                 sweep_mode = live_state["sweep"]
+                # Push every live value onto the emitter. It holds the tuning
+                # now, so a key that only updated a local would silently stop
+                # working -- which is the same class of bug as the two paths
+                # drifting, just inside one file.
+                emitter.gamma = gamma
+                emitter.trim = trim
+                emitter.density = density
+                emitter.rows = rows
+                emitter.autofit = autofit
+                emitter.sweep_mode = sweep_mode
+                if cal:
+                    emitter.grid = (cal["grid_rows"], cal["grid_cols"])
+                    emitter.levels = cal.get("levels")
 
             index, _ = update_index(png_paths_len, PINGPONG)
             if index != prev_index:
@@ -772,7 +820,7 @@ def run_scope(clock_source=None):
                         duty_acc -= 1.0
                     _emit(scope, ml, fl, index, frame_raster, sweep, sweep_mode,
                           gamma, trim, density, rows, min_feature, autofit,
-                          lowpass, oversample, cal,
+                          lowpass, oversample, cal, dc_comp=dc_comp, border=border, emitter=emitter,
                           field=mix_field_i % fields, fields=fields)
                     if frame_raster:
                         mix_field_i += 1
@@ -794,7 +842,7 @@ def run_scope(clock_source=None):
                 if scope.ready():
                     _emit(scope, ml, fl, index, True, sweep, sweep_mode,
                           gamma, trim, density, rows, min_feature, autofit,
-                          lowpass, oversample, cal,
+                          lowpass, oversample, cal, dc_comp=dc_comp, border=border, emitter=emitter,
                           field=field_i % fields, fields=fields)
                     field_i += 1
                     prev_key = key
@@ -802,7 +850,7 @@ def run_scope(clock_source=None):
                 if key != prev_key:
                     _emit(scope, ml, fl, index, False, sweep, sweep_mode,
                           gamma, trim, density, rows, min_feature, autofit,
-                          lowpass, oversample, cal)
+                          lowpass, oversample, cal, dc_comp=dc_comp, border=border, emitter=emitter)
                     prev_key = key
 
             if monitor is not None and now - last_monitor >= 1.0:
@@ -861,22 +909,19 @@ def run_scope(clock_source=None):
 
 def _emit(scope, ml, fl, index, as_raster, sweep, sweep_mode,
           gamma, trim, density, rows, min_feature, autofit=True, lowpass=None,
-          oversample=1, cal=None, field=0, fields=1):
+          oversample=1, cal=None, field=0, fields=1, dc_comp=None,
+          border=0.0, emitter=None):
     n = scope.samples_per_frame
     if as_raster:
-        frame = raster_frame(
-            ml, index, fl, index, n,
-            gamma=gamma, trim=trim, density=density, rows=rows,
-            autofit=autofit, oversample=oversample, **(cal or {}),
-            fields=fields, field=field,
-            palindrome=(sweep_mode == "palindrome"),
-            reverse=(sweep_mode == "alternate" and sweep["rev"]),
-            start=sweep["end"] if sweep_mode == "alternate" else None,
-            close=(sweep_mode == "retrace"))
+        # Composite here, sweep in the emitter. Everything about HOW the trace
+        # is drawn -- grid, fields, chaining, border, dc-comp -- lives on the
+        # emitter, which scope_screen.py shares. Nothing about it is restated
+        # in this file, so there is no second parameter list to drift.
+        frame = emitter.emit(composite_luma(ml, index, fl, index))
         if frame is not None:
-            if sweep_mode == "alternate":
-                sweep["rev"] = not sweep["rev"]
-                sweep["end"] = frame[-1]
+            # mirrored back for the live-controls print and anything else
+            # reading sweep state; the emitter owns the real copy
+            sweep["rev"], sweep["end"] = emitter._rev, emitter._end
             if lowpass and lowpass_circular is not None:
                 frame = lowpass_circular(frame, lowpass, scope.samplerate)
             scope.show_frame(frame)

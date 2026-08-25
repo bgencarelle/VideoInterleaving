@@ -105,6 +105,20 @@ def configure_runtime():
     parser.add_argument("--scope-density", type=float,
                         help="Default: settings.SCOPE_DENSITY")
     parser.add_argument("--scope-rows", type=int)
+    parser.add_argument("--scope-border", type=float, metavar="F",
+                        help="Draw a fixed one-cell rectangle at the full "
+                             "extent every trace, spending F of the trace's "
+                             "samples on it (try 0.03). Without it the drawn "
+                             "extent is whatever the content occupies, so dark "
+                             "margins pull that side in and the picture skews "
+                             "and rescales as the subject changes. 0 = off.")
+    parser.add_argument("--scope-dc-comp", type=float, metavar="HZ",
+                        help="Pre-compensate the output's AC coupling at this "
+                             "corner frequency, so a DC-ish trace holds its "
+                             "shape instead of sagging. Start at 30. Costs "
+                             "amplitude: ~26%% at a 20 Hz corner. Both handoff "
+                             "documents already list this flag; until now it "
+                             "existed only in scope_screen.py as --dc-comp.")
     parser.add_argument("--scope-lowpass", type=float, metavar="HZ",
                         help="Low-pass the XY output at this corner, to emulate "
                              "a softer DAC or a physical RC filter. Try 800-8000; "
@@ -314,6 +328,10 @@ def configure_runtime():
             settings.SCOPE_FPS = args.scope_fps
         if getattr(args, "scope_fields", None):
             settings.SCOPE_FIELDS = args.scope_fields
+        if getattr(args, "scope_dc_comp", None):
+            settings.SCOPE_DC_COMP = args.scope_dc_comp
+        if getattr(args, "scope_border", None) is not None:
+            settings.SCOPE_BORDER = args.scope_border
         if args.scope_samples:
             settings.SCOPE_SAMPLES = args.scope_samples
         if args.scope_trim is not None:

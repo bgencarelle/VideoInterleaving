@@ -87,6 +87,14 @@ HEADLESS_RES = (480, 600)   # Resolution for the virtual screen
 # Scope refresh defaults to IPS: one trace per index maximises samples per
 # trace, which is the entire resolution budget (samples = rate / fps).
 SCOPE_MODE = False
+SCOPE_BORDER = 0.0        # fraction of each trace spent drawing a fixed
+                          # rectangle at the full extent. Pins the framing so
+                          # the picture stops skewing as content changes.
+                          # 0.03 is about right; 0 = off.
+SCOPE_DC_COMP = None      # Hz. Cancel the output's AC coupling at this corner
+                          # so flat regions of a trace do not sag. Start at 30.
+                          # Costs amplitude (~26% at a 20 Hz corner, ~47% at
+                          # 50 Hz), so raise the scope gain to compensate.
 SCOPE_PREVIEW_FPS = 12    # /scope/stream.mjpg frame rate. THE cpu knob for
                           # the web preview, together with ?size=. Rendering
                           # runs on the request thread, so this never costs the

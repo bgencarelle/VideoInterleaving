@@ -35,9 +35,8 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from scope_bake import SweepSource, render_luma          # noqa: E402
-from scope_out import (Scope, BufferedSource, choose_device,  # noqa: E402
-                       precompensate_hpf)
+from scope_bake import SweepSource, plan_grid, TraceEmitter   # noqa: E402
+from scope_out import Scope, BufferedSource, choose_device  # noqa: E402
 
 
 # ---------------------------------------------------------------- sources
@@ -258,11 +257,18 @@ def _profile(args, grab):
     cap = (time.perf_counter() - t0) / 20 * 1000
 
     lum = np.asarray(inner(), dtype=np.float32)
+    # Time the REAL path, not a hand-rolled approximation of it -- a probe that
+    # measures something the program never runs is worse than no probe.
+    _probe_em = TraceEmitter(48000, n, gamma=args.gamma, trim=args.trim,
+                             density=args.density, rows=args.rows,
+                             fields=max(1, args.fields),
+                             border=getattr(args, "border", 0.0),
+                             oversample=getattr(args, "oversample", 1))
     for _ in range(3):
-        render_luma(lum, n, trim=args.trim, close=False)
+        _probe_em.emit(lum)
     t0 = time.perf_counter()
     for _ in range(30):
-        render_luma(lum, n, trim=args.trim, close=False)
+        _probe_em.emit(lum)
     build = (time.perf_counter() - t0) / 30 * 1000
 
     cap_hz = args.capture_fps
@@ -329,6 +335,17 @@ def main():
                     help="drop cells dimmer than this. Useful on dark content; "
                          "leave low for a full-frame source")
     ap.add_argument("--gamma", type=float, default=1.8)
+    ap.add_argument("--border", type=float, default=0.0, metavar="F",
+                    help="Fixed rectangle at the full extent, F of the trace's "
+                         "samples (try 0.03). Stops the framing moving with "
+                         "the content.")
+    ap.add_argument("--oversample", type=int, default=1, metavar="N",
+                    help="Anti-alias the path. ~5%% change on real content.")
+    ap.add_argument("--fields", type=int, default=1, metavar="N",
+                    help="Interlace: N=2 draws every other row per trace and "
+                         "alternates, so the beam repaints at N x the picture "
+                         "rate on the SAME grid. Refresh without paying "
+                         "resolution for it. Use --fps N x capture-fps.")
     ap.add_argument("--density", type=float, default=1.0)
     ap.add_argument("--rows", type=int, help="scanline count (default: auto)")
     ap.add_argument("--adapt", type=float, default=4.0, metavar="SEC",
@@ -413,6 +430,24 @@ def main():
             lv["hi"] += a * (hi_n - lv["hi"])
         return (lv["lo"], lv["hi"])
 
+    # --- fix the grid once -------------------------------------------------
+    # autofit re-derives rows/cols from the fraction of cells surviving trim.
+    # On live screen content that fraction moves whenever the picture does, so
+    # leaving autofit on per frame meant the grid resized under the image and
+    # every cell boundary re-quantized -- cells popping in and out. Same reason
+    # mode scope calls calibrate() at startup and holds the result.
+    #
+    # levels are handled separately above and are deliberately adaptive, but
+    # slowly (--adapt, in seconds). Geometry cannot be adaptive at all.
+    _probe = np.asarray(grab(), dtype=np.float32)
+    _grid_rows, _grid_cols = plan_grid(_probe, n, density=args.density,
+                                       trim=args.trim, rows=args.rows,
+                                       fields=max(1, args.fields))
+    print(f"[SCREEN] grid fixed at {_grid_cols}x{_grid_rows} "
+          f"({n * max(1, args.fields) / max(_grid_rows * _grid_cols, 1):.2f} "
+          f"samples/cell)"
+          + (f", interlace x{args.fields}" if args.fields > 1 else ""))
+
     if args.stream:
         gen = SweepSource(lum_fn=grab, samples_per_pass=n, gamma=args.gamma,
                           trim=args.trim, density=args.density, rows=args.rows,
@@ -424,19 +459,30 @@ def main():
     else:
         # Whole-trace build: one vectorised pass instead of ~40 tiny per-row
         # ones.  Measured ~1.6 ms per trace against ~12% of a core streaming.
-        sweep = {"rev": False, "end": None}
+        # One emitter, shared with mode scope. Tuning lives on the object, so
+        # a knob added there arrives here without anyone porting it.
+        emitter = TraceEmitter(
+            scope.samplerate, n,
+            gamma=args.gamma, trim=args.trim, density=args.density,
+            rows=args.rows, fields=max(1, args.fields),
+            border=getattr(args, "border", 0.0),
+            oversample=getattr(args, "oversample", 1),
+            sweep="alternate", dc_comp=args.dc_comp,
+            grid=(_grid_rows, _grid_cols))
 
         def push():
+            # Gate on the callback having taken the last frame. Without it a
+            # frame can be queued over an unconsumed one and dropped while
+            # sweep["end"] advances anyway -- so the next trace starts from a
+            # position the beam was never at, which with close=False is a
+            # full-screen jump nothing budgeted samples for: a bright flyback.
+            # It also guarantees interlaced fields arrive one per trace, in
+            # order, instead of one silently replacing the other.
+            if not scope.ready():
+                return
             lum = np.asarray(grab(), dtype=np.float32)
-            fr = render_luma(lum, n, gamma=args.gamma, trim=args.trim,
-                             density=args.density, rows=args.rows,
-                             levels=levels_for(lum), reverse=sweep["rev"],
-                             start=sweep["end"], close=False)
+            fr = emitter.emit(lum, levels=levels_for(lum))
             if fr is not None:
-                sweep["rev"] = not sweep["rev"]
-                sweep["end"] = fr[-1]
-                if args.dc_comp:
-                    fr = precompensate_hpf(fr, args.dc_comp, scope.samplerate)
                 scope.show_frame(fr)
 
         push()

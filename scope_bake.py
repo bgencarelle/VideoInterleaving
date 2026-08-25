@@ -522,15 +522,72 @@ def apply_overscan(P, W, travel, overscan, level=0.9, travel_frac=0.12):
     return np.vstack(new_P), np.asarray(new_W, dtype=np.float64)
 
 
-def preview_frame(samples, size=384, spot=1.2, exposure=1.0, budget=20000):
+def plan_grid(lum, n, density=1.0, trim=0.02, rows=None, cols=None,
+              aspect=None, fields=1, autofit=True):
+    """Decide the grid ONCE. Returns (rows, cols).
+
+    Extracted from render_luma so there is exactly one implementation of the
+    sizing rule.  scope_screen.py needs it to fix a grid at startup the way
+    calibrate() does for mode scope; before this it re-derived the grid on
+    every frame, which is the per-frame adaptation that shows as flicker.
+    """
+    lum = np.asarray(lum, dtype=np.float32)
+    if aspect is None:
+        aspect = lum.shape[0] / max(lum.shape[1], 1)
+    density = max(float(density), 0.25)
+    fields = max(1, int(fields))
+    cells = max(64.0, n * fields / density)
+    if rows and cols:
+        rows, cols = int(rows), int(cols)
+    elif rows:
+        rows = int(rows)
+        cols = max(8, int(cells / rows))
+    elif cols:
+        cols = int(cols)
+        rows = max(6, int(cells / cols))
+    else:
+        cols = max(8, int(np.sqrt(cells / max(aspect, 1e-6))))
+        rows = max(6, int(round(cols * aspect)))
+
+    if autofit and trim > 0:
+        probe = _box(lum, rows, cols)
+        lit0 = probe[probe > 0.01]
+        if lit0.size > 16:
+            lo0, hi0 = np.percentile(lit0, 2), np.percentile(lit0, 98)
+            if hi0 > lo0:
+                probe = np.clip((probe - lo0) / (hi0 - lo0), 0.0, 1.0)
+        frac = float((probe > trim).mean())
+        if 0.05 < frac < 0.95:
+            grow = min(1.0 / np.sqrt(frac), 2.5)
+            rows = max(6, min(int(round(rows * grow)), lum.shape[0]))
+            cols = max(8, min(int(round(cols * grow)), lum.shape[1]))
+    return int(rows), int(cols)
+
+
+def preview_frame(samples, size=384, spot=1.2, exposure=1.0, max_split=192):
     """Simulated scope screen: splat beam positions, blur, tonemap, tint green.
 
     THE SPLAT IS THE POINT.  Dwell is brightness -- render_luma spends more
     SAMPLES on brighter cells, it does not vary any intensity value.  So the
     image only appears if each sample deposits energy independently and they
     accumulate.  Drawing the path as a connected polyline instead gives every
-    segment the same brightness regardless of how many samples were on it,
-    which throws the whole picture away and leaves an outline of the rows.
+    segment the same brightness however many samples were on it, which throws
+    the picture away and leaves an outline of the rows with the retrace
+    diagonals as the brightest thing on screen.
+
+    Subdivision is per segment and measured in PIXELS.  One sample-time is one
+    unit of energy no matter how far the beam travelled during it, so a segment
+    covering d pixels gets ceil(d) splats of weight 1/ceil(d): total energy
+    stays 1, and energy per pixel comes out as 1/d.  That is the physics --
+    fast travel is faint, slow travel is bright -- and it is gapless.
+
+    The previous fixed interpolation (a constant count per segment, budget //
+    n, capped at 24) could not do this.  Constant subdivision means a long
+    segment gets the same few points as a short one, so at size 700 roughly a
+    fifth of segments were left with gaps of up to 19 px.  Travel strokes came
+    out as dotted lines rather than faint continuous ones, and the effect got
+    worse the larger the render, which is the opposite of what raising the
+    resolution is for.
 
     Canonical implementation.  test_scope_pair.render_trace() delegates here
     rather than keeping a second copy -- SweepSource and raster_frame already
@@ -538,22 +595,30 @@ def preview_frame(samples, size=384, spot=1.2, exposure=1.0, budget=20000):
     """
     import cv2
     samples = np.asarray(samples, dtype=np.float32)
-    n = len(samples)
-    if n == 0:
+    if len(samples) < 2:
         return np.zeros((size, size, 3), np.uint8)
-    # Interpolate up when the path is short, so consecutive samples land on
-    # adjacent pixels instead of leaving the line dotted.
-    k = int(np.clip(budget // max(n, 1), 1, 24))
-    if k > 1:
-        t = np.arange(n)
-        ti = np.linspace(0, n - 1, n * k)
-        x = np.interp(ti, t, samples[:, 0])
-        y = np.interp(ti, t, samples[:, 1])
-    else:
-        x, y = samples[:, 0], samples[:, 1]
-    px = np.clip(((x + 1) * 0.5 * (size - 1)).astype(np.int32), 0, size - 1)
-    py = np.clip(((1 - y) * 0.5 * (size - 1)).astype(np.int32), 0, size - 1)
-    acc = np.bincount(py * size + px, minlength=size * size).reshape(size, size)
+
+    px = (samples[:, 0] + 1.0) * 0.5 * (size - 1)
+    py = (1.0 - samples[:, 1]) * 0.5 * (size - 1)     # y up -> row down
+    x0, x1 = px[:-1], px[1:]
+    y0, y1 = py[:-1], py[1:]
+
+    # max_split bounds the cost: a single sample cannot cost more than this
+    # many splats however far the beam jumped.  Only a flyback gets near it.
+    d = np.hypot(x1 - x0, y1 - y0)
+    m = np.clip(np.ceil(d), 1, max_split).astype(np.int64)
+
+    seg = np.repeat(np.arange(len(m)), m)
+    starts = np.concatenate(([0], np.cumsum(m)[:-1]))
+    j = np.arange(int(m.sum())) - np.repeat(starts, m)
+    t = (j + 0.5) / m[seg]
+
+    xs = np.clip(x0[seg] + (x1[seg] - x0[seg]) * t, 0, size - 1).astype(np.int32)
+    ys = np.clip(y0[seg] + (y1[seg] - y0[seg]) * t, 0, size - 1).astype(np.int32)
+    wt = (1.0 / m[seg]).astype(np.float32)
+
+    acc = np.bincount(ys * size + xs, weights=wt,
+                      minlength=size * size).reshape(size, size)
     acc = cv2.GaussianBlur(acc.astype(np.float32), (0, 0), spot)
     lit = acc[acc > 0]
     gain = exposure * 2.5 / max(float(np.percentile(lit, 75)), 1e-6) if lit.size else 1.0
@@ -670,12 +735,117 @@ _TRAVEL_W = np.float32([1e-3])
 _TRAVEL_T = np.ones(1, dtype=bool)
 
 
+class TraceEmitter:
+    """Turns a luminance array into the next trace. The single implementation.
+
+    Every caller that drives a scope needs the same seven things: fixed grid
+    and levels, field rotation, sweep chaining, the border, DC compensation,
+    and a consistent set of tuning parameters. Before this class each caller
+    assembled that list itself, and they drifted -- scope_screen was still
+    re-deriving its grid every frame, and gained `border` and `oversample`
+    only when someone remembered to port them across.
+
+    Callers differ ONLY in where the luminance comes from: mode scope
+    composites two baked libraries, scope_screen grabs the screen. Both hand
+    the array here and get a frame back.
+
+    Sweep state lives in the object because it has to persist between traces
+    and because two callers keeping their own copies is how it goes wrong.
+    """
+
+    def __init__(self, samplerate, samples, *, gamma=2.2, trim=0.02,
+                 density=1.0, rows=None, fields=1, border=0.0, oversample=1,
+                 sweep="alternate", dc_comp=None, grid=None, levels=None,
+                 autofit=True):
+        self.samplerate = samplerate
+        self.n = int(samples)
+        self.gamma, self.trim, self.density = gamma, trim, density
+        self.rows, self.fields = rows, max(1, int(fields))
+        self.border, self.oversample = border, oversample
+        self.sweep_mode, self.dc_comp = sweep, dc_comp
+        self.grid, self.levels, self.autofit = grid, levels, autofit
+        self._rev, self._end, self._field = False, None, 0
+
+    def reset(self):
+        """Drop chain state. Call after a device swap: the beam is not where
+        the chain thinks it is, and continuing would jump the full screen."""
+        self._rev, self._end, self._field = False, None, 0
+
+    def emit(self, lum, levels=None):
+        """One trace, or None if there is nothing to draw."""
+        if lum is None:
+            return None
+        alt = self.sweep_mode == "alternate"
+        kw = {}
+        if self.grid:
+            kw["grid_rows"], kw["grid_cols"] = self.grid
+        lv = levels if levels is not None else self.levels
+        frame = render_luma(
+            lum, self.n, gamma=self.gamma, trim=self.trim,
+            density=self.density, rows=self.rows, autofit=self.autofit,
+            oversample=self.oversample, border=self.border,
+            fields=self.fields, field=self._field % self.fields,
+            levels=lv, palindrome=(self.sweep_mode == "palindrome"),
+            reverse=(alt and self._rev),
+            start=self._end if alt else None,
+            close=(self.sweep_mode == "retrace"), **kw)
+        if frame is None:
+            return None
+        self._field += 1
+        if alt:
+            self._rev = not self._rev
+            # captured BEFORE compensation: the chain continues from where the
+            # geometry says the beam is, not from the boosted sample
+            self._end = frame[-1]
+        if self.dc_comp:
+            from scope_out import precompensate_hpf
+            frame = precompensate_hpf(frame, self.dc_comp, self.samplerate)
+        return frame
+
+
+def composite_luma(main_lib, main_idx, float_lib, float_idx, bbox=None):
+    """The interleaved composite as a luminance array, and nothing else.
+
+    Split out of raster_frame so there is ONE place that decides what the
+    picture is, separate from the one place that decides how to sweep it.
+    Everything downstream -- mode scope, scope_screen, the preview -- takes a
+    luminance array, so they can share a single emitter instead of each
+    re-assembling the same argument list and drifting apart.
+    """
+    tm = main_lib.thumb(main_idx) if main_lib is not None and len(main_lib) else None
+    tf = float_lib.thumb(float_idx) if float_lib is not None and len(float_lib) else None
+    if tm is None and tf is None:
+        return None
+
+    def split(t):
+        return (t[..., 0].astype(np.float64) / 255.0,
+                t[..., 1].astype(np.float64) / 255.0)
+
+    if tf is not None and tm is not None and tf.shape[:2] == tm.shape[:2]:
+        lf, af = split(tf)
+        lm, am = split(tm)
+        lum = lf * af + lm * am * (1.0 - af)
+    elif tf is not None:
+        lf, af = split(tf)
+        lum = lf * af
+    else:
+        lm, am = split(tm)
+        lum = lm * am
+
+    if bbox is not None:                       # crop to the subject so the
+        hh, ww = lum.shape                     # budget is spent on content
+        x0, y0, x1, y1 = bbox
+        lum = lum[int(y0 * hh):max(int(y1 * hh), int(y0 * hh) + 1),
+                  int(x0 * ww):max(int(x1 * ww), int(x0 * ww) + 1)]
+    return lum
+
+
 def raster_frame(main_lib, main_idx, float_lib, float_idx, n,
                  gamma=2.2, floor=0.012, level=0.9, rows=None, cols=None,
                  density=1.0, trim=0.02, stretch=True, bbox=None, autofit=True,
                  oversample=1, grid_rows=None, grid_cols=None, levels=None,
                  fields=1, field=0, palindrome=False, reverse=False, start=None,
-                 close=None, overscan=1.0):
+                 close=None, overscan=1.0, border=0.0):
     """
     Dwell-modulated serpentine: the 2-channel equivalent of a video-to-scope
     adapter.  The beam sweeps every row and lingers on bright cells, so
@@ -721,34 +891,12 @@ def raster_frame(main_lib, main_idx, float_lib, float_idx, n,
                 index must get `fields` traces or you see half a picture.
                 Buys refresh rate (less flicker), never resolution.
     """
-    tm = main_lib.thumb(main_idx) if main_lib is not None and len(main_lib) else None
-    tf = float_lib.thumb(float_idx) if float_lib is not None and len(float_lib) else None
-    if tm is None and tf is None:
+    lum = composite_luma(main_lib, main_idx, float_lib, float_idx, bbox=bbox)
+    if lum is None:
         return None
-
-    def split(t):
-        return (t[..., 0].astype(np.float64) / 255.0,
-                t[..., 1].astype(np.float64) / 255.0)
-
-    if tf is not None and tm is not None and tf.shape[:2] == tm.shape[:2]:
-        lf, af = split(tf)
-        lm, am = split(tm)
-        lum = lf * af + lm * am * (1.0 - af)
-    elif tf is not None:
-        lf, af = split(tf)
-        lum = lf * af
-    else:
-        lm, am = split(tm)
-        lum = lm * am
-
-    if bbox is not None:                       # crop to the subject so the
-        hh, ww = lum.shape                     # budget is spent on content
-        x0, y0, x1, y1 = bbox
-        lum = lum[int(y0 * hh):max(int(y1 * hh), int(y0 * hh) + 1),
-                  int(x0 * ww):max(int(x1 * ww), int(x0 * ww) + 1)]
     return render_luma(lum, n, gamma=gamma, floor=floor, level=level,
                        rows=rows, cols=cols, density=density, trim=trim,
-                       stretch=stretch, bbox=bbox, autofit=autofit,
+                       stretch=stretch, bbox=bbox, autofit=autofit, border=border,
                        oversample=oversample, grid_rows=grid_rows,
                        grid_cols=grid_cols, levels=levels, fields=fields,
                        field=field, palindrome=palindrome, reverse=reverse,
@@ -758,6 +906,7 @@ def raster_frame(main_lib, main_idx, float_lib, float_idx, n,
 def render_luma(lum, n, gamma=2.2, floor=0.012, level=0.9, rows=None,
                 cols=None, density=1.0, trim=0.02, stretch=True, bbox=None,
                 autofit=True, oversample=1, grid_rows=None, grid_cols=None,
+                border=0.0,
                 levels=None, fields=1, field=0, palindrome=False,
                 reverse=False, start=None, close=None, overscan=1.0):
     """
@@ -927,10 +1076,70 @@ def render_luma(lum, n, gamma=2.2, floor=0.012, level=0.9, rows=None,
 
     if overscan > 1.0:
         P, wgt = apply_overscan(P, wgt, trav, overscan)
+
+    if border > 0.0:
+        P, wgt = _append_border(P, wgt, sx, sy, border)
+
     out = _walk(P, wgt, n, oversample=oversample) * level
     # deliberately not mean-centred: the output AC-couples anyway, and
     # subtracting a content-dependent mean would double the brightness drift
     return np.ascontiguousarray(out, dtype=np.float32)
+
+
+def _append_border(P, wgt, sx, sy, frac):
+    """Append a fixed rectangle at the full extent, at the END of the path.
+
+    Without it the drawn extent is whatever the content happens to occupy, so
+    dark margins on one side pull that side in and the picture appears to skew
+    and rescale as the subject changes. The scope has no absolute reference in
+    XY -- the only reference is what the beam actually touches -- so the fix is
+    to touch the corners every trace, regardless of content.
+
+    Deliberately AFTER overscan: the border defines the extent, so scaling it
+    would defeat the point.
+
+    MEASURED, so as not to over-claim it:
+      - extent is pinned exactly. X range holds at +-0.675 whether the subject
+        is centred, shifted, narrow or wide; without it the same four cases
+        ranged from +-0.175 to +-0.673.
+      - the trace END is NOT fixed. Entry is at whichever corner the content
+        finished nearest, which keeps the connector short and dim but means
+        the exit corner follows the content. Chain continuity is unaffected --
+        it just is not the constant it would be nice to claim.
+      - it does NOT fix DC drift. At a 4% share the mean is still content-
+        dominated (-0.2425 -> -0.2331 on a left-shifted subject). Use
+        --scope-dc-comp for coupling, not this.
+
+    `frac` is the share of the trace's samples spent on it -- the honest cost,
+    stated the way it is paid. Weight is spread along the perimeter in
+    proportion to length so the box is evenly lit rather than bright at the
+    corners.
+    """
+    frac = float(np.clip(frac, 0.0, 0.5))
+    if frac <= 0.0 or len(P) < 2:
+        return P, wgt
+
+    corners = np.array([[-sx, -sy], [sx, -sy], [sx, sy], [-sx, sy]], np.float32)
+    # enter at whichever corner the content ended nearest, so the connector is
+    # as short -- and therefore as dim and as cheap -- as it can be
+    k = int(np.argmin(np.hypot(*(corners - P[-1]).T)))
+    loop = np.vstack([corners[k:], corners[:k], corners[k:k + 1]])
+
+    seg = np.hypot(*np.diff(loop, axis=0).T)          # 4 sides
+    content_w = float(wgt.sum())
+    if content_w <= 0:
+        return P, wgt
+    border_w = content_w * frac / (1.0 - frac)
+
+    # connector from the content's last point to the entry corner: travel, so
+    # give it almost nothing and let it stay a faint line
+    P = np.vstack([P, loop])
+    wgt = np.concatenate([
+        wgt,
+        [content_w * 0.002],                          # the connector
+        (seg / seg.sum() * border_w).astype(wgt.dtype),
+    ])
+    return P, wgt
 
 
 def _inside(points, loops):
