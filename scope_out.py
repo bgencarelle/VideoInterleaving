@@ -531,6 +531,16 @@ class Scope:
                 if p is not None:
                     self._frame = p
 
+    def ready(self):
+        """True when the last queued frame has been taken by the callback.
+
+        Interlaced fields must be handed over one per trace, in order: queue
+        two and the second silently replaces the first, so half the rows are
+        never drawn.  Gating on this keeps the producer exactly one trace
+        ahead, which is also what stops the chained sweep from breaking.
+        """
+        return self._pending is None
+
     def show_frame(self, frame):
         """Queue a raw (n, 2) sample frame for the next frame boundary.
 

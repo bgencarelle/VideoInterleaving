@@ -22,6 +22,7 @@ there, exactly as the other modes read ASCII_MODE / SERVER_MODE.
 import argparse
 import os
 import shutil
+import threading
 import time
 from pathlib import Path
 
@@ -29,7 +30,7 @@ import numpy as np
 
 import settings
 
-from scope_out import Scope, choose_device, BufferedSource, precompensate_hpf
+from scope_out import Scope, choose_device, BufferedSource
 from scope_bake import XYLibrary, merge, raster_frame, SweepSource, calibrate
 try:
     from scope_lowpass import lowpass_circular
@@ -197,6 +198,96 @@ def _open_layer(paths_by_index, xy_root, layer_name, expected_frames):
 
 # ---------------------------------------------------------------- engine
 
+# The web handler runs on a server thread and must not touch PortAudio: the
+# stream has to be torn down and rebuilt on the thread that owns the render
+# loop, or the callback can fire against a half-closed stream.  So the handler
+# only parks a request here and the loop picks it up.
+_device_request = {"spec": None, "pending": False, "message": ""}
+_device_lock = threading.Lock()
+
+
+def request_device(spec):
+    """Ask the running scope to move to another output. Thread-safe.
+
+    Returns immediately; the swap happens on the render loop's next tick.
+    `spec` is a name fragment, an output-list index, or None for the system
+    default -- exactly what --device accepts.
+    """
+    with _device_lock:
+        _device_request["spec"] = spec
+        _device_request["pending"] = True
+        _device_request["message"] = "requested"
+    return True
+
+
+def device_status():
+    """Current request state, for the web page to echo back."""
+    with _device_lock:
+        return dict(_device_request)
+
+
+
+def _dev_name_of(scope):
+    """Human-readable name of whatever output a Scope ended up on."""
+    try:
+        import sounddevice as _sd
+        from scope_out import scrub as _scrub
+        return _scrub(_sd.query_devices(scope.stream.device)["name"])
+    except Exception:
+        return "?"
+
+
+def _swap_device(old_scope, spec, source, fps, samples, main_libs, float_libs,
+                 density, trim, rows, fields):
+    """Move the running scope to another output device.
+
+    Returns (new_scope, new_cal, fresh_sweep_state).
+
+    Two things make this more than close-and-reopen:
+
+    1.  A different device can have a different DEFAULT SAMPLE RATE, and
+        samples_per_trace is samplerate/fps.  A different sample budget is a
+        different grid -- so the tone mapping and grid MUST be recalibrated,
+        not carried over.  This is the same reason the handoff says the grid
+        has to stay runtime-derived: it depends on the sample budget, which is
+        a fact about the device.
+    2.  The chained alternating sweep carries the previous trace's last sample
+        forward.  Across a stream teardown the beam is not where that says it
+        is, so the chain is reset rather than continued -- otherwise the first
+        trace on the new device starts with a full-screen jump.
+
+    The old stream is closed BEFORE the new one opens: some exclusive-mode
+    routes (raw ALSA hw:, WASAPI exclusive) will refuse a second handle, and
+    holding both would fail on exactly the devices worth using.
+    """
+    from scope_out import Scope, resolve_device
+    dev = resolve_device(spec)
+    try:
+        old_scope.stream.stop()
+        old_scope.stream.close()
+    except Exception:
+        pass
+    # Matches the original construction at run_scope() exactly.  Note NO
+    # lowpass_hz: the SCOPE_LOWPASS setting is applied per frame through
+    # lowpass_circular() in _emit, not by the Scope.  Passing it here as well
+    # would filter twice after a device change and only after a device change,
+    # which is the kind of difference that gets blamed on the new device.
+    new_scope = Scope(fps=fps, samples=samples, device=dev, source=source,
+                      invert_y=False)
+    new_cal = {}
+    try:
+        new_cal = calibrate(main_libs, float_libs, new_scope.samples_per_frame,
+                            density=density, trim=trim, rows=rows,
+                            fields=fields)
+    except Exception as e:
+        print(f"[SCOPE] recalibration after device change skipped ({e})")
+    new_scope.stream.start()
+    print(f"[SCOPE] output now: {_dev_name_of(new_scope)} "
+          f"({new_scope.samplerate} Hz, {new_scope.samples_per_frame} "
+          f"samples/trace)", flush=True)
+    return new_scope, new_cal, {"rev": False, "end": None}
+
+
 def run_scope(clock_source=None):
     """Caller (main.py, or _bootstrap) must have prepared the generated lists."""
     if clock_source is None:
@@ -219,9 +310,9 @@ def run_scope(clock_source=None):
     rows = getattr(settings, "SCOPE_ROWS", None)
     autofit = getattr(settings, "SCOPE_AUTOFIT", True)
     lowpass = getattr(settings, "SCOPE_LOWPASS", None)
-    dc_comp = getattr(settings, "SCOPE_DC_COMP", None)
     oversample = int(getattr(settings, "SCOPE_OVERSAMPLE", 1) or 1)
     sweep_mode = getattr(settings, "SCOPE_SWEEP", "alternate")
+    fields = max(1, int(getattr(settings, "SCOPE_FIELDS", 1) or 1))
     mix_hz = getattr(settings, "SCOPE_MIX", None)
     mix_duty = min(1.0, max(0.0, getattr(settings, "SCOPE_MIX_DUTY", 0.5)))
     device_spec = getattr(settings, "SCOPE_DEVICE_SPEC", None)
@@ -240,6 +331,56 @@ def run_scope(clock_source=None):
         realtime = False
     if mix_hz:
         fps = int(round(mix_hz))        # the switch rate IS the trace rate
+
+    # --- interlace ---------------------------------------------------------
+    # The visible flicker is the TRACE rate, not the content rate.  At 30 fps
+    # the beam repaints 30 times a second, well under fusion, so the sweep is
+    # legible as a sweep.  Raising fps progressively shrinks the grid, because
+    # a trace is rate/fps samples and the grid is sized from that.
+    #
+    # Interlace breaks the coupling: each trace draws every Nth row, so a
+    # picture still costs rate/IPS samples in total and the grid is unchanged,
+    # but the beam covers the full screen height N times as often.  Refresh
+    # goes up, resolution does not go down.  Same reason broadcast television
+    # did it.
+    if mix_hz:
+        # Mix hands only `mix_duty` of the traces to raster, so a raster
+        # picture is assembled from mix_hz*duty/IPS traces -- and that is
+        # exactly a field count.  Sizing the grid per TRACE here throws away
+        # the same resolution interlace was written to recover: at mix 120 /
+        # duty 0.5 the raster grid came out a quarter of the 30 fps grid, when
+        # only half of that loss is the real cost of sharing the beam.
+        _raster_traces = mix_hz * mix_duty / max(IPS, 1)
+        if fields <= 1 and _raster_traces >= 1.9:
+            fields = int(round(_raster_traces))
+            print(f"[SCOPE] mix: raster gets {_raster_traces:.1f} traces per "
+                  f"index, so interlacing it x{fields} -- the grid is sized "
+                  f"for {fields} traces, not one. Pass --scope-fields 1 to "
+                  "size it per trace as before.")
+
+    if fields > 1:
+        if not use_raster and not mix_hz:
+            print("[SCOPE] interlace is a raster technique (vector traces have "
+                  "no row structure); ignoring --scope-fields.")
+            fields = 1
+        elif realtime:
+            print("[SCOPE] interlace needs whole traces and realtime streams "
+                  "rows; ignoring --scope-fields.")
+            fields = 1
+        elif mix_hz:
+            # mix already fixed fps to the switch rate; do not touch it
+            pass
+        elif samples:
+            print(f"[SCOPE] interlace x{fields}: --scope-samples set "
+                  "explicitly, so the trace rate is whatever that implies. "
+                  f"For a stable picture it must come to {fields} x {IPS} Hz.")
+        elif getattr(settings, "SCOPE_FPS", None) and fps != fields * IPS:
+            print(f"[SCOPE] --scope-fps {fps} with --scope-fields {fields} "
+                  f"is not {fields} x {IPS} ips; fields will not line up with "
+                  f"indices. Using {fields * IPS}.")
+            fps = fields * IPS
+        else:
+            fps = fields * IPS
 
     # --- libraries ---
     # Prefer the baked tree: it carries the same folder names in the same
@@ -288,10 +429,18 @@ def run_scope(clock_source=None):
     if getattr(settings, "SCOPE_DEVICE_RESOLVED", False):
         dev = getattr(settings, "SCOPE_DEVICE", None)   # main.py already chose
     else:
+        # SCOPE_DEVICE_SPEC is set to None unconditionally by main.py, so this
+        # branch could only ever reach the system default -- there was no way
+        # to pin an output from settings.py at all.  That is fine interactively
+        # and fatal headless, where there is no CLI to carry --device and the
+        # system default is whatever HDMI enumerated first.  Fall back to
+        # SCOPE_DEVICE so settings.py can name one.
+        if device_spec is None:
+            device_spec = getattr(settings, "SCOPE_DEVICE", None)
         dev = choose_device(ask=ask, device=device_spec)
     source = None
     if realtime:
-        probe = Scope(fps=fps, samples=samples, device=dev)
+        probe = Scope(fps=fps, samples=samples, device=dev, invert_y=False)
         n_pass = probe.samples_per_frame
         probe.stream.close()
         # Calibrate HERE, before the generator is built: it needs the same
@@ -299,12 +448,13 @@ def run_scope(clock_source=None):
         # content differently.
         try:
             cal = calibrate(main_libs, float_libs, n_pass,
-                            density=density, trim=trim, rows=rows)
+                            density=density, trim=trim, rows=rows,
+                            fields=fields)
         except Exception as e:
             print(f"[SCOPE] calibration skipped ({e})")
             cal = {}
         if cal:
-            _spc = n_pass / max(cal["grid_rows"] * cal["grid_cols"], 1)
+            _spc = n_pass * fields / max(cal["grid_rows"] * cal["grid_cols"], 1)
             print(f"[SCOPE] grid {cal['grid_cols']}x{cal['grid_rows']} "
                   f"({_spc:.2f} samples/cell), calibrated once")
         gen = SweepSource(lambda: live, n_pass, gamma=gamma, trim=trim,
@@ -315,8 +465,13 @@ def run_scope(clock_source=None):
         # it small.
         source = BufferedSource(gen, blocksize=256,
                                 depth=getattr(settings, "SCOPE_BUFFER_BLOCKS", 6))
+    # invert_y=False: everything out of scope_bake is ALREADY in scope
+    # space (y up).  XYLibrary.frame() applies flip_y, and render_luma
+    # builds its rows with ys = -linspace(...).  Scope.show()'s invert_y
+    # is for callers handing it raw screen-space polylines; applying it
+    # here flips a second time and stands the vector picture on its head.
     scope = Scope(fps=fps, samples=samples, device=dev, source=source,
-                  blocksize=getattr(settings, "SCOPE_BLOCKSIZE", 512))
+                  invert_y=False)
 
     # The baked thumbnail is a hard ceiling on scanlines; clamping silently
     # would look like the row setting being ignored.
@@ -331,7 +486,7 @@ def run_scope(clock_source=None):
                       f"Rebake with --thumb-width {int(rows * cap_cols / cap_rows)} "
                       "for more scanlines.")
             else:
-                cells = scope.samples_per_frame / max(density, 0.25)
+                cells = scope.samples_per_frame * fields / max(density, 0.25)
                 want = int(round((cells * cap_rows / cap_cols) ** 0.5))
                 if want > cap_rows:
                     print(f"[SCOPE] the sample budget could resolve ~{want} "
@@ -349,9 +504,10 @@ def run_scope(clock_source=None):
     if (use_raster or mix_hz) and not cal:
         try:
             cal = calibrate(main_libs, float_libs, scope.samples_per_frame,
-                            density=density, trim=trim, rows=rows)
+                            density=density, trim=trim, rows=rows,
+                            fields=fields)
             if cal:
-                spc = scope.samples_per_frame / max(
+                spc = scope.samples_per_frame * fields / max(
                     cal["grid_rows"] * cal["grid_cols"], 1)
                 print(f"[SCOPE] grid {cal['grid_cols']}x{cal['grid_rows']} "
                       f"({spc:.2f} samples/cell), calibrated once")
@@ -363,29 +519,39 @@ def run_scope(clock_source=None):
             print(f"[SCOPE] calibration skipped ({e}); per-frame adaptation")
 
     mode_name = "MIX" if mix_hz else ("RASTER" if use_raster else "VECTOR")
-    print(f"[SCOPE] {mode_name}{' REALTIME' if realtime else ''} | "
+    _trace_hz = scope.samplerate / scope.samples_per_frame
+    print(f"[SCOPE] {mode_name}{' REALTIME' if realtime else ''}"
+          f"{f' INTERLACE x{fields}' if fields > 1 else ''} | "
           f"{scope.samples_per_frame} samples/trace @ {scope.samplerate} Hz "
-          f"({scope.samplerate / scope.samples_per_frame:.0f} passes/sec) | "
+          f"({_trace_hz:.0f} passes/sec) | "
           f"latency ~{scope.stream.latency * 1000:.0f} ms")
+    if fields > 1:
+        print(f"[SCOPE] refresh {_trace_hz:.0f} Hz, picture "
+              f"{_trace_hz / fields:.0f} Hz "
+              f"({scope.samples_per_frame * fields} samples per picture -- "
+              "the grid is sized for that, not for one field)")
     print(f"[SCOPE] {main_folder_count} main / {float_folder_count} float "
           f"folders, {png_paths_len} frames, content {IPS} ips")
     if mix_hz:
         print(f"[SCOPE] mix duty {mix_duty:.2f} "
               f"({mix_duty * mix_hz:.0f} raster + {(1 - mix_duty) * mix_hz:.0f} "
               f"vector passes/sec)")
-    if dc_comp:
-        print(f"[SCOPE] AC-coupling pre-compensation at {dc_comp:.0f} Hz "
-              "(restores shape; costs amplitude, make it up on the scope's "
-              "volts/div)")
+        print(f"[SCOPE] mix raster: {scope.samples_per_frame * fields} samples "
+              f"per picture across {fields} trace(s). Baseline for comparison "
+              f"is {int(scope.samplerate / max(IPS, 1))} at --scope-fps {IPS} "
+              "with no mix; the shortfall is the beam time spent on vector.")
     if lowpass:
         print(f"[SCOPE] low-pass {lowpass:.0f} Hz in the output path "
               "(emulating a softer DAC / RC filter)")
     if fps < IPS and not mix_hz:
         print(f"[SCOPE] note: {fps} traces/sec < {IPS} ips, so some indices are "
               "skipped -- still on time, never late")
-    if sweep_mode == "alternate" and fps > IPS and not mix_hz:
-        print(f"[SCOPE] note: {fps} traces/sec > {IPS} ips means traces repeat, "
-              "and a repeated one-way sweep shows a flyback. "
+    if sweep_mode == "alternate" and fps > IPS and not mix_hz and not use_raster:
+        # Raster no longer has this problem: it renders a fresh chained frame
+        # for every trace, so a one-way sweep always continues rather than
+        # looping back over an unbudgeted jump.  Vector still emits per index.
+        print(f"[SCOPE] note: {fps} traces/sec > {IPS} ips means vector traces "
+              "repeat, and a repeated one-way sweep shows a flyback. "
               "Consider SCOPE_SWEEP='palindrome'.")
 
     # Measure the real per-frame cost once, so a slow machine says so up front
@@ -406,12 +572,12 @@ def run_scope(clock_source=None):
                                  gamma=gamma, trim=trim, density=density,
                                  rows=rows, close=False, **cal)
                 _ms = (_t.perf_counter() - _t0) / 10 * 1000.0
-                _budget = 1000.0 / max(IPS, 1)
-                print(f"[SCOPE] {_ms:.1f} ms per frame, budget {_budget:.1f} ms "
-                      f"({_ms / _budget:.0%} of one index period)")
+                _budget = 1000.0 / max(scope.samplerate / scope.samples_per_frame, 1)
+                print(f"[SCOPE] {_ms:.1f} ms per trace, budget {_budget:.1f} ms "
+                      f"({_ms / _budget:.0%} of one trace period)")
                 if _ms > 0.7 * _budget:
                     print("[SCOPE] tight: raise --scope-density, lower "
-                          "--scope-fps, or drop --scope-oversample")
+                          "--scope-fields, or drop --scope-oversample")
         except Exception:
             pass
 
@@ -421,6 +587,44 @@ def run_scope(clock_source=None):
     live_state = dict(trim=trim, density=density, gamma=gamma, rows=rows,
                       lowpass=lowpass, raster=use_raster, sweep=sweep_mode,
                       autofit=autofit)
+    # --- monitoring ---
+    # Same two-part contract every other mode uses: main.py starts the server,
+    # the engine feeds lightweight_monitor.  Without this scope is invisible to
+    # /data, to the dashboard and to multimonitor.py -- which matters far more
+    # here than elsewhere, because scope has no window to look at and no tty
+    # under systemd.
+    monitor = None
+    try:
+        from lightweight_monitor import start_monitor, monitor_data
+        monitor = start_monitor()
+        monitor_data["scope_device"] = _dev_name
+        # Static: enumerated once. The page needs it to build the selector, and
+        # putting it in /data avoids a second endpoint.
+        try:
+            from scope_out import list_output_devices, default_output_index
+            _dflt = default_output_index()
+            monitor_data["scope_devices"] = [
+                {"index": i, "name": nm, "api": api, "rate": rate,
+                 "default": (i == _dflt)}
+                for (i, nm, api, rate) in list_output_devices()]
+        except Exception:
+            monitor_data["scope_devices"] = []
+        monitor_data["scope_mode"] = mode_name + (" REALTIME" if realtime else "")
+        monitor_data["scope_samplerate"] = int(scope.samplerate)
+        monitor_data["scope_samples_per_trace"] = int(scope.samples_per_frame)
+        monitor_data["scope_fields"] = int(fields)
+        monitor_data["scope_refresh_hz"] = round(
+            scope.samplerate / max(scope.samples_per_frame, 1), 1)
+        monitor_data["scope_picture_hz"] = round(
+            scope.samplerate / max(scope.samples_per_frame * fields, 1), 1)
+        if cal:
+            monitor_data["scope_grid"] = f"{cal['grid_cols']}x{cal['grid_rows']}"
+            monitor_data["scope_samples_per_cell"] = round(
+                scope.samples_per_frame * fields
+                / max(cal["grid_rows"] * cal["grid_cols"], 1), 2)
+    except Exception as e:
+        print(f"[SCOPE] monitor unavailable ({e})")
+
     keys = term = None
     try:
         from scope_controls import KeyMap, Terminal, as_flags
@@ -433,17 +637,78 @@ def run_scope(clock_source=None):
         pass
 
     # --- loop ---
-    tick = 1.0 / max(2 * IPS, 2 * fps)
+    # Poll well inside a trace period: the raster path hands over one frame per
+    # trace and has to notice the handover promptly, or the beam re-runs the
+    # frame it already drew.
+    tick = 1.0 / max(2 * IPS, 4 * fps)
     prev_index = -1
     prev_key = None
-    last_push = 0.0
     duty_acc = 0.0
+    field_i = 0                     # free-running; survives a slipped deadline
+    mix_field_i = 0                 # advances only on the RASTER traces of mix
     sweep = {"rev": False, "end": None}
     last_report = time.time()
+    last_monitor = 0.0
 
-    with scope:
-      try:
+    # NOT `with scope:` -- the device can be changed at runtime, which means
+    # rebinding `scope`.  A with-block would call __exit__ on the object it
+    # entered, i.e. the already-closed old stream, and raise on the way out.
+    scope.stream.start()
+    try:
         while True:
+            # --- pending device change, parked by request_device() ----------
+            with _device_lock:
+                _want = (_device_request["spec"]
+                         if _device_request["pending"] else False)
+                if _device_request["pending"]:
+                    _device_request["pending"] = False
+            if _want is not False and realtime:
+                # BufferedSource wraps a generator built around the CURRENT
+                # samples_per_frame.  A new device can have a different default
+                # sample rate, which changes that -- and the generator would go
+                # on emitting the old length.  Refusing is honest; swapping
+                # would look like it worked and drift.
+                _msg = ("device change is not available in realtime mode "
+                        "(restart with --device instead)")
+                print(f"[SCOPE] {_msg}", flush=True)
+                with _device_lock:
+                    _device_request["message"] = f"failed: {_msg}"
+                _want = False
+            if _want is not False:
+                try:
+                    scope, cal, sweep = _swap_device(
+                        scope, _want, source, fps, samples,
+                        main_libs, float_libs, density, trim, rows, fields)
+                    with _device_lock:
+                        _device_request["message"] = f"now on {_dev_name_of(scope)}"
+                    _dev_name = _dev_name_of(scope)
+                    try:
+                        from lightweight_monitor import monitor_data as _md2
+                        _md2["scope_device"] = _dev_name
+                        _md2["scope_samplerate"] = int(scope.samplerate)
+                        _md2["scope_samples_per_trace"] = int(scope.samples_per_frame)
+                        # A new device can mean a new sample rate, so these
+                        # three move too.  Leaving them stale made the page
+                        # report the OLD refresh rate against the NEW device,
+                        # which is worse than reporting nothing.
+                        _md2["scope_refresh_hz"] = round(
+                            scope.samplerate / max(scope.samples_per_frame, 1), 1)
+                        _md2["scope_picture_hz"] = round(
+                            scope.samplerate
+                            / max(scope.samples_per_frame * fields, 1), 1)
+                        if cal:
+                            _md2["scope_grid"] = (f"{cal['grid_cols']}x"
+                                                  f"{cal['grid_rows']}")
+                            _md2["scope_samples_per_cell"] = round(
+                                scope.samples_per_frame * fields
+                                / max(cal["grid_rows"] * cal["grid_cols"], 1), 2)
+                    except Exception:
+                        pass
+                    prev_key = None          # force a redraw on the new stream
+                except Exception as e:
+                    print(f"[SCOPE] device change failed: {e}", flush=True)
+                    with _device_lock:
+                        _device_request["message"] = f"failed: {e}"
             if keys is not None:
                 for ch in term.read():
                     if keys.feed(ch) and keys.message:
@@ -460,8 +725,9 @@ def run_scope(clock_source=None):
                         try:
                             cal = calibrate(main_libs, float_libs,
                                             scope.samples_per_frame,
-                                            density=density, trim=trim, rows=rows)
-                            spc = scope.samples_per_frame / max(
+                                            density=density, trim=trim,
+                                            rows=rows, fields=fields)
+                            spc = scope.samples_per_frame * fields / max(
                                 cal["grid_rows"] * cal["grid_cols"], 1)
                             print(f"  grid {cal['grid_cols']}x{cal['grid_rows']} "
                                   f"({spc:.2f} samples/cell)"
@@ -483,29 +749,92 @@ def run_scope(clock_source=None):
             key = (index, mf, ff)
 
             now = time.time()
-            due = (mix_hz and now - last_push >= 1.0 / mix_hz)
-            if key != prev_key or due:
-                ml = main_libs[mf % main_folder_count]
-                fl = float_libs[ff % float_folder_count]
+            ml = main_libs[mf % main_folder_count]
+            fl = float_libs[ff % float_folder_count]
 
-                if realtime:
+            if realtime:
+                if key != prev_key:
                     # publish state; the audio thread picks it up at the next
                     # row boundary, so a new index lands within ~1 ms
                     live.update(main=ml, mi=index, float=fl, fi=index)
-                elif mix_hz:
+                    prev_key = key
+            elif mix_hz:
+                # Same ready() gate as plain raster, for the same reason: the
+                # old wall-clock pacer drifted against the actual trace rate,
+                # so frames were occasionally queued two-deep and the second
+                # replaced the first.  Losing a frame that way costs a whole
+                # interlace field, and it also desynchronised duty_acc from
+                # the traces the beam really drew.
+                if scope.ready():
                     duty_acc += mix_duty
                     frame_raster = duty_acc >= 1.0
                     if frame_raster:
                         duty_acc -= 1.0
-                    last_push = now
                     _emit(scope, ml, fl, index, frame_raster, sweep, sweep_mode,
                           gamma, trim, density, rows, min_feature, autofit,
-                          lowpass, oversample, cal, dc_comp)
-                else:
-                    _emit(scope, ml, fl, index, use_raster, sweep, sweep_mode,
+                          lowpass, oversample, cal,
+                          field=mix_field_i % fields, fields=fields)
+                    if frame_raster:
+                        mix_field_i += 1
+                    prev_key = key
+            elif use_raster:
+                # One frame per TRACE, gated on the callback having taken the
+                # last one.  Three things fall out of this that the
+                # emit-on-index-change version got wrong:
+                #   - interlaced fields are handed over in order, so both
+                #     halves of the picture actually reach the beam;
+                #   - the chained alternating sweep gets the fresh frame it
+                #     assumes, instead of the callback looping a frame whose
+                #     close segment was deliberately omitted -- that loop is a
+                #     full-screen jump with no samples budgeted for it, i.e. a
+                #     bright flyback line on every repeat;
+                #   - a frame is never queued on top of an unconsumed one, so
+                #     sweep["end"] can no longer advance to the end of a frame
+                #     the beam never drew.
+                if scope.ready():
+                    _emit(scope, ml, fl, index, True, sweep, sweep_mode,
                           gamma, trim, density, rows, min_feature, autofit,
-                          lowpass, oversample, cal, dc_comp)
-                prev_key = key
+                          lowpass, oversample, cal,
+                          field=field_i % fields, fields=fields)
+                    field_i += 1
+                    prev_key = key
+            else:
+                if key != prev_key:
+                    _emit(scope, ml, fl, index, False, sweep, sweep_mode,
+                          gamma, trim, density, rows, min_feature, autofit,
+                          lowpass, oversample, cal)
+                    prev_key = key
+
+            if monitor is not None and now - last_monitor >= 1.0:
+                last_monitor = now
+                try:
+                    from lightweight_monitor import monitor_data as _md
+                    # trim/density/gamma are live-tunable, so re-publish them
+                    _md["scope_trim"] = round(trim, 3)
+                    _md["scope_density"] = round(density, 3)
+                    _md["scope_gamma"] = round(gamma, 2)
+                    _md["scope_sweep"] = sweep_mode
+                    _md["scope_traces_drawn"] = int(scope.frames_drawn)
+                    _md["scope_indices_skipped"] = int(scope.frames_dropped)
+                    _md["scope_underruns"] = int(getattr(source, "underruns", 0)
+                                                 if source is not None else 0)
+                    # displayed == index: scope has no FIFO, so the trace being
+                    # drawn IS the current index.  Reporting them equal keeps
+                    # the shared dashboard's delta meaningful rather than blank.
+                    monitor.update({
+                        "index": index,
+                        "displayed": index,
+                        "fps": round(scope.samplerate
+                                     / max(scope.samples_per_frame, 1), 1),
+                        "fifo_depth": 0,
+                        "successful_frame": True,
+                        "main_folder": mf,
+                        "float_folder": ff,
+                        "main_folder_count": main_folder_count,
+                        "float_folder_count": float_folder_count,
+                    })
+                except Exception:
+                    pass
 
             if now - last_report >= 60.0:
                 last_report = now
@@ -518,22 +847,28 @@ def run_scope(clock_source=None):
                           "generator is not keeping up; raise "
                           "SCOPE_BUFFER_BLOCKS or use frame mode")
             time.sleep(tick)
-      finally:
+    finally:
         if term is not None:
             term.restore()
         if source is not None and hasattr(source, "close"):
             source.close()
+        try:
+            scope.stream.stop()
+            scope.stream.close()
+        except Exception:
+            pass
 
 
 def _emit(scope, ml, fl, index, as_raster, sweep, sweep_mode,
           gamma, trim, density, rows, min_feature, autofit=True, lowpass=None,
-          oversample=1, cal=None, dc_comp=None, samplerate=48000):
+          oversample=1, cal=None, field=0, fields=1):
     n = scope.samples_per_frame
     if as_raster:
         frame = raster_frame(
             ml, index, fl, index, n,
             gamma=gamma, trim=trim, density=density, rows=rows,
             autofit=autofit, oversample=oversample, **(cal or {}),
+            fields=fields, field=field,
             palindrome=(sweep_mode == "palindrome"),
             reverse=(sweep_mode == "alternate" and sweep["rev"]),
             start=sweep["end"] if sweep_mode == "alternate" else None,
@@ -544,8 +879,6 @@ def _emit(scope, ml, fl, index, as_raster, sweep, sweep_mode,
                 sweep["end"] = frame[-1]
             if lowpass and lowpass_circular is not None:
                 frame = lowpass_circular(frame, lowpass, scope.samplerate)
-            if dc_comp:
-                frame = precompensate_hpf(frame, dc_comp, scope.samplerate)
             scope.show_frame(frame)
     else:
         # empty -> safe idle circle, never a parked dot

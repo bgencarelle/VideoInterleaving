@@ -199,7 +199,12 @@ def main():
         probe.stream.close()
         src = SweepSource(lambda: dict(_state), n_pass, gamma=args.gamma,
                           trim=args.trim, density=args.density, rows=args.rows)
-    _scope = Scope(fps=fps, samples=args.samples, source=src,
+    # invert_y=False: everything out of scope_bake is ALREADY in scope
+    # space (y up).  XYLibrary.frame() applies flip_y, and render_luma
+    # builds its rows with ys = -linspace(...).  Scope.show()'s invert_y
+    # is for callers handing it raw screen-space polylines; applying it
+    # here flips a second time and stands the vector picture on its head.
+    _scope = Scope(fps=fps, samples=args.samples, source=src, invert_y=False,
                    device=choose_device(ask=args.ask, device=args.device))
     _scope.stream.start()
     print(f"[SIDECAR] {_scope.samples_per_frame} samples/trace, "

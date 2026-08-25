@@ -88,15 +88,13 @@ HEADLESS_RES = (480, 600)   # Resolution for the virtual screen
 # trace, which is the entire resolution budget (samples = rate / fps).
 SCOPE_MODE = False
 SCOPE_FPS = None          # None -> follow IPS
+SCOPE_FIELDS = 1          # raster interlace: traces per picture. 2 or 4 lifts
+                          # the refresh rate above flicker fusion without
+                          # touching the grid. Needs SCOPE_FPS = N * IPS.
 SCOPE_MIN_FEATURE = 0.02  # vector: shortest stroke kept by the occlusion cull
 SCOPE_TRIM = 0.02         # raster: drop cells dimmer than this from the sweep
 SCOPE_GAMMA = 2.2         # raster contrast
 SCOPE_DENSITY = 1.0       # raster samples per cell (1.0 = finest)
-SCOPE_DC_COMP = None      # Hz. Headphone/line outputs are AC coupled, and the
-                          # VERTICAL SWEEP REPEATS AT THE TRACE RATE -- 30 Hz at
-                          # 30 fps -- so the sweep's fundamental sits on the
-                          # corner and the picture collapses into a funnel.
-                          # Set to the output's corner (try 20-50) to cancel it.
 SCOPE_LOWPASS = None      # Hz; emulate a softer output chain (Pi headphone
                           # jack, cheap codec, or a physical RC filter).
                           # None = off. See scope_lowpass.py.
@@ -104,10 +102,6 @@ SCOPE_OVERSAMPLE = 1      # anti-alias the path: generate N x samples, bandlimit
                           # decimate. Correct in principle, but measured only a
                           # 5.6% change on portrait content -- the dwell profile
                           # is already mostly below Nyquist. Costs ~10% CPU at 4.
-SCOPE_BLOCKSIZE = 512     # audio callback size. Unset, PortAudio takes the
-                          # smallest buffer the device allows (~1500 wakeups/s
-                          # on CoreAudio). 512 is ~5 ms at 96 kHz. Raise if the
-                          # machine is struggling; 0 = let PortAudio decide.
 SCOPE_BUFFER_BLOCKS = 6   # realtime mode: 256-sample blocks queued ahead of the
                           # audio callback. Higher survives slower machines;
                           # each block is ~2.7 ms of added latency at 96 kHz.

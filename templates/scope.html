@@ -1,0 +1,294 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Interleaving Project Scope Monitor</title>
+  <style>
+    /* Mirrors HTML_TEMPLATE in lightweight_monitor.py. Kept as a separate copy
+       rather than shared, because that template is a Python string literal
+       inside lightweight_monitor.py while this page is served straight off
+       disk by _serve_dynamic_template(). If you restyle one, restyle both. */
+    body { background:#111; color:#0f0; font-family:monospace; padding:2em; }
+    .label{color:#888;margin-right:1em;}
+    a { color:#0f0; }
+    h2.section { color:#0f0; border-bottom:1px solid #333;
+                 padding-bottom:0.5em; margin-top:2em; }
+    .control-panel {
+      margin-top: 2em;
+      padding: 1em;
+      border: 1px solid #333;
+      background: #0a0a0a;
+    }
+    .control-panel h2 {
+      margin-top: 0;
+      color: #0f0;
+      border-bottom: 1px solid #333;
+      padding-bottom: 0.5em;
+    }
+    .dim-controls {
+      display: flex;
+      gap: 1em;
+      align-items: center;
+      margin: 1em 0;
+      flex-wrap: wrap;
+    }
+    .dim-controls select {
+      background: #111;
+      border: 1px solid #333;
+      color: #0f0;
+      padding: 0.5em;
+      font-family: monospace;
+      min-width: 320px;
+    }
+    .dim-controls button {
+      background: #0f0;
+      color: #000;
+      border: none;
+      padding: 0.5em 1em;
+      font-family: monospace;
+      cursor: pointer;
+      font-weight: bold;
+    }
+    .dim-controls button:hover { background: #0a0; }
+    .dim-controls button:disabled { background:#333; color:#666; cursor:default; }
+    .presets { display:flex; gap:0.5em; flex-wrap:wrap; margin:1em 0; }
+    .preset-btn {
+      background: #222;
+      color: #0f0;
+      border: 1px solid #333;
+      padding: 0.5em 1em;
+      font-family: monospace;
+      cursor: pointer;
+    }
+    .preset-btn:hover { background:#333; border-color:#0f0; }
+    .status-message { margin-top:1em; padding:0.5em; font-size:0.9em; }
+    .status-message.success { color:#0f0; background:#003300; }
+    .status-message.error { color:#f00; background:#330000; }
+    .current-dims { color:#0f0; font-weight:bold; margin:0.5em 0; }
+    .warn { color:#fa0; }
+  </style>
+</head>
+<body>
+  <h1>Interleaving Project Scope Monitor</h1>
+  <div><a href="/">&larr; main monitor</a> &nbsp;|&nbsp; <a href="/log">log</a></div>
+
+  <h2 class="section">Scope</h2>
+  <div id="scope_data">Loading&hellip;</div>
+
+  <h2 class="section">Playback &amp; system</h2>
+  <div id="monitor_data"></div>
+
+  <!-- Sound output. Deliberately the last thing on the page: it is the only
+       control here that interrupts the audio, so it should not sit above the
+       numbers you would use to decide whether to touch it. -->
+  <div class="control-panel" id="audio-controls">
+    <h2>Sound output</h2>
+    <div class="current-dims" id="current-device">Loading&hellip;</div>
+    <div class="dim-controls">
+      <select id="device-select">
+        <option value="">System default output</option>
+      </select>
+      <button id="apply-btn" onclick="applyDevice()">Switch output</button>
+      <button class="preset-btn" onclick="useDefault()">Use system default</button>
+    </div>
+    <div id="rate-warning" class="warn" style="display:none;"></div>
+    <div class="status-message" id="status-message" style="display:none;"></div>
+  </div>
+
+  <script>
+    // Explicit field order, rather than iterating the object as the main
+    // dashboard does. /data key order is not guaranteed, and this block is
+    // meant to be read at a glance from across a room.
+    const SCOPE_FIELDS = [
+      ["scope_mode",              "mode"],
+      ["scope_device",            "output device"],
+      ["scope_samplerate",        "sample rate"],
+      ["scope_samples_per_trace", "samples / trace"],
+      ["scope_fields",            "interlace fields"],
+      ["scope_refresh_hz",        "refresh (Hz)"],
+      ["scope_picture_hz",        "picture (Hz)"],
+      ["scope_grid",              "grid"],
+      ["scope_samples_per_cell",  "samples / cell"],
+      ["scope_trim",              "trim"],
+      ["scope_density",           "density"],
+      ["scope_gamma",             "gamma"],
+      ["scope_sweep",             "sweep"],
+      ["scope_traces_drawn",      "traces drawn"],
+      ["scope_indices_skipped",   "indices skipped"],
+      ["scope_underruns",         "audio underruns"]
+    ];
+
+    let lastData = {};
+    let devicesRendered = false;
+    let currentDeviceName = null;
+    let switching = false;
+
+    // textContent, never innerHTML, for anything originating in /data --
+    // device names come from the OS and are not ours to trust as markup.
+    function row(label, value, colour) {
+      const d = document.createElement("div");
+      const s = document.createElement("span");
+      s.className = "label";
+      s.textContent = label + ":";
+      d.appendChild(s);
+      const v = document.createElement("span");
+      v.textContent = value;
+      if (colour) v.style.color = colour;
+      d.appendChild(v);
+      return d;
+    }
+
+    function render(d) {
+      const top = document.getElementById("scope_data");
+      top.textContent = "";
+      let any = false;
+      for (const [key, label] of SCOPE_FIELDS) {
+        if (d[key] === undefined) continue;
+        any = true;
+        // Underruns are the one number that means something is wrong right
+        // now, so make it impossible to skim past.
+        const bad = (key === "scope_underruns" && Number(d[key]) > 0);
+        top.appendChild(row(label, d[key], bad ? "#f00" : null));
+      }
+      if (!any) {
+        const w = document.createElement("span");
+        w.className = "warn";
+        w.textContent = "No scope instance is reporting on this port.";
+        top.appendChild(w);
+      }
+
+      const rest = document.getElementById("monitor_data");
+      rest.textContent = "";
+      for (const k in d) {
+        if (k.startsWith("scope_")) continue;
+        const v = d[k];
+        if (Array.isArray(v) || (v && typeof v === "object")) continue;
+        rest.appendChild(row(k, v));
+      }
+
+      if (d.scope_device && d.scope_device !== currentDeviceName) {
+        currentDeviceName = d.scope_device;
+        document.getElementById("current-device").textContent =
+          "Currently on: " + d.scope_device;
+        if (switching) {
+          switching = false;
+          document.getElementById("apply-btn").disabled = false;
+          showStatus("Now on " + d.scope_device, false);
+        }
+      }
+
+      // scope_devices is enumerated once at startup and does not change while
+      // the process runs, so build the list once.
+      if (!devicesRendered && Array.isArray(d.scope_devices) && d.scope_devices.length) {
+        buildDeviceList(d.scope_devices);
+        devicesRendered = true;
+      }
+    }
+
+    function buildDeviceList(devices) {
+      const sel = document.getElementById("device-select");
+      sel.textContent = "";
+
+      // System default is first and pre-selected, so the page opens on the
+      // same output the process uses when no --device is given.
+      const dflt = devices.find(x => x.default);
+      const o = document.createElement("option");
+      o.value = "";
+      o.textContent = "System default output"
+                    + (dflt ? "  \u2014  " + dflt.name : "");
+      sel.appendChild(o);
+
+      for (const dv of devices) {
+        const opt = document.createElement("option");
+        // Send the NAME, not the index. PortAudio indices reshuffle when
+        // hardware is plugged or unplugged, so an index picked now can point
+        // at a different device by the time it is applied.
+        opt.value = dv.name;
+        opt.textContent = dv.name + "  [" + dv.api + ", " + dv.rate + " Hz]";
+        opt.dataset.rate = dv.rate;
+        sel.appendChild(opt);
+      }
+      sel.selectedIndex = 0;
+      sel.onchange = rateWarning;
+    }
+
+    function rateWarning() {
+      const sel = document.getElementById("device-select");
+      const opt = sel.options[sel.selectedIndex];
+      const w = document.getElementById("rate-warning");
+      const currentRate = Number(lastData.scope_samplerate || 0);
+      const newRate = Number(opt.dataset.rate || 0);
+      if (newRate && currentRate && newRate !== currentRate) {
+        // Not a failure, but not free either: samples/trace is samplerate/fps,
+        // so a different rate is a different sample budget and therefore a
+        // different grid. The swap recalibrates.
+        w.style.display = "block";
+        w.textContent = "This device runs at " + newRate + " Hz, not "
+          + currentRate + " Hz. The sample budget changes, so the grid is "
+          + "recalibrated on switch.";
+      } else {
+        w.style.display = "none";
+      }
+    }
+
+    function useDefault() {
+      document.getElementById("device-select").selectedIndex = 0;
+      rateWarning();
+      applyDevice();
+    }
+
+    async function applyDevice() {
+      const sel = document.getElementById("device-select");
+      const btn = document.getElementById("apply-btn");
+      btn.disabled = true;
+      switching = true;
+      showStatus("Switching\u2026 audio drops out briefly while the stream reopens.", false);
+      try {
+        const r = await fetch("/scope/device", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ device: sel.value })
+        });
+        const j = await r.json();
+        if (!j.ok) {
+          switching = false;
+          btn.disabled = false;
+          showStatus("Failed: " + (j.error || "unknown error"), true);
+        }
+        // On success the confirmation comes from /data reporting the new
+        // device name, not from this response: the swap happens on the render
+        // loop's next tick and has not run yet when this returns.
+      } catch (e) {
+        switching = false;
+        btn.disabled = false;
+        showStatus("Request failed: " + e, true);
+      }
+    }
+
+    function showStatus(msg, isError) {
+      const el = document.getElementById("status-message");
+      el.textContent = msg;
+      el.className = "status-message " + (isError ? "error" : "success");
+      el.style.display = "block";
+    }
+
+    function poll() {
+      // Relative "data", matching HTML_TEMPLATE, so the page works unchanged
+      // behind the nginx prefix that setup_nginx.sh installs.
+      fetch("data", { cache: "no-store" })
+        .then(r => r.json())
+        .then(d => { lastData = d; render(d); })
+        .catch(() => {
+          const el = document.getElementById("scope_data");
+          el.textContent = "";
+          const w = document.createElement("span");
+          w.className = "warn";
+          w.textContent = "Monitor unreachable.";
+          el.appendChild(w);
+        });
+    }
+    poll();
+    setInterval(poll, 1000);
+  </script>
+</body>
+</html>

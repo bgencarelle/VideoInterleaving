@@ -240,7 +240,12 @@ def main():
         args.fps = int(round(args.mix))     # switch rate == trace rate
     scope = None
     try:
-        scope = Scope(fps=args.fps, samples=args.samples,
+        # invert_y=False: everything out of scope_bake is ALREADY in scope
+        # space (y up).  XYLibrary.frame() applies flip_y, and render_luma
+        # builds its rows with ys = -linspace(...).  Scope.show()'s invert_y
+        # is for callers handing it raw screen-space polylines; applying it
+        # here flips a second time and stands the vector picture on its head.
+        scope = Scope(fps=args.fps, samples=args.samples, invert_y=False,
                       device=choose_device(ask=args.ask, device=args.device))
         scope.stream.start()
         print(f"[AUDIO] {scope.samplerate} Hz, {scope.samples_per_frame} samples/trace")

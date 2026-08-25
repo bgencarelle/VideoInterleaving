@@ -282,6 +282,44 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
+    def do_POST(self):
+        """Control endpoints.
+
+        The first POST handler in this file.  Note the ASCII panel in
+        HTML_TEMPLATE already POSTs to /ascii/size, which has never had a
+        handler and whose get_ascii_dimensions() helper is not defined
+        anywhere -- so that panel has always been dead.  This does not revive
+        it; it only adds the scope one.
+        """
+        if self.path == "/scope/device":
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                if length > 4096:                      # nothing legitimate is
+                    self.send_error(413)               # anywhere near this
+                    return
+                body = self.rfile.read(length) if length else b"{}"
+                payload = json.loads(body.decode("utf-8") or "{}")
+                # "" and null both mean the system default, which is what the
+                # page sends for its first option.
+                spec = payload.get("device")
+                if isinstance(spec, str) and not spec.strip():
+                    spec = None
+
+                import scope_display
+                scope_display.request_device(spec)
+                result = {"ok": True, "requested": spec}
+            except Exception as e:
+                result = {"ok": False, "error": str(e)}
+            blob = json.dumps(result).encode("utf-8")
+            self.send_response(200 if result.get("ok") else 400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(blob)))
+            self.end_headers()
+            self.wfile.write(blob)
+            return
+
+        self.send_error(404)
+
 
 class StreamHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
     # Timeout for streaming connections

@@ -120,7 +120,13 @@ def enable(main_paths, float_paths, xy_root=None, raster=False, realtime=False,
         probe.stream.close()
         _source = SweepSource(lambda: dict(_state), n_pass, gamma=gamma,
                               trim=trim, density=density, rows=rows)
-    _scope = Scope(fps=fps, samples=samples, device=dev, source=_source)
+    # invert_y=False: everything out of scope_bake is ALREADY in scope
+    # space (y up).  XYLibrary.frame() applies flip_y, and render_luma
+    # builds its rows with ys = -linspace(...).  Scope.show()'s invert_y
+    # is for callers handing it raw screen-space polylines; applying it
+    # here flips a second time and stands the vector picture on its head.
+    _scope = Scope(fps=fps, samples=samples, device=dev, source=_source,
+                   invert_y=False)
     _scope.stream.start()
 
     mode = "MIX" if mix else ("RASTER" if raster else "VECTOR")

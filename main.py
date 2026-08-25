@@ -90,6 +90,12 @@ def configure_runtime():
                              "within a row instead of at a trace boundary (raster only)")
     parser.add_argument("--scope-fps", type=int, help="Scope trace rate (default: IPS)")
     parser.add_argument("--scope-samples", type=int, help="Scope samples per trace")
+    parser.add_argument("--scope-fields", type=int, metavar="N",
+                        help="Scope raster: interlace. N=2 draws every other "
+                             "row per trace and alternates, so the beam "
+                             "repaints at N x the picture rate at the SAME "
+                             "grid. Requires --scope-fps = N * IPS. "
+                             "Default: settings.SCOPE_FIELDS (1 = progressive)")
     parser.add_argument("--scope-trim", type=float,
                         help="Scope raster: drop cells dimmer than this (0.08-0.16 "
                              "reduces stray lines on dark backgrounds). "
@@ -99,12 +105,6 @@ def configure_runtime():
     parser.add_argument("--scope-density", type=float,
                         help="Default: settings.SCOPE_DENSITY")
     parser.add_argument("--scope-rows", type=int)
-    parser.add_argument("--scope-dc-comp", type=float, metavar="HZ",
-                        help="Cancel the output's AC coupling. Headphone jacks "
-                             "high-pass around 20-50 Hz and the vertical sweep "
-                             "runs at the trace rate, so the image funnels. Set "
-                             "this to the corner frequency; start at 30 and "
-                             "adjust until the sides are parallel.")
     parser.add_argument("--scope-lowpass", type=float, metavar="HZ",
                         help="Low-pass the XY output at this corner, to emulate "
                              "a softer DAC or a physical RC filter. Try 800-8000; "
@@ -306,6 +306,8 @@ def configure_runtime():
             settings.SCOPE_REALTIME = True
         if args.scope_fps:
             settings.SCOPE_FPS = args.scope_fps
+        if getattr(args, "scope_fields", None):
+            settings.SCOPE_FIELDS = args.scope_fields
         if args.scope_samples:
             settings.SCOPE_SAMPLES = args.scope_samples
         if args.scope_trim is not None:
@@ -322,8 +324,6 @@ def configure_runtime():
             settings.SCOPE_LIST_FROM_IMAGES = True
         if args.scope_lowpass:
             settings.SCOPE_LOWPASS = args.scope_lowpass
-        if args.scope_dc_comp:
-            settings.SCOPE_DC_COMP = args.scope_dc_comp
         if args.scope_oversample:
             settings.SCOPE_OVERSAMPLE = args.scope_oversample
         if args.scope_min_feature is not None:
