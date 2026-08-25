@@ -87,6 +87,13 @@ HEADLESS_RES = (480, 600)   # Resolution for the virtual screen
 # Scope refresh defaults to IPS: one trace per index maximises samples per
 # trace, which is the entire resolution budget (samples = rate / fps).
 SCOPE_MODE = False
+SCOPE_DEVICE = None       # audio output: name FRAGMENT ("Scarlett", "hw:1")
+                          # or index. Prefer the name -- PortAudio indices
+                          # reshuffle when hardware is plugged or unplugged, so
+                          # an index that works today is a wrong-device bug at
+                          # the install. --device overrides this. This is the
+                          # only way to pin an output without a CLI, which is
+                          # what a systemd unit needs.
 SCOPE_FPS = None          # None -> follow IPS
 SCOPE_FIELDS = 1          # raster interlace: traces per picture. 2 or 4 lifts
                           # the refresh rate above flicker fusion without

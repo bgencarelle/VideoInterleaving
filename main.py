@@ -295,7 +295,13 @@ def configure_runtime():
         settings.SCOPE_MODE = True
         config.set_mode(MODE_SCOPE)
         ports = config.get_ports()
-        require_ports(ports.get_all_ports())
+        # Deliberately NOT require_ports() here.  Scope binds nothing -- the
+        # launch block below is `pass  # No servers` -- but require_ports()
+        # sys.exit(1)s on a busy port.  So scope refused to start whenever web
+        # or ascii already held the monitor port, over a port it never opens,
+        # and under `Restart=always` a port still in TIME_WAIT after a crash
+        # would fail the unit fast enough to trip StartLimitBurst and stop it
+        # permanently.  WEB_PORT is still published for anything that reads it.
         settings.WEB_PORT = ports.monitor
 
         # Publish CLI overrides into settings; scope_display reads settings,
@@ -551,7 +557,17 @@ def main(clock=CLOCK_MODE):
         web_service.start_server(monitor=True, stream=False)
 
     elif mode == "scope":
-        pass  # No servers: output goes to the audio device
+        # Scope is reached the same way every other mode is: over the network.
+        # It has no window and, under systemd, no tty either -- so without this
+        # there is no way to see whether it is running, what device it grabbed,
+        # or whether it is dropping traces.  Monitor only; there is no video
+        # frame to stream.
+        #
+        # NOT gated on require_ports(): run_monitor_server() runs in a daemon
+        # thread and its OSError on a busy port dies in that thread.  The audio
+        # keeps going.  A monitor port held by another instance must never take
+        # the installation off the air.
+        web_service.start_server(monitor=True, stream=False)
 
         # 3. Start Display Engine
     try:
