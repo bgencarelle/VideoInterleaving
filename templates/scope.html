@@ -122,6 +122,39 @@
   <!-- Sound output. Deliberately the last thing on the page: it is the only
        control here that interrupts the audio, so it should not sit above the
        numbers you would use to decide whether to touch it. -->
+  <!-- Client-side audio. The server has no sound card, so it ships the
+       LUMINANCE and each visitor renders the trace here, at their own
+       AudioContext rate, on their own DAC -- which is the only device that
+       can reach their scope. -->
+  <div class="control-panel" id="local-audio">
+    <h2>Play on your own scope</h2>
+    <div class="current-dims" id="local-status">Not running.</div>
+    <div class="dim-controls">
+      <button id="local-btn" onclick="toggleLocal()">Start audio</button>
+      <label>trim
+        <select id="local-trim">
+          <option value="0.02">0.02</option>
+          <option value="0.10" selected>0.10</option>
+          <option value="0.16">0.16</option>
+        </select>
+      </label>
+      <label>gamma
+        <select id="local-gamma">
+          <option value="1.8">1.8</option>
+          <option value="2.2" selected>2.2</option>
+          <option value="2.6">2.6</option>
+        </select>
+      </label>
+    </div>
+    <div class="warn">
+      Connect your scope to this machine's audio output and set it to XY.
+      Left is X, right is Y. Turn the volume up full &mdash; the level is the
+      picture size, and anything the operating system does to the signal
+      (EQ, "enhancements", spatial audio) will distort it.
+    </div>
+    <img id="luma-src" style="display:none" alt="">
+  </div>
+
   <div class="control-panel" id="audio-controls">
     <h2>Sound output</h2>
     <div class="current-dims" id="current-device">Loading&hellip;</div>
@@ -363,6 +396,149 @@
     });
 
     startPreview();
+
+    // ------------------------------------------------- client-side rendering
+    // A port of scope_bake.render_luma. Same algorithm: box-resample the
+    // luminance to a grid, tone-map it, walk a serpentine path spending
+    // samples in proportion to brightness. Dwell IS the brightness, which is
+    // why the walk is weighted rather than uniform.
+    //
+    // It runs HERE rather than on the server because the server has no sound
+    // card, and because the browser's AudioContext rate decides the sample
+    // budget -- rendering server-side would mean resampling, and resampling a
+    // trace is a filter applied to a picture.
+    const lumImg = document.getElementById("luma-src");
+    let actx = null, worklet = null, lumCanvas = null, lumCtx = null;
+    let localRunning = false, tracesBuilt = 0;
+
+    function boxGrid(data, w, h, rows, cols) {
+      // area-average each cell, matching _box()
+      const g = new Float32Array(rows * cols);
+      for (let r = 0; r < rows; r++) {
+        const y0 = Math.floor(r * h / rows), y1 = Math.max(y0 + 1, Math.floor((r + 1) * h / rows));
+        for (let c = 0; c < cols; c++) {
+          const x0 = Math.floor(c * w / cols), x1 = Math.max(x0 + 1, Math.floor((c + 1) * w / cols));
+          let sum = 0, n = 0;
+          for (let y = y0; y < y1; y++) {
+            const off = y * w;
+            for (let x = x0; x < x1; x++) { sum += data[(off + x) * 4]; n++; }
+          }
+          g[r * cols + c] = n ? sum / (n * 255) : 0;
+        }
+      }
+      return g;
+    }
+
+    function buildTrace(g, rows, cols, n, trim, gamma) {
+      // serpentine path + per-cell weight, then walk it by cumulative weight
+      const px = [], py = [], wt = [];
+      const sx = 0.9, sy = 0.9 * (rows / cols) > 1 ? 0.9 : 0.9;
+      let prevRight = false;
+      for (let r = 0; r < rows; r++) {
+        let a = -1, b = -1;
+        for (let c = 0; c < cols; c++) if (g[r * cols + c] > trim) { if (a < 0) a = c; b = c; }
+        if (a < 0) continue;
+        const y = 1 - 2 * (r + 0.5) / rows;              // y up on the scope
+        const fwd = !prevRight;
+        for (let k = 0; k <= (b - a); k++) {
+          const c = fwd ? a + k : b - k;
+          px.push((2 * (c + 0.5) / cols - 1) * sx);
+          py.push(y * sy);
+          wt.push(Math.pow(Math.max(g[r * cols + c], 1e-9), gamma));
+        }
+        prevRight = fwd;
+      }
+      const m = px.length;
+      const out = new Float32Array(n * 2);
+      if (m < 2) return out;
+      // cumulative weight -> sample positions. More weight = more samples =
+      // the beam lingers = brighter. This is the whole display mechanism.
+      const cum = new Float64Array(m);
+      let tot = 0;
+      for (let i = 0; i < m; i++) { tot += wt[i]; cum[i] = tot; }
+      if (tot <= 0) return out;
+      let j = 0;
+      for (let i = 0; i < n; i++) {
+        const target = (i + 0.5) / n * tot;
+        while (j < m - 1 && cum[j] < target) j++;
+        out[i * 2] = px[j];
+        out[i * 2 + 1] = py[j];
+      }
+      return out;
+    }
+
+    const WORKLET_SRC = `
+      class ScopeOut extends AudioWorkletProcessor {
+        constructor(){ super(); this.buf=null; this.pos=0;
+          this.port.onmessage = e => { this.buf = e.data; this.pos = 0; }; }
+        process(_i, outputs){
+          const L=outputs[0][0], R=outputs[0][1];
+          if(!this.buf){ L.fill(0); R.fill(0); return true; }
+          const b=this.buf, n=b.length>>1;
+          for(let k=0;k<L.length;k++){
+            L[k]=b[this.pos*2]; R[k]=b[this.pos*2+1];
+            this.pos++; if(this.pos>=n) this.pos=0;   // loop, never silence
+          }
+          return true;
+        }
+      }
+      registerProcessor('scope-out', ScopeOut);
+    `;
+
+    async function toggleLocal() {
+      if (localRunning) {
+        localRunning = false;
+        if (actx) { await actx.close(); actx = null; worklet = null; }
+        lumImg.removeAttribute("src");
+        document.getElementById("local-btn").textContent = "Start audio";
+        document.getElementById("local-status").textContent = "Not running.";
+        return;
+      }
+      try {
+        actx = new (window.AudioContext || window.webkitAudioContext)();
+        await actx.resume();
+        const url = URL.createObjectURL(new Blob([WORKLET_SRC], {type:"text/javascript"}));
+        await actx.audioWorklet.addModule(url);
+        worklet = new AudioWorkletNode(actx, "scope-out", {outputChannelCount:[2]});
+        worklet.connect(actx.destination);
+        lumCanvas = document.createElement("canvas");
+        lumCtx = lumCanvas.getContext("2d", {willReadFrequently:true});
+        lumImg.src = "scope/luma.mjpg?t=" + Date.now();
+        localRunning = true;
+        document.getElementById("local-btn").textContent = "Stop audio";
+        setStatus();
+      } catch (e) {
+        document.getElementById("local-status").textContent = "Failed: " + e;
+      }
+    }
+
+    function setStatus() {
+      if (!localRunning || !actx) return;
+      const n = Math.max(64, Math.round(actx.sampleRate / 30));
+      document.getElementById("local-status").textContent =
+        `Running at ${actx.sampleRate} Hz \u2014 ${n} samples per trace, `
+        + `${tracesBuilt} built. Your rate, your sound card.`;
+    }
+
+    lumImg.onload = () => {
+      if (!localRunning || !actx || !worklet) return;
+      const w = lumImg.naturalWidth, h = lumImg.naturalHeight;
+      if (!w || !h) return;
+      if (lumCanvas.width !== w) { lumCanvas.width = w; lumCanvas.height = h; }
+      lumCtx.drawImage(lumImg, 0, 0);
+      const px = lumCtx.getImageData(0, 0, w, h).data;
+      // sample budget comes from THIS browser's rate, not the server's
+      const n = Math.max(64, Math.round(actx.sampleRate / 30));
+      const cells = Math.max(64, n);
+      let cols = Math.max(8, Math.round(Math.sqrt(cells / (h / w))));
+      let rows = Math.max(6, Math.round(cols * h / w));
+      cols = Math.min(cols, w); rows = Math.min(rows, h);
+      const trim = parseFloat(document.getElementById("local-trim").value);
+      const gamma = parseFloat(document.getElementById("local-gamma").value);
+      const g = boxGrid(px, w, h, rows, cols);
+      worklet.port.postMessage(buildTrace(g, rows, cols, n, trim, gamma));
+      if ((++tracesBuilt % 15) === 0) setStatus();
+    };
 
     function poll() {
       // Relative "data", matching HTML_TEMPLATE, so the page works unchanged

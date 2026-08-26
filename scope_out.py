@@ -18,7 +18,22 @@ try:
 except Exception:                    # usable standalone, outside the repo
     settings_mod = None
 import numpy as np
-import sounddevice as sd
+try:
+    import sounddevice as sd
+except (ImportError, OSError) as _sd_err:
+    # A VPS has no sound card AND typically no libportaudio2, and sounddevice
+    # raises OSError at IMPORT time when the library is missing. Without this
+    # the whole module is unimportable and the server build cannot run at all,
+    # even though it never intends to open a device.
+    sd = None
+    _SD_IMPORT_ERROR = _sd_err
+else:
+    _SD_IMPORT_ERROR = None
+
+
+def have_audio():
+    """False when PortAudio is absent -- only --device null will work."""
+    return sd is not None
 
 SAMPLE_RATE = 48_000     # fallback only; Scope reads the device's rate at init
 FPS = 50
@@ -127,6 +142,8 @@ def resolve_device(spec):
     if spec is None or spec == "":
         return None
     spec = scrub(spec) if isinstance(spec, str) else spec
+    if isinstance(spec, str) and spec.strip().lower() in ("null", "none", "off"):
+        return "null"          # handled by Scope, never reaches PortAudio
     if isinstance(spec, str):
         spec = _ANSI_OR_CTRL.sub("", spec).strip()
         if not spec:
@@ -449,6 +466,61 @@ class BufferedSource:
         self._thread.join(timeout=0.5)
 
 
+class NullStream:
+    """A sound card that isn't there.
+
+    A VPS has no audio device, so sd.OutputStream() fails and scope mode will
+    not start at all.  But the samples still have to be GENERATED -- the whole
+    point of the server build is to hand the picture to browsers and let each
+    client render the audio on its own hardware.
+
+    So this presents the OutputStream interface and drives the callback from a
+    software clock instead of a DAC.  Same cadence, same frame boundaries, no
+    hardware.  It intentionally does NOT keep the samples: nothing on the
+    server listens to them.  What the browser needs is the luminance, and that
+    is published separately by the tap.
+    """
+
+    def __init__(self, samplerate, blocksize, callback):
+        self.samplerate = float(samplerate)
+        self.blocksize = int(blocksize or 512)
+        self._cb = callback
+        self.latency = 0.0
+        self._stop = threading.Event()
+        self._buf = np.zeros((self.blocksize, 2), dtype=np.float32)
+        self._t = None
+
+    def start(self):
+        if self._t is not None:
+            return
+        self._t = threading.Thread(target=self._run, daemon=True,
+                                   name="scope-null-clock")
+        self._t.start()
+
+    def _run(self):
+        period = self.blocksize / self.samplerate
+        nxt = time.monotonic()
+        while not self._stop.is_set():
+            try:
+                self._cb(self._buf, self.blocksize, None, None)
+            except Exception:
+                pass
+            nxt += period
+            # absolute deadline, not sleep(period): sleeping accumulates drift,
+            # and the index clock is derived from how many blocks have gone by
+            delay = nxt - time.monotonic()
+            if delay > 0:
+                self._stop.wait(delay)
+            else:
+                nxt = time.monotonic()          # fell behind; resynchronise
+
+    def stop(self):
+        self._stop.set()
+
+    def close(self):
+        self._stop.set()
+
+
 class Scope:
     """Continuously loops the current frame out of an audio device.
 
@@ -473,9 +545,23 @@ class Scope:
         """
         self.invert_y = invert_y
         self.swap_xy = swap_xy
+        _null = (isinstance(device, str) and device.strip().lower()
+                 in ("null", "none", "off"))
+        if sd is None and not _null:
+            raise RuntimeError(
+                f"PortAudio is unavailable ({_SD_IMPORT_ERROR}). On a host with "
+                "no sound card, run with --device null: the samples are "
+                "generated for browsers to render, not played here.")
         if samplerate is None:
-            info = sd.query_devices(device, "output")
-            samplerate = int(info["default_samplerate"]) or SAMPLE_RATE
+            if _null:
+                # No device to ask. 48 kHz because that is what a browser's
+                # AudioContext almost always runs at, and the client renders
+                # its own trace at its own rate anyway -- this only sets the
+                # index clock and the grid the server reports.
+                samplerate = SAMPLE_RATE
+            else:
+                info = sd.query_devices(device, "output")
+                samplerate = int(info["default_samplerate"]) or SAMPLE_RATE
         self.source = source
         # Optional band-limit applied to every frame before it reaches the DAC,
         # so hardware sees exactly what the offline comparison shows.
@@ -490,13 +576,22 @@ class Scope:
         self._pos = 0
         self.frames_drawn = 0     # complete traces emitted
         self.frames_dropped = 0   # indices superseded before they were drawn
-        warn_if_builtin(device)
+        self.null = (isinstance(device, str) and device.strip().lower()
+                     in ("null", "none", "off"))
+        if not self.null:
+            warn_if_builtin(device)
         # An explicit blocksize matters: with latency="low" and blocksize
         # unset, PortAudio picks the smallest buffer the device allows, so the
         # audio thread wakes ~1500 times a second and takes the GIL each time.
         # 512 frames is ~5 ms at 96 kHz -- far below the trace period, and a
         # third the wakeups.
         self.blocksize = int(blocksize or 0)
+        if self.null:
+            print(f"[SCOPE] no audio device (--device null): generating at "
+                  f"{samplerate:.0f} Hz for the browser to render")
+            self.stream = NullStream(samplerate, self.blocksize or 512,
+                                     self._callback)
+            return
         self.stream = sd.OutputStream(
             samplerate=samplerate, channels=2, dtype="float32",
             device=device, blocksize=self.blocksize,
@@ -562,6 +657,32 @@ class Scope:
     # page, it is the whole image being wrong.
     _tap_fields = 1
     _tap_accum = []
+    # The LUMINANCE the trace was built from. This is what a browser needs: it
+    # renders its own trace, at its own AudioContext rate, on its own DAC.
+    # Shipping this instead of PCM is ~19x less bandwidth, because lossy
+    # compression is fatal to a waveform (the waveform IS the picture) but
+    # nearly free on the luminance (the renderer quantises it to a ~50x66 grid
+    # downstream regardless).
+    _luma = {"seq": 0, "data": None}
+    _luma_lock = threading.Lock()
+
+    @classmethod
+    def publish_luma(cls, lum):
+        """Called by the display engine with the composited luminance."""
+        if lum is None:
+            return
+        try:
+            q = np.clip(np.asarray(lum, dtype=np.float32), 0.0, 1.0)
+            with cls._luma_lock:
+                cls._luma["seq"] += 1
+                cls._luma["data"] = (q * 255.0).astype(np.uint8)
+        except Exception:
+            pass
+
+    @classmethod
+    def read_luma(cls):
+        with cls._luma_lock:
+            return cls._luma["seq"], cls._luma["data"]
 
     @classmethod
     def set_tap_fields(cls, fields):

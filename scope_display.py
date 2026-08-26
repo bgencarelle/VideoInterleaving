@@ -30,6 +30,7 @@ import numpy as np
 
 import settings
 
+from time import monotonic as _time_mono
 from scope_out import Scope, choose_device, BufferedSource, precompensate_hpf
 from scope_bake import (XYLibrary, merge, SweepSource, calibrate,
                         composite_luma, TraceEmitter)
@@ -927,7 +928,11 @@ def _emit(scope, ml, fl, index, as_raster, sweep, sweep_mode,
         # is drawn -- grid, fields, chaining, border, dc-comp -- lives on the
         # emitter, which scope_screen.py shares. Nothing about it is restated
         # in this file, so there is no second parameter list to drift.
-        frame = emitter.emit(composite_luma(ml, index, fl, index))
+        _lum = composite_luma(ml, index, fl, index)
+        if Scope._tap_until > _time_mono():
+            # only while a browser is watching -- same gate as the trace tap
+            Scope.publish_luma(_lum)
+        frame = emitter.emit(_lum)
         if frame is not None:
             # mirrored back for the live-controls print and anything else
             # reading sweep state; the emitter owns the real copy

@@ -265,6 +265,13 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
         elif self.path.startswith("/scope/stream.mjpg"):
             self._scope_mjpeg()
 
+        elif self.path.startswith("/scope/luma.mjpg"):
+            # The LUMINANCE the trace was built from, as MJPEG. The browser
+            # renders its own trace from this, at its own AudioContext rate,
+            # and plays it on its own sound card -- which is the only place it
+            # can reach the visitor's scope from.
+            self._scope_luma_stream()
+
         elif self.path.startswith("/scope/frame.jpg"):
             # Single still, for anything that will not hold a connection open.
             _sz, _ex = _scope_opts(self.path)
@@ -335,6 +342,55 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
 
         else:
             self.send_error(404)
+
+    def _scope_luma_stream(self):
+        """multipart JPEG of the source luminance, not the rendered trace."""
+        try:
+            import cv2
+            from scope_out import Scope
+        except Exception:
+            self.send_error(503); return
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type",
+                             "multipart/x-mixed-replace; boundary=frame")
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+            self.end_headers()
+        except (OSError, AttributeError):
+            return
+        last, idle = -1, 0.0
+        # q88: below about q80 the compression pushes cells across `trim`,
+        # which flips them from drawn to undrawn and reroutes the serpentine.
+        # Visually harmless but it is a cliff, not a slope, so stay above it.
+        enc = [cv2.IMWRITE_JPEG_QUALITY, 88]
+        try:
+            while True:
+                Scope.want_tap(3.0)
+                seq, lum = Scope.read_luma()
+                if lum is None or seq == last:
+                    time.sleep(0.01); idle += 0.01
+                    if idle > 30.0:
+                        return
+                    continue
+                idle = 0.0; last = seq
+                ok, buf = cv2.imencode(".jpg", lum, enc)
+                if not ok:
+                    continue
+                try:
+                    self.wfile.write(HEADER_BOUNDARY)
+                    self.wfile.write(HEADER_CTYPE_JPEG)
+                    self.wfile.write(buf.tobytes())
+                    self.wfile.write(HEADER_NEWLINE)
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError,
+                        ConnectionAbortedError, OSError):
+                    return
+                time.sleep(1.0 / max(getattr(settings, "IPS", 30), 1))
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError,
+                socket.timeout, OSError):
+            return
+        except Exception as e:
+            print(f"[Scope luma] {e}", file=sys.stderr)
 
     def _scope_mjpeg(self):
         """multipart/x-mixed-replace, same shape as StreamHandler.

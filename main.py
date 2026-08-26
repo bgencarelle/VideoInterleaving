@@ -378,8 +378,10 @@ def configure_runtime():
             args.scope_device = _scrub(args.scope_device)
             settings.SCOPE_DEVICE = _choose(ask=args.scope_ask,
                                             device=args.scope_device)
-            import sounddevice as _sd
             try:
+                # not a top-level import: on a host without PortAudio this
+                # raises OSError, and the null path must survive that
+                import sounddevice as _sd
                 _name = _scrub(_sd.query_devices(settings.SCOPE_DEVICE)["name"]) \
                     if settings.SCOPE_DEVICE is not None else "system default"
             except Exception:
