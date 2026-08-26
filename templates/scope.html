@@ -82,21 +82,31 @@
   <div><a href="/">&larr; main monitor</a> &nbsp;|&nbsp; <a href="/log">log</a></div>
 
   <h2 class="section">Output</h2>
-  <!-- Live preview of the trace the beam is drawing. Mirrors the phosphor
-       model in test_scope_pair.py's render_trace(): additive blending so
-       overlapping and slow-moving beam positions accumulate brightness, which
-       is what makes dwell read as tone, plus the same green tint and a decay
-       between frames standing in for phosphor persistence. -->
+  <!-- Live preview of the trace the beam is drawing. Rendered server-side by
+       scope_bake.preview_frame(), the same phosphor model test_scope_pair.py
+       uses, and delivered as MJPEG exactly like the main web mode.
+
+       Size is the resolution knob and the cpu knob at once, and they cannot be
+       separated: the picture is ~92 scanlines, so under about 400 px they
+       merge and it turns into a blob regardless of anything else. -->
   <div class="scope-wrap">
-    <img id="scope-img" alt="scope output" width="384" height="384">
+    <img id="scope-img" alt="scope output" width="512" height="512">
     <div class="scope-meta">
       <label><input type="checkbox" id="preview-on" checked> live preview</label>
       <label>size
         <select id="preview-size">
-          <option value="256">256</option>
-          <option value="384" selected>384</option>
-          <option value="512">512</option>
-          <option value="700">700</option>
+          <option value="256">256 &mdash; cheapest, merges</option>
+          <option value="384">384</option>
+          <option value="512" selected>512 &mdash; default</option>
+          <option value="700">700 &mdash; sharpest, costly</option>
+        </select>
+      </label>
+      <label>exposure
+        <select id="preview-exposure">
+          <option value="0.4">0.4</option>
+          <option value="0.7">0.7</option>
+          <option value="1.0" selected>1.0</option>
+          <option value="1.6">1.6</option>
         </select>
       </label>
       <span id="preview-note"></span>
@@ -320,6 +330,7 @@
     const img = document.getElementById("scope-img");
     const onBox = document.getElementById("preview-on");
     const sizeSel = document.getElementById("preview-size");
+    const expSel = document.getElementById("preview-exposure");
 
     function note(t) { document.getElementById("preview-note").textContent = t; }
 
@@ -327,8 +338,11 @@
       const s = sizeSel.value;
       img.width = img.height = Number(s);
       // cache-buster: without it a reconnect can be served the dead stream
-      img.src = "scope/stream.mjpg?size=" + s + "&t=" + Date.now();
-      note("");
+      img.src = "scope/stream.mjpg?size=" + s
+              + "&exposure=" + expSel.value + "&t=" + Date.now();
+      note(Number(s) < 512
+        ? "below 512 the scanlines merge \u2014 expect a blob, not features"
+        : "");
     }
 
     function stopPreview() {
@@ -338,6 +352,7 @@
 
     onBox.onchange = () => onBox.checked ? startPreview() : stopPreview();
     sizeSel.onchange = () => { if (onBox.checked) startPreview(); };
+    expSel.onchange  = () => { if (onBox.checked) startPreview(); };
     img.onerror = () => note("preview unavailable");
 
     // A hidden tab keeps an MJPEG connection open and the tap alive, so drop

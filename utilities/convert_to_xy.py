@@ -258,7 +258,13 @@ def process_folder(args):
 
     try:
         verts, poly_starts, frame_starts, flags, names = [], [0], [0], [], []
-        thumbs = []
+        # Preallocated on the first thumb rather than a list + np.stack at the
+        # end.  np.stack copies the whole set into a second buffer, so peak
+        # memory was double the data: 219 MB per worker for 2221 frames at
+        # width 128, and the pool runs one worker per folder.  Filling in place
+        # halves it.
+        thumbs = None
+        n_thumbs = 0
         for fp in files:
             if thumbs_only:
                 rgb_i, alpha_i = load_rgba(fp)
@@ -272,8 +278,11 @@ def process_folder(args):
                     min_v=prof["min_v"], max_v=prof["max_v"],
                     thumb_width=prof.get("thumb_width", THUMB_W),
                     precondition=prof.get("precondition", PRECONDITION))
-            if not prof.get("no_thumbs"):
-                thumbs.append(thumb)
+            if not prof.get("no_thumbs") and thumb is not None:
+                if thumbs is None:
+                    thumbs = np.empty((len(files),) + thumb.shape, np.uint8)
+                thumbs[n_thumbs] = thumb
+                n_thumbs += 1
             for p, f in zip(polys, fl):
                 q = np.clip(np.round(p * Q), -Q, Q).astype(np.int16)
                 verts.append(q)
@@ -289,8 +298,9 @@ def process_folder(args):
         np.save(dest / "poly_starts.npy", np.array(poly_starts, np.int32))
         np.save(dest / "frame_starts.npy", np.array(frame_starts, np.int32))
         np.save(dest / "flags.npy", np.array(flags, np.uint8))
-        if thumbs:
-            np.save(dest / "thumbs.npy", np.stack(thumbs))
+        if thumbs is not None and n_thumbs:
+            # a frame can fail to produce a thumb, so trim rather than assume
+            np.save(dest / "thumbs.npy", thumbs[:n_thumbs])
         (dest / "names.json").write_text(json.dumps(names))
         return None
     except Exception as e:

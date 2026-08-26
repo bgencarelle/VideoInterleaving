@@ -203,16 +203,26 @@ class RobustHandlerMixin:
             print(f"⚠️ [Web Error] {e}", file=sys.stderr)
 
 
-def _scope_size(path, default=384):
-    """?size=N, clamped. 384 is ~2.8 ms a frame; 700 is ~14 ms."""
+def _scope_opts(path):
+    """(size, exposure) from the query string, clamped.
+
+    Size is the resolution knob AND the cpu knob and there is no way to
+    separate them: the scanlines are about 92 rows, so below ~400 px they
+    merge and the picture turns into a blob. 512 is the smallest that still
+    resolves features. Cost here is 2.4 / 4.4 / 8.0 / 13.7 ms at
+    256 / 384 / 512 / 700; a Pi will be several times that.
+    """
+    size, exposure = 512, 1.0
     try:
         q = parse_qs(urlparse(path).query)
-        return max(128, min(768, int(q.get("size", [default])[0])))
+        size = max(128, min(768, int(q.get("size", [size])[0])))
+        exposure = max(0.1, min(4.0, float(q.get("exposure", [exposure])[0])))
     except Exception:
-        return default
+        pass
+    return size, exposure
 
 
-def _scope_jpeg(size, pts=None, quality=70):
+def _scope_jpeg(size, pts=None, quality=82, exposure=1.0):
     """Render the parked trace to JPEG bytes, or None if there is nothing."""
     try:
         import cv2
@@ -223,7 +233,7 @@ def _scope_jpeg(size, pts=None, quality=70):
             _, pts = Scope.read_tap()
         if pts is None:
             return None
-        img = preview_frame(pts, size=size)
+        img = preview_frame(pts, size=size, exposure=exposure)
         ok, buf = cv2.imencode(".jpg", img[:, :, ::-1],
                                [cv2.IMWRITE_JPEG_QUALITY, quality])
         return buf.tobytes() if ok else None
@@ -257,7 +267,8 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
 
         elif self.path.startswith("/scope/frame.jpg"):
             # Single still, for anything that will not hold a connection open.
-            blob = _scope_jpeg(_scope_size(self.path))
+            _sz, _ex = _scope_opts(self.path)
+            blob = _scope_jpeg(_sz, exposure=_ex)
             if blob is None:
                 self.send_response(204); self.end_headers(); return
             self.send_response(200)
@@ -332,7 +343,7 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
         slow client or a heavy size setting therefore costs frames on the
         preview and nothing at all on the trace deadline.
         """
-        size = _scope_size(self.path)
+        size, exposure = _scope_opts(self.path)
         try:
             self.send_response(200)
             self.send_header("Content-Type",
@@ -362,7 +373,7 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
                     continue
                 idle = 0.0
                 last_seq = seq
-                blob = _scope_jpeg(size, pts)
+                blob = _scope_jpeg(size, pts, exposure=exposure)
                 if blob is None:
                     continue
                 try:
