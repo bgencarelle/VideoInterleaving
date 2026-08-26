@@ -231,6 +231,8 @@ def device_status():
 
 def _dev_name_of(scope):
     """Human-readable name of whatever output a Scope ended up on."""
+    if getattr(scope, "null", False):
+        return "none (browser renders)"
     try:
         import sounddevice as _sd
         from scope_out import scrub as _scrub
@@ -498,12 +500,15 @@ def run_scope(clock_source=None):
                           f"scanlines but the bake caps it at {cap_rows}; "
                           "rebake with a larger --thumb-width to use it.")
 
-    try:
-        import sounddevice as _sd
-        from scope_out import scrub as _scrub
-        _dev_name = _scrub(_sd.query_devices(scope.stream.device)["name"])
-    except Exception:
-        _dev_name = "?"
+    if getattr(scope, "null", False):
+        _dev_name = "none (browser renders)"
+    else:
+        try:
+            import sounddevice as _sd
+            from scope_out import scrub as _scrub
+            _dev_name = _scrub(_sd.query_devices(scope.stream.device)["name"])
+        except Exception:
+            _dev_name = "?"
     print(f"[SCOPE] output: {_dev_name}")
 
     if (use_raster or mix_hz) and not cal:

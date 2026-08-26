@@ -378,13 +378,17 @@ def configure_runtime():
             args.scope_device = _scrub(args.scope_device)
             settings.SCOPE_DEVICE = _choose(ask=args.scope_ask,
                                             device=args.scope_device)
-            try:
-                # not a top-level import: on a host without PortAudio this
-                # raises OSError, and the null path must survive that
+            if settings.SCOPE_DEVICE == "null":
+                _name = "none (browser renders)"
+            else:
+              try:
+                # NOT a top-level import. sounddevice runs Pa_Initialize() on
+                # import, which throws PortAudioError -- not OSError -- on a
+                # host with no sound server. Catch broadly.
                 import sounddevice as _sd
                 _name = _scrub(_sd.query_devices(settings.SCOPE_DEVICE)["name"]) \
                     if settings.SCOPE_DEVICE is not None else "system default"
-            except Exception:
+              except Exception:
                 _name = str(settings.SCOPE_DEVICE)
             print(f">> AUDIO OUT: {_name}")
             # Explicit flag: scope_display must NOT re-resolve, or the choice

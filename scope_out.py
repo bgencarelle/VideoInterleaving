@@ -20,11 +20,19 @@ except Exception:                    # usable standalone, outside the repo
 import numpy as np
 try:
     import sounddevice as sd
-except (ImportError, OSError) as _sd_err:
-    # A VPS has no sound card AND typically no libportaudio2, and sounddevice
-    # raises OSError at IMPORT time when the library is missing. Without this
-    # the whole module is unimportable and the server build cannot run at all,
-    # even though it never intends to open a device.
+except Exception as _sd_err:            # deliberately broad -- see below
+    # sounddevice calls Pa_Initialize() at IMPORT time, so a headless host
+    # fails before this module even finishes loading, and nothing in the
+    # project can run -- not even the paths that never touch a device.
+    #
+    # The exception is NOT reliably ImportError or OSError:
+    #   no libportaudio2        -> OSError
+    #   no PulseAudio server    -> sounddevice.PortAudioError, which subclasses
+    #                              plain Exception and nothing narrower
+    #   no ALSA config          -> PortAudioError again, different host error
+    # A server typically hits the middle one: PortAudio is installed and works,
+    # it just has no session bus to reach a sound server through. Catching
+    # narrowly here is how this failed the first time.
     sd = None
     _SD_IMPORT_ERROR = _sd_err
 else:
