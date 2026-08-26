@@ -146,11 +146,24 @@
         </select>
       </label>
     </div>
+    <div class="dim-controls">
+      <button class="preset-btn" id="sink-btn" onclick="chooseOutput()">
+        Choose output device
+      </button>
+      <select id="sink-select" style="display:none"></select>
+      <span id="sink-status"></span>
+    </div>
     <div class="warn">
       Connect your scope to this machine's audio output and set it to XY.
       Left is X, right is Y. Turn the volume up full &mdash; the level is the
       picture size, and anything the operating system does to the signal
       (EQ, "enhancements", spatial audio) will distort it.
+      <br><br>
+      Audio goes to your system's default output unless you pick another.
+      Firefox shows a device picker; Chrome has to ask for microphone
+      permission first, because that is the only way it will reveal what your
+      speakers are called. Declining is fine &mdash; set the default in your
+      OS sound settings instead and it will follow.
     </div>
     <img id="luma-src" style="display:none" alt="">
   </div>
@@ -398,13 +411,33 @@
     onBox.onchange = () => onBox.checked ? startPreview() : stopPreview();
     sizeSel.onchange = () => { if (onBox.checked) startPreview(); };
     expSel.onchange  = () => { if (onBox.checked) startPreview(); };
-    img.onerror = () => note("preview unavailable");
+    // The visible preview cannot be watched the same way -- it is displayed
+    // directly and never read back -- so it gets a plain reconnect on error
+    // plus a periodic refresh, which costs one request an hour.
+    img.onerror = () => {
+      note("preview dropped, reconnecting\u2026");
+      setTimeout(() => { if (onBox.checked && !document.hidden) startPreview(); }, 2000);
+    };
+    setInterval(() => {
+      if (onBox.checked && !document.hidden && localRunning !== null) startPreview();
+    }, 55 * 60 * 1000);   // under nginx's 3600s proxy_read_timeout
 
     // A hidden tab keeps an MJPEG connection open and the tap alive, so drop
     // it and pick it up again on return.
     document.addEventListener("visibilitychange", () => {
-      if (document.hidden) { img.removeAttribute("src"); }
-      else if (onBox.checked) { startPreview(); }
+      if (document.hidden) {
+        img.removeAttribute("src");
+      } else {
+        if (onBox.checked) startPreview();
+        // A hidden tab has its timers throttled to roughly once a second or
+        // stopped outright, so the stall watchdog would see a frozen frame
+        // and fire a spurious reconnect the instant the tab came back.
+        // Forgive the gap instead of reacting to it.
+        lastChange = Date.now();
+        if (localRunning && lumImg && !lumImg.getAttribute("src")) {
+          lumImg.src = "scope/luma.mjpg?t=" + Date.now();
+        }
+      }
     });
 
     startPreview();
@@ -525,6 +558,66 @@
       registerProcessor('scope-out', ScopeOut);
     `;
 
+    // ------------------------------------------------- output device
+    // Web Audio renders to the OS default and stays there. Moving it needs
+    // AudioContext.setSinkId(), and the two engines gate it differently:
+    //
+    //   Firefox: selectAudioOutput() shows a NATIVE picker and grants
+    //            permission for the chosen device. No microphone prompt.
+    //   Chrome:  setSinkId() exists, but enumerateDevices() returns audio
+    //            outputs with EMPTY labels until the page has been granted
+    //            media permission -- so reading speaker names requires
+    //            getUserMedia({audio:true}), i.e. a microphone prompt purely
+    //            to learn what the speakers are called. That is a browser
+    //            privacy rule, not our choice, so it is opt-in behind this
+    //            button and never requested on load.
+    //
+    // Either way the OS default already works, so nothing here is required.
+    async function chooseOutput() {
+      const st = document.getElementById("sink-status");
+      const sel = document.getElementById("sink-select");
+      if (!actx) { st.textContent = "Start audio first."; return; }
+      if (!("setSinkId" in actx)) {
+        st.textContent = "This browser cannot redirect Web Audio output "
+                       + "\u2014 change your system default instead.";
+        return;
+      }
+      try {
+        if (navigator.mediaDevices && navigator.mediaDevices.selectAudioOutput) {
+          const dev = await navigator.mediaDevices.selectAudioOutput();
+          await actx.setSinkId(dev.deviceId);
+          st.textContent = "Output: " + (dev.label || dev.deviceId);
+          return;
+        }
+        // Chrome path: unlock the labels, then offer a list.
+        st.textContent = "Asking for device access\u2026";
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach(t => t.stop());   // we never wanted the mic
+        const devs = (await navigator.mediaDevices.enumerateDevices())
+                       .filter(d => d.kind === "audiooutput");
+        if (!devs.length) { st.textContent = "No output devices found."; return; }
+        sel.textContent = "";
+        for (const d of devs) {
+          const o = document.createElement("option");
+          o.value = d.deviceId;
+          o.textContent = d.label || d.deviceId;
+          sel.appendChild(o);
+        }
+        sel.style.display = "";
+        sel.onchange = async () => {
+          try {
+            await actx.setSinkId(sel.value);
+            st.textContent = "Output: " + sel.options[sel.selectedIndex].textContent;
+          } catch (e) { st.textContent = "Could not switch: " + e; }
+        };
+        document.getElementById("sink-btn").style.display = "none";
+        st.textContent = "Pick an output.";
+      } catch (e) {
+        st.textContent = "Not available (" + e.name + ") \u2014 change your "
+                       + "system default output instead.";
+      }
+    }
+
     async function toggleLocal() {
       if (localRunning) {
         localRunning = false;
@@ -577,6 +670,15 @@
       if (lumCanvas.width !== w) { lumCanvas.width = w; lumCanvas.height = h; }
       lumCtx.drawImage(lumImg, 0, 0);
       const px = lumCtx.getImageData(0, 0, w, h).data;
+      const hh = frameHash(px, w, h);
+      if (hh !== lastHash) {
+        lastHash = hh;
+        lastChange = Date.now();
+        backoff = 1000;                 // healthy again, reset the backoff
+      } else if (Date.now() - lastChange > STALL_MS) {
+        reconnectLuma("feed stalled");
+        return;
+      }
       // sample budget comes from THIS browser's rate, not the server's
       const n = Math.max(64, Math.round(actx.sampleRate / 30));
       const cells = Math.max(64, n);
@@ -602,10 +704,46 @@
     function stopLumaLoop() {
       if (lumTimer) { clearInterval(lumTimer); lumTimer = null; }
     }
-    lumImg.onerror = () => {
+    // ---------------------------------------------------- keepalive
+    // An MJPEG connection is not forever. nginx cuts it at
+    // proxy_read_timeout, the server's own loop returns after 30 s with no
+    // new frame, and a sleeping laptop or a network blip ends it too. None
+    // of those raise an error the page can see: the <img> simply stops
+    // updating, and the worklet keeps looping its last trace, so the audio
+    // carries on sounding correct while the picture is frozen. That is the
+    // worst possible failure -- it looks like it is working.
+    //
+    // So watch the CONTENT, not the connection. If the frame stops changing,
+    // reconnect regardless of whether anything reported a problem.
+    const STALL_MS = 6000;
+    let lastHash = -1, lastChange = Date.now(), reconnects = 0, backoff = 1000;
+
+    function frameHash(px, w, h) {
+      // ~100 scattered pixels: enough to notice a changed picture, far
+      // cheaper than hashing the frame, and it runs every render.
+      let acc = 0;
+      const step = Math.max(4, Math.floor((w * h) / 100)) * 4;
+      for (let i = 0; i < px.length; i += step) acc = (acc * 31 + px[i]) | 0;
+      return acc;
+    }
+
+    function reconnectLuma(why) {
+      if (!localRunning) return;
+      reconnects++;
       document.getElementById("local-status").textContent =
-        "Luminance feed unavailable (scope/luma.mjpg).";
-    };
+        `Reconnecting (${why})\u2026 attempt ${reconnects}`;
+      lumImg.removeAttribute("src");
+      setTimeout(() => {
+        if (!localRunning) return;
+        lumImg.src = "scope/luma.mjpg?t=" + Date.now();
+        lastChange = Date.now();
+        // back off so a server that is down is not hammered, but cap it:
+        // this is an installation, it should recover on its own eventually
+        backoff = Math.min(backoff * 2, 15000);
+      }, backoff);
+    }
+
+    lumImg.onerror = () => reconnectLuma("feed error");
 
     function poll() {
       // Relative "data", matching HTML_TEMPLATE, so the page works unchanged

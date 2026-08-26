@@ -370,6 +370,10 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
                 if lum is None or seq == last:
                     time.sleep(0.01); idle += 0.01
                     if idle > 30.0:
+                        # Nothing is producing. Returning frees the thread and
+                        # the client reconnects; holding the socket open would
+                        # look healthy to the browser while delivering nothing,
+                        # which is the failure that hides itself.
                         return
                     continue
                 idle = 0.0; last = seq
