@@ -257,19 +257,46 @@ check_ssl_configured() {
     return 1
 }
 
+# Carry forward any hand-added server-level directives we do not generate.
+#
+# The operator may have added things this script knows nothing about -- a
+# limit_req rate limiter is the case that prompted this. Regenerating the file
+# would silently drop them, and the failure is invisible until someone floods
+# the box.
+#
+# Deliberately extracts whatever is there rather than hardcoding a zone name:
+# `limit_req zone=NAME` only works if `limit_req_zone NAME` is declared in the
+# http{} block of nginx.conf, which this script never touches. Emitting a
+# hardcoded line on a host without that zone would make `nginx -t` fail and
+# take the site down. Preserving what already worked cannot.
+extract_custom_server_directives() {
+    local config_file="$1"
+    [ -f "$config_file" ] || return 0
+    awk '
+        /^server \{/ {
+            if (block_count == 0) { in_first_block=1 }
+            block_count++
+        }
+        /^\}/ && in_first_block { in_first_block=0 }
+        in_first_block && /^[[:space:]]*(limit_req|limit_conn|limit_rate)[[:space:]]/ {
+            gsub(/^[[:space:]]+/, "", $0); print $0
+        }
+    ' "$config_file" 2>/dev/null | sed 's/^/    /' || echo ""
+}
+
 # Extract SSL block from first server block only (HTTPS block)
 extract_ssl_from_first_server_block() {
     local config_file="$1"
     # Use awk to extract SSL lines only from first server block
     # Match lines that are SSL-related and within the first server block
     awk '
-        /^server \{/ { 
+        /^server \{/ {
             if (block_count == 0) {
                 in_first_block=1
             }
             block_count++
         }
-        /^\}/ && in_first_block { 
+        /^\}/ && in_first_block {
             in_first_block=0
         }
         in_first_block && /listen.*443|ssl_certificate|ssl_certificate_key|include.*letsencrypt|ssl_dhparam/ {
@@ -313,7 +340,7 @@ if ! command -v nginx >/dev/null 2>&1; then
     fi
 else
     log_success "Nginx already installed: $(nginx -v 2>&1 | head -1)"
-    
+
     # Check if certbot-nginx plugin is installed
     if ! python3 -c "import certbot_nginx" 2>/dev/null; then
         log_info "Installing certbot-nginx plugin..."
@@ -399,6 +426,7 @@ log_info "Using Server Name: $DOMAIN_NAME and www.$DOMAIN_NAME"
 
 # 4. Remove old site configuration and backup existing config
 SSL_BLOCK=""
+CUSTOM_DIRECTIVES=""
 SSL_ENABLED=false
 
 # Remove old symlink in sites-enabled (if it exists)
@@ -435,12 +463,17 @@ if [ -f "$NGINX_AVAILABLE" ]; then
             log_warning "Backup may have failed, but continuing..."
         fi
     fi
-    
+
     # Extract SSL settings if present (Certbot managed)
     if check_ssl_configured; then
         log_info "Preserving SSL configuration (Certbot managed)..."
         # Extract SSL-related lines from FIRST server block only (HTTPS block)
         SSL_BLOCK=$(extract_ssl_from_first_server_block "$NGINX_AVAILABLE")
+        CUSTOM_DIRECTIVES=$(extract_custom_server_directives "$NGINX_AVAILABLE")
+        if [ -n "$CUSTOM_DIRECTIVES" ]; then
+            log_info "Preserving hand-added rate limiting:"
+            echo "$CUSTOM_DIRECTIVES" | sed 's/^/    /'
+        fi
         if [ -n "$SSL_BLOCK" ]; then
             SSL_ENABLED=true
             log_verbose "Extracted SSL block from first server block"
@@ -474,6 +507,7 @@ $([ "$SSL_ENABLED" != "true" ] && echo "    listen 80 default_server;")
 $([ "$SSL_ENABLED" != "true" ] && echo "    listen [::]:80 default_server;")
 
     # --- Global Settings ---
+${CUSTOM_DIRECTIVES:-}
     client_max_body_size 20M;
     root $PROJECT_DIR;
     index index.html;
@@ -610,6 +644,7 @@ $([ "$SSL_ENABLED" != "true" ] && echo "    listen 80 default_server;")
 $([ "$SSL_ENABLED" != "true" ] && echo "    listen [::]:80 default_server;")
 
     # --- Global Settings ---
+${CUSTOM_DIRECTIVES:-}
     client_max_body_size 20M;
     root $PROJECT_DIR;
     index index.html;
