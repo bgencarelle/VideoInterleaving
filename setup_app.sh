@@ -779,7 +779,8 @@ Environment=XAUTHORITY=$XAUTH_PATH"
     ASCII_SERVICE_EXISTS=false
     ASCIIWEB_SERVICE_EXISTS=false
     LOCAL_SERVICE_EXISTS=false
-    
+    SCOPE_SERVICE_EXISTS=false
+
     if check_systemd_service_exists "vi-web.service"; then
         WEB_SERVICE_EXISTS=true
         log_info "Existing vi-web.service found"
@@ -792,11 +793,15 @@ Environment=XAUTHORITY=$XAUTH_PATH"
         ASCIIWEB_SERVICE_EXISTS=true
         log_info "Existing vi-asciiweb.service found"
     fi
+    if check_systemd_service_exists "vi-scope.service"; then
+        SCOPE_SERVICE_EXISTS=true
+        log_info "Existing vi-scope.service found"
+    fi
     if check_systemd_service_exists "vi-local.service"; then
         LOCAL_SERVICE_EXISTS=true
         log_info "Existing vi-local.service found"
     fi
-    
+
     if [ "$DRY_RUN" = true ]; then
         if [ "$WEB_SERVICE_EXISTS" = true ]; then
             log_info "[DRY-RUN] Would update /etc/systemd/system/vi-web.service"
@@ -879,6 +884,33 @@ WantedBy=multi-user.target
 EOF
         echo "[DRY-RUN] ---"
         echo ""
+        if [ "$SCOPE_SERVICE_EXISTS" = true ]; then
+            log_info "[DRY-RUN] Would update /etc/systemd/system/vi-scope.service"
+        else
+            log_info "[DRY-RUN] Would create /etc/systemd/system/vi-scope.service"
+        fi
+        echo "[DRY-RUN] ---"
+        cat <<EOF | sed 's/^/[DRY-RUN] /'
+[Unit]
+Description=VideoInterleaving (Scope XY, browser-rendered)
+After=network.target
+
+[Service]
+User=$USERNAME
+WorkingDirectory=$PROJECT_DIR
+Environment=PYTHONUNBUFFERED=1
+$ENV_BLOCK
+ExecStart=$VENV_DIR/bin/python -O main.py --mode scope --device null --xy-dir ${SCOPE_XY_DIR:-images_xy} --scope-raster --scope-trim 0.10 --scope-fields 2
+Restart=always
+RestartSec=3
+StandardOutput=append:$PROJECT_DIR/vi-scope.log
+StandardError=append:$PROJECT_DIR/vi-scope.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        echo "[DRY-RUN] ---"
+        echo ""
         if [ "$LOCAL_SERVICE_EXISTS" = true ]; then
             log_info "[DRY-RUN] Would update /etc/systemd/system/vi-local.service"
         else
@@ -952,17 +984,20 @@ EOF
         if [ "$LOCAL_SERVICE_EXISTS" = true ]; then
             backup_systemd_service "vi-local.service"
         fi
-        
+        if [ "$SCOPE_SERVICE_EXISTS" = true ]; then
+            backup_systemd_service "vi-scope.service"
+        fi
+
         # Stop services before rewriting (good practice)
         # Only stop if services are actually running to avoid errors on low-end systems
         log_info "Stopping existing services before update..."
-        for service in vi-web vi-ascii vi-asciiweb vi-local; do
+        for service in vi-web vi-ascii vi-asciiweb vi-local vi-scope; do
             # Check if service is active (with sudo for permissions) and stop if running
             if sudo systemctl is-active --quiet "$service.service" 2>/dev/null; then
                 sudo systemctl stop "$service.service" 2>/dev/null || true
             fi
         done
-        
+
         # Create/update services
         if [ "$WEB_SERVICE_EXISTS" = true ]; then
             log_info "Updating vi-web.service..."
@@ -989,6 +1024,38 @@ StandardError=append:$PROJECT_DIR/vi-web.log
 WantedBy=multi-user.target
 EOF
         log_success "vi-web.service created/updated"
+
+        # --- scope -------------------------------------------------------
+        # Shaped exactly like vi-web, NOT like vi-local. With --device null
+        # there is no sound card, no session bus and no audio group to join,
+        # so none of the usual audio-service complications apply: the samples
+        # are generated for BROWSERS to render on their own hardware. That is
+        # what makes this a plain network service.
+        if [ "$SCOPE_SERVICE_EXISTS" = true ]; then
+            log_info "Updating vi-scope.service..."
+        else
+            log_info "Creating vi-scope.service..."
+        fi
+        sudo tee "/etc/systemd/system/vi-scope.service" > /dev/null <<EOF
+[Unit]
+Description=VideoInterleaving (Scope XY, browser-rendered)
+After=network.target
+
+[Service]
+User=$USERNAME
+WorkingDirectory=$PROJECT_DIR
+Environment=PYTHONUNBUFFERED=1
+$ENV_BLOCK
+ExecStart=$VENV_DIR/bin/python -O main.py --mode scope --device null --xy-dir ${SCOPE_XY_DIR:-images_xy} --scope-raster --scope-trim 0.10 --scope-fields 2
+Restart=always
+RestartSec=3
+StandardOutput=append:$PROJECT_DIR/vi-scope.log
+StandardError=append:$PROJECT_DIR/vi-scope.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        log_success "vi-scope.service created/updated"
 
         if [ "$ASCII_SERVICE_EXISTS" = true ]; then
             log_info "Updating vi-ascii.service..."
@@ -1057,7 +1124,7 @@ EOF
         if [ "$DRY_RUN" = false ] && [ -d "$USER_HOME" ]; then
             log_info "Creating user service for local mode (better GUI compatibility)..."
             mkdir -p "$USER_SERVICE_DIR"
-            
+
             # Create user service
             cat <<EOF > "$USER_SERVICE_DIR/vi-local.service"
 [Unit]
@@ -1083,7 +1150,7 @@ EOF
             log_success "User service created at $USER_SERVICE_DIR/vi-local.service"
             log_info "Enable with: systemctl --user enable --now vi-local.service"
         fi
-        
+
         # Also create system service as fallback (but note it may not work for GUI)
         log_info "Creating system service for local mode (fallback)..."
         sudo tee "/etc/systemd/system/vi-local.service" > /dev/null <<EOF
@@ -1115,11 +1182,11 @@ EOF
         log_info "Reloading systemd daemon..."
 sudo systemctl daemon-reload
         log_success "Systemd daemon reloaded"
-        
+
         # Restart services that existed before (they were updated)
         log_info "Restarting updated services..."
         services_restarted=0
-        
+
         # Check and restart each service if it existed
         if [ "$WEB_SERVICE_EXISTS" = true ]; then
             if sudo systemctl is-enabled --quiet vi-web.service 2>/dev/null; then
@@ -1132,7 +1199,19 @@ sudo systemctl daemon-reload
                 fi
             fi
         fi
-        
+
+        if [ "$SCOPE_SERVICE_EXISTS" = true ]; then
+            if sudo systemctl is-enabled --quiet vi-scope.service 2>/dev/null; then
+                log_info "Restarting vi-scope.service..."
+                if sudo systemctl restart vi-scope.service 2>/dev/null; then
+                    log_success "vi-scope.service restarted"
+                    services_restarted=$((services_restarted + 1))
+                else
+                    log_warning "Failed to restart vi-scope.service (may not be running)"
+                fi
+            fi
+        fi
+
         if [ "$ASCII_SERVICE_EXISTS" = true ]; then
             if sudo systemctl is-enabled --quiet vi-ascii.service 2>/dev/null; then
                 log_info "Restarting vi-ascii.service..."
@@ -1144,7 +1223,7 @@ sudo systemctl daemon-reload
                 fi
             fi
         fi
-        
+
         if [ "$ASCIIWEB_SERVICE_EXISTS" = true ]; then
             if sudo systemctl is-enabled --quiet vi-asciiweb.service 2>/dev/null; then
                 log_info "Restarting vi-asciiweb.service..."
@@ -1156,7 +1235,7 @@ sudo systemctl daemon-reload
                 fi
             fi
         fi
-        
+
         if [ "$LOCAL_SERVICE_EXISTS" = true ]; then
             if sudo systemctl is-enabled --quiet vi-local.service 2>/dev/null; then
                 log_info "Restarting vi-local.service (system service)..."
@@ -1167,7 +1246,7 @@ sudo systemctl daemon-reload
                     log_warning "Failed to restart vi-local.service (system) (may not be running)"
                 fi
             fi
-            
+
             # Also restart user service for local mode if it exists
             USER_HOME=$(eval echo ~"$USERNAME" 2>/dev/null || getent passwd "$USERNAME" 2>/dev/null | cut -d: -f6 || echo "")
             if [ -n "$USER_HOME" ] && [ -f "$USER_HOME/.config/systemd/user/vi-local.service" ]; then
@@ -1177,14 +1256,14 @@ sudo systemctl daemon-reload
                 fi
             fi
         fi
-        
+
         if [ "$services_restarted" -gt 0 ]; then
             log_success "Restarted $services_restarted service(s)"
         else
             log_info "No services were restarted (either new services or not enabled)"
         fi
     fi
-    
+
     echo ""
     log_info "To enable and start services, run:"
     echo "   👉 Web Mode:   systemctl enable --now vi-web"
@@ -1208,7 +1287,7 @@ fi
 # --------------------------------------------
 if command -v ufw >/dev/null 2>&1; then
     log_step "🔥 Configuring Firewall..."
-    
+
     # Check if firewall is active
     firewall_status=$(ufw status 2>/dev/null | head -1 || echo "inactive")
     if echo "$firewall_status" | grep -q "inactive"; then
@@ -1216,7 +1295,7 @@ if command -v ufw >/dev/null 2>&1; then
     else
         log_success "UFW firewall is active"
     fi
-    
+
     ports_to_add=(
         "1978/tcp:Monitor (WEB mode)"
         "1980/tcp:Monitor (ASCIIWEB mode)"
@@ -1227,7 +1306,7 @@ if command -v ufw >/dev/null 2>&1; then
         "8080/tcp:Web stream"
         "8888/tcp:Monitor (LOCAL mode)"
     )
-    
+
     if [ "$DRY_RUN" = true ]; then
         for port_info in "${ports_to_add[@]}"; do
             port=$(echo "$port_info" | cut -d: -f1)
@@ -1261,7 +1340,7 @@ if [ "$DRY_RUN" = true ]; then
     log_info "Run without --dry-run to apply these changes"
 else
     log_success "App Setup Complete"
-    
+
     # Summary of what was done
     echo ""
     log_info "Summary:"
@@ -1272,7 +1351,7 @@ else
     else
         echo "   ⏭️  Python virtual environment (already up to date)"
     fi
-    
+
     if [[ "$OSTYPE" == "linux-gnu"* ]] && command -v systemctl >/dev/null 2>&1; then
         if [ "$WEB_SERVICE_EXISTS" = true ] || [ "$ASCII_SERVICE_EXISTS" = true ] || [ "$ASCIIWEB_SERVICE_EXISTS" = true ] || [ "$LOCAL_SERVICE_EXISTS" = true ]; then
             echo "   ✅ Updated systemd services"
