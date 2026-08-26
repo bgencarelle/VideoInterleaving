@@ -89,19 +89,19 @@ parse_args() {
         for arg in "$@"; do
             case "$arg" in
                 --asciiweb)
-                    args="$args --mode asciiweb"
+                    args="$args --mode asciiweb --dir ${ASCII_DIR:-images_ascii}"
                     mode_specified=true
                     ;;
                 --ascii)
-                    args="$args --mode ascii"
+                    args="$args --mode ascii --dir ${ASCII_DIR:-images_ascii}"
                     mode_specified=true
                     ;;
                 --web)
-                    args="$args --mode web"
+                    args="$args --mode web --dir ${SBS_DIR:-images_sbs}"
                     mode_specified=true
                     ;;
                 --local)
-                    args="$args --mode local"
+                    args="$args --mode local --dir ${SBS_DIR:-images_sbs}"
                     mode_specified=true
                     ;;
                 --scope)
@@ -110,7 +110,7 @@ parse_args() {
                     # own hardware, which is what makes this runnable on a
                     # headless server at all. Pass --device NAME after
                     # --scope to override and drive a real output locally.
-                    args="$args --mode scope --device null --scope-raster --scope-fields 2"
+                    args="$args --mode scope --device null --xy-dir ${SCOPE_XY_DIR:-images_xy} --scope-raster --scope-fields 2"
                     mode_specified=true
                     ;;
                 --restart-delay=*)
@@ -135,7 +135,7 @@ parse_args() {
 
     # Default to local mode if no mode was specified
     if [ "$mode_specified" = false ]; then
-        args="$args --mode local"
+        args="$args --mode local --dir ${SBS_DIR:-images_sbs}"
     fi
 
     echo "$args"

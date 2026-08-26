@@ -5,6 +5,17 @@ set -euo pipefail  # Better error handling: exit on error, undefined vars, pipe 
 PROJECT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 VENV_DIR="$PROJECT_DIR/.venv"
 
+# --- Per-mode source trees -------------------------------------------------
+# Each mode wants differently prepared material, so they do not share a folder:
+#   sbs   - side-by-side frames for the video modes
+#   ascii - prepared for the character renderer
+#   xy    - the BAKED library for scope mode. Note --xy-dir, not --dir: scope
+#           never opens an image, it reads the manifest out of the bake.
+# Override any of these in the environment before running this script.
+SBS_DIR="${SBS_DIR:-images_sbs}"
+ASCII_DIR="${ASCII_DIR:-images_ascii}"
+SCOPE_XY_DIR="${SCOPE_XY_DIR:-images_xy}"
+
 # Parse command line arguments
 DRY_RUN=false
 VERBOSE=false
@@ -92,7 +103,7 @@ check_port_available() {
 detect_port_usage() {
     local ports_in_use=()
     local ports_available=()
-    
+
     for port in "${DEFAULT_PORTS[@]}"; do
         if check_port_available "$port"; then
             ports_available+=("$port")
@@ -102,7 +113,7 @@ detect_port_usage() {
             log_verbose "Port $port is in use by: $process"
         fi
     done
-    
+
     if [ ${#ports_in_use[@]} -gt 0 ]; then
         log_warning "Some ports are already in use: ${ports_in_use[*]}"
         log_info "This is normal if services are already running"
@@ -113,9 +124,9 @@ detect_port_usage() {
 preflight_checks() {
     local errors=0
     local warnings=0
-    
+
     log_step "🔍 Running Pre-flight Checks..."
-    
+
     # Check Python version
     if ! python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)" 2>/dev/null; then
         log_error "Python 3.11+ required. Found: $(python3 --version 2>&1)"
@@ -123,7 +134,7 @@ preflight_checks() {
     else
         log_success "Python version: $(python3 --version 2>&1)"
     fi
-    
+
     # Check project directory structure
     if [ ! -f "$PROJECT_DIR/requirements.txt" ]; then
         log_error "requirements.txt not found in $PROJECT_DIR"
@@ -131,14 +142,14 @@ preflight_checks() {
     else
         log_success "requirements.txt found"
     fi
-    
+
     if [ ! -f "$PROJECT_DIR/main.py" ]; then
         log_warning "main.py not found - project may be incomplete"
         warnings=$((warnings + 1))
     else
         log_success "main.py found"
     fi
-    
+
     # Check disk space (at least 1GB free)
     if command -v df >/dev/null 2>&1; then
         local available_space=$(df "$PROJECT_DIR" | tail -1 | awk '{print $4}')
@@ -149,7 +160,7 @@ preflight_checks() {
             log_verbose "Disk space: $(df -h "$PROJECT_DIR" | tail -1 | awk '{print $4}') available"
         fi
     fi
-    
+
     # Check if systemd is available (Linux)
     if [[ "$OSTYPE" == "linux-gnu"* ]]; then
         if ! command -v systemctl >/dev/null 2>&1; then
@@ -159,10 +170,10 @@ preflight_checks() {
             log_success "systemd available"
         fi
     fi
-    
+
     # Check port availability
     detect_port_usage
-    
+
     # Summary
     if [ "$errors" -gt 0 ]; then
         log_error "Pre-flight checks failed with $errors error(s)"
@@ -198,7 +209,7 @@ detect_os() {
     local pkg_update_cmd=""
     local pkg_install_cmd=""
     local needs_sudo=true
-    
+
     if [[ "$OSTYPE" == "darwin"* ]]; then
         # macOS
         os="macos"
@@ -260,7 +271,7 @@ detect_os() {
         echo "❌ ERROR: Unsupported OS: $OSTYPE"
         exit 1
     fi
-    
+
     echo "$os|$pkg_manager|$pkg_update_cmd|$pkg_install_cmd|$needs_sudo"
 }
 
@@ -365,11 +376,11 @@ install_system_packages() {
     local update_cmd=$3
     local install_cmd=$4
     local needs_sudo=$5
-    
+
     echo ">>> 📦 Installing system libraries ($pkg_manager)..."
-    
+
     local packages=$(get_packages_for_platform "$os")
-    
+
     if [ -z "$packages" ]; then
         echo "⚠️  WARNING: No packages defined for platform: $os"
         return
@@ -391,7 +402,7 @@ install_system_packages() {
             return
         fi
     fi
-    
+
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would run: $update_cmd"
         if [ "$needs_sudo" = "true" ]; then
@@ -402,7 +413,7 @@ install_system_packages() {
         echo "[DRY-RUN] Packages to install: $packages"
         return
     fi
-    
+
     # Install packages (update already done above for apt)
     if [ "$needs_sudo" = "true" ]; then
         if [ "$pkg_manager" != "apt" ]; then
@@ -445,14 +456,14 @@ if [[ "$OSTYPE" == "linux-gnu"* ]] && [ "$HAS_GPU" = true ] && [ "$USERNAME" != 
     user_groups=$(groups "$USERNAME" 2>/dev/null || id -Gn "$USERNAME" 2>/dev/null || echo "")
     needs_video=false
     needs_render=false
-    
+
     if ! echo "$user_groups" | grep -q "\bvideo\b"; then
         needs_video=true
     fi
     if ! echo "$user_groups" | grep -q "\brender\b"; then
         needs_render=true
     fi
-    
+
     if [ "$needs_video" = true ] || [ "$needs_render" = true ]; then
         if [ "$DRY_RUN" = true ]; then
             log_info "[DRY-RUN] Would add user $USERNAME to groups: video, render"
@@ -472,26 +483,26 @@ check_venv_valid() {
     if [ ! -d "$VENV_DIR" ]; then
         return 1  # Venv doesn't exist
     fi
-    
+
     if [ ! -f "$VENV_DIR/bin/python" ]; then
         return 1  # Python executable missing
     fi
-    
+
     # Check Python version matches
     local venv_python_version=$("$VENV_DIR/bin/python" --version 2>&1 | awk '{print $2}')
     local system_python_version=$(python3 --version 2>&1 | awk '{print $2}')
-    
+
     if [ "$venv_python_version" != "$system_python_version" ]; then
         log_verbose "Venv Python version ($venv_python_version) differs from system ($system_python_version)"
         return 1
     fi
-    
+
     # Check if key packages are installed
     if ! "$VENV_DIR/bin/python" -c "import moderngl" 2>/dev/null; then
         log_verbose "Key package 'moderngl' not found in venv"
         return 1
     fi
-    
+
     return 0  # Venv is valid
 }
 
@@ -506,12 +517,12 @@ VENV_NEEDS_UPDATE=false
 if check_venv_valid; then
     log_success "Existing venv found and validated"
     VENV_NEEDS_CREATE=false
-    
+
     # Check if requirements are up to date
     if [ -f "$PROJECT_DIR/requirements.txt" ]; then
         req_hash=$(md5sum "$PROJECT_DIR/requirements.txt" 2>/dev/null | awk '{print $1}' || echo "")
         venv_req_hash_file="$VENV_DIR/.requirements_hash"
-        
+
         if [ -f "$venv_req_hash_file" ]; then
             stored_hash=$(cat "$venv_req_hash_file" 2>/dev/null || echo "")
             if [ "$req_hash" != "$stored_hash" ]; then
@@ -545,7 +556,7 @@ if [ "$DRY_RUN" = true ]; then
     else
         log_info "[DRY-RUN] Venv is up to date - no changes needed"
     fi
-    
+
     if [ "$VENV_NEEDS_CREATE" = true ] || [ "$VENV_NEEDS_UPDATE" = true ]; then
         if [ "$OS" = "macos" ] || [ "$USERNAME" = "$(whoami)" ]; then
             if [ "$VENV_NEEDS_CREATE" = true ]; then
@@ -564,7 +575,7 @@ if [ "$DRY_RUN" = true ]; then
 else
     if [ "$VENV_NEEDS_CREATE" = true ]; then
         # Remove existing invalid venv
-        if [ -d "$VENV_DIR" ]; then 
+        if [ -d "$VENV_DIR" ]; then
             log_info "Removing existing venv..."
             rm -rf "$VENV_DIR"
         fi
@@ -583,7 +594,7 @@ else
     if [ "$VENV_NEEDS_CREATE" = true ] || [ "$VENV_NEEDS_UPDATE" = true ]; then
         VENV_PIP="$VENV_DIR/bin/pip"
         log_info "Installing/updating Python packages..."
-        
+
         if [ "$OS" = "macos" ] || [ "$USERNAME" = "$(whoami)" ]; then
             "$VENV_PIP" install --upgrade pip wheel
             "$VENV_PIP" install -r "$PROJECT_DIR/requirements.txt"
@@ -591,12 +602,12 @@ else
             sudo -u "$USERNAME" "$VENV_PIP" install --upgrade pip wheel
             sudo -u "$USERNAME" "$VENV_PIP" install -r "$PROJECT_DIR/requirements.txt"
         fi
-        
+
         # Store requirements hash
         if [ -f "$PROJECT_DIR/requirements.txt" ]; then
             md5sum "$PROJECT_DIR/requirements.txt" 2>/dev/null | awk '{print $1}' > "$VENV_DIR/.requirements_hash" || true
         fi
-        
+
         log_success "Python packages installed/updated"
     fi
 fi
@@ -643,43 +654,43 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
             echo "wayland"
             return
         fi
-        
+
         if [ -n "${DISPLAY:-}" ]; then
             echo "x11"
             return
         fi
-        
+
         if [ -S "/tmp/.X11-unix/X0" ] 2>/dev/null; then
             echo "x11"
             return
         fi
-        
+
         for socket in /tmp/.X11-unix/X*; do
             if [ -S "$socket" ] 2>/dev/null; then
                 echo "x11"
                 return
             fi
         done
-        
+
         if [ -c "/dev/fb0" ] 2>/dev/null; then
             echo "framebuffer"
             return
         fi
-        
+
         echo "x11"
     }
 
     get_user_display() {
         local user=$1
         local display=""
-        
+
         if command -v loginctl >/dev/null 2>&1; then
             local session=$(loginctl list-sessions --user="$user" --no-legend 2>/dev/null | head -n1 | awk '{print $1}')
             if [ -n "$session" ]; then
                 display=$(loginctl show-session "$session" -p Display --value 2>/dev/null || echo "")
             fi
         fi
-        
+
         if [ -z "$display" ]; then
             if [ -S "/tmp/.X11-unix/X0" ] 2>/dev/null; then
                 display=":0"
@@ -693,7 +704,7 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
                 done
             fi
         fi
-        
+
         echo "${display:-:0}"
     }
 
@@ -701,18 +712,18 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
         local user=$1
         local xauth_path=""
         local home_dir=$(eval echo ~"$user")
-        
+
         if [ -f "$home_dir/.Xauthority" ]; then
             xauth_path="$home_dir/.Xauthority"
         fi
-        
+
         if [ -z "$xauth_path" ] && command -v loginctl >/dev/null 2>&1; then
             local session=$(loginctl list-sessions --user="$user" --no-legend 2>/dev/null | head -n1 | awk '{print $1}')
             if [ -n "$session" ]; then
                 xauth_path=$(loginctl show-session "$session" -p XAuthority --value 2>/dev/null || echo "")
             fi
         fi
-        
+
         echo "$xauth_path"
     }
 fi
@@ -757,7 +768,7 @@ fi
     DISPLAY_TYPE=$(detect_display)
     DISPLAY_VAR=$(get_user_display "$USERNAME")
     XAUTH_PATH=$(get_xauthority "$USERNAME")
-    
+
     # Build display environment block
     if [ "$DISPLAY_TYPE" = "wayland" ]; then
         WAYLAND_DISPLAY_VAR=${WAYLAND_DISPLAY:-wayland-0}
@@ -773,7 +784,7 @@ Environment=XAUTHORITY=$XAUTH_PATH"
     else
         ENV_DISPLAY="# Framebuffer mode - no DISPLAY needed"
     fi
-    
+
     # Check which services exist
     WEB_SERVICE_EXISTS=false
     ASCII_SERVICE_EXISTS=false
@@ -819,7 +830,7 @@ User=$USERNAME
 WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode web
+ExecStart=$VENV_DIR/bin/python -O main.py --mode web --dir $SBS_DIR
 Restart=always
 RestartSec=3
 StandardOutput=append:$PROJECT_DIR/vi-web.log
@@ -846,7 +857,7 @@ User=$USERNAME
 WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode ascii
+ExecStart=$VENV_DIR/bin/python -O main.py --mode ascii --dir $ASCII_DIR
 Restart=always
 RestartSec=3
 StandardOutput=append:$PROJECT_DIR/vi-ascii.log
@@ -873,7 +884,7 @@ User=$USERNAME
 WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode asciiweb
+ExecStart=$VENV_DIR/bin/python -O main.py --mode asciiweb --dir $ASCII_DIR
 Restart=always
 RestartSec=3
 StandardOutput=append:$PROJECT_DIR/vi-asciiweb.log
@@ -900,7 +911,7 @@ User=$USERNAME
 WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode scope --device null --xy-dir ${SCOPE_XY_DIR:-images_xy} --scope-raster --scope-trim 0.10 --scope-fields 2
+ExecStart=$VENV_DIR/bin/python -O main.py --mode scope --device null --xy-dir $SCOPE_XY_DIR --scope-raster --scope-trim 0.10 --scope-fields 2
 Restart=always
 RestartSec=3
 StandardOutput=append:$PROJECT_DIR/vi-scope.log
@@ -932,7 +943,7 @@ WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_DISPLAY
 $ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode local --test
+ExecStart=$VENV_DIR/bin/python -O main.py --mode local --test --dir $SBS_DIR
 Restart=always
 RestartSec=3
 StandardOutput=append:$PROJECT_DIR/vi-local.log
@@ -958,7 +969,7 @@ WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_DISPLAY
 $ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode local --test
+ExecStart=$VENV_DIR/bin/python -O main.py --mode local --test --dir $SBS_DIR
 Restart=on-failure
 RestartSec=3
 StandardOutput=append:$PROJECT_DIR/vi-local.log
@@ -1014,7 +1025,7 @@ User=$USERNAME
 WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode web
+ExecStart=$VENV_DIR/bin/python -O main.py --mode web --dir $SBS_DIR
 Restart=always
 RestartSec=3
 StandardOutput=append:$PROJECT_DIR/vi-web.log
@@ -1046,7 +1057,7 @@ User=$USERNAME
 WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode scope --device null --xy-dir ${SCOPE_XY_DIR:-images_xy} --scope-raster --scope-trim 0.10 --scope-fields 2
+ExecStart=$VENV_DIR/bin/python -O main.py --mode scope --device null --xy-dir $SCOPE_XY_DIR --scope-raster --scope-trim 0.10 --scope-fields 2
 Restart=always
 RestartSec=3
 StandardOutput=append:$PROJECT_DIR/vi-scope.log
@@ -1072,7 +1083,7 @@ User=$USERNAME
 WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode ascii
+ExecStart=$VENV_DIR/bin/python -O main.py --mode ascii --dir $ASCII_DIR
 Restart=always
 RestartSec=3
 StandardOutput=append:$PROJECT_DIR/vi-ascii.log
@@ -1098,7 +1109,7 @@ User=$USERNAME
 WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode asciiweb
+ExecStart=$VENV_DIR/bin/python -O main.py --mode asciiweb --dir $ASCII_DIR
 Restart=always
 RestartSec=3
 StandardOutput=append:$PROJECT_DIR/vi-asciiweb.log
@@ -1137,7 +1148,7 @@ WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_DISPLAY
 $ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode local --test
+ExecStart=$VENV_DIR/bin/python -O main.py --mode local --test --dir $SBS_DIR
 Restart=always
 RestartSec=3
 StandardOutput=append:$PROJECT_DIR/vi-local.log
@@ -1167,7 +1178,7 @@ WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_DISPLAY
 $ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode local --test
+ExecStart=$VENV_DIR/bin/python -O main.py --mode local --test --dir $SBS_DIR
 Restart=on-failure
 RestartSec=3
 StandardOutput=append:$PROJECT_DIR/vi-local.log
