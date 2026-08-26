@@ -251,9 +251,16 @@
         }
       }
 
-      // scope_devices is enumerated once at startup and does not change while
-      // the process runs, so build the list once.
-      if (!devicesRendered && Array.isArray(d.scope_devices) && d.scope_devices.length) {
+      // A server running --device null has no outputs to offer: there is no
+      // PortAudio, scope_devices is empty, and switching would try to open a
+      // device that does not exist. Hide the panel rather than present a
+      // control that can only fail. The visitor's own sound card is reached
+      // through "Play on your own scope" instead, which is the whole point of
+      // the server build.
+      const ac = document.getElementById("audio-controls");
+      const noDevices = !Array.isArray(d.scope_devices) || !d.scope_devices.length;
+      if (ac) ac.style.display = noDevices ? "none" : "";
+      if (!devicesRendered && !noDevices) {
         buildDeviceList(d.scope_devices);
         devicesRendered = true;
       }
@@ -318,7 +325,12 @@
       switching = true;
       showStatus("Switching\u2026 audio drops out briefly while the stream reopens.", false);
       try {
-        const r = await fetch("/scope/device", {
+        // RELATIVE, like every other request on this page. An absolute path
+        // breaks the moment nginx serves the page under a prefix: the page
+        // lives at /scope/, so relative "scope/device" resolves to
+        // /scope/scope/device and the proxy strips the prefix back off. An
+        // absolute "/scope/device" would bypass the prefix and 404.
+        const r = await fetch("scope/device", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ device: sel.value })
@@ -516,6 +528,7 @@
     async function toggleLocal() {
       if (localRunning) {
         localRunning = false;
+        stopLumaLoop();
         if (actx) { await actx.close(); actx = null; worklet = null; }
         lumImg.removeAttribute("src");
         document.getElementById("local-btn").textContent = "Start audio";
@@ -533,6 +546,7 @@
         lumCtx = lumCanvas.getContext("2d", {willReadFrequently:true});
         lumImg.src = "scope/luma.mjpg?t=" + Date.now();
         localRunning = true;
+        startLumaLoop();
         document.getElementById("local-btn").textContent = "Stop audio";
         setStatus();
       } catch (e) {
@@ -548,7 +562,15 @@
         + `${tracesBuilt} built. Your rate, your sound card.`;
     }
 
-    lumImg.onload = () => {
+    // MJPEG in an <img> fires `load` ONCE. The browser keeps replacing the
+    // displayed frame as new parts arrive, but there is no event per frame,
+    // so anything hung off onload runs exactly once -- which rendered a
+    // single trace and then stopped forever.
+    //
+    // Instead, sample the element on a clock. drawImage() always copies
+    // whatever frame is currently showing, so a timer gets the live picture
+    // without needing an event that does not exist.
+    function renderFromLuma() {
       if (!localRunning || !actx || !worklet) return;
       const w = lumImg.naturalWidth, h = lumImg.naturalHeight;
       if (!w || !h) return;
@@ -566,6 +588,23 @@
       const g = boxGrid(px, w, h, rows, cols);
       worklet.port.postMessage(buildTrace(g, rows, cols, n, trim, gamma, w, h));
       if ((++tracesBuilt % 15) === 0) setStatus();
+    }
+
+    // IPS, not the trace rate: the picture only changes when the index does,
+    // and rebuilding faster would burn CPU redrawing identical content. The
+    // worklet loops whatever it was last given, so the beam keeps sweeping
+    // between updates regardless.
+    let lumTimer = null;
+    function startLumaLoop() {
+      if (lumTimer) clearInterval(lumTimer);
+      lumTimer = setInterval(renderFromLuma, 1000 / 30);
+    }
+    function stopLumaLoop() {
+      if (lumTimer) { clearInterval(lumTimer); lumTimer = null; }
+    }
+    lumImg.onerror = () => {
+      document.getElementById("local-status").textContent =
+        "Luminance feed unavailable (scope/luma.mjpg).";
     };
 
     function poll() {
