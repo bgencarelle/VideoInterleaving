@@ -279,7 +279,7 @@ def _swap_device(old_scope, spec, source, fps, samples, main_libs, float_libs,
     try:
         new_cal = calibrate(main_libs, float_libs, new_scope.samples_per_frame,
                             density=density, trim=trim, rows=rows,
-                            fields=fields)
+                            fields=fields, row_bias=row_bias)
     except Exception as e:
         print(f"[SCOPE] recalibration after device change skipped ({e})")
     new_scope.stream.start()
@@ -316,6 +316,7 @@ def run_scope(clock_source=None):
     fields = max(1, int(getattr(settings, "SCOPE_FIELDS", 1) or 1))
     dc_comp = getattr(settings, "SCOPE_DC_COMP", None)
     border = float(getattr(settings, "SCOPE_BORDER", 0.0) or 0.0)
+    row_bias = float(getattr(settings, "SCOPE_ROW_BIAS", 1.0) or 1.0)
     mix_hz = getattr(settings, "SCOPE_MIX", None)
     mix_duty = min(1.0, max(0.0, getattr(settings, "SCOPE_MIX_DUTY", 0.5)))
     device_spec = getattr(settings, "SCOPE_DEVICE_SPEC", None)
@@ -452,7 +453,7 @@ def run_scope(clock_source=None):
         try:
             cal = calibrate(main_libs, float_libs, n_pass,
                             density=density, trim=trim, rows=rows,
-                            fields=fields)
+                            fields=fields, row_bias=row_bias)
         except Exception as e:
             print(f"[SCOPE] calibration skipped ({e})")
             cal = {}
@@ -508,7 +509,7 @@ def run_scope(clock_source=None):
         try:
             cal = calibrate(main_libs, float_libs, scope.samples_per_frame,
                             density=density, trim=trim, rows=rows,
-                            fields=fields)
+                            fields=fields, row_bias=row_bias)
             if cal:
                 spc = scope.samples_per_frame * fields / max(
                     cal["grid_rows"] * cal["grid_cols"], 1)
@@ -575,7 +576,7 @@ def run_scope(clock_source=None):
                     scope.samplerate, scope.samples_per_frame,
                     gamma=gamma, trim=trim, density=density, rows=rows,
                     fields=fields, border=border, oversample=oversample,
-                    sweep=sweep_mode, autofit=autofit,
+                    sweep=sweep_mode, autofit=autofit, row_bias=row_bias,
                     grid=((cal["grid_rows"], cal["grid_cols"]) if cal else None),
                     levels=(cal.get("levels") if cal else None))
                 for _ in range(3):
@@ -605,6 +606,13 @@ def run_scope(clock_source=None):
     # /data, to the dashboard and to multimonitor.py -- which matters far more
     # here than elsewhere, because scope has no window to look at and no tty
     # under systemd.
+    # The web page is the only display many people will have, so its preview
+    # must show a whole picture, not one interlaced field.
+    try:
+        scope.set_tap_fields(fields)
+    except Exception:
+        pass
+
     monitor = None
     try:
         from lightweight_monitor import start_monitor, monitor_data
@@ -712,6 +720,7 @@ def run_scope(clock_source=None):
                         gamma=gamma, trim=trim, density=density, rows=rows,
                         fields=fields, border=border, oversample=oversample,
                         sweep=sweep_mode, dc_comp=dc_comp, autofit=autofit,
+        row_bias=row_bias,
                         grid=((cal["grid_rows"], cal["grid_cols"]) if cal else None),
                         levels=(cal.get("levels") if cal else None))
                     with _device_lock:
@@ -761,7 +770,8 @@ def run_scope(clock_source=None):
                             cal = calibrate(main_libs, float_libs,
                                             scope.samples_per_frame,
                                             density=density, trim=trim,
-                                            rows=rows, fields=fields)
+                                            rows=rows, fields=fields,
+                                            row_bias=row_bias)
                             spc = scope.samples_per_frame * fields / max(
                                 cal["grid_rows"] * cal["grid_cols"], 1)
                             print(f"  grid {cal['grid_cols']}x{cal['grid_rows']} "

@@ -87,6 +87,10 @@ HEADLESS_RES = (480, 600)   # Resolution for the virtual screen
 # Scope refresh defaults to IPS: one trace per index maximises samples per
 # trace, which is the entire resolution budget (samples = rate / fps).
 SCOPE_MODE = False
+SCOPE_ROW_BIAS = 1.0      # >1 trades columns for rows at constant cell count.
+                          # Faces want ~1.3: their features are horizontal
+                          # edges, and rows resolve those. Past ~1.6 the mouth
+                          # smears and the silhouette blocks up.
 SCOPE_BORDER = 0.0        # fraction of each trace spent drawing a fixed
                           # rectangle at the full extent. Pins the framing so
                           # the picture stops skewing as content changes.

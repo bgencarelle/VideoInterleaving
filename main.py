@@ -105,6 +105,14 @@ def configure_runtime():
     parser.add_argument("--scope-density", type=float,
                         help="Default: settings.SCOPE_DENSITY")
     parser.add_argument("--scope-rows", type=int)
+    parser.add_argument("--scope-row-bias", type=float, metavar="F",
+                        help="Trade columns for rows at constant cell count. "
+                             "Face features are mostly horizontal edges "
+                             "(eyelids, lip line, brow) and horizontal edges "
+                             "are resolved by rows, which the MTF says is also "
+                             "the cheap axis. On a real face 1.3 reads visibly "
+                             "sharper than the default 1.0. Past ~1.6 the "
+                             "mouth smears and the silhouette blocks up.")
     parser.add_argument("--scope-border", type=float, metavar="F",
                         help="Draw a fixed one-cell rectangle at the full "
                              "extent every trace, spending F of the trace's "
@@ -332,6 +340,8 @@ def configure_runtime():
             settings.SCOPE_DC_COMP = args.scope_dc_comp
         if getattr(args, "scope_border", None) is not None:
             settings.SCOPE_BORDER = args.scope_border
+        if getattr(args, "scope_row_bias", None):
+            settings.SCOPE_ROW_BIAS = args.scope_row_bias
         if args.scope_samples:
             settings.SCOPE_SAMPLES = args.scope_samples
         if args.scope_trim is not None:

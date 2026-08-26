@@ -554,6 +554,20 @@ class Scope:
     _tap_until = 0.0
     _tap = {"seq": 0, "data": None}
     _tap_lock = threading.Lock()
+    # How many consecutive traces make ONE PICTURE.  Set to the interlace field
+    # count by the display engine.  A trace is a FIELD, not a picture, so a tap
+    # that grabs one trace shows every Nth scanline -- 50% of the picture at
+    # fields=2, 26% at fields=4.  For anyone driving real hardware that is
+    # merely a wrong preview; for the many people whose ONLY display is the web
+    # page, it is the whole image being wrong.
+    _tap_fields = 1
+    _tap_accum = []
+
+    @classmethod
+    def set_tap_fields(cls, fields):
+        """Tell the tap how many traces to join before publishing a picture."""
+        cls._tap_fields = max(1, int(fields))
+        cls._tap_accum = []
 
     @classmethod
     def want_tap(cls, seconds=3.0):
@@ -581,6 +595,16 @@ class Scope:
         if len(frame) == 0:
             return
         pts = np.array(frame, dtype=np.float32, copy=True) / max(LEVEL, 1e-9)
+        k = Scope._tap_fields
+        if k > 1:
+            # Join consecutive traces into a whole picture. They are already
+            # chained end-to-start, so concatenating is exactly what the beam
+            # draws -- no seam to stitch.
+            Scope._tap_accum.append(pts)
+            if len(Scope._tap_accum) < k:
+                return
+            pts = np.concatenate(Scope._tap_accum[-k:], axis=0)
+            Scope._tap_accum = []
         with Scope._tap_lock:
             Scope._tap["seq"] += 1
             Scope._tap["data"] = pts
