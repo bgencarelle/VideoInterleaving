@@ -104,6 +104,15 @@ parse_args() {
                     args="$args --mode local"
                     mode_specified=true
                     ;;
+                --scope)
+                    # --device null: no sound card is used or required. The
+                    # samples are generated for browsers to render on their
+                    # own hardware, which is what makes this runnable on a
+                    # headless server at all. Pass --device NAME after
+                    # --scope to override and drive a real output locally.
+                    args="$args --mode scope --device null --scope-raster --scope-fields 2"
+                    mode_specified=true
+                    ;;
                 --restart-delay=*)
                     RESTART_DELAY="${arg#*=}"
                     ;;
@@ -123,12 +132,12 @@ parse_args() {
             esac
         done
     fi
-    
+
     # Default to local mode if no mode was specified
     if [ "$mode_specified" = false ]; then
         args="$args --mode local"
     fi
-    
+
     echo "$args"
 }
 
@@ -140,7 +149,7 @@ SIGINT_TIMEOUT=3  # Seconds within which second Ctrl+C must be pressed
 
 handle_sigint() {
     local current_time=$(date +%s)
-    
+
     if [ "$FIRST_SIGINT_TIME" -eq 0 ]; then
         # First Ctrl+C - record time and warn user
         FIRST_SIGINT_TIME=$current_time
@@ -181,7 +190,7 @@ trap handle_sigterm SIGTERM
 run_app() {
     local app_args="$1"
     local restart_count=0
-    
+
     log_info "Starting VideoInterleaving application runner"
     log_info "Project directory: $PROJECT_DIR"
     log_info "Restart delay: ${RESTART_DELAY}s"
@@ -194,28 +203,28 @@ run_app() {
         log_info "Log file: $LOG_FILE"
     fi
     echo ""
-    
+
     # Setup virtual environment
     if ! setup_venv; then
         log_warning "Continuing without virtual environment"
     fi
-    
+
     # Set PYTHONPATH (handle case where it's not already set)
     export PYTHONPATH="${PYTHONPATH:-}:."
-    
+
     # Main restart loop
     while true; do
         if [ "$GRACEFUL_EXIT" = true ]; then
             log_info "Graceful exit requested - not restarting"
             break
         fi
-        
+
         # Check max restarts
         if [ "$MAX_RESTARTS" -gt 0 ] && [ "$restart_count" -ge "$MAX_RESTARTS" ]; then
             log_error "Maximum restart attempts ($MAX_RESTARTS) reached. Exiting."
             exit 1
         fi
-        
+
         # Log restart attempt if not first run
         if [ "$restart_count" -gt 0 ]; then
             log_warning "Restart attempt #$restart_count"
@@ -224,20 +233,20 @@ run_app() {
             FIRST_SIGINT_TIME=0
             sleep "$RESTART_DELAY"
         fi
-        
+
         # Run the application
         log_info "Starting application: python3 main.py$app_args"
         log_info "---"
-        
+
         # Run the application and capture exit code
         # Use eval to properly handle arguments with spaces
         set +e  # Don't exit on error, we want to check exit code
         eval "python3 main.py $app_args"
         local exit_code=$?
         set -e  # Re-enable exit on error
-        
+
         log_info "---"
-        
+
         # Check exit code
         if [ $exit_code -eq 0 ]; then
             log_success "Application exited normally (exit code: 0)"
@@ -255,17 +264,17 @@ run_app() {
         else
             log_error "Application crashed with exit code: $exit_code"
             restart_count=$((restart_count + 1))
-            
+
             if [ "$SHOULD_RESTART" = false ]; then
                 log_info "Not restarting (shutdown requested)"
                 break
             fi
-            
+
             # Continue loop to restart
             continue
         fi
     done
-    
+
     log_info "Application runner stopped"
 }
 

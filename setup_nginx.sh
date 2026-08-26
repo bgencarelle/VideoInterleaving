@@ -480,6 +480,11 @@ $([ "$SSL_ENABLED" != "true" ] && echo "    listen [::]:80 default_server;")
 
     # --- Redirects ---
     location = /monitor { return 301 /monitor/; }
+    # /scope MUST redirect to /scope/. The page fetches "data" and
+    # "scope/luma.mjpg" relatively, so without the slash the browser resolves
+    # them against / and they land on the STREAM server, which serves the
+    # template happily and has no scope data behind it.
+    location = /scope { return 301 /scope/; }
     location = /monitor_ascii { return 301 /monitor_ascii/; }
     location = /ascii { return 301 /ascii/; }
 
@@ -511,6 +516,42 @@ $([ "$SSL_ENABLED" != "true" ] && echo "    listen [::]:80 default_server;")
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_buffering off;
+        proxy_read_timeout 3600s;
+    }
+
+    # --- Scope (XY audio, browser-rendered) ---
+    # Trailing slash on proxy_pass strips the prefix:
+    #   /scope/data              -> 8890/data
+    #   /scope/scope/luma.mjpg   -> 8890/scope/luma.mjpg
+    # proxy_buffering off is not optional: the preview and the luminance feed
+    # are both infinite multipart responses, and a buffering proxy waits for
+    # an end that never comes, hanging with nothing in any log.
+    # The PAGE itself lives at /scope on the backend, not at the backend's
+    # root. Without this exact-match block /scope/ maps to 8890/ and serves
+    # the main statistics dashboard instead of the scope page -- the data is
+    # all correct, it is simply the wrong page. Exact match wins over the
+    # prefix block below, so only the page is special-cased and every
+    # subresource still falls through.
+    # NOTE: no trailing slash on this proxy_pass. Adding one maps it back to
+    # the root and reintroduces exactly that bug.
+    location = /scope/ {
+        proxy_pass http://127.0.0.1:8890/scope;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_buffering off;
+    }
+
+    location /scope/ {
+        proxy_pass http://127.0.0.1:8890/;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_buffering off;
+        proxy_cache off;
         proxy_read_timeout 3600s;
     }
 
@@ -575,6 +616,11 @@ $([ "$SSL_ENABLED" != "true" ] && echo "    listen [::]:80 default_server;")
 
     # --- Redirects ---
     location = /monitor { return 301 /monitor/; }
+    # /scope MUST redirect to /scope/. The page fetches "data" and
+    # "scope/luma.mjpg" relatively, so without the slash the browser resolves
+    # them against / and they land on the STREAM server, which serves the
+    # template happily and has no scope data behind it.
+    location = /scope { return 301 /scope/; }
     location = /monitor_ascii { return 301 /monitor_ascii/; }
     location = /ascii { return 301 /ascii/; }
 
@@ -606,6 +652,42 @@ $([ "$SSL_ENABLED" != "true" ] && echo "    listen [::]:80 default_server;")
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_buffering off;
+        proxy_read_timeout 3600s;
+    }
+
+    # --- Scope (XY audio, browser-rendered) ---
+    # Trailing slash on proxy_pass strips the prefix:
+    #   /scope/data              -> 8890/data
+    #   /scope/scope/luma.mjpg   -> 8890/scope/luma.mjpg
+    # proxy_buffering off is not optional: the preview and the luminance feed
+    # are both infinite multipart responses, and a buffering proxy waits for
+    # an end that never comes, hanging with nothing in any log.
+    # The PAGE itself lives at /scope on the backend, not at the backend's
+    # root. Without this exact-match block /scope/ maps to 8890/ and serves
+    # the main statistics dashboard instead of the scope page -- the data is
+    # all correct, it is simply the wrong page. Exact match wins over the
+    # prefix block below, so only the page is special-cased and every
+    # subresource still falls through.
+    # NOTE: no trailing slash on this proxy_pass. Adding one maps it back to
+    # the root and reintroduces exactly that bug.
+    location = /scope/ {
+        proxy_pass http://127.0.0.1:8890/scope;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_buffering off;
+    }
+
+    location /scope/ {
+        proxy_pass http://127.0.0.1:8890/;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_buffering off;
+        proxy_cache off;
         proxy_read_timeout 3600s;
     }
 
