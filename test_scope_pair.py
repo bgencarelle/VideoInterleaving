@@ -112,7 +112,7 @@ def advance(index, direction, frames, pingpong=True):
 
 # ---------------------------------------------------------------- phosphor sim
 
-def render_trace(samples, size=700, spot=1.2, exposure=1.0, budget=None):
+def render_trace(samples, size=700, spot=None, exposure=1.0, budget=None):
     """Delegates to scope_bake.preview_frame -- the canonical phosphor model.
 
     Was a second copy of that algorithm. The web preview needs the same one,

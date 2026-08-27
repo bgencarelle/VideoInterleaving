@@ -590,7 +590,7 @@ def _apply_row_bias(rows, cols, bias, shape):
             max(8, min(int(round(cols / k)), shape[1])))
 
 
-def preview_frame(samples, size=384, spot=1.2, exposure=1.0, max_split=192):
+def preview_frame(samples, size=384, spot=None, exposure=1.0, max_split=192):
     """Simulated scope screen: splat beam positions, blur, tonemap, tint green.
 
     THE SPLAT IS THE POINT.  Dwell is brightness -- render_luma spends more
@@ -623,6 +623,29 @@ def preview_frame(samples, size=384, spot=1.2, exposure=1.0, max_split=192):
     samples = np.asarray(samples, dtype=np.float32)
     if len(samples) < 2:
         return np.zeros((size, size, 3), np.uint8)
+
+    if spot is None:
+        # SCALE THE SPOT WITH THE ROW PITCH, not with nothing.
+        #
+        # A fixed 1.2 px blur was a quarter of the row pitch at 256 px and a
+        # sixteenth of it at 700, so raising the render size opened the gaps
+        # between scanlines instead of resolving more detail -- which is why
+        # the SMALLEST preview looked best. That is backwards: the small one
+        # was not sharper, it was accidentally doing what a real beam spot
+        # does, filling the space between rows.
+        #
+        # A CRT's spot is a fixed fraction of the screen, so it always
+        # overlaps its neighbours by the same amount however many lines are
+        # drawn. Matching that means deriving the spot from the row pitch.
+        _ys = np.unique(np.round(samples[:, 1], 5))
+        _rows = max(len(_ys), 2)
+        # 0.40: at k=0.18 the rows stay separate and you get the outline
+        # look; 0.24 and 0.30 still show the sweep as a stack of bars; 0.40 is
+        # the first value where a face reads as a face. Erring soft is correct
+        # here -- a real tube's spot overlaps generously, and the eye recovers
+        # detail from a soft continuous image far better than from a sharp
+        # discontinuous one.
+        spot = max(0.6, 0.40 * size / _rows)
 
     px = (samples[:, 0] + 1.0) * 0.5 * (size - 1)
     py = (1.0 - samples[:, 1]) * 0.5 * (size - 1)     # y up -> row down
