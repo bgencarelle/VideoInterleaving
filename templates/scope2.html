@@ -1,543 +1,332 @@
 <!doctype html>
 <html>
 <head>
-  <meta charset="utf-8">
-  <title>Interleaving Project Scope Monitor</title>
-  <style>
-    /* Mirrors HTML_TEMPLATE in lightweight_monitor.py. Kept as a separate copy
-       rather than shared, because that template is a Python string literal
-       inside lightweight_monitor.py while this page is served straight off
-       disk by _serve_dynamic_template(). If you restyle one, restyle both. */
-    body { background:#111; color:#0f0; font-family:monospace; padding:2em; }
-    .label{color:#888;margin-right:1em;}
-    a { color:#0f0; }
-    h2.section { color:#0f0; border-bottom:1px solid #333;
-                 padding-bottom:0.5em; margin-top:2em; }
-    .control-panel {
-      margin-top: 2em;
-      padding: 1em;
-      border: 1px solid #333;
-      background: #0a0a0a;
-    }
-    .control-panel h2 {
-      margin-top: 0;
-      color: #0f0;
-      border-bottom: 1px solid #333;
-      padding-bottom: 0.5em;
-    }
-    .dim-controls {
-      display: flex;
-      gap: 1em;
-      align-items: center;
-      margin: 1em 0;
-      flex-wrap: wrap;
-    }
-    .dim-controls select {
-      background: #111;
-      border: 1px solid #333;
-      color: #0f0;
-      padding: 0.5em;
-      font-family: monospace;
-      min-width: 320px;
-    }
-    .dim-controls button {
-      background: #0f0;
-      color: #000;
-      border: none;
-      padding: 0.5em 1em;
-      font-family: monospace;
-      cursor: pointer;
-      font-weight: bold;
-    }
-    .dim-controls button:hover { background: #0a0; }
-    .dim-controls button:disabled { background:#333; color:#666; cursor:default; }
-    .presets { display:flex; gap:0.5em; flex-wrap:wrap; margin:1em 0; }
-    .preset-btn {
-      background: #222;
-      color: #0f0;
-      border: 1px solid #333;
-      padding: 0.5em 1em;
-      font-family: monospace;
-      cursor: pointer;
-    }
-    .preset-btn:hover { background:#333; border-color:#0f0; }
-    .status-message { margin-top:1em; padding:0.5em; font-size:0.9em; }
-    .status-message.success { color:#0f0; background:#003300; }
-    .status-message.error { color:#f00; background:#330000; }
-    .current-dims { color:#0f0; font-weight:bold; margin:0.5em 0; }
-    .warn { color:#fa0; }
-    .scope-wrap { margin:1em 0; }
-    #scope-img {
-      background:#000;
-      border:1px solid #333;
-      max-width:100%;
-      display:block;
-    }
-    .scope-meta { color:#888; margin-top:0.5em; font-size:0.9em; }
-    .scope-meta label { color:#0f0; margin-right:1em; cursor:pointer; }
-  </style>
+    <meta charset="utf-8">
+    <title>Scope Monitor — Stream & Audio</title>
+    <style>
+        body {
+            background: #111;
+            color: #0f0;
+            font-family: monospace;
+            padding: 2em;
+        }
+
+        a {
+            color: #0f0;
+        }
+
+        h2.section {
+            color: #0f0;
+            border-bottom: 1px solid #333;
+            padding-bottom: 0.5em;
+            margin-top: 1.5em;
+        }
+
+        .control-panel {
+            margin-top: 2em;
+            padding: 1em;
+            border: 1px solid #333;
+            background: #0a0a0a;
+        }
+
+        .control-panel h2 {
+            margin-top: 0;
+            color: #0f0;
+            border-bottom: 1px solid #333;
+            padding-bottom: 0.5em;
+        }
+
+        .dim-controls {
+            display: flex;
+            gap: 1em;
+            align-items: center;
+            margin: 1em 0;
+            flex-wrap: wrap;
+        }
+
+        .dim-controls select {
+            background: #111;
+            border: 1px solid #333;
+            color: #0f0;
+            padding: 0.5em;
+            font-family: monospace;
+            min-width: 150px;
+        }
+
+        .dim-controls button, .preset-btn {
+            background: #0f0;
+            color: #000;
+            border: none;
+            padding: 0.5em 1em;
+            font-family: monospace;
+            cursor: pointer;
+            font-weight: bold;
+        }
+
+        .preset-btn {
+            background: #222;
+            color: #0f0;
+            border: 1px solid #333;
+            font-weight: normal;
+        }
+
+        .dim-controls button:hover, .preset-btn:hover {
+            background: #0a0;
+            color: #000;
+        }
+
+        .dim-controls button:disabled {
+            background: #333;
+            color: #666;
+            cursor: default;
+        }
+
+        .current-dims {
+            color: #0f0;
+            font-weight: bold;
+            margin: 0.5em 0;
+        }
+
+        .warn {
+            color: #fa0;
+            font-size: 0.9em;
+        }
+
+        .scope-wrap {
+            margin: 1em 0;
+            width: 100%;
+        }
+
+        /* Fixed visual size responsive to full horizontal page/container width */
+        #scope-img {
+            background: #000;
+            border: 1px solid #333;
+            width: 100%;
+            height: auto;
+            aspect-ratio: 1 / 1;
+            display: block;
+            box-sizing: border-box;
+        }
+
+        .scope-meta {
+            color: #888;
+            margin-top: 0.5em;
+            font-size: 0.9em;
+        }
+
+        .scope-meta label {
+            color: #0f0;
+            margin-right: 1em;
+            cursor: pointer;
+        }
+    </style>
 </head>
 <body>
-  <h1>Interleaving Project Scope Monitor</h1>
-  <div><a href="/">&larr; main monitor</a> &nbsp;|&nbsp; <a href="/log">log</a></div>
+<h1>Scope Monitor</h1>
 
-  <h2 class="section">Output</h2>
-  <!-- Live preview of the trace the beam is drawing. Rendered server-side by
-       scope_bake.preview_frame(), the same phosphor model test_scope_pair.py
-       uses, and delivered as MJPEG exactly like the main web mode.
-
-       Size is the resolution knob and the cpu knob at once, and they cannot be
-       separated: the picture is ~92 scanlines, so under about 400 px they
-       merge and it turns into a blob regardless of anything else. -->
-  <div class="scope-wrap">
-    <img id="scope-img" alt="scope output" width="512" height="512">
+<h2 class="section">Output Preview</h2>
+<div class="scope-wrap">
+    <img id="scope-img" alt="scope output">
     <div class="scope-meta">
-      <label><input type="checkbox" id="preview-on" checked> live preview</label>
-      <label>size
-        <select id="preview-size">
-          <option value="256" selected>256 &mdash; default, cheapest, merges</option>
-          <option value="384">384</option>
-          <option value="512" >512 &mdash; </option>
-          <option value="700" >700 &mdash; sharpest, costly</option>
-        </select>
-      </label>
-      <label>exposure
-        <select id="preview-exposure">
-          <option value="0.4">0.4</option>
-          <option value="0.7">0.7</option>
-          <option value="1.0" selected>1.0</option>
-          <option value="1.6">1.6</option>
-        </select>
-      </label>
-      <span id="preview-note"></span>
+        <label><input type="checkbox" id="preview-on" checked> live preview</label>
+        <label>quality
+            <select id="preview-size">
+                <option value="256" selected>256 &mdash; default</option>
+                <option value="384">384</option>
+                <option value="512">512</option>
+                <option value="700">700 &mdash; sharpest</option>
+            </select>
+        </label>
+        <label>exposure
+            <select id="preview-exposure">
+                <option value="0.4">0.4</option>
+                <option value="0.7">0.7</option>
+                <option value="1.0" selected>1.0</option>
+                <option value="1.6">1.6</option>
+            </select>
+        </label>
+        <span id="preview-note"></span>
     </div>
-  </div>
+</div>
 
-  <h2 class="section">Scope</h2>
-  <div id="scope_data">Loading&hellip;</div>
-
-  <h2 class="section">Playback &amp; system</h2>
-  <div id="monitor_data"></div>
-
-  <!-- Sound output. Deliberately the last thing on the page: it is the only
-       control here that interrupts the audio, so it should not sit above the
-       numbers you would use to decide whether to touch it. -->
-  <!-- Client-side audio. The server has no sound card, so it ships the
-       LUMINANCE and each visitor renders the trace here, at their own
-       AudioContext rate, on their own DAC -- which is the only device that
-       can reach their scope. -->
-  <div class="control-panel" id="local-audio">
+<div class="control-panel" id="local-audio">
     <h2>Play on your own scope</h2>
     <div class="current-dims" id="local-status">Not running.</div>
     <div class="dim-controls">
-      <button id="local-btn" onclick="toggleLocal()">Start audio</button>
-      <label>trim
-        <select id="local-trim">
-          <option value="0.02">0.02</option>
-          <option value="0.10" selected>0.10</option>
-          <option value="0.16">0.16</option>
-        </select>
-      </label>
-      <label>gamma
-        <select id="local-gamma">
-          <option value="1.8">1.8</option>
-          <option value="2.2" selected>2.2</option>
-          <option value="2.6">2.6</option>
-        </select>
-      </label>
+        <button id="local-btn" onclick="toggleLocal()">Start audio</button>
+        <label>trim
+            <select id="local-trim">
+                <option value="0.02">0.02</option>
+                <option value="0.10" selected>0.10</option>
+                <option value="0.16">0.16</option>
+            </select>
+        </label>
+        <label>gamma
+            <select id="local-gamma">
+                <option value="1.8">1.8</option>
+                <option value="2.2" selected>2.2</option>
+                <option value="2.6">2.6</option>
+            </select>
+        </label>
     </div>
     <div class="dim-controls">
-      <button class="preset-btn" id="sink-btn" onclick="chooseOutput()">
-        Choose output device
-      </button>
-      <select id="sink-select" style="display:none"></select>
-      <span id="sink-status"></span>
+        <button class="preset-btn" id="sink-btn" onclick="chooseOutput()">
+            Choose output device
+        </button>
+        <select id="sink-select" style="display:none"></select>
+        <span id="sink-status"></span>
     </div>
     <div class="warn">
-      Connect your scope to this machine's audio output and set it to XY.
-      Left is X, right is Y. Turn the volume up full &mdash; the level is the
-      picture size, and anything the operating system does to the signal
-      (EQ, "enhancements", spatial audio) will distort it.
-      <br><br>
-      Audio goes to your system's default output unless you pick another.
-      Firefox shows a device picker; Chrome has to ask for microphone
-      permission first, because that is the only way it will reveal what your
-      speakers are called. Declining is fine &mdash; set the default in your
-      OS sound settings instead and it will follow.
+        Connect your scope to this machine's audio output and set it to XY.
+        Left is X, right is Y. Turn the volume up full &mdash; the level is the
+        picture size, and anything the operating system does to the signal
+        (EQ, "enhancements", spatial audio) will distort it.
+        <br><br>
+        Audio goes to your system's default output unless you pick another.
     </div>
     <img id="luma-src" style="display:none" alt="">
-  </div>
+</div>
 
-  <div class="control-panel" id="audio-controls">
-    <h2>Sound output</h2>
-    <div class="current-dims" id="current-device">Loading&hellip;</div>
-    <div class="dim-controls">
-      <select id="device-select">
-        <option value="">System default output</option>
-      </select>
-      <button id="apply-btn" onclick="applyDevice()">Switch output</button>
-      <button class="preset-btn" onclick="useDefault()">Use system default</button>
-    </div>
-    <div id="rate-warning" class="warn" style="display:none;"></div>
-    <div class="status-message" id="status-message" style="display:none;"></div>
-  </div>
-
-  <script>
-    // Explicit field order, rather than iterating the object as the main
-    // dashboard does. /data key order is not guaranteed, and this block is
-    // meant to be read at a glance from across a room.
-    const SCOPE_FIELDS = [
-      ["scope_mode",              "mode"],
-      ["scope_device",            "output device"],
-      ["scope_samplerate",        "sample rate"],
-      ["scope_samples_per_trace", "samples / trace"],
-      ["scope_fields",            "interlace fields"],
-      ["scope_refresh_hz",        "refresh (Hz)"],
-      ["scope_picture_hz",        "picture (Hz)"],
-      ["scope_grid",              "grid"],
-      ["scope_samples_per_cell",  "samples / cell"],
-      ["scope_trim",              "trim"],
-      ["scope_density",           "density"],
-      ["scope_gamma",             "gamma"],
-      ["scope_sweep",             "sweep"],
-      ["scope_traces_drawn",      "traces drawn"],
-      ["scope_indices_skipped",   "indices skipped"],
-      ["scope_underruns",         "audio underruns"]
-    ];
-
-    let lastData = {};
-    let devicesRendered = false;
-    let currentDeviceName = null;
-    let switching = false;
-
-    // textContent, never innerHTML, for anything originating in /data --
-    // device names come from the OS and are not ours to trust as markup.
-    function row(label, value, colour) {
-      const d = document.createElement("div");
-      const s = document.createElement("span");
-      s.className = "label";
-      s.textContent = label + ":";
-      d.appendChild(s);
-      const v = document.createElement("span");
-      v.textContent = value;
-      if (colour) v.style.color = colour;
-      d.appendChild(v);
-      return d;
-    }
-
-    function render(d) {
-      const top = document.getElementById("scope_data");
-      top.textContent = "";
-      let any = false;
-      for (const [key, label] of SCOPE_FIELDS) {
-        if (d[key] === undefined) continue;
-        any = true;
-        // Underruns are the one number that means something is wrong right
-        // now, so make it impossible to skim past.
-        const bad = (key === "scope_underruns" && Number(d[key]) > 0);
-        top.appendChild(row(label, d[key], bad ? "#f00" : null));
-      }
-      if (!any) {
-        const w = document.createElement("span");
-        w.className = "warn";
-        w.textContent = "No scope instance is reporting on this port.";
-        top.appendChild(w);
-      }
-
-      const rest = document.getElementById("monitor_data");
-      rest.textContent = "";
-      for (const k in d) {
-        if (k.startsWith("scope_")) continue;
-        const v = d[k];
-        if (Array.isArray(v) || (v && typeof v === "object")) continue;
-        rest.appendChild(row(k, v));
-      }
-
-      if (d.scope_device && d.scope_device !== currentDeviceName) {
-        currentDeviceName = d.scope_device;
-        document.getElementById("current-device").textContent =
-          "Currently on: " + d.scope_device;
-        if (switching) {
-          switching = false;
-          document.getElementById("apply-btn").disabled = false;
-          showStatus("Now on " + d.scope_device, false);
-        }
-      }
-
-      // A server running --device null has no outputs to offer: there is no
-      // PortAudio, scope_devices is empty, and switching would try to open a
-      // device that does not exist. Hide the panel rather than present a
-      // control that can only fail. The visitor's own sound card is reached
-      // through "Play on your own scope" instead, which is the whole point of
-      // the server build.
-      const ac = document.getElementById("audio-controls");
-      const noDevices = !Array.isArray(d.scope_devices) || !d.scope_devices.length;
-      if (ac) ac.style.display = noDevices ? "none" : "";
-      if (!devicesRendered && !noDevices) {
-        buildDeviceList(d.scope_devices);
-        devicesRendered = true;
-      }
-    }
-
-    function buildDeviceList(devices) {
-      const sel = document.getElementById("device-select");
-      sel.textContent = "";
-
-      // System default is first and pre-selected, so the page opens on the
-      // same output the process uses when no --device is given.
-      const dflt = devices.find(x => x.default);
-      const o = document.createElement("option");
-      o.value = "";
-      o.textContent = "System default output"
-                    + (dflt ? "  \u2014  " + dflt.name : "");
-      sel.appendChild(o);
-
-      for (const dv of devices) {
-        const opt = document.createElement("option");
-        // Send the NAME, not the index. PortAudio indices reshuffle when
-        // hardware is plugged or unplugged, so an index picked now can point
-        // at a different device by the time it is applied.
-        opt.value = dv.name;
-        opt.textContent = dv.name + "  [" + dv.api + ", " + dv.rate + " Hz]";
-        opt.dataset.rate = dv.rate;
-        sel.appendChild(opt);
-      }
-      sel.selectedIndex = 0;
-      sel.onchange = rateWarning;
-    }
-
-    function rateWarning() {
-      const sel = document.getElementById("device-select");
-      const opt = sel.options[sel.selectedIndex];
-      const w = document.getElementById("rate-warning");
-      const currentRate = Number(lastData.scope_samplerate || 0);
-      const newRate = Number(opt.dataset.rate || 0);
-      if (newRate && currentRate && newRate !== currentRate) {
-        // Not a failure, but not free either: samples/trace is samplerate/fps,
-        // so a different rate is a different sample budget and therefore a
-        // different grid. The swap recalibrates.
-        w.style.display = "block";
-        w.textContent = "This device runs at " + newRate + " Hz, not "
-          + currentRate + " Hz. The sample budget changes, so the grid is "
-          + "recalibrated on switch.";
-      } else {
-        w.style.display = "none";
-      }
-    }
-
-    function useDefault() {
-      document.getElementById("device-select").selectedIndex = 0;
-      rateWarning();
-      applyDevice();
-    }
-
-    async function applyDevice() {
-      const sel = document.getElementById("device-select");
-      const btn = document.getElementById("apply-btn");
-      btn.disabled = true;
-      switching = true;
-      showStatus("Switching\u2026 audio drops out briefly while the stream reopens.", false);
-      try {
-        // RELATIVE, like every other request on this page. An absolute path
-        // breaks the moment nginx serves the page under a prefix: the page
-        // lives at /scope/, so relative "scope/device" resolves to
-        // /scope/scope/device and the proxy strips the prefix back off. An
-        // absolute "/scope/device" would bypass the prefix and 404.
-        const r = await fetch("scope/device", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ device: sel.value })
-        });
-        const j = await r.json();
-        if (!j.ok) {
-          switching = false;
-          btn.disabled = false;
-          showStatus("Failed: " + (j.error || "unknown error"), true);
-        }
-        // On success the confirmation comes from /data reporting the new
-        // device name, not from this response: the swap happens on the render
-        // loop's next tick and has not run yet when this returns.
-      } catch (e) {
-        switching = false;
-        btn.disabled = false;
-        showStatus("Request failed: " + e, true);
-      }
-    }
-
-    function showStatus(msg, isError) {
-      const el = document.getElementById("status-message");
-      el.textContent = msg;
-      el.className = "status-message " + (isError ? "error" : "success");
-      el.style.display = "block";
-    }
-
+<script>
     // ---------------------------------------------------------------- preview
-    // MJPEG, same transport as the main web mode. The server runs
-    // scope_bake.preview_frame() -- the phosphor model test_scope_pair.py
-    // already used -- and sends JPEGs.
-    //
-    // The earlier version sent raw points and drew a polyline here, which
-    // could not work: dwell IS the brightness, and a stroked path gives every
-    // segment the same brightness however many samples were on it. What came
-    // out was an outline of the scanlines with the retrace diagonals as the
-    // brightest thing on screen. Splatting each sample so they accumulate is
-    // the whole algorithm, and it belongs where the samples are.
-    //
-    // Holding the connection open IS the request to capture. Close the page
-    // and the tap switches itself off within about three seconds.
     const img = document.getElementById("scope-img");
     const onBox = document.getElementById("preview-on");
     const sizeSel = document.getElementById("preview-size");
     const expSel = document.getElementById("preview-exposure");
 
-    function note(t) { document.getElementById("preview-note").textContent = t; }
+    function note(t) {
+        document.getElementById("preview-note").textContent = t;
+    }
 
     function startPreview() {
-      const s = sizeSel.value;
-      img.width = img.height = Number(s);
-      // cache-buster: without it a reconnect can be served the dead stream
-      img.src = "scope/stream.mjpg?size=" + s
-              + "&exposure=" + expSel.value + "&t=" + Date.now();
-      note(Number(s) < 512
-        ? "below 512 the scanlines merge \u2014 expect a blob, not features"
-        : "");
+        const s = sizeSel.value;
+        // Visual size is controlled strictly by CSS (width: 100%; aspect-ratio: 1/1)
+        img.src = "scope/stream.mjpg?size=" + s
+                + "&exposure=" + expSel.value + "&t=" + Date.now();
+        note(Number(s) < 512
+                ? "below 512 the scanlines merge \u2014 expect a blob, not features"
+                : "");
     }
 
     function stopPreview() {
-      img.removeAttribute("src");
-      note("preview off");
+        img.removeAttribute("src");
+        note("preview off");
     }
 
     onBox.onchange = () => onBox.checked ? startPreview() : stopPreview();
-    sizeSel.onchange = () => { if (onBox.checked) startPreview(); };
-    expSel.onchange  = () => { if (onBox.checked) startPreview(); };
-    // The visible preview cannot be watched the same way -- it is displayed
-    // directly and never read back -- so it gets a plain reconnect on error
-    // plus a periodic refresh, which costs one request an hour.
+    sizeSel.onchange = () => {
+        if (onBox.checked) startPreview();
+    };
+    expSel.onchange = () => {
+        if (onBox.checked) startPreview();
+    };
+
     img.onerror = () => {
-      note("preview dropped, reconnecting\u2026");
-      setTimeout(() => { if (onBox.checked && !document.hidden) startPreview(); }, 2000);
+        note("preview dropped, reconnecting\u2026");
+        setTimeout(() => {
+            if (onBox.checked && !document.hidden) startPreview();
+        }, 2000);
     };
     setInterval(() => {
-      if (onBox.checked && !document.hidden && localRunning !== null) startPreview();
-    }, 55 * 60 * 1000);   // under nginx's 3600s proxy_read_timeout
+        if (onBox.checked && !document.hidden && localRunning !== null) startPreview();
+    }, 55 * 60 * 1000);
 
-    // A hidden tab keeps an MJPEG connection open and the tap alive, so drop
-    // it and pick it up again on return.
     document.addEventListener("visibilitychange", () => {
-      if (document.hidden) {
-        img.removeAttribute("src");
-      } else {
-        if (onBox.checked) startPreview();
-        // A hidden tab has its timers throttled to roughly once a second or
-        // stopped outright, so the stall watchdog would see a frozen frame
-        // and fire a spurious reconnect the instant the tab came back.
-        // Forgive the gap instead of reacting to it.
-        lastChange = Date.now();
-        if (localRunning && lumImg && !lumImg.getAttribute("src")) {
-          lumImg.src = "scope/luma.mjpg?t=" + Date.now();
+        if (document.hidden) {
+            img.removeAttribute("src");
+        } else {
+            if (onBox.checked) startPreview();
+            lastChange = Date.now();
+            if (localRunning && lumImg && !lumImg.getAttribute("src")) {
+                lumImg.src = "scope/luma.mjpg?t=" + Date.now();
+            }
         }
-      }
     });
 
     startPreview();
 
     // ------------------------------------------------- client-side rendering
-    // A port of scope_bake.render_luma. Same algorithm: box-resample the
-    // luminance to a grid, tone-map it, walk a serpentine path spending
-    // samples in proportion to brightness. Dwell IS the brightness, which is
-    // why the walk is weighted rather than uniform.
-    //
-    // It runs HERE rather than on the server because the server has no sound
-    // card, and because the browser's AudioContext rate decides the sample
-    // budget -- rendering server-side would mean resampling, and resampling a
-    // trace is a filter applied to a picture.
     const lumImg = document.getElementById("luma-src");
     let actx = null, worklet = null, lumCanvas = null, lumCtx = null;
     let localRunning = false, tracesBuilt = 0;
 
     function boxGrid(data, w, h, rows, cols) {
-      // area-average each cell, matching _box()
-      const g = new Float32Array(rows * cols);
-      for (let r = 0; r < rows; r++) {
-        const y0 = Math.floor(r * h / rows), y1 = Math.max(y0 + 1, Math.floor((r + 1) * h / rows));
-        for (let c = 0; c < cols; c++) {
-          const x0 = Math.floor(c * w / cols), x1 = Math.max(x0 + 1, Math.floor((c + 1) * w / cols));
-          let sum = 0, n = 0;
-          for (let y = y0; y < y1; y++) {
-            const off = y * w;
-            for (let x = x0; x < x1; x++) { sum += data[(off + x) * 4]; n++; }
-          }
-          g[r * cols + c] = n ? sum / (n * 255) : 0;
+        const g = new Float32Array(rows * cols);
+        for (let r = 0; r < rows; r++) {
+            const y0 = Math.floor(r * h / rows), y1 = Math.max(y0 + 1, Math.floor((r + 1) * h / rows));
+            for (let c = 0; c < cols; c++) {
+                const x0 = Math.floor(c * w / cols), x1 = Math.max(x0 + 1, Math.floor((c + 1) * w / cols));
+                let sum = 0, n = 0;
+                for (let y = y0; y < y1; y++) {
+                    const off = y * w;
+                    for (let x = x0; x < x1; x++) {
+                        sum += data[(off + x) * 4];
+                        n++;
+                    }
+                }
+                g[r * cols + c] = n ? sum / (n * 255) : 0;
+            }
         }
-      }
-      return g;
+        return g;
     }
 
     function buildTrace(g, rows, cols, n, trim, gamma, w, h, level) {
-      // serpentine path + per-cell weight, then walk it by cumulative weight
-      const px = [], py = [], wt = [];
-      // Aspect, matching render_luma: the SHORT side is scaled down so the
-      // picture keeps its proportions. Without this a 128x171 source came out
-      // nearly square -- x reached +-0.874 where it should reach +-0.674 --
-      // so the face was stretched sideways.
-      const L = (level === undefined ? 0.9 : level);
-      const sx = L * (w >= h ? 1.0 : w / h);
-      const sy = L * (h >= w ? 1.0 : h / w);
-      // Contrast stretch, matching render_luma: map the 2nd..98th percentile
-      // of the LIT cells onto 0..1. Without it the picture is flat and much
-      // too bright -- measured 72.8% of pixels lit against python's 55.1%.
-      const lit = [];
-      for (let i = 0; i < g.length; i++) if (g[i] > 0.01) lit.push(g[i]);
-      if (lit.length > 16) {
-        lit.sort((p, q) => p - q);
-        const lo = lit[Math.floor(lit.length * 0.02)];
-        const hi = lit[Math.floor(lit.length * 0.98)];
-        if (hi > lo) {
-          for (let i = 0; i < g.length; i++)
-            g[i] = Math.min(1, Math.max(0, (g[i] - lo) / (hi - lo)));
+        const px = [], py = [], wt = [];
+        const L = (level === undefined ? 0.9 : level);
+        const sx = L * (w >= h ? 1.0 : w / h);
+        const sy = L * (h >= w ? 1.0 : h / w);
+        const lit = [];
+        for (let i = 0; i < g.length; i++) if (g[i] > 0.01) lit.push(g[i]);
+        if (lit.length > 16) {
+            lit.sort((p, q) => p - q);
+            const lo = lit[Math.floor(lit.length * 0.02)];
+            const hi = lit[Math.floor(lit.length * 0.98)];
+            if (hi > lo) {
+                for (let i = 0; i < g.length; i++)
+                    g[i] = Math.min(1, Math.max(0, (g[i] - lo) / (hi - lo)));
+            }
         }
-      }
 
-      let prevRight = false;
-      for (let r = 0; r < rows; r++) {
-        let a = -1, b = -1;
-        for (let c = 0; c < cols; c++) if (g[r * cols + c] > trim) { if (a < 0) a = c; b = c; }
-        if (a < 0) continue;
-        const y = 1 - 2 * (r + 0.5) / rows;              // y up on the scope
-        const fwd = !prevRight;
-        for (let k = 0; k <= (b - a); k++) {
-          const c = fwd ? a + k : b - k;
-          px.push((2 * (c + 0.5) / cols - 1) * sx);
-          py.push(y * sy);
-          wt.push(Math.pow(Math.max(g[r * cols + c], 1e-9), gamma));
+        let prevRight = false;
+        for (let r = 0; r < rows; r++) {
+            let a = -1, b = -1;
+            for (let c = 0; c < cols; c++) if (g[r * cols + c] > trim) {
+                if (a < 0) a = c;
+                b = c;
+            }
+            if (a < 0) continue;
+            const y = 1 - 2 * (r + 0.5) / rows;
+            const fwd = !prevRight;
+            for (let k = 0; k <= (b - a); k++) {
+                const c = fwd ? a + k : b - k;
+                px.push((2 * (c + 0.5) / cols - 1) * sx);
+                py.push(y * sy);
+                wt.push(Math.pow(Math.max(g[r * cols + c], 1e-9), gamma));
+            }
+            prevRight = fwd;
         }
-        prevRight = fwd;
-      }
-      const m = px.length;
-      const out = new Float32Array(n * 2);
-      if (m < 2) return out;
-      // cumulative weight -> sample positions. More weight = more samples =
-      // the beam lingers = brighter. This is the whole display mechanism.
-      const cum = new Float64Array(m);
-      let tot = 0;
-      for (let i = 0; i < m; i++) { tot += wt[i]; cum[i] = tot; }
-      if (tot <= 0) return out;
-      let j = 0;
-      for (let i = 0; i < n; i++) {
-        const target = (i + 0.5) / n * tot;
-        while (j < m - 1 && cum[j] < target) j++;
-        // Interpolate WITHIN the segment. Snapping to the nearest vertex puts
-        // every sample exactly on a cell centre, which is what made the output
-        // read as a dot grid rather than continuous scanlines.
-        const c0 = j > 0 ? cum[j - 1] : 0;
-        const span = cum[j] - c0;
-        const t = span > 1e-12 ? Math.min(1, Math.max(0, (target - c0) / span)) : 0;
-        const jp = j > 0 ? j - 1 : 0;
-        out[i * 2] = px[jp] + (px[j] - px[jp]) * t;
-        out[i * 2 + 1] = py[jp] + (py[j] - py[jp]) * t;
-      }
-      return out;
+        const m = px.length;
+        const out = new Float32Array(n * 2);
+        if (m < 2) return out;
+        const cum = new Float64Array(m);
+        let tot = 0;
+        for (let i = 0; i < m; i++) {
+            tot += wt[i];
+            cum[i] = tot;
+        }
+        if (tot <= 0) return out;
+        let j = 0;
+        for (let i = 0; i < n; i++) {
+            const target = (i + 0.5) / n * tot;
+            while (j < m - 1 && cum[j] < target) j++;
+            const c0 = j > 0 ? cum[j - 1] : 0;
+            const span = cum[j] - c0;
+            const t = span > 1e-12 ? Math.min(1, Math.max(0, (target - c0) / span)) : 0;
+            const jp = j > 0 ? j - 1 : 0;
+            out[i * 2] = px[jp] + (px[j] - px[jp]) * t;
+            out[i * 2 + 1] = py[jp] + (py[j] - py[jp]) * t;
+        }
+        return out;
     }
 
     const WORKLET_SRC = `
@@ -550,7 +339,7 @@
           const b=this.buf, n=b.length>>1;
           for(let k=0;k<L.length;k++){
             L[k]=b[this.pos*2]; R[k]=b[this.pos*2+1];
-            this.pos++; if(this.pos>=n) this.pos=0;   // loop, never silence
+            this.pos++; if(this.pos>=n) this.pos=0;
           }
           return true;
         }
@@ -559,209 +348,168 @@
     `;
 
     // ------------------------------------------------- output device
-    // Web Audio renders to the OS default and stays there. Moving it needs
-    // AudioContext.setSinkId(), and the two engines gate it differently:
-    //
-    //   Firefox: selectAudioOutput() shows a NATIVE picker and grants
-    //            permission for the chosen device. No microphone prompt.
-    //   Chrome:  setSinkId() exists, but enumerateDevices() returns audio
-    //            outputs with EMPTY labels until the page has been granted
-    //            media permission -- so reading speaker names requires
-    //            getUserMedia({audio:true}), i.e. a microphone prompt purely
-    //            to learn what the speakers are called. That is a browser
-    //            privacy rule, not our choice, so it is opt-in behind this
-    //            button and never requested on load.
-    //
-    // Either way the OS default already works, so nothing here is required.
     async function chooseOutput() {
-      const st = document.getElementById("sink-status");
-      const sel = document.getElementById("sink-select");
-      if (!actx) { st.textContent = "Start audio first."; return; }
-      if (!("setSinkId" in actx)) {
-        st.textContent = "This browser cannot redirect Web Audio output "
-                       + "\u2014 change your system default instead.";
-        return;
-      }
-      try {
-        if (navigator.mediaDevices && navigator.mediaDevices.selectAudioOutput) {
-          const dev = await navigator.mediaDevices.selectAudioOutput();
-          await actx.setSinkId(dev.deviceId);
-          st.textContent = "Output: " + (dev.label || dev.deviceId);
-          return;
+        const st = document.getElementById("sink-status");
+        const sel = document.getElementById("sink-select");
+        if (!actx) {
+            st.textContent = "Start audio first.";
+            return;
         }
-        // Chrome path: unlock the labels, then offer a list.
-        st.textContent = "Asking for device access\u2026";
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        stream.getTracks().forEach(t => t.stop());   // we never wanted the mic
-        const devs = (await navigator.mediaDevices.enumerateDevices())
-                       .filter(d => d.kind === "audiooutput");
-        if (!devs.length) { st.textContent = "No output devices found."; return; }
-        sel.textContent = "";
-        for (const d of devs) {
-          const o = document.createElement("option");
-          o.value = d.deviceId;
-          o.textContent = d.label || d.deviceId;
-          sel.appendChild(o);
+        if (!("setSinkId" in actx)) {
+            st.textContent = "This browser cannot redirect Web Audio output \u2014 change your system default instead.";
+            return;
         }
-        sel.style.display = "";
-        sel.onchange = async () => {
-          try {
-            await actx.setSinkId(sel.value);
-            st.textContent = "Output: " + sel.options[sel.selectedIndex].textContent;
-          } catch (e) { st.textContent = "Could not switch: " + e; }
-        };
-        document.getElementById("sink-btn").style.display = "none";
-        st.textContent = "Pick an output.";
-      } catch (e) {
-        st.textContent = "Not available (" + e.name + ") \u2014 change your "
-                       + "system default output instead.";
-      }
+        try {
+            if (navigator.mediaDevices && navigator.mediaDevices.selectAudioOutput) {
+                const dev = await navigator.mediaDevices.selectAudioOutput();
+                await actx.setSinkId(dev.deviceId);
+                st.textContent = "Output: " + (dev.label || dev.deviceId);
+                return;
+            }
+            st.textContent = "Asking for device access\u2026";
+            const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+            stream.getTracks().forEach(t => t.stop());
+            const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "audiooutput");
+            if (!devs.length) {
+                st.textContent = "No output devices found.";
+                return;
+            }
+            sel.textContent = "";
+            for (const d of devs) {
+                const o = document.createElement("option");
+                o.value = d.deviceId;
+                o.textContent = d.label || d.deviceId;
+                sel.appendChild(o);
+            }
+            sel.style.display = "";
+            sel.onchange = async () => {
+                try {
+                    await actx.setSinkId(sel.value);
+                    st.textContent = "Output: " + sel.options[sel.selectedIndex].textContent;
+                } catch (e) {
+                    st.textContent = "Could not switch: " + e;
+                }
+            };
+            document.getElementById("sink-btn").style.display = "none";
+            st.textContent = "Pick an output.";
+        } catch (e) {
+            st.textContent = "Not available (" + e.name + ") \u2014 change your system default output instead.";
+        }
     }
 
     async function toggleLocal() {
-      if (localRunning) {
-        localRunning = false;
-        stopLumaLoop();
-        if (actx) { await actx.close(); actx = null; worklet = null; }
-        lumImg.removeAttribute("src");
-        document.getElementById("local-btn").textContent = "Start audio";
-        document.getElementById("local-status").textContent = "Not running.";
-        return;
-      }
-      try {
-        actx = new (window.AudioContext || window.webkitAudioContext)();
-        await actx.resume();
-        const url = URL.createObjectURL(new Blob([WORKLET_SRC], {type:"text/javascript"}));
-        await actx.audioWorklet.addModule(url);
-        worklet = new AudioWorkletNode(actx, "scope-out", {outputChannelCount:[2]});
-        worklet.connect(actx.destination);
-        lumCanvas = document.createElement("canvas");
-        lumCtx = lumCanvas.getContext("2d", {willReadFrequently:true});
-        lumImg.src = "scope/luma.mjpg?t=" + Date.now();
-        localRunning = true;
-        startLumaLoop();
-        document.getElementById("local-btn").textContent = "Stop audio";
-        setStatus();
-      } catch (e) {
-        document.getElementById("local-status").textContent = "Failed: " + e;
-      }
+        if (localRunning) {
+            localRunning = false;
+            stopLumaLoop();
+            if (actx) {
+                await actx.close();
+                actx = null;
+                worklet = null;
+            }
+            lumImg.removeAttribute("src");
+            document.getElementById("local-btn").textContent = "Start audio";
+            document.getElementById("local-status").textContent = "Not running.";
+            return;
+        }
+        try {
+            actx = new (window.AudioContext || window.webkitAudioContext)();
+            await actx.resume();
+            const url = URL.createObjectURL(new Blob([WORKLET_SRC], {type: "text/javascript"}));
+            await actx.audioWorklet.addModule(url);
+            worklet = new AudioWorkletNode(actx, "scope-out", {outputChannelCount: [2]});
+            worklet.connect(actx.destination);
+            lumCanvas = document.createElement("canvas");
+            lumCtx = lumCanvas.getContext("2d", {willReadFrequently: true});
+            lumImg.src = "scope/luma.mjpg?t=" + Date.now();
+            localRunning = true;
+            startLumaLoop();
+            document.getElementById("local-btn").textContent = "Stop audio";
+            setStatus();
+        } catch (e) {
+            document.getElementById("local-status").textContent = "Failed: " + e;
+        }
     }
 
     function setStatus() {
-      if (!localRunning || !actx) return;
-      const n = Math.max(64, Math.round(actx.sampleRate / 30));
-      document.getElementById("local-status").textContent =
-        `Running at ${actx.sampleRate} Hz \u2014 ${n} samples per trace, `
-        + `${tracesBuilt} built. Your rate, your sound card.`;
+        if (!localRunning || !actx) return;
+        const n = Math.max(64, Math.round(actx.sampleRate / 30));
+        document.getElementById("local-status").textContent =
+                `Running at ${actx.sampleRate} Hz \u2014 ${n} samples per trace, `
+                + `${tracesBuilt} built. Your rate, your sound card.`;
     }
 
-    // MJPEG in an <img> fires `load` ONCE. The browser keeps replacing the
-    // displayed frame as new parts arrive, but there is no event per frame,
-    // so anything hung off onload runs exactly once -- which rendered a
-    // single trace and then stopped forever.
-    //
-    // Instead, sample the element on a clock. drawImage() always copies
-    // whatever frame is currently showing, so a timer gets the live picture
-    // without needing an event that does not exist.
     function renderFromLuma() {
-      if (!localRunning || !actx || !worklet) return;
-      const w = lumImg.naturalWidth, h = lumImg.naturalHeight;
-      if (!w || !h) return;
-      if (lumCanvas.width !== w) { lumCanvas.width = w; lumCanvas.height = h; }
-      lumCtx.drawImage(lumImg, 0, 0);
-      const px = lumCtx.getImageData(0, 0, w, h).data;
-      const hh = frameHash(px, w, h);
-      if (hh !== lastHash) {
-        lastHash = hh;
-        lastChange = Date.now();
-        backoff = 1000;                 // healthy again, reset the backoff
-      } else if (Date.now() - lastChange > STALL_MS) {
-        reconnectLuma("feed stalled");
-        return;
-      }
-      // sample budget comes from THIS browser's rate, not the server's
-      const n = Math.max(64, Math.round(actx.sampleRate / 30));
-      const cells = Math.max(64, n);
-      let cols = Math.max(8, Math.round(Math.sqrt(cells / (h / w))));
-      let rows = Math.max(6, Math.round(cols * h / w));
-      cols = Math.min(cols, w); rows = Math.min(rows, h);
-      const trim = parseFloat(document.getElementById("local-trim").value);
-      const gamma = parseFloat(document.getElementById("local-gamma").value);
-      const g = boxGrid(px, w, h, rows, cols);
-      worklet.port.postMessage(buildTrace(g, rows, cols, n, trim, gamma, w, h));
-      if ((++tracesBuilt % 15) === 0) setStatus();
+        if (!localRunning || !actx || !worklet) return;
+        const w = lumImg.naturalWidth, h = lumImg.naturalHeight;
+        if (!w || !h) return;
+        if (lumCanvas.width !== w) {
+            lumCanvas.width = w;
+            lumCanvas.height = h;
+        }
+        lumCtx.drawImage(lumImg, 0, 0);
+        const px = lumCtx.getImageData(0, 0, w, h).data;
+        const hh = frameHash(px, w, h);
+        if (hh !== lastHash) {
+            lastHash = hh;
+            lastChange = Date.now();
+            backoff = 1000;
+        } else if (Date.now() - lastChange > STALL_MS) {
+            reconnectLuma("feed stalled");
+            return;
+        }
+        const n = Math.max(64, Math.round(actx.sampleRate / 30));
+        const cells = Math.max(64, n);
+        let cols = Math.max(8, Math.round(Math.sqrt(cells / (h / w))));
+        let rows = Math.max(6, Math.round(cols * h / w));
+        cols = Math.min(cols, w);
+        rows = Math.min(rows, h);
+        const trim = parseFloat(document.getElementById("local-trim").value);
+        const gamma = parseFloat(document.getElementById("local-gamma").value);
+        const g = boxGrid(px, w, h, rows, cols);
+        worklet.port.postMessage(buildTrace(g, rows, cols, n, trim, gamma, w, h));
+        if ((++tracesBuilt % 15) === 0) setStatus();
     }
 
-    // IPS, not the trace rate: the picture only changes when the index does,
-    // and rebuilding faster would burn CPU redrawing identical content. The
-    // worklet loops whatever it was last given, so the beam keeps sweeping
-    // between updates regardless.
     let lumTimer = null;
+
     function startLumaLoop() {
-      if (lumTimer) clearInterval(lumTimer);
-      lumTimer = setInterval(renderFromLuma, 1000 / 30);
+        if (lumTimer) clearInterval(lumTimer);
+        lumTimer = setInterval(renderFromLuma, 1000 / 30);
     }
+
     function stopLumaLoop() {
-      if (lumTimer) { clearInterval(lumTimer); lumTimer = null; }
+        if (lumTimer) {
+            clearInterval(lumTimer);
+            lumTimer = null;
+        }
     }
+
     // ---------------------------------------------------- keepalive
-    // An MJPEG connection is not forever. nginx cuts it at
-    // proxy_read_timeout, the server's own loop returns after 30 s with no
-    // new frame, and a sleeping laptop or a network blip ends it too. None
-    // of those raise an error the page can see: the <img> simply stops
-    // updating, and the worklet keeps looping its last trace, so the audio
-    // carries on sounding correct while the picture is frozen. That is the
-    // worst possible failure -- it looks like it is working.
-    //
-    // So watch the CONTENT, not the connection. If the frame stops changing,
-    // reconnect regardless of whether anything reported a problem.
     const STALL_MS = 6000;
     let lastHash = -1, lastChange = Date.now(), reconnects = 0, backoff = 1000;
 
     function frameHash(px, w, h) {
-      // ~100 scattered pixels: enough to notice a changed picture, far
-      // cheaper than hashing the frame, and it runs every render.
-      let acc = 0;
-      const step = Math.max(4, Math.floor((w * h) / 100)) * 4;
-      for (let i = 0; i < px.length; i += step) acc = (acc * 31 + px[i]) | 0;
-      return acc;
+        let acc = 0;
+        const step = Math.max(4, Math.floor((w * h) / 100)) * 4;
+        for (let i = 0; i < px.length; i += step) acc = (acc * 31 + px[i]) | 0;
+        return acc;
     }
 
     function reconnectLuma(why) {
-      if (!localRunning) return;
-      reconnects++;
-      document.getElementById("local-status").textContent =
-        `Reconnecting (${why})\u2026 attempt ${reconnects}`;
-      lumImg.removeAttribute("src");
-      setTimeout(() => {
         if (!localRunning) return;
-        lumImg.src = "scope/luma.mjpg?t=" + Date.now();
-        lastChange = Date.now();
-        // back off so a server that is down is not hammered, but cap it:
-        // this is an installation, it should recover on its own eventually
-        backoff = Math.min(backoff * 2, 15000);
-      }, backoff);
+        reconnects++;
+        document.getElementById("local-status").textContent =
+                `Reconnecting (${why})\u2026 attempt ${reconnects}`;
+        lumImg.removeAttribute("src");
+        setTimeout(() => {
+            if (!localRunning) return;
+            lumImg.src = "scope/luma.mjpg?t=" + Date.now();
+            lastChange = Date.now();
+            backoff = Math.min(backoff * 2, 15000);
+        }, backoff);
     }
 
     lumImg.onerror = () => reconnectLuma("feed error");
-
-    function poll() {
-      // Relative "data", matching HTML_TEMPLATE, so the page works unchanged
-      // behind the nginx prefix that setup_nginx.sh installs.
-      fetch("data", { cache: "no-store" })
-        .then(r => r.json())
-        .then(d => { lastData = d; render(d); })
-        .catch(() => {
-          const el = document.getElementById("scope_data");
-          el.textContent = "";
-          const w = document.createElement("span");
-          w.className = "warn";
-          w.textContent = "Monitor unreachable.";
-          el.appendChild(w);
-        });
-    }
-    poll();
-    setInterval(poll, 1000);
-  </script>
+</script>
 </body>
 </html>
