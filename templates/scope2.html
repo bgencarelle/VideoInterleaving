@@ -101,13 +101,12 @@
             width: 100%;
         }
 
-        /* Height-constrained layout to fit window without scrolling */
+        /* Height-constrained scope element (scaled relative to viewport height) */
         #scope-img {
             background: #000;
             border: 1px solid #333;
-            height: calc(100vh - 60px);
-            width: auto;
-            max-width: 100%;
+            width: min(80vh, 100%);
+            height: auto;
             aspect-ratio: 1 / 1;
             display: block;
             box-sizing: border-box;
