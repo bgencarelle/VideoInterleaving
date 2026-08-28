@@ -229,10 +229,33 @@ still applies there.
 
 ## Group E — which engine runs
 
-### `--scope-raster` (default off, i.e. vector)
+### `--scope-mode vector|raster|stochastic` (default `SCOPE_RENDER_MODE`)
 
-Scanline/dwell mode instead of vector line art. **This is what you use.** Nearly
-every flag in groups B and C is raster-only and silently inert without it.
+Selects the rendering engine explicitly:
+
+- `vector` traces the baked contour geometry at constant arc length.
+- `raster` draws dwell-modulated horizontal scanlines.
+- `stochastic` performs a luminance-weighted nearest-neighbour XY walk. It has
+  no scanline spacing and needs no Z/brightness channel.
+
+### `--scope-raster` / `--scope-stochastic`
+
+Compatibility shortcuts for `--scope-mode raster` and
+`--scope-mode stochastic`. They are mutually exclusive with each other and
+with an explicit `--scope-mode`.
+
+### Stochastic controls
+
+| flag | default | effect |
+|---|---:|---|
+| `--scope-walk-radius PX` | 10 | Radius searched for a nearby unvisited accepted pixel. |
+| `--scope-walk-stride PX` | 1 | Spacing of source-pixel candidates. Higher is faster/coarser. |
+| `--scope-walk-reseed-ms MS` | 5.0 | Interval between weighted jumps to another bright region. |
+| `--scope-walk-edge F` | 0.35 | Extra visit probability assigned to luminance gradients. |
+
+`--scope-trim` and `--scope-gamma` also apply to stochastic mode. Density,
+rows, fields, autofit, border, and sweep are raster-only. The common
+`--scope-lowpass` remains available to smooth the resulting XY signal.
 
 ### `--scope-min-feature F` (default 0.02)
 
@@ -313,7 +336,7 @@ From `scope_controls.py`, verified against `SPECS` and `HELP`:
 | `,` / `.` | density finer / coarser (0.20–4.0, multiplies) | yes |
 | `[` / `]` | gamma down / up (0.4–5.0) | no |
 | `l` | lowpass cycle: off → 12k → 6k → 3k → 1.5k | no |
-| `v` | vector / raster | yes |
+| `v` | vector → raster → stochastic → vector | yes |
 | `w` | sweep: alternate → palindrome → retrace | no |
 | `a` | autofit on / off | yes |
 | `p` | **print current settings as a command line** | — |
@@ -323,6 +346,9 @@ From `scope_controls.py`, verified against `SPECS` and `HELP`:
 `p` is the one to know. Tune by ear on the tube, hit `p`, paste the result into
 your launch script. That is the intended workflow and it is not obvious from any
 doc.
+
+Mode cycling is unavailable in realtime and mix modes because those select a
+different audio/scheduling path at startup.
 
 Not live-adjustable, because they need the audio stream reopened: `--scope-fps`,
 `--scope-samples`, and `--scope-fields`.

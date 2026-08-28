@@ -73,7 +73,7 @@ def main():
         if "thumbs.npy" in files:
             folders.append(root)
     if not folders:
-        print(f"No thumbs.npy under {args.xy_dir} -- was this baked --no-thumbs?")
+        print(f"No thumbs.npy under {args.xy_dir} -- rebake with the current baker.")
         return 1
     folders.sort()
 

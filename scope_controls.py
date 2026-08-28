@@ -36,7 +36,7 @@ scope live controls
   ,  / .    density     finer / coarser (samples per cell; below ~0.3 flecks)
   [  / ]    gamma       down / up      (contrast of the dwell curve)
   l         lowpass     cycle off -> 12k -> 6k -> 3k -> 1.5k
-  v         vector / raster
+  v         mode         vector -> raster -> stochastic
   w         sweep       alternate -> palindrome -> retrace
   a         autofit     on / off
   p         print current settings as command-line flags
@@ -94,9 +94,16 @@ class KeyMap:
         elif ch == "l":
             self._bump("lowpass", +1)
         elif ch == "v":
-            s["raster"] = not s.get("raster", False)
+            if s.get("mode_locked"):
+                self.message = "mode cycling unavailable in realtime/mix mode"
+                return True
+            order = ["vector", "raster", "stochastic"]
+            current = s.get("mode", "raster" if s.get("raster") else "vector")
+            i = order.index(current) if current in order else 0
+            s["mode"] = order[(i + 1) % len(order)]
+            s["raster"] = s["mode"] == "raster"  # legacy state readers
             self.dirty = True
-            self.message = "mode = " + ("RASTER" if s["raster"] else "VECTOR")
+            self.message = "mode = " + s["mode"].upper()
         elif ch == "w":
             order = ["alternate", "palindrome", "retrace"]
             i = order.index(s.get("sweep", "alternate")) if s.get("sweep") in order else 0
@@ -119,7 +126,8 @@ class KeyMap:
 
 def as_flags(s):
     """Current state as flags you can paste into a command line."""
-    out = ["--scope-raster"] if s.get("raster") else []
+    mode = s.get("mode", "raster" if s.get("raster") else "vector")
+    out = [] if mode == "vector" else [f"--scope-mode {mode}"]
     out.append(f"--scope-trim {s.get('trim', 0.02):g}")
     out.append(f"--scope-gamma {s.get('gamma', 2.2):g}")
     if abs(s.get("density", 1.0) - 1.0) > 1e-6:

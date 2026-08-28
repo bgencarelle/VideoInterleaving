@@ -111,13 +111,20 @@ SCOPE_DEVICE = None       # audio output: name FRAGMENT ("Scarlett", "hw:1")
                           # only way to pin an output without a CLI, which is
                           # what a systemd unit needs.
 SCOPE_FPS = None          # None -> follow IPS
+SCOPE_RENDER_MODE = "vector"  # vector | raster | stochastic. Stochastic is an
+                          # Osci-style luminance-weighted XY walk: no scanlines
+                          # and no Z/brightness channel.
 SCOPE_FIELDS = 1          # raster interlace: traces per picture. 2 or 4 lifts
                           # the refresh rate above flicker fusion without
                           # touching the grid. Needs SCOPE_FPS = N * IPS.
 SCOPE_MIN_FEATURE = 0.02  # vector: shortest stroke kept by the occlusion cull
 SCOPE_TRIM = 0.02         # raster: drop cells dimmer than this from the sweep
-SCOPE_GAMMA = 2.2         # raster contrast
+SCOPE_GAMMA = 2.2         # raster/stochastic luminance exponent
 SCOPE_DENSITY = 1.0       # raster samples per cell (1.0 = finest)
+SCOPE_WALK_RADIUS = 10    # stochastic: nearest-neighbour search radius, pixels
+SCOPE_WALK_STRIDE = 1     # stochastic: source-pixel step between candidates
+SCOPE_WALK_RESEED_MS = 5.0  # stochastic: jump to another bright region
+SCOPE_WALK_EDGE = 0.35    # stochastic: extra probability for image edges
 SCOPE_LOWPASS = None      # Hz; emulate a softer output chain (Pi headphone
                           # jack, cheap codec, or a physical RC filter).
                           # None = off. See scope_lowpass.py.

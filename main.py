@@ -83,8 +83,15 @@ def configure_runtime():
 
     # --- Options for --mode scope (XY output on the sound card) ---
     parser.add_argument("--xy-dir", help="Baked XY libraries (default: settings.XY_DIR)")
-    parser.add_argument("--scope-raster", action="store_true",
-                        help="Scope: scanline/dwell mode instead of vector line art")
+    scope_render = parser.add_mutually_exclusive_group()
+    scope_render.add_argument("--scope-mode",
+                              choices=("vector", "raster", "stochastic"),
+                              help="Scope renderer (default: settings.SCOPE_RENDER_MODE)")
+    scope_render.add_argument("--scope-raster", action="store_true",
+                              help="Alias for --scope-mode raster")
+    scope_render.add_argument("--scope-stochastic", action="store_true",
+                              help="Alias for --scope-mode stochastic: Osci-style "
+                                   "luminance-weighted XY walk with no Z channel")
     parser.add_argument("--scope-realtime", action="store_true",
                         help="Scope: stream continuously so index changes land "
                              "within a row instead of at a trace boundary (raster only)")
@@ -104,6 +111,15 @@ def configure_runtime():
                         help="Default: settings.SCOPE_GAMMA")
     parser.add_argument("--scope-density", type=float,
                         help="Default: settings.SCOPE_DENSITY")
+    parser.add_argument("--scope-walk-radius", type=int, metavar="PX",
+                        help="Scope stochastic: nearest-neighbour search radius")
+    parser.add_argument("--scope-walk-stride", type=int, metavar="PX",
+                        help="Scope stochastic: source-pixel step (default 1)")
+    parser.add_argument("--scope-walk-reseed-ms", type=float, metavar="MS",
+                        help="Scope stochastic: time between weighted reseeds "
+                             "(default 5 ms, matching Osci-render)")
+    parser.add_argument("--scope-walk-edge", type=float, metavar="F",
+                        help="Scope stochastic: edge-importance gain (default 0.35)")
     parser.add_argument("--scope-rows", type=int)
     parser.add_argument("--scope-row-bias", type=float, metavar="F",
                         help="Trade columns for rows at constant cell count. "
@@ -328,8 +344,14 @@ def configure_runtime():
 
         # Publish CLI overrides into settings; scope_display reads settings,
         # exactly as the other modes read ASCII_MODE / SERVER_MODE.
-        if args.scope_raster:
-            settings.SCOPE_RASTER = True
+        if args.scope_mode:
+            settings.SCOPE_RENDER_MODE = args.scope_mode
+        elif args.scope_raster:
+            settings.SCOPE_RENDER_MODE = "raster"
+        elif args.scope_stochastic:
+            settings.SCOPE_RENDER_MODE = "stochastic"
+        # Compatibility for callers outside main.py that still inspect this.
+        settings.SCOPE_RASTER = settings.SCOPE_RENDER_MODE == "raster"
         if args.scope_realtime:
             settings.SCOPE_REALTIME = True
         if args.scope_fps:
@@ -350,6 +372,14 @@ def configure_runtime():
             settings.SCOPE_GAMMA = args.scope_gamma
         if args.scope_density is not None:
             settings.SCOPE_DENSITY = args.scope_density
+        if args.scope_walk_radius is not None:
+            settings.SCOPE_WALK_RADIUS = args.scope_walk_radius
+        if args.scope_walk_stride is not None:
+            settings.SCOPE_WALK_STRIDE = args.scope_walk_stride
+        if args.scope_walk_reseed_ms is not None:
+            settings.SCOPE_WALK_RESEED_MS = args.scope_walk_reseed_ms
+        if args.scope_walk_edge is not None:
+            settings.SCOPE_WALK_EDGE = args.scope_walk_edge
         if args.scope_rows:
             settings.SCOPE_ROWS = args.scope_rows
         if args.scope_no_autofit:

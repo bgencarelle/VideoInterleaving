@@ -28,6 +28,7 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from scope_bake import Q, order_paths, fit_epsilon, subdivide, path_length  # noqa: E402
+from make_file_lists import natural_sort_key  # noqa: E402
 
 VALID = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
@@ -246,8 +247,11 @@ def folder_allowed(path, root):
 
 def process_folder(args):
     src_folder, dest_dir, prof = args
-    files = sorted(p for p in Path(src_folder).iterdir()
-                   if p.is_file() and p.suffix.lower() in VALID)
+    files = sorted(
+        (p for p in Path(src_folder).iterdir()
+         if p.is_file() and p.suffix.lower() in VALID),
+        key=lambda p: natural_sort_key(p.name),
+    )
     if not files:
         return f"Skipped (no images): {src_folder}"
 
@@ -278,7 +282,7 @@ def process_folder(args):
                     min_v=prof["min_v"], max_v=prof["max_v"],
                     thumb_width=prof.get("thumb_width", THUMB_W),
                     precondition=prof.get("precondition", PRECONDITION))
-            if not prof.get("no_thumbs") and thumb is not None:
+            if thumb is not None:
                 if thumbs is None:
                     thumbs = np.empty((len(files),) + thumb.shape, np.uint8)
                 thumbs[n_thumbs] = thumb
@@ -331,12 +335,9 @@ def main():
                          "the hard ceiling on scanline count. 96 caps at 128 "
                          "lines, 128 caps at 171. Storage scales with the "
                          "square, and no sample budget resolves past ~138x184.")
-    ap.add_argument("--no-thumbs", action="store_true",
-                    help="skip raster thumbnails entirely (vector mode only) -- "
-                         "saves most of the bake size")
     ap.add_argument("--thumbs-only", action="store_true",
-                    help="bake only raster thumbnails (skip vectorizing) -- "
-                         "much faster when you only use raster mode")
+                    help="bake only luminance/alpha thumbnails (skip vectorizing) -- "
+                         "much faster for raster/stochastic-only use")
     ap.add_argument("--min-verts", type=int,
                     help="floor on vertices per contour (raise for legibility, "
                          "lower to fit more contours)")
@@ -349,11 +350,8 @@ def main():
     prof = dict(PROFILES[args.profile])
     prof["thumb_width"] = args.thumb_width
     prof["precondition"] = args.precondition
-    prof["no_thumbs"] = args.no_thumbs
     if args.thumbs_only:
         prof["thumbs_only"] = True
-        if args.no_thumbs:
-            raise SystemExit("--thumbs-only and --no-thumbs are contradictory")
     if args.budget:
         prof["budget_main"] = args.budget
     if args.bands is not None:

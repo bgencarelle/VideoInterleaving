@@ -13,6 +13,8 @@ It is designed to run on everything from high-end workstations to headless Raspb
     * **Local Window**: GPU-accelerated OpenGL display (GLFW).
     * **Web Stream**: Low-latency MJPEG stream for browsers.
     * **ASCII Stream**: Real-time text-mode video over Telnet/TCP.
+    * **Oscilloscope XY**: Vector, scanline raster, or no-Z stochastic bitmap
+      rendering through a stereo audio interface.
 * **Performance First**: Uses Side-by-Side (SBS) JPEGs and TurboJPEG for maximum throughput on low-power CPUs.
 * **Sync**: Supports free-running, MIDI, MTC, and Client/Server index synchronization.
 
@@ -132,6 +134,16 @@ python main.py --mode ascii --dir ./images_tiny
 ```bash
 python main.py --mode local --dir ./images_sbs
 ```
+
+**4. Start Oscilloscope Mode (Osci-style bitmap walk, no Z channel):**
+
+```bash
+python utilities/convert_to_xy.py -i ./images -o ./images_xy
+python main.py --mode scope --xy-dir ./images_xy --scope-mode stochastic
+```
+
+Press `v` while it is running to cycle vector, raster, and stochastic modes.
+See `SCOPE_MODE.md` for wiring, sample-budget, and renderer details.
 
 ### The `settings.py` Way (Legacy)
 

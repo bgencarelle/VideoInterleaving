@@ -17,11 +17,14 @@ expensive work — vectorizing, simplifying, path ordering — happens here, whe
 you can afford to spend a second per frame.
 
 **Playback (runtime).** Read the index from the clock, look up two baked
-frames, composite them, push samples to the audio device. Two array slices and
-some arithmetic. A Pi Zero can do it.
+frames, composite them, and push samples to the audio device. Vector playback
+mostly slices arrays; raster and stochastic modes additionally construct their
+XY route from the baked thumbnail. On the reference Python path, a 1600-sample
+stochastic trace benchmarks around 13 ms on the development machine, inside a
+33 ms/30 Hz trace period; the runtime prints its own measured cost at startup.
 
-This split is the whole design. The runtime is cheap *because* the bake is
-expensive.
+The bake remains one-time and resolution-independent; changing renderer,
+sample rate, or trace rate does not require rebaking.
 
 ---
 
@@ -56,6 +59,12 @@ mode's code path is altered.
 
 ```
 python main.py --mode scope --dir images --xy-dir images_xy --scope-raster
+```
+
+For the no-Z Osci-style renderer:
+
+```
+python main.py --mode scope --xy-dir images_xy --scope-mode stochastic
 ```
 
 or directly, using the settings.py defaults:
@@ -127,7 +136,7 @@ come out right. So it participates in occlusion and is never drawn.
 
 ---
 
-## 4. Two rendering modes
+## 4. Three rendering modes
 
 They are genuinely different pictures, and they use different parts of the
 library.
@@ -184,6 +193,32 @@ mattes work with no special casing.
 
 The grid **auto-sizes to the sample budget**, because raster needs roughly one
 sample per cell. 882 samples ≈ 33×25; 1470 ≈ 37×50.
+
+### Stochastic — Osci-style bitmap walk, no Z axis
+
+Uses `thumbs.npy` **only**. It has no horizontal rows and does not use a third
+brightness channel. Luminance becomes probability: bright pixels are selected
+more often, nearby unvisited pixels are visited first, and the phosphor turns
+that visit density into visible tone.
+
+The renderer constructs a continuous route in four stages:
+
+1. Convert composited luminance to a visit-probability map using `trim` and
+   `gamma`.
+2. Add a modest gradient term so silhouettes, eyes, and mouth edges survive.
+3. Walk to the nearest unvisited accepted pixel, periodically reseeding into a
+   different bright region so the route covers the whole subject.
+4. Resample local target-to-target moves with equal beam time, make reseed jumps
+   deliberately faster/dimmer, and begin the next trace at the previous trace's
+   endpoint.
+
+This is based on Osci-render's bitmap strategy rather than its SVG renderer.
+There is still no invisible travel without Z: the nearest-neighbour walk and
+endpoint chaining make travel short, while `--scope-walk-reseed-ms` controls
+the unavoidable longer relocations.
+
+At 48 kHz, start with `--scope-fields 1 --scope-fps 15` (3200 samples) when the
+tube can tolerate 15 Hz, or 30 Hz (1600 samples) when flicker matters more.
 
 ### Scanlines and the bake ceiling
 
@@ -330,12 +365,12 @@ A bake flag. It writes `thumbs.npy` and skips vectorizing entirely.
 
 - **Much faster** — seconds instead of minutes, since vectorization is all the
   work.
-- **Raster mode works.**
+- **Raster and stochastic modes work.**
 - **Vector mode does not** — there's no geometry, so it falls back to the idle
   circle.
 
-Use it when you've settled on raster and are iterating on content. Do a full
-bake when you want both modes available.
+Use it when you've settled on raster/stochastic and are iterating on content.
+Do a full bake when you want live cycling through all three modes.
 
 ---
 
@@ -453,7 +488,7 @@ python utilities/convert_to_xy.py -i images -o images_xy [options]
 | `--budget N` | Override main-layer vertex budget |
 | `--bands N` | Luminance levels for interior detail. 2 = starker, 4 = more tonal. |
 | `--min-verts N` | Floor on vertices per contour. Raise for fewer/cleaner shapes. |
-| `--thumbs-only` | Raster data only, skip vectorizing |
+| `--thumbs-only` | Raster/stochastic luminance data only; skip vectorizing. |
 
 Floats always bake silhouette-only — they're mattes, with no interior worth
 tracing.
@@ -461,32 +496,37 @@ tracing.
 ### Playback
 
 ```
-python scope_display.py [--dir images] [--xy-dir images_xy] [options]
+python main.py --mode scope --xy-dir images_xy [options]
 ```
 
 | Flag | Effect |
 |---|---|
-| `--raster` | Scanline mode instead of vector |
-| `--fps N` | Scope redraw rate. Defaults to `IPS`. Sets `N = rate/fps`. |
-| `--samples N` | Path length per trace directly. Overrides `--fps`. |
-| `--realtime` | Stream continuously; index changes land within a row (raster only) |
-| `--mix [HZ]` | Alternate raster/vector each trace (default 120 Hz) |
-| `--mix-duty F` | Fraction of mixed passes spent on raster (default 0.5) |
-| `--sweep MODE` | `alternate` (default), `palindrome`, or `retrace` |
-| `--rows N` | Raster scanline count (default: auto from budget) |
-| `--gamma F` | Raster contrast (default 2.2) |
-| `--density F` | Raster samples per cell (1.0 = finest) |
-| `--trim F` | Drop cells dimmer than this from the sweep (default 0.02) |
-| `--no-trim` | Sweep across black margins instead of skipping them |
-| `--fields N` | Interlacing: 2 draws alternate rows per trace |
-| `--retrace` | Allow the visible flyback instead of a closed loop |
-| `--density F` | Raster samples per cell (1.0 = dots, 2–3 = solid lines) |
-| `--fields N` | Raster interlacing (1 = progressive, 2 = interlaced) |
-| `--even-rows` | Constant beam time per row (fixes the bottom crunch) |
-| `--fields N` | Raster interlace fields (default 4). Both axes gain √N. |
-| `--rebuild` | Force rebuild of file lists |
-| `--ask` | Choose the audio output interactively (only prompts when 2+ exist) |
+| `--scope-mode vector\|raster\|stochastic` | Select the renderer. |
+| `--scope-raster` | Compatibility alias for `--scope-mode raster`. |
+| `--scope-stochastic` | Alias for `--scope-mode stochastic`. |
+| `--scope-walk-radius PX` | Stochastic nearest-neighbour search radius (default 10). |
+| `--scope-walk-stride PX` | Stochastic source-pixel step (default 1). |
+| `--scope-walk-reseed-ms MS` | Time between weighted region changes (default 5 ms). |
+| `--scope-walk-edge F` | Edge-importance gain (default 0.35). |
+| `--scope-fps N` | Scope redraw rate. Defaults to `IPS`. Sets `N = rate/fps`. |
+| `--scope-samples N` | Path length per trace directly. Overrides FPS. |
+| `--scope-realtime` | Stream continuously; index changes land within a row (raster only). |
+| `--scope-mix [HZ]` | Alternate raster/vector each trace (default 120 Hz). |
+| `--scope-mix-duty F` | Fraction of mixed passes spent on raster (default 0.5). |
+| `--scope-sweep MODE` | `alternate` (default), `palindrome`, or `retrace`. |
+| `--scope-rows N` | Raster scanline count (default: auto from budget). |
+| `--scope-gamma F` | Raster/stochastic luminance exponent (default 2.2). |
+| `--scope-density F` | Raster samples per cell (1.0 = finest). |
+| `--scope-trim F` | Ignore luminance below this level (default 0.02). |
+| `--scope-fields N` | Raster interlacing (1 = progressive). |
+| `--ask` / `--scope-ask` | Choose the audio output interactively. |
 | `--device X` | Audio output by index or name fragment, e.g. `--device Scarlett` |
+
+While scope mode owns a terminal, press `v` to cycle
+`VECTOR → RASTER → STOCHASTIC → VECTOR`. Press `p` to print the current mode
+and live settings as reusable command-line flags. Cycling is disabled in
+`--scope-realtime` and `--scope-mix`, whose audio/scheduling paths are fixed at
+startup; restart with `--scope-mode` to leave either one.
 
 ### Preview
 
