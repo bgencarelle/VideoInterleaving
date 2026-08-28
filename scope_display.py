@@ -61,7 +61,11 @@ def _bootstrap():
     ap.add_argument("--scope-walk-radius", type=int)
     ap.add_argument("--scope-walk-stride", type=int)
     ap.add_argument("--scope-walk-reseed-ms", type=float)
+    ap.add_argument("--scope-gamma", type=float,
+                    help="active raster/stochastic luminance exponent")
+    ap.add_argument("--scope-walk-gamma", type=float, help=argparse.SUPPRESS)
     ap.add_argument("--scope-walk-edge", type=float)
+    ap.add_argument("--scope-walk-hz", type=float)
     args = ap.parse_args()
 
     if args.dir:
@@ -89,11 +93,17 @@ def _bootstrap():
         settings.SCOPE_RENDER_MODE = "stochastic"
     if args.scope_mode or args.scope_raster or args.scope_stochastic:
         settings.SCOPE_RASTER = settings.SCOPE_RENDER_MODE == "raster"
+    if args.scope_gamma is not None:
+        settings.SCOPE_GAMMA = args.scope_gamma
+        if settings.SCOPE_RENDER_MODE == "stochastic":
+            settings.SCOPE_WALK_GAMMA = args.scope_gamma
     for arg, setting_name in (
             (args.scope_walk_radius, "SCOPE_WALK_RADIUS"),
             (args.scope_walk_stride, "SCOPE_WALK_STRIDE"),
             (args.scope_walk_reseed_ms, "SCOPE_WALK_RESEED_MS"),
-            (args.scope_walk_edge, "SCOPE_WALK_EDGE")):
+            (args.scope_walk_gamma, "SCOPE_WALK_GAMMA"),
+            (args.scope_walk_edge, "SCOPE_WALK_EDGE"),
+            (args.scope_walk_hz, "SCOPE_WALK_HZ")):
         if arg is not None:
             setattr(settings, setting_name, arg)
 
@@ -344,9 +354,11 @@ def run_scope(clock_source=None):
     gamma = getattr(settings, "SCOPE_GAMMA", 2.2)
     density = getattr(settings, "SCOPE_DENSITY", 1.0)
     walk_radius = max(1, int(getattr(settings, "SCOPE_WALK_RADIUS", 10)))
-    walk_stride = max(1, int(getattr(settings, "SCOPE_WALK_STRIDE", 1)))
+    walk_stride = max(0, int(getattr(settings, "SCOPE_WALK_STRIDE", 0)))
     walk_reseed_ms = max(0.1, float(getattr(settings, "SCOPE_WALK_RESEED_MS", 5.0)))
-    walk_edge = max(0.0, float(getattr(settings, "SCOPE_WALK_EDGE", 0.35)))
+    walk_gamma = max(0.01, float(getattr(settings, "SCOPE_WALK_GAMMA", 2.0)))
+    walk_edge = max(0.0, float(getattr(settings, "SCOPE_WALK_EDGE", 0.0)))
+    walk_hz = max(1.0, float(getattr(settings, "SCOPE_WALK_HZ", 48000.0)))
     rows = getattr(settings, "SCOPE_ROWS", None)
     autofit = getattr(settings, "SCOPE_AUTOFIT", True)
     lowpass = getattr(settings, "SCOPE_LOWPASS", None)
@@ -462,6 +474,25 @@ def run_scope(clock_source=None):
             "Raster and stochastic modes need thumbnails and this bake has "
             f"{len(missing_thumbs)} library/libraries without them. Rebake "
             "normally; thumbnails are part of every standard bake.")
+    if use_stochastic:
+        legacy_luma = [lib for lib in main_libs + float_libs
+                       if lib is not None and lib.thumbs is not None
+                       and lib.thumbs.ndim >= 4 and lib.thumbs.shape[-1] < 3]
+        if legacy_luma:
+            print("[SCOPE] stochastic: this older bake has only the raster-"
+                  "preconditioned luminance channel. It remains compatible, "
+                  "but rebake once for the raw stochastic luminance channel.")
+        first_thumb = next(
+            (lib.thumbs for lib in main_libs + float_libs
+             if lib is not None and lib.thumbs is not None), None)
+        walk_width = int(first_thumb.shape[2])
+        resolved_stride = StochasticEmitter(
+            48000, 2, stride=walk_stride)._stride_for_width(walk_width)
+        stride_text = (f"auto -> {resolved_stride}" if walk_stride <= 0
+                       else str(resolved_stride))
+        print(f"[SCOPE] stochastic settings: gamma={walk_gamma:g} "
+              f"stride={stride_text} at {walk_width}px radius={walk_radius} "
+              f"reseed={walk_reseed_ms:g}ms walk={walk_hz:g}Hz", flush=True)
 
     # Calibrate the grid and tone mapping ONCE.  Deriving either per frame
     # makes them follow content statistics: the grid changing by a row
@@ -620,9 +651,10 @@ def run_scope(clock_source=None):
                 if use_stochastic and not mix_hz:
                     _pe = StochasticEmitter(
                         scope.samplerate, scope.samples_per_frame,
-                        gamma=gamma, trim=trim, radius=walk_radius,
+                        gamma=walk_gamma, trim=trim, radius=walk_radius,
                         stride=walk_stride, edge_gain=walk_edge,
-                        reseed_ms=walk_reseed_ms, dc_comp=dc_comp)
+                        reseed_ms=walk_reseed_ms, walk_hz=walk_hz,
+                        dc_comp=dc_comp)
                 else:
                     _pe = TraceEmitter(
                         scope.samplerate, scope.samples_per_frame,
@@ -632,10 +664,13 @@ def run_scope(clock_source=None):
                         grid=((cal["grid_rows"], cal["grid_cols"]) if cal else None),
                         levels=(cal.get("levels") if cal else None))
                 for _ in range(3):
-                    _pe.emit(composite_luma(ml0, 0, fl0, 0))
+                    _pe.emit(composite_luma(
+                        ml0, 0, fl0, 0, raw=(use_stochastic and not mix_hz)))
                 _t0 = _t.perf_counter()
                 for _k in range(10):
-                    _pe.emit(composite_luma(ml0, _k, fl0, _k))
+                    _pe.emit(composite_luma(
+                        ml0, _k, fl0, _k,
+                        raw=(use_stochastic and not mix_hz)))
                 _ms = (_t.perf_counter() - _t0) / 10 * 1000.0
                 _budget = 1000.0 / max(scope.samplerate / scope.samples_per_frame, 1)
                 print(f"[SCOPE] {_ms:.1f} ms per trace, budget {_budget:.1f} ms "
@@ -649,7 +684,9 @@ def run_scope(clock_source=None):
     # --- live controls ---
     # Everything below is adjustable while watching the scope; restarting to
     # try a different trim is useless when the thing you are judging is a beam.
-    live_state = dict(trim=trim, density=density, gamma=gamma, rows=rows,
+    live_state = dict(trim=trim, density=density,
+                      gamma=(walk_gamma if use_stochastic else gamma),
+                      raster_gamma=gamma, stochastic_gamma=walk_gamma, rows=rows,
                       lowpass=lowpass, mode=render_mode, raster=use_raster,
                       sweep=sweep_mode, autofit=autofit,
                       mode_locked=bool(realtime or mix_hz))
@@ -729,8 +766,9 @@ def run_scope(clock_source=None):
         levels=(cal.get("levels") if cal else None))
     stochastic_emitter = StochasticEmitter(
         scope.samplerate, scope.samples_per_frame,
-        gamma=gamma, trim=trim, radius=walk_radius, stride=walk_stride,
-        edge_gain=walk_edge, reseed_ms=walk_reseed_ms, dc_comp=dc_comp)
+        gamma=walk_gamma, trim=trim, radius=walk_radius, stride=walk_stride,
+        edge_gain=walk_edge, reseed_ms=walk_reseed_ms, walk_hz=walk_hz,
+        dc_comp=dc_comp)
 
     field_i = 0                     # free-running; survives a slipped deadline
     mix_field_i = 0                 # advances only on the RASTER traces of mix
@@ -783,9 +821,10 @@ def run_scope(clock_source=None):
                         levels=(cal.get("levels") if cal else None))
                     stochastic_emitter = StochasticEmitter(
                         scope.samplerate, scope.samples_per_frame,
-                        gamma=gamma, trim=trim, radius=walk_radius,
+                        gamma=walk_gamma, trim=trim, radius=walk_radius,
                         stride=walk_stride, edge_gain=walk_edge,
-                        reseed_ms=walk_reseed_ms, dc_comp=dc_comp)
+                        reseed_ms=walk_reseed_ms, walk_hz=walk_hz,
+                        dc_comp=dc_comp)
                     beam_end = None
                     with _device_lock:
                         _device_request["message"] = f"now on {_dev_name_of(scope)}"
@@ -861,7 +900,14 @@ def run_scope(clock_source=None):
                         except Exception as e:
                             print(f"  recalibration failed: {e}", flush=True)
                     prev_key = None          # force a redraw with the new values
-                gamma = live_state["gamma"]; lowpass = live_state["lowpass"]
+                active_gamma = live_state["gamma"]
+                if render_mode == "stochastic":
+                    walk_gamma = active_gamma
+                    live_state["stochastic_gamma"] = walk_gamma
+                else:
+                    gamma = active_gamma
+                    live_state["raster_gamma"] = gamma
+                lowpass = live_state["lowpass"]
                 sweep_mode = live_state["sweep"]
                 # Push every live value onto the emitter. It holds the tuning
                 # now, so a key that only updated a local would silently stop
@@ -876,7 +922,7 @@ def run_scope(clock_source=None):
                 if cal:
                     emitter.grid = (cal["grid_rows"], cal["grid_cols"])
                     emitter.levels = cal.get("levels")
-                stochastic_emitter.gamma = gamma
+                stochastic_emitter.gamma = walk_gamma
                 stochastic_emitter.trim = trim
 
             index, _ = update_index(png_paths_len, PINGPONG)
@@ -1048,16 +1094,17 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
         # is drawn -- grid, fields, chaining, border, dc-comp -- lives on the
         # emitter, which scope_screen.py shares. Nothing about it is restated
         # in this file, so there is no second parameter list to drift.
-        _lum = composite_luma(ml, index, fl, index)
+        _lum = composite_luma(
+            ml, index, fl, index, raw=(render_mode == "stochastic"))
         if Scope._tap_until > _time_mono():
             # only while a browser is watching -- same gate as the trace tap
             Scope.publish_luma(_lum)
+        exact_handoff = False
         if beam_start is not None:
             if render_mode == "raster" and emitter.sweep_mode == "alternate":
                 emitter._end = np.asarray(beam_start, dtype=np.float32).copy()
             elif render_mode == "stochastic":
-                stochastic_emitter._end = np.asarray(
-                    beam_start, dtype=np.float32).copy()
+                exact_handoff = stochastic_emitter.handoff_from(beam_start)
         frame = (emitter.emit(_lum) if render_mode == "raster"
                  else stochastic_emitter.emit(_lum))
         if frame is not None:
@@ -1065,9 +1112,12 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
             # reading sweep state; the emitter owns the real copy
             if render_mode == "raster":
                 sweep["rev"], sweep["end"] = emitter._rev, emitter._end
-            if lowpass and lowpass_circular is not None:
+            if render_mode == "stochastic":
+                frame = stochastic_emitter.apply_lowpass(frame, lowpass)
+            elif lowpass and lowpass_circular is not None:
                 frame = lowpass_circular(frame, lowpass, scope.samplerate)
-            if beam_start is not None:
+            if beam_start is not None and (render_mode == "raster"
+                                           or exact_handoff):
                 # Circular filters and DC compensation can move sample zero.
                 # Restore the exact handoff point so the frame boundary itself
                 # never introduces an unbudgeted visible connector.
@@ -1077,7 +1127,7 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
             if render_mode == "raster" and emitter.sweep_mode == "alternate":
                 emitter._end = frame[-1].copy()
             elif render_mode == "stochastic":
-                stochastic_emitter._end = frame[-1].copy()
+                stochastic_emitter.chain_from(frame[-1])
             scope.show_frame(frame)
             return frame[-1].copy()
     else:

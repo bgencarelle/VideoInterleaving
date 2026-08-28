@@ -18,13 +18,16 @@ you can afford to spend a second per frame.
 
 **Playback (runtime).** Read the index from the clock, look up two baked
 frames, composite them, and push samples to the audio device. Vector playback
-mostly slices arrays; raster and stochastic modes additionally construct their
-XY route from the baked thumbnail. On the reference Python path, a 1600-sample
-stochastic trace benchmarks around 13 ms on the development machine, inside a
-33 ms/30 Hz trace period; the runtime prints its own measured cost at startup.
+mostly slices arrays; raster constructs a pass from the baked thumbnail;
+stochastic updates a continuous walk's probability field. On the supplied
+portrait, 1,600 stochastic output samples benchmark around 11 ms on the
+development machine, inside a 33 ms/30 Hz buffer period; the runtime prints its
+own measured cost at startup.
 
 The bake remains one-time and resolution-independent; changing renderer,
-sample rate, or trace rate does not require rebaking.
+sample rate, or trace rate does not require rebaking. Bakes made before the raw
+stochastic luminance channel remain compatible, but one rebake after this
+change removes raster-specific horizontal preconditioning from stochastic.
 
 ---
 
@@ -107,7 +110,7 @@ Each library directory contains:
 | `poly_starts.npy` | `(P+1,) int32`. Polyline *p* occupies `verts[poly_starts[p] : poly_starts[p+1]]`. |
 | `frame_starts.npy` | `(F+1,) int32`. Frame *i* owns polylines `frame_starts[i]` to `frame_starts[i+1]`. |
 | `flags.npy` | `(P,) uint8`. One per polyline — see below. |
-| `thumbs.npy` | `(F, h, 96, 2) uint8`. A 96px-wide thumbnail per frame: `[luminance, alpha]`. |
+| `thumbs.npy` | `(F, h, 96, 3) uint8`. `[raster luminance, alpha, raw luminance]`. Legacy two-channel files still load. |
 | `names.json` | Source filenames, for provenance. |
 
 This is a CSR layout — flat arrays plus offset tables, no per-frame Python
@@ -201,24 +204,44 @@ brightness channel. Luminance becomes probability: bright pixels are selected
 more often, nearby unvisited pixels are visited first, and the phosphor turns
 that visit density into visible tone.
 
-The renderer constructs a continuous route in four stages:
+New bakes give stochastic the raw luminance channel. Raster keeps its separately
+preconditioned channel because horizontal sharpening compensates a horizontal
+scan; applying that same directional correction to a directionless walk was an
+unintentional source of false edges. This is extra stored source data, not a Z
+or intensity output channel.
 
-1. Convert composited luminance to a visit-probability map using `trim` and
-   `gamma`.
-2. Add a modest gradient term so silhouettes, eyes, and mouth edges survive.
-3. Walk to the nearest unvisited accepted pixel, periodically reseeding into a
-   different bright region so the route covers the whole subject.
-4. Resample local target-to-target moves with equal beam time, make reseed jumps
-   deliberately faster/dimmer, and begin the next trace at the previous trace's
-   endpoint.
+The renderer is a continuous sample source, not a per-trace route:
+
+1. Composite the current thumbnail into a probability field. Pixels at or below
+   0.2 are excluded; every candidate gets a fresh `luminance ** gamma` test.
+2. At a fixed target clock (48 kHz by default), spiral outward to the nearest
+   accepted unvisited pixel using radius 10 and a source-scale-aware stride.
+   The default resolves to 1 on a 96-pixel bake, equivalent to Osci's stride 4
+   on an approximately 480-pixel source.
+3. Clear the short visited history every ten targets and randomly relocate every
+   5 ms, matching the current Osci-render implementation.
+4. Continue the same state across audio buffers and image-index changes. A trace
+   boundary does not rebuild, cap, or resample a waypoint list.
+
+The target clock, image clock, and DAC clock are separate. `IPS` changes the
+probability field. `SCOPE_WALK_HZ` advances the walk. The device sample rate
+samples that path: at 96 kHz the default 48 kHz walk gets two DAC samples per
+target interval instead of drawing twice as many targets per second. Raising
+the DAC rate therefore improves representation of the same waveform; it is not
+an image-resolution knob.
+
+If the optional software low-pass is enabled, stochastic uses a causal filter
+whose state crosses audio buffers. The circular per-trace filter remains for
+repeating completed paths; applying it to a continuous walk would falsely join
+the end of each buffer to its beginning.
 
 This is based on Osci-render's bitmap strategy rather than its SVG renderer.
-There is still no invisible travel without Z: the nearest-neighbour walk and
-endpoint chaining make travel short, while `--scope-walk-reseed-ms` controls
-the unavoidable longer relocations.
-
-At 48 kHz, start with `--scope-fields 1 --scope-fps 15` (3200 samples) when the
-tube can tolerate 15 Hz, or 30 Hz (1600 samples) when flicker matters more.
+There is still no invisible travel without Z: nearest-neighbour motion keeps
+most connectors local, while `--scope-walk-reseed-ms` controls the unavoidable
+long relocations. Lowering `--scope-fps` merely makes larger audio buffers and
+slower content handoff; it no longer reduces the number of target decisions per
+second. Start at the normal 30 Hz and let phosphor persistence integrate the
+continuous visit density.
 
 ### Scanlines and the bake ceiling
 
@@ -232,11 +255,11 @@ reported rather than silently clamped.
 
 | `--thumb-width` | max scanlines | per folder (2220 frames) | 32 folders |
 |---|---|---|---|
-| 48 | 64 | 14 MB | 0.44 GB |
-| 64 | 85 | 24 MB | 0.77 GB |
-| **96** (default) | **128** | 55 MB | 1.75 GB |
-| 128 | 171 | 97 MB | 3.11 GB |
-| 256 | 341 | 388 MB | 12.4 GB |
+| 48 | 64 | 21 MB | 0.66 GB |
+| 64 | 85 | 36 MB | 1.16 GB |
+| **96** (default) | **128** | 83 MB | 2.63 GB |
+| 128 | 171 | 146 MB | 4.67 GB |
+| 256 | 341 | 582 MB | 18.6 GB |
 
 There is a natural ceiling worth knowing: `cells ≈ samples / density`, so no
 realistic budget resolves past about 138×184 (6400 samples at density 0.25).
@@ -374,17 +397,17 @@ Do a full bake when you want live cycling through all three modes.
 
 ---
 
-## 6. The sample budget
+## 6. The sample budget (vector and raster)
 
-Everything downstream depends on one number: **the path length per trace**,
-N. The DAC consumes samples at a fixed rate and the beam position *is* those
-samples, so
+Completed vector and raster passes depend on one number: **the path length per
+trace**, N. The DAC consumes samples at a fixed rate and the beam position *is*
+those samples, so
 
 ```
 trace duration = N / sample_rate
 ```
 
-That is the only coupling between detail and refresh, and it is unavoidable.
+That is the vector/raster coupling between detail and refresh.
 Note what is *not* a parameter here: frame rate. It falls out as
 `sample_rate / N`. `--fps` is a convenience that sets `N = rate/fps`; `--samples`
 sets N directly and is the honest knob. Frames may even vary in length between
@@ -394,8 +417,14 @@ traces — the audio callback handles it.
 samples per trace = sample_rate / fps        # the same equation, rearranged
 ```
 
-44.1kHz ÷ 30fps = 1470. That's the entire resolution budget for one image —
-every line, every scanline cell.
+44.1kHz ÷ 30fps = 1470. For a completed vector or raster image, that is the
+budget for every line or scanline cell.
+
+Stochastic mode is the exception. Its walk does not restart at a trace boundary
+and has no per-image waypoint count. The audio buffer may still be 1470 samples,
+but the independent walk continues into the next buffer and the current image
+only changes its acceptance probabilities. DAC bandwidth and analogue slew can
+soften that path; the nominal DAC rate is not its picture timer.
 
 A related invariant that's easy to get wrong:
 
@@ -505,9 +534,11 @@ python main.py --mode scope --xy-dir images_xy [options]
 | `--scope-raster` | Compatibility alias for `--scope-mode raster`. |
 | `--scope-stochastic` | Alias for `--scope-mode stochastic`. |
 | `--scope-walk-radius PX` | Stochastic nearest-neighbour search radius (default 10). |
-| `--scope-walk-stride PX` | Stochastic source-pixel step (default 1). |
-| `--scope-walk-reseed-ms MS` | Time between weighted region changes (default 5 ms). |
-| `--scope-walk-edge F` | Edge-importance gain (default 0.35). |
+| `--scope-walk-stride PX` | Stochastic source-pixel step. Default 0 auto-scales: 1 at width 96, 2 at 256, 4 at 480. |
+| `--scope-walk-reseed-ms MS` | Time between random region changes (default 5 ms). |
+| `--scope-gamma F` | Fresh per-candidate luminance exponent in stochastic mode (default 2). Gamma 6 is Osci's UI default but strongly suppresses portrait midtones. |
+| `--scope-walk-edge F` | Optional non-Osci edge probability (default 0). |
+| `--scope-walk-hz HZ` | Target decisions per second (default 48000), independent of faster DAC rates. |
 | `--scope-fps N` | Scope redraw rate. Defaults to `IPS`. Sets `N = rate/fps`. |
 | `--scope-samples N` | Path length per trace directly. Overrides FPS. |
 | `--scope-realtime` | Stream continuously; index changes land within a row (raster only). |
@@ -515,7 +546,7 @@ python main.py --mode scope --xy-dir images_xy [options]
 | `--scope-mix-duty F` | Fraction of mixed passes spent on raster (default 0.5). |
 | `--scope-sweep MODE` | `alternate` (default), `palindrome`, or `retrace`. |
 | `--scope-rows N` | Raster scanline count (default: auto from budget). |
-| `--scope-gamma F` | Raster/stochastic luminance exponent (default 2.2). |
+| `--scope-gamma F` | Active renderer's luminance exponent: raster default 2.2, stochastic default 2. |
 | `--scope-density F` | Raster samples per cell (1.0 = finest). |
 | `--scope-trim F` | Ignore luminance below this level (default 0.02). |
 | `--scope-fields N` | Raster interlacing (1 = progressive). |
@@ -545,8 +576,10 @@ but only when more than one exists, and only when there's a terminal to prompt
 on, so it can live in a kiosk launch script without ever hanging. Blank input
 or an out-of-range number falls back to the default.
 
-The listed sample rate matters: it sets `samples per trace = rate / fps`, so a
-96kHz interface gives more than twice the detail of a 44.1kHz built-in output.
+For completed raster/vector passes, the listed rate sets `samples per trace =
+rate / fps`, so 96 kHz gives more pass samples than a 44.1 kHz built-in output.
+For stochastic, a higher device rate samples the same independent 48 kHz walk
+more densely; it does not advance the image or target clocks faster.
 
 Once you know which device you want, `--device` takes an index or a
 case-insensitive name fragment (`--device Scarlett`) — better than an index for

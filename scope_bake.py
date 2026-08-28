@@ -134,7 +134,7 @@ class XYLibrary:
 
 
     def thumb(self, i):
-        """(h, w, 2) uint8 [luminance, alpha], or None if not baked."""
+        """Baked channels, or None. New bakes are [raster L, alpha, raw L]."""
         if self.thumbs is None:
             return None
         return np.asarray(self.thumbs[i % len(self.thumbs)])
@@ -858,220 +858,318 @@ class TraceEmitter:
         return frame
 
 
-def stochastic_luma(lum, n, *, rng=None, gamma=2.2, trim=0.02,
-                    radius=10, stride=1, edge_gain=0.35,
-                    reseed_samples=240, start=None, level=0.9):
-    """Render luminance as one continuous stochastic XY walk.
+def _stochastic_probability(lum, gamma, trim, edge_gain):
+    """Return Osci-style per-candidate acceptance probabilities.
 
-    This follows the useful part of Osci-render's bitmap algorithm without a
-    brightness/Z channel: luminance controls how likely a pixel is to become a
-    target, the beam visits nearby unvisited targets first, and an occasional
-    reseed prevents it getting trapped in one feature.  Bright regions therefore
-    receive more beam visits and appear brighter through phosphor persistence.
-
-    Unlike :func:`render_luma`, there are no scanlines and therefore no fixed
-    vertical line spacing.  ``start`` is the previous trace endpoint; including
-    it as sample zero makes consecutive traces geometrically continuous.
+    Osci does not draw one random mask and walk that mask for an entire trace.
+    It makes a fresh probability decision every time it examines a candidate.
+    That distinction is what turns luminance into visit density instead of a
+    collection of permanently connected random islands.
     """
-    if lum is None or int(n) < 2:
+    if lum is None:
         return None
     a = np.asarray(lum, dtype=np.float64)
     if a.ndim != 2 or not a.size:
         return None
-    a = np.nan_to_num(a, nan=0.0, posinf=1.0, neginf=0.0)
-    a = np.clip(a, 0.0, 1.0)
-    h, w = a.shape
-    if h < 1 or w < 1:
-        return None
+    a = np.clip(np.nan_to_num(a, nan=0.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
 
-    # Tone is visit probability.  A modest gradient term protects silhouettes
-    # and facial features without turning every compression edge into a contour.
-    tone = np.clip((a - float(trim)) / max(1.0 - float(trim), 1e-9), 0.0, 1.0)
-    tone = tone ** max(float(gamma), 0.01)
-    if edge_gain > 0.0 and min(h, w) > 1:
+    # ImageParser::isOverThreshold has a fixed pixel > 0.2 gate.  Keep a
+    # larger user trim useful, but never silently admit the dark background
+    # that Osci excludes.
+    floor = max(0.2, float(trim))
+    prob = np.where(a > floor, a ** max(float(gamma), 0.01), 0.0)
+    if edge_gain > 0.0 and min(a.shape) > 1:
         gy, gx = np.gradient(a)
         edge = np.hypot(gx, gy)
         peak = float(edge.max())
         if peak > 1e-12:
             edge /= peak
-            tone = np.maximum(tone, float(edge_gain) * edge * (0.25 + 0.75 * a))
-    peak = float(tone.max())
-    if peak <= 1e-12:
-        return None
-    prob = tone / peak
-
-    rng = rng if rng is not None else np.random.default_rng()
-    active = rng.random(a.shape) < prob
-    # Always retain the strongest points so a sparse/dark image cannot vanish
-    # merely because of one unlucky probability draw.
-    # Searching every DAC sample is wasteful: adjacent targets are geometry,
-    # while the additional samples are needed to traverse that geometry within
-    # the output bandwidth.  Build a smaller route, then resample it to the full
-    # hardware budget.  This keeps a 30 Hz trace comfortably real-time in Python.
-    # Leave proportionally more headroom at short/high-refresh traces, where the
-    # render deadline is tight; longer traces spend the extra budget on more
-    # independent image targets.  800/1600/3200 samples yield about
-    # 80/280/500 waypoints respectively.  The cap keeps worst-case generation
-    # inside the trace deadline; the remaining samples still improve analogue
-    # traversal and dwell smoothness.
-    route_n = min(int(n), max(64, min(500, (int(n) - 480) // 4)))
-    keep = min(max(8, route_n // 32), a.size)
-    strongest = np.argpartition(tone.ravel(), -keep)[-keep:]
-    active.ravel()[strongest] = True
-    visited = np.zeros_like(active, dtype=bool)
-
-    radius = max(1, min(int(radius), 64, max(w, h)))
-    stride = max(1, min(int(stride), max(w, h)))
-    yy, xx = np.mgrid[-radius:radius + 1, -radius:radius + 1]
-    use = (xx != 0) | (yy != 0)
-    ox = (xx[use] * stride).astype(np.int32)
-    oy = (yy[use] * stride).astype(np.int32)
-    order = np.argsort(ox.astype(np.float64) ** 2 + oy.astype(np.float64) ** 2,
-                       kind="stable")
-    ox, oy = ox[order], oy[order]
-
-    reseed_order = np.flatnonzero(active.ravel())
-    rng.shuffle(reseed_order)
-    reseed_cursor = 0
-
-    def reseed():
-        nonlocal reseed_cursor, reseed_order
-        while (reseed_cursor < len(reseed_order)
-               and visited.ravel()[reseed_order[reseed_cursor]]):
-            reseed_cursor += 1
-        if reseed_cursor >= len(reseed_order):
-            visited.fill(False)
-            reseed_order = np.flatnonzero(active.ravel())
-            rng.shuffle(reseed_order)
-            reseed_cursor = 0
-        flat = int(reseed_order[reseed_cursor])
-        reseed_cursor += 1
-        cy, cx = divmod(flat, w)
-        visited[cy, cx] = True
-        return cx, cy
-
-    if start is None:
-        cx, cy = reseed()
-        first = None
-    else:
-        sx, sy = np.asarray(start, dtype=np.float64)[:2] / max(float(level), 1e-9)
-        scale = max(w, h) / 2.0
-        cx = int(np.clip(round(sx * scale + w / 2.0 - 0.5), 0, w - 1))
-        cy = int(np.clip(round(-sy * scale + h / 2.0 - 0.5), 0, h - 1))
-        first = np.asarray(start, dtype=np.float64)[:2]
-
-    points = np.empty((route_n, 2), dtype=np.int32)
-    travel = np.zeros(max(route_n - 1, 0), dtype=bool)
-    points[0] = (cx, cy)
-    begin = 1
-    reseed_samples = max(1, int(reseed_samples))
-    reseed_route = max(1, round(reseed_samples * route_n / int(n)))
-    for i in range(begin, route_n):
-        jumped = False
-        if i > begin and i % reseed_route == 0:
-            cx, cy = reseed()
-            jumped = True
-        else:
-            xs, ys = cx + ox, cy + oy
-            valid = ((xs >= 0) & (xs < w) & (ys >= 0) & (ys < h))
-            if valid.any():
-                ids = np.flatnonzero(valid)
-                ids = ids[active[ys[ids], xs[ids]] & ~visited[ys[ids], xs[ids]]]
-            else:
-                ids = np.empty(0, dtype=np.int64)
-            if ids.size:
-                # Randomise equal-distance choices so repeated traces accumulate
-                # tone instead of locking into the same geometric comb.
-                d2 = ox[ids] * ox[ids] + oy[ids] * oy[ids]
-                near = ids[d2 == d2.min()]
-                j = int(near[rng.integers(len(near))])
-                cx, cy = int(xs[j]), int(ys[j])
-                visited[cy, cx] = True
-            else:
-                cx, cy = reseed()
-                jumped = True
-        points[i] = (cx, cy)
-        travel[i - 1] = jumped
-
-    scale = max(w, h) / 2.0
-    route = np.empty((route_n, 2), dtype=np.float64)
-    route[:, 0] = (points[:, 0] + 0.5 - w / 2.0) / scale
-    route[:, 1] = -(points[:, 1] + 0.5 - h / 2.0) / scale
-    route *= float(level)
-    if first is not None:
-        route[0] = first
-    if not np.any(np.diff(points, axis=0)):
-        # Never turn a one-pixel image into a stationary full-brightness burn
-        # point. Draw the smallest source-pixel-sized loop the thumbnail can
-        # represent, analogous to scope_out.rasterize()'s safe idle circle.
-        theta = np.linspace(0.0, 2.0 * np.pi, int(n), endpoint=False)
-        radius_px = float(level) / max(w, h)
-        out = route[-1] + radius_px * np.column_stack(
-            [np.cos(theta), np.sin(theta)])
-        if first is not None:
-            out[0] = first
-        return np.ascontiguousarray(out, dtype=np.float32)
-    # Brightness is VISIT density, as in Osci-render: local target-to-target
-    # moves receive equal time rather than time proportional to their physical
-    # length.  Otherwise a long reseed connector would become the brightest
-    # feature in the picture and dense bright regions would paradoxically get
-    # less beam time.  Reseeds are deliberately fast/dim.
-    time_weight = np.where(travel, 0.12, 1.0)
-    cum = np.concatenate([[0.0], np.cumsum(time_weight)])
-    if cum[-1] <= 1e-12:
-        return np.repeat(route[:1], int(n), axis=0).astype(np.float32)
-    sample_at = np.linspace(0.0, cum[-1], int(n), endpoint=True)
-    seg_i = np.clip(np.searchsorted(cum, sample_at, side="right") - 1,
-                    0, len(time_weight) - 1)
-    frac = ((sample_at - cum[seg_i]) / time_weight[seg_i])[:, None]
-    out = route[seg_i] + frac * (route[seg_i + 1] - route[seg_i])
-    out[-1] = route[-1]
-    if first is not None:
-        out[0] = first
-    return np.ascontiguousarray(out, dtype=np.float32)
+            prob = np.maximum(prob, float(edge_gain) * edge * (0.25 + 0.75 * a))
+    prob = np.clip(prob, 0.0, 1.0)
+    return prob if float(prob.max()) > 1e-12 else None
 
 
 class StochasticEmitter:
-    """Stateful Osci-style luminance walk, chained from trace to trace."""
+    """Continuous Osci-style walk whose state survives trace buffers.
 
-    def __init__(self, samplerate, samples, *, gamma=2.2, trim=0.02,
-                 radius=10, stride=1, edge_gain=0.35, reseed_ms=5.0,
-                 seed=0, dc_comp=None):
-        self.samplerate = int(samplerate)
-        self.n = int(samples)
+    Three clocks are deliberately separate:
+
+    * the image/index clock chooses the current probability field;
+    * ``walk_hz`` chooses new image targets (48 kHz matches Osci's usual
+      one-target-per-sample behaviour at a 48 kHz device);
+    * the DAC rate samples that continuing path.  A 96 kHz DAC therefore gets
+      two samples for each 48 kHz target interval instead of drawing twice as
+      much image merely because the hardware sample rate doubled.
+
+    A trace is only an audio buffer.  It is not a stochastic image frame and
+    it has no waypoint budget.
+    """
+
+    _DIRS = ((1, 0), (0, 1), (-1, 0), (0, -1))
+
+    def __init__(self, samplerate, samples, *, gamma=2.0, trim=0.02,
+                 radius=10, stride=0, edge_gain=0.0, reseed_ms=5.0,
+                 walk_hz=48000.0, seed=0, dc_comp=None, level=0.9):
+        self.samplerate = max(1, int(samplerate))
+        self.n = max(2, int(samples))
         self.gamma, self.trim = gamma, trim
         self.radius, self.stride = radius, stride
         self.edge_gain, self.reseed_ms = edge_gain, reseed_ms
+        self.walk_hz = max(1.0, float(walk_hz))
         self.dc_comp = dc_comp
+        self.level = float(level)
         self.rng = np.random.default_rng(seed)
-        self._end = None
+        self.reset()
 
     def reset(self):
         self._end = None
+        self._shape = None
+        self._pixel = None
+        self._visited = None
+        self._count = 0
+        self._phase = 1.0       # choose a target for the first output sample
+        self._idle_phase = 0
+        self._handoff_pending = False
+        self._lowpass = None
+        self._lowpass_cutoff = None
+
+    def start_at(self, point):
+        """Begin a mode handoff at the beam's actual current position."""
+        self._end = np.asarray(point, dtype=np.float32)[:2].copy()
+        self._pixel = None      # remap this endpoint when the image shape is known
+        self._count = 1         # do not turn a handoff into an immediate reseed
+        self._phase = 1.0
+        self._handoff_pending = True
+        if self._visited is not None:
+            self._visited.fill(False)
+        if self._lowpass is not None:
+            self._lowpass.z[:] = self._end
+
+    def chain_from(self, point):
+        """Record the endpoint actually sent to the DAC after filtering."""
+        self._end = np.asarray(point, dtype=np.float32)[:2].copy()
+
+    def handoff_from(self, point):
+        """Use an exact first sample only when entering from another mode."""
+        if self._pixel is None:
+            self.start_at(point)
+            return True
+        else:
+            self.chain_from(point)
+            return False
+
+    def apply_lowpass(self, frame, cutoff_hz):
+        """Stateful filter for a walk that does not loop at buffer edges."""
+        enabled = bool(cutoff_hz and 0 < cutoff_hz < self.samplerate / 2)
+        if self._lowpass is None:
+            if not enabled:
+                return frame
+            from scope_lowpass import CascadedOnePole
+            self._lowpass = CascadedOnePole(
+                cutoff_hz, self.samplerate, order=4, channels=2)
+            self._lowpass.z[:] = frame[0]
+            self._lowpass_cutoff = float(cutoff_hz)
+        elif cutoff_hz != self._lowpass_cutoff:
+            was_enabled = self._lowpass.enabled
+            self._lowpass.set_cutoff(cutoff_hz, self.samplerate)
+            if enabled and not was_enabled:
+                self._lowpass.z[:] = frame[0]
+            self._lowpass_cutoff = float(cutoff_hz) if cutoff_hz else None
+        return self._lowpass.process(frame)
+
+    def _xy_to_pixel(self, point, shape):
+        h, w = shape
+        m = float(max(w, h))
+        p = np.asarray(point, dtype=np.float64)[:2] / max(abs(self.level), 1e-9)
+        x = (p[0] + 1.0) * 0.5 * m - (m - w) * 0.5
+        y = (1.0 - p[1]) * 0.5 * m - (m - h) * 0.5
+        return (int(np.clip(round(x), 0, w - 1)),
+                int(np.clip(round(y), 0, h - 1)))
+
+    def _pixel_to_xy(self, pixel, shape):
+        h, w = shape
+        x, y = pixel
+        m = float(max(w, h))
+        return np.asarray([
+            2.0 * (x + (m - w) * 0.5) / m - 1.0,
+            1.0 - 2.0 * (y + (m - h) * 0.5) / m,
+        ], dtype=np.float32) * self.level
+
+    def _ensure_state(self, shape):
+        h, w = shape
+        if self._shape != shape:
+            self._shape = shape
+            self._visited = np.zeros(shape, dtype=bool)
+            self._pixel = None
+        if self._pixel is None:
+            if self._end is not None:
+                self._pixel = self._xy_to_pixel(self._end, shape)
+            else:
+                self._pixel = (int(self.rng.integers(w)),
+                               int(self.rng.integers(h)))
+
+    def _find_white(self, prob):
+        """Osci's global rejection fallback, with a bounded exact fallback."""
+        h, w = prob.shape
+        for _ in range(100):
+            x = int(self.rng.integers(w)); y = int(self.rng.integers(h))
+            p = float(prob[y, x])
+            if p > 0.0 and self.rng.random() < p:
+                return x, y
+
+        # Rejection can miss a very small bright feature 100 times.  Sampling
+        # proportional to p is the same accepted distribution without letting
+        # sparse images become a CPU or blank-frame lottery.
+        weights = prob.ravel()
+        total = float(weights.sum())
+        if total <= 1e-12:
+            return self._pixel
+        flat = int(np.searchsorted(np.cumsum(weights),
+                                   self.rng.random() * total, side="right"))
+        flat = min(flat, weights.size - 1)
+        return flat % w, flat // w
+
+    def _stride_for_width(self, width):
+        return (max(1, int(round(width / 120.0))) if int(self.stride) <= 0
+                else max(1, int(self.stride)))
+
+    def _advance(self, prob):
+        h, w = prob.shape
+        reseed_targets = max(1, round(
+            min(self.walk_hz, float(self.samplerate))
+            * max(float(self.reseed_ms), 0.0) / 1000.0))
+        if self._count % reseed_targets == 0:
+            self._pixel = (int(self.rng.integers(w)),
+                           int(self.rng.integers(h)))
+
+        # This is what current Osci-render actually executes: due to operator
+        # precedence, `count % 10 * jumpFrequency() == 0` clears every ten
+        # target samples, not every ten jump intervals.
+        if self._count % 10 == 0:
+            self._visited.fill(False)
+
+        x, y = self._pixel
+        sx, sy = x, y
+        direction = int(self.rng.integers(4))
+        radius = max(1, min(int(self.radius), 64))
+        # Osci's default stride 4 is measured in full-resolution source pixels
+        # (about 480 px wide for the supplied portrait). Applying the same
+        # integer to a 96 px bake made every move five times too large and
+        # produced the visible orthogonal maze. Zero means scale that physical
+        # step to the stored width: 96/120 -> 1, 256/120 -> 2, 480/120 -> 4.
+        stride = self._stride_for_width(w)
+        found = None
+        local = False
+        for arm in range(1, 2 * radius + 1):
+            for _ in range(2):
+                dx, dy = self._DIRS[direction]
+                for _ in range(arm):
+                    sx += stride * dx; sy += stride * dy
+                    if sx < 0 or sx >= w or sy < 0 or sy >= h:
+                        break
+                    p = float(prob[sy, sx])
+                    if (p > 0.0 and not self._visited[sy, sx]
+                            and self.rng.random() < p):
+                        found = (sx, sy)
+                        local = True
+                        break
+                if found is not None:
+                    break
+                direction = (direction + 1) % 4
+            if found is not None:
+                break
+
+        if found is None:
+            found = self._find_white(prob)
+        self._pixel = found
+        if local:
+            self._visited[found[1], found[0]] = True
+        self._count += 1
 
     def emit(self, lum):
-        frame = stochastic_luma(
-            lum, self.n, rng=self.rng, gamma=self.gamma, trim=self.trim,
-            radius=self.radius, stride=self.stride, edge_gain=self.edge_gain,
-            reseed_samples=max(1, round(self.samplerate * self.reseed_ms / 1000.0)),
-            start=self._end)
-        if frame is None:
+        prob = _stochastic_probability(
+            lum, self.gamma, self.trim, self.edge_gain)
+        if prob is None:
             return None
-        self._end = frame[-1].copy()
+        self._ensure_state(prob.shape)
+
+        out = np.empty((self.n, 2), dtype=np.float32)
+        # A DAC faster than the walk clock samples the same continuing target
+        # stream more densely.  It does not receive extra image decisions.
+        step = min(self.walk_hz, float(self.samplerate)) / self.samplerate
+        h, w = prob.shape
+        max_dim = float(max(w, h))
+        x_pad = (max_dim - w) * 0.5
+        y_pad = (max_dim - h) * 0.5
+        scale = self.level
+        begin = 0
+        if self._handoff_pending and self._end is not None:
+            out[0] = self._end
+            begin = 1
+            self._handoff_pending = False
+        for i in range(begin, self.n):
+            if self._phase >= 1.0:
+                self._advance(prob)
+                self._phase -= 1.0
+            # Scalar assignment avoids allocating a two-element NumPy array on
+            # every target sample -- material on a Pi at 48,000 calls/second.
+            x, y = self._pixel
+            out[i, 0] = scale * (2.0 * (x + x_pad) / max_dim - 1.0)
+            out[i, 1] = scale * (1.0 - 2.0 * (y + y_pad) / max_dim)
+            self._phase += step
+
+        if not np.any(np.diff(out, axis=0)):
+            # A one-pixel source would otherwise park a full-brightness dot.
+            theta = (2.0 * np.pi
+                     * (np.arange(self.n) + self._idle_phase) / self.n)
+            radius = self.level / max(prob.shape)
+            centre = out[-1].copy()
+            out = centre + radius * np.column_stack(
+                [np.cos(theta), np.sin(theta)]).astype(np.float32)
+            self._idle_phase = (self._idle_phase + self.n) % self.n
+
         if self.dc_comp:
             from scope_out import precompensate_hpf
-            frame = precompensate_hpf(frame, self.dc_comp, self.samplerate)
-        return frame
+            out = precompensate_hpf(out, self.dc_comp, self.samplerate)
+        self._end = out[-1].copy()
+        return np.ascontiguousarray(out, dtype=np.float32)
 
 
-def composite_luma(main_lib, main_idx, float_lib, float_idx, bbox=None):
+def stochastic_luma(lum, n, *, rng=None, gamma=2.0, trim=0.02,
+                    radius=10, stride=0, edge_gain=0.0,
+                    reseed_samples=240, start=None, level=0.9):
+    """Standalone one-buffer form of :class:`StochasticEmitter`.
+
+    The runtime keeps an emitter alive across buffers.  This convenience form
+    exists for tests and previews and still chooses a fresh target on every
+    returned sample; it never constructs or resamples a smaller waypoint list.
+    """
+    if int(n) < 2:
+        return None
+    reference_rate = 48000
+    emitter = StochasticEmitter(
+        reference_rate, int(n), gamma=gamma, trim=trim, radius=radius,
+        stride=stride, edge_gain=edge_gain,
+        reseed_ms=1000.0 * max(1, int(reseed_samples)) / reference_rate,
+        walk_hz=reference_rate, seed=0, level=level)
+    if rng is not None:
+        emitter.rng = rng
+    if start is not None:
+        emitter.start_at(start)
+    return emitter.emit(lum)
+
+
+def composite_luma(main_lib, main_idx, float_lib, float_idx, bbox=None,
+                   raw=False):
     """The interleaved composite as a luminance array, and nothing else.
 
     Split out of raster_frame so there is ONE place that decides what the
     picture is, separate from the one place that decides how to sweep it.
     Everything downstream -- mode scope, scope_screen, the preview -- takes a
     luminance array, so they can share a single emitter instead of each
-    re-assembling the same argument list and drifting apart.
+    re-assembling the same argument list and drifting apart. ``raw`` selects
+    the third channel of new bakes for directionless stochastic motion; legacy
+    two-channel bakes fall back to their raster luminance.
     """
     tm = main_lib.thumb(main_idx) if main_lib is not None and len(main_lib) else None
     tf = float_lib.thumb(float_idx) if float_lib is not None and len(float_lib) else None
@@ -1079,7 +1177,8 @@ def composite_luma(main_lib, main_idx, float_lib, float_idx, bbox=None):
         return None
 
     def split(t):
-        return (t[..., 0].astype(np.float64) / 255.0,
+        channel = 2 if raw and t.shape[-1] >= 3 else 0
+        return (t[..., channel].astype(np.float64) / 255.0,
                 t[..., 1].astype(np.float64) / 255.0)
 
     if tf is not None and tm is not None and tf.shape[:2] == tm.shape[:2]:

@@ -5,8 +5,9 @@ bake_advisor.py -- what --thumb-width does YOUR content actually need?
     python bake_advisor.py --xy-dir images_xy --rate 96000 --fps 30 --fields 2
 
 The thumbnail is a hard ceiling on grid size, and storage scales with its
-square: width 96 is about 2 GB for 32 folders x 2221 frames, width 128 about
-3.5 GB.  So the temptation is to pick the smaller one.
+square: with the current three-channel thumbnails width 96 is about 2.6 GB for
+32 folders x 2221 frames, width 128 about 4.7 GB. So the temptation is to pick
+the smaller one.
 
 The catch is that the right answer is content-dependent and not monotonic.
 autofit grows the grid by 1/sqrt(the fraction of cells surviving trim), capped
@@ -114,7 +115,7 @@ def main():
                 clipped = (r >= h) or (c >= w)
                 pr, pc, pcl = worst.get(w, (0, 0, 0))
                 worst[w] = (max(pr, r), max(pc, c), pcl + int(clipped))
-                total_bytes[w] = h * w * 2
+                total_bytes[w] = h * w * 3
 
     print(f"{len(folders)} folders, {n_frames_total} frames total, "
           f"up to {args.frames} sampled per folder\n")
@@ -124,7 +125,7 @@ def main():
     best = None
     for w in sorted(worst):
         r, c, cl = worst[w]
-        h = total_bytes[w] // (w * 2)
+        h = total_bytes[w] // (w * 3)
         size = total_bytes[w] * n_frames_total
         flag = "CLIPPED" if cl else "ok"
         if not cl and best is None:
@@ -177,16 +178,19 @@ def _format_report(folders, n_frames_total, args):
         return
     S = np.concatenate(sample)
     lum, alpha = S[..., 0], S[..., 1]
+    raw_lum = S[..., 2] if S.shape[-1] >= 3 else None
     per_frame = S[0].nbytes
     total = per_frame * n_frames_total
 
     print(f"\nsampled {len(S)} frames from {len(sample)} folders")
-    print(f"current: raw uint8 [luma, alpha] interleaved, {per_frame} B/frame")
+    layout = "[raster luma, alpha, raw luma]" if raw_lum is not None else "[luma, alpha]"
+    print(f"current: raw uint8 {layout} interleaved, {per_frame} B/frame")
     print(f"         whole bake {total / 1e9:.2f} GB\n")
     print(f"  alpha fully transparent : {100 * (alpha == 0).mean():5.1f}% of pixels")
     print(f"  alpha fully opaque      : {100 * (alpha == 255).mean():5.1f}%")
     print(f"  matte edge (soft alpha) : {100 * ((alpha > 0) & (alpha < 255)).mean():5.1f}%")
-    invisible = (alpha == 0).mean() / 2.0
+    luma_channels = S.shape[-1] - 1
+    invisible = (alpha == 0).mean() * luma_channels / S.shape[-1]
     print(f"  -> {100 * invisible:.0f}% of the file is luma behind transparent "
           "pixels: stored, then multiplied by zero at runtime")
 
@@ -198,14 +202,19 @@ def _format_report(folders, n_frames_total, args):
 
     cc = zstd.ZstdCompressor(level=3)
     dc = zstd.ZstdDecompressor()
-    prem = np.stack([(lum.astype(np.uint16) * alpha // 255).astype(np.uint8),
-                     alpha], axis=-1)
+    prem_channels = [(lum.astype(np.uint16) * alpha // 255).astype(np.uint8),
+                     alpha]
+    if raw_lum is not None:
+        prem_channels.append(
+            (raw_lum.astype(np.uint16) * alpha // 255).astype(np.uint8))
+    prem = np.stack(prem_channels, axis=-1)
     variants = [
         ("raw interleaved (current)", S.tobytes(), False),
         ("zstd-3, as-is", S.tobytes(), True),
         ("zstd-3, premultiplied", prem.tobytes(), True),
         ("zstd-3, premultiplied + planar",
-         np.concatenate([prem[..., 0].ravel(), prem[..., 1].ravel()]).tobytes(), True),
+         np.concatenate([prem[..., c].ravel()
+                         for c in range(prem.shape[-1])]).tobytes(), True),
     ]
     base = S.nbytes
     print(f"\n{'layout':34} {'ratio':>7} {'whole bake':>12}")

@@ -19,8 +19,9 @@ Two filter implementations, because the two signal paths need different things:
                       frame, which is exact for a repeating signal, and
                       zero-phase so the image does not rotate or shift.
 
-  CascadedOnePole     for --realtime streaming, where samples arrive in chunks
-                      and the filter must carry state across them.
+  CascadedOnePole     for --realtime raster and continuous stochastic output,
+                      where buffers do not loop and filter state must cross
+                      their boundaries.
 
 Works identically for hardware and virtual routing: the filter sits in the
 sample path before the device, so BlackHole -> a virtual scope sees exactly

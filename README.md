@@ -142,6 +142,16 @@ python utilities/convert_to_xy.py -i ./images -o ./images_xy
 python main.py --mode scope --xy-dir ./images_xy --scope-mode stochastic
 ```
 
+Stochastic uses Osci-render's bitmap walk (`radius 10`, no added edge term)
+and scales Osci's full-resolution stride to the baked thumbnail (`auto`
+resolves to stride 1 at the default width 96). Its portrait default is
+`gamma 2`, equivalent to Osci's Image Threshold 0.1. Osci's UI default maps to
+gamma 6 and suppresses too many facial midtones in this material. It runs
+continuously across audio buffers. Use the existing `--scope-gamma` argument
+to tune the active renderer.
+Its 48 kHz target clock is independent of the image rate and of faster DAC
+sample rates; use `--scope-walk-hz` only when deliberately changing that walk.
+
 Press `v` while it is running to cycle vector, raster, and stochastic modes.
 See `SCOPE_MODE.md` for wiring, sample-budget, and renderer details.
 

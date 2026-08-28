@@ -108,18 +108,28 @@ def configure_runtime():
                              "reduces stray lines on dark backgrounds). "
                              "Default: settings.SCOPE_TRIM")
     parser.add_argument("--scope-gamma", type=float,
-                        help="Default: settings.SCOPE_GAMMA")
+                        help="Luminance exponent for the active raster or "
+                             "stochastic renderer. Stochastic default 2 keeps "
+                             "portrait midtones; raster default is "
+                             "settings.SCOPE_GAMMA")
     parser.add_argument("--scope-density", type=float,
                         help="Default: settings.SCOPE_DENSITY")
     parser.add_argument("--scope-walk-radius", type=int, metavar="PX",
                         help="Scope stochastic: nearest-neighbour search radius")
     parser.add_argument("--scope-walk-stride", type=int, metavar="PX",
-                        help="Scope stochastic: source-pixel step (default 1)")
+                        help="Scope stochastic: source-pixel step. Default 0 "
+                             "auto-scales to the baked width (1 at width 96)")
     parser.add_argument("--scope-walk-reseed-ms", type=float, metavar="MS",
-                        help="Scope stochastic: time between weighted reseeds "
+                        help="Scope stochastic: time between random reseeds "
                              "(default 5 ms, matching Osci-render)")
+    parser.add_argument("--scope-walk-gamma", type=float, metavar="F",
+                        help=argparse.SUPPRESS)
     parser.add_argument("--scope-walk-edge", type=float, metavar="F",
-                        help="Scope stochastic: edge-importance gain (default 0.35)")
+                        help="Scope stochastic: optional edge probability. "
+                             "Default 0 matches Osci-render")
+    parser.add_argument("--scope-walk-hz", type=float, metavar="HZ",
+                        help="Scope stochastic target clock (default 48000). "
+                             "Independent of the image rate and of faster DACs")
     parser.add_argument("--scope-rows", type=int)
     parser.add_argument("--scope-row-bias", type=float, metavar="F",
                         help="Trade columns for rows at constant cell count. "
@@ -370,6 +380,10 @@ def configure_runtime():
             settings.SCOPE_TRIM = args.scope_trim
         if args.scope_gamma is not None:
             settings.SCOPE_GAMMA = args.scope_gamma
+            # One public gamma control follows the active renderer. The old
+            # walk-specific spelling below remains a compatibility alias.
+            if settings.SCOPE_RENDER_MODE == "stochastic":
+                settings.SCOPE_WALK_GAMMA = args.scope_gamma
         if args.scope_density is not None:
             settings.SCOPE_DENSITY = args.scope_density
         if args.scope_walk_radius is not None:
@@ -378,8 +392,12 @@ def configure_runtime():
             settings.SCOPE_WALK_STRIDE = args.scope_walk_stride
         if args.scope_walk_reseed_ms is not None:
             settings.SCOPE_WALK_RESEED_MS = args.scope_walk_reseed_ms
+        if args.scope_walk_gamma is not None:
+            settings.SCOPE_WALK_GAMMA = args.scope_walk_gamma
         if args.scope_walk_edge is not None:
             settings.SCOPE_WALK_EDGE = args.scope_walk_edge
+        if args.scope_walk_hz is not None:
+            settings.SCOPE_WALK_HZ = args.scope_walk_hz
         if args.scope_rows:
             settings.SCOPE_ROWS = args.scope_rows
         if args.scope_no_autofit:

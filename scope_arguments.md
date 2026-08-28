@@ -13,14 +13,14 @@ you hold these in your head the rest stops being arbitrary.
 
 ```
 sample_rate     from the audio device. You do not set it. 96000 typical.
-samples/trace   = sample_rate / trace_rate.  THE budget. Everything competes for it.
+samples/trace   = sample_rate / trace_rate. Vector/raster pass budget; stochastic buffer size.
 IPS             = 30. settings.IPS. How fast the artwork advances. Unrelated to the beam.
 ```
 
-The one thing to internalise: **the DAC eats samples at a fixed rate, so the
-only way to draw more detail is to spend more time, and the only way to spend
-more time is to refresh less often.** Every "quality" flag here is a rule for
-dividing a fixed sample budget. Nothing creates samples.
+For vector and raster, the DAC eats a fixed number of samples per completed
+pass, so more pass detail costs time. Stochastic is different: it is a
+continuous target stream and a "trace" is only an audio buffer. Lowering its
+trace rate does not create more target decisions per second.
 
 Two rates that are easy to conflate and are not the same thing:
 
@@ -39,11 +39,9 @@ Before interlace those were forced equal. That was the whole refresh problem.
 Trace rate. Named "fps" but it is not a frame rate in the video sense; it is
 how many times per second the beam completes a pass.
 
-It does not set anything directly. It computes `samples = sample_rate / N`, and
-*that* is the real quantity. Raising fps to 60 does not make the picture
-smoother, it halves your sample budget and therefore shrinks the grid by √2 in
-each axis. Before the interlace work, that was the only knob you had for
-flicker and it cost you resolution every time.
+It computes `samples = sample_rate / N`. In raster, raising fps to 60 halves
+the pass budget and shrinks the grid by √2 in each axis. In stochastic it only
+halves the buffer duration; the walk state and target clock continue unchanged.
 
 **With `--scope-fields` set, do not pass this at all.** The code computes
 `fields * IPS` for you. If you pass a value that isn't a multiple it overrides
@@ -163,7 +161,7 @@ Mostly a diagnostic. The auto split is usually right.
 
 ## Group C — tone
 
-### `--scope-gamma F` (default 2.2)
+### `--scope-gamma F` (raster default 2.2; stochastic default 2)
 
 Contrast of the dwell curve. Applied as `weight ** gamma` on the per-cell
 brightness before the beam path is walked, so it maps image brightness onto
@@ -175,6 +173,11 @@ that raster mode exists to provide.
 
 This is the one Group B/C flag that does **not** change the grid, so it is
 cheap to sweep with the `[` and `]` keys while watching.
+
+In stochastic mode this controls the walk's fresh per-candidate luminance
+probability. Its default is 2, equivalent to Osci-render's Image Threshold 0.1.
+Osci's UI default of 0.5 maps to exponent 6, which discards too many portrait
+midtones for this material.
 
 ---
 
@@ -201,6 +204,11 @@ filter — a Pi headphone jack, say. Try 800–8000.
 This is a *simulation* tool: it lets you see on good hardware what the install
 hardware will do, before you get there. Audition corners with `scope_lowpass.py`
 first, or cycle them live with `l` (off → 12k → 6k → 3k → 1.5k).
+
+Completed repeating vector/raster traces use a circular zero-phase filter.
+Stochastic does not repeat at buffer boundaries, so it uses a causal stateful
+filter whose state carries across buffers; treating each stochastic buffer as
+a loop creates a false seam and is explicitly avoided.
 
 ### `--scope-sweep MODE` (default `alternate`)
 
@@ -249,13 +257,21 @@ with an explicit `--scope-mode`.
 | flag | default | effect |
 |---|---:|---|
 | `--scope-walk-radius PX` | 10 | Radius searched for a nearby unvisited accepted pixel. |
-| `--scope-walk-stride PX` | 1 | Spacing of source-pixel candidates. Higher is faster/coarser. |
-| `--scope-walk-reseed-ms MS` | 5.0 | Interval between weighted jumps to another bright region. |
-| `--scope-walk-edge F` | 0.35 | Extra visit probability assigned to luminance gradients. |
+| `--scope-walk-stride PX` | 0 (auto) | Source-scale-aware spacing: 1 at width 96, 2 at 256, 4 at 480. Explicit higher values are coarser. |
+| `--scope-walk-reseed-ms MS` | 5.0 | Interval between random relocations. |
+| `--scope-gamma F` | 2.0 | Fresh `luminance ** gamma` acceptance test for every candidate in stochastic mode. |
+| `--scope-walk-edge F` | 0.0 | Optional gradient probability. Zero matches Osci-render. |
+| `--scope-walk-hz HZ` | 48000 | Target decisions per second, independent of image rate and faster DAC rates. |
 
-`--scope-trim` and `--scope-gamma` also apply to stochastic mode. Density,
-rows, fields, autofit, border, and sweep are raster-only. The common
-`--scope-lowpass` remains available to smooth the resulting XY signal.
+Stochastic always excludes luminance at or below 0.2, as Osci-render does; a
+larger `--scope-trim` raises that floor. Density, rows, fields, autofit, border,
+and sweep are raster-only. The common `--scope-lowpass` remains available to
+audition a bandwidth-limited XY chain.
+
+There is no stochastic waypoint budget. At the default 48 kHz target clock a
+48 kHz DAC chooses one target per sample; a 96 kHz DAC samples each target
+interval twice. The current image may change at 30 IPS while the walk carries
+on continuously through that change.
 
 ### `--scope-min-feature F` (default 0.02)
 
@@ -334,7 +350,7 @@ From `scope_controls.py`, verified against `SPECS` and `HELP`:
 |---|---|---|
 | `-` / `=` | trim down / up (0.0–0.60, steps) | yes |
 | `,` / `.` | density finer / coarser (0.20–4.0, multiplies) | yes |
-| `[` / `]` | gamma down / up (0.4–5.0) | no |
+| `[` / `]` | active renderer gamma down / up (0.4–10.0) | no |
 | `l` | lowpass cycle: off → 12k → 6k → 3k → 1.5k | no |
 | `v` | vector → raster → stochastic → vector | yes |
 | `w` | sweep: alternate → palindrome → retrace | no |

@@ -55,12 +55,15 @@ PROFILES = {
 # resolves past ~138x184 (6400 samples at density 0.25).  Baking wider stores
 # data nothing can read.
 #
+# New bakes store three channels: raster luminance, alpha, and the unmodified
+# luminance stochastic needs. Older two-channel bakes remain readable.
+#
 #   width   grid cap   per folder (2220 frames)   32 folders
-#      48      48x64          14 MB                 0.44 GB
-#      64      64x85          24 MB                 0.77 GB
-#      96     96x128          55 MB                 1.75 GB   <- default
-#     128    128x171          97 MB                 3.11 GB
-#     256    256x341         388 MB                12.40 GB   (unusable headroom)
+#      48      48x64          21 MB                 0.66 GB
+#      64      64x85          36 MB                 1.16 GB
+#      96     96x128          83 MB                 2.63 GB   <- default
+#     128    128x171         146 MB                 4.67 GB
+#     256    256x341         582 MB                18.60 GB   (unusable headroom)
 THUMB_W = 96
 
 
@@ -99,13 +102,20 @@ PRECOND_SIGMA_Y = 0.6
 
 
 def make_thumb(rgb, alpha, width=THUMB_W, precondition=PRECONDITION):
-    """(h, w, 2) uint8 of [luminance, alpha] for raster mode."""
+    """(h, w, 3) uint8: [raster luminance, alpha, raw luminance].
+
+    Raster benefits from horizontal preconditioning because its beam always
+    moves along rows. The stochastic walk has no preferred horizontal axis;
+    feeding it that raster channel invents direction-dependent edges. Store
+    both once at bake time so neither renderer does image work live.
+    """
     import cv2
     h, w = alpha.shape
     tw = int(width)
     th = max(1, int(round(h * tw / float(w))))
     lum = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     lum = cv2.resize(lum, (tw, th), interpolation=cv2.INTER_AREA)
+    raw_lum = lum.copy()
     if precondition and precondition > 0:
         # sharpen AFTER downscaling, so the kernel is sized in thumbnail cells
         # -- which is what the beam actually sweeps
@@ -120,7 +130,7 @@ def make_thumb(rgb, alpha, width=THUMB_W, precondition=PRECONDITION):
                                cv2.dilate(L, k))
         lum = np.clip(sharp * 255.0, 0, 255)
     a = cv2.resize(alpha, (tw, th), interpolation=cv2.INTER_AREA)
-    return np.stack([lum, a], axis=-1).astype(np.uint8)
+    return np.stack([lum, a, raw_lum], axis=-1).astype(np.uint8)
 
 
 def simplify_to(c, target, closed=True):
@@ -336,7 +346,8 @@ def main():
                          "lines, 128 caps at 171. Storage scales with the "
                          "square, and no sample budget resolves past ~138x184.")
     ap.add_argument("--thumbs-only", action="store_true",
-                    help="bake only luminance/alpha thumbnails (skip vectorizing) -- "
+                    help="bake only raster/raw luminance + alpha thumbnails "
+                         "(skip vectorizing) -- "
                          "much faster for raster/stochastic-only use")
     ap.add_argument("--min-verts", type=int,
                     help="floor on vertices per contour (raise for legibility, "

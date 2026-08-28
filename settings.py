@@ -84,8 +84,9 @@ JPEG_QUALITY = 75# Image quality
 HEADLESS_RES = (480, 600)   # Resolution for the virtual screen
 
 # --- SCOPE MODE (XY output via the sound card) ---
-# Scope refresh defaults to IPS: one trace per index maximises samples per
-# trace, which is the entire resolution budget (samples = rate / fps).
+# Scope refresh defaults to IPS. For completed vector/raster passes, one trace
+# per index maximises their finite sample budget (samples = rate / fps).
+# Stochastic is continuous: a trace is only an audio buffer, not an image.
 SCOPE_MODE = False
 SCOPE_ROW_BIAS = 1.0      # >1 trades columns for rows at constant cell count.
                           # Faces want ~1.3: their features are horizontal
@@ -119,12 +120,15 @@ SCOPE_FIELDS = 1          # raster interlace: traces per picture. 2 or 4 lifts
                           # touching the grid. Needs SCOPE_FPS = N * IPS.
 SCOPE_MIN_FEATURE = 0.02  # vector: shortest stroke kept by the occlusion cull
 SCOPE_TRIM = 0.02         # raster: drop cells dimmer than this from the sweep
-SCOPE_GAMMA = 2.2         # raster/stochastic luminance exponent
+SCOPE_GAMMA = 2.2         # raster luminance exponent
 SCOPE_DENSITY = 1.0       # raster samples per cell (1.0 = finest)
 SCOPE_WALK_RADIUS = 10    # stochastic: nearest-neighbour search radius, pixels
-SCOPE_WALK_STRIDE = 1     # stochastic: source-pixel step between candidates
+SCOPE_WALK_STRIDE = 0     # stochastic: auto-scale (~width/120; 1 at width 96)
 SCOPE_WALK_RESEED_MS = 5.0  # stochastic: jump to another bright region
-SCOPE_WALK_EDGE = 0.35    # stochastic: extra probability for image edges
+SCOPE_WALK_GAMMA = 2.0    # stochastic: useful portrait default. Equivalent to
+                          # Osci Image Threshold 0.1 (exponent = UI * 10 + 1).
+SCOPE_WALK_EDGE = 0.0     # stochastic: optional non-Osci edge probability
+SCOPE_WALK_HZ = 48000.0   # stochastic target clock; independent of faster DACs
 SCOPE_LOWPASS = None      # Hz; emulate a softer output chain (Pi headphone
                           # jack, cheap codec, or a physical RC filter).
                           # None = off. See scope_lowpass.py.

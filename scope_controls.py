@@ -23,7 +23,7 @@ import sys
 SPECS = {
     "trim":     ("trim",     "add", 0.0, 0.60, True),
     "density":  ("density",  "mul", 0.20, 4.0, True),
-    "gamma":    ("gamma",    "add", 0.4, 5.0, False),
+    "gamma":    ("gamma",    "add", 0.4, 10.0, False),
     "lowpass":  ("lowpass",  "cyc", None, None, False),
     "rows":     ("rows",     "add", 0, 400, True),
 }
@@ -34,7 +34,7 @@ HELP = """
 scope live controls
   -  / =    trim        down / up      (dark-cell cutoff; raises kill stray lines)
   ,  / .    density     finer / coarser (samples per cell; below ~0.3 flecks)
-  [  / ]    gamma       down / up      (contrast of the dwell curve)
+  [  / ]    gamma       down / up      (raster dwell / stochastic probability)
   l         lowpass     cycle off -> 12k -> 6k -> 3k -> 1.5k
   v         mode         vector -> raster -> stochastic
   w         sweep       alternate -> palindrome -> retrace
@@ -56,7 +56,12 @@ class KeyMap:
 
     def _bump(self, name, direction):
         attr, kind, lo, hi, recal = SPECS[name]
+        if name == "gamma":
+            attr = ("stochastic_gamma" if self.state.get("mode") == "stochastic"
+                    else "raster_gamma")
         cur = self.state.get(attr)
+        if cur is None and name == "gamma":
+            cur = self.state.get("gamma")
         if kind == "cyc":
             try:
                 i = LOWPASS_CYCLE.index(cur)
@@ -71,6 +76,8 @@ class KeyMap:
             if name == "rows" and new <= 0:
                 new = None
         self.state[attr] = new
+        if name == "gamma":
+            self.state["gamma"] = new
         if recal:
             self.dirty = True
         shown = "auto" if new is None and name == "rows" else (
@@ -102,6 +109,10 @@ class KeyMap:
             i = order.index(current) if current in order else 0
             s["mode"] = order[(i + 1) % len(order)]
             s["raster"] = s["mode"] == "raster"  # legacy state readers
+            gamma_key = ("stochastic_gamma" if s["mode"] == "stochastic"
+                         else "raster_gamma")
+            if gamma_key in s:
+                s["gamma"] = s[gamma_key]
             self.dirty = True
             self.message = "mode = " + s["mode"].upper()
         elif ch == "w":
@@ -129,7 +140,12 @@ def as_flags(s):
     mode = s.get("mode", "raster" if s.get("raster") else "vector")
     out = [] if mode == "vector" else [f"--scope-mode {mode}"]
     out.append(f"--scope-trim {s.get('trim', 0.02):g}")
-    out.append(f"--scope-gamma {s.get('gamma', 2.2):g}")
+    if mode == "stochastic":
+        gamma = s.get("stochastic_gamma", s.get("gamma", 2.0))
+        out.append(f"--scope-gamma {gamma:g}")
+    else:
+        gamma = s.get("raster_gamma", s.get("gamma", 2.2))
+        out.append(f"--scope-gamma {gamma:g}")
     if abs(s.get("density", 1.0) - 1.0) > 1e-6:
         out.append(f"--scope-density {s['density']:g}")
     if s.get("rows"):
