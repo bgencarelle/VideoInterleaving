@@ -59,6 +59,11 @@ don't care what rate that implies. **It also suppresses the automatic
 correct value would have been, but does not change it. That is deliberate: you
 asked for a specific budget explicitly.
 
+It cannot be combined with `--scope-mix`. Mix rate is itself the trace clock;
+letting an explicit sample count override it made the displayed duty/pass rates
+false. The CLI now rejects the combination, and a stale settings.py combination
+prints a warning and follows `SCOPE_MIX`.
+
 ### `--scope-fields N` (default: 1 — new)
 
 Interlace. `N=2` draws every other row per trace and alternates which set,
@@ -179,6 +184,15 @@ probability. Its default is 2, equivalent to Osci-render's Image Threshold 0.1.
 Osci's UI default of 0.5 maps to exponent 6, which discards too many portrait
 midtones for this material.
 
+In mix mode `--scope-gamma` sets both raster and stochastic. Add
+`--scope-stochastic-gamma F` when the two need different values; it overrides
+only stochastic. The older spelling `--scope-walk-gamma` remains accepted as
+a compatibility alias.
+
+Fusion follows the same two-gamma rule: `--scope-gamma` initializes both
+luminance sources, and `--scope-stochastic-gamma` can separate the raw
+stochastic contribution from raster's preconditioned contribution.
+
 ---
 
 ## Group D — the output path
@@ -237,7 +251,7 @@ still applies there.
 
 ## Group E — which engine runs
 
-### `--scope-mode vector|raster|stochastic` (default `SCOPE_RENDER_MODE`)
+### `--scope-mode vector|raster|stochastic|fusion` (default `SCOPE_RENDER_MODE`)
 
 Selects the rendering engine explicitly:
 
@@ -245,6 +259,14 @@ Selects the rendering engine explicitly:
 - `raster` draws dwell-modulated horizontal scanlines.
 - `stochastic` performs a luminance-weighted nearest-neighbour XY walk. It has
   no scanline spacing and needs no Z/brightness channel.
+- `fusion` performs one continuous walk through a mass-normalized combination
+  of vector ridges, raster luminance, and/or raw stochastic luminance.
+
+### `--scope-fusion vrs|vr|sv|sr` (default `vrs`)
+
+Selects fusion's equal-mass component set: all three, vector+raster,
+stochastic+vector, or stochastic+raster. This combines 2D dwell probability,
+not instantaneous XY positions. Press `f` in fusion mode to cycle the presets.
 
 ### `--scope-raster` / `--scope-stochastic`
 
@@ -257,9 +279,10 @@ with an explicit `--scope-mode`.
 | flag | default | effect |
 |---|---:|---|
 | `--scope-walk-radius PX` | 10 | Radius searched for a nearby unvisited accepted pixel. |
-| `--scope-walk-stride PX` | 0 (auto) | Source-scale-aware spacing: 1 at width 96, 2 at 256, 4 at 480. Explicit higher values are coarser. |
+| `--scope-walk-stride PX` | 0 (auto) | Source-scale-aware spacing: 2 at the default width 256; 1 at 96 and 4 at 480. Explicit higher values are coarser. |
 | `--scope-walk-reseed-ms MS` | 5.0 | Interval between random relocations. |
 | `--scope-gamma F` | 2.0 | Fresh `luminance ** gamma` acceptance test for every candidate in stochastic mode. |
+| `--scope-stochastic-gamma F` | 2.0 | Stochastic-only gamma override, especially for mix. `--scope-walk-gamma` is an alias. |
 | `--scope-walk-edge F` | 0.0 | Optional gradient probability. Zero matches Osci-render. |
 | `--scope-walk-hz HZ` | 48000 | Target decisions per second, independent of image rate and faster DAC rates. |
 
@@ -275,7 +298,8 @@ on continuously through that change.
 
 ### `--scope-min-feature F` (default 0.02)
 
-Vector only. Shortest stroke the occlusion cull keeps. Irrelevant in raster.
+Vector and fusion presets containing `v`: shortest stroke the occlusion cull
+keeps. Irrelevant in raster, stochastic, and `sr` fusion.
 
 ### `--scope-realtime` (default off)
 
@@ -292,17 +316,33 @@ Also incompatible with `--scope-fields`, since interlace needs whole traces.
 
 ### `--scope-mix [HZ]` (default off; bare flag gives 120)
 
-Alternate raster and vector traces at this rate. Above flicker fusion the
-phosphor sums them: raster supplies tone, vector supplies outline.
+Run a triangular whole-trace sequence at this rate:
+`VECTOR -> RASTER -> STOCHASTIC -> RASTER -> ...`. Above flicker fusion the
+phosphor sums all three: raster supplies tone, vector supplies outlines, and
+stochastic adds directionless bitmap detail. Whole traces are switched rather
+than interpolated; interpolating unrelated XY coordinates would draw false
+connector shapes between them.
 
 Note it **overrides your trace rate** — `fps = mix_hz` — because the switch rate
 *is* the trace rate. So `--scope-mix 120` silently puts you at 120 traces/sec and
-a correspondingly small budget. Incompatible with realtime and with fields.
+a correspondingly small budget. It is incompatible with realtime and with an
+explicit `--scope-samples`. The raster part can still use `--scope-fields`;
+automatic field sizing is based on the raster share and is enabled only when
+both total and raster traces per source image are whole numbers. Otherwise it
+stays progressive so an interlaced picture never straddles two source images.
+
+The hardware sees one trace at a time, but the web preview joins enough traces
+to contain every raster field plus at least one vector and one stochastic pass.
+At the default duty this is the complete four-trace `V,R,S,R` exposure, rather
+than alternating incomplete `V+R` and `S+R` previews.
 
 ### `--scope-mix-duty F` (default 0.5)
 
-Fraction of mixed passes spent on raster. Raise to 0.6–0.8 if the vector outline
-overpowers the tone. Inert without `--scope-mix`.
+Fraction of mixed passes spent on raster. The remainder is split equally
+between vector and stochastic. At 0.5 the exact repeating sequence is
+`V, R, S, R`; at 120 Hz that is 30 vector, 60 raster, and 30 stochastic
+passes per second. Raise to 0.6–0.8 if tone needs more beam time. Inert without
+`--scope-mix`.
 
 ---
 
@@ -373,57 +413,26 @@ Not live-adjustable, because they need the audio stream reopened: `--scope-fps`,
 
 ## Gotchas, ranked by how much time they'll cost you
 
-1. **`--scope-dc-comp` does not exist.** It is in the run command in both
-   handoffs. `grep -rn "dc_comp\|precompensate" *.py` finds nothing on the
-   branch. The documented command fails with an argparse error. The
-   `precompensate_hpf` function exists in your local `scope_out.py` but nothing
-   calls it.
+1. **Density is inverted from intuition.** Lower = finer: `cells = samples /
+   density`. Below about 0.3, cells start receiving less than one sample and
+   the picture can break into moving flecks.
 
-2. **You cannot pin the audio device from `settings.py`.** `scope_display.py:227`
-   reads `settings.SCOPE_DEVICE_SPEC`, but `main.py:357` sets that to `None`
-   unconditionally, and `settings.SCOPE_DEVICE` is only consulted when
-   `SCOPE_DEVICE_RESOLVED` is true, which only `--device`/`--ask` sets. So the
-   device must come from the CLI every time. For an unattended install that
-   means the launch script is the only place it can live.
+2. **Mix owns the trace clock.** `--scope-mix 120` means 120 complete passes
+   per second. `--scope-fps` is superseded and `--scope-samples` is rejected.
 
-3. **Density is inverted from intuition.** Lower = finer. `cells = samples /
-   density`.
+3. **Interlace needs integer registration.** In mix, both total traces/index
+   and raster traces/index must be whole numbers. The default 120 Hz, duty 0.5,
+   and 30 IPS gives four total and two raster traces, so it is exact.
 
-4. **`--scope-mix` hijacks your trace rate.** `fps = mix_hz`, so `--scope-mix 120`
-   is also `--scope-fps 120` and a quarter of your usual budget.
+4. **Partially rebaking is not registration.** Main and float thumbnails must
+   have the same dimensions and frame count. Runtime rejects mismatches instead
+   of silently dropping one layer; rebake the complete tree after changing
+   `--thumb-width`.
 
-5. **Eight `SCOPE_*` settings are undeclared in `settings.py`** and exist only if
-   the CLI creates them: `SCOPE_RASTER`, `SCOPE_SAMPLES`, `SCOPE_REALTIME`,
-   `SCOPE_LIST_FROM_IMAGES`, `SCOPE_DEVICE`, `SCOPE_DEVICE_SPEC`, `SCOPE_ASK`,
-   `SCOPE_BLOCKSIZE`. Everything reads them via `getattr(..., default)` so
-   nothing breaks — but you cannot set them in `settings.py` and expect them to
-   be picked up unless you add the line yourself.
+5. **There is still no invisible travel without Z.** Raster and stochastic
+   hand off at the beam's actual endpoint. A vector pass has its own first
+   vertex, so entering vector can still make one fast, faint connector.
 
-6. **`SCOPE_BLOCKSIZE` is documented but not read.** `Scope.__init__` takes
-   `blocksize=512` as a Python default; no code looks for the setting. Your own
-   measurement says blocksize isn't a meaningful CPU lever anyway (1.2 µs
-   callback overhead).
-
-7. **The `a` autofit key is inert in a calibrated run**, because calibration
-   supplies a fixed grid and that disables the autofit path.
-
-8. **Several flags use truthiness, not `is not None`.** `--scope-fps 0`,
-   `--scope-rows 0`, `--scope-oversample 0` are silently ignored rather than
-   erroring. `--scope-trim`, `--scope-gamma`, `--scope-density`,
-   `--scope-min-feature` and `--scope-mix-duty` correctly use `is not None`, so
-   `--scope-trim 0` does work.
-
----
-
-## Correction to something I told you earlier
-
-Two posts ago I said the supplement was wrong to claim `--scope-ask` and
-`--scope-device` exist. **I was wrong and the supplement was right.** `main.py`
-line 136 is `parser.add_argument("--device", "--scope-device",
-dest="scope_device", ...)` and line 141 is the same pattern for `--ask` /
-`--scope-ask`. Both spellings work. I had grepped for the flag strings in a way
-that only surfaced the first alias and then asserted the negative from it.
-
-Everything else in `SCOPE_CORRECTIONS.md` still holds — I re-checked
-`--scope-dc-comp`, `scope_profile.py` and `scope_screen.py` against the branch
-while writing this.
+6. **Use a device name for unattended installs.** `SCOPE_DEVICE = "Scarlett"`
+   works in settings.py; `--device Scarlett` overrides it. Numeric PortAudio
+   ordering can change when hardware is reconnected.

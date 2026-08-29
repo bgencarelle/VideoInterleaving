@@ -4,10 +4,10 @@ bake_advisor.py -- what --thumb-width does YOUR content actually need?
     python bake_advisor.py --xy-dir images_xy
     python bake_advisor.py --xy-dir images_xy --rate 96000 --fps 30 --fields 2
 
-The thumbnail is a hard ceiling on grid size, and storage scales with its
-square: with the current three-channel thumbnails width 96 is about 2.6 GB for
-32 folders x 2221 frames, width 128 about 4.7 GB. So the temptation is to pick
-the smaller one.
+For raster the thumbnail is a hard ceiling on grid size, while stochastic uses
+its stored spatial field directly. Storage scales with the square: with the
+current three-channel thumbnails width 96 is about 2.6 GB for 32 folders x
+2221 frames, and the current width-256 default is about 18.6 GB.
 
 The catch is that the right answer is content-dependent and not monotonic.
 autofit grows the grid by 1/sqrt(the fraction of cells surviving trim), capped
@@ -23,8 +23,11 @@ A mid-sized subject is the worst case: small enough that trim discards most of
 the frame, big enough that autofit's growth is not wasted.  Guessing from the
 average is exactly wrong -- it is the mid-sized frames that decide.
 
-So this reads the bake you already have, runs the real sizing rule over real
-frames, and reports what each width would give you.  It changes nothing.
+So this reads the bake you already have, runs the real raster sizing rule over
+real frames, and reports what each width would give raster. It changes nothing.
+It cannot recover source detail discarded by an existing small bake, so its
+"smallest" result is not a recommendation to shrink stochastic below the
+current width-256 default.
 """
 import argparse
 import json
@@ -105,7 +108,7 @@ def main():
             # Rescale the SAME picture to each candidate width, so the
             # comparison is about the ceiling and not about which frames the
             # existing bake happens to contain.
-            for w in (64, 80, 96, 128, 160):
+            for w in (64, 80, 96, 128, 160, 192, 256, 320, 480):
                 h = max(1, int(round(th * w / float(tw))))
                 ys = np.linspace(0, lum.shape[0] - 1, h).astype(int)
                 xs = np.linspace(0, lum.shape[1] - 1, w).astype(int)
@@ -142,12 +145,17 @@ def main():
         cur = baked_width or max(worst)
         saving = (total_bytes.get(cur, 0) - total_bytes[best]) * n_frames_total
         print(f"You baked at --thumb-width {baked_width}.")
-        print(f"Smallest width that never clips on this content: --thumb-width {best}")
+        print("Smallest width that never clips the raster grid on this content: "
+              f"--thumb-width {best}")
         if best < cur and saving > 0:
             print(f"Going from {cur} to {best} saves {saving / 1e9:.2f} GB "
-                  f"and loses no grid, because the sample budget runs out first.")
+                  "and loses no raster grid, because the sample budget runs "
+                  "out first.")
+            print("That can still discard stochastic source detail; keep 256 "
+                  "for stochastic or mix unless you have measured otherwise.")
         else:
-            print("Nothing smaller would do -- the ceiling is doing real work here.")
+            print("Nothing smaller would do for raster -- the ceiling is doing "
+                  "real work here.")
     print("\nRebake is required to change this: --thumb-width is baked in.")
     if args.format:
         _format_report(folders, n_frames_total, args)

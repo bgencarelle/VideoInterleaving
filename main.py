@@ -2,6 +2,7 @@ import traceback
 import sys
 import os
 import argparse
+import math
 import threading
 import socket
 import atexit
@@ -85,7 +86,7 @@ def configure_runtime():
     parser.add_argument("--xy-dir", help="Baked XY libraries (default: settings.XY_DIR)")
     scope_render = parser.add_mutually_exclusive_group()
     scope_render.add_argument("--scope-mode",
-                              choices=("vector", "raster", "stochastic"),
+                              choices=("vector", "raster", "stochastic", "fusion"),
                               help="Scope renderer (default: settings.SCOPE_RENDER_MODE)")
     scope_render.add_argument("--scope-raster", action="store_true",
                               help="Alias for --scope-mode raster")
@@ -111,19 +112,31 @@ def configure_runtime():
                         help="Luminance exponent for the active raster or "
                              "stochastic renderer. Stochastic default 2 keeps "
                              "portrait midtones; raster default is "
-                             "settings.SCOPE_GAMMA")
+                             "settings.SCOPE_GAMMA. In mix this sets both; "
+                             "fusion also initializes both; "
+                             "--scope-stochastic-gamma can then override the "
+                             "stochastic side")
     parser.add_argument("--scope-density", type=float,
                         help="Default: settings.SCOPE_DENSITY")
     parser.add_argument("--scope-walk-radius", type=int, metavar="PX",
                         help="Scope stochastic: nearest-neighbour search radius")
     parser.add_argument("--scope-walk-stride", type=int, metavar="PX",
                         help="Scope stochastic: source-pixel step. Default 0 "
-                             "auto-scales to the baked width (1 at width 96)")
+                             "auto-scales to the baked width (2 at the default "
+                             "width 256)")
     parser.add_argument("--scope-walk-reseed-ms", type=float, metavar="MS",
                         help="Scope stochastic: time between random reseeds "
                              "(default 5 ms, matching Osci-render)")
-    parser.add_argument("--scope-walk-gamma", type=float, metavar="F",
-                        help=argparse.SUPPRESS)
+    parser.add_argument("--scope-stochastic-gamma", "--scope-walk-gamma",
+                        dest="scope_walk_gamma", type=float, metavar="F",
+                        help="Scope stochastic luminance exponent. Useful in "
+                             "mix when --scope-gamma is being used for raster; "
+                             "the old --scope-walk-gamma spelling remains an "
+                             "accepted compatibility alias")
+    parser.add_argument("--scope-fusion", choices=("vrs", "vr", "sv", "sr"),
+                        help="Scope fusion components: vector+raster+stochastic, "
+                             "vector+raster, stochastic+vector, or "
+                             "stochastic+raster (default settings.SCOPE_FUSION)")
     parser.add_argument("--scope-walk-edge", type=float, metavar="F",
                         help="Scope stochastic: optional edge probability. "
                              "Default 0 matches Osci-render")
@@ -173,13 +186,14 @@ def configure_runtime():
                              "resolution win on a dark background)")
     parser.add_argument("--scope-mix", nargs="?", type=float, const=120.0,
                         metavar="HZ",
-                        help="Scope: alternate raster and vector every trace at "
-                             "this rate (default 120). Above flicker fusion the "
-                             "phosphor sums them: raster gives tone, vector gives "
-                             "outline.")
+                        help="Scope: triangular whole-trace mix at this rate "
+                             "(default 120): vector -> raster -> stochastic -> "
+                             "raster. Above flicker fusion the phosphor sums all "
+                             "three renderers.")
     parser.add_argument("--scope-mix-duty", type=float, default=None,
                         help="Scope: fraction of mixed passes spent on raster "
-                             "(0.6-0.8 if the vector outline overpowers the tone)")
+                             "(the remainder is split equally between vector "
+                             "and stochastic)")
     parser.add_argument("--scope-sweep", choices=("alternate", "palindrome", "retrace"),
                         default=None,
                         help="Scope raster: alternate (default) chains one-way "
@@ -335,6 +349,19 @@ def configure_runtime():
         print(">> Local mode: Enabling --test flag for network monitoring")
 
     elif args.mode == "scope":
+        if (args.scope_mix_duty is not None
+                and (not math.isfinite(args.scope_mix_duty)
+                     or not 0.0 <= args.scope_mix_duty <= 1.0)):
+            parser.error("--scope-mix-duty must be between 0 and 1")
+        if args.scope_mix is not None:
+            if not math.isfinite(args.scope_mix) or args.scope_mix <= 0:
+                parser.error("--scope-mix must be a finite rate greater than zero")
+            if args.scope_samples is not None:
+                parser.error("--scope-samples cannot be combined with "
+                             "--scope-mix; the mix rate is the trace clock")
+            if args.scope_mode == "fusion":
+                parser.error("--scope-mode fusion and --scope-mix are "
+                             "alternative combiners; choose one")
         if args.port:
             print("⚠️  WARNING: --port ignored in SCOPE mode.")
         print(f">> MODE: SCOPE (XY audio) [{source_name}]")
@@ -366,8 +393,9 @@ def configure_runtime():
             settings.SCOPE_REALTIME = True
         if args.scope_fps:
             settings.SCOPE_FPS = args.scope_fps
-        if getattr(args, "scope_fields", None):
+        if getattr(args, "scope_fields", None) is not None:
             settings.SCOPE_FIELDS = args.scope_fields
+            settings.SCOPE_FIELDS_EXPLICIT = True
         if getattr(args, "scope_dc_comp", None):
             settings.SCOPE_DC_COMP = args.scope_dc_comp
         if getattr(args, "scope_border", None) is not None:
@@ -379,11 +407,17 @@ def configure_runtime():
         if args.scope_trim is not None:
             settings.SCOPE_TRIM = args.scope_trim
         if args.scope_gamma is not None:
-            settings.SCOPE_GAMMA = args.scope_gamma
-            # One public gamma control follows the active renderer. The old
-            # walk-specific spelling below remains a compatibility alias.
-            if settings.SCOPE_RENDER_MODE == "stochastic":
+            # One public gamma follows the selected renderer. Mix contains
+            # both luminance renderers, so it deliberately sets both; the
+            # stochastic-specific flag below can then override just its side.
+            if (args.scope_mix is not None
+                    or settings.SCOPE_RENDER_MODE == "fusion"):
+                settings.SCOPE_GAMMA = args.scope_gamma
                 settings.SCOPE_WALK_GAMMA = args.scope_gamma
+            elif settings.SCOPE_RENDER_MODE == "stochastic":
+                settings.SCOPE_WALK_GAMMA = args.scope_gamma
+            else:
+                settings.SCOPE_GAMMA = args.scope_gamma
         if args.scope_density is not None:
             settings.SCOPE_DENSITY = args.scope_density
         if args.scope_walk_radius is not None:
@@ -394,6 +428,8 @@ def configure_runtime():
             settings.SCOPE_WALK_RESEED_MS = args.scope_walk_reseed_ms
         if args.scope_walk_gamma is not None:
             settings.SCOPE_WALK_GAMMA = args.scope_walk_gamma
+        if args.scope_fusion is not None:
+            settings.SCOPE_FUSION = args.scope_fusion
         if args.scope_walk_edge is not None:
             settings.SCOPE_WALK_EDGE = args.scope_walk_edge
         if args.scope_walk_hz is not None:
@@ -412,20 +448,24 @@ def configure_runtime():
             settings.SCOPE_MIN_FEATURE = args.scope_min_feature
         if args.scope_sweep:
             settings.SCOPE_SWEEP = args.scope_sweep
-        if args.scope_mix:
+        if args.scope_mix is not None:
             settings.SCOPE_MIX = args.scope_mix
         if args.scope_mix_duty is not None:
             settings.SCOPE_MIX_DUTY = args.scope_mix_duty
         # Resolve the audio device NOW, before file lists are built and before
         # stdout is wrapped. Prompting from deep inside run_scope meant the
         # question appeared after a long silence, so it read as a hang.
-        if args.scope_ask or args.scope_device:
+        _configured_device = (args.scope_device if args.scope_device is not None
+                              else getattr(settings, "SCOPE_DEVICE", None))
+        _configured_ask = bool(
+            args.scope_ask or getattr(settings, "SCOPE_ASK", False))
+        if _configured_ask or _configured_device is not None:
             from scope_out import choose_device as _choose, scrub as _scrub
             # argv is decoded with surrogateescape, so a stray byte in shell
             # history arrives as a lone surrogate and breaks any later encode
-            args.scope_device = _scrub(args.scope_device)
-            settings.SCOPE_DEVICE = _choose(ask=args.scope_ask,
-                                            device=args.scope_device)
+            _configured_device = _scrub(_configured_device)
+            settings.SCOPE_DEVICE = _choose(ask=_configured_ask,
+                                            device=_configured_device)
             if settings.SCOPE_DEVICE == "null":
                 _name = "none (browser renders)"
             else:

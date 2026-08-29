@@ -1,5 +1,5 @@
 """
-scope_bake.py -- shared vector/raster/stochastic toolkit for scope mode.
+scope_bake.py -- shared vector/raster/stochastic/fusion toolkit for scope mode.
 
 Both sides import from here and nothing here imports either side:
     utilities/convert_to_xy.py  (offline)  -> geometry helpers, format constants
@@ -113,6 +113,15 @@ class XYLibrary:
         self.names = json.loads(npath.read_text()) if npath.exists() else []
         tpath = p / "thumbs.npy"
         self.thumbs = np.load(tpath, mmap_mode="r") if tpath.exists() else None
+        if self.thumbs is not None:
+            if self.thumbs.ndim != 4 or self.thumbs.shape[-1] < 2:
+                raise ValueError(
+                    f"invalid thumbs.npy shape {self.thumbs.shape}; expected "
+                    "(frames, height, width, channels>=2)")
+            if len(self.thumbs) != len(self):
+                raise ValueError(
+                    f"thumbs.npy has {len(self.thumbs)} frames but geometry "
+                    f"has {len(self)}; rebake this folder")
 
     def __len__(self):
         return len(self.fstart) - 1
@@ -678,7 +687,7 @@ def preview_frame(samples, size=384, spot=None, exposure=1.0, max_split=192):
 
 def calibrate(main_libs, float_libs, n_samples, density=1.0, trim=0.02,
               rows=None, cols=None, bbox=None, frames=24, fields=1,
-              row_bias=1.0):
+              row_bias=1.0, autofit=True):
     """
     Compute a FIXED grid size and tone mapping from a sample of the sequence.
 
@@ -740,7 +749,7 @@ def calibrate(main_libs, float_libs, n_samples, density=1.0, trim=0.02,
     if los:
         # median, not mean: robust to the odd blank or blown-out frame
         out["levels"] = (float(np.median(los)), float(np.median(his)))
-    if fracs and trim > 0:
+    if autofit and fracs and trim > 0:
         frac = float(np.median(fracs))
         if 0.05 < frac < 0.95:
             grow = min(1.0 / np.sqrt(frac), 2.5)
@@ -934,14 +943,19 @@ class StochasticEmitter:
         self._lowpass_cutoff = None
 
     def start_at(self, point):
-        """Begin a mode handoff at the beam's actual current position."""
+        """Resume after a mode handoff at the beam's actual position.
+
+        The walk clock and short visited history survive. Resetting them here
+        made every stochastic pass in V-R-S-R mix behave like a brand-new
+        renderer, even though the emitter itself was deliberately persistent.
+        Only the geometric cursor is remapped to the beam's current endpoint.
+        """
         self._end = np.asarray(point, dtype=np.float32)[:2].copy()
         self._pixel = None      # remap this endpoint when the image shape is known
-        self._count = 1         # do not turn a handoff into an immediate reseed
-        self._phase = 1.0
+        if self._count == 0:
+            # Do not turn the first handoff into an immediate random reseed.
+            self._count = 1
         self._handoff_pending = True
-        if self._visited is not None:
-            self._visited.fill(False)
         if self._lowpass is not None:
             self._lowpass.z[:] = self._end
 
@@ -1089,7 +1103,24 @@ class StochasticEmitter:
     def emit(self, lum):
         prob = _stochastic_probability(
             lum, self.gamma, self.trim, self.edge_gain)
-        if prob is None:
+        return self.emit_probability(prob)
+
+    def emit_probability(self, probability):
+        """Walk an already-combined probability field.
+
+        Fusion uses this entry point because each component has already had
+        its own tone rule applied and has been mass-normalized. Running the
+        result through the stochastic luminance threshold a second time would
+        erase the weaker component after blending.
+        """
+        if probability is None:
+            return None
+        prob = np.asarray(probability, dtype=np.float64)
+        if prob.ndim != 2 or not prob.size:
+            return None
+        prob = np.clip(np.nan_to_num(
+            prob, nan=0.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
+        if float(prob.max()) <= 1e-12:
             return None
         self._ensure_state(prob.shape)
 
@@ -1133,6 +1164,59 @@ class StochasticEmitter:
             out = precompensate_hpf(out, self.dc_comp, self.samplerate)
         self._end = out[-1].copy()
         return np.ascontiguousarray(out, dtype=np.float32)
+
+
+class TriangleMixScheduler:
+    """Whole-trace VECTOR -> RASTER -> STOCHASTIC -> RASTER scheduler.
+
+    ``raster_duty`` retains the old mix contract: it is the long-term fraction
+    of traces assigned to raster. The remaining traces alternate vector and
+    stochastic, so they receive equal shares. At the default 0.5 duty the
+    exact repeating route is V, R, S, R -- a triangle through the three
+    renderers instead of the old two-state square V, R, V, R.
+
+    Whole traces are deliberate. Blending unrelated XY sample positions would
+    draw the interpolation between them; phosphor persistence already performs
+    the useful visual sum without inventing those connector shapes.
+    """
+
+    def __init__(self, raster_duty=0.5):
+        duty = float(raster_duty)
+        if not np.isfinite(duty):
+            raise ValueError("raster_duty must be finite")
+        self.raster_duty = min(1.0, max(0.0, duty))
+        self._raster_error = 0.0
+        self._outer = 0
+
+    @staticmethod
+    def coverage_traces(raster_duty=0.5, raster_fields=1):
+        """Traces needed for one complete mixed preview exposure.
+
+        The window must contain every raster field and, when present, at
+        least one vector and one stochastic pass. It is also used as the
+        honest combined-picture refresh period reported by the monitor.
+        """
+        duty = float(raster_duty)
+        if not np.isfinite(duty):
+            raise ValueError("raster_duty must be finite")
+        duty = min(1.0, max(0.0, duty))
+        fields = max(1, int(raster_fields))
+        spans = [1]
+        if duty > 0.0:
+            spans.append(int(np.ceil(fields / duty - 1e-12)))
+        if duty < 1.0:
+            # Vector and stochastic split the non-raster share equally.
+            spans.append(int(np.ceil(2.0 / (1.0 - duty) - 1e-12)))
+        return max(spans)
+
+    def next_mode(self):
+        self._raster_error += self.raster_duty
+        if self._raster_error >= 1.0 - 1e-12:
+            self._raster_error -= 1.0
+            return "raster"
+        mode = "vector" if self._outer % 2 == 0 else "stochastic"
+        self._outer += 1
+        return mode
 
 
 def stochastic_luma(lum, n, *, rng=None, gamma=2.0, trim=0.02,
@@ -1181,7 +1265,13 @@ def composite_luma(main_lib, main_idx, float_lib, float_idx, bbox=None,
         return (t[..., channel].astype(np.float64) / 255.0,
                 t[..., 1].astype(np.float64) / 255.0)
 
-    if tf is not None and tm is not None and tf.shape[:2] == tm.shape[:2]:
+    if tf is not None and tm is not None and tf.shape[:2] != tm.shape[:2]:
+        raise ValueError(
+            "main/float thumbnail geometry differs "
+            f"({tm.shape[1]}x{tm.shape[0]} vs {tf.shape[1]}x{tf.shape[0]}); "
+            "rebake all layers with the same --thumb-width")
+
+    if tf is not None and tm is not None:
         lf, af = split(tf)
         lm, am = split(tm)
         lum = lf * af + lm * am * (1.0 - af)
@@ -1198,6 +1288,144 @@ def composite_luma(main_lib, main_idx, float_lib, float_idx, bbox=None,
         lum = lum[int(y0 * hh):max(int(y1 * hh), int(y0 * hh) + 1),
                   int(x0 * ww):max(int(x1 * ww), int(x0 * ww) + 1)]
     return lum
+
+
+FUSION_COMPONENTS = ("vrs", "vr", "sv", "sr")
+
+
+def normalize_fusion_components(value):
+    """Canonicalize a fusion component spelling to one supported preset."""
+    key = "".join(ch for ch in str(value).lower() if ch in "vrs")
+    canonical = {
+        frozenset("vrs"): "vrs",
+        frozenset("vr"): "vr",
+        frozenset("sv"): "sv",
+        frozenset("sr"): "sr",
+    }.get(frozenset(key))
+    if canonical is None or len(set(key)) != len(key):
+        raise ValueError(
+            "fusion components must be one of: vrs, vr, sv, sr")
+    return canonical
+
+
+def vector_density(polylines, shape, thickness=1):
+    """Rasterize baked XY lines into the thumbnail's square-padded space.
+
+    This is a dwell-density source, not a displayed raster. It uses only
+    NumPy so fusion does not add an OpenCV dependency to playback.
+    """
+    h, w = map(int, shape[:2])
+    out = np.zeros((h, w), dtype=np.float64)
+    if h <= 0 or w <= 0:
+        return out
+    m = float(max(w, h))
+    x_pad = (m - w) * 0.5
+    y_pad = (m - h) * 0.5
+    starts, ends = [], []
+    for polyline in polylines or ():
+        p = np.asarray(polyline, dtype=np.float64).reshape(-1, 2)
+        if len(p) < 2:
+            continue
+        x = (p[:, 0] + 1.0) * 0.5 * m - x_pad
+        y = (1.0 - p[:, 1]) * 0.5 * m - y_pad
+        starts.append(np.column_stack([x[:-1], y[:-1]]))
+        ends.append(np.column_stack([x[1:], y[1:]]))
+    if starts:
+        p0, p1 = np.vstack(starts), np.vstack(ends)
+        delta = p1 - p0
+        steps = np.maximum(
+            1, np.ceil(np.max(np.abs(delta), axis=1)).astype(np.int64))
+        # All segments in one DDA pass. A Python loop per baked vertex costs
+        # most of a trace on a Pi; repeat/index arithmetic keeps the result
+        # gapless while making cost proportional to emitted ridge pixels.
+        segment = np.repeat(np.arange(len(steps)), steps + 1)
+        offsets = np.arange(int((steps + 1).sum()))
+        offsets -= np.repeat(np.r_[0, np.cumsum(steps + 1)[:-1]], steps + 1)
+        t = offsets / steps[segment]
+        points = p0[segment] + delta[segment] * t[:, None]
+        xi = np.clip(np.rint(points[:, 0]).astype(np.int64), 0, w - 1)
+        yi = np.clip(np.rint(points[:, 1]).astype(np.int64), 0, h - 1)
+        out[yi, xi] = 1.0
+    # A one-pixel contour can be missed too easily by a source-scale walk.
+    # A small max-neighbourhood makes it a probability ridge without turning
+    # it into the broad tonal mass supplied by raster/raw luminance.
+    radius = max(0, int(thickness))
+    if radius:
+        padded = np.pad(out, radius)
+        grown = np.zeros_like(out)
+        for dy in range(2 * radius + 1):
+            for dx in range(2 * radius + 1):
+                grown = np.maximum(grown, padded[dy:dy + h, dx:dx + w])
+        out = grown
+    return out
+
+
+def _mass_normalize(density):
+    a = np.clip(np.nan_to_num(np.asarray(density, dtype=np.float64),
+                              nan=0.0, posinf=0.0, neginf=0.0), 0.0, None)
+    total = float(a.sum())
+    return a / total if total > 1e-12 else None
+
+
+def fuse_density(vector=None, raster=None, stochastic=None, components="vrs",
+                 raster_gamma=2.2, stochastic_gamma=2.0, trim=0.02,
+                 edge_gain=0.0):
+    """Combine component *dwell distributions*, never instantaneous XY.
+
+    Every available component is normalized to unit probability mass before
+    equal mixing. Sparse vector ridges therefore receive the same requested
+    dwell share as a full-frame luminance field instead of disappearing under
+    its much larger pixel sum. The returned maximum is one; relative mass is
+    unchanged and can be consumed directly by ``emit_probability``.
+    """
+    components = normalize_fusion_components(components)
+    fields = []
+    if "v" in components and vector is not None:
+        fields.append(_mass_normalize(vector))
+    if "r" in components and raster is not None:
+        a = np.clip(np.asarray(raster, dtype=np.float64), 0.0, 1.0)
+        fields.append(_mass_normalize(np.where(
+            a > max(0.0, float(trim)),
+            a ** max(0.01, float(raster_gamma)), 0.0)))
+    if "s" in components and stochastic is not None:
+        fields.append(_mass_normalize(_stochastic_probability(
+            stochastic, stochastic_gamma, trim, edge_gain)))
+    fields = [field for field in fields if field is not None]
+    if not fields:
+        return None
+    shape = fields[0].shape
+    if any(field.shape != shape for field in fields[1:]):
+        raise ValueError("fusion component geometry differs")
+    fused = np.sum(fields, axis=0) / len(fields)
+    peak = float(fused.max())
+    return fused / peak if peak > 1e-12 else None
+
+
+def fusion_probability(main_lib, main_idx, float_lib, float_idx,
+                       components="vrs", bbox=None, min_feature=0.02,
+                       raster_gamma=2.2, stochastic_gamma=2.0, trim=0.02,
+                       edge_gain=0.0, vector_thickness=1):
+    """Build one normalized field from the requested baked render sources."""
+    components = normalize_fusion_components(components)
+    raster = (composite_luma(main_lib, main_idx, float_lib, float_idx,
+                             bbox=bbox, raw=False)
+              if "r" in components else None)
+    stochastic = (composite_luma(main_lib, main_idx, float_lib, float_idx,
+                                 bbox=bbox, raw=True)
+                  if "s" in components else None)
+    reference = raster if raster is not None else stochastic
+    vector = None
+    if "v" in components:
+        if reference is None:
+            return None
+        vector = vector_density(
+            merge(main_lib, main_idx, float_lib, float_idx,
+                  min_feature=min_feature),
+            reference.shape, thickness=vector_thickness)
+    return fuse_density(
+        vector=vector, raster=raster, stochastic=stochastic,
+        components=components, raster_gamma=raster_gamma,
+        stochastic_gamma=stochastic_gamma, trim=trim, edge_gain=edge_gain)
 
 
 def raster_frame(main_lib, main_idx, float_lib, float_idx, n,
@@ -1610,7 +1838,7 @@ if __name__ == "__main__":
               "and the baker;\nit has nothing to run on its own.\n\n"
               "You probably want the baker:\n"
               "  python utilities/convert_to_xy.py -i images -o images_xy "
-              "--thumb-width 128\n\n"
+              "--thumb-width 256\n\n"
               "Other entry points:\n"
               "  python main.py --mode scope ...   run the mode\n"
               "  python test_scope_pair.py ...     preview one pair\n"

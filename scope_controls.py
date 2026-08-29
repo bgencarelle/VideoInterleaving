@@ -36,7 +36,8 @@ scope live controls
   ,  / .    density     finer / coarser (samples per cell; below ~0.3 flecks)
   [  / ]    gamma       down / up      (raster dwell / stochastic probability)
   l         lowpass     cycle off -> 12k -> 6k -> 3k -> 1.5k
-  v         mode         vector -> raster -> stochastic
+  v         mode         vector -> raster -> stochastic -> fusion
+  f         fusion       vrs -> vr -> sv -> sr (in fusion mode)
   w         sweep       alternate -> palindrome -> retrace
   a         autofit     on / off
   p         print current settings as command-line flags
@@ -57,7 +58,10 @@ class KeyMap:
     def _bump(self, name, direction):
         attr, kind, lo, hi, recal = SPECS[name]
         if name == "gamma":
-            attr = ("stochastic_gamma" if self.state.get("mode") == "stochastic"
+            mode = self.state.get("mode")
+            fusion = self.state.get("fusion_components", "vrs")
+            attr = ("stochastic_gamma"
+                    if mode == "stochastic" or (mode == "fusion" and "s" in fusion)
                     else "raster_gamma")
         cur = self.state.get(attr)
         if cur is None and name == "gamma":
@@ -104,17 +108,34 @@ class KeyMap:
             if s.get("mode_locked"):
                 self.message = "mode cycling unavailable in realtime/mix mode"
                 return True
-            order = ["vector", "raster", "stochastic"]
+            order = ["vector", "raster", "stochastic", "fusion"]
             current = s.get("mode", "raster" if s.get("raster") else "vector")
             i = order.index(current) if current in order else 0
             s["mode"] = order[(i + 1) % len(order)]
             s["raster"] = s["mode"] == "raster"  # legacy state readers
-            gamma_key = ("stochastic_gamma" if s["mode"] == "stochastic"
+            gamma_key = ("stochastic_gamma"
+                         if (s["mode"] == "stochastic"
+                             or (s["mode"] == "fusion"
+                                 and "s" in s.get("fusion_components", "vrs")))
                          else "raster_gamma")
             if gamma_key in s:
                 s["gamma"] = s[gamma_key]
             self.dirty = True
             self.message = "mode = " + s["mode"].upper()
+        elif ch == "f":
+            if s.get("mode") != "fusion":
+                self.message = "fusion combinations are available in FUSION mode"
+                return True
+            order = ["vrs", "vr", "sv", "sr"]
+            current = s.get("fusion_components", "vrs")
+            i = order.index(current) if current in order else 0
+            s["fusion_components"] = order[(i + 1) % len(order)]
+            gamma_key = ("stochastic_gamma"
+                         if "s" in s["fusion_components"] else "raster_gamma")
+            if gamma_key in s:
+                s["gamma"] = s[gamma_key]
+            self.dirty = True
+            self.message = "fusion = " + s["fusion_components"].upper()
         elif ch == "w":
             order = ["alternate", "palindrome", "retrace"]
             i = order.index(s.get("sweep", "alternate")) if s.get("sweep") in order else 0
@@ -138,9 +159,28 @@ class KeyMap:
 def as_flags(s):
     """Current state as flags you can paste into a command line."""
     mode = s.get("mode", "raster" if s.get("raster") else "vector")
-    out = [] if mode == "vector" else [f"--scope-mode {mode}"]
+    mix_hz = s.get("mix_hz")
+    if mix_hz:
+        out = [f"--scope-mix {mix_hz:g}",
+               f"--scope-mix-duty {s.get('mix_duty', 0.5):g}"]
+    else:
+        out = [] if mode == "vector" else [f"--scope-mode {mode}"]
+        if mode == "fusion":
+            out.append(f"--scope-fusion {s.get('fusion_components', 'vrs')}")
     out.append(f"--scope-trim {s.get('trim', 0.02):g}")
-    if mode == "stochastic":
+    if mix_hz:
+        raster_gamma = s.get("raster_gamma", 2.2)
+        stochastic_gamma = s.get("stochastic_gamma", 2.0)
+        out.append(f"--scope-gamma {raster_gamma:g}")
+        if abs(stochastic_gamma - raster_gamma) > 1e-9:
+            out.append(f"--scope-stochastic-gamma {stochastic_gamma:g}")
+    elif mode == "fusion":
+        raster_gamma = s.get("raster_gamma", 2.2)
+        stochastic_gamma = s.get("stochastic_gamma", 2.0)
+        out.append(f"--scope-gamma {raster_gamma:g}")
+        if abs(stochastic_gamma - raster_gamma) > 1e-9:
+            out.append(f"--scope-stochastic-gamma {stochastic_gamma:g}")
+    elif mode == "stochastic":
         gamma = s.get("stochastic_gamma", s.get("gamma", 2.0))
         out.append(f"--scope-gamma {gamma:g}")
     else:

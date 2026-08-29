@@ -111,19 +111,29 @@ SCOPE_DEVICE = None       # audio output: name FRAGMENT ("Scarlett", "hw:1")
                           # the install. --device overrides this. This is the
                           # only way to pin an output without a CLI, which is
                           # what a systemd unit needs.
+SCOPE_DEVICE_SPEC = None  # transient CLI name/index before it is resolved
+SCOPE_DEVICE_RESOLVED = False
+SCOPE_ASK = False         # interactive device picker; safe only with a tty
 SCOPE_FPS = None          # None -> follow IPS
-SCOPE_RENDER_MODE = "vector"  # vector | raster | stochastic. Stochastic is an
-                          # Osci-style luminance-weighted XY walk: no scanlines
-                          # and no Z/brightness channel.
+SCOPE_SAMPLES = None      # explicit samples/trace; incompatible with mix
+SCOPE_RENDER_MODE = "vector"  # vector | raster | stochastic | fusion
+                          # Stochastic/fusion use a luminance-weighted XY walk:
+                          # no scanlines and no Z/brightness channel.
+SCOPE_FUSION = "vrs"      # vrs | vr | sv | sr; equal density mass per component
+SCOPE_RASTER = False      # compatibility mirror for older integrations
+SCOPE_REALTIME = False    # raster-only low-latency streaming path
+SCOPE_LIST_FROM_IMAGES = False  # bypass the baked manifest for legacy bakes
 SCOPE_FIELDS = 1          # raster interlace: traces per picture. 2 or 4 lifts
                           # the refresh rate above flicker fusion without
                           # touching the grid. Needs SCOPE_FPS = N * IPS.
+SCOPE_FIELDS_EXPLICIT = False  # main.py sets this for --scope-fields, including
+                          # explicit 1, which disables mix's automatic fields
 SCOPE_MIN_FEATURE = 0.02  # vector: shortest stroke kept by the occlusion cull
 SCOPE_TRIM = 0.02         # raster: drop cells dimmer than this from the sweep
 SCOPE_GAMMA = 2.2         # raster luminance exponent
 SCOPE_DENSITY = 1.0       # raster samples per cell (1.0 = finest)
 SCOPE_WALK_RADIUS = 10    # stochastic: nearest-neighbour search radius, pixels
-SCOPE_WALK_STRIDE = 0     # stochastic: auto-scale (~width/120; 1 at width 96)
+SCOPE_WALK_STRIDE = 0     # stochastic: auto-scale (~width/120; 2 at width 256)
 SCOPE_WALK_RESEED_MS = 5.0  # stochastic: jump to another bright region
 SCOPE_WALK_GAMMA = 2.0    # stochastic: useful portrait default. Equivalent to
                           # Osci Image Threshold 0.1 (exponent = UI * 10 + 1).
@@ -144,5 +154,5 @@ SCOPE_AUTOFIT = True      # size the grid against cells that survive trim,
                           # usable grid on a subject over a dark background
 SCOPE_SWEEP = "alternate" # alternate | palindrome | retrace
 SCOPE_ROWS = None         # raster scanline count (None = auto from budget)
-SCOPE_MIX = None          # Hz to alternate raster/vector (None = off)
-SCOPE_MIX_DUTY = 0.5      # fraction of mixed passes spent on raster
+SCOPE_MIX = None          # Hz for triangular V -> R -> S -> R trace mix
+SCOPE_MIX_DUTY = 0.5      # raster share; remainder splits vector/stochastic

@@ -110,7 +110,7 @@ Each library directory contains:
 | `poly_starts.npy` | `(P+1,) int32`. Polyline *p* occupies `verts[poly_starts[p] : poly_starts[p+1]]`. |
 | `frame_starts.npy` | `(F+1,) int32`. Frame *i* owns polylines `frame_starts[i]` to `frame_starts[i+1]`. |
 | `flags.npy` | `(P,) uint8`. One per polyline — see below. |
-| `thumbs.npy` | `(F, h, 96, 3) uint8`. `[raster luminance, alpha, raw luminance]`. Legacy two-channel files still load. |
+| `thumbs.npy` | `(F, h, 256, 3) uint8` by default. `[raster luminance, alpha, raw luminance]`. Legacy sizes and two-channel files still load. |
 | `names.json` | Source filenames, for provenance. |
 
 This is a CSR layout — flat arrays plus offset tables, no per-frame Python
@@ -139,7 +139,7 @@ come out right. So it participates in occlusion and is never drawn.
 
 ---
 
-## 4. Three rendering modes
+## 4. Four rendering modes
 
 They are genuinely different pictures, and they use different parts of the
 library.
@@ -216,7 +216,7 @@ The renderer is a continuous sample source, not a per-trace route:
    0.2 are excluded; every candidate gets a fresh `luminance ** gamma` test.
 2. At a fixed target clock (48 kHz by default), spiral outward to the nearest
    accepted unvisited pixel using radius 10 and a source-scale-aware stride.
-   The default resolves to 1 on a 96-pixel bake, equivalent to Osci's stride 4
+   The default resolves to 2 on a 256-pixel bake, equivalent to Osci's stride 4
    on an approximately 480-pixel source.
 3. Clear the short visited history every ten targets and randomly relocate every
    5 ms, matching the current Osci-render implementation.
@@ -243,6 +243,27 @@ slower content handoff; it no longer reduces the number of target decisions per
 second. Start at the normal 30 Hz and let phosphor persistence integrate the
 continuous visit density.
 
+### Fusion — one walk through combined dwell density
+
+Fusion does **not** average simultaneous XY positions. Vector, raster, and
+stochastic paths have no shared phase, so pointwise averaging would invent
+midpoints and collapse features toward the centre. Instead, fusion converts
+each requested source into a 2D dwell-density field, normalizes each field to
+equal total mass, adds them, and drives one persistent nearest-neighbour walk.
+
+```
+--scope-mode fusion --scope-fusion vrs   # vector + raster + stochastic
+--scope-mode fusion --scope-fusion vr    # vector + raster
+--scope-mode fusion --scope-fusion sv    # stochastic + vector
+--scope-mode fusion --scope-fusion sr    # stochastic + raster
+```
+
+Vector geometry becomes a narrow probability ridge; raster contributes its
+preconditioned luminance; stochastic contributes raw luminance. All four
+presets use one continuous beam path with no mode-switch boundary. `v`, `r`,
+and `s` are component names, not output channels, and fusion still has no Z.
+Press `f` while fusion is active to cycle the four presets.
+
 ### Scanlines and the bake ceiling
 
 The runtime area-averages the baked thumbnail down to whatever grid the sample
@@ -250,20 +271,32 @@ budget supports — a proper summed-area resample, not line-skipping, which woul
 alias badly on scanline content. So the thumbnail is a resolution-independent
 store like the vectors, and grid size is a runtime decision.
 
-But its size is a **hard ceiling on scanline count**, and exceeding it is
-reported rather than silently clamped.
+For raster, its size is a **hard ceiling on scanline count**, and exceeding it
+is reported rather than silently clamped. Stochastic also uses the stored
+spatial field directly, so a bake can remain useful above raster's grid ceiling.
+On the supplied portrait, raw contrast was already ample (5th–95th percentile
+span 0.81); enlarging the field, not stretching tone, was the useful change.
+Width 96 retained 63% of source edge energy, while width 256 retained 90%.
 
 | `--thumb-width` | max scanlines | per folder (2220 frames) | 32 folders |
 |---|---|---|---|
 | 48 | 64 | 21 MB | 0.66 GB |
 | 64 | 85 | 36 MB | 1.16 GB |
-| **96** (default) | **128** | 83 MB | 2.63 GB |
+| 96 | 128 | 83 MB | 2.63 GB |
 | 128 | 171 | 146 MB | 4.67 GB |
-| 256 | 341 | 582 MB | 18.6 GB |
+| **256** (default) | **341** | **582 MB** | **18.6 GB** |
+| 480 | 640 | 2.05 GB | 65.5 GB |
+
+The baker writes each folder's thumbnail array through a temporary on-disk
+memmap and atomically installs it when complete. Parallel workers therefore do
+not each hold a 582 MB array in RAM, and an interrupted folder does not replace
+its previous valid `thumbs.npy` with a partial file. Rebake the complete tree
+when changing width; runtime rejects mixed main/float dimensions.
 
 There is a natural ceiling worth knowing: `cells ≈ samples / density`, so no
 realistic budget resolves past about 138×184 (6400 samples at density 0.25).
-Baking wider than ~128 stores data nothing can read.
+That is raster's ceiling. The default 256px raw channel still benefits
+stochastic because its target search runs in stored source-pixel space.
 
 Three ways to add scanlines, trading against different things:
 
@@ -292,69 +325,41 @@ Two controls change how the fixed budget is spent:
   wherever it crosses a dark area it leaves a faint trail. Raising trim to
   0.08–0.16 cuts that noticeably. `--no-trim` disables it entirely.
 
-### Retrace
+### Sweep continuity and interlace
 
-The sweep is a **closed loop** by default: it runs down the rows and back up
-over the same path, so there is no jump from the last row to the first. Without
-this the beam has to fly back across the picture every frame, and with no Z
-channel to blank it you see a bright diagonal. The return pass redraws the same
-cells, so brightness is unchanged — it costs nothing. `--retrace` restores the
-old behaviour if you want the CRT-style flyback as an effect.
+The default `alternate` sweep draws one direction per trace and starts the next
+trace at the endpoint the DAC actually received. It then reverses direction,
+so fresh traces chain without a flyback and without spending half the samples
+redrawing the same image. `palindrome` draws down and back inside one trace;
+it is safe when the same trace must repeat, but each direction gets half the
+budget. `retrace` deliberately restores the visible CRT-style flyback.
 
-Faint diagonals that remain are the beam crossing dark regions between bright
-ones. They are inherent without blanking, and they are genuinely dim on
-hardware — brightness is dwell time, and the beam is moving fast there.
+Faint diagonals inside an image are travel between bright regions. They are
+inherent without Z blanking and are dimmer than drawn detail because the beam
+crosses them quickly.
 
-Neither changes how long a trace takes. Trace duration is `1/fps`, always,
-regardless of image complexity. What they change is how thinly the budget is
-spread over the picture.
-
-Three controls decide how that fixed budget is spent:
+Trace duration is always `samples / sample_rate`, independent of image
+complexity. Two controls decide how that fixed raster budget is spent:
 
 **`--density`** — samples per cell. At 1.0 you get the most cells, each with
 about one sample, which reads as dots. At 2–3 you get fewer, larger cells drawn
 as solid bright lines. Lower resolution, better-formed image. This is the
 knob for "make it draw properly rather than finely".
 
-**`--fields`** — interlacing. Field *f* draws rows *f, f+fields, f+2·fields…*
-With half the rows per pass, each row gets twice the samples, so **horizontal
-resolution doubles at no extra cost**, and phosphor persistence merges
-successive fields back into a whole image. The cost is temporal: consecutive
-fields come from consecutive indices, so fast motion combs — exactly like
-interlaced video. At 48kHz/30ips, 2 fields takes ~34 columns to ~49.
+**`--fields`** — interlacing. Field *f* draws rows `f, f+fields,
+f+2·fields…`. Runtime raises the trace rate to `fields × IPS`, so each trace is
+shorter but a complete picture still receives `sample_rate / IPS` samples.
+The result is the same grid and same 30 Hz complete-picture rate as progressive,
+with the screen touched at 60/90/120 Hz for 2/3/4 fields. It buys steadier
+phosphor coverage relative to simply raising FPS, not extra resolution over a
+30 Hz progressive picture.
 
-**`--even-rows`** — constant beam time per row instead of brightness-weighted.
-Without it, bright content in the upper frame eats the global budget and the
-lower rows starve — the beam "runs out of time" toward the bottom and renders
-it as sparse dots. With it, every row gets equal time. The cost is that dark
-rows also consume their share, appearing as faint scanlines, since without a Z
-channel there's no way to blank them.
-
-#### Interlacing — the resolution lever
-
-At 48kHz and 30fps you get 1600 samples for ~1530 cells: about one sample per
-cell. Resolution is grid-limited, and the grid is sample-limited. Skipping
-dark cells does not help — measured on real content, black cells already
-consume only **3.3%** of the budget, so scanning content spans alone would buy
-just 1.12× per axis.
-
-Since samples per second is fixed by the hardware, the only remaining lever is
-**time**. With `fields = N`, one trace draws only rows where
-`row % N == field`. The full grid can then hold N times as many cells for the
-same per-trace cost, so **both axes gain √N**, and the phosphor integrates
-successive fields into one picture. Analog TV did exactly this, for exactly
-this reason.
-
-| fields | rows in full grid | full-image refresh at 30fps |
-|---|---|---|
-| 1 | 54 | 30 Hz |
-| 2 | 82 | 15 Hz |
-| 3 | 102 | 10 Hz |
-| 4 | 120 | 7.5 Hz |
-
-Default is 4. The cost is that a full image takes N traces, so fast motion can
-comb, and a low full-refresh rate can visibly crawl on a scope with short
-persistence. Lower it to 2 if either bothers you.
+| fields | trace rate at 30 IPS | complete-picture rate | grid budget |
+|---|---:|---:|---:|
+| 1 (default) | 30 Hz | 30 Hz | 1×1600 samples at 48 kHz |
+| 2 | 60 Hz | 30 Hz | 2×800 samples |
+| 3 | 90 Hz | 30 Hz | 3×533 samples |
+| 4 | 120 Hz | 30 Hz | 4×400 samples |
 
 Because interlacing needs a fresh field on *every* trace, the runtime pushes
 one whenever a trace completes — not only when the index changes. Otherwise a
@@ -364,21 +369,32 @@ held frame would show one field forever and stay permanently combed.
 
 ## 4b. Mix mode
 
-`--mix [HZ]` (default 120) alternates raster and vector on successive traces.
-Above flicker fusion the phosphor sums them, so you see one image: raster
-supplies tone and mass, vector supplies the outline and features.
+`--scope-mix [HZ]` (default 120) follows a triangular whole-trace route:
+`VECTOR -> RASTER -> STOCHASTIC -> RASTER -> ...`. Above flicker fusion the
+phosphor sums all three, so you see one image: raster supplies tone and mass,
+vector supplies the outline, and stochastic supplies directionless bitmap
+detail. Whole traces are switched rather than sample-interpolated, which would
+draw false connectors between unrelated XY positions.
 
 The switch rate **is** the trace rate, so each pass gets `rate / HZ` samples —
 400 at 48kHz/120Hz, 800 at 60Hz. Lower HZ gives each mode more detail but
-starts to read as two alternating pictures rather than one combined one.
+starts to read as three separate component pictures rather than one combined
+one.
 60–120 Hz is the useful range.
 
-Both modes need their data, so this requires a **full bake**, not
+All three modes need their data, so this requires a **full bake**, not
 `--thumbs-only`.
 
-The beam has to jump between the end of the raster sweep and the start of the
-vector path, so expect a faint connector. It is dim (fast traversal) and gets
-less noticeable as HZ rises.
+`--scope-mix-duty` remains the raster fraction. The non-raster fraction is split
+equally between vector and stochastic, so duty 0.5 at 120 Hz yields 30 vector,
+60 raster and 30 stochastic passes per second. The beam handoff is chained for
+raster and stochastic; vector can still contribute a faint fast connector.
+
+Mix owns the trace clock, so `--scope-samples` is rejected rather than silently
+overriding the requested switch rate. Automatic raster interlace is used only
+when total and raster traces per source image are whole numbers. The web preview
+joins a complete component/field exposure—four traces at the default—so it
+shows `V+R+S+R` rather than alternating incomplete halves.
 
 ---
 
@@ -388,9 +404,10 @@ A bake flag. It writes `thumbs.npy` and skips vectorizing entirely.
 
 - **Much faster** — seconds instead of minutes, since vectorization is all the
   work.
-- **Raster and stochastic modes work.**
+- **Raster, stochastic, and `sr` fusion work.**
 - **Vector mode does not** — there's no geometry, so it falls back to the idle
   circle.
+- **Fusion presets containing `v` do not** — they require contour geometry.
 
 Use it when you've settled on raster/stochastic and are iterating on content.
 Do a full bake when you want live cycling through all three modes.
@@ -530,23 +547,24 @@ python main.py --mode scope --xy-dir images_xy [options]
 
 | Flag | Effect |
 |---|---|
-| `--scope-mode vector\|raster\|stochastic` | Select the renderer. |
+| `--scope-mode vector\|raster\|stochastic\|fusion` | Select the renderer. |
+| `--scope-fusion vrs\|vr\|sv\|sr` | Choose equal-mass density sources for fusion. |
 | `--scope-raster` | Compatibility alias for `--scope-mode raster`. |
 | `--scope-stochastic` | Alias for `--scope-mode stochastic`. |
 | `--scope-walk-radius PX` | Stochastic nearest-neighbour search radius (default 10). |
-| `--scope-walk-stride PX` | Stochastic source-pixel step. Default 0 auto-scales: 1 at width 96, 2 at 256, 4 at 480. |
+| `--scope-walk-stride PX` | Stochastic source-pixel step. Default 0 auto-scales: 2 at the default width 256; 1 at 96 and 4 at 480. |
 | `--scope-walk-reseed-ms MS` | Time between random region changes (default 5 ms). |
-| `--scope-gamma F` | Fresh per-candidate luminance exponent in stochastic mode (default 2). Gamma 6 is Osci's UI default but strongly suppresses portrait midtones. |
+| `--scope-stochastic-gamma F` | Stochastic-only exponent (default 2); `--scope-walk-gamma` remains an alias. |
 | `--scope-walk-edge F` | Optional non-Osci edge probability (default 0). |
 | `--scope-walk-hz HZ` | Target decisions per second (default 48000), independent of faster DAC rates. |
 | `--scope-fps N` | Scope redraw rate. Defaults to `IPS`. Sets `N = rate/fps`. |
-| `--scope-samples N` | Path length per trace directly. Overrides FPS. |
+| `--scope-samples N` | Path length per trace directly. Overrides FPS; incompatible with mix. |
 | `--scope-realtime` | Stream continuously; index changes land within a row (raster only). |
-| `--scope-mix [HZ]` | Alternate raster/vector each trace (default 120 Hz). |
-| `--scope-mix-duty F` | Fraction of mixed passes spent on raster (default 0.5). |
+| `--scope-mix [HZ]` | Triangular vector/raster/stochastic/raster whole-trace mix (default 120 Hz). |
+| `--scope-mix-duty F` | Raster fraction; remainder splits equally between vector/stochastic (default 0.5). |
 | `--scope-sweep MODE` | `alternate` (default), `palindrome`, or `retrace`. |
 | `--scope-rows N` | Raster scanline count (default: auto from budget). |
-| `--scope-gamma F` | Active renderer's luminance exponent: raster default 2.2, stochastic default 2. |
+| `--scope-gamma F` | Active renderer's exponent: raster default 2.2, stochastic default 2; sets both in mix. |
 | `--scope-density F` | Raster samples per cell (1.0 = finest). |
 | `--scope-trim F` | Ignore luminance below this level (default 0.02). |
 | `--scope-fields N` | Raster interlacing (1 = progressive). |
@@ -554,7 +572,8 @@ python main.py --mode scope --xy-dir images_xy [options]
 | `--device X` | Audio output by index or name fragment, e.g. `--device Scarlett` |
 
 While scope mode owns a terminal, press `v` to cycle
-`VECTOR → RASTER → STOCHASTIC → VECTOR`. Press `p` to print the current mode
+`VECTOR → RASTER → STOCHASTIC → FUSION → VECTOR`; in fusion, `f` cycles
+`VRS → VR → SV → SR`. Press `p` to print the current mode
 and live settings as reusable command-line flags. Cycling is disabled in
 `--scope-realtime` and `--scope-mix`, whose audio/scheduling paths are fixed at
 startup; restart with `--scope-mode` to leave either one.
@@ -564,6 +583,9 @@ startup; restart with `--scope-mode` to leave either one.
 ```
 python test_scope_pair.py --xy-dir images_xy [--bg N --fg N --index N] [options]
 ```
+
+Pass `--fusion vrs|vr|sv|sr` to preview a fusion preset; press `f` to cycle
+the presets in the preview window.
 
 Adds `--play`, `--ips`, `--loop`, `--exposure`, `--size`, `--ask` and
 `--device` on top of the playback flags.

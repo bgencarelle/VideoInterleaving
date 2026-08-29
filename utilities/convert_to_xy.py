@@ -51,9 +51,13 @@ PROFILES = {
 # whatever grid the sample budget supports, so this is a resolution-independent
 # store like the vectors -- but its size is a hard ceiling on scanline count.
 #
-# There IS a natural ceiling: cells = samples/density, so no realistic budget
-# resolves past ~138x184 (6400 samples at density 0.25).  Baking wider stores
-# data nothing can read.
+# Raster still has a natural ceiling: cells = samples/density, so no realistic
+# completed raster pass resolves past ~138x184 (6400 samples at density 0.25).
+# Stochastic is different: its persistent walk chooses targets in the baked
+# source field, so retaining source-scale edges still matters after raster has
+# run out of grid cells.  On the supplied 480 px portrait, width 96 retained
+# 63% of source edge energy, width 256 retained 90%, and width 480 retained
+# 100%.  Width 256 is the useful knee rather than a storage-minimising default.
 #
 # New bakes store three channels: raster luminance, alpha, and the unmodified
 # luminance stochastic needs. Older two-channel bakes remain readable.
@@ -61,10 +65,11 @@ PROFILES = {
 #   width   grid cap   per folder (2220 frames)   32 folders
 #      48      48x64          21 MB                 0.66 GB
 #      64      64x85          36 MB                 1.16 GB
-#      96     96x128          83 MB                 2.63 GB   <- default
+#      96     96x128          83 MB                 2.63 GB
 #     128    128x171         146 MB                 4.67 GB
-#     256    256x341         582 MB                18.60 GB   (unusable headroom)
-THUMB_W = 96
+#     256    256x341         582 MB                18.60 GB   <- default
+#     480    480x640        2046 MB                65.47 GB   (source reference)
+THUMB_W = 256
 
 
 def load_rgba(path):
@@ -99,6 +104,7 @@ PRECONDITION = 1.2
 PRECOND_CLAMP = 3        # radius of the local min/max the result may not exceed
 PRECOND_SIGMA_X = 2.2
 PRECOND_SIGMA_Y = 0.6
+PRECOND_REFERENCE_W = 96  # constants above were tuned at this stored width
 
 
 def make_thumb(rgb, alpha, width=THUMB_W, precondition=PRECONDITION):
@@ -118,14 +124,22 @@ def make_thumb(rgb, alpha, width=THUMB_W, precondition=PRECONDITION):
     raw_lum = lum.copy()
     if precondition and precondition > 0:
         # sharpen AFTER downscaling, so the kernel is sized in thumbnail cells
-        # -- which is what the beam actually sweeps
+        # -- which is what the beam actually sweeps. Scale the kernel with the
+        # stored width: otherwise changing the default from 96 to 256 would
+        # make the same physical correction 2.7x narrower and raster would
+        # silently lose its pre-compensation when it downsamples the bake.
+        pre_scale = tw / float(PRECOND_REFERENCE_W)
         L = lum.astype(np.float32) / 255.0
-        blur = cv2.GaussianBlur(L, (0, 0), sigmaX=PRECOND_SIGMA_X,
-                                sigmaY=PRECOND_SIGMA_Y)
+        blur = cv2.GaussianBlur(
+            L, (0, 0), sigmaX=PRECOND_SIGMA_X * pre_scale,
+            sigmaY=PRECOND_SIGMA_Y * pre_scale)
         sharp = L + precondition * (L - blur)
         if PRECOND_CLAMP:
             # no rim, ever: the result may not leave the original local range
-            k = np.ones((PRECOND_CLAMP, PRECOND_CLAMP), np.uint8)
+            clamp_size = max(1, int(round(PRECOND_CLAMP * pre_scale)))
+            if clamp_size % 2 == 0:
+                clamp_size += 1
+            k = np.ones((clamp_size, clamp_size), np.uint8)
             sharp = np.minimum(np.maximum(sharp, cv2.erode(L, k)),
                                cv2.dilate(L, k))
         lum = np.clip(sharp * 255.0, 0, 255)
@@ -269,15 +283,19 @@ def process_folder(args):
     is_float = "float" in Path(src_folder).parts
     budget = prof["budget_float"] if is_float else prof["budget_main"]
     bands = 0 if is_float else prof["bands"]   # floats are mattes: silhouette only
+    dest = Path(dest_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+    thumb_temp = dest / f".thumbs-{os.getpid()}.npy"
+    thumbs = None
 
     try:
         verts, poly_starts, frame_starts, flags, names = [], [0], [0], [], []
-        # Preallocated on the first thumb rather than a list + np.stack at the
-        # end.  np.stack copies the whole set into a second buffer, so peak
-        # memory was double the data: 219 MB per worker for 2221 frames at
-        # width 128, and the pool runs one worker per folder.  Filling in place
-        # halves it.
-        thumbs = None
+        # Write thumbnails directly into a temporary .npy memmap. At the 256px
+        # default one 2220-frame folder is about 582 MB; keeping one such array
+        # resident per ProcessPool worker would turn the higher-resolution bake
+        # into an out-of-memory failure. The completed file is atomically moved
+        # into place, so an interrupted bake does not replace a good old one
+        # with a partial array.
         n_thumbs = 0
         for fp in files:
             if thumbs_only:
@@ -294,7 +312,9 @@ def process_folder(args):
                     precondition=prof.get("precondition", PRECONDITION))
             if thumb is not None:
                 if thumbs is None:
-                    thumbs = np.empty((len(files),) + thumb.shape, np.uint8)
+                    thumbs = np.lib.format.open_memmap(
+                        thumb_temp, mode="w+", dtype=np.uint8,
+                        shape=(len(files),) + thumb.shape)
                 thumbs[n_thumbs] = thumb
                 n_thumbs += 1
             for p, f in zip(polys, fl):
@@ -305,19 +325,28 @@ def process_folder(args):
             frame_starts.append(len(poly_starts) - 1)
             names.append(fp.name)
 
-        dest = Path(dest_dir)
-        dest.mkdir(parents=True, exist_ok=True)
         V = np.vstack(verts) if verts else np.zeros((0, 2), np.int16)
         np.save(dest / "verts.npy", V)
         np.save(dest / "poly_starts.npy", np.array(poly_starts, np.int32))
         np.save(dest / "frame_starts.npy", np.array(frame_starts, np.int32))
         np.save(dest / "flags.npy", np.array(flags, np.uint8))
-        if thumbs is not None and n_thumbs:
-            # a frame can fail to produce a thumb, so trim rather than assume
-            np.save(dest / "thumbs.npy", thumbs[:n_thumbs])
+        if thumbs is not None:
+            if n_thumbs != len(files):
+                raise RuntimeError(
+                    f"generated {n_thumbs} thumbnails for {len(files)} frames")
+            thumbs.flush()
+            del thumbs
+            os.replace(thumb_temp, dest / "thumbs.npy")
         (dest / "names.json").write_text(json.dumps(names))
         return None
     except Exception as e:
+        try:
+            if thumbs is not None:
+                del thumbs
+            if thumb_temp.exists():
+                thumb_temp.unlink()
+        except Exception:
+            pass
         return f"Error processing {src_folder}: {e}"
 
 
@@ -341,10 +370,12 @@ def main():
                          "min/max so it cannot form halos -- no bright rim or "
                          "hollow eyes. Safe to raise; gains taper past ~2.")
     ap.add_argument("--thumb-width", type=int, default=THUMB_W,
-                    help=f"raster thumbnail width (default {THUMB_W}); this is "
-                         "the hard ceiling on scanline count. 96 caps at 128 "
-                         "lines, 128 caps at 171. Storage scales with the "
-                         "square, and no sample budget resolves past ~138x184.")
+                    help=f"baked luminance width (default {THUMB_W}). Raster "
+                         "uses it as a grid ceiling; stochastic uses its "
+                         "source-scale spatial detail. On the reference "
+                         "portrait 256 retains about 90%% of source edge "
+                         "energy, versus 63%% at 96. Storage scales with the "
+                         "square.")
     ap.add_argument("--thumbs-only", action="store_true",
                     help="bake only raster/raw luminance + alpha thumbnails "
                          "(skip vectorizing) -- "
@@ -354,6 +385,8 @@ def main():
                          "lower to fit more contours)")
     ap.add_argument("--log-level", default="INFO")
     args = ap.parse_args()
+    if args.thumb_width < 16:
+        ap.error("--thumb-width must be at least 16 pixels")
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), 20),
                         format="%(asctime)s [%(levelname)s] %(message)s")
@@ -413,15 +446,23 @@ def main():
         if f.exists():
             layer = "float" if "float" in Path(dest).parts else "main"
             counts.setdefault(layer, set()).add(len(np.load(f)) - 1)
+    registration_broken = False
     for layer, ns in counts.items():
         if len(ns) > 1:
+            registration_broken = True
             logging.warning("Frame counts differ within %s layer: %s "
                             "-- index registration is broken!", layer, sorted(ns))
 
     logging.info("Done in %.1fs.", time.time() - start)
     for e in errors:
         logging.warning("  - %s", e)
+    if errors or registration_broken:
+        logging.error("Bake incomplete: %d folder error(s)%s", len(errors),
+                      " plus frame-registration failures"
+                      if registration_broken else "")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

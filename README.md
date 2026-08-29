@@ -144,7 +144,7 @@ python main.py --mode scope --xy-dir ./images_xy --scope-mode stochastic
 
 Stochastic uses Osci-render's bitmap walk (`radius 10`, no added edge term)
 and scales Osci's full-resolution stride to the baked thumbnail (`auto`
-resolves to stride 1 at the default width 96). Its portrait default is
+resolves to stride 2 at the default width 256). Its portrait default is
 `gamma 2`, equivalent to Osci's Image Threshold 0.1. Osci's UI default maps to
 gamma 6 and suppresses too many facial midtones in this material. It runs
 continuously across audio buffers. Use the existing `--scope-gamma` argument
@@ -152,7 +152,23 @@ to tune the active renderer.
 Its 48 kHz target clock is independent of the image rate and of faster DAC
 sample rates; use `--scope-walk-hz` only when deliberately changing that walk.
 
-Press `v` while it is running to cycle vector, raster, and stochastic modes.
+Fusion combines dwell distributions into one continuous walk instead of
+averaging unrelated XY positions or switching whole traces:
+
+```bash
+python main.py --mode scope --xy-dir ./images_xy --scope-mode fusion --scope-fusion vrs
+```
+
+`--scope-fusion` accepts `vrs`, `vr`, `sv`, and `sr`. Each active source gets
+equal total probability mass, so sparse vector contours do not disappear
+under a full-frame luminance field. Press `f` in fusion mode to cycle them.
+
+The 256 px bake default is intentional. The reference portrait already has a
+wide luminance range, so global contrast expansion would discard useful tone.
+The old 96 px bake retained only about 63% of its source edge energy; 256 px
+retains about 90% without taking the full cost of a source-sized 480 px field.
+
+Press `v` while it is running to cycle vector, raster, stochastic, and fusion.
 See `SCOPE_MODE.md` for wiring, sample-budget, and renderer details.
 
 ### The `settings.py` Way (Legacy)

@@ -19,6 +19,7 @@ Fallbacks: no audio device -> display only; no GUI -> writes a PNG.
 """
 import argparse
 import itertools
+import math
 import os
 import sys
 import time
@@ -30,7 +31,9 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from scope_bake import XYLibrary, merge, raster_frame, content_bbox  # noqa: E402
+from scope_bake import (XYLibrary, merge, raster_frame, content_bbox,
+                        composite_luma, StochasticEmitter,
+                        TriangleMixScheduler, fusion_probability)   # noqa: E402
 from scope_out import Scope, rasterize, FPS, choose_device           # noqa: E402
 
 PNG_OUT = "test_scope_pair_output.png"
@@ -146,6 +149,8 @@ def build_parser():
     ap.add_argument("--size", type=int, default=700, help="preview window size")
 
     ap.add_argument("--raster", action="store_true", help="start in raster mode")
+    ap.add_argument("--fusion", choices=("vrs", "vr", "sv", "sr"),
+                    help="start in fused-density mode with these components")
     ap.add_argument("--samples", type=int,
                     help="path length per trace -- the real detail budget. "
                          "Refresh follows as rate/samples. Overrides --fps.")
@@ -157,6 +162,8 @@ def build_parser():
 
     ap.add_argument("--rows", type=int, help="raster scanline count (default auto)")
     ap.add_argument("--gamma", type=float, default=2.2, help="raster contrast")
+    ap.add_argument("--stochastic-gamma", type=float, default=2.0,
+                    help="stochastic luminance exponent (default 2.0)")
     ap.add_argument("--density", type=float, default=1.0,
                     help="raster samples per cell; 1.0 = finest, above 1 trades "
                          "detail for brighter solider lines")
@@ -174,18 +181,13 @@ def build_parser():
                     help="sweep full width even across black margins")
     ap.add_argument("--mix", nargs="?", type=float, const=120.0, default=None,
                     metavar="HZ",
-                    help="alternate RASTER and VECTOR every trace at this rate "
-                         "(default 120). Above flicker fusion the phosphor sums "
-                         "them: raster gives tone, vector gives outline. The "
-                         "switch rate IS the trace rate, so each pass gets "
-                         "rate/HZ samples -- 400 at 48kHz/120Hz.")
+                    help="triangular VECTOR -> RASTER -> STOCHASTIC -> RASTER "
+                         "whole-trace mix at this rate (default 120). The trace "
+                         "rate is HZ, so each pass gets rate/HZ samples.")
     ap.add_argument("--mix-duty", type=float, default=0.5, metavar="F",
                     help="fraction of mixed passes spent on RASTER (default "
-                         "0.5). Raster spreads its samples over hundreds of "
-                         "cells so it reads dim; vector concentrates them on a "
-                         "few strokes so it reads bright. Raise toward 0.75 to "
-                         "let tone hold its own against the outline. 1.0 = all "
-                         "raster, 0.0 = all vector.")
+                         "0.5); the remainder splits equally between VECTOR "
+                         "and STOCHASTIC")
     ap.add_argument("--sweep", choices=("alternate", "palindrome", "retrace"),
                     default="alternate",
                     help="alternate: each trace sweeps one way and the next "
@@ -212,6 +214,16 @@ def build_parser():
 def main():
     args = build_parser().parse_args()
 
+    if args.mix is not None:
+        if not math.isfinite(args.mix) or args.mix <= 0:
+            raise SystemExit("--mix must be a finite rate greater than zero")
+        if args.samples is not None:
+            raise SystemExit("--samples cannot be combined with --mix; the "
+                             "mix rate is the trace clock")
+    if (not math.isfinite(args.mix_duty)
+            or not 0.0 <= args.mix_duty <= 1.0):
+        raise SystemExit("--mix-duty must be between 0 and 1")
+
     mains, floats, root = discover(args.xy_dir)
     bg_dir = choose("Background (main)", mains, root, args.bg)
     fg_dir = choose("Foreground (float)", floats, root, args.fg)
@@ -227,7 +239,7 @@ def main():
         index = (int(raw) if raw else 0) % frames
 
     if args.mix:
-        args.fps = int(round(args.mix))     # switch rate == trace rate
+        args.fps = args.mix                 # switch rate == trace rate
     scope = None
     try:
         # invert_y=False: everything out of scope_bake is ALREADY in scope
@@ -268,14 +280,20 @@ def main():
     field_counter = itertools.count()
     sweep = {"rev": False, "end": None}
     duty = min(1.0, max(0.0, args.mix_duty))
-    duty_acc = 0.0
+    mix_scheduler = TriangleMixScheduler(duty)
+    stochastic = StochasticEmitter(
+        scope.samplerate if scope else 44100, n_samples,
+        gamma=args.stochastic_gamma)
+    beam_end = None
+    last_mode = None
     if args.sweep == "alternate" and args.fps > args.ips:
         print(f"[SWEEP] --fps {args.fps} > --ips {args.ips:.0f}: traces will "
               "repeat and a repeated one-way sweep shows a flyback. "
               "Use --sweep palindrome or match fps to ips.")
 
-    def build(idx, do_cull, do_raster):
-        if do_raster:
+    def build(idx, do_cull, mode):
+        nonlocal beam_end, last_mode
+        if mode == "raster":
             samp = raster_frame(mlib, idx, flib, idx, n_samples,
                                 gamma=gamma, rows=args.rows, density=density,
                                 trim=0.0 if args.no_trim else args.trim,
@@ -283,7 +301,7 @@ def main():
                                 field=next(field_counter),
                                 palindrome=(args.sweep == "palindrome"),
                                 reverse=(args.sweep == "alternate" and sweep["rev"]),
-                                start=sweep["end"] if args.sweep == "alternate" else None,
+                                start=beam_end if args.sweep == "alternate" else None,
                                 close=(args.sweep == "retrace"))
             if args.sweep == "alternate" and samp is not None:
                 sweep["rev"] = not sweep["rev"]
@@ -292,7 +310,37 @@ def main():
                 print("[RASTER] this bake has no thumbs.npy -- rebake:\n"
                       "  python utilities/convert_to_xy.py -i <images> "
                       "-o <xy_dir> --thumbs-only")
-                return build(idx, do_cull, False)
+                return build(idx, do_cull, "vector")
+            beam_end = samp[-1].copy()
+            last_mode = mode
+            if scope:
+                scope.show_frame(samp)
+            return samp, 0
+        if mode == "stochastic":
+            if beam_end is not None and last_mode != "stochastic":
+                stochastic.start_at(beam_end)
+            samp = stochastic.emit(composite_luma(
+                mlib, idx, flib, idx, raw=True))
+            if samp is None:
+                return build(idx, do_cull, "vector")
+            beam_end = samp[-1].copy()
+            last_mode = mode
+            if scope:
+                scope.show_frame(samp)
+            return samp, 0
+        if mode == "fusion":
+            if beam_end is not None and last_mode != "fusion":
+                stochastic.start_at(beam_end)
+            probability = fusion_probability(
+                mlib, idx, flib, idx, components=args.fusion or "vrs",
+                min_feature=args.min_feature, raster_gamma=gamma,
+                stochastic_gamma=args.stochastic_gamma,
+                trim=0.0 if args.no_trim else args.trim)
+            samp = stochastic.emit_probability(probability)
+            if samp is None:
+                return build(idx, do_cull, "vector")
+            beam_end = samp[-1].copy()
+            last_mode = mode
             if scope:
                 scope.show_frame(samp)
             return samp, 0
@@ -303,11 +351,17 @@ def main():
             fp, ff = flib.frame(idx % len(flib))
             polys = ([p for p, f in zip(mp, mf) if f != 2]
                      + [p for p, f in zip(fp, ff) if f != 2])
+        samp = rasterize(polys, n_samples)
+        beam_end = samp[-1].copy()
+        last_mode = mode
         if scope:
-            scope.show(polys)
-        return rasterize(polys, n_samples), len(polys)
+            scope.show_frame(samp)
+        return samp, len(polys)
 
-    samples, npolys = build(index, culled, raster)
+    active_mode = (mix_scheduler.next_mode() if args.mix
+                   else "fusion" if args.fusion
+                   else "raster" if raster else "vector")
+    samples, npolys = build(index, culled, active_mode)
     shown_index = index
     dirty = True
     last_step = time.perf_counter()
@@ -315,8 +369,10 @@ def main():
     push_interval = (1.0 / args.mix) if args.mix else (1.0 / ips)
     sim = TraceSim(args.fps, last_step)
     if args.mix:
-        print(f"[MIX] alternating raster/vector at {args.mix:g} Hz "
-              f"-> {n_samples} samples per pass, {args.mix / 2:g} of each per second")
+        outer = (1.0 - duty) * args.mix * 0.5
+        print(f"[MIX] triangular V -> R -> S -> R at {args.mix:g} Hz "
+              f"-> {outer:g} vector, {duty * args.mix:g} raster, "
+              f"{outer:g} stochastic passes/sec")
 
     while True:
         now = time.perf_counter()
@@ -327,15 +383,8 @@ def main():
                     last_step = now
                     index, direction = advance(index, direction, frames, pingpong)
                 if args.mix:
-                    # Bresenham-style accumulator: spreads the duty ratio evenly
-                    # across passes instead of clumping them.
-                    duty_acc += duty
-                    if duty_acc >= 1.0:
-                        raster = True
-                        duty_acc -= 1.0
-                    else:
-                        raster = False
-                sim.queue(build(index, culled, raster), index)
+                    active_mode = mix_scheduler.next_mode()
+                sim.queue(build(index, culled, active_mode), index)
             got = sim.poll(now)
             if got is not None:
                 (samples, npolys), shown_index = got
@@ -344,11 +393,13 @@ def main():
             shown_index = index
 
         if dirty:
-            mode = ("RASTER" if raster
+            mode = ("RASTER" if active_mode == "raster"
+                    else "STOCHASTIC" if active_mode == "stochastic"
+                    else f"FUSION {args.fusion.upper()}" if active_mode == "fusion"
                     else f"VECTOR paths {npolys} merge {'on' if culled else 'OFF'}")
             if args.mix:
                 mode = (f"MIX {args.mix:g}Hz duty {duty:.2f} "
-                        f"[{'R' if raster else 'V'}]")
+                        f"[{active_mode[0].upper()}]")
             state = (f"{'PLAY' if playing else 'PAUSE'} "
                      f"{'<>' if pingpong else '>>'}{'+' if direction > 0 else '-'} "
                      f"{ips:.0f}ips/{args.fps}fps")
@@ -359,7 +410,7 @@ def main():
                            f"  frame {shown_index}/{frames - 1}  {mode}"
                            f"  {n_samples} samples  exp {exposure:.2f}"
                            + (f"  gamma {gamma:.1f} density {density:.0f}"
-                              if raster else "")
+                              if active_mode == "raster" else "")
                            + f"  {state}")
             dirty = False
 
@@ -390,10 +441,10 @@ def main():
             dirty = True
         elif key in (81, ord("a")):
             index, direction = (index - 1) % frames, -1
-            samples, npolys = build(index, culled, raster); dirty = True
+            samples, npolys = build(index, culled, active_mode); dirty = True
         elif key in (83, ord("s")):
             index, direction = (index + 1) % frames, 1
-            samples, npolys = build(index, culled, raster); dirty = True
+            samples, npolys = build(index, culled, active_mode); dirty = True
         elif key == ord("."):
             ips = min(120.0, ips * 1.25); dirty = True
         elif key == ord(","):
@@ -402,23 +453,30 @@ def main():
             pingpong = not pingpong; dirty = True
         elif key == ord("m"):
             culled = not culled
-            samples, npolys = build(index, culled, raster); dirty = True
+            samples, npolys = build(index, culled, active_mode); dirty = True
         elif key == ord("r"):
             raster = not raster
-            samples, npolys = build(index, culled, raster); dirty = True
+            active_mode = "raster" if raster else "vector"
+            samples, npolys = build(index, culled, active_mode); dirty = True
+        elif key == ord("f"):
+            order = ("vrs", "vr", "sv", "sr")
+            current = args.fusion if args.fusion in order else "vrs"
+            args.fusion = order[(order.index(current) + 1) % len(order)]
+            active_mode = "fusion"
+            samples, npolys = build(index, culled, active_mode); dirty = True
         elif key in (ord("+"), ord("=")):
             exposure = min(4.0, exposure * 1.3); dirty = True
         elif key in (ord("-"), ord("_")):
             exposure = max(0.05, exposure / 1.3); dirty = True
         elif key == ord("]"):
             gamma = min(5.0, gamma + 0.2)
-            samples, npolys = build(index, culled, raster); dirty = True
+            samples, npolys = build(index, culled, active_mode); dirty = True
         elif key == ord("["):
             gamma = max(0.6, gamma - 0.2)
-            samples, npolys = build(index, culled, raster); dirty = True
+            samples, npolys = build(index, culled, active_mode); dirty = True
         elif key == ord("d"):
             density = 1.0 if density >= 4.0 else density + 1.0
-            samples, npolys = build(index, culled, raster); dirty = True
+            samples, npolys = build(index, culled, active_mode); dirty = True
 
     if scope:
         scope.stream.stop()
