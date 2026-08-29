@@ -93,7 +93,8 @@ def main():
     import inspect
     params = set(inspect.signature(TraceEmitter.__init__).parameters)
     for knob in ("gamma", "trim", "density", "rows", "fields", "border",
-                 "oversample", "sweep", "dc_comp", "grid", "levels", "autofit"):
+                 "oversample", "sweep", "dc_comp", "grid", "levels",
+                 "autofit", "row_bias", "precondition"):
         ok &= check(f"knob '{knob}'", knob in params)
 
     print("\nboth callers go through TraceEmitter, not render_luma directly")

@@ -24,10 +24,10 @@ portrait, 1,600 stochastic output samples benchmark around 11 ms on the
 development machine, inside a 33 ms/30 Hz buffer period; the runtime prints its
 own measured cost at startup.
 
-The bake remains one-time and resolution-independent; changing renderer,
-sample rate, or trace rate does not require rebaking. Bakes made before the raw
-stochastic luminance channel remain compatible, but one rebake after this
-change removes raster-specific horizontal preconditioning from stochastic.
+The bake remains one-time and output-rate-independent; changing renderer,
+sample rate, or trace rate does not require rebaking. Older bakes remain
+compatible. A compact-format rebake is required only to recover the storage
+saving, source-detail stipple candidates, and grid-domain raster correction.
 
 ---
 
@@ -116,7 +116,11 @@ Each library directory contains:
 | `poly_starts.npy` | `(P+1,) int32`. Polyline *p* occupies `verts[poly_starts[p] : poly_starts[p+1]]`. |
 | `frame_starts.npy` | `(F+1,) int32`. Frame *i* owns polylines `frame_starts[i]` to `frame_starts[i+1]`. |
 | `flags.npy` | `(P,) uint8`. One per polyline — see below. |
-| `thumbs.npy` | `(F, h, 256, 3) uint8` by default. `[raster luminance, alpha, raw luminance]`. Legacy sizes and two-channel files still load. |
+| `thumbs.npy` | `(F, h, 128, 2) uint8` by default: `[raw luminance, alpha]`. Legacy two-channel and interim three-channel bakes still load. |
+| `stipple_xy.npy` | `(F, 1024, 2) uint16` normalized source-detail candidate coordinates. |
+| `stipple_lae.npy` | `(F, 1024, 3) uint8` candidate luminance, alpha, and edge values. |
+| `stipple_mass.npy` | `(F,) float32` proposal mass used for unbiased live reweighting. |
+| `format.json` | Bake version, channel meaning, and recommended grid-domain raster compensation. |
 | `names.json` | Source filenames, for provenance. |
 
 This is a CSR layout — flat arrays plus offset tables, no per-frame Python
@@ -210,11 +214,10 @@ brightness channel. Luminance becomes probability: bright pixels are selected
 more often, nearby unvisited pixels are visited first, and the phosphor turns
 that visit density into visible tone.
 
-New bakes give stochastic the raw luminance channel. Raster keeps its separately
-preconditioned channel because horizontal sharpening compensates a horizontal
-scan; applying that same directional correction to a directionless walk was an
-unintentional source of false edges. This is extra stored source data, not a Z
-or intensity output channel.
+New compact bakes give both modes the same raw luminance channel. Raster applies
+a restrained horizontal-only correction after reducing it to the actual sweep
+grid. Stochastic reads it unchanged. This removes the redundant full-size
+preconditioned channel and prevents the old scaled 9x9 face treatment.
 
 The renderer is a continuous sample source, not a per-trace route:
 
@@ -222,8 +225,7 @@ The renderer is a continuous sample source, not a per-trace route:
    0.2 are excluded; every candidate gets a fresh `luminance ** gamma` test.
 2. At a fixed target clock (48 kHz by default), spiral outward to the nearest
    accepted unvisited pixel using radius 10 and a source-scale-aware stride.
-   The default resolves to 2 on a 256-pixel bake, equivalent to Osci's stride 4
-   on an approximately 480-pixel source.
+   The default resolves to 1 on a 128-pixel compact bake.
 3. Clear the short visited history every ten targets and randomly relocate every
    5 ms, matching the current Osci-render implementation.
 4. Continue the same state across audio buffers and image-index changes. A trace
@@ -248,6 +250,31 @@ long relocations. Lowering `--scope-fps` merely makes larger audio buffers and
 slower content handoff; it no longer reduces the number of target decisions per
 second. Start at the normal 30 Hz and let phosphor persistence integrate the
 continuous visit density.
+
+### Stipple — stable weighted image route
+
+Stipple is the non-maze alternative and leaves `stochastic` intact for anyone
+who wants that behavior. It systematically samples a fixed number of
+luminance-weighted positions, so bright pixels receive repeated visits without
+random clumps. It then orders the unique positions by Euclidean nearest
+neighbor—diagonal motion is allowed—and resamples the completed route to the
+output array length. There is no stride, search radius, visited-map reset,
+random reseed, or walk clock.
+
+Compact bakes do not construct those positions from the 128px raster field.
+They store 1024 weighted candidate positions analyzed at 256px, with uint16
+normalized coordinates and raw tone values. Runtime applies live gamma/trim,
+combines the chosen main and float layers, and selects the requested 768 route
+positions. Thus source-detail placement costs about 0.57 GB for the complete
+32-folder library rather than another full-resolution image channel.
+
+```bash
+--scope-mode stipple --scope-stipple-points 768
+```
+
+The point count belongs to the image construction. A different output sample
+rate only represents the same route more or less densely. `--scope-gamma`,
+`--scope-trim`, and `--scope-walk-edge` shape the importance map.
 
 ### Fusion — corresponding-position multiplexing
 
@@ -277,31 +304,31 @@ alias badly on scanline content. So the thumbnail is a resolution-independent
 store like the vectors, and grid size is a runtime decision.
 
 For raster, its size is a **hard ceiling on scanline count**, and exceeding it
-is reported rather than silently clamped. Stochastic also uses the stored
-spatial field directly, so a bake can remain useful above raster's grid ceiling.
-On the supplied portrait, raw contrast was already ample (5th–95th percentile
-span 0.81); enlarging the field, not stretching tone, was the useful change.
-Width 96 retained 63% of source edge energy, while width 256 retained 90%.
+is reported rather than silently clamped. Stochastic uses the stored field
+directly. Stipple is different: its source-detail coordinate store is
+independent of `--thumb-width`.
 
 | `--thumb-width` | max scanlines | per folder (2220 frames) | 32 folders |
 |---|---|---|---|
-| 48 | 64 | 21 MB | 0.66 GB |
-| 64 | 85 | 36 MB | 1.16 GB |
-| 96 | 128 | 83 MB | 2.63 GB |
-| 128 | 171 | 146 MB | 4.67 GB |
-| **256** (default) | **341** | **582 MB** | **18.6 GB** |
-| 480 | 640 | 2.05 GB | 65.5 GB |
+| 48 | 64 | 14 MB | 0.44 GB |
+| 64 | 85 | 24 MB | 0.77 GB |
+| 96 | 128 | 55 MB | 1.75 GB |
+| **128** (default) | **171** | **97 MB** | **3.11 GB** |
+| 256 | 341 | 388 MB | 12.4 GB |
+
+The fixed 1024-candidate stipple store adds about 0.57 GB at every thumbnail
+width, making the default image data approximately 3.7 GB.
 
 The baker writes each folder's thumbnail array through a temporary on-disk
 memmap and atomically installs it when complete. Parallel workers therefore do
-not each hold a 582 MB array in RAM, and an interrupted folder does not replace
-its previous valid `thumbs.npy` with a partial file. Rebake the complete tree
+not retain whole-folder arrays in RAM, and an interrupted folder does not replace
+its previous valid files with partial data. Rebake the complete tree
 when changing width; runtime rejects mixed main/float dimensions.
 
 There is a natural ceiling worth knowing: `cells ≈ samples / density`, so no
 realistic budget resolves past about 138×184 (6400 samples at density 0.25).
-That is raster's ceiling. The default 256px raw channel still benefits
-stochastic because its target search runs in stored source-pixel space.
+That is raster's ceiling. The 128px default leaves useful stochastic detail;
+stipple retains 256px placement through its sparse candidates instead.
 
 Three ways to add scanlines, trading against different things:
 
@@ -552,16 +579,19 @@ python main.py --mode scope --xy-dir images_xy [options]
 
 | Flag | Effect |
 |---|---|
-| `--scope-mode vector\|raster\|stochastic\|fusion` | Select the renderer. |
+| `--scope-mode vector\|raster\|stochastic\|stipple\|fusion` | Select the renderer. |
 | `--scope-fusion vrs\|vr\|sv\|sr` | Choose round-robin position-array sources for fusion. |
 | `--scope-raster` | Compatibility alias for `--scope-mode raster`. |
 | `--scope-stochastic` | Alias for `--scope-mode stochastic`. |
+| `--scope-stipple` | Alias for `--scope-mode stipple`. |
 | `--scope-walk-radius PX` | Stochastic nearest-neighbour search radius (default 10). |
-| `--scope-walk-stride PX` | Stochastic source-pixel step. Default 0 auto-scales: 2 at the default width 256; 1 at 96 and 4 at 480. |
+| `--scope-walk-stride PX` | Stochastic source-pixel step. Default 0 auto-scales to 1 at width 128. |
 | `--scope-walk-reseed-ms MS` | Time between random region changes (default 5 ms). |
 | `--scope-stochastic-gamma F` | Stochastic-only exponent (default 2); `--scope-walk-gamma` remains an alias. |
 | `--scope-walk-edge F` | Optional non-Osci edge probability (default 0). |
 | `--scope-walk-hz HZ` | Target decisions per second (default 48000), independent of faster DAC rates. |
+| `--scope-stipple-points N` | Stable weighted positions in stipple mode (default 768). |
+| `--scope-precondition F` | Raster horizontal compensation on the final sweep grid. Compact-bake default 0.45; legacy default 0. |
 | `--scope-fps N` | Scope redraw rate. Defaults to `IPS`. Sets `N = rate/fps`. |
 | `--scope-samples N` | Path length per trace directly. Overrides FPS; incompatible with mix. |
 | `--scope-realtime` | Stream continuously; index changes land within a row (raster only). |
@@ -577,7 +607,7 @@ python main.py --mode scope --xy-dir images_xy [options]
 | `--device X` | Audio output by index or name fragment, e.g. `--device Scarlett` |
 
 While scope mode owns a terminal, press `v` to cycle
-`VECTOR → RASTER → STOCHASTIC → FUSION → VECTOR`; in fusion, `f` cycles
+`VECTOR → RASTER → STOCHASTIC → STIPPLE → FUSION → VECTOR`; in fusion, `f` cycles
 `VRS → VR → SV → SR`. Press `p` to print the current mode
 and live settings as reusable command-line flags. Cycling is disabled in
 `--scope-realtime` and `--scope-mix`, whose audio/scheduling paths are fixed at
@@ -589,8 +619,9 @@ startup; restart with `--scope-mode` to leave either one.
 python test_scope_pair.py --xy-dir images_xy [--bg N --fg N --index N] [options]
 ```
 
-Pass `--fusion vrs|vr|sv|sr` to preview a fusion preset; press `f` to cycle
-the presets in the preview window.
+Pass `--stipple --stipple-points 768` to preview stipple, or
+`--fusion vrs|vr|sv|sr` for a fusion preset. Press `v` to cycle all renderers
+and `f` to cycle fusion presets in the preview window.
 
 Adds `--play`, `--ips`, `--loop`, `--exposure`, `--size`, `--ask` and
 `--device` on top of the playback flags.
@@ -612,8 +643,8 @@ Once you know which device you want, `--device` takes an index or a
 case-insensitive name fragment (`--device Scarlett`) — better than an index for
 scripts, since indices reshuffle when hardware is plugged or unplugged.
 
-Keys: `space` play/pause · `←/→` step · `m` toggle occlusion cull · `r`
-vector↔raster · `+/-` intensity · `[/]` gamma · `,/.` speed · `l`
+Keys: `space` play/pause · `←/→` step · `m` toggle occlusion cull · `v` cycle
+renderer · `r` vector↔raster · `+/-` intensity · `[/]` gamma · `,/.` speed · `l`
 pingpong↔loop · `q` quit.
 
 `--exposure` stands in for the scope's intensity knob. Raster detail hides

@@ -3,8 +3,9 @@ scope_display.py -- the scope-mode engine.
 
 A standalone mode, like ascii / asciiweb / local / web: selected once and it
 owns the run. Renders the interleaved composition as XY vectors, dwell raster,
-an Osci-style stochastic luminance walk, or a per-index multiplexer across
-complete XY position arrays on the audio output, driven by the same clock
+an Osci-style stochastic luminance walk, a stable weighted stipple route, or a
+per-index multiplexer across complete XY position arrays on the audio output,
+driven by the same clock
 (update_index, MIDI included) and the same
 folder selector as every other mode.
 
@@ -37,9 +38,11 @@ from time import monotonic as _time_mono
 from scope_out import (Scope, choose_device, BufferedSource, rasterize,
                        precompensate_hpf)
 from scope_bake import (XYLibrary, merge, SweepSource, calibrate,
-                        composite_luma, TraceEmitter, StochasticEmitter,
+                        composite_luma, composite_stipple_candidates,
+                        TraceEmitter, StochasticEmitter,
+                        StippleEmitter,
                         TriangleMixScheduler, PositionMultiplexer,
-                        normalize_fusion_components)
+                        normalize_fusion_components, apply_trace_border)
 try:
     from scope_lowpass import lowpass_circular
 except Exception:            # optional tool; absence must not break the mode
@@ -59,11 +62,14 @@ def _bootstrap():
                     help="force rebuild of image lists")
     render = ap.add_mutually_exclusive_group()
     render.add_argument("--scope-mode",
-                        choices=("vector", "raster", "stochastic", "fusion"))
+                        choices=("vector", "raster", "stochastic", "stipple",
+                                 "fusion"))
     render.add_argument("--scope-raster", "--raster", dest="scope_raster",
                         action="store_true")
     render.add_argument("--scope-stochastic", "--stochastic",
                         dest="scope_stochastic", action="store_true")
+    render.add_argument("--scope-stipple", "--stipple",
+                        dest="scope_stipple", action="store_true")
     ap.add_argument("--scope-walk-radius", type=int)
     ap.add_argument("--scope-walk-stride", type=int)
     ap.add_argument("--scope-walk-reseed-ms", type=float)
@@ -74,6 +80,8 @@ def _bootstrap():
     ap.add_argument("--scope-fusion", choices=("vrs", "vr", "sv", "sr"))
     ap.add_argument("--scope-walk-edge", type=float)
     ap.add_argument("--scope-walk-hz", type=float)
+    ap.add_argument("--scope-stipple-points", type=int)
+    ap.add_argument("--scope-precondition", type=float)
     args = ap.parse_args()
 
     if args.dir:
@@ -99,13 +107,16 @@ def _bootstrap():
         settings.SCOPE_RENDER_MODE = "raster"
     elif args.scope_stochastic:
         settings.SCOPE_RENDER_MODE = "stochastic"
-    if args.scope_mode or args.scope_raster or args.scope_stochastic:
+    elif args.scope_stipple:
+        settings.SCOPE_RENDER_MODE = "stipple"
+    if (args.scope_mode or args.scope_raster or args.scope_stochastic
+            or args.scope_stipple):
         settings.SCOPE_RASTER = settings.SCOPE_RENDER_MODE == "raster"
     if args.scope_gamma is not None:
         if settings.SCOPE_RENDER_MODE == "fusion":
             settings.SCOPE_GAMMA = args.scope_gamma
             settings.SCOPE_WALK_GAMMA = args.scope_gamma
-        elif settings.SCOPE_RENDER_MODE == "stochastic":
+        elif settings.SCOPE_RENDER_MODE in ("stochastic", "stipple"):
             settings.SCOPE_WALK_GAMMA = args.scope_gamma
         else:
             settings.SCOPE_GAMMA = args.scope_gamma
@@ -115,7 +126,9 @@ def _bootstrap():
             (args.scope_walk_reseed_ms, "SCOPE_WALK_RESEED_MS"),
             (args.scope_walk_gamma, "SCOPE_WALK_GAMMA"),
             (args.scope_walk_edge, "SCOPE_WALK_EDGE"),
-            (args.scope_walk_hz, "SCOPE_WALK_HZ")):
+            (args.scope_walk_hz, "SCOPE_WALK_HZ"),
+            (args.scope_stipple_points, "SCOPE_STIPPLE_POINTS"),
+            (args.scope_precondition, "SCOPE_PRECONDITION")):
         if arg is not None:
             setattr(settings, setting_name, arg)
     if args.scope_fusion is not None:
@@ -401,10 +414,12 @@ def run_scope(clock_source=None):
     render_mode = getattr(settings, "SCOPE_RENDER_MODE", None)
     if getattr(settings, "SCOPE_RASTER", False) and render_mode == "vector":
         render_mode = "raster"       # compatibility with older settings.py
-    if render_mode not in ("vector", "raster", "stochastic", "fusion"):
+    if render_mode not in ("vector", "raster", "stochastic", "stipple",
+                           "fusion"):
         render_mode = "raster" if getattr(settings, "SCOPE_RASTER", False) else "vector"
     use_raster = render_mode == "raster"
     use_stochastic = render_mode == "stochastic"
+    use_stipple = render_mode == "stipple"
     use_fusion = render_mode == "fusion"
     try:
         fusion_components = normalize_fusion_components(
@@ -423,6 +438,8 @@ def run_scope(clock_source=None):
     walk_gamma = max(0.01, float(getattr(settings, "SCOPE_WALK_GAMMA", 2.0)))
     walk_edge = max(0.0, float(getattr(settings, "SCOPE_WALK_EDGE", 0.0)))
     walk_hz = max(1.0, float(getattr(settings, "SCOPE_WALK_HZ", 48000.0)))
+    stipple_points = max(8, int(getattr(
+        settings, "SCOPE_STIPPLE_POINTS", 768)))
     rows = getattr(settings, "SCOPE_ROWS", None)
     autofit = getattr(settings, "SCOPE_AUTOFIT", True)
     lowpass = getattr(settings, "SCOPE_LOWPASS", None)
@@ -584,13 +601,14 @@ def run_scope(clock_source=None):
                 "thumbs-only bake. Rebake normally without --thumbs-only.")
     missing_thumbs = [lib for lib in main_libs + float_libs
                       if lib is not None and lib.thumbs is None]
-    if (use_raster or use_stochastic or use_fusion or mix_hz) and missing_thumbs:
+    if (use_raster or use_stochastic or use_stipple or use_fusion
+            or mix_hz) and missing_thumbs:
         raise RuntimeError(
             "Raster, stochastic, and fusion modes need thumbnails and this "
             "bake has "
             f"{len(missing_thumbs)} library/libraries without them. Rebake "
             "normally; thumbnails are part of every standard bake.")
-    if use_raster or use_stochastic or use_fusion or mix_hz:
+    if use_raster or use_stochastic or use_stipple or use_fusion or mix_hz:
         thumb_shapes = {
             tuple(lib.thumbs.shape[1:3])
             for lib in main_libs + float_libs
@@ -602,19 +620,21 @@ def run_scope(clock_source=None):
                 "Baked thumbnail geometry is inconsistent across layers "
                 f"({shown}). Rebake the complete tree with one --thumb-width; "
                 "mixing partial old/new bakes breaks layer registration.")
-    if (use_stochastic or use_fusion
+    if (use_stochastic or use_stipple or use_fusion
             or (mix_hz and mix_duty < 1.0)):
-        raw_active = (use_stochastic
+        raw_active = (use_stochastic or use_stipple
                       or (use_fusion and "s" in fusion_components)
                       or (mix_hz and mix_duty < 1.0))
         legacy_luma = ([lib for lib in main_libs + float_libs
                         if lib is not None and lib.thumbs is not None
-                        and lib.thumbs.ndim >= 4 and lib.thumbs.shape[-1] < 3]
+                        and lib.thumbs.ndim >= 4
+                        and lib.thumbs.shape[-1] < 3
+                        and not getattr(lib, "raw_thumbnail", False)]
                        if raw_active else [])
         if legacy_luma:
-            print("[SCOPE] stochastic: this older bake has only the raster-"
+            print("[SCOPE] raw-luminance modes: this older bake has only the raster-"
                   "preconditioned luminance channel. It remains compatible, "
-                  "but rebake once for the raw stochastic luminance channel.")
+                  "but rebake once for the raw luminance channel.")
         first_thumb = next(
             (lib.thumbs for lib in main_libs + float_libs
              if lib is not None and lib.thumbs is not None), None)
@@ -623,13 +643,40 @@ def run_scope(clock_source=None):
             48000, 2, stride=walk_stride)._stride_for_width(walk_width)
         stride_text = (f"auto -> {resolved_stride}" if walk_stride <= 0
                        else str(resolved_stride))
-        print(f"[SCOPE] stochastic settings: gamma={walk_gamma:g} "
-              f"stride={stride_text} at {walk_width}px radius={walk_radius} "
-              f"reseed={walk_reseed_ms:g}ms walk={walk_hz:g}Hz", flush=True)
-        if walk_width < 256:
-            print(f"[SCOPE] stochastic source is a legacy {walk_width}px bake. "
-                  "The current 256px default retains substantially more "
-                  "spatial detail; rebake normally or pass --thumb-width 256.")
+        stochastic_active = (use_stochastic
+                             or (use_fusion and "s" in fusion_components)
+                             or (mix_hz and mix_duty < 1.0))
+        if stochastic_active:
+            print(f"[SCOPE] stochastic settings: gamma={walk_gamma:g} "
+                  f"stride={stride_text} at {walk_width}px radius={walk_radius} "
+                  f"reseed={walk_reseed_ms:g}ms walk={walk_hz:g}Hz", flush=True)
+        if use_stipple:
+            candidate_counts = {
+                int(lib.stipple_xy.shape[1])
+                for lib in main_libs + float_libs
+                if lib is not None and lib.stipple_xy is not None
+            }
+            candidate_text = (f" from {min(candidate_counts)} baked source-detail "
+                              "candidates" if candidate_counts else
+                              " (legacy full-thumbnail fallback)")
+            print(f"[SCOPE] stipple settings: {stipple_points} stable weighted "
+                  f"positions{candidate_text}, gamma={walk_gamma:g}, "
+                  f"edge={walk_edge:g}")
+
+    valid_libs = [lib for lib in main_libs + float_libs if lib is not None]
+    tagged_raw = [lib for lib in valid_libs
+                  if getattr(lib, "raw_thumbnail", False)]
+    requested_precondition = getattr(settings, "SCOPE_PRECONDITION", None)
+    if requested_precondition is not None:
+        raster_precondition = max(0.0, float(requested_precondition))
+    elif tagged_raw and len(tagged_raw) == len(valid_libs):
+        raster_precondition = min(
+            float(lib.raster_precondition) for lib in tagged_raw)
+    else:
+        raster_precondition = 0.0
+    if (use_raster or mix_hz or (use_fusion and "r" in fusion_components)):
+        domain = "sweep-grid" if raster_precondition else "baked/legacy"
+        print(f"[SCOPE] raster precondition: {raster_precondition:g} ({domain})")
 
     # Calibrate the grid and tone mapping ONCE.  Deriving either per frame
     # makes them follow content statistics: the grid changing by a row
@@ -671,7 +718,8 @@ def run_scope(clock_source=None):
             print(f"[SCOPE] grid {cal['grid_cols']}x{cal['grid_rows']} "
                   f"({_spc:.2f} samples/cell), calibrated once")
         gen = SweepSource(lambda: live, n_pass, gamma=gamma, trim=trim,
-                          density=density, rows=rows, **(cal or {}))
+                          density=density, rows=rows,
+                          precondition=raster_precondition, **(cal or {}))
         # Generate on a worker thread rather than in the audio callback: only
         # the AVERAGE has to keep up, and the ring absorbs the spikes.  Depth
         # is latency, and low latency is the point of realtime mode, so keep
@@ -785,7 +833,7 @@ def run_scope(clock_source=None):
 
     # Measure the real per-frame cost once, so a slow machine says so up front
     # instead of quietly dropping traces.  The budget is one index period.
-    if use_raster or use_stochastic or use_fusion or mix_hz:
+    if use_raster or use_stochastic or use_stipple or use_fusion or mix_hz:
         try:
             import time as _t
             ml0 = next((l for l in main_libs if l is not None), None)
@@ -805,7 +853,7 @@ def run_scope(clock_source=None):
                         (label, (_t.perf_counter() - _t0) / 10 * 1000.0))
 
                 # Probe every path that can really be scheduled. The old mix
-                # probe timed raster only and could miss an over-budget 256px
+                # probe timed raster only and could miss an over-budget
                 # stochastic pass entirely.
                 if use_raster or (mix_hz and mix_duty > 0.0):
                     _raster_probe = TraceEmitter(
@@ -813,6 +861,7 @@ def run_scope(clock_source=None):
                         gamma=gamma, trim=trim, density=density, rows=rows,
                         fields=fields, border=border, oversample=oversample,
                         sweep=sweep_mode, autofit=autofit, row_bias=row_bias,
+                        precondition=raster_precondition,
                         grid=((cal["grid_rows"], cal["grid_cols"])
                               if cal else None),
                         levels=(cal.get("levels") if cal else None))
@@ -825,16 +874,30 @@ def run_scope(clock_source=None):
                         gamma=walk_gamma, trim=trim, radius=walk_radius,
                         stride=walk_stride, edge_gain=walk_edge,
                         reseed_ms=walk_reseed_ms, walk_hz=walk_hz,
-                        dc_comp=dc_comp)
+                        dc_comp=dc_comp, border=border)
                     _measure("stochastic", lambda k: _stochastic_probe.emit(
                         composite_luma(ml0, k, fl0, k, raw=True)))
+
+                if use_stipple:
+                    _stipple_probe = StippleEmitter(
+                        scope.samplerate, scope.samples_per_frame,
+                        points=stipple_points, gamma=walk_gamma, trim=trim,
+                        edge_gain=walk_edge, dc_comp=dc_comp, border=border)
+                    def _probe_stipple(k):
+                        cloud = composite_stipple_candidates(ml0, k, fl0, k)
+                        return (_stipple_probe.emit_candidates(cloud)
+                                if cloud is not None else _stipple_probe.emit(
+                                    composite_luma(
+                                        ml0, k, fl0, k, raw=True)))
+                    _measure("stipple", _probe_stipple)
 
                 if use_fusion:
                     _fusion_raster = TraceEmitter(
                         scope.samplerate, scope.samples_per_frame,
                         gamma=gamma, trim=trim, density=density, rows=rows,
-                        fields=fields, border=border, oversample=oversample,
+                        fields=fields, border=0.0, oversample=oversample,
                         sweep=sweep_mode, autofit=autofit, row_bias=row_bias,
+                        precondition=raster_precondition,
                         grid=((cal["grid_rows"], cal["grid_cols"])
                               if cal else None),
                         levels=(cal.get("levels") if cal else None))
@@ -844,7 +907,7 @@ def run_scope(clock_source=None):
                         radius=walk_radius, stride=walk_stride,
                         edge_gain=walk_edge,
                         reseed_ms=walk_reseed_ms, walk_hz=walk_hz,
-                        dc_comp=None)
+                        dc_comp=None, border=0.0)
                     _fusion_mux = PositionMultiplexer()
 
                     def _fusion_probe(k):
@@ -877,7 +940,13 @@ def run_scope(clock_source=None):
                 print(f"[SCOPE] trace costs: {_costs}; budget {_budget:.1f} ms "
                       f"(worst {_worst / _budget:.0%})")
                 if _worst > 0.7 * _budget:
-                    if use_fusion:
+                    if use_stipple:
+                        print("[SCOPE] stipple is CPU-tight: lower "
+                              "--scope-stipple-points or --scope-fps. The "
+                              "current index clock stays authoritative, so "
+                              "an over-budget route repeats the previous "
+                              "trace rather than drifting late")
+                    elif use_fusion:
                         print("[SCOPE] fusion is CPU-tight: try --scope-fusion "
                               "sr, or lower --scope-walk-hz before changing "
                               "the DAC rate")
@@ -892,14 +961,16 @@ def run_scope(clock_source=None):
     # try a different trim is useless when the thing you are judging is a beam.
     live_state = dict(trim=trim, density=density,
                       gamma=(walk_gamma
-                             if (use_stochastic
+                             if (use_stochastic or use_stipple
                                  or (use_fusion and "s" in fusion_components))
                              else gamma),
                       raster_gamma=gamma, stochastic_gamma=walk_gamma, rows=rows,
                       lowpass=lowpass, mode=render_mode, raster=use_raster,
                       sweep=sweep_mode, autofit=autofit,
+                      precondition=raster_precondition,
                       mode_locked=bool(realtime or mix_hz),
                       mix_hz=mix_hz, mix_duty=mix_duty,
+                      stipple_points=stipple_points,
                       fusion_components=fusion_components)
     # --- monitoring ---
     # Same two-part contract every other mode uses: main.py starts the server,
@@ -939,7 +1010,8 @@ def run_scope(clock_source=None):
         monitor_data["scope_fusion"] = fusion_components if use_fusion else None
         monitor_data["scope_gamma"] = round(
             walk_gamma
-            if ((use_stochastic or (use_fusion and "s" in fusion_components))
+            if ((use_stochastic or use_stipple
+                 or (use_fusion and "s" in fusion_components))
                 and not mix_hz) else gamma, 2)
         monitor_data["scope_refresh_hz"] = round(
             scope.samplerate / max(scope.samples_per_frame, 1), 1)
@@ -981,13 +1053,18 @@ def run_scope(clock_source=None):
         gamma=gamma, trim=trim, density=density, rows=rows, fields=fields,
         border=border, oversample=oversample, sweep=sweep_mode,
         dc_comp=dc_comp, autofit=autofit, row_bias=row_bias,
+        precondition=raster_precondition,
         grid=((cal["grid_rows"], cal["grid_cols"]) if cal else None),
         levels=(cal.get("levels") if cal else None))
     stochastic_emitter = StochasticEmitter(
         scope.samplerate, scope.samples_per_frame,
         gamma=walk_gamma, trim=trim, radius=walk_radius, stride=walk_stride,
         edge_gain=walk_edge, reseed_ms=walk_reseed_ms, walk_hz=walk_hz,
-        dc_comp=dc_comp)
+        dc_comp=dc_comp, border=border)
+    stipple_emitter = StippleEmitter(
+        scope.samplerate, scope.samples_per_frame,
+        points=stipple_points, gamma=walk_gamma, trim=trim,
+        edge_gain=walk_edge, dc_comp=dc_comp, border=border)
     fusion_multiplexer = PositionMultiplexer()
 
     field_i = 0                     # free-running; survives a slipped deadline
@@ -1037,7 +1114,7 @@ def run_scope(clock_source=None):
                         gamma=gamma, trim=trim, density=density, rows=rows,
                         fields=fields, border=border, oversample=oversample,
                         sweep=sweep_mode, dc_comp=dc_comp, autofit=autofit,
-                        row_bias=row_bias,
+                        row_bias=row_bias, precondition=raster_precondition,
                         grid=((cal["grid_rows"], cal["grid_cols"]) if cal else None),
                         levels=(cal.get("levels") if cal else None))
                     stochastic_emitter = StochasticEmitter(
@@ -1045,7 +1122,11 @@ def run_scope(clock_source=None):
                         gamma=walk_gamma, trim=trim, radius=walk_radius,
                         stride=walk_stride, edge_gain=walk_edge,
                         reseed_ms=walk_reseed_ms, walk_hz=walk_hz,
-                        dc_comp=dc_comp)
+                        dc_comp=dc_comp, border=border)
+                    stipple_emitter = StippleEmitter(
+                        scope.samplerate, scope.samples_per_frame,
+                        points=stipple_points, gamma=walk_gamma, trim=trim,
+                        edge_gain=walk_edge, dc_comp=dc_comp, border=border)
                     fusion_multiplexer.reset()
                     beam_end = None
                     with _device_lock:
@@ -1099,10 +1180,12 @@ def run_scope(clock_source=None):
                         # stale position it had before cycling away from it.
                         emitter.reset()
                         stochastic_emitter.reset()
+                        stipple_emitter.reset()
                         fusion_multiplexer.reset()
                     render_mode = next_mode
                     use_raster = render_mode == "raster"
                     use_stochastic = render_mode == "stochastic"
+                    use_stipple = render_mode == "stipple"
                     use_fusion = render_mode == "fusion"
                     fusion_components = next_fusion
                     if mode_changed:
@@ -1129,7 +1212,7 @@ def run_scope(clock_source=None):
                             print(f"  recalibration failed: {e}", flush=True)
                     prev_key = None          # force a redraw with the new values
                 active_gamma = live_state["gamma"]
-                if (render_mode == "stochastic"
+                if (render_mode in ("stochastic", "stipple")
                         or (render_mode == "fusion" and "s" in fusion_components)):
                     walk_gamma = active_gamma
                     live_state["stochastic_gamma"] = walk_gamma
@@ -1153,6 +1236,8 @@ def run_scope(clock_source=None):
                     emitter.levels = cal.get("levels")
                 stochastic_emitter.gamma = walk_gamma
                 stochastic_emitter.trim = trim
+                stipple_emitter.gamma = walk_gamma
+                stipple_emitter.trim = trim
 
             index, _ = update_index(png_paths_len, PINGPONG)
             if index != prev_index:
@@ -1240,6 +1325,19 @@ def run_scope(clock_source=None):
                     if _end is not None:
                         beam_end = _end
                     prev_key = key
+            elif use_stipple:
+                if scope.ready():
+                    _end = _emit(
+                        scope, ml, fl, index, "stipple", sweep, sweep_mode,
+                        gamma, trim, density, rows, min_feature, autofit,
+                        lowpass, oversample, cal, dc_comp=dc_comp,
+                        border=border, emitter=emitter,
+                        stochastic_emitter=stochastic_emitter,
+                        stipple_emitter=stipple_emitter,
+                        beam_start=beam_end)
+                    if _end is not None:
+                        beam_end = _end
+                    prev_key = key
             elif use_fusion:
                 if scope.ready():
                     _end = _emit(
@@ -1282,7 +1380,7 @@ def run_scope(clock_source=None):
                                              if use_fusion else None)
                     _md["scope_gamma"] = round(
                         walk_gamma
-                        if ((use_stochastic
+                        if ((use_stochastic or use_stipple
                              or (use_fusion and "s" in fusion_components))
                             and not mix_hz) else gamma,
                         2)
@@ -1344,7 +1442,7 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
           oversample=1, cal=None, field=0, fields=1, dc_comp=None,
           border=0.0, emitter=None, stochastic_emitter=None, beam_start=None,
           mode_handoff=False, fusion_components="vrs",
-          stochastic_gamma=2.0, stochastic_edge=0.0,
+          stochastic_gamma=2.0, stochastic_edge=0.0, stipple_emitter=None,
           fusion_multiplexer=None):
     n = scope.samples_per_frame
     if render_mode == "fusion":
@@ -1354,8 +1452,14 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
         components = normalize_fusion_components(fusion_components)
         old_raster_dc = emitter.dc_comp
         old_stochastic_dc = stochastic_emitter.dc_comp
+        old_raster_border = emitter.border
+        old_stochastic_border = stochastic_emitter.border
         emitter.dc_comp = None
         stochastic_emitter.dc_comp = None
+        # Component-local rectangles would be interleaved into several broken
+        # boxes. Fusion gets one rectangle after its position multiplexer.
+        emitter.border = 0.0
+        stochastic_emitter.border = 0.0
         try:
             vector_frame = (rasterize(
                 merge(ml, index, fl, index, min_feature=min_feature), n)
@@ -1382,8 +1486,16 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
         finally:
             emitter.dc_comp = old_raster_dc
             stochastic_emitter.dc_comp = old_stochastic_dc
+            emitter.border = old_raster_border
+            stochastic_emitter.border = old_stochastic_border
         if frame is None:
             return None
+        reference = composite_luma(ml, index, fl, index, raw=False)
+        if reference is not None:
+            h, w = reference.shape
+            frame = apply_trace_border(
+                frame, border, aspect=h / float(max(w, 1)),
+                level=stochastic_emitter.level)
         if dc_comp:
             frame = precompensate_hpf(frame, dc_comp, scope.samplerate)
         if "s" in components:
@@ -1398,13 +1510,14 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
         scope.show_frame(frame)
         return frame[-1].copy()
 
-    if render_mode in ("raster", "stochastic"):
+    if render_mode in ("raster", "stochastic", "stipple"):
         # Composite here, sweep in the emitter. Everything about HOW the trace
         # is drawn -- grid, fields, chaining, border, dc-comp -- lives on the
         # emitter, which scope_screen.py shares. Nothing about it is restated
         # in this file, so there is no second parameter list to drift.
         _lum = composite_luma(
-            ml, index, fl, index, raw=(render_mode == "stochastic"))
+            ml, index, fl, index,
+            raw=(render_mode in ("stochastic", "stipple")))
         if Scope._tap_until > _time_mono():
             # only while a browser is watching -- same gate as the trace tap
             Scope.publish_luma(_lum)
@@ -1412,21 +1525,31 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
         if beam_start is not None:
             if render_mode == "raster" and emitter.sweep_mode == "alternate":
                 emitter._end = np.asarray(beam_start, dtype=np.float32).copy()
-            elif render_mode == "stochastic":
+            elif render_mode in ("stochastic", "stipple"):
                 if mode_handoff:
-                    stochastic_emitter.start_at(beam_start)
+                    (stipple_emitter if render_mode == "stipple"
+                     else stochastic_emitter).start_at(beam_start)
                     exact_handoff = True
                 else:
-                    exact_handoff = stochastic_emitter.handoff_from(beam_start)
-        frame = (emitter.emit(_lum) if render_mode == "raster"
-                 else stochastic_emitter.emit(_lum))
+                    exact_handoff = (
+                        stipple_emitter if render_mode == "stipple"
+                        else stochastic_emitter).handoff_from(beam_start)
+        if render_mode == "raster":
+            frame = emitter.emit(_lum)
+        elif render_mode == "stipple":
+            cloud = composite_stipple_candidates(ml, index, fl, index)
+            frame = (stipple_emitter.emit_candidates(cloud)
+                     if cloud is not None else stipple_emitter.emit(_lum))
+        else:
+            frame = stochastic_emitter.emit(_lum)
         if frame is not None:
             # mirrored back for the live-controls print and anything else
             # reading sweep state; the emitter owns the real copy
             if render_mode == "raster":
                 sweep["rev"], sweep["end"] = emitter._rev, emitter._end
-            if render_mode == "stochastic":
-                frame = stochastic_emitter.apply_lowpass(frame, lowpass)
+            if render_mode in ("stochastic", "stipple"):
+                frame = (stipple_emitter if render_mode == "stipple"
+                         else stochastic_emitter).apply_lowpass(frame, lowpass)
             elif lowpass and lowpass_circular is not None:
                 frame = lowpass_circular(frame, lowpass, scope.samplerate)
             if beam_start is not None and (render_mode == "raster"
@@ -1439,8 +1562,9 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
             # sample the DAC actually receives, not the unfiltered geometry.
             if render_mode == "raster" and emitter.sweep_mode == "alternate":
                 emitter._end = frame[-1].copy()
-            elif render_mode == "stochastic":
-                stochastic_emitter.chain_from(frame[-1])
+            elif render_mode in ("stochastic", "stipple"):
+                (stipple_emitter if render_mode == "stipple"
+                 else stochastic_emitter).chain_from(frame[-1])
             scope.show_frame(frame)
             return frame[-1].copy()
     else:

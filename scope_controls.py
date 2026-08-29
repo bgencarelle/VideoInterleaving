@@ -36,7 +36,7 @@ scope live controls
   ,  / .    density     finer / coarser (samples per cell; below ~0.3 flecks)
   [  / ]    gamma       down / up      (raster dwell / stochastic probability)
   l         lowpass     cycle off -> 12k -> 6k -> 3k -> 1.5k
-  v         mode         vector -> raster -> stochastic -> fusion
+  v         mode         vector -> raster -> stochastic -> stipple -> fusion
   f         fusion       vrs -> vr -> sv -> sr (in fusion mode)
   w         sweep       alternate -> palindrome -> retrace
   a         autofit     on / off
@@ -61,7 +61,8 @@ class KeyMap:
             mode = self.state.get("mode")
             fusion = self.state.get("fusion_components", "vrs")
             attr = ("stochastic_gamma"
-                    if mode == "stochastic" or (mode == "fusion" and "s" in fusion)
+                    if mode in ("stochastic", "stipple")
+                    or (mode == "fusion" and "s" in fusion)
                     else "raster_gamma")
         cur = self.state.get(attr)
         if cur is None and name == "gamma":
@@ -108,13 +109,13 @@ class KeyMap:
             if s.get("mode_locked"):
                 self.message = "mode cycling unavailable in realtime/mix mode"
                 return True
-            order = ["vector", "raster", "stochastic", "fusion"]
+            order = ["vector", "raster", "stochastic", "stipple", "fusion"]
             current = s.get("mode", "raster" if s.get("raster") else "vector")
             i = order.index(current) if current in order else 0
             s["mode"] = order[(i + 1) % len(order)]
             s["raster"] = s["mode"] == "raster"  # legacy state readers
             gamma_key = ("stochastic_gamma"
-                         if (s["mode"] == "stochastic"
+                         if (s["mode"] in ("stochastic", "stipple")
                              or (s["mode"] == "fusion"
                                  and "s" in s.get("fusion_components", "vrs")))
                          else "raster_gamma")
@@ -180,14 +181,19 @@ def as_flags(s):
         out.append(f"--scope-gamma {raster_gamma:g}")
         if abs(stochastic_gamma - raster_gamma) > 1e-9:
             out.append(f"--scope-stochastic-gamma {stochastic_gamma:g}")
-    elif mode == "stochastic":
+    elif mode in ("stochastic", "stipple"):
         gamma = s.get("stochastic_gamma", s.get("gamma", 2.0))
         out.append(f"--scope-gamma {gamma:g}")
+        if mode == "stipple":
+            out.append(
+                f"--scope-stipple-points {int(s.get('stipple_points', 768))}")
     else:
         gamma = s.get("raster_gamma", s.get("gamma", 2.2))
         out.append(f"--scope-gamma {gamma:g}")
     if abs(s.get("density", 1.0) - 1.0) > 1e-6:
         out.append(f"--scope-density {s['density']:g}")
+    if s.get("precondition") is not None:
+        out.append(f"--scope-precondition {s['precondition']:g}")
     if s.get("rows"):
         out.append(f"--scope-rows {int(s['rows'])}")
     if s.get("sweep", "alternate") != "alternate":

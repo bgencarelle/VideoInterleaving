@@ -144,13 +144,27 @@ python main.py --mode scope --xy-dir ./images_xy --scope-mode stochastic
 
 Stochastic uses Osci-render's bitmap walk (`radius 10`, no added edge term)
 and scales Osci's full-resolution stride to the baked thumbnail (`auto`
-resolves to stride 2 at the default width 256). Its portrait default is
+resolves to stride 1 at the compact default width 128). Its portrait default is
 `gamma 2`, equivalent to Osci's Image Threshold 0.1. Osci's UI default maps to
 gamma 6 and suppresses too many facial midtones in this material. It runs
 continuously across audio buffers. Use the existing `--scope-gamma` argument
 to tune the active renderer.
 Its 48 kHz target clock is independent of the image rate and of faster DAC
 sample rates; use `--scope-walk-hz` only when deliberately changing that walk.
+
+The separate `stipple` renderer implements the stable image-driven alternative:
+
+```bash
+python main.py --mode scope --xy-dir ./images_xy --scope-mode stipple \
+  --scope-stipple-points 768
+```
+
+It selects deterministic luminance-weighted positions, orders them by
+unrestricted Euclidean proximity, and resamples that finished route. It has no
+cardinal-direction crawl, visited-map reset, random reseed, or target clock.
+New bakes store a 1024-point source-detail candidate cloud for this mode, so
+the route keeps 256px coordinate placement without retaining a complete 256px
+image plane for every frame.
 
 Fusion builds corresponding position arrays for the selected renderers and
 selects entries round-robin by array index instead of switching whole traces:
@@ -163,12 +177,14 @@ python main.py --mode scope --xy-dir ./images_xy --scope-mode fusion --scope-fus
 outputs `V[0], R[1], V[2], R[3]...`; `vrs` cycles V, R, S the same way. No XY
 coordinates are arithmetically averaged. Press `f` in fusion mode to cycle.
 
-The 256 px bake default is intentional. The reference portrait already has a
-wide luminance range, so global contrast expansion would discard useful tone.
-The old 96 px bake retained only about 63% of its source edge energy; 256 px
-retains about 90% without taking the full cost of a source-sized 480 px field.
+The compact bake stores raw luminance and alpha at 128px. That is above the
+normal raster sweep grid, while stochastic can still use the field directly.
+Stipple's separately baked source-detail coordinates preserve the useful
+high-resolution placement. A typical 32-folder library is about 3.7 GB rather
+than the 18-25 GB produced by the former 256px, three-channel format.
 
-Press `v` while it is running to cycle vector, raster, stochastic, and fusion.
+Press `v` while it is running to cycle vector, raster, stochastic, stipple,
+and fusion.
 See `SCOPE_MODE.md` for wiring, sample-budget, and renderer details.
 
 ### The `settings.py` Way (Legacy)

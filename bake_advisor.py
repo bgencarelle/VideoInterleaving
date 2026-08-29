@@ -5,9 +5,10 @@ bake_advisor.py -- what --thumb-width does YOUR content actually need?
     python bake_advisor.py --xy-dir images_xy --rate 96000 --fps 30 --fields 2
 
 For raster the thumbnail is a hard ceiling on grid size, while stochastic uses
-its stored spatial field directly. Storage scales with the square: with the
-current three-channel thumbnails width 96 is about 2.6 GB for 32 folders x
-2221 frames, and the current width-256 default is about 18.6 GB.
+its stored spatial field directly. Compact bakes store two 128px channels (raw
+luminance + alpha), about 3.1 GB for 32 folders x 2221 frames. Stipple detail is
+a separate fixed-size candidate cloud, so its coordinate precision does not
+make thumbnail storage scale with 256 squared.
 
 The catch is that the right answer is content-dependent and not monotonic.
 autofit grows the grid by 1/sqrt(the fraction of cells surviving trim), capped
@@ -26,8 +27,8 @@ average is exactly wrong -- it is the mid-sized frames that decide.
 So this reads the bake you already have, runs the real raster sizing rule over
 real frames, and reports what each width would give raster. It changes nothing.
 It cannot recover source detail discarded by an existing small bake, so its
-"smallest" result is not a recommendation to shrink stochastic below the
-current width-256 default.
+"smallest" result is not automatically a stochastic recommendation. Stipple is
+not constrained by this width in the compact format.
 """
 import argparse
 import json
@@ -118,7 +119,7 @@ def main():
                 clipped = (r >= h) or (c >= w)
                 pr, pc, pcl = worst.get(w, (0, 0, 0))
                 worst[w] = (max(pr, r), max(pc, c), pcl + int(clipped))
-                total_bytes[w] = h * w * 3
+                total_bytes[w] = h * w * 2
 
     print(f"{len(folders)} folders, {n_frames_total} frames total, "
           f"up to {args.frames} sampled per folder\n")
@@ -128,7 +129,7 @@ def main():
     best = None
     for w in sorted(worst):
         r, c, cl = worst[w]
-        h = total_bytes[w] // (w * 3)
+        h = total_bytes[w] // (w * 2)
         size = total_bytes[w] * n_frames_total
         flag = "CLIPPED" if cl else "ok"
         if not cl and best is None:
@@ -151,8 +152,8 @@ def main():
             print(f"Going from {cur} to {best} saves {saving / 1e9:.2f} GB "
                   "and loses no raster grid, because the sample budget runs "
                   "out first.")
-            print("That can still discard stochastic source detail; keep 256 "
-                  "for stochastic or mix unless you have measured otherwise.")
+            print("That can still discard stochastic source detail; stipple's "
+                  "separate candidate coordinates are unaffected.")
         else:
             print("Nothing smaller would do for raster -- the ceiling is doing "
                   "real work here.")
@@ -189,11 +190,21 @@ def _format_report(folders, n_frames_total, args):
     raw_lum = S[..., 2] if S.shape[-1] >= 3 else None
     per_frame = S[0].nbytes
     total = per_frame * n_frames_total
+    candidate_total = sum(
+        os.path.getsize(os.path.join(fd, name))
+        for fd in folders
+        for name in ("stipple_xy.npy", "stipple_lae.npy", "stipple_mass.npy")
+        if os.path.exists(os.path.join(fd, name)))
 
     print(f"\nsampled {len(S)} frames from {len(sample)} folders")
     layout = "[raster luma, alpha, raw luma]" if raw_lum is not None else "[luma, alpha]"
     print(f"current: raw uint8 {layout} interleaved, {per_frame} B/frame")
-    print(f"         whole bake {total / 1e9:.2f} GB\n")
+    print(f"         thumbnail planes {total / 1e9:.2f} GB")
+    if candidate_total:
+        print(f"         stipple candidates {candidate_total / 1e9:.2f} GB")
+        print(f"         image data total {(total + candidate_total) / 1e9:.2f} GB\n")
+    else:
+        print()
     print(f"  alpha fully transparent : {100 * (alpha == 0).mean():5.1f}% of pixels")
     print(f"  alpha fully opaque      : {100 * (alpha == 255).mean():5.1f}%")
     print(f"  matte edge (soft alpha) : {100 * ((alpha > 0) & (alpha < 255)).mean():5.1f}%")

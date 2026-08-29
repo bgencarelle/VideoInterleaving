@@ -11,7 +11,8 @@ trace timing, so what you see is what the scope draws.
     python test_scope_pair.py --xy-dir images_xy --bg 3 --fg 3 --raster \
            --fps 30 --ips 30 --exposure 0.4 --play
 
-Keys:  space play/pause · left/right step · m occlusion cull · r vector<->raster
+Keys:  space play/pause · left/right step · m occlusion cull · v cycle mode
+       r vector<->raster
        + / - intensity · [ / ] gamma · d density · , / . speed · l pingpong<->loop
        q quit
 
@@ -32,9 +33,10 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from scope_bake import (XYLibrary, merge, raster_frame, content_bbox,
-                        composite_luma, StochasticEmitter,
+                        composite_luma, composite_stipple_candidates,
+                        StochasticEmitter, StippleEmitter,
                         TriangleMixScheduler,
-                        PositionMultiplexer)                        # noqa: E402
+                        PositionMultiplexer, apply_trace_border)    # noqa: E402
 from scope_out import Scope, rasterize, FPS, choose_device           # noqa: E402
 
 PNG_OUT = "test_scope_pair_output.png"
@@ -153,6 +155,8 @@ def build_parser():
     ap.add_argument("--size", type=int, default=700, help="preview window size")
 
     ap.add_argument("--raster", action="store_true", help="start in raster mode")
+    ap.add_argument("--stipple", action="store_true",
+                    help="start in stable luminance-weighted stipple mode")
     ap.add_argument("--fusion", choices=("vrs", "vr", "sv", "sr"),
                     help="start in fused-density mode with these components")
     ap.add_argument("--samples", type=int,
@@ -168,6 +172,8 @@ def build_parser():
     ap.add_argument("--gamma", type=float, default=2.2, help="raster contrast")
     ap.add_argument("--stochastic-gamma", type=float, default=2.0,
                     help="stochastic luminance exponent (default 2.0)")
+    ap.add_argument("--stipple-points", type=int, default=768,
+                    help="stable weighted positions in stipple mode")
     ap.add_argument("--density", type=float, default=1.0,
                     help="raster samples per cell; 1.0 = finest, above 1 trades "
                          "detail for brighter solider lines")
@@ -183,6 +189,9 @@ def build_parser():
                          "of clipping faint detail. Try 0.08-0.16.")
     ap.add_argument("--no-trim", action="store_true",
                     help="sweep full width even across black margins")
+    ap.add_argument("--border", type=float, default=0.0, metavar="F",
+                    help="fraction of every image trace spent on a fixed "
+                         "full-extent border (same as main --scope-border)")
     ap.add_argument("--mix", nargs="?", type=float, const=120.0, default=None,
                     metavar="HZ",
                     help="triangular VECTOR -> RASTER -> STOCHASTIC -> RASTER "
@@ -287,7 +296,11 @@ def main():
     mix_scheduler = TriangleMixScheduler(duty)
     stochastic = StochasticEmitter(
         scope.samplerate if scope else 44100, n_samples,
-        gamma=args.stochastic_gamma)
+        gamma=args.stochastic_gamma, border=args.border)
+    stipple = StippleEmitter(
+        scope.samplerate if scope else 44100, n_samples,
+        points=args.stipple_points, gamma=args.stochastic_gamma,
+        trim=0.0 if args.no_trim else args.trim, border=args.border)
     fusion_multiplexer = PositionMultiplexer()
     beam_end = None
     last_mode = None
@@ -302,6 +315,7 @@ def main():
             samp = raster_frame(mlib, idx, flib, idx, n_samples,
                                 gamma=gamma, rows=args.rows, density=density,
                                 trim=0.0 if args.no_trim else args.trim,
+                                border=args.border,
                                 bbox=fit_bbox, fields=args.fields,
                                 field=next(field_counter),
                                 palindrome=(args.sweep == "palindrome"),
@@ -333,6 +347,20 @@ def main():
             if scope:
                 scope.show_frame(samp)
             return samp, 0
+        if mode == "stipple":
+            if beam_end is not None:
+                stipple.start_at(beam_end)
+            cloud = composite_stipple_candidates(mlib, idx, flib, idx)
+            samp = (stipple.emit_candidates(cloud) if cloud is not None
+                    else stipple.emit(composite_luma(
+                        mlib, idx, flib, idx, raw=True)))
+            if samp is None:
+                return build(idx, do_cull, "vector")
+            beam_end = samp[-1].copy()
+            last_mode = mode
+            if scope:
+                scope.show_frame(samp)
+            return samp, 0
         if mode == "fusion":
             components = args.fusion or "vrs"
             vector_trace = (rasterize(
@@ -345,6 +373,7 @@ def main():
                     mlib, idx, flib, idx, n_samples,
                     gamma=gamma, rows=args.rows, density=density,
                     trim=0.0 if args.no_trim else args.trim,
+                    border=0.0,
                     bbox=fit_bbox, fields=args.fields,
                     field=next(field_counter),
                     palindrome=(args.sweep == "palindrome"),
@@ -357,13 +386,24 @@ def main():
             if "s" in components:
                 if beam_end is not None:
                     stochastic.start_at(beam_end)
-                stochastic_trace = stochastic.emit(composite_luma(
-                    mlib, idx, flib, idx, raw=True))
+                old_border = stochastic.border
+                stochastic.border = 0.0
+                try:
+                    stochastic_trace = stochastic.emit(composite_luma(
+                        mlib, idx, flib, idx, raw=True))
+                finally:
+                    stochastic.border = old_border
             samp = fusion_multiplexer.emit(
                 vector=vector_trace, raster=raster_trace,
                 stochastic=stochastic_trace, components=components)
             if samp is None:
                 return build(idx, do_cull, "vector")
+            reference = composite_luma(mlib, idx, flib, idx, raw=False)
+            if reference is not None:
+                h, w = reference.shape
+                samp = apply_trace_border(
+                    samp, args.border, aspect=h / float(max(w, 1)),
+                    level=stochastic.level)
             if beam_end is not None:
                 samp[0] = beam_end
             beam_end = samp[-1].copy()
@@ -388,6 +428,7 @@ def main():
 
     active_mode = (mix_scheduler.next_mode() if args.mix
                    else "fusion" if args.fusion
+                   else "stipple" if args.stipple
                    else "raster" if raster else "vector")
     samples, npolys = build(index, culled, active_mode)
     shown_index = index
@@ -435,6 +476,7 @@ def main():
         if dirty and (gui or img is None):
             mode = ("RASTER" if active_mode == "raster"
                     else "STOCHASTIC" if active_mode == "stochastic"
+                    else "STIPPLE" if active_mode == "stipple"
                     else f"FUSION {args.fusion.upper()}" if active_mode == "fusion"
                     else f"VECTOR paths {npolys} merge {'on' if culled else 'OFF'}")
             if args.mix:
@@ -505,6 +547,12 @@ def main():
         elif key == ord("r"):
             raster = not raster
             active_mode = "raster" if raster else "vector"
+            samples, npolys = build(index, culled, active_mode); dirty = True
+        elif key == ord("v"):
+            order = ("vector", "raster", "stochastic", "stipple", "fusion")
+            active_mode = order[(order.index(active_mode) + 1) % len(order)]
+            if active_mode == "fusion" and not args.fusion:
+                args.fusion = "vrs"
             samples, npolys = build(index, culled, active_mode); dirty = True
         elif key == ord("f"):
             order = ("vrs", "vr", "sv", "sr")

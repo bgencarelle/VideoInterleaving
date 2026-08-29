@@ -1,5 +1,5 @@
 """
-scope_bake.py -- shared vector/raster/stochastic/fusion toolkit for scope mode.
+scope_bake.py -- shared vector/raster/stochastic/stipple/fusion scope toolkit.
 
 Both sides import from here and nothing here imports either side:
     utilities/convert_to_xy.py  (offline)  -> geometry helpers, format constants
@@ -111,6 +111,11 @@ class XYLibrary:
         self.flags = np.load(fpath) if fpath.exists() else None
         npath = p / "names.json"
         self.names = json.loads(npath.read_text()) if npath.exists() else []
+        meta_path = p / "format.json"
+        try:
+            self.format = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+        except (OSError, ValueError):
+            self.format = {}
         tpath = p / "thumbs.npy"
         self.thumbs = np.load(tpath, mmap_mode="r") if tpath.exists() else None
         if self.thumbs is not None:
@@ -122,6 +127,24 @@ class XYLibrary:
                 raise ValueError(
                     f"thumbs.npy has {len(self.thumbs)} frames but geometry "
                     f"has {len(self)}; rebake this folder")
+        sx = p / "stipple_xy.npy"
+        sl = p / "stipple_lae.npy"
+        sm = p / "stipple_mass.npy"
+        self.stipple_xy = np.load(sx, mmap_mode="r") if sx.exists() else None
+        self.stipple_lae = np.load(sl, mmap_mode="r") if sl.exists() else None
+        self.stipple_mass = np.load(sm, mmap_mode="r") if sm.exists() else None
+        stores = (self.stipple_xy, self.stipple_lae, self.stipple_mass)
+        if any(v is not None for v in stores):
+            if not all(v is not None for v in stores):
+                raise ValueError(f"incomplete stipple candidate store in {p}")
+            if (len(self.stipple_xy) != len(self)
+                    or len(self.stipple_lae) != len(self)
+                    or len(self.stipple_mass) != len(self)):
+                raise ValueError(f"stipple candidate frame count differs in {p}")
+            if (self.stipple_xy.shape[-1] != 2
+                    or self.stipple_lae.shape[-1] != 3
+                    or self.stipple_xy.shape[:2] != self.stipple_lae.shape[:2]):
+                raise ValueError(f"invalid stipple candidate geometry in {p}")
 
     def __len__(self):
         return len(self.fstart) - 1
@@ -143,10 +166,34 @@ class XYLibrary:
 
 
     def thumb(self, i):
-        """Baked channels, or None. New bakes are [raster L, alpha, raw L]."""
+        """Baked channels, or None.
+
+        Compact v2 bakes are [raw L, alpha]. Interim bakes may be
+        [preconditioned raster L, alpha, raw L]; older two-channel files remain
+        readable and are treated as legacy raster data without new correction.
+        """
         if self.thumbs is None:
             return None
         return np.asarray(self.thumbs[i % len(self.thumbs)])
+
+    def stipple(self, i):
+        """Return compact (xy, luminance/alpha/edge, proposal mass)."""
+        if self.stipple_xy is None:
+            return None
+        j = i % len(self.stipple_xy)
+        return (np.asarray(self.stipple_xy[j]),
+                np.asarray(self.stipple_lae[j]),
+                float(self.stipple_mass[j]))
+
+    @property
+    def raw_thumbnail(self):
+        return self.format.get("thumbnail_channels") == [
+            "raw_luminance", "alpha"]
+
+    @property
+    def raster_precondition(self):
+        return (float(self.format.get("raster_precondition", 0.0))
+                if self.raw_thumbnail else 0.0)
 
 
 def _walk(P, w, n, oversample=1):
@@ -232,7 +279,7 @@ class SweepSource:
     def __init__(self, state_fn=None, samples_per_pass=1600, gamma=2.2,
                  floor=0.012, trim=0.02, density=1.0, rows=None, bbox=None,
                  level=0.9, grid_rows=None, grid_cols=None, levels=None,
-                 lum_fn=None, auto_levels=0.0):
+                 lum_fn=None, auto_levels=0.0, precondition=0.0):
         """
         lum_fn      : optional callable returning an (H, W) float array in
                       0..1 -- any live source (screen grab, camera, video,
@@ -261,6 +308,7 @@ class SweepSource:
         self.gamma, self.floor, self.trim = gamma, floor, trim
         self.density, self.rows_override, self.bbox = density, rows, bbox
         self.level = level
+        self.precondition = max(0.0, float(precondition))
         self._out = np.zeros((0, 2), np.float32)
         self._plan = None
         self._budgets = None
@@ -316,6 +364,7 @@ class SweepSource:
             lo, hi = 0.0, 1.0
         if hi > lo:
             g = np.clip((g - lo) / (hi - lo), 0.0, 1.0)
+        g = _precondition_grid(g, self.precondition)
         xs, ys = self._axes
         self._grid = (g, xs, ys)
         return self._grid
@@ -372,6 +421,7 @@ class SweepSource:
                 lo, hi = np.percentile(lit, 2), np.percentile(lit, 98)
                 if hi > lo:
                     g = np.clip((g - lo) / (hi - lo), 0.0, 1.0)
+        g = _precondition_grid(g, self.precondition)
         sx = 1.0 if w >= h else w / float(h)
         sy = 1.0 if h >= w else h / float(w)
         self._grid_key = key
@@ -797,6 +847,71 @@ _TRAVEL_W = np.float32([1e-3])
 _TRAVEL_T = np.ones(1, dtype=bool)
 
 
+def apply_trace_border(frame, fraction, aspect=1.0, level=0.9):
+    """Replace a trace tail with a full-extent rectangle, then rejoin it.
+
+    Continuous renderers cannot append samples: their output buffer is the
+    DAC's fixed time budget. They also must not reset hidden walk/route state
+    at each border. Generate the complete image trace first, spend
+    ``fraction`` of its existing samples on the rectangle, and finish at the
+    trace's original endpoint. The next buffer therefore resumes exactly as
+    it would have with the border disabled.
+
+    The one-sample entry and exit connectors cross quickly and stay faint;
+    every corner itself is represented exactly. ``aspect`` is height/width
+    before square padding, matching all three image-renderer conventions.
+    """
+    source = np.asarray(frame, dtype=np.float32)
+    if source.ndim != 2 or source.shape[1] != 2:
+        raise ValueError(f"trace must have shape (N, 2), got {source.shape}")
+    fraction = float(np.clip(fraction, 0.0, 0.5))
+    count = min(len(source) - 1, int(round(len(source) * fraction)))
+    if fraction <= 0.0 or count < 6:
+        return np.ascontiguousarray(source, dtype=np.float32)
+
+    aspect = max(float(aspect), 1e-9)
+    sx = 1.0 if aspect <= 1.0 else 1.0 / aspect
+    sy = aspect if aspect <= 1.0 else 1.0
+    sx *= float(level)
+    sy *= float(level)
+    corners = np.array(
+        [[-sx, -sy], [sx, -sy], [sx, sy], [-sx, sy]], dtype=np.float32)
+
+    # Enter at the nearest corner. Rotate rather than reverse so border
+    # direction remains stable as content moves around the frame.
+    start = source[-count - 1]
+    first = int(np.argmin(np.sum((corners - start) ** 2, axis=1)))
+    corners = np.roll(corners, -first, axis=0)
+
+    perimeter_count = count - 1       # final sample rejoins image endpoint
+    lengths = np.hypot(
+        *(np.roll(corners, -1, axis=0) - corners).T).astype(np.float64)
+    # At least one sample per side guarantees all four corners are touched.
+    side_counts = np.ones(4, dtype=np.int64)
+    remaining = perimeter_count - 4
+    if remaining:
+        exact = remaining * lengths / lengths.sum()
+        add = np.floor(exact).astype(np.int64)
+        side_counts += add
+        left = int(remaining - add.sum())
+        if left:
+            order = np.argsort(-(exact - add), kind="stable")
+            side_counts[order[:left]] += 1
+
+    perimeter = []
+    for side, samples in enumerate(side_counts):
+        a = corners[side]
+        b = corners[(side + 1) % 4]
+        t = (np.arange(samples, dtype=np.float32) / samples)[:, None]
+        perimeter.append(a + t * (b - a))
+    perimeter = np.vstack(perimeter)
+
+    out = source.copy()
+    out[-count:-1] = perimeter
+    out[-1] = source[-1]              # preserve continuous renderer state
+    return np.ascontiguousarray(out, dtype=np.float32)
+
+
 class TraceEmitter:
     """Turns a luminance array into the next trace. The single implementation.
 
@@ -818,7 +933,7 @@ class TraceEmitter:
     def __init__(self, samplerate, samples, *, gamma=2.2, trim=0.02,
                  density=1.0, rows=None, fields=1, border=0.0, oversample=1,
                  sweep="alternate", dc_comp=None, grid=None, levels=None,
-                 autofit=True, row_bias=1.0):
+                 autofit=True, row_bias=1.0, precondition=0.0):
         self.samplerate = samplerate
         self.n = int(samples)
         self.gamma, self.trim, self.density = gamma, trim, density
@@ -827,6 +942,7 @@ class TraceEmitter:
         self.sweep_mode, self.dc_comp = sweep, dc_comp
         self.grid, self.levels, self.autofit = grid, levels, autofit
         self.row_bias = row_bias
+        self.precondition = max(0.0, float(precondition))
         self._rev, self._end, self._field = False, None, 0
 
     def reset(self):
@@ -847,7 +963,7 @@ class TraceEmitter:
             lum, self.n, gamma=self.gamma, trim=self.trim,
             density=self.density, rows=self.rows, autofit=self.autofit,
             oversample=self.oversample, border=self.border,
-            row_bias=self.row_bias,
+            row_bias=self.row_bias, precondition=self.precondition,
             fields=self.fields, field=self._field % self.fields,
             levels=lv, palindrome=(self.sweep_mode == "palindrome"),
             reverse=(alt and self._rev),
@@ -918,7 +1034,8 @@ class StochasticEmitter:
 
     def __init__(self, samplerate, samples, *, gamma=2.0, trim=0.02,
                  radius=10, stride=0, edge_gain=0.0, reseed_ms=5.0,
-                 walk_hz=48000.0, seed=0, dc_comp=None, level=0.9):
+                 walk_hz=48000.0, seed=0, dc_comp=None, level=0.9,
+                 border=0.0):
         self.samplerate = max(1, int(samplerate))
         self.n = max(2, int(samples))
         self.gamma, self.trim = gamma, trim
@@ -927,6 +1044,7 @@ class StochasticEmitter:
         self.walk_hz = max(1.0, float(walk_hz))
         self.dc_comp = dc_comp
         self.level = float(level)
+        self.border = float(np.clip(border, 0.0, 0.5))
         self.rng = np.random.default_rng(seed)
         self.reset()
 
@@ -1159,11 +1277,199 @@ class StochasticEmitter:
                 [np.cos(theta), np.sin(theta)]).astype(np.float32)
             self._idle_phase = (self._idle_phase + self.n) % self.n
 
+        out = apply_trace_border(
+            out, self.border, aspect=h / float(max(w, 1)), level=self.level)
         if self.dc_comp:
             from scope_out import precompensate_hpf
             out = precompensate_hpf(out, self.dc_comp, self.samplerate)
         self._end = out[-1].copy()
         return np.ascontiguousarray(out, dtype=np.float32)
+
+
+def _stipple_importance(lum, gamma=2.0, trim=0.02, edge_gain=0.0):
+    """Continuous image importance without stochastic's fixed 0.2 gate."""
+    if lum is None:
+        return None
+    a = np.asarray(lum, dtype=np.float64)
+    if a.ndim != 2 or not a.size:
+        return None
+    a = np.clip(np.nan_to_num(
+        a, nan=0.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
+    importance = np.where(
+        a > max(0.0, float(trim)),
+        a ** max(0.01, float(gamma)), 0.0)
+    if edge_gain > 0.0 and min(a.shape) > 1:
+        gy, gx = np.gradient(a)
+        edge = np.hypot(gx, gy)
+        peak = float(edge.max())
+        if peak > 1e-12:
+            importance += float(edge_gain) * edge / peak
+    total = float(importance.sum())
+    return importance if total > 1e-12 else None
+
+
+class StippleEmitter(StochasticEmitter):
+    """Stable luminance-weighted points joined by an unrestricted local tour.
+
+    The point set belongs to the image, not to an output-rate clock. Systematic
+    weighted sampling gives every frame the same evenly spaced probability
+    quantiles; repeated pixels become dwell, and a Euclidean nearest-neighbour
+    tour keeps unavoidable no-Z connectors short. The finished route is then
+    resampled to the caller's array length.
+    """
+
+    def __init__(self, samplerate, samples, *, points=768, gamma=2.0,
+                 trim=0.02, edge_gain=0.0, dc_comp=None, level=0.9,
+                 border=0.0):
+        super().__init__(
+            samplerate, samples, gamma=gamma, trim=trim,
+            edge_gain=edge_gain, dc_comp=dc_comp, level=level, border=border)
+        self.points = max(8, int(points))
+
+    def _sample_pixels(self, importance):
+        h, w = importance.shape
+        weights = importance.ravel()
+        total = float(weights.sum())
+        if total <= 1e-12:
+            return None
+        count = self.points
+        # Systematic resampling: deterministic, exact visit-density weighting,
+        # and much less clumpy than independent random draws.
+        marks = (np.arange(count, dtype=np.float64) + 0.5) * total / count
+        flat = np.searchsorted(np.cumsum(weights), marks, side="left")
+        flat = np.clip(flat, 0, weights.size - 1)
+        unique, dwell = np.unique(flat, return_counts=True)
+        pixels = np.column_stack([unique % w, unique // w]).astype(np.float64)
+
+        # Greedy Euclidean tour. This is intentionally not the old cardinal-
+        # direction spiral; diagonal neighbours are neighbours too.
+        remaining = np.ones(len(pixels), dtype=bool)
+        if self._end is not None:
+            start = np.asarray(self._xy_to_pixel(self._end, (h, w)), np.float64)
+        else:
+            start = pixels[np.argmax(dwell)]
+        order = []
+        pos = start
+        for _ in range(len(pixels)):
+            delta = pixels - pos
+            distance = np.einsum("ij,ij->i", delta, delta)
+            distance[~remaining] = np.inf
+            chosen = int(np.argmin(distance))
+            order.append(chosen)
+            remaining[chosen] = False
+            pos = pixels[chosen]
+        order = np.asarray(order, dtype=np.int64)
+        return np.repeat(pixels[order], dwell[order], axis=0)
+
+    def emit(self, lum):
+        importance = _stipple_importance(
+            lum, self.gamma, self.trim, self.edge_gain)
+        if importance is None:
+            return None
+        pixels = self._sample_pixels(importance)
+        if pixels is None or not len(pixels):
+            return None
+        h, w = importance.shape
+        m = float(max(w, h))
+        route = np.column_stack([
+            2.0 * (pixels[:, 0] + (m - w) * 0.5) / m - 1.0,
+            1.0 - 2.0 * (pixels[:, 1] + (m - h) * 0.5) / m,
+        ]) * self.level
+        if self._end is not None:
+            route = np.vstack([self._end, route])
+        if len(route) == 1:
+            theta = 2.0 * np.pi * np.arange(self.n) / self.n
+            radius = self.level / max(importance.shape)
+            out = route[0] + radius * np.column_stack(
+                [np.cos(theta), np.sin(theta)])
+        else:
+            # Interpolate in target-index time rather than arc length: repeated
+            # targets remain dwell, while long connectors are crossed quickly.
+            target_t = np.linspace(0.0, len(route) - 1, self.n)
+            lo = np.floor(target_t).astype(np.int64)
+            hi = np.minimum(lo + 1, len(route) - 1)
+            frac = (target_t - lo)[:, None]
+            out = route[lo] + frac * (route[hi] - route[lo])
+        out = apply_trace_border(
+            out, self.border, aspect=h / float(max(w, 1)), level=self.level)
+        if self.dc_comp:
+            from scope_out import precompensate_hpf
+            out = precompensate_hpf(out, self.dc_comp, self.samplerate)
+        self._end = out[-1].copy()
+        self._handoff_pending = False
+        return out
+
+    def emit_candidates(self, cloud):
+        """Render a compact baked candidate cloud with live tone controls."""
+        if cloud is None:
+            return None
+        xy = np.asarray(cloud["xy"], dtype=np.float64)
+        lum = np.clip(np.asarray(cloud["luminance"], dtype=np.float64), 0, 1)
+        edge = np.clip(np.asarray(cloud["edge"], dtype=np.float64), 0, 1)
+        correction = np.maximum(
+            np.asarray(cloud["correction"], dtype=np.float64), 0.0)
+        if not len(xy) or not (len(xy) == len(lum) == len(correction)):
+            return None
+        importance = np.where(
+            lum > max(0.0, float(self.trim)),
+            lum ** max(0.01, float(self.gamma)), 0.0)
+        if self.edge_gain > 0.0:
+            importance += float(self.edge_gain) * edge
+        importance *= correction
+        total = float(importance.sum())
+        if total <= 1e-12:
+            return None
+
+        marks = ((np.arange(self.points, dtype=np.float64) + 0.5)
+                 * total / self.points)
+        chosen = np.searchsorted(np.cumsum(importance), marks, side="left")
+        chosen = np.clip(chosen, 0, len(xy) - 1)
+        unique, dwell = np.unique(chosen, return_counts=True)
+        points = xy[unique]
+
+        aspect = max(float(cloud.get("aspect", 1.0)), 1e-9)
+        sx = 1.0 if aspect <= 1.0 else 1.0 / aspect
+        sy = aspect if aspect <= 1.0 else 1.0
+        display = np.column_stack([
+            (2.0 * points[:, 0] - 1.0) * sx,
+            (1.0 - 2.0 * points[:, 1]) * sy,
+        ]) * self.level
+
+        remaining = np.ones(len(display), dtype=bool)
+        start = self._end if self._end is not None else display[np.argmax(dwell)]
+        order = []
+        pos = np.asarray(start, dtype=np.float64)
+        for _ in range(len(display)):
+            delta = display - pos
+            distance = np.einsum("ij,ij->i", delta, delta)
+            distance[~remaining] = np.inf
+            j = int(np.argmin(distance))
+            order.append(j)
+            remaining[j] = False
+            pos = display[j]
+        order = np.asarray(order, dtype=np.int64)
+        route = np.repeat(display[order], dwell[order], axis=0)
+        if self._end is not None:
+            route = np.vstack([self._end, route])
+        if len(route) == 1:
+            theta = 2.0 * np.pi * np.arange(self.n) / self.n
+            radius = self.level / 256.0
+            out = route[0] + radius * np.column_stack(
+                [np.cos(theta), np.sin(theta)])
+        else:
+            target_t = np.linspace(0.0, len(route) - 1, self.n)
+            lo = np.floor(target_t).astype(np.int64)
+            hi = np.minimum(lo + 1, len(route) - 1)
+            frac = (target_t - lo)[:, None]
+            out = route[lo] + frac * (route[hi] - route[lo])
+        out = apply_trace_border(
+            out, self.border, aspect=aspect, level=self.level)
+        if self.dc_comp:
+            from scope_out import precompensate_hpf
+            out = precompensate_hpf(out, self.dc_comp, self.samplerate)
+        self._end = out[-1].copy()
+        self._handoff_pending = False
+        return out
 
 
 class TriangleMixScheduler:
@@ -1288,6 +1594,90 @@ def composite_luma(main_lib, main_idx, float_lib, float_idx, bbox=None,
         lum = lum[int(y0 * hh):max(int(y1 * hh), int(y0 * hh) + 1),
                   int(x0 * ww):max(int(x1 * ww), int(x0 * ww) + 1)]
     return lum
+
+
+def raster_precondition_for(main_lib, float_lib=None):
+    """Recommended grid-domain compensation, or zero for legacy bakes.
+
+    A legacy two-channel bake may already be preconditioned and a three-channel
+    bake definitely has a separate preconditioned raster channel. Applying the
+    new grid correction to either would sharpen twice, so only an explicitly
+    tagged raw-thumbnail format enables it.
+    """
+    libs = [lib for lib in (main_lib, float_lib) if lib is not None]
+    if not libs or not all(getattr(lib, "raw_thumbnail", False) for lib in libs):
+        return 0.0
+    values = [float(getattr(lib, "raster_precondition", 0.0)) for lib in libs]
+    return min(values) if values else 0.0
+
+
+def _alpha_at(alpha, xy):
+    """Nearest matte lookup at normalized uint16/float candidate positions."""
+    if alpha is None or not len(xy):
+        return np.zeros(len(xy), dtype=np.float64)
+    uv = np.asarray(xy, dtype=np.float64)
+    if uv.size and float(np.nanmax(uv)) > 1.0:
+        uv = uv / 65535.0
+    h, w = alpha.shape
+    xx = np.clip(np.round(uv[:, 0] * max(w - 1, 0)), 0, w - 1).astype(int)
+    yy = np.clip(np.round(uv[:, 1] * max(h - 1, 0)), 0, h - 1).astype(int)
+    return np.asarray(alpha[yy, xx], dtype=np.float64) / 255.0
+
+
+def composite_stipple_candidates(main_lib, main_idx, float_lib, float_idx):
+    """Combine sparse source-detail candidates for an arbitrary layer pair.
+
+    Candidate coordinates were sampled from a broad proposal at bake time.
+    ``correction`` is the proposal-density correction; StippleEmitter applies
+    the live gamma and then uses it to recover the intended image distribution.
+    The compact raster alpha is sufficient for float-over-main occlusion while
+    the uint16 coordinates retain source-resolution feature placement.
+    """
+    cm = (main_lib.stipple(main_idx)
+          if main_lib is not None and hasattr(main_lib, "stipple") else None)
+    cf = (float_lib.stipple(float_idx)
+          if float_lib is not None and hasattr(float_lib, "stipple") else None)
+    if cm is None and cf is None:
+        return None
+
+    tm = main_lib.thumb(main_idx) if main_lib is not None else None
+    tf = float_lib.thumb(float_idx) if float_lib is not None else None
+    reference = tm if tm is not None else tf
+    if reference is None:
+        return None
+    aspect = reference.shape[0] / float(max(reference.shape[1], 1))
+
+    clouds = []
+
+    def add(candidate, occluder=None):
+        if candidate is None:
+            return
+        xy, lae, mass = candidate
+        uv = np.asarray(xy, dtype=np.float64) / 65535.0
+        values = np.asarray(lae, dtype=np.float64) / 255.0
+        lum, alpha, edge = values[:, 0], values[:, 1], values[:, 2]
+        visible = alpha.copy()
+        if occluder is not None:
+            visible *= 1.0 - _alpha_at(occluder, xy)
+        signal = lum * visible
+        shown_edge = edge * visible
+        proposal = alpha * (0.15 + 0.75 * lum + 0.10 * edge)
+        correction = np.divide(
+            max(float(mass), 0.0), proposal,
+            out=np.zeros_like(proposal), where=proposal > 1e-9)
+        clouds.append((uv, signal, shown_edge, correction))
+
+    add(cm, tf[..., 1] if tf is not None else None)
+    add(cf)
+    if not clouds:
+        return None
+    return {
+        "xy": np.concatenate([c[0] for c in clouds]),
+        "luminance": np.concatenate([c[1] for c in clouds]),
+        "edge": np.concatenate([c[2] for c in clouds]),
+        "correction": np.concatenate([c[3] for c in clouds]),
+        "aspect": aspect,
+    }
 
 
 FUSION_COMPONENTS = ("vrs", "vr", "sv", "sr")
@@ -1492,7 +1882,7 @@ def raster_frame(main_lib, main_idx, float_lib, float_idx, n,
                  oversample=1, grid_rows=None, grid_cols=None, levels=None,
                  fields=1, field=0, palindrome=False, reverse=False, start=None,
                  close=None, overscan=1.0, border=0.0, row_bias=1.0,
-                 subcell=True):
+                 subcell=True, precondition=None):
     """
     Dwell-modulated serpentine: the 2-channel equivalent of a video-to-scope
     adapter.  The beam sweeps every row and lingers on bright cells, so
@@ -1541,6 +1931,8 @@ def raster_frame(main_lib, main_idx, float_lib, float_idx, n,
     lum = composite_luma(main_lib, main_idx, float_lib, float_idx, bbox=bbox)
     if lum is None:
         return None
+    if precondition is None:
+        precondition = raster_precondition_for(main_lib, float_lib)
     return render_luma(lum, n, gamma=gamma, floor=floor, level=level,
                        rows=rows, cols=cols, density=density, trim=trim,
                        stretch=stretch, bbox=bbox, autofit=autofit, border=border,
@@ -1548,7 +1940,28 @@ def raster_frame(main_lib, main_idx, float_lib, float_idx, n,
                        oversample=oversample, grid_rows=grid_rows,
                        grid_cols=grid_cols, levels=levels, fields=fields,
                        field=field, palindrome=palindrome, reverse=reverse,
-                       start=start, close=close, overscan=overscan)
+                       start=start, close=close, overscan=overscan,
+                       precondition=precondition)
+
+
+def _precondition_grid(grid, amount):
+    """Small horizontal-only beam compensation on the final sweep grid."""
+    g = np.asarray(grid, dtype=np.float64)
+    if not amount or amount <= 0.0 or g.shape[1] <= 2:
+        return g
+    # Correct only the axis the raster beam actually smears. The former
+    # bake-time 2-D mask compared eyes and facial shadows with distant vertical
+    # pixels; this filter cannot invent a vertical facial contour.
+    p = np.pad(g, ((0, 0), (2, 2)), mode="edge")
+    blur = (p[:, :-4] + 4.0 * p[:, 1:-3] + 6.0 * p[:, 2:-2]
+            + 4.0 * p[:, 3:-1] + p[:, 4:]) / 16.0
+    sharp = g + float(amount) * (g - blur)
+    # Clamp only to the immediate horizontal range: no bright/dark overshoot
+    # and, unlike the old scaled 9x9 clamp, no borrowing from eye/chin shadows.
+    q = np.pad(g, ((0, 0), (1, 1)), mode="edge")
+    local_lo = np.minimum(np.minimum(q[:, :-2], q[:, 1:-1]), q[:, 2:])
+    local_hi = np.maximum(np.maximum(q[:, :-2], q[:, 1:-1]), q[:, 2:])
+    return np.minimum(np.maximum(sharp, local_lo), local_hi)
 
 
 def render_luma(lum, n, gamma=2.2, floor=0.012, level=0.9, rows=None,
@@ -1556,7 +1969,8 @@ def render_luma(lum, n, gamma=2.2, floor=0.012, level=0.9, rows=None,
                 autofit=True, oversample=1, grid_rows=None, grid_cols=None,
                 border=0.0, row_bias=1.0, subcell=True,
                 levels=None, fields=1, field=0, palindrome=False,
-                reverse=False, start=None, close=None, overscan=1.0):
+                reverse=False, start=None, close=None, overscan=1.0,
+                precondition=0.0):
     """
     Render a luminance image to XY samples.  This is the whole display engine:
     everything above it just decides what the image is.
@@ -1634,6 +2048,8 @@ def render_luma(lum, n, gamma=2.2, floor=0.012, level=0.9, rows=None,
             lo, hi = np.percentile(lit, 2), np.percentile(lit, 98)
             if hi > lo:
                 g = np.clip((g - lo) / (hi - lo), 0.0, 1.0)
+
+    g = _precondition_grid(g, precondition)
 
     # Aspect-correct extents.  Mapping both axes to +-1 would stretch a
     # non-square image to a square -- vector mode normalises by max(w, h), and

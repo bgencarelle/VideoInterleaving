@@ -191,7 +191,7 @@ a compatibility alias.
 
 Fusion follows the same two-gamma rule: `--scope-gamma` initializes both
 luminance sources, and `--scope-stochastic-gamma` can separate the raw
-stochastic contribution from raster's preconditioned contribution.
+stochastic contribution from raster's grid-compensated contribution.
 
 ---
 
@@ -251,7 +251,7 @@ still applies there.
 
 ## Group E — which engine runs
 
-### `--scope-mode vector|raster|stochastic|fusion` (default `SCOPE_RENDER_MODE`)
+### `--scope-mode vector|raster|stochastic|stipple|fusion` (default `SCOPE_RENDER_MODE`)
 
 Selects the rendering engine explicitly:
 
@@ -259,6 +259,9 @@ Selects the rendering engine explicitly:
 - `raster` draws dwell-modulated horizontal scanlines.
 - `stochastic` performs a luminance-weighted nearest-neighbour XY walk. It has
   no scanline spacing and needs no Z/brightness channel.
+- `stipple` builds stable luminance-weighted image positions, orders them by
+  unrestricted Euclidean proximity, and resamples that completed route. It
+  keeps the stochastic maze mode available under its existing name.
 - `fusion` generates corresponding position arrays for the selected renderers
   and selects their entries round-robin by array index.
 
@@ -269,18 +272,18 @@ stochastic+vector, or stochastic+raster. `vr` produces
 `V[0], R[1], V[2], R[3]...`; no XY coordinates are averaged. Press `f` in
 fusion mode to cycle the presets.
 
-### `--scope-raster` / `--scope-stochastic`
+### `--scope-raster` / `--scope-stochastic` / `--scope-stipple`
 
 Compatibility shortcuts for `--scope-mode raster` and
-`--scope-mode stochastic`. They are mutually exclusive with each other and
-with an explicit `--scope-mode`.
+`--scope-mode stochastic` or `--scope-mode stipple`. They are mutually
+exclusive with each other and with an explicit `--scope-mode`.
 
 ### Stochastic controls
 
 | flag | default | effect |
 |---|---:|---|
 | `--scope-walk-radius PX` | 10 | Radius searched for a nearby unvisited accepted pixel. |
-| `--scope-walk-stride PX` | 0 (auto) | Source-scale-aware spacing: 2 at the default width 256; 1 at 96 and 4 at 480. Explicit higher values are coarser. |
+| `--scope-walk-stride PX` | 0 (auto) | Source-scale-aware spacing: 1 at the compact default width 128; explicit higher values are coarser. |
 | `--scope-walk-reseed-ms MS` | 5.0 | Interval between random relocations. |
 | `--scope-gamma F` | 2.0 | Fresh `luminance ** gamma` acceptance test for every candidate in stochastic mode. |
 | `--scope-stochastic-gamma F` | 2.0 | Stochastic-only gamma override, especially for mix. `--scope-walk-gamma` is an alias. |
@@ -288,14 +291,42 @@ with an explicit `--scope-mode`.
 | `--scope-walk-hz HZ` | 48000 | Target decisions per second, independent of image rate and faster DAC rates. |
 
 Stochastic always excludes luminance at or below 0.2, as Osci-render does; a
-larger `--scope-trim` raises that floor. Density, rows, fields, autofit, border,
-and sweep are raster-only. The common `--scope-lowpass` remains available to
+larger `--scope-trim` raises that floor. Density, rows, fields, autofit, and
+sweep are raster-only. `--scope-border` also applies to stochastic and stipple:
+it replaces the requested tail share after the complete continuous path has
+been generated, then rejoins that path's original endpoint so the walk or
+route stays continuous across buffers. Fusion applies one border after its
+component-position multiplexer, rather than interleaving pieces of several
+component-local rectangles. The common `--scope-lowpass` remains available to
 audition a bandwidth-limited XY chain.
 
 There is no stochastic waypoint budget. At the default 48 kHz target clock a
 48 kHz DAC chooses one target per sample; a 96 kHz DAC samples each target
 interval twice. The current image may change at 30 IPS while the walk carries
 on continuously through that change.
+
+### `--scope-stipple-points N` (default 768)
+
+Number of deterministic luminance-weighted positions used to construct a
+stipple route. This is an image-route parameter, not a sample-rate clock.
+Repeated positions provide dwell; Euclidean nearest-neighbor ordering keeps
+unavoidable no-Z connectors local. Stipple shares `--scope-gamma`,
+`--scope-trim`, and optional `--scope-walk-edge`, but ignores stochastic's
+radius, stride, reseed interval, and walk rate. It shares the fixed-extent
+`--scope-border`; the border returns to the unbordered route endpoint so it
+does not restart the next frame's nearest-neighbour tour.
+
+Current bakes store 1024 source-detail candidates analyzed at 256px rather than
+a complete 256px luminance plane. The runtime reweights those candidates, so
+live gamma remains functional and the compact 128px raster field does not limit
+stipple coordinate placement.
+
+### `--scope-precondition F` (compact-bake default 0.45)
+
+Horizontal-only raster compensation applied after luminance has been reduced
+to the final sweep grid. It does not add a stored channel. Legacy bakes default
+to zero because their raster channel may already contain bake-time sharpening;
+an explicit value overrides that compatibility choice.
 
 ### `--scope-min-feature F` (default 0.02)
 

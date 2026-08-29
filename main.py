@@ -86,13 +86,17 @@ def configure_runtime():
     parser.add_argument("--xy-dir", help="Baked XY libraries (default: settings.XY_DIR)")
     scope_render = parser.add_mutually_exclusive_group()
     scope_render.add_argument("--scope-mode",
-                              choices=("vector", "raster", "stochastic", "fusion"),
+                              choices=("vector", "raster", "stochastic",
+                                       "stipple", "fusion"),
                               help="Scope renderer (default: settings.SCOPE_RENDER_MODE)")
     scope_render.add_argument("--scope-raster", action="store_true",
                               help="Alias for --scope-mode raster")
     scope_render.add_argument("--scope-stochastic", action="store_true",
                               help="Alias for --scope-mode stochastic: Osci-style "
                                    "luminance-weighted XY walk with no Z channel")
+    scope_render.add_argument("--scope-stipple", action="store_true",
+                              help="Alias for --scope-mode stipple: stable "
+                                   "weighted points with a Euclidean route")
     parser.add_argument("--scope-realtime", action="store_true",
                         help="Scope: stream continuously so index changes land "
                              "within a row instead of at a trace boundary (raster only)")
@@ -118,12 +122,17 @@ def configure_runtime():
                              "stochastic side")
     parser.add_argument("--scope-density", type=float,
                         help="Default: settings.SCOPE_DENSITY")
+    parser.add_argument("--scope-precondition", type=float, metavar="F",
+                        help="Raster horizontal compensation on the final "
+                             "sweep grid. New compact bakes recommend 0.45; "
+                             "legacy bakes default to 0 to avoid sharpening "
+                             "their already-processed luminance twice")
     parser.add_argument("--scope-walk-radius", type=int, metavar="PX",
                         help="Scope stochastic: nearest-neighbour search radius")
     parser.add_argument("--scope-walk-stride", type=int, metavar="PX",
                         help="Scope stochastic: source-pixel step. Default 0 "
-                             "auto-scales to the baked width (2 at the default "
-                             "width 256)")
+                             "auto-scales to the baked width (1 at the compact "
+                             "default width 128)")
     parser.add_argument("--scope-walk-reseed-ms", type=float, metavar="MS",
                         help="Scope stochastic: time between random reseeds "
                              "(default 5 ms, matching Osci-render)")
@@ -143,6 +152,9 @@ def configure_runtime():
     parser.add_argument("--scope-walk-hz", type=float, metavar="HZ",
                         help="Scope stochastic target clock (default 48000). "
                              "Independent of the image rate and of faster DACs")
+    parser.add_argument("--scope-stipple-points", type=int, metavar="N",
+                        help="Scope stipple: stable luminance-weighted image "
+                             "positions before proximity ordering (default 768)")
     parser.add_argument("--scope-rows", type=int)
     parser.add_argument("--scope-row-bias", type=float, metavar="F",
                         help="Trade columns for rows at constant cell count. "
@@ -153,9 +165,10 @@ def configure_runtime():
                              "sharper than the default 1.0. Past ~1.6 the "
                              "mouth smears and the silhouette blocks up.")
     parser.add_argument("--scope-border", type=float, metavar="F",
-                        help="Draw a fixed one-cell rectangle at the full "
-                             "extent every trace, spending F of the trace's "
-                             "samples on it (try 0.03). Without it the drawn "
+                        help="Draw a fixed rectangle at the full extent in "
+                             "raster, stochastic, stipple, and fusion, "
+                             "spending F of the trace's samples on it (try "
+                             "0.03). Without it the drawn "
                              "extent is whatever the content occupies, so dark "
                              "margins pull that side in and the picture skews "
                              "and rescales as the subject changes. 0 = off.")
@@ -387,6 +400,8 @@ def configure_runtime():
             settings.SCOPE_RENDER_MODE = "raster"
         elif args.scope_stochastic:
             settings.SCOPE_RENDER_MODE = "stochastic"
+        elif args.scope_stipple:
+            settings.SCOPE_RENDER_MODE = "stipple"
         # Compatibility for callers outside main.py that still inspect this.
         settings.SCOPE_RASTER = settings.SCOPE_RENDER_MODE == "raster"
         if args.scope_realtime:
@@ -414,12 +429,16 @@ def configure_runtime():
                     or settings.SCOPE_RENDER_MODE == "fusion"):
                 settings.SCOPE_GAMMA = args.scope_gamma
                 settings.SCOPE_WALK_GAMMA = args.scope_gamma
-            elif settings.SCOPE_RENDER_MODE == "stochastic":
+            elif settings.SCOPE_RENDER_MODE in ("stochastic", "stipple"):
                 settings.SCOPE_WALK_GAMMA = args.scope_gamma
             else:
                 settings.SCOPE_GAMMA = args.scope_gamma
         if args.scope_density is not None:
             settings.SCOPE_DENSITY = args.scope_density
+        if args.scope_precondition is not None:
+            if args.scope_precondition < 0:
+                parser.error("--scope-precondition must be non-negative")
+            settings.SCOPE_PRECONDITION = args.scope_precondition
         if args.scope_walk_radius is not None:
             settings.SCOPE_WALK_RADIUS = args.scope_walk_radius
         if args.scope_walk_stride is not None:
@@ -434,6 +453,10 @@ def configure_runtime():
             settings.SCOPE_WALK_EDGE = args.scope_walk_edge
         if args.scope_walk_hz is not None:
             settings.SCOPE_WALK_HZ = args.scope_walk_hz
+        if args.scope_stipple_points is not None:
+            if args.scope_stipple_points < 8:
+                parser.error("--scope-stipple-points must be at least 8")
+            settings.SCOPE_STIPPLE_POINTS = args.scope_stipple_points
         if args.scope_rows:
             settings.SCOPE_ROWS = args.scope_rows
         if args.scope_no_autofit:

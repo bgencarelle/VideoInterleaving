@@ -116,7 +116,7 @@ SCOPE_DEVICE_RESOLVED = False
 SCOPE_ASK = False         # interactive device picker; safe only with a tty
 SCOPE_FPS = None          # None -> follow IPS
 SCOPE_SAMPLES = None      # explicit samples/trace; incompatible with mix
-SCOPE_RENDER_MODE = "vector"  # vector | raster | stochastic | fusion
+SCOPE_RENDER_MODE = "vector"  # vector | raster | stochastic | stipple | fusion
                           # Stochastic is a luminance-weighted XY walk; fusion
                           # multiplexes corresponding V/R/S array entries.
 SCOPE_FUSION = "vrs"      # vrs | vr | sv | sr; round-robin position sources
@@ -132,13 +132,16 @@ SCOPE_MIN_FEATURE = 0.02  # vector: shortest stroke kept by the occlusion cull
 SCOPE_TRIM = 0.02         # raster: drop cells dimmer than this from the sweep
 SCOPE_GAMMA = 2.2         # raster luminance exponent
 SCOPE_DENSITY = 1.0       # raster samples per cell (1.0 = finest)
+SCOPE_PRECONDITION = None # None uses compact bake's recommendation; legacy 0
 SCOPE_WALK_RADIUS = 10    # stochastic: nearest-neighbour search radius, pixels
-SCOPE_WALK_STRIDE = 0     # stochastic: auto-scale (~width/120; 2 at width 256)
+SCOPE_WALK_STRIDE = 0     # stochastic: auto-scale (~width/120; 1 at width 128)
 SCOPE_WALK_RESEED_MS = 5.0  # stochastic: jump to another bright region
 SCOPE_WALK_GAMMA = 2.0    # stochastic: useful portrait default. Equivalent to
                           # Osci Image Threshold 0.1 (exponent = UI * 10 + 1).
 SCOPE_WALK_EDGE = 0.0     # stochastic: optional non-Osci edge probability
 SCOPE_WALK_HZ = 48000.0   # stochastic target clock; independent of faster DACs
+SCOPE_STIPPLE_POINTS = 768 # stable weighted image positions; output rate only
+                           # resamples the finished proximity-ordered route
 SCOPE_LOWPASS = None      # Hz; emulate a softer output chain (Pi headphone
                           # jack, cheap codec, or a physical RC filter).
                           # None = off. See scope_lowpass.py.

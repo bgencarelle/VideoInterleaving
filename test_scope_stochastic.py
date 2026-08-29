@@ -1,12 +1,15 @@
-"""Regression checks for the no-Z stochastic and fusion scope renderers."""
+"""Regression checks for no-Z stochastic, stipple, and fusion renderers."""
 import tempfile
 from pathlib import Path
 
 import numpy as np
 
-from scope_bake import (StochasticEmitter, TraceEmitter, TriangleMixScheduler,
+from scope_bake import (StochasticEmitter, StippleEmitter, TraceEmitter,
+                        TriangleMixScheduler,
                         PositionMultiplexer,
-                        calibrate, composite_luma, merge, stochastic_luma,
+                        calibrate, composite_luma,
+                        composite_stipple_candidates, raster_precondition_for,
+                        _precondition_grid, merge, stochastic_luma,
                         fuse_density, fuse_positions,
                         normalize_fusion_components, vector_density)
 from utilities.convert_to_xy import THUMB_W
@@ -192,9 +195,9 @@ def test_auto_stride_scales_osci_source_pixels_to_bake_width():
         assert emitter._stride_for_width(width) == expected
 
 
-def test_thumbnail_default_retains_stochastic_spatial_detail():
-    assert THUMB_W == 256
-    assert StochasticEmitter(48000, 200)._stride_for_width(THUMB_W) == 2
+def test_compact_thumbnail_default_stays_inside_old_storage_range():
+    assert THUMB_W == 128
+    assert StochasticEmitter(48000, 200)._stride_for_width(THUMB_W) == 1
 
 
 def test_baker_streams_large_thumbnail_arrays_to_an_atomic_memmap():
@@ -202,8 +205,13 @@ def test_baker_streams_large_thumbnail_arrays_to_an_atomic_memmap():
 
     original = baker.vectorize
     try:
-        baker.vectorize = lambda *_args, **_kwargs: (
-            [], [], np.full((4, 3, 3), 137, dtype=np.uint8))
+        def fake_vectorize(*_args, **kwargs):
+            count = kwargs["stipple_candidates"]
+            return ([], [], np.full((4, 3, 2), 137, dtype=np.uint8),
+                    np.full((count, 2), 1234, dtype=np.uint16),
+                    np.full((count, 3), 99, dtype=np.uint8), np.float32(0.4))
+
+        baker.vectorize = fake_vectorize
         with tempfile.TemporaryDirectory() as root:
             src = Path(root) / "0_source"
             dst = Path(root) / "baked"
@@ -215,9 +223,21 @@ def test_baker_streams_large_thumbnail_arrays_to_an_atomic_memmap():
             result = baker.process_folder((src, dst, profile))
             assert result is None
             thumbs = np.load(dst / "thumbs.npy", mmap_mode="r")
-            assert thumbs.shape == (2, 4, 3, 3)
+            assert thumbs.shape == (2, 4, 3, 2)
             assert np.all(thumbs == 137)
             assert not list(dst.glob(".thumbs-*.npy"))
+            assert np.load(dst / "stipple_xy.npy", mmap_mode="r").shape == (
+                2, baker.STIPPLE_CANDIDATES, 2)
+            assert np.load(dst / "stipple_lae.npy", mmap_mode="r").shape == (
+                2, baker.STIPPLE_CANDIDATES, 3)
+            meta = __import__("json").loads((dst / "format.json").read_text())
+            assert meta["thumbnail_channels"] == ["raw_luminance", "alpha"]
+            assert meta["thumb_width"] == 128
+            from scope_bake import XYLibrary
+            lib = XYLibrary(dst)
+            assert lib.raw_thumbnail
+            assert lib.raster_precondition == baker.PRECONDITION
+            assert lib.stipple(1)[0].shape == (baker.STIPPLE_CANDIDATES, 2)
     finally:
         baker.vectorize = original
 
@@ -266,7 +286,141 @@ def test_image_update_does_not_reset_continuous_walk():
     assert emitter._count == 1600
 
 
-def test_live_mode_cycles_all_four_renderers_and_fusion_sets():
+def _assert_full_border(frame, aspect, level=0.9):
+    sx = level if aspect <= 1.0 else level / aspect
+    sy = level * aspect if aspect <= 1.0 else level
+    expected = ((-sx, -sy), (sx, -sy), (sx, sy), (-sx, sy))
+    for corner in expected:
+        assert np.any(np.all(np.isclose(frame, corner, atol=1e-6), axis=1))
+
+
+def test_stochastic_border_preserves_walk_clock_and_hidden_endpoint():
+    lum = _portrait()
+    plain = StochasticEmitter(48000, 800, seed=19)
+    boxed = StochasticEmitter(48000, 800, seed=19, border=0.04)
+    for _ in range(2):
+        a = plain.emit(lum)
+        b = boxed.emit(lum)
+        assert a.shape == b.shape == (800, 2)
+        assert np.array_equal(a[-1], b[-1])
+        assert plain._count == boxed._count
+        assert plain._pixel == boxed._pixel
+        _assert_full_border(b, lum.shape[0] / lum.shape[1])
+
+
+def test_sparse_stipple_border_preserves_route_endpoint_between_frames():
+    cloud = {
+        "xy": np.array([[0.1, 0.2], [0.5, 0.5], [0.9, 0.8]]),
+        "luminance": np.array([0.25, 0.6, 1.0]),
+        "edge": np.zeros(3),
+        "correction": np.ones(3),
+        "aspect": 4 / 3,
+    }
+    plain = StippleEmitter(48000, 800, points=96)
+    boxed = StippleEmitter(48000, 800, points=96, border=0.04)
+    for _ in range(2):
+        a = plain.emit_candidates(cloud)
+        b = boxed.emit_candidates(cloud)
+        assert np.array_equal(a[-1], b[-1])
+        _assert_full_border(b, cloud["aspect"])
+
+
+def test_stipple_is_stable_euclidean_and_rate_independent():
+    lum = _portrait()
+    a = StippleEmitter(48000, 800, points=192).emit(lum)
+    b = StippleEmitter(48000, 800, points=192).emit(lum)
+    hi = StippleEmitter(96000, 1600, points=192).emit(lum)
+    assert np.array_equal(a, b)
+    assert a.shape == (800, 2) and hi.shape == (1600, 2)
+    assert np.isfinite(a).all() and np.abs(a).max() <= 0.900001
+    # The same image route is merely sampled more densely at the larger output
+    # array length; compare both at common normalized positions.
+    common = np.linspace(0.0, 1.0, 200)
+    ta = np.linspace(0.0, 1.0, len(a))
+    th = np.linspace(0.0, 1.0, len(hi))
+    for axis in range(2):
+        assert np.allclose(np.interp(common, ta, a[:, axis]),
+                           np.interp(common, th, hi[:, axis]), atol=1e-2)
+    delta = np.diff(a, axis=0)
+    assert np.any((np.abs(delta[:, 0]) > 1e-5)
+                  & (np.abs(delta[:, 1]) > 1e-5))
+
+
+def test_sparse_stipple_candidates_keep_source_coordinates_and_live_gamma():
+    cloud = {
+        "xy": np.array([[0.1, 0.2], [0.5, 0.5], [0.9, 0.8]]),
+        "luminance": np.array([0.25, 0.6, 1.0]),
+        "edge": np.zeros(3),
+        "correction": np.ones(3),
+        "aspect": 4 / 3,
+    }
+    a = StippleEmitter(48000, 800, points=96, gamma=1.0).emit_candidates(cloud)
+    b = StippleEmitter(48000, 800, points=96, gamma=1.0).emit_candidates(cloud)
+    dark = StippleEmitter(48000, 800, points=96, gamma=4.0).emit_candidates(cloud)
+    assert np.array_equal(a, b)
+    assert a.shape == dark.shape == (800, 2)
+    assert np.isfinite(a).all() and np.abs(a).max() <= 0.900001
+    assert not np.array_equal(a, dark)
+
+
+def test_grid_precondition_is_horizontal_clamped_and_face_safe():
+    base = np.array([[0.1, 0.4, 0.2, 0.8, 0.3],
+                     [0.2, 0.6, 0.3, 0.7, 0.2],
+                     [0.9, 0.1, 0.8, 0.2, 0.9]], dtype=np.float64)
+    changed_vertical_neighbours = base.copy()
+    changed_vertical_neighbours[0] = 1.0 - base[0]
+    changed_vertical_neighbours[2] = 1.0 - base[2]
+    actual = _precondition_grid(base, 0.45)
+    other = _precondition_grid(changed_vertical_neighbours, 0.45)
+    assert np.allclose(actual[1], other[1])
+    for row_in, row_out in zip(base, actual):
+        padded = np.pad(row_in, 1, mode="edge")
+        assert np.all(row_out >= np.minimum.reduce(
+            [padded[:-2], padded[1:-1], padded[2:]]) - 1e-12)
+        assert np.all(row_out <= np.maximum.reduce(
+            [padded[:-2], padded[1:-1], padded[2:]]) + 1e-12)
+
+
+def test_new_bake_metadata_enables_grid_precondition_only_once():
+    class New:
+        raw_thumbnail = True
+        raster_precondition = 0.45
+
+    class Legacy:
+        raw_thumbnail = False
+        raster_precondition = 0.0
+
+    assert raster_precondition_for(New(), New()) == 0.45
+    assert raster_precondition_for(New(), Legacy()) == 0.0
+
+
+def test_sparse_stipple_composite_respects_float_over_main_alpha():
+    class Lib:
+        def __init__(self, lum, alpha):
+            self._thumb = np.zeros((4, 4, 2), dtype=np.uint8)
+            self._thumb[..., 0] = lum
+            self._thumb[..., 1] = alpha
+            self._xy = np.array([[32768, 32768]], dtype=np.uint16)
+            self._lae = np.array([[lum, alpha, 0]], dtype=np.uint8)
+
+        def __len__(self):
+            return 1
+
+        def thumb(self, _index):
+            return self._thumb
+
+        def stipple(self, _index):
+            return self._xy, self._lae, 0.5
+
+    main = Lib(200, 255)
+    floating = Lib(100, 255)
+    cloud = composite_stipple_candidates(main, 0, floating, 0)
+    # First pool is main and is fully occluded; second is the float layer.
+    assert cloud["luminance"][0] == 0.0
+    assert np.isclose(cloud["luminance"][1], 100 / 255)
+
+
+def test_live_mode_cycles_all_five_renderers_and_fusion_sets():
     state = {"mode": "vector", "raster": False, "gamma": 2.2,
              "raster_gamma": 2.2, "stochastic_gamma": 2.0}
     keys = KeyMap(state)
@@ -278,6 +432,10 @@ def test_live_mode_cycles_all_four_renderers_and_fusion_sets():
     assert state["gamma"] == 2.0
     assert "--scope-mode stochastic" in as_flags(state)
     assert "--scope-gamma 2" in as_flags(state)
+    keys.feed("v")
+    assert state["mode"] == "stipple"
+    assert state["gamma"] == 2.0
+    assert "--scope-mode stipple" in as_flags(state)
     keys.feed("v")
     assert state["mode"] == "fusion"
     state["fusion_components"] = "vrs"
@@ -402,6 +560,14 @@ def test_vector_density_and_fusion_runtime_emit_all_combinations():
         assert np.isfinite(frame).all()
         if combo == "vrs":
             assert np.allclose(frame, expected_vrs)
+
+    scope_display._emit(
+        scope, lib, None, 0, "fusion", {}, "alternate",
+        2.2, 0.02, 1.0, None, 0.02,
+        border=0.04, emitter=raster, stochastic_emitter=stochastic,
+        beam_start=beam, mode_handoff=True, fusion_components="vr",
+        stochastic_gamma=2.0)
+    _assert_full_border(scope.frames[-1], 64 / 48)
 
 
 def test_live_mode_cycle_respects_fixed_scheduler():
@@ -574,7 +740,7 @@ def test_pair_mixer_playback_is_not_gated_on_gui():
     assert "scope is None or scope.ready()" in source
 
 
-def test_combined_256_bake_triangle_mix_emits_all_three_paths():
+def test_legacy_three_channel_bake_triangle_mix_emits_all_three_paths():
     import scope_display
 
     class Lib:
