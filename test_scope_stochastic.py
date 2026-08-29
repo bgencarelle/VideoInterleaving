@@ -5,8 +5,9 @@ from pathlib import Path
 import numpy as np
 
 from scope_bake import (StochasticEmitter, TraceEmitter, TriangleMixScheduler,
-                        calibrate, composite_luma, stochastic_luma,
-                        fuse_density, fusion_probability,
+                        PositionMultiplexer,
+                        calibrate, composite_luma, merge, stochastic_luma,
+                        fuse_density, fuse_positions,
                         normalize_fusion_components, vector_density)
 from utilities.convert_to_xy import THUMB_W
 from scope_controls import KeyMap, as_flags
@@ -317,6 +318,28 @@ def test_fusion_density_supports_every_requested_component_set():
         assert max(active) - min(active) < 1e-9
 
 
+def test_position_fusion_multiplexes_corresponding_array_entries():
+    vector = np.column_stack([np.arange(8), np.full(8, 10)])
+    raster = np.column_stack([np.arange(8), np.full(8, 20)])
+    stochastic = np.column_stack([np.arange(8), np.full(8, 30)])
+    sources = {"v": vector, "r": raster, "s": stochastic}
+    for combo in ("vrs", "vr", "sv", "sr"):
+        mux = PositionMultiplexer()
+        actual = mux.emit(vector, raster, stochastic, components=combo)
+        expected = np.empty_like(vector, dtype=np.float32)
+        for i in range(len(expected)):
+            expected[i] = sources[combo[i % len(combo)]][i]
+        assert actual.dtype == np.float32
+        assert np.array_equal(actual, expected)
+
+    # Eight entries do not divide evenly across V/R/S. The next array resumes
+    # at S instead of favoring V at the beginning of every call.
+    mux = PositionMultiplexer()
+    mux.emit(vector, raster, stochastic, components="vrs")
+    continued = mux.emit(vector, raster, stochastic, components="vrs")
+    assert np.array_equal(continued[0], stochastic[0])
+
+
 def test_vector_density_and_fusion_runtime_emit_all_combinations():
     import scope_display
 
@@ -357,20 +380,28 @@ def test_vector_density_and_fusion_runtime_emit_all_combinations():
     scope_display.Scope._tap_until = 0
     scope = FakeScope()
     stochastic = StochasticEmitter(48000, 800, seed=22)
+    raster = TraceEmitter(48000, 800)
+    from scope_out import rasterize
+    expected_vector = rasterize(merge(lib, 0, None, 0), 800)
+    expected_raster = TraceEmitter(48000, 800).emit(
+        composite_luma(lib, 0, None, 0))
+    expected_stochastic = StochasticEmitter(48000, 800, seed=22).emit(
+        composite_luma(lib, 0, None, 0, raw=True))
+    expected_vrs = fuse_positions(
+        expected_vector, expected_raster, expected_stochastic, "vrs")
     beam = None
     for combo in ("vrs", "vr", "sv", "sr"):
-        probability = fusion_probability(lib, 0, None, 0, components=combo)
-        assert probability.shape == (64, 48)
-        assert probability.max() == 1.0
         beam = scope_display._emit(
             scope, lib, None, 0, "fusion", {}, "alternate",
             2.2, 0.02, 1.0, None, 0.02,
-            stochastic_emitter=stochastic, beam_start=beam,
+            emitter=raster, stochastic_emitter=stochastic, beam_start=beam,
             mode_handoff=True, fusion_components=combo,
             stochastic_gamma=2.0)
         frame = scope.frames[-1]
         assert frame.shape == (800, 2)
         assert np.isfinite(frame).all()
+        if combo == "vrs":
+            assert np.allclose(frame, expected_vrs)
 
 
 def test_live_mode_cycle_respects_fixed_scheduler():
@@ -496,6 +527,51 @@ def test_scope_tap_publishes_one_complete_mixed_exposure():
         Scope._tap_fields = original_fields
         Scope._tap_accum = original_accum
         Scope._tap_until = original_until
+
+
+def test_baked_manifest_matches_normal_folder_count_grouping_and_order():
+    import scope_display
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+
+        def bake(rel, frames):
+            dest = root / rel
+            dest.mkdir(parents=True)
+            np.save(dest / "frame_starts.npy",
+                    np.arange(frames + 1, dtype=np.int32))
+            return dest
+
+        m0 = bake("face/0_base", 4)
+        m2 = bake("face/2_second", 4)
+        bake("face/1_wrong_length", 7)
+        m10 = bake("face/10_tenth", 4)
+        f2 = bake("float/255_2_float", 4)
+        f10 = bake("float/255_10_float", 4)
+        bake("float/255_wrong_length", 6)
+
+        frames, mains, floats = scope_display._manifest_from_xy(root)
+        assert frames == 4
+        assert mains == [m0, m2, m10]
+        assert floats == [f2, f10]
+
+        # The interactive pair tester must offer exactly the libraries the
+        # live runtime can select, rather than every stale bake on disk.
+        import test_scope_pair
+        pair_mains, pair_floats, pair_root = test_scope_pair.discover(root)
+        assert pair_root == root
+        assert pair_mains == mains
+        assert pair_floats == floats
+
+
+def test_pair_mixer_playback_is_not_gated_on_gui():
+    """Headless/audio-only playback must advance beyond its first V trace."""
+    import inspect
+    import test_scope_pair
+
+    source = inspect.getsource(test_scope_pair.main)
+    assert "if playing and gui:" not in source
+    assert "scope is None or scope.ready()" in source
 
 
 def test_combined_256_bake_triangle_mix_emits_all_three_paths():

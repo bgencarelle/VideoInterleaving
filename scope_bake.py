@@ -1308,6 +1308,64 @@ def normalize_fusion_components(value):
     return canonical
 
 
+class PositionMultiplexer:
+    """Select corresponding entries from V/R/S arrays in round-robin order.
+
+    Fusion is temporal selection, not coordinate arithmetic.  For ``vr`` the
+    result is ``V[0], R[1], V[2], R[3]...``; for ``vrs`` it is
+    ``V[0], R[1], S[2], V[3]...``.  ``phase`` continues across calls so a
+    length not divisible by the component count does not favor the first
+    component on every array.
+    """
+
+    def __init__(self):
+        self.phase = 0
+        self.components = None
+
+    def reset(self):
+        self.phase = 0
+        self.components = None
+
+    def emit(self, vector=None, raster=None, stochastic=None,
+             components="vrs"):
+        components = normalize_fusion_components(components)
+        available = {"v": vector, "r": raster, "s": stochastic}
+        names, arrays = [], []
+        for name in components:
+            trace = available[name]
+            if trace is None:
+                continue
+            trace = np.asarray(trace, dtype=np.float32)
+            if trace.ndim != 2 or trace.shape[1] != 2 or not len(trace):
+                raise ValueError(
+                    f"invalid {name} fusion trace shape {trace.shape}")
+            names.append(name)
+            arrays.append(trace)
+        if not arrays:
+            return None
+        shape = arrays[0].shape
+        if any(trace.shape != shape for trace in arrays[1:]):
+            raise ValueError("fusion component trace lengths differ")
+        key = tuple(names)
+        if key != self.components:
+            self.phase = 0
+            self.components = key
+        choice = (np.arange(shape[0], dtype=np.int64) + self.phase) % len(arrays)
+        out = np.empty(shape, dtype=np.float32)
+        for source, trace in enumerate(arrays):
+            mask = choice == source
+            out[mask] = trace[mask]
+        self.phase = int((self.phase + shape[0]) % len(arrays))
+        return np.ascontiguousarray(out)
+
+
+def fuse_positions(vector=None, raster=None, stochastic=None,
+                   components="vrs"):
+    """Stateless convenience wrapper for per-index position multiplexing."""
+    return PositionMultiplexer().emit(
+        vector, raster, stochastic, components=components)
+
+
 def vector_density(polylines, shape, thickness=1):
     """Rasterize baked XY lines into the thumbnail's square-padded space.
 

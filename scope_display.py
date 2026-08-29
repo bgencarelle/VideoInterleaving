@@ -3,8 +3,9 @@ scope_display.py -- the scope-mode engine.
 
 A standalone mode, like ascii / asciiweb / local / web: selected once and it
 owns the run. Renders the interleaved composition as XY vectors, dwell raster,
-an Osci-style stochastic luminance walk, or a fused density walk on the audio
-output, driven by the same clock (update_index, MIDI included) and the same
+an Osci-style stochastic luminance walk, or a per-index multiplexer across
+complete XY position arrays on the audio output, driven by the same clock
+(update_index, MIDI included) and the same
 folder selector as every other mode.
 
 Needs none of the image machinery: no ImageLoader, no FIFO, no TurboJPEG, no
@@ -33,10 +34,11 @@ import numpy as np
 import settings
 
 from time import monotonic as _time_mono
-from scope_out import Scope, choose_device, BufferedSource
+from scope_out import (Scope, choose_device, BufferedSource, rasterize,
+                       precompensate_hpf)
 from scope_bake import (XYLibrary, merge, SweepSource, calibrate,
                         composite_luma, TraceEmitter, StochasticEmitter,
-                        TriangleMixScheduler, fusion_probability,
+                        TriangleMixScheduler, PositionMultiplexer,
                         normalize_fusion_components)
 try:
     from scope_lowpass import lowpass_circular
@@ -205,13 +207,50 @@ def _manifest_from_xy(xy_root):
     if not mains or not floats:
         return None
 
-    mains.sort(key=lambda p: natural_sort_key(p.name))
-    floats.sort(key=lambda p: natural_sort_key(p.name))
-    try:
-        frames = len(np.load(mains[0] / "frame_starts.npy")) - 1
-    except Exception:
+    def folder_key(path):
+        # create_folder_csv_files() sorts by numeric prefix, then basename.
+        # The relative path is only a deterministic tie-breaker for nested
+        # folders with the same leaf name; it does not alter normal ordering.
+        name = path.name
+        prefix = name.partition("_")[0]
+        number = int(prefix) if prefix.isdigit() else float("inf")
+        return (number, natural_sort_key(name),
+                natural_sort_key(str(path.relative_to(root))))
+
+    mains.sort(key=folder_key)
+    floats.sort(key=folder_key)
+
+    # Match find_default_csvs(): normal modes group folders by image count,
+    # keep only counts that exist in BOTH layers, then choose the largest
+    # common count. Counting every bake and replacing mismatches with None
+    # shifts folder_selector's numeric indices and pairs the wrong face/float.
+    by_count = {"main": {}, "float": {}}
+    for kind, paths in (("main", mains), ("float", floats)):
+        for path in paths:
+            try:
+                count = len(np.load(path / "frame_starts.npy", mmap_mode="r")) - 1
+            except Exception as e:
+                print(f"[SCOPE] warning: cannot read bake manifest {path} ({e})")
+                continue
+            if count > 0:
+                by_count[kind].setdefault(count, []).append(path)
+
+    common = set(by_count["main"]) & set(by_count["float"])
+    if not common:
+        print("[SCOPE] warning: no face/float bake pair has the same frame "
+              "count; cannot reproduce normal folder selection")
         return None
-    return frames, mains, floats
+    frames = max(common)
+    if len(common) > 1:
+        print(f"[SCOPE] multiple common bake lengths {sorted(common)}; "
+              f"using {frames}, matching normal modes")
+    selected_mains = by_count["main"][frames]
+    selected_floats = by_count["float"][frames]
+    skipped = len(mains) + len(floats) - len(selected_mains) - len(selected_floats)
+    if skipped:
+        print(f"[SCOPE] manifest: excluded {skipped} baked folder(s) whose "
+              f"frame count is not the selected face/float length {frames}")
+    return frames, selected_mains, selected_floats
 
 
 def _open_dirs(dirs, layer_name, expected_frames):
@@ -726,8 +765,9 @@ def run_scope(clock_source=None):
         print(f"[SCOPE] one complete mixed exposure spans {tap_traces} traces "
               f"({_trace_hz / tap_traces:.1f} combined pictures/sec)")
     elif use_fusion:
-        print(f"[SCOPE] fusion components {fusion_components.upper()}: one "
-              "mass-normalized density field, one continuous beam walk")
+        _route = " -> ".join(fusion_components.upper())
+        print(f"[SCOPE] fusion components {fusion_components.upper()}: "
+              f"per-index position mux {_route} -> ...")
     if lowpass:
         print(f"[SCOPE] low-pass {lowpass:.0f} Hz in the output path "
               "(emulating a softer DAC / RC filter)")
@@ -790,17 +830,39 @@ def run_scope(clock_source=None):
                         composite_luma(ml0, k, fl0, k, raw=True)))
 
                 if use_fusion:
-                    _fusion_probe = StochasticEmitter(
+                    _fusion_raster = TraceEmitter(
                         scope.samplerate, scope.samples_per_frame,
+                        gamma=gamma, trim=trim, density=density, rows=rows,
+                        fields=fields, border=border, oversample=oversample,
+                        sweep=sweep_mode, autofit=autofit, row_bias=row_bias,
+                        grid=((cal["grid_rows"], cal["grid_cols"])
+                              if cal else None),
+                        levels=(cal.get("levels") if cal else None))
+                    _fusion_stochastic = StochasticEmitter(
+                        scope.samplerate, scope.samples_per_frame,
+                        gamma=walk_gamma, trim=trim,
                         radius=walk_radius, stride=walk_stride,
+                        edge_gain=walk_edge,
                         reseed_ms=walk_reseed_ms, walk_hz=walk_hz,
-                        dc_comp=dc_comp)
-                    _measure("fusion", lambda k: _fusion_probe.emit_probability(
-                        fusion_probability(
-                            ml0, k, fl0, k, components=fusion_components,
-                            min_feature=min_feature, raster_gamma=gamma,
-                            stochastic_gamma=walk_gamma, trim=trim,
-                            edge_gain=walk_edge)))
+                        dc_comp=None)
+                    _fusion_mux = PositionMultiplexer()
+
+                    def _fusion_probe(k):
+                        return _fusion_mux.emit(
+                            vector=(rasterize(
+                                merge(ml0, k, fl0, k,
+                                      min_feature=min_feature),
+                                scope.samples_per_frame)
+                                    if "v" in fusion_components else None),
+                            raster=(_fusion_raster.emit(composite_luma(
+                                ml0, k, fl0, k))
+                                    if "r" in fusion_components else None),
+                            stochastic=(_fusion_stochastic.emit(composite_luma(
+                                ml0, k, fl0, k, raw=True))
+                                    if "s" in fusion_components else None),
+                            components=fusion_components)
+
+                    _measure("fusion", _fusion_probe)
 
                 if mix_hz and mix_duty < 1.0:
                     from scope_out import rasterize as _rasterize
@@ -926,6 +988,7 @@ def run_scope(clock_source=None):
         gamma=walk_gamma, trim=trim, radius=walk_radius, stride=walk_stride,
         edge_gain=walk_edge, reseed_ms=walk_reseed_ms, walk_hz=walk_hz,
         dc_comp=dc_comp)
+    fusion_multiplexer = PositionMultiplexer()
 
     field_i = 0                     # free-running; survives a slipped deadline
     mix_field_i = 0                 # advances only on the RASTER traces of mix
@@ -983,6 +1046,7 @@ def run_scope(clock_source=None):
                         stride=walk_stride, edge_gain=walk_edge,
                         reseed_ms=walk_reseed_ms, walk_hz=walk_hz,
                         dc_comp=dc_comp)
+                    fusion_multiplexer.reset()
                     beam_end = None
                     with _device_lock:
                         _device_request["message"] = f"now on {_dev_name_of(scope)}"
@@ -1035,6 +1099,7 @@ def run_scope(clock_source=None):
                         # stale position it had before cycling away from it.
                         emitter.reset()
                         stochastic_emitter.reset()
+                        fusion_multiplexer.reset()
                     render_mode = next_mode
                     use_raster = render_mode == "raster"
                     use_stochastic = render_mode == "stochastic"
@@ -1183,6 +1248,7 @@ def run_scope(clock_source=None):
                         lowpass, oversample, cal, dc_comp=dc_comp,
                         border=border, emitter=emitter,
                         stochastic_emitter=stochastic_emitter,
+                        fusion_multiplexer=fusion_multiplexer,
                         beam_start=beam_end,
                         fusion_components=fusion_components,
                         stochastic_gamma=walk_gamma,
@@ -1278,22 +1344,67 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
           oversample=1, cal=None, field=0, fields=1, dc_comp=None,
           border=0.0, emitter=None, stochastic_emitter=None, beam_start=None,
           mode_handoff=False, fusion_components="vrs",
-          stochastic_gamma=2.0, stochastic_edge=0.0):
+          stochastic_gamma=2.0, stochastic_edge=0.0,
+          fusion_multiplexer=None):
     n = scope.samples_per_frame
-    if render_mode in ("raster", "stochastic", "fusion"):
+    if render_mode == "fusion":
+        # Build corresponding V/R/S position arrays, then select their entries
+        # round-robin by index. No coordinates are averaged and no component
+        # is converted into a probability field.
+        components = normalize_fusion_components(fusion_components)
+        old_raster_dc = emitter.dc_comp
+        old_stochastic_dc = stochastic_emitter.dc_comp
+        emitter.dc_comp = None
+        stochastic_emitter.dc_comp = None
+        try:
+            vector_frame = (rasterize(
+                merge(ml, index, fl, index, min_feature=min_feature), n)
+                if "v" in components else None)
+            raster_frame = None
+            if "r" in components:
+                if beam_start is not None and emitter.sweep_mode == "alternate":
+                    emitter._end = np.asarray(
+                        beam_start, dtype=np.float32).copy()
+                raster_frame = emitter.emit(
+                    composite_luma(ml, index, fl, index, raw=False))
+            stochastic_frame = None
+            if "s" in components:
+                if beam_start is not None:
+                    # start_at preserves the walk clock and only aligns the
+                    # first physical sample with the fused beam endpoint.
+                    stochastic_emitter.start_at(beam_start)
+                stochastic_frame = stochastic_emitter.emit(
+                    composite_luma(ml, index, fl, index, raw=True))
+            mux = fusion_multiplexer or PositionMultiplexer()
+            frame = mux.emit(vector=vector_frame, raster=raster_frame,
+                             stochastic=stochastic_frame,
+                             components=components)
+        finally:
+            emitter.dc_comp = old_raster_dc
+            stochastic_emitter.dc_comp = old_stochastic_dc
+        if frame is None:
+            return None
+        if dc_comp:
+            frame = precompensate_hpf(frame, dc_comp, scope.samplerate)
+        if "s" in components:
+            frame = stochastic_emitter.apply_lowpass(frame, lowpass)
+        elif lowpass and lowpass_circular is not None:
+            frame = lowpass_circular(frame, lowpass, scope.samplerate)
+        if beam_start is not None:
+            frame[0] = beam_start
+        emitter._end = frame[-1].copy()
+        stochastic_emitter.chain_from(frame[-1])
+        sweep["rev"], sweep["end"] = emitter._rev, emitter._end
+        scope.show_frame(frame)
+        return frame[-1].copy()
+
+    if render_mode in ("raster", "stochastic"):
         # Composite here, sweep in the emitter. Everything about HOW the trace
         # is drawn -- grid, fields, chaining, border, dc-comp -- lives on the
         # emitter, which scope_screen.py shares. Nothing about it is restated
         # in this file, so there is no second parameter list to drift.
-        if render_mode == "fusion":
-            _lum = fusion_probability(
-                ml, index, fl, index, components=fusion_components,
-                min_feature=min_feature, raster_gamma=gamma,
-                stochastic_gamma=stochastic_gamma, trim=trim,
-                edge_gain=stochastic_edge)
-        else:
-            _lum = composite_luma(
-                ml, index, fl, index, raw=(render_mode == "stochastic"))
+        _lum = composite_luma(
+            ml, index, fl, index, raw=(render_mode == "stochastic"))
         if Scope._tap_until > _time_mono():
             # only while a browser is watching -- same gate as the trace tap
             Scope.publish_luma(_lum)
@@ -1301,22 +1412,20 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
         if beam_start is not None:
             if render_mode == "raster" and emitter.sweep_mode == "alternate":
                 emitter._end = np.asarray(beam_start, dtype=np.float32).copy()
-            elif render_mode in ("stochastic", "fusion"):
+            elif render_mode == "stochastic":
                 if mode_handoff:
                     stochastic_emitter.start_at(beam_start)
                     exact_handoff = True
                 else:
                     exact_handoff = stochastic_emitter.handoff_from(beam_start)
         frame = (emitter.emit(_lum) if render_mode == "raster"
-                 else stochastic_emitter.emit_probability(_lum)
-                 if render_mode == "fusion"
                  else stochastic_emitter.emit(_lum))
         if frame is not None:
             # mirrored back for the live-controls print and anything else
             # reading sweep state; the emitter owns the real copy
             if render_mode == "raster":
                 sweep["rev"], sweep["end"] = emitter._rev, emitter._end
-            if render_mode in ("stochastic", "fusion"):
+            if render_mode == "stochastic":
                 frame = stochastic_emitter.apply_lowpass(frame, lowpass)
             elif lowpass and lowpass_circular is not None:
                 frame = lowpass_circular(frame, lowpass, scope.samplerate)
@@ -1330,14 +1439,13 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
             # sample the DAC actually receives, not the unfiltered geometry.
             if render_mode == "raster" and emitter.sweep_mode == "alternate":
                 emitter._end = frame[-1].copy()
-            elif render_mode in ("stochastic", "fusion"):
+            elif render_mode == "stochastic":
                 stochastic_emitter.chain_from(frame[-1])
             scope.show_frame(frame)
             return frame[-1].copy()
     else:
         # empty -> safe idle circle, never a parked dot
         polys = merge(ml, index, fl, index, min_feature=min_feature)
-        from scope_out import rasterize
         frame = rasterize(polys, n)
         if lowpass and lowpass_circular is not None:
             frame = lowpass_circular(frame, lowpass, scope.samplerate)

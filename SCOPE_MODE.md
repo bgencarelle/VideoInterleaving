@@ -102,6 +102,12 @@ The baker mirrors your source tree: `images/face/02_foo/` becomes
 folder's library by its path relative to the images root, so folder 3 on the
 scope is folder 3 on screen by construction.
 
+At startup, scope also applies the normal display's frame-count rule: it keeps
+the largest frame count shared by both face and float folders, excludes baked
+folders of other lengths, and preserves numeric-prefix order within each
+layer. This keeps the two counts and every selector index identical across
+scope, local, and web modes even when an old or partial bake is still present.
+
 Each library directory contains:
 
 | File | Contents |
@@ -243,13 +249,15 @@ slower content handoff; it no longer reduces the number of target decisions per
 second. Start at the normal 30 Hz and let phosphor persistence integrate the
 continuous visit density.
 
-### Fusion — one walk through combined dwell density
+### Fusion — corresponding-position multiplexing
 
-Fusion does **not** average simultaneous XY positions. Vector, raster, and
-stochastic paths have no shared phase, so pointwise averaging would invent
-midpoints and collapse features toward the centre. Instead, fusion converts
-each requested source into a 2D dwell-density field, normalizes each field to
-equal total mass, adds them, and drives one persistent nearest-neighbour walk.
+Fusion generates equal-length position arrays from every requested renderer,
+then selects between their corresponding entries round-robin. `vr` produces
+`V[0], R[1], V[2], R[3]...`; `vrs` produces
+`V[0], R[1], S[2], V[3]...`. It performs no arithmetic averaging of XY
+coordinates and does not convert the components into a stochastic probability
+field. Unlike mix, switching happens within the array rather than once per
+whole trace.
 
 ```
 --scope-mode fusion --scope-fusion vrs   # vector + raster + stochastic
@@ -258,11 +266,8 @@ equal total mass, adds them, and drives one persistent nearest-neighbour walk.
 --scope-mode fusion --scope-fusion sr    # stochastic + raster
 ```
 
-Vector geometry becomes a narrow probability ridge; raster contributes its
-preconditioned luminance; stochastic contributes raw luminance. All four
-presets use one continuous beam path with no mode-switch boundary. `v`, `r`,
-and `s` are component names, not output channels, and fusion still has no Z.
-Press `f` while fusion is active to cycle the four presets.
+`v`, `r`, and `s` are component names, not output channels, and fusion still
+has no Z. Press `f` while fusion is active to cycle the four presets.
 
 ### Scanlines and the bake ceiling
 
@@ -548,7 +553,7 @@ python main.py --mode scope --xy-dir images_xy [options]
 | Flag | Effect |
 |---|---|
 | `--scope-mode vector\|raster\|stochastic\|fusion` | Select the renderer. |
-| `--scope-fusion vrs\|vr\|sv\|sr` | Choose equal-mass density sources for fusion. |
+| `--scope-fusion vrs\|vr\|sv\|sr` | Choose round-robin position-array sources for fusion. |
 | `--scope-raster` | Compatibility alias for `--scope-mode raster`. |
 | `--scope-stochastic` | Alias for `--scope-mode stochastic`. |
 | `--scope-walk-radius PX` | Stochastic nearest-neighbour search radius (default 10). |

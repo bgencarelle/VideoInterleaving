@@ -33,7 +33,8 @@ if ROOT_DIR not in sys.path:
 
 from scope_bake import (XYLibrary, merge, raster_frame, content_bbox,
                         composite_luma, StochasticEmitter,
-                        TriangleMixScheduler, fusion_probability)   # noqa: E402
+                        TriangleMixScheduler,
+                        PositionMultiplexer)                        # noqa: E402
 from scope_out import Scope, rasterize, FPS, choose_device           # noqa: E402
 
 PNG_OUT = "test_scope_pair_output.png"
@@ -47,14 +48,17 @@ def discover(xy_root):
         raise SystemExit(f"XY directory not found: {root}\n"
                          "Bake first: python utilities/convert_to_xy.py "
                          f"-i <images> -o {root}")
-    dirs = sorted(p.parent for p in root.rglob("verts.npy"))
-    if not dirs:
-        dirs = sorted(p.parent for p in root.rglob("thumbs.npy"))
-    mains = [d for d in dirs if "float" not in d.relative_to(root).parts]
-    floats = [d for d in dirs if "float" in d.relative_to(root).parts]
-    if not mains or not floats:
-        raise SystemExit(f"Need both main and float libraries under {root} "
-                         f"(found {len(mains)} main, {len(floats)} float)")
+    # Use the live scope runtime's manifest verbatim.  In particular, this
+    # applies the normal display rule of selecting the largest frame count
+    # shared by both layers and preserves numeric-prefix folder order.  The
+    # pair tester must not offer stale folders the real mode would exclude.
+    from scope_display import _manifest_from_xy
+    manifest = _manifest_from_xy(root)
+    if manifest is None:
+        raise SystemExit(
+            f"Need matching main and float libraries under {root}; no shared "
+            "positive frame count was found")
+    _frames, mains, floats = manifest
     return mains, floats, root
 
 
@@ -284,6 +288,7 @@ def main():
     stochastic = StochasticEmitter(
         scope.samplerate if scope else 44100, n_samples,
         gamma=args.stochastic_gamma)
+    fusion_multiplexer = PositionMultiplexer()
     beam_end = None
     last_mode = None
     if args.sweep == "alternate" and args.fps > args.ips:
@@ -329,17 +334,40 @@ def main():
                 scope.show_frame(samp)
             return samp, 0
         if mode == "fusion":
-            if beam_end is not None and last_mode != "fusion":
-                stochastic.start_at(beam_end)
-            probability = fusion_probability(
-                mlib, idx, flib, idx, components=args.fusion or "vrs",
-                min_feature=args.min_feature, raster_gamma=gamma,
-                stochastic_gamma=args.stochastic_gamma,
-                trim=0.0 if args.no_trim else args.trim)
-            samp = stochastic.emit_probability(probability)
+            components = args.fusion or "vrs"
+            vector_trace = (rasterize(
+                merge(mlib, idx, flib, idx,
+                      min_feature=args.min_feature), n_samples)
+                if "v" in components else None)
+            raster_trace = None
+            if "r" in components:
+                raster_trace = raster_frame(
+                    mlib, idx, flib, idx, n_samples,
+                    gamma=gamma, rows=args.rows, density=density,
+                    trim=0.0 if args.no_trim else args.trim,
+                    bbox=fit_bbox, fields=args.fields,
+                    field=next(field_counter),
+                    palindrome=(args.sweep == "palindrome"),
+                    reverse=(args.sweep == "alternate" and sweep["rev"]),
+                    start=(beam_end if args.sweep == "alternate" else None),
+                    close=(args.sweep == "retrace"))
+                if args.sweep == "alternate" and raster_trace is not None:
+                    sweep["rev"] = not sweep["rev"]
+            stochastic_trace = None
+            if "s" in components:
+                if beam_end is not None:
+                    stochastic.start_at(beam_end)
+                stochastic_trace = stochastic.emit(composite_luma(
+                    mlib, idx, flib, idx, raw=True))
+            samp = fusion_multiplexer.emit(
+                vector=vector_trace, raster=raster_trace,
+                stochastic=stochastic_trace, components=components)
             if samp is None:
                 return build(idx, do_cull, "vector")
+            if beam_end is not None:
+                samp[0] = beam_end
             beam_end = samp[-1].copy()
+            stochastic.chain_from(beam_end)
             last_mode = mode
             if scope:
                 scope.show_frame(samp)
@@ -364,6 +392,9 @@ def main():
     samples, npolys = build(index, culled, active_mode)
     shown_index = index
     dirty = True
+    img = None
+    headless_written = False
+    headless_audio_announced = False
     last_step = time.perf_counter()
     last_push = last_step
     push_interval = (1.0 / args.mix) if args.mix else (1.0 / ips)
@@ -376,8 +407,14 @@ def main():
 
     while True:
         now = time.perf_counter()
-        if playing and gui:
-            if now - last_push >= push_interval:
+        if playing:
+            # Audio playback must not depend on an OpenCV window.  A headless
+            # OpenCV build used to strand the very first (vector) trace here
+            # forever.  For a mix, also wait until the callback has accepted
+            # the pending trace so V/R/S/R cannot collapse through last-write-
+            # wins replacement into whichever component happened to survive.
+            can_push = (not args.mix or scope is None or scope.ready())
+            if now - last_push >= push_interval and can_push:
                 last_push = now
                 if now - last_step >= 1.0 / ips:
                     last_step = now
@@ -392,7 +429,10 @@ def main():
         else:
             shown_index = index
 
-        if dirty:
+        # In headless audio mode the DAC still advances continuously, but
+        # rendering and rewriting a PNG at the trace rate would only steal
+        # time from it.  Save one representative preview and keep scheduling.
+        if dirty and (gui or img is None):
             mode = ("RASTER" if active_mode == "raster"
                     else "STOCHASTIC" if active_mode == "stochastic"
                     else f"FUSION {args.fusion.upper()}" if active_mode == "fusion"
@@ -415,15 +455,23 @@ def main():
             dirty = False
 
         if not gui:
-            cv2.imwrite(PNG_OUT, img)
-            print(f"[DISPLAY] no GUI -- wrote {PNG_OUT}")
+            if not headless_written:
+                cv2.imwrite(PNG_OUT, img)
+                print(f"[DISPLAY] no GUI -- wrote {PNG_OUT}")
+                headless_written = True
             if scope:
-                print("[AUDIO] looping to scope, Ctrl+C to stop")
+                if playing and args.mix:
+                    message = "[AUDIO] mixed playback continues, Ctrl+C to stop"
+                else:
+                    message = "[AUDIO] looping to scope, Ctrl+C to stop"
+                if not headless_audio_announced:
+                    print(message)
+                    headless_audio_announced = True
                 try:
-                    while True:
-                        time.sleep(0.5)
+                    time.sleep(0.001 if playing else 0.05)
                 except KeyboardInterrupt:
-                    pass
+                    break
+                continue
             break
 
         try:

@@ -152,16 +152,16 @@ to tune the active renderer.
 Its 48 kHz target clock is independent of the image rate and of faster DAC
 sample rates; use `--scope-walk-hz` only when deliberately changing that walk.
 
-Fusion combines dwell distributions into one continuous walk instead of
-averaging unrelated XY positions or switching whole traces:
+Fusion builds corresponding position arrays for the selected renderers and
+selects entries round-robin by array index instead of switching whole traces:
 
 ```bash
 python main.py --mode scope --xy-dir ./images_xy --scope-mode fusion --scope-fusion vrs
 ```
 
-`--scope-fusion` accepts `vrs`, `vr`, `sv`, and `sr`. Each active source gets
-equal total probability mass, so sparse vector contours do not disappear
-under a full-frame luminance field. Press `f` in fusion mode to cycle them.
+`--scope-fusion` accepts `vrs`, `vr`, `sv`, and `sr`. For example, `vr`
+outputs `V[0], R[1], V[2], R[3]...`; `vrs` cycles V, R, S the same way. No XY
+coordinates are arithmetically averaged. Press `f` in fusion mode to cycle.
 
 The 256 px bake default is intentional. The reference portrait already has a
 wide luminance range, so global contrast expansion would discard useful tone.

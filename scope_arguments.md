@@ -259,14 +259,15 @@ Selects the rendering engine explicitly:
 - `raster` draws dwell-modulated horizontal scanlines.
 - `stochastic` performs a luminance-weighted nearest-neighbour XY walk. It has
   no scanline spacing and needs no Z/brightness channel.
-- `fusion` performs one continuous walk through a mass-normalized combination
-  of vector ridges, raster luminance, and/or raw stochastic luminance.
+- `fusion` generates corresponding position arrays for the selected renderers
+  and selects their entries round-robin by array index.
 
 ### `--scope-fusion vrs|vr|sv|sr` (default `vrs`)
 
-Selects fusion's equal-mass component set: all three, vector+raster,
-stochastic+vector, or stochastic+raster. This combines 2D dwell probability,
-not instantaneous XY positions. Press `f` in fusion mode to cycle the presets.
+Selects fusion's round-robin component set: all three, vector+raster,
+stochastic+vector, or stochastic+raster. `vr` produces
+`V[0], R[1], V[2], R[3]...`; no XY coordinates are averaged. Press `f` in
+fusion mode to cycle the presets.
 
 ### `--scope-raster` / `--scope-stochastic`
 

@@ -117,9 +117,9 @@ SCOPE_ASK = False         # interactive device picker; safe only with a tty
 SCOPE_FPS = None          # None -> follow IPS
 SCOPE_SAMPLES = None      # explicit samples/trace; incompatible with mix
 SCOPE_RENDER_MODE = "vector"  # vector | raster | stochastic | fusion
-                          # Stochastic/fusion use a luminance-weighted XY walk:
-                          # no scanlines and no Z/brightness channel.
-SCOPE_FUSION = "vrs"      # vrs | vr | sv | sr; equal density mass per component
+                          # Stochastic is a luminance-weighted XY walk; fusion
+                          # multiplexes corresponding V/R/S array entries.
+SCOPE_FUSION = "vrs"      # vrs | vr | sv | sr; round-robin position sources
 SCOPE_RASTER = False      # compatibility mirror for older integrations
 SCOPE_REALTIME = False    # raster-only low-latency streaming path
 SCOPE_LIST_FROM_IMAGES = False  # bypass the baked manifest for legacy bakes
