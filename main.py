@@ -97,6 +97,13 @@ def configure_runtime():
     scope_render.add_argument("--scope-stipple", action="store_true",
                               help="Alias for --scope-mode stipple: stable "
                                    "weighted points with a Euclidean route")
+    parser.add_argument("--scope-invert", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help="Invert covered image luminance in raster, "
+                             "stochastic, stipple, mix, and fusion. Vector "
+                             "keeps its geometry but shifts beam dwell toward "
+                             "originally dark regions. Transparent padding "
+                             "stays dark. Press i to toggle live")
     parser.add_argument("--scope-realtime", action="store_true",
                         help="Scope: stream continuously so index changes land "
                              "within a row instead of at a trace boundary (raster only)")
@@ -124,9 +131,9 @@ def configure_runtime():
                         help="Default: settings.SCOPE_DENSITY")
     parser.add_argument("--scope-precondition", type=float, metavar="F",
                         help="Raster horizontal compensation on the final "
-                             "sweep grid. New compact bakes recommend 0.45; "
-                             "legacy bakes default to 0 to avoid sharpening "
-                             "their already-processed luminance twice")
+                             "sweep grid. Default 0 preserves natural facial "
+                             "tone and full spatial resolution. Positive "
+                             "values are optional display-specific sharpening")
     parser.add_argument("--scope-walk-radius", type=int, metavar="PX",
                         help="Scope stochastic: nearest-neighbour search radius")
     parser.add_argument("--scope-walk-stride", type=int, metavar="PX",
@@ -140,6 +147,8 @@ def configure_runtime():
                         dest="scope_walk_gamma", type=float, metavar="F",
                         help="Scope stochastic luminance exponent. Useful in "
                              "mix when --scope-gamma is being used for raster; "
+                             "also shapes stochastic position weights in "
+                             "fusion; "
                              "the old --scope-walk-gamma spelling remains an "
                              "accepted compatibility alias")
     parser.add_argument("--scope-fusion", choices=("vrs", "vr", "sv", "sr"),
@@ -199,14 +208,14 @@ def configure_runtime():
                              "resolution win on a dark background)")
     parser.add_argument("--scope-mix", nargs="?", type=float, const=120.0,
                         metavar="HZ",
-                        help="Scope: triangular whole-trace mix at this rate "
-                             "(default 120): vector -> raster -> stochastic -> "
-                             "raster. Above flicker fusion the phosphor sums all "
-                             "three renderers.")
+                        help="Scope: whole-trace mix at this rate (default "
+                             "120): vector -> raster -> stochastic -> raster "
+                             "-> stipple -> raster. Above flicker fusion the "
+                             "phosphor sums all four renderers.")
     parser.add_argument("--scope-mix-duty", type=float, default=None,
                         help="Scope: fraction of mixed passes spent on raster "
-                             "(the remainder is split equally between vector "
-                             "and stochastic)")
+                             "(the remainder is split equally between vector, "
+                             "stochastic, and stipple)")
     parser.add_argument("--scope-sweep", choices=("alternate", "palindrome", "retrace"),
                         default=None,
                         help="Scope raster: alternate (default) chains one-way "
@@ -404,6 +413,8 @@ def configure_runtime():
             settings.SCOPE_RENDER_MODE = "stipple"
         # Compatibility for callers outside main.py that still inspect this.
         settings.SCOPE_RASTER = settings.SCOPE_RENDER_MODE == "raster"
+        if args.scope_invert is not None:
+            settings.SCOPE_INVERT = args.scope_invert
         if args.scope_realtime:
             settings.SCOPE_REALTIME = True
         if args.scope_fps:

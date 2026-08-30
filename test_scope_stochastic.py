@@ -11,7 +11,9 @@ from scope_bake import (StochasticEmitter, StippleEmitter, TraceEmitter,
                         composite_stipple_candidates, raster_precondition_for,
                         _precondition_grid, merge, stochastic_luma,
                         fuse_density, fuse_positions,
-                        normalize_fusion_components, vector_density)
+                        normalize_fusion_components, vector_density,
+                        trace_luminance_weights, raster_frame)
+from scope_bake import retime_trace_by_weights
 from utilities.convert_to_xy import THUMB_W
 from scope_controls import KeyMap, as_flags
 
@@ -244,9 +246,9 @@ def test_baker_streams_large_thumbnail_arrays_to_an_atomic_memmap():
 
 def test_triangle_mix_default_sequence_and_duty():
     scheduler = TriangleMixScheduler(0.5)
-    assert [scheduler.next_mode() for _ in range(8)] == [
-        "vector", "raster", "stochastic", "raster",
-        "vector", "raster", "stochastic", "raster",
+    assert [scheduler.next_mode() for _ in range(12)] == [
+        "vector", "raster", "stochastic", "raster", "stipple", "raster",
+        "vector", "raster", "stochastic", "raster", "stipple", "raster",
     ]
 
 
@@ -255,9 +257,10 @@ def test_triangle_mix_preserves_raster_duty_and_splits_remainder():
         scheduler = TriangleMixScheduler(duty)
         modes = [scheduler.next_mode() for _ in range(10000)]
         counts = {mode: modes.count(mode)
-                  for mode in ("vector", "raster", "stochastic")}
+                  for mode in ("vector", "raster", "stochastic", "stipple")}
         assert abs(counts["raster"] / len(modes) - duty) <= 1 / len(modes)
         assert abs(counts["vector"] - counts["stochastic"]) <= 1
+        assert abs(counts["vector"] - counts["stipple"]) <= 1
 
 
 def test_triangle_mix_preview_window_contains_every_active_component():
@@ -273,6 +276,7 @@ def test_triangle_mix_preview_window_contains_every_active_component():
                 if duty < 1:
                     assert "vector" in window
                     assert "stochastic" in window
+                    assert "stipple" in window
 
 
 def test_image_update_does_not_reset_continuous_walk():
@@ -394,6 +398,29 @@ def test_new_bake_metadata_enables_grid_precondition_only_once():
     assert raster_precondition_for(New(), Legacy()) == 0.0
 
 
+def test_raster_default_ignores_old_sharpening_metadata_without_losing_grid():
+    class Lib:
+        raw_thumbnail = True
+        raster_precondition = 0.45
+
+        def __len__(self):
+            return 1
+
+        def thumb(self, _index):
+            thumb = np.zeros((48, 36, 2), dtype=np.uint8)
+            thumb[5:43, 4:32, 0] = np.tile(
+                np.array([40, 100, 180, 240], dtype=np.uint8), (38, 7))
+            thumb[5:43, 4:32, 1] = 255
+            return thumb
+
+    natural = raster_frame(Lib(), 0, None, 0, 800)
+    explicit_zero = raster_frame(Lib(), 0, None, 0, 800, precondition=0.0)
+    sharpened = raster_frame(Lib(), 0, None, 0, 800, precondition=0.45)
+    assert np.array_equal(natural, explicit_zero)
+    assert natural.shape == sharpened.shape == (800, 2)
+    assert not np.array_equal(natural, sharpened)
+
+
 def test_sparse_stipple_composite_respects_float_over_main_alpha():
     class Lib:
         def __init__(self, lum, alpha):
@@ -418,6 +445,33 @@ def test_sparse_stipple_composite_respects_float_over_main_alpha():
     # First pool is main and is fully occluded; second is the float layer.
     assert cloud["luminance"][0] == 0.0
     assert np.isclose(cloud["luminance"][1], 100 / 255)
+    inverse = composite_stipple_candidates(
+        main, 0, floating, 0, invert=True)
+    assert inverse["luminance"][0] == 0.0
+    assert np.isclose(inverse["luminance"][1], 1.0 - 100 / 255)
+
+
+def test_inverse_luminance_preserves_transparent_padding():
+    class Lib:
+        def __init__(self):
+            self._thumb = np.zeros((2, 3, 2), dtype=np.uint8)
+            self._thumb[..., 0] = np.array(
+                [[0, 64, 255], [255, 128, 0]], dtype=np.uint8)
+            self._thumb[..., 1] = np.array(
+                [[0, 255, 255], [128, 128, 0]], dtype=np.uint8)
+
+        def __len__(self):
+            return 1
+
+        def thumb(self, _index):
+            return self._thumb
+
+    normal = composite_luma(Lib(), 0, None, 0)
+    inverse = composite_luma(Lib(), 0, None, 0, invert=True)
+    alpha = Lib().thumb(0)[..., 1].astype(np.float64) / 255.0
+    assert np.allclose(normal + inverse, alpha)
+    assert inverse[0, 0] == 0.0       # transparent black does not turn white
+    assert inverse[1, 2] == 0.0
 
 
 def test_live_mode_cycles_all_five_renderers_and_fusion_sets():
@@ -447,6 +501,19 @@ def test_live_mode_cycles_all_five_renderers_and_fusion_sets():
     keys.feed("v")
     assert state["mode"] == "vector"
     assert state["gamma"] == 2.2
+
+
+def test_live_inverse_toggle_and_printed_flag():
+    state = {"mode": "raster", "raster": True, "invert": False}
+    keys = KeyMap(state)
+    assert keys.feed("i")
+    assert state["invert"] is True
+    assert keys.dirty
+    assert "--scope-invert" in as_flags(state)
+    keys.dirty = False
+    keys.feed("i")
+    assert state["invert"] is False
+    assert "--scope-invert" not in as_flags(state)
 
 
 def test_fusion_density_supports_every_requested_component_set():
@@ -498,6 +565,95 @@ def test_position_fusion_multiplexes_corresponding_array_entries():
     assert np.array_equal(continued[0], stochastic[0])
 
 
+def test_position_fusion_allocates_more_samples_to_brighter_candidates():
+    n = 1000
+    vector = np.column_stack([np.arange(n), np.full(n, 10)])
+    raster = np.column_stack([np.arange(n), np.full(n, 20)])
+    weights = {
+        "v": np.full(n, 0.9),
+        "r": np.full(n, 0.1),
+    }
+    actual = PositionMultiplexer().emit(
+        vector=vector, raster=raster, components="vr", weights=weights)
+    vector_count = int(np.count_nonzero(actual[:, 1] == 10))
+    raster_count = int(np.count_nonzero(actual[:, 1] == 20))
+    assert vector_count == 900
+    assert raster_count == 100
+
+    # With no light at either candidate, selection remains balanced rather
+    # than parking on whichever component happens to be first.
+    dark = {"v": np.zeros(n), "r": np.zeros(n)}
+    fallback = PositionMultiplexer().emit(
+        vector=vector, raster=raster, components="vr", weights=dark)
+    assert np.count_nonzero(fallback[:, 1] == 10) == n // 2
+
+
+def test_trace_luminance_weights_distinguish_light_and_dark_positions():
+    lum = np.zeros((32, 32), dtype=np.float64)
+    lum[:, 16:] = 1.0
+    trace = np.array([[-0.6, 0.0], [0.6, 0.0]], dtype=np.float32)
+    weights = trace_luminance_weights(lum, trace, gamma=2.0, trim=0.02)
+    assert weights[0] == 0.0
+    assert weights[1] > 0.99
+
+
+def test_inverse_vector_retiming_preserves_geometry_and_favors_dark_source():
+    x = np.linspace(-0.9, 0.9, 401, dtype=np.float32)
+    trace = np.column_stack([x, np.zeros_like(x)])
+    # This is already inverse luminance: the source's dark left side is now
+    # high weight and should receive most of the vector's beam time.
+    weights = np.where(x < 0.0, 1.0, 0.05).astype(np.float32)
+    inverse = retime_trace_by_weights(trace, weights)
+    assert inverse.shape == trace.shape
+    assert np.array_equal(inverse[0], trace[0])
+    assert np.array_equal(inverse[-1], trace[-1])
+    assert np.count_nonzero(inverse[:, 0] < 0.0) > 300
+    assert np.all(np.diff(inverse[:, 0]) >= -1e-6)
+
+
+def test_runtime_vector_mode_applies_inverse_dwell_retiming():
+    import scope_display
+
+    class Lib:
+        def __len__(self):
+            return 1
+
+        def thumb(self, _index):
+            thumb = np.zeros((32, 64, 2), dtype=np.uint8)
+            thumb[..., 0] = np.linspace(0, 255, 64, dtype=np.uint8)
+            thumb[..., 1] = 255
+            return thumb
+
+        def frame(self, _index):
+            line = np.array([
+                [-0.8, -0.2], [0.8, -0.2], [0.8, 0.2], [-0.8, 0.2],
+            ], dtype=np.float32)
+            return [line], [0]
+
+    class Scope:
+        samples_per_frame = 800
+        samplerate = 48000
+
+        def __init__(self):
+            self.frames = []
+
+        def show_frame(self, frame):
+            self.frames.append(frame.copy())
+
+    scope_display.Scope._tap_until = 0
+    scope = Scope()
+    args = (scope, Lib(), None, 0, "vector", {}, "alternate",
+            2.2, 0.02, 1.0, None, 0.02)
+    scope_display._emit(*args, invert=False)
+    normal = scope.frames[-1]
+    scope_display._emit(*args, invert=True)
+    inverse = scope.frames[-1]
+    assert normal.shape == inverse.shape == (800, 2)
+    assert np.array_equal(normal[0], inverse[0])
+    assert np.array_equal(normal[-1], inverse[-1])
+    assert not np.array_equal(normal, inverse)
+
+
 def test_vector_density_and_fusion_runtime_emit_all_combinations():
     import scope_display
 
@@ -545,8 +701,18 @@ def test_vector_density_and_fusion_runtime_emit_all_combinations():
         composite_luma(lib, 0, None, 0))
     expected_stochastic = StochasticEmitter(48000, 800, seed=22).emit(
         composite_luma(lib, 0, None, 0, raw=True))
+    fusion_luma = composite_luma(lib, 0, None, 0, raw=True)
+    expected_weights = {
+        "v": trace_luminance_weights(
+            fusion_luma, expected_vector, gamma=2.2, trim=0.02),
+        "r": trace_luminance_weights(
+            fusion_luma, expected_raster, gamma=2.2, trim=0.02),
+        "s": trace_luminance_weights(
+            fusion_luma, expected_stochastic, gamma=2.0, trim=0.02),
+    }
     expected_vrs = fuse_positions(
-        expected_vector, expected_raster, expected_stochastic, "vrs")
+        expected_vector, expected_raster, expected_stochastic, "vrs",
+        weights=expected_weights)
     beam = None
     for combo in ("vrs", "vr", "sv", "sr"):
         beam = scope_display._emit(
@@ -740,7 +906,7 @@ def test_pair_mixer_playback_is_not_gated_on_gui():
     assert "scope is None or scope.ready()" in source
 
 
-def test_legacy_three_channel_bake_triangle_mix_emits_all_three_paths():
+def test_legacy_three_channel_bake_mix_emits_all_four_paths():
     import scope_display
 
     class Lib:
@@ -777,6 +943,7 @@ def test_legacy_three_channel_bake_triangle_mix_emits_all_three_paths():
     lib = Lib()
     raster = TraceEmitter(48000, 400, fields=2, sweep="alternate")
     stochastic = StochasticEmitter(48000, 400, seed=12)
+    stipple = StippleEmitter(48000, 400, points=96)
     scheduler = TriangleMixScheduler(0.5)
     sweep = {}
     beam = None
@@ -784,26 +951,29 @@ def test_legacy_three_channel_bake_triangle_mix_emits_all_three_paths():
     raster_field = 0
     modes = []
 
-    for _ in range(8):
+    for _ in range(12):
         mode = scheduler.next_mode()
         modes.append(mode)
         end = scope_display._emit(
             scope, lib, None, 0, mode, sweep, "alternate",
             2.2, 0.02, 1.0, None, 0.02,
             emitter=raster, stochastic_emitter=stochastic,
+            stipple_emitter=stipple,
             beam_start=beam,
             mode_handoff=(last_mode is not None and mode != last_mode),
             field=raster_field % 2, fields=2)
         frame = scope.frames[-1]
         assert frame.shape == (400, 2)
         assert np.isfinite(frame).all()
-        if beam is not None and mode in ("raster", "stochastic"):
+        if beam is not None and mode in ("raster", "stochastic", "stipple"):
             assert np.array_equal(frame[0], beam)
         beam = end
         if mode == "raster":
             raster_field += 1
         last_mode = mode
 
-    assert modes == ["vector", "raster", "stochastic", "raster"] * 2
-    assert raster_field == 4
+    assert modes == [
+        "vector", "raster", "stochastic", "raster", "stipple", "raster",
+    ] * 2
+    assert raster_field == 6
     assert stochastic._count > 400  # its clock survived the intervening modes

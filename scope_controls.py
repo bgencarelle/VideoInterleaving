@@ -34,10 +34,11 @@ HELP = """
 scope live controls
   -  / =    trim        down / up      (dark-cell cutoff; raises kill stray lines)
   ,  / .    density     finer / coarser (samples per cell; below ~0.3 flecks)
-  [  / ]    gamma       down / up      (raster dwell / stochastic probability)
+  [  / ]    gamma       down / up      (dwell / probability / fusion light weight)
   l         lowpass     cycle off -> 12k -> 6k -> 3k -> 1.5k
   v         mode         vector -> raster -> stochastic -> stipple -> fusion
   f         fusion       vrs -> vr -> sv -> sr (in fusion mode)
+  i         inverse      luminance normal / inverted
   w         sweep       alternate -> palindrome -> retrace
   a         autofit     on / off
   p         print current settings as command-line flags
@@ -137,6 +138,10 @@ class KeyMap:
                 s["gamma"] = s[gamma_key]
             self.dirty = True
             self.message = "fusion = " + s["fusion_components"].upper()
+        elif ch == "i":
+            s["invert"] = not s.get("invert", False)
+            self.dirty = True
+            self.message = "inverse = " + ("on" if s["invert"] else "off")
         elif ch == "w":
             order = ["alternate", "palindrome", "retrace"]
             i = order.index(s.get("sweep", "alternate")) if s.get("sweep") in order else 0
@@ -202,6 +207,8 @@ def as_flags(s):
         out.append(f"--scope-lowpass {s['lowpass']:g}")
     if not s.get("autofit", True):
         out.append("--scope-no-autofit")
+    if s.get("invert", False):
+        out.append("--scope-invert")
     return "  " + " ".join(out)
 
 

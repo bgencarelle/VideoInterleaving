@@ -279,7 +279,8 @@ class SweepSource:
     def __init__(self, state_fn=None, samples_per_pass=1600, gamma=2.2,
                  floor=0.012, trim=0.02, density=1.0, rows=None, bbox=None,
                  level=0.9, grid_rows=None, grid_cols=None, levels=None,
-                 lum_fn=None, auto_levels=0.0, precondition=0.0):
+                 lum_fn=None, auto_levels=0.0, precondition=0.0,
+                 invert=False):
         """
         lum_fn      : optional callable returning an (H, W) float array in
                       0..1 -- any live source (screen grab, camera, video,
@@ -309,6 +310,7 @@ class SweepSource:
         self.density, self.rows_override, self.bbox = density, rows, bbox
         self.level = level
         self.precondition = max(0.0, float(precondition))
+        self.invert = bool(invert)
         self._out = np.zeros((0, 2), np.float32)
         self._plan = None
         self._budgets = None
@@ -327,6 +329,8 @@ class SweepSource:
             lum = lum.mean(axis=2)
         if lum.max() > 1.5:
             lum = lum / 255.0
+        if self.invert:
+            lum = 1.0 - np.clip(lum, 0.0, 1.0)
         h, w = lum.shape
         if self._grid is None or self._lum_shape != (h, w):
             self._lum_shape = (h, w)
@@ -371,7 +375,8 @@ class SweepSource:
 
     # -- geometry -------------------------------------------------------
     def _composite(self, st):
-        key = (id(st.get("main")), st.get("mi"), id(st.get("float")), st.get("fi"))
+        key = (id(st.get("main")), st.get("mi"), id(st.get("float")),
+               st.get("fi"), self.invert)
         if key == self._grid_key and self._grid is not None:
             return self._grid
         ml, fl = st.get("main"), st.get("float")
@@ -387,10 +392,13 @@ class SweepSource:
         if tf is not None and tm is not None and tf.shape[:2] == tm.shape[:2]:
             lf, af = split(tf); lm, am = split(tm)
             lum = lf * af + lm * am * (1.0 - af)
+            coverage = af + am * (1.0 - af)
         elif tf is not None:
-            lf, af = split(tf); lum = lf * af
+            lf, af = split(tf); lum = lf * af; coverage = af
         else:
-            lm, am = split(tm); lum = lm * am
+            lm, am = split(tm); lum = lm * am; coverage = am
+        if self.invert:
+            lum = np.clip(coverage - lum, 0.0, 1.0)
 
         if self.bbox is not None:
             hh, ww = lum.shape
@@ -737,7 +745,7 @@ def preview_frame(samples, size=384, spot=None, exposure=1.0, max_split=192):
 
 def calibrate(main_libs, float_libs, n_samples, density=1.0, trim=0.02,
               rows=None, cols=None, bbox=None, frames=24, fields=1,
-              row_bias=1.0, autofit=True):
+              row_bias=1.0, autofit=True, invert=False):
     """
     Compute a FIXED grid size and tone mapping from a sample of the sequence.
 
@@ -785,7 +793,10 @@ def calibrate(main_libs, float_libs, n_samples, density=1.0, trim=0.02,
         step = max(1, F // max(frames // max(len(libs[:8]), 1), 1))
         for i in range(0, F, step):
             t = np.asarray(lib.thumbs[i])
-            v = (t[..., 0] / 255.0) * (t[..., 1] / 255.0)
+            alpha = t[..., 1] / 255.0
+            v = (t[..., 0] / 255.0) * alpha
+            if invert:
+                v = np.clip(alpha - v, 0.0, 1.0)
             g = _box(v, min(r0, v.shape[0]), min(c0, v.shape[1]))
             lit = g[g > 0.01]
             if lit.size < 16:
@@ -1064,7 +1075,7 @@ class StochasticEmitter:
         """Resume after a mode handoff at the beam's actual position.
 
         The walk clock and short visited history survive. Resetting them here
-        made every stochastic pass in V-R-S-R mix behave like a brand-new
+        made every stochastic pass in the whole-trace mix behave like a brand-new
         renderer, even though the emitter itself was deliberately persistent.
         Only the geometric cursor is remapped to the beam's current endpoint.
         """
@@ -1473,13 +1484,12 @@ class StippleEmitter(StochasticEmitter):
 
 
 class TriangleMixScheduler:
-    """Whole-trace VECTOR -> RASTER -> STOCHASTIC -> RASTER scheduler.
+    """Whole-trace V/R/S/stipple scheduler (historical public class name).
 
     ``raster_duty`` retains the old mix contract: it is the long-term fraction
-    of traces assigned to raster. The remaining traces alternate vector and
-    stochastic, so they receive equal shares. At the default 0.5 duty the
-    exact repeating route is V, R, S, R -- a triangle through the three
-    renderers instead of the old two-state square V, R, V, R.
+    of traces assigned to raster. The remaining traces cycle vector,
+    stochastic, and stipple, so all three receive equal shares. At the default
+    0.5 duty the exact repeating route is V, R, S, R, T, R (T = stipple).
 
     Whole traces are deliberate. Blending unrelated XY sample positions would
     draw the interpolation between them; phosphor persistence already performs
@@ -1499,7 +1509,7 @@ class TriangleMixScheduler:
         """Traces needed for one complete mixed preview exposure.
 
         The window must contain every raster field and, when present, at
-        least one vector and one stochastic pass. It is also used as the
+        least one vector, stochastic, and stipple pass. It is also used as the
         honest combined-picture refresh period reported by the monitor.
         """
         duty = float(raster_duty)
@@ -1511,8 +1521,8 @@ class TriangleMixScheduler:
         if duty > 0.0:
             spans.append(int(np.ceil(fields / duty - 1e-12)))
         if duty < 1.0:
-            # Vector and stochastic split the non-raster share equally.
-            spans.append(int(np.ceil(2.0 / (1.0 - duty) - 1e-12)))
+            # Vector, stochastic, and stipple split the outer share equally.
+            spans.append(int(np.ceil(3.0 / (1.0 - duty) - 1e-12)))
         return max(spans)
 
     def next_mode(self):
@@ -1520,7 +1530,7 @@ class TriangleMixScheduler:
         if self._raster_error >= 1.0 - 1e-12:
             self._raster_error -= 1.0
             return "raster"
-        mode = "vector" if self._outer % 2 == 0 else "stochastic"
+        mode = ("vector", "stochastic", "stipple")[self._outer % 3]
         self._outer += 1
         return mode
 
@@ -1550,7 +1560,7 @@ def stochastic_luma(lum, n, *, rng=None, gamma=2.0, trim=0.02,
 
 
 def composite_luma(main_lib, main_idx, float_lib, float_idx, bbox=None,
-                   raw=False):
+                   raw=False, invert=False):
     """The interleaved composite as a luminance array, and nothing else.
 
     Split out of raster_frame so there is ONE place that decides what the
@@ -1581,12 +1591,20 @@ def composite_luma(main_lib, main_idx, float_lib, float_idx, bbox=None,
         lf, af = split(tf)
         lm, am = split(tm)
         lum = lf * af + lm * am * (1.0 - af)
+        coverage = af + am * (1.0 - af)
     elif tf is not None:
         lf, af = split(tf)
         lum = lf * af
+        coverage = af
     else:
         lm, am = split(tm)
         lum = lm * am
+        coverage = am
+
+    if invert:
+        # Invert only covered image content. Transparent padding remains dark
+        # instead of becoming a full-bright rectangle around a float layer.
+        lum = np.clip(coverage - lum, 0.0, 1.0)
 
     if bbox is not None:                       # crop to the subject so the
         hh, ww = lum.shape                     # budget is spent on content
@@ -1624,7 +1642,8 @@ def _alpha_at(alpha, xy):
     return np.asarray(alpha[yy, xx], dtype=np.float64) / 255.0
 
 
-def composite_stipple_candidates(main_lib, main_idx, float_lib, float_idx):
+def composite_stipple_candidates(main_lib, main_idx, float_lib, float_idx,
+                                  invert=False):
     """Combine sparse source-detail candidates for an arbitrary layer pair.
 
     Candidate coordinates were sampled from a broad proposal at bake time.
@@ -1659,7 +1678,7 @@ def composite_stipple_candidates(main_lib, main_idx, float_lib, float_idx):
         visible = alpha.copy()
         if occluder is not None:
             visible *= 1.0 - _alpha_at(occluder, xy)
-        signal = lum * visible
+        signal = (1.0 - lum) * visible if invert else lum * visible
         shown_edge = edge * visible
         proposal = alpha * (0.15 + 0.75 * lum + 0.10 * edge)
         correction = np.divide(
@@ -1698,26 +1717,119 @@ def normalize_fusion_components(value):
     return canonical
 
 
-class PositionMultiplexer:
-    """Select corresponding entries from V/R/S arrays in round-robin order.
+def trace_luminance_weights(lum, trace, gamma=2.0, trim=0.02, level=0.9):
+    """Sample image luminance at every XY position in a component trace.
 
-    Fusion is temporal selection, not coordinate arithmetic.  For ``vr`` the
-    result is ``V[0], R[1], V[2], R[3]...``; for ``vrs`` it is
-    ``V[0], R[1], S[2], V[3]...``.  ``phase`` continues across calls so a
-    length not divisible by the component count does not favor the first
-    component on every array.
+    Fusion uses these values as temporal selection weights. Bilinear sampling
+    avoids making the selector flicker merely because a moving point crosses
+    a thumbnail cell boundary. Coordinates outside the square-padded image
+    are dark, and ``trim``/``gamma`` give bright points progressively more
+    beam time without changing their positions.
+    """
+    if lum is None or trace is None:
+        return None
+    image = np.asarray(lum, dtype=np.float64)
+    points = np.asarray(trace, dtype=np.float64)
+    if image.ndim != 2 or not image.size:
+        return None
+    if points.ndim != 2 or points.shape[1] != 2 or not len(points):
+        return None
+    image = np.clip(np.nan_to_num(
+        image, nan=0.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
+    h, w = image.shape
+    extent = max(abs(float(level)), 1e-9)
+    m = float(max(w, h))
+    x = ((points[:, 0] / extent + 1.0) * 0.5 * m
+         - (m - w) * 0.5)
+    y = ((1.0 - points[:, 1] / extent) * 0.5 * m
+         - (m - h) * 0.5)
+    valid = np.isfinite(x) & np.isfinite(y)
+    valid &= (x >= 0.0) & (x <= w - 1) & (y >= 0.0) & (y <= h - 1)
+    x = np.clip(np.nan_to_num(x), 0.0, max(w - 1, 0))
+    y = np.clip(np.nan_to_num(y), 0.0, max(h - 1, 0))
+    x0 = np.floor(x).astype(np.int64)
+    y0 = np.floor(y).astype(np.int64)
+    x1 = np.minimum(x0 + 1, w - 1)
+    y1 = np.minimum(y0 + 1, h - 1)
+    fx = x - x0
+    fy = y - y0
+    sampled = ((1.0 - fx) * (1.0 - fy) * image[y0, x0]
+               + fx * (1.0 - fy) * image[y0, x1]
+               + (1.0 - fx) * fy * image[y1, x0]
+               + fx * fy * image[y1, x1])
+    sampled[~valid] = 0.0
+    floor = max(0.0, float(trim))
+    return np.where(
+        sampled > floor,
+        sampled ** max(0.01, float(gamma)), 0.0).astype(np.float32)
+
+
+def retime_trace_by_weights(trace, weights, travel_floor=0.03):
+    """Re-time a fixed vector path so weighted regions receive more dwell.
+
+    A two-channel scope cannot invert a vector with a Z/intensity value that
+    does not exist. The useful no-Z equivalent is velocity modulation: retain
+    the baked path and sample count, move slowly through high-weight regions,
+    and cross low-weight regions quickly. Large inter-polyline jumps are kept
+    at the minimum share so inversion never turns travel into bright strokes.
+    """
+    points = np.asarray(trace, dtype=np.float32)
+    value = np.asarray(weights, dtype=np.float64).reshape(-1)
+    if (points.ndim != 2 or points.shape[1] != 2 or len(points) < 2
+            or len(value) != len(points)):
+        raise ValueError("trace and weights must have matching N and trace (N, 2)")
+    value = np.maximum(
+        np.nan_to_num(value, nan=0.0, posinf=1.0, neginf=0.0), 0.0)
+    peak = float(value.max())
+    if peak <= 1e-12:
+        return np.ascontiguousarray(points, dtype=np.float32)
+
+    dwell = 0.5 * (value[:-1] + value[1:]) / peak
+    floor = float(np.clip(travel_floor, 1e-4, 1.0))
+    duration = floor + (1.0 - floor) * dwell
+    distance = np.hypot(*np.diff(points, axis=0).T)
+    nonzero = distance[distance > 1e-9]
+    if nonzero.size:
+        typical = float(np.median(nonzero))
+        duration[distance > 4.0 * typical] = floor
+
+    cumulative = np.concatenate([[0.0], np.cumsum(duration)])
+    target = np.linspace(0.0, cumulative[-1], len(points), endpoint=True)
+    segment = np.clip(
+        np.searchsorted(cumulative, target, side="right") - 1,
+        0, len(duration) - 1)
+    fraction = ((target - cumulative[segment])
+                / np.maximum(duration[segment], 1e-12))[:, None]
+    out = points[segment] + fraction * (
+        points[segment + 1] - points[segment])
+    out[0] = points[0]
+    out[-1] = points[-1]
+    return np.ascontiguousarray(out, dtype=np.float32)
+
+
+class PositionMultiplexer:
+    """Select corresponding entries from V/R/S arrays in temporal proportion.
+
+    Fusion is temporal selection, not coordinate arithmetic. With no weights,
+    the historical V/R/S round-robin is preserved exactly. With per-position
+    luminance weights, a deficit scheduler gives bright candidates more of
+    the nearby DAC samples and dark candidates fewer. Credit survives buffer
+    boundaries, so weighting changes density rather than introducing random
+    frame-to-frame choices.
     """
 
     def __init__(self):
         self.phase = 0
         self.components = None
+        self.credit = None
 
     def reset(self):
         self.phase = 0
         self.components = None
+        self.credit = None
 
     def emit(self, vector=None, raster=None, stochastic=None,
-             components="vrs"):
+             components="vrs", weights=None):
         components = normalize_fusion_components(components)
         available = {"v": vector, "r": raster, "s": stochastic}
         names, arrays = [], []
@@ -1740,20 +1852,105 @@ class PositionMultiplexer:
         if key != self.components:
             self.phase = 0
             self.components = key
-        choice = (np.arange(shape[0], dtype=np.int64) + self.phase) % len(arrays)
+            self.credit = np.zeros(len(arrays), dtype=np.float64)
+
+        supplied = weights or {}
+        weight_arrays = []
+        for name in names:
+            value = supplied.get(name)
+            if value is None:
+                weight_arrays.append(np.ones(shape[0], dtype=np.float64))
+                continue
+            value = np.asarray(value, dtype=np.float64).reshape(-1)
+            if len(value) != shape[0]:
+                raise ValueError(
+                    f"{name} fusion weight length {len(value)} != {shape[0]}")
+            weight_arrays.append(np.maximum(
+                np.nan_to_num(value, nan=0.0, posinf=1.0, neginf=0.0), 0.0))
+
+        if not supplied:
+            choice = ((np.arange(shape[0], dtype=np.int64) + self.phase)
+                      % len(arrays))
+            self.phase = int((self.phase + shape[0]) % len(arrays))
+        else:
+            matrix = np.column_stack(weight_arrays)
+            choice = np.empty(shape[0], dtype=np.int64)
+            phase = self.phase
+            count = len(arrays)
+            # V/R/S has only two or three active sources. Scalar-specialized
+            # loops are ~7x faster here than thousands of tiny NumPy sums and
+            # argmax calls, which is material inside a 33 ms audio budget.
+            if count == 1:
+                choice.fill(0)
+            elif count == 2:
+                a0, a1 = matrix[:, 0], matrix[:, 1]
+                c0, c1 = map(float, self.credit)
+                for i in range(shape[0]):
+                    w0, w1 = float(a0[i]), float(a1[i])
+                    total = w0 + w1
+                    if total <= 1e-12:
+                        c0 += 0.5; c1 += 0.5
+                    else:
+                        inv = 1.0 / total
+                        c0 += w0 * inv; c1 += w1 * inv
+                    if c0 > c1 + 1e-12:
+                        selected = 0
+                    elif c1 > c0 + 1e-12:
+                        selected = 1
+                    else:
+                        selected = phase
+                    choice[i] = selected
+                    if selected == 0:
+                        c0 -= 1.0
+                    else:
+                        c1 -= 1.0
+                    phase = 1 - selected
+                self.credit[:] = (c0, c1)
+            else:
+                a0, a1, a2 = matrix[:, 0], matrix[:, 1], matrix[:, 2]
+                c0, c1, c2 = map(float, self.credit)
+                for i in range(shape[0]):
+                    w0 = float(a0[i]); w1 = float(a1[i]); w2 = float(a2[i])
+                    total = w0 + w1 + w2
+                    if total <= 1e-12:
+                        c0 += 1.0 / 3.0
+                        c1 += 1.0 / 3.0
+                        c2 += 1.0 / 3.0
+                    else:
+                        inv = 1.0 / total
+                        c0 += w0 * inv; c1 += w1 * inv; c2 += w2 * inv
+                    peak = max(c0, c1, c2)
+                    if phase == 0:
+                        selected = (0 if c0 >= peak - 1e-12 else
+                                    1 if c1 >= peak - 1e-12 else 2)
+                    elif phase == 1:
+                        selected = (1 if c1 >= peak - 1e-12 else
+                                    2 if c2 >= peak - 1e-12 else 0)
+                    else:
+                        selected = (2 if c2 >= peak - 1e-12 else
+                                    0 if c0 >= peak - 1e-12 else 1)
+                    choice[i] = selected
+                    if selected == 0:
+                        c0 -= 1.0
+                    elif selected == 1:
+                        c1 -= 1.0
+                    else:
+                        c2 -= 1.0
+                    phase = (selected + 1) % 3
+                self.credit[:] = (c0, c1, c2)
+            self.phase = phase
         out = np.empty(shape, dtype=np.float32)
         for source, trace in enumerate(arrays):
             mask = choice == source
             out[mask] = trace[mask]
-        self.phase = int((self.phase + shape[0]) % len(arrays))
         return np.ascontiguousarray(out)
 
 
 def fuse_positions(vector=None, raster=None, stochastic=None,
-                   components="vrs"):
+                   components="vrs", weights=None):
     """Stateless convenience wrapper for per-index position multiplexing."""
     return PositionMultiplexer().emit(
-        vector, raster, stochastic, components=components)
+        vector, raster, stochastic, components=components, weights=weights)
 
 
 def vector_density(polylines, shape, thickness=1):
@@ -1852,14 +2049,14 @@ def fuse_density(vector=None, raster=None, stochastic=None, components="vrs",
 def fusion_probability(main_lib, main_idx, float_lib, float_idx,
                        components="vrs", bbox=None, min_feature=0.02,
                        raster_gamma=2.2, stochastic_gamma=2.0, trim=0.02,
-                       edge_gain=0.0, vector_thickness=1):
+                       edge_gain=0.0, vector_thickness=1, invert=False):
     """Build one normalized field from the requested baked render sources."""
     components = normalize_fusion_components(components)
     raster = (composite_luma(main_lib, main_idx, float_lib, float_idx,
-                             bbox=bbox, raw=False)
+                             bbox=bbox, raw=False, invert=invert)
               if "r" in components else None)
     stochastic = (composite_luma(main_lib, main_idx, float_lib, float_idx,
-                                 bbox=bbox, raw=True)
+                                 bbox=bbox, raw=True, invert=invert)
                   if "s" in components else None)
     reference = raster if raster is not None else stochastic
     vector = None
@@ -1882,7 +2079,7 @@ def raster_frame(main_lib, main_idx, float_lib, float_idx, n,
                  oversample=1, grid_rows=None, grid_cols=None, levels=None,
                  fields=1, field=0, palindrome=False, reverse=False, start=None,
                  close=None, overscan=1.0, border=0.0, row_bias=1.0,
-                 subcell=True, precondition=None):
+                 subcell=True, precondition=0.0, invert=False):
     """
     Dwell-modulated serpentine: the 2-channel equivalent of a video-to-scope
     adapter.  The beam sweeps every row and lingers on bright cells, so
@@ -1928,10 +2125,11 @@ def raster_frame(main_lib, main_idx, float_lib, float_idx, n,
                 index must get `fields` traces or you see half a picture.
                 Buys refresh rate (less flicker), never resolution.
     """
-    lum = composite_luma(main_lib, main_idx, float_lib, float_idx, bbox=bbox)
+    lum = composite_luma(
+        main_lib, main_idx, float_lib, float_idx, bbox=bbox, invert=invert)
     if lum is None:
         return None
-    if precondition is None:
+    if precondition is None:  # explicit metadata opt-in for old callers only
         precondition = raster_precondition_for(main_lib, float_lib)
     return render_luma(lum, n, gamma=gamma, floor=floor, level=level,
                        rows=rows, cols=cols, density=density, trim=trim,

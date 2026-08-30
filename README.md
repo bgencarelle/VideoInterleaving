@@ -167,15 +167,17 @@ the route keeps 256px coordinate placement without retaining a complete 256px
 image plane for every frame.
 
 Fusion builds corresponding position arrays for the selected renderers and
-selects entries round-robin by array index instead of switching whole traces:
+selects corresponding entries by luminance instead of switching whole traces:
 
 ```bash
 python main.py --mode scope --xy-dir ./images_xy --scope-mode fusion --scope-fusion vrs
 ```
 
-`--scope-fusion` accepts `vrs`, `vr`, `sv`, and `sr`. For example, `vr`
-outputs `V[0], R[1], V[2], R[3]...`; `vrs` cycles V, R, S the same way. No XY
-coordinates are arithmetically averaged. Press `f` in fusion mode to cycle.
+`--scope-fusion` accepts `vrs`, `vr`, `sv`, and `sr`. A persistent temporal
+selector gives bright positions more nearby DAC samples and dark positions
+fewer, using the existing raster and stochastic gamma controls. Equal or
+all-dark candidates remain evenly interleaved. No XY coordinates are
+arithmetically averaged. Press `f` in fusion mode to cycle.
 
 The compact bake stores raw luminance and alpha at 128px. That is above the
 normal raster sweep grid, while stochastic can still use the field directly.
@@ -184,7 +186,9 @@ high-resolution placement. A typical 32-folder library is about 3.7 GB rather
 than the 18-25 GB produced by the former 256px, three-channel format.
 
 Press `v` while it is running to cycle vector, raster, stochastic, stipple,
-and fusion.
+and fusion. Press `i` to toggle alpha-aware luminance inversion, or start with
+`--scope-invert`; vector keeps its baked geometry but shifts dwell toward
+originally dark stroke regions, and transparent padding remains dark.
 See `SCOPE_MODE.md` for wiring, sample-budget, and renderer details.
 
 ### The `settings.py` Way (Legacy)

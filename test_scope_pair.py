@@ -12,7 +12,7 @@ trace timing, so what you see is what the scope draws.
            --fps 30 --ips 30 --exposure 0.4 --play
 
 Keys:  space play/pause · left/right step · m occlusion cull · v cycle mode
-       r vector<->raster
+       r vector<->raster · i inverse luminance
        + / - intensity · [ / ] gamma · d density · , / . speed · l pingpong<->loop
        q quit
 
@@ -36,7 +36,9 @@ from scope_bake import (XYLibrary, merge, raster_frame, content_bbox,
                         composite_luma, composite_stipple_candidates,
                         StochasticEmitter, StippleEmitter,
                         TriangleMixScheduler,
-                        PositionMultiplexer, apply_trace_border)    # noqa: E402
+                        PositionMultiplexer, apply_trace_border,
+                        trace_luminance_weights,
+                        retime_trace_by_weights)                    # noqa: E402
 from scope_out import Scope, rasterize, FPS, choose_device           # noqa: E402
 
 PNG_OUT = "test_scope_pair_output.png"
@@ -157,8 +159,12 @@ def build_parser():
     ap.add_argument("--raster", action="store_true", help="start in raster mode")
     ap.add_argument("--stipple", action="store_true",
                     help="start in stable luminance-weighted stipple mode")
+    ap.add_argument("--invert", action="store_true",
+                    help="invert covered image luminance; transparent padding "
+                         "stays dark")
     ap.add_argument("--fusion", choices=("vrs", "vr", "sv", "sr"),
-                    help="start in fused-density mode with these components")
+                    help="start in luminance-weighted position fusion with "
+                         "these components")
     ap.add_argument("--samples", type=int,
                     help="path length per trace -- the real detail budget. "
                          "Refresh follows as rate/samples. Overrides --fps.")
@@ -177,6 +183,9 @@ def build_parser():
     ap.add_argument("--density", type=float, default=1.0,
                     help="raster samples per cell; 1.0 = finest, above 1 trades "
                          "detail for brighter solider lines")
+    ap.add_argument("--precondition", type=float, default=0.0, metavar="F",
+                    help="optional raster horizontal sharpening; default 0 "
+                         "keeps natural facial tone")
     ap.add_argument("--fields", type=int, default=1,
                     help="raster interlacing: 2 draws alternate rows per trace. "
                          "Only meaningful when --fps is a multiple of --ips")
@@ -194,13 +203,14 @@ def build_parser():
                          "full-extent border (same as main --scope-border)")
     ap.add_argument("--mix", nargs="?", type=float, const=120.0, default=None,
                     metavar="HZ",
-                    help="triangular VECTOR -> RASTER -> STOCHASTIC -> RASTER "
-                         "whole-trace mix at this rate (default 120). The trace "
+                    help="VECTOR -> RASTER -> STOCHASTIC -> RASTER -> "
+                         "STIPPLE -> RASTER whole-trace mix at this rate "
+                         "(default 120). The trace "
                          "rate is HZ, so each pass gets rate/HZ samples.")
     ap.add_argument("--mix-duty", type=float, default=0.5, metavar="F",
                     help="fraction of mixed passes spent on RASTER (default "
-                         "0.5); the remainder splits equally between VECTOR "
-                         "and STOCHASTIC")
+                         "0.5); the remainder splits equally between VECTOR, "
+                         "STOCHASTIC, and STIPPLE")
     ap.add_argument("--sweep", choices=("alternate", "palindrome", "retrace"),
                     default="alternate",
                     help="alternate: each trace sweeps one way and the next "
@@ -315,6 +325,8 @@ def main():
             samp = raster_frame(mlib, idx, flib, idx, n_samples,
                                 gamma=gamma, rows=args.rows, density=density,
                                 trim=0.0 if args.no_trim else args.trim,
+                                precondition=args.precondition,
+                                invert=args.invert,
                                 border=args.border,
                                 bbox=fit_bbox, fields=args.fields,
                                 field=next(field_counter),
@@ -339,7 +351,7 @@ def main():
             if beam_end is not None and last_mode != "stochastic":
                 stochastic.start_at(beam_end)
             samp = stochastic.emit(composite_luma(
-                mlib, idx, flib, idx, raw=True))
+                mlib, idx, flib, idx, raw=True, invert=args.invert))
             if samp is None:
                 return build(idx, do_cull, "vector")
             beam_end = samp[-1].copy()
@@ -350,10 +362,12 @@ def main():
         if mode == "stipple":
             if beam_end is not None:
                 stipple.start_at(beam_end)
-            cloud = composite_stipple_candidates(mlib, idx, flib, idx)
+            cloud = composite_stipple_candidates(
+                mlib, idx, flib, idx, invert=args.invert)
             samp = (stipple.emit_candidates(cloud) if cloud is not None
                     else stipple.emit(composite_luma(
-                        mlib, idx, flib, idx, raw=True)))
+                        mlib, idx, flib, idx, raw=True,
+                        invert=args.invert)))
             if samp is None:
                 return build(idx, do_cull, "vector")
             beam_end = samp[-1].copy()
@@ -373,6 +387,8 @@ def main():
                     mlib, idx, flib, idx, n_samples,
                     gamma=gamma, rows=args.rows, density=density,
                     trim=0.0 if args.no_trim else args.trim,
+                    precondition=args.precondition,
+                    invert=args.invert,
                     border=0.0,
                     bbox=fit_bbox, fields=args.fields,
                     field=next(field_counter),
@@ -390,15 +406,30 @@ def main():
                 stochastic.border = 0.0
                 try:
                     stochastic_trace = stochastic.emit(composite_luma(
-                        mlib, idx, flib, idx, raw=True))
+                        mlib, idx, flib, idx, raw=True,
+                        invert=args.invert))
                 finally:
                     stochastic.border = old_border
+            reference = composite_luma(
+                mlib, idx, flib, idx, raw=True, invert=args.invert)
+            weights = {
+                "v": trace_luminance_weights(
+                    reference, vector_trace, gamma=gamma,
+                    trim=0.0 if args.no_trim else args.trim),
+                "r": trace_luminance_weights(
+                    reference, raster_trace, gamma=gamma,
+                    trim=0.0 if args.no_trim else args.trim),
+                "s": trace_luminance_weights(
+                    reference, stochastic_trace,
+                    gamma=args.stochastic_gamma,
+                    trim=0.0 if args.no_trim else args.trim),
+            }
             samp = fusion_multiplexer.emit(
                 vector=vector_trace, raster=raster_trace,
-                stochastic=stochastic_trace, components=components)
+                stochastic=stochastic_trace, components=components,
+                weights=weights)
             if samp is None:
                 return build(idx, do_cull, "vector")
-            reference = composite_luma(mlib, idx, flib, idx, raw=False)
             if reference is not None:
                 h, w = reference.shape
                 samp = apply_trace_border(
@@ -420,6 +451,14 @@ def main():
             polys = ([p for p, f in zip(mp, mf) if f != 2]
                      + [p for p, f in zip(fp, ff) if f != 2])
         samp = rasterize(polys, n_samples)
+        if args.invert:
+            inverse_luma = composite_luma(
+                mlib, idx, flib, idx, raw=True, invert=True)
+            weights = trace_luminance_weights(
+                inverse_luma, samp, gamma=gamma,
+                trim=0.0 if args.no_trim else args.trim)
+            if weights is not None:
+                samp = retime_trace_by_weights(samp, weights)
         beam_end = samp[-1].copy()
         last_mode = mode
         if scope:
@@ -441,10 +480,10 @@ def main():
     push_interval = (1.0 / args.mix) if args.mix else (1.0 / ips)
     sim = TraceSim(args.fps, last_step)
     if args.mix:
-        outer = (1.0 - duty) * args.mix * 0.5
-        print(f"[MIX] triangular V -> R -> S -> R at {args.mix:g} Hz "
+        outer = (1.0 - duty) * args.mix / 3.0
+        print(f"[MIX] V -> R -> S -> R -> T -> R at {args.mix:g} Hz "
               f"-> {outer:g} vector, {duty * args.mix:g} raster, "
-              f"{outer:g} stochastic passes/sec")
+              f"{outer:g} stochastic, {outer:g} stipple passes/sec")
 
     while True:
         now = time.perf_counter()
@@ -452,7 +491,7 @@ def main():
             # Audio playback must not depend on an OpenCV window.  A headless
             # OpenCV build used to strand the very first (vector) trace here
             # forever.  For a mix, also wait until the callback has accepted
-            # the pending trace so V/R/S/R cannot collapse through last-write-
+            # the pending trace so V/R/S/R/T/R cannot collapse through last-write-
             # wins replacement into whichever component happened to survive.
             can_push = (not args.mix or scope is None or scope.ready())
             if now - last_push >= push_interval and can_push:
@@ -559,6 +598,13 @@ def main():
             current = args.fusion if args.fusion in order else "vrs"
             args.fusion = order[(order.index(current) + 1) % len(order)]
             active_mode = "fusion"
+            samples, npolys = build(index, culled, active_mode); dirty = True
+        elif key == ord("i"):
+            args.invert = not args.invert
+            stochastic.reset()
+            stipple.reset()
+            fusion_multiplexer.reset()
+            beam_end = None
             samples, npolys = build(index, culled, active_mode); dirty = True
         elif key in (ord("+"), ord("=")):
             exposure = min(4.0, exposure * 1.3); dirty = True

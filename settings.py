@@ -118,9 +118,10 @@ SCOPE_FPS = None          # None -> follow IPS
 SCOPE_SAMPLES = None      # explicit samples/trace; incompatible with mix
 SCOPE_RENDER_MODE = "vector"  # vector | raster | stochastic | stipple | fusion
                           # Stochastic is a luminance-weighted XY walk; fusion
-                          # multiplexes corresponding V/R/S array entries.
-SCOPE_FUSION = "vrs"      # vrs | vr | sv | sr; round-robin position sources
+                          # multiplexes corresponding V/R/S entries by light.
+SCOPE_FUSION = "vrs"      # vrs | vr | sv | sr; weighted position sources
 SCOPE_RASTER = False      # compatibility mirror for older integrations
+SCOPE_INVERT = False      # inverse tone; vector approximates it through dwell velocity
 SCOPE_REALTIME = False    # raster-only low-latency streaming path
 SCOPE_LIST_FROM_IMAGES = False  # bypass the baked manifest for legacy bakes
 SCOPE_FIELDS = 1          # raster interlace: traces per picture. 2 or 4 lifts
@@ -132,7 +133,7 @@ SCOPE_MIN_FEATURE = 0.02  # vector: shortest stroke kept by the occlusion cull
 SCOPE_TRIM = 0.02         # raster: drop cells dimmer than this from the sweep
 SCOPE_GAMMA = 2.2         # raster luminance exponent
 SCOPE_DENSITY = 1.0       # raster samples per cell (1.0 = finest)
-SCOPE_PRECONDITION = None # None uses compact bake's recommendation; legacy 0
+SCOPE_PRECONDITION = 0.0  # natural raster tone; opt in only if a display needs it
 SCOPE_WALK_RADIUS = 10    # stochastic: nearest-neighbour search radius, pixels
 SCOPE_WALK_STRIDE = 0     # stochastic: auto-scale (~width/120; 1 at width 128)
 SCOPE_WALK_RESEED_MS = 5.0  # stochastic: jump to another bright region
@@ -157,5 +158,5 @@ SCOPE_AUTOFIT = True      # size the grid against cells that survive trim,
                           # usable grid on a subject over a dark background
 SCOPE_SWEEP = "alternate" # alternate | palindrome | retrace
 SCOPE_ROWS = None         # raster scanline count (None = auto from budget)
-SCOPE_MIX = None          # Hz for triangular V -> R -> S -> R trace mix
-SCOPE_MIX_DUTY = 0.5      # raster share; remainder splits vector/stochastic
+SCOPE_MIX = None          # Hz for V -> R -> S -> R -> T -> R trace mix
+SCOPE_MIX_DUTY = 0.5      # raster share; remainder splits vector/stochastic/stipple

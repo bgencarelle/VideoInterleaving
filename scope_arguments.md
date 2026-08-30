@@ -131,6 +131,17 @@ Two separate effects, and the second is the one people miss:
 
 Range that does anything: 0.08–0.16. Your 0.10 is sensible.
 
+### `--scope-invert` / `--no-scope-invert` (default off)
+
+Invert luminance before raster, stochastic, stipple, mix, or fusion constructs
+its path. Inversion is alpha-aware: it applies only to covered image content,
+so transparent padding and the area outside a float matte remain dark rather
+than becoming a bright rectangle. Vector has no Z/intensity channel, so it
+keeps the baked geometry and implements the negative through beam velocity:
+originally dark stroke regions receive more dwell, bright regions are crossed
+faster, and inter-polyline travel remains fast. Press `i` to toggle this live;
+the fixed tone/grid calibration is recomputed for the inverted distribution.
+
 ### `--scope-no-autofit` (default: autofit ON)
 
 Autofit is the correction that makes trim's second effect actually happen.
@@ -263,13 +274,18 @@ Selects the rendering engine explicitly:
   unrestricted Euclidean proximity, and resamples that completed route. It
   keeps the stochastic maze mode available under its existing name.
 - `fusion` generates corresponding position arrays for the selected renderers
-  and selects their entries round-robin by array index.
+  and temporally selects their corresponding entries by source luminance.
+  Bright candidates receive more nearby DAC samples; dark candidates receive
+  fewer. No coordinates are averaged.
 
 ### `--scope-fusion vrs|vr|sv|sr` (default `vrs`)
 
-Selects fusion's round-robin component set: all three, vector+raster,
-stochastic+vector, or stochastic+raster. `vr` produces
-`V[0], R[1], V[2], R[3]...`; no XY coordinates are averaged. Press `f` in
+Selects fusion's component set: all three, vector+raster, stochastic+vector,
+or stochastic+raster. The selector samples raw composite luminance at each
+component position and uses a persistent deficit scheduler to distribute beam
+time in proportion to that luminance. Raster/vector positions use
+`--scope-gamma`; stochastic positions use `--scope-stochastic-gamma`. Equal or
+all-dark candidates fall back to even round-robin selection. Press `f` in
 fusion mode to cycle the presets.
 
 ### `--scope-raster` / `--scope-stochastic` / `--scope-stipple`
@@ -321,12 +337,13 @@ a complete 256px luminance plane. The runtime reweights those candidates, so
 live gamma remains functional and the compact 128px raster field does not limit
 stipple coordinate placement.
 
-### `--scope-precondition F` (compact-bake default 0.45)
+### `--scope-precondition F` (default 0)
 
 Horizontal-only raster compensation applied after luminance has been reduced
-to the final sweep grid. It does not add a stored channel. Legacy bakes default
-to zero because their raster channel may already contain bake-time sharpening;
-an explicit value overrides that compatibility choice.
+to the final sweep grid. It does not add a stored channel or spatial detail.
+The default is zero because even the restrained correction can make facial
+shadows look hollow or uncanny. Positive values remain available as
+display-specific sharpening; they do not require a rebake.
 
 ### `--scope-min-feature F` (default 0.02)
 
@@ -348,12 +365,12 @@ Also incompatible with `--scope-fields`, since interlace needs whole traces.
 
 ### `--scope-mix [HZ]` (default off; bare flag gives 120)
 
-Run a triangular whole-trace sequence at this rate:
-`VECTOR -> RASTER -> STOCHASTIC -> RASTER -> ...`. Above flicker fusion the
-phosphor sums all three: raster supplies tone, vector supplies outlines, and
-stochastic adds directionless bitmap detail. Whole traces are switched rather
-than interpolated; interpolating unrelated XY coordinates would draw false
-connector shapes between them.
+Run a whole-trace sequence at this rate:
+`VECTOR -> RASTER -> STOCHASTIC -> RASTER -> STIPPLE -> RASTER -> ...`.
+Above flicker fusion the phosphor sums all four: raster supplies tone, vector
+supplies outlines, stochastic adds the free bitmap walk, and stipple adds its
+stable source-detail route. Whole traces are switched rather than interpolated;
+interpolating unrelated XY coordinates would draw false connector shapes.
 
 Note it **overrides your trace rate** — `fps = mix_hz` — because the switch rate
 *is* the trace rate. So `--scope-mix 120` silently puts you at 120 traces/sec and
@@ -364,17 +381,17 @@ both total and raster traces per source image are whole numbers. Otherwise it
 stays progressive so an interlaced picture never straddles two source images.
 
 The hardware sees one trace at a time, but the web preview joins enough traces
-to contain every raster field plus at least one vector and one stochastic pass.
-At the default duty this is the complete four-trace `V,R,S,R` exposure, rather
-than alternating incomplete `V+R` and `S+R` previews.
+to contain every raster field plus at least one vector, stochastic, and stipple
+pass. At the default duty this is the complete six-trace `V,R,S,R,T,R`
+exposure, rather than alternating incomplete component subsets.
 
 ### `--scope-mix-duty F` (default 0.5)
 
 Fraction of mixed passes spent on raster. The remainder is split equally
-between vector and stochastic. At 0.5 the exact repeating sequence is
-`V, R, S, R`; at 120 Hz that is 30 vector, 60 raster, and 30 stochastic
-passes per second. Raise to 0.6–0.8 if tone needs more beam time. Inert without
-`--scope-mix`.
+between vector, stochastic, and stipple. At 0.5 the exact repeating sequence is
+`V, R, S, R, T, R`; at 120 Hz that is 20 vector, 60 raster, 20 stochastic, and
+20 stipple passes per second. Raise to 0.6–0.8 if tone needs more beam time.
+Inert without `--scope-mix`.
 
 ---
 
@@ -424,7 +441,8 @@ From `scope_controls.py`, verified against `SPECS` and `HELP`:
 | `,` / `.` | density finer / coarser (0.20–4.0, multiplies) | yes |
 | `[` / `]` | active renderer gamma down / up (0.4–10.0) | no |
 | `l` | lowpass cycle: off → 12k → 6k → 3k → 1.5k | no |
-| `v` | vector → raster → stochastic → vector | yes |
+| `v` | vector → raster → stochastic → stipple → fusion | yes |
+| `i` | covered-image luminance normal / inverted | yes |
 | `w` | sweep: alternate → palindrome → retrace | no |
 | `a` | autofit on / off | yes |
 | `p` | **print current settings as a command line** | — |
@@ -436,7 +454,7 @@ your launch script. That is the intended workflow and it is not obvious from any
 doc.
 
 Mode cycling is unavailable in realtime and mix modes because those select a
-different audio/scheduling path at startup.
+different audio/scheduling path at startup. Inversion remains live in both.
 
 Not live-adjustable, because they need the audio stream reopened: `--scope-fps`,
 `--scope-samples`, and `--scope-fields`.

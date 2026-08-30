@@ -91,9 +91,10 @@ def load_rgba(path):
     return rgb, np.full(rgb.shape[:2], 255, np.uint8)
 
 
-# Recommended grid-domain compensation. It is metadata, not a baked channel:
+# Optional grid-domain compensation. It is metadata, not a baked channel:
 # scope_bake applies it horizontally after reducing to the actual sweep grid.
-PRECONDITION = 0.45
+# Zero keeps natural facial tone; positive values are display-specific tuning.
+PRECONDITION = 0.0
 
 
 def make_thumb(rgb, alpha, width=THUMB_W, precondition=PRECONDITION):
@@ -435,7 +436,7 @@ def main():
                          "999_* backups are not baked for nothing)")
     ap.add_argument("--precondition", type=float, default=PRECONDITION,
                     metavar="AMOUNT",
-                    help=f"recommended runtime raster compensation stored in "
+                    help=f"optional runtime raster compensation stored in "
                          f"format.json (default {PRECONDITION}; 0 disables). "
                          "Applied after reduction to the sweep grid, not baked "
                          "into another full-resolution channel.")

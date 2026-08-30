@@ -214,10 +214,11 @@ brightness channel. Luminance becomes probability: bright pixels are selected
 more often, nearby unvisited pixels are visited first, and the phosphor turns
 that visit density into visible tone.
 
-New compact bakes give both modes the same raw luminance channel. Raster applies
-a restrained horizontal-only correction after reducing it to the actual sweep
-grid. Stochastic reads it unchanged. This removes the redundant full-size
-preconditioned channel and prevents the old scaled 9x9 face treatment.
+New compact bakes give both modes the same raw luminance channel. Raster can
+optionally apply horizontal-only correction after reducing it to the actual
+sweep grid; the natural-tone default is zero. Stochastic reads it unchanged.
+This removes the redundant full-size preconditioned channel and prevents the
+old scaled 9x9 face treatment.
 
 The renderer is a continuous sample source, not a per-trace route:
 
@@ -279,12 +280,15 @@ rate only represents the same route more or less densely. `--scope-gamma`,
 ### Fusion — corresponding-position multiplexing
 
 Fusion generates equal-length position arrays from every requested renderer,
-then selects between their corresponding entries round-robin. `vr` produces
-`V[0], R[1], V[2], R[3]...`; `vrs` produces
-`V[0], R[1], S[2], V[3]...`. It performs no arithmetic averaging of XY
-coordinates and does not convert the components into a stochastic probability
-field. Unlike mix, switching happens within the array rather than once per
-whole trace.
+samples raw composite luminance at each corresponding XY entry, then uses a
+persistent deficit scheduler to allocate nearby DAC samples in proportion to
+those values. Bright candidates therefore appear more often and dark
+candidates less often; equal or all-dark candidates remain round-robin. It
+performs no arithmetic averaging of XY coordinates and does not convert the
+components into a stochastic probability field. Unlike mix, switching happens
+within the array rather than once per whole trace. `--scope-gamma` shapes
+vector/raster selection weights and `--scope-stochastic-gamma` shapes the
+stochastic weights.
 
 ```
 --scope-mode fusion --scope-fusion vrs   # vector + raster + stochastic
@@ -401,32 +405,34 @@ held frame would show one field forever and stay permanently combed.
 
 ## 4b. Mix mode
 
-`--scope-mix [HZ]` (default 120) follows a triangular whole-trace route:
-`VECTOR -> RASTER -> STOCHASTIC -> RASTER -> ...`. Above flicker fusion the
-phosphor sums all three, so you see one image: raster supplies tone and mass,
-vector supplies the outline, and stochastic supplies directionless bitmap
-detail. Whole traces are switched rather than sample-interpolated, which would
-draw false connectors between unrelated XY positions.
+`--scope-mix [HZ]` (default 120) follows a whole-trace route:
+`VECTOR -> RASTER -> STOCHASTIC -> RASTER -> STIPPLE -> RASTER -> ...`.
+Above flicker fusion the phosphor sums all four, so you see one image: raster
+supplies tone and mass, vector supplies the outline, stochastic supplies the
+free bitmap walk, and stipple supplies its stable source-detail route. Whole
+traces are switched rather than sample-interpolated, which would draw false
+connectors between unrelated XY positions.
 
 The switch rate **is** the trace rate, so each pass gets `rate / HZ` samples —
 400 at 48kHz/120Hz, 800 at 60Hz. Lower HZ gives each mode more detail but
-starts to read as three separate component pictures rather than one combined
+starts to read as four separate component pictures rather than one combined
 one.
 60–120 Hz is the useful range.
 
-All three modes need their data, so this requires a **full bake**, not
+All four modes need their data, so this requires a **full bake**, not
 `--thumbs-only`.
 
 `--scope-mix-duty` remains the raster fraction. The non-raster fraction is split
-equally between vector and stochastic, so duty 0.5 at 120 Hz yields 30 vector,
-60 raster and 30 stochastic passes per second. The beam handoff is chained for
-raster and stochastic; vector can still contribute a faint fast connector.
+equally between vector, stochastic, and stipple, so duty 0.5 at 120 Hz yields
+20 vector, 60 raster, 20 stochastic, and 20 stipple passes per second. The beam
+handoff is chained for raster, stochastic, and stipple; vector can still
+contribute a faint fast connector.
 
 Mix owns the trace clock, so `--scope-samples` is rejected rather than silently
 overriding the requested switch rate. Automatic raster interlace is used only
 when total and raster traces per source image are whole numbers. The web preview
-joins a complete component/field exposure—four traces at the default—so it
-shows `V+R+S+R` rather than alternating incomplete halves.
+joins a complete component/field exposure—six traces at the default—so it
+shows `V+R+S+R+T+R` rather than alternating incomplete subsets.
 
 ---
 
@@ -442,7 +448,7 @@ A bake flag. It writes `thumbs.npy` and skips vectorizing entirely.
 - **Fusion presets containing `v` do not** — they require contour geometry.
 
 Use it when you've settled on raster/stochastic and are iterating on content.
-Do a full bake when you want live cycling through all three modes.
+Do a full bake when you want live cycling through all five modes.
 
 ---
 
@@ -566,7 +572,7 @@ python utilities/convert_to_xy.py -i images -o images_xy [options]
 | `--budget N` | Override main-layer vertex budget |
 | `--bands N` | Luminance levels for interior detail. 2 = starker, 4 = more tonal. |
 | `--min-verts N` | Floor on vertices per contour. Raise for fewer/cleaner shapes. |
-| `--thumbs-only` | Raster/stochastic luminance data only; skip vectorizing. |
+| `--thumbs-only` | Raster/stochastic/stipple data only; skip vectorizing. |
 
 Floats always bake silhouette-only — they're mattes, with no interior worth
 tracing.
@@ -580,7 +586,7 @@ python main.py --mode scope --xy-dir images_xy [options]
 | Flag | Effect |
 |---|---|
 | `--scope-mode vector\|raster\|stochastic\|stipple\|fusion` | Select the renderer. |
-| `--scope-fusion vrs\|vr\|sv\|sr` | Choose round-robin position-array sources for fusion. |
+| `--scope-fusion vrs\|vr\|sv\|sr` | Choose luminance-weighted position-array sources for fusion. |
 | `--scope-raster` | Compatibility alias for `--scope-mode raster`. |
 | `--scope-stochastic` | Alias for `--scope-mode stochastic`. |
 | `--scope-stipple` | Alias for `--scope-mode stipple`. |
@@ -591,24 +597,26 @@ python main.py --mode scope --xy-dir images_xy [options]
 | `--scope-walk-edge F` | Optional non-Osci edge probability (default 0). |
 | `--scope-walk-hz HZ` | Target decisions per second (default 48000), independent of faster DAC rates. |
 | `--scope-stipple-points N` | Stable weighted positions in stipple mode (default 768). |
-| `--scope-precondition F` | Raster horizontal compensation on the final sweep grid. Compact-bake default 0.45; legacy default 0. |
+| `--scope-precondition F` | Optional raster horizontal compensation on the final sweep grid (default 0 for natural facial tone). |
 | `--scope-fps N` | Scope redraw rate. Defaults to `IPS`. Sets `N = rate/fps`. |
 | `--scope-samples N` | Path length per trace directly. Overrides FPS; incompatible with mix. |
 | `--scope-realtime` | Stream continuously; index changes land within a row (raster only). |
-| `--scope-mix [HZ]` | Triangular vector/raster/stochastic/raster whole-trace mix (default 120 Hz). |
-| `--scope-mix-duty F` | Raster fraction; remainder splits equally between vector/stochastic (default 0.5). |
+| `--scope-mix [HZ]` | Vector/raster/stochastic/raster/stipple/raster whole-trace mix (default 120 Hz). |
+| `--scope-mix-duty F` | Raster fraction; remainder splits equally between vector/stochastic/stipple (default 0.5). |
 | `--scope-sweep MODE` | `alternate` (default), `palindrome`, or `retrace`. |
 | `--scope-rows N` | Raster scanline count (default: auto from budget). |
 | `--scope-gamma F` | Active renderer's exponent: raster default 2.2, stochastic default 2; sets both in mix. |
 | `--scope-density F` | Raster samples per cell (1.0 = finest). |
 | `--scope-trim F` | Ignore luminance below this level (default 0.02). |
+| `--scope-invert` / `--no-scope-invert` | Toggle alpha-aware inversion; vector retains geometry and inverts dwell weighting. |
 | `--scope-fields N` | Raster interlacing (1 = progressive). |
 | `--ask` / `--scope-ask` | Choose the audio output interactively. |
 | `--device X` | Audio output by index or name fragment, e.g. `--device Scarlett` |
 
 While scope mode owns a terminal, press `v` to cycle
 `VECTOR → RASTER → STOCHASTIC → STIPPLE → FUSION → VECTOR`; in fusion, `f` cycles
-`VRS → VR → SV → SR`. Press `p` to print the current mode
+`VRS → VR → SV → SR`. Press `i` to toggle covered-image luminance
+inversion and `p` to print the current mode
 and live settings as reusable command-line flags. Cycling is disabled in
 `--scope-realtime` and `--scope-mix`, whose audio/scheduling paths are fixed at
 startup; restart with `--scope-mode` to leave either one.
