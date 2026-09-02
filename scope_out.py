@@ -43,7 +43,7 @@ def have_audio():
     """False when PortAudio is absent -- only --device null will work."""
     return sd is not None
 
-SAMPLE_RATE = 192_000     # fallback only; Scope reads the device's rate at init
+SAMPLE_RATE = 384_000     # fallback only; Scope reads the device's rate at init
 FPS = 60
 SAMPLES_PER_FRAME = SAMPLE_RATE // FPS   # fallback resolution budget
 
