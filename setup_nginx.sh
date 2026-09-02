@@ -90,6 +90,7 @@ APP_PORTS=(
     2424  # ASCII WebSocket (ASCIIWEB mode)
     8080  # Web stream
     8888  # Monitor (LOCAL mode)
+    8890  # Scope / Scope2 HTTP backend
 )
 
 check_port_available() {
@@ -113,7 +114,7 @@ check_port_available() {
 detect_app_ports() {
     local ports_in_use=()
     local ports_available=()
-    
+
     for port in "${APP_PORTS[@]}"; do
         if check_port_available "$port"; then
             ports_available+=("$port")
@@ -124,7 +125,7 @@ detect_app_ports() {
             log_verbose "Port $port is in use by: $process"
         fi
     done
-    
+
     if [ ${#ports_in_use[@]} -gt 0 ]; then
         log_warning "Some application ports are in use: ${ports_in_use[*]}"
         log_info "This is normal if the application is already running"
@@ -137,9 +138,9 @@ detect_app_ports() {
 preflight_validation() {
     local errors=0
     local warnings=0
-    
+
     log_step "🔍 Running Pre-flight Validation..."
-    
+
     # Check if nginx is installed
     if ! command -v nginx >/dev/null 2>&1; then
         log_warning "nginx not found - will attempt to install"
@@ -147,7 +148,7 @@ preflight_validation() {
     else
         log_success "nginx found: $(nginx -v 2>&1 | head -1)"
     fi
-    
+
     # Validate project directory
     if [ ! -d "$PROJECT_DIR" ]; then
         log_error "Project directory not found: $PROJECT_DIR"
@@ -155,14 +156,14 @@ preflight_validation() {
     else
         log_success "Project directory: $PROJECT_DIR"
     fi
-    
+
     if [ ! -f "$PROJECT_DIR/main.py" ]; then
         log_warning "main.py not found - project may be incomplete"
         warnings=$((warnings + 1))
     else
         log_success "main.py found"
     fi
-    
+
     # Check if nginx directories exist
     if [ ! -d "/etc/nginx/sites-available" ]; then
         log_error "/etc/nginx/sites-available not found"
@@ -170,19 +171,19 @@ preflight_validation() {
     else
         log_success "nginx sites-available directory exists"
     fi
-    
+
     if [ ! -d "/etc/nginx/sites-enabled" ]; then
         log_error "/etc/nginx/sites-enabled not found"
         errors=$((errors + 1))
     else
         log_success "nginx sites-enabled directory exists"
     fi
-    
+
     # Check port 80 availability
     if command -v netstat >/dev/null 2>&1 || command -v ss >/dev/null 2>&1; then
         port80_in_use=false
         port80_process=""
-        
+
     if command -v netstat >/dev/null 2>&1; then
         if netstat -tuln 2>/dev/null | grep -q ":80 "; then
                 port80_in_use=true
@@ -194,7 +195,7 @@ preflight_validation() {
                 port80_process=$(ss -tulpn 2>/dev/null | grep ":80 " | head -1 | awk '{print $6}' || echo "unknown")
             fi
         fi
-        
+
         if [ "$port80_in_use" = true ]; then
             if echo "$port80_process" | grep -q nginx; then
                 log_success "Port 80 is in use by nginx"
@@ -206,10 +207,10 @@ preflight_validation() {
             log_verbose "Port 80 is available"
         fi
     fi
-    
+
     # Check application ports
     detect_app_ports
-    
+
     # Summary
     if [ "$errors" -gt 0 ]; then
         echo ""
@@ -494,11 +495,12 @@ if [ "$DRY_RUN" = true ]; then
     echo "---"
 fi
 
-# Create config (or show in dry-run)
-# Note: SSL configuration (listen 443, ssl_certificate, etc.) is managed by Certbot
-# and will be added automatically when SSL is configured
-if [ "$DRY_RUN" = true ]; then
-    cat <<EOF | sed 's/^/[DRY-RUN] /'
+# Render the nginx server block once and reuse it for both dry-run and real writes.
+# This prevents the preview and installed configuration from drifting apart.
+# SSL configuration (listen 443, ssl_certificate, etc.) is still preserved from
+# an existing Certbot-managed configuration and inserted at the end of the block.
+render_nginx_config() {
+    cat <<EOF
 server {
     # 1. FIX WWW ERROR: Listen for both bare domain and www subdomain
     server_name $DOMAIN_NAME www.$DOMAIN_NAME;
@@ -514,11 +516,38 @@ ${CUSTOM_DIRECTIVES:-}
 
     # --- Redirects ---
     location = /monitor { return 301 /monitor/; }
+
     # /scope MUST redirect to /scope/. The page fetches "data" and
     # "scope/luma.mjpg" relatively, so without the slash the browser resolves
     # them against / and they land on the STREAM server, which serves the
     # template happily and has no scope data behind it.
     location = /scope { return 301 /scope/; }
+    location = /scope2 { return 301 /scope2/; }
+
+    # Scope2 page: unlike /scope2/* subresources, the page itself lives at the
+    # backend's /scope2 endpoint, so keep this as an exact-match location.
+    location = /scope2/ {
+        proxy_pass http://127.0.0.1:8890/scope2;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_buffering off;
+    }
+
+    # Strip the public /scope2/ prefix for scope2 data/stream subresources.
+    location /scope2/ {
+        proxy_pass http://127.0.0.1:8890/;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+    }
+
     location = /monitor_ascii { return 301 /monitor_ascii/; }
     location = /ascii { return 301 /ascii/; }
 
@@ -568,6 +597,16 @@ ${CUSTOM_DIRECTIVES:-}
     # subresource still falls through.
     # NOTE: no trailing slash on this proxy_pass. Adding one maps it back to
     # the root and reintroduces exactly that bug.
+
+    # --- Explicit Scope Pages ---
+    location = /scope_test {
+        proxy_pass http://127.0.0.1:8890/scope_test;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_buffering off;
+    }
+
     location = /scope/ {
         proxy_pass http://127.0.0.1:8890/scope;
         proxy_http_version 1.1;
@@ -621,155 +660,24 @@ ${CUSTOM_DIRECTIVES:-}
     location /ascii_ws/ {
         proxy_pass http://127.0.0.1:2424/;
         proxy_http_version 1.1;
-
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "Upgrade";
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
-
         proxy_read_timeout 7d;
         proxy_buffering off;
     }
 ${SSL_BLOCK:-}
 }
 EOF
+}
+
+if [ "$DRY_RUN" = true ]; then
+    render_nginx_config | sed 's/^/[DRY-RUN] /'
     echo "[DRY-RUN] ---"
 else
-    cat <<EOF > "$NGINX_AVAILABLE"
-server {
-    # 1. FIX WWW ERROR: Listen for both bare domain and www subdomain
-    server_name $DOMAIN_NAME www.$DOMAIN_NAME;
-$([ "$SSL_ENABLED" != "true" ] && echo "    # Listen directives (HTTP only - removed when SSL is configured)")
-$([ "$SSL_ENABLED" != "true" ] && echo "    listen 80 default_server;")
-$([ "$SSL_ENABLED" != "true" ] && echo "    listen [::]:80 default_server;")
+    render_nginx_config > "$NGINX_AVAILABLE"
 
-    # --- Global Settings ---
-${CUSTOM_DIRECTIVES:-}
-    client_max_body_size 20M;
-    root $PROJECT_DIR;
-    index index.html;
-
-    # --- Redirects ---
-    location = /monitor { return 301 /monitor/; }
-    # /scope MUST redirect to /scope/. The page fetches "data" and
-    # "scope/luma.mjpg" relatively, so without the slash the browser resolves
-    # them against / and they land on the STREAM server, which serves the
-    # template happily and has no scope data behind it.
-    location = /scope { return 301 /scope/; }
-    location = /monitor_ascii { return 301 /monitor_ascii/; }
-    location = /ascii { return 301 /ascii/; }
-
-    # --- 1. Main Stream (Web Mode) ---
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_http_version 1.1;
-        proxy_set_header Connection "";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-
-        # 3. FIX BUFFERING: Kill all buffers for real-time streaming
-        proxy_buffering off;
-        proxy_cache off;
-        proxy_request_buffering off;
-        proxy_read_timeout 7d;
-        sendfile off;
-        tcp_nodelay on;
-        gzip off;
-    }
-
-    # --- 2. Web Monitor Dashboard ---
-    location /monitor/ {
-        proxy_pass http://127.0.0.1:1978/;
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_buffering off;
-        proxy_read_timeout 3600s;
-    }
-
-    # --- Scope (XY audio, browser-rendered) ---
-    # Trailing slash on proxy_pass strips the prefix:
-    #   /scope/data              -> 8890/data
-    #   /scope/scope/luma.mjpg   -> 8890/scope/luma.mjpg
-    # proxy_buffering off is not optional: the preview and the luminance feed
-    # are both infinite multipart responses, and a buffering proxy waits for
-    # an end that never comes, hanging with nothing in any log.
-    # The PAGE itself lives at /scope on the backend, not at the backend's
-    # root. Without this exact-match block /scope/ maps to 8890/ and serves
-    # the main statistics dashboard instead of the scope page -- the data is
-    # all correct, it is simply the wrong page. Exact match wins over the
-    # prefix block below, so only the page is special-cased and every
-    # subresource still falls through.
-    # NOTE: no trailing slash on this proxy_pass. Adding one maps it back to
-    # the root and reintroduces exactly that bug.
-    location = /scope/ {
-        proxy_pass http://127.0.0.1:8890/scope;
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_buffering off;
-    }
-
-    location /scope/ {
-        proxy_pass http://127.0.0.1:8890/;
-        proxy_http_version 1.1;
-        proxy_set_header Connection "";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_buffering off;
-        proxy_cache off;
-        proxy_read_timeout 3600s;
-    }
-
-    # --- 3. ASCII Monitor Dashboard ---
-    location /monitor_ascii/ {
-        proxy_pass http://127.0.0.1:1980/;
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_buffering off;
-        proxy_read_timeout 3600s;
-    }
-
-    # --- 4. ASCII Viewer Page (Proxied to Python) ---
-    location /ascii/ {
-        proxy_pass http://127.0.0.1:1980/ascii;
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_buffering off;
-    }
-
-    # --- 5. Static Assets ---
-    # Proxy to Python because 'www-data' cannot read user home dir
-    location /static/ {
-        proxy_pass http://127.0.0.1:1978;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_buffering off;
-    }
-
-    # --- 6. ASCII WebSocket Tunnel ---
-    location /ascii_ws/ {
-        proxy_pass http://127.0.0.1:2424/;
-        proxy_http_version 1.1;
-
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "Upgrade";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-
-        proxy_read_timeout 7d;
-        proxy_buffering off;
-    }
-${SSL_BLOCK:-}
-}
-EOF
     # Verify config was written successfully
     if [ -f "$NGINX_AVAILABLE" ] && [ -s "$NGINX_AVAILABLE" ]; then
         log_success "Nginx configuration created/updated"
