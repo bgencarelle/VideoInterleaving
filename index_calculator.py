@@ -3,6 +3,8 @@ import time
 import datetime
 import math
 import decimal
+from zoneinfo import ZoneInfo
+
 from globals import control_data_dictionary
 from settings import IPS, CLIENT_MODE, VALID_MODES, FROM_BIRTH, CLOCK_MODE, BIRTH_TZ, BIRTH_TIME, TIMEZONE_OFFSETS
 
@@ -11,21 +13,13 @@ midi_mode = False
 import midi_control
 #import index_client
 launch_time = 0  # Stored as nanoseconds (integer)
-
 # Module-level variables for MIDI clock modes (set by make_file_lists.initialize_image_lists)
 png_paths_len = 0
 frame_duration = 1.0
 
-
 def get_timezone(tz_str):
-    """
-    Returns a datetime.timezone object based on the given timezone abbreviation.
-    For example, "EST" returns UTC-5.
-    """
-    if tz_str not in TIMEZONE_OFFSETS:
-        raise ValueError(f"Unknown timezone abbreviation: {tz_str}")
-    offset_hours = TIMEZONE_OFFSETS[tz_str]
-    return datetime.timezone(datetime.timedelta(hours=offset_hours))
+    """Return an IANA timezone using the platform timezone database."""
+    return ZoneInfo(tz_str)
 
 def set_launch_time(from_birth=False):
     global launch_time
@@ -63,7 +57,7 @@ def calculate_free_clock_index(total_images, pingpong=True):
     """
     Fast, mirrored ping‑pong index:
       0,1,2,...,N-1, N-1,N-2,...,1,0, 0,1,2...
-    
+
     Uses nanosecond precision for tighter synchronization, especially important
     for multi-machine setups with chrony-synchronized clocks.
     """
@@ -72,7 +66,6 @@ def calculate_free_clock_index(total_images, pingpong=True):
     elapsed_ns = current_time_ns - launch_time
     # Calculate index using integer math: (elapsed_ns * IPS) // 1_000_000_000
     raw_index = (elapsed_ns * IPS) // 1_000_000_000
-
     if pingpong and total_images > 1:
         period    = 2 * total_images
         mod_index = raw_index % period
@@ -97,7 +90,7 @@ def calculate_midi_clock_index(frame_counter, png_paths_len_param=None, frame_du
     # Use parameters if provided, otherwise fall back to module-level variables
     png_len = png_paths_len_param if png_paths_len_param is not None else png_paths_len
     frame_dur = frame_duration_param if frame_duration_param is not None else frame_duration
-    
+
     scale_ref = 4.0
     frame_scale = scale_ref / frame_dur
     progress = (decimal.Decimal(frame_counter * frame_scale)) % (png_len * 2)
@@ -110,7 +103,6 @@ def calculate_midi_clock_index(frame_counter, png_paths_len_param=None, frame_du
         direction = -1
     index = max(0, min(index, png_len))
     return index, direction
-
 
 def update_index(total_images, pingpong=True):
     """
