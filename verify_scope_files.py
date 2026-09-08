@@ -49,7 +49,7 @@ EXPECTED = [
       "test_vector_density_and_fusion_runtime_emit_all_combinations",
       "test_baker_streams_large_thumbnail_arrays_to_an_atomic_memmap",
       "test_fixed_calibration_respects_autofit_toggle",
-      "test_legacy_three_channel_bake_triangle_mix_emits_all_three_paths"]),
+      "test_legacy_three_channel_bake_mix_emits_all_four_paths"]),
     ("scope_screen.py",
      "scope_screen.py -- use an oscilloscope as a (very) low resolution",
      ["screen_source", "video_source", "test_source"]),

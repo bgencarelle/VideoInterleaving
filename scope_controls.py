@@ -109,6 +109,9 @@ class KeyMap:
         elif ch == "l":
             self._bump("lowpass", +1)
         elif ch == "v":
+            if s.get("yt"):
+                self.message = "mode cycling unavailable in Y-T mode (raster required)"
+                return True
             if s.get("mode_locked"):
                 self.message = "mode cycling unavailable in realtime/mix mode"
                 return True
@@ -178,6 +181,7 @@ def as_flags(s):
     yt = bool(s.get("yt"))
     if yt:
         out = ["--scope-yt"]
+        out.append(f"--scope-yt-trigger {s.get('yt_trigger_us', 250.0):g}")
     elif mix_hz:
         out = [f"--scope-mix {mix_hz:g}",
                f"--scope-mix-duty {s.get('mix_duty', 0.5):g}"]

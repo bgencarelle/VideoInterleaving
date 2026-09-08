@@ -665,17 +665,34 @@ def test_yt_realtime_marker_survives_callback_block_boundaries():
         scope.stream.close()
 
 
+def test_yt_trigger_duration_is_configurable():
+    from scope_out import Scope
+
+    scope = Scope(device="null", samplerate=96000, samples=3200,
+                  yt_mode=True, yt_trigger_us=500.0)
+    try:
+        assert scope.yt_trigger_us == 500.0
+        assert scope.yt_trigger_samples == 48
+    finally:
+        scope.stream.close()
+
+
 def test_yt_live_flags_lock_retrace():
     state = {
         "mode": "raster", "raster": True, "yt": True,
+        "yt_trigger_us": 500.0,
         "sweep": "retrace", "trim": 0.02, "gamma": 2.2,
     }
     keys = KeyMap(state)
     assert keys.feed("w")
     assert state["sweep"] == "retrace"
     assert "fixes sweep" in keys.message
+    assert keys.feed("v")
+    assert state["mode"] == "raster"
+    assert "Y-T" in keys.message
     flags = as_flags(state)
     assert "--scope-yt" in flags
+    assert "--scope-yt-trigger 500" in flags
     assert "--scope-sweep" not in flags
 
 

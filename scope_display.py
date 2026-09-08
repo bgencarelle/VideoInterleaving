@@ -143,6 +143,8 @@ def _bootstrap():
                     default=None)
     ap.add_argument("--scope-yt", action="store_true",
                     help="stable X trigger edge for one-channel Y-T viewing")
+    ap.add_argument("--scope-yt-trigger", "--scope-yt-trigger-us",
+                    dest="scope_yt_trigger_us", type=float, metavar="US")
     ap.add_argument("--scope-walk-radius", type=int)
     ap.add_argument("--scope-walk-stride", type=int)
     ap.add_argument("--scope-walk-reseed-ms", type=float)
@@ -188,10 +190,20 @@ def _bootstrap():
     if args.scope_invert is not None:
         settings.SCOPE_INVERT = args.scope_invert
     if args.scope_yt:
+        if (args.scope_mode not in (None, "raster")
+                or args.scope_stochastic or args.scope_stipple):
+            ap.error("--scope-yt is a raster-only output mode")
+        if settings.SCOPE_REALTIME:
+            ap.error("--scope-yt requires complete traces; set SCOPE_REALTIME=False")
         settings.SCOPE_YT = True
         settings.SCOPE_RENDER_MODE = "raster"
         settings.SCOPE_RASTER = True
         settings.SCOPE_SWEEP = "retrace"
+    if args.scope_yt_trigger_us is not None:
+        if (not math.isfinite(args.scope_yt_trigger_us)
+                or args.scope_yt_trigger_us <= 0):
+            ap.error("--scope-yt-trigger must be finite and greater than zero")
+        settings.SCOPE_YT_TRIGGER_US = args.scope_yt_trigger_us
     if args.scope_gamma is not None:
         if settings.SCOPE_RENDER_MODE == "fusion":
             settings.SCOPE_GAMMA = args.scope_gamma
@@ -488,9 +500,6 @@ def run_scope(clock_source=None):
     if clock_source is None:
         clock_source = settings.CLOCK_MODE
 
-    import make_file_lists
-    from index_calculator import update_index
-    from folder_selector import update_folder_selection, folder_dictionary
     from settings import IPS, PINGPONG
 
     # --- configuration: all of it from settings ---
@@ -498,6 +507,9 @@ def run_scope(clock_source=None):
     samples = getattr(settings, "SCOPE_SAMPLES", None)
     render_mode = getattr(settings, "SCOPE_RENDER_MODE", None)
     yt_mode = bool(getattr(settings, "SCOPE_YT", False))
+    yt_trigger_us = float(settings.SCOPE_YT_TRIGGER_US)
+    if not math.isfinite(yt_trigger_us) or yt_trigger_us <= 0:
+        raise ValueError("SCOPE_YT_TRIGGER_US must be finite and greater than zero")
     if yt_mode:
         render_mode = "raster"
     if getattr(settings, "SCOPE_RASTER", False) and render_mode == "vector":
@@ -521,6 +533,13 @@ def run_scope(clock_source=None):
         print(f"[SCOPE] {e}; using vrs")
         fusion_components = "vrs"
     realtime = getattr(settings, "SCOPE_REALTIME", False)
+    if yt_mode and realtime:
+        raise ValueError("Y-T requires complete traces; remove --scope-realtime "
+                         "and set SCOPE_REALTIME=False to keep the trigger aligned")
+    import make_file_lists
+    from index_calculator import update_index
+    from folder_selector import update_folder_selection, folder_dictionary
+
     min_feature = getattr(settings, "SCOPE_MIN_FEATURE", 0.02)
     trim = getattr(settings, "SCOPE_TRIM", 0.02)
     gamma = getattr(settings, "SCOPE_GAMMA", 2.2)
@@ -838,7 +857,8 @@ def run_scope(clock_source=None):
     # X-triggered and X-only displays. Every renderer below receives the
     # orientation while the physical output axes remain fixed.
     scope = Scope(fps=fps, samples=samples, device=dev, source=source,
-                  invert_y=False, rotation=0, yt_mode=yt_mode)
+                  invert_y=False, rotation=0, yt_mode=yt_mode,
+                  yt_trigger_us=yt_trigger_us)
 
     if yt_mode:
         marker_us = scope.yt_trigger_us
@@ -1111,8 +1131,9 @@ def run_scope(clock_source=None):
                       lowpass=lowpass, mode=render_mode, raster=use_raster,
                       sweep=sweep_mode, autofit=autofit,
                       invert=invert, rotation=rotation, yt=yt_mode,
+                      yt_trigger_us=scope.yt_trigger_us,
                       precondition=raster_precondition,
-                      mode_locked=bool(realtime or mix_hz),
+                      mode_locked=bool(yt_mode or realtime or mix_hz),
                       mix_hz=mix_hz, mix_duty=mix_duty,
                       stipple_points=stipple_points,
                       fusion_components=fusion_components)
@@ -1155,6 +1176,7 @@ def run_scope(clock_source=None):
         monitor_data["scope_invert"] = invert
         monitor_data["scope_rotation"] = rotation
         monitor_data["scope_yt"] = yt_mode
+        monitor_data["scope_yt_trigger_us"] = scope.yt_trigger_us
         monitor_data["scope_gamma"] = round(
             walk_gamma
             if ((use_stochastic or use_stipple
@@ -1575,6 +1597,7 @@ def run_scope(clock_source=None):
                     _md["scope_invert"] = invert
                     _md["scope_rotation"] = rotation
                     _md["scope_yt"] = yt_mode
+                    _md["scope_yt_trigger_us"] = scope.yt_trigger_us
                     _md["scope_gamma"] = round(
                         walk_gamma
                         if ((use_stochastic or use_stipple

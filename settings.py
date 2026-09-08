@@ -124,6 +124,7 @@ SCOPE_RASTER = False      # compatibility mirror for older integrations
 SCOPE_INVERT = False      # inverse tone; vector approximates it through dwell velocity
 SCOPE_REALTIME = False    # raster-only low-latency streaming path
 SCOPE_YT = False          # one-channel Y-T: preserve XY, add X trigger marker
+SCOPE_YT_TRIGGER_US = 250.0  # Y-T X marker duration; CLI override is in microseconds
 SCOPE_LIST_FROM_IMAGES = False  # bypass the baked manifest for legacy bakes
 SCOPE_FIELDS = 1          # raster interlace: traces per picture. 2 or 4 lifts
                           # the refresh rate above flicker fusion without

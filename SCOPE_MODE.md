@@ -607,11 +607,12 @@ python main.py --mode scope --xy-dir images_xy [options]
 | `--scope-precondition F` | Optional raster horizontal compensation on the final sweep grid (default 0 for natural facial tone). |
 | `--scope-fps N` | Scope redraw rate. Defaults to `IPS`. Sets `N = rate/fps`. |
 | `--scope-samples N` | Path length per trace directly. Overrides FPS; incompatible with mix. |
-| `--scope-realtime` | Stream continuously; index changes land within a row (raster only). |
+| `--scope-realtime` | Stream continuously; index changes land within a row (raster only; incompatible with `--scope-yt`). |
 | `--scope-mix [HZ]` | Vector/raster/stochastic/raster/stipple/raster whole-trace mix (default 120 Hz). |
 | `--scope-mix-duty F` | Raster fraction; remainder splits equally between vector/stochastic/stipple (default 0.5). |
 | `--scope-sweep MODE` | `alternate` (default), `palindrome`, or `retrace`. |
 | `--scope-yt` | Preserve the XY waveform while adding a unique per-trace X trigger edge for one-channel Y-T viewing; fixes sweep to `retrace`. |
+| `--scope-yt-trigger US` | Set the Y-T X trigger marker duration in microseconds (default 250; `--scope-yt-trigger 500` gives a 500 us marker). Alias: `--scope-yt-trigger-us`. |
 | `--scope-rows N` | Raster scanline count (default: auto from budget). |
 | `--scope-gamma F` | Active renderer's exponent: raster default 2.2, stochastic default 2; sets both in mix. |
 | `--scope-density F` | Raster samples per cell (1.0 = finest). |
@@ -627,8 +628,9 @@ While scope mode owns a terminal, press `v` to cycle
 inversion, `r` or `R` to rotate the complete XY output in 90° steps, and
 `p` to print the current mode
 and live settings as reusable command-line flags. Cycling is disabled in
-`--scope-realtime` and `--scope-mix`, whose audio/scheduling paths are fixed at
-startup; restart with `--scope-mode` to leave either one.
+`--scope-realtime`, `--scope-mix`, and `--scope-yt`, whose audio/scheduling paths
+are fixed at startup; restart with `--scope-mode` to leave them. Y-T also locks
+the sweep to retrace, and printed flags include its trigger duration.
 
 ### Preview
 

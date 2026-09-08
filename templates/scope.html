@@ -541,11 +541,13 @@
       return out;
     }
 
-    function addYtTrigger(xy, n, sampleRate) {
-      // Preserve the existing XY waveform. Only X receives a 250 us,
+    function addYtTrigger(xy, n, sampleRate, triggerUs) {
+      // Preserve the existing XY waveform. Only X receives a short,
       // threshold-unique low-to-high edge at the start of each trace.
       const out = new Float32Array(xy);
-      const marker = Math.max(4, Math.min(n, Math.round(sampleRate * 0.00025)));
+      const markerUs = Number(triggerUs || 250);
+      const marker = Math.max(4, Math.min(
+        n, Math.round(sampleRate * markerUs / 1000000)));
       const split = Math.max(2, Math.floor(marker / 2));
       for (let i = 0; i < n; i++) {
         if (i < split) out[i * 2] = -0.99;
@@ -703,7 +705,10 @@
       const gamma = parseFloat(document.getElementById("local-gamma").value);
       const g = boxGrid(px, w, h, rows, cols);
       let trace = buildTrace(g, rows, cols, n, trim, gamma, w, h);
-      if (lastData.scope_yt) trace = addYtTrigger(trace, n, actx.sampleRate);
+      if (lastData.scope_yt) {
+        trace = addYtTrigger(trace, n, actx.sampleRate,
+                             lastData.scope_yt_trigger_us);
+      }
       worklet.port.postMessage(trace);
       if ((++tracesBuilt % 15) === 0) setStatus();
     }

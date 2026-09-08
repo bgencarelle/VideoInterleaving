@@ -264,13 +264,24 @@ Makes the existing X signal trigger reliably when it is viewed alone in an
 oscilloscope's Y-T mode. It implies raster mode and `--scope-sweep retrace` so
 consecutive traces never alternate or appear mirrored in time.
 
-Every trace begins with a 250 us `-0.99 -> +0.99` marker on X. Picture content
-remains inside +/-0.9, making a rising trigger level around +0.95 unique and
-stable. The Y channel and all remaining XY samples are preserved exactly. Set
-the oscilloscope timebase so one complete trace fills the screen.
+Every trace begins with a configurable `-0.99 -> +0.99` marker on X. The
+default duration is 250 us; set it with `--scope-yt-trigger US` (for example,
+`--scope-yt-trigger 500`). Picture content remains inside +/-0.9, making a
+rising trigger level around +0.95 unique and stable. The Y channel and all
+remaining XY samples are preserved exactly. Set the oscilloscope timebase so
+one complete trace fills the screen. The marker replaces the initial X samples;
+500 us is its total duration, including both low and high halves.
 
 This is a runtime output mode; it does not require a rebake. It cannot be
-combined with mix, stochastic, stipple, vector, or fusion output.
+combined with mix, stochastic, stipple, vector, fusion, or `--scope-realtime`.
+The realtime row stream does not guarantee complete trace lengths and therefore
+cannot currently keep the periodic trigger aligned. Use `SCOPE_REALTIME=False`.
+In Y-T mode, `v` and `w` keep raster/retrace selected; `p` includes the custom
+trigger duration in the printed flags.
+
+The renderer still uses brightness-dependent dwell timing. The trigger stabilizes
+trace starts; it does not prevent internal image features from moving in time
+as brightness changes. Fixed-row timing is experimental and is not implemented.
 
 ---
 

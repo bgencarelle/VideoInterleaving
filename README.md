@@ -190,7 +190,12 @@ This fixes the sweep direction and adds one unique rising trigger marker to X
 per trace without remapping either channel or changing the rest of the XY
 waveform. Set the scope to Y-T, use the X lead, choose a rising-edge trigger
 near +0.95, and set a timebase covering one complete trace. It is a runtime
-setting and does not require another bake.
+setting and does not require another bake. The marker is 250 us by default; use
+`--scope-yt-trigger 500` (or `--scope-yt-trigger-us 500`) to make it 500 us.
+Y-T requires complete traces: omit `--scope-realtime` and leave
+`SCOPE_REALTIME=False`. Mode/sweep cycling is locked while Y-T is active, and
+`p` prints the trigger duration along with the other settings. Brightness still
+controls dwell timing, so internal features can shift in time between images.
 
 The compact bake stores raw luminance and alpha at 128px. That is above the
 normal raster sweep grid, while stochastic can still use the field directly.
