@@ -51,7 +51,7 @@ if (_scope_out_api != _REQUIRED_SCOPE_OUT_API or
 
 from time import monotonic as _time_mono
 from scope_out import (Scope, choose_device, BufferedSource, rasterize,
-                       precompensate_hpf)
+                       precompensate_hpf, rotate_frame)
 from scope_bake import (XYLibrary, merge, SweepSource, calibrate,
                         composite_luma, composite_stipple_candidates,
                         TraceEmitter, StochasticEmitter,
@@ -63,6 +63,58 @@ try:
     from scope_lowpass import lowpass_circular
 except Exception:            # optional tool; absence must not break the mode
     lowpass_circular = None
+
+
+def _quarter_turn(value):
+    """Return a validated clockwise-control quarter turn in degrees."""
+    angle = int(value) % 360
+    if angle % 90:
+        raise ValueError("scope rotation must be a multiple of 90 degrees")
+    return angle
+
+
+def _rotate_luma(lum, rotation):
+    """Rotate image content before trace generation.
+
+    Raster timing depends on X remaining the fast sweep axis. Rotating the
+    completed XY trace would swap that carrier onto Y at 90/270 degrees;
+    rotating the luminance first lets the renderer build horizontal rows for
+    the new orientation instead.
+    """
+    if lum is None:
+        return None
+    k = _quarter_turn(rotation) // 90
+    src = np.asarray(lum)
+    return np.ascontiguousarray(np.rot90(src, k=k)) if k else src
+
+
+def _rotate_stipple_cloud(cloud, rotation):
+    """Rotate normalized baked stipple candidates in image space."""
+    if cloud is None:
+        return None
+    k = _quarter_turn(rotation) // 90
+    if not k:
+        return cloud
+    out = dict(cloud)
+    xy = np.asarray(cloud["xy"], dtype=np.float64)
+    u, v = xy[:, 0], xy[:, 1]
+    if k == 1:
+        out["xy"] = np.column_stack((v, 1.0 - u))
+    elif k == 2:
+        out["xy"] = np.column_stack((1.0 - u, 1.0 - v))
+    else:
+        out["xy"] = np.column_stack((1.0 - v, u))
+    if k % 2:
+        out["aspect"] = 1.0 / max(float(cloud.get("aspect", 1.0)), 1e-9)
+    return out
+
+
+def _rotation_grid(cal, rotation):
+    """Return calibrated (rows, columns) for the oriented image."""
+    if not cal:
+        return None
+    rows, cols = int(cal["grid_rows"]), int(cal["grid_cols"])
+    return (cols, rows) if (_quarter_turn(rotation) // 90) % 2 else (rows, cols)
 
 
 # ---------------------------------------------------------------- bootstrap
@@ -741,10 +793,15 @@ def run_scope(clock_source=None):
             _spc = n_pass * fields / max(cal["grid_rows"] * cal["grid_cols"], 1)
             print(f"[SCOPE] grid {cal['grid_cols']}x{cal['grid_rows']} "
                   f"({_spc:.2f} samples/cell), calibrated once")
-        gen = SweepSource(lambda: live, n_pass, gamma=gamma, trim=trim,
-                          density=density, rows=rows,
-                          precondition=raster_precondition, invert=invert,
-                          **(cal or {}))
+        _gen_grid = _rotation_grid(cal, rotation)
+        gen = SweepSource(
+            lambda: live, n_pass, gamma=gamma, trim=trim,
+            density=density, rows=rows,
+            precondition=raster_precondition, invert=invert,
+            rotation=rotation,
+            grid_rows=(_gen_grid[0] if _gen_grid else None),
+            grid_cols=(_gen_grid[1] if _gen_grid else None),
+            levels=(cal.get("levels") if cal else None))
         # Generate on a worker thread rather than in the audio callback: only
         # the AVERAGE has to keep up, and the ring absorbs the spikes.  Depth
         # is latency, and low latency is the point of realtime mode, so keep
@@ -756,8 +813,12 @@ def run_scope(clock_source=None):
     # builds its rows with ys = -linspace(...).  Scope.show()'s invert_y
     # is for callers handing it raw screen-space polylines; applying it
     # here flips a second time and stands the vector picture on its head.
+    # Rotation belongs in renderer/image space. Scope's final-output rotation
+    # swaps the fast raster carrier from X to Y at quarter turns, which breaks
+    # X-triggered and X-only displays. Every renderer below receives the
+    # orientation while the physical output axes remain fixed.
     scope = Scope(fps=fps, samples=samples, device=dev, source=source,
-                  invert_y=False, rotation=rotation)
+                  invert_y=False, rotation=0)
 
     # The baked thumbnail is a hard ceiling on scanlines; clamping silently
     # would look like the row setting being ignored.
@@ -1111,7 +1172,7 @@ def run_scope(clock_source=None):
         border=border, oversample=oversample, sweep=sweep_mode,
         dc_comp=dc_comp, autofit=autofit, row_bias=row_bias,
         precondition=raster_precondition,
-        grid=((cal["grid_rows"], cal["grid_cols"]) if cal else None),
+        grid=_rotation_grid(cal, rotation),
         levels=(cal.get("levels") if cal else None))
     stochastic_emitter = StochasticEmitter(
         scope.samplerate, scope.samples_per_frame,
@@ -1172,7 +1233,7 @@ def run_scope(clock_source=None):
                         fields=fields, border=border, oversample=oversample,
                         sweep=sweep_mode, dc_comp=dc_comp, autofit=autofit,
                         row_bias=row_bias, precondition=raster_precondition,
-                        grid=((cal["grid_rows"], cal["grid_cols"]) if cal else None),
+                        grid=_rotation_grid(cal, rotation),
                         levels=(cal.get("levels") if cal else None))
                     stochastic_emitter = StochasticEmitter(
                         scope.samplerate, scope.samples_per_frame,
@@ -1225,8 +1286,23 @@ def run_scope(clock_source=None):
                     break
                 if keys.transform_dirty:
                     keys.transform_dirty = False
-                    rotation = int(live_state.get("rotation", 0)) % 360
-                    scope.set_rotation(rotation)
+                    rotation = _quarter_turn(live_state.get("rotation", 0))
+                    # Rebuild in image space. The Scope output transform stays
+                    # at zero so X remains the fast raster/trigger axis.
+                    scope.set_rotation(0)
+                    emitter.reset()
+                    emitter.grid = _rotation_grid(cal, rotation)
+                    stochastic_emitter.reset()
+                    stipple_emitter.reset()
+                    fusion_multiplexer.reset()
+                    beam_end = None
+                    sweep = {"rev": False, "end": None}
+                    field_i = 0
+                    mix_field_i = 0
+                    mix_last_mode = None
+                    if realtime:
+                        gen.set_rotation(rotation,
+                                         grid=_rotation_grid(cal, rotation))
                     try:
                         from lightweight_monitor import monitor_data as _md_rotate
                         _md_rotate["scope_rotation"] = rotation
@@ -1306,7 +1382,7 @@ def run_scope(clock_source=None):
                 emitter.autofit = autofit
                 emitter.sweep_mode = sweep_mode
                 if cal:
-                    emitter.grid = (cal["grid_rows"], cal["grid_cols"])
+                    emitter.grid = _rotation_grid(cal, rotation)
                     emitter.levels = cal.get("levels")
                 if realtime:
                     gen.gamma = gamma
@@ -1315,8 +1391,8 @@ def run_scope(clock_source=None):
                     gen.rows_override = rows
                     gen.invert = invert
                     if cal:
-                        gen.grid_rows = cal["grid_rows"]
-                        gen.grid_cols = cal["grid_cols"]
+                        gen.grid_rows, gen.grid_cols = _rotation_grid(
+                            cal, rotation)
                         gen.levels = cal.get("levels")
                     gen._grid = None
                     gen._grid_key = None
@@ -1364,7 +1440,8 @@ def run_scope(clock_source=None):
                         beam_start=beam_end,
                         mode_handoff=(mix_last_mode is not None
                                       and mix_mode != mix_last_mode),
-                        field=mix_field_i % fields, fields=fields)
+                        field=mix_field_i % fields, fields=fields,
+                        rotation=rotation)
                     if _end is not None:
                         beam_end = _end
                     if mix_mode == "raster":
@@ -1393,7 +1470,8 @@ def run_scope(clock_source=None):
                         border=border, invert=invert, emitter=emitter,
                         stochastic_emitter=stochastic_emitter,
                         beam_start=beam_end,
-                        field=field_i % fields, fields=fields)
+                        field=field_i % fields, fields=fields,
+                        rotation=rotation)
                     if _end is not None:
                         beam_end = _end
                     field_i += 1
@@ -1408,7 +1486,7 @@ def run_scope(clock_source=None):
                         lowpass, oversample, cal, dc_comp=dc_comp,
                         border=border, invert=invert, emitter=emitter,
                         stochastic_emitter=stochastic_emitter,
-                        beam_start=beam_end)
+                        beam_start=beam_end, rotation=rotation)
                     if _end is not None:
                         beam_end = _end
                     prev_key = key
@@ -1421,7 +1499,7 @@ def run_scope(clock_source=None):
                         border=border, invert=invert, emitter=emitter,
                         stochastic_emitter=stochastic_emitter,
                         stipple_emitter=stipple_emitter,
-                        beam_start=beam_end)
+                        beam_start=beam_end, rotation=rotation)
                     if _end is not None:
                         beam_end = _end
                     prev_key = key
@@ -1437,7 +1515,7 @@ def run_scope(clock_source=None):
                         beam_start=beam_end,
                         fusion_components=fusion_components,
                         stochastic_gamma=walk_gamma,
-                        stochastic_edge=walk_edge)
+                        stochastic_edge=walk_edge, rotation=rotation)
                     if _end is not None:
                         beam_end = _end
                     prev_key = key
@@ -1449,7 +1527,7 @@ def run_scope(clock_source=None):
                         lowpass, oversample, cal, dc_comp=dc_comp,
                         border=border, invert=invert, emitter=emitter,
                         stochastic_emitter=stochastic_emitter,
-                        beam_start=beam_end)
+                        beam_start=beam_end, rotation=rotation)
                     if _end is not None:
                         beam_end = _end
                     prev_key = key
@@ -1532,7 +1610,7 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
           border=0.0, emitter=None, stochastic_emitter=None, beam_start=None,
           mode_handoff=False, fusion_components="vrs",
           stochastic_gamma=2.0, stochastic_edge=0.0, stipple_emitter=None,
-          fusion_multiplexer=None, invert=False):
+          fusion_multiplexer=None, invert=False, rotation=0):
     n = scope.samples_per_frame
     if render_mode == "fusion":
         # Build corresponding V/R/S position arrays, then select their entries
@@ -1550,28 +1628,30 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
         emitter.border = 0.0
         stochastic_emitter.border = 0.0
         try:
-            fusion_luma = composite_luma(
-                ml, index, fl, index, raw=True, invert=invert)
-            vector_frame = (rasterize(
-                merge(ml, index, fl, index, min_feature=min_feature), n)
-                if "v" in components else None)
+            fusion_luma = _rotate_luma(composite_luma(
+                ml, index, fl, index, raw=True, invert=invert), rotation)
+            vector_frame = (rotate_frame(rasterize(
+                merge(ml, index, fl, index, min_feature=min_feature), n),
+                rotation) if "v" in components else None)
             raster_frame = None
             if "r" in components:
                 if beam_start is not None and emitter.sweep_mode == "alternate":
                     emitter._end = np.asarray(
                         beam_start, dtype=np.float32).copy()
-                raster_frame = emitter.emit(
+                raster_frame = emitter.emit(_rotate_luma(
                     composite_luma(
-                        ml, index, fl, index, raw=False, invert=invert))
+                        ml, index, fl, index, raw=False, invert=invert),
+                    rotation))
             stochastic_frame = None
             if "s" in components:
                 if beam_start is not None:
                     # start_at preserves the walk clock and only aligns the
                     # first physical sample with the fused beam endpoint.
                     stochastic_emitter.start_at(beam_start)
-                stochastic_frame = stochastic_emitter.emit(
+                stochastic_frame = stochastic_emitter.emit(_rotate_luma(
                     composite_luma(
-                        ml, index, fl, index, raw=True, invert=invert))
+                        ml, index, fl, index, raw=True, invert=invert),
+                    rotation))
             mux = fusion_multiplexer or PositionMultiplexer()
             fusion_weights = {
                 "v": trace_luminance_weights(
@@ -1619,9 +1699,10 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
         # is drawn -- grid, fields, chaining, border, dc-comp -- lives on the
         # emitter, which scope_screen.py shares. Nothing about it is restated
         # in this file, so there is no second parameter list to drift.
-        _lum = composite_luma(
+        _lum = _rotate_luma(composite_luma(
             ml, index, fl, index,
-            raw=(render_mode in ("stochastic", "stipple")), invert=invert)
+            raw=(render_mode in ("stochastic", "stipple")), invert=invert),
+            rotation)
         if Scope._tap_until > _time_mono():
             # only while a browser is watching -- same gate as the trace tap
             Scope.publish_luma(_lum)
@@ -1641,8 +1722,8 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
         if render_mode == "raster":
             frame = emitter.emit(_lum)
         elif render_mode == "stipple":
-            cloud = composite_stipple_candidates(
-                ml, index, fl, index, invert=invert)
+            cloud = _rotate_stipple_cloud(composite_stipple_candidates(
+                ml, index, fl, index, invert=invert), rotation)
             frame = (stipple_emitter.emit_candidates(cloud)
                      if cloud is not None else stipple_emitter.emit(_lum))
         else:
@@ -1675,10 +1756,10 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
     else:
         # empty -> safe idle circle, never a parked dot
         polys = merge(ml, index, fl, index, min_feature=min_feature)
-        frame = rasterize(polys, n)
+        frame = rotate_frame(rasterize(polys, n), rotation)
         if invert:
-            inverse_luma = composite_luma(
-                ml, index, fl, index, raw=True, invert=True)
+            inverse_luma = _rotate_luma(composite_luma(
+                ml, index, fl, index, raw=True, invert=True), rotation)
             weights = trace_luminance_weights(
                 inverse_luma, frame, gamma=gamma, trim=trim)
             if weights is not None:

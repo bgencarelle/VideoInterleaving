@@ -280,7 +280,7 @@ class SweepSource:
                  floor=0.012, trim=0.02, density=1.0, rows=None, bbox=None,
                  level=0.9, grid_rows=None, grid_cols=None, levels=None,
                  lum_fn=None, auto_levels=0.0, precondition=0.0,
-                 invert=False):
+                 invert=False, rotation=0):
         """
         lum_fn      : optional callable returning an (H, W) float array in
                       0..1 -- any live source (screen grab, camera, video,
@@ -311,6 +311,9 @@ class SweepSource:
         self.level = level
         self.precondition = max(0.0, float(precondition))
         self.invert = bool(invert)
+        self.rotation = int(rotation) % 360
+        if self.rotation % 90:
+            raise ValueError("scope rotation must be a multiple of 90 degrees")
         self._out = np.zeros((0, 2), np.float32)
         self._plan = None
         self._budgets = None
@@ -322,6 +325,23 @@ class SweepSource:
         self.passes = 0
         self.row_switches = 0
 
+    def set_rotation(self, degrees, grid=None):
+        """Rotate source content while leaving X as the fast sweep axis."""
+        angle = int(degrees) % 360
+        if angle % 90:
+            raise ValueError("scope rotation must be a multiple of 90 degrees")
+        self.rotation = angle
+        if grid is not None:
+            self.grid_rows, self.grid_cols = map(int, grid)
+        self._out = np.zeros((0, 2), np.float32)
+        self._plan = None
+        self._budgets = None
+        self._row_i = 0
+        self._last = None
+        self._lum_shape = None
+        self._grid_key = None
+        self._grid = None
+
     def _live(self):
         """Grid + axes for a live luminance source."""
         lum = np.asarray(self.lum_fn(), dtype=np.float32)
@@ -331,6 +351,9 @@ class SweepSource:
             lum = lum / 255.0
         if self.invert:
             lum = 1.0 - np.clip(lum, 0.0, 1.0)
+        if self.rotation:
+            lum = np.rot90(lum, k=self.rotation // 90)
+            lum = np.ascontiguousarray(lum)
         h, w = lum.shape
         if self._grid is None or self._lum_shape != (h, w):
             self._lum_shape = (h, w)
@@ -376,7 +399,7 @@ class SweepSource:
     # -- geometry -------------------------------------------------------
     def _composite(self, st):
         key = (id(st.get("main")), st.get("mi"), id(st.get("float")),
-               st.get("fi"), self.invert)
+               st.get("fi"), self.invert, self.rotation)
         if key == self._grid_key and self._grid is not None:
             return self._grid
         ml, fl = st.get("main"), st.get("float")
@@ -405,6 +428,10 @@ class SweepSource:
             x0, y0, x1, y1 = self.bbox
             lum = lum[int(y0 * hh):max(int(y1 * hh), int(y0 * hh) + 1),
                       int(x0 * ww):max(int(x1 * ww), int(x0 * ww) + 1)]
+
+        if self.rotation:
+            lum = np.rot90(lum, k=self.rotation // 90)
+            lum = np.ascontiguousarray(lum)
 
         h, w = lum.shape
         aspect = h / float(w)
