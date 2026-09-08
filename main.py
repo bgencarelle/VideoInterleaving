@@ -644,23 +644,29 @@ cli_args, log_filename = configure_runtime()
 # -----------------------------------------------------------------------------
 # STANDARD IMPORTS
 # -----------------------------------------------------------------------------
-import make_file_lists
-
-# Imported here, as upstream, so startup behaviour for the existing modes is
-# unchanged.  The failure is only DEFERRED (not skipped) so that scope mode --
-# which needs neither TurboJPEG nor GL -- can still run on a box without them.
-try:
-    import image_display
-
-    _image_display_error = None
-except Exception as _e:  # pragma: no cover - environment dependent
-    image_display = None
-    _image_display_error = _e
-import web_service
-import ascii_server
-import ascii_stats_server
-import ascii_web_server
 from settings import CLOCK_MODE
+
+# Everything a MODE needs is imported by that mode, at the point of use.
+#
+# These used to be module-level, which meant every mode paid for every other
+# mode's dependencies: scope mode -- which needs neither TurboJPEG nor GL nor a
+# websocket library -- could not start on a box that was missing any of them.
+# image_display was already wrapped in try/except for exactly this reason, but
+# that only deferred the FAILURE; the import still ran and its stack still had
+# to be installed. ascii_web_server had no such wrapper at all, so a missing
+# SimpleWebSocketServer stopped scope, local and web modes dead.
+#
+# The mapping, so the branches below are not the only record of it:
+#
+#   make_file_lists     every mode except scope reading a baked manifest
+#   image_display       local, web, ascii, asciiweb   (turbojpeg, glfw, moderngl)
+#   web_service         local, web, asciiweb, scope   (stdlib only)
+#   ascii_server        ascii                         (stdlib only)
+#   ascii_stats_server  ascii                         (stdlib only)
+#   ascii_web_server    asciiweb                      (SimpleWebSocketServer)
+#   scope_display       scope                         (numpy, sounddevice)
+#
+# Python caches modules, so importing inside a branch costs nothing on repeat.
 
 
 class Tee:
@@ -773,6 +779,7 @@ def main(clock=CLOCK_MODE):
               "bake (--scope-list-from-images to override)")
     elif cli_args.rebuild or not lists_exist:
         print(">> Building file lists...")
+        import make_file_lists          # PIL + numpy; not needed off this path
         make_file_lists.process_files()
     else:
         print(f">> Skipping build. Reusing existing lists in: {settings.GENERATED_LISTS_DIR}")
@@ -781,17 +788,23 @@ def main(clock=CLOCK_MODE):
     mode = cli_args.mode
 
     if mode == "ascii":
+        import ascii_server
+        import ascii_stats_server
         threading.Thread(target=ascii_server.start_server, daemon=True, name="ASCII-Telnet").start()
         threading.Thread(target=ascii_stats_server.start_server, daemon=True, name="ASCII-Stats").start()
 
     elif mode == "asciiweb":
+        import ascii_web_server          # SimpleWebSocketServer lives behind this
+        import web_service
         threading.Thread(target=ascii_web_server.start_server, daemon=True, name="ASCII-WS").start()
         web_service.start_server(monitor=True, stream=False)
 
     elif mode == "web":
+        import web_service
         web_service.start_server(monitor=True, stream=True)
 
     elif mode == "local":
+        import web_service
         web_service.start_server(monitor=True, stream=False)
 
     elif mode == "scope":
@@ -805,6 +818,7 @@ def main(clock=CLOCK_MODE):
         # thread and its OSError on a busy port dies in that thread.  The audio
         # keeps going.  A monitor port held by another instance must never take
         # the installation off the air.
+        import web_service
         web_service.start_server(monitor=True, stream=False)
 
         # 3. Start Display Engine
@@ -815,8 +829,17 @@ def main(clock=CLOCK_MODE):
             import scope_display
             scope_display.run_scope(clock)
         else:
-            if image_display is None:
-                raise _image_display_error
+            # TurboJPEG, glfw and moderngl are reached through this, and only
+            # this. Say which mode wanted them, because "No module named
+            # 'turbojpeg'" from a bare traceback does not.
+            try:
+                import image_display
+            except Exception as e:
+                raise RuntimeError(
+                    f"{mode} mode needs the video display stack "
+                    f"(TurboJPEG / GL) and it could not be loaded: {e}. "
+                    f"Scope mode does not need it and still runs."
+                ) from e
             image_display.run_display(clock)
     except KeyboardInterrupt:
         print("\n[MAIN] Shutdown requested via Ctrl+C")

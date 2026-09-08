@@ -10,7 +10,12 @@ from settings import IPS, CLIENT_MODE, VALID_MODES, FROM_BIRTH, CLOCK_MODE, BIRT
 
 clock_mode = CLOCK_MODE
 midi_mode = False
-import midi_control
+# midi_control is imported inside update_index, not here.  It pulls in `mido`
+# at module level, so importing it here made a MIDI stack a hard requirement of
+# every mode -- including a free-running clock that never reads a MIDI message,
+# and scope mode on a box with no MIDI at all.  Deferring it also breaks the
+# import cycle: midi_control imports this module back, and by the time the
+# branch below runs, this one has finished loading.
 #import index_client
 launch_time = 0  # Stored as nanoseconds (integer)
 # Module-level variables for MIDI clock modes (set by make_file_lists.initialize_image_lists)
@@ -110,6 +115,7 @@ def update_index(total_images, pingpong=True):
     """
     global control_data_dictionary, clock_mode, midi_mode
     if midi_mode:
+        import midi_control          # `mido` lives behind this
         midi_control.process_midi(clock_mode)
         control_data_dictionary.update(midi_control.midi_data_dictionary)
         index, _ = control_data_dictionary['Index_and_Direction']

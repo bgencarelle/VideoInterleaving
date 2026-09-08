@@ -17,9 +17,13 @@ import csv
 import sys
 import shutil
 from itertools import zip_longest
-from PIL import Image
 from collections import defaultdict
 import numpy as np  # [ADDED]
+
+# Pillow is imported where it is used, in scan_directory_recursive, and nowhere
+# else in this module.  At module level it made PIL a hard requirement of every
+# caller -- including scope mode, which reads its manifest out of a baked .npy
+# through numpy and never opens an image at all.
 
 import settings
 
@@ -109,6 +113,8 @@ def scan_directory_recursive(base_path, script_dir, folder_type):
     Recursively scans a directory for image folders matching the strict prefix rules.
     folder_type: 'main' or 'float'
     """
+    from PIL import Image        # the only place this module needs Pillow
+
     results = []
     if not os.path.exists(base_path) or not os.path.isdir(base_path):
         print(f"Error: Directory '{base_path}' is missing.")
