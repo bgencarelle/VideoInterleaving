@@ -98,6 +98,15 @@ def configure_runtime():
     )
 
     parser.add_argument(
+        "--ascii-contrast",
+        type=float,
+        metavar="F",
+        help="ASCII grading contrast, scaled about mid-grey "
+             "(default: ASCII_CONTRAST, 1.0 = neutral, >1 more punch, "
+             "<1 flatter). Applies to --mode ascii and asciiweb"
+    )
+
+    parser.add_argument(
         "--dir",
         help="Path to image source folder (overrides settings.py)"
     )
@@ -323,6 +332,25 @@ def configure_runtime():
         settings.INITIAL_ROTATION = int(args.rotation) % 360
     if args.mirror is not None:
         settings.INITIAL_MIRROR = 1 if args.mirror else 0
+
+    # ASCII grading, before the converter builds anything from it.
+    if args.ascii_contrast is not None:
+        if not math.isfinite(args.ascii_contrast):
+            parser.error("--ascii-contrast must be a finite number")
+        if args.ascii_contrast < 0:
+            # Negative scales the picture through mid-grey and comes back
+            # inverted. That is a tone inversion, not a contrast, and it is far
+            # likelier to be a stray minus sign than a request.
+            parser.error("--ascii-contrast cannot be negative "
+                         "(0 flattens to mid-grey, 1.0 is neutral)")
+        settings.ASCII_CONTRAST = args.ascii_contrast
+
+    # Options that only mean anything in one mode; say so rather than silently
+    # ignoring them. The whole point of a knob is that turning it does
+    # something, and a flag accepted in the wrong mode does nothing quietly.
+    if args.mode not in ("ascii", "asciiweb") and args.ascii_contrast is not None:
+        print("⚠️  --ascii-contrast ignored: it applies to --mode ascii and "
+              "asciiweb. Each mode in VideoInterleaving runs standalone.")
 
     # Scope options only mean anything in scope mode; say so rather than
     # silently ignoring them.

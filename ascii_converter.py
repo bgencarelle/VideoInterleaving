@@ -51,6 +51,7 @@ def to_ascii(frame):
     font_ratio = getattr(settings, 'ASCII_FONT_RATIO', 0.5)
 
     sat_mult = getattr(settings, 'ASCII_SATURATION', 1.0)
+    contrast_mult = getattr(settings, 'ASCII_CONTRAST', 1.0)
     bright_mult = getattr(settings, 'ASCII_BRIGHTNESS', 1.0)
 
     # --- 2. CALCULATE GEOMETRY (COVER Scaling) ---
@@ -82,6 +83,22 @@ def to_ascii(frame):
     # --- Step B: Color Grading (Now on the final max_cols x max_rows pixel count) ---
     hsv = cv2.cvtColor(frame_cropped, cv2.COLOR_RGB2HSV).astype(float)
     if sat_mult != 1.0: hsv[:, :, 1] = np.clip(hsv[:, :, 1] * sat_mult, 0, 255)
+    # Contrast, then brightness, both on V, both exactly once.
+    #
+    # ASCII_CONTRAST used to be read by a SECOND grading stage that ran before
+    # this one -- and that stage referenced three module globals that were
+    # never defined, so to_ascii() raised NameError on every call until commit
+    # 9adda652 deleted it. The setting outlived the code and has done nothing
+    # since. It lives here now, in the one stage that exists.
+    #
+    # Scaling about mid-grey rather than about zero is what makes this contrast
+    # rather than brightness: 1.0 is exactly neutral (v - 128 + 128 == v), above
+    # 1.0 pushes lights and darks apart, below pulls them together. That
+    # neutrality is load-bearing -- it is what lets the setting become live
+    # without changing a single character of anyone's existing output.
+    if contrast_mult != 1.0:
+        hsv[:, :, 2] = np.clip((hsv[:, :, 2] - 128.0) * contrast_mult + 128.0,
+                               0, 255)
     if bright_mult != 1.0:
         hsv[:, :, 2] = np.clip(hsv[:, :, 2] * bright_mult, 0, 255)
     frame_boosted = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)

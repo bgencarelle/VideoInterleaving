@@ -169,10 +169,6 @@ class PrecompensateHpfTests(unittest.TestCase):
         self.assertFalse(np.allclose(out, f))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class RealtimeFailureTests(unittest.TestCase):
     def test_source_failure_keeps_motion_and_trigger_phase(self):
         def fail(n):
@@ -193,3 +189,6 @@ class RealtimeFailureTests(unittest.TestCase):
         edges = np.flatnonzero((block[:-1, 0] < .95) & (block[1:, 0] >= .95))
         np.testing.assert_array_equal(np.diff(edges), [scope.trace_samples] * 2)
         self.assertEqual(scope.trace_samples, 3200)
+
+if __name__ == "__main__":
+    unittest.main()

@@ -130,6 +130,21 @@ python main.py --mode ascii --dir ./images_tiny
 * Connect via Terminal: `telnet <IP> 2323` or `nc <IP> 2323`
 * *Note: Use smaller resolution images (e.g., 150px wide) for ASCII to save CPU.*
 
+Tone is graded once, in `ascii_converter.to_ascii`: saturation on S, then
+contrast and brightness on V, then gamma on the grey the character is chosen
+from. Contrast is settable per run:
+
+```bash
+python main.py --mode ascii --dir ./images_tiny --ascii-contrast 1.4
+```
+
+It scales about mid-grey, so `1.0` is exactly neutral, above 1 pushes lights
+and darks apart, and `0` flattens everything to one tone. The shipped default
+is `1.0` — `ASCII_CONTRAST` sat at 1.2 in `constantStorage/ascii_constants.py`
+for a long time while the code that read it was gone, so wiring it up at 1.2
+would have changed every existing installation's picture. Saturation,
+brightness and gamma are still set in that file.
+
 **3. Start Local Mode (Windowed):**
 ```bash
 python main.py --mode local --dir ./images_sbs
