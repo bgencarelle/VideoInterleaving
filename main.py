@@ -112,11 +112,15 @@ def configure_runtime():
                         help="Scope: make the existing X signal stable in "
                              "one-channel Y-T viewing by adding one unique "
                              "trigger edge per trace. Implies raster + retrace; "
-                             "does not alter Y or remap the XY waveform")
+                             "keeps X as the picture channel; fixed row timing "
+                             "is the default (dwell restores the earlier timing)")
     parser.add_argument("--scope-yt-trigger", "--scope-yt-trigger-us",
                         dest="scope_yt_trigger_us", type=float, metavar="US",
                         help="Scope Y-T trigger marker duration in microseconds "
                              "(default: 250)")
+    parser.add_argument("--scope-yt-timing", choices=("fixed", "dwell"),
+                        help="Y-T timing: fixed row slots (default), or the "
+                             "previous brightness-weighted whole-trace timing")
     parser.add_argument("--scope-fps", type=int, help="Scope trace rate (default: IPS)")
     parser.add_argument("--scope-samples", type=int, help="Scope samples per trace")
     parser.add_argument("--scope-fields", type=int, metavar="N",
@@ -442,6 +446,8 @@ def configure_runtime():
                     or args.scope_yt_trigger_us <= 0):
                 parser.error("--scope-yt-trigger must be finite and greater than zero")
             settings.SCOPE_YT_TRIGGER_US = args.scope_yt_trigger_us
+        if args.scope_yt_timing is not None:
+            settings.SCOPE_YT_TIMING = args.scope_yt_timing
         if args.scope_realtime:
             settings.SCOPE_REALTIME = True
         if args.scope_fps:

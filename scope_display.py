@@ -145,6 +145,7 @@ def _bootstrap():
                     help="stable X trigger edge for one-channel Y-T viewing")
     ap.add_argument("--scope-yt-trigger", "--scope-yt-trigger-us",
                     dest="scope_yt_trigger_us", type=float, metavar="US")
+    ap.add_argument("--scope-yt-timing", choices=("fixed", "dwell"))
     ap.add_argument("--scope-walk-radius", type=int)
     ap.add_argument("--scope-walk-stride", type=int)
     ap.add_argument("--scope-walk-reseed-ms", type=float)
@@ -204,6 +205,8 @@ def _bootstrap():
                 or args.scope_yt_trigger_us <= 0):
             ap.error("--scope-yt-trigger must be finite and greater than zero")
         settings.SCOPE_YT_TRIGGER_US = args.scope_yt_trigger_us
+    if args.scope_yt_timing is not None:
+        settings.SCOPE_YT_TIMING = args.scope_yt_timing
     if args.scope_gamma is not None:
         if settings.SCOPE_RENDER_MODE == "fusion":
             settings.SCOPE_GAMMA = args.scope_gamma
@@ -507,6 +510,9 @@ def run_scope(clock_source=None):
     samples = getattr(settings, "SCOPE_SAMPLES", None)
     render_mode = getattr(settings, "SCOPE_RENDER_MODE", None)
     yt_mode = bool(getattr(settings, "SCOPE_YT", False))
+    yt_timing = settings.SCOPE_YT_TIMING
+    if yt_timing not in ("fixed", "dwell"):
+        raise ValueError("SCOPE_YT_TIMING must be fixed or dwell")
     yt_trigger_us = float(settings.SCOPE_YT_TRIGGER_US)
     if not math.isfinite(yt_trigger_us) or yt_trigger_us <= 0:
         raise ValueError("SCOPE_YT_TRIGGER_US must be finite and greater than zero")
@@ -863,8 +869,11 @@ def run_scope(clock_source=None):
     if yt_mode:
         marker_us = scope.yt_trigger_us
         trigger_hz = scope.samplerate / max(scope.samples_per_frame, 1)
-        print(f"[SCOPE] Y-T trigger on X: existing XY signal preserved, "
+        print(f"[SCOPE] Y-T on X: {yt_timing} timing, "
               f"{trigger_hz:g} Hz trace trigger, {marker_us:g} us marker")
+        if yt_timing == "fixed":
+            print("[SCOPE] Y-T fixed row slots: image width stays registered; "
+                  "brightness controls dwell within each row")
         print("[SCOPE] Y-T trigger: rising edge near +0.95; set the timebase "
               "to one complete trace")
 
@@ -1001,6 +1010,8 @@ def run_scope(clock_source=None):
                         fields=fields, border=border, oversample=oversample,
                         sweep=sweep_mode, autofit=autofit, row_bias=row_bias,
                         precondition=raster_precondition,
+                        yt_timing=yt_timing if yt_mode else None,
+                        yt_trigger_samples=scope.yt_trigger_samples if yt_mode else 0,
                         grid=((cal["grid_rows"], cal["grid_cols"])
                               if cal else None),
                         levels=(cal.get("levels") if cal else None))
@@ -1132,6 +1143,7 @@ def run_scope(clock_source=None):
                       sweep=sweep_mode, autofit=autofit,
                       invert=invert, rotation=rotation, yt=yt_mode,
                       yt_trigger_us=scope.yt_trigger_us,
+                      yt_timing=yt_timing,
                       precondition=raster_precondition,
                       mode_locked=bool(yt_mode or realtime or mix_hz),
                       mix_hz=mix_hz, mix_duty=mix_duty,
@@ -1177,6 +1189,10 @@ def run_scope(clock_source=None):
         monitor_data["scope_rotation"] = rotation
         monitor_data["scope_yt"] = yt_mode
         monitor_data["scope_yt_trigger_us"] = scope.yt_trigger_us
+        monitor_data["scope_yt_timing"] = yt_timing
+        monitor_data["scope_border"] = border
+        monitor_data["scope_yt_grid"] = _rotation_grid(cal, rotation) if cal else None
+        monitor_data["scope_yt_levels"] = cal.get("levels") if cal else None
         monitor_data["scope_gamma"] = round(
             walk_gamma
             if ((use_stochastic or use_stipple
@@ -1223,6 +1239,8 @@ def run_scope(clock_source=None):
         border=border, oversample=oversample, sweep=sweep_mode,
         dc_comp=dc_comp, autofit=autofit, row_bias=row_bias,
         precondition=raster_precondition,
+        yt_timing=yt_timing if yt_mode else None,
+        yt_trigger_samples=scope.yt_trigger_samples if yt_mode else 0,
         grid=_rotation_grid(cal, rotation),
         levels=(cal.get("levels") if cal else None))
     stochastic_emitter = StochasticEmitter(
@@ -1284,6 +1302,8 @@ def run_scope(clock_source=None):
                         fields=fields, border=border, oversample=oversample,
                         sweep=sweep_mode, dc_comp=dc_comp, autofit=autofit,
                         row_bias=row_bias, precondition=raster_precondition,
+                        yt_timing=yt_timing if yt_mode else None,
+                        yt_trigger_samples=scope.yt_trigger_samples if yt_mode else 0,
                         grid=_rotation_grid(cal, rotation),
                         levels=(cal.get("levels") if cal else None))
                     stochastic_emitter = StochasticEmitter(
@@ -1598,6 +1618,9 @@ def run_scope(clock_source=None):
                     _md["scope_rotation"] = rotation
                     _md["scope_yt"] = yt_mode
                     _md["scope_yt_trigger_us"] = scope.yt_trigger_us
+                    _md["scope_yt_timing"] = yt_timing
+                    _md["scope_yt_grid"] = _rotation_grid(cal, rotation) if cal else None
+                    _md["scope_yt_levels"] = cal.get("levels") if cal else None
                     _md["scope_gamma"] = round(
                         walk_gamma
                         if ((use_stochastic or use_stipple
@@ -1791,6 +1814,10 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
                          else stochastic_emitter).apply_lowpass(frame, lowpass)
             elif lowpass and lowpass_circular is not None:
                 frame = lowpass_circular(frame, lowpass, scope.samplerate)
+            if render_mode == "raster" and emitter.yt_timing == "fixed":
+                # Filtering can overshoot the image range. Keep the +0.95
+                # trigger threshold exclusive to Scope's marker, inserted next.
+                frame[:, 0] = np.clip(frame[:, 0], -0.98, 0.9)
             if beam_start is not None and (render_mode == "raster"
                                            or exact_handoff):
                 # Circular filters and DC compensation can move sample zero.

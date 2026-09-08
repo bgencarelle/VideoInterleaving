@@ -972,7 +972,8 @@ class TraceEmitter:
     def __init__(self, samplerate, samples, *, gamma=2.2, trim=0.02,
                  density=1.0, rows=None, fields=1, border=0.0, oversample=1,
                  sweep="alternate", dc_comp=None, grid=None, levels=None,
-                 autofit=True, row_bias=1.0, precondition=0.0):
+                 autofit=True, row_bias=1.0, precondition=0.0,
+                 yt_timing=None, yt_trigger_samples=0):
         self.samplerate = samplerate
         self.n = int(samples)
         self.gamma, self.trim, self.density = gamma, trim, density
@@ -982,6 +983,10 @@ class TraceEmitter:
         self.grid, self.levels, self.autofit = grid, levels, autofit
         self.row_bias = row_bias
         self.precondition = max(0.0, float(precondition))
+        if yt_timing not in (None, "fixed", "dwell"):
+            raise ValueError("Y-T timing must be fixed or dwell")
+        self.yt_timing = yt_timing
+        self.yt_trigger_samples = int(yt_trigger_samples)
         self._rev, self._end, self._field = False, None, 0
 
     def reset(self):
@@ -1007,7 +1012,9 @@ class TraceEmitter:
             levels=lv, palindrome=(self.sweep_mode == "palindrome"),
             reverse=(alt and self._rev),
             start=self._end if alt else None,
-            close=(self.sweep_mode == "retrace"), **kw)
+            close=(self.sweep_mode == "retrace"),
+            yt_fixed=(self.yt_timing == "fixed"),
+            yt_trigger_samples=self.yt_trigger_samples, **kw)
         if frame is None:
             return None
         self._field += 1
@@ -2190,13 +2197,100 @@ def _precondition_grid(grid, amount):
     return np.minimum(np.maximum(sharp, local_lo), local_hi)
 
 
+def yt_timeline(n, rows, fields=1, trigger_samples=0, border=0.0):
+    """Integer sample boundaries independent of luminance and field parity.
+
+    Layout: reserved trigger, equal row slots, border, return. Uneven field
+    lengths get a padding slot, so an odd row count cannot resize the picture.
+    """
+    n, fields = int(n), max(1, int(fields))
+    slots = (int(rows) + fields - 1) // fields
+    trigger = max(0, int(trigger_samples))
+    border_n = int(np.floor(n * float(np.clip(border, 0.0, 0.5)) + 0.5))
+    if border_n < 5:
+        border_n = 0
+    retrace = max(2, int(np.floor(n * 0.004 + 0.5)))
+    picture_end = n - border_n - retrace
+    picture_n = picture_end - trigger
+    if slots < 1 or picture_n < 2 * slots:
+        raise ValueError("Y-T fixed timing needs at least two samples per row; "
+                         "reduce --scope-rows/--scope-yt-trigger/--scope-border "
+                         "or increase --scope-samples")
+    edges = trigger + (np.arange(slots + 1, dtype=np.int64) * picture_n) // slots
+    return edges, picture_end, n - retrace
+
+
+def render_yt_grid(g, n, *, aspect=1.0, gamma=2.2, trim=0.02, floor=0.012,
+                   level=0.9, fields=1, field=0, border=0.0,
+                   trigger_samples=0, oversample=1):
+    """Render a tone-mapped grid on a fixed Y-T time axis, still on X.
+
+    Dwell is normalized within each row only. A row can no longer borrow
+    time from any other row; empty rows retain their time at a negative
+    pedestal outside the normal picture range. The pedestal is visible if
+    the scope shows that voltage; there is no blanking/Z channel.
+    """
+    g = np.asarray(g, dtype=np.float64)
+    rows, cols = g.shape
+    edges, picture_end, return_start = yt_timeline(n, rows, fields, trigger_samples, border)
+    sx = level * min(1.0, 1.0 / float(aspect))
+    sy = level * min(1.0, float(aspect))
+    xs, ys = np.linspace(-sx, sx, cols), np.linspace(sy, -sy, rows)
+    # No positive trigger crossing outside Scope's reserved marker.
+    pedestal = -min(0.98, level * 1.04)
+    out = np.empty((n, 2), dtype=np.float32)
+    out[:] = (pedestal, sy)
+    for slot, (begin, end) in enumerate(zip(edges[:-1], edges[1:])):
+        r = slot * max(1, int(fields)) + int(field) % max(1, int(fields))
+        if r >= rows:
+            out[begin:end] = (pedestal, -sy)
+            continue
+        row = g[r]
+        idx = np.flatnonzero(row > max(0.0, trim))
+        out[begin:end] = (pedestal, ys[r])
+        if not idx.size:
+            continue
+        a, b = int(idx[0]), int(idx[-1]) + 1
+        xx, vv = xs[a:b], row[a:b]
+        if trim > 0 and len(xx) > 1:
+            # Keep the XY renderer's subcell silhouette positions; changing
+            # endpoint geometry does not change the row's time allocation.
+            xx = xx.copy()
+            step = xs[1] - xs[0]
+            if a > 0 and row[a] > row[a - 1]:
+                xx[0] -= step * np.clip((row[a] - trim) / (row[a] - row[a - 1]), 0., 1.)
+            if b < cols and row[b - 1] > row[b]:
+                xx[-1] += step * np.clip((row[b - 1] - trim) / (row[b - 1] - row[b]), 0., 1.)
+        if r % 2:
+            xx, vv = xx[::-1], vv[::-1]
+        if len(xx) == 1:
+            out[begin:end] = (xx[0], ys[r])
+            continue
+        points = np.column_stack((xx, np.full(len(xx), ys[r])))
+        weights = np.maximum(vv[1:], floor) ** gamma
+        # Explicit endpoints keep row-to-row transitions at fixed indices.
+        body = _walk(points, weights, int(end - begin - 1), oversample=oversample)
+        body[:, 0] = np.clip(body[:, 0], -sx, sx)
+        out[begin:end - 1] = body
+        out[begin] = points[0]
+        out[end - 1] = points[-1]
+    if return_start > picture_end:
+        # Fixed corner and direction: changing the subject cannot rotate the
+        # border's phase, as nearest-corner entry would do.
+        corners = np.array([[-sx, -sy], [sx, -sy], [sx, sy], [-sx, sy], [-sx, -sy]])
+        weights = np.linalg.norm(np.diff(corners, axis=0), axis=1)
+        out[picture_end:return_start] = _walk(corners, weights, return_start - picture_end)
+    out[return_start:] = np.linspace(out[return_start - 1], out[0], n - return_start)
+    return np.ascontiguousarray(out)
+
+
 def render_luma(lum, n, gamma=2.2, floor=0.012, level=0.9, rows=None,
                 cols=None, density=1.0, trim=0.02, stretch=True, bbox=None,
                 autofit=True, oversample=1, grid_rows=None, grid_cols=None,
                 border=0.0, row_bias=1.0, subcell=True,
                 levels=None, fields=1, field=0, palindrome=False,
                 reverse=False, start=None, close=None, overscan=1.0,
-                precondition=0.0):
+                precondition=0.0, yt_fixed=False, yt_trigger_samples=0):
     """
     Render a luminance image to XY samples.  This is the whole display engine:
     everything above it just decides what the image is.
@@ -2243,7 +2337,7 @@ def render_luma(lum, n, gamma=2.2, floor=0.012, level=0.9, rows=None,
         rows, cols = int(grid_rows), int(grid_cols)
         autofit = False
 
-    if autofit and trim > 0:
+    if autofit and trim > 0 and not yt_fixed:
         # One cheap probe pass: measure what fraction of the grid survives
         # trim, then grow the grid so the SURVIVING cells match the budget.
         probe = _box(lum, rows, cols)
@@ -2268,7 +2362,7 @@ def render_luma(lum, n, gamma=2.2, floor=0.012, level=0.9, rows=None,
         lo, hi = levels
         if hi > lo:
             g = np.clip((g - lo) / (hi - lo), 0.0, 1.0)
-    elif stretch:
+    elif stretch and not yt_fixed:
         lit = g[g > 0.01]
         if lit.size > 16:
             lo, hi = np.percentile(lit, 2), np.percentile(lit, 98)
@@ -2276,6 +2370,12 @@ def render_luma(lum, n, gamma=2.2, floor=0.012, level=0.9, rows=None,
                 g = np.clip((g - lo) / (hi - lo), 0.0, 1.0)
 
     g = _precondition_grid(g, precondition)
+
+    if yt_fixed:
+        return render_yt_grid(g, n, aspect=aspect, gamma=gamma, trim=trim,
+                              floor=floor, level=level, fields=fields, field=field,
+                              border=border, trigger_samples=yt_trigger_samples,
+                              oversample=oversample)
 
     # Aspect-correct extents.  Mapping both axes to +-1 would stretch a
     # non-square image to a square -- vector mode normalises by max(w, h), and

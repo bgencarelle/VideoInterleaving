@@ -611,8 +611,9 @@ python main.py --mode scope --xy-dir images_xy [options]
 | `--scope-mix [HZ]` | Vector/raster/stochastic/raster/stipple/raster whole-trace mix (default 120 Hz). |
 | `--scope-mix-duty F` | Raster fraction; remainder splits equally between vector/stochastic/stipple (default 0.5). |
 | `--scope-sweep MODE` | `alternate` (default), `palindrome`, or `retrace`. |
-| `--scope-yt` | Preserve the XY waveform while adding a unique per-trace X trigger edge for one-channel Y-T viewing; fixes sweep to `retrace`. |
+| `--scope-yt` | One-channel Y-T viewing on X with a unique trigger edge, fixed row timing by default, and `retrace` sweep. |
 | `--scope-yt-trigger US` | Set the Y-T X trigger marker duration in microseconds (default 250; `--scope-yt-trigger 500` gives a 500 us marker). Alias: `--scope-yt-trigger-us`. |
+| `--scope-yt-timing fixed\|dwell` | `fixed` (default): reserve equal row slots, including empty rows, to prevent frame width changes caused by time redistribution. `dwell`: previous whole-trace weighting for comparison. Both retain X as the picture signal. |
 | `--scope-rows N` | Raster scanline count (default: auto from budget). |
 | `--scope-gamma F` | Active renderer's exponent: raster default 2.2, stochastic default 2; sets both in mix. |
 | `--scope-density F` | Raster samples per cell (1.0 = finest). |

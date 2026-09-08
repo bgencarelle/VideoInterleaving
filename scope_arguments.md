@@ -260,28 +260,48 @@ still applies there.
 
 ### `--scope-yt`
 
-Makes the existing X signal trigger reliably when it is viewed alone in an
-oscilloscope's Y-T mode. It implies raster mode and `--scope-sweep retrace` so
+Draws the picture on X for viewing alone in an oscilloscope's Y-T mode, with
+a unique trigger marker. It implies raster mode and `--scope-sweep retrace` so
 consecutive traces never alternate or appear mirrored in time.
 
 Every trace begins with a configurable `-0.99 -> +0.99` marker on X. The
 default duration is 250 us; set it with `--scope-yt-trigger US` (for example,
 `--scope-yt-trigger 500`). Picture content remains inside +/-0.9, making a
-rising trigger level around +0.95 unique and stable. The Y channel and all
-remaining XY samples are preserved exactly. Set the oscilloscope timebase so
-one complete trace fills the screen. The marker replaces the initial X samples;
-500 us is its total duration, including both low and high halves.
+rising trigger level around +0.95 unique. Set the oscilloscope timebase so one
+complete trace fills the screen. The marker occupies a reserved interval in
+fixed timing; 500 us is its total duration, including both low and high halves.
+X remains the picture signal; channels are not exchanged.
 
 This is a runtime output mode; it does not require a rebake. It cannot be
 combined with mix, stochastic, stipple, vector, fusion, or `--scope-realtime`.
 The realtime row stream does not guarantee complete trace lengths and therefore
 cannot currently keep the periodic trigger aligned. Use `SCOPE_REALTIME=False`.
 In Y-T mode, `v` and `w` keep raster/retrace selected; `p` includes the custom
-trigger duration in the printed flags.
+trigger duration and timing mode in the printed flags.
 
-The renderer still uses brightness-dependent dwell timing. The trigger stabilizes
-trace starts; it does not prevent internal image features from moving in time
-as brightness changes. Fixed-row timing is experimental and is not implemented.
+### `--scope-yt-timing fixed|dwell` (default `fixed`)
+
+`fixed` gives every row a fixed time slot. Empty rows retain their slots rather
+than disappearing from the timeline. Trigger, picture, border and return have
+fixed sample boundaries; the border always starts at the same corner. One row's
+brightness cannot stretch other rows. Automatic per-image grid enlargement and
+contrast stretching are disabled; the run's calibrated grid and levels are used.
+
+Brightness-dependent dwell is retained inside each row, so local features can
+still shift within their own slot. Equal row durations also change tonal balance
+compared with allocating time according to each row's total brightness. Empty
+slots sit at X=-0.936 (normal picture range is within +/-0.9): that may appear as
+an edge rail because this is single-channel output with no blanking input.
+
+`dwell` restores the earlier Y-T waveform, with brightness determining the share
+of the entire trace allocated to each row. Its marker replaces the initial X
+samples, as before. Use this setting for A/B comparison without replacing files.
+These options do not change regular XY raster output or require rebaking.
+
+```bash
+python main.py --mode scope --scope-yt --scope-yt-timing fixed \\
+  --xy-dir images_xy --device BlackHole --scope-border .09 --scope-yt-trigger 500
+```
 
 ---
 

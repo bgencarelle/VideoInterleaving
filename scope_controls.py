@@ -182,6 +182,7 @@ def as_flags(s):
     if yt:
         out = ["--scope-yt"]
         out.append(f"--scope-yt-trigger {s.get('yt_trigger_us', 250.0):g}")
+        out.append(f"--scope-yt-timing {s.get('yt_timing', 'fixed')}")
     elif mix_hz:
         out = [f"--scope-mix {mix_hz:g}",
                f"--scope-mix-duty {s.get('mix_duty', 0.5):g}"]

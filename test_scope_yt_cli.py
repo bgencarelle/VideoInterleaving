@@ -71,6 +71,13 @@ class YtConfigurationTests(unittest.TestCase):
                     self.configure("--scope-yt", "--scope-yt-trigger", duration)
                 self.assertEqual(err.exception.code, 2)
 
+    def test_timing_selection_reaches_settings_and_printed_flags(self):
+        for timing in ("fixed", "dwell"):
+            self.configure("--scope-yt", "--scope-yt-timing", timing)
+            self.assertEqual(settings.SCOPE_YT_TIMING, timing)
+            flags = as_flags(dict(yt=True, yt_timing=settings.SCOPE_YT_TIMING))
+            self.assertIn("--scope-yt-timing " + timing, flags)
+
     def test_realtime_cli_rejected(self):
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit) as err:
