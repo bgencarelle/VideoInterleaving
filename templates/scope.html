@@ -97,16 +97,16 @@
         <select id="preview-size">
           <option value="256">256 &mdash; cheapest, merges</option>
           <option value="384">384</option>
-          <option value="512" selected>512 &mdash; default</option>
-          <option value="700">700 &mdash; sharpest, costly</option>
+          <option value="512">512</option>
+          <option value="700" selected>700 &mdash; default, sharpest, costly</option>
         </select>
       </label>
       <label>exposure
         <select id="preview-exposure">
           <option value="0.4">0.4</option>
           <option value="0.7">0.7</option>
-          <option value="1.0" selected>1.0</option>
-          <option value="1.6">1.6</option>
+          <option value="1.0">1.0</option>
+          <option value="1.6" selected>1.6</option>
         </select>
       </label>
       <span id="preview-note"></span>
@@ -161,10 +161,9 @@
       (EQ, "enhancements", spatial audio) will distort it.
       <br><br>
       Audio goes to your system's default output unless you pick another.
-      Firefox shows a device picker; Chrome has to ask for microphone
-      permission first, because that is the only way it will reveal what your
-      speakers are called. Declining is fine &mdash; set the default in your
-      OS sound settings instead and it will follow.
+      Where supported, the device picker requests output access only.
+      Otherwise, select the output in your system sound settings before starting.
+      This page never requests microphone access.
     </div>
     <img id="luma-src" style="display:none" alt="">
   </div>

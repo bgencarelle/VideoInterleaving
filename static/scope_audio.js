@@ -21,7 +21,6 @@
     async function chooseOutput() {
       if (audioBusy) return;
       const st = document.getElementById("sink-status");
-      const sel = document.getElementById("sink-select");
       const AudioContextClass = window.AudioContext || window.webkitAudioContext;
       if (!AudioContextClass || !("setSinkId" in AudioContextClass.prototype)) {
         st.textContent = "This browser cannot redirect Web Audio output — change your system default before starting audio.";
@@ -34,38 +33,7 @@
           await applyOutput(dev.deviceId, dev.label || dev.deviceId);
           return;
         }
-        st.textContent = "Asking for device access…";
-        const stream = await navigator.mediaDevices.getUserMedia({audio: true});
-        stream.getTracks().forEach(t => t.stop());
-        const devs = (await navigator.mediaDevices.enumerateDevices())
-          .filter(d => d.kind === "audiooutput");
-        if (!devs.length) { st.textContent = "No output devices found."; return; }
-        sel.textContent = "";
-        const placeholder = document.createElement("option");
-        placeholder.textContent = "Choose an output…";
-        placeholder.value = "";
-        placeholder.disabled = true;
-        placeholder.selected = true;
-        sel.appendChild(placeholder);
-        for (const d of devs) {
-          const option = document.createElement("option");
-          option.value = d.deviceId;
-          option.textContent = d.label || d.deviceId;
-          sel.appendChild(option);
-        }
-        if (selectedSinkId !== null) sel.value = selectedSinkId;
-        sel.style.display = "";
-        sel.onchange = async () => {
-          if (audioBusy) return;
-          setAudioBusy(true);
-          try {
-            await applyOutput(sel.value, sel.options[sel.selectedIndex].textContent);
-          } catch (e) {
-            sel.value = selectedSinkId === null ? "" : selectedSinkId;
-            st.textContent = "Could not switch: " + e;
-          } finally { setAudioBusy(false); }
-        };
-        st.textContent = "Pick an output.";
+        st.textContent = "Output selection is not available in this browser. Choose your output in system sound settings before starting audio. No microphone access is requested.";
       } catch (e) {
         st.textContent = "Output selection failed (" + e.name + "). Try again or choose the system default before starting.";
       } finally { setAudioBusy(false); }
