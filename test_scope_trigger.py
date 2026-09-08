@@ -15,6 +15,7 @@ Two claims have to hold for that to be safe, and these tests pin both:
      moving, never dwelling) and parked outside the +-0.9 picture box, which
      is the same off-screen-excursion trick apply_overscan() uses.
 """
+from pathlib import Path
 import unittest
 
 import numpy as np
@@ -155,6 +156,33 @@ class EveryRendererTests(unittest.TestCase):
         out = self.emit_through_scope(frame, trigger=False)
         np.testing.assert_allclose(out, frame, atol=1e-6)
         self.assertEqual(len(rising(out[:, 0])), 0)
+
+
+class MeasurementToolsTests(unittest.TestCase):
+    """Tools that MEASURE the waveform must not have it stamped on.
+
+    The marker is a deliberate corruption of the signal for a triggering
+    scope's benefit. On a calibration square or a filter audition it is
+    indistinguishable from the distortion those tools exist to reveal, so
+    both construct their Scope with trigger=False and these tests keep it
+    that way -- the default flipping to on is exactly how it would come back.
+    """
+
+    def source_of(self, filename):
+        return Path(__file__).with_name(filename).read_text()
+
+    def test_the_calibration_bench_disables_the_marker(self):
+        src = self.source_of("scope_out.py")
+        bench = src[src.index('if __name__ == "__main__":'):]
+        call = bench[bench.index("scope = Scope("):]
+        self.assertIn("trigger=False", call[:call.index(")")],
+                      "the calibration square must not carry a trigger marker")
+
+    def test_the_lowpass_audition_tool_disables_the_marker(self):
+        src = self.source_of("scope_lowpass.py")
+        call = src[src.index("scope = Scope("):]
+        self.assertIn("trigger=False", call[:call.index("\n            samplerate")],
+                      "a filter audition must show the filter, not the marker")
 
 
 class BackwardCompatibilityTests(unittest.TestCase):

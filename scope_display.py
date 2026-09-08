@@ -596,13 +596,10 @@ def run_scope(clock_source=None):
     lowpass = getattr(settings, "SCOPE_LOWPASS", None)
     oversample = int(getattr(settings, "SCOPE_OVERSAMPLE", 1) or 1)
     sweep_mode = getattr(settings, "SCOPE_SWEEP", "alternate")
-    if yt_timing == "fixed" and sweep_mode != "retrace":
-        # render_yt_grid builds its own closed timeline and ignores the
-        # chaining a sweep mode sets up, so the two would silently disagree.
-        # Not an error any more, just a stated substitution.
-        print(f"[SCOPE] fixed row timing supplies its own retrace; "
-              f"ignoring --scope-sweep {sweep_mode}.")
-        sweep_mode = "retrace"
+    # The sweep substitution is deliberately NOT made here: mix and realtime
+    # below can still demote fixed timing to dwell, and announcing that the
+    # sweep is being ignored before deciding whether fixed timing survives
+    # printed a claim that then stopped being true. See after those checks.
     fields = max(1, int(getattr(settings, "SCOPE_FIELDS", 1) or 1))
     fields_explicit = bool(getattr(settings, "SCOPE_FIELDS_EXPLICIT", False))
     dc_comp = getattr(settings, "SCOPE_DC_COMP", None)
@@ -638,6 +635,14 @@ def run_scope(clock_source=None):
         print("[SCOPE] mix alternates renderers; using dwell timing so every "
               "trace is built the same way.")
         yt_timing = "dwell"
+    # Now that fixed timing has survived every demotion above, it can claim
+    # the sweep. render_yt_grid builds its own closed timeline and ignores the
+    # chaining a sweep mode sets up, so the two would otherwise disagree
+    # silently. Not an error any more, just a stated substitution.
+    if yt_timing == "fixed" and sweep_mode != "retrace":
+        print(f"[SCOPE] fixed row timing supplies its own retrace; "
+              f"ignoring --scope-sweep {sweep_mode}.")
+        sweep_mode = "retrace"
     if mix_hz is not None:
         mix_hz = float(mix_hz)
         if not math.isfinite(mix_hz) or mix_hz <= 0.0:

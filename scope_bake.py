@@ -2213,8 +2213,8 @@ def yt_timeline(n, rows, fields=1, trigger_samples=0, border=0.0):
     picture_end = n - border_n - retrace
     picture_n = picture_end - trigger
     if slots < 1 or picture_n < 2 * slots:
-        raise ValueError("Y-T fixed timing needs at least two samples per row; "
-                         "reduce --scope-rows/--scope-yt-trigger/--scope-border "
+        raise ValueError("fixed row timing needs at least two samples per row; "
+                         "reduce --scope-rows/--scope-trigger-us/--scope-border "
                          "or increase --scope-samples")
     edges = trigger + (np.arange(slots + 1, dtype=np.int64) * picture_n) // slots
     return edges, picture_end, n - retrace

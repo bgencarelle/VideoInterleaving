@@ -191,7 +191,11 @@ def main():
     samplerate = 48000
     if not args.no_audio:
         try:
-            scope = Scope(fps=args.fps, samples=args.samples,
+            # trigger=False: this tool exists to show EXACTLY what the filter
+            # does to the waveform. A marker stamped on after filtering is not
+            # part of what you are auditioning, and it would sit on top of the
+            # corner ringing you came here to look at.
+            scope = Scope(fps=args.fps, samples=args.samples, trigger=False,
                           device=choose_device(ask=args.ask, device=args.device))
             samplerate = scope.samplerate
         except Exception as e:

@@ -1103,7 +1103,12 @@ if __name__ == "__main__":
     ap.add_argument("--ask", action="store_true")
     args = ap.parse_args()
 
-    scope = Scope(fps=args.fps,
+    # trigger=False: this is a MEASUREMENT pattern. The whole point of the
+    # calibration square is that you judge a known shape against itself to
+    # find AC-coupling distortion, and a marker stamped over the first samples
+    # -- with Y pinned to the rail -- is exactly the kind of thing you would
+    # then mistake for the distortion you came to look for.
+    scope = Scope(fps=args.fps, trigger=False,
                   device=choose_device(ask=args.ask, device=args.device))
     n = scope.samples_per_frame
     print(f"[BENCH] {n} samples/trace @ {scope.samplerate} Hz "
