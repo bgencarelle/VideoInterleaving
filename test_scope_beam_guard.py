@@ -73,16 +73,21 @@ class ShowFrameEnforcementTests(unittest.TestCase):
         self.assertEqual(self.scope.beams_unparked, 1)
 
     def test_a_normal_frame_passes_through_untouched(self):
+        # trigger off: the marker is on by default now and would overwrite the
+        # first samples. This test is about the guard, not the marker.
+        scope = Scope(device="null", samplerate=96000, samples=3200,
+                      trigger=False)
+        self.addCleanup(scope.stream.close)
         f = moving_frame()
-        self.scope.show_frame(f)
-        np.testing.assert_allclose(self.scope._pending, f, atol=1e-6)
-        self.assertEqual(self.scope.beams_unparked, 0)
+        scope.show_frame(f)
+        np.testing.assert_allclose(scope._pending, f, atol=1e-6)
+        self.assertEqual(scope.beams_unparked, 0)
 
     def test_the_guard_runs_before_the_yt_marker_can_fake_motion(self):
         # The marker moves X by itself, so a check placed after it would
         # declare a collapsed picture healthy.
         scope = Scope(device="null", samplerate=96000, samples=3200,
-                      yt_mode=True, yt_trigger_us=500.0)
+                      yt_trigger_us=500.0)
         self.addCleanup(scope.stream.close)
         scope.show_frame(constant_frame())
         self.assertEqual(scope.beams_unparked, 1)

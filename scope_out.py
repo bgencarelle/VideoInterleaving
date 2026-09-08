@@ -54,6 +54,52 @@ JUMP_GAIN = 0.12   # <1 -> fewer samples spent on travel moves -> dimmer
 SMOOTH = 5         # circular box filter width; tames DAC ringing at corners
 LEVEL = 0.9        # peak output amplitude, keep below 1.0
 
+# A frame whose peak-to-peak is below this on BOTH channels is not a picture,
+# it is a stationary beam.  Full scale is 1.8 peak-to-peak, so this is ~5e-5 of
+# the range: far below anything a real image produces, and far above the
+# round-off left by the filters a frame has already been through.
+PARK_PTP = 1e-4
+
+
+def beam_is_parked(frame, eps=PARK_PTP):
+    """True when every sample in the frame is effectively the same position.
+
+    "Never park the beam" is stated in four places in this codebase and was
+    enforced in none of them: rasterize() idles on a circle, BufferedSource holds
+    its last sample, StochasticGen substitutes a micro-circle for a one-pixel
+    source -- but a frame that collapses anywhere else reached the DAC intact.
+    A stationary beam is a full-brightness dot that burns phosphor, so the
+    check belongs at the one point every frame passes through, not in each
+    producer that might create one.
+
+    ptp per channel rather than diff(): no allocation of an (n, 2) temporary in
+    a path that runs once per trace.
+    """
+    f = np.asarray(frame)
+    if len(f) < 2:
+        return True
+    return bool(np.ptp(f[:, 0]) < eps and np.ptp(f[:, 1]) < eps)
+
+
+def unpark_frame(frame, phase=0, level=LEVEL, eps=PARK_PTP):
+    """Replace a stationary frame with a small circle about the same point.
+
+    Matches StochasticGen's existing one-pixel guard: the radius is small
+    enough that the picture is still recognisably "a dot there" rather than
+    jumping somewhere else, but the energy is spread over a ring instead of a
+    single spot.  ``phase`` advances the start angle so consecutive parked
+    frames do not retrace the identical ring.
+    """
+    f = np.ascontiguousarray(np.asarray(frame, dtype=np.float32)[:, :2])
+    n = len(f)
+    if n < 2:
+        return f
+    centre = f[0].astype(np.float64)
+    radius = level * 0.02
+    th = 2.0 * np.pi * (np.arange(n) + int(phase)) / n
+    out = centre + radius * np.column_stack([np.cos(th), np.sin(th)])
+    return np.ascontiguousarray(np.clip(out, -level, level), dtype=np.float32)
+
 
 def rotate_frame(frame, degrees):
     """Rotate XY samples around the display centre in 90-degree steps.
@@ -511,8 +557,16 @@ def precompensate_hpf(frame, corner_hz, samplerate, max_boost=8.0, level=LEVEL):
     for c in range(frame.shape[1]):
         out[:, c] = np.fft.irfft(np.fft.rfft(frame[:, c]) * corr, n=n)
     peak = np.abs(out).max()
-    if peak > 0:
-        out *= level / peak
+    # Renormalising is only meaningful if something survived DC removal.  A
+    # constant frame is ENTIRELY bin 0, so killing that bin leaves nothing but
+    # FFT round-off -- and `level / peak` then amplifies that round-off to full
+    # scale, turning a parked beam into a full-screen noise smear.  Measured:
+    # a constant frame came out at 0.9 peak, and a frame carrying 1e-4 of real
+    # motion was given 9000x gain.  Below the floor, hand back the input and
+    # let the caller's park guard deal with it.
+    if peak < 1e-3:
+        return np.asarray(frame, dtype=np.float32)
+    out *= level / peak
     return out.astype(np.float32)
 
 
@@ -541,7 +595,13 @@ class BufferedSource:
         self._buf = np.zeros((self.capacity, channels), dtype=np.float32)
         self._w = 0                  # samples written, monotonic
         self._r = 0                  # samples read, monotonic
+        # NOT zeros: the callback can beat the producer thread to the first
+        # block, and holding the "last" sample would then hold (0, 0) -- the
+        # parked centre dot this class exists to avoid -- for as long as the
+        # cold start lasts.  Start on the idle ring instead.
         self._last = np.zeros(channels, dtype=np.float32)
+        if channels >= 2:
+            self._last[0] = LEVEL
         self._lock = threading.Lock()
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -742,6 +802,14 @@ class Scope:
         self._pos = 0
         self.frames_drawn = 0     # complete traces emitted
         self.frames_dropped = 0   # indices superseded before they were drawn
+        self.beams_unparked = 0   # frames that arrived stationary and were rung
+        self.dac_dropouts = 0     # callbacks PortAudio flagged; each one is a
+                                  # block of silence it filled in for us, which
+                                  # on a scope is a dot at screen centre
+        # Held on underflow instead of zeroing.  Seeded from the idle circle so
+        # that a failure in the very first callback holds a point on the ring
+        # rather than the (0, 0) a zeros() default would give.
+        self._last_out = self._frame[0].copy()
         self.null = (isinstance(device, str) and device.strip().lower()
                      in ("null", "none", "off"))
         if not self.null:
@@ -764,6 +832,13 @@ class Scope:
             latency="low", callback=self._callback)
 
     def _callback(self, outdata, frames, time_info, status):
+        # PortAudio fills a missed block with SILENCE, and silence on both
+        # channels is a stationary full-brightness dot at screen centre.  We
+        # cannot retrieve those samples, but an underrun that is never counted
+        # is a bright spot with no explanation; counted, it is a number on the
+        # dashboard.  No formatting here -- this is the audio thread.
+        if status:
+            self.dac_dropouts += 1
         # Continuous source: content follows the clock in real time, with no
         # frame boundaries to wait for.
         if self.source is not None:
@@ -783,9 +858,14 @@ class Scope:
                     self._yt_pos = ((self._yt_pos + frames)
                                     % self.samples_per_frame)
                 outdata[:] = rendered
+                self._last_out = rendered[-1].copy()
                 self.frames_drawn += 1
             except Exception:
-                outdata[:] = 0.0
+                # HOLD, never zero.  BufferedSource.__call__ already documents why
+                # -- zero on both channels parks the beam at screen centre --
+                # and this path was the one place that did the opposite.
+                outdata[:] = self._last_out
+                self.dac_dropouts += 1
             return
         # Swap ONLY at a frame boundary.  Replacing the buffer mid-trace makes
         # the beam jump from its position in one image to the same offset in a
@@ -805,6 +885,8 @@ class Scope:
                 self._pending = None
                 if p is not None:
                     self._frame = p
+        if frames:
+            self._last_out = outdata[-1].copy()
 
     def ready(self):
         """True when the last queued frame has been taken by the callback.
@@ -944,6 +1026,12 @@ class Scope:
         if self._pending is not None:
             self.frames_dropped += 1
         f = mirror_frame(rotate_frame(frame, self.rotation), self.mirror)
+        # Before the filters, not after: lowpass ringing and the Y-T marker
+        # both add motion of their own, so a picture that collapsed upstream
+        # would still look alive by the time it reached the DAC.
+        if beam_is_parked(f):
+            f = unpark_frame(f, phase=self.beams_unparked * 7)
+            self.beams_unparked += 1
         if self.lowpass_hz:
             f = lowpass_frame(f, self.samplerate, self.lowpass_hz,
                               self.lowpass_taper)

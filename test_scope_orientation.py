@@ -60,7 +60,9 @@ class MirrorFrameTests(unittest.TestCase):
 
 class ScopeMirrorOutputTests(unittest.TestCase):
     def test_show_frame_applies_the_configured_mirror(self):
-        scope = Scope(device="null", samplerate=96000, samples=3200, mirror=True)
+        # trigger off: it would overwrite the first samples of both channels.
+        scope = Scope(device="null", samplerate=96000, samples=3200,
+                      mirror=True, trigger=False)
         self.addCleanup(scope.stream.close)
         f = picture_frame()
         scope.show_frame(f)
@@ -68,7 +70,8 @@ class ScopeMirrorOutputTests(unittest.TestCase):
         np.testing.assert_allclose(scope._pending[:, 1], f[:, 1], atol=1e-6)
 
     def test_set_mirror_takes_effect_without_a_restart(self):
-        scope = Scope(device="null", samplerate=96000, samples=3200)
+        scope = Scope(device="null", samplerate=96000, samples=3200,
+                      trigger=False)
         self.addCleanup(scope.stream.close)
         f = picture_frame()
         scope.show_frame(f)
@@ -81,7 +84,7 @@ class ScopeMirrorOutputTests(unittest.TestCase):
         # Applied after the marker, the -0.99 -> +0.99 rise becomes a fall and
         # a rising-edge trigger stops locking entirely.
         scope = Scope(device="null", samplerate=96000, samples=3200,
-                      mirror=True, yt_mode=True, yt_trigger_us=500.0)
+                      mirror=True, yt_trigger_us=500.0)
         self.addCleanup(scope.stream.close)
         scope.show_frame(picture_frame())
         x = scope._pending[:, 0]
