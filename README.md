@@ -179,28 +179,36 @@ fewer, using the existing raster and stochastic gamma controls. Equal or
 all-dark candidates remain evenly interleaved. No XY coordinates are
 arithmetically averaged. Press `f` in fusion mode to cycle.
 
-For a conventional single-input scope using its internal timebase, use the
-dedicated Y-T raster output:
+A conventional single-input scope, using its own timebase, needs nothing
+special: every trace already carries one unique rising edge on X, so put the X
+lead on the scope's single input, set it to Y-T, choose a rising-edge trigger
+near +0.95, and set a timebase covering one complete trace (the rate is printed
+at startup).
 
 ```bash
-python main.py --mode scope --xy-dir ./images_xy --scope-yt --device BlackHole
+python main.py --mode scope --xy-dir ./images_xy --device BlackHole
 ```
 
-This fixes the sweep direction and draws on a fixed row timeline, with one
-unique rising trigger marker on X per trace. Set the scope to Y-T, use the X
-lead, choose a rising-edge trigger
-near +0.95, and set a timebase covering one complete trace. It is a runtime
-setting and does not require another bake. The marker is 250 us by default; use
-`--scope-yt-trigger 500` (or `--scope-yt-trigger-us 500`) to make it 500 us.
-Y-T requires complete traces: omit `--scope-realtime` and leave
-`SCOPE_REALTIME=False`. Mode/sweep cycling is locked while Y-T is active, and
-`p` prints the trigger duration and timing mode along with the other settings.
-`--scope-yt-timing fixed` is the default: each row keeps its time slot even when
-other rows change brightness or become empty. Dwell remains brightness-dependent
-within a row, so tone may change and local features can still move within their
-slot. Empty slots use a negative edge rail. For comparison, use
-`--scope-yt-timing dwell` to restore the previous Y-T waveform. Regular XY raster
-output is unchanged. See `scope_arguments.md` for the sample layout and tradeoffs.
+The trigger is on by default because it costs an XY display nothing. The marker
+sweeps rather than dwelling — an edge trigger fires on the crossing, so parking
+at the extremes only makes them bright — and it is parked outside the ±0.9
+picture box, the same off-screen excursion `--scope-overscan` uses. Set the
+scope so ±0.9 fills the screen and the marker deflects past the phosphor
+entirely. `--no-scope-trigger` removes it; `--scope-trigger-us 500` lengthens
+it from the 250 µs default; `--scope-trigger-shape step` restores the original
+two-dwell marker for a scope whose trigger will not hold on a ramp (it shows as
+two bright dots in XY). It is a runtime setting and needs no rebake, and it
+constrains nothing — every renderer, `--scope-mix` and `--scope-realtime`
+included, carries it.
+
+Row timing is separate. `--scope-yt-timing fixed` gives every row an equal time
+slot, so unrelated brightness cannot move or resize a row and the picture stays
+registered — at the cost of the tonal balance whole-trace weighting gives you,
+and a negative rail where empty rows sit. `dwell` is the default and the
+long-standing behaviour. Fixed timing is raster-only; asking for it elsewhere
+prints a line and falls back rather than refusing to start. `--scope-yt` is
+kept as a deprecated spelling of `--scope-yt-timing fixed`. See
+`scope_arguments.md` for the sample layout and tradeoffs.
 
 The compact bake stores raw luminance and alpha at 128px. That is above the
 normal raster sweep grid, while stochastic can still use the field directly.
@@ -212,7 +220,19 @@ Press `v` while it is running to cycle vector, raster, stochastic, stipple,
 and fusion. Press `i` to toggle alpha-aware luminance inversion, or start with
 `--scope-invert`; vector keeps its baked geometry but shifts dwell toward
 originally dark stroke regions, and transparent padding remains dark. `r` or
-`R` rotates the complete scope output by 90°, matching local display mode.
+`R` rotates the complete scope output by 90° and `m` mirrors it left-right,
+both matching local display mode.
+
+Orientation can also be set from the command line, in local mode as well as
+scope mode: `--rotation {0,90,180,270}` and `--mirror` / `--no-mirror`. They
+default to `INITIAL_ROTATION` and `INITIAL_MIRROR` in
+`constantStorage/display_constants.py`, so turning a display sideways no
+longer means editing a constant:
+
+```bash
+python main.py --mode local --rotation 90 --mirror
+```
+
 See `SCOPE_MODE.md` for wiring, sample-budget, and renderer details.
 
 ### The `settings.py` Way (Legacy)

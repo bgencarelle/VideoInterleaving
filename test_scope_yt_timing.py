@@ -80,16 +80,23 @@ class FixedYtTests(unittest.TestCase):
                                    yt_trigger_samples=scope.yt_trigger_samples)
             frame = emitter.emit(self.a)
             scope.show_frame(frame)
+            # The reserved window is the marker's; everything after it is the
+            # picture, byte for byte. (The ramp parks Y inside that window too,
+            # which is what keeps the marker off an XY display.)
             np.testing.assert_array_equal(scope._pending[48:], frame[48:])
-            np.testing.assert_array_equal(scope._pending[:, 1], frame[:, 1])
             scope._frame, scope._pending = scope._pending, None
             chunks=[]
             for count in (17, 29, 3154, 17, 3183):
                 buf=np.empty((count,2),np.float32)
                 scope._callback(buf,count,None,None);chunks.append(buf)
             out=np.vstack(chunks)
+            # One rising crossing per trace, wherever in the marker it falls:
+            # two traces of 3200 samples were consumed, so exactly two.
             crossings=np.flatnonzero((out[:-1,0]<.95)&(out[1:,0]>=.95))+1
-            np.testing.assert_array_equal(crossings,[24,3224])
+            self.assertEqual(len(crossings), 2)
+            # ...and they are exactly one trace apart, which is the property a
+            # scope timebase actually depends on.
+            self.assertEqual(int(crossings[1] - crossings[0]), self.n)
         finally:
             scope.stream.close()
 
@@ -123,7 +130,9 @@ class FixedYtTests(unittest.TestCase):
                 self.assertEqual(out.shape,(3200,2))
                 self.assertTrue(np.isfinite(out).all())
                 crossings=np.flatnonzero((out[:-1,0]<.95)&(out[1:,0]>=.95))+1
-                np.testing.assert_array_equal(crossings,[24])
+                # Filtering and rotation must not manufacture a second edge.
+                self.assertEqual(len(crossings), 1)
+                self.assertLess(int(crossings[0]), scope.yt_trigger_samples)
         finally:
             scope.stream.close()
 

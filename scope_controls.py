@@ -40,6 +40,7 @@ scope live controls
   f         fusion       vrs -> vr -> sv -> sr (in fusion mode)
   i         inverse      luminance normal / inverted
   r / R     rotation     0 -> 90 -> 180 -> 270
+  m         mirror      left-right flip on / off
   w         sweep       alternate -> palindrome -> retrace
   a         autofit     on / off
   p         print current settings as command-line flags
@@ -109,9 +110,6 @@ class KeyMap:
         elif ch == "l":
             self._bump("lowpass", +1)
         elif ch == "v":
-            if s.get("yt"):
-                self.message = "mode cycling unavailable in Y-T mode (raster required)"
-                return True
             if s.get("mode_locked"):
                 self.message = "mode cycling unavailable in realtime/mix mode"
                 return True
@@ -151,9 +149,17 @@ class KeyMap:
             s["rotation"] = (int(s.get("rotation", 0)) + 90) % 360
             self.transform_dirty = True
             self.message = f"rotation = {s['rotation']} degrees"
+        elif ch == "m":
+            # Same key and same meaning as local mode's window mirror, so the
+            # two display paths are not muscle-memory traps for each other.
+            s["mirror"] = not s.get("mirror", False)
+            self.transform_dirty = True
+            self.message = "mirror = " + ("on" if s["mirror"] else "off")
         elif ch == "w":
-            if s.get("yt"):
-                self.message = "Y-T output fixes sweep = retrace"
+            if s.get("yt_timing") == "fixed":
+                # Not the trigger: fixed row timing builds its own closed
+                # timeline, so a sweep mode has nothing left to decide.
+                self.message = "fixed row timing supplies its own retrace"
                 return True
             order = ["alternate", "palindrome", "retrace"]
             i = order.index(s.get("sweep", "alternate")) if s.get("sweep") in order else 0
@@ -178,18 +184,18 @@ def as_flags(s):
     """Current state as flags you can paste into a command line."""
     mode = s.get("mode", "raster" if s.get("raster") else "vector")
     mix_hz = s.get("mix_hz")
-    yt = bool(s.get("yt"))
-    if yt:
-        out = ["--scope-yt"]
-        out.append(f"--scope-yt-trigger {s.get('yt_trigger_us', 250.0):g}")
-        out.append(f"--scope-yt-timing {s.get('yt_timing', 'fixed')}")
-    elif mix_hz:
+    # The trigger is no longer a mode, so it no longer replaces the mode flag
+    # -- it is one more setting printed alongside everything else.
+    yt_timing = s.get("yt_timing", "dwell")
+    if mix_hz:
         out = [f"--scope-mix {mix_hz:g}",
                f"--scope-mix-duty {s.get('mix_duty', 0.5):g}"]
     else:
         out = [] if mode == "vector" else [f"--scope-mode {mode}"]
         if mode == "fusion":
             out.append(f"--scope-fusion {s.get('fusion_components', 'vrs')}")
+    if yt_timing == "fixed":
+        out.append("--scope-yt-timing fixed")
     out.append(f"--scope-trim {s.get('trim', 0.02):g}")
     if mix_hz:
         raster_gamma = s.get("raster_gamma", 2.2)
@@ -218,7 +224,7 @@ def as_flags(s):
         out.append(f"--scope-precondition {s['precondition']:g}")
     if s.get("rows"):
         out.append(f"--scope-rows {int(s['rows'])}")
-    if not yt and s.get("sweep", "alternate") != "alternate":
+    if yt_timing != "fixed" and s.get("sweep", "alternate") != "alternate":
         out.append(f"--scope-sweep {s['sweep']}")
     if s.get("lowpass"):
         out.append(f"--scope-lowpass {s['lowpass']:g}")
@@ -226,6 +232,17 @@ def as_flags(s):
         out.append("--scope-no-autofit")
     if s.get("invert", False):
         out.append("--scope-invert")
+    if int(s.get("rotation", 0)) % 360:
+        out.append(f"--rotation {int(s['rotation']) % 360}")
+    if s.get("mirror", False):
+        out.append("--mirror")
+    if not s.get("yt", True):
+        out.append("--no-scope-trigger")
+    else:
+        if abs(float(s.get("yt_trigger_us", 250.0)) - 250.0) > 1e-9:
+            out.append(f"--scope-trigger-us {s['yt_trigger_us']:g}")
+        if s.get("trigger_shape", "ramp") != "ramp":
+            out.append(f"--scope-trigger-shape {s['trigger_shape']}")
     return "  " + " ".join(out)
 
 

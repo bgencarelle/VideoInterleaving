@@ -129,10 +129,13 @@ fs.writeFileSync({json.dumps(os.path.join(tmp, 'trace.f32'))},
                  Buffer.from(new Float32Array(out).buffer));
 const yt=addYtTrigger(out,n,48000,250);
 const yt500=addYtTrigger(out,n,48000,500);
+const ytStep=addYtTrigger(out,n,48000,250,'step');
 fs.writeFileSync({json.dumps(os.path.join(tmp, 'yt.f32'))},
                  Buffer.from(new Float32Array(yt).buffer));
 fs.writeFileSync({json.dumps(os.path.join(tmp, 'yt500.f32'))},
                  Buffer.from(new Float32Array(yt500).buffer));
+fs.writeFileSync({json.dumps(os.path.join(tmp, 'ytstep.f32'))},
+                 Buffer.from(new Float32Array(ytStep).buffer));
 console.log(JSON.stringify({{rows:rows,cols:cols}}));
 """)
     r = subprocess.run(["node", js_path], capture_output=True, text=True)
@@ -145,9 +148,13 @@ console.log(JSON.stringify({{rows:rows,cols:cols}}));
     py = render_luma(lum, n, trim=0.10, gamma=2.2)
     js_yt = np.fromfile(os.path.join(tmp, "yt.f32"), dtype=np.float32).reshape(-1, 2)
     js_yt500 = np.fromfile(os.path.join(tmp, "yt500.f32"), dtype=np.float32).reshape(-1, 2)
-    from scope_out import yt_trigger_frame
-    py_yt = yt_trigger_frame(js, trigger_samples=round(48000 * 0.00025))
-    py_yt500 = yt_trigger_frame(js, trigger_samples=round(48000 * 0.0005))
+    js_ytstep = np.fromfile(os.path.join(tmp, "ytstep.f32"), dtype=np.float32).reshape(-1, 2)
+    from scope_out import clip_for_trigger, trigger_frame
+    clipped = clip_for_trigger(js)
+    py_yt = trigger_frame(clipped, trigger_samples=round(48000 * 0.00025))
+    py_yt500 = trigger_frame(clipped, trigger_samples=round(48000 * 0.0005))
+    py_ytstep = trigger_frame(clipped, trigger_samples=round(48000 * 0.00025),
+                              shape="step")
 
     ok = True
 
@@ -171,10 +178,26 @@ console.log(JSON.stringify({{rows:rows,cols:cols}}));
 
     yt_matches = np.array_equal(py_yt, js_yt)
     ok &= yt_matches
-    print(f"  {'PASS' if yt_matches else 'FAIL'}  Y-T X trigger; Y preserved")
+    print(f"  {'PASS' if yt_matches else 'FAIL'}  X trigger, ramp (default)")
     yt500_matches = np.array_equal(py_yt500, js_yt500)
     ok &= yt500_matches
-    print(f"  {'PASS' if yt500_matches else 'FAIL'}  Y-T custom 500 us trigger")
+    print(f"  {'PASS' if yt500_matches else 'FAIL'}  X trigger, custom 500 us")
+    ytstep_matches = np.array_equal(py_ytstep, js_ytstep)
+    ok &= ytstep_matches
+    print(f"  {'PASS' if ytstep_matches else 'FAIL'}  X trigger, step shape")
+    # The claim that makes the marker safe to leave on: on an XY display the
+    # ramp deflects past the phosphor instead of drawing two bright dots.
+    marker = round(48000 * 0.00025)
+    off_picture = bool(np.all(np.abs(py_yt[:marker, 1]) > 0.9))
+    moving = bool(np.all(np.diff(py_yt[:marker, 0]) >= -1e-6)
+                  and np.count_nonzero(np.abs(np.diff(py_yt[:marker, 0])) > 1e-6)
+                  >= marker // 2)
+    single = int(np.count_nonzero((py_yt[:-1, 0] < 0.95)
+                                  & (py_yt[1:, 0] >= 0.95))) == 1
+    benign = off_picture and moving and single
+    ok &= benign
+    print(f"  {'PASS' if benign else 'FAIL'}  ramp is off-picture, moving, "
+          f"and crosses once")
 
     print("\nrendered picture -- catches the missing contrast stretch")
     try:

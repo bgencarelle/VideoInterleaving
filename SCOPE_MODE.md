@@ -607,19 +607,22 @@ python main.py --mode scope --xy-dir images_xy [options]
 | `--scope-precondition F` | Optional raster horizontal compensation on the final sweep grid (default 0 for natural facial tone). |
 | `--scope-fps N` | Scope redraw rate. Defaults to `IPS`. Sets `N = rate/fps`. |
 | `--scope-samples N` | Path length per trace directly. Overrides FPS; incompatible with mix. |
-| `--scope-realtime` | Stream continuously; index changes land within a row (raster only; incompatible with `--scope-yt`). |
+| `--scope-realtime` | Stream continuously; index changes land within a row (raster only). |
 | `--scope-mix [HZ]` | Vector/raster/stochastic/raster/stipple/raster whole-trace mix (default 120 Hz). |
 | `--scope-mix-duty F` | Raster fraction; remainder splits equally between vector/stochastic/stipple (default 0.5). |
 | `--scope-sweep MODE` | `alternate` (default), `palindrome`, or `retrace`. |
-| `--scope-yt` | One-channel Y-T viewing on X with a unique trigger edge, fixed row timing by default, and `retrace` sweep. |
-| `--scope-yt-trigger US` | Set the Y-T X trigger marker duration in microseconds (default 250; `--scope-yt-trigger 500` gives a 500 us marker). Alias: `--scope-yt-trigger-us`. |
-| `--scope-yt-timing fixed\|dwell` | `fixed` (default): reserve equal row slots, including empty rows, to prevent frame width changes caused by time redistribution. `dwell`: previous whole-trace weighting for comparison. Both retain X as the picture signal. |
+| `--scope-trigger` / `--no-scope-trigger` | One unique rising edge on X per trace, so a single-input scope in Y-T locks onto the picture. On by default in every renderer; the `ramp` shape is invisible on an XY display. |
+| `--scope-trigger-shape ramp\|step` | `ramp` (default): the marker sweeps and parks outside +/-0.9, so an XY display never shows it. `step`: the original two-dwell marker, for a scope whose trigger will not hold on a ramp. |
+| `--scope-trigger-us US` | Trigger marker duration in microseconds (default 250). Aliases: `--scope-trigger-duration`, `--scope-yt-trigger`, `--scope-yt-trigger-us`. |
+| `--scope-yt-timing fixed\|dwell` | Raster row timing, independent of the trigger. `dwell` (default): brightness shares out the whole trace. `fixed`: equal row slots, including empty ones, so unrelated brightness cannot move or resize a row -- at the cost of tonal balance and a rail on empty rows. Raster only; degrades to `dwell` with a printed reason elsewhere. `--scope-yt` is a deprecated spelling of `--scope-yt-timing fixed`. |
 | `--scope-rows N` | Raster scanline count (default: auto from budget). |
 | `--scope-gamma F` | Active renderer's exponent: raster default 2.2, stochastic default 2; sets both in mix. |
 | `--scope-density F` | Raster samples per cell (1.0 = finest). |
 | `--scope-trim F` | Ignore luminance below this level (default 0.02). |
 | `--scope-invert` / `--no-scope-invert` | Toggle alpha-aware inversion; vector retains geometry and inverts dwell weighting. |
 | `--scope-fields N` | Raster interlacing (1 = progressive). |
+| `--rotation {0,90,180,270}` | Quarter-turn rotation, applied in image space so X stays the fast sweep. Works in local mode too; defaults to `INITIAL_ROTATION`. Live key `r`. |
+| `--mirror` / `--no-mirror` | Left-right flip, applied at the output boundary — before the Y-T marker, so the trigger edge stays rising. Works in local mode too; defaults to `INITIAL_MIRROR`. Live key `m`. |
 | `--ask` / `--scope-ask` | Choose the audio output interactively. |
 | `--device X` | Audio output by index or name fragment, e.g. `--device Scarlett` |
 
@@ -629,7 +632,7 @@ While scope mode owns a terminal, press `v` to cycle
 inversion, `r` or `R` to rotate the complete XY output in 90° steps, and
 `p` to print the current mode
 and live settings as reusable command-line flags. Cycling is disabled in
-`--scope-realtime`, `--scope-mix`, and `--scope-yt`, whose audio/scheduling paths
+`--scope-realtime` and `--scope-mix`, whose audio/scheduling paths
 are fixed at startup; restart with `--scope-mode` to leave them. Y-T also locks
 the sweep to retrace, and printed flags include its trigger duration.
 

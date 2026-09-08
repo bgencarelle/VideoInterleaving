@@ -74,8 +74,12 @@ def _is_macos() -> bool:
 class DisplayState:
     def __init__(self, image_size: tuple[int, int] = (640, 480)) -> None:
         self.image_size = image_size
-        self.rotation = INITIAL_ROTATION
-        self.mirror = INITIAL_MIRROR
+        # Read at construction, not from the names bound at import: those are
+        # copies of the constants taken before main.py has had a chance to
+        # apply --rotation / --mirror, so a CLI override would be silently
+        # ignored here while the scope path honoured it.
+        self.rotation = getattr(settings, "INITIAL_ROTATION", INITIAL_ROTATION)
+        self.mirror = getattr(settings, "INITIAL_MIRROR", INITIAL_MIRROR)
         self.fullscreen = True
         self.run_mode = True
         self.needs_update = False

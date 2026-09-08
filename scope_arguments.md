@@ -208,6 +208,28 @@ stochastic contribution from raster's grid-compensated contribution.
 
 ## Group D — the output path
 
+### `--rotation {0,90,180,270}` and `--mirror` / `--no-mirror`
+
+Orientation of the picture. These are not scope-only flags: the local window
+and the scope output are two renderings of the same image, so both honour
+them, and both default to `INITIAL_ROTATION` / `INITIAL_MIRROR` in
+`constantStorage/display_constants.py`. Before these existed, the only way to
+turn a display sideways was to edit that constant — a source change to hang a
+screen differently.
+
+Live keys match local mode: `r` rotates a quarter turn, `m` toggles mirror,
+and `p` prints both back as flags.
+
+The two are applied in different places, deliberately. Rotation happens in
+*image* space, before the trace is generated: at 90 and 270 degrees, rotating
+a finished XY trace would move the fast sweep from X onto Y, which breaks
+raster row timing and the Y-T trigger. The renderer builds horizontal rows for
+the new orientation instead. A mirror only negates X — the sweep stays on X
+and every row keeps its slot and duration — so it is applied at the output
+boundary, where it costs one sign flip rather than a second orientation
+parameter threaded through every renderer. It lands *before* the Y-T marker is
+inserted, so the trigger's rising edge stays rising.
+
 ### `--scope-oversample N` (default 1)
 
 Generate `N ×` samples, bandlimit circularly, decimate back down.
@@ -258,28 +280,60 @@ a full-brightness diagonal. Raster now renders per-trace and gates on
 largely gone in raster mode. Vector still emits per index, so the old warning
 still applies there.
 
-### `--scope-yt`
+### `--scope-trigger` / `--no-scope-trigger` (default on)
 
-Draws the picture on X for viewing alone in an oscilloscope's Y-T mode, with
-a unique trigger marker. It implies raster mode and `--scope-sweep retrace` so
-consecutive traces never alternate or appear mirrored in time.
+One unique rising edge on X per trace, so a scope with a single input, in its
+own Y-T timebase, can lock onto the picture. This used to be a mode
+(`--scope-yt`) that implied raster, forced `retrace`, and refused to start next
+to mix, realtime, stochastic or stipple. It is a property of the output now: it
+is stamped on the finished frame in `Scope.show_frame()`, which every renderer
+already passes through, so there is nothing left for it to be incompatible
+with. That is why it can simply be on.
 
-Every trace begins with a configurable `-0.99 -> +0.99` marker on X. The
-default duration is 250 us; set it with `--scope-yt-trigger US` (for example,
-`--scope-yt-trigger 500`). Picture content remains inside +/-0.9, making a
-rising trigger level around +0.95 unique. Set the oscilloscope timebase so one
-complete trace fills the screen. The marker occupies a reserved interval in
-fixed timing; 500 us is its total duration, including both low and high halves.
-X remains the picture signal; channels are not exchanged.
+Picture content lives inside +/-0.9 and the marker reaches 0.99, so a rising
+trigger level around +0.95 sees only the marker. Set the timebase so one
+complete trace fills the screen; the trace rate is printed at startup. Because
+a filter applied after the geometry can ring above that threshold, X is clipped
+to +/-0.9 immediately before the marker is inserted — otherwise a bright
+highlight becomes a second edge and the picture will not sit still.
 
-This is a runtime output mode; it does not require a rebake. It cannot be
-combined with mix, stochastic, stipple, vector, fusion, or `--scope-realtime`.
-The realtime row stream does not guarantee complete trace lengths and therefore
-cannot currently keep the periodic trigger aligned. Use `SCOPE_REALTIME=False`.
-In Y-T mode, `v` and `w` keep raster/retrace selected; `p` includes the custom
-trigger duration and timing mode in the printed flags.
+It does not require a rebake, and it is unrelated to whether you are looking at
+the output in XY or Y-T. `--no-scope-trigger` removes it.
 
-### `--scope-yt-timing fixed|dwell` (default `fixed`)
+### `--scope-trigger-shape ramp|step` (default `ramp`)
+
+What the marker looks like, and the reason it can be left on.
+
+`ramp` sweeps X monotonically from -0.99 to +0.99 across the reserved interval,
+with a couple of samples of hold at each end for the comparator, and pins Y to
+the same rail for the duration. An edge trigger fires on the CROSSING, so
+dwelling at the extremes buys nothing but brightness — and a stationary beam is
+the brightest thing on a scope. Moving the whole marker outside the +/-0.9
+picture box is the same off-screen-excursion trick `--scope-overscan` uses for
+travel moves: set the scope so +/-0.9 fills the screen and the marker deflects
+past the phosphor. An XY display shows no sign of it.
+
+`step` is the original: half the interval parked at -0.99, half at +0.99, Y
+untouched. On a Y-T scope it is ideal. On an XY scope it is two hard bright
+dots at the top corners with a streak between them. Use it if your scope's
+trigger will not hold on the ramp — an AC-coupled trigger with a low corner is
+the likely case.
+
+### `--scope-trigger-us US` (default 250)
+
+Marker duration in microseconds, counted as the whole interval. Aliases:
+`--scope-trigger-duration`, `--scope-yt-trigger`, `--scope-yt-trigger-us`.
+Longer means a slower, more easily triggered edge and more samples taken from
+the picture; in fixed row timing it is a reserved interval, so it comes out of
+the row budget directly.
+
+### `--scope-yt-timing fixed|dwell` (default `dwell`)
+
+Raster row timing. Independent of the trigger — this decides how the picture is
+drawn, the trigger only decides how a scope finds the start of it.
+
+`dwell` is the default and the long-standing behaviour: each row's share of the
+trace is proportional to its brightness.
 
 `fixed` gives every row a fixed time slot. Empty rows retain their slots rather
 than disappearing from the timeline. Trigger, picture, border and return have
@@ -293,14 +347,21 @@ compared with allocating time according to each row's total brightness. Empty
 slots sit at X=-0.936 (normal picture range is within +/-0.9): that may appear as
 an edge rail because this is single-channel output with no blanking input.
 
-`dwell` restores the earlier Y-T waveform, with brightness determining the share
-of the entire trace allocated to each row. Its marker replaces the initial X
-samples, as before. Use this setting for A/B comparison without replacing files.
-These options do not change regular XY raster output or require rebaking.
+`fixed` is implemented inside `render_luma`, so it is genuinely raster-only —
+but asking for it elsewhere prints a line and falls back to `dwell` rather than
+refusing to start. The same applies with `--scope-realtime`, which streams
+partial traces, and with `--scope-mix`, which alternates renderers. It also
+supplies its own retrace, so `--scope-sweep` is ignored and says so.
+
+`--scope-yt` is kept as a deprecated spelling of `--scope-yt-timing fixed`.
 
 ```bash
-python main.py --mode scope --scope-yt --scope-yt-timing fixed \\
-  --xy-dir images_xy --device BlackHole --scope-border .09 --scope-yt-trigger 500
+# Y-T on a single-input scope, with rock-solid row registration
+python main.py --mode scope --scope-yt-timing fixed \\
+  --xy-dir images_xy --device BlackHole --scope-border .09 --scope-trigger-us 500
+
+# the same signal on an XY scope: nothing to turn off
+python main.py --mode scope --xy-dir images_xy --device BlackHole
 ```
 
 ---

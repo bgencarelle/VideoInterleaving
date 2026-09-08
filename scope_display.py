@@ -36,18 +36,19 @@ import numpy as np
 import settings
 import scope_out as _scope_out
 
-_REQUIRED_SCOPE_OUT_API = 3
+_REQUIRED_SCOPE_OUT_API = 5
 _scope_out_api = getattr(_scope_out, "SCOPE_OUT_API_VERSION", 0)
 _scope_signature = inspect.signature(_scope_out.Scope.__init__)
 if (_scope_out_api != _REQUIRED_SCOPE_OUT_API or
         "rotation" not in _scope_signature.parameters or
-        "yt_mode" not in _scope_signature.parameters):
+        "mirror" not in _scope_signature.parameters or
+        "trigger_shape" not in _scope_signature.parameters):
     raise RuntimeError(
         "scope_display.py and scope_out.py are from different revisions. "
         f"Loaded scope_out from {_scope_out.__file__!r}; "
         f"API={_scope_out_api}, constructor={_scope_signature}. "
-        "Replace scope_out.py with the rotation/Y-T-aware file from the "
-        "same runtime bundle as scope_display.py."
+        "Replace scope_out.py with the rotation/mirror/trigger-aware file "
+        "from the same runtime bundle as scope_display.py."
     )
 
 from time import monotonic as _time_mono
@@ -141,11 +142,20 @@ def _bootstrap():
                         dest="scope_stipple", action="store_true")
     ap.add_argument("--scope-invert", action=argparse.BooleanOptionalAction,
                     default=None)
-    ap.add_argument("--scope-yt", action="store_true",
-                    help="stable X trigger edge for one-channel Y-T viewing")
-    ap.add_argument("--scope-yt-trigger", "--scope-yt-trigger-us",
-                    dest="scope_yt_trigger_us", type=float, metavar="US")
+    ap.add_argument("--scope-trigger", action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="one rising X edge per trace (on by default)")
+    ap.add_argument("--scope-trigger-us", "--scope-trigger-duration",
+                    "--scope-yt-trigger", "--scope-yt-trigger-us",
+                    dest="scope_trigger_us", type=float, metavar="US")
+    ap.add_argument("--scope-trigger-shape", choices=("ramp", "step"))
     ap.add_argument("--scope-yt-timing", choices=("fixed", "dwell"))
+    ap.add_argument("--scope-yt", action="store_true",
+                    help=argparse.SUPPRESS)  # deprecated: = fixed timing
+    ap.add_argument("--rotation", type=int, choices=[0, 90, 180, 270],
+                    help="quarter-turn rotation of the output")
+    ap.add_argument("--mirror", action=argparse.BooleanOptionalAction,
+                    default=None, help="left-right flip of the output")
     ap.add_argument("--scope-walk-radius", type=int)
     ap.add_argument("--scope-walk-stride", type=int)
     ap.add_argument("--scope-walk-reseed-ms", type=float)
@@ -190,23 +200,24 @@ def _bootstrap():
         settings.SCOPE_RASTER = settings.SCOPE_RENDER_MODE == "raster"
     if args.scope_invert is not None:
         settings.SCOPE_INVERT = args.scope_invert
-    if args.scope_yt:
-        if (args.scope_mode not in (None, "raster")
-                or args.scope_stochastic or args.scope_stipple):
-            ap.error("--scope-yt is a raster-only output mode")
-        if settings.SCOPE_REALTIME:
-            ap.error("--scope-yt requires complete traces; set SCOPE_REALTIME=False")
-        settings.SCOPE_YT = True
-        settings.SCOPE_RENDER_MODE = "raster"
-        settings.SCOPE_RASTER = True
-        settings.SCOPE_SWEEP = "retrace"
-    if args.scope_yt_trigger_us is not None:
-        if (not math.isfinite(args.scope_yt_trigger_us)
-                or args.scope_yt_trigger_us <= 0):
-            ap.error("--scope-yt-trigger must be finite and greater than zero")
-        settings.SCOPE_YT_TRIGGER_US = args.scope_yt_trigger_us
+    if args.rotation is not None:
+        settings.INITIAL_ROTATION = int(args.rotation) % 360
+    if args.mirror is not None:
+        settings.INITIAL_MIRROR = 1 if args.mirror else 0
+    if args.scope_trigger is not None:
+        settings.SCOPE_TRIGGER = args.scope_trigger
+    if args.scope_trigger_shape is not None:
+        settings.SCOPE_TRIGGER_SHAPE = args.scope_trigger_shape
+    if args.scope_trigger_us is not None:
+        if (not math.isfinite(args.scope_trigger_us)
+                or args.scope_trigger_us <= 0):
+            ap.error("--scope-trigger-us must be finite and greater than zero")
+        settings.SCOPE_TRIGGER_US = args.scope_trigger_us
+        settings.SCOPE_YT_TRIGGER_US = None   # the CLI wins over the alias
     if args.scope_yt_timing is not None:
         settings.SCOPE_YT_TIMING = args.scope_yt_timing
+    elif args.scope_yt:
+        settings.SCOPE_YT_TIMING = "fixed"
     if args.scope_gamma is not None:
         if settings.SCOPE_RENDER_MODE == "fusion":
             settings.SCOPE_GAMMA = args.scope_gamma
@@ -480,7 +491,9 @@ def _swap_device(old_scope, spec, source, fps, samples, main_libs, float_libs,
     new_scope = Scope(
         fps=fps, samples=samples, device=dev, source=source,
         invert_y=False, rotation=getattr(old_scope, "rotation", 0),
-        yt_mode=getattr(old_scope, "yt_mode", False),
+        mirror=getattr(old_scope, "mirror", False),
+        trigger=getattr(old_scope, "trigger", True),
+        trigger_shape=getattr(old_scope, "trigger_shape", "ramp"),
         yt_trigger_us=getattr(old_scope, "yt_trigger_us", 250.0),
         yt_trigger_level=getattr(old_scope, "yt_trigger_level", 0.99))
     new_cal = {}
@@ -509,15 +522,22 @@ def run_scope(clock_source=None):
     fps = getattr(settings, "SCOPE_FPS", None) or IPS
     samples = getattr(settings, "SCOPE_SAMPLES", None)
     render_mode = getattr(settings, "SCOPE_RENDER_MODE", None)
-    yt_mode = bool(getattr(settings, "SCOPE_YT", False))
-    yt_timing = settings.SCOPE_YT_TIMING
+    trigger_on = bool(getattr(settings, "SCOPE_TRIGGER", True))
+    trigger_shape = getattr(settings, "SCOPE_TRIGGER_SHAPE", "ramp")
+    if trigger_shape not in ("ramp", "step"):
+        raise ValueError("SCOPE_TRIGGER_SHAPE must be ramp or step")
+    yt_timing = getattr(settings, "SCOPE_YT_TIMING", "dwell")
+    if getattr(settings, "SCOPE_YT", False):
+        yt_timing = "fixed"          # deprecated settings.py spelling
     if yt_timing not in ("fixed", "dwell"):
         raise ValueError("SCOPE_YT_TIMING must be fixed or dwell")
-    yt_trigger_us = float(settings.SCOPE_YT_TRIGGER_US)
-    if not math.isfinite(yt_trigger_us) or yt_trigger_us <= 0:
-        raise ValueError("SCOPE_YT_TRIGGER_US must be finite and greater than zero")
-    if yt_mode:
-        render_mode = "raster"
+    # SCOPE_YT_TRIGGER_US was the name this shipped under; an existing
+    # settings.py that sets it should not quietly stop being honoured.
+    trigger_us = float(getattr(settings, "SCOPE_TRIGGER_US", 250.0)
+                       if getattr(settings, "SCOPE_YT_TRIGGER_US", None) is None
+                       else settings.SCOPE_YT_TRIGGER_US)
+    if not math.isfinite(trigger_us) or trigger_us <= 0:
+        raise ValueError("SCOPE_TRIGGER_US must be finite and greater than zero")
     if getattr(settings, "SCOPE_RASTER", False) and render_mode == "vector":
         render_mode = "raster"       # compatibility with older settings.py
     if render_mode not in ("vector", "raster", "stochastic", "stipple",
@@ -532,6 +552,7 @@ def run_scope(clock_source=None):
     if rotation % 90:
         print(f"[SCOPE] INITIAL_ROTATION {rotation} is not a quarter turn; using 0")
         rotation = 0
+    mirror = bool(getattr(settings, "INITIAL_MIRROR", 0))
     try:
         fusion_components = normalize_fusion_components(
             getattr(settings, "SCOPE_FUSION", "vrs"))
@@ -539,9 +560,21 @@ def run_scope(clock_source=None):
         print(f"[SCOPE] {e}; using vrs")
         fusion_components = "vrs"
     realtime = getattr(settings, "SCOPE_REALTIME", False)
-    if yt_mode and realtime:
-        raise ValueError("Y-T requires complete traces; remove --scope-realtime "
-                         "and set SCOPE_REALTIME=False to keep the trigger aligned")
+    # Degrade, do not refuse. Fixed row timing is implemented inside
+    # render_luma, so it really is raster-only -- but the answer to asking for
+    # it in stochastic is to say so and draw something, not to exit.
+    if yt_timing == "fixed" and render_mode != "raster":
+        print(f"[SCOPE] fixed row timing is raster only; {render_mode} keeps "
+              f"dwell timing. The trigger marker is unaffected.")
+        yt_timing = "dwell"
+    if yt_timing == "fixed" and realtime:
+        # The marker stays periodic either way -- it is stamped on a sample
+        # counter, not on the row stream -- but fixed slots assume a whole
+        # trace, which realtime does not deliver.
+        print("[SCOPE] realtime streams partial traces; using dwell timing. "
+              "The trigger stays periodic, so a Y-T scope still locks, but "
+              "the picture may drift against it.")
+        yt_timing = "dwell"
     import make_file_lists
     from index_calculator import update_index
     from folder_selector import update_folder_selection, folder_dictionary
@@ -563,7 +596,12 @@ def run_scope(clock_source=None):
     lowpass = getattr(settings, "SCOPE_LOWPASS", None)
     oversample = int(getattr(settings, "SCOPE_OVERSAMPLE", 1) or 1)
     sweep_mode = getattr(settings, "SCOPE_SWEEP", "alternate")
-    if yt_mode:
+    if yt_timing == "fixed" and sweep_mode != "retrace":
+        # render_yt_grid builds its own closed timeline and ignores the
+        # chaining a sweep mode sets up, so the two would silently disagree.
+        # Not an error any more, just a stated substitution.
+        print(f"[SCOPE] fixed row timing supplies its own retrace; "
+              f"ignoring --scope-sweep {sweep_mode}.")
         sweep_mode = "retrace"
     fields = max(1, int(getattr(settings, "SCOPE_FIELDS", 1) or 1))
     fields_explicit = bool(getattr(settings, "SCOPE_FIELDS_EXPLICIT", False))
@@ -592,9 +630,14 @@ def run_scope(clock_source=None):
     if mix_hz and realtime:
         print("[SCOPE] mix needs whole passes; ignoring realtime.")
         realtime = False
-    if yt_mode and mix_hz:
-        print("[SCOPE] Y-T is a dedicated one-channel raster path; ignoring mix.")
-        mix_hz = None
+    if yt_timing == "fixed" and mix_hz:
+        # Mix alternates whole traces between renderers, and only the raster
+        # ones can honour fixed slots. The marker is periodic across all of
+        # them regardless, so mix keeps working -- it is only the row timing
+        # that has to give way.
+        print("[SCOPE] mix alternates renderers; using dwell timing so every "
+              "trace is built the same way.")
+        yt_timing = "dwell"
     if mix_hz is not None:
         mix_hz = float(mix_hz)
         if not math.isfinite(mix_hz) or mix_hz <= 0.0:
@@ -843,7 +886,7 @@ def run_scope(clock_source=None):
             density=density, rows=rows,
             precondition=raster_precondition, invert=invert,
             rotation=rotation,
-            alternate=not yt_mode,
+            alternate=(yt_timing != "fixed"),
             grid_rows=(_gen_grid[0] if _gen_grid else None),
             grid_cols=(_gen_grid[1] if _gen_grid else None),
             levels=(cal.get("levels") if cal else None))
@@ -862,20 +905,31 @@ def run_scope(clock_source=None):
     # swaps the fast raster carrier from X to Y at quarter turns, which breaks
     # X-triggered and X-only displays. Every renderer below receives the
     # orientation while the physical output axes remain fixed.
+    # Mirror is the exception to the paragraph above: it only negates X, so
+    # the fast carrier stays on X and it is safe -- and cheaper -- to apply it
+    # at the output rather than re-orienting every renderer's source.
     scope = Scope(fps=fps, samples=samples, device=dev, source=source,
-                  invert_y=False, rotation=0, yt_mode=yt_mode,
-                  yt_trigger_us=yt_trigger_us)
+                  invert_y=False, rotation=0, mirror=mirror,
+                  trigger=trigger_on, trigger_shape=trigger_shape,
+                  yt_trigger_us=trigger_us)
 
-    if yt_mode:
+    if trigger_on:
         marker_us = scope.yt_trigger_us
         trigger_hz = scope.samplerate / max(scope.samples_per_frame, 1)
-        print(f"[SCOPE] Y-T on X: {yt_timing} timing, "
-              f"{trigger_hz:g} Hz trace trigger, {marker_us:g} us marker")
-        if yt_timing == "fixed":
-            print("[SCOPE] Y-T fixed row slots: image width stays registered; "
-                  "brightness controls dwell within each row")
-        print("[SCOPE] Y-T trigger: rising edge near +0.95; set the timebase "
-              "to one complete trace")
+        print(f"[SCOPE] X trigger: {trigger_shape} marker, {marker_us:g} us, "
+              f"{trigger_hz:g} Hz. Rising edge near +0.95.")
+        if trigger_shape == "ramp":
+            print("[SCOPE] The marker sweeps and parks outside +-0.9, so an "
+                  "XY display set to fill the screen never shows it. Use "
+                  "--scope-trigger-shape step if your trigger will not hold.")
+        else:
+            print("[SCOPE] step marker dwells at both rails: two bright dots "
+                  "on an XY display. Y-T only.")
+        print("[SCOPE] One channel, Y-T: take X, set the timebase to one "
+              f"complete trace ({1e6 / max(trigger_hz, 1e-9):g} us).")
+    if yt_timing == "fixed":
+        print("[SCOPE] fixed row slots: image width stays registered; "
+              "brightness controls dwell within each row")
 
     # The baked thumbnail is a hard ceiling on scanlines; clamping silently
     # would look like the row setting being ignored.
@@ -1010,8 +1064,8 @@ def run_scope(clock_source=None):
                         fields=fields, border=border, oversample=oversample,
                         sweep=sweep_mode, autofit=autofit, row_bias=row_bias,
                         precondition=raster_precondition,
-                        yt_timing=yt_timing if yt_mode else None,
-                        yt_trigger_samples=scope.yt_trigger_samples if yt_mode else 0,
+                        yt_timing=yt_timing,
+                        yt_trigger_samples=(scope.yt_trigger_samples if trigger_on else 0),
                         grid=((cal["grid_rows"], cal["grid_cols"])
                               if cal else None),
                         levels=(cal.get("levels") if cal else None))
@@ -1141,11 +1195,13 @@ def run_scope(clock_source=None):
                       raster_gamma=gamma, stochastic_gamma=walk_gamma, rows=rows,
                       lowpass=lowpass, mode=render_mode, raster=use_raster,
                       sweep=sweep_mode, autofit=autofit,
-                      invert=invert, rotation=rotation, yt=yt_mode,
+                      invert=invert, rotation=rotation, mirror=mirror,
+                      yt=trigger_on,
                       yt_trigger_us=scope.yt_trigger_us,
+                      trigger_shape=trigger_shape,
                       yt_timing=yt_timing,
                       precondition=raster_precondition,
-                      mode_locked=bool(yt_mode or realtime or mix_hz),
+                      mode_locked=bool(realtime or mix_hz),
                       mix_hz=mix_hz, mix_duty=mix_duty,
                       stipple_points=stipple_points,
                       fusion_components=fusion_components)
@@ -1187,7 +1243,9 @@ def run_scope(clock_source=None):
         monitor_data["scope_fusion"] = fusion_components if use_fusion else None
         monitor_data["scope_invert"] = invert
         monitor_data["scope_rotation"] = rotation
-        monitor_data["scope_yt"] = yt_mode
+        monitor_data["scope_mirror"] = mirror
+        monitor_data["scope_trigger"] = trigger_on
+        monitor_data["scope_trigger_shape"] = trigger_shape
         monitor_data["scope_yt_trigger_us"] = scope.yt_trigger_us
         monitor_data["scope_yt_timing"] = yt_timing
         monitor_data["scope_border"] = border
@@ -1202,6 +1260,10 @@ def run_scope(clock_source=None):
             scope.samplerate / max(scope.samples_per_frame, 1), 1)
         monitor_data["scope_picture_hz"] = round(
             scope.samplerate / max(scope.samples_per_frame * tap_traces, 1), 1)
+        # Seed both counters so the dashboard shows a 0 from the first poll
+        # rather than an empty field that looks like the metric is missing.
+        monitor_data["scope_beam_parked"] = int(scope.beams_unparked)
+        monitor_data["scope_dac_dropouts"] = int(scope.dac_dropouts)
         if cal:
             monitor_data["scope_grid"] = f"{cal['grid_cols']}x{cal['grid_rows']}"
             monitor_data["scope_samples_per_cell"] = round(
@@ -1239,8 +1301,8 @@ def run_scope(clock_source=None):
         border=border, oversample=oversample, sweep=sweep_mode,
         dc_comp=dc_comp, autofit=autofit, row_bias=row_bias,
         precondition=raster_precondition,
-        yt_timing=yt_timing if yt_mode else None,
-        yt_trigger_samples=scope.yt_trigger_samples if yt_mode else 0,
+        yt_timing=yt_timing,
+        yt_trigger_samples=(scope.yt_trigger_samples if trigger_on else 0),
         grid=_rotation_grid(cal, rotation),
         levels=(cal.get("levels") if cal else None))
     stochastic_emitter = StochasticEmitter(
@@ -1302,8 +1364,8 @@ def run_scope(clock_source=None):
                         fields=fields, border=border, oversample=oversample,
                         sweep=sweep_mode, dc_comp=dc_comp, autofit=autofit,
                         row_bias=row_bias, precondition=raster_precondition,
-                        yt_timing=yt_timing if yt_mode else None,
-                        yt_trigger_samples=scope.yt_trigger_samples if yt_mode else 0,
+                        yt_timing=yt_timing,
+                        yt_trigger_samples=(scope.yt_trigger_samples if trigger_on else 0),
                         grid=_rotation_grid(cal, rotation),
                         levels=(cal.get("levels") if cal else None))
                     stochastic_emitter = StochasticEmitter(
@@ -1361,6 +1423,11 @@ def run_scope(clock_source=None):
                     # Rebuild in image space. The Scope output transform stays
                     # at zero so X remains the fast raster/trigger axis.
                     scope.set_rotation(0)
+                    # Mirror needs no rebuild -- it is a sign flip at the
+                    # output -- but it rides the same dirty flag so one
+                    # keypress cannot leave the two transforms disagreeing.
+                    mirror = bool(live_state.get("mirror", False))
+                    scope.set_mirror(mirror)
                     emitter.reset()
                     emitter.grid = _rotation_grid(cal, rotation)
                     stochastic_emitter.reset()
@@ -1377,6 +1444,7 @@ def run_scope(clock_source=None):
                     try:
                         from lightweight_monitor import monitor_data as _md_rotate
                         _md_rotate["scope_rotation"] = rotation
+                        _md_rotate["scope_mirror"] = mirror
                     except Exception:
                         pass
                     prev_key = None          # queue the current image rotated
@@ -1616,7 +1684,9 @@ def run_scope(clock_source=None):
                                              if use_fusion else None)
                     _md["scope_invert"] = invert
                     _md["scope_rotation"] = rotation
-                    _md["scope_yt"] = yt_mode
+                    _md["scope_mirror"] = mirror
+                    _md["scope_trigger"] = trigger_on
+                    _md["scope_trigger_shape"] = trigger_shape
                     _md["scope_yt_trigger_us"] = scope.yt_trigger_us
                     _md["scope_yt_timing"] = yt_timing
                     _md["scope_yt_grid"] = _rotation_grid(cal, rotation) if cal else None
@@ -1639,6 +1709,14 @@ def run_scope(clock_source=None):
                     _md["scope_indices_skipped"] = int(scope.frames_dropped)
                     _md["scope_underruns"] = int(getattr(source, "underruns", 0)
                                                  if source is not None else 0)
+                    # Both of these are centre-dot causes.  A rising
+                    # scope_beam_parked means frames are arriving stationary
+                    # and the guard is ringing them; a rising
+                    # scope_dac_dropouts means PortAudio filled a block with
+                    # silence and the dot was already on screen.  Which one
+                    # moves tells you where to look.
+                    _md["scope_beam_parked"] = int(scope.beams_unparked)
+                    _md["scope_dac_dropouts"] = int(scope.dac_dropouts)
                     # displayed == index: scope has no FIFO, so the trace being
                     # drawn IS the current index.  Reporting them equal keeps
                     # the shared dashboard's delta meaningful rather than blank.
@@ -1814,10 +1892,10 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
                          else stochastic_emitter).apply_lowpass(frame, lowpass)
             elif lowpass and lowpass_circular is not None:
                 frame = lowpass_circular(frame, lowpass, scope.samplerate)
-            if render_mode == "raster" and emitter.yt_timing == "fixed":
-                # Filtering can overshoot the image range. Keep the +0.95
-                # trigger threshold exclusive to Scope's marker, inserted next.
-                frame[:, 0] = np.clip(frame[:, 0], -0.98, 0.9)
+            # The overshoot clip that used to sit here, gated on raster +
+            # fixed timing, now lives in Scope.show_frame as clip_for_trigger.
+            # It has to cover every renderer once the marker is always on, and
+            # show_frame is the one place they all arrive post-filter.
             if beam_start is not None and (render_mode == "raster"
                                            or exact_handoff):
                 # Circular filters and DC compensation can move sample zero.

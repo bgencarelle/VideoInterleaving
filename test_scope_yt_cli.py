@@ -1,4 +1,12 @@
-"""Y-T configuration regressions; run with python -m unittest test_scope_yt_cli."""
+"""Trigger and row-timing configuration; run with python -m unittest test_scope_yt_cli.
+
+The trigger used to be a MODE, and these tests pinned the five combinations it
+refused to start in. It is a property of the output now -- stamped on the
+finished frame in Scope.show_frame, which every renderer already passes through
+-- so there is nothing left for it to be incompatible with, and what these
+tests pin instead is that the old flags still land somewhere sensible and that
+the awkward combinations degrade with a message rather than exiting.
+"""
 import ast
 import contextlib
 import io
@@ -45,50 +53,82 @@ class YtConfigurationTests(unittest.TestCase):
         with patch.object(sys, "argv", argv), contextlib.redirect_stdout(io.StringIO()):
             return self.ns["configure_runtime"]()
 
-    def test_aliases_reach_the_output_and_printed_flags(self):
-        for flag in ("--scope-yt-trigger", "--scope-yt-trigger-us"):
+    def test_every_duration_alias_reaches_the_output(self):
+        for flag in ("--scope-trigger-us", "--scope-trigger-duration",
+                     "--scope-yt-trigger", "--scope-yt-trigger-us"):
             with self.subTest(flag=flag):
-                self.configure("--scope-yt", flag, "500")
-                self.assertTrue(settings.SCOPE_YT)
-                self.assertEqual(settings.SCOPE_RENDER_MODE, "raster")
-                self.assertEqual(settings.SCOPE_SWEEP, "retrace")
-                scope = Scope(device="null", samplerate=96000, yt_mode=settings.SCOPE_YT,
-                              yt_trigger_us=settings.SCOPE_YT_TRIGGER_US)
+                self.configure(flag, "500")
+                self.assertEqual(settings.SCOPE_TRIGGER_US, 500.0)
+                scope = Scope(device="null", samplerate=96000,
+                              yt_trigger_us=settings.SCOPE_TRIGGER_US)
                 try:
                     self.assertEqual(scope.yt_trigger_samples, 48)
                     state = dict(yt=True, mode="raster", raster=True,
-                                 yt_trigger_us=scope.yt_trigger_us, sweep="retrace")
-                    KeyMap(state).feed("v")
-                    self.assertEqual(state["mode"], "raster")
-                    self.assertIn("--scope-yt-trigger 500", as_flags(state))
+                                 yt_trigger_us=scope.yt_trigger_us)
+                    self.assertIn("--scope-trigger-us 500", as_flags(state))
                 finally:
                     scope.stream.close()
+
+    def test_the_trigger_is_on_by_default_and_can_be_switched_off(self):
+        self.configure()
+        self.assertTrue(settings.SCOPE_TRIGGER)
+        self.assertEqual(settings.SCOPE_TRIGGER_SHAPE, "ramp")
+        self.configure("--no-scope-trigger")
+        self.assertFalse(settings.SCOPE_TRIGGER)
+
+    def test_shape_selection_reaches_settings(self):
+        for shape in ("ramp", "step"):
+            self.configure("--scope-trigger-shape", shape)
+            self.assertEqual(settings.SCOPE_TRIGGER_SHAPE, shape)
 
     def test_invalid_duration_rejected(self):
         for duration in ("0", "-1", "nan", "inf"):
             with self.subTest(duration=duration), contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit) as err:
-                    self.configure("--scope-yt", "--scope-yt-trigger", duration)
+                    self.configure("--scope-trigger-us", duration)
                 self.assertEqual(err.exception.code, 2)
 
     def test_timing_selection_reaches_settings_and_printed_flags(self):
         for timing in ("fixed", "dwell"):
-            self.configure("--scope-yt", "--scope-yt-timing", timing)
+            self.configure("--scope-yt-timing", timing)
             self.assertEqual(settings.SCOPE_YT_TIMING, timing)
-            flags = as_flags(dict(yt=True, yt_timing=settings.SCOPE_YT_TIMING))
-            self.assertIn("--scope-yt-timing " + timing, flags)
+        # Only the non-default is worth printing back.
+        self.assertIn("--scope-yt-timing fixed",
+                      as_flags(dict(yt=True, yt_timing="fixed")))
+        self.assertNotIn("--scope-yt-timing",
+                         as_flags(dict(yt=True, yt_timing="dwell")))
 
-    def test_realtime_cli_rejected(self):
-        with contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit) as err:
-                self.configure("--scope-yt", "--scope-realtime")
-            self.assertEqual(err.exception.code, 2)
+    def test_deprecated_scope_yt_still_selects_fixed_row_timing(self):
+        self.configure("--scope-yt")
+        self.assertEqual(settings.SCOPE_YT_TIMING, "fixed")
+        # ...and no longer drags a renderer, a sweep or a mode lock with it.
+        self.assertTrue(settings.SCOPE_TRIGGER)
 
-    def test_realtime_settings_rejected_before_playback(self):
-        settings.SCOPE_YT = True
-        settings.SCOPE_REALTIME = True
-        with self.assertRaisesRegex(ValueError, "requires complete traces"):
-            scope_display.run_scope()
+    def test_combinations_that_used_to_be_refused_now_start(self):
+        # Each of these called parser.error() before. The marker is applied to
+        # the finished frame, so none of them can conflict with it.
+        for flags in (("--scope-realtime",),
+                      ("--scope-mode", "stochastic"),
+                      ("--scope-stipple",),
+                      ("--scope-mix", "120"),
+                      ("--scope-sweep", "palindrome")):
+            with self.subTest(flags=flags):
+                self.configure(*flags)
+                self.assertTrue(settings.SCOPE_TRIGGER)
+
+    def test_fixed_timing_degrades_instead_of_exiting(self):
+        # Raster-only, so asking for it in stochastic has to give way -- with
+        # a message on stdout, not a SystemExit.
+        settings.SCOPE_YT_TIMING = "fixed"
+        settings.SCOPE_RENDER_MODE = "stochastic"
+        settings.SCOPE_REALTIME = False
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            with self.assertRaises(Exception) as err:
+                scope_display.run_scope()
+        # It got past configuration and failed later, on missing image data.
+        self.assertNotIsInstance(err.exception, SystemExit)
+        self.assertIn("raster only", out.getvalue())
 
 
 if __name__ == "__main__":

@@ -77,6 +77,26 @@ def configure_runtime():
         help="Primary Port override"
     )
 
+    # Orientation is not scope-specific: the local window and the scope output
+    # are two renderings of the same picture, and having one of them settable
+    # only by editing constantStorage/display_constants.py meant the constant
+    # got edited instead -- a source change to turn a display sideways.
+    parser.add_argument(
+        "--rotation",
+        type=int,
+        choices=[0, 90, 180, 270],
+        help="Quarter-turn rotation for local and scope output "
+             "(default: INITIAL_ROTATION). Press r live to change it"
+    )
+
+    parser.add_argument(
+        "--mirror",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Left-right flip for local and scope output "
+             "(default: INITIAL_MIRROR). Press m live to toggle it"
+    )
+
     parser.add_argument(
         "--dir",
         help="Path to image source folder (overrides settings.py)"
@@ -107,20 +127,31 @@ def configure_runtime():
     parser.add_argument("--scope-realtime", action="store_true",
                         help="Scope: stream continuously so index changes land "
                              "within a row instead of at a trace boundary "
-                             "(raster only; incompatible with --scope-yt)")
-    parser.add_argument("--scope-yt", action="store_true",
-                        help="Scope: make the existing X signal stable in "
-                             "one-channel Y-T viewing by adding one unique "
-                             "trigger edge per trace. Implies raster + retrace; "
-                             "keeps X as the picture channel; fixed row timing "
-                             "is the default (dwell restores the earlier timing)")
-    parser.add_argument("--scope-yt-trigger", "--scope-yt-trigger-us",
-                        dest="scope_yt_trigger_us", type=float, metavar="US",
-                        help="Scope Y-T trigger marker duration in microseconds "
+                             "(raster only)")
+    parser.add_argument("--scope-trigger",
+                        action=argparse.BooleanOptionalAction, default=None,
+                        help="Scope: one unique rising edge on X per trace, so "
+                             "a single-channel scope in Y-T can lock onto the "
+                             "picture. On by default and invisible on an XY "
+                             "display; --no-scope-trigger removes it")
+    parser.add_argument("--scope-trigger-us", "--scope-trigger-duration",
+                        "--scope-yt-trigger", "--scope-yt-trigger-us",
+                        dest="scope_trigger_us", type=float, metavar="US",
+                        help="Scope trigger marker duration in microseconds "
                              "(default: 250)")
+    parser.add_argument("--scope-trigger-shape", choices=("ramp", "step"),
+                        help="ramp (default): the marker sweeps and parks "
+                             "outside the picture box, so an XY display never "
+                             "shows it. step: the original two-dwell marker, "
+                             "for a scope whose trigger will not take a ramp")
     parser.add_argument("--scope-yt-timing", choices=("fixed", "dwell"),
-                        help="Y-T timing: fixed row slots (default), or the "
-                             "previous brightness-weighted whole-trace timing")
+                        help="Raster row timing. dwell (default): brightness "
+                             "shares out the whole trace. fixed: equal row "
+                             "slots, so unrelated brightness cannot move or "
+                             "resize a row -- at the cost of tonal balance "
+                             "and a rail on empty rows")
+    parser.add_argument("--scope-yt", action="store_true",
+                        help=argparse.SUPPRESS)  # deprecated: = fixed timing
     parser.add_argument("--scope-fps", type=int, help="Scope trace rate (default: IPS)")
     parser.add_argument("--scope-samples", type=int, help="Scope samples per trace")
     parser.add_argument("--scope-fields", type=int, metavar="N",
@@ -285,6 +316,14 @@ def configure_runtime():
             sys.exit(1)
         settings.XY_DIR = abs_xy
 
+    # Orientation, before anything reads it.  display_manager binds these at
+    # import time and scope_display reads them when the engine starts, so both
+    # have to be settled here rather than inside a per-mode branch.
+    if args.rotation is not None:
+        settings.INITIAL_ROTATION = int(args.rotation) % 360
+    if args.mirror is not None:
+        settings.INITIAL_MIRROR = 1 if args.mirror else 0
+
     # Scope options only mean anything in scope mode; say so rather than
     # silently ignoring them.
     if args.mode != "scope":
@@ -429,25 +468,32 @@ def configure_runtime():
         settings.SCOPE_RASTER = settings.SCOPE_RENDER_MODE == "raster"
         if args.scope_invert is not None:
             settings.SCOPE_INVERT = args.scope_invert
-        if args.scope_yt:
-            if args.scope_realtime:
-                parser.error("--scope-yt requires complete traces; remove "
-                             "--scope-realtime to keep the trigger aligned")
-            if args.scope_mode not in (None, "raster"):
-                parser.error("--scope-yt is a raster-only output mode")
-            if args.scope_stochastic or args.scope_stipple:
-                parser.error("--scope-yt cannot be combined with stochastic/stipple")
-            if args.scope_mix is not None:
-                parser.error("--scope-yt cannot be combined with --scope-mix")
-            if args.scope_sweep not in (None, "retrace"):
-                parser.error("--scope-yt fixes the sweep direction; use retrace")
-        if args.scope_yt_trigger_us is not None:
-            if (not math.isfinite(args.scope_yt_trigger_us)
-                    or args.scope_yt_trigger_us <= 0):
-                parser.error("--scope-yt-trigger must be finite and greater than zero")
-            settings.SCOPE_YT_TRIGGER_US = args.scope_yt_trigger_us
+        # The marker used to be a MODE, and a mode has to reject every
+        # combination it cannot represent -- five parser.error()s that made
+        # Y-T an either/or against realtime, mix, and every renderer but
+        # raster. It is a property of the output now: it is stamped on the
+        # finished frame in Scope.show_frame, which every renderer already
+        # passes through, so there is nothing left to be incompatible with.
+        if args.scope_trigger is not None:
+            settings.SCOPE_TRIGGER = args.scope_trigger
+        if args.scope_trigger_shape is not None:
+            settings.SCOPE_TRIGGER_SHAPE = args.scope_trigger_shape
+        if args.scope_trigger_us is not None:
+            if (not math.isfinite(args.scope_trigger_us)
+                    or args.scope_trigger_us <= 0):
+                parser.error("--scope-trigger-us must be finite and greater "
+                             "than zero")
+            settings.SCOPE_TRIGGER_US = args.scope_trigger_us
+            settings.SCOPE_YT_TRIGGER_US = None   # the CLI wins over the alias
         if args.scope_yt_timing is not None:
             settings.SCOPE_YT_TIMING = args.scope_yt_timing
+        elif args.scope_yt:
+            # The flag's remaining meaning. Everything else it used to imply
+            # -- raster, retrace, the marker -- is either the default now or
+            # arranged by the timing itself.
+            settings.SCOPE_YT_TIMING = "fixed"
+            print("[SCOPE] --scope-yt is now --scope-yt-timing fixed; the "
+                  "trigger marker is on by default in every mode.")
         if args.scope_realtime:
             settings.SCOPE_REALTIME = True
         if args.scope_fps:
@@ -519,11 +565,9 @@ def configure_runtime():
             settings.SCOPE_MIX = args.scope_mix
         if args.scope_mix_duty is not None:
             settings.SCOPE_MIX_DUTY = args.scope_mix_duty
-        if args.scope_yt:
-            settings.SCOPE_YT = True
-            settings.SCOPE_RENDER_MODE = "raster"
-            settings.SCOPE_RASTER = True
-            settings.SCOPE_SWEEP = "retrace"
+        # Fixed row timing lives inside render_luma, so it is genuinely raster
+        # only -- but that is a reason to say so and fall back, not to refuse
+        # to start. scope_display does the falling back, with the warning.
         # Resolve the audio device NOW, before file lists are built and before
         # stdout is wrapped. Prompting from deep inside run_scope meant the
         # question appeared after a long silence, so it read as a hang.

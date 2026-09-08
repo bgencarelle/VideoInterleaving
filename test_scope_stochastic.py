@@ -3,6 +3,7 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from scope_bake import (StochasticEmitter, StippleEmitter, TraceEmitter,
                         TriangleMixScheduler,
@@ -537,7 +538,7 @@ def test_scope_rotation_key_and_output_cover_frame_and_realtime_paths():
     assert keys.transform_dirty
 
     scope = Scope(device="null", samples=len(source),
-                  source=lambda _n: source, rotation=90)
+                  source=lambda _n: source, rotation=90, trigger=False)
     try:
         out = np.zeros_like(source)
         scope._callback(out, len(source), None, None)
@@ -605,13 +606,14 @@ def test_realtime_image_rotation_keeps_horizontal_sweeps():
     assert source._grid is None
 
 
-def test_yt_mode_adds_one_unique_x_edge_and_preserves_y():
-    from scope_out import Scope, yt_trigger_frame
+def test_step_marker_keeps_its_original_two_dwell_waveform():
+    """The legacy shape, unchanged, for a scope that will not take the ramp."""
+    from scope_out import Scope, trigger_frame
 
     xy = np.column_stack((
         np.linspace(-0.8, 0.8, 64, dtype=np.float32),
         np.linspace(0.7, -0.7, 64, dtype=np.float32)))
-    encoded = yt_trigger_frame(xy, trigger_samples=8)
+    encoded = trigger_frame(xy, trigger_samples=8, shape="step")
     assert encoded.shape == (64, 2)
     assert np.array_equal(encoded[:, 1], xy[:, 1])
     assert np.allclose(encoded[:4, 0], -0.99)
@@ -621,13 +623,48 @@ def test_yt_mode_adds_one_unique_x_edge_and_preserves_y():
     assert np.count_nonzero((encoded[:-1, 0] < 0.95)
                             & (encoded[1:, 0] >= 0.95)) == 1
 
-    scope = Scope(device="null", samples=64, yt_mode=True)
+    scope = Scope(device="null", samples=64, trigger_shape="step")
     try:
         scope.show_frame(xy)
         assert np.array_equal(scope._pending[:, 1], xy[:, 1])
         assert scope._pending[0, 0] == -scope.yt_trigger_level
         assert scope._pending[scope.yt_trigger_samples - 1, 0] \
             == scope.yt_trigger_level
+    finally:
+        scope.stream.close()
+
+
+def test_ramp_marker_triggers_once_while_staying_off_an_xy_picture():
+    """The default shape: same single crossing, no ink an XY display shows."""
+    from scope_out import LEVEL, Scope, trigger_frame
+
+    xy = np.column_stack((
+        np.linspace(-0.8, 0.8, 64, dtype=np.float32),
+        np.linspace(0.7, -0.7, 64, dtype=np.float32)))
+    encoded = trigger_frame(xy, trigger_samples=8)
+    marker = encoded[:8, 0]
+
+    # Exactly one rising crossing per trace: that is the whole requirement.
+    assert np.count_nonzero((encoded[:-1, 0] < 0.95)
+                            & (encoded[1:, 0] >= 0.95)) == 1
+    # Monotonic, so no threshold anywhere in the range is crossed twice.
+    assert np.all(np.diff(marker) >= -1e-6)
+    assert marker[0] == pytest.approx(-0.99)
+    assert marker[-1] == pytest.approx(0.99)
+    # Moving, not dwelling: a stationary run is the bright dot we are avoiding.
+    assert np.count_nonzero(np.abs(np.diff(marker)) > 1e-6) >= 4
+    # Parked outside the picture box, so a scope set so +-0.9 fills the screen
+    # deflects the entire marker past the phosphor.
+    assert np.all(np.abs(encoded[:8, 1]) > LEVEL)
+    # The picture itself is untouched.
+    assert np.array_equal(encoded[8:], xy[8:])
+
+    scope = Scope(device="null", samples=64)
+    try:
+        assert scope.trigger and scope.trigger_shape == "ramp"
+        scope.show_frame(xy)
+        x = scope._pending[:, 0]
+        assert np.count_nonzero((x[:-1] < 0.95) & (x[1:] >= 0.95)) == 1
     finally:
         scope.stream.close()
 
@@ -646,23 +683,34 @@ def test_yt_realtime_marker_survives_callback_block_boundaries():
         cursor = (cursor + n) % len(xy)
         return xy[idx]
 
-    scope = Scope(device="null", samples=64, source=source, yt_mode=True,
-                  yt_trigger_us=100.0)
-    try:
-        parts = []
-        for n in (17, 23, 24):
-            out = np.zeros((n, 2), dtype=np.float32)
-            scope._callback(out, n, None, None)
-            parts.append(out)
-        whole = np.vstack(parts)
-        assert np.array_equal(whole[:, 1], xy[:, 1])
-        split = max(2, scope.yt_trigger_samples // 2)
-        assert np.all(whole[:split, 0] == -scope.yt_trigger_level)
-        assert np.all(whole[split:scope.yt_trigger_samples, 0]
-                      == scope.yt_trigger_level)
-        assert scope._yt_pos == 0
-    finally:
-        scope.stream.close()
+    def run(**kw):
+        scope = Scope(device="null", samples=64, source=source,
+                      yt_trigger_us=100.0, **kw)
+        try:
+            parts = []
+            for n in (17, 23, 24):
+                out = np.zeros((n, 2), dtype=np.float32)
+                scope._callback(out, n, None, None)
+                parts.append(out)
+            assert scope._yt_pos == 0
+            return scope, np.vstack(parts)
+        finally:
+            scope.stream.close()
+
+    # The marker is stamped on a sample counter, so it lands in one piece no
+    # matter where the callback boundaries fall.
+    scope, whole = run(trigger_shape="step")
+    split = max(2, scope.yt_trigger_samples // 2)
+    assert np.array_equal(whole[:, 1], xy[:, 1])
+    assert np.all(whole[:split, 0] == -scope.yt_trigger_level)
+    assert np.all(whole[split:scope.yt_trigger_samples, 0]
+                  == scope.yt_trigger_level)
+
+    scope, whole = run()
+    marker = whole[:scope.yt_trigger_samples, 0]
+    assert np.all(np.diff(marker) >= -1e-6)
+    assert np.count_nonzero((whole[:-1, 0] < 0.95) & (whole[1:, 0] >= 0.95)) == 1
+    cursor = 0
 
 
 def test_yt_trigger_duration_is_configurable():
@@ -677,23 +725,36 @@ def test_yt_trigger_duration_is_configurable():
         scope.stream.close()
 
 
-def test_yt_live_flags_lock_retrace():
+def test_fixed_row_timing_supplies_its_own_retrace():
+    """Fixed slots still own the sweep. The TRIGGER locks nothing any more."""
     state = {
         "mode": "raster", "raster": True, "yt": True,
-        "yt_trigger_us": 500.0,
+        "yt_trigger_us": 500.0, "yt_timing": "fixed",
         "sweep": "retrace", "trim": 0.02, "gamma": 2.2,
     }
     keys = KeyMap(state)
     assert keys.feed("w")
     assert state["sweep"] == "retrace"
-    assert "fixes sweep" in keys.message
-    assert keys.feed("v")
-    assert state["mode"] == "raster"
-    assert "Y-T" in keys.message
+    assert "own retrace" in keys.message
     flags = as_flags(state)
-    assert "--scope-yt" in flags
-    assert "--scope-yt-trigger 500" in flags
+    assert "--scope-yt-timing fixed" in flags
+    assert "--scope-trigger-us 500" in flags
     assert "--scope-sweep" not in flags
+
+
+def test_the_trigger_no_longer_locks_the_renderer_or_the_sweep():
+    """It is stamped on the finished frame, so it constrains nothing."""
+    state = {"mode": "raster", "raster": True, "yt": True,
+             "sweep": "alternate", "trim": 0.02, "gamma": 2.2}
+    keys = KeyMap(state)
+    assert keys.feed("v")
+    assert state["mode"] == "stochastic"      # cycling past raster is allowed
+    assert keys.feed("w")
+    assert state["sweep"] == "palindrome"     # so is changing the sweep
+    # On by default, so an untouched state prints no trigger flag at all.
+    assert "--scope-trigger" not in as_flags(state)
+    state["yt"] = False
+    assert "--no-scope-trigger" in as_flags(state)
 
 
 def test_fusion_density_supports_every_requested_component_set():

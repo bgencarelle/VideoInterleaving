@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 
-SCOPE_OUT_API_VERSION = 3  # rotation-aware output plus explicit Y-T trigger
+SCOPE_OUT_API_VERSION = 5  # rotation + mirror output, always-on shaped X trigger
 
 try:
     import settings as settings_mod
@@ -80,21 +80,75 @@ def rotate_frame(frame, degrees):
     return np.ascontiguousarray(out)
 
 
-def yt_trigger_frame(frame, trigger_samples=24, trigger_level=0.99,
-                     offset=0, period=None):
-    """Insert one threshold-unique trigger edge on X per existing XY trace.
+def mirror_frame(frame, mirror):
+    """Flip XY samples left-right about the display centre.
 
-    The image waveform and channel routing are deliberately unchanged. Only
-    X receives a short low-to-high marker; Y passes through untouched. Normal
-    picture content is limited to LEVEL (0.9), while the marker reaches 0.99,
-    so a trigger level around +0.95 sees only this edge.
-
-    ``offset`` supports arbitrary audio callback block boundaries. ``period``
-    is the complete trace length at which the marker repeats.
+    Unlike rotation, this one belongs at the OUTPUT boundary rather than in
+    image space. Rotation at 90/270 would move the fast sweep off X and break
+    raster timing and the Y-T trigger, which is why scope_display rotates the
+    luminance instead. A mirror only negates X: the sweep stays on X, every
+    row keeps its slot and its duration, and the result is bit-for-bit the
+    reflection you would get by mirroring the source image first. Doing it
+    here means it costs one sign flip instead of a second orientation
+    parameter threaded through every renderer.
     """
     src = np.asarray(frame, dtype=np.float32)
+    if not mirror:
+        return np.ascontiguousarray(src)
+    out = src.copy()
+    out[:, 0] = -out[:, 0]
+    return np.ascontiguousarray(out)
+
+
+TRIGGER_SHAPES = ("ramp", "step")
+
+
+def clip_for_trigger(frame, level=LEVEL, floor=-0.98):
+    """Keep picture content strictly below the trigger threshold.
+
+    The marker is unique only because nothing else crosses +0.95. Geometry
+    obeys that by construction -- it is built inside +-LEVEL -- but a lowpass
+    or DC pre-emphasis applied afterwards can ring above it, and a second
+    rising crossing per trace is a scope that will not hold a picture still.
+    The floor is below -LEVEL because fixed row timing parks empty slots on a
+    pedestal at -0.936 that is deliberately outside the picture range.
+    """
+    out = np.array(frame, dtype=np.float32, copy=True)
+    np.clip(out[:, 0], floor, level, out=out[:, 0])
+    return out
+
+
+def trigger_frame(frame, trigger_samples=24, trigger_level=0.99,
+                  offset=0, period=None, shape="ramp"):
+    """Insert one threshold-unique rising edge on X per trace.
+
+    Picture content is limited to LEVEL (0.9) and the marker reaches 0.99, so
+    a trigger level around +0.95 sees only this edge. ``offset`` supports
+    arbitrary audio callback block boundaries; ``period`` is the trace length
+    at which the marker repeats.
+
+    Two shapes, because the marker has to serve two displays at once:
+
+    ``step`` is the original: half the marker parked at -0.99, half at +0.99,
+    Y untouched. On a Y-T scope that is ideal. On an XY scope those are two
+    STATIONARY samples runs, and a stationary beam is the brightest thing on
+    the screen -- two hard dots and a streak across the picture. It is kept
+    for scopes whose trigger will not take the ramp.
+
+    ``ramp`` is the default, and the reason the marker can be on all the time.
+    An edge trigger fires on the CROSSING; dwelling at the extremes buys
+    nothing but brightness. So X sweeps monotonically from -0.99 to +0.99 with
+    only a couple of samples of hold at each end for the comparator, and Y is
+    pushed to the same rail -- outside the +-LEVEL picture box, the same
+    off-screen-excursion trick apply_overscan() uses for travel moves. Set the
+    scope so +-0.9 fills the screen and the whole marker deflects past the
+    phosphor: identical trigger, no ink.
+    """
+    if shape not in TRIGGER_SHAPES:
+        raise ValueError(f"trigger shape must be one of {TRIGGER_SHAPES}")
+    src = np.asarray(frame, dtype=np.float32)
     if src.ndim != 2 or src.shape[1] < 2:
-        raise ValueError("Y-T source must have shape (samples, 2)")
+        raise ValueError("trigger source must have shape (samples, 2)")
     count = len(src)
     if count == 0:
         return np.empty((0, 2), dtype=np.float32)
@@ -102,12 +156,31 @@ def yt_trigger_frame(frame, trigger_samples=24, trigger_level=0.99,
     cycle = max(1, int(period if period is not None else count))
     marker = max(4, min(int(trigger_samples), cycle))
     phase = (np.arange(count, dtype=np.int64) + int(offset)) % cycle
-    low = phase < max(2, marker // 2)
-    high = (phase >= max(2, marker // 2)) & (phase < marker)
     level = min(1.0, max(float(trigger_level), LEVEL + 0.01))
-    out[low, 0] = -level
-    out[high, 0] = level
+
+    if shape == "step":
+        low = phase < max(2, marker // 2)
+        high = (phase >= max(2, marker // 2)) & (phase < marker)
+        out[low, 0] = -level
+        out[high, 0] = level
+        return out
+
+    inside = phase < marker
+    if not inside.any():
+        return out
+    p = phase[inside].astype(np.float64)
+    hold = max(1, marker // 8)
+    span = max(1, marker - 2 * hold - 1)
+    # Monotonic: exactly one crossing of any threshold in (-level, +level).
+    t = np.clip((p - hold) / span, 0.0, 1.0)
+    out[inside, 0] = (-level + 2.0 * level * t).astype(np.float32)
+    out[inside, 1] = np.float32(level)
     return out
+
+
+# The name this shipped under. Kept so settings.py edits, saved command lines
+# and the existing tests that pin the step waveform keep working.
+yt_trigger_frame = trigger_frame
 
 
 # Names that usually mean an internal loudspeaker.  The XY signal is not audio
@@ -601,8 +674,9 @@ class Scope:
     def __init__(self, device=None, samplerate=None, fps=FPS, samples=None,
                  invert_y=True, swap_xy=False, source=None, rotation=0,
                  lowpass_hz=None, lowpass_taper=0.0, blocksize=512,
-                 yt_mode=False, yt_trigger_us=250.0,
-                 yt_trigger_level=0.99):
+                 yt_mode=None, yt_trigger_us=250.0,
+                 yt_trigger_level=0.99, mirror=False,
+                 trigger=True, trigger_shape="ramp"):
         """
         samples : path length per trace -- the REAL parameter.  Refresh is not
                   set independently; it falls out as rate/samples, because the
@@ -614,6 +688,7 @@ class Scope:
         self.invert_y = invert_y
         self.swap_xy = swap_xy
         self.set_rotation(rotation)
+        self.set_mirror(mirror)
         _null = (isinstance(device, str) and device.strip().lower()
                  in ("null", "none", "off"))
         if sd is None and not _null:
@@ -640,7 +715,16 @@ class Scope:
         self.samplerate = samplerate
         self.samples_per_frame = (max(64, int(samples)) if samples
                                   else max(64, round(samplerate / fps)))
-        self.yt_mode = bool(yt_mode)
+        # The marker is no longer a mode. It is a property of the output, on
+        # by default, because a ramp-shaped marker parked outside the picture
+        # box costs an XY display nothing and is the entire requirement for a
+        # single-channel Y-T display. `yt_mode` is the name it shipped under
+        # and still wins when passed explicitly.
+        self.trigger = bool(trigger if yt_mode is None else yt_mode)
+        if trigger_shape not in TRIGGER_SHAPES:
+            raise ValueError(f"trigger shape must be one of {TRIGGER_SHAPES}")
+        self.trigger_shape = trigger_shape
+        self.yt_mode = self.trigger          # legacy attribute name
         self.yt_trigger_us = max(float(yt_trigger_us), 1.0)
         self.yt_trigger_samples = max(
             4, round(float(samplerate) * self.yt_trigger_us
@@ -649,10 +733,10 @@ class Scope:
             1.0, max(float(yt_trigger_level), LEVEL + 0.01))
         self._yt_pos = 0
         self._frame = rasterize([], self.samples_per_frame)  # idle circle, never a parked dot
-        if self.yt_mode:
-            self._frame = yt_trigger_frame(
+        if self.trigger:
+            self._frame = trigger_frame(
                 self._frame, self.yt_trigger_samples, self.yt_trigger_level,
-                period=self.samples_per_frame)
+                period=self.samples_per_frame, shape=self.trigger_shape)
         self._pending = None
         self._lock = threading.Lock()
         self._pos = 0
@@ -685,12 +769,17 @@ class Scope:
         if self.source is not None:
             try:
                 buf = self.source(frames)
-                rendered = rotate_frame(buf[:frames], self.rotation)
-                if self.yt_mode:
-                    rendered = yt_trigger_frame(
-                        rendered, self.yt_trigger_samples,
+                # Mirror before the marker: negating X afterwards would turn
+                # the trigger's rising edge into a falling one and the scope
+                # would stop locking.
+                rendered = mirror_frame(
+                    rotate_frame(buf[:frames], self.rotation), self.mirror)
+                if self.trigger:
+                    rendered = trigger_frame(
+                        clip_for_trigger(rendered), self.yt_trigger_samples,
                         self.yt_trigger_level, offset=self._yt_pos,
-                        period=self.samples_per_frame)
+                        period=self.samples_per_frame,
+                        shape=self.trigger_shape)
                     self._yt_pos = ((self._yt_pos + frames)
                                     % self.samples_per_frame)
                 outdata[:] = rendered
@@ -735,6 +824,11 @@ class Scope:
         self.rotation = angle
         Scope._output_rotation = angle
 
+    def set_mirror(self, mirror):
+        """Set output mirroring, matching local mode's `m` key."""
+        self.mirror = bool(mirror)
+        Scope._output_mirror = self.mirror
+
     # --- optional preview tap -------------------------------------------
     # Every render path lands in show_frame(): show() rasterises then calls it,
     # and raster mode calls it directly.  So one hook here catches raster,
@@ -764,6 +858,7 @@ class Scope:
     _luma = {"seq": 0, "data": None}
     _luma_lock = threading.Lock()
     _output_rotation = 0
+    _output_mirror = False
 
     @classmethod
     def publish_luma(cls, lum):
@@ -774,6 +869,13 @@ class Scope:
             q = np.clip(np.asarray(lum, dtype=np.float32), 0.0, 1.0)
             if cls._output_rotation:
                 q = np.rot90(q, k=cls._output_rotation // 90)
+            if cls._output_mirror:
+                # The display engine rotates the luminance itself, so the
+                # rotation above is normally a no-op -- but mirroring happens
+                # at the output boundary, after this luminance was composited.
+                # Without the flip here the browser's local render would be
+                # the mirror image of what the hardware is drawing.
+                q = np.ascontiguousarray(q[:, ::-1])
             with cls._luma_lock:
                 cls._luma["seq"] += 1
                 cls._luma["data"] = (q * 255.0).astype(np.uint8)
@@ -841,14 +943,19 @@ class Scope:
         """
         if self._pending is not None:
             self.frames_dropped += 1
-        f = rotate_frame(frame, self.rotation)
+        f = mirror_frame(rotate_frame(frame, self.rotation), self.mirror)
         if self.lowpass_hz:
             f = lowpass_frame(f, self.samplerate, self.lowpass_hz,
                               self.lowpass_taper)
-        if self.yt_mode:
-            f = yt_trigger_frame(
-                f, self.yt_trigger_samples, self.yt_trigger_level,
-                period=len(f))
+        if self.trigger:
+            # Clip here, not in each renderer: the filters above are exactly
+            # what can push picture content over the trigger threshold, and
+            # this is the one place every path has already passed through
+            # them.
+            f = trigger_frame(
+                clip_for_trigger(f), self.yt_trigger_samples,
+                self.yt_trigger_level, period=len(f),
+                shape=self.trigger_shape)
         if Scope._tap_until > time.monotonic():
             try:
                 self._capture(f)

@@ -188,7 +188,8 @@
     // meant to be read at a glance from across a room.
     const SCOPE_FIELDS = [
       ["scope_mode",              "mode"],
-      ["scope_yt",                "one-channel Y-T"],
+      ["scope_trigger",           "X trigger"],
+      ["scope_trigger_shape",     "trigger shape"],
       ["scope_device",            "output device"],
       ["scope_samplerate",        "sample rate"],
       ["scope_samples_per_trace", "samples / trace"],
@@ -603,17 +604,35 @@
       return out;
     }
 
-    function addYtTrigger(xy, n, sampleRate, triggerUs) {
-      // Preserve the existing XY waveform. Only X receives a short,
-      // threshold-unique low-to-high edge at the start of each trace.
+    function addYtTrigger(xy, n, sampleRate, triggerUs, shape) {
+      // Must stay bit-comparable with scope_out.trigger_frame; the parity
+      // test in test_scope_web.py runs both and diffs them.
       const out = new Float32Array(xy);
       const markerUs = Number(triggerUs || 250);
       const marker = Math.max(4, Math.min(
         n, Math.round(sampleRate * markerUs / 1000000)));
-      const split = Math.max(2, Math.floor(marker / 2));
+      const level = 0.99;
+      // Picture content must stay clear of the trigger threshold, or a
+      // filtered highlight becomes a second edge and the scope will not hold.
       for (let i = 0; i < n; i++) {
-        if (i < split) out[i * 2] = -0.99;
-        else if (i < marker) out[i * 2] = 0.99;
+        out[i * 2] = Math.min(0.9, Math.max(-0.98, out[i * 2]));
+      }
+      if (shape === "step") {
+        const split = Math.max(2, Math.floor(marker / 2));
+        for (let i = 0; i < n; i++) {
+          if (i < split) out[i * 2] = -level;
+          else if (i < marker) out[i * 2] = level;
+        }
+        return out;
+      }
+      // ramp: one monotonic crossing, and Y parked on the rail so the whole
+      // marker sits outside the +-0.9 picture box an XY display is showing.
+      const hold = Math.max(1, Math.floor(marker / 8));
+      const span = Math.max(1, marker - 2 * hold - 1);
+      for (let i = 0; i < marker && i < n; i++) {
+        const t = Math.min(1, Math.max(0, (i - hold) / span));
+        out[i * 2] = -level + 2 * level * t;
+        out[i * 2 + 1] = level;
       }
       return out;
     }
@@ -727,7 +746,7 @@
 
     function setStatus() {
       if (!localRunning || !actx) return;
-      const ytFixed = lastData.scope_yt && lastData.scope_yt_timing === "fixed";
+      const ytFixed = lastData.scope_yt_timing === "fixed";
       const rate = ytFixed ? (lastData.scope_refresh_hz || 30) : 30;
       const n = Math.max(64, Math.round(actx.sampleRate / rate));
       document.getElementById("local-status").textContent =
@@ -760,7 +779,7 @@
         return;
       }
       // sample budget comes from THIS browser's rate, not the server's
-      const ytFixed = lastData.scope_yt && lastData.scope_yt_timing === "fixed";
+      const ytFixed = lastData.scope_yt_timing === "fixed";
       const rate = ytFixed ? (lastData.scope_refresh_hz || 30) : 30;
       const n = Math.max(64, Math.round(actx.sampleRate / rate));
       const cells = Math.max(64, n);
@@ -791,9 +810,10 @@
       } else {
         trace = buildTrace(g, rows, cols, n, trim, gamma, w, h);
       }
-      if (lastData.scope_yt) {
+      if (lastData.scope_trigger !== false) {
         trace = addYtTrigger(trace, n, actx.sampleRate,
-                             lastData.scope_yt_trigger_us);
+                             lastData.scope_yt_trigger_us,
+                             lastData.scope_trigger_shape);
       }
       worklet.port.postMessage(trace);
       if ((++tracesBuilt % 15) === 0) setStatus();
