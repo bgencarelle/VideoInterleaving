@@ -4,7 +4,7 @@ test_scope_web.py -- does the browser render the same picture as the server?
     python test_scope_web.py                 # needs node on PATH
     python test_scope_web.py --write out.png # also save a side-by-side
 
-templates/scope.html contains a JavaScript port of render_luma, because the
+static/scope_renderer.js contains a JavaScript port of render_luma, because the
 server has no sound card and each visitor renders the trace on their own
 hardware at their own AudioContext rate.  That makes it a SECOND
 implementation of an algorithm we already have -- the exact situation
@@ -40,7 +40,7 @@ import tempfile
 
 import numpy as np
 
-PAGE = os.path.join("templates", "scope.html")
+PAGE = os.path.join("static", "scope_renderer.js")
 TOL_RANGE = 0.06        # allowed drift in the drawn extent
 TOL_LIT = 4.0           # allowed drift in percent of lit pixels
 
@@ -100,8 +100,8 @@ def main():
     _fake_audio()
     from scope_bake import render_luma
 
-    page = "\n".join(re.findall(r"<script>(.*?)</script>",
-                                open(PAGE, encoding="utf-8").read(), re.S))
+    with open(PAGE, encoding="utf-8") as source:
+        page = source.read()
     lum = _subject()
     h, w = lum.shape
     n = args.samples

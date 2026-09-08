@@ -2,11 +2,13 @@
     // Keep it for subsequent starts on this page, including after Stop audio.
     let selectedSinkId = null;
     let audioBusy = false;
+    let outputCheckPending = false;
 
     function setAudioBusy(busy) {
       audioBusy = busy;
       for (const id of ["local-btn", "sink-btn", "sink-select"])
         document.getElementById(id).disabled = busy;
+      if (!busy && outputCheckPending) void checkSelectedOutput();
     }
 
     async function applyOutput(id, label) {
@@ -119,19 +121,32 @@
       } finally { setAudioBusy(false); }
     }
 
-    // If the chosen output disappears, stop rather than continue on a
-    // browser-selected replacement. Keep the selection visible for recovery.
-    if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
-      navigator.mediaDevices.addEventListener("devicechange", async () => {
-        if (!selectedSinkId || selectedSinkId === "default" || audioBusy) return;
-        try {
-          const devices = await navigator.mediaDevices.enumerateDevices();
-          if (devices.some(d => d.kind === "audiooutput" && d.deviceId === selectedSinkId)) return;
-          if (localRunning) await toggleLocal();
-          document.getElementById("output-label").textContent = "Selected output unavailable";
-          document.getElementById("sink-status").textContent = "Choose an output again before starting.";
-        } catch (e) {
-          document.getElementById("sink-status").textContent = "Could not check audio outputs: " + e;
-        }
-      });
+    // Coalesce device changes while an operation is in flight, then check
+    // again when it releases the lock. Never discard a disconnect event.
+    async function checkSelectedOutput() {
+      outputCheckPending = true;
+      if (audioBusy) return;
+      outputCheckPending = false;
+      if (!selectedSinkId || selectedSinkId === "default") return;
+      setAudioBusy(true);
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        if (devices.some(d => d.kind === "audiooutput" && d.deviceId === selectedSinkId)) return;
+        localRunning = false;
+        stopLumaLoop();
+        if (worklet) worklet.disconnect();
+        if (actx) { try { await actx.close(); } catch (_) {} }
+        actx = null;
+        worklet = null;
+        lumImg.removeAttribute("src");
+        document.getElementById("local-btn").textContent = "Start audio";
+        document.getElementById("local-status").textContent = "Stopped: selected output disconnected.";
+        document.getElementById("output-label").textContent = "Selected output unavailable";
+        document.getElementById("sink-status").textContent = "Choose an output again before starting.";
+      } catch (e) {
+        document.getElementById("sink-status").textContent = "Could not check audio outputs: " + e;
+      } finally { setAudioBusy(false); }
     }
+
+    if (navigator.mediaDevices && navigator.mediaDevices.addEventListener)
+      navigator.mediaDevices.addEventListener("devicechange", checkSelectedOutput);
