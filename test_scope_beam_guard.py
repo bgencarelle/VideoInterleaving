@@ -171,3 +171,25 @@ class PrecompensateHpfTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RealtimeFailureTests(unittest.TestCase):
+    def test_source_failure_keeps_motion_and_trigger_phase(self):
+        def fail(n):
+            raise RuntimeError("source failed")
+        scope = Scope(device="null", source=fail, samples=3200)
+        block = np.empty((512, 2), dtype=np.float32)
+        for i in range(3):
+            scope._callback(block, len(block), None, None)
+            self.assertFalse(beam_is_parked(block))
+            self.assertEqual(scope._yt_pos, ((i + 1) * len(block)) % 3200)
+        self.assertEqual(scope.beams_unparked, 3)
+        self.assertEqual(scope.dac_dropouts, 3)
+
+    def test_reported_period_matches_realtime_edges(self):
+        scope = Scope(device="null", samples=3200, source=moving_frame)
+        block = np.empty((9600, 2), dtype=np.float32)
+        scope._callback(block, len(block), None, None)
+        edges = np.flatnonzero((block[:-1, 0] < .95) & (block[1:, 0] >= .95))
+        np.testing.assert_array_equal(np.diff(edges), [scope.trace_samples] * 2)
+        self.assertEqual(scope.trace_samples, 3200)

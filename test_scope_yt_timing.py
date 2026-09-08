@@ -187,7 +187,7 @@ const lumCtx={{drawImage:()=>{{}},getImageData:()=>({{data:px}})}};
 let lastHash=0,lastChange=Date.now(),backoff=0,tracesBuilt=0;
 const STALL_MS=6000,frameHash=()=>1;
 const document={{getElementById:id=>({{value:id==='local-gamma'?'2.2':'0.02'}})}};
-const lastData={{scope_yt:true,scope_yt_timing:'fixed',scope_refresh_hz:60,
+const lastData={{scope_yt:true,scope_yt_timing:'fixed',scope_refresh_hz:58.3,scope_samplerate:96000,scope_samples_per_trace:1600,
   scope_yt_grid:[32,32],scope_yt_levels:[0,1],scope_border:.09,scope_yt_trigger_us:500}};
 renderFromLuma();
 // picture + marker: the window is reserved, not carved out of the picture

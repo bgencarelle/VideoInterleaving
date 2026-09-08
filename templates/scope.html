@@ -131,6 +131,7 @@
     <div class="current-dims" id="local-status">Not running.</div>
     <div class="dim-controls">
       <button id="local-btn" onclick="toggleLocal()">Start audio</button>
+      <span id="output-label" aria-live="polite">Output: system default</span>
       <label>trim
         <select id="local-trim">
           <option value="0.02">0.02</option>
@@ -697,99 +698,14 @@
       registerProcessor('scope-out', ScopeOut);
     `;
 
-    // ------------------------------------------------- output device
-    // Web Audio renders to the OS default and stays there. Moving it needs
-    // AudioContext.setSinkId(), and the two engines gate it differently:
-    //
-    //   Firefox: selectAudioOutput() shows a NATIVE picker and grants
-    //            permission for the chosen device. No microphone prompt.
-    //   Chrome:  setSinkId() exists, but enumerateDevices() returns audio
-    //            outputs with EMPTY labels until the page has been granted
-    //            media permission -- so reading speaker names requires
-    //            getUserMedia({audio:true}), i.e. a microphone prompt purely
-    //            to learn what the speakers are called. That is a browser
-    //            privacy rule, not our choice, so it is opt-in behind this
-    //            button and never requested on load.
-    //
-    // Either way the OS default already works, so nothing here is required.
-    async function chooseOutput() {
-      const st = document.getElementById("sink-status");
-      const sel = document.getElementById("sink-select");
-      if (!actx) { st.textContent = "Start audio first."; return; }
-      if (!("setSinkId" in actx)) {
-        st.textContent = "This browser cannot redirect Web Audio output "
-                       + "\u2014 change your system default instead.";
-        return;
-      }
-      try {
-        if (navigator.mediaDevices && navigator.mediaDevices.selectAudioOutput) {
-          const dev = await navigator.mediaDevices.selectAudioOutput();
-          await actx.setSinkId(dev.deviceId);
-          st.textContent = "Output: " + (dev.label || dev.deviceId);
-          return;
-        }
-        // Chrome path: unlock the labels, then offer a list.
-        st.textContent = "Asking for device access\u2026";
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        stream.getTracks().forEach(t => t.stop());   // we never wanted the mic
-        const devs = (await navigator.mediaDevices.enumerateDevices())
-                       .filter(d => d.kind === "audiooutput");
-        if (!devs.length) { st.textContent = "No output devices found."; return; }
-        sel.textContent = "";
-        for (const d of devs) {
-          const o = document.createElement("option");
-          o.value = d.deviceId;
-          o.textContent = d.label || d.deviceId;
-          sel.appendChild(o);
-        }
-        sel.style.display = "";
-        sel.onchange = async () => {
-          try {
-            await actx.setSinkId(sel.value);
-            st.textContent = "Output: " + sel.options[sel.selectedIndex].textContent;
-          } catch (e) { st.textContent = "Could not switch: " + e; }
-        };
-        document.getElementById("sink-btn").style.display = "none";
-        st.textContent = "Pick an output.";
-      } catch (e) {
-        st.textContent = "Not available (" + e.name + ") \u2014 change your "
-                       + "system default output instead.";
-      }
-    }
-
-    async function toggleLocal() {
-      if (localRunning) {
-        localRunning = false;
-        stopLumaLoop();
-        if (actx) { await actx.close(); actx = null; worklet = null; }
-        lumImg.removeAttribute("src");
-        document.getElementById("local-btn").textContent = "Start audio";
-        document.getElementById("local-status").textContent = "Not running.";
-        return;
-      }
-      try {
-        actx = new (window.AudioContext || window.webkitAudioContext)();
-        await actx.resume();
-        const url = URL.createObjectURL(new Blob([WORKLET_SRC], {type:"text/javascript"}));
-        await actx.audioWorklet.addModule(url);
-        worklet = new AudioWorkletNode(actx, "scope-out", {outputChannelCount:[2]});
-        worklet.connect(actx.destination);
-        lumCanvas = document.createElement("canvas");
-        lumCtx = lumCanvas.getContext("2d", {willReadFrequently:true});
-        lumImg.src = "scope/luma.mjpg?t=" + Date.now();
-        localRunning = true;
-        startLumaLoop();
-        document.getElementById("local-btn").textContent = "Stop audio";
-        setStatus();
-      } catch (e) {
-        document.getElementById("local-status").textContent = "Failed: " + e;
-      }
-    }
-
     function setStatus() {
       if (!localRunning || !actx) return;
       const ytFixed = lastData.scope_yt_timing === "fixed";
-      const rate = ytFixed ? (lastData.scope_refresh_hz || 30) : 30;
+      // Use the picture budget, not the marker-inclusive refresh rate.
+      const serverRate = Number(lastData.scope_samplerate);
+      const pictureSamples = Number(lastData.scope_samples_per_trace);
+      const rate = ytFixed && serverRate > 0 && pictureSamples > 0
+        ? serverRate / pictureSamples : 30;
       const n = Math.max(64, Math.round(actx.sampleRate / rate));
       document.getElementById("local-status").textContent =
         `Running at ${actx.sampleRate} Hz \u2014 ${n} samples per trace, `
@@ -822,7 +738,11 @@
       }
       // sample budget comes from THIS browser's rate, not the server's
       const ytFixed = lastData.scope_yt_timing === "fixed";
-      const rate = ytFixed ? (lastData.scope_refresh_hz || 30) : 30;
+      // Use the picture budget, not the marker-inclusive refresh rate.
+      const serverRate = Number(lastData.scope_samplerate);
+      const pictureSamples = Number(lastData.scope_samples_per_trace);
+      const rate = ytFixed && serverRate > 0 && pictureSamples > 0
+        ? serverRate / pictureSamples : 30;
       const n = Math.max(64, Math.round(actx.sampleRate / rate));
       const cells = Math.max(64, n);
       let cols = Math.max(8, Math.round(Math.sqrt(cells / (h / w))));
@@ -937,5 +857,6 @@
     poll();
     setInterval(poll, 1000);
   </script>
+<script src="/static/scope_audio.js"></script>
 </body>
 </html>

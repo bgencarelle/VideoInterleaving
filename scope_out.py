@@ -908,7 +908,8 @@ class Scope:
         -- and the marker is added to it, so the refresh rate is
         samplerate / trace_samples, not samplerate / samples_per_frame.
         """
-        return self.samples_per_frame + (len(self._marker) if self.trigger else 0)
+        return self.samples_per_frame + (
+            len(self._marker) if self.trigger and self.source is None else 0)
 
     def _stamp_marker(self, block, pos):
         """Write the marker into a continuous block, in place, no allocation.
@@ -978,10 +979,18 @@ class Scope:
                 self._last_out = rendered[-1].copy()
                 self.frames_drawn += 1
             except Exception:
-                # HOLD, never zero.  BufferedSource.__call__ already documents why
-                # -- zero on both channels parks the beam at screen centre --
-                # and this path was the one place that did the opposite.
-                outdata[:] = self._last_out
+                # Keep moving and keep the trigger clock running if the source
+                # fails. Holding the final coordinate bypasses the beam guard.
+                if frames:
+                    fallback = np.repeat(self._last_out[None, :], frames, axis=0)
+                    rendered = unpark_frame(fallback, phase=self.beams_unparked * 7)
+                    outdata[:] = rendered[:frames]
+                    self.beams_unparked += 1
+                    if self.trigger:
+                        self._stamp_marker(outdata, self._yt_pos)
+                        self._yt_pos = ((self._yt_pos + frames)
+                                        % self.samples_per_frame)
+                    self._last_out = outdata[-1].copy()
                 self.dac_dropouts += 1
             return
         # Swap ONLY at a frame boundary.  Replacing the buffer mid-trace makes
