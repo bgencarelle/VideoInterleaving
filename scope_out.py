@@ -13,6 +13,8 @@ import sys
 import threading
 import time
 
+SCOPE_OUT_API_VERSION = 2  # rotation-aware Scope constructor/output path
+
 try:
     import settings as settings_mod
 except Exception:                    # usable standalone, outside the repo
@@ -43,13 +45,39 @@ def have_audio():
     """False when PortAudio is absent -- only --device null will work."""
     return sd is not None
 
-SAMPLE_RATE = 192_000     # fallback only; Scope reads the device's rate at init
-FPS = 60
+SAMPLE_RATE = 48_000     # physical-device fallback; normally read from device
+NULL_SAMPLE_RATE = 96_000  # virtual trace budget; no DAC compatibility limit
+FPS = 50
 SAMPLES_PER_FRAME = SAMPLE_RATE // FPS   # fallback resolution budget
 
 JUMP_GAIN = 0.12   # <1 -> fewer samples spent on travel moves -> dimmer
 SMOOTH = 5         # circular box filter width; tames DAC ringing at corners
 LEVEL = 0.9        # peak output amplitude, keep below 1.0
+
+
+def rotate_frame(frame, degrees):
+    """Rotate XY samples around the display centre in 90-degree steps.
+
+    Scope mode has no GLFW window, so its transform must happen on the signal
+    itself. Keeping the operation here, at the final output boundary, makes the
+    same rotation apply to every renderer and to both frame and realtime paths.
+    """
+    angle = int(degrees) % 360
+    if angle % 90:
+        raise ValueError("scope rotation must be a multiple of 90 degrees")
+    src = np.asarray(frame, dtype=np.float32)
+    if angle == 0:
+        return np.ascontiguousarray(src)
+    out = np.empty_like(src)
+    if angle == 90:
+        out[:, 0] = -src[:, 1]
+        out[:, 1] = src[:, 0]
+    elif angle == 180:
+        out[:] = -src
+    else:  # 270
+        out[:, 0] = src[:, 1]
+        out[:, 1] = -src[:, 0]
+    return np.ascontiguousarray(out)
 
 
 # Names that usually mean an internal loudspeaker.  The XY signal is not audio
@@ -541,7 +569,7 @@ class Scope:
     """
 
     def __init__(self, device=None, samplerate=None, fps=FPS, samples=None,
-                 invert_y=True, swap_xy=False, source=None,
+                 invert_y=True, swap_xy=False, source=None, rotation=0,
                  lowpass_hz=None, lowpass_taper=0.0, blocksize=512):
         """
         samples : path length per trace -- the REAL parameter.  Refresh is not
@@ -553,6 +581,7 @@ class Scope:
         """
         self.invert_y = invert_y
         self.swap_xy = swap_xy
+        self.set_rotation(rotation)
         _null = (isinstance(device, str) and device.strip().lower()
                  in ("null", "none", "off"))
         if sd is None and not _null:
@@ -562,11 +591,12 @@ class Scope:
                 "generated for browsers to render, not played here.")
         if samplerate is None:
             if _null:
-                # No device to ask. 48 kHz because that is what a browser's
-                # AudioContext almost always runs at, and the client renders
-                # its own trace at its own rate anyway -- this only sets the
-                # index clock and the grid the server reports.
-                samplerate = SAMPLE_RATE
+                # No device constrains the virtual renderer. Use the same
+                # high-resolution budget as the normal 96 kHz scope route:
+                # at 30 traces/s this gives the preview 3200 XY positions
+                # instead of 1600. Browser-local audio still builds from
+                # luminance at its own AudioContext.sampleRate.
+                samplerate = NULL_SAMPLE_RATE
             else:
                 info = sd.query_devices(device, "output")
                 samplerate = int(info["default_samplerate"]) or SAMPLE_RATE
@@ -611,7 +641,7 @@ class Scope:
         if self.source is not None:
             try:
                 buf = self.source(frames)
-                outdata[:] = buf[:frames]
+                outdata[:] = rotate_frame(buf[:frames], self.rotation)
                 self.frames_drawn += 1
             except Exception:
                 outdata[:] = 0.0
@@ -645,6 +675,14 @@ class Scope:
         """
         return self._pending is None
 
+    def set_rotation(self, degrees):
+        """Set output rotation, matching local mode's quarter-turn control."""
+        angle = int(degrees) % 360
+        if angle % 90:
+            raise ValueError("scope rotation must be a multiple of 90 degrees")
+        self.rotation = angle
+        Scope._output_rotation = angle
+
     # --- optional preview tap -------------------------------------------
     # Every render path lands in show_frame(): show() rasterises then calls it,
     # and raster mode calls it directly.  So one hook here catches raster,
@@ -673,6 +711,7 @@ class Scope:
     # downstream regardless).
     _luma = {"seq": 0, "data": None}
     _luma_lock = threading.Lock()
+    _output_rotation = 0
 
     @classmethod
     def publish_luma(cls, lum):
@@ -681,6 +720,8 @@ class Scope:
             return
         try:
             q = np.clip(np.asarray(lum, dtype=np.float32), 0.0, 1.0)
+            if cls._output_rotation:
+                q = np.rot90(q, k=cls._output_rotation // 90)
             with cls._luma_lock:
                 cls._luma["seq"] += 1
                 cls._luma["data"] = (q * 255.0).astype(np.uint8)
@@ -748,12 +789,12 @@ class Scope:
         """
         if self._pending is not None:
             self.frames_dropped += 1
+        f = rotate_frame(frame, self.rotation)
         if Scope._tap_until > time.monotonic():
             try:
-                self._capture(frame)
+                self._capture(f)
             except Exception:
                 pass                       # a preview must never break audio
-        f = np.ascontiguousarray(frame, dtype=np.float32)
         if self.lowpass_hz:
             f = lowpass_frame(f, self.samplerate, self.lowpass_hz,
                               self.lowpass_taper)

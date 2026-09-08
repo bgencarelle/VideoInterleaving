@@ -23,6 +23,7 @@ All tuning is read from settings.SCOPE_*; main.py publishes CLI overrides
 there, exactly as the other modes read ASCII_MODE / SERVER_MODE.
 """
 import argparse
+import inspect
 import math
 import os
 import shutil
@@ -33,6 +34,20 @@ from pathlib import Path
 import numpy as np
 
 import settings
+import scope_out as _scope_out
+
+_REQUIRED_SCOPE_OUT_API = 2
+_scope_out_api = getattr(_scope_out, "SCOPE_OUT_API_VERSION", 0)
+_scope_signature = inspect.signature(_scope_out.Scope.__init__)
+if (_scope_out_api != _REQUIRED_SCOPE_OUT_API or
+        "rotation" not in _scope_signature.parameters):
+    raise RuntimeError(
+        "scope_display.py and scope_out.py are from different revisions. "
+        f"Loaded scope_out from {_scope_out.__file__!r}; "
+        f"API={_scope_out_api}, constructor={_scope_signature}. "
+        "Replace scope_out.py with the rotation-aware file from the same "
+        "runtime bundle as scope_display.py."
+    )
 
 from time import monotonic as _time_mono
 from scope_out import (Scope, choose_device, BufferedSource, rasterize,
@@ -388,7 +403,8 @@ def _swap_device(old_scope, spec, source, fps, samples, main_libs, float_libs,
     # would filter twice after a device change and only after a device change,
     # which is the kind of difference that gets blamed on the new device.
     new_scope = Scope(fps=fps, samples=samples, device=dev, source=source,
-                      invert_y=False)
+                      invert_y=False,
+                      rotation=getattr(old_scope, "rotation", 0))
     new_cal = {}
     try:
         new_cal = calibrate(main_libs, float_libs, new_scope.samples_per_frame,
@@ -428,6 +444,10 @@ def run_scope(clock_source=None):
     use_stipple = render_mode == "stipple"
     use_fusion = render_mode == "fusion"
     invert = bool(getattr(settings, "SCOPE_INVERT", False))
+    rotation = int(getattr(settings, "INITIAL_ROTATION", 0) or 0) % 360
+    if rotation % 90:
+        print(f"[SCOPE] INITIAL_ROTATION {rotation} is not a quarter turn; using 0")
+        rotation = 0
     try:
         fusion_components = normalize_fusion_components(
             getattr(settings, "SCOPE_FUSION", "vrs"))
@@ -737,7 +757,7 @@ def run_scope(clock_source=None):
     # is for callers handing it raw screen-space polylines; applying it
     # here flips a second time and stands the vector picture on its head.
     scope = Scope(fps=fps, samples=samples, device=dev, source=source,
-                  invert_y=False)
+                  invert_y=False, rotation=rotation)
 
     # The baked thumbnail is a hard ceiling on scanlines; clamping silently
     # would look like the row setting being ignored.
@@ -1001,7 +1021,7 @@ def run_scope(clock_source=None):
                       raster_gamma=gamma, stochastic_gamma=walk_gamma, rows=rows,
                       lowpass=lowpass, mode=render_mode, raster=use_raster,
                       sweep=sweep_mode, autofit=autofit,
-                      invert=invert,
+                      invert=invert, rotation=rotation,
                       precondition=raster_precondition,
                       mode_locked=bool(realtime or mix_hz),
                       mix_hz=mix_hz, mix_duty=mix_duty,
@@ -1044,6 +1064,7 @@ def run_scope(clock_source=None):
         monitor_data["scope_stochastic_gamma"] = round(walk_gamma, 2)
         monitor_data["scope_fusion"] = fusion_components if use_fusion else None
         monitor_data["scope_invert"] = invert
+        monitor_data["scope_rotation"] = rotation
         monitor_data["scope_gamma"] = round(
             walk_gamma
             if ((use_stochastic or use_stipple
@@ -1202,6 +1223,16 @@ def run_scope(clock_source=None):
                         keys.message = ""
                 if keys.quit:
                     break
+                if keys.transform_dirty:
+                    keys.transform_dirty = False
+                    rotation = int(live_state.get("rotation", 0)) % 360
+                    scope.set_rotation(rotation)
+                    try:
+                        from lightweight_monitor import monitor_data as _md_rotate
+                        _md_rotate["scope_rotation"] = rotation
+                    except Exception:
+                        pass
+                    prev_key = None          # queue the current image rotated
                 if keys.dirty:
                     keys.dirty = False
                     trim = live_state["trim"]; density = live_state["density"]
@@ -1435,6 +1466,7 @@ def run_scope(clock_source=None):
                     _md["scope_fusion"] = (fusion_components
                                              if use_fusion else None)
                     _md["scope_invert"] = invert
+                    _md["scope_rotation"] = rotation
                     _md["scope_gamma"] = round(
                         walk_gamma
                         if ((use_stochastic or use_stipple

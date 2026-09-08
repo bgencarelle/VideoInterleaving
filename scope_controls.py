@@ -39,6 +39,7 @@ scope live controls
   v         mode         vector -> raster -> stochastic -> stipple -> fusion
   f         fusion       vrs -> vr -> sv -> sr (in fusion mode)
   i         inverse      luminance normal / inverted
+  r / R     rotation     0 -> 90 -> 180 -> 270
   w         sweep       alternate -> palindrome -> retrace
   a         autofit     on / off
   p         print current settings as command-line flags
@@ -53,6 +54,7 @@ class KeyMap:
     def __init__(self, state):
         self.state = state
         self.dirty = False          # set when the grid must be recalibrated
+        self.transform_dirty = False
         self.quit = False
         self.message = ""
 
@@ -142,6 +144,10 @@ class KeyMap:
             s["invert"] = not s.get("invert", False)
             self.dirty = True
             self.message = "inverse = " + ("on" if s["invert"] else "off")
+        elif ch in ("r", "R"):
+            s["rotation"] = (int(s.get("rotation", 0)) + 90) % 360
+            self.transform_dirty = True
+            self.message = f"rotation = {s['rotation']} degrees"
         elif ch == "w":
             order = ["alternate", "palindrome", "retrace"]
             i = order.index(s.get("sweep", "alternate")) if s.get("sweep") in order else 0

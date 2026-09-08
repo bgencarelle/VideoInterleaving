@@ -8,7 +8,7 @@ ENABLE_SRGB_FRAMEBUFFER = False     # Request sRGB framebuffer if supported
 # -------------------------
 # Image Transformation Settings
 # -------------------------
-INITIAL_ROTATION = 0
+INITIAL_ROTATION = 90
 INITIAL_MIRROR = 0
 CONNECTED_TO_RCA_HDMI = False  # this is for analog TVs
 RCA_HDMI_RESOLUTION = (640, 480)

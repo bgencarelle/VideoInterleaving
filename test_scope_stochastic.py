@@ -516,6 +516,47 @@ def test_live_inverse_toggle_and_printed_flag():
     assert "--scope-invert" not in as_flags(state)
 
 
+def test_scope_rotation_key_and_output_cover_frame_and_realtime_paths():
+    from scope_controls import KeyMap
+    from scope_out import Scope, rotate_frame
+
+    source = np.array([[0.25, 0.75], [-0.5, 0.125]], dtype=np.float32)
+    expected_90 = np.array([[-0.75, 0.25], [-0.125, -0.5]],
+                           dtype=np.float32)
+    assert np.array_equal(rotate_frame(source, 90), expected_90)
+    assert np.array_equal(rotate_frame(source, 180), -source)
+
+    state = {"rotation": 0}
+    keys = KeyMap(state)
+    assert keys.feed("r")
+    assert state["rotation"] == 90
+    assert keys.transform_dirty
+    keys.transform_dirty = False
+    assert keys.feed("R")
+    assert state["rotation"] == 180
+    assert keys.transform_dirty
+
+    scope = Scope(device="null", samples=len(source),
+                  source=lambda _n: source, rotation=90)
+    try:
+        out = np.zeros_like(source)
+        scope._callback(out, len(source), None, None)
+        assert np.array_equal(out, expected_90)
+
+        scope.source = None
+        scope.show_frame(source)
+        assert np.array_equal(scope._pending, expected_90)
+
+        lum = np.arange(6, dtype=np.float32).reshape(2, 3) / 5.0
+        Scope.publish_luma(lum)
+        _seq, rotated_lum = Scope.read_luma()
+        assert np.array_equal(rotated_lum,
+                              (np.rot90(lum) * 255.0).astype(np.uint8))
+    finally:
+        scope.set_rotation(0)
+        scope.stream.close()
+
+
 def test_fusion_density_supports_every_requested_component_set():
     shape = (24, 30)
     vector = np.zeros(shape)

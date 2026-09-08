@@ -39,7 +39,7 @@ from scope_bake import (XYLibrary, merge, raster_frame, content_bbox,
                         PositionMultiplexer, apply_trace_border,
                         trace_luminance_weights,
                         retime_trace_by_weights)                    # noqa: E402
-from scope_out import Scope, rasterize, FPS, choose_device           # noqa: E402
+from scope_out import Scope, rasterize, rotate_frame, FPS, choose_device  # noqa: E402
 
 PNG_OUT = "test_scope_pair_output.png"
 
@@ -298,6 +298,7 @@ def main():
            or bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")))
     culled, raster = True, args.raster
     exposure, gamma, density = args.exposure, args.gamma, args.density
+    rotation = 0
     playing, pingpong, ips = args.play, not args.loop, max(0.5, args.ips)
     direction = 1
     field_counter = itertools.count()
@@ -526,7 +527,9 @@ def main():
                      f"{ips:.0f}ips/{args.fps}fps")
             if playing and sim.dropped:
                 state += f"  SKIPPED {sim.dropped / max(sim.dropped + sim.drawn, 1):.0%}"
-            img = annotate(render_trace(samples, args.size, exposure=exposure),
+            shown_samples = rotate_frame(samples, rotation)
+            img = annotate(render_trace(shown_samples, args.size,
+                                        exposure=exposure),
                            f"{bg_dir.relative_to(root)} + {fg_dir.relative_to(root)}"
                            f"  frame {shown_index}/{frames - 1}  {mode}"
                            f"  {n_samples} samples  exp {exposure:.2f}"
@@ -606,6 +609,13 @@ def main():
             fusion_multiplexer.reset()
             beam_end = None
             samples, npolys = build(index, culled, active_mode); dirty = True
+        elif key == ord("R"):
+            rotation = (rotation + 90) % 360
+            if scope:
+                scope.set_rotation(rotation)
+                samples, npolys = build(index, culled, active_mode)
+            dirty = True
+            print(f"[DISPLAY] rotation = {rotation} degrees")
         elif key in (ord("+"), ord("=")):
             exposure = min(4.0, exposure * 1.3); dirty = True
         elif key in (ord("-"), ord("_")):
