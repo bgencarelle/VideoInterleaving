@@ -33,7 +33,44 @@
           await applyOutput(dev.deviceId, dev.label || dev.deviceId);
           return;
         }
-        st.textContent = "Output selection is not available in this browser. Choose your output in system sound settings before starting audio. No microphone access is requested.";
+        // List only outputs already exposed to this page. Never request input.
+        const media = navigator.mediaDevices;
+        const outputs = media && typeof media.enumerateDevices === "function"
+          ? (await media.enumerateDevices()).filter(d =>
+              d.kind === "audiooutput" && d.deviceId) : [];
+        const sel = document.getElementById("sink-select");
+        sel.textContent = "";
+        sel.style.display = outputs.length ? "" : "none";
+        if (!outputs.length) {
+          st.textContent = "No selectable outputs are exposed to this page. Choose your output in system sound settings before starting audio.";
+          return;
+        }
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = "Choose an output…";
+        placeholder.disabled = true;
+        placeholder.selected = true;
+        sel.appendChild(placeholder);
+        outputs.forEach((device, index) => {
+          const option = document.createElement("option");
+          option.value = device.deviceId;
+          option.textContent = device.label || (device.deviceId === "default"
+            ? "System default" : "Audio output " + (index + 1));
+          sel.appendChild(option);
+        });
+        sel.value = outputs.some(d => d.deviceId === selectedSinkId)
+          ? selectedSinkId : "";
+        sel.onchange = async () => {
+          if (audioBusy) return;
+          setAudioBusy(true);
+          try {
+            await applyOutput(sel.value, sel.options[sel.selectedIndex].textContent);
+          } catch (e) {
+            sel.value = selectedSinkId === null ? "" : selectedSinkId;
+            st.textContent = "Could not select output: " + e.message;
+          } finally { setAudioBusy(false); }
+        };
+        st.textContent = "Choose an available output. No microphone access is requested.";
       } catch (e) {
         st.textContent = "Output selection failed (" + e.name + "). Try again or choose the system default before starting.";
       } finally { setAudioBusy(false); }
