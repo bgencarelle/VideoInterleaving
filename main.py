@@ -97,6 +97,8 @@ def configure_runtime():
              "(default: INITIAL_MIRROR). Press m live to toggle it"
     )
 
+    # The ASCII grading stage, in the order it is applied. All three only mean
+    # anything in --mode ascii and asciiweb; passing them elsewhere says so.
     parser.add_argument(
         "--ascii-contrast",
         type=float,
@@ -104,6 +106,24 @@ def configure_runtime():
         help="ASCII grading contrast, scaled about mid-grey "
              "(default: ASCII_CONTRAST, 1.0 = neutral, >1 more punch, "
              "<1 flatter). Applies to --mode ascii and asciiweb"
+    )
+
+    parser.add_argument(
+        "--ascii-brightness",
+        type=float,
+        metavar="F",
+        help="ASCII grading brightness, a straight multiply on value "
+             "(default: ASCII_BRIGHTNESS, 1.0 = neutral, 0 = black). "
+             "Applies after contrast"
+    )
+
+    parser.add_argument(
+        "--ascii-gamma",
+        type=float,
+        metavar="F",
+        help="ASCII gamma on the grey the character is chosen from "
+             "(default: ASCII_GAMMA, 1.0 = linear, <1 lifts shadows). "
+             "Applied last, after contrast and brightness"
     )
 
     parser.add_argument(
@@ -333,24 +353,51 @@ def configure_runtime():
     if args.mirror is not None:
         settings.INITIAL_MIRROR = 1 if args.mirror else 0
 
-    # ASCII grading, before the converter builds anything from it.
+    # ASCII grading, before the converter builds anything from it.  Each is
+    # rejected here rather than left to misbehave later: the failure modes are
+    # specific, so the messages are too.
+    #
+    #   contrast   negative scales the picture through mid-grey and comes back
+    #              INVERTED -- a tone inversion, not a contrast, and far more
+    #              likely a stray minus sign than a request.  0 is the honest
+    #              endpoint: everything flattens to one tone.
+    #   brightness a straight multiply, so 0 is black and negative is
+    #              meaningless -- it clips to black anyway, silently.
+    #   gamma      an exponent on i/255.  0 makes every non-zero input 1.0
+    #              (a flat white field) and negative divides by zero at i=0,
+    #              which overflows to 255 rather than raising.
+    for flag, value, floor, closed in (
+            ("--ascii-contrast", args.ascii_contrast, 0.0, True),
+            ("--ascii-brightness", args.ascii_brightness, 0.0, True),
+            ("--ascii-gamma", args.ascii_gamma, 0.0, False)):
+        if value is None:
+            continue
+        if not math.isfinite(value):
+            parser.error(f"{flag} must be a finite number")
+        if value < floor or (not closed and value == floor):
+            parser.error(f"{flag} must be greater than {floor:g}"
+                         if not closed else
+                         f"{flag} cannot be negative "
+                         f"({floor:g} is the low end, 1.0 is neutral)")
     if args.ascii_contrast is not None:
-        if not math.isfinite(args.ascii_contrast):
-            parser.error("--ascii-contrast must be a finite number")
-        if args.ascii_contrast < 0:
-            # Negative scales the picture through mid-grey and comes back
-            # inverted. That is a tone inversion, not a contrast, and it is far
-            # likelier to be a stray minus sign than a request.
-            parser.error("--ascii-contrast cannot be negative "
-                         "(0 flattens to mid-grey, 1.0 is neutral)")
         settings.ASCII_CONTRAST = args.ascii_contrast
+    if args.ascii_brightness is not None:
+        settings.ASCII_BRIGHTNESS = args.ascii_brightness
+    if args.ascii_gamma is not None:
+        settings.ASCII_GAMMA = args.ascii_gamma
 
     # Options that only mean anything in one mode; say so rather than silently
     # ignoring them. The whole point of a knob is that turning it does
     # something, and a flag accepted in the wrong mode does nothing quietly.
-    if args.mode not in ("ascii", "asciiweb") and args.ascii_contrast is not None:
-        print("⚠️  --ascii-contrast ignored: it applies to --mode ascii and "
-              "asciiweb. Each mode in VideoInterleaving runs standalone.")
+    if args.mode not in ("ascii", "asciiweb"):
+        _ascii_used = [f for f, v in (("--ascii-contrast", args.ascii_contrast),
+                                      ("--ascii-brightness", args.ascii_brightness),
+                                      ("--ascii-gamma", args.ascii_gamma))
+                       if v is not None]
+        if _ascii_used:
+            print(f"⚠️  {', '.join(_ascii_used)} ignored: these apply to "
+                  f"--mode ascii and asciiweb. Each mode in VideoInterleaving "
+                  f"runs standalone.")
 
     # Scope options only mean anything in scope mode; say so rather than
     # silently ignoring them.

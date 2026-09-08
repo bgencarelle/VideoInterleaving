@@ -132,18 +132,24 @@ python main.py --mode ascii --dir ./images_tiny
 
 Tone is graded once, in `ascii_converter.to_ascii`: saturation on S, then
 contrast and brightness on V, then gamma on the grey the character is chosen
-from. Contrast is settable per run:
+from. The last three are settable per run, in that order of application:
 
 ```bash
-python main.py --mode ascii --dir ./images_tiny --ascii-contrast 1.4
+python main.py --mode ascii --dir ./images_tiny \
+  --ascii-contrast 1.4 --ascii-brightness 1.2 --ascii-gamma 0.9
 ```
 
-It scales about mid-grey, so `1.0` is exactly neutral, above 1 pushes lights
-and darks apart, and `0` flattens everything to one tone. The shipped default
-is `1.0` — `ASCII_CONTRAST` sat at 1.2 in `constantStorage/ascii_constants.py`
-for a long time while the code that read it was gone, so wiring it up at 1.2
-would have changed every existing installation's picture. Saturation,
-brightness and gamma are still set in that file.
+* `--ascii-contrast` scales about mid-grey, so `1.0` is exactly neutral, above
+  1 pushes lights and darks apart, and `0` flattens everything to one tone.
+* `--ascii-brightness` is a straight multiply on value; `0` is black.
+* `--ascii-gamma` is the exponent applied to the grey the character comes from;
+  below 1 lifts shadows. It must be above 0 — at exactly 0 every non-zero input
+  becomes full white, which is a discontinuity rather than an endpoint.
+
+The shipped contrast default is `1.0`. `ASCII_CONTRAST` sat at 1.2 in
+`constantStorage/ascii_constants.py` for a long time while the code that read
+it was gone, so wiring it up at 1.2 would have changed every existing
+installation's picture. Saturation is still set in that file.
 
 **3. Start Local Mode (Windowed):**
 ```bash
