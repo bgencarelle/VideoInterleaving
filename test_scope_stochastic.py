@@ -557,6 +557,128 @@ def test_scope_rotation_key_and_output_cover_frame_and_realtime_paths():
         scope.stream.close()
 
 
+def test_image_space_rotation_keeps_x_as_raster_fast_axis():
+    from scope_display import (_rotate_luma, _rotate_stipple_cloud,
+                               _rotation_grid)
+
+    lum = np.full((24, 16), 0.8, dtype=np.float32)
+    lum[:, :3] = 0.0
+    assert np.array_equal(_rotate_luma(lum, 90), np.rot90(lum))
+    assert _rotation_grid({"grid_rows": 24, "grid_cols": 16}, 90) == (16, 24)
+
+    emitter = TraceEmitter(
+        96000, 3200, gamma=2.2, trim=0.02,
+        grid=_rotation_grid({"grid_rows": 24, "grid_cols": 16}, 90))
+    frame = emitter.emit(_rotate_luma(lum, 90))
+    delta = np.diff(frame, axis=0)
+    delta = delta[np.linalg.norm(delta, axis=1) > 1e-6]
+    horizontal = np.count_nonzero(np.abs(delta[:, 0]) > 2 * np.abs(delta[:, 1]))
+    vertical = np.count_nonzero(np.abs(delta[:, 1]) > 2 * np.abs(delta[:, 0]))
+    assert horizontal > 10 * max(vertical, 1)
+
+    cloud = {
+        "xy": np.asarray([[0.2, 0.3], [0.8, 0.9]]),
+        "luminance": np.ones(2), "edge": np.zeros(2),
+        "correction": np.ones(2), "aspect": 2.0,
+    }
+    turned = _rotate_stipple_cloud(cloud, 90)
+    assert np.allclose(turned["xy"], [[0.3, 0.8], [0.9, 0.2]])
+    assert turned["aspect"] == 0.5
+
+
+def test_realtime_image_rotation_keeps_horizontal_sweeps():
+    from scope_bake import SweepSource
+
+    lum = np.full((24, 16), 0.8, dtype=np.float32)
+    source = SweepSource(
+        samples_per_pass=3200, lum_fn=lambda: lum,
+        grid_rows=16, grid_cols=24, rotation=90)
+    frame = source(3200)
+    delta = np.diff(frame, axis=0)
+    delta = delta[np.linalg.norm(delta, axis=1) > 1e-6]
+    horizontal = np.count_nonzero(np.abs(delta[:, 0]) > 2 * np.abs(delta[:, 1]))
+    vertical = np.count_nonzero(np.abs(delta[:, 1]) > 2 * np.abs(delta[:, 0]))
+    assert horizontal > 10 * max(vertical, 1)
+
+    source.set_rotation(0, grid=(24, 16))
+    assert source.rotation == 0
+    assert source._grid is None
+
+
+def test_yt_mode_adds_one_unique_x_edge_and_preserves_y():
+    from scope_out import Scope, yt_trigger_frame
+
+    xy = np.column_stack((
+        np.linspace(-0.8, 0.8, 64, dtype=np.float32),
+        np.linspace(0.7, -0.7, 64, dtype=np.float32)))
+    encoded = yt_trigger_frame(xy, trigger_samples=8)
+    assert encoded.shape == (64, 2)
+    assert np.array_equal(encoded[:, 1], xy[:, 1])
+    assert np.allclose(encoded[:4, 0], -0.99)
+    assert np.allclose(encoded[4:8, 0], 0.99)
+    assert np.array_equal(encoded[8:, 0], xy[8:, 0])
+    # Ordinary image content cannot cross a +0.95 trigger threshold.
+    assert np.count_nonzero((encoded[:-1, 0] < 0.95)
+                            & (encoded[1:, 0] >= 0.95)) == 1
+
+    scope = Scope(device="null", samples=64, yt_mode=True)
+    try:
+        scope.show_frame(xy)
+        assert np.array_equal(scope._pending[:, 1], xy[:, 1])
+        assert scope._pending[0, 0] == -scope.yt_trigger_level
+        assert scope._pending[scope.yt_trigger_samples - 1, 0] \
+            == scope.yt_trigger_level
+    finally:
+        scope.stream.close()
+
+
+def test_yt_realtime_marker_survives_callback_block_boundaries():
+    from scope_out import Scope
+
+    xy = np.column_stack((
+        np.linspace(-0.8, 0.8, 64, dtype=np.float32),
+        np.zeros(64, dtype=np.float32)))
+    cursor = 0
+
+    def source(n):
+        nonlocal cursor
+        idx = (np.arange(n) + cursor) % len(xy)
+        cursor = (cursor + n) % len(xy)
+        return xy[idx]
+
+    scope = Scope(device="null", samples=64, source=source, yt_mode=True,
+                  yt_trigger_us=100.0)
+    try:
+        parts = []
+        for n in (17, 23, 24):
+            out = np.zeros((n, 2), dtype=np.float32)
+            scope._callback(out, n, None, None)
+            parts.append(out)
+        whole = np.vstack(parts)
+        assert np.array_equal(whole[:, 1], xy[:, 1])
+        split = max(2, scope.yt_trigger_samples // 2)
+        assert np.all(whole[:split, 0] == -scope.yt_trigger_level)
+        assert np.all(whole[split:scope.yt_trigger_samples, 0]
+                      == scope.yt_trigger_level)
+        assert scope._yt_pos == 0
+    finally:
+        scope.stream.close()
+
+
+def test_yt_live_flags_lock_retrace():
+    state = {
+        "mode": "raster", "raster": True, "yt": True,
+        "sweep": "retrace", "trim": 0.02, "gamma": 2.2,
+    }
+    keys = KeyMap(state)
+    assert keys.feed("w")
+    assert state["sweep"] == "retrace"
+    assert "fixes sweep" in keys.message
+    flags = as_flags(state)
+    assert "--scope-yt" in flags
+    assert "--scope-sweep" not in flags
+
+
 def test_fusion_density_supports_every_requested_component_set():
     shape = (24, 30)
     vector = np.zeros(shape)

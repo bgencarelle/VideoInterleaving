@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 
-SCOPE_OUT_API_VERSION = 2  # rotation-aware Scope constructor/output path
+SCOPE_OUT_API_VERSION = 3  # rotation-aware output plus explicit Y-T trigger
 
 try:
     import settings as settings_mod
@@ -78,6 +78,36 @@ def rotate_frame(frame, degrees):
         out[:, 0] = src[:, 1]
         out[:, 1] = -src[:, 0]
     return np.ascontiguousarray(out)
+
+
+def yt_trigger_frame(frame, trigger_samples=24, trigger_level=0.99,
+                     offset=0, period=None):
+    """Insert one threshold-unique trigger edge on X per existing XY trace.
+
+    The image waveform and channel routing are deliberately unchanged. Only
+    X receives a short low-to-high marker; Y passes through untouched. Normal
+    picture content is limited to LEVEL (0.9), while the marker reaches 0.99,
+    so a trigger level around +0.95 sees only this edge.
+
+    ``offset`` supports arbitrary audio callback block boundaries. ``period``
+    is the complete trace length at which the marker repeats.
+    """
+    src = np.asarray(frame, dtype=np.float32)
+    if src.ndim != 2 or src.shape[1] < 2:
+        raise ValueError("Y-T source must have shape (samples, 2)")
+    count = len(src)
+    if count == 0:
+        return np.empty((0, 2), dtype=np.float32)
+    out = np.ascontiguousarray(src[:, :2]).copy()
+    cycle = max(1, int(period if period is not None else count))
+    marker = max(4, min(int(trigger_samples), cycle))
+    phase = (np.arange(count, dtype=np.int64) + int(offset)) % cycle
+    low = phase < max(2, marker // 2)
+    high = (phase >= max(2, marker // 2)) & (phase < marker)
+    level = min(1.0, max(float(trigger_level), LEVEL + 0.01))
+    out[low, 0] = -level
+    out[high, 0] = level
+    return out
 
 
 # Names that usually mean an internal loudspeaker.  The XY signal is not audio
@@ -570,7 +600,9 @@ class Scope:
 
     def __init__(self, device=None, samplerate=None, fps=FPS, samples=None,
                  invert_y=True, swap_xy=False, source=None, rotation=0,
-                 lowpass_hz=None, lowpass_taper=0.0, blocksize=512):
+                 lowpass_hz=None, lowpass_taper=0.0, blocksize=512,
+                 yt_mode=False, yt_trigger_us=250.0,
+                 yt_trigger_level=0.99):
         """
         samples : path length per trace -- the REAL parameter.  Refresh is not
                   set independently; it falls out as rate/samples, because the
@@ -608,7 +640,19 @@ class Scope:
         self.samplerate = samplerate
         self.samples_per_frame = (max(64, int(samples)) if samples
                                   else max(64, round(samplerate / fps)))
+        self.yt_mode = bool(yt_mode)
+        self.yt_trigger_us = max(float(yt_trigger_us), 1.0)
+        self.yt_trigger_samples = max(
+            4, round(float(samplerate) * self.yt_trigger_us
+                     / 1_000_000.0))
+        self.yt_trigger_level = min(
+            1.0, max(float(yt_trigger_level), LEVEL + 0.01))
+        self._yt_pos = 0
         self._frame = rasterize([], self.samples_per_frame)  # idle circle, never a parked dot
+        if self.yt_mode:
+            self._frame = yt_trigger_frame(
+                self._frame, self.yt_trigger_samples, self.yt_trigger_level,
+                period=self.samples_per_frame)
         self._pending = None
         self._lock = threading.Lock()
         self._pos = 0
@@ -641,7 +685,15 @@ class Scope:
         if self.source is not None:
             try:
                 buf = self.source(frames)
-                outdata[:] = rotate_frame(buf[:frames], self.rotation)
+                rendered = rotate_frame(buf[:frames], self.rotation)
+                if self.yt_mode:
+                    rendered = yt_trigger_frame(
+                        rendered, self.yt_trigger_samples,
+                        self.yt_trigger_level, offset=self._yt_pos,
+                        period=self.samples_per_frame)
+                    self._yt_pos = ((self._yt_pos + frames)
+                                    % self.samples_per_frame)
+                outdata[:] = rendered
                 self.frames_drawn += 1
             except Exception:
                 outdata[:] = 0.0
@@ -790,14 +842,18 @@ class Scope:
         if self._pending is not None:
             self.frames_dropped += 1
         f = rotate_frame(frame, self.rotation)
+        if self.lowpass_hz:
+            f = lowpass_frame(f, self.samplerate, self.lowpass_hz,
+                              self.lowpass_taper)
+        if self.yt_mode:
+            f = yt_trigger_frame(
+                f, self.yt_trigger_samples, self.yt_trigger_level,
+                period=len(f))
         if Scope._tap_until > time.monotonic():
             try:
                 self._capture(f)
             except Exception:
                 pass                       # a preview must never break audio
-        if self.lowpass_hz:
-            f = lowpass_frame(f, self.samplerate, self.lowpass_hz,
-                              self.lowpass_taper)
         self._pending = f
 
     def show(self, polylines):

@@ -188,6 +188,7 @@
     // meant to be read at a glance from across a room.
     const SCOPE_FIELDS = [
       ["scope_mode",              "mode"],
+      ["scope_yt",                "one-channel Y-T"],
       ["scope_device",            "output device"],
       ["scope_samplerate",        "sample rate"],
       ["scope_samples_per_trace", "samples / trace"],
@@ -540,6 +541,19 @@
       return out;
     }
 
+    function addYtTrigger(xy, n, sampleRate) {
+      // Preserve the existing XY waveform. Only X receives a 250 us,
+      // threshold-unique low-to-high edge at the start of each trace.
+      const out = new Float32Array(xy);
+      const marker = Math.max(4, Math.min(n, Math.round(sampleRate * 0.00025)));
+      const split = Math.max(2, Math.floor(marker / 2));
+      for (let i = 0; i < n; i++) {
+        if (i < split) out[i * 2] = -0.99;
+        else if (i < marker) out[i * 2] = 0.99;
+      }
+      return out;
+    }
+
     const WORKLET_SRC = `
       class ScopeOut extends AudioWorkletProcessor {
         constructor(){ super(); this.buf=null; this.pos=0;
@@ -688,7 +702,9 @@
       const trim = parseFloat(document.getElementById("local-trim").value);
       const gamma = parseFloat(document.getElementById("local-gamma").value);
       const g = boxGrid(px, w, h, rows, cols);
-      worklet.port.postMessage(buildTrace(g, rows, cols, n, trim, gamma, w, h));
+      let trace = buildTrace(g, rows, cols, n, trim, gamma, w, h);
+      if (lastData.scope_yt) trace = addYtTrigger(trace, n, actx.sampleRate);
+      worklet.port.postMessage(trace);
       if ((++tracesBuilt % 15) === 0) setStatus();
     }
 

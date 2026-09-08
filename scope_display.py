@@ -36,17 +36,18 @@ import numpy as np
 import settings
 import scope_out as _scope_out
 
-_REQUIRED_SCOPE_OUT_API = 2
+_REQUIRED_SCOPE_OUT_API = 3
 _scope_out_api = getattr(_scope_out, "SCOPE_OUT_API_VERSION", 0)
 _scope_signature = inspect.signature(_scope_out.Scope.__init__)
 if (_scope_out_api != _REQUIRED_SCOPE_OUT_API or
-        "rotation" not in _scope_signature.parameters):
+        "rotation" not in _scope_signature.parameters or
+        "yt_mode" not in _scope_signature.parameters):
     raise RuntimeError(
         "scope_display.py and scope_out.py are from different revisions. "
         f"Loaded scope_out from {_scope_out.__file__!r}; "
         f"API={_scope_out_api}, constructor={_scope_signature}. "
-        "Replace scope_out.py with the rotation-aware file from the same "
-        "runtime bundle as scope_display.py."
+        "Replace scope_out.py with the rotation/Y-T-aware file from the "
+        "same runtime bundle as scope_display.py."
     )
 
 from time import monotonic as _time_mono
@@ -140,6 +141,8 @@ def _bootstrap():
                         dest="scope_stipple", action="store_true")
     ap.add_argument("--scope-invert", action=argparse.BooleanOptionalAction,
                     default=None)
+    ap.add_argument("--scope-yt", action="store_true",
+                    help="stable X trigger edge for one-channel Y-T viewing")
     ap.add_argument("--scope-walk-radius", type=int)
     ap.add_argument("--scope-walk-stride", type=int)
     ap.add_argument("--scope-walk-reseed-ms", type=float)
@@ -184,6 +187,11 @@ def _bootstrap():
         settings.SCOPE_RASTER = settings.SCOPE_RENDER_MODE == "raster"
     if args.scope_invert is not None:
         settings.SCOPE_INVERT = args.scope_invert
+    if args.scope_yt:
+        settings.SCOPE_YT = True
+        settings.SCOPE_RENDER_MODE = "raster"
+        settings.SCOPE_RASTER = True
+        settings.SCOPE_SWEEP = "retrace"
     if args.scope_gamma is not None:
         if settings.SCOPE_RENDER_MODE == "fusion":
             settings.SCOPE_GAMMA = args.scope_gamma
@@ -454,9 +462,12 @@ def _swap_device(old_scope, spec, source, fps, samples, main_libs, float_libs,
     # lowpass_circular() in _emit, not by the Scope.  Passing it here as well
     # would filter twice after a device change and only after a device change,
     # which is the kind of difference that gets blamed on the new device.
-    new_scope = Scope(fps=fps, samples=samples, device=dev, source=source,
-                      invert_y=False,
-                      rotation=getattr(old_scope, "rotation", 0))
+    new_scope = Scope(
+        fps=fps, samples=samples, device=dev, source=source,
+        invert_y=False, rotation=getattr(old_scope, "rotation", 0),
+        yt_mode=getattr(old_scope, "yt_mode", False),
+        yt_trigger_us=getattr(old_scope, "yt_trigger_us", 250.0),
+        yt_trigger_level=getattr(old_scope, "yt_trigger_level", 0.99))
     new_cal = {}
     try:
         new_cal = calibrate(main_libs, float_libs, new_scope.samples_per_frame,
@@ -486,6 +497,9 @@ def run_scope(clock_source=None):
     fps = getattr(settings, "SCOPE_FPS", None) or IPS
     samples = getattr(settings, "SCOPE_SAMPLES", None)
     render_mode = getattr(settings, "SCOPE_RENDER_MODE", None)
+    yt_mode = bool(getattr(settings, "SCOPE_YT", False))
+    if yt_mode:
+        render_mode = "raster"
     if getattr(settings, "SCOPE_RASTER", False) and render_mode == "vector":
         render_mode = "raster"       # compatibility with older settings.py
     if render_mode not in ("vector", "raster", "stochastic", "stipple",
@@ -524,6 +538,8 @@ def run_scope(clock_source=None):
     lowpass = getattr(settings, "SCOPE_LOWPASS", None)
     oversample = int(getattr(settings, "SCOPE_OVERSAMPLE", 1) or 1)
     sweep_mode = getattr(settings, "SCOPE_SWEEP", "alternate")
+    if yt_mode:
+        sweep_mode = "retrace"
     fields = max(1, int(getattr(settings, "SCOPE_FIELDS", 1) or 1))
     fields_explicit = bool(getattr(settings, "SCOPE_FIELDS_EXPLICIT", False))
     dc_comp = getattr(settings, "SCOPE_DC_COMP", None)
@@ -551,6 +567,9 @@ def run_scope(clock_source=None):
     if mix_hz and realtime:
         print("[SCOPE] mix needs whole passes; ignoring realtime.")
         realtime = False
+    if yt_mode and mix_hz:
+        print("[SCOPE] Y-T is a dedicated one-channel raster path; ignoring mix.")
+        mix_hz = None
     if mix_hz is not None:
         mix_hz = float(mix_hz)
         if not math.isfinite(mix_hz) or mix_hz <= 0.0:
@@ -799,6 +818,7 @@ def run_scope(clock_source=None):
             density=density, rows=rows,
             precondition=raster_precondition, invert=invert,
             rotation=rotation,
+            alternate=not yt_mode,
             grid_rows=(_gen_grid[0] if _gen_grid else None),
             grid_cols=(_gen_grid[1] if _gen_grid else None),
             levels=(cal.get("levels") if cal else None))
@@ -818,7 +838,15 @@ def run_scope(clock_source=None):
     # X-triggered and X-only displays. Every renderer below receives the
     # orientation while the physical output axes remain fixed.
     scope = Scope(fps=fps, samples=samples, device=dev, source=source,
-                  invert_y=False, rotation=0)
+                  invert_y=False, rotation=0, yt_mode=yt_mode)
+
+    if yt_mode:
+        marker_us = scope.yt_trigger_us
+        trigger_hz = scope.samplerate / max(scope.samples_per_frame, 1)
+        print(f"[SCOPE] Y-T trigger on X: existing XY signal preserved, "
+              f"{trigger_hz:g} Hz trace trigger, {marker_us:g} us marker")
+        print("[SCOPE] Y-T trigger: rising edge near +0.95; set the timebase "
+              "to one complete trace")
 
     # The baked thumbnail is a hard ceiling on scanlines; clamping silently
     # would look like the row setting being ignored.
@@ -1082,7 +1110,7 @@ def run_scope(clock_source=None):
                       raster_gamma=gamma, stochastic_gamma=walk_gamma, rows=rows,
                       lowpass=lowpass, mode=render_mode, raster=use_raster,
                       sweep=sweep_mode, autofit=autofit,
-                      invert=invert, rotation=rotation,
+                      invert=invert, rotation=rotation, yt=yt_mode,
                       precondition=raster_precondition,
                       mode_locked=bool(realtime or mix_hz),
                       mix_hz=mix_hz, mix_duty=mix_duty,
@@ -1126,6 +1154,7 @@ def run_scope(clock_source=None):
         monitor_data["scope_fusion"] = fusion_components if use_fusion else None
         monitor_data["scope_invert"] = invert
         monitor_data["scope_rotation"] = rotation
+        monitor_data["scope_yt"] = yt_mode
         monitor_data["scope_gamma"] = round(
             walk_gamma
             if ((use_stochastic or use_stipple
@@ -1545,6 +1574,7 @@ def run_scope(clock_source=None):
                                              if use_fusion else None)
                     _md["scope_invert"] = invert
                     _md["scope_rotation"] = rotation
+                    _md["scope_yt"] = yt_mode
                     _md["scope_gamma"] = round(
                         walk_gamma
                         if ((use_stochastic or use_stipple

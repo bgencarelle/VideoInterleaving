@@ -149,6 +149,9 @@ class KeyMap:
             self.transform_dirty = True
             self.message = f"rotation = {s['rotation']} degrees"
         elif ch == "w":
+            if s.get("yt"):
+                self.message = "Y-T output fixes sweep = retrace"
+                return True
             order = ["alternate", "palindrome", "retrace"]
             i = order.index(s.get("sweep", "alternate")) if s.get("sweep") in order else 0
             s["sweep"] = order[(i + 1) % len(order)]
@@ -172,7 +175,10 @@ def as_flags(s):
     """Current state as flags you can paste into a command line."""
     mode = s.get("mode", "raster" if s.get("raster") else "vector")
     mix_hz = s.get("mix_hz")
-    if mix_hz:
+    yt = bool(s.get("yt"))
+    if yt:
+        out = ["--scope-yt"]
+    elif mix_hz:
         out = [f"--scope-mix {mix_hz:g}",
                f"--scope-mix-duty {s.get('mix_duty', 0.5):g}"]
     else:
@@ -207,7 +213,7 @@ def as_flags(s):
         out.append(f"--scope-precondition {s['precondition']:g}")
     if s.get("rows"):
         out.append(f"--scope-rows {int(s['rows'])}")
-    if s.get("sweep", "alternate") != "alternate":
+    if not yt and s.get("sweep", "alternate") != "alternate":
         out.append(f"--scope-sweep {s['sweep']}")
     if s.get("lowpass"):
         out.append(f"--scope-lowpass {s['lowpass']:g}")

@@ -280,7 +280,7 @@ class SweepSource:
                  floor=0.012, trim=0.02, density=1.0, rows=None, bbox=None,
                  level=0.9, grid_rows=None, grid_cols=None, levels=None,
                  lum_fn=None, auto_levels=0.0, precondition=0.0,
-                 invert=False, rotation=0):
+                 invert=False, rotation=0, alternate=True):
         """
         lum_fn      : optional callable returning an (H, W) float array in
                       0..1 -- any live source (screen grab, camera, video,
@@ -314,6 +314,7 @@ class SweepSource:
         self.rotation = int(rotation) % 360
         if self.rotation % 90:
             raise ValueError("scope rotation must be a multiple of 90 degrees")
+        self.alternate = bool(alternate)
         self._out = np.zeros((0, 2), np.float32)
         self._plan = None
         self._budgets = None
@@ -529,7 +530,7 @@ class SweepSource:
         while len(self._out) < n:
             st = self.state_fn() if self.state_fn is not None else None
             if self._plan is None or self._row_i >= len(self._plan):
-                self._reverse = not self._reverse
+                self._reverse = (not self._reverse) if self.alternate else False
                 if not self._start_pass(st):
                     return np.zeros((n, 2), np.float32)
             budget = int(self._budgets[self._row_i]) if self._budgets is not None \

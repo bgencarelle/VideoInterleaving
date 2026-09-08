@@ -64,6 +64,11 @@ mode's code path is altered.
 python main.py --mode scope --dir images --xy-dir images_xy --scope-raster
 ```
 
+With `--device null`, the server-side virtual trace uses a 96 kHz reference
+budget. At 30 traces/s this gives the browser scope display 3200 XY samples per
+trace, matching a 96 kHz local scope route. Browser-local audio continues to
+use the visitor's actual `AudioContext.sampleRate`.
+
 For the no-Z Osci-style renderer:
 
 ```
@@ -573,6 +578,8 @@ python utilities/convert_to_xy.py -i images -o images_xy [options]
 | `--bands N` | Luminance levels for interior detail. 2 = starker, 4 = more tonal. |
 | `--min-verts N` | Floor on vertices per contour. Raise for fewer/cleaner shapes. |
 | `--thumbs-only` | Raster/stochastic/stipple data only; skip vectorizing. |
+| `--max-bake-gb N` | Refuse fixed thumbnail/stipple stores above `N` GB (default 16; `0` disables). |
+| `--clean-stale-temp` | Remove converter-owned temporary arrays left by an interrupted bake before starting. |
 
 Floats always bake silhouette-only — they're mattes, with no interior worth
 tracing.
@@ -604,6 +611,7 @@ python main.py --mode scope --xy-dir images_xy [options]
 | `--scope-mix [HZ]` | Vector/raster/stochastic/raster/stipple/raster whole-trace mix (default 120 Hz). |
 | `--scope-mix-duty F` | Raster fraction; remainder splits equally between vector/stochastic/stipple (default 0.5). |
 | `--scope-sweep MODE` | `alternate` (default), `palindrome`, or `retrace`. |
+| `--scope-yt` | Preserve the XY waveform while adding a unique per-trace X trigger edge for one-channel Y-T viewing; fixes sweep to `retrace`. |
 | `--scope-rows N` | Raster scanline count (default: auto from budget). |
 | `--scope-gamma F` | Active renderer's exponent: raster default 2.2, stochastic default 2; sets both in mix. |
 | `--scope-density F` | Raster samples per cell (1.0 = finest). |
@@ -616,7 +624,8 @@ python main.py --mode scope --xy-dir images_xy [options]
 While scope mode owns a terminal, press `v` to cycle
 `VECTOR → RASTER → STOCHASTIC → STIPPLE → FUSION → VECTOR`; in fusion, `f` cycles
 `VRS → VR → SV → SR`. Press `i` to toggle covered-image luminance
-inversion and `p` to print the current mode
+inversion, `r` or `R` to rotate the complete XY output in 90° steps, and
+`p` to print the current mode
 and live settings as reusable command-line flags. Cycling is disabled in
 `--scope-realtime` and `--scope-mix`, whose audio/scheduling paths are fixed at
 startup; restart with `--scope-mode` to leave either one.

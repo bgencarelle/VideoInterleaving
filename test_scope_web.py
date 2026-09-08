@@ -112,6 +112,7 @@ def main():
     with open(js_path, "w", encoding="utf-8") as f:
         f.write(_extract_fn(page, "boxGrid") + "\n")
         f.write(_extract_fn(page, "buildTrace") + "\n")
+        f.write(_extract_fn(page, "addYtTrigger") + "\n")
         f.write(f"""
 const fs=require('fs');
 const w={w},h={h},n={n},trim=0.10,gamma=2.2;
@@ -126,6 +127,9 @@ const g=boxGrid(data,w,h,rows,cols);
 const out=buildTrace(g,rows,cols,n,trim,gamma,w,h);
 fs.writeFileSync({json.dumps(os.path.join(tmp, 'trace.f32'))},
                  Buffer.from(new Float32Array(out).buffer));
+const yt=addYtTrigger(out,n,48000);
+fs.writeFileSync({json.dumps(os.path.join(tmp, 'yt.f32'))},
+                 Buffer.from(new Float32Array(yt).buffer));
 console.log(JSON.stringify({{rows:rows,cols:cols}}));
 """)
     r = subprocess.run(["node", js_path], capture_output=True, text=True)
@@ -136,6 +140,9 @@ console.log(JSON.stringify({{rows:rows,cols:cols}}));
 
     js = np.fromfile(os.path.join(tmp, "trace.f32"), dtype=np.float32).reshape(-1, 2)
     py = render_luma(lum, n, trim=0.10, gamma=2.2)
+    js_yt = np.fromfile(os.path.join(tmp, "yt.f32"), dtype=np.float32).reshape(-1, 2)
+    from scope_out import yt_trigger_frame
+    py_yt = yt_trigger_frame(js, trigger_samples=round(48000 * 0.00025))
 
     ok = True
 
@@ -156,6 +163,10 @@ console.log(JSON.stringify({{rows:rows,cols:cols}}));
     pa = (py[:, 0].max() - py[:, 0].min()) / max(py[:, 1].max() - py[:, 1].min(), 1e-9)
     ja = (js[:, 0].max() - js[:, 0].min()) / max(js[:, 1].max() - js[:, 1].min(), 1e-9)
     check("width/height ratio", pa, ja, 0.08)
+
+    yt_matches = np.array_equal(py_yt, js_yt)
+    ok &= yt_matches
+    print(f"  {'PASS' if yt_matches else 'FAIL'}  Y-T X trigger; Y preserved")
 
     print("\nrendered picture -- catches the missing contrast stretch")
     try:

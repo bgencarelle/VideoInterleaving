@@ -179,6 +179,19 @@ fewer, using the existing raster and stochastic gamma controls. Equal or
 all-dark candidates remain evenly interleaved. No XY coordinates are
 arithmetically averaged. Press `f` in fusion mode to cycle.
 
+For a conventional single-input scope using its internal timebase, use the
+dedicated Y-T raster output:
+
+```bash
+python main.py --mode scope --xy-dir ./images_xy --scope-yt --device BlackHole
+```
+
+This fixes the sweep direction and adds one unique rising trigger marker to X
+per trace without remapping either channel or changing the rest of the XY
+waveform. Set the scope to Y-T, use the X lead, choose a rising-edge trigger
+near +0.95, and set a timebase covering one complete trace. It is a runtime
+setting and does not require another bake.
+
 The compact bake stores raw luminance and alpha at 128px. That is above the
 normal raster sweep grid, while stochastic can still use the field directly.
 Stipple's separately baked source-detail coordinates preserve the useful
@@ -188,7 +201,8 @@ than the 18-25 GB produced by the former 256px, three-channel format.
 Press `v` while it is running to cycle vector, raster, stochastic, stipple,
 and fusion. Press `i` to toggle alpha-aware luminance inversion, or start with
 `--scope-invert`; vector keeps its baked geometry but shifts dwell toward
-originally dark stroke regions, and transparent padding remains dark.
+originally dark stroke regions, and transparent padding remains dark. `r` or
+`R` rotates the complete scope output by 90°, matching local display mode.
 See `SCOPE_MODE.md` for wiring, sample-budget, and renderer details.
 
 ### The `settings.py` Way (Legacy)

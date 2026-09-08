@@ -258,6 +258,20 @@ a full-brightness diagonal. Raster now renders per-trace and gates on
 largely gone in raster mode. Vector still emits per index, so the old warning
 still applies there.
 
+### `--scope-yt`
+
+Makes the existing X signal trigger reliably when it is viewed alone in an
+oscilloscope's Y-T mode. It implies raster mode and `--scope-sweep retrace` so
+consecutive traces never alternate or appear mirrored in time.
+
+Every trace begins with a 250 us `-0.99 -> +0.99` marker on X. Picture content
+remains inside +/-0.9, making a rising trigger level around +0.95 unique and
+stable. The Y channel and all remaining XY samples are preserved exactly. Set
+the oscilloscope timebase so one complete trace fills the screen.
+
+This is a runtime output mode; it does not require a rebake. It cannot be
+combined with mix, stochastic, stipple, vector, or fusion output.
+
 ---
 
 ## Group E — which engine runs
@@ -443,6 +457,7 @@ From `scope_controls.py`, verified against `SPECS` and `HELP`:
 | `l` | lowpass cycle: off → 12k → 6k → 3k → 1.5k | no |
 | `v` | vector → raster → stochastic → stipple → fusion | yes |
 | `i` | covered-image luminance normal / inverted | yes |
+| `r` / `R` | rotate the complete XY output by 90° | no |
 | `w` | sweep: alternate → palindrome → retrace | no |
 | `a` | autofit on / off | yes |
 | `p` | **print current settings as a command line** | — |
@@ -454,7 +469,8 @@ your launch script. That is the intended workflow and it is not obvious from any
 doc.
 
 Mode cycling is unavailable in realtime and mix modes because those select a
-different audio/scheduling path at startup. Inversion remains live in both.
+different audio/scheduling path at startup. Inversion and rotation remain live
+in both. Scope starts from the same `INITIAL_ROTATION` setting as local mode.
 
 Not live-adjustable, because they need the audio stream reopened: `--scope-fps`,
 `--scope-samples`, and `--scope-fields`.

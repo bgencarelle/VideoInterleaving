@@ -107,6 +107,11 @@ def configure_runtime():
     parser.add_argument("--scope-realtime", action="store_true",
                         help="Scope: stream continuously so index changes land "
                              "within a row instead of at a trace boundary (raster only)")
+    parser.add_argument("--scope-yt", action="store_true",
+                        help="Scope: make the existing X signal stable in "
+                             "one-channel Y-T viewing by adding one unique "
+                             "trigger edge per trace. Implies raster + retrace; "
+                             "does not alter Y or remap the XY waveform")
     parser.add_argument("--scope-fps", type=int, help="Scope trace rate (default: IPS)")
     parser.add_argument("--scope-samples", type=int, help="Scope samples per trace")
     parser.add_argument("--scope-fields", type=int, metavar="N",
@@ -415,6 +420,15 @@ def configure_runtime():
         settings.SCOPE_RASTER = settings.SCOPE_RENDER_MODE == "raster"
         if args.scope_invert is not None:
             settings.SCOPE_INVERT = args.scope_invert
+        if args.scope_yt:
+            if args.scope_mode not in (None, "raster"):
+                parser.error("--scope-yt is a raster-only output mode")
+            if args.scope_stochastic or args.scope_stipple:
+                parser.error("--scope-yt cannot be combined with stochastic/stipple")
+            if args.scope_mix is not None:
+                parser.error("--scope-yt cannot be combined with --scope-mix")
+            if args.scope_sweep not in (None, "retrace"):
+                parser.error("--scope-yt fixes the sweep direction; use retrace")
         if args.scope_realtime:
             settings.SCOPE_REALTIME = True
         if args.scope_fps:
@@ -486,6 +500,11 @@ def configure_runtime():
             settings.SCOPE_MIX = args.scope_mix
         if args.scope_mix_duty is not None:
             settings.SCOPE_MIX_DUTY = args.scope_mix_duty
+        if args.scope_yt:
+            settings.SCOPE_YT = True
+            settings.SCOPE_RENDER_MODE = "raster"
+            settings.SCOPE_RASTER = True
+            settings.SCOPE_SWEEP = "retrace"
         # Resolve the audio device NOW, before file lists are built and before
         # stdout is wrapped. Prompting from deep inside run_scope meant the
         # question appeared after a long silence, so it read as a hang.
