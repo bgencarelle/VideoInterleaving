@@ -78,7 +78,16 @@ def beam_is_parked(frame, eps=PARK_PTP):
     f = np.asarray(frame)
     if len(f) < 2:
         return True
-    return bool(np.ptp(f[:, 0]) < eps and np.ptp(f[:, 1]) < eps)
+    # ptp propagates NaN and inf, so both are caught from the two reductions we
+    # already need -- `not (v >= 0)` is True for NaN and `v == inf` for inf.
+    # An isfinite().all() here would be correct too, but it allocates a full
+    # boolean array, and this runs on the audio thread once per callback.
+    px, py = np.ptp(f[:, 0]), np.ptp(f[:, 1])
+    if not (px >= 0.0) or not (py >= 0.0) or px == np.inf or py == np.inf:
+        # Not a picture. Treat it as parked so the caller replaces it with
+        # something the deflection amplifiers can actually follow.
+        return True
+    return bool(px < eps and py < eps)
 
 
 def unpark_frame(frame, phase=0, level=LEVEL, eps=PARK_PTP):
@@ -91,14 +100,21 @@ def unpark_frame(frame, phase=0, level=LEVEL, eps=PARK_PTP):
     frames do not retrace the identical ring.
     """
     f = np.ascontiguousarray(np.asarray(frame, dtype=np.float32)[:, :2])
-    n = len(f)
-    if n < 2:
-        return f
-    centre = f[0].astype(np.float64)
+    n = max(2, len(f))
     radius = level * 0.02
+    centre = np.asarray(f[0] if len(f) else (0.0, 0.0), dtype=np.float64)
+    if not np.isfinite(centre).all():
+        centre = np.zeros(2)          # a NaN park has no position to keep
+    # Clamp the CENTRE, not the finished ring. Clipping the ring is what made
+    # this function able to produce a parked beam of its own: a park at the
+    # -0.936 pedestal that render_yt_grid uses for empty rows is outside
+    # +-LEVEL on both axes, so every point of the ring clipped to the same
+    # corner and the guard reported success while the dot kept burning.
+    centre = np.clip(centre, -(level - radius), level - radius)
     th = 2.0 * np.pi * (np.arange(n) + int(phase)) / n
     out = centre + radius * np.column_stack([np.cos(th), np.sin(th)])
-    return np.ascontiguousarray(np.clip(out, -level, level), dtype=np.float32)
+    return np.ascontiguousarray(out[:len(f)] if len(f) >= 2 else out,
+                                dtype=np.float32)
 
 
 def rotate_frame(frame, degrees):
@@ -161,6 +177,11 @@ def clip_for_trigger(frame, level=LEVEL, floor=-0.98):
     """
     out = np.array(frame, dtype=np.float32, copy=True)
     np.clip(out[:, 0], floor, level, out=out[:, 0])
+    # Y is bounded too. It cannot forge a trigger -- nothing looks at Y -- but
+    # a single +inf from a filter or a division upstream drives the vertical
+    # deflection to whatever the amplifier will do, and the marker's own rail
+    # is the largest legitimate value on that axis.
+    np.clip(out[:, 1], -1.0, 1.0, out=out[:, 1])
     return out
 
 
@@ -227,6 +248,41 @@ def trigger_frame(frame, trigger_samples=24, trigger_level=0.99,
 # The name this shipped under. Kept so settings.py edits, saved command lines
 # and the existing tests that pin the step waveform keep working.
 yt_trigger_frame = trigger_frame
+
+
+def marker_window(count, trigger_level=0.99, shape="ramp"):
+    """The marker as its OWN samples, to be prepended to a complete picture.
+
+    trigger_frame() overwrites the head of a trace, which is what the realtime
+    path has to do -- it has no frame boundary to prepend at. For a whole
+    frame that is the wrong trade: it destroyed the first `count` samples of
+    every picture and, with them, the exact frame-boundary handoff that
+    scope_display restores into frame[0]. Reserving the marker its own window
+    costs 0.75% of the refresh rate instead of 0.75% of the picture, and the
+    handoff survives because the picture's first sample is still its own.
+
+    The window is entered and left in ONE sample each. That is deliberate and
+    it is the dimmest possible transit: brightness is dwell per unit length, so
+    spending more samples getting to the rail would make the move brighter, not
+    dimmer -- the same reasoning apply_overscan() documents. Measured against a
+    normal raster frame, a transit is ~84x faster than picture ink.
+    """
+    n = max(2, int(count))
+    level = min(1.0, max(float(trigger_level), LEVEL + 0.01))
+    out = np.empty((n, 2), dtype=np.float32)
+    if shape == "step":
+        split = max(1, n // 2)
+        out[:split] = (-level, level)
+        out[split:] = (level, level)
+        return out
+    if shape != "ramp":
+        raise ValueError(f"trigger shape must be one of {TRIGGER_SHAPES}")
+    hold = max(1, n // 8)
+    span = max(1, n - 2 * hold - 1)
+    t = np.clip((np.arange(n, dtype=np.float64) - hold) / span, 0.0, 1.0)
+    out[:, 0] = (-level + 2.0 * level * t).astype(np.float32)
+    out[:, 1] = np.float32(level)
+    return out
 
 
 # Names that usually mean an internal loudspeaker.  The XY signal is not audio
@@ -786,17 +842,30 @@ class Scope:
         self.trigger_shape = trigger_shape
         self.yt_mode = self.trigger          # legacy attribute name
         self.yt_trigger_us = max(float(yt_trigger_us), 1.0)
-        self.yt_trigger_samples = max(
-            4, round(float(samplerate) * self.yt_trigger_us
-                     / 1_000_000.0))
+        # Bounded above as well as below. --scope-trigger-us only validated
+        # "finite and > 0", so 40000 us at 96 kHz asked for 3840 marker samples
+        # against a 3200-sample trace and silently replaced the entire picture.
+        # An eighth of the trace is already a very generous edge.
+        _ceiling = max(4, self.samples_per_frame // 8)
+        _asked = max(4, round(float(samplerate) * self.yt_trigger_us
+                              / 1_000_000.0))
+        self.yt_trigger_samples = min(_asked, _ceiling)
+        if self.yt_trigger_samples != _asked:
+            print(f"[SCOPE] trigger marker {self.yt_trigger_us:g} us is "
+                  f"{_asked} samples of a {self.samples_per_frame}-sample "
+                  f"trace; clamped to {self.yt_trigger_samples}.")
+            self.yt_trigger_us = (self.yt_trigger_samples * 1_000_000.0
+                                  / float(samplerate))
         self.yt_trigger_level = min(
             1.0, max(float(yt_trigger_level), LEVEL + 0.01))
         self._yt_pos = 0
+        # Built once. The window is identical every trace, and rebuilding it
+        # per callback was ~15 numpy allocations on the audio thread.
+        self._marker = marker_window(self.yt_trigger_samples,
+                                     self.yt_trigger_level, self.trigger_shape)
         self._frame = rasterize([], self.samples_per_frame)  # idle circle, never a parked dot
         if self.trigger:
-            self._frame = trigger_frame(
-                self._frame, self.yt_trigger_samples, self.yt_trigger_level,
-                period=self.samples_per_frame, shape=self.trigger_shape)
+            self._frame = np.vstack((self._marker, self._frame))
         self._pending = None
         self._lock = threading.Lock()
         self._pos = 0
@@ -831,13 +900,50 @@ class Scope:
             device=device, blocksize=self.blocksize,
             latency="low", callback=self._callback)
 
+    @property
+    def trace_samples(self):
+        """Samples the DAC actually consumes per trace, marker included.
+
+        samples_per_frame is the PICTURE budget -- what the renderers are given
+        -- and the marker is added to it, so the refresh rate is
+        samplerate / trace_samples, not samplerate / samples_per_frame.
+        """
+        return self.samples_per_frame + (len(self._marker) if self.trigger else 0)
+
+    def _stamp_marker(self, block, pos):
+        """Write the marker into a continuous block, in place, no allocation.
+
+        The realtime path has no frame boundary, so the marker repeats on a
+        sample counter. At most a couple of windows intersect any one block, so
+        this is a slice copy per window rather than the phase-array arithmetic
+        trigger_frame() does -- that ran on the audio thread and allocated
+        about fifteen arrays per callback.
+        """
+        n = len(block)
+        period = max(1, self.samples_per_frame)
+        marker = len(self._marker)
+        # A window that began in the previous block and runs into this one.
+        if pos < marker:
+            k = min(marker - pos, n)
+            block[:k] = self._marker[pos:pos + k]
+        start = (-pos) % period                  # next window boundary
+        while start < n:
+            k = min(marker, n - start)
+            block[start:start + k] = self._marker[:k]
+            start += period
+
     def _callback(self, outdata, frames, time_info, status):
         # PortAudio fills a missed block with SILENCE, and silence on both
         # channels is a stationary full-brightness dot at screen centre.  We
         # cannot retrieve those samples, but an underrun that is never counted
         # is a bright spot with no explanation; counted, it is a number on the
         # dashboard.  No formatting here -- this is the audio thread.
-        if status:
+        #
+        # output_underflow only: CallbackFlags is truthy for priming_output
+        # too, which every clean stream sets on its first callbacks, and a
+        # dashboard that reports dropouts on a healthy stream is worse than one
+        # that reports none.
+        if status is not None and getattr(status, "output_underflow", False):
             self.dac_dropouts += 1
         # Continuous source: content follows the clock in real time, with no
         # frame boundaries to wait for.
@@ -849,12 +955,23 @@ class Scope:
                 # would stop locking.
                 rendered = mirror_frame(
                     rotate_frame(buf[:frames], self.rotation), self.mirror)
+                # Guard BEFORE the marker, for the same reason show_frame does:
+                # the marker is motion of its own, so a stream that collapsed
+                # upstream -- a starved BufferedSource holding its last sample,
+                # most likely -- would look alive by the time it was checked.
+                if beam_is_parked(rendered):
+                    rendered = unpark_frame(
+                        rendered, phase=self.beams_unparked * 7)
+                    self.beams_unparked += 1
                 if self.trigger:
-                    rendered = trigger_frame(
-                        clip_for_trigger(rendered), self.yt_trigger_samples,
-                        self.yt_trigger_level, offset=self._yt_pos,
-                        period=self.samples_per_frame,
-                        shape=self.trigger_shape)
+                    # Realtime is the one path that still OVERWRITES: it is a
+                    # continuous stream with no frame boundary to prepend at,
+                    # so the marker is stamped on a sample counter instead. It
+                    # costs the same handful of samples per period; they just
+                    # come out of the sweep rather than being reserved.
+                    np.clip(rendered[:, 0], -0.98, LEVEL, out=rendered[:, 0])
+                    np.clip(rendered[:, 1], -1.0, 1.0, out=rendered[:, 1])
+                    self._stamp_marker(rendered, self._yt_pos)
                     self._yt_pos = ((self._yt_pos + frames)
                                     % self.samples_per_frame)
                 outdata[:] = rendered
@@ -1040,10 +1157,13 @@ class Scope:
             # what can push picture content over the trigger threshold, and
             # this is the one place every path has already passed through
             # them.
-            f = trigger_frame(
-                clip_for_trigger(f), self.yt_trigger_samples,
-                self.yt_trigger_level, period=len(f),
-                shape=self.trigger_shape)
+            #
+            # PREPEND, do not overwrite. The marker gets its own samples, so
+            # the picture arrives whole and frame[0] -- which scope_display
+            # sets to the exact beam handoff point -- is still the first thing
+            # drawn after it. The cost moves from 0.75% of the picture to 0.75%
+            # of the refresh rate.
+            f = np.vstack((self._marker, clip_for_trigger(f)))
         if Scope._tap_until > time.monotonic():
             try:
                 self._capture(f)

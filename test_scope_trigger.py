@@ -21,7 +21,8 @@ import unittest
 import numpy as np
 
 from scope_bake import TraceEmitter, render_luma
-from scope_out import (LEVEL, Scope, clip_for_trigger, trigger_frame,
+from scope_out import (LEVEL, Scope, beam_is_parked, clip_for_trigger,
+                       marker_window, trigger_frame, unpark_frame,
                        yt_trigger_frame)
 
 RATE = 96000
@@ -183,6 +184,130 @@ class MeasurementToolsTests(unittest.TestCase):
         call = src[src.index("scope = Scope("):]
         self.assertIn("trigger=False", call[:call.index("\n            samplerate")],
                       "a filter audition must show the filter, not the marker")
+
+
+class ReservedWindowTests(unittest.TestCase):
+    """The marker gets its own samples; it does not eat the picture.
+
+    It used to overwrite the head of every trace. That cost 0.75% of the
+    picture AND silently defeated the exact frame-boundary handoff, because
+    scope_display writes the handoff point into frame[0] and the marker landed
+    right on top of it. Reserving moves the cost to the refresh rate instead.
+    """
+
+    def scope(self, **kw):
+        s = Scope(device="null", samplerate=RATE, samples=N, **kw)
+        self.addCleanup(s.stream.close)
+        return s
+
+    def test_the_picture_arrives_whole(self):
+        s = self.scope(yt_trigger_us=500.0)
+        frame = render_luma(subject(), N, grid_rows=32, grid_cols=32)
+        s.show_frame(frame)
+        m = s.yt_trigger_samples
+        self.assertEqual(len(s._pending), N + m)
+        np.testing.assert_allclose(s._pending[m:], clip_for_trigger(frame),
+                                   atol=1e-6)
+
+    def test_the_frame_boundary_handoff_survives(self):
+        s = self.scope(yt_trigger_us=500.0)
+        frame = render_luma(subject(), N, grid_rows=32, grid_cols=32)
+        handoff = np.array([-0.682, 0.759], np.float32)
+        frame[0] = handoff                       # what scope_display._emit does
+        s.show_frame(frame)
+        np.testing.assert_allclose(s._pending[s.yt_trigger_samples], handoff,
+                                   atol=1e-6)
+
+    def test_the_refresh_rate_pays_instead_of_the_picture(self):
+        s = self.scope(yt_trigger_us=500.0)
+        self.assertEqual(s.samples_per_frame, N)          # picture budget
+        self.assertEqual(s.trace_samples, N + s.yt_trigger_samples)
+        off = self.scope(trigger=False)
+        self.assertEqual(off.trace_samples, N)
+
+    def test_a_marker_longer_than_the_trace_is_clamped(self):
+        # --scope-trigger-us only checked "finite and > 0", so 40000 us at
+        # 96 kHz asked for 3840 samples of a 3200-sample trace.
+        s = self.scope(yt_trigger_us=40000.0)
+        self.assertLessEqual(s.yt_trigger_samples, N // 8)
+        frame = render_luma(subject(), N, grid_rows=32, grid_cols=32)
+        s.show_frame(frame)
+        self.assertEqual(len(rising(s._pending[:, 0])), 1)
+
+
+class GuardEdgeCaseTests(unittest.TestCase):
+    def test_unpark_does_not_collapse_a_park_outside_the_picture_box(self):
+        # render_yt_grid rails empty rows at -0.936, outside +-LEVEL on both
+        # axes. Clipping the finished ring sent every point to the same corner,
+        # so the guard reported success while the dot kept burning.
+        f = np.tile(np.array([[-0.936, -0.936]], np.float32), (3200, 1))
+        self.assertTrue(beam_is_parked(f))
+        out = unpark_frame(f)
+        self.assertFalse(beam_is_parked(out), "unpark produced a parked beam")
+        self.assertLessEqual(float(np.abs(out).max()), LEVEL + 1e-6)
+
+    def test_a_non_finite_frame_counts_as_parked(self):
+        # ptp of NaN is NaN and every comparison against it is False, so an
+        # all-NaN frame read as "moving" and went to the DAC intact.
+        self.assertTrue(beam_is_parked(np.full((64, 2), np.nan, np.float32)))
+        out = unpark_frame(np.full((64, 2), np.nan, np.float32))
+        self.assertTrue(np.isfinite(out).all())
+
+    def test_the_clip_bounds_y_as_well_as_x(self):
+        f = np.zeros((64, 2), np.float32)
+        f[10] = (np.inf, np.inf)
+        out = clip_for_trigger(f)
+        self.assertTrue(np.isfinite(out).all(),
+                        "an inf on Y drove the vertical deflection unbounded")
+
+    def test_a_short_frame_does_not_become_a_marker_shaped_constant(self):
+        for n in (1, 2, 3, 4, 8):
+            with self.subTest(n=n):
+                g = np.column_stack((np.linspace(-.8, .8, n),
+                                     np.linspace(.7, -.7, n))).astype(np.float32)
+                s = Scope(device="null", samplerate=RATE, samples=max(64, n))
+                try:
+                    s.show_frame(g)
+                    self.assertFalse(beam_is_parked(s._pending))
+                finally:
+                    s.stream.close()
+
+
+class RealtimePathTests(unittest.TestCase):
+    def test_the_park_guard_covers_the_continuous_source_too(self):
+        # The guard lived only in show_frame, and realtime never goes through
+        # it -- yet a starved BufferedSource holding its last sample is the
+        # most likely way to park in the first place.
+        s = Scope(device="null", samplerate=RATE, samples=N,
+                  source=lambda n: np.tile(np.array([[0.3, -0.5]], np.float32),
+                                           (n, 1)))
+        try:
+            buf = np.empty((512, 2), np.float32)
+            s._callback(buf, 512, None, None)
+            self.assertGreater(s.beams_unparked, 0)
+            self.assertFalse(beam_is_parked(buf))
+        finally:
+            s.stream.close()
+
+    def test_the_marker_lands_whole_across_block_boundaries(self):
+        pos = 0
+        s = Scope(device="null", samplerate=RATE, samples=256,
+                  yt_trigger_us=200.0,
+                  source=lambda n: np.column_stack((
+                      np.full(n, 0.5, np.float32),
+                      np.full(n, -0.5, np.float32))))
+        try:
+            parts = []
+            for count in (7, 100, 200, 149, 300):
+                buf = np.empty((count, 2), np.float32)
+                s._callback(buf, count, None, None)
+                parts.append(buf)
+            out = np.vstack(parts)
+            edges = rising(out[:, 0])
+            self.assertGreater(len(edges), 1)
+            np.testing.assert_array_equal(np.diff(edges), 256)
+        finally:
+            s.stream.close()
 
 
 class BackwardCompatibilityTests(unittest.TestCase):

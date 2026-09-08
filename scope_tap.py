@@ -125,8 +125,10 @@ def enable(main_paths, float_paths, xy_root=None, raster=False, realtime=False,
     # builds its rows with ys = -linspace(...).  Scope.show()'s invert_y
     # is for callers handing it raw screen-space polylines; applying it
     # here flips a second time and stands the vector picture on its head.
+    # trigger=False: a pass-through: clipping X and stamping a marker corrupts the very
+    # signal this tool exists to reproduce faithfully.
     _scope = Scope(fps=fps, samples=samples, device=dev, source=_source,
-                   invert_y=False)
+                   invert_y=False, trigger=False)
     _scope.stream.start()
 
     mode = "MIX" if mix else ("RASTER" if raster else "VECTOR")

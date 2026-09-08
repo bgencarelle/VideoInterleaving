@@ -920,7 +920,7 @@ def run_scope(clock_source=None):
 
     if trigger_on:
         marker_us = scope.yt_trigger_us
-        trigger_hz = scope.samplerate / max(scope.samples_per_frame, 1)
+        trigger_hz = scope.samplerate / max(scope.trace_samples, 1)
         print(f"[SCOPE] X trigger: {trigger_shape} marker, {marker_us:g} us, "
               f"{trigger_hz:g} Hz. Rising edge near +0.95.")
         if trigger_shape == "ramp":
@@ -986,7 +986,9 @@ def run_scope(clock_source=None):
             print(f"[SCOPE] calibration skipped ({e}); per-frame adaptation")
 
     mode_name = "MIX" if mix_hz else render_mode.upper()
-    _trace_hz = scope.samplerate / scope.samples_per_frame
+    # trace_samples, not samples_per_frame: the marker has its own samples,
+    # so the picture budget and the emitted trace length are no longer equal.
+    _trace_hz = scope.samplerate / scope.trace_samples
     print(f"[SCOPE] {mode_name}{' REALTIME' if realtime else ''}"
           f"{f' INTERLACE x{fields}' if fields > 1 else ''} | "
           f"{scope.samples_per_frame} samples/trace @ {scope.samplerate} Hz "
@@ -1070,7 +1072,7 @@ def run_scope(clock_source=None):
                         sweep=sweep_mode, autofit=autofit, row_bias=row_bias,
                         precondition=raster_precondition,
                         yt_timing=yt_timing,
-                        yt_trigger_samples=(scope.yt_trigger_samples if trigger_on else 0),
+                        yt_trigger_samples=0,   # Scope prepends the marker its own window
                         grid=((cal["grid_rows"], cal["grid_cols"])
                               if cal else None),
                         levels=(cal.get("levels") if cal else None))
@@ -1262,9 +1264,9 @@ def run_scope(clock_source=None):
                  or (use_fusion and "s" in fusion_components))
                 and not mix_hz) else gamma, 2)
         monitor_data["scope_refresh_hz"] = round(
-            scope.samplerate / max(scope.samples_per_frame, 1), 1)
+            scope.samplerate / max(scope.trace_samples, 1), 1)
         monitor_data["scope_picture_hz"] = round(
-            scope.samplerate / max(scope.samples_per_frame * tap_traces, 1), 1)
+            scope.samplerate / max(scope.trace_samples * tap_traces, 1), 1)
         # Seed both counters so the dashboard shows a 0 from the first poll
         # rather than an empty field that looks like the metric is missing.
         monitor_data["scope_beam_parked"] = int(scope.beams_unparked)
@@ -1307,7 +1309,7 @@ def run_scope(clock_source=None):
         dc_comp=dc_comp, autofit=autofit, row_bias=row_bias,
         precondition=raster_precondition,
         yt_timing=yt_timing,
-        yt_trigger_samples=(scope.yt_trigger_samples if trigger_on else 0),
+        yt_trigger_samples=0,   # Scope prepends the marker its own window
         grid=_rotation_grid(cal, rotation),
         levels=(cal.get("levels") if cal else None))
     stochastic_emitter = StochasticEmitter(
@@ -1370,7 +1372,7 @@ def run_scope(clock_source=None):
                         sweep=sweep_mode, dc_comp=dc_comp, autofit=autofit,
                         row_bias=row_bias, precondition=raster_precondition,
                         yt_timing=yt_timing,
-                        yt_trigger_samples=(scope.yt_trigger_samples if trigger_on else 0),
+                        yt_trigger_samples=0,   # Scope prepends the marker its own window
                         grid=_rotation_grid(cal, rotation),
                         levels=(cal.get("levels") if cal else None))
                     stochastic_emitter = StochasticEmitter(
@@ -1398,10 +1400,10 @@ def run_scope(clock_source=None):
                         # report the OLD refresh rate against the NEW device,
                         # which is worse than reporting nothing.
                         _md2["scope_refresh_hz"] = round(
-                            scope.samplerate / max(scope.samples_per_frame, 1), 1)
+                            scope.samplerate / max(scope.trace_samples, 1), 1)
                         _md2["scope_picture_hz"] = round(
                             scope.samplerate
-                            / max(scope.samples_per_frame * tap_traces, 1), 1)
+                            / max(scope.trace_samples * tap_traces, 1), 1)
                         if cal:
                             _md2["scope_grid"] = (f"{cal['grid_cols']}x"
                                                   f"{cal['grid_rows']}")

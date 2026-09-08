@@ -94,6 +94,9 @@ class ShowFrameEnforcementTests(unittest.TestCase):
         # The marker is still intact: exactly one rising crossing per trace.
         x = scope._pending[:, 0]
         self.assertEqual(int(np.count_nonzero((x[:-1] < 0.95) & (x[1:] >= 0.95))), 1)
+        # ...and it is ADDED, not carved out of the picture.
+        self.assertEqual(len(scope._pending),
+                         3200 + scope.yt_trigger_samples)
 
     def test_callback_output_is_never_silent_after_a_source_failure(self):
         def exploding_source(_frames):
@@ -108,11 +111,22 @@ class ShowFrameEnforcementTests(unittest.TestCase):
                          "a dead source must hold position, not park at centre")
         self.assertEqual(scope.dac_dropouts, 1)
 
-    def test_reported_dropouts_track_portaudio_status(self):
+    def test_reported_dropouts_count_underflow_and_ignore_priming(self):
+        class Flags:                       # shaped like sd.CallbackFlags
+            def __init__(self, under=False, prime=False):
+                self.output_underflow, self.priming_output = under, prime
+            def __bool__(self):
+                return self.output_underflow or self.priming_output
+
         buf = np.empty((512, 2), dtype=np.float32)
         self.scope._callback(buf, 512, None, None)
         self.assertEqual(self.scope.dac_dropouts, 0)
-        self.scope._callback(buf, 512, None, "output underflow")
+        # Every clean stream sets priming_output on its first callbacks, and
+        # CallbackFlags is truthy for it -- reporting those as dropouts made a
+        # healthy stream look sick.
+        self.scope._callback(buf, 512, None, Flags(prime=True))
+        self.assertEqual(self.scope.dac_dropouts, 0)
+        self.scope._callback(buf, 512, None, Flags(under=True))
         self.assertEqual(self.scope.dac_dropouts, 1)
 
 

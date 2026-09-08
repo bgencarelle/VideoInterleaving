@@ -9,7 +9,8 @@ import unittest
 import numpy as np
 
 from scope_bake import TraceEmitter, render_luma, render_yt_grid, yt_timeline
-from scope_out import Scope, yt_trigger_frame
+from scope_out import (Scope, clip_for_trigger, marker_window,
+                       yt_trigger_frame)
 from test_scope_web import _extract_fn
 
 
@@ -80,23 +81,25 @@ class FixedYtTests(unittest.TestCase):
                                    yt_trigger_samples=scope.yt_trigger_samples)
             frame = emitter.emit(self.a)
             scope.show_frame(frame)
-            # The reserved window is the marker's; everything after it is the
-            # picture, byte for byte. (The ramp parks Y inside that window too,
-            # which is what keeps the marker off an XY display.)
-            np.testing.assert_array_equal(scope._pending[48:], frame[48:])
+            m = scope.yt_trigger_samples
+            # The marker has its OWN samples: the picture arrives whole, byte
+            # for byte, and the trace is longer by exactly the window.
+            self.assertEqual(len(scope._pending), self.n + m)
+            np.testing.assert_array_equal(scope._pending[m:], frame)
             scope._frame, scope._pending = scope._pending, None
+            period = self.n + m
             chunks=[]
-            for count in (17, 29, 3154, 17, 3183):
+            for count in (17, 29, period - 46, 17, period - 17):
                 buf=np.empty((count,2),np.float32)
                 scope._callback(buf,count,None,None);chunks.append(buf)
             out=np.vstack(chunks)
             # One rising crossing per trace, wherever in the marker it falls:
-            # two traces of 3200 samples were consumed, so exactly two.
+            # two whole traces were consumed, so exactly two.
             crossings=np.flatnonzero((out[:-1,0]<.95)&(out[1:,0]>=.95))+1
             self.assertEqual(len(crossings), 2)
             # ...and they are exactly one trace apart, which is the property a
             # scope timebase actually depends on.
-            self.assertEqual(int(crossings[1] - crossings[0]), self.n)
+            self.assertEqual(int(crossings[1] - crossings[0]), period)
         finally:
             scope.stream.close()
 
@@ -127,10 +130,11 @@ class FixedYtTests(unittest.TestCase):
                 _emit(scope,Library(),None,0,"raster",{},"retrace",2.2,.02,1.,
                       None,.02,emitter=emitter,rotation=angle,lowpass=6000)
                 out=scope._pending
-                self.assertEqual(out.shape,(3200,2))
+                self.assertEqual(out.shape,(3200 + scope.yt_trigger_samples, 2))
                 self.assertTrue(np.isfinite(out).all())
                 crossings=np.flatnonzero((out[:-1,0]<.95)&(out[1:,0]>=.95))+1
-                # Filtering and rotation must not manufacture a second edge.
+                # Filtering and rotation must not manufacture a second edge,
+                # and the one edge belongs to the reserved window at the head.
                 self.assertEqual(len(crossings), 1)
                 self.assertLess(int(crossings[0]), scope.yt_trigger_samples)
         finally:
@@ -166,7 +170,8 @@ class FixedYtTests(unittest.TestCase):
     def test_browser_render_entry_uses_timing_rate_and_marker_settings(self):
         page=Path(__file__).with_name("templates").joinpath("scope.html").read_text()
         functions="\n".join(_extract_fn(page,name) for name in
-                            ("boxGrid","buildTrace","buildYtTrace","addYtTrigger","renderFromLuma"))
+                            ("boxGrid","buildTrace","buildYtTrace","addYtTrigger",
+                             "markerWindow","prependMarker","renderFromLuma"))
         raw=(self.a*255).astype(np.uint8)
         with tempfile.TemporaryDirectory() as tmp:
             fixed=Path(tmp)/"fixed.f32"
@@ -185,15 +190,18 @@ const document={{getElementById:id=>({{value:id==='local-gamma'?'2.2':'0.02'}})}
 const lastData={{scope_yt:true,scope_yt_timing:'fixed',scope_refresh_hz:60,
   scope_yt_grid:[32,32],scope_yt_levels:[0,1],scope_border:.09,scope_yt_trigger_us:500}};
 renderFromLuma();
-if(messages.length!==1||messages[0].length!==3200)throw Error('fixed entry did not emit expected budget');
+// picture + marker: the window is reserved, not carved out of the picture
+if(messages.length!==1||messages[0].length!==(1600+48)*2)throw Error('fixed entry did not emit expected budget: '+messages[0].length);
 fs.writeFileSync({json.dumps(str(fixed))},Buffer.from(messages[0].buffer));
 lastData.scope_yt_timing='dwell';renderFromLuma();
-if(messages.length!==2||messages[1].length!==6400)throw Error('dwell entry changed');
+if(messages.length!==2||messages[1].length!==(3200+48)*2)throw Error('dwell entry changed: '+messages[1].length);
 """
             result = subprocess.run(["node","-e",script],capture_output=True,text=True)
             self.assertEqual(result.returncode,0,result.stderr)
             actual=np.fromfile(fixed,np.float32).reshape(-1,2)
-            expected=yt_trigger_frame(render_yt_grid(raw/255.,1600,trigger_samples=48,border=.09),48)
+            expected=np.vstack((marker_window(48),
+                                clip_for_trigger(render_yt_grid(
+                                    raw/255.,1600,trigger_samples=0,border=.09))))
             np.testing.assert_allclose(actual,expected,atol=2e-6,rtol=0.)
 
 

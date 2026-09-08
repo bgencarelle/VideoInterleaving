@@ -204,7 +204,8 @@ def main():
     # builds its rows with ys = -linspace(...).  Scope.show()'s invert_y
     # is for callers handing it raw screen-space polylines; applying it
     # here flips a second time and stands the vector picture on its head.
-    _scope = Scope(fps=fps, samples=args.samples, source=src, invert_y=False,
+    # trigger=False: same reason as scope_tap: this reproduces a signal, it does not author one.
+    _scope = Scope(fps=fps, samples=args.samples, source=src, invert_y=False, trigger=False,
                    device=choose_device(ask=args.ask, device=args.device))
     _scope.stream.start()
     print(f"[SIDECAR] {_scope.samples_per_frame} samples/trace, "

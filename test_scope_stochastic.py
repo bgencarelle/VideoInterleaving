@@ -626,10 +626,13 @@ def test_step_marker_keeps_its_original_two_dwell_waveform():
     scope = Scope(device="null", samples=64, trigger_shape="step")
     try:
         scope.show_frame(xy)
-        assert np.array_equal(scope._pending[:, 1], xy[:, 1])
+        m = scope.yt_trigger_samples
+        # The marker is its OWN samples now, so the picture arrives whole and
+        # the trace is that much longer rather than that much shorter.
+        assert len(scope._pending) == len(xy) + m
+        np.testing.assert_allclose(scope._pending[m:], xy, atol=1e-6)
         assert scope._pending[0, 0] == -scope.yt_trigger_level
-        assert scope._pending[scope.yt_trigger_samples - 1, 0] \
-            == scope.yt_trigger_level
+        assert scope._pending[m - 1, 0] == scope.yt_trigger_level
     finally:
         scope.stream.close()
 
@@ -697,11 +700,11 @@ def test_yt_realtime_marker_survives_callback_block_boundaries():
         finally:
             scope.stream.close()
 
-    # The marker is stamped on a sample counter, so it lands in one piece no
-    # matter where the callback boundaries fall.
+    # Realtime is the one path that still OVERWRITES -- a continuous stream has
+    # no frame boundary to prepend at -- and the marker is stamped on a sample
+    # counter, so it lands in one piece wherever the block boundaries fall.
     scope, whole = run(trigger_shape="step")
-    split = max(2, scope.yt_trigger_samples // 2)
-    assert np.array_equal(whole[:, 1], xy[:, 1])
+    split = max(1, scope.yt_trigger_samples // 2)
     assert np.all(whole[:split, 0] == -scope.yt_trigger_level)
     assert np.all(whole[split:scope.yt_trigger_samples, 0]
                   == scope.yt_trigger_level)

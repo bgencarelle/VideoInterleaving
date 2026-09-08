@@ -297,6 +297,20 @@ a filter applied after the geometry can ring above that threshold, X is clipped
 to +/-0.9 immediately before the marker is inserted — otherwise a bright
 highlight becomes a second edge and the picture will not sit still.
 
+The marker gets its OWN samples: it is prepended to a complete picture, not
+stamped over the head of one. So the cost is 0.75% of the refresh rate (a
+3200-sample trace becomes 3224 at the default 250 us) rather than 0.75% of the
+picture, and the exact frame-boundary handoff still lands on the picture's own
+first sample. The trace is entered and left in one sample each, which is the
+dimmest possible transit — brightness is dwell per unit length, so spending
+more samples getting to the rail would make the move brighter, not dimmer,
+which is the same reasoning `--scope-overscan` documents. Measured against a
+normal raster frame, a transit is ~84x faster than picture ink.
+
+`--scope-realtime` is the exception: a continuous stream has no frame boundary
+to prepend at, so there the marker is stamped on a sample counter and does
+overwrite those samples. It stays periodic either way, so a Y-T scope locks.
+
 It does not require a rebake, and it is unrelated to whether you are looking at
 the output in XY or Y-T. `--no-scope-trigger` removes it.
 

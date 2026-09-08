@@ -189,7 +189,9 @@ at startup).
 python main.py --mode scope --xy-dir ./images_xy --device BlackHole
 ```
 
-The trigger is on by default because it costs an XY display nothing. The marker
+The trigger is on by default because it costs an XY display essentially
+nothing. It gets its own samples rather than overwriting the picture, so a
+3200-sample trace becomes 3224 and the refresh rate pays instead of the image. The marker
 sweeps rather than dwelling — an edge trigger fires on the crossing, so parking
 at the extremes only makes them bright — and it is parked outside the ±0.9
 picture box, the same off-screen excursion `--scope-overscan` uses. Set the
