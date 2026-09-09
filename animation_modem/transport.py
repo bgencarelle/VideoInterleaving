@@ -200,8 +200,16 @@ def decode_packet(samples):
     # Unused bins provide a frame-local estimate of noise/leakage. Regularization
     # prevents deep notches from amplifying it into full-scale coloured speckles.
     noise = max(float(np.mean(np.abs(spectrum[:, [1, 2, 57, 58, 59, 60, 61, 62]])**2)), 1e-12)
-    u, singular, vh = np.linalg.svd(h)
-    inv = (vh.conj().transpose(0,2,1) * (singular/(singular**2+4*noise))[:,None,:]) @ u.conj().transpose(0,2,1)
+    # V diag(s/(s^2+4n)) U^H == (H^H H + 4n I)^-1 H^H; 2x2 closed form, no SVD.
+    hH = h.conj().transpose(0, 2, 1)
+    gram = hH @ h
+    gram[:, 0, 0] += 4*noise
+    gram[:, 1, 1] += 4*noise
+    det = gram[:,0,0]*gram[:,1,1] - gram[:,0,1]*gram[:,1,0]
+    adj = np.empty_like(gram)
+    adj[:,0,0], adj[:,1,1] = gram[:,1,1], gram[:,0,0]
+    adj[:,0,1], adj[:,1,0] = -gram[:,0,1], -gram[:,1,0]
+    inv = (adj / det[:, None, None]) @ hH
     response = inv @ h
     weights = np.clip(np.real(np.diagonal(response,axis1=1,axis2=2)),0,1)
     equal = np.einsum('kij,skj->ski', inv, received) / phases
@@ -209,13 +217,16 @@ def decode_packet(samples):
     for channel in range(2):
         keep = weights[PLOC, channel] > .6
         if np.count_nonzero(keep) >= 2:
-            bins = PILOTS[keep]
+            bins = PILOTS[keep].astype(float)
             angles = np.unwrap(np.angle(equal[2:, PLOC[keep], channel]), axis=1)
             w = weights[PLOC[keep], channel]**2
-            design = np.stack([bins, np.ones(len(bins))], axis=1)
-            fit = np.linalg.pinv(design*w[:,None]) * w[None,:]
-            coeff = angles @ fit.T
-            phase = coeff[:,0,None]*ALL + coeff[:,1,None]
+            # Weighted line fit in closed form; identical to the pinv solution.
+            s0, s1, s2 = w.sum(), (w*bins).sum(), (w*bins*bins).sum()
+            determinant = s0*s2 - s1*s1
+            ty, txy = (angles*w).sum(1), (angles*w*bins).sum(1)
+            slope = (s0*txy - s1*ty) / determinant
+            offset = (s2*ty - s1*txy) / determinant
+            phase = slope[:,None]*ALL + offset[:,None]
             equal[2:,:,channel] *= np.exp(-1j*phase)
     pe = float(np.sqrt(np.mean(np.abs(equal[2:, PLOC] - 1)**2)))
     candidates = [(equal[2:4, DLOC]*weights[DLOC]).sum(axis=-1) / np.maximum(weights[DLOC].sum(axis=-1),1e-9),
@@ -259,26 +270,36 @@ def decode_packet(samples):
                   profile=profile, profile_identity='verified_header', target_time_ms32=target_time_ms32)
 
 
-def sync_correlation(samples):
+def sync_correlation(samples, limit=None):
     """Stable local normalization, including near-silent stereo channels.
 
-    Subtracting cumulative energies loses precision after louder audio. FFT
-    correlation also leaves residuals in silent windows. Together these can
-    create impossible scores and false locks. Direct local sums avoid both.
+    Energy uses a per-call cumulative sum (bounded length, peak-normalized), not
+    a running one across the stream, so the precision loss that motivated the
+    old O(N*len(SYNC)) moving sum does not apply. `limit` restricts the
+    correlation to the offsets the caller will actually inspect; the reliability
+    floor still uses every window's energy, so scores are unchanged.
     """
     x = np.asarray(samples, dtype=np.float64)
-    if len(x) < len(SYNC):
+    n = len(x) - len(SYNC) + 1
+    if limit is not None:
+        n = max(0, min(n, limit))
+    if n <= 0:
         return np.empty(0, dtype=float)
     peak = float(np.max(np.abs(x)))
     if peak == 0:
-        return np.zeros(len(x)-len(SYNC)+1)
+        return np.zeros(n)
     x = x / peak
-    corr = correlate(x, SYNC, mode='valid', method='direct')
-    energy = correlate(x*x, np.ones(len(SYNC)), mode='valid', method='direct')
-    score = np.zeros_like(energy)
+    cumulative = np.empty(len(x) + 1)
+    cumulative[0] = 0.0
+    np.cumsum(x * x, out=cumulative[1:])
+    energy = cumulative[len(SYNC):] - cumulative[:-len(SYNC)]
     # Ignore numerical-floor windows rather than amplify their residuals.
-    reliable = energy > 64*np.finfo(float).eps*float(np.max(energy))
-    score[reliable] = np.abs(corr[reliable]) / np.sqrt(energy[reliable]*SYNC_ENERGY)
+    floor = 64 * np.finfo(float).eps * float(np.max(energy))
+    m = n
+    corr = correlate(x[:m + len(SYNC) - 1], SYNC, mode='valid', method='direct')
+    score = np.zeros(m)
+    reliable = energy[:m] > floor
+    score[reliable] = np.abs(corr[reliable]) / np.sqrt(energy[:m][reliable] * SYNC_ENERGY)
     return np.minimum(score, 1.0)  # Round-off only; normalization is local.
 
 
@@ -312,7 +333,7 @@ class Receiver:
             limit = len(self.buffer) - PACKET + 17
             scores = []
             for c in range(2):
-                scores.append(sync_correlation(self.buffer[:, c])[:limit])
+                scores.append(sync_correlation(self.buffer[:, c], limit))
             score = np.maximum(*scores)
             hits = np.flatnonzero(score >= self.threshold)
             if not len(hits):
