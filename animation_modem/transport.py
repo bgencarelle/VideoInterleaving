@@ -1,7 +1,9 @@
 """Experimental frame-local analog OFDM image link. Wire format v1."""
+import statistics
 import struct
 import time
 import zlib
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -27,6 +29,23 @@ _s[6:109] = np.exp(1j * _rng.uniform(-np.pi, np.pi, 103))
 SYNC = np.fft.irfft(_s, n=256)
 SYNC *= .65 / np.max(np.abs(SYNC))
 SYNC_ENERGY = np.dot(SYNC, SYNC)
+RESAMPLE_TAPS = 8  # Lanczos half-width for speed correction
+# A source running off-speed compresses or stretches the preamble too, so a
+# single template stops correlating well before the demodulator gives up.
+# These cover cassette-grade error; the tracked estimate refines it after lock.
+SYNC_SCALES = (-.024, -.016, -.008, 0., .008, .016, .024)
+
+
+def _scaled_sync(scale):
+    if not scale:
+        return SYNC
+    length = int(round(len(SYNC)/(1.0+scale)))
+    return np.interp(np.arange(length)*(1.0+scale), np.arange(len(SYNC)), SYNC)
+
+
+SYNC_BANK = [(scale, _scaled_sync(scale)) for scale in SYNC_SCALES]
+SYNC_BANK = [(scale, template, float(np.dot(template, template)))
+             for scale, template in SYNC_BANK]
 
 # Exactly 2,880 real image values in every profile; modem timing is unchanged.
 PROFILES = {
@@ -155,6 +174,7 @@ class Result:
     target_time_ms32: int | None = None
     target_time_ns: int | None = None
     decode_error_ms: float | None = None
+    rate_error: float = 0.0
 
 
 def conceal_values(values, weights, profile="color"):
@@ -270,7 +290,31 @@ def decode_packet(samples):
                   profile=profile, profile_identity='verified_header', target_time_ms32=target_time_ms32)
 
 
-def sync_correlation(samples, limit=None):
+def resample_packet(samples, rate):
+    """Undo a constant playback-speed error before demodulating.
+
+    `rate` is the received duration divided by the nominal duration, minus one:
+    negative when the source played fast. Tape and turntable speed error walks
+    each symbol off the decoder's fixed window, and once that walk exceeds the
+    cyclic prefix the window straddles two symbols and no amount of pilot phase
+    correction helps. Correcting the whole packet first keeps every symbol
+    inside its guard.
+
+    Linear interpolation is not good enough here: the carriers reach 20.25 kHz
+    against a 24 kHz Nyquist, where it loses about half the signal. A windowed
+    sinc keeps that under two percent.
+    """
+    position = np.arange(PACKET)*(1.0+rate)
+    base = np.floor(position).astype(int)
+    taps = np.arange(-RESAMPLE_TAPS+1, RESAMPLE_TAPS+1)
+    index = np.clip(base[:, None]+taps[None, :], 0, len(samples)-1)
+    offsets = (position-base)[:, None]-taps[None, :]
+    weights = np.sinc(offsets)*np.sinc(offsets/RESAMPLE_TAPS)
+    weights /= weights.sum(axis=1, keepdims=True)
+    return np.einsum('ij,ijc->ic', weights, samples[index]).astype(np.float32)
+
+
+def sync_correlation(samples, limit=None, template=None, energy=None):
     """Stable local normalization, including near-silent stereo channels.
 
     Energy uses a per-call cumulative sum (bounded length, peak-normalized), not
@@ -279,8 +323,10 @@ def sync_correlation(samples, limit=None):
     correlation to the offsets the caller will actually inspect; the reliability
     floor still uses every window's energy, so scores are unchanged.
     """
+    if template is None:
+        template, energy = SYNC, SYNC_ENERGY
     x = np.asarray(samples, dtype=np.float64)
-    n = len(x) - len(SYNC) + 1
+    n = len(x) - len(template) + 1
     if limit is not None:
         n = max(0, min(n, limit))
     if n <= 0:
@@ -292,14 +338,14 @@ def sync_correlation(samples, limit=None):
     cumulative = np.empty(len(x) + 1)
     cumulative[0] = 0.0
     np.cumsum(x * x, out=cumulative[1:])
-    energy = cumulative[len(SYNC):] - cumulative[:-len(SYNC)]
+    window = cumulative[len(template):] - cumulative[:-len(template)]
     # Ignore numerical-floor windows rather than amplify their residuals.
-    floor = 64 * np.finfo(float).eps * float(np.max(energy))
+    floor = 64 * np.finfo(float).eps * float(np.max(window))
     m = n
-    corr = correlate(x[:m + len(SYNC) - 1], SYNC, mode='valid', method='direct')
+    corr = correlate(x[:m + len(template) - 1], template, mode='valid', method='direct')
     score = np.zeros(m)
-    reliable = energy[:m] > floor
-    score[reliable] = np.abs(corr[reliable]) / np.sqrt(energy[:m][reliable] * SYNC_ENERGY)
+    reliable = window[:m] > floor
+    score[reliable] = np.abs(corr[reliable]) / np.sqrt(window[:m][reliable] * energy)
     return np.minimum(score, 1.0)  # Round-off only; normalization is local.
 
 
@@ -309,13 +355,35 @@ class Receiver:
     Reacquires each frame. No temporal image state. Small clock differences are
     handled by per-frame acquisition and pilot correction, not a full resampler.
     """
-    def __init__(self, threshold=.45):
+    # Below this the existing per-symbol pilot phase fit absorbs the drift on
+    # its own, and correcting would only resample for no reason.
+    RATE_DEADBAND = .0005
+
+    def __init__(self, threshold=.45, track_rate=True):
         self.buffer = np.empty((0, 2), np.float32)
         self.offset = 0
         self.expected = None
         self.next_sample = None
         self.threshold = threshold
         self.unidentified_next = 0
+        self.track_rate = track_rate
+        self.rate = 0.
+        self.rate_history = deque(maxlen=9)
+        self.last_sync = None
+
+    def _observe_rate(self, absolute_sample):
+        """Packets leave the transmitter exactly FRAME samples apart, so the
+        measured spacing between sync locks is the source's speed error."""
+        if self.last_sync is not None:
+            gap = absolute_sample - self.last_sync
+            periods = round(gap/FRAME)
+            # Ignore spacings that are not a plausible whole number of packets.
+            if periods >= 1 and abs(gap - periods*FRAME) < FRAME*.04:
+                self.rate_history.append(gap/(periods*FRAME) - 1)
+        self.last_sync = absolute_sample
+        if len(self.rate_history) >= 3:
+            estimate = statistics.median(self.rate_history)
+            self.rate = estimate if abs(estimate) >= self.RATE_DEADBAND else 0.
 
     def _discard(self, n):
         self.buffer = self.buffer[n:]
@@ -331,10 +399,17 @@ class Receiver:
         results = []
         while len(self.buffer) >= PACKET:
             limit = len(self.buffer) - PACKET + 17
-            scores = []
-            for c in range(2):
-                scores.append(sync_correlation(self.buffer[:, c], limit))
-            score = np.maximum(*scores)
+            # Only cold acquisition pays for the bank. Once the spacing between
+            # locks has settled, an on-speed source is rate 0 and still wants
+            # exactly one template -- test convergence, not the estimate.
+            searching = self.track_rate and len(self.rate_history) < 3
+            bank = (SYNC_BANK if searching
+                    else [min(SYNC_BANK, key=lambda e: abs(e[0]-self.rate))])
+            score = None
+            for scale, template, energy in bank:
+                for c in range(2):
+                    one = sync_correlation(self.buffer[:, c], limit, template, energy)
+                    score = one if score is None else np.maximum(score, one)
             hits = np.flatnonzero(score >= self.threshold)
             if not len(hits):
                 self._discard(max(1, len(self.buffer)-PACKET+1))
@@ -345,7 +420,9 @@ class Receiver:
             if begin < 0:
                 self._discard(peak + 256)
                 continue
-            if begin + PACKET > len(self.buffer):
+            # A slowed source stretches the packet past PACKET samples.
+            span = PACKET + int(np.ceil(PACKET*max(self.rate, 0.))) + 2
+            if begin + span > len(self.buffer):
                 break
             absolute_sample = self.offset + begin
             if self.next_sample is None:
@@ -356,7 +433,12 @@ class Receiver:
                 results.append(Result(self.expected, 'missing', sample=self.next_sample, identity='estimated'))
                 self.expected = (self.expected+1) & 0xffffffff
                 self.next_sample += FRAME
-            result = decode_packet(self.buffer[begin:begin+PACKET])
+            if self.track_rate:
+                self._observe_rate(absolute_sample)
+            window = self.buffer[begin:begin+span]
+            result = decode_packet(resample_packet(window, self.rate)
+                                   if self.rate else window[:PACKET])
+            result.rate_error = self.rate
             result.sync_score = float(score[peak])
             result.sample = absolute_sample
             if result.frame is not None:
