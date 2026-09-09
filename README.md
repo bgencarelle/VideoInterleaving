@@ -407,6 +407,9 @@ sudo apt install chrony
 * `web_service.py`: Flask-less HTTP server for MJPEG streaming and System Monitoring.
 * `ascii_server.py`: Raw TCP server for Telnet streaming.
 * `ascii_converter.py`: Vectorized image-to-text conversion engine.
+* `MODEM_MODE.md`: Stereo modem integration, bake and run instructions.
+* `utilities/convert_to_modem.py`: Prebakes project face/float layers to RGBA slabs.
+* `modem_display.py`: Composites baked layers and drives the frame-independent modem.
 * `settings.py`: Global configuration constants.
 * `tools/`: Helper scripts (e.g., `convert_to_sbs_fixed.py`).
 

@@ -195,3 +195,15 @@ RENDERING_PIPELINE_ANALYSIS.md
 images_xy/
 *_xy/
 /images_xy.zip
+
+# Modem baked RGBA libraries and local test exports
+*_modem/
+!animation_modem/
+!animation_modem/**
+.modem-bake-*/
+
+# Modem baked RGBA libraries and local test exports
+*_modem/
+!animation_modem/
+!animation_modem/**
+.modem-bake-*/

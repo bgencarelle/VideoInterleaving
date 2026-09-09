@@ -66,7 +66,7 @@ def configure_runtime():
 
     parser.add_argument(
         "--mode",
-        choices=["web", "ascii", "asciiweb", "local", "scope"],
+        choices=["web", "ascii", "asciiweb", "local", "scope", "modem"],
         default="local",
         help="Operating Mode (default: local)"
     )
@@ -321,7 +321,49 @@ def configure_runtime():
         help="Override hosts to '0.0.0.0' for network testing (default: '127.0.0.1')"
     )
 
+    # Modem is independent of the XY waveform and the video/GL display stack.
+    parser.add_argument("--modem-dir", help="RGBA modem bake from utilities/convert_to_modem.py")
+    parser.add_argument("--modem-channels", default="1,2", help="1-based stereo output pair")
+    parser.add_argument("--modem-latency", default="low", help="low, high, or seconds")
+    parser.add_argument("--modem-time-offset-ms", type=float, default=0.0,
+                        help="Additional receiver allowance; scheduled transmission is already compensated")
+    parser.add_argument("--modem-receive-margin-ms", type=float, default=15.0,
+                        help="Time after packet completion reserved for input/decode/GUI (default 15)")
+    parser.add_argument("--modem-prepare-ms", type=float, default=10.0,
+                        help="Minimum encoding lead before a send deadline (default 10)")
+    parser.add_argument("--modem-frames", type=int, default=0, help="0 = unlimited live / one source pass for WAV")
+    parser.add_argument("--modem-wav", help="Export a deterministic pair to PCM16 WAV instead of live playback")
+    parser.add_argument("--modem-pair", help="Fixed zero-based face,float pair for inspection, e.g. 1,0")
+    parser.add_argument("-f", "--modem-numbered", action="store_true", help="Burn absolute and source-index counters into modem pixels")
+    parser.add_argument("--modem-log-frames", action="store_true")
+    parser.add_argument("--modem-clock", type=int, choices=[0,1,2,3,255], default=settings.CLOCK_MODE)
+    parser.add_argument("--modem-frame-duration", type=float, default=1.0,
+                        help="Existing MIDI clock's frame scaling factor")
     args = parser.parse_args()
+
+    if args.mode == "modem":
+        if args.modem_frames < 0:
+            parser.error("Modem frame count must be nonnegative")
+        if not math.isfinite(args.modem_time_offset_ms):
+            parser.error("--modem-time-offset-ms must be finite")
+        if (not math.isfinite(args.modem_receive_margin_ms) or args.modem_receive_margin_ms < 0
+                or not math.isfinite(args.modem_prepare_ms) or args.modem_prepare_ms <= 0
+                or not 0 <= args.modem_receive_margin_ms + args.modem_time_offset_ms <= 2000):
+            parser.error("Modem prepare time must be positive and total receiver allowance must be 0..2000 ms")
+        if not math.isfinite(args.modem_frame_duration) or args.modem_frame_duration <= 0:
+            parser.error("--modem-frame-duration must be finite and positive")
+        if args.scope_ask:
+            parser.error("Modem mode takes --device explicitly; use modem_receive.py --list-devices")
+        if args.dir:
+            settings.IMAGES_DIR = os.path.abspath(args.dir)
+        if not args.modem_dir:
+            args.modem_dir = settings.IMAGES_DIR + "_modem"
+        if not os.path.isfile(os.path.join(args.modem_dir, "modem.json")):
+            parser.error("No modem.json in --modem-dir; run utilities/convert_to_modem.py first")
+        settings.CLOCK_MODE = args.modem_clock
+        os.makedirs(LOGS_DIR, exist_ok=True)
+        # Baked-only mode: no image scan, cache removal, ports, or GL setup.
+        return args, os.path.join(LOGS_DIR, "runtime_modem.log")
 
     # 1. Apply Directory Override
     if args.dir:
@@ -820,6 +862,23 @@ except Exception as e:
 
 
 def main(clock=CLOCK_MODE):
+    if cli_args.mode == "modem":
+        try:
+            from modem_display import run_modem
+            run_modem(cli_args)
+        except KeyboardInterrupt:
+            print("\n[MODEM] Shutdown requested")
+        except Exception as exc:
+            print(f"[MODEM] {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+        finally:
+            sys.stdout.flush()
+            sys.stderr.flush()
+            sys.stdout = _original_stdout
+            sys.stderr = _original_stderr
+            if _log_file is not None:
+                _log_file.close()
+        return
     # Register cleanup handler for display resolution restoration
     try:
         from display_manager import _restore_display_resolution
