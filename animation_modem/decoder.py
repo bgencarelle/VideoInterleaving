@@ -20,7 +20,10 @@ def main(argv=None):
     p.add_argument('--channels', type=pair, default=(0, 1), help='Input pair, 1-based (default 1,2)')
     p.add_argument('--wav', type=Path, help='Receive a baked/recorded 48 kHz PCM16 WAV')
     p.add_argument('--list-devices', action='store_true')
-    p.add_argument('--quiet', action='store_true', help='Disable per-frame JSON to avoid terminal I/O during display')
+    p.add_argument('--quiet', action=argparse.BooleanOptionalAction, default=None,
+                   help='Suppress per-frame JSON. Default on with a display, off with --headless.')
+    p.add_argument('-v', '--verbose', dest='quiet', action='store_false',
+                   help='Per-frame JSON records, including decode and display timing')
     p.add_argument('--headless', action='store_true', help='JSON reporting without a display')
     p.add_argument('--fast', action='store_true', help='Decode WAV without real-time pacing')
     p.add_argument('--save-frames', type=Path, help='Optional PNG directory; saving adds processing cost')
@@ -30,6 +33,11 @@ def main(argv=None):
         print(sounddevice().query_devices()); return
     if args.fast and not args.wav:
         p.error('--fast requires --wav')
+    if args.quiet is None:
+        # Per-frame printing costs terminal I/O on the thread that must keep
+        # reading the input stream; a display run does not need it. --headless
+        # exists to emit those records, so it stays verbose unless asked.
+        args.quiet = not args.headless
     try:
         settings = settings_from_args(args)
     except ValueError as exc:
