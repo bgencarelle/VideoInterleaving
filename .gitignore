@@ -199,11 +199,11 @@ images_xy/
 # Modem baked RGBA libraries and local test exports
 *_modem/
 !animation_modem/
-!animation_modem/**
+!animation_modem/*.py
 .modem-bake-*/
 
 # Modem baked RGBA libraries and local test exports
 *_modem/
 !animation_modem/
-!animation_modem/**
+!animation_modem/*.py
 .modem-bake-*/

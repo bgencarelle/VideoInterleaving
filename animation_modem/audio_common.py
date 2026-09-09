@@ -1,7 +1,7 @@
 import argparse
 import wave
 import numpy as np
-from .transport import RATE
+from .transport import RATE, ALL, N
 
 
 def device(value):
@@ -42,3 +42,48 @@ def route(data, channels):
     out = np.zeros((len(data), max(channels)+1), np.float32)
     out[:, channels] = data
     return out
+
+
+# Data occupies bins 3..54 only. Everything outside carries no information, but
+# it does inflate the peak and window energy that sync_correlation normalises
+# by, which is what pushes the score under threshold on an analog source. The
+# demodulator's FFT already rejects it; the acquisition detector does not.
+BAND = (600.0, 22000.0)          # comfortably outside 1125 Hz .. 20250 Hz
+
+
+class InputFilter:
+    """Stateful band-pass applied to received audio before acquisition.
+
+    Removes turntable rumble, mains hum and out-of-band hiss. Costs about
+    0.4 dB on a clean source and makes full-scale rumble a non-event.
+    """
+
+    def __init__(self, band=BAND, order=4):
+        from scipy.signal import butter
+        high, low = band
+        if not (0 < high < low < RATE/2):
+            raise ValueError(f'Input band must satisfy 0 < high < low < {RATE/2}')
+        lowest, highest = ALL[0]*RATE/N, ALL[-1]*RATE/N
+        if high > lowest or low < highest:
+            raise ValueError(f'Input band must span the carriers '
+                             f'({lowest:.0f}..{highest:.0f} Hz)')
+        self.sos = np.concatenate([
+            butter(order, high, btype='highpass', fs=RATE, output='sos'),
+            butter(order, low, btype='lowpass', fs=RATE, output='sos')])
+        self.zi = np.zeros((len(self.sos), 2, 2))
+
+    def process(self, data):
+        from scipy.signal import sosfilt
+        data = np.asarray(data, np.float32)
+        if not len(data):
+            return data
+        out, self.zi = sosfilt(self.sos, data, axis=0, zi=self.zi)
+        return out.astype(np.float32)
+
+
+def band(value):
+    try:
+        high, low = (float(v) for v in value.split(','))
+    except ValueError:
+        raise argparse.ArgumentTypeError('Use HIGHPASS,LOWPASS in Hz, e.g. 600,22000')
+    return (high, low)
