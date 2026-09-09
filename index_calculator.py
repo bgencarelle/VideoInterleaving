@@ -67,7 +67,7 @@ def set_clock_mode(mode=None):
         import midi_control
     print("Clock mode set to", list(VALID_MODES.keys())[list(VALID_MODES.values()).index(clock_mode)])
 
-def calculate_free_clock_index(total_images, pingpong=True):
+def calculate_free_clock_index(total_images, pingpong=True, *, time_offset_ns=0, at_time_ns=None, publish=True):
     """
     Fast, mirrored ping‑pong index:
       0,1,2,...,N-1, N-1,N-2,...,1,0, 0,1,2...
@@ -76,7 +76,9 @@ def calculate_free_clock_index(total_images, pingpong=True):
     for multi-machine setups with chrony-synchronized clocks.
     """
     # Use nanosecond precision with integer arithmetic to avoid floating point errors
-    current_time_ns = time.time_ns()
+    # Output adapters can select ahead without changing the shared epoch or IPS.
+    # Existing callers retain precisely the same clock behavior (offset zero).
+    current_time_ns = (time.time_ns() if at_time_ns is None else int(at_time_ns)) + int(time_offset_ns)
     elapsed_ns = current_time_ns - launch_time
     # Calculate index using integer math: (elapsed_ns * IPS) // 1_000_000_000
     raw_index = (elapsed_ns * IPS) // 1_000_000_000
@@ -93,7 +95,8 @@ def calculate_free_clock_index(total_images, pingpong=True):
     else:
         index = raw_index % total_images if total_images > 0 else 0
 
-    control_data_dictionary['Index_and_Direction'] = (index, None)
+    if publish:
+        control_data_dictionary['Index_and_Direction'] = (index, None)
     return index, None
 
 def calculate_midi_clock_index(frame_counter, png_paths_len_param=None, frame_duration_param=None):
@@ -118,7 +121,7 @@ def calculate_midi_clock_index(frame_counter, png_paths_len_param=None, frame_du
     index = max(0, min(index, png_len))
     return index, direction
 
-def update_index(total_images, pingpong=True):
+def update_index(total_images, pingpong=True, *, time_offset_ns=0, at_time_ns=None):
     """
     Update the index using MIDI data if in MIDI mode; otherwise use the free-clock calculation.
     """
@@ -136,4 +139,5 @@ def update_index(total_images, pingpong=True):
         index, _ = control_data_dictionary['Index_and_Direction']
         return index, None
     else:
-        return calculate_free_clock_index(total_images, pingpong)
+        return calculate_free_clock_index(total_images, pingpong,
+                                          time_offset_ns=time_offset_ns, at_time_ns=at_time_ns)
