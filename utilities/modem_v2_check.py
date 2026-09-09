@@ -18,6 +18,14 @@ Three things you can do with this:
   python utilities/modem_v2_check.py read --preset tape \
       --wav captured_off_tape.wav --allocation modem_allocation.npy --save-frames out/
 
+  # 4. real time, two terminals. Start the receiver first.
+  python utilities/modem_v2_check.py live-receive --device "BlackHole 2ch" --preset tape
+  python utilities/modem_v2_check.py live-send --modem-dir images_modem \
+      --device "BlackHole 2ch" --preset tape --allocation modem_allocation.npy
+
+  # list audio devices
+  python utilities/modem_v2_check.py live-send --list-devices
+
 The read step reports per-frame status, quality tier, measured playback rate
 and PSNR where it can, so a deck's speed error and roll-off show up as numbers
 rather than a verdict.
@@ -36,7 +44,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from animation_modem import transport as V1                    # noqa: E402
 from animation_modem import transport2 as V2                   # noqa: E402
 from animation_modem import impairments as IMP                 # noqa: E402
-from animation_modem.audio_common import pcm, wav_blocks       # noqa: E402
+from animation_modem.audio_common import (BAND, InputFilter, pcm,   # noqa: E402
+                                          wav_blocks)
 
 
 def frames_from(args, profile='color'):
@@ -199,6 +208,170 @@ def do_bench(args):
           '  run the "allocate" step against your bake and pass --allocation.')
 
 
+def _sounddevice():
+    try:
+        import sounddevice as sd
+        return sd
+    except (ImportError, OSError) as exc:
+        raise SystemExit('Live audio needs sounddevice and PortAudio: '
+                         'pip install -r requirements-modem.txt') from exc
+
+
+def do_live_send(args):
+    """Play v2 packets continuously to an output device.
+
+    No shared-clock scheduling here on purpose: this is a link test, so it just
+    keeps the carrier fed. Frame identity comes from the header, not a deadline.
+    """
+    sd = _sounddevice()
+    if args.list_devices:
+        print(sd.query_devices()); return
+    frames, profile = frames_from(args)
+    coder, _ = coder_for(profile, args.allocation)
+    layout = V2.PRESETS[args.preset]
+    print(layout.describe())
+    packets = [V2.encode(V1.image_values(
+                   V1.prepare_image(im, n+1, 1, len(frames), args.numbered, profile), profile),
+               layout, coder, n+1, (n % len(frames))+1, len(frames),
+               stamp_ms=n*int(1000/layout.fps))*args.gain
+               for n, im in enumerate(frames)]
+    print(f'{len(packets)} packets ready, {layout.fps:.2f} fps. Ctrl-C to stop.')
+    state = {'packet': 0, 'position': 0, 'sent': 0}
+    channels = tuple(int(c)-1 for c in args.channels.split(','))
+
+    def callback(outdata, count, timing, status):
+        outdata.fill(0)
+        written = 0
+        while written < count:
+            block = packets[state['packet']]
+            take = min(count-written, len(block)-state['position'])
+            outdata[written:written+take, channels] = \
+                block[state['position']:state['position']+take]
+            written += take
+            state['position'] += take
+            if state['position'] >= len(block):
+                state['position'] = 0
+                state['packet'] = (state['packet']+1) % len(packets)
+                state['sent'] += 1
+
+    with sd.OutputStream(samplerate=V2.RATE, channels=max(channels)+1, dtype='float32',
+                         device=args.device, blocksize=256, latency='low',
+                         callback=callback):
+        try:
+            import time
+            while True:
+                time.sleep(1)
+                print(f'  sent {state["sent"]} packets', end='\r', flush=True)
+        except KeyboardInterrupt:
+            print(f'\nstopped after {state["sent"]} packets')
+
+
+def do_live_receive(args):
+    """Decode from an input device and show the newest complete frame.
+
+    No timestamp scheduling and no presentation queue: whatever decoded most
+    recently is what is on screen. That is the right model for an analog
+    source, where the header carries identity and a recorded timestamp means
+    nothing against the current wall clock.
+    """
+    import threading
+    sd = _sounddevice()
+    if args.list_devices:
+        print(sd.query_devices()); return
+    coder, _ = coder_for(args.profile, args.allocation)
+    layout = V2.PRESETS[args.preset]
+    print(layout.describe(), file=sys.stderr)
+    channels = tuple(int(c)-1 for c in args.channels.split(','))
+    receiver = V2.Receiver(layout, coder)
+    conditioner = InputFilter(BAND) if args.input_filter else None
+    if args.save_frames:
+        Path(args.save_frames).mkdir(parents=True, exist_ok=True)
+    newest = {'result': None, 'seen': 0, 'tiers': {}}
+    stop = threading.Event()
+
+    def pump():
+        with sd.InputStream(samplerate=V2.RATE, channels=max(channels)+1, dtype='float32',
+                            device=args.device, blocksize=256, latency='low') as stream:
+            print(json.dumps({'input_latency_ms': stream.latency*1000}), file=sys.stderr)
+            while not stop.is_set():
+                audio, overflow = stream.read(256)
+                if overflow:
+                    print(json.dumps({'status': 'input_overflow'}), flush=True)
+                block = audio[:, channels]
+                if conditioner is not None:
+                    block = conditioner.process(block)
+                for r in receiver.feed(block):
+                    newest['seen'] += 1
+                    newest['tiers'][r.tier] = newest['tiers'].get(r.tier, 0)+1
+                    if r.values is not None:
+                        newest['result'] = r          # latest wins, nothing queued
+                    if not args.quiet:
+                        print(json.dumps({
+                            'status': r.status, 'identity': r.identity, 'frame': r.absolute,
+                            'index': r.index, 'count': r.count, 'tier': r.tier,
+                            'coverage': r.coverage, 'pilot_error': r.pilot_error,
+                            'playback_rate_pct': round(100*r.rate_error, 3)}), flush=True)
+                    if args.save_frames and r.values is not None:
+                        name = (f'{r.absolute:06d}' if r.absolute is not None
+                                else f'x{newest["seen"]:06d}')
+                        V1.values_image(np.clip(r.values, -1, 1), args.profile).save(
+                            Path(args.save_frames)/f'frame_{name}.png')
+
+    if args.headless:
+        try:
+            pump()
+        except KeyboardInterrupt:
+            pass
+        print(f'\n{newest["seen"]} packets, tiers {newest["tiers"]}', file=sys.stderr)
+        return
+
+    import tkinter as tk
+    from PIL import ImageTk, ImageOps
+    size = (args.width, args.height)
+    root = tk.Tk()
+    root.title(f'modem v2 - {args.preset} - waiting for signal')
+    blank = ImageTk.PhotoImage(Image.new('RGB', size, 'black'))
+    label = tk.Label(root, background='black', image=blank)
+    label.image = blank
+    label.pack()
+    status = tk.Label(root, text='waiting for signal')
+    status.pack()
+    thread = threading.Thread(target=pump, daemon=True)
+
+    def close():
+        stop.set()
+        root.destroy()
+    root.protocol('WM_DELETE_WINDOW', close)
+    thread.start()
+    shown = {'at': None}
+
+    def refresh():
+        r = newest['result']
+        if r is not None and r is not shown['at']:
+            shown['at'] = r
+            im = V1.values_image(np.clip(r.values, -1, 1), args.profile)
+            canvas = Image.new('RGB', size, 'black')
+            scaled = ImageOps.contain(im, size, Image.Resampling.NEAREST)
+            canvas.paste(scaled, ((size[0]-scaled.width)//2, (size[1]-scaled.height)//2))
+            photo = ImageTk.PhotoImage(canvas)
+            label.configure(image=photo)
+            label.image = photo
+            frame = r.absolute if r.absolute is not None else '?'
+            status.config(text=f'frame {frame} | {r.status} | tier {r.tier} | '
+                               f'coverage {r.coverage:.2f} | '
+                               f'speed {100*r.rate_error:+.2f}%')
+            root.title(f'modem v2 - {args.preset} - frame {frame} - {r.tier}')
+        if not stop.is_set():
+            root.after(10, refresh)
+
+    refresh()
+    try:
+        root.mainloop()
+    finally:
+        stop.set()
+    print(f'{newest["seen"]} packets, tiers {newest["tiers"]}', file=sys.stderr)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -224,9 +397,26 @@ def main(argv=None):
     r.add_argument('--preset', choices=list(V2.PRESETS), default='wide')
     r.add_argument('--profile', choices=list(V1.PROFILES), default='color')
     r.add_argument('--save-frames', type=Path)
+    ls = sub.add_parser('live-send'); shared(ls)
+    ls.add_argument('--device'); ls.add_argument('--channels', default='1,2')
+    ls.add_argument('--gain', type=float, default=1.0)
+    ls.add_argument('-f', '--numbered', action='store_true')
+    ls.add_argument('--list-devices', action='store_true')
+    lr = sub.add_parser('live-receive')
+    lr.add_argument('--device'); lr.add_argument('--channels', default='1,2')
+    lr.add_argument('--allocation', type=Path)
+    lr.add_argument('--preset', choices=list(V2.PRESETS), default='wide')
+    lr.add_argument('--profile', choices=list(V1.PROFILES), default='color')
+    lr.add_argument('--save-frames', type=Path)
+    lr.add_argument('--input-filter', action=argparse.BooleanOptionalAction, default=True)
+    lr.add_argument('--headless', action='store_true', help='JSON only, no window')
+    lr.add_argument('--quiet', action='store_true', help='Window only, no per-packet JSON')
+    lr.add_argument('--width', type=int, default=480)
+    lr.add_argument('--height', type=int, default=576)
+    lr.add_argument('--list-devices', action='store_true')
     args = p.parse_args(argv)
-    {'bench': do_bench, 'allocate': do_allocate,
-     'write': do_write, 'read': do_read}[args.command](args)
+    {'bench': do_bench, 'allocate': do_allocate, 'write': do_write, 'read': do_read,
+     'live-send': do_live_send, 'live-receive': do_live_receive}[args.command](args)
 
 
 if __name__ == '__main__':

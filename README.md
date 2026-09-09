@@ -428,10 +428,18 @@ python utilities/modem_v2_check.py live-send --modem-dir images_modem \
     --device "BlackHole 2ch" --preset tape --allocation modem_allocation.npy
 ```
 
+`live-receive` opens a window showing the newest decoded frame, and prints one
+JSON line per packet with status, frame identity, quality tier, bin coverage
+and `playback_rate_pct` -- through a tape deck that last field is the deck's
+speed error, measured live. `--headless` gives JSON with no window, `--quiet`
+the window with no JSON, and `--width`/`--height` size it.
+
+Nothing is queued or scheduled: whatever decoded most recently is what is on
+screen. For an analog source that is the only model that means anything, since
+a timestamp recorded onto tape says nothing about the current wall clock.
+
 `--list-devices` on either lists PortAudio devices. `--channels` is a one-based
-pair, default `1,2`. The receiver prints one JSON line per packet with status,
-frame identity, quality tier, bin coverage and `playback_rate_pct` -- through a
-tape deck that last field is the deck's speed error, measured live.
+pair, default `1,2`.
 
 `live-send` runs no shared-clock scheduling. It keeps the carrier fed and
 identity travels in the header, which is the only model that means anything for
