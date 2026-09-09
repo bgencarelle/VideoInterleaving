@@ -1,5 +1,10 @@
 # Modem v2 — theory, state, and handover
 
+**Recovery update:** see [MODEM_V2_RECOVERY.md](MODEM_V2_RECOVERY.md) for the
+current receive state machine, tests and commands. The measurements and known
+bugs below describe the earlier prototype; allocation inversion, acquisition,
+EOF handling, WAV alternate loss and small-preset sizing have since changed.
+
 This covers the analog image link on the `modem` branch: why it is built the
 way it is, what was measured, what landed, what is proposed but unfinished,
 and what to do next. Read `MODEM_MODE.md` first for how v1 is operated.
