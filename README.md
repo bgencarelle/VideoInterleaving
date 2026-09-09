@@ -397,6 +397,59 @@ sudo apt install chrony
 
 ---
 
+## 6. Modem v2 test tool
+
+`utilities/modem_v2_check.py` exercises the proposed v2 transport
+(`animation_modem/transport2.py`). v2 is not wired into `main.py`; this tool is
+the only way to run it.
+
+Build the power-allocation table first. v2's source coder is guessing without
+it, and the table is a constant derived from the bake, so it only needs
+rebuilding when the images change:
+
+```bash
+python utilities/modem_v2_check.py allocate --modem-dir images_modem \
+    --out modem_allocation.npy
+```
+
+Presets choose the occupied band and the frame-rate/resolution trade:
+`wide` (1125-20250 Hz, 14.35 fps), `tape` (1125-10125 Hz, 7.71 fps, same
+picture), `tape-fast` (1125-10125 Hz, 14.35 fps, smaller picture), `narrow`
+(1125-7875 Hz). Narrow bands survive tape roll-off and tolerate more playback
+speed error: `tape` decodes up to 2.37x where `wide` aliases above 1.19x.
+
+### Live link
+
+Two terminals, receiver first:
+
+```bash
+python utilities/modem_v2_check.py live-receive --device "BlackHole 2ch" --preset tape
+python utilities/modem_v2_check.py live-send --modem-dir images_modem \
+    --device "BlackHole 2ch" --preset tape --allocation modem_allocation.npy
+```
+
+`--list-devices` on either lists PortAudio devices. `--channels` is a one-based
+pair, default `1,2`. The receiver prints one JSON line per packet with status,
+frame identity, quality tier, bin coverage and `playback_rate_pct` -- through a
+tape deck that last field is the deck's speed error, measured live.
+
+`live-send` runs no shared-clock scheduling. It keeps the carrier fed and
+identity travels in the header, which is the only model that means anything for
+playback off tape.
+
+### Offline and tape
+
+`bench` compares v1 against v2 across simulated channels. `write` encodes a
+bake to WAV for recording; `read` decodes a captured WAV. Both take
+`--allocation` and `--preset`. `--save-frames DIR` on `read` or `live-receive`
+writes PNGs; `-f` on the send side burns counters into the pixels.
+
+**Known limitation:** allocation currently loses about 3 dB on a rolled-off
+channel instead of the measured gain. `decode_packet` computes per-carrier
+`weights` and discards them for the image path, and `SourceCoder.inverse`
+divides by the allocation gain rather than Wiener-filtering with it. Until
+those are joined up, v2 trails v1 on the channels it was built for.
+
 ## Project Structure
 
 * `main.py`: Entry point. Parses CLI args and launches threads.
