@@ -335,6 +335,9 @@ def configure_runtime():
     parser.add_argument("--modem-wav", help="Export a deterministic pair to PCM16 WAV instead of live playback")
     parser.add_argument("--modem-pair", help="Fixed zero-based face,float pair for inspection, e.g. 1,0")
     parser.add_argument("-f", "--modem-numbered", action="store_true", help="Burn absolute and source-index counters into modem pixels")
+    parser.add_argument("--modem-index-offset-ms", type=float, default=0.0,
+        help="Shift only which image the clock returns, not when it is shown; "
+             "use to align modem output with local/scope/ascii. One image is 1000/IPS ms.")
     parser.add_argument("--modem-log-frames", action="store_true")
     parser.add_argument("--modem-clock", type=int, choices=[0,1,2,3,255], default=settings.CLOCK_MODE)
     parser.add_argument("--modem-frame-duration", type=float, default=1.0,
@@ -350,6 +353,8 @@ def configure_runtime():
                 or not math.isfinite(args.modem_prepare_ms) or args.modem_prepare_ms <= 0
                 or not 0 <= args.modem_receive_margin_ms + args.modem_time_offset_ms <= 2000):
             parser.error("Modem prepare time must be positive and total receiver allowance must be 0..2000 ms")
+        if not math.isfinite(args.modem_index_offset_ms) or abs(args.modem_index_offset_ms) > 10000:
+            parser.error("--modem-index-offset-ms must be finite and within +/-10000")
         if not math.isfinite(args.modem_frame_duration) or args.modem_frame_duration <= 0:
             parser.error("--modem-frame-duration must be finite and positive")
         if args.scope_ask:

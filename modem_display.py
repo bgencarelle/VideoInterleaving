@@ -77,6 +77,11 @@ def run_modem(args):
         raise ValueError('--modem-time-offset-ms requires the free clock; MIDI events cannot be predicted')
     prepare_ms=args.modem_prepare_ms
     receive_margin_ms=args.modem_receive_margin_ms + args.modem_time_offset_ms
+    # Timing offsets move the presentation instant AND the index together, so they
+    # cannot correct an index that disagrees with the other modes. This shifts only
+    # which image the clock formula returns, leaving the shared epoch and the
+    # transmitted timestamp alone.
+    index_offset_ns=round(getattr(args,'modem_index_offset_ms',0.0)*1_000_000)
     previous=None
     n=0
     # Poll at the existing display rate; packet readiness, not sleep, controls
@@ -105,7 +110,8 @@ def run_modem(args):
                     # Same clock formula as every mode; do not mutate the live
                     # selector's state while looking up a future image index.
                     index,_=index_calculator.calculate_free_clock_index(
-                        library.frames,settings.PINGPONG,at_time_ns=target_time_ns,publish=False)
+                        library.frames,settings.PINGPONG,at_time_ns=target_time_ns,
+                        time_offset_ns=index_offset_ns,publish=False)
                 encode_started=time.perf_counter()
                 audio,report,_=packet(library,n+1,(index,*folders),args.modem_numbered,
                                       background,rotation,mirror,target_time_ns)

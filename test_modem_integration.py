@@ -109,7 +109,7 @@ class ModemIntegrationTests(unittest.TestCase):
             modem_wav=None, modem_channels='1,2', modem_latency='low',
             rotation=None, mirror=None, modem_clock=255, modem_frame_duration=1,
             modem_time_offset_ms=0, modem_prepare_ms=10, modem_receive_margin_ms=15, modem_frames=3, modem_numbered=False,
-            modem_log_frames=False, scope_device=None)
+            modem_log_frames=False, scope_device=None, modem_index_offset_ms=33.3)
         with patch.object(index_calculator,'set_clock_mode'), \
              patch.object(index_calculator,'midi_mode',False), \
              patch.object(index_calculator,'update_index',side_effect=[(0,None),(0,None),(1,None)]) as clock, \
@@ -125,6 +125,9 @@ class ModemIntegrationTests(unittest.TestCase):
         self.assertTrue(all(not call.kwargs for call in clock.call_args_list))
         self.assertTrue(all(call.kwargs['at_time_ns']==1_700_000_000_000_000_000 for call in target_clock.call_args_list))
         self.assertTrue(all(call.kwargs['publish'] is False for call in target_clock.call_args_list))
+        # The index offset must reach the clock formula without disturbing the
+        # transmitted timestamp: presentation time is unchanged above.
+        self.assertTrue(all(call.kwargs['time_offset_ns']==33_300_000 for call in target_clock.call_args_list))
         self.assertTrue(all(x.target_time_ms32 is not None for x in emitted))
 
     def test_main_wav_path_needs_no_video_or_audio_device_stack(self):
