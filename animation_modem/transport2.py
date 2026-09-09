@@ -23,9 +23,15 @@ Differences from v1, each one measured rather than assumed:
 * Image values are sent as DCT coefficients under a fixed power allocation
   derived from the bake. Important coefficients go out loud and fine detail
   goes out quiet, so a failing channel loses detail before it loses structure.
-  Measured +5 dB on a good channel and +13 dB on a bad one, and the gain grows
-  as the channel worsens, which is what makes quality graded rather than
-  pass/fail. Position is not a lever -- reordering alone measured +0.5 dB,
+  Measured +5 dB on a good channel and +13 dB on a bad one -- in a standalone
+  experiment where the receiver knew each carrier's gain and formed an MMSE
+  estimate. THAT IS NOT WHAT THIS FILE DOES YET. decode_packet computes
+  exactly that information as `weights` and discards it for the image path,
+  and SourceCoder.inverse divides by the allocation gain rather than
+  Wiener-filtering with it, so a coefficient given little power has its noise
+  amplified by 1/gain. Measured today, allocation LOSES about 3 dB on a
+  rolled-off channel. Joining the weights to the estimate is the change that
+  makes the gain real, and until then the rest of v2 is not worth adopting. Position is not a lever -- reordering alone measured +0.5 dB,
   because an orthonormal transform does not care which slot a coefficient
   occupies. Do not pair loud coefficients with robust carriers either; that
   multiplies both penalties together and measured 2-5 dB WORSE than leaving
