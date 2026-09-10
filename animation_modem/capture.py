@@ -1,4 +1,4 @@
-"""Input rate negotiation and continuous conversion to the modem sample rate."""
+"""Device-default capture and continuous conversion to the modem sample rate."""
 from contextlib import contextmanager
 from fractions import Fraction
 
@@ -7,44 +7,20 @@ from scipy.signal import firwin, upfirdn
 
 from .transport2 import RATE
 
-# PortAudio tests specific settings; it does not enumerate every supported rate.
-STANDARD_RATES = (768000, 705600, 384000, 352800, 192000, 176400,
-                  96000, 88200, 64000, 48000, 44100, 32000, 24000,
-                  22050, 16000, 12000, 11025, 8000)
-
-
 @contextmanager
 def open_input(sd, device, channels, default_rate):
-    """Use the highest tested rate that both opens and starts successfully."""
-    rates = sorted(set(STANDARD_RATES) | {float(default_rate)}, reverse=True)
-    failures = []
-    stream = None
-    for rate in rates:
-        if rate <= 0 or not np.isfinite(rate):
-            continue
-        candidate = None
-        try:
-            sd.check_input_settings(device=device, channels=channels,
-                                    dtype='float32', samplerate=rate)
-            candidate = sd.InputStream(device=device, channels=channels,
-                                       dtype='float32', samplerate=rate,
-                                       blocksize=0, latency='low')
-            candidate.start()
-        except sd.PortAudioError as exc:
-            if candidate is not None:
-                candidate.close()
-            failures.append(f'{rate:g} Hz: {exc}')
-            continue
-        except BaseException:
-            # No context manager has been entered yet: interrupted startup
-            # must still release the device handle.
-            if candidate is not None:
-                candidate.close()
-            raise
-        stream = candidate
-        break
-    if stream is None:
-        raise RuntimeError('No usable input sample rate. ' + '; '.join(failures))
+    """Open once at the device-reported default rate, without probing rates."""
+    rate = float(default_rate)
+    if not np.isfinite(rate) or rate <= 0:
+        raise ValueError('Device reported an invalid default sample rate')
+    stream = sd.InputStream(device=device, channels=channels,
+                            dtype='float32', samplerate=rate,
+                            blocksize=0, latency='low')
+    try:
+        stream.start()
+    except BaseException:
+        stream.close()
+        raise
     try:
         yield stream
     finally:
@@ -103,3 +79,66 @@ class CaptureResampler:
         output = converted[start:start+count*self.up//self.down]
         self.history = joined[-self.history_length:].copy()
         return output.astype(np.float32)
+
+
+class BufferedInput:
+    """Read independently of decoding; retain at most 150 ms of fresh audio.
+
+    Sequence gaps mark discarded blocks, so filters and acquisition reset at
+    the exact discontinuity. The buffer has capacity, not a prefill delay.
+    """
+    def __init__(self, stream, blocksize, max_seconds=.15):
+        from collections import deque
+        import threading
+        self.stream, self.blocksize = stream, blocksize
+        self.capacity = max(1, int(max_seconds*stream.samplerate/blocksize))
+        self.queue = deque()
+        self.lock = threading.Lock()
+        self.stop = threading.Event()
+        self.error = None
+        self.sequence = 0
+        self.expected = 0
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def _poll(self):
+        if self.stream.read_available < self.blocksize:
+            return False
+        audio, overflow = self.stream.read(self.blocksize)
+        # Own samples even if a backend reuses its read buffer.
+        with self.lock:
+            if len(self.queue) >= self.capacity:
+                self.queue.popleft()
+            self.queue.append((self.sequence, audio.copy(), overflow))
+            self.sequence += 1
+        return True
+
+    def _run(self):
+        try:
+            while not self.stop.is_set():
+                if not self._poll():self.stop.wait(.002)
+        except BaseException as exc:
+            self.error = exc
+
+    def read(self):
+        with self.lock:
+            if not self.queue:
+                if self.error is not None:raise self.error
+                return None
+            sequence, audio, overflow = self.queue.popleft()
+        skipped = sequence-self.expected
+        self.expected = sequence+1
+        return audio, overflow, skipped
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *args):
+        self.stop.set()
+        self.thread.join(timeout=1.0)
+        if self.thread.is_alive():
+            # Unblock a driver read before its owning stream is closed.
+            self.stream.abort()
+            self.thread.join(timeout=1.0)
+            if self.thread.is_alive():
+                raise RuntimeError('Audio input reader did not stop')

@@ -7,7 +7,7 @@ import numpy as np
 from scipy.signal import upfirdn, resample_poly
 
 from animation_modem import decoder
-from animation_modem.capture import CaptureResampler, open_input
+from animation_modem.capture import BufferedInput, CaptureResampler, open_input
 from animation_modem.channel_scan import AutoChannels
 from animation_modem.transport2 import encode, Receiver
 
@@ -20,8 +20,7 @@ class FakeSD:
         self.interrupt = False
 
     def check_input_settings(self, **kw):
-        if kw['samplerate'] > 192000:
-            raise self.PortAudioError('unsupported')
+        raise AssertionError('Sample-rate probing must not be called')
 
     def InputStream(self, **kw):
         sd, rate = self, kw['samplerate']
@@ -37,20 +36,80 @@ class FakeSD:
 
 
 class CaptureTests(unittest.TestCase):
-    def test_rate_fallback_and_body_error_close(self):
+    def test_capture_queue_is_bounded_and_marks_gaps(self):
+        class Stream:
+            samplerate=48000
+            read_available=256
+            n=0
+            def read(self,size):
+                self.n+=1
+                return np.full((size,2),self.n,np.float32), self.n==4
+        buffer=BufferedInput(Stream(),256,max_seconds=3*256/48000)
+        for _ in range(5):buffer._poll()
+        self.assertEqual(len(buffer.queue),3)
+        audio,overflow,skipped=buffer.read()
+        self.assertEqual((audio[0,0],overflow,skipped),(3,False,2))
+        self.assertEqual(buffer.read()[1:],(True,0))
+        buffer.error=RuntimeError('driver stopped')
+        self.assertEqual(buffer.read()[0][0,0],5)
+        with self.assertRaisesRegex(RuntimeError,'driver stopped'):buffer.read()
+
+    def test_utility_uses_shared_input_and_preserves_channel_override(self):
+        import contextlib
+        import io
+        import json
+        from utilities import modem_v2_check as utility
+        result=SimpleNamespace(values=None, absolute=42, index=7, source_index=6,
+            count=20, face_folder=1, float_folder=2, tier='best', coverage=1.,
+            status='received', identity='verified_header', pilot_error=0.,
+            rate_error=0., extra={'input_channels':[4,2]})
+        for options, expected in (([],None),(['--channels','4,2'],(3,1))):
+            closed=[]; calls=[]
+            def live(sd,device,channels,layout,coder,settings,stop,report):
+                calls.append((device,channels))
+                try:yield result
+                finally:closed.append(True)
+            output=io.StringIO()
+            with patch.object(utility,'_sounddevice',return_value=object()), \
+                 patch.object(utility,'live_results',live), \
+                 contextlib.redirect_stdout(output),contextlib.redirect_stderr(io.StringIO()):
+                utility.main(['live-receive','--device','18','--headless',*options])
+            self.assertEqual(calls,[(18,expected)])
+            self.assertEqual(closed,[True])
+            self.assertEqual(json.loads(output.getvalue())['frame'],42)
+
+    def test_utility_propagates_capture_failure(self):
+        import contextlib
+        import io
+        from utilities import modem_v2_check as utility
+        def broken(*args):
+            raise RuntimeError('device disconnected')
+            yield
+        with patch.object(utility,'_sounddevice',return_value=object()), \
+             patch.object(utility,'live_results',broken), \
+             contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError,'device disconnected'):
+                utility.main(['live-receive','--headless'])
+
+    def test_device_default_rate_and_body_error_close(self):
         sd = FakeSD()
         with self.assertRaisesRegex(ValueError, 'body'):
             with open_input(sd, 1, 8, 48000) as stream:
-                self.assertEqual(stream.samplerate, 96000)
+                self.assertEqual(stream.samplerate, 48000)
                 raise ValueError('body')
-        self.assertIn(('close', 192000), sd.events)
-        self.assertEqual(sd.events[-2:], [('stop', 96000), ('close', 96000)])
+        self.assertEqual(sd.events, [('start', 48000), ('stop', 48000), ('close', 48000)])
+
+    def test_failed_start_does_not_try_other_rates(self):
+        sd = FakeSD()
+        with self.assertRaisesRegex(sd.PortAudioError, 'clock busy'):
+            with open_input(sd, 1, 8, 192000):pass
+        self.assertEqual(sd.events, [('start', 192000), ('close', 192000)])
 
     def test_interrupted_start_closes(self):
         sd = FakeSD(); sd.interrupt = True
         with self.assertRaises(KeyboardInterrupt):
             with open_input(sd, 1, 8, 48000):pass
-        self.assertEqual(sd.events[-1], ('close', 192000))
+        self.assertEqual(sd.events[-1], ('close', 48000))
 
     def test_resampling_chunk_boundaries_and_reset(self):
         x = np.random.default_rng(2).normal(size=(8099, 2)).astype(np.float32)
@@ -114,7 +173,15 @@ class CaptureTests(unittest.TestCase):
         sd = SimpleNamespace(query_devices=query, check_input_settings=check,
                              PortAudioError=FakeSD.PortAudioError,
                              InputStream=lambda **kw:Input())
-        with patch.object(decoder.time, 'monotonic', side_effect=lambda:clock[0]), \
+        class ImmediateBuffer:
+            def __init__(self, stream, size):self.stream=stream
+            def __enter__(self):return self
+            def __exit__(self,*args):pass
+            def read(self):
+                self.stream.read_available
+                return None
+        with patch.object(decoder, 'BufferedInput', ImmediateBuffer), \
+             patch.object(decoder.time, 'monotonic', side_effect=lambda:clock[0]), \
              patch.object(decoder, 'AutoChannels') as auto, patch.object(decoder, 'Emulator'):
             self.assertEqual(list(decoder.live_results(sd, 1, None, None, None, None,
                                                       stop, reports.append)), [])

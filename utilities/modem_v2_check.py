@@ -15,6 +15,7 @@ experimental layouts for offline comparisons only. Live sending loops a
 selected set of baked composites; this tool does not drive main.py's scheduler.
 """
 import argparse
+from contextlib import closing
 import json
 from pathlib import Path
 import sys
@@ -29,6 +30,7 @@ from animation_modem import transport2 as V2                   # noqa: E402
 from animation_modem import impairments as IMP                 # noqa: E402
 from animation_modem.audio_common import (pcm, pair, device,   # noqa: E402
                                           wav_blocks)
+from animation_modem.decoder import live_results              # noqa: E402
 from animation_modem.timing import ProgressSummary            # noqa: E402
 from animation_modem.imaging import (burn_counters, fit_shapes,  # noqa: E402
                                      image_values, plane_shapes, values_image)
@@ -249,8 +251,6 @@ def do_live_receive(args):
     layout = V2.PRESETS[args.preset]
     coder, _ = coder_for(args.profile, args.allocation,layout)
     print(layout.describe(), file=sys.stderr)
-    channels = args.channels
-    receiver = receive_for(args,layout,coder)
     if args.save_frames:
         Path(args.save_frames).mkdir(parents=True, exist_ok=True)
     newest = {'result': None, 'seen': 0, 'tiers': {}}
@@ -258,17 +258,16 @@ def do_live_receive(args):
     summary = ProgressSummary(args.summary_seconds)
     stop = threading.Event()
 
+    errors = []
+    def report_input(record):
+        if not args.silent:
+            print(json.dumps(record), file=sys.stderr, flush=True)
+
     def pump():
-        with sd.InputStream(samplerate=V2.RATE, channels=max(channels)+1, dtype='float32',
-                            device=args.device, blocksize=256, latency='low') as stream:
-            print(json.dumps({'input_latency_ms': stream.latency*1000}), file=sys.stderr)
-            while not stop.is_set():
-                audio, overflow = stream.read(256)
-                if overflow:
-                    print(json.dumps({'status': 'input_overflow'}), flush=True)
-                    receiver.reset()
-                block = audio[:, channels]
-                for r in receiver.feed(block):
+        try:
+            with closing(live_results(sd, args.device, args.channels, layout, coder,
+                                      IMP.Settings(), stop, report_input)) as live:
+                for r in live:
                     newest['seen'] += 1
                     newest['tiers'][r.tier] = newest['tiers'].get(r.tier, 0)+1
                     if r.values is not None:
@@ -285,12 +284,19 @@ def do_live_receive(args):
                         values_image(r.values, coder.shapes).save(
                             Path(args.save_frames)/f'frame_{name}.png')
 
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            stop.set()
+
     if args.headless:
         try:
             pump()
         except KeyboardInterrupt:
             pass
-        print(f'\n{newest["seen"]} packets, tiers {newest["tiers"]}', file=sys.stderr)
+        if errors:raise RuntimeError(str(errors[0])) from errors[0]
+        if not args.silent:
+            print(f'\n{newest["seen"]} packets, tiers {newest["tiers"]}', file=sys.stderr)
         return
 
     import tkinter as tk
@@ -314,6 +320,9 @@ def do_live_receive(args):
     shown = {'at': None}
 
     def refresh():
+        if errors:
+            status.config(text=f'Input error: {errors[0]}')
+            return
         r = newest['result']
         if r is not None and r is not shown['at']:
             shown['at'] = r
@@ -340,9 +349,15 @@ def do_live_receive(args):
     refresh()
     try:
         root.mainloop()
+    except KeyboardInterrupt:
+        pass
     finally:
         stop.set()
-    print(f'{newest["seen"]} packets, tiers {newest["tiers"]}', file=sys.stderr)
+        thread.join(timeout=1.0)
+        try:root.destroy()
+        except tk.TclError:pass
+    if errors:raise RuntimeError(str(errors[0])) from errors[0]
+    if not args.silent:print(f'{newest["seen"]} packets, tiers {newest["tiers"]}', file=sys.stderr)
 
 
 def main(argv=None):
@@ -371,7 +386,8 @@ def main(argv=None):
     ls.add_argument('-f', '--numbered', action='store_true')
     ls.add_argument('--list-devices', action='store_true')
     lr = sub.add_parser('live-receive')
-    lr.add_argument('--device',type=device); lr.add_argument('--channels',type=pair,default=(0,1))
+    lr.add_argument('--device',type=device); lr.add_argument('--channels',type=pair,
+        help='Optional 1-based input pair; default: automatic detection')
     lr.add_argument('--save-frames', type=Path)
     lr.add_argument('--headless', action='store_true',
                     help='JSON only, no window; implies --verbose')

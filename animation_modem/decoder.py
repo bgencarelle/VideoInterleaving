@@ -28,7 +28,7 @@ import numpy as np
 
 from .audio_common import device, pair, sounddevice, wav_blocks
 from .channel_scan import AutoChannels
-from .capture import CaptureResampler, open_input
+from .capture import BufferedInput, CaptureResampler, open_input
 from .imaging import DEFAULT_PROFILE, fit_shapes, plane_shapes, values_image
 from .transport2 import PRESETS, RATE, Receiver, SourceCoder
 from .timing import expand_timestamp, ProgressSummary, TimingStats, PresentationBuffer
@@ -72,41 +72,45 @@ def live_results(sd, input_device, channels, layout, coder, settings, stop, repo
                     'capture_rate_hz': capture_rate, 'decode_rate_hz': RATE,
                     'resample_filter_delay_ms': converter.filter_delay_ms,
                     'resample_max_buffer_ms': converter.max_buffer_ms,
+                    'capture_buffer_capacity_ms': 150,
                     'input_channels': channel_count,
                     'channel_selection': 'automatic' if automatic else
                     [c+1 for c in channels]})
-            last_picture = time.monotonic()
-            reported_pair = None
-            while not stop.is_set():
-                if time.monotonic() - last_picture >= 30.0:
-                    report({'status': 'input_reopen',
-                            'reason': 'no_recovered_picture_for_30_seconds'})
-                    break  # InputStream exits/closes before the next open.
-                # Do not block indefinitely in read() if the device stops delivering.
-                if stream.read_available < read_size:
-                    stop.wait(.002)
-                    continue
-                audio, overflow = stream.read(read_size)
-                if overflow:
-                    report({'status': 'input_overflow', 'identity': 'unknown'})
-                    receiver.reset()
-                    emulator = Emulator(settings)
-                    converter.reset()
-                audio = converter.process(audio)
-                if not len(audio):
-                    continue
-                results = receiver.feed(audio if automatic else
-                                        emulator.process(audio[:, channels]))
-                for result in results:
-                    if result.values is not None:
-                        last_picture = time.monotonic()
-                    if automatic:
-                        selected = tuple(result.extra['input_channels'])
-                        if selected != reported_pair:
-                            report({'input_channels': selected,
-                                    'channel_lock': result.extra['channel_lock']})
-                            reported_pair = selected
-                    yield result
+            with BufferedInput(stream, read_size) as capture:
+                last_picture = time.monotonic()
+                reported_pair = None
+                while not stop.is_set():
+                    if time.monotonic() - last_picture >= 30.0:
+                        report({'status': 'input_reopen',
+                                'reason': 'no_recovered_picture_for_30_seconds'})
+                        break  # InputStream exits/closes before the next open.
+                    # Do not block indefinitely in read() if the device stops delivering.
+                    captured = capture.read()
+                    if captured is None:
+                        stop.wait(.002)
+                        continue
+                    audio, overflow, skipped = captured
+                    if overflow or skipped:
+                        report({'status': 'input_overflow' if overflow else 'capture_backlog',
+                                'dropped_blocks': skipped, 'identity': 'unknown'})
+                        receiver.reset()
+                        emulator = Emulator(settings)
+                        converter.reset()
+                    audio = converter.process(audio)
+                    if not len(audio):
+                        continue
+                    results = receiver.feed(audio if automatic else
+                                            emulator.process(audio[:, channels]))
+                    for result in results:
+                        if result.values is not None:
+                            last_picture = time.monotonic()
+                        if automatic:
+                            selected = tuple(result.extra['input_channels'])
+                            if selected != reported_pair:
+                                report({'input_channels': selected,
+                                        'channel_lock': result.extra['channel_lock']})
+                                reported_pair = selected
+                        yield result
 
 
 def main(argv=None):
