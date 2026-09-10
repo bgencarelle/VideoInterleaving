@@ -81,7 +81,9 @@ def coder_for(profile, allocation, layout=None):
 
 
 def receive_for(args,layout,coder):
-    return V2.Receiver(layout,coder)
+    # Live operation favors one decode per packet. Offline checks retain the
+    # automatic conditioned/EQ recovery in transport2.Receiver by default.
+    return V2.Receiver(layout,coder,recovery=False)
 
 
 def record(r):

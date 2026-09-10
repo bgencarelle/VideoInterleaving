@@ -56,7 +56,9 @@ def live_results(sd, input_device, channels, layout, coder, settings, stop, repo
     if channel_count > int(device_info['max_input_channels']):
         raise ValueError('Selected input channels are unavailable on this device')
     emulator = Emulator(settings)
-    receiver = Receiver(layout, coder)
+    # Live operation favors one decode per packet. The explicit Receiver API
+    # keeps damaged-signal conditioning available to offline callers.
+    receiver = Receiver(layout, coder, recovery=False, fast=True)
     with open_input(sd, input_device, channel_count,
                     device_info['default_samplerate']) as stream:
         capture_rate = float(stream.samplerate)
@@ -82,7 +84,7 @@ def live_results(sd, input_device, channels, layout, coder, settings, stop, repo
                 audio, overflow, skipped = captured
                 if overflow or skipped:
                     gate.reset()
-                    receiver.reset()
+                    receiver.reset(preserve_timing=True)
                     emulator = Emulator(settings)
                     converter.reset()
                 was_active = gate.active
@@ -90,7 +92,7 @@ def live_results(sd, input_device, channels, layout, coder, settings, stop, repo
                 audio = gate.process(audio[:, channels])
                 if audio is None:
                     if was_active:
-                        receiver.reset()
+                        receiver.reset(preserve_timing=True)
                         emulator = Emulator(settings)
                         converter.reset()
                     health = CaptureHealth(time.monotonic())
