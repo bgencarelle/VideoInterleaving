@@ -2,6 +2,7 @@
 from collections import deque
 import statistics
 import threading
+import time
 
 
 def expand_timestamp(ms32, now_ns):
@@ -43,6 +44,70 @@ class PresentationBuffer:
             self.dropped+=n-1
             del self.items[:n]
             return value
+
+
+class ProgressSummary:
+    """One line per pass through the bake, instead of one per packet.
+
+    A live receiver runs for hours at 14 packets a second, so per-packet JSON
+    is thousands of lines nobody reads. Silence is worse -- there is no way to
+    tell a working link from a dead one -- so the default digests a whole loop
+    and prints when the source index comes back to zero. That ties the cadence
+    to the content rather than to a clock: one line per lap, whatever the
+    frame rate or playback speed.
+
+    A time fallback covers the case the index cannot: a link delivering
+    pictures whose headers never verify has no index to loop on, and without
+    it that would look exactly like a dead link.
+    """
+
+    def __init__(self, fallback_seconds=30.0):
+        self.fallback_seconds = fallback_seconds
+        self.deadline = None
+        self.reset()
+
+    def reset(self):
+        self.packets = 0
+        self.verified = 0
+        self.tiers = {}
+        self.speeds = []
+        self.coverage = []
+
+    def record(self, result, now=None):
+        """Accumulate one result. True when a summary line is due."""
+        self.packets += 1
+        self.verified += getattr(result, 'identity', None) == 'verified_header'
+        tier = getattr(result, 'tier', None)
+        if tier:
+            self.tiers[tier] = self.tiers.get(tier, 0) + 1
+        rate = getattr(result, 'rate_error', None)
+        if rate is not None:
+            self.speeds.append(1/(1 + rate))
+        if getattr(result, 'coverage', None) is not None:
+            self.coverage.append(result.coverage)
+
+        now = time.monotonic() if now is None else now
+        if self.deadline is None:
+            self.deadline = now + self.fallback_seconds
+        index = getattr(result, 'source_index', None)
+        # A lap closes on index zero, but not on the very first packet -- that
+        # would report a one-packet lap before anything has been counted.
+        if index == 0 and self.packets > 1:
+            self.deadline = now + self.fallback_seconds
+            return True
+        if index is None and now >= self.deadline:
+            self.deadline = now + self.fallback_seconds
+            return True
+        return False
+
+    def line(self):
+        if not self.packets:
+            return 'no packets'
+        tiers = ' '.join(f'{k} {v}' for k, v in sorted(self.tiers.items()))
+        speed = statistics.median(self.speeds) if self.speeds else float('nan')
+        cover = statistics.median(self.coverage) if self.coverage else float('nan')
+        return (f'{self.packets} packets, {self.verified} verified, {tiers}, '
+                f'speed {speed:.4f}x, coverage {cover:.2f}')
 
 
 class ProgressSummary:

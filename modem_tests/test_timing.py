@@ -31,8 +31,41 @@ def encode(image, absolute, index, count, numbered=False, profile=DEFAULT_PROFIL
 
 def decode_packet(audio, profile=DEFAULT_PROFILE):
     return _decode(audio[:LAYOUT.packet], LAYOUT, _coder(profile))
-from animation_modem.timing import expand_timestamp, PresentationBuffer
+from animation_modem.timing import expand_timestamp, PresentationBuffer, ProgressSummary
 import index_calculator
+
+
+class ProgressSummaryTests(unittest.TestCase):
+    def result(self,index,identity='verified_header',tier='best'):
+        return SimpleNamespace(source_index=index,identity=identity,tier=tier,
+                               rate_error=0.0,coverage=1.0)
+
+    def test_one_line_per_lap_not_per_packet(self):
+        s=ProgressSummary()
+        fired=[]
+        for lap in range(3):
+            for i in range(12):
+                if s.record(self.result(i),now=0.0):
+                    fired.append(s.packets); s.reset()
+        # A lap closes on index zero, and never on the first packet seen.
+        self.assertEqual(fired,[13,12])
+
+    def test_lost_identity_falls_back_to_time(self):
+        # Pictures without verified headers have no index to lap on. Without a
+        # fallback that is indistinguishable from a dead link.
+        s=ProgressSummary(fallback_seconds=30)
+        self.assertFalse(s.record(self.result(None,identity='unknown'),now=0.0))
+        self.assertFalse(s.record(self.result(None,identity='unknown'),now=29.0))
+        self.assertTrue(s.record(self.result(None,identity='unknown'),now=30.0))
+
+    def test_reported_counts_and_tiers(self):
+        s=ProgressSummary()
+        s.record(self.result(1),now=0.0)
+        s.record(self.result(2,identity='unknown',tier='good'),now=0.0)
+        line=s.line()
+        self.assertIn('2 packets, 1 verified',line)
+        self.assertIn('best 1',line)
+        self.assertIn('good 1',line)
 
 
 class TimingTests(unittest.TestCase):

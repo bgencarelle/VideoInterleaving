@@ -55,8 +55,9 @@ def main(argv=None):
                    help='Per-frame JSON records, including decode and display timing')
     p.add_argument('--silent', action='store_true',
                    help='No output at all, not even the periodic summary')
-    p.add_argument('--summary-seconds', type=float, default=5.0,
-                   help='Seconds between summary lines (default 5)')
+    p.add_argument('--summary-seconds', type=float, default=30.0,
+                   help='Fallback digest interval when no source index is decoding '
+                        '(default 30; a verified link summarises once per lap instead)')
     p.add_argument('--headless', action='store_true',
                    help='JSON reporting without a display; implies --verbose')
     p.add_argument('--fast', action='store_true', help='Decode WAV without real-time pacing')
@@ -98,9 +99,9 @@ def main(argv=None):
         """Periodic one-liner so a quiet run is still legible."""
         if verbose or args.silent:
             return
-        summary.record(result)
-        if summary.due_now(time.monotonic()):
+        if summary.record(result):
             with log_lock:print(summary.line(), file=sys.stderr, flush=True)
+            summary.reset()
 
     def schedule(result, now_ns):
         """Shared-time deadline if this looks live, otherwise present at once."""

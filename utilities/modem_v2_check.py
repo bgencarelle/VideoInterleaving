@@ -276,9 +276,9 @@ def do_live_receive(args):
                     if verbose:
                         print(json.dumps(record(r)),flush=True)
                     if not verbose and not args.silent:
-                        summary.record(r)
-                        if summary.due_now(time.monotonic()):
+                        if summary.record(r):
                             print(summary.line(), file=sys.stderr, flush=True)
+                            summary.reset()
                     if args.save_frames and r.values is not None:
                         name = (f'{r.absolute:06d}' if r.absolute is not None
                                 else f'x{newest["seen"]:06d}')
@@ -379,7 +379,8 @@ def main(argv=None):
                     help='Per-packet JSON. Off by default: a live link is 14 a second.')
     lr.add_argument('--silent', action='store_true',
                     help='No output at all, not even the periodic summary')
-    lr.add_argument('--summary-seconds', type=float, default=5.0)
+    lr.add_argument('--summary-seconds', type=float, default=30.0,
+                    help='Fallback digest interval when no source index is decoding')
     lr.add_argument('--width', type=int, default=480)
     lr.add_argument('--height', type=int, default=576)
     lr.add_argument('--list-devices', action='store_true')
