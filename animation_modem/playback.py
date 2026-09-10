@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import threading
 import numpy as np
 from .audio_common import sounddevice, route
-from .transport import RATE, FRAME, PACKET
+from .transport import RATE, FRAME, PACKET   # v1 defaults; v2 layouts pass their own
 
 
 def latency(value):
@@ -33,7 +33,14 @@ class Slot:
 
 
 class PacketOutput:
-    def __init__(self, device=None, channels=(0, 1), requested_latency='low'):
+    def __init__(self, device=None, channels=(0, 1), requested_latency='low',
+                 frame=FRAME, packet=PACKET):
+        # v2 layouts have their own geometry -- wide is 3344 samples, not v1's
+        # 3200 -- so the packet size cannot be a module constant any more.
+        self.frame = int(frame)
+        self.packet = int(packet)
+        if not 0 < self.packet <= self.frame:
+            raise ValueError('Packet must be positive and fit inside the frame')
         self.channels = channels
         self.pending = None
         self.pending_start = None
@@ -92,12 +99,12 @@ class PacketOutput:
         earliest = now + self.stream.latency + 256/RATE + prepare_ms/1000
         with self.lock:
             start = max(self.next_start or earliest, earliest)
-        target = wall_ns + round((start-now + PACKET/RATE + receive_margin_ms/1000)*1e9)
+        target = wall_ns + round((start-now + self.packet/RATE + receive_margin_ms/1000)*1e9)
         # Select the image at the exact timestamp the header can represent.
         return Slot(start, (target//1_000_000)*1_000_000)
 
     def submit(self, audio, slot=None):
-        if np.shape(audio) != (FRAME, 2) or not np.isfinite(audio).all():
+        if np.shape(audio) != (self.frame, 2) or not np.isfinite(audio).all():
             raise ValueError('Expected one finite stereo modem frame')
         prepared = route(audio, self.channels)
         self.check()
@@ -109,7 +116,7 @@ class PacketOutput:
                 raise RuntimeError('Wait for ready() before submitting another packet')
             self.pending = prepared
             self.pending_start = slot.start_time if slot else None
-            if slot:self.next_start = slot.start_time + FRAME/RATE
+            if slot:self.next_start = slot.start_time + self.frame/RATE
         if not self.started:
             self.stream.start()
             self.started = True

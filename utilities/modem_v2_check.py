@@ -29,6 +29,8 @@ from animation_modem import transport2 as V2                   # noqa: E402
 from animation_modem import impairments as IMP                 # noqa: E402
 from animation_modem.audio_common import (pcm, pair, device,   # noqa: E402
                                           wav_blocks)
+from animation_modem.imaging import (fit_shapes, image_values,  # noqa: E402
+                                     plane_shapes, values_image)
 
 
 def frames_from(args, profile='color'):
@@ -63,40 +65,11 @@ def psnr(a, b):
 
 
 def coder_for(profile, allocation, layout=None):
-    shapes = V1.plane_shapes(profile)
-    if layout and sum(np.prod(s) for s in shapes) > layout.capacity:
-        h,w=shapes[0]
-        # Keep the profile's aspect ratio and chroma layout within its value
-        # budget. tape-fast must not try to transmit 2880 values in 1260 slots.
-        choices=[]
-        for width in range(2,w+1,2):
-            for height in range(2,h+1,2):
-                trial=[(height,width)]+([(height//2,width//2)]*2 if len(shapes)==3 else [])
-                count=sum(np.prod(s) for s in trial)
-                if count<=layout.capacity:
-                    choices.append((count/(1+abs(width/height-w/h)),trial))
-        shapes=max(choices,key=lambda p:p[0])[1]
+    shapes = plane_shapes(profile)
+    if layout:
+        shapes = fit_shapes(shapes, layout.capacity)
     table = np.load(allocation) if allocation else None
     return V2.SourceCoder(shapes, table), shapes
-
-
-def image_values(image,coder):
-    h,w=coder.shapes[0]
-    image=ImageOps.pad(image.convert('RGB'),(w,h),method=Image.Resampling.LANCZOS)
-    planes=image.convert('YCbCr').split()
-    return np.concatenate([np.asarray(plane.resize((shape[1],shape[0]),Image.Resampling.BOX)).ravel()
-                           for plane,shape in zip(planes,coder.shapes)]).astype(float)/127.5-1
-
-
-def values_image(values,coder):
-    planes=[];offset=0
-    for h,w in coder.shapes:
-        pixels=np.uint8(np.clip(np.rint((values[offset:offset+h*w]+1)*127.5),0,255))
-        planes.append(Image.fromarray(pixels.reshape(h,w)))
-        offset+=h*w
-    if len(planes)==1:return planes[0].convert('RGB')
-    return Image.merge('YCbCr',(planes[0],*[p.resize(planes[0].size,Image.Resampling.BILINEAR)
-                                          for p in planes[1:]])).convert('RGB')
 
 
 def receive_for(args,layout,coder):
@@ -121,7 +94,7 @@ def do_write(args):
         sink.setparams((2, 2, V2.RATE, 0, 'NONE', 'not compressed'))
         for n, im in enumerate(frames):
             values = image_values(V1.prepare_image(im, n+1, 1, len(frames), args.numbered,
-                                                   profile),coder)
+                                                   profile), coder.shapes)
             audio = V2.encode(values, layout, coder, n+1, (n % len(frames))+1,
                               len(frames), stamp_ms=n*int(1000/layout.fps))
             sink.writeframesraw(pcm(audio*args.gain))
@@ -149,7 +122,7 @@ def do_read(args):
         print(json.dumps(record(r)),flush=True)
         if args.save_frames and r.values is not None:
             name = f'{r.absolute:06d}' if r.absolute is not None else f'x{seen:06d}'
-            values_image(r.values,coder).save(Path(args.save_frames)/f'frame_{name}.png')
+            values_image(r.values, coder.shapes).save(Path(args.save_frames)/f'frame_{name}.png')
     if rates:
         speed = 1/(1+float(np.median(rates)))
         print(f'\n{seen} packets. tiers {tiers}. '
@@ -186,7 +159,7 @@ def do_bench(args):
             if good:
                 v1q.append(psnr(good[0].image, ref))
             # v2
-            audio2 = V2.encode(image_values(ready,coder), layout, coder, n+1, 1, len(frames))
+            audio2 = V2.encode(image_values(ready, coder.shapes), layout, coder, n+1, 1, len(frames))
             emu2 = IMP.Emulator(IMP.Settings(**settings))
             rx2 = V2.Receiver(layout, coder)
             got2 = []
@@ -196,7 +169,7 @@ def do_bench(args):
             got2 += rx2.flush()
             good2 = [g for g in got2 if g.values is not None]
             if good2:
-                v2q.append(psnr(values_image(good2[0].values,coder).resize(ready.size), ready))
+                v2q.append(psnr(values_image(good2[0].values, coder.shapes).resize(ready.size), ready))
                 tier[good2[0].tier] = tier.get(good2[0].tier, 0)+1
                 hdr += good2[0].identity == 'verified_header'
         print(f'  {name:<16}{np.mean(v1q) if v1q else float("nan"):>9.2f}'
@@ -229,7 +202,7 @@ def do_live_send(args):
     coder, _ = coder_for(profile, args.allocation,layout)
     print(layout.describe())
     packets = [V2.encode(image_values(
-                   V1.prepare_image(im, n+1, 1, len(frames), args.numbered, profile), coder),
+                   V1.prepare_image(im, n+1, 1, len(frames), args.numbered, profile), coder.shapes),
                layout, coder, n+1, (n % len(frames))+1, len(frames),
                stamp_ms=n*int(1000/layout.fps))*args.gain
                for n, im in enumerate(frames)]
@@ -306,7 +279,7 @@ def do_live_receive(args):
                     if args.save_frames and r.values is not None:
                         name = (f'{r.absolute:06d}' if r.absolute is not None
                                 else f'x{newest["seen"]:06d}')
-                        values_image(r.values,coder).save(
+                        values_image(r.values, coder.shapes).save(
                             Path(args.save_frames)/f'frame_{name}.png')
 
     if args.headless:
@@ -341,7 +314,7 @@ def do_live_receive(args):
         r = newest['result']
         if r is not None and r is not shown['at']:
             shown['at'] = r
-            im = values_image(r.values,coder)
+            im = values_image(r.values, coder.shapes)
             canvas = Image.new('RGB', size, 'black')
             scaled = ImageOps.contain(im, size, Image.Resampling.NEAREST)
             canvas.paste(scaled, ((size[0]-scaled.width)//2, (size[1]-scaled.height)//2))
