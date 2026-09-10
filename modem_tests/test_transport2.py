@@ -137,16 +137,29 @@ class V2Tests(unittest.TestCase):
                 self.assertEqual(result.absolute,1)
                 self.assertEqual(len(result.values),coder.count)
 
-    def test_cli_tape_fast_write_read_streaming(self):
+    def test_cli_fixed_write_read_streaming(self):
         with tempfile.TemporaryDirectory() as d:
             path=Path(d)/'test.wav'
             output=io.StringIO()
             with contextlib.redirect_stdout(output),contextlib.redirect_stderr(io.StringIO()):
-                main(['write','--preset','tape-fast','--frames','6','--out',str(path)])
+                main(['write','--frames','6','--out',str(path)])
                 output.seek(0);output.truncate(0)
-                main(['read','--preset','tape-fast','--wav',str(path)])
+                main(['read','--wav',str(path)])
             rows=[json.loads(line) for line in output.getvalue().splitlines()]
             self.assertEqual([r['frame'] for r in rows],list(range(1,7)))
+
+    def test_normal_cli_rejects_alternate_formats(self):
+        for command, option in (
+            ('write', ['--preset', 'tape-fast']),
+            ('live-send', ['--allocation', 'missing.npy']),
+            ('live-receive', ['--profile', 'mono']),
+            ('write', ['--gain', '.5']),
+        ):
+            with self.subTest(command=command, option=option):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as exc:
+                        main([command, *option])
+                self.assertEqual(exc.exception.code, 2)
 
     def test_nonfinite_input_and_reset(self):
         rx=v2.Receiver(self.layout,self.coder)
