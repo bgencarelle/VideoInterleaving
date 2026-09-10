@@ -43,3 +43,55 @@ class PresentationBuffer:
             self.dropped+=n-1
             del self.items[:n]
             return value
+
+
+class ProgressSummary:
+    """One line every `every` seconds instead of one per packet.
+
+    A live receiver runs at 14 fps for hours; per-packet JSON is thousands of
+    lines nobody reads and a real cost on the thread that must keep reading the
+    input stream. Silence is worse though -- there is no way to tell a working
+    link from a dead one -- so the default is a periodic digest.
+    """
+
+    def __init__(self, every=5.0):
+        self.every = every
+        self.reset()
+
+    def reset(self):
+        self.packets = 0
+        self.verified = 0
+        self.tiers = {}
+        self.speeds = []
+        self.coverage = []
+        self.due = None
+
+    def record(self, result):
+        self.packets += 1
+        self.verified += getattr(result, 'identity', None) == 'verified_header'
+        tier = getattr(result, 'tier', None)
+        if tier:
+            self.tiers[tier] = self.tiers.get(tier, 0) + 1
+        rate = getattr(result, 'rate_error', None)
+        if rate is not None:
+            self.speeds.append(1/(1 + rate))
+        if getattr(result, 'coverage', None) is not None:
+            self.coverage.append(result.coverage)
+
+    def due_now(self, now):
+        if self.due is None:
+            self.due = now + self.every
+            return False
+        if now < self.due:
+            return False
+        self.due = now + self.every
+        return True
+
+    def line(self):
+        if not self.packets:
+            return 'no packets'
+        tiers = ' '.join(f'{k} {v}' for k, v in sorted(self.tiers.items()))
+        speed = statistics.median(self.speeds) if self.speeds else float('nan')
+        cover = statistics.median(self.coverage) if self.coverage else float('nan')
+        return (f'{self.packets} packets, {self.verified} verified, {tiers}, '
+                f'speed {speed:.4f}x, coverage {cover:.2f}')

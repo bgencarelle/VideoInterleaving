@@ -18,6 +18,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
+import time
 import wave
 
 import numpy as np
@@ -28,6 +29,7 @@ from animation_modem import transport2 as V2                   # noqa: E402
 from animation_modem import impairments as IMP                 # noqa: E402
 from animation_modem.audio_common import (pcm, pair, device,   # noqa: E402
                                           wav_blocks)
+from animation_modem.timing import ProgressSummary            # noqa: E402
 from animation_modem.imaging import (burn_counters, fit_shapes,  # noqa: E402
                                      image_values, plane_shapes, values_image)
 
@@ -252,6 +254,8 @@ def do_live_receive(args):
     if args.save_frames:
         Path(args.save_frames).mkdir(parents=True, exist_ok=True)
     newest = {'result': None, 'seen': 0, 'tiers': {}}
+    verbose = (args.verbose or args.headless) and not args.silent
+    summary = ProgressSummary(args.summary_seconds)
     stop = threading.Event()
 
     def pump():
@@ -269,8 +273,12 @@ def do_live_receive(args):
                     newest['tiers'][r.tier] = newest['tiers'].get(r.tier, 0)+1
                     if r.values is not None:
                         newest['result'] = r          # latest wins, nothing queued
-                    if not args.quiet:
+                    if verbose:
                         print(json.dumps(record(r)),flush=True)
+                    if not verbose and not args.silent:
+                        summary.record(r)
+                        if summary.due_now(time.monotonic()):
+                            print(summary.line(), file=sys.stderr, flush=True)
                     if args.save_frames and r.values is not None:
                         name = (f'{r.absolute:06d}' if r.absolute is not None
                                 else f'x{newest["seen"]:06d}')
@@ -365,8 +373,13 @@ def main(argv=None):
     lr = sub.add_parser('live-receive')
     lr.add_argument('--device',type=device); lr.add_argument('--channels',type=pair,default=(0,1))
     lr.add_argument('--save-frames', type=Path)
-    lr.add_argument('--headless', action='store_true', help='JSON only, no window')
-    lr.add_argument('--quiet', action='store_true', help='Window only, no per-packet JSON')
+    lr.add_argument('--headless', action='store_true',
+                    help='JSON only, no window; implies --verbose')
+    lr.add_argument('-v','--verbose', action='store_true',
+                    help='Per-packet JSON. Off by default: a live link is 14 a second.')
+    lr.add_argument('--silent', action='store_true',
+                    help='No output at all, not even the periodic summary')
+    lr.add_argument('--summary-seconds', type=float, default=5.0)
     lr.add_argument('--width', type=int, default=480)
     lr.add_argument('--height', type=int, default=576)
     lr.add_argument('--list-devices', action='store_true')

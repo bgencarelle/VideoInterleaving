@@ -28,7 +28,7 @@ import numpy as np
 from .audio_common import device, pair, sounddevice, wav_blocks
 from .imaging import DEFAULT_PROFILE, fit_shapes, plane_shapes, values_image
 from .transport2 import PRESETS, RATE, Receiver, SourceCoder
-from .timing import expand_timestamp, TimingStats, PresentationBuffer
+from .timing import expand_timestamp, ProgressSummary, TimingStats, PresentationBuffer
 from .impairments import Emulator, add_arguments, settings_from_args
 
 # A stamp further from now than this cannot be a live shared-time deadline, so
@@ -51,11 +51,14 @@ def main(argv=None):
     p.add_argument('--channels', type=pair, default=(0, 1), help='Input pair, 1-based (default 1,2)')
     p.add_argument('--wav', type=Path, help='Receive a baked/recorded 48 kHz PCM16 WAV')
     p.add_argument('--list-devices', action='store_true')
-    p.add_argument('--quiet', action=argparse.BooleanOptionalAction, default=False,
-                   help='Suppress per-frame JSON, including the decode/display timing records')
-    p.add_argument('-v', '--verbose', dest='quiet', action='store_false',
+    p.add_argument('-v', '--verbose', action='store_true',
                    help='Per-frame JSON records, including decode and display timing')
-    p.add_argument('--headless', action='store_true', help='JSON reporting without a display')
+    p.add_argument('--silent', action='store_true',
+                   help='No output at all, not even the periodic summary')
+    p.add_argument('--summary-seconds', type=float, default=5.0,
+                   help='Seconds between summary lines (default 5)')
+    p.add_argument('--headless', action='store_true',
+                   help='JSON reporting without a display; implies --verbose')
     p.add_argument('--fast', action='store_true', help='Decode WAV without real-time pacing')
     p.add_argument('--save-frames', type=Path, help='Optional PNG directory; saving adds processing cost')
     add_arguments(p)
@@ -64,6 +67,11 @@ def main(argv=None):
         print(sounddevice().query_devices()); return
     if args.fast and not args.wav:
         p.error('--fast requires --wav')
+    # A live receiver runs for hours at 14 fps, so per-frame JSON is off unless
+    # asked for. --headless exists to emit those records, so it turns them on.
+    verbose = args.verbose or args.headless
+    if args.silent:
+        verbose = False
     try:
         settings = settings_from_args(args)
         layout, coder = build()
@@ -80,9 +88,19 @@ def main(argv=None):
     errors = []
     log_lock = threading.Lock()
 
+    summary = ProgressSummary(args.summary_seconds)
+
     def log(record):
-        if not args.quiet:
+        if verbose:
             with log_lock:print(json.dumps(record),flush=True)
+
+    def digest(result):
+        """Periodic one-liner so a quiet run is still legible."""
+        if verbose or args.silent:
+            return
+        summary.record(result)
+        if summary.due_now(time.monotonic()):
+            with log_lock:print(summary.line(), file=sys.stderr, flush=True)
 
     def schedule(result, now_ns):
         """Shared-time deadline if this looks live, otherwise present at once."""
@@ -121,6 +139,7 @@ def main(argv=None):
             record.update(result.extra)
             if timing:record['decode_error_window']=timing
             log(record)
+            digest(result)
             if result.values is not None and args.save_frames:
                 name = f'{result.absolute:010d}' if result.absolute is not None else 'unknown'
                 values_image(result.values, coder.shapes).save(
