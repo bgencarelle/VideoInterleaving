@@ -2,7 +2,7 @@
 from dataclasses import asdict, dataclass
 import numpy as np
 from scipy.signal import butter, sosfilt
-from .transport import RATE
+from .transport2 import RATE
 
 
 @dataclass

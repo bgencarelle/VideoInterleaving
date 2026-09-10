@@ -1,7 +1,7 @@
 import argparse
 import wave
 import numpy as np
-from .transport import RATE, ALL, N
+from .transport2 import PRESETS, RATE, N
 
 
 def device(value):
@@ -63,7 +63,8 @@ class InputFilter:
         high, low = band
         if not (0 < high < low < RATE/2):
             raise ValueError(f'Input band must satisfy 0 < high < low < {RATE/2}')
-        lowest, highest = ALL[0]*RATE/N, ALL[-1]*RATE/N
+        carriers = PRESETS['wide'].carriers
+        lowest, highest = carriers[0]*RATE/N, carriers[-1]*RATE/N
         if high > lowest or low < highest:
             raise ValueError(f'Input band must span the carriers '
                              f'({lowest:.0f}..{highest:.0f} Hz)')

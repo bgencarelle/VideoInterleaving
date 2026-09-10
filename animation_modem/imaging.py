@@ -10,7 +10,7 @@ values. `plane_shapes` still accepts the other profiles for offline
 comparisons, and `fit_shapes` trims a profile into a smaller layout's budget.
 """
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageOps
 
 # Luma size and chroma size per profile. Every profile is exactly 2880 values.
 PROFILES = {
@@ -87,3 +87,33 @@ def values_image(values, shapes):
     return Image.merge('YCbCr', (planes[0], *[
         plane.resize(planes[0].size, Image.Resampling.BILINEAR)
         for plane in planes[1:]])).convert('RGB')
+
+
+# 3x5 digits, small enough to read on a 40x48 transmitted image.
+GLYPHS = dict(zip('0123456789AF/', [
+    '111101101101111', '010110010010111', '111001111100111',
+    '111001111001111', '101101111001001', '111100111001111',
+    '111100111101111', '111001001001001', '111101111101111',
+    '111101111001111', '010101111101101', '111100110100100',
+    '001001010100100']))
+
+
+def _text(im, text, y):
+    strip = Image.new('RGB', (4*len(text), 7), 'black')
+    draw = ImageDraw.Draw(strip)
+    for i, character in enumerate(text):
+        for p, bit in enumerate(GLYPHS[character]):
+            if bit == '1':
+                draw.point((i*4 + p % 3, 1 + p//3), fill='white')
+    if strip.width > im.width:
+        strip = strip.resize((im.width, 7), Image.Resampling.NEAREST)
+    im.paste(strip, (0, y))
+
+
+def burn_counters(image, absolute, index, count):
+    """Debug overlay in transmitted pixels. Kept out of the transport so the
+    wire format carries no notion of it."""
+    out = image.convert('RGB').copy()
+    _text(out, 'A' + str(absolute).zfill(6), 0)
+    _text(out, 'F' + str(index) + '/' + str(count), 7)
+    return out

@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import numpy as np
 from PIL import Image
-from animation_modem.transport import PROFILES
+from animation_modem.imaging import PROFILES
 
 
 class ModemLibrary:

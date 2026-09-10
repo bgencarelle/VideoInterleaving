@@ -15,7 +15,7 @@ if str(ROOT_DIR) not in sys.path:
 from utilities.bake_assets import write_slab
 from utilities.convert_to_xy import load_rgba, _image_files
 from make_file_lists import check_folder_prefix, natural_sort_key
-from animation_modem.transport import PROFILES
+from animation_modem.imaging import PROFILES
 
 
 def bake_tree(source, output, profile='color', jpeg_layout='sbs'):

@@ -24,13 +24,12 @@ import numpy as np
 from PIL import Image, ImageOps
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from animation_modem import transport as V1                    # noqa: E402
 from animation_modem import transport2 as V2                   # noqa: E402
 from animation_modem import impairments as IMP                 # noqa: E402
 from animation_modem.audio_common import (pcm, pair, device,   # noqa: E402
                                           wav_blocks)
-from animation_modem.imaging import (fit_shapes, image_values,  # noqa: E402
-                                     plane_shapes, values_image)
+from animation_modem.imaging import (burn_counters, fit_shapes,  # noqa: E402
+                                     image_values, plane_shapes, values_image)
 
 
 def frames_from(args, profile='color'):
@@ -57,6 +56,11 @@ def frames_from(args, profile='color'):
             im[:, :, c] = np.where(mask, tex*k, 4)
         out.append(Image.fromarray(np.uint8(np.clip(im, 0, 255))))
     return out, profile
+
+
+def _prepared(image, absolute, count, numbered=False):
+    """What actually goes on the wire, counters included when asked."""
+    return burn_counters(image, absolute, absolute, count) if numbered else image
 
 
 def psnr(a, b):
@@ -93,8 +97,7 @@ def do_write(args):
     with wave.open(str(path), 'wb') as sink:
         sink.setparams((2, 2, V2.RATE, 0, 'NONE', 'not compressed'))
         for n, im in enumerate(frames):
-            values = image_values(V1.prepare_image(im, n+1, 1, len(frames), args.numbered,
-                                                   profile), coder.shapes)
+            values = image_values(_prepared(im, n+1, len(frames), args.numbered), coder.shapes)
             audio = V2.encode(values, layout, coder, n+1, (n % len(frames))+1,
                               len(frames), stamp_ms=n*int(1000/layout.fps))
             sink.writeframesraw(pcm(audio*args.gain))
@@ -133,59 +136,41 @@ def do_read(args):
 
 
 def do_bench(args):
+    """Compare a preset across simulated channels. v2 only -- there is no v1
+    encode or decode left in the runtime to compare against."""
     frames, profile = frames_from(args)
     print('\n'.join('  '+l.describe() for l in V2.PRESETS.values()) + '\n')
     layout = V2.PRESETS[args.preset]
-    coder, _ = coder_for(profile, args.allocation,layout)
+    coder, _ = coder_for(profile, args.allocation, layout)
     channels = [('clean', {}),
                 ('cassette-ish', dict(lowpass_hz=10000, noise_dbfs=-45)),
                 ('worn deck', dict(lowpass_hz=8000, noise_dbfs=-40, crosstalk=.07))]
-    print(f'  {"channel":<16}{"v1 PSNR":>9}{"v2 PSNR":>9}{"v2 hdr":>8}{"v2 tier":>10}')
+    print(f'  {"channel":<16}{"PSNR":>8}{"headers":>9}{"tier":>10}{"coverage":>10}')
     for name, settings in channels:
-        v1q, v2q, hdr, tier = [], [], 0, {}
+        quality, hdr, tier, coverage = [], 0, {}, []
         for n, im in enumerate(frames[:args.frames]):
-            ready = V1.prepare_image(im, n+1, 1, len(frames), False, profile)
-            values = V1.image_values(ready, profile)
-            # v1
-            audio, ref, _ = V1.encode(im, n+1, 1, len(frames), False, profile)
-            emu = IMP.Emulator(IMP.Settings(**settings))
-            rx = V1.Receiver(track_rate=False)
+            ready = _prepared(im, n+1, len(frames), False)
+            audio = V2.encode(image_values(ready, coder.shapes), layout, coder,
+                              n+1, 1, len(frames))
+            emulator = IMP.Emulator(IMP.Settings(**settings))
+            receiver = V2.Receiver(layout, coder)
             got = []
-            sig = np.concatenate([np.zeros((300, 2), np.float32), audio,
-                                  np.zeros((V2.RATE//8, 2), np.float32)])
-            for i in range(0, len(sig), 256):
-                got += rx.feed(emu.process(sig[i:i+256]))
-            good = [g for g in got if g.image is not None]
+            signal = np.concatenate([np.zeros((300, 2), np.float32), audio])
+            for i in range(0, len(signal), 256):
+                got += receiver.feed(emulator.process(signal[i:i+256]))
+            got += receiver.flush()
+            good = [g for g in got if g.values is not None]
             if good:
-                v1q.append(psnr(good[0].image, ref))
-            # v2
-            audio2 = V2.encode(image_values(ready, coder.shapes), layout, coder, n+1, 1, len(frames))
-            emu2 = IMP.Emulator(IMP.Settings(**settings))
-            rx2 = V2.Receiver(layout, coder)
-            got2 = []
-            sig2 = np.concatenate([np.zeros((300, 2), np.float32), audio2])
-            for i in range(0, len(sig2), 256):
-                got2 += rx2.feed(emu2.process(sig2[i:i+256]))
-            got2 += rx2.flush()
-            good2 = [g for g in got2 if g.values is not None]
-            if good2:
-                v2q.append(psnr(values_image(good2[0].values, coder.shapes).resize(ready.size), ready))
-                tier[good2[0].tier] = tier.get(good2[0].tier, 0)+1
-                hdr += good2[0].identity == 'verified_header'
-        print(f'  {name:<16}{np.mean(v1q) if v1q else float("nan"):>9.2f}'
-              f'{np.mean(v2q) if v2q else float("nan"):>9.2f}'
-              f'{hdr:>8}{max(tier, key=tier.get) if tier else "-":>10}')
-    print('\n  Small presets include a resolution tradeoff. Compare clean and impaired rows;\n'
-          '  an allocation table must be made for the same preset and used on both ends.')
-
-
-def _sounddevice():
-    try:
-        import sounddevice as sd
-        return sd
-    except (ImportError, OSError) as exc:
-        raise SystemExit('Live audio needs sounddevice and PortAudio: '
-                         'pip install -r requirements-modem.txt') from exc
+                quality.append(psnr(values_image(good[0].values, coder.shapes)
+                                    .resize(ready.size), ready))
+                tier[good[0].tier] = tier.get(good[0].tier, 0)+1
+                coverage.append(good[0].coverage or 0)
+                hdr += good[0].identity == 'verified_header'
+        print(f'  {name:<16}{np.mean(quality) if quality else float("nan"):>8.2f}'
+              f'{hdr:>9}{max(tier, key=tier.get) if tier else "-":>10}'
+              f'{np.mean(coverage) if coverage else float("nan"):>10.3f}')
+    print('\n  Small presets trade resolution for band. An allocation table must be built\n'
+          '  for the same preset and used at both ends.')
 
 
 def do_live_send(args):
@@ -202,7 +187,7 @@ def do_live_send(args):
     coder, _ = coder_for(profile, args.allocation,layout)
     print(layout.describe())
     packets = [V2.encode(image_values(
-                   V1.prepare_image(im, n+1, 1, len(frames), args.numbered, profile), coder.shapes),
+                   _prepared(im, n+1, len(frames), args.numbered), coder.shapes),
                layout, coder, n+1, (n % len(frames))+1, len(frames),
                stamp_ms=n*int(1000/layout.fps))*args.gain
                for n, im in enumerate(frames)]

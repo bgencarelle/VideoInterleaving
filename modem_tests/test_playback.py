@@ -7,7 +7,16 @@ import unittest
 from unittest.mock import patch
 import numpy as np
 from animation_modem.playback import PacketOutput
-from animation_modem.transport import FRAME, Receiver, encode
+from animation_modem.transport2 import PRESETS, Receiver, SourceCoder, encode
+from animation_modem.imaging import (DEFAULT_PROFILE, fit_shapes, image_values,
+                                     plane_shapes)
+
+LAYOUT = PRESETS['wide']
+FRAME = LAYOUT.frame
+
+
+def _coder():
+    return SourceCoder(fit_shapes(plane_shapes(DEFAULT_PROFILE), LAYOUT.capacity))
 from PIL import Image
 
 
@@ -76,18 +85,21 @@ class PlaybackTests(unittest.TestCase):
         self.assertEqual(self.output.completed,1)
 
     def test_waveforms_decode_across_non_frame_callback_sizes(self):
-        blocks=[encode(Image.new('RGB',(40,48),(n*40,90,140)),n,n,3)[0] for n in range(1,4)]
+        coder=_coder()
+        blocks=[encode(image_values(Image.new('RGB',(40,48),(n*40,90,140)),coder),
+                       LAYOUT,coder,n,n,3) for n in range(1,4)]
         captures=[]
         for block in blocks:
             self.assertTrue(self.output.ready())
             self.output.submit(block)
             # Drain exactly a frame via callback boundaries that split symbols.
-            for count in (257,31,2048,864):captures.append(self.consume(count))
+           # Split symbols on odd boundaries, but drain exactly one frame.
+            for count in (257,31,2048,FRAME-257-31-2048):captures.append(self.consume(count))
         audio=np.concatenate(captures)
         np.testing.assert_array_equal(audio,np.concatenate(blocks).astype(np.float32))
-        rx=Receiver();results=[]
+        rx=Receiver(LAYOUT,_coder());results=[]
         for start in range(0,len(audio),173):results.extend(rx.feed(audio[start:start+173]))
-        self.assertEqual([r.frame for r in results if r.image is not None],[1,2,3])
+        self.assertEqual([r.absolute for r in results if r.values is not None],[1,2,3])
 
     def test_finish_waits_for_callback_drain(self):
         class DrainStream(Stream):
@@ -118,7 +130,9 @@ class PlaybackTests(unittest.TestCase):
         wall=1_700_000_000_000_000_000
         with patch('animation_modem.playback.time.time_ns',return_value=wall):
             slot=self.output.reserve(prepare_ms=10,receive_margin_ms=15)
-        packet=encode(Image.new('RGB',(40,48)),1,1,1,target_time_ns=slot.target_time_ns)[0]
+        coder=_coder()
+        packet=encode(image_values(Image.new('RGB',(40,48)),coder),LAYOUT,coder,1,1,1,
+                      stamp_ms=(slot.target_time_ns//1_000_000)&0xffffffff)
         self.assertTrue(self.output.submit(packet,slot))
         chunks=[];position=0;dac=10.005
         for count in (71,257,512,4096):
@@ -132,7 +146,8 @@ class PlaybackTests(unittest.TestCase):
         np.testing.assert_array_equal(actual[gap:gap+FRAME],packet)
         self.assertEqual(self.output.deadline_misses,0)
         self.assertEqual(self.output.starvations,0)
-        expected=wall+round((slot.start_time-10+0.063+0.015)*1e9)
+        # Packet duration is the layout's, not a constant: wide is 69 ms.
+        expected=wall+round((slot.start_time-10+LAYOUT.packet/48000+0.015)*1e9)
         self.assertLess(abs(slot.target_time_ns-expected),1_000_000)
 
     def test_late_encode_is_rejected_and_retargeted(self):

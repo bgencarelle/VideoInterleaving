@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-"""Receive stereo audio; display each independently reconstructed image."""
+"""Receive stereo audio; display each independently reconstructed image.
+
+Runs the v2 transport. The receiver is not configured against a transmitter:
+its job is to make do with whatever arrives. The wire format is fixed, and
+acquisition, playback rate and channel conditioning are all derived from the
+incoming audio by transport2.Receiver. There is deliberately no preset,
+profile, allocation, input-filter or speed switch here -- anything that had to
+be kept matching at both ends would be a way to get it wrong.
+
+Presentation follows the source. When a packet carries a plausible shared-time
+stamp the frame is held until that instant, which is what keeps modem output
+agreeing with local, scope and ascii on a chrony-disciplined install. When it
+does not -- anything played back off tape, where a recorded timestamp says
+nothing about the current wall clock -- the newest decoded frame is shown as
+soon as it lands. Nothing is queued in that mode and nothing waits.
+"""
 import argparse
 from dataclasses import asdict
 import json
@@ -8,10 +23,26 @@ import sys
 import threading
 import time
 
-from .audio_common import BAND, InputFilter, band, device, pair, sounddevice, wav_blocks
-from .transport import Receiver, RATE, FRAME
+import numpy as np
+
+from .audio_common import device, pair, sounddevice, wav_blocks
+from .imaging import DEFAULT_PROFILE, fit_shapes, plane_shapes, values_image
+from .transport2 import PRESETS, RATE, Receiver, SourceCoder
 from .timing import expand_timestamp, TimingStats, PresentationBuffer
 from .impairments import Emulator, add_arguments, settings_from_args
+
+# A stamp further from now than this cannot be a live shared-time deadline, so
+# it is treated as a recording and presented immediately. Decided from the
+# packet, not from a flag.
+LIVE_STAMP_WINDOW_NS = 30_000_000_000
+FIXED_PRESET = 'wide'
+FIXED_PROFILE = DEFAULT_PROFILE
+
+
+def build():
+    """The fixed receive format. Not negotiated and not configurable."""
+    layout = PRESETS[FIXED_PRESET]
+    return layout, SourceCoder(fit_shapes(plane_shapes(FIXED_PROFILE), layout.capacity))
 
 
 def main(argv=None):
@@ -27,10 +58,6 @@ def main(argv=None):
     p.add_argument('--headless', action='store_true', help='JSON reporting without a display')
     p.add_argument('--fast', action='store_true', help='Decode WAV without real-time pacing')
     p.add_argument('--save-frames', type=Path, help='Optional PNG directory; saving adds processing cost')
-    p.add_argument('--input-filter', action=argparse.BooleanOptionalAction, default=True,
-                   help='Band-pass received audio to the carriers before acquisition (default on)')
-    p.add_argument('--input-band', type=band, default=BAND,
-                   help='HIGHPASS,LOWPASS in Hz for --input-filter (default 600,22000)')
     add_arguments(p)
     args = p.parse_args(argv)
     if args.list_devices:
@@ -39,19 +66,17 @@ def main(argv=None):
         p.error('--fast requires --wav')
     try:
         settings = settings_from_args(args)
-        conditioner = InputFilter(args.input_band) if args.input_filter else None
-    except ValueError as exc:
+        layout, coder = build()
+    except (ValueError, OSError) as exc:
         p.error(str(exc))
-    print(json.dumps({'input_filter': list(args.input_band) if conditioner else None}),
-          file=sys.stderr)
-    print(json.dumps({'audio_emulation': asdict(settings), 'preset': args.emulate}), file=sys.stderr)
+    print(json.dumps({'audio_emulation': asdict(settings), 'preset': args.emulate,
+                      'layout': layout.describe()}), file=sys.stderr)
     if args.save_frames:
         args.save_frames.mkdir(parents=True, exist_ok=True)
     updates = PresentationBuffer()
     decode_stats = TimingStats()
     display_stats = TimingStats()
     stop = threading.Event()
-    done = threading.Event()
     errors = []
     log_lock = threading.Lock()
 
@@ -59,53 +84,57 @@ def main(argv=None):
         if not args.quiet:
             with log_lock:print(json.dumps(record),flush=True)
 
-    def publish(value):
-        if args.headless:return
-        target=getattr(value,'target_time_ns',None)
-        updates.put(value,target if target is not None else time.time_ns())
+    def schedule(result, now_ns):
+        """Shared-time deadline if this looks live, otherwise present at once."""
+        if args.wav or not result.stamp_ms:
+            return None
+        target = expand_timestamp(result.stamp_ms, now_ns)
+        if abs(target - now_ns) > LIVE_STAMP_WINDOW_NS:
+            return None            # a recording, not a deadline
+        return target
 
     def receive():
-        rx = Receiver()
+        receiver = Receiver(layout, coder)
         emulator = Emulator(settings)
         def process(audio):
-            audio = emulator.process(audio)
-            if conditioner is not None:
-                audio = conditioner.process(audio)
-            for result in rx.feed(audio):
-                now_ns=time.time_ns()
-                timing=None
-                if result.target_time_ms32 is not None and not args.wav:
-                    result.target_time_ns=expand_timestamp(result.target_time_ms32,now_ns)
-                    result.decode_error_ms=(now_ns-result.target_time_ns)/1e6
-                    timing=decode_stats.record(result.decode_error_ms)
-                # Publish before terminal/file I/O. Early frames wait for their
-                # shared target time; late frames can be shown at the next GUI tick.
-                publish(result)
-                record = {k: v for k, v in vars(result).items() if k != 'image'}
-                if timing:record['decode_error_window']=timing
-                if args.wav and result.target_time_ms32 is not None:
-                    record['timing_mode']='replay_no_live_clock_comparison'
-                log(record)
-                if result.image is not None and args.save_frames:
-                    name = f'{result.frame:010d}' if result.frame is not None else 'unknown'
-                    result.image.save(args.save_frames / f'frame_{name}_{result.sample}.png')
+            for result in receiver.feed(emulator.process(audio)):
+                emit(result)
+        def emit(result):
+            now_ns = time.time_ns()
+            target = schedule(result, now_ns)
+            # Always present, so every record has the same shape whether or not
+            # this source is schedulable.
+            result.target_time_ns = target
+            result.decode_error_ms = None
+            timing = None
+            if target is not None:
+                result.decode_error_ms = (now_ns-target)/1e6
+                timing = decode_stats.record(result.decode_error_ms)
+            if not args.headless:
+                updates.put(result, target if target is not None else now_ns)
+            record = {k: v for k, v in vars(result).items() if k != 'values'}
+            record.pop('extra', None)
+            record.update(result.extra)
+            if timing:record['decode_error_window']=timing
+            log(record)
+            if result.values is not None and args.save_frames:
+                name = f'{result.absolute:010d}' if result.absolute is not None else 'unknown'
+                values_image(result.values, coder.shapes).save(
+                    args.save_frames / f'frame_{name}.png')
         try:
             if args.wav:
                 start = time.monotonic()
                 samples = 0
-                for audio in wav_blocks(args.wav, args.channels):
+                for audio in wav_blocks(args.wav, args.channels, 1024):
                     if stop.is_set(): break
                     samples += len(audio)
                     if not args.fast:
                         stop.wait(max(0, start + samples/RATE-time.monotonic()))
                     process(audio)
-                # Finish reporting a final missing interval if present.
-                import numpy as np
-                process(np.zeros((33, 2), np.float32))
+                for result in receiver.flush():
+                    emit(result)
             else:
                 sd = sounddevice()
-                # The output side fixes its blocksize; leaving the input side to
-                # negotiate its own is how a device reports 95 ms of input latency.
                 with sd.InputStream(samplerate=RATE, channels=max(args.channels)+1,
                                     device=args.device, dtype='float32',
                                     blocksize=256, latency='low') as stream:
@@ -114,22 +143,23 @@ def main(argv=None):
                         audio, overflow = stream.read(256)
                         if overflow:
                             log({'status': 'input_overflow', 'identity': 'unknown'})
-                            rx = Receiver()  # Unknown lost sample count invalidates prediction.
                         process(audio[:, args.channels])
         except Exception as exc:
             errors.append(exc)
-            publish(str(exc))
+            if not args.headless:
+                updates.put(str(exc), time.time_ns())
         finally:
-            done.set()
+            stop.set() if args.headless else None
 
     if args.headless:
         receive()
     else:
         import tkinter as tk
         from PIL import Image, ImageTk, ImageOps
+        size = (400, 480)
         root = tk.Tk()
         root.title('Stereo image receiver — waiting for synchronization')
-        initial = ImageTk.PhotoImage(Image.new('RGB', (400, 480), 'black'))
+        initial = ImageTk.PhotoImage(Image.new('RGB', size, 'black'))
         label = tk.Label(root, background='black', image=initial)
         label.image = initial
         label.pack()
@@ -146,26 +176,31 @@ def main(argv=None):
             if result is not None:
                 if isinstance(result, str):
                     status.config(text=result)
-                else:
-                    im = result.image or Image.new('RGB', (40, 48), 'black')
-                    canvas = Image.new('RGB', (400, 480), 'black')
-                    scaled = ImageOps.contain(im, (400, 480), Image.Resampling.NEAREST)
-                    canvas.paste(scaled, ((400-scaled.width)//2, (480-scaled.height)//2))
+                elif result.values is not None:
+                    # Only a real picture replaces the last one; a lost packet
+                    # leaves the previous frame up rather than flashing black.
+                    canvas = Image.new('RGB', size, 'black')
+                    scaled = ImageOps.contain(values_image(result.values, coder.shapes),
+                                              size, Image.Resampling.NEAREST)
+                    canvas.paste(scaled, ((size[0]-scaled.width)//2, (size[1]-scaled.height)//2))
                     photo = ImageTk.PhotoImage(canvas)
-                    label.configure(image=photo, width=400, height=480)
+                    label.configure(image=photo, width=size[0], height=size[1])
                     label.image = photo
-                    name = result.frame if result.frame is not None else 'unknown'
-                    status.config(text=f'Frame {name} | {result.status} | {result.identity}')
+                    name = result.absolute if result.absolute is not None else 'unknown'
+                    status.config(text=f'Frame {name} | {result.status} | {result.identity} '
+                                       f'| tier {result.tier}')
                     file_id = f'{result.index}/{result.count}' if result.index is not None else 'unknown'
-                    root.title(f"Stereo image — {result.profile or 'unknown profile'} — frame {name} — file {file_id}")
+                    root.title(f'Stereo image — {layout.name} — frame {name} — file {file_id}')
                     if result.target_time_ns is not None:
                         error_ms=(time.time_ns()-result.target_time_ns)/1e6
-                        log({'event':'display_submit','frame':result.frame,
+                        log({'event':'display_submit','frame':result.absolute,
                             'target_time_ns':result.target_time_ns,
                             'display_submit_error_ms':error_ms,
                             'display_error_window':display_stats.record(error_ms),
                             'presentation_frames_skipped':updates.dropped})
-            if not stop.is_set(): root.after(2, refresh)
+                else:
+                    status.config(text=f'{result.status} | {result.identity}')
+            if not stop.is_set(): root.after(10, refresh)
         refresh()
         try:
             root.mainloop()

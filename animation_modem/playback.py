@@ -11,7 +11,9 @@ from dataclasses import dataclass
 import threading
 import numpy as np
 from .audio_common import sounddevice, route
-from .transport import RATE, FRAME, PACKET   # v1 defaults; v2 layouts pass their own
+from .transport2 import PRESETS, RATE
+
+_DEFAULT = PRESETS['wide']   # layouts pass their own geometry
 
 
 def latency(value):
@@ -34,7 +36,7 @@ class Slot:
 
 class PacketOutput:
     def __init__(self, device=None, channels=(0, 1), requested_latency='low',
-                 frame=FRAME, packet=PACKET):
+                 frame=_DEFAULT.frame, packet=_DEFAULT.packet):
         # v2 layouts have their own geometry -- wide is 3344 samples, not v1's
         # 3200 -- so the packet size cannot be a module constant any more.
         self.frame = int(frame)

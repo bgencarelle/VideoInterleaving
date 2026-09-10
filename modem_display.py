@@ -10,7 +10,8 @@ from pathlib import Path
 import time
 import wave
 from animation_modem.transport2 import PRESETS, RATE, SourceCoder, encode
-from animation_modem.imaging import DEFAULT_PROFILE, fit_shapes, image_values, plane_shapes
+from animation_modem.imaging import (DEFAULT_PROFILE, burn_counters, fit_shapes,
+                                     image_values, plane_shapes)
 from animation_modem.audio_common import device, pair, pcm
 from animation_modem.playback import PacketOutput, latency
 from modem_bake import ModemLibrary
@@ -44,16 +45,6 @@ def packet(library, layout, coder, absolute, selection, numbered=False,
     return audio, {'frame':absolute,'source_index':index,'face_folder':main,
                    'float_folder':front,'layout':layout.name,'encode_ms':ms,
                    'target_time_ns':target_time_ns}, im
-
-
-def burn_counters(im, absolute, index, count):
-    """Debug overlay, kept out of the transport so the wire format stays fixed."""
-    from PIL import ImageDraw
-    im=im.copy()
-    draw=ImageDraw.Draw(im)
-    draw.text((1,1),f'A{absolute}',fill='white')
-    draw.text((1,9),f'F{index}/{count}',fill='white')
-    return im
 
 
 def run_modem(args):
