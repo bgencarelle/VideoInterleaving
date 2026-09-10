@@ -114,7 +114,10 @@ def main(argv=None):
                 updates.put(result, target if target is not None else now_ns)
             record = {k: v for k, v in vars(result).items() if k != 'values'}
             record.pop('extra', None)
-            record['source_index'] = result.source_index   # derived, not in vars()
+            # Derived properties are invisible to vars().
+            record['source_index'] = result.source_index
+            record['face_folder'] = result.face_folder
+            record['float_folder'] = result.float_folder
             record.update(result.extra)
             if timing:record['decode_error_window']=timing
             log(record)
@@ -190,8 +193,11 @@ def main(argv=None):
                     name = result.absolute if result.absolute is not None else 'unknown'
                     source = (f'{result.source_index}/{result.count}'
                               if result.source_index is not None else 'unknown')
-                    status.config(text=f'Frame {name} | source {source} | {result.status} '
-                                       f'| {result.identity} | tier {result.tier}')
+                    folders = ('?' if result.face_folder is None
+                               else f'{result.face_folder}/{result.float_folder}')
+                    status.config(text=f'Frame {name} | source {source} | face/float {folders} '
+                                       f'| {result.status} | {result.identity} '
+                                       f'| tier {result.tier}')
                     root.title(f'Stereo image — {layout.name} — frame {name} — source {source}')
                     if result.target_time_ns is not None:
                         error_ms=(time.time_ns()-result.target_time_ns)/1e6

@@ -284,6 +284,21 @@ IMAGE_GAIN = .7
 
 
 HEADER_FORMAT = '>2sBBIHHI'      # magic, flags, top_bin, absolute, index, count, stamp
+# The flags byte was transmitted and CRC-protected but always zero. It now
+# carries the selected folder pair, four bits each: face in the high nibble,
+# float in the low one. Free -- the byte was already on the wire and the header
+# did not grow.
+#
+# Four bits holds 16. Past that the index wraps, so with more than 16 folders
+# of a layer the reported number is the folder modulo 16 and several folders
+# share a number. That is a reporting field, not a selection input: nothing
+# decodes from it and the picture is unaffected either way.
+FOLDER_LIMIT = 16
+
+
+def pack_folders(face, float_folder):
+    """Pack a folder pair into the flags byte, wrapping past FOLDER_LIMIT."""
+    return ((int(face) % FOLDER_LIMIT) << 4) | (int(float_folder) % FOLDER_LIMIT)
 
 
 def pack_header(flags, top_bin, absolute, index, count, stamp_ms, magic=b'V2'):
@@ -358,6 +373,23 @@ class Decoded:
     identity: str = 'unknown'
     tier: str = 'none'
     extra: dict = field(default_factory=dict)
+
+    @property
+    def face_folder(self):
+        """Selected face folder, from the flags byte. None without identity.
+
+        Modulo 16 -- see FOLDER_LIMIT. With a longer folder list this is the
+        low four bits of the real index, not the index itself.
+        """
+        return None if self.identity != 'verified_header' else (self.flags >> 4) & 0xf
+
+    @property
+    def float_folder(self):
+        """Selected float folder, from the flags byte. None without identity.
+
+        Modulo 16 -- see FOLDER_LIMIT.
+        """
+        return None if self.identity != 'verified_header' else self.flags & 0xf
 
     @property
     def source_index(self):

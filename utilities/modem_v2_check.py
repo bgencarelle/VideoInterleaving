@@ -83,7 +83,8 @@ def receive_for(args,layout,coder):
 def record(r):
     speed=1/(1+r.rate_error)
     return {'status':r.status,'identity':r.identity,'frame':r.absolute,
-            'index':r.index,'source_index':r.source_index,'count':r.count,'tier':r.tier,'coverage':r.coverage,
+            'index':r.index,'source_index':r.source_index,'count':r.count,
+            'face_folder':r.face_folder,'float_folder':r.float_folder,'tier':r.tier,'coverage':r.coverage,
             'pilot_error':r.pilot_error,'playback_speed':speed,
             'playback_rate_pct':round(100*(speed-1),3),**r.extra}
 
@@ -316,10 +317,15 @@ def do_live_receive(args):
             label.configure(image=photo)
             label.image = photo
             frame = r.absolute if r.absolute is not None else '?'
-            status.config(text=f'frame {frame} | {r.status} | tier {r.tier} | '
-                               f'coverage {r.coverage:.2f} | '
+            source = (f'{r.source_index}/{r.count}'
+                      if r.source_index is not None else 'unknown')
+            folders = ('?' if r.face_folder is None
+                       else f'{r.face_folder}/{r.float_folder}')
+            status.config(text=f'frame {frame} | source {source} | face/float {folders} '
+                               f'| {r.status} | tier {r.tier} '
+                               f'| coverage {r.coverage:.2f} | '
                                f'speed {1/(1+r.rate_error):.3f}x')
-            root.title(f'modem v2 - {args.preset} - frame {frame} - {r.tier}')
+            root.title(f'modem v2 - {args.preset} - frame {frame} - source {source}')
         if not stop.is_set():
             root.after(10, refresh)
 

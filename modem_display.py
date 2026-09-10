@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 import time
 import wave
-from animation_modem.transport2 import PRESETS, RATE, SourceCoder, encode
+from animation_modem.transport2 import PRESETS, RATE, SourceCoder, encode, pack_folders
 from animation_modem.imaging import (DEFAULT_PROFILE, burn_counters, fit_shapes,
                                      image_values, plane_shapes)
 from animation_modem.audio_common import device, pair, pcm
@@ -40,7 +40,8 @@ def packet(library, layout, coder, absolute, selection, numbered=False,
     # than raising. The absolute frame number stays 32-bit.
     stamp_ms=0 if target_time_ns is None else (int(target_time_ns)//1_000_000) & 0xffffffff
     audio=encode(values,layout,coder,absolute & 0xffffffff,
-                 (index % 0xffff)+1,max(1,min(library.frames,0xffff)),stamp_ms=stamp_ms)
+                 (index % 0xffff)+1,max(1,min(library.frames,0xffff)),stamp_ms=stamp_ms,
+                 flags=pack_folders(main,front))
     ms=(_time.perf_counter()-started)*1000
     return audio, {'frame':absolute,'source_index':index,'face_folder':main,
                    'float_folder':front,'layout':layout.name,'encode_ms':ms,

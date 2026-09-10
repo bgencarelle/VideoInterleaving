@@ -259,6 +259,23 @@ class V2Tests(unittest.TestCase):
                 self.assertEqual(result.index,source+1)
                 self.assertEqual(result.source_index,source)
 
+    def test_folder_pair_rides_the_flags_byte(self):
+        from animation_modem.transport2 import FOLDER_LIMIT, pack_folders
+        for face, front in ((0,0),(2,1),(15,15),(9,4)):
+            with self.subTest(face=face,front=front):
+                audio=v2.encode(image_values(self.image,self.coder),self.layout,self.coder,
+                                1,1,1,flags=pack_folders(face,front))
+                result=v2.decode_packet(audio[:self.layout.packet],self.layout,self.coder)
+                self.assertEqual(result.identity,'verified_header')
+                self.assertEqual((result.face_folder,result.float_folder),(face,front))
+        # Four bits each, so a longer folder list wraps rather than failing.
+        self.assertEqual(pack_folders(FOLDER_LIMIT,FOLDER_LIMIT),pack_folders(0,0))
+        self.assertEqual(pack_folders(17,33),pack_folders(1,1))
+        audio=v2.encode(image_values(self.image,self.coder),self.layout,self.coder,
+                        1,1,1,flags=pack_folders(20,18))
+        result=v2.decode_packet(audio[:self.layout.packet],self.layout,self.coder)
+        self.assertEqual((result.face_folder,result.float_folder),(4,2))
+
     def test_erased_header_yields_no_index_at_all(self):
         audio=v2.encode(image_values(self.image,self.coder),self.layout,self.coder,1,1,1)
         start=v2.SYNC_LEN+2*v2.SYMBOL
@@ -267,6 +284,9 @@ class V2Tests(unittest.TestCase):
         self.assertNotEqual(result.identity,'verified_header')
         self.assertIsNone(result.index)
         self.assertIsNone(result.source_index)
+        # Without a verified header the flags byte is not evidence of anything.
+        self.assertIsNone(result.face_folder)
+        self.assertIsNone(result.float_folder)
 
 
 if __name__=='__main__':unittest.main()
