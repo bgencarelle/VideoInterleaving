@@ -246,4 +246,27 @@ class V2Tests(unittest.TestCase):
         self.assertEqual([r.absolute for r in self.decode(self.packet(2),rx=rx)],[2])
 
 
+    def test_source_index_is_zero_based_and_survives_the_round_trip(self):
+        # The bake is zero-based; the wire is one-based so an erased header
+        # decodes as invalid rather than as frame zero. Only the derived
+        # source_index should ever reach anything downstream.
+        for source in (0, 1, 11, 0xfffe):
+            with self.subTest(source=source):
+                audio=v2.encode(image_values(self.image,self.coder),self.layout,self.coder,
+                                source+1,source+1,0xffff)
+                result=v2.decode_packet(audio[:self.layout.packet],self.layout,self.coder)
+                self.assertEqual(result.identity,'verified_header')
+                self.assertEqual(result.index,source+1)
+                self.assertEqual(result.source_index,source)
+
+    def test_erased_header_yields_no_index_at_all(self):
+        audio=v2.encode(image_values(self.image,self.coder),self.layout,self.coder,1,1,1)
+        start=v2.SYNC_LEN+2*v2.SYMBOL
+        audio[start:start+self.layout.header_symbols*v2.SYMBOL]=0
+        result=v2.decode_packet(audio[:self.layout.packet],self.layout,self.coder)
+        self.assertNotEqual(result.identity,'verified_header')
+        self.assertIsNone(result.index)
+        self.assertIsNone(result.source_index)
+
+
 if __name__=='__main__':unittest.main()

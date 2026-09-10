@@ -359,12 +359,20 @@ def configure_runtime():
             parser.error("--modem-frame-duration must be finite and positive")
         if args.scope_ask:
             parser.error("Modem mode takes --device explicitly; use modem_receive.py --list-devices")
+        # --dir names the directory to use, in this mode as in every other.
+        # It is not a source tree to append a suffix to; only the fallback,
+        # when no directory is given at all, derives one from IMAGES_DIR.
         if args.dir:
             settings.IMAGES_DIR = os.path.abspath(args.dir)
         if not args.modem_dir:
-            args.modem_dir = settings.IMAGES_DIR + "_modem"
+            args.modem_dir = (os.path.abspath(args.dir) if args.dir
+                              else settings.IMAGES_DIR + "_modem")
+        args.modem_dir = os.path.abspath(args.modem_dir)
+        if not os.path.isdir(args.modem_dir):
+            parser.error(f"Directory not found: {args.modem_dir}")
         if not os.path.isfile(os.path.join(args.modem_dir, "modem.json")):
-            parser.error("No modem.json in --modem-dir; run utilities/convert_to_modem.py first")
+            parser.error(f"No modem.json in {args.modem_dir}; "
+                         "run utilities/convert_to_modem.py first")
         settings.CLOCK_MODE = args.modem_clock
         os.makedirs(LOGS_DIR, exist_ok=True)
         # Baked-only mode: no image scan, cache removal, ports, or GL setup.

@@ -132,6 +132,9 @@ class ModemIntegrationTests(unittest.TestCase):
             run_modem(args)
         self.assertEqual(select.call_count,2)
         self.assertEqual([x.index for x in emitted],[1,1,2])
+        # The wire is one-based so a zeroed header fails the 1 <= index guard;
+        # source_index is what the bake actually uses.
+        self.assertEqual([x.source_index for x in emitted],[0,0,1])
         self.assertEqual([x.absolute for x in emitted],[1,2,3])
         self.assertTrue(all(not call.kwargs for call in clock.call_args_list))
         self.assertTrue(all(call.kwargs['at_time_ns']==1_700_000_000_000_000_000 for call in target_clock.call_args_list))
@@ -170,6 +173,7 @@ runpy.run_path(sys.argv[1],run_name='__main__')
         rows=[json.loads(line) for line in r.stdout.splitlines()]
         self.assertEqual([x['frame'] for x in rows],list(range(1,6)))
         self.assertEqual([x['index'] for x in rows],[1,2,3,1,2])
+        self.assertEqual([x['source_index'] for x in rows],[0,1,2,0,1])
 
 
 if __name__=='__main__':unittest.main()

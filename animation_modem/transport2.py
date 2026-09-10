@@ -359,6 +359,17 @@ class Decoded:
     tier: str = 'none'
     extra: dict = field(default_factory=dict)
 
+    @property
+    def source_index(self):
+        """Zero-based index into the bake.
+
+        The wire carries it one-based so that a zeroed or erased header fails
+        the `1 <= index <= count` guard rather than decoding as frame zero.
+        Everything downstream wants the bake's own numbering, so convert once
+        here instead of leaving a -1 for every caller to remember.
+        """
+        return None if self.index is None else self.index - 1
+
 
 def _equalise(body, layout):
     carriers = layout.carriers

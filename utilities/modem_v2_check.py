@@ -83,7 +83,7 @@ def receive_for(args,layout,coder):
 def record(r):
     speed=1/(1+r.rate_error)
     return {'status':r.status,'identity':r.identity,'frame':r.absolute,
-            'index':r.index,'count':r.count,'tier':r.tier,'coverage':r.coverage,
+            'index':r.index,'source_index':r.source_index,'count':r.count,'tier':r.tier,'coverage':r.coverage,
             'pilot_error':r.pilot_error,'playback_speed':speed,
             'playback_rate_pct':round(100*(speed-1),3),**r.extra}
 
@@ -171,6 +171,15 @@ def do_bench(args):
               f'{np.mean(coverage) if coverage else float("nan"):>10.3f}')
     print('\n  Small presets trade resolution for band. An allocation table must be built\n'
           '  for the same preset and used at both ends.')
+
+
+def _sounddevice():
+    try:
+        import sounddevice as sd
+        return sd
+    except (ImportError, OSError) as exc:
+        raise SystemExit('Live audio needs sounddevice and PortAudio: '
+                         'pip install -r requirements-modem.txt') from exc
 
 
 def do_live_send(args):

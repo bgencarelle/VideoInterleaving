@@ -114,6 +114,7 @@ def main(argv=None):
                 updates.put(result, target if target is not None else now_ns)
             record = {k: v for k, v in vars(result).items() if k != 'values'}
             record.pop('extra', None)
+            record['source_index'] = result.source_index   # derived, not in vars()
             record.update(result.extra)
             if timing:record['decode_error_window']=timing
             log(record)
@@ -187,10 +188,11 @@ def main(argv=None):
                     label.configure(image=photo, width=size[0], height=size[1])
                     label.image = photo
                     name = result.absolute if result.absolute is not None else 'unknown'
-                    status.config(text=f'Frame {name} | {result.status} | {result.identity} '
-                                       f'| tier {result.tier}')
-                    file_id = f'{result.index}/{result.count}' if result.index is not None else 'unknown'
-                    root.title(f'Stereo image — {layout.name} — frame {name} — file {file_id}')
+                    source = (f'{result.source_index}/{result.count}'
+                              if result.source_index is not None else 'unknown')
+                    status.config(text=f'Frame {name} | source {source} | {result.status} '
+                                       f'| {result.identity} | tier {result.tier}')
+                    root.title(f'Stereo image — {layout.name} — frame {name} — source {source}')
                     if result.target_time_ns is not None:
                         error_ms=(time.time_ns()-result.target_time_ns)/1e6
                         log({'event':'display_submit','frame':result.absolute,
