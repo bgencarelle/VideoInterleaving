@@ -7,7 +7,7 @@ import numpy as np
 from scipy.signal import upfirdn, resample_poly
 
 from animation_modem import decoder
-from animation_modem.capture import BufferedInput, CaptureResampler, open_input
+from animation_modem.capture import AudioGate, BufferedInput, CaptureHealth, CaptureResampler, open_input
 from animation_modem.channel_scan import AutoChannels
 from animation_modem.transport2 import encode, Receiver
 
@@ -36,6 +36,36 @@ class FakeSD:
 
 
 class CaptureTests(unittest.TestCase):
+    def test_gate_quiet_preroll_hold_and_reopening(self):
+        gate=AudioGate(48000)
+        quiet=np.full((256,2),1e-6,np.float32)
+        signal=quiet.copy();signal[0,0]=.01
+        for _ in range(100):self.assertIsNone(gate.process(quiet))
+        first=gate.process(signal)
+        self.assertEqual(first.shape,(512,2))
+        np.testing.assert_array_equal(first[256:],signal)
+        for _ in range(47):self.assertIsNotNone(gate.process(quiet))
+        self.assertIsNone(gate.process(quiet))
+        self.assertFalse(gate.active)
+        self.assertEqual(gate.process(signal).shape,(512,2))
+
+    def test_driver_latency_sizes_buffer_without_prefill(self):
+        stream=SimpleNamespace(samplerate=48000,latency=.2)
+        buffer=BufferedInput(stream,256)
+        self.assertGreaterEqual(buffer.capacity_ms,450)
+        self.assertEqual(len(buffer.queue),0)
+        self.assertIsNone(buffer.read())
+
+    def test_drop_reports_are_aggregated(self):
+        health=CaptureHealth(0)
+        for i in range(100):
+            health.record(480,48000,.002,skipped=1)
+            self.assertIsNone(health.summary(i*.04))
+        row=health.summary(5)
+        self.assertEqual(row['dropped_blocks'],100)
+        self.assertAlmostEqual(row['processing_load'],.2)
+        self.assertIsNone(health.summary(10))
+
     def test_capture_queue_is_bounded_and_marks_gaps(self):
         class Stream:
             samplerate=48000
@@ -49,9 +79,11 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(len(buffer.queue),3)
         audio,overflow,skipped=buffer.read()
         self.assertEqual((audio[0,0],overflow,skipped),(3,False,2))
-        self.assertEqual(buffer.read()[1:],(True,0))
+        combined,overflow,skipped=buffer.read()
+        self.assertEqual((overflow,skipped),(True,0))
+        self.assertEqual(combined.shape,(512,2))
+        self.assertEqual(combined[-1,0],5)
         buffer.error=RuntimeError('driver stopped')
-        self.assertEqual(buffer.read()[0][0,0],5)
         with self.assertRaisesRegex(RuntimeError,'driver stopped'):buffer.read()
 
     def test_utility_uses_shared_input_and_preserves_channel_override(self):
@@ -148,7 +180,7 @@ class CaptureTests(unittest.TestCase):
 
     def test_silence_keeps_one_stream_and_uses_only_selected_pair(self):
         import threading
-        stop=threading.Event(); calls=[]; events=[]
+        stop=threading.Event(); calls=[]; events=[]; reports=[]
         class Input:
             samplerate=48000
             latency=.1
@@ -161,18 +193,21 @@ class CaptureTests(unittest.TestCase):
         sd=SimpleNamespace(query_devices=lambda *args:dict(max_input_channels=8,
                            default_samplerate=48000), InputStream=open_stream)
         class Buffer:
+            capacity_ms=150
             def __init__(self,*args):self.count=0
             def __enter__(self):return self
             def __exit__(self,*args):pass
             def read(self):
                 self.count+=1
                 if self.count==4:stop.set()
-                return None
+                return np.zeros((256,2),np.float32),False,3
         with patch.object(decoder,'BufferedInput',Buffer), \
-             patch.object(decoder,'Receiver'),patch.object(decoder,'Emulator'), \
+             patch.object(decoder,'Receiver') as receiver,patch.object(decoder,'Emulator'), \
              patch.object(stop,'wait'):
             self.assertEqual(list(decoder.live_results(sd,1,None,None,None,None,
-                                                      stop,lambda r:None)),[])
+                                                      stop,reports.append)),[])
+            receiver.return_value.feed.assert_not_called()
+        self.assertEqual(reports,[])
         self.assertEqual(len(calls),1)
         self.assertEqual(calls[0]['channels'],2)
         self.assertEqual(calls[0]['samplerate'],48000)

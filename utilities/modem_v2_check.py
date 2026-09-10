@@ -250,7 +250,6 @@ def do_live_receive(args):
         print(sd.query_devices()); return
     layout = V2.PRESETS[args.preset]
     coder, _ = coder_for(args.profile, args.allocation,layout)
-    print(layout.describe(), file=sys.stderr)
     if args.save_frames:
         Path(args.save_frames).mkdir(parents=True, exist_ok=True)
     newest = {'result': None, 'seen': 0, 'tiers': {}}
@@ -259,7 +258,9 @@ def do_live_receive(args):
     stop = threading.Event()
 
     errors = []
+    heard_audio = [False]
     def report_input(record):
+        heard_audio[0] = True
         if not args.silent:
             print(json.dumps(record), file=sys.stderr, flush=True)
 
@@ -295,7 +296,7 @@ def do_live_receive(args):
         except KeyboardInterrupt:
             pass
         if errors:raise RuntimeError(str(errors[0])) from errors[0]
-        if not args.silent:
+        if not args.silent and (heard_audio[0] or newest['seen']):
             print(f'\n{newest["seen"]} packets, tiers {newest["tiers"]}', file=sys.stderr)
         return
 
@@ -357,7 +358,7 @@ def do_live_receive(args):
         try:root.destroy()
         except tk.TclError:pass
     if errors:raise RuntimeError(str(errors[0])) from errors[0]
-    if not args.silent:print(f'{newest["seen"]} packets, tiers {newest["tiers"]}', file=sys.stderr)
+    if not args.silent and (heard_audio[0] or newest['seen']):print(f'{newest["seen"]} packets, tiers {newest["tiers"]}', file=sys.stderr)
 
 
 def main(argv=None):

@@ -27,7 +27,7 @@ import time
 import numpy as np
 
 from .audio_common import device, pair, sounddevice, wav_blocks
-from .capture import BufferedInput, CaptureResampler, open_input
+from .capture import AudioGate, BufferedInput, CaptureHealth, CaptureResampler, open_input
 from .imaging import DEFAULT_PROFILE, fit_shapes, plane_shapes, values_image
 from .transport2 import PRESETS, RATE, Receiver, SourceCoder
 from .timing import expand_timestamp, ProgressSummary, TimingStats, PresentationBuffer
@@ -62,27 +62,47 @@ def live_results(sd, input_device, channels, layout, coder, settings, stop, repo
         capture_rate = float(stream.samplerate)
         converter = CaptureResampler(capture_rate, 2)
         read_size = max(1, round(256*capture_rate/RATE))
-        report({'input_latency_ms': stream.latency*1000,
+        capture = BufferedInput(stream, read_size)
+        startup = {'input_latency_ms': stream.latency*1000,
                 'capture_rate_hz': capture_rate, 'decode_rate_hz': RATE,
                 'input_channels': [c+1 for c in channels],
                 'resample_filter_delay_ms': converter.filter_delay_ms,
-                'capture_buffer_capacity_ms': 150})
-        with BufferedInput(stream, read_size) as capture:
+                'capture_buffer_capacity_ms': capture.capacity_ms}
+        gate = AudioGate(capture_rate)
+        announced = False
+        with capture:
+            health = CaptureHealth(time.monotonic())
             while not stop.is_set():
+                summary = health.summary(time.monotonic())
+                if summary is not None and gate.active:report(summary)
                 captured = capture.read()
                 if captured is None:
                     stop.wait(.002)
                     continue
                 audio, overflow, skipped = captured
                 if overflow or skipped:
-                    report({'status': 'input_overflow' if overflow else 'capture_backlog',
-                            'dropped_blocks': skipped, 'identity': 'unknown'})
+                    gate.reset()
                     receiver.reset()
                     emulator = Emulator(settings)
                     converter.reset()
-                audio = converter.process(audio[:, channels])
-                if not len(audio):continue
-                for result in receiver.feed(emulator.process(audio)):
+                was_active = gate.active
+                input_samples = len(audio)
+                audio = gate.process(audio[:, channels])
+                if audio is None:
+                    if was_active:
+                        receiver.reset()
+                        emulator = Emulator(settings)
+                        converter.reset()
+                    health = CaptureHealth(time.monotonic())
+                    continue
+                if not announced:
+                    report(startup)
+                    announced = True
+                started = time.perf_counter()
+                audio = converter.process(audio)
+                results = receiver.feed(emulator.process(audio)) if len(audio) else []
+                health.record(input_samples, capture_rate, time.perf_counter()-started, overflow, skipped)
+                for result in results:
                     result.extra['input_channels'] = [c+1 for c in channels]
                     yield result
 
@@ -121,8 +141,9 @@ def main(argv=None):
         layout, coder = build()
     except (ValueError, OSError) as exc:
         p.error(str(exc))
-    print(json.dumps({'audio_emulation': asdict(settings), 'preset': args.emulate,
-                      'layout': layout.describe()}), file=sys.stderr)
+    if args.wav and not args.silent:
+        print(json.dumps({'audio_emulation': asdict(settings), 'preset': args.emulate,
+                          'layout': layout.describe()}), file=sys.stderr)
     if args.save_frames:
         args.save_frames.mkdir(parents=True, exist_ok=True)
     updates = PresentationBuffer()

@@ -82,16 +82,19 @@ class CaptureResampler:
 
 
 class BufferedInput:
-    """Read independently of decoding; retain at most 150 ms of fresh audio.
+    """Read independently of decoding; retain a bounded amount of fresh audio sized for driver bursts.
 
     Sequence gaps mark discarded blocks, so filters and acquisition reset at
     the exact discontinuity. The buffer has capacity, not a prefill delay.
     """
-    def __init__(self, stream, blocksize, max_seconds=.15):
+    def __init__(self, stream, blocksize, max_seconds=None):
         from collections import deque
         import threading
         self.stream, self.blocksize = stream, blocksize
-        self.capacity = max(1, int(max_seconds*stream.samplerate/blocksize))
+        if max_seconds is None:
+            max_seconds = max(.15, min(1., 2*float(stream.latency)+.05))
+        self.capacity = max(1, int(np.ceil(max_seconds*stream.samplerate/blocksize)))
+        self.capacity_ms = self.capacity*blocksize/stream.samplerate*1000
         self.queue = deque()
         self.lock = threading.Lock()
         self.stop = threading.Event()
@@ -125,9 +128,15 @@ class BufferedInput:
                 if self.error is not None:raise self.error
                 return None
             sequence, audio, overflow = self.queue.popleft()
+            pieces = [audio]
+            last_sequence = sequence
+            # Drain a delivered burst together, but never hide a discontinuity.
+            while self.queue and not self.queue[0][2] and self.queue[0][0] == last_sequence+1:
+                last_sequence, following, _ = self.queue.popleft()
+                pieces.append(following)
         skipped = sequence-self.expected
-        self.expected = sequence+1
-        return audio, overflow, skipped
+        self.expected = last_sequence+1
+        return (np.concatenate(pieces) if len(pieces)>1 else audio), overflow, skipped
 
     def __enter__(self):
         self.thread.start()
@@ -142,3 +151,68 @@ class BufferedInput:
             self.thread.join(timeout=1.0)
             if self.thread.is_alive():
                 raise RuntimeError('Audio input reader did not stop')
+
+
+class CaptureHealth:
+    """Accumulate capture failures; emit at most one summary every five seconds."""
+    def __init__(self, now):
+        self.since = now
+        self.clear()
+
+    def clear(self):
+        self.dropped = self.overflows = 0
+        self.audio_seconds = self.processing_seconds = self.max_processing_seconds = 0.
+
+    def record(self, samples, rate, elapsed, overflow=False, skipped=0):
+        self.dropped += skipped
+        self.overflows += int(overflow)
+        self.audio_seconds += samples/rate
+        self.processing_seconds += elapsed
+        self.max_processing_seconds = max(self.max_processing_seconds, elapsed)
+
+    def summary(self, now):
+        if now-self.since < 5:return None
+        row = None
+        if self.dropped or self.overflows:
+            row = dict(status='capture_summary', interval_seconds=round(now-self.since,1),
+                       dropped_blocks=self.dropped, input_overflows=self.overflows,
+                       processing_load=round(self.processing_seconds/max(self.audio_seconds,1e-9),3),
+                       max_process_ms=round(1000*self.max_processing_seconds,2))
+        self.clear()
+        self.since = now
+        return row
+
+
+class AudioGate:
+    """Skip quiet input without altering samples above the threshold.
+
+    Keep one quiet block before opening and 250 ms after the last activity,
+    preserving packet starts and short gaps. This detects level, not identity.
+    """
+    def __init__(self, rate, threshold_dbfs=-80., hold_seconds=.25):
+        self.threshold = 10**(threshold_dbfs/20)
+        self.hold_samples = round(rate*hold_seconds)
+        self.reset()
+
+    def reset(self):
+        self.active = False
+        self.remaining = 0
+        self.previous = None
+
+    def process(self, audio):
+        if not np.isfinite(audio).all():raise ValueError('Nonfinite input audio')
+        if not len(audio):return None
+        loud = np.max(np.abs(audio)) >= self.threshold
+        if loud:
+            self.remaining = self.hold_samples
+            if not self.active:
+                self.active = True
+                previous, self.previous = self.previous, None
+                return np.concatenate((previous,audio)) if previous is not None else audio
+            return audio
+        if self.active and self.remaining > 0:
+            self.remaining -= len(audio)
+            return audio
+        self.active = False
+        self.previous = audio.copy()
+        return None
