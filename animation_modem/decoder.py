@@ -27,7 +27,6 @@ import time
 import numpy as np
 
 from .audio_common import device, pair, sounddevice, wav_blocks
-from .channel_scan import AutoChannels
 from .capture import BufferedInput, CaptureResampler, open_input
 from .imaging import DEFAULT_PROFILE, fit_shapes, plane_shapes, values_image
 from .transport2 import PRESETS, RATE, Receiver, SourceCoder
@@ -49,75 +48,50 @@ def build():
 
 
 def live_results(sd, input_device, channels, layout, coder, settings, stop, report):
-    """Reopen capture after 30 seconds without a picture, including startup.
-
-    The deadline uses monotonic time, so a stalled input with no samples also
-    times out. Each open gets fresh device information and decoder state.
-    """
-    automatic = channels is None
-    while not stop.is_set():
-        device_info = sd.query_devices(input_device, 'input')
-        channel_count = (int(device_info['max_input_channels'])
-                         if automatic else max(channels)+1)
-        emulator = Emulator(settings)
-        receiver = (AutoChannels(layout, coder, channel_count,
-                                 transform_factory=lambda: Emulator(settings))
-                    if automatic else Receiver(layout, coder))
-        with open_input(sd, input_device, channel_count,
-                        device_info['default_samplerate']) as stream:
-            capture_rate = float(stream.samplerate)
-            converter = CaptureResampler(capture_rate, channel_count)
-            read_size = max(1, round(256*capture_rate/RATE))
-            report({'input_latency_ms': stream.latency*1000,
-                    'capture_rate_hz': capture_rate, 'decode_rate_hz': RATE,
-                    'resample_filter_delay_ms': converter.filter_delay_ms,
-                    'resample_max_buffer_ms': converter.max_buffer_ms,
-                    'capture_buffer_capacity_ms': 150,
-                    'input_channels': channel_count,
-                    'channel_selection': 'automatic' if automatic else
-                    [c+1 for c in channels]})
-            with BufferedInput(stream, read_size) as capture:
-                last_picture = time.monotonic()
-                reported_pair = None
-                while not stop.is_set():
-                    if time.monotonic() - last_picture >= 30.0:
-                        report({'status': 'input_reopen',
-                                'reason': 'no_recovered_picture_for_30_seconds'})
-                        break  # InputStream exits/closes before the next open.
-                    # Do not block indefinitely in read() if the device stops delivering.
-                    captured = capture.read()
-                    if captured is None:
-                        stop.wait(.002)
-                        continue
-                    audio, overflow, skipped = captured
-                    if overflow or skipped:
-                        report({'status': 'input_overflow' if overflow else 'capture_backlog',
-                                'dropped_blocks': skipped, 'identity': 'unknown'})
-                        receiver.reset()
-                        emulator = Emulator(settings)
-                        converter.reset()
-                    audio = converter.process(audio)
-                    if not len(audio):
-                        continue
-                    results = receiver.feed(audio if automatic else
-                                            emulator.process(audio[:, channels]))
-                    for result in results:
-                        if result.values is not None:
-                            last_picture = time.monotonic()
-                        if automatic:
-                            selected = tuple(result.extra['input_channels'])
-                            if selected != reported_pair:
-                                report({'input_channels': selected,
-                                        'channel_lock': result.extra['channel_lock']})
-                                reported_pair = selected
-                        yield result
+    """One ordinary input stream; select a pair explicitly, defaulting to 1/2."""
+    if stop.is_set():return
+    channels = (0, 1) if channels is None else channels
+    device_info = sd.query_devices(input_device, 'input')
+    channel_count = max(channels)+1
+    if channel_count > int(device_info['max_input_channels']):
+        raise ValueError('Selected input channels are unavailable on this device')
+    emulator = Emulator(settings)
+    receiver = Receiver(layout, coder)
+    with open_input(sd, input_device, channel_count,
+                    device_info['default_samplerate']) as stream:
+        capture_rate = float(stream.samplerate)
+        converter = CaptureResampler(capture_rate, 2)
+        read_size = max(1, round(256*capture_rate/RATE))
+        report({'input_latency_ms': stream.latency*1000,
+                'capture_rate_hz': capture_rate, 'decode_rate_hz': RATE,
+                'input_channels': [c+1 for c in channels],
+                'resample_filter_delay_ms': converter.filter_delay_ms,
+                'capture_buffer_capacity_ms': 150})
+        with BufferedInput(stream, read_size) as capture:
+            while not stop.is_set():
+                captured = capture.read()
+                if captured is None:
+                    stop.wait(.002)
+                    continue
+                audio, overflow, skipped = captured
+                if overflow or skipped:
+                    report({'status': 'input_overflow' if overflow else 'capture_backlog',
+                            'dropped_blocks': skipped, 'identity': 'unknown'})
+                    receiver.reset()
+                    emulator = Emulator(settings)
+                    converter.reset()
+                audio = converter.process(audio[:, channels])
+                if not len(audio):continue
+                for result in receiver.feed(emulator.process(audio)):
+                    result.extra['input_channels'] = [c+1 for c in channels]
+                    yield result
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--device', type=device, help='Input device ID or name substring')
-    p.add_argument('--channels', type=pair,
-                   help='Optional ordered input pair, 1-based; live default: auto-detect, WAV: 1,2')
+    p.add_argument('--channels', type=pair, default=(0, 1),
+                   help='Ordered input pair, 1-based (default: 1,2)')
     p.add_argument('--wav', type=Path, help='Receive a baked/recorded 48 kHz PCM16 WAV')
     p.add_argument('--list-devices', action='store_true')
     p.add_argument('-v', '--verbose', action='store_true',

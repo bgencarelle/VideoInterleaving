@@ -386,8 +386,8 @@ def main(argv=None):
     ls.add_argument('-f', '--numbered', action='store_true')
     ls.add_argument('--list-devices', action='store_true')
     lr = sub.add_parser('live-receive')
-    lr.add_argument('--device',type=device); lr.add_argument('--channels',type=pair,
-        help='Optional 1-based input pair; default: automatic detection')
+    lr.add_argument('--device',type=device); lr.add_argument('--channels',type=pair,default=(0,1),
+        help='Ordered 1-based input pair (default: 1,2)')
     lr.add_argument('--save-frames', type=Path)
     lr.add_argument('--headless', action='store_true',
                     help='JSON only, no window; implies --verbose')

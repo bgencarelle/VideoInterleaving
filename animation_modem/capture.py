@@ -15,7 +15,7 @@ def open_input(sd, device, channels, default_rate):
         raise ValueError('Device reported an invalid default sample rate')
     stream = sd.InputStream(device=device, channels=channels,
                             dtype='float32', samplerate=rate,
-                            blocksize=0, latency='low')
+                            blocksize=0)
     try:
         stream.start()
     except BaseException:

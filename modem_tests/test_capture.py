@@ -63,7 +63,7 @@ class CaptureTests(unittest.TestCase):
             count=20, face_folder=1, float_folder=2, tier='best', coverage=1.,
             status='received', identity='verified_header', pilot_error=0.,
             rate_error=0., extra={'input_channels':[4,2]})
-        for options, expected in (([],None),(['--channels','4,2'],(3,1))):
+        for options, expected in (([],(0,1)),(['--channels','4,2'],(3,1))):
             closed=[]; calls=[]
             def live(sd,device,channels,layout,coder,settings,stop,report):
                 calls.append((device,channels))
@@ -146,48 +146,38 @@ class CaptureTests(unittest.TestCase):
                 receiver.reset()
                 self.assertEqual(set(receiver.selected), {1, 3})
 
-    def test_stalled_stream_closes_before_reopen(self):
-        clock = [0.0]; events = []; reports = []
-        class Stop:
-            stopped = False
-            def is_set(self):return self.stopped
-            def wait(self, seconds):clock[0] += 15.0
-        stop = Stop()
+    def test_silence_keeps_one_stream_and_uses_only_selected_pair(self):
+        import threading
+        stop=threading.Event(); calls=[]; events=[]
         class Input:
-            latency = .005
-            samplerate = 48000
-            def start(self):
-                self.number = sum(e == 'start' for e in events)+1
-                events.append('start')
+            samplerate=48000
+            latency=.1
+            def start(self):events.append('start')
             def stop(self):events.append('stop')
             def close(self):events.append('close')
-            @property
-            def read_available(self):
-                if self.number == 2:stop.stopped = True
-                return 0
-        def query(*args):
-            events.append('query')
-            return dict(max_input_channels=4, default_samplerate=48000)
-        def check(**kw):
-            if kw['samplerate'] != 48000:raise FakeSD.PortAudioError('unsupported')
-        sd = SimpleNamespace(query_devices=query, check_input_settings=check,
-                             PortAudioError=FakeSD.PortAudioError,
-                             InputStream=lambda **kw:Input())
-        class ImmediateBuffer:
-            def __init__(self, stream, size):self.stream=stream
+        def open_stream(**kwargs):
+            calls.append(kwargs)
+            return Input()
+        sd=SimpleNamespace(query_devices=lambda *args:dict(max_input_channels=8,
+                           default_samplerate=48000), InputStream=open_stream)
+        class Buffer:
+            def __init__(self,*args):self.count=0
             def __enter__(self):return self
             def __exit__(self,*args):pass
             def read(self):
-                self.stream.read_available
+                self.count+=1
+                if self.count==4:stop.set()
                 return None
-        with patch.object(decoder, 'BufferedInput', ImmediateBuffer), \
-             patch.object(decoder.time, 'monotonic', side_effect=lambda:clock[0]), \
-             patch.object(decoder, 'AutoChannels') as auto, patch.object(decoder, 'Emulator'):
-            self.assertEqual(list(decoder.live_results(sd, 1, None, None, None, None,
-                                                      stop, reports.append)), [])
-            self.assertEqual(auto.call_count, 2)
-        self.assertEqual(events, ['query', 'start', 'stop', 'close']*2)
-        self.assertEqual(sum(r.get('status') == 'input_reopen' for r in reports), 1)
+        with patch.object(decoder,'BufferedInput',Buffer), \
+             patch.object(decoder,'Receiver'),patch.object(decoder,'Emulator'), \
+             patch.object(stop,'wait'):
+            self.assertEqual(list(decoder.live_results(sd,1,None,None,None,None,
+                                                      stop,lambda r:None)),[])
+        self.assertEqual(len(calls),1)
+        self.assertEqual(calls[0]['channels'],2)
+        self.assertEqual(calls[0]['samplerate'],48000)
+        self.assertNotIn('latency',calls[0])
+        self.assertEqual(events,['start','stop','close'])
 
 
 if __name__ == '__main__':unittest.main()
