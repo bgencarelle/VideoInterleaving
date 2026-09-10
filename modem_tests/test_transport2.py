@@ -161,6 +161,84 @@ class V2Tests(unittest.TestCase):
                         main([command, *option])
                 self.assertEqual(exc.exception.code, 2)
 
+    def test_progressive_low_band_keeps_all_plane_dc_values(self):
+        layout=v2.PRESETS['wide']
+        slots=v2.coefficient_slots(layout,tuple(self.coder.shapes))
+        bins=np.broadcast_to(layout.data_bins[None,:,None,None],
+                             (layout.image_symbols,len(layout.data_bins),2,2)).ravel()[slots]
+        self.assertEqual(layout.band[0],375)
+        self.assertTrue(np.any(bins==2))
+        dc=np.cumsum([0]+[h*w for h,w in self.coder.shapes[:-1]])
+        np.testing.assert_array_equal(bins[dc],np.ones(len(dc)))
+        sent=self.coder.forward(self.values)
+        recovered=self.coder.inverse(sent*(bins<=8))
+        for a,b in zip(self.coder._split(recovered),self.coder._split(self.values)):
+            self.assertAlmostEqual(float(a.mean()),float(b.mean()),places=10)
+
+    def test_progressive_stream_survives_six_khz_rolloff(self):
+        from argparse import Namespace
+        from utilities.modem_v2_check import frames_from
+        im=frames_from(Namespace(modem_dir=None,frames=1,stride=1))[0][0]
+        layout=v2.PRESETS['wide']
+        values=image_values(im,self.coder)
+        audio=v2.encode(values,layout,self.coder,1,1,1)
+        audio=sosfilt(butter(6,6000,fs=v2.RATE,output='sos'),audio,axis=0)
+        audio+=np.random.default_rng(10).normal(0,.0003,audio.shape)
+        results=self.decode(audio,rx=v2.Receiver(layout,self.coder))
+        self.assertEqual(len(results),1)
+        self.assertLess(float(np.sqrt(np.mean((results[0].values-values)**2))),.15)
+
+    def test_auto_receiver_preserves_neutral_color_at_slow_speeds(self):
+        from animation_modem.audio_common import pcm
+        from utilities.modem_v2_check import values_image
+        layout=v2.PRESETS['wide']
+        values=image_values(Image.new('RGB',(40,48),(128,128,128)),self.coder)
+        audio=v2.encode(values,layout,self.coder,1,1,1)
+        audio=np.frombuffer(pcm(audio),'<i2').reshape(-1,2)/32768
+        for up,down in ((1,1),(5,4),(2,1),(4,1)):
+            with self.subTest(speed=down/up):
+                signal=resample_poly(audio,up,down) if up!=down else audio.copy()
+                original=signal.copy()
+                got=self.decode(signal,rx=v2.Receiver(layout,self.coder))
+                np.testing.assert_array_equal(signal,original)
+                self.assertEqual(len(got),1)
+                self.assertEqual(got[0].identity,'verified_header')
+                self.assertEqual(got[0].extra['input_path'],'raw')
+                self.assertAlmostEqual(got[0].extra['playback_speed'],down/up,places=4)
+                np.testing.assert_allclose(np.asarray(values_image(got[0].values,self.coder)),128,atol=1)
+
+    def test_auto_receiver_selects_conditioning_for_hum(self):
+        from utilities.modem_v2_check import values_image
+        layout=v2.PRESETS['wide']
+        values=image_values(Image.new('RGB',(40,48),(128,128,128)),self.coder)
+        audio=v2.encode(values,layout,self.coder,1,1,1)
+        audio=audio+.3*np.sin(2*np.pi*50*np.arange(len(audio))/v2.RATE)[:,None]
+        got=self.decode(audio,rx=v2.Receiver(layout,self.coder))
+        self.assertEqual(len(got),1)
+        self.assertEqual(got[0].identity,'verified_header')
+        self.assertEqual(got[0].extra['input_path'],'conditioned')
+        rgb=np.asarray(values_image(got[0].values,self.coder)).mean((0,1))
+        np.testing.assert_allclose(rgb,128,atol=2)
+
+    def test_auto_receiver_handles_bass_eq_without_transmitter_changes(self):
+        from argparse import Namespace
+        from scipy.signal import bilinear,tf2sos
+        from utilities.modem_v2_check import frames_from
+        layout=v2.PRESETS['wide']
+        values=image_values(frames_from(Namespace(modem_dir=None,frames=1,stride=1))[0][0],self.coder)
+        clean=np.concatenate([v2.encode(values,layout,self.coder,i,i,2) for i in (1,2)])
+        for hz,db in ((375,6),(375,-6),(1000,6),(1000,-6)):
+            with self.subTest(hz=hz,db=db):
+                # A unity-at-DC/Nyquist bell EQ, Q=1, with its center prewarped.
+                w=2*v2.RATE*np.tan(np.pi*hz/v2.RATE)
+                b,a=bilinear([1,10**(db/20)*w,w*w],[1,w,w*w],fs=v2.RATE)
+                signal=.25*sosfilt(tf2sos(b,a),clean,axis=0)
+                got=self.decode(signal,rx=v2.Receiver(layout,self.coder))
+                self.assertEqual([q.absolute for q in got],[1,2])
+                for q in got:
+                    self.assertEqual(q.extra['input_path'],'eq_corrected')
+                    self.assertLess(float(np.sqrt(np.mean((q.values-values)**2))),.12)
+
     def test_nonfinite_input_and_reset(self):
         rx=v2.Receiver(self.layout,self.coder)
         with self.assertRaises(ValueError):rx.feed(np.full((300,2),np.nan))

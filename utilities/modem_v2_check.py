@@ -1,34 +1,18 @@
 #!/usr/bin/env python3
-"""Exercise v2 transport: bench it, or run an independent receive/tape loop.
+"""Fixed-format v2 image/audio link.
 
-Three things you can do with this:
+Normal transmit: 48 kHz stereo, wide layout, color 40x48 luma plus
+20x24 chroma, 2880 values, deterministic built-in allocation. The receiver
+uses the same constants and recovers timing/rate from incoming audio.
 
-  # 1. see the presets and bench v2 against v1 on synthetic or baked frames
-  python utilities/modem_v2_check.py bench --modem-dir images_modem
+  python utilities/modem_v2_check.py write --modem-dir images_modem --out clean.wav
+  python utilities/modem_v2_check.py read --wav clean.wav
+  python utilities/modem_v2_check.py live-receive --device "BlackHole 2ch"
+  python utilities/modem_v2_check.py live-send --device "BlackHole 2ch" --modem-dir images_modem
 
-  # 2. build the power-allocation table from your bake (v2 needs this to be
-  #    worth anything -- without it the source coder is guessing)
-  python utilities/modem_v2_check.py allocate --modem-dir images_modem \
-      --out modem_allocation.npy
-
-  # 3. the actual tape test: write a WAV, record it to tape, play it back,
-  #    capture to a WAV, and decode that
-  python utilities/modem_v2_check.py write --modem-dir images_modem \
-      --preset tape --frames 200 --out v2_tape.wav --allocation modem_allocation.npy
-  python utilities/modem_v2_check.py read --preset tape \
-      --wav captured_off_tape.wav --allocation modem_allocation.npy --save-frames out/
-
-  # 4. real time, two terminals. Start the receiver first.
-  python utilities/modem_v2_check.py live-receive --device "BlackHole 2ch" --preset tape
-  python utilities/modem_v2_check.py live-send --modem-dir images_modem \
-      --device "BlackHole 2ch" --preset tape --allocation modem_allocation.npy
-
-  # list audio devices
-  python utilities/modem_v2_check.py live-send --list-devices
-
-The read step reports per-frame status, quality tier, measured playback rate
-and PSNR where it can, so a deck's speed error and roll-off show up as numbers
-rather than a verdict.
+Apply effects to copies of rendered WAVs. The bench subcommand retains
+experimental layouts for offline comparisons only. Live sending loops a
+selected set of baked composites; this tool does not drive main.py's scheduler.
 """
 import argparse
 import json
@@ -38,13 +22,12 @@ import wave
 
 import numpy as np
 from PIL import Image, ImageOps
-from scipy.fft import dctn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from animation_modem import transport as V1                    # noqa: E402
 from animation_modem import transport2 as V2                   # noqa: E402
 from animation_modem import impairments as IMP                 # noqa: E402
-from animation_modem.audio_common import (InputFilter, pcm, pair, device,   # noqa: E402
+from animation_modem.audio_common import (pcm, pair, device,   # noqa: E402
                                           wav_blocks)
 
 
@@ -54,7 +37,8 @@ def frames_from(args, profile='color'):
         from modem_bake import ModemLibrary
         library = ModemLibrary(args.modem_dir)
         picks = range(0, min(library.frames, args.frames*args.stride), args.stride)
-        return [library.composite(i, 0, 0) for i in picks], library.profile
+        # Bake profile affects source detail, never the fixed wire format.
+        return [library.composite(i, 0, 0) for i in picks], 'color'
     out = []
     for t in range(args.frames):
         rng = np.random.default_rng(4242)
@@ -80,48 +64,29 @@ def psnr(a, b):
 
 def coder_for(profile, allocation, layout=None):
     shapes = V1.plane_shapes(profile)
-
     if layout and sum(np.prod(s) for s in shapes) > layout.capacity:
-        h, w = shapes[0]
-        choices = []
-
-        for width in range(2, w + 1, 2):
-            for height in range(2, h + 1, 2):
-                trial = [(height, width)]
-
-                if len(shapes) == 3:
-                    trial += [(height // 2, width // 2)] * 2
-
-                count = sum(np.prod(s) for s in trial)
-
-                if count <= layout.capacity:
-                    score = count / (1 + abs(width / height - w / h))
-                    choices.append((score, trial))
-
-        shapes = max(choices, key=lambda item: item[0])[1]
-
+        h,w=shapes[0]
+        # Keep the profile's aspect ratio and chroma layout within its value
+        # budget. tape-fast must not try to transmit 2880 values in 1260 slots.
+        choices=[]
+        for width in range(2,w+1,2):
+            for height in range(2,h+1,2):
+                trial=[(height,width)]+([(height//2,width//2)]*2 if len(shapes)==3 else [])
+                count=sum(np.prod(s) for s in trial)
+                if count<=layout.capacity:
+                    choices.append((count/(1+abs(width/height-w/h)),trial))
+        shapes=max(choices,key=lambda p:p[0])[1]
     table = np.load(allocation) if allocation else None
     return V2.SourceCoder(shapes, table), shapes
 
-def image_values(image, coder):
-    h, w = coder.shapes[0]
-    image = ImageOps.pad(
-        image.convert("RGB"),
-        (w, h),
-        method=Image.Resampling.LANCZOS,
-    )
 
-    planes = image.convert("YCbCr").split()
+def image_values(image,coder):
+    h,w=coder.shapes[0]
+    image=ImageOps.pad(image.convert('RGB'),(w,h),method=Image.Resampling.LANCZOS)
+    planes=image.convert('YCbCr').split()
+    return np.concatenate([np.asarray(plane.resize((shape[1],shape[0]),Image.Resampling.BOX)).ravel()
+                           for plane,shape in zip(planes,coder.shapes)]).astype(float)/127.5-1
 
-    return np.concatenate([
-        np.asarray(
-            plane.resize(
-                (shape[1], shape[0]),
-                Image.Resampling.BOX,
-            )
-        ).ravel()
-        for plane, shape in zip(planes, coder.shapes)
-    ]).astype(float) / 127.5 - 1
 
 def values_image(values,coder):
     planes=[];offset=0
@@ -135,7 +100,7 @@ def values_image(values,coder):
 
 
 def receive_for(args,layout,coder):
-    return V2.Receiver(layout,coder,min_speed=args.min_speed,max_speed=args.max_speed)
+    return V2.Receiver(layout,coder)
 
 
 def record(r):
@@ -146,76 +111,35 @@ def record(r):
             'playback_rate_pct':round(100*(speed-1),3),**r.extra}
 
 
-def do_allocate(args):
-    """Per-coefficient energy over the bake. This is the table v2 wants."""
-    frames, profile = frames_from(args, )
-    coder,shapes = coder_for(profile,None,V2.PRESETS[args.preset])
-    total, n = None, 0
-    for im in frames:
-        values = image_values(im,coder)
-        pieces, offset = [], 0
-        for shape in shapes:
-            size = int(np.prod(shape))
-            pieces.append(dctn(values[offset:offset+size].reshape(shape), norm='ortho').ravel())
-            offset += size
-        c = np.concatenate(pieces)**2
-        total = c if total is None else total + c
-        n += 1
-    sigma = np.sqrt(total/max(n, 1))
-    sigma = np.maximum(sigma, sigma.max()*1e-4)      # never allocate exactly zero
-    np.save(args.out, sigma)
-    print(f'{n} frames, profile {profile}, {len(sigma)} coefficients -> {args.out}')
-    print(f'  energy spread: max/min = {sigma.max()/sigma.min():.1f}  '
-          f'(a flat spread means allocation buys nothing)')
-
-
 def do_write(args):
     frames, profile = frames_from(args)
     layout = V2.PRESETS[args.preset]
-    coder, _ = coder_for(profile, args.allocation, layout)
-
+    coder, _ = coder_for(profile, args.allocation,layout)
     print(layout.describe())
-
     path = Path(args.out)
-    with wave.open(str(path), "wb") as sink:
-        sink.setparams((2, 2, V2.RATE, 0, "NONE", "not compressed"))
-
+    with wave.open(str(path), 'wb') as sink:
+        sink.setparams((2, 2, V2.RATE, 0, 'NONE', 'not compressed'))
         for n, im in enumerate(frames):
-            prepared = V1.prepare_image(
-                im,
-                n + 1,
-                1,
-                len(frames),
-                args.numbered,
-                profile,
-            )
+            values = image_values(V1.prepare_image(im, n+1, 1, len(frames), args.numbered,
+                                                   profile),coder)
+            audio = V2.encode(values, layout, coder, n+1, (n % len(frames))+1,
+                              len(frames), stamp_ms=n*int(1000/layout.fps))
+            sink.writeframesraw(pcm(audio*args.gain))
+    seconds = len(frames)/layout.fps
+    print(f'wrote {len(frames)} frames, {seconds:.1f} s, peak gain {args.gain} -> {path}')
+    print('Decode this clean WAV first; apply effects to a separate copy afterward.')
 
-            values = image_values(prepared, coder)
-
-            audio = V2.encode(
-                values,
-                layout,
-                coder,
-                n + 1,
-                (n % len(frames)) + 1,
-                len(frames),
-                stamp_ms=n * int(1000 / layout.fps),
-            )
-
-            sink.writeframesraw(pcm(audio * args.gain))
 
 def do_read(args):
     layout = V2.PRESETS[args.preset]
     coder, _ = coder_for(args.profile, args.allocation,layout)
     print(layout.describe(), file=sys.stderr)
     receiver = receive_for(args,layout,coder)
-    conditioner = InputFilter((600*args.min_speed,22000)) if args.input_filter else None
     if args.save_frames:
         Path(args.save_frames).mkdir(parents=True, exist_ok=True)
     tiers, rates, seen = {}, [], 0
     def results():
         for block in wav_blocks(args.wav,args.channels,1024):
-            if conditioner is not None:block=conditioner.process(block)
             yield from receiver.feed(block)
         yield from receiver.flush()
     for r in results():
@@ -357,14 +281,12 @@ def do_live_receive(args):
     print(layout.describe(), file=sys.stderr)
     channels = args.channels
     receiver = receive_for(args,layout,coder)
-    conditioner = InputFilter((600*args.min_speed,22000)) if args.input_filter else None
     if args.save_frames:
         Path(args.save_frames).mkdir(parents=True, exist_ok=True)
     newest = {'result': None, 'seen': 0, 'tiers': {}}
     stop = threading.Event()
 
     def pump():
-        nonlocal conditioner
         with sd.InputStream(samplerate=V2.RATE, channels=max(channels)+1, dtype='float32',
                             device=args.device, blocksize=256, latency='low') as stream:
             print(json.dumps({'input_latency_ms': stream.latency*1000}), file=sys.stderr)
@@ -373,11 +295,7 @@ def do_live_receive(args):
                 if overflow:
                     print(json.dumps({'status': 'input_overflow'}), flush=True)
                     receiver.reset()
-                    if conditioner is not None:
-                        conditioner=InputFilter((600*args.min_speed,22000))
                 block = audio[:, channels]
-                if conditioner is not None:
-                    block = conditioner.process(block)
                 for r in receiver.feed(block):
                     newest['seen'] += 1
                     newest['tiers'][r.tier] = newest['tiers'].get(r.tier, 0)+1
@@ -450,56 +368,41 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest='command', required=True)
+    # Normal sending and receiving share one format, without external tables.
+    p.set_defaults(preset='wide', profile='color', allocation=None, gain=1.0)
     def shared(q):
         q.add_argument('--modem-dir', type=Path, help='Bake to read frames from')
         q.add_argument('--frames', type=int, default=24)
-        q.add_argument('--stride', type=int, default=7)
-        q.add_argument('--allocation', type=Path, help='Table from the allocate step')
-        q.add_argument('--preset', choices=list(V2.PRESETS), default='wide')
-    b = sub.add_parser('bench'); shared(b)
-    a = sub.add_parser('allocate'); shared(a)
-    a.add_argument('--out', type=Path, default=Path('modem_allocation.npy'))
+        q.add_argument('--stride', type=int, default=1)
+    b = sub.add_parser('bench', help='Offline experimental comparison'); shared(b)
+    b.add_argument('--allocation', type=Path)
+    b.add_argument('--preset', choices=list(V2.PRESETS), default='wide')
     w = sub.add_parser('write'); shared(w)
     w.add_argument('--out', type=Path, default=Path('v2_test.wav'))
-    w.add_argument('--gain', type=float, default=1.0, help='Output scale before PCM')
     w.add_argument('-f', '--numbered', action='store_true')
     r = sub.add_parser('read')
     r.add_argument('--wav', type=Path, required=True)
     r.add_argument('--channels', type=pair,
                    default=(0, 1))
-    r.add_argument('--allocation', type=Path)
-    r.add_argument('--preset', choices=list(V2.PRESETS), default='wide')
-    r.add_argument('--profile', choices=list(V1.PROFILES), default='color')
     r.add_argument('--save-frames', type=Path)
-    r.add_argument('--input-filter', action=argparse.BooleanOptionalAction, default=True)
     ls = sub.add_parser('live-send'); shared(ls)
     ls.add_argument('--device',type=device); ls.add_argument('--channels',type=pair,default=(0,1))
-    ls.add_argument('--gain', type=float, default=1.0)
     ls.add_argument('-f', '--numbered', action='store_true')
     ls.add_argument('--list-devices', action='store_true')
     lr = sub.add_parser('live-receive')
     lr.add_argument('--device',type=device); lr.add_argument('--channels',type=pair,default=(0,1))
-    lr.add_argument('--allocation', type=Path)
-    lr.add_argument('--preset', choices=list(V2.PRESETS), default='wide')
-    lr.add_argument('--profile', choices=list(V1.PROFILES), default='color')
     lr.add_argument('--save-frames', type=Path)
-    lr.add_argument('--input-filter', action=argparse.BooleanOptionalAction, default=True)
     lr.add_argument('--headless', action='store_true', help='JSON only, no window')
     lr.add_argument('--quiet', action='store_true', help='Window only, no per-packet JSON')
     lr.add_argument('--width', type=int, default=480)
     lr.add_argument('--height', type=int, default=576)
     lr.add_argument('--list-devices', action='store_true')
-    for parser in (r,lr):
-        parser.add_argument('--min-speed',type=float,default=.5,
-                            help='Minimum playback speed searched (.25 to 1, default .5)')
-        parser.add_argument('--max-speed',type=float,default=2.,
-                            help='Maximum playback speed searched (1 to 2, default 2)')
     args = p.parse_args(argv)
     if getattr(args,'frames',1)<1 or getattr(args,'stride',1)<1:
         p.error('--frames and --stride must be positive')
     if not np.isfinite(getattr(args,'gain',1)) or getattr(args,'gain',1)<=0:
         p.error('--gain must be finite and positive')
-    {'bench': do_bench, 'allocate': do_allocate, 'write': do_write, 'read': do_read,
+    {'bench': do_bench, 'write': do_write, 'read': do_read,
      'live-send': do_live_send, 'live-receive': do_live_receive}[args.command](args)
 
 

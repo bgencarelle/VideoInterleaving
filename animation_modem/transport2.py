@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.fft import dctn, idctn
-from scipy.signal import resample_poly, firwin
+from scipy.signal import resample_poly, firwin, butter, sosfiltfilt
 
 RATE = 48000
 N, CP = 128, 16
@@ -53,6 +53,7 @@ class Layout:
     top_bin: int = 54          # highest carrier; 54 -> 20.25 kHz, 27 -> 10.1 kHz
     image_symbols: int = 15    # more symbols -> bigger picture, lower frame rate
     name: str = 'wide'
+    progressive: bool = False
 
     def __post_init__(self):
         if not (isinstance(self.top_bin,int) and 10<=self.top_bin<=63
@@ -61,10 +62,13 @@ class Layout:
 
     @cached_property
     def carriers(self):
-        return np.arange(LOW_BIN, self.top_bin + 1)
+        return np.arange(1 if self.progressive else LOW_BIN, self.top_bin + 1)
 
     @cached_property
     def pilots(self):
+        if self.progressive:
+            # Two low-band pilots survive roll-off; bins 1 and 2 carry images.
+            return np.array([3, 5, 21, 45])
         c = self.carriers
         if len(c)<12:
             return c[np.linspace(0,len(c)-1,4).round().astype(int)]
@@ -122,7 +126,7 @@ class Layout:
 
 PRESETS = {
     # today's band and cadence, for a cable or a digital loopback
-    'wide': Layout(top_bin=54, image_symbols=15, name='wide'),
+    'wide': Layout(top_bin=54, image_symbols=15, name='wide', progressive=True),
     # cassette: 10 kHz ceiling, full picture, slower
     'tape': Layout(top_bin=27, image_symbols=35, name='tape'),
     # cassette: 10 kHz ceiling, keeps the frame rate, smaller picture
@@ -200,6 +204,31 @@ class SourceCoder:
                                for p in self._split(coeffs)])
 
 
+@lru_cache(maxsize=32)
+def coefficient_slots(layout, shapes):
+    """Source coefficient -> wire slot, coarse image first in audio frequency.
+
+    Sort all planes together by normalized spatial frequency. Place the three
+    DC terms first, then progressively finer features on ascending carriers.
+    Each carrier spans all image symbols and both stereo channels.
+    """
+    count = sum(h*w for h,w in shapes)
+    if not layout.progressive:
+        return np.arange(count)
+    ranks = []
+    for h,w in shapes:
+        yy,xx = np.mgrid[:h,:w]
+        ranks.extend(np.hypot(yy/h,xx/w).ravel())
+    source_order = np.argsort(ranks, kind='stable')
+    slots = np.arange(layout.capacity).reshape(
+        layout.image_symbols, len(layout.data_bins), 2, 2)
+    low_to_high = slots.transpose(1,0,2,3).ravel()[:count]
+    mapping = np.empty(count, dtype=int)
+    mapping[source_order] = low_to_high
+    mapping.setflags(write=False)
+    return mapping
+
+
 # --------------------------------------------------------------------------
 # Preamble templates and resampling (legacy full-bank helper retained)
 # --------------------------------------------------------------------------
@@ -257,10 +286,10 @@ IMAGE_GAIN = .7
 HEADER_FORMAT = '>2sBBIHHI'      # magic, flags, top_bin, absolute, index, count, stamp
 
 
-def pack_header(flags, top_bin, absolute, index, count, stamp_ms):
+def pack_header(flags, top_bin, absolute, index, count, stamp_ms, magic=b'V2'):
     if not (0 <= absolute <= 0xffffffff and 1 <= index <= count <= 0xffff):
         raise ValueError('Frame/index/count outside the header ranges')
-    raw = struct.pack(HEADER_FORMAT, b'V2', flags & 0xff, top_bin & 0xff,
+    raw = struct.pack(HEADER_FORMAT, magic, flags & 0xff, top_bin & 0xff,
                       absolute, index, count, stamp_ms & 0xffffffff)
     return raw + struct.pack('>I', zlib.crc32(raw))
 
@@ -279,7 +308,8 @@ def encode(values, layout, coder, absolute, index, count, stamp_ms=0, flags=0):
     grid[0, :, 0] = 1
     grid[1, :, 1] = 1
 
-    raw = pack_header(flags, layout.top_bin, absolute, index, count, stamp_ms)
+    raw = pack_header(flags, layout.top_bin, absolute, index, count, stamp_ms,
+                      magic=b'V3' if layout.progressive else b'V2')
     bits = np.unpackbits(np.frombuffer(raw, np.uint8)).reshape(HEADER_SLOTS, 2)
     qpsk = ((bits[:, 0]*2.-1) + 1j*(bits[:, 1]*2.-1))/np.sqrt(2)
     room = layout.header_symbols*len(header)
@@ -290,9 +320,9 @@ def encode(values, layout, coder, absolute, index, count, stamp_ms=0, flags=0):
         grid[2+s, header, 0] = spread[s]*HEADER_GAIN
         grid[2+s, header, 1] = spread[s]*HEADER_GAIN
 
-    sent = coder.forward(values)
     room = layout.image_symbols*len(data)*4
-    sent = np.resize(np.concatenate([sent, np.zeros(max(0, room-len(sent)))]), room)
+    sent = np.zeros(room)
+    sent[coefficient_slots(layout, tuple(coder.shapes))] = coder.forward(values)
     block = sent.reshape(layout.image_symbols, len(data), 2, 2)
     grid[2+layout.header_symbols:, data, :] = (block[..., 0] + 1j*block[..., 1])*IMAGE_GAIN
     grid[2:, pilots, :] = 1
@@ -392,7 +422,8 @@ def decode_packet(samples, layout, coder):
         if zlib.crc32(raw[:HEADER_BYTES]) == struct.unpack('>I', raw[HEADER_BYTES:])[0]:
             magic, hflags, top, absolute, index, count, stamp = struct.unpack(
                 HEADER_FORMAT, raw[:HEADER_BYTES])
-            if magic == b'V2' and top == layout.top_bin and 1 <= index <= count:
+            expected_magic = b'V3' if layout.progressive else b'V2'
+            if magic == expected_magic and top == layout.top_bin and 1 <= index <= count:
                 fields = (hflags, absolute, index, count, stamp)
                 break
 
@@ -403,7 +434,8 @@ def decode_packet(samples, layout, coder):
     coverage = float(np.mean(per >= .55))
     per_noise = np.broadcast_to(variance[data][None, :, :, None],
                                (layout.image_symbols, len(data), 2, 2)).ravel()
-    values = coder.inverse(sent[:coder.count], per[:coder.count], per_noise[:coder.count])
+    slots = coefficient_slots(layout, tuple(coder.shapes))
+    values = coder.inverse(sent[slots], per[slots], per_noise[slots])
     tier = ('best' if coverage >= .95 else 'better' if coverage >= .7
             else 'good' if coverage >= .35 else 'poor')
     if fields is None:
@@ -506,6 +538,77 @@ def _fit_sync(samples, at, scale, reach=.03, cutoff=None):
     return float(left+pos),float(s),float(scores.max())
 
 
+@lru_cache(maxsize=4)
+def _conditioning_filter(cutoff):
+    return butter(4, cutoff, btype='highpass', fs=RATE, output='sos')
+
+
+def _condition(samples, cutoff):
+    # Applied only to buffered search/packet windows; zero phase avoids adding
+    # a causal filter's group delay to the playback-rate estimate. No lookahead
+    # beyond the already available samples or the current packet is required.
+    return sosfiltfilt(_conditioning_filter(cutoff), samples, axis=0)
+
+
+def _recovery_quality(result):
+    if result.values is None or not np.isfinite(result.values).all():
+        return (False, False, -float('inf'))
+    return (True, result.identity == 'verified_header',
+            -float(result.pilot_error if result.pilot_error is not None else np.inf))
+
+
+@lru_cache(maxsize=8)
+def _channel_training(layout):
+    """Known preamble/training prefix and a cached 128-tap stereo FIR fit.
+
+    No image, header identity or previous decoded frame is used as training.
+    Ignore the first 128 received samples to reduce previous-packet tail bias.
+    """
+    taps = 128
+    spectrum = np.zeros((2,N//2+1,2),complex)
+    ph = phases(layout)
+    spectrum[0,layout.carriers,0] = ph[0,:,0]
+    spectrum[1,layout.carriers,1] = ph[1,:,1]
+    wave = np.fft.irfft(spectrum,n=N,axis=1)
+    wave = np.concatenate([wave[:,-CP:],wave],axis=1).reshape(-1,2)
+    reference = np.zeros((SYNC_LEN+2*SYMBOL,2))
+    reference[16:16+len(SYNC),0] = SYNC
+    reference[SYNC_LEN:] = wave
+    padded = np.pad(reference,((taps-1,0),(0,0)))
+    design = np.lib.stride_tricks.sliding_window_view(padded,taps,axis=0)
+    design = design[:,:,::-1].reshape(len(reference),-1)[taps:]
+    inverse = np.linalg.solve(design.T @ design + np.eye(2*taps)*1e-5,design.T)
+    return design,inverse
+
+
+def _undo_channel_memory(samples,layout):
+    """Optional same-packet inverse for EQ tails longer than the cyclic prefix.
+
+    Fit the stereo impulse response from known samples. Regularize spectral
+    inversion to limit boost at weak frequencies; normal decoding subsequently
+    estimates residual channel error. Caller keeps this only if recovery improves.
+    """
+    taps = 128
+    design,inverse = _channel_training(layout)
+    observed = samples[taps:SYNC_LEN+2*SYMBOL]
+    coefficients = inverse @ observed
+    residual = observed-design @ coefficients
+    fit_error = float(np.mean(residual**2)/max(np.mean(observed**2),1e-20))
+    if not np.isfinite(fit_error) or fit_error > .1:
+        return None,fit_error
+    impulse = coefficients.reshape(2,taps,2).transpose(2,0,1)
+    size = 1 << (len(samples)+2*taps-1).bit_length()
+    channel = np.fft.rfft(impulse,n=size,axis=-1).transpose(2,0,1)
+    adjoint = channel.conj().transpose(0,2,1)
+    gram = adjoint @ channel
+    power = float(np.mean(np.abs(channel)**2))
+    regularizer = max(power*max(1e-4,fit_error),1e-12)
+    equalizer = np.linalg.solve(gram+np.eye(2)[None]*regularizer,adjoint)
+    signal = np.fft.rfft(samples,n=size,axis=0)
+    restored = np.fft.irfft(np.einsum('kij,kj->ki',equalizer,signal),n=size,axis=0)
+    return restored[:len(samples)],fit_error
+
+
 class Receiver:
     """Incremental SEARCH -> BODY -> emit. No frame-spacing or wall-clock input.
 
@@ -514,17 +617,19 @@ class Receiver:
     artificial EOF padding is needed. Memory is bounded even for giant WAV reads.
     """
     def __init__(self, layout, coder, threshold=.4, rate_window=None,
-                 min_speed=.5, max_speed=2.0):
+                 min_speed=.25, max_speed=2.0):
         if not (0 < min_speed <= 1 <= max_speed and min_speed >= .25 and max_speed <= 2):
             raise ValueError('Supported search range: .25 <= min_speed <= 1 <= max_speed <= 2')
         if coder.count > layout.capacity:raise ValueError('Source coder exceeds layout capacity')
         self.layout, self.coder, self.threshold = layout, coder, threshold
+        self.min_speed, self.max_speed = min_speed, max_speed
         self.bank = _coarse_bank(min_speed, max_speed)
         self.lengths=np.array([len(t) for _,t in self.bank])
         self.templates=np.stack([np.pad(t,(0,int(self.lengths.max())-len(t))) for _,t in self.bank])
         self.energies=np.sum(self.templates**2,axis=1)
         self.keep = int(np.ceil(280/min_speed))+32
-        self.sync_cutoff=layout.band[1] if layout.top_bin<=13 else None
+        self.sync_cutoff=(3000 if layout.progressive else
+                          layout.band[1] if layout.top_bin<=13 else None)
         self.reset()
 
     def reset(self):
@@ -534,10 +639,34 @@ class Receiver:
         self.pending = None
         self.search_after = 272
         self.acquire_ms = 0.
+        self.acquisition_path = 'raw'
+
+    def _fit(self, x, at, scale, reach=.03):
+        # Preserve all available timing information on clean audio. Low-band
+        # fitting is a fallback for roll-off, never forced on a clean signal.
+        raw = _fit_sync(x, at, scale, reach=reach)
+        if raw[2] >= .85 or self.sync_cutoff is None:
+            return raw
+        narrowed = _fit_sync(x, at, scale, reach=reach, cutoff=self.sync_cutoff)
+        return narrowed if narrowed[2] >= self.threshold else raw
 
     def _acquire(self):
         x = self.buffer[:max(2048, 2*self.keep)]
         if not np.any(x):return None
+        self.acquisition_path = 'raw'
+        found = self._acquire_window(x)
+        if found is None and len(x) >= 272:
+            # The preamble begins above 281 Hz even at quarter speed. This
+            # search-only cutoff can reject hum without filtering image data.
+            found = self._acquire_window(_condition(x,120))
+            if found is not None:self.acquisition_path = 'conditioned'
+        if found is not None:
+            speed = 1/found[1]
+            if not self.min_speed*.98 <= speed <= self.max_speed*1.02:
+                return None
+        return found
+
+    def _acquire_window(self, x):
         scale = 1+self.rate
         if self.confidence and len(x)<np.ceil(272*scale):return None
         t = SYNC if abs(scale-1)<1e-6 else _template(float(scale))
@@ -548,7 +677,7 @@ class Receiver:
             if len(hits):
                 first = int(hits[0]);at = first+int(np.argmax(scores[first:first+8]))
                 if scores[at]>.999 and scale==1:return float(at),1.,float(scores[at])
-                fit = _fit_sync(x,at,scale,reach=.004 if self.confidence else .03,cutoff=self.sync_cutoff)
+                fit = self._fit(x,at,scale,reach=.004 if self.confidence else .03)
                 if fit[2]>=self.threshold:return fit
         if len(x)<256:return None
         coarse = np.asarray(resample_poly(x,1,8,axis=0),dtype=float)
@@ -582,7 +711,7 @@ class Receiver:
                             candidates.append((score,p,float(s)))
         # Verify the strongest coarse hypotheses in chronological order.
         for _,at,s in sorted(sorted(candidates,reverse=True)[:12],key=lambda p:p[1]):
-            fit=_fit_sync(x,at,s,cutoff=self.sync_cutoff)
+            fit=self._fit(x,at,s)
             if fit[2]>=self.threshold:return fit
         return None
 
@@ -626,9 +755,24 @@ class Receiver:
             else:
                 straight=resample_packet(self.buffer,scale-1,self.layout.packet,offset=begin)
             result=decode_packet(straight,self.layout,self.coder)
+            input_path = 'raw'
+            if result.identity != 'verified_header' or result.pilot_error > .05:
+                # Rate correction has returned the carriers to nominal Hz.
+                # Compare the same packet with rumble removed; keep raw on ties.
+                alternative = decode_packet(_condition(straight,120),self.layout,self.coder)
+                if _recovery_quality(alternative) > _recovery_quality(result):
+                    result, input_path = alternative, 'conditioned'
+            if result.identity != 'verified_header' or result.pilot_error > .15:
+                restored,fit_error = _undo_channel_memory(straight,self.layout)
+                if restored is not None:
+                    alternative = decode_packet(restored,self.layout,self.coder)
+                    if _recovery_quality(alternative) > _recovery_quality(result):
+                        result,input_path = alternative,'eq_corrected'
+                        result.extra['channel_fit_error'] = fit_error
             result.rate_error=scale-1
             result.rate_confidence=score
             result.extra.update(sync_score=score, at=self.offset+begin,
+                                input_path=input_path, acquisition_path=self.acquisition_path,
                                 playback_speed=1/scale,
                                 decode_ms=(time.perf_counter()-started)*1000,
                                 acquire_ms=self.acquire_ms)
