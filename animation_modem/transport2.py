@@ -263,15 +263,40 @@ def find_preamble(samples, limit=None, bank=None):
     return best
 
 
-def resample_packet(samples, rate, length, taps=8, offset=0.0):
-    """Windowed sinc. Linear interpolation loses about half the signal here."""
+@lru_cache(maxsize=4)
+def _sinc_weight_table(taps=8, phases=4096):
+    """Quantized windowed-sinc weights for the live packet path."""
+    offsets = np.arange(-taps+1, taps+1, dtype=float)
+    fraction = np.arange(phases, dtype=float)[:, None]/phases
+    weights = (np.sinc(fraction-offsets[None, :]) *
+               np.sinc((fraction-offsets[None, :])/taps))
+    weights /= weights.sum(axis=1, keepdims=True)
+    return weights
+
+
+def resample_packet(samples, rate, length, taps=8, offset=0.0, fast=False):
+    """Resample one packet, using a cheap path for normal small clock error.
+
+    The live path uses a cached fractional-delay sinc table; the uncached path
+    is retained for the timing fitter, where each call uses a different delay.
+    """
+    if fast and abs(rate) < .02:
+        # Near nominal speed, six taps retain the image fidelity of the full
+        # path while reducing the per-sample window from 16 to 12 taps.
+        taps = min(int(taps), 6)
     position = offset + np.arange(length)*(1.0+rate)
     base = np.floor(position).astype(int)
     offsets = np.arange(-taps+1, taps+1)
     index = np.clip(base[:, None]+offsets[None, :], 0, len(samples)-1)
     delta = (position-base)[:, None]-offsets[None, :]
-    weights = np.sinc(delta)*np.sinc(delta/taps)
-    weights /= weights.sum(axis=1, keepdims=True)
+    if fast:
+        phases = _sinc_weight_table(taps)
+        phase = np.minimum((delta[:, taps-1]*len(phases)).astype(np.intp),
+                           len(phases)-1)
+        weights = phases[phase]
+    else:
+        weights = np.sinc(delta)*np.sinc(delta/taps)
+        weights /= weights.sum(axis=1, keepdims=True)
     return np.einsum('ij,ijc->ic', weights, samples[index]).astype(np.float32)
 
 
@@ -537,7 +562,7 @@ def _sync_filter(cutoff):
     return firwin(33,cutoff,fs=RATE)
 
 
-def _fit_sync(samples, at, scale, reach=.03, cutoff=None):
+def _fit_sync(samples, at, scale, reach=.03, cutoff=None, iterations=7):
     """Refine only the preamble, not five complete image decodes."""
     radius = 12
     left = max(0, int(at)-radius)
@@ -562,7 +587,7 @@ def _fit_sync(samples, at, scale, reach=.03, cutoff=None):
     # Two-parameter timing loop over a single preamble. Project out gain, then
     # fit timing error and dilation together; no general-purpose optimizer and
     # no repeated full-frame inverse FFTs.
-    for _ in range(7):
+    for _ in range(iterations):
         z=filtered(resample_packet(local,s-1,len(SYNC),offset=pos))
         scores=abs(reference @ z)/np.sqrt(energy*np.maximum((z*z).sum(0),1e-20))
         c=int(np.argmax(scores));z=z[:,c].astype(float)
@@ -660,11 +685,13 @@ class Receiver:
     artificial EOF padding is needed. Memory is bounded even for giant WAV reads.
     """
     def __init__(self, layout, coder, threshold=.4, rate_window=None,
-                 min_speed=.25, max_speed=2.0):
+                 min_speed=.25, max_speed=2.0, recovery=True, fast=False):
         if not (0 < min_speed <= 1 <= max_speed and min_speed >= .25 and max_speed <= 2):
             raise ValueError('Supported search range: .25 <= min_speed <= 1 <= max_speed <= 2')
         if coder.count > layout.capacity:raise ValueError('Source coder exceeds layout capacity')
         self.layout, self.coder, self.threshold = layout, coder, threshold
+        self.recovery = bool(recovery)
+        self.fast = bool(fast)
         self.min_speed, self.max_speed = min_speed, max_speed
         self.bank = _coarse_bank(min_speed, max_speed)
         self.lengths=np.array([len(t) for _,t in self.bank])
@@ -675,22 +702,31 @@ class Receiver:
                           layout.band[1] if layout.top_bin<=13 else None)
         self.reset()
 
-    def reset(self):
+    def reset(self, preserve_timing=False):
+        # A capture queue drop creates a gap, but it does not change the
+        # device/tape rate. Live callers can discard the partial packet and
+        # retain the last measured rate so reacquisition stays on the cheap
+        # locked path instead of restarting the wide cold search.
+        rate = self.rate if preserve_timing else 0.
+        confidence = self.confidence if preserve_timing else 0.
         self.buffer = np.empty((0,2), np.float32)
         self.offset = 0
-        self.rate, self.confidence = 0., 0.
+        self.rate, self.confidence = rate, confidence
         self.pending = None
         self.search_after = 272
         self.acquire_ms = 0.
         self.acquisition_path = 'raw'
+        self.locked_packets = 0
 
     def _fit(self, x, at, scale, reach=.03):
         # Preserve all available timing information on clean audio. Low-band
         # fitting is a fallback for roll-off, never forced on a clean signal.
-        raw = _fit_sync(x, at, scale, reach=reach)
+        iterations = 3 if self.confidence else 7
+        raw = _fit_sync(x, at, scale, reach=reach, iterations=iterations)
         if raw[2] >= .85 or self.sync_cutoff is None:
             return raw
-        narrowed = _fit_sync(x, at, scale, reach=reach, cutoff=self.sync_cutoff)
+        narrowed = _fit_sync(x, at, scale, reach=reach, cutoff=self.sync_cutoff,
+                             iterations=iterations)
         return narrowed if narrowed[2] >= self.threshold else raw
 
     def _acquire(self):
@@ -720,6 +756,14 @@ class Receiver:
             if len(hits):
                 first = int(hits[0]);at = first+int(np.argmax(scores[first:first+8]))
                 if scores[at]>.999 and scale==1:return float(at),1.,float(scores[at])
+                # Once locked, a strong correlation with the previous packet's
+                # rate is enough. A short PLL fit is only needed for cold
+                # acquisition or when the tape speed has moved enough to
+                # weaken this cheap test.
+                locked_cutoff = .42 if self.fast else .60
+                if self.confidence and scores[at] >= locked_cutoff:
+                    self.locked_packets += 1
+                    return float(at),float(scale),float(scores[at])
                 fit = self._fit(x,at,scale,reach=.004 if self.confidence else .03)
                 if fit[2]>=self.threshold:return fit
         if len(x)<256:return None
@@ -796,16 +840,17 @@ class Receiver:
             if scale==1 and begin==int(begin) and begin>=0:
                 straight=self.buffer[int(begin):int(begin)+self.layout.packet]
             else:
-                straight=resample_packet(self.buffer,scale-1,self.layout.packet,offset=begin)
+                straight=resample_packet(self.buffer,scale-1,self.layout.packet,offset=begin,
+                                         fast=self.fast)
             result=decode_packet(straight,self.layout,self.coder)
             input_path = 'raw'
-            if result.identity != 'verified_header' or result.pilot_error > .05:
+            if self.recovery and (result.identity != 'verified_header' or result.pilot_error > .05):
                 # Rate correction has returned the carriers to nominal Hz.
                 # Compare the same packet with rumble removed; keep raw on ties.
                 alternative = decode_packet(_condition(straight,120),self.layout,self.coder)
                 if _recovery_quality(alternative) > _recovery_quality(result):
                     result, input_path = alternative, 'conditioned'
-            if result.identity != 'verified_header' or result.pilot_error > .15:
+            if self.recovery and (result.identity != 'verified_header' or result.pilot_error > .15):
                 restored,fit_error = _undo_channel_memory(straight,self.layout)
                 if restored is not None:
                     alternative = decode_packet(restored,self.layout,self.coder)

@@ -86,6 +86,10 @@ class Emulator:
         self.settings = settings.validate()
         self.rng = np.random.default_rng(settings.seed)
         self.sample = 0
+        self.identity = not any((settings.lowpass_hz, settings.highpass_hz,
+                                 settings.gain_db, settings.right_gain_db,
+                                 settings.crosstalk, settings.clip, settings.bits,
+                                 settings.dropout_ms, settings.noise_dbfs is not None))
         filters = []
         if settings.highpass_hz:
             filters.append(butter(4, settings.highpass_hz, btype='highpass', fs=RATE, output='sos'))
@@ -96,6 +100,12 @@ class Emulator:
 
     def process(self, data):
         s = self.settings
+        if self.identity:
+            x = np.asarray(data, dtype=np.float32)
+            if x.ndim != 2 or x.shape[1] != 2 or not np.isfinite(x).all():
+                raise ValueError('Emulator requires finite stereo samples')
+            self.sample += len(x)
+            return x
         x = np.asarray(data, dtype=np.float64).copy()
         if x.ndim != 2 or x.shape[1] != 2 or not np.isfinite(x).all():
             raise ValueError('Emulator requires finite stereo samples')
