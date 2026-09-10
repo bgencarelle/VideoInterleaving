@@ -121,6 +121,13 @@ class TimingTests(unittest.TestCase):
         class Input:
             latency=.005
             position=0
+            samplerate=48000
+            closed=False
+            def start(self):pass
+            def stop(self):pass
+            def close(self):self.closed=True
+            @property
+            def read_available(self):return 256
             def __enter__(self):return self
             def __exit__(self,*args):pass
             def read(self,count):
@@ -129,12 +136,20 @@ class TimingTests(unittest.TestCase):
                 self.position+=len(block)
                 return block,False
         stream=Input()
-        fake=SimpleNamespace(InputStream=lambda **kwargs:stream)
+        class PortAudioError(Exception):pass
+        def check_input_settings(**kwargs):
+            if kwargs['samplerate'] != 48000:raise PortAudioError('unsupported')
+        fake=SimpleNamespace(InputStream=lambda **kwargs:stream,
+                             PortAudioError=PortAudioError,
+                             check_input_settings=check_input_settings,
+                             query_devices=lambda *args:dict(max_input_channels=2,
+                                                             default_samplerate=48000))
         output=io.StringIO()
         with patch.object(decoder,'sounddevice',return_value=fake), \
              patch.object(decoder.time,'time_ns',side_effect=lambda:base+round(stream.position/48000*1e9)), \
              contextlib.redirect_stdout(output),contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(KeyboardInterrupt):decoder.main(['--headless'])
+        self.assertTrue(stream.closed)
         rows=[json.loads(line) for line in output.getvalue().splitlines()]
         received=next(row for row in rows if row['absolute']==1)
         self.assertEqual(received['target_time_ns'],target)
