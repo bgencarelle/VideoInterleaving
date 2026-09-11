@@ -5,6 +5,40 @@ face and float layers, composites one complete RGBA image at a time, and sends
 it through the frame-independent stereo audio modem. The existing scope,
 local, web, and ASCII modes are left on their existing paths.
 
+## Install modem dependencies
+
+Normal `setup_app.sh` setup now includes modem dependencies through
+`requirements.txt` -> `requirements-modem.txt`, and verifies them in `.venv`.
+An existing environment is updated when either requirements file changes or a
+modem import is missing. System packages include SciPy and Pillow's Tk bridge
+on Debian, Tk bindings on every supported platform, and PortAudio.
+
+For an existing checkout, rerun your usual `setup_app.sh` command. To verify
+without changing the environment or touching audio devices:
+
+```bash
+.venv/bin/python utilities/check_modem_setup.py
+```
+
+For standalone baking/receiving tools, install the OS Tk/PortAudio dependencies
+first, then use a virtual environment:
+
+```bash
+python -m pip install -r requirements-modem.txt
+python utilities/check_modem_setup.py
+```
+
+Debian/Ubuntu packages: `python3-scipy python3-tk python3-pil.imagetk libportaudio2`.
+Fedora uses `python3-tkinter portaudio`; Arch uses `tk portaudio`. Homebrew uses
+`python-tk portaudio`; Tk must match the Python version used for the venv.
+Full `main.py --mode modem` transmission still uses the normal application
+requirements, which are installed by setup.
+
+FFmpeg with the `rubberband` filter is optional and only needed to generate the
+pitch-probe experiment files (`utilities/modem_pitch_probe.py make`). It is not
+required for baking, live transmission, or reception. Setup does not change
+working audio device/channel selections or clock synchronization.
+
 ## Prepare a modem bake
 
 The modem bake is a compact, memory-mapped RGBA slab for each numeric face and

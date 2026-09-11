@@ -35,7 +35,8 @@ sudo ./setup_app.sh
 This script will:
 * Install all system packages from `system-requirements.txt`
 * Create a Python virtual environment with `--system-site-packages` enabled
-* Install all Python packages from `requirements.txt`
+* Install all Python packages from `requirements.txt` (including `requirements-modem.txt`)
+* Verify modem NumPy/SciPy, Pillow/Tk, and PortAudio bindings without opening audio devices
 * Auto-detect your display environment (X11/Wayland/framebuffer)
 * Create systemd services for web, ASCII, and local modes
 
@@ -55,7 +56,7 @@ sudo apt install $(grep -v '^#' system-requirements.txt | tr '\n' ' ')
 
 ```bash
 sudo dnf install python3 python3-pip python3-devel gcc gcc-c++ make cmake pkgconfig \
-    libwebp-devel libjpeg-turbo-devel SDL2-devel alsa-lib-devel \
+    libwebp-devel libjpeg-turbo-devel SDL2-devel alsa-lib-devel portaudio python3-tkinter \
     mesa-libGL-devel mesa-libGLU-devel mesa-libEGL-devel mesa-libGLES-devel \
     libglvnd-devel glfw-devel mesa-utils chrony ninja-build bind-utils
 ```
@@ -63,7 +64,7 @@ sudo dnf install python3 python3-pip python3-devel gcc gcc-c++ make cmake pkgcon
 **macOS (Homebrew):**
 
 ```bash
-brew install python webp pkg-config sdl2 chrony jpeg-turbo 
+brew install python python-tk portaudio webp pkg-config sdl2 chrony jpeg-turbo
 ```
 
 #### Python Environment
@@ -87,8 +88,15 @@ Install Dependencies:
 ```bash
 pip install --upgrade pip
 pip install -r requirements.txt
+python utilities/check_modem_setup.py
 ```
-> **Note:** `requirements.txt` only contains Python packages (system packages live in `system-requirements.txt`).
+> **Note:** `requirements.txt` includes `requirements-modem.txt`. Compatible system NumPy/SciPy/Pillow installs are reused; pip supplies missing or newer required versions. Debian system packages live in `system-requirements.txt`.
+
+For Homebrew, [Python Tk bindings](https://formulae.brew.sh/formula/python-tk)
+must match the Python interpreter used to create `.venv`. If using a versioned
+Python formula, install the corresponding `python-tk@<major.minor>` formula.
+[PortAudio](https://formulae.brew.sh/formula/portaudio) supplies the native audio library.
+The import check also verifies Pillow's compiled Tk bridge without opening a window.
 
 ---
 

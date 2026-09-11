@@ -1,5 +1,7 @@
 # Minimal dependencies for modem baking, runtime and reception.
-# Tkinter is supplied by the Python/OS installation, not pip.
+# Included by requirements.txt; also usable alone for standalone modem tools.
+# Tkinter and PortAudio come from the Python/OS installation, not this pip list.
+# Debian also splits the Pillow Tk bridge into python3-pil.imagetk.
 numpy>=1.24
 scipy>=1.10
 Pillow>=9.5

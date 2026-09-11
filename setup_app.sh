@@ -143,6 +143,12 @@ preflight_checks() {
         log_success "requirements.txt found"
     fi
 
+    if [ ! -f "$PROJECT_DIR/requirements-modem.txt" ] || \
+       [ ! -f "$PROJECT_DIR/utilities/check_modem_setup.py" ]; then
+        log_error "Modem requirements/check script missing - update the complete checkout"
+        errors=$((errors + 1))
+    fi
+
     if [ ! -f "$PROJECT_DIR/main.py" ]; then
         log_warning "main.py not found - project may be incomplete"
         warnings=$((warnings + 1))
@@ -304,7 +310,7 @@ get_packages_for_platform() {
         rhel)
             # From README.md (Fedora/CentOS)
             pkg_list="python3 python3-pip python3-devel gcc gcc-c++ make cmake pkgconfig \
-libwebp-devel libjpeg-turbo-devel SDL2-devel alsa-lib-devel \
+libwebp-devel libjpeg-turbo-devel SDL2-devel alsa-lib-devel portaudio python3-tkinter \
 mesa-libGL-devel mesa-libGLU-devel mesa-libEGL-devel mesa-libGLES-devel \
 libglvnd-devel glfw-devel mesa-utils \
 chrony ninja-build bind-utils certbot python3-certbot-nginx"
@@ -312,12 +318,12 @@ chrony ninja-build bind-utils certbot python3-certbot-nginx"
         arch)
             # Arch Linux equivalents
             pkg_list="python python-pip base-devel cmake pkg-config ninja \
-libwebp libjpeg-turbo sdl2 alsa-lib mesa glu glfw \
+libwebp libjpeg-turbo sdl2 alsa-lib portaudio tk mesa glu glfw \
 chrony bind-tools certbot certbot-nginx"
             ;;
         macos)
             # From README.md (macOS/Homebrew) - minimal set
-            pkg_list="python webp pkg-config sdl2 chrony jpeg-turbo"
+            pkg_list="python python-tk portaudio webp pkg-config sdl2 chrony jpeg-turbo"
             # Note: certbot on macOS is typically installed via pip or brew separately
             ;;
         *)
@@ -478,6 +484,21 @@ if [[ "$OSTYPE" == "linux-gnu"* ]] && [ "$HAS_GPU" = true ] && [ "$USERNAME" != 
     fi
 fi
 
+# Hash both pip inputs with Python (also works on macOS without md5sum).
+requirements_hash() {
+    python3 - "$PROJECT_DIR" <<'PYHASH'
+import hashlib
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+digest = hashlib.sha256()
+for name in ('requirements.txt', 'requirements-modem.txt'):
+    digest.update(name.encode() + b'\0')
+    digest.update((root / name).read_bytes() + b'\0')
+print(digest.hexdigest())
+PYHASH
+}
+
 # --- VENV DETECTION & VALIDATION ---
 check_venv_valid() {
     if [ ! -d "$VENV_DIR" ]; then
@@ -520,13 +541,13 @@ if check_venv_valid; then
 
     # Check if requirements are up to date
     if [ -f "$PROJECT_DIR/requirements.txt" ]; then
-        req_hash=$(md5sum "$PROJECT_DIR/requirements.txt" 2>/dev/null | awk '{print $1}' || echo "")
+        req_hash=$(requirements_hash)
         venv_req_hash_file="$VENV_DIR/.requirements_hash"
 
         if [ -f "$venv_req_hash_file" ]; then
             stored_hash=$(cat "$venv_req_hash_file" 2>/dev/null || echo "")
             if [ "$req_hash" != "$stored_hash" ]; then
-                log_info "requirements.txt has changed - venv will be updated"
+                log_info "Python requirements have changed - venv will be updated"
                 VENV_NEEDS_UPDATE=true
             else
                 log_success "Venv packages are up to date"
@@ -535,6 +556,12 @@ if check_venv_valid; then
             log_info "No requirements hash found - will update venv"
             VENV_NEEDS_UPDATE=true
         fi
+    fi
+    # Repair missing modem packages in place, even when requirement files did
+    # not change. No audio devices are queried or opened by this check.
+    if ! "$VENV_DIR/bin/python" "$PROJECT_DIR/utilities/check_modem_setup.py" --quiet 2>/dev/null; then
+        log_info "Modem dependencies need repair - venv will be updated"
+        VENV_NEEDS_UPDATE=true
     fi
 else
     if [ -d "$VENV_DIR" ]; then
@@ -603,13 +630,19 @@ else
             sudo -u "$USERNAME" "$VENV_PIP" install -r "$PROJECT_DIR/requirements.txt"
         fi
 
-        # Store requirements hash
-        if [ -f "$PROJECT_DIR/requirements.txt" ]; then
-            md5sum "$PROJECT_DIR/requirements.txt" 2>/dev/null | awk '{print $1}' > "$VENV_DIR/.requirements_hash" || true
-        fi
-
         log_success "Python packages installed/updated"
     fi
+fi
+
+# Verify Python bindings/native libraries without creating a GUI or audio stream.
+if [ "$DRY_RUN" = true ]; then
+    log_info "[DRY-RUN] Would verify modem dependencies with $VENV_DIR/bin/python utilities/check_modem_setup.py"
+else
+    if ! "$VENV_DIR/bin/python" "$PROJECT_DIR/utilities/check_modem_setup.py"; then
+        log_error "Modem dependencies are incomplete; fix the reported Python/OS packages and rerun setup"
+        exit 1
+    fi
+    requirements_hash > "$VENV_DIR/.requirements_hash"
 fi
 
 # --------------------------------------------
@@ -1287,9 +1320,9 @@ sudo systemctl daemon-reload
 else
     log_step "⚙️  Skipping Systemd Services (not available on this system)"
     if [ "$OS" = "macos" ]; then
-        log_info "On macOS, run manually: $VENV_DIR/bin/python -O main.py --mode <web|ascii|asciiweb|local>"
+        log_info "On macOS, run manually: $VENV_DIR/bin/python -O main.py --mode <web|ascii|asciiweb|local|scope|modem>"
     else
-        log_info "Run manually: $VENV_DIR/bin/python -O main.py --mode <web|ascii|asciiweb|local>"
+        log_info "Run manually: $VENV_DIR/bin/python -O main.py --mode <web|ascii|asciiweb|local|scope|modem>"
     fi
 fi
 
