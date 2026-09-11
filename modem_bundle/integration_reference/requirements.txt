@@ -1,0 +1,11 @@
+# Application Python dependencies; compatible system packages are reused.
+# Include modem baking, transmission and receiver dependencies.
+-r requirements-modem.txt
+#webp
+mido
+glfw  # Python bindings - requires libglfw3-dev system package (installed via system-requirements.txt)
+PyTurboJPEG==1.8.2
+SimpleWebsocketServer
+PyOpenGL  # Legacy renderer fallback (GLES2 / GL2.1)
+# sounddevice is shared by scope/modem and specified in requirements-modem.txt.
+tzdata  # IANA timezone database fallback for zoneinfo (notably Windows)

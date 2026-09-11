@@ -1,0 +1,119 @@
+diff --git a/MODEM_REFERENCE_RECEIVER.md b/MODEM_REFERENCE_RECEIVER.md
+index 92c62973..00fe129d 100644
+--- a/MODEM_REFERENCE_RECEIVER.md
++++ b/MODEM_REFERENCE_RECEIVER.md
+@@ -82,3 +82,25 @@ feed boundaries, gaps, changed gain, fresh frames, erased headers, noise and res
+ plus the existing progressive checks. Short 0.8x inspection also recovered a
+ verified frame. No full suite, hardware benchmark, broad impairment sweep,
+ independent-pitch validation or tape experiment was run.
++
++## Faster-playback reference correction
++
++The original wideband linear timing fit could reject a valid preamble at 1.12x:
++its sample-rounded edges put the high-frequency waveform outside the accurate
++range of a first-order correction. The reference receiver now applies one fixed,
++symmetric 33-tap low-pass FIR to both the known preamble model and the observation.
++The cached model filters the gain, delay and dilation columns consistently.
++Only the preamble timing measurement is filtered; training and payload samples
++retain their existing path.
++
++This still performs one direct solve per reference event pair. The residual
++limit remains 0.35; there are no alternative rates, correlation searches,
++iterative corrections or payload retries. Sampling, display deadlines and
++shared-time scheduling are unchanged.
++
++The added regression checks 1.12x at two input alignments, blocks calls into
++search/replay APIs, checks one reference fit and one FFT per symbol, and compares
++image error against the older progressive receiver on the same input. Existing
++normal/slow-speed, noise, reset, gap and header-erasure checks remain in place.
++This fixes the reproduced rejection, not independent pitch or all faster-input
++impairments; high carriers can still be lost near the audio Nyquist limit.
+diff --git a/animation_modem/reference_receiver.py b/animation_modem/reference_receiver.py
+index 2a01f9e3..dc8218a6 100644
+--- a/animation_modem/reference_receiver.py
++++ b/animation_modem/reference_receiver.py
+@@ -13,17 +13,26 @@ from .progressive import Receiver as ProgressiveReceiver
+ 
+ @lru_cache(maxsize=1)
+ def _reference_table():
+-    # Single local linearization: gain, fractional delay, dilation. Centering
+-    # keeps the tiny normal equation well conditioned. Never iterate/replay.
+-    q = np.arange(8, len(v.SYNC)-8, dtype=float)
++    # Edge locations are quantized in input samples. At faster playback that
++    # can be more than one nominal sample: a wideband first-order model then
++    # rejects a valid preamble. Measure its smooth low-band component instead.
++    # One fixed symmetric FIR, shared by the reference and observation, keeps
++    # the same single gain/delay/dilation solve without an iterative fit.
++    taps = np.arange(-16, 17, dtype=float)
++    kernel = np.sinc(.16*taps)*np.hanning(len(taps))
++    kernel /= kernel.sum()
++    q = np.arange(len(v.SYNC), dtype=float)
+     derivative = np.fft.irfft(
+         np.fft.rfft(v.SYNC)*(2j*np.pi*np.fft.rfftfreq(len(v.SYNC))),
+-        n=len(v.SYNC))[8:-8]
+-    design = np.stack((v.SYNC[8:-8], derivative,
+-                       derivative*(q-q.mean())), axis=1)
++        n=len(v.SYNC))
++    smooth = np.convolve(v.SYNC, kernel, mode='same')[16:-16]
++    slope = np.convolve(derivative, kernel, mode='same')[16:-16]
++    # Apply the same filter to the dilation column, not just to its derivative.
++    stretch = np.convolve(derivative*(q-q.mean()), kernel, mode='same')[16:-16]
++    design = np.stack((smooth, slope, stretch), axis=1)
+     gram = np.einsum('ni,nj->ij', design, design, optimize=False)
+     projection = np.linalg.solve(gram, design.T)
+-    return q, design, projection
++    return q, design, projection, kernel
+ 
+ 
+ class Receiver(ProgressiveReceiver):
+@@ -72,8 +81,9 @@ class Receiver(ProgressiveReceiver):
+         scale = (right-left)/(v.SYNC_LEN+v.SYMBOL-16)
+         if not .5 <= scale <= 4:
+             return None
+-        q, design, projection = _reference_table()
++        q, design, projection, kernel = _reference_table()
+         observed = v._sample_at(self.buffer, left+q*scale)[:, 0]
++        observed = np.convolve(observed, kernel, mode='same')[16:-16]
+         coefficients = np.einsum('ij,j->i', projection, observed, optimize=False)
+         gain, delay, dilation = coefficients
+         self.reference_fits += 1
+diff --git a/modem_tests/test_reference_receiver.py b/modem_tests/test_reference_receiver.py
+index e42617f5..c8d82c49 100644
+--- a/modem_tests/test_reference_receiver.py
++++ b/modem_tests/test_reference_receiver.py
+@@ -45,6 +45,35 @@ class ReferenceReceiverTests(unittest.TestCase):
+                 self.assertAlmostEqual(out[-1].rate_error+1, factor, delta=.002)
+                 self.assertLess(np.sqrt(np.mean((out[-1].values-self.values)**2)), .01)
+ 
++    def test_faster_playback_with_different_input_alignment(self):
++        from animation_modem.progressive import Receiver as ProgressiveReceiver
++        # 1.12x failed before payload decoding. A one-sample source prefix
++        # also checks that this is not a fix for just one resampling phase.
++        for prefix in (0, 1):
++            with self.subTest(prefix=prefix):
++                source = np.concatenate((np.zeros((prefix, 2)), self.audio))
++                audio = resample_poly(source, 25, 28, axis=0)
++                baseline = ProgressiveReceiver(self.layout, self.coder)
++                expected = (baseline.feed(audio)+baseline.flush())[-1]
++                with patch.object(v, '_coarse_bank', side_effect=AssertionError('bank')), \
++                     patch.object(v.Receiver, '_acquire', side_effect=AssertionError('search')), \
++                     patch.object(v, '_fit_sync', side_effect=AssertionError('iterative fit')), \
++                     patch.object(v, 'decode_packet', side_effect=AssertionError('payload replay')):
++                    rx, out = self.collect(audio)
++                self.assertTrue(out)
++                final = out[-1]
++                self.assertTrue(final.extra['complete'])
++                self.assertEqual(final.absolute, 1)
++                self.assertEqual(rx.reference_fits, 1)
++                self.assertEqual(rx.reference_rejections, 0)
++                self.assertEqual(final.extra['fft_symbols'], self.layout.symbols)
++                self.assertAlmostEqual(1/(1+final.rate_error), 1.12, delta=.001)
++                # Verified identity alone is insufficient: retain the older
++                # decoder's image fidelity on exactly the same speed-up audio.
++                error = np.sqrt(np.mean((final.values-self.values)**2))
++                baseline_error = np.sqrt(np.mean((expected.values-self.values)**2))
++                self.assertLess(error, baseline_error+.005)
++
+     def test_feed_boundaries(self):
+         _, expected = self.collect(self.audio)
+         for chunk in (37, len(self.audio)):

@@ -1,0 +1,482 @@
+{
+  "repository": "https://github.com/bgencarelle/VideoInterleaving",
+  "branch": "modem",
+  "baseline_commit": "8e80b8c8b4d9fef8aec7f7482f5ffa02ba68b0db",
+  "baseline_state": "unpatched: proposed reference speed fix is kept separately",
+  "files": [
+    {
+      "path": "source/animation_modem/__init__.py",
+      "source_path": "animation_modem/__init__.py",
+      "role": "core",
+      "sha256": "c7f7b1f415709107d437f12454dc5ebdc5964a13a7f257b55074257341622d74"
+    },
+    {
+      "path": "source/animation_modem/audio_common.py",
+      "source_path": "animation_modem/audio_common.py",
+      "role": "core",
+      "sha256": "a9bdc25ae8e3125f7e01071692d092d0c65976f143db079343c0bfc97a35ccf2"
+    },
+    {
+      "path": "source/animation_modem/capture.py",
+      "source_path": "animation_modem/capture.py",
+      "role": "core",
+      "sha256": "b4e3c0e99bcc6c8ac9ac1780c813c505f0264e2193dace5f5cee8a0737ad088d"
+    },
+    {
+      "path": "source/animation_modem/channel_scan.py",
+      "source_path": "animation_modem/channel_scan.py",
+      "role": "core",
+      "sha256": "21e628c4d20857c6e494883c9059124b49503fae85a7c6910b4b1876fe13f688"
+    },
+    {
+      "path": "source/animation_modem/decoder.py",
+      "source_path": "animation_modem/decoder.py",
+      "role": "core",
+      "sha256": "3dac460f3a5b32f455192693f5745735a01f95b69db853aaa33365fb3b070c04"
+    },
+    {
+      "path": "source/animation_modem/imaging.py",
+      "source_path": "animation_modem/imaging.py",
+      "role": "core",
+      "sha256": "6b873bc3ddcbed3c80ecd518143b9bab5572ad963dd66ef3ff58417751eadd40"
+    },
+    {
+      "path": "source/animation_modem/impairments.py",
+      "source_path": "animation_modem/impairments.py",
+      "role": "core",
+      "sha256": "8ba0b824a2d0ac9aa8a1b5cf634da097b8258438ab5827957285d0b082da25b4"
+    },
+    {
+      "path": "source/animation_modem/pilot_clock_prototype.py",
+      "source_path": "animation_modem/pilot_clock_prototype.py",
+      "role": "core",
+      "sha256": "ce3a1d986afb79e83a340088a4feae2d112c11632bffb69821086b32e00cea1c"
+    },
+    {
+      "path": "source/animation_modem/playback.py",
+      "source_path": "animation_modem/playback.py",
+      "role": "core",
+      "sha256": "e1df5674a7c06766084a3378bf40d2bbc0dc77672aadb8f0e49720f04ce062ee"
+    },
+    {
+      "path": "source/animation_modem/presentation.py",
+      "source_path": "animation_modem/presentation.py",
+      "role": "core",
+      "sha256": "9517c0b2e6cc45d24162a98393ea5c472ac07d27c4415b59b4e8d77d182e07c5"
+    },
+    {
+      "path": "source/animation_modem/preview_overlay.py",
+      "source_path": "animation_modem/preview_overlay.py",
+      "role": "core",
+      "sha256": "65a0aadb3cd9cff19b953375379f55b8d5559e6a41b888bbc85a08e97c19f7ea"
+    },
+    {
+      "path": "source/animation_modem/progressive.py",
+      "source_path": "animation_modem/progressive.py",
+      "role": "core",
+      "sha256": "0edfdd7321e9de264b6d4a9872d24990c504f0a2fc4a7da64fff84cc227c9593"
+    },
+    {
+      "path": "source/animation_modem/reference_receiver.py",
+      "source_path": "animation_modem/reference_receiver.py",
+      "role": "core",
+      "sha256": "69d74191ed7fef0d7f4be480783f57dbbe514cb7982dd02fd325e2ba54fc8e20"
+    },
+    {
+      "path": "source/animation_modem/timing.py",
+      "source_path": "animation_modem/timing.py",
+      "role": "core",
+      "sha256": "b4ada5e9822a2a69ce61f96c4aa45610f5d9e5d8c3b701b4b6eaa976cc2531c6"
+    },
+    {
+      "path": "source/animation_modem/transport.py",
+      "source_path": "animation_modem/transport.py",
+      "role": "core",
+      "sha256": "fc4b192d6a7dd0d3043570e03e36e971d649c08498150fdc27eff96d8ff4d763"
+    },
+    {
+      "path": "source/animation_modem/transport2.py",
+      "source_path": "animation_modem/transport2.py",
+      "role": "core",
+      "sha256": "7151d2a62c1c165f223e7bd0863c3a814fe863d5701f5a1ba489f2fdba4f6c16"
+    },
+    {
+      "path": "source/modem_bake.py",
+      "source_path": "modem_bake.py",
+      "role": "core",
+      "sha256": "b1d4bd87e2362970a1cb5ed8fa78b53c7be3ab23bbe0b820e72eb7114074917f"
+    },
+    {
+      "path": "source/modem_display.py",
+      "source_path": "modem_display.py",
+      "role": "core",
+      "sha256": "3b26e4539a6431d592d410b95b85a9f9ce36b01479ece11f96d1a99af0092d9c"
+    },
+    {
+      "path": "source/modem_receive.py",
+      "source_path": "modem_receive.py",
+      "role": "core",
+      "sha256": "3ca742be88095237ccf11b26dd9fd2d8c3e10034f735e7d6281a633f55332aef"
+    },
+    {
+      "path": "source/utilities/check_modem_setup.py",
+      "source_path": "utilities/check_modem_setup.py",
+      "role": "core",
+      "sha256": "42755d4ee9642eaafdaa141ae532daf068a7914b14e639c9f84d276dabd9587f"
+    },
+    {
+      "path": "source/utilities/convert_to_modem.py",
+      "source_path": "utilities/convert_to_modem.py",
+      "role": "core",
+      "sha256": "ed9fe191ddfeb6d32fd11de605d5aa0ca8318879d0a89eeb0c85bcaa9bce636a"
+    },
+    {
+      "path": "source/utilities/modem_level_check.py",
+      "source_path": "utilities/modem_level_check.py",
+      "role": "core",
+      "sha256": "979c69333fab42ca2614596f91f0b5f3328d08e9a6f66357946eb67dafa8c6f9"
+    },
+    {
+      "path": "source/utilities/modem_link_budget.py",
+      "source_path": "utilities/modem_link_budget.py",
+      "role": "core",
+      "sha256": "b45843fea370c976a392fbccd1d7c5acc3e162ddfa79393f914e0fc2a6def9fd"
+    },
+    {
+      "path": "source/utilities/modem_pilot_prototype.py",
+      "source_path": "utilities/modem_pilot_prototype.py",
+      "role": "core",
+      "sha256": "d938e4d56a915577e734a2f3832b714232235ddb3ed4a3608fa8988982b0d9ae"
+    },
+    {
+      "path": "source/utilities/modem_pitch_probe.py",
+      "source_path": "utilities/modem_pitch_probe.py",
+      "role": "core",
+      "sha256": "455668b468fdb3f8a8f1638ec6dc17026cc078210a0f52afa4b277052f6fd351"
+    },
+    {
+      "path": "source/utilities/modem_v2_check.py",
+      "source_path": "utilities/modem_v2_check.py",
+      "role": "core",
+      "sha256": "762dd9183f366627222793d9f092e89ebb37945335f60ace5f04138c8bf31756"
+    },
+    {
+      "path": "source/constantStorage/ascii_constants.py",
+      "source_path": "constantStorage/ascii_constants.py",
+      "role": "support",
+      "sha256": "416de2cffa306d535bbc32a2cdc2bbe5d537c060b842fa76b49308351ec69ab9"
+    },
+    {
+      "path": "source/constantStorage/bio_constants.py",
+      "source_path": "constantStorage/bio_constants.py",
+      "role": "support",
+      "sha256": "da1a2824d11c0efdce7b63a793709a9c5d1c68e9068233d336d6c592c031b47e"
+    },
+    {
+      "path": "source/constantStorage/display_constants.py",
+      "source_path": "constantStorage/display_constants.py",
+      "role": "support",
+      "sha256": "5b32e038d393c10b00becd83b1fb66152cd9c1dec2681d5d92a65432b90e1b4a"
+    },
+    {
+      "path": "source/constantStorage/midi_constants.py",
+      "source_path": "constantStorage/midi_constants.py",
+      "role": "support",
+      "sha256": "ddf1a1ff05df980f6adc1fa66fdd54bfee628bbe1e362d78eb658bc735736769"
+    },
+    {
+      "path": "source/constantStorage/server_constants.py",
+      "source_path": "constantStorage/server_constants.py",
+      "role": "support",
+      "sha256": "945a18cb3a13b5bb902c2ca480a3f5ded6859db996ddf94fb4ac7be7c7152417"
+    },
+    {
+      "path": "source/constantStorage/timezones.py",
+      "source_path": "constantStorage/timezones.py",
+      "role": "support",
+      "sha256": "d1157b216f0403248d89580fc2b2e8bad0c1385b0f5dbfcf60cb31d2a397b2f9"
+    },
+    {
+      "path": "source/folder_selector.py",
+      "source_path": "folder_selector.py",
+      "role": "support",
+      "sha256": "9033fe130431f293ea81f53398bdd9497dcaa9cdb21ba24cc4430382ca61f094"
+    },
+    {
+      "path": "source/globals.py",
+      "source_path": "globals.py",
+      "role": "support",
+      "sha256": "303d53073b7c0ec48fd36d9969b073dd6ad8d66065145b6e53b965d0c86e1329"
+    },
+    {
+      "path": "source/index_calculator.py",
+      "source_path": "index_calculator.py",
+      "role": "support",
+      "sha256": "95d956bd3c4fd83292ae3ad1be4ed328d64be8413467311ea69014862d5a88f7"
+    },
+    {
+      "path": "source/make_file_lists.py",
+      "source_path": "make_file_lists.py",
+      "role": "support",
+      "sha256": "6d6a194cb501a3f3880794ea68d5964850904b2dd0b4ff4ecbeaff99f258067d"
+    },
+    {
+      "path": "source/midi_control.py",
+      "source_path": "midi_control.py",
+      "role": "support",
+      "sha256": "360148f5d7e733099dd0d11fec99a3a628a355fa5c75af910223d0d51ade1440"
+    },
+    {
+      "path": "source/scope_bake.py",
+      "source_path": "scope_bake.py",
+      "role": "support",
+      "sha256": "591a51252196e00d83f649f11e08672d98ca75186694a0e35155b61326bea6b9"
+    },
+    {
+      "path": "source/scope_lowpass.py",
+      "source_path": "scope_lowpass.py",
+      "role": "support",
+      "sha256": "878b759865d25c09e99786a9d2b62fd5bf73a6a59e542d7c9577be78b76b4dde"
+    },
+    {
+      "path": "source/scope_out.py",
+      "source_path": "scope_out.py",
+      "role": "support",
+      "sha256": "15284328151c1ae37ab259cef49ac660419e47b55f2006bf8edef61b28a0a426"
+    },
+    {
+      "path": "source/settings.py",
+      "source_path": "settings.py",
+      "role": "support",
+      "sha256": "c0c80827c1e7cc6fb88c90a07b2b125ee7eac65c94343111d26a0817eb53fac8"
+    },
+    {
+      "path": "source/utilities/bake_assets.py",
+      "source_path": "utilities/bake_assets.py",
+      "role": "support",
+      "sha256": "b43f486a49afe95b4363192a8475c61de9f5af2b15061b4d588ecfcd515d7148"
+    },
+    {
+      "path": "source/utilities/convert_to_xy.py",
+      "source_path": "utilities/convert_to_xy.py",
+      "role": "support",
+      "sha256": "b84a0cb40c781b08198f16882b4cbf96c9814d8cad4dbe06cae8a7101d6e9cfd"
+    },
+    {
+      "path": "source/main.py",
+      "source_path": "main.py",
+      "role": "application modem entry point/support; other modes not bundled",
+      "sha256": "d045bc7a844f7afa1a16f1bc5a66d7313189fdfbbf01ef6648e29f66c8d9200c"
+    },
+    {
+      "path": "source/server_config.py",
+      "source_path": "server_config.py",
+      "role": "application modem entry point/support; other modes not bundled",
+      "sha256": "ab918f0aa9df431053fa871bd97752e1b292fb4e0160268c1a3c77af1c1d2d3d"
+    },
+    {
+      "path": "source/MODEM_MODE.md",
+      "source_path": "MODEM_MODE.md",
+      "role": "historical modem documentation",
+      "sha256": "b98de867a6cbaffc98b4f0909d93bc0524675610224ef9931f409d6d1adf900e"
+    },
+    {
+      "path": "source/MODEM_PILOT_PROTOTYPE.md",
+      "source_path": "MODEM_PILOT_PROTOTYPE.md",
+      "role": "historical modem documentation",
+      "sha256": "51abde35d3b223be73bfc5669bf1bff0eb4b4b6c90a0d6a931f402da832355fa"
+    },
+    {
+      "path": "source/MODEM_PITCH_PROBE.md",
+      "source_path": "MODEM_PITCH_PROBE.md",
+      "role": "historical modem documentation",
+      "sha256": "1e0b66c0905b01e58978f6931e94eaedd385e2b3648f8a97602d267cf7deddad"
+    },
+    {
+      "path": "source/MODEM_PRESENTATION_DEADLINE.md",
+      "source_path": "MODEM_PRESENTATION_DEADLINE.md",
+      "role": "historical modem documentation",
+      "sha256": "8a07ba844e8ec833ff35d468a4e8b62749709e163e17136f1024b0ec37f88da9"
+    },
+    {
+      "path": "source/MODEM_REFERENCE_RECEIVER.md",
+      "source_path": "MODEM_REFERENCE_RECEIVER.md",
+      "role": "historical modem documentation",
+      "sha256": "5eb050e96d460cda4fcd2a8644d64a1f1630396ed6282dd6fdb54640585b3604"
+    },
+    {
+      "path": "source/MODEM_V2.md",
+      "source_path": "MODEM_V2.md",
+      "role": "historical modem documentation",
+      "sha256": "491f7deed57ac7799b4b88618799c9029e3db5b760e831591d7128be578f6999"
+    },
+    {
+      "path": "source/MODEM_V2_RECOVERY.md",
+      "source_path": "MODEM_V2_RECOVERY.md",
+      "role": "historical modem documentation",
+      "sha256": "c7482a7abde00811489eb6e601ba492ddf966e3bf8e34a5ee2a79c6a0fdbebdd"
+    },
+    {
+      "path": "source/modem_tests/__init__.py",
+      "source_path": "modem_tests/__init__.py",
+      "role": "tests",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "source/modem_tests/test_capture.py",
+      "source_path": "modem_tests/test_capture.py",
+      "role": "tests",
+      "sha256": "91e5348b2e2de998138cdb06dccebf31becb131b5631d160e1ec678f270b30af"
+    },
+    {
+      "path": "source/modem_tests/test_clock.py",
+      "source_path": "modem_tests/test_clock.py",
+      "role": "tests",
+      "sha256": "c048b4b34f3a13a7fdad44a037b78c6235e27d13a1115b323f46fbfaea497aed"
+    },
+    {
+      "path": "source/modem_tests/test_decode_fast.py",
+      "source_path": "modem_tests/test_decode_fast.py",
+      "role": "tests",
+      "sha256": "a7b2029dd48cbbd29e45f929f35845a0432be2a25f19ad2e8466afecc6546610"
+    },
+    {
+      "path": "source/modem_tests/test_impairments.py",
+      "source_path": "modem_tests/test_impairments.py",
+      "role": "tests",
+      "sha256": "556e4cdc16dc7b83fbcfe593d9bd54611e93b542e212c1aae4ea6b4c6312f4e6"
+    },
+    {
+      "path": "source/modem_tests/test_level_check.py",
+      "source_path": "modem_tests/test_level_check.py",
+      "role": "tests",
+      "sha256": "a8146341f366632c39b930a6ac027faf59ffb6bbe3aefc006ab2cbb1ecacbb62"
+    },
+    {
+      "path": "source/modem_tests/test_pilot_continuity.py",
+      "source_path": "modem_tests/test_pilot_continuity.py",
+      "role": "tests",
+      "sha256": "f91b235df7649c366e8eb065321caea95bf8ec24237f4b1039286850d80830ec"
+    },
+    {
+      "path": "source/modem_tests/test_playback.py",
+      "source_path": "modem_tests/test_playback.py",
+      "role": "tests",
+      "sha256": "2bc2bf8aecb8f325ab458415f94269ac87d58c156c14fb8eb9345c8856c67e57"
+    },
+    {
+      "path": "source/modem_tests/test_presentation_deadline.py",
+      "source_path": "modem_tests/test_presentation_deadline.py",
+      "role": "tests",
+      "sha256": "c3427488dd5193a9929f1d1c73b7e0e7083459fd0a0068a0284820903350fdf8"
+    },
+    {
+      "path": "source/modem_tests/test_preview_overlay.py",
+      "source_path": "modem_tests/test_preview_overlay.py",
+      "role": "tests",
+      "sha256": "0a4221db8640bce017d98e04441650aa8edeea56b3f1db3192daf02303923be1"
+    },
+    {
+      "path": "source/modem_tests/test_profiles.py",
+      "source_path": "modem_tests/test_profiles.py",
+      "role": "tests",
+      "sha256": "e1e78d9266203b2f3be6db33bbc13b5a6896016aebdafddc41b7d26ba2996f75"
+    },
+    {
+      "path": "source/modem_tests/test_progressive_receive.py",
+      "source_path": "modem_tests/test_progressive_receive.py",
+      "role": "tests",
+      "sha256": "39ada9fc2e3818dc9a221e2b826018695560febfd9a5d00eaf147a4985479392"
+    },
+    {
+      "path": "source/modem_tests/test_recovered_clock.py",
+      "source_path": "modem_tests/test_recovered_clock.py",
+      "role": "tests",
+      "sha256": "f77ce0d9337f2893e5e89895e6b263ca1c8aa979fef8a41f0dc16780729d00c1"
+    },
+    {
+      "path": "source/modem_tests/test_reference_receiver.py",
+      "source_path": "modem_tests/test_reference_receiver.py",
+      "role": "tests",
+      "sha256": "fb93f07b3a6dacde188c9aae6b01419a9229b85e4d8a71a2984a584c575f5b9b"
+    },
+    {
+      "path": "source/modem_tests/test_sync.py",
+      "source_path": "modem_tests/test_sync.py",
+      "role": "tests",
+      "sha256": "8b479b7b822e32881406dd93672bb4d0bf3f6f2e037575453be2b0dae1380e0f"
+    },
+    {
+      "path": "source/modem_tests/test_timing.py",
+      "source_path": "modem_tests/test_timing.py",
+      "role": "tests",
+      "sha256": "1f801188aa23d40ee1870930fb0cec236da62fbb4e7edf4f202949aba4af084b"
+    },
+    {
+      "path": "source/modem_tests/test_transport.py",
+      "source_path": "modem_tests/test_transport.py",
+      "role": "tests",
+      "sha256": "ffa676fd147178910f1dd23b594357396e4bc379c8dd754c0d64fb1e2e02e317"
+    },
+    {
+      "path": "source/modem_tests/test_transport2.py",
+      "source_path": "modem_tests/test_transport2.py",
+      "role": "tests",
+      "sha256": "41a3fcf05b23137a7913784cc61d4467c1d0a68ce4810b8883a93dea2e0a32ae"
+    },
+    {
+      "path": "source/test_modem_integration.py",
+      "source_path": "test_modem_integration.py",
+      "role": "tests",
+      "sha256": "e3fba2f6a36b16ce04293862cf719c6bd9b4ebbad446ea9b9ab3801d03abcf27"
+    },
+    {
+      "path": "source/requirements-modem.txt",
+      "source_path": "requirements-modem.txt",
+      "role": "modem dependencies",
+      "sha256": "62c51b9717bc64f9e7a7e601a6daa347de48b19750b88ed7a55d1e6bf2c7502e"
+    },
+    {
+      "path": "integration_reference/setup_app.sh",
+      "source_path": "setup_app.sh",
+      "role": "full application setup reference; not standalone installer",
+      "sha256": "e97d6bab61bd29ecf618ca95d827e7c63719f4c1f9aaaa7a7c4d92d91df8faea"
+    },
+    {
+      "path": "integration_reference/run_app.sh",
+      "source_path": "run_app.sh",
+      "role": "full application setup reference; not standalone installer",
+      "sha256": "26a51d4111aad6af8d319d0b2a310234b4a5cb62234a869eb1c5e39caafe5bae"
+    },
+    {
+      "path": "integration_reference/requirements.txt",
+      "source_path": "requirements.txt",
+      "role": "full application setup reference; not standalone installer",
+      "sha256": "e8684ef93da1b91ea2fa47e055fa28323a58a70830b0a6e310174f32b2ed573d"
+    },
+    {
+      "path": "integration_reference/requirements-modem.txt",
+      "source_path": "requirements-modem.txt",
+      "role": "full application setup reference; not standalone installer",
+      "sha256": "62c51b9717bc64f9e7a7e601a6daa347de48b19750b88ed7a55d1e6bf2c7502e"
+    },
+    {
+      "path": "integration_reference/system-requirements.txt",
+      "source_path": "system-requirements.txt",
+      "role": "full application setup reference; not standalone installer",
+      "sha256": "bc9f100f43e131ea8e16cc881fd565b63b26ff40feb66492c79efe28c4e26641"
+    },
+    {
+      "path": "integration_reference/README.md",
+      "source_path": "README.md",
+      "role": "full application setup reference; not standalone installer",
+      "sha256": "3e74a76f1b596b3ac0e468374f4749864412f79987e781f06ec5ba704cae1995"
+    },
+    {
+      "path": "patches/modem-reference-speed-fix.patch",
+      "source_path": "previously delivered patch, not applied",
+      "role": "optional proposed speed fix",
+      "sha256": "44da8187d1260c3a3bc3caa06a3038d44208261cdd23e5c29ed72f366a95d7ac"
+    }
+  ]
+}

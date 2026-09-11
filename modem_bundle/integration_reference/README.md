@@ -1,0 +1,491 @@
+# VideoInterleaving
+
+**VideoInterleaving** is a timecode-synced image-sequence renderer designed for high-performance animation installations. It supports dual-layer blending, MIDI/MTC synchronization, real-time OpenGL rendering, and multi-format streaming (MJPEG & ASCII).
+
+It is designed to run on everything from high-end workstations to headless Raspberry Pis and remote VPS instances.
+
+---
+
+## Key Features
+
+* **Dual-Layer Compositing**: Blends a "Main" face layer with a "Float" overlay layer in real-time.
+* **Multi-Mode Output**:
+    * **Local Window**: GPU-accelerated OpenGL display (GLFW).
+    * **Web Stream**: Low-latency MJPEG stream for browsers.
+    * **ASCII Stream**: Real-time text-mode video over Telnet/TCP.
+    * **Oscilloscope XY**: Vector, scanline raster, or no-Z stochastic bitmap
+      rendering through a stereo audio interface.
+* **Performance First**: Uses Side-by-Side (SBS) JPEGs and TurboJPEG for maximum throughput on low-power CPUs.
+* **Sync**: Supports free-running, MIDI, MTC, and Client/Server index synchronization.
+
+---
+
+## 1. Prerequisites
+
+### Automated Setup (Recommended)
+
+The `setup_app.sh` script handles all dependencies and systemd service configuration automatically:
+
+```bash
+git clone [https://github.com/bgencarelle/VideoInterleaving.git](https://github.com/bgencarelle/VideoInterleaving.git)
+cd VideoInterleaving
+sudo ./setup_app.sh
+```
+
+This script will:
+* Install all system packages from `system-requirements.txt`
+* Create a Python virtual environment with `--system-site-packages` enabled
+* Install all Python packages from `requirements.txt` (including `requirements-modem.txt`)
+* Verify modem NumPy/SciPy, Pillow/Tk, and PortAudio bindings without opening audio devices
+* Auto-detect your display environment (X11/Wayland/framebuffer)
+* Create systemd services for web, ASCII, and local modes
+
+### Manual Setup
+
+#### System Libraries
+
+**Debian/Ubuntu/Raspbian:**
+System packages are listed in `system-requirements.txt`. Install them with:
+
+```bash
+sudo apt update
+sudo apt install $(grep -v '^#' system-requirements.txt | tr '\n' ' ')
+```
+
+**Fedora/CentOS (rough equivalents):**
+
+```bash
+sudo dnf install python3 python3-pip python3-devel gcc gcc-c++ make cmake pkgconfig \
+    libwebp-devel libjpeg-turbo-devel SDL2-devel alsa-lib-devel portaudio python3-tkinter \
+    mesa-libGL-devel mesa-libGLU-devel mesa-libEGL-devel mesa-libGLES-devel \
+    libglvnd-devel glfw-devel mesa-utils chrony ninja-build bind-utils
+```
+
+**macOS (Homebrew):**
+
+```bash
+brew install python python-tk portaudio webp pkg-config sdl2 chrony jpeg-turbo
+```
+
+#### Python Environment
+
+Clone the repo:
+
+```bash
+git clone [https://github.com/bgencarelle/VideoInterleaving.git](https://github.com/bgencarelle/VideoInterleaving.git)
+cd VideoInterleaving
+```
+
+Create venv with system-site-packages (allows access to system-installed Python packages):
+
+```bash
+python3 -m venv --system-site-packages .venv
+source .venv/bin/activate
+```
+
+Install Dependencies:
+
+```bash
+pip install --upgrade pip
+pip install -r requirements.txt
+python utilities/check_modem_setup.py
+```
+> **Note:** `requirements.txt` includes `requirements-modem.txt`. Compatible system NumPy/SciPy/Pillow installs are reused; pip supplies missing or newer required versions. Debian system packages live in `system-requirements.txt`.
+
+For Homebrew, [Python Tk bindings](https://formulae.brew.sh/formula/python-tk)
+must match the Python interpreter used to create `.venv`. If using a versioned
+Python formula, install the corresponding `python-tk@<major.minor>` formula.
+[PortAudio](https://formulae.brew.sh/formula/portaudio) supplies the native audio library.
+The import check also verifies Pillow's compiled Tk bridge without opening a window.
+
+---
+
+## 2. Image Preparation (Crucial)
+
+To achieve high framerates on low-end hardware, this engine uses a custom Side-by-Side (SBS) JPEG format instead of RGBA WebP or PNG.
+
+* **Left Half**: Color Data (RGB)
+* **Right Half**: Alpha Mask (Grayscale)
+
+**How to Convert Your Images:** We provide a multi-core converter tool that takes your existing folder of WebP/PNGs and generates the optimized SBS JPEGs.
+
+```bash
+python tools/convert_to_sbs_fixed.py
+# Follow the prompts to select your source 'images' folder.
+# It will create a new folder (e.g., 'images_sbs') automatically.
+```
+> **Note:** Ensure your `settings.py` or CLI arguments point to this new `_sbs` folder.
+
+---
+
+## 3. Running the Player
+
+You can configure the player via `settings.py` (defaults) or override them at runtime using CLI arguments.
+
+### The CLI Way (Recommended)
+
+**1. Start the Web Stream (MJPEG):**
+```bash
+python main.py --mode web --dir ./images_sbs
+```
+* View at: `http://<IP>:8080`
+* Monitor: `http://<IP>:1978`
+
+**2. Start the ASCII Stream (Telnet):**
+```bash
+python main.py --mode ascii --dir ./images_tiny
+```
+* Connect via Terminal: `telnet <IP> 2323` or `nc <IP> 2323`
+* *Note: Use smaller resolution images (e.g., 150px wide) for ASCII to save CPU.*
+
+Tone is graded once, in `ascii_converter.to_ascii`: saturation on S, then
+contrast and brightness on V, then gamma on the grey the character is chosen
+from. The last three are settable per run, in that order of application:
+
+```bash
+python main.py --mode ascii --dir ./images_tiny \
+  --ascii-contrast 1.4 --ascii-brightness 1.2 --ascii-gamma 0.9
+```
+
+* `--ascii-contrast` scales about mid-grey, so `1.0` is exactly neutral, above
+  1 pushes lights and darks apart, and `0` flattens everything to one tone.
+* `--ascii-brightness` is a straight multiply on value; `0` is black.
+* `--ascii-gamma` is the exponent applied to the grey the character comes from;
+  below 1 lifts shadows. It must be above 0 — at exactly 0 every non-zero input
+  becomes full white, which is a discontinuity rather than an endpoint.
+
+The shipped contrast default is `1.0`. `ASCII_CONTRAST` sat at 1.2 in
+`constantStorage/ascii_constants.py` for a long time while the code that read
+it was gone, so wiring it up at 1.2 would have changed every existing
+installation's picture. Saturation is still set in that file.
+
+**3. Start Local Mode (Windowed):**
+```bash
+python main.py --mode local --dir ./images_sbs
+```
+
+**4. Start Oscilloscope Mode (Osci-style bitmap walk, no Z channel):**
+
+```bash
+python utilities/convert_to_xy.py -i ./images -o ./images_xy
+python main.py --mode scope --xy-dir ./images_xy --scope-mode stochastic
+```
+
+Stochastic uses Osci-render's bitmap walk (`radius 10`, no added edge term)
+and scales Osci's full-resolution stride to the baked thumbnail (`auto`
+resolves to stride 1 at the compact default width 128). Its portrait default is
+`gamma 2`, equivalent to Osci's Image Threshold 0.1. Osci's UI default maps to
+gamma 6 and suppresses too many facial midtones in this material. It runs
+continuously across audio buffers. Use the existing `--scope-gamma` argument
+to tune the active renderer.
+Its 48 kHz target clock is independent of the image rate and of faster DAC
+sample rates; use `--scope-walk-hz` only when deliberately changing that walk.
+
+The separate `stipple` renderer implements the stable image-driven alternative:
+
+```bash
+python main.py --mode scope --xy-dir ./images_xy --scope-mode stipple \
+  --scope-stipple-points 768
+```
+
+It selects deterministic luminance-weighted positions, orders them by
+unrestricted Euclidean proximity, and resamples that finished route. It has no
+cardinal-direction crawl, visited-map reset, random reseed, or target clock.
+New bakes store a 1024-point source-detail candidate cloud for this mode, so
+the route keeps 256px coordinate placement without retaining a complete 256px
+image plane for every frame.
+
+Fusion builds corresponding position arrays for the selected renderers and
+selects corresponding entries by luminance instead of switching whole traces:
+
+```bash
+python main.py --mode scope --xy-dir ./images_xy --scope-mode fusion --scope-fusion vrs
+```
+
+`--scope-fusion` accepts `vrs`, `vr`, `sv`, and `sr`. A persistent temporal
+selector gives bright positions more nearby DAC samples and dark positions
+fewer, using the existing raster and stochastic gamma controls. Equal or
+all-dark candidates remain evenly interleaved. No XY coordinates are
+arithmetically averaged. Press `f` in fusion mode to cycle.
+
+A conventional single-input scope, using its own timebase, needs nothing
+special: every trace already carries one unique rising edge on X, so put the X
+lead on the scope's single input, set it to Y-T, choose a rising-edge trigger
+near +0.95, and set a timebase covering one complete trace (the rate is printed
+at startup).
+
+```bash
+python main.py --mode scope --xy-dir ./images_xy --device BlackHole
+```
+
+The trigger is on by default because it costs an XY display essentially
+nothing. It gets its own samples rather than overwriting the picture, so a
+3200-sample trace becomes 3224 and the refresh rate pays instead of the image. The marker
+sweeps rather than dwelling — an edge trigger fires on the crossing, so parking
+at the extremes only makes them bright — and it is parked outside the ±0.9
+picture box, the same off-screen excursion `--scope-overscan` uses. Set the
+scope so ±0.9 fills the screen and the marker deflects past the phosphor
+entirely. `--no-scope-trigger` removes it; `--scope-trigger-us 500` lengthens
+it from the 250 µs default; `--scope-trigger-shape step` restores the original
+two-dwell marker for a scope whose trigger will not hold on a ramp (it shows as
+two bright dots in XY). It is a runtime setting and needs no rebake, and it
+constrains nothing — every renderer, `--scope-mix` and `--scope-realtime`
+included, carries it.
+
+Row timing is separate. `--scope-yt-timing fixed` gives every row an equal time
+slot, so unrelated brightness cannot move or resize a row and the picture stays
+registered — at the cost of the tonal balance whole-trace weighting gives you,
+and a negative rail where empty rows sit. `dwell` is the default and the
+long-standing behaviour. Fixed timing is raster-only; asking for it elsewhere
+prints a line and falls back rather than refusing to start. `--scope-yt` is
+kept as a deprecated spelling of `--scope-yt-timing fixed`. See
+`scope_arguments.md` for the sample layout and tradeoffs.
+
+The compact bake stores raw luminance and alpha at 128px. That is above the
+normal raster sweep grid, while stochastic can still use the field directly.
+Stipple's separately baked source-detail coordinates preserve the useful
+high-resolution placement. A typical 32-folder library is about 3.7 GB rather
+than the 18-25 GB produced by the former 256px, three-channel format.
+
+Press `v` while it is running to cycle vector, raster, stochastic, stipple,
+and fusion. Press `i` to toggle alpha-aware luminance inversion, or start with
+`--scope-invert`; vector keeps its baked geometry but shifts dwell toward
+originally dark stroke regions, and transparent padding remains dark. `r` or
+`R` rotates the complete scope output by 90° and `m` mirrors it left-right,
+both matching local display mode.
+
+Orientation can also be set from the command line, in local mode as well as
+scope mode: `--rotation {0,90,180,270}` and `--mirror` / `--no-mirror`. They
+default to `INITIAL_ROTATION` and `INITIAL_MIRROR` in
+`constantStorage/display_constants.py`, so turning a display sideways no
+longer means editing a constant:
+
+```bash
+python main.py --mode local --rotation 90 --mirror
+```
+
+See `SCOPE_MODE.md` for wiring, sample-budget, and renderer details.
+
+### The `settings.py` Way (Legacy)
+
+Edit `settings.py` to set your defaults:
+
+```python
+SERVER_MODE = True       # Web Stream
+ASCII_MODE = False       # ASCII Stream (Overrides SERVER_MODE if True)
+IMAGES_DIR = "images_sbs"
+```
+
+Then simply run:
+
+```bash
+python main.py
+```
+
+---
+
+## 4. ASCII Mode Details
+
+The ASCII engine is a dedicated render path that converts video frames into colored ANSI text characters.
+
+**Connecting:** Standard `telnet` works, but `netcat` (`nc`) often provides a smoother frame rate.
+
+```bash
+# Auto-reconnect loop for digital signage displays
+while true; do nc 192.168.1.50 2323; sleep 1; done
+```
+
+**Configuration (`settings.py`):**
+* `ASCII_WIDTH` / `HEIGHT`: Resolution of the text grid (e.g., 80x40).
+* `ASCII_COLOR`: Enable/Disable ANSI color codes.
+* `ASCII_FONT_RATIO`: Corrects aspect ratio for non-square terminal characters (default `0.55`).
+
+**Artistic Tweaks:**
+* `ASCII_SATURATION`: Boost color intensity.
+* `ASCII_GAMMA`: Lift mid-tones for better visibility on dark terminals.
+* `ASCII_PALETTE`: Custom character set sorted by visual density.
+
+---
+
+## 5. Hardware Configuration
+
+### Raspberry Pi (HDMI & Composite Out)
+
+For kiosk deployments using Wayland and hardware video output (HDMI or Composite), use the following configurations.
+
+**1. Boot Configuration (`/boot/firmware/config.txt`)**
+Add or modify the following lines to configure the display outputs and DRM drivers:
+
+```ini
+# Enable DRM VC4 V3D driver
+dtoverlay=vc4-kms-v3d,composite
+enable_tvout=1
+max_framebuffers=2
+
+# HDMI configuration
+#hdmi_ignore_edid=0xa5000080
+hdmi_ignore_hotplug=1
+hdmi_force_hotplug=0
+#hdmi_group=2              # CEA
+#hdmi_mode=9               # 800x600p
+#hdmi_drive=1              # DVI mode (no HDMI audio)
+
+# Don't have the firmware create an initial video= setting in cmdline.txt.
+# Use the kernel's default instead.
+disable_fw_kms_setup=1
+```
+
+**2. Kernel Command Line (`/boot/firmware/cmdline.txt`)**
+Ensure your boot parameters are set correctly to handle composite resolution and margins. *Add this to the start of the single line in the file:*
+
+```text
+console=serial0,115200 console=tty1 root=PARTUUID=ce063a65-02 rootfstype=ext4 fsck.repair=yes rootwait quiet splash plymouth.ignore-serial-consoles cfg80211.ieee80211_regdom=DE video=Composite-1:720x576@50ie margin_left=40,margin_right=40,margin_top=32,margin_bottom=32
+```
+
+**3. Wayland Display Initialization**
+To force the correct output resolution in a Wayland environment (like Sway or Wayfire), run the appropriate `wlr-randr` command before launching the app. This can be edited in  ~/.config/labwc/autostart after running sudo setup_vi_kiosk_wayland.sh :
+
+* **For HDMI:**
+  ```bash
+  sh -c 'sleep 1; wlr-randr --output HDMI-A-1 --mode 1920x1080 || true'
+  ```
+* **For Composite:**
+  ```bash
+  sh -c 'sleep 1; wlr-randr --output Composite-1  --mode 720x576  || true'
+  ```
+
+**4. Kiosk Autostart**
+To automatically launch and respawn the application in a kiosk environment:
+
+```bash
+/usr/bin/lwrespawn /opt/kiosk/run_videointerleaving.sh
+```
+
+### Performance Optimization for Low-Power Devices
+
+For Raspberry Pi Zero 2 W and similar low-power devices, consider these optimizations in `settings.py`:
+
+* **Memory Optimization:**
+  * `FIFO_LENGTH = 10-15` (default: 30) - Reduces memory usage by limiting pre-loaded frames. Lower values reduce memory footprint but may cause frame drops if loading is slow.
+* **Encoding/Decoding Performance:**
+  * `JPEG_QUALITY = 40-50` (default: 55) - Lower quality equals faster encode/decode.
+* **Frame Rate:**
+  * `FPS = 20-25` (default: 30) - Lower target FPS reduces CPU load.
+  * `SERVER_CAPTURE_RATE = 10-15` (default: matches FPS) - Lower capture rate for web streaming.
+* **Additional Tips:**
+  * Use pre-encoded SBS JPEGs (already optimized format).
+  * Disable frame counter if not needed: `FRAME_COUNTER_DISPLAY = False`
+  * Reduce image resolution if possible (smaller images = faster processing).
+
+### Legacy GPUs (GLES 2.0 / GL 2.1)
+
+Some systems (e.g., Raspberry Pi 2 / older iGPUs / restricted drivers) only expose GLES 2.0 / OpenGL 2.1. In these cases, the app automatically switches to a legacy PyOpenGL renderer for local window mode.
+
+For headless streaming on Wayland where standalone EGL contexts fail, the app will also fall back to a hidden GLFW window + legacy FBO capture path.
+
+**Optional overrides:**
+* Force legacy renderer: `FORCE_LEGACY_GL=1`
+* Force GLES version attempts: `GLES_REQUIRE_OVERRIDE=200` (or `300`, `310`)
+
+**Wayland note:**
+* In local mode on Wayland, fullscreen uses a borderless fullscreen-sized window (not a mode-setting fullscreen) to reduce compositor/session crashes on some drivers.
+
+**TurboJPEG note:**
+* If you see `unable to locate turbojpeg library automatically`, install `libturbojpeg0` (Debian/Raspbian) or set `TURBOJPEG_LIB=/path/to/libturbojpeg.so.0`.
+
+### Precision Timing (Chrony)
+
+For installations requiring frame-perfect sync across multiple machines, installing `chrony` is highly recommended.
+
+**Linux Install:**
+```bash
+sudo apt install chrony
+```
+*(See `chrony.conf` sample in repo for PTB/German time server config.)*
+
+---
+
+## 6. Modem v2 test tool
+
+`utilities/modem_v2_check.py` exercises the proposed v2 transport
+(`animation_modem/transport2.py`). v2 is not wired into `main.py`; this tool is
+the only way to run it.
+
+Build the power-allocation table first. v2's source coder is guessing without
+it, and the table is a constant derived from the bake, so it only needs
+rebuilding when the images change:
+
+```bash
+python utilities/modem_v2_check.py allocate --modem-dir images_modem \
+    --out modem_allocation.npy
+```
+
+Presets choose the occupied band and the frame-rate/resolution trade:
+`wide` (1125-20250 Hz, 14.35 fps), `tape` (1125-10125 Hz, 7.71 fps, same
+picture), `tape-fast` (1125-10125 Hz, 14.35 fps, smaller picture), `narrow`
+(1125-7875 Hz). Narrow bands survive tape roll-off and tolerate more playback
+speed error: `tape` decodes up to 2.37x where `wide` aliases above 1.19x.
+
+### Live link
+
+Two terminals, receiver first:
+
+```bash
+python utilities/modem_v2_check.py live-receive --device "BlackHole 2ch" --preset tape
+python utilities/modem_v2_check.py live-send --modem-dir images_modem \
+    --device "BlackHole 2ch" --preset tape --allocation modem_allocation.npy
+```
+
+`live-receive` opens a window showing the newest decoded frame, and prints one
+JSON line per packet with status, frame identity, quality tier, bin coverage
+and `playback_rate_pct` -- through a tape deck that last field is the deck's
+speed error, measured live. `--headless` gives JSON with no window, `--quiet`
+the window with no JSON, and `--width`/`--height` size it.
+
+Nothing is queued or scheduled: whatever decoded most recently is what is on
+screen. For an analog source that is the only model that means anything, since
+a timestamp recorded onto tape says nothing about the current wall clock.
+
+`--list-devices` on either lists PortAudio devices. `--channels` is a one-based
+pair, default `1,2`.
+
+`live-send` runs no shared-clock scheduling. It keeps the carrier fed and
+identity travels in the header, which is the only model that means anything for
+playback off tape.
+
+### Offline and tape
+
+`bench` compares v1 against v2 across simulated channels. `write` encodes a
+bake to WAV for recording; `read` decodes a captured WAV. Both take
+`--allocation` and `--preset`. `--save-frames DIR` on `read` or `live-receive`
+writes PNGs; `-f` on the send side burns counters into the pixels.
+
+**Known limitation:** allocation currently loses about 3 dB on a rolled-off
+channel instead of the measured gain. `decode_packet` computes per-carrier
+`weights` and discards them for the image path, and `SourceCoder.inverse`
+divides by the allocation gain rather than Wiener-filtering with it. Until
+those are joined up, v2 trails v1 on the channels it was built for.
+
+## Project Structure
+
+* `main.py`: Entry point. Parses CLI args and launches threads.
+* `renderer.py`: The Unified Rendering Engine. Handles OpenGL (Shader) and CPU (NumPy) compositing.
+* `display_manager.py`: Manages window creation (GLFW or Headless FBO) and GL context.
+* `image_display.py`: The main loop. Manages time, loading, and feeding the renderer.
+* `image_loader.py`: High-speed TurboJPEG loader with FIFO buffering.
+* `web_service.py`: Flask-less HTTP server for MJPEG streaming and System Monitoring.
+* `ascii_server.py`: Raw TCP server for Telnet streaming.
+* `ascii_converter.py`: Vectorized image-to-text conversion engine.
+* `MODEM_MODE.md`: Stereo modem integration, bake and run instructions.
+* `utilities/convert_to_modem.py`: Prebakes project face/float layers to RGBA slabs.
+* `modem_display.py`: Composites baked layers and drives the frame-independent modem.
+* `settings.py`: Global configuration constants.
+* `tools/`: Helper scripts (e.g., `convert_to_sbs_fixed.py`).
+
+---
+
+## License
+
+MIT License. See LICENSE.
+
+© 2026 Ben Gencarelle
