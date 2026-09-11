@@ -321,8 +321,10 @@ def do_live_receive(args):
     label = tk.Label(root, background='black', image=blank)
     label.image = blank
     label.pack()
-    status = tk.Label(root, text='waiting for signal')
-    status.pack()
+    # Reserve two lines without letting status text dictate window width.
+    status = tk.Label(root, text='Waiting for signal\n', width=1, height=2,
+                      anchor='w', justify='left', wraplength=max(1, size[0]-12))
+    status.pack(fill='x', padx=6)
     thread = threading.Thread(target=pump, daemon=True)
 
     def close():
@@ -343,18 +345,15 @@ def do_live_receive(args):
             canvas = Image.new('RGB', size, 'black')
             scaled = ImageOps.contain(im, size, Image.Resampling.NEAREST)
             canvas.paste(scaled, ((size[0]-scaled.width)//2, (size[1]-scaled.height)//2))
-            photo = ImageTk.PhotoImage(canvas)
-            label.configure(image=photo)
-            label.image = photo
+            label.image.paste(canvas)
             frame = r.absolute if r.absolute is not None else '?'
             source = (f'{r.source_index}/{r.count}'
                       if r.source_index is not None else 'unknown')
             folders = ('?' if r.face_folder is None
                        else f'{r.face_folder}/{r.float_folder}')
-            status.config(text=f'frame {frame} | source {source} | face/float {folders} '
-                               f'| {r.status} | tier {r.tier} '
-                               f'| coverage {r.coverage:.2f} | '
-                               f'speed {1/(1+r.rate_error):.3f}x')
+            status.config(text=f'Frame {frame} | src {source} | folders {folders}\n'
+                               f'{r.status} | {r.tier} | coverage {r.coverage:.2f} | '
+                               f'{1/(1+r.rate_error):.3f}x')
             root.title(f'modem v2 - {args.preset} - frame {frame} - source {source}')
         if not stop.is_set():
             root.after(10, refresh)

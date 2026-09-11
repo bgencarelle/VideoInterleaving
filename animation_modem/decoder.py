@@ -263,8 +263,11 @@ def main(argv=None):
         label = tk.Label(root, background='black', image=initial)
         label.image = initial
         label.pack()
-        status = tk.Label(root, text='Frame identity unknown — waiting for signal')
-        status.pack()
+        # The image determines window width; status updates never resize it.
+        status = tk.Label(root, text='Frame identity unknown\nWaiting for signal',
+                          width=1, height=2, anchor='w', justify='left',
+                          wraplength=size[0]-12)
+        status.pack(fill='x', padx=6)
         def close():
             stop.set()
             root.destroy()
@@ -283,17 +286,15 @@ def main(argv=None):
                     scaled = ImageOps.contain(overlay.render(result),
                                               size, Image.Resampling.NEAREST)
                     canvas.paste(scaled, ((size[0]-scaled.width)//2, (size[1]-scaled.height)//2))
-                    photo = ImageTk.PhotoImage(canvas)
-                    label.configure(image=photo, width=size[0], height=size[1])
-                    label.image = photo
+                    # Keep one Tk image and update its pixels in place.
+                    label.image.paste(canvas)
                     name = result.absolute if result.absolute is not None else 'unknown'
                     source = (f'{result.source_index}/{result.count}'
                               if result.source_index is not None else 'unknown')
                     folders = ('?' if result.face_folder is None
                                else f'{result.face_folder}/{result.float_folder}')
-                    status.config(text=f'Frame {name} | source {source} | face/float {folders} '
-                                       f'| {result.status} | {result.identity} '
-                                       f'| tier {result.tier}')
+                    status.config(text=f'Frame {name} | src {source} | folders {folders}\n'
+                                       f'{result.status} | {result.identity} | tier {result.tier}')
                     root.title(f'Stereo image — {layout.name} — frame {name} — source {source}')
                     if result.target_time_ns is not None:
                         error_ms=(time.time_ns()-result.target_time_ns)/1e6
