@@ -44,7 +44,7 @@ def _sync_waveform(seed=41015):
 
 
 SYNC = _sync_waveform()
-SYNC_ENERGY = float(np.dot(SYNC, SYNC))
+SYNC_ENERGY = float(np.einsum('i,i->', SYNC, SYNC, optimize=False))
 
 
 @dataclass(frozen=True)
@@ -242,7 +242,7 @@ def _scaled_sync(scale):
 
 
 SYNC_BANK = [(float(s), _scaled_sync(float(s))) for s in SYNC_SCALES]
-SYNC_BANK = [(s, t, float(np.dot(t, t))) for s, t in SYNC_BANK]
+SYNC_BANK = [(s, t, float(np.einsum('i,i->', t, t, optimize=False))) for s, t in SYNC_BANK]
 
 
 def find_preamble(samples, limit=None, bank=None):
@@ -466,16 +466,17 @@ def _equalise(body, layout):
     h = np.stack([received[0]*inverse_phase[0, :, 0, None],
                   received[1]*inverse_phase[1, :, 1, None]], axis=-1)
     noise = max(float(np.mean(np.abs(spectrum[:, unused])**2)), 1e-12)
+    # Keep these tiny products out of matmul/BLAS; do not suppress FP errors.
     hH = h.conj().transpose(0, 2, 1)
-    gram = hH @ h
+    gram = np.einsum('kij,kjl->kil', hH, h, optimize=False)
     gram[:, 0, 0] += 4*noise
     gram[:, 1, 1] += 4*noise
     det = gram[:, 0, 0]*gram[:, 1, 1] - gram[:, 0, 1]*gram[:, 1, 0]
     adj = np.empty_like(gram)
     adj[:, 0, 0], adj[:, 1, 1] = gram[:, 1, 1], gram[:, 0, 0]
     adj[:, 0, 1], adj[:, 1, 0] = -gram[:, 0, 1], -gram[:, 1, 0]
-    inverse = (adj/det[:, None, None]) @ hH
-    weights = np.clip(np.real(np.diagonal(inverse @ h, axis1=1, axis2=2)), 0, 1)
+    inverse = np.einsum('kij,kjl->kil', adj/det[:, None, None], hH, optimize=False)
+    weights = np.clip(np.real(np.einsum('kij,kji->ki', inverse, h, optimize=False)), 0, 1)
     equal = np.einsum('kij,skj->ski', inverse, received)*inverse_phase
     variance = .5*noise*np.sum(np.abs(inverse)**2, axis=-1)/IMAGE_GAIN**2
     coherence = abs(np.sum(h[1:]*h[:-1].conj())) / max(
@@ -514,7 +515,7 @@ def decode_packet(samples, layout, coder, *, body=None):
                     # the recovered clock with an unreliable pilot.
                     axis = np.arange(len(slope), dtype=float)
                     axis -= axis.mean()
-                    gradient = float(axis @ slope / (axis @ axis))
+                    gradient = float(np.einsum('i,i->', axis, slope, optimize=False) / np.einsum('i,i->', axis, axis, optimize=False))
                     residual = slope-slope.mean()-gradient*axis
                     if np.sqrt(np.mean(residual**2))*N/(2*np.pi) < .15:
                         clock_errors.append(gradient*N/(2*np.pi*SYMBOL))
@@ -627,7 +628,7 @@ def _fit_sync(samples, at, scale, reach=.03, cutoff=None, iterations=7, fast=Fal
     best = (0., float(at-left), scale)
     for s in (np.linspace(scale*(1-reach), scale*(1+reach), 13) if reach else ()):
         template = _scaled_sync(float(s))
-        energy = float(template @ template)
+        energy = float(np.einsum('i,i->', template, template, optimize=False))
         for c in range(2):
             scores = sync_correlation(local[:, c], 2*radius+1, template, energy)
             if len(scores):
@@ -640,26 +641,26 @@ def _fit_sync(samples, at, scale, reach=.03, cutoff=None, iterations=7, fast=Fal
         return np.stack([np.convolve(z[:,c],_sync_filter(cutoff),'same') for c in range(z.shape[1])],axis=1)
     if cutoff is not None:
         reference=np.convolve(SYNC,_sync_filter(cutoff),'same')
-    energy=float(reference @ reference)
+    energy=float(np.einsum('i,i->', reference, reference, optimize=False))
     # Two-parameter timing loop over a single preamble. Project out gain, then
     # fit timing error and dilation together; no general-purpose optimizer and
     # no repeated full-frame inverse FFTs.
     for _ in range(iterations):
         z=filtered(resample_packet(local,s-1,len(SYNC),offset=pos, fast=fast))
-        scores=abs(reference @ z)/np.sqrt(energy*np.maximum((z*z).sum(0),1e-20))
+        scores=abs(np.einsum('i,ic->c', reference, z, optimize=False))/np.sqrt(energy*np.maximum((z*z).sum(0),1e-20))
         c=int(np.argmax(scores));z=z[:,c].astype(float)
-        gain=float(reference @ z)/energy
+        gain=float(np.einsum('i,i->', reference, z, optimize=False))/energy
         derivative=(filtered(resample_packet(local,s-1,len(SYNC),offset=pos+.05, fast=fast))[:,c]
                     -filtered(resample_packet(local,s-1,len(SYNC),offset=pos-.05, fast=fast))[:,c])/.1
         j=np.stack([derivative,derivative*np.arange(len(SYNC))/1000],axis=1)
-        j-=reference[:,None]*(reference @ j)[None,:]/energy
-        gram=j.T @ j + np.eye(2)*1e-12
-        step=np.linalg.solve(gram,j.T @ (z-gain*reference))
+        j-=reference[:,None]*np.einsum('i,ij->j', reference, j, optimize=False)[None,:]/energy
+        gram=np.einsum('ni,nj->ij', j, j, optimize=False) + np.eye(2)*1e-12
+        step=np.linalg.solve(gram,np.einsum('ni,n->i', j, z-gain*reference, optimize=False))
         step=np.clip(step,[-1.,-s*2],[1.,s*2])
         pos=max(0,pos-step[0]);s-=step[1]/1000
         if np.max(abs(step))<1e-4:break
     z=filtered(resample_packet(local,s-1,len(SYNC),offset=pos, fast=fast))
-    scores=abs(reference @ z)/np.sqrt(energy*np.maximum((z*z).sum(0),1e-20))
+    scores=abs(np.einsum('i,ic->c', reference, z, optimize=False))/np.sqrt(energy*np.maximum((z*z).sum(0),1e-20))
     return float(left+pos),float(s),float(scores.max())
 
 
@@ -821,7 +822,7 @@ class Receiver:
         t = SYNC if abs(scale-1)<1e-6 else _template(float(scale))
         # Earliest peak, never the strongest peak in the entire file.
         for c in range(2):
-            scores = sync_correlation(x[:,c], template=t, energy=float(t@t))
+            scores = sync_correlation(x[:,c], template=t, energy=float(np.einsum('i,i->', t, t, optimize=False)))
             hits = np.flatnonzero(scores >= max(self.threshold,.55))
             if len(hits):
                 first = int(hits[0]);at = first+int(np.argmax(scores[first:first+8]))

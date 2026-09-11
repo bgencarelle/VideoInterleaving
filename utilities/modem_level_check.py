@@ -57,7 +57,7 @@ def analyze(recorded, rate, pilot, slots, level_dbfs, max_delay):
         raise ValueError('Recording must contain finite multichannel samples')
     noise = np.sqrt(np.mean(recorded[:max(1,round(.15*rate))]**2, axis=0))
     reference_rms = 10**(level_dbfs/20)/np.sqrt(2)
-    pilot_energy = float(pilot@pilot)
+    pilot_energy = float(np.einsum('i,i->', pilot, pilot, optimize=False))
     rows = []
     for slot in slots:
         start = slot['pilot_start']
