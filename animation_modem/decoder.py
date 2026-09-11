@@ -12,8 +12,10 @@ Presentation follows the source. When a packet carries a plausible shared-time
 stamp the frame is held until that instant, which is what keeps modem output
 agreeing with local, scope and ascii on a chrony-disciplined install. When it
 does not -- anything played back off tape, where a recorded timestamp says
-nothing about the current wall clock -- the newest decoded frame is shown as
-soon as it lands. Nothing is queued in that mode and nothing waits.
+nothing about the current wall clock -- complete pictures appear immediately.
+Partials wait until half the previous received packet duration from the current
+packet start, then refine over the held picture. Only the newest unscheduled
+reconstruction is retained.
 """
 import argparse
 from contextlib import closing
@@ -32,7 +34,8 @@ from .imaging import DEFAULT_PROFILE, fit_shapes, plane_shapes, values_image
 from .transport2 import PRESETS, RATE, SourceCoder
 from .progressive import Receiver
 from .reference_receiver import Receiver as ReferenceReceiver
-from .timing import expand_timestamp, ProgressSummary, TimingStats, PresentationBuffer
+from .timing import expand_timestamp, ProgressSummary, TimingStats
+from .presentation import DeadlinePresentationBuffer
 from .impairments import Emulator, add_arguments, settings_from_args
 
 # A stamp further from now than this cannot be a live shared-time deadline, so
@@ -154,7 +157,7 @@ def main(argv=None):
                           'layout': layout.describe()}), file=sys.stderr)
     if args.save_frames:
         args.save_frames.mkdir(parents=True, exist_ok=True)
-    updates = PresentationBuffer()
+    updates = DeadlinePresentationBuffer(RATE, layout.packet, coder.count)
     decode_stats = TimingStats()
     display_stats = TimingStats()
     stop = threading.Event()
@@ -203,7 +206,7 @@ def main(argv=None):
                 result.decode_error_ms = (now_ns-target)/1e6
                 timing = decode_stats.record(result.decode_error_ms)
             if not args.headless:
-                updates.put(result, target if target is not None else now_ns)
+                updates.put(result, target if target is not None else now_ns, now_ns=now_ns)
             record = {k: v for k, v in vars(result).items() if k != 'values'}
             record.pop('extra', None)
             # Derived properties are invisible to vars().

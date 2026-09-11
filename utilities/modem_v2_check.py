@@ -239,12 +239,11 @@ def do_live_send(args):
 
 
 def do_live_receive(args):
-    """Decode from an input device and show the newest complete frame.
+    """Decode from an input device with full-frame/deadline-preview selection.
 
-    No timestamp scheduling and no presentation queue: whatever decoded most
-    recently is what is on screen. That is the right model for an analog
-    source, where the header carries identity and a recorded timestamp means
-    nothing against the current wall clock.
+    Recorded timestamps are ignored here. Complete pictures display immediately;
+    partials wait until half the previous packet duration from this packet start.
+    Only the newest unscheduled reconstruction is retained.
     """
     import threading
     from animation_modem.progressive import Receiver as ProgressiveReceiver
@@ -257,7 +256,9 @@ def do_live_receive(args):
     coder, _ = coder_for(args.profile, args.allocation,layout)
     if args.save_frames:
         Path(args.save_frames).mkdir(parents=True, exist_ok=True)
-    newest = {'result': None, 'seen': 0, 'tiers': {}}
+    from animation_modem.presentation import DeadlinePresentationBuffer
+    updates = DeadlinePresentationBuffer(V2.RATE, layout.packet, coder.count)
+    newest = {'seen': 0, 'tiers': {}}
     verbose = (args.verbose or args.headless) and not args.silent
     summary = ProgressSummary(args.summary_seconds)
     stop = threading.Event()
@@ -279,8 +280,9 @@ def do_live_receive(args):
                     if complete:
                         newest['seen'] += 1
                         newest['tiers'][r.tier] = newest['tiers'].get(r.tier, 0)+1
-                    if r.values is not None:
-                        newest['result'] = r          # latest wins, nothing queued
+                    if r.values is not None and not args.headless:
+                        now_ns = time.time_ns()
+                        updates.put(r, now_ns, now_ns=now_ns)
                     if verbose:
                         print(json.dumps(record(r)),flush=True)
                     if complete and not verbose and not args.silent:
@@ -334,7 +336,7 @@ def do_live_receive(args):
         if errors:
             status.config(text=f'Input error: {errors[0]}')
             return
-        r = newest['result']
+        r = updates.pop_due(time.time_ns())
         if r is not None and r is not shown['at']:
             shown['at'] = r
             im = overlay.render(r)

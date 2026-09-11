@@ -198,6 +198,8 @@ class Receiver(v.Receiver):
                 result.rate_confidence=score
                 result.extra.update(packet_id=self.offset+begin,at=self.offset+begin,
                     playback_speed=1/scale, input_path='streaming', sync_score=score,
+                    packet_duration_samples=float(self.layout.packet*scale),
+                    packet_age_samples=float(max(0, now-self.offset-begin)),
                     decode_ms=self.cpu_pending+(time.perf_counter()-started)*1000,acquire_ms=self.acquire_ms)
                 result.extra['receive_cpu_ms']=result.extra['decode_ms']+self.acquire_ms
                 out.append(result)
