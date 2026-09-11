@@ -81,9 +81,9 @@ def coder_for(profile, allocation, layout=None):
 
 
 def receive_for(args,layout,coder):
-    # Live operation favors one decode per packet. Offline checks retain the
-    # automatic conditioned/EQ recovery in transport2.Receiver by default.
-    return V2.Receiver(layout,coder,recovery=False)
+    # WAV checks exercise the same recovered-clock path as live reception.
+    # Explicit Receiver callers can still request full-packet EQ recovery.
+    return V2.Receiver(layout,coder,recovery=False,fast=True)
 
 
 def record(r):

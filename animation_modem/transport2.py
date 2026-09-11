@@ -274,44 +274,39 @@ def _sinc_weight_table(taps=8, phases=4096):
     return weights
 
 
-# The timing check/preamble gives us one scale for the complete packet.  Keep
-# the integer sample walk and quantised fractional phases cached so the live
-# decoder does not rebuild arange/floor/sinc arrays for every packet.
-_PLAN_SCALE_Q = 65536
-_PLAN_PHASE_Q = 4096
+# One fixed fractional-delay table serves every speed and starting phase.
+# Only the affine sample walk changes; no cache keyed by noisy speed estimates.
+@lru_cache(maxsize=32)
+def _sample_walk(length, taps):
+    return np.arange(length, dtype=np.float64), np.arange(-taps+1, taps+1)
+
+
+def _sample_at(samples, position, taps=8):
+    """Read a recovered-clock sample walk using fixed fractional-delay weights."""
+    _, offsets = _sample_walk(0, taps)
+    base = np.floor(position).astype(np.intp)
+    table = _sinc_weight_table(taps)
+    phase = np.minimum(((position-base)*len(table)).astype(np.intp), len(table)-1)
+    index = np.clip(base[:, None]+offsets, 0, len(samples)-1)
+    return np.einsum('ij,ijc->ic', table[phase], samples[index]).astype(np.float32)
 
 
 @lru_cache(maxsize=32)
-def _resample_plan(length, scale_key, phase_key, taps):
-    scale = float(scale_key) / _PLAN_SCALE_Q
-    phase = float(phase_key) / _PLAN_PHASE_Q
-    position = phase + np.arange(length, dtype=np.float64) * scale
-    base = np.floor(position).astype(np.int32)
-    frac = np.minimum((position - base) * _PLAN_PHASE_Q,
-                      _PLAN_PHASE_Q - 1).astype(np.intp)
-    offsets = np.arange(-taps + 1, taps + 1, dtype=np.int32)
-    # Relative base positions are independent of the packet's absolute start.
-    return base, frac, offsets
+def _body_walk(layout):
+    """Only the useful FFT windows; skip sync, guards and unused CP samples."""
+    return (SYNC_LEN + np.arange(layout.symbols)[:, None]*SYMBOL +
+            CP-4 + np.arange(N)[None, :]).ravel()
 
 
 def resample_packet(samples, rate, length, taps=8, offset=0.0, fast=False):
     """Resample one packet, using a cheap path for normal small clock error.
 
-    The live path uses a cached fractional-delay sinc table; the uncached path
-    is retained for the timing fitter, where each call uses a different delay.
+    The live path and its local timing updates use a fixed fractional-delay
+    table. Cold acquisition retains the full-precision reference path.
     """
     if fast:
-        absolute = int(np.floor(offset))
-        fraction = float(offset - absolute)
-        phase_key = int(round(fraction * _PLAN_PHASE_Q))
-        if phase_key >= _PLAN_PHASE_Q:
-            absolute += 1
-            phase_key = 0
-        scale_key = int(round((1.0 + rate) * _PLAN_SCALE_Q))
-        base, phase, offsets = _resample_plan(length, scale_key, phase_key, taps)
-        index = np.clip(absolute + base[:, None] + offsets[None, :],
-                        0, len(samples)-1)
-        weights = _sinc_weight_table(taps)[phase]
+        walk, _ = _sample_walk(length, taps)
+        return _sample_at(samples, offset+walk*(1.0+rate), taps)
     else:
         position = offset + np.arange(length)*(1.0+rate)
         base = np.floor(position).astype(int)
@@ -488,13 +483,15 @@ def _equalise(body, layout):
     return equal, weights, variance, float(coherence)
 
 
-def decode_packet(samples, layout, coder):
+def decode_packet(samples, layout, coder, *, body=None):
     carriers = layout.carriers
     data, pilots, header, _, _ = _decode_tables(layout)
-    body = samples[SYNC_LEN:layout.packet].reshape(layout.symbols, SYMBOL, 2)[:, CP-4:CP-4+N]
+    if body is None:
+        body = samples[SYNC_LEN:layout.packet].reshape(layout.symbols, SYMBOL, 2)[:, CP-4:CP-4+N]
     equal, weights, variance, coherence = _equalise(body, layout)
 
     timing_drift = 0.0
+    clock_errors = []
     for channel in range(2):
         keep = weights[pilots, channel] > .6
         if np.count_nonzero(keep) >= 2:
@@ -512,6 +509,15 @@ def decode_packet(samples, layout, coder):
                 if len(slope) >= 4:
                     drift = abs(float(np.median(slope[-3:])-np.median(slope[:3]))) * N/(2*np.pi)
                     timing_drift = max(timing_drift, drift)
+                    # Signed phase slope per symbol measures relative clock
+                    # error. Reject nonlinear/noisy fits rather than steering
+                    # the recovered clock with an unreliable pilot.
+                    axis = np.arange(len(slope), dtype=float)
+                    axis -= axis.mean()
+                    gradient = float(axis @ slope / (axis @ axis))
+                    residual = slope-slope.mean()-gradient*axis
+                    if np.sqrt(np.mean(residual**2))*N/(2*np.pi) < .15:
+                        clock_errors.append(gradient*N/(2*np.pi*SYMBOL))
                 equal[2:, :, channel] *= np.exp(-1j*(slope[:, None]*carriers + offset[:, None]))
     pilot_error = float(np.sqrt(np.mean(np.abs(equal[2:, pilots] - 1)**2)))
 
@@ -556,13 +562,15 @@ def decode_packet(samples, layout, coder):
         return Decoded('picture_only' if usable else 'lost',
                        values=values if usable else None, pilot_error=pilot_error,
                        coverage=coverage, tier=tier if usable else 'none',
-                       extra={'timing_drift_samples': timing_drift})
+                       extra={'timing_drift_samples': timing_drift,
+                              'clock_error': float(np.median(clock_errors)) if clock_errors else None})
     flags, absolute, index, count, stamp = fields
     return Decoded('received' if pilot_error < .15 else 'degraded', values=values,
                    absolute=absolute, index=index, count=count, stamp_ms=stamp,
                    flags=flags, pilot_error=pilot_error, coverage=coverage,
                    identity='verified_header', tier=tier,
-                   extra={'timing_drift_samples': timing_drift})
+                   extra={'timing_drift_samples': timing_drift,
+                              'clock_error': float(np.median(clock_errors)) if clock_errors else None})
 
 
 def sync_correlation(x, limit=None, template=None, energy=None):
@@ -593,8 +601,10 @@ def sync_correlation(x, limit=None, template=None, energy=None):
 
 @lru_cache(maxsize=128)
 def _template(scale):
-    ratio = Fraction(float(scale)).limit_denominator(512)
-    return resample_poly(SYNC, ratio.numerator, ratio.denominator)
+    # Zero guards preserve the template boundary; no runtime FIR design.
+    reference = np.pad(SYNC, (16, 16))[:, None]
+    return resample_packet(reference, 1/scale-1, int(round(len(SYNC)*scale)),
+                           offset=16., fast=True)[:, 0]
 
 
 @lru_cache(maxsize=8)
@@ -609,7 +619,7 @@ def _sync_filter(cutoff):
     return firwin(33,cutoff,fs=RATE)
 
 
-def _fit_sync(samples, at, scale, reach=.03, cutoff=None, iterations=7):
+def _fit_sync(samples, at, scale, reach=.03, cutoff=None, iterations=7, fast=False):
     """Refine only the preamble, not five complete image decodes."""
     radius = 12
     left = max(0, int(at)-radius)
@@ -635,12 +645,12 @@ def _fit_sync(samples, at, scale, reach=.03, cutoff=None, iterations=7):
     # fit timing error and dilation together; no general-purpose optimizer and
     # no repeated full-frame inverse FFTs.
     for _ in range(iterations):
-        z=filtered(resample_packet(local,s-1,len(SYNC),offset=pos))
+        z=filtered(resample_packet(local,s-1,len(SYNC),offset=pos, fast=fast))
         scores=abs(reference @ z)/np.sqrt(energy*np.maximum((z*z).sum(0),1e-20))
         c=int(np.argmax(scores));z=z[:,c].astype(float)
         gain=float(reference @ z)/energy
-        derivative=(filtered(resample_packet(local,s-1,len(SYNC),offset=pos+.05))[:,c]
-                    -filtered(resample_packet(local,s-1,len(SYNC),offset=pos-.05))[:,c])/.1
+        derivative=(filtered(resample_packet(local,s-1,len(SYNC),offset=pos+.05, fast=fast))[:,c]
+                    -filtered(resample_packet(local,s-1,len(SYNC),offset=pos-.05, fast=fast))[:,c])/.1
         j=np.stack([derivative,derivative*np.arange(len(SYNC))/1000],axis=1)
         j-=reference[:,None]*(reference @ j)[None,:]/energy
         gram=j.T @ j + np.eye(2)*1e-12
@@ -648,7 +658,7 @@ def _fit_sync(samples, at, scale, reach=.03, cutoff=None, iterations=7):
         step=np.clip(step,[-1.,-s*2],[1.,s*2])
         pos=max(0,pos-step[0]);s-=step[1]/1000
         if np.max(abs(step))<1e-4:break
-    z=filtered(resample_packet(local,s-1,len(SYNC),offset=pos))
+    z=filtered(resample_packet(local,s-1,len(SYNC),offset=pos, fast=fast))
     scores=abs(reference @ z)/np.sqrt(energy*np.maximum((z*z).sum(0),1e-20))
     return float(left+pos),float(s),float(scores.max())
 
@@ -692,7 +702,14 @@ def _channel_training(layout):
     padded = np.pad(reference,((taps-1,0),(0,0)))
     design = np.lib.stride_tricks.sliding_window_view(padded,taps,axis=0)
     design = design[:,:,::-1].reshape(len(reference),-1)[taps:]
-    inverse = np.linalg.solve(design.T @ design + np.eye(2*taps)*1e-5,design.T)
+    # Explicit contractions avoid the matmul/BLAS dispatch that has emitted
+    # invalid floating-point warnings on some hosts for these finite arrays.
+    # optimize=False is intentional: do not dispatch back to a BLAS product.
+    gram = np.einsum('ni,nj->ij', design, design, optimize=False)
+    gram.flat[::gram.shape[0]+1] += 1e-5
+    inverse = np.linalg.solve(gram, design.T)
+    if not np.isfinite(inverse).all():
+        raise FloatingPointError('Non-finite channel training inverse')
     return design,inverse
 
 
@@ -706,8 +723,10 @@ def _undo_channel_memory(samples,layout):
     taps = 128
     design,inverse = _channel_training(layout)
     observed = samples[taps:SYNC_LEN+2*SYMBOL]
-    coefficients = inverse @ observed
-    residual = observed-design @ coefficients
+    if not np.isfinite(observed).all():
+        return None, float('inf')
+    coefficients = np.einsum('ij,jc->ic', inverse, observed, optimize=False)
+    residual = observed-np.einsum('ij,jc->ic', design, coefficients, optimize=False)
     fit_error = float(np.mean(residual**2)/max(np.mean(observed**2),1e-20))
     if not np.isfinite(fit_error) or fit_error > .1:
         return None,fit_error
@@ -715,7 +734,7 @@ def _undo_channel_memory(samples,layout):
     size = 1 << (len(samples)+2*taps-1).bit_length()
     channel = np.fft.rfft(impulse,n=size,axis=-1).transpose(2,0,1)
     adjoint = channel.conj().transpose(0,2,1)
-    gram = adjoint @ channel
+    gram = np.einsum('kij,kjl->kil', adjoint, channel, optimize=False)
     power = float(np.mean(np.abs(channel)**2))
     regularizer = max(power*max(1e-4,fit_error),1e-12)
     equalizer = np.linalg.solve(gram+np.eye(2)[None]*regularizer,adjoint)
@@ -768,7 +787,6 @@ class Receiver:
         self.acquire_ms = 0.
         self.acquisition_path = 'raw'
         self.locked_packets = 0
-        self._track_needed = False
 
     def _fit(self, x, at, scale, reach=.03):
         # Preserve all available timing information on clean audio. Low-band
@@ -816,10 +834,9 @@ class Receiver:
                 if self.confidence and scores[at] >= locked_cutoff:
                     # Update fractional start and dilation from known samples.
                     # At most three local steps, no scale bank or trial image decodes.
-                    if not self._track_needed and scores[at] >= .995:
-                        self.locked_packets += 1
-                        return float(at), float(scale), float(scores[at])
-                    tracked = _fit_sync(x, at, scale, reach=0, iterations=3)
+                    tracked = _fit_sync(x, at, scale, reach=0,
+                                        iterations=1 if scores[at] >= .995 else 3,
+                                        fast=self.fast)
                     if tracked[2] >= max(self.threshold, scores[at]-.05):
                         self.locked_packets += 1
                         return tracked
@@ -912,12 +929,23 @@ class Receiver:
             end=begin+(self.layout.packet-1)*scale+1
             if len(self.buffer)<end-(2 if final else 0):break
             started=time.perf_counter()
-            if scale==1 and begin==int(begin) and begin>=0:
+            if self.fast and not self.recovery:
+                # The recovered clock drives carrier extraction directly.
+                # No full nominal-rate packet is reconstructed on this path.
+                if scale == 1 and begin == int(begin) and begin >= 0:
+                    packet = self.buffer[int(begin):int(begin)+self.layout.packet]
+                    body = packet[SYNC_LEN:].reshape(self.layout.symbols, SYMBOL, 2)[:, CP-4:CP-4+N]
+                else:
+                    body = _sample_at(self.buffer, begin+_body_walk(self.layout)*scale)
+                    body = body.reshape(self.layout.symbols, N, 2)
+                result = decode_packet(None, self.layout, self.coder, body=body)
+            elif scale==1 and begin==int(begin) and begin>=0:
                 straight=self.buffer[int(begin):int(begin)+self.layout.packet]
             else:
                 straight=resample_packet(self.buffer,scale-1,self.layout.packet,offset=begin,
                                          fast=self.fast)
-            result=decode_packet(straight,self.layout,self.coder)
+            if not (self.fast and not self.recovery):
+                result=decode_packet(straight,self.layout,self.coder)
             input_path = 'raw'
             if self.recovery and (result.identity != 'verified_header' or result.pilot_error > .05):
                 # Rate correction has returned the carriers to nominal Hz.
@@ -942,9 +970,15 @@ class Receiver:
             result.extra['receive_cpu_ms']=result.extra['decode_ms']+self.acquire_ms
             self.pending=None
             if result.values is not None:
-                self._track_needed = (result.extra.get('timing_drift_samples', 0.) > .15
-                                      or result.pilot_error > .05)
-                self.rate,self.confidence=scale-1,score
+                clock_error = result.extra.get('clock_error')
+                next_scale = scale
+                if (clock_error is not None and result.pilot_error < .15
+                        and abs(clock_error) < .005):
+                    # Half-gain loop suppresses measurement noise. Every new
+                    # packet still verifies its own reference; no cadence lock.
+                    next_scale = scale/(1+.5*clock_error)
+                    next_scale = float(np.clip(next_scale, 1/self.max_speed, 1/self.min_speed))
+                self.rate,self.confidence=next_scale-1,score
                 out.append(result)
                 self.acquire_ms=0.
                 self._drop(max(1,int(np.floor(begin+self.layout.packet*scale))))
