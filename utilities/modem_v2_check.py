@@ -247,6 +247,9 @@ def do_live_receive(args):
     nothing against the current wall clock.
     """
     import threading
+    from animation_modem.progressive import Receiver as ProgressiveReceiver
+    from animation_modem.reference_receiver import Receiver as ReferenceReceiver
+    receiver_factory = ReferenceReceiver if args.receiver == 'reference' else ProgressiveReceiver
     sd = _sounddevice()
     if args.list_devices:
         print(sd.query_devices()); return
@@ -269,7 +272,8 @@ def do_live_receive(args):
     def pump():
         try:
             with closing(live_results(sd, args.device, args.channels, layout, coder,
-                                      IMP.Settings(), stop, report_input)) as live:
+                                      IMP.Settings(), stop, report_input,
+                                      receiver_factory=receiver_factory)) as live:
                 for r in live:
                     complete = r.extra.get('complete', True)
                     if complete:
@@ -391,6 +395,7 @@ def main(argv=None):
     ls.add_argument('-f', '--numbered', action='store_true')
     ls.add_argument('--list-devices', action='store_true')
     lr = sub.add_parser('live-receive')
+    lr.add_argument('--receiver', choices=('progressive', 'reference'), default='progressive')
     lr.add_argument('--device',type=device); lr.add_argument('--channels',type=pair,default=(0,1),
         help='Ordered 1-based input pair (default: 1,2)')
     lr.add_argument('--save-frames', type=Path)

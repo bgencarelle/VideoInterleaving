@@ -31,6 +31,7 @@ from .capture import AudioGate, BufferedInput, CaptureHealth, CaptureResampler, 
 from .imaging import DEFAULT_PROFILE, fit_shapes, plane_shapes, values_image
 from .transport2 import PRESETS, RATE, SourceCoder
 from .progressive import Receiver
+from .reference_receiver import Receiver as ReferenceReceiver
 from .timing import expand_timestamp, ProgressSummary, TimingStats, PresentationBuffer
 from .impairments import Emulator, add_arguments, settings_from_args
 
@@ -48,7 +49,8 @@ def build():
     return layout, SourceCoder(fit_shapes(plane_shapes(FIXED_PROFILE), layout.capacity))
 
 
-def live_results(sd, input_device, channels, layout, coder, settings, stop, report):
+def live_results(sd, input_device, channels, layout, coder, settings, stop, report,
+                 receiver_factory=Receiver):
     """One ordinary input stream; select a pair explicitly, defaulting to 1/2."""
     if stop.is_set():return
     channels = (0, 1) if channels is None else channels
@@ -58,7 +60,7 @@ def live_results(sd, input_device, channels, layout, coder, settings, stop, repo
         raise ValueError('Selected input channels are unavailable on this device')
     emulator = Emulator(settings)
     # Calibrate once, then consume each symbol once and publish usable previews.
-    receiver = Receiver(layout, coder)
+    receiver = receiver_factory(layout, coder)
     with open_input(sd, input_device, channel_count,
                     device_info['default_samplerate']) as stream:
         capture_rate = float(stream.samplerate)
@@ -116,6 +118,8 @@ def main(argv=None):
     p.add_argument('--device', type=device, help='Input device ID or name substring')
     p.add_argument('--channels', type=pair, default=(0, 1),
                    help='Ordered input pair, 1-based (default: 1,2)')
+    p.add_argument('--receiver', choices=('progressive', 'reference'), default='progressive',
+                   help='reference: experimental first-pass reference events, no acquisition searches')
     p.add_argument('--wav', type=Path, help='Receive a baked/recorded 48 kHz PCM16 WAV')
     p.add_argument('--list-devices', action='store_true')
     p.add_argument('-v', '--verbose', action='store_true',
@@ -181,7 +185,8 @@ def main(argv=None):
         return target
 
     def receive():
-        receiver = Receiver(layout, coder)
+        receiver_factory = ReferenceReceiver if args.receiver == 'reference' else Receiver
+        receiver = receiver_factory(layout, coder)
         emulator = Emulator(settings)
         def process(audio):
             for result in receiver.feed(emulator.process(audio)):
@@ -230,7 +235,8 @@ def main(argv=None):
                     if not args.silent:
                         print(json.dumps(record), file=sys.stderr, flush=True)
                 with closing(live_results(sounddevice(), args.device, args.channels,
-                                          layout, coder, settings, stop, report_input)) as live:
+                                          layout, coder, settings, stop, report_input,
+                                          receiver_factory=receiver_factory)) as live:
                     for result in live:
                         emit(result)
         except Exception as exc:
