@@ -310,6 +310,8 @@ def do_live_receive(args):
 
     import tkinter as tk
     from PIL import ImageTk, ImageOps
+    from animation_modem.preview_overlay import PreviewOverlay
+    overlay = PreviewOverlay(coder.shapes)
     size = (args.width, args.height)
     root = tk.Tk()
     root.title(f'modem v2 - {args.preset} - waiting for signal')
@@ -335,7 +337,7 @@ def do_live_receive(args):
         r = newest['result']
         if r is not None and r is not shown['at']:
             shown['at'] = r
-            im = values_image(r.values, coder.shapes)
+            im = overlay.render(r)
             canvas = Image.new('RGB', size, 'black')
             scaled = ImageOps.contain(im, size, Image.Resampling.NEAREST)
             canvas.paste(scaled, ((size[0]-scaled.width)//2, (size[1]-scaled.height)//2))

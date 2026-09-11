@@ -251,6 +251,8 @@ def main(argv=None):
     else:
         import tkinter as tk
         from PIL import Image, ImageTk, ImageOps
+        from .preview_overlay import PreviewOverlay
+        overlay = PreviewOverlay(coder.shapes)
         size = (400, 480)
         root = tk.Tk()
         root.title('Stereo image receiver — waiting for synchronization')
@@ -275,7 +277,7 @@ def main(argv=None):
                     # Only a real picture replaces the last one; a lost packet
                     # leaves the previous frame up rather than flashing black.
                     canvas = Image.new('RGB', size, 'black')
-                    scaled = ImageOps.contain(values_image(result.values, coder.shapes),
+                    scaled = ImageOps.contain(overlay.render(result),
                                               size, Image.Resampling.NEAREST)
                     canvas.paste(scaled, ((size[0]-scaled.width)//2, (size[1]-scaled.height)//2))
                     photo = ImageTk.PhotoImage(canvas)
