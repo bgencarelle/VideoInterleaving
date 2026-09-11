@@ -458,9 +458,8 @@ def _decode_tables(layout):
     return (*indices, unused, phases(layout).conj())
 
 
-def _equalise(body, layout):
+def _channel_equalizer(spectrum, layout):
     carriers = layout.carriers
-    spectrum = rfft(body, n=N, axis=1, workers=1)
     received = spectrum[:, carriers, :]
     _, _, _, unused, inverse_phase = _decode_tables(layout)
     h = np.stack([received[0]*inverse_phase[0, :, 0, None],
@@ -477,11 +476,17 @@ def _equalise(body, layout):
     adj[:, 0, 1], adj[:, 1, 0] = -gram[:, 0, 1], -gram[:, 1, 0]
     inverse = np.einsum('kij,kjl->kil', adj/det[:, None, None], hH, optimize=False)
     weights = np.clip(np.real(np.einsum('kij,kji->ki', inverse, h, optimize=False)), 0, 1)
-    equal = np.einsum('kij,skj->ski', inverse, received)*inverse_phase
     variance = .5*noise*np.sum(np.abs(inverse)**2, axis=-1)/IMAGE_GAIN**2
     coherence = abs(np.sum(h[1:]*h[:-1].conj())) / max(
         np.sqrt(np.sum(abs(h[1:])**2)*np.sum(abs(h[:-1])**2)), 1e-20)
-    return equal, weights, variance, float(coherence)
+    return inverse, weights, variance, float(coherence)
+
+
+def _equalise(body, layout):
+    spectrum = rfft(body, n=N, axis=1, workers=1)
+    inverse, weights, variance, coherence = _channel_equalizer(spectrum, layout)
+    equal = np.einsum('kij,skj->ski', inverse, spectrum[:, layout.carriers, :])*_decode_tables(layout)[4]
+    return equal, weights, variance, coherence
 
 
 def decode_packet(samples, layout, coder, *, body=None):

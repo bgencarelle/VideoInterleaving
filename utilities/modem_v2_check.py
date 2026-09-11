@@ -271,17 +271,19 @@ def do_live_receive(args):
             with closing(live_results(sd, args.device, args.channels, layout, coder,
                                       IMP.Settings(), stop, report_input)) as live:
                 for r in live:
-                    newest['seen'] += 1
-                    newest['tiers'][r.tier] = newest['tiers'].get(r.tier, 0)+1
+                    complete = r.extra.get('complete', True)
+                    if complete:
+                        newest['seen'] += 1
+                        newest['tiers'][r.tier] = newest['tiers'].get(r.tier, 0)+1
                     if r.values is not None:
                         newest['result'] = r          # latest wins, nothing queued
                     if verbose:
                         print(json.dumps(record(r)),flush=True)
-                    if not verbose and not args.silent:
+                    if complete and not verbose and not args.silent:
                         if summary.record(r):
                             print(summary.line(), file=sys.stderr, flush=True)
                             summary.reset()
-                    if args.save_frames and r.values is not None:
+                    if complete and args.save_frames and r.values is not None:
                         name = (f'{r.absolute:06d}' if r.absolute is not None
                                 else f'x{newest["seen"]:06d}')
                         values_image(r.values, coder.shapes).save(

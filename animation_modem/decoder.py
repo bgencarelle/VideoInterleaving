@@ -29,7 +29,8 @@ import numpy as np
 from .audio_common import device, pair, sounddevice, wav_blocks
 from .capture import AudioGate, BufferedInput, CaptureHealth, CaptureResampler, open_input
 from .imaging import DEFAULT_PROFILE, fit_shapes, plane_shapes, values_image
-from .transport2 import PRESETS, RATE, Receiver, SourceCoder
+from .transport2 import PRESETS, RATE, SourceCoder
+from .progressive import Receiver
 from .timing import expand_timestamp, ProgressSummary, TimingStats, PresentationBuffer
 from .impairments import Emulator, add_arguments, settings_from_args
 
@@ -56,9 +57,8 @@ def live_results(sd, input_device, channels, layout, coder, settings, stop, repo
     if channel_count > int(device_info['max_input_channels']):
         raise ValueError('Selected input channels are unavailable on this device')
     emulator = Emulator(settings)
-    # Live operation favors one decode per packet. The explicit Receiver API
-    # keeps damaged-signal conditioning available to offline callers.
-    receiver = Receiver(layout, coder, recovery=False, fast=True)
+    # Calibrate once, then consume each symbol once and publish usable previews.
+    receiver = Receiver(layout, coder)
     with open_input(sd, input_device, channel_count,
                     device_info['default_samplerate']) as stream:
         capture_rate = float(stream.samplerate)
@@ -102,11 +102,13 @@ def live_results(sd, input_device, channels, layout, coder, settings, stop, repo
                     announced = True
                 started = time.perf_counter()
                 audio = converter.process(audio)
-                results = receiver.feed(emulator.process(audio)) if len(audio) else []
+                if len(audio):
+                    audio = emulator.process(audio)
+                    for at in range(0, len(audio), 256):
+                        for result in receiver.feed(audio[at:at+256]):
+                            result.extra['input_channels'] = [c+1 for c in channels]
+                            yield result
                 health.record(input_samples, capture_rate, time.perf_counter()-started, overflow, skipped)
-                for result in results:
-                    result.extra['input_channels'] = [c+1 for c in channels]
-                    yield result
 
 
 def main(argv=None):
@@ -163,7 +165,7 @@ def main(argv=None):
 
     def digest(result):
         """Periodic one-liner so a quiet run is still legible."""
-        if verbose or args.silent:
+        if verbose or args.silent or not result.extra.get('complete', True):
             return
         if summary.record(result):
             with log_lock:print(summary.line(), file=sys.stderr, flush=True)
@@ -207,7 +209,7 @@ def main(argv=None):
             if timing:record['decode_error_window']=timing
             log(record)
             digest(result)
-            if result.values is not None and args.save_frames:
+            if result.values is not None and args.save_frames and result.extra.get('complete', True):
                 name = f'{result.absolute:010d}' if result.absolute is not None else 'unknown'
                 values_image(result.values, coder.shapes).save(
                     args.save_frames / f'frame_{name}.png')
