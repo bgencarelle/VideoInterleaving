@@ -497,7 +497,19 @@ def decode_packet(samples, layout, coder, *, body=None):
         keep = weights[pilots, channel] > .6
         if np.count_nonzero(keep) >= 2:
             bins = layout.pilots[keep].astype(float)
-            angles = np.unwrap(np.angle(equal[2:, pilots[keep], channel]), axis=1)
+            pilot_values = equal[2:, pilots[keep], channel]
+            angles = np.angle(pilot_values)
+            if np.all(np.abs(pilot_values) > .25):
+                # Adjacent symbols give a much smaller phase increment than
+                # widely spaced carriers during flutter. Keep that continuity
+                # instead of choosing a fresh, possibly aliased slope each row.
+                initial = np.unwrap(angles[0])
+                angles = np.unwrap(angles, axis=0)
+                angles += (initial-angles[0])[None, :]
+            else:
+                # Missing pilots cannot anchor a phase history. Preserve the
+                # independent-symbol fallback for header erasure/dropouts.
+                angles = np.unwrap(angles, axis=1)
             w = weights[pilots[keep], channel]**2
             s0, s1, s2 = w.sum(), (w*bins).sum(), (w*bins*bins).sum()
             det = s0*s2 - s1*s1
@@ -793,11 +805,11 @@ class Receiver:
         # Preserve all available timing information on clean audio. Low-band
         # fitting is a fallback for roll-off, never forced on a clean signal.
         iterations = 3 if self.confidence else 7
-        raw = _fit_sync(x, at, scale, reach=reach, iterations=iterations)
+        raw = _fit_sync(x, at, scale, reach=reach, iterations=iterations, fast=self.fast)
         if raw[2] >= .85 or self.sync_cutoff is None:
             return raw
         narrowed = _fit_sync(x, at, scale, reach=reach, cutoff=self.sync_cutoff,
-                             iterations=iterations)
+                             iterations=iterations, fast=self.fast)
         return narrowed if narrowed[2] >= self.threshold else raw
 
     def _acquire(self):
