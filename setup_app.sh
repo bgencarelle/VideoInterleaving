@@ -359,7 +359,8 @@ remap_packages_for_platform() {
                     log_info "Remapping $pkg -> libjpeg-dev (generic fallback)" >&2
                     remapped="$remapped libjpeg-dev"
                 else
-                    log_warning "No libjpeg-turbo package found for: $pkg — skipping" >&2
+                    log_warning "No libjpeg-turbo replacement found for: $pkg — retaining for failure report" >&2
+                    remapped="$remapped $pkg"
                 fi
                 ;;
             wlrctl)
@@ -379,61 +380,66 @@ remap_packages_for_platform() {
     echo "$remapped" | sed 's/^ *//'
 }
 
-# Install system packages
+# Attempt every native package and retain the complete output for diagnosis.
 install_system_packages() {
-    local os=$1
-    local pkg_manager=$2
-    local update_cmd=$3
-    local install_cmd=$4
-    local needs_sudo=$5
-
-    echo ">>> 📦 Installing system libraries ($pkg_manager)..."
-
-    local packages=$(get_packages_for_platform "$os" "$pkg_manager")
-
-    if [ -z "$packages" ]; then
-        echo "⚠️  WARNING: No packages defined for platform: $os"
-        return
-    fi
-
-    # Remap package names for Debian-based distros (handles Armbian, etc.)
-    if [ "$pkg_manager" = "apt" ]; then
-        # Update package lists first so apt-cache is accurate
-        if [ "$DRY_RUN" = false ]; then
-            if [ "$needs_sudo" = "true" ]; then
-                sudo $update_cmd || true
-            else
-                $update_cmd || true
-            fi
-        fi
-        packages=$(remap_packages_for_platform "$packages")
-        if [ -z "$packages" ]; then
-            log_warning "No installable packages remain after remapping"
-            return
-        fi
-    fi
-
+    local os=$1 pkg_manager=$2 update_cmd=$3 install_cmd=$4 needs_sudo=$5
+    local packages package status
+    local failure_count=0
+    local failures=()
+    local prefix=()
+    local update_words=() install_words=()
+    local install_log="$PROJECT_DIR/setup-packages.log"
+    packages=$(get_packages_for_platform "$os" "$pkg_manager")
+    read -r -a update_words <<< "$update_cmd"
+    read -r -a install_words <<< "$install_cmd"
+    if [ "$needs_sudo" = true ]; then prefix=(sudo); fi
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] Would run: $update_cmd"
-        if [ "$needs_sudo" = "true" ]; then
-            echo "[DRY-RUN] Would run: sudo $install_cmd $packages"
-        else
-            echo "[DRY-RUN] Would run: $install_cmd $packages"
-        fi
-        echo "[DRY-RUN] Packages to install: $packages"
-        return
+        echo "[DRY-RUN] Would update $pkg_manager and attempt each package separately: $packages"
+        return 0
     fi
-
-    # Install packages (update already done above for apt)
-    if [ "$needs_sudo" = "true" ]; then
-        if [ "$pkg_manager" != "apt" ]; then
-            sudo $update_cmd || true
-        fi
-        sudo $install_cmd $packages
+    : > "$install_log"
+    # Confirm credentials once; cancelled sudo must not trigger a prompt per package.
+    if [ "$needs_sudo" = true ]; then sudo -v; fi
+    echo ">>> Installing system libraries ($pkg_manager); log: $install_log"
+    # The older dnf/yum command strings include shell '|| true'. Do not pass
+    # those tokens as package-manager arguments. Exit 100 means updates exist.
+    if [ "$pkg_manager" = dnf ] || [ "$pkg_manager" = yum ]; then
+        update_words=("$pkg_manager" check-update -q)
+    fi
+    if ${prefix[@]+"${prefix[@]}"} "${update_words[@]}" >> "$install_log" 2>&1; then
+        status=0
     else
-        # Homebrew doesn't need sudo
-        $update_cmd || true
-        $install_cmd $packages
+        status=$?
+    fi
+    if [ "$status" -ne 0 ] && ! { [ "$status" -eq 100 ] && { [ "$pkg_manager" = dnf ] || [ "$pkg_manager" = yum ]; }; }; then
+        failures+=("Package index update (exit $status)")
+        failure_count=$((failure_count + 1))
+        echo "Package index update failed; attempting packages using the available index." >&2
+    fi
+    if [ "$pkg_manager" = apt ]; then
+        packages=$(remap_packages_for_platform "$packages")
+    fi
+    for package in $packages; do
+        printf '\n>>> %s: %s\n' "$pkg_manager" "$package" | tee -a "$install_log"
+        if ${prefix[@]+"${prefix[@]}"} "${install_words[@]}" "$package" 2>&1 | tee -a "$install_log"; then
+            echo "Installed/available: $package"
+        else
+            # PIPESTATUS must be captured before running another command.
+            local pipeline_status=("${PIPESTATUS[@]}")
+            status=${pipeline_status[0]}
+            if [ "$status" -eq 0 ]; then status=${pipeline_status[1]}; fi
+            failures+=("$package (exit $status)")
+            failure_count=$((failure_count + 1))
+            echo "FAILED: $package; continuing with remaining packages." >&2
+        fi
+    done
+    if [ "$failure_count" -gt 0 ]; then
+        {
+            printf '\nSystem dependency failures (%s):\n' "$failure_count"
+            printf '  - %s\n' "${failures[@]}"
+            printf 'Full output: %s\nFix these failures and rerun setup. Python/service setup has not started.\n' "$install_log"
+        } | tee -a "$install_log" >&2
+        return 1
     fi
 }
 

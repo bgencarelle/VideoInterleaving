@@ -36,3 +36,11 @@ MacPorts provides [legacy macOS installers](https://www.macports.org/install.php
 Successful manager installation does not guarantee every full-app port can build
 on Sierra; any package/build error remains visible. Native installation trials
 are still needed on the target Macs.
+
+Native packages are attempted individually. Setup collects index-update and
+package failures in one final summary, with full command output in
+`setup-packages.log` (replaced on the next run). It stops before Python and
+service setup when any native requirement fails. A failure of one package does
+not prevent attempts for the remaining packages. Downstream packages may also
+fail if they depend on an earlier failed package; the log retains those details.
+Sudo credential failures stop immediately instead of repeatedly prompting.
