@@ -57,6 +57,13 @@ No baked image libraries, WAV recordings, virtual environments or generated
 logs are included. Those are external input assets, not modem source code.
 No duplicate LTC project was available in this checkout.
 
+## Decoder-only setup
+
+Use [DECODE_SETUP.md](DECODE_SETUP.md) and the bundle-root `requirements.txt`
+for live reception, or `requirements-decode-core.txt` for WAV-only reception.
+`check_decode_setup.py` supports `--wav` and `--headless` to check only the
+chosen dependencies. These files leave the frozen baseline unchanged.
+
 ## Starting the later port
 
 Use `source/` as the candidate project root. The copied receivers/utilities keep
