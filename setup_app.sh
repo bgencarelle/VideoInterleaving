@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail  # Better error handling: exit on error, undefined vars, pipe failures
 
+# Report explicit exits as well as failures hidden by command substitution.
+trap 'setup_status=$?; if [ "$setup_status" -ne 0 ]; then printf "Setup failed (exit %s). See the error above.\n" "$setup_status" >&2; fi' EXIT
+
 # --- CONFIGURATION ---
 PROJECT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 VENV_DIR="$PROJECT_DIR/.venv"
@@ -225,7 +228,9 @@ detect_os() {
             pkg_install_cmd="brew install"
             needs_sudo=false
         else
-            echo "❌ ERROR: Homebrew not found. Install from https://brew.sh"
+            echo "❌ ERROR: Full-app setup requires Homebrew: https://brew.sh" >&2
+            echo "For decoder-only setup, including older Macs/MacPorts, run:" >&2
+            echo "  python3 \"$PROJECT_DIR/modem_bundle/setup_decode.py\" --package-manager" >&2
             exit 1
         fi
     elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
@@ -258,8 +263,8 @@ detect_os() {
                     pkg_install_cmd="pacman -S --noconfirm"
                     ;;
                 *)
-                    echo "⚠️  WARNING: Unsupported Linux distribution: $ID"
-                    echo "   Attempting Debian/Ubuntu package names..."
+                    echo "⚠️  WARNING: Unsupported Linux distribution: $ID" >&2
+                    echo "   Attempting Debian/Ubuntu package names..." >&2
                     os="debian"
                     pkg_manager="apt"
                     pkg_update_cmd="apt update -qq"
@@ -267,14 +272,14 @@ detect_os() {
                     ;;
             esac
         else
-            echo "⚠️  WARNING: Cannot detect Linux distribution. Assuming Debian/Ubuntu."
+            echo "⚠️  WARNING: Cannot detect Linux distribution. Assuming Debian/Ubuntu." >&2
             os="debian"
             pkg_manager="apt"
             pkg_update_cmd="apt update -qq"
             pkg_install_cmd="apt install -y"
         fi
     else
-        echo "❌ ERROR: Unsupported OS: $OSTYPE"
+        echo "❌ ERROR: Unsupported OS: $OSTYPE" >&2
         exit 1
     fi
 

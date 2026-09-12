@@ -94,3 +94,7 @@ it does not establish new robustness, performance or Sierra compatibility.
 Only copy/checksum integrity, Python syntax and patch applicability were checked
 while assembling this bundle. No audio streams, device scans or modem test suite
 were run.
+
+Decoder installation: run `setup_decode.command` (macOS/Linux) or
+`setup_decode.cmd` (Windows). See [DECODE_SETUP.md](DECODE_SETUP.md) for
+MacPorts, selecting Python, native packages, and WAV/headless options.
