@@ -322,9 +322,9 @@ libwebp libjpeg-turbo sdl2 alsa-lib mesa glu glfw portaudio tk python-opencv ffm
 chrony bind-tools certbot certbot-nginx"
             ;;
         macos)
-            # From README.md (macOS/Homebrew) - minimal set
+            # Package names differ by manager (MacPorts uses webp, not libwebp).
             if [ "$manager" = port ]; then
-                pkg_list="python312 py312-pip py312-numpy py312-scipy py312-Pillow py312-tkinter py312-opencv4 portaudio libwebp pkgconfig libsdl2 chrony libjpeg-turbo glfw ffmpeg"
+                pkg_list="python312 py312-pip py312-numpy py312-scipy py312-Pillow py312-tkinter py312-opencv4 portaudio webp pkgconfig libsdl2 chrony libjpeg-turbo glfw ffmpeg"
             else
                 pkg_list="python@3.12 python-tk@3.12 portaudio webp pkg-config sdl2 chrony jpeg-turbo glfw ffmpeg"
             fi
