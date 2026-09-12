@@ -102,3 +102,8 @@ MacPorts, selecting Python, native packages, and WAV/headless options.
 Decoder installation: run `setup_decode.command` (macOS/Linux) or
 `setup_decode.cmd` (Windows). See [DECODE_SETUP.md](DECODE_SETUP.md) for
 MacPorts, selecting Python, native packages, and WAV/headless options.
+
+Use the bundle-level `modem_receive.py` for original modem 2 packet reception
+(default). The archived `source/modem_receive.py` retains its old progressive
+default. Setup now prints the bundle-level command. Experimental receivers
+remain optional with `--receiver progressive` or `--receiver reference`.

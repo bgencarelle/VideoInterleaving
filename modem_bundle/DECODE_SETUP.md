@@ -1,6 +1,6 @@
 # Decoder-only dependencies
 
-These requirements apply to the preserved `source/modem_receive.py` entry point.
+These requirements apply to the bundle-level `modem_receive.py` entry point.
 They do not install or launch the transmitter, baker, full application or services.
 The frozen `source/` tree and `SNAPSHOT.json` remain unchanged.
 
@@ -113,13 +113,14 @@ does not discover, choose, or change devices/channels/sample rates.
 macOS/Linux examples:
 
 ```bash
-.venv/bin/python source/modem_receive.py --receiver reference --device YOUR_DEVICE --channels YOUR_CHANNELS
-.venv/bin/python source/modem_receive.py --receiver reference --wav recording.wav --headless --fast
+.venv/bin/python modem_receive.py --device YOUR_DEVICE --channels YOUR_CHANNELS
+.venv/bin/python modem_receive.py --wav recording.wav --headless --fast
 ```
 
 Windows uses `.venv\Scripts\python.exe` instead. Add `--headless` for live
-headless reception. Receiver flags are separate from setup flags. These commands
-select the preserved reference receiver; its known speed limitation is unchanged.
+headless reception. Receiver flags are separate from setup flags. These commands select the original modem 2 packet receiver, matching the utility
+with `recovery=False, fast=True`. Progressive/reference are optional via
+`--receiver progressive` or `--receiver reference`.
 
 ## OS dependencies
 
@@ -140,5 +141,5 @@ change neither installs nor reconfigures time synchronization.
 
 The checker verifies imports only. It does not query devices, open audio streams,
 probe sample rates, test capture permissions or run decoding benchmarks.
-The reference decoder here remains the archived, unpatched baseline; these
-requirements do not apply the separately retained speed-fix patch.
+The archived source remains unchanged; the separately retained speed-fix patch
+is not applied.

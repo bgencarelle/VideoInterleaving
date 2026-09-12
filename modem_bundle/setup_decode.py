@@ -163,7 +163,7 @@ def main():
         manager_help(args.non_interactive)
         return 1
     print('Decoder dependencies ready; audio and display were not opened.')
-    receiver = [str(python), str(ROOT / 'source/modem_receive.py'), '--receiver', 'reference']
+    receiver = [str(python), str(ROOT / 'modem_receive.py')]
     receiver += ['--wav', 'YOUR_RECORDING.wav'] if args.wav else ['--device', 'YOUR_DEVICE', '--channels', 'YOUR_CHANNELS']
     if args.headless:
         receiver.append('--headless')
