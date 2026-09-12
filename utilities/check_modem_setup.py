@@ -12,11 +12,11 @@ CHECKS = (
     ('scipy.signal', 'scipy from requirements-modem.txt / python3-scipy'),
     ('PIL.Image', 'Pillow from requirements-modem.txt'),
     ('tkinter', 'Python Tk bindings: python3-tk (Debian), python3-tkinter (Fedora), '
-                 'tk (Arch), or python-tk matching your Homebrew Python'),
+                 'tk (Arch), or matching Homebrew python-tk / MacPorts py312-tkinter'),
     ('PIL.ImageTk', 'Pillow Tk support'),
     ('PIL._imagingtk', 'Pillow Tk bridge: python3-pil.imagetk (Debian) or pip Pillow'),
     ('sounddevice', 'sounddevice from requirements-modem.txt and PortAudio '
-                    '(libportaudio2 on Debian; portaudio on Fedora/Arch/Homebrew)'),
+                    '(libportaudio2 on Debian; portaudio on Fedora/Arch/Homebrew/MacPorts)'),
 )
 
 

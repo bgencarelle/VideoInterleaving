@@ -1,73 +1,12 @@
 #!/bin/bash
 set -euo pipefail  # Better error handling: exit on error, undefined vars, pipe failures
 
-# Report explicit exits as well as failures hidden by command substitution.
 trap 'setup_status=$?; if [ "$setup_status" -ne 0 ]; then printf "Setup failed (exit %s). See the error above.\n" "$setup_status" >&2; fi' EXIT
 
 # --- CONFIGURATION ---
 PROJECT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 VENV_DIR="$PROJECT_DIR/.venv"
-
-# Decoder-only routing must happen before full-app Python/GPU/service checks.
-MODEM_ONLY=false
-MODEM_DRY_RUN=false
-MODEM_ARGS=()
-for setup_arg in "$@"; do
-    case "$setup_arg" in
-        --modem|--decoder-only) MODEM_ONLY=true ;;
-        --dry-run) MODEM_DRY_RUN=true ;;
-        *) MODEM_ARGS+=("$setup_arg") ;;
-    esac
-done
-
-# A MacPorts-only Mac should get an actionable choice at the familiar entry point.
-if [ "$#" -eq 0 ] && [[ "$OSTYPE" == darwin* ]] && \
-   ! command -v brew >/dev/null 2>&1 && \
-   [ ! -x /opt/homebrew/bin/brew ] && [ ! -x /usr/local/bin/brew ]; then
-    if command -v port >/dev/null 2>&1 || [ -x /opt/local/bin/port ]; then
-        echo "MacPorts detected. Decoder-only setup is available without Homebrew."
-        if [ -t 0 ]; then
-            read -r -p "Run decoder-only setup? [y/N] " modem_answer || modem_answer=n
-            case "$modem_answer" in y|Y|yes|YES) MODEM_ONLY=true ;; esac
-        fi
-        if [ "$MODEM_ONLY" != true ]; then
-            echo "Run: bash setup_app.sh --modem --native" >&2
-            echo "Full-app macOS setup still requires Homebrew." >&2
-            exit 1
-        fi
-    fi
-fi
-if [ "$MODEM_ONLY" = true ]; then
-    # Native installs remain a separate, confirmed --native action.
-    MODEM_INSTALL=true
-    for setup_arg in ${MODEM_ARGS[@]+"${MODEM_ARGS[@]}"}; do
-        case "$setup_arg" in --package-manager|--help|-h) MODEM_INSTALL=false ;; esac
-    done
-    if [ "$MODEM_INSTALL" = true ]; then MODEM_ARGS=(--install ${MODEM_ARGS[@]+"${MODEM_ARGS[@]}"}); fi
-    if [ "$MODEM_DRY_RUN" = true ]; then
-        printf 'Decoder-only route (no changes): bash %q' "$PROJECT_DIR/modem_bundle/setup_decode.command"
-        printf ' %q' ${MODEM_ARGS[@]+"${MODEM_ARGS[@]}"}
-        printf '\n'
-        exit 0
-    fi
-    if [ ! -f "$PROJECT_DIR/modem_bundle/setup_decode.command" ]; then
-        echo "Decoder setup launcher missing; update the complete checkout." >&2
-        exit 1
-    fi
-    export MODEM_NO_PAUSE=1
-    exec bash "$PROJECT_DIR/modem_bundle/setup_decode.command" ${MODEM_ARGS[@]+"${MODEM_ARGS[@]}"}
-fi
-
-# --- Per-mode source trees -------------------------------------------------
-# Each mode wants differently prepared material, so they do not share a folder:
-#   sbs   - side-by-side frames for the video modes
-#   ascii - prepared for the character renderer
-#   xy    - the BAKED library for scope mode. Note --xy-dir, not --dir: scope
-#           never opens an image, it reads the manifest out of the bake.
-# Override any of these in the environment before running this script.
-SBS_DIR="${SBS_DIR:-images_sbs}"
-ASCII_DIR="${ASCII_DIR:-images_ascii}"
-SCOPE_XY_DIR="${SCOPE_XY_DIR:-images_xy}"
+PYTHON_BIN=python3
 
 # Parse command line arguments
 DRY_RUN=false
@@ -181,11 +120,11 @@ preflight_checks() {
     log_step "🔍 Running Pre-flight Checks..."
 
     # Check Python version
-    if ! python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)" 2>/dev/null; then
-        log_error "Python 3.11+ required. Found: $(python3 --version 2>&1)"
+    if ! "$PYTHON_BIN" -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)" 2>/dev/null; then
+        log_error "Python 3.11+ required. Found: $("$PYTHON_BIN" --version 2>&1)"
         errors=$((errors + 1))
     else
-        log_success "Python version: $(python3 --version 2>&1)"
+        log_success "Python version: $("$PYTHON_BIN" --version 2>&1)"
     fi
 
     # Check project directory structure
@@ -194,12 +133,6 @@ preflight_checks() {
         errors=$((errors + 1))
     else
         log_success "requirements.txt found"
-    fi
-
-    if [ ! -f "$PROJECT_DIR/requirements-modem.txt" ] || \
-       [ ! -f "$PROJECT_DIR/utilities/check_modem_setup.py" ]; then
-        log_error "Modem requirements/check script missing - update the complete checkout"
-        errors=$((errors + 1))
     fi
 
     if [ ! -f "$PROJECT_DIR/main.py" ]; then
@@ -253,11 +186,14 @@ fi
 log_info "Running as User: $USERNAME"
 log_info "Project Dir:     $PROJECT_DIR"
 
-# Run pre-flight checks
-if ! preflight_checks; then
-    log_error "Exiting due to validation errors"
-    exit 1
-fi
+# Python may be supplied by the selected package manager below.
+# Validate checkout inputs before installing anything.
+for requirement in requirements.txt requirements-modem.txt requirements-scope.txt system-requirements.txt utilities/check_modem_setup.py; do
+    if [ ! -f "$PROJECT_DIR/$requirement" ]; then
+        log_error "Missing $requirement; update the complete checkout"
+        exit 1
+    fi
+done
 
 # --------------------------------------------
 # 0. OS Detection & Package Manager Setup
@@ -272,15 +208,23 @@ detect_os() {
     if [[ "$OSTYPE" == "darwin"* ]]; then
         # macOS
         os="macos"
-        if command -v brew >/dev/null 2>&1; then
+        local port_bin brew_bin
+        port_bin=$(command -v port || true)
+        brew_bin=$(command -v brew || true)
+        if [ -z "$port_bin" ] && [ -x /opt/local/bin/port ]; then port_bin=/opt/local/bin/port; fi
+        if [ -z "$brew_bin" ] && [ -x /opt/homebrew/bin/brew ]; then brew_bin=/opt/homebrew/bin/brew; fi
+        if [ -z "$brew_bin" ] && [ -x /usr/local/bin/brew ]; then brew_bin=/usr/local/bin/brew; fi
+        if [ -n "$port_bin" ]; then
+            pkg_manager="port"
+            pkg_update_cmd="$port_bin selfupdate"
+            pkg_install_cmd="$port_bin install"
+        elif [ -n "$brew_bin" ]; then
             pkg_manager="brew"
-            pkg_update_cmd="brew update"
-            pkg_install_cmd="brew install"
+            pkg_update_cmd="$brew_bin update"
+            pkg_install_cmd="$brew_bin install"
             needs_sudo=false
         else
-            echo "❌ ERROR: Full-app setup requires Homebrew: https://brew.sh" >&2
-            echo "For decoder-only setup, including older Macs/MacPorts, run:" >&2
-            echo "  python3 \"$PROJECT_DIR/modem_bundle/setup_decode.py\" --package-manager" >&2
+            echo "ERROR: Install MacPorts (https://www.macports.org/install.php) or Homebrew (https://brew.sh), then rerun setup." >&2
             exit 1
         fi
     elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
@@ -349,6 +293,7 @@ read_pkg_file() {
 # Get platform-specific packages based on README.md instructions
 get_packages_for_platform() {
     local os=$1
+    local manager=${2:-}
     local pkg_list=""
 
     case "$os" in
@@ -365,7 +310,7 @@ get_packages_for_platform() {
         rhel)
             # From README.md (Fedora/CentOS)
             pkg_list="python3 python3-pip python3-devel gcc gcc-c++ make cmake pkgconfig \
-libwebp-devel libjpeg-turbo-devel SDL2-devel alsa-lib-devel portaudio python3-tkinter \
+libwebp-devel libjpeg-turbo-devel SDL2-devel alsa-lib-devel portaudio python3-tkinter python3-opencv \
 mesa-libGL-devel mesa-libGLU-devel mesa-libEGL-devel mesa-libGLES-devel \
 libglvnd-devel glfw-devel mesa-utils \
 chrony ninja-build bind-utils certbot python3-certbot-nginx"
@@ -373,12 +318,16 @@ chrony ninja-build bind-utils certbot python3-certbot-nginx"
         arch)
             # Arch Linux equivalents
             pkg_list="python python-pip base-devel cmake pkg-config ninja \
-libwebp libjpeg-turbo sdl2 alsa-lib portaudio tk mesa glu glfw \
+libwebp libjpeg-turbo sdl2 alsa-lib mesa glu glfw portaudio tk python-opencv ffmpeg \
 chrony bind-tools certbot certbot-nginx"
             ;;
         macos)
             # From README.md (macOS/Homebrew) - minimal set
-            pkg_list="python python-tk portaudio webp pkg-config sdl2 chrony jpeg-turbo"
+            if [ "$manager" = port ]; then
+                pkg_list="python312 py312-pip py312-numpy py312-scipy py312-Pillow py312-tkinter py312-opencv4 portaudio libwebp pkgconfig libsdl2 chrony libjpeg-turbo glfw ffmpeg"
+            else
+                pkg_list="python@3.12 python-tk@3.12 portaudio webp pkg-config sdl2 chrony jpeg-turbo glfw ffmpeg"
+            fi
             # Note: certbot on macOS is typically installed via pip or brew separately
             ;;
         *)
@@ -440,7 +389,7 @@ install_system_packages() {
 
     echo ">>> 📦 Installing system libraries ($pkg_manager)..."
 
-    local packages=$(get_packages_for_platform "$os")
+    local packages=$(get_packages_for_platform "$os" "$pkg_manager")
 
     if [ -z "$packages" ]; then
         echo "⚠️  WARNING: No packages defined for platform: $os"
@@ -508,8 +457,29 @@ NEEDS_SUDO=$(echo "$OS_INFO" | cut -d'|' -f5)
 
 echo "    OS: $OS | Package Manager: $PKG_MANAGER"
 
+# Use the interpreter belonging to the native Tk/scientific packages.
+if [ "$PKG_MANAGER" = port ]; then
+    manager_executable=${PKG_INSTALL% install}
+    PYTHON_BIN="$(dirname "$manager_executable")/python3.12"
+    export PATH="$(dirname "$manager_executable"):$PATH"
+elif [ "$PKG_MANAGER" = brew ]; then
+    manager_executable=${PKG_INSTALL% install}
+    PYTHON_BIN="$("$manager_executable" --prefix)/opt/python@3.12/bin/python3.12"
+    export PATH="$(dirname "$manager_executable"):$PATH"
+fi
+
 # Install system packages
 install_system_packages "$OS" "$PKG_MANAGER" "$PKG_UPDATE" "$PKG_INSTALL" "$NEEDS_SUDO"
+
+if [ "$DRY_RUN" = false ]; then
+    if ! preflight_checks; then
+        log_error "Exiting due to validation errors"
+        exit 1
+    fi
+else
+    log_info "[DRY-RUN] Would validate Python and dependencies with $PYTHON_BIN"
+fi
+
 
 # Add user to video/render groups (Linux only)
 if [[ "$OSTYPE" == "linux-gnu"* ]] && [ "$HAS_GPU" = true ] && [ "$USERNAME" != "root" ]; then
@@ -539,22 +509,18 @@ if [[ "$OSTYPE" == "linux-gnu"* ]] && [ "$HAS_GPU" = true ] && [ "$USERNAME" != 
     fi
 fi
 
-# Hash both pip inputs with Python (also works on macOS without md5sum).
+# --- VENV DETECTION & VALIDATION ---
 requirements_hash() {
-    python3 - "$PROJECT_DIR" <<'PYHASH'
-import hashlib
-from pathlib import Path
-import sys
-root = Path(sys.argv[1])
-digest = hashlib.sha256()
-for name in ('requirements.txt', 'requirements-modem.txt'):
-    digest.update(name.encode() + b'\0')
-    digest.update((root / name).read_bytes() + b'\0')
-print(digest.hexdigest())
+    "$PYTHON_BIN" - "$PROJECT_DIR" <<'PYHASH'
+import hashlib, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+h = hashlib.sha256()
+for name in ('requirements.txt', 'requirements-modem.txt', 'requirements-scope.txt'):
+    h.update(name.encode()); h.update((root / name).read_bytes())
+print(h.hexdigest())
 PYHASH
 }
 
-# --- VENV DETECTION & VALIDATION ---
 check_venv_valid() {
     if [ ! -d "$VENV_DIR" ]; then
         return 1  # Venv doesn't exist
@@ -566,10 +532,20 @@ check_venv_valid() {
 
     # Check Python version matches
     local venv_python_version=$("$VENV_DIR/bin/python" --version 2>&1 | awk '{print $2}')
-    local system_python_version=$(python3 --version 2>&1 | awk '{print $2}')
+    local system_python_version=$("$PYTHON_BIN" --version 2>&1 | awk '{print $2}')
 
     if [ "$venv_python_version" != "$system_python_version" ]; then
         log_verbose "Venv Python version ($venv_python_version) differs from system ($system_python_version)"
+        return 1
+    fi
+
+    if ! "$VENV_DIR/bin/python" - "$PYTHON_BIN" <<'PYCHECK'
+import pathlib, subprocess, sys
+selected = subprocess.check_output([sys.argv[1], '-c', 'import sys; print(sys.base_prefix)'], text=True).strip()
+sys.exit(pathlib.Path(selected).resolve() != pathlib.Path(sys.base_prefix).resolve())
+PYCHECK
+    then
+        log_verbose "Venv belongs to a different Python installation"
         return 1
     fi
 
@@ -602,7 +578,7 @@ if check_venv_valid; then
         if [ -f "$venv_req_hash_file" ]; then
             stored_hash=$(cat "$venv_req_hash_file" 2>/dev/null || echo "")
             if [ "$req_hash" != "$stored_hash" ]; then
-                log_info "Python requirements have changed - venv will be updated"
+                log_info "requirements.txt has changed - venv will be updated"
                 VENV_NEEDS_UPDATE=true
             else
                 log_success "Venv packages are up to date"
@@ -611,12 +587,6 @@ if check_venv_valid; then
             log_info "No requirements hash found - will update venv"
             VENV_NEEDS_UPDATE=true
         fi
-    fi
-    # Repair missing modem packages in place, even when requirement files did
-    # not change. No audio devices are queried or opened by this check.
-    if ! "$VENV_DIR/bin/python" "$PROJECT_DIR/utilities/check_modem_setup.py" --quiet 2>/dev/null; then
-        log_info "Modem dependencies need repair - venv will be updated"
-        VENV_NEEDS_UPDATE=true
     fi
 else
     if [ -d "$VENV_DIR" ]; then
@@ -642,13 +612,13 @@ if [ "$DRY_RUN" = true ]; then
     if [ "$VENV_NEEDS_CREATE" = true ] || [ "$VENV_NEEDS_UPDATE" = true ]; then
         if [ "$OS" = "macos" ] || [ "$USERNAME" = "$(whoami)" ]; then
             if [ "$VENV_NEEDS_CREATE" = true ]; then
-                log_info "[DRY-RUN] Would run: python3 -m venv --system-site-packages $VENV_DIR"
+                log_info "[DRY-RUN] Would run: $PYTHON_BIN -m venv --system-site-packages $VENV_DIR"
             fi
             log_info "[DRY-RUN] Would run: $VENV_DIR/bin/pip install --upgrade pip wheel"
             log_info "[DRY-RUN] Would run: $VENV_DIR/bin/pip install -r $PROJECT_DIR/requirements.txt"
         else
             if [ "$VENV_NEEDS_CREATE" = true ]; then
-                log_info "[DRY-RUN] Would run: sudo -u $USERNAME python3 -m venv --system-site-packages $VENV_DIR"
+                log_info "[DRY-RUN] Would run: sudo -u $USERNAME $PYTHON_BIN -m venv --system-site-packages $VENV_DIR"
             fi
             log_info "[DRY-RUN] Would run: sudo -u $USERNAME $VENV_DIR/bin/pip install --upgrade pip wheel"
             log_info "[DRY-RUN] Would run: sudo -u $USERNAME $VENV_DIR/bin/pip install -r $PROJECT_DIR/requirements.txt"
@@ -665,9 +635,9 @@ else
         # Create venv with appropriate ownership
         log_info "Creating venv..."
         if [ "$OS" = "macos" ] || [ "$USERNAME" = "$(whoami)" ]; then
-            python3 -m venv --system-site-packages "$VENV_DIR"
+            "$PYTHON_BIN" -m venv --system-site-packages "$VENV_DIR"
         else
-            sudo -u "$USERNAME" python3 -m venv --system-site-packages "$VENV_DIR"
+            sudo -u "$USERNAME" "$PYTHON_BIN" -m venv --system-site-packages "$VENV_DIR"
         fi
         log_success "Venv created"
     fi
@@ -685,19 +655,29 @@ else
             sudo -u "$USERNAME" "$VENV_PIP" install -r "$PROJECT_DIR/requirements.txt"
         fi
 
+        # Store requirements hash
+        if [ -f "$PROJECT_DIR/requirements.txt" ]; then
+            requirements_hash > "$VENV_DIR/.requirements_hash"
+        fi
+
         log_success "Python packages installed/updated"
     fi
 fi
 
-# Verify Python bindings/native libraries without creating a GUI or audio stream.
-if [ "$DRY_RUN" = true ]; then
-    log_info "[DRY-RUN] Would verify modem dependencies with $VENV_DIR/bin/python utilities/check_modem_setup.py"
-else
-    if ! "$VENV_DIR/bin/python" "$PROJECT_DIR/utilities/check_modem_setup.py"; then
-        log_error "Modem dependencies are incomplete; fix the reported Python/OS packages and rerun setup"
-        exit 1
+# Scope uses OpenCV for baking/video and mss for screen capture. Avoid
+# installing a second OpenCV over compatible OS/MacPorts bindings.
+if [ "$DRY_RUN" = false ]; then
+    if ! "$VENV_DIR/bin/python" -c 'import cv2' >/dev/null 2>&1; then
+        if [ "$OS" = macos ] || [ "$USERNAME" = "$(whoami)" ]; then
+            "$VENV_DIR/bin/python" -m pip install 'opencv-python>=4.5'
+        else
+            sudo -u "$USERNAME" "$VENV_DIR/bin/python" -m pip install 'opencv-python>=4.5'
+        fi
     fi
-    requirements_hash > "$VENV_DIR/.requirements_hash"
+    "$VENV_DIR/bin/python" "$PROJECT_DIR/utilities/check_modem_setup.py"
+    "$VENV_DIR/bin/python" -c 'import cv2, mss; print("Scope dependencies available (OpenCV and mss).")'
+else
+    log_info "[DRY-RUN] Would check modem/scope imports and install OpenCV if missing"
 fi
 
 # --------------------------------------------
@@ -878,7 +858,6 @@ Environment=XAUTHORITY=$XAUTH_PATH"
     ASCII_SERVICE_EXISTS=false
     ASCIIWEB_SERVICE_EXISTS=false
     LOCAL_SERVICE_EXISTS=false
-    SCOPE_SERVICE_EXISTS=false
 
     if check_systemd_service_exists "vi-web.service"; then
         WEB_SERVICE_EXISTS=true
@@ -891,10 +870,6 @@ Environment=XAUTHORITY=$XAUTH_PATH"
     if check_systemd_service_exists "vi-asciiweb.service"; then
         ASCIIWEB_SERVICE_EXISTS=true
         log_info "Existing vi-asciiweb.service found"
-    fi
-    if check_systemd_service_exists "vi-scope.service"; then
-        SCOPE_SERVICE_EXISTS=true
-        log_info "Existing vi-scope.service found"
     fi
     if check_systemd_service_exists "vi-local.service"; then
         LOCAL_SERVICE_EXISTS=true
@@ -918,7 +893,7 @@ User=$USERNAME
 WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode web --dir $SBS_DIR
+ExecStart=$VENV_DIR/bin/python -O main.py --mode web
 Restart=always
 RestartSec=3
 StandardOutput=append:$PROJECT_DIR/vi-web.log
@@ -945,7 +920,7 @@ User=$USERNAME
 WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode ascii --dir $ASCII_DIR
+ExecStart=$VENV_DIR/bin/python -O main.py --mode ascii
 Restart=always
 RestartSec=3
 StandardOutput=append:$PROJECT_DIR/vi-ascii.log
@@ -972,38 +947,11 @@ User=$USERNAME
 WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode asciiweb --dir $ASCII_DIR
+ExecStart=$VENV_DIR/bin/python -O main.py --mode asciiweb
 Restart=always
 RestartSec=3
 StandardOutput=append:$PROJECT_DIR/vi-asciiweb.log
 StandardError=append:$PROJECT_DIR/vi-asciiweb.log
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        echo "[DRY-RUN] ---"
-        echo ""
-        if [ "$SCOPE_SERVICE_EXISTS" = true ]; then
-            log_info "[DRY-RUN] Would update /etc/systemd/system/vi-scope.service"
-        else
-            log_info "[DRY-RUN] Would create /etc/systemd/system/vi-scope.service"
-        fi
-        echo "[DRY-RUN] ---"
-        cat <<EOF | sed 's/^/[DRY-RUN] /'
-[Unit]
-Description=VideoInterleaving (Scope XY, browser-rendered)
-After=network.target
-
-[Service]
-User=$USERNAME
-WorkingDirectory=$PROJECT_DIR
-Environment=PYTHONUNBUFFERED=1
-$ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode scope --device null --xy-dir $SCOPE_XY_DIR --scope-raster --scope-trim 0.10 --scope-fields 2
-Restart=always
-RestartSec=3
-StandardOutput=append:$PROJECT_DIR/vi-scope.log
-StandardError=append:$PROJECT_DIR/vi-scope.log
 
 [Install]
 WantedBy=multi-user.target
@@ -1031,7 +979,7 @@ WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_DISPLAY
 $ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode local --test --dir $SBS_DIR
+ExecStart=$VENV_DIR/bin/python -O main.py --mode local --test
 Restart=always
 RestartSec=3
 StandardOutput=append:$PROJECT_DIR/vi-local.log
@@ -1057,7 +1005,7 @@ WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_DISPLAY
 $ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode local --test --dir $SBS_DIR
+ExecStart=$VENV_DIR/bin/python -O main.py --mode local --test
 Restart=on-failure
 RestartSec=3
 StandardOutput=append:$PROJECT_DIR/vi-local.log
@@ -1083,14 +1031,11 @@ EOF
         if [ "$LOCAL_SERVICE_EXISTS" = true ]; then
             backup_systemd_service "vi-local.service"
         fi
-        if [ "$SCOPE_SERVICE_EXISTS" = true ]; then
-            backup_systemd_service "vi-scope.service"
-        fi
 
         # Stop services before rewriting (good practice)
         # Only stop if services are actually running to avoid errors on low-end systems
         log_info "Stopping existing services before update..."
-        for service in vi-web vi-ascii vi-asciiweb vi-local vi-scope; do
+        for service in vi-web vi-ascii vi-asciiweb vi-local; do
             # Check if service is active (with sudo for permissions) and stop if running
             if sudo systemctl is-active --quiet "$service.service" 2>/dev/null; then
                 sudo systemctl stop "$service.service" 2>/dev/null || true
@@ -1113,7 +1058,7 @@ User=$USERNAME
 WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode web --dir $SBS_DIR
+ExecStart=$VENV_DIR/bin/python -O main.py --mode web
 Restart=always
 RestartSec=3
 StandardOutput=append:$PROJECT_DIR/vi-web.log
@@ -1123,38 +1068,6 @@ StandardError=append:$PROJECT_DIR/vi-web.log
 WantedBy=multi-user.target
 EOF
         log_success "vi-web.service created/updated"
-
-        # --- scope -------------------------------------------------------
-        # Shaped exactly like vi-web, NOT like vi-local. With --device null
-        # there is no sound card, no session bus and no audio group to join,
-        # so none of the usual audio-service complications apply: the samples
-        # are generated for BROWSERS to render on their own hardware. That is
-        # what makes this a plain network service.
-        if [ "$SCOPE_SERVICE_EXISTS" = true ]; then
-            log_info "Updating vi-scope.service..."
-        else
-            log_info "Creating vi-scope.service..."
-        fi
-        sudo tee "/etc/systemd/system/vi-scope.service" > /dev/null <<EOF
-[Unit]
-Description=VideoInterleaving (Scope XY, browser-rendered)
-After=network.target
-
-[Service]
-User=$USERNAME
-WorkingDirectory=$PROJECT_DIR
-Environment=PYTHONUNBUFFERED=1
-$ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode scope --device null --xy-dir $SCOPE_XY_DIR --scope-raster --scope-trim 0.10 --scope-fields 2
-Restart=always
-RestartSec=3
-StandardOutput=append:$PROJECT_DIR/vi-scope.log
-StandardError=append:$PROJECT_DIR/vi-scope.log
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        log_success "vi-scope.service created/updated"
 
         if [ "$ASCII_SERVICE_EXISTS" = true ]; then
             log_info "Updating vi-ascii.service..."
@@ -1171,7 +1084,7 @@ User=$USERNAME
 WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode ascii --dir $ASCII_DIR
+ExecStart=$VENV_DIR/bin/python -O main.py --mode ascii
 Restart=always
 RestartSec=3
 StandardOutput=append:$PROJECT_DIR/vi-ascii.log
@@ -1197,7 +1110,7 @@ User=$USERNAME
 WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode asciiweb --dir $ASCII_DIR
+ExecStart=$VENV_DIR/bin/python -O main.py --mode asciiweb
 Restart=always
 RestartSec=3
 StandardOutput=append:$PROJECT_DIR/vi-asciiweb.log
@@ -1236,7 +1149,7 @@ WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_DISPLAY
 $ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode local --test --dir $SBS_DIR
+ExecStart=$VENV_DIR/bin/python -O main.py --mode local --test
 Restart=always
 RestartSec=3
 StandardOutput=append:$PROJECT_DIR/vi-local.log
@@ -1266,7 +1179,7 @@ WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 $ENV_DISPLAY
 $ENV_BLOCK
-ExecStart=$VENV_DIR/bin/python -O main.py --mode local --test --dir $SBS_DIR
+ExecStart=$VENV_DIR/bin/python -O main.py --mode local --test
 Restart=on-failure
 RestartSec=3
 StandardOutput=append:$PROJECT_DIR/vi-local.log
@@ -1295,18 +1208,6 @@ sudo systemctl daemon-reload
                     services_restarted=$((services_restarted + 1))
                 else
                     log_warning "Failed to restart vi-web.service (may not be running)"
-                fi
-            fi
-        fi
-
-        if [ "$SCOPE_SERVICE_EXISTS" = true ]; then
-            if sudo systemctl is-enabled --quiet vi-scope.service 2>/dev/null; then
-                log_info "Restarting vi-scope.service..."
-                if sudo systemctl restart vi-scope.service 2>/dev/null; then
-                    log_success "vi-scope.service restarted"
-                    services_restarted=$((services_restarted + 1))
-                else
-                    log_warning "Failed to restart vi-scope.service (may not be running)"
                 fi
             fi
         fi

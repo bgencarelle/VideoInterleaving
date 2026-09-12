@@ -24,6 +24,7 @@ python3-opengl
 python3-moderngl
 
 # Image and media libraries
+ffmpeg
 libwebp-dev
 libjpeg-dev
 libturbojpeg0

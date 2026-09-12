@@ -1,6 +1,8 @@
 # Application Python dependencies; compatible system packages are reused.
-# Include modem baking, transmission and receiver dependencies.
+# Include modem baking/reception and scope audio/image/capture dependencies.
 -r requirements-modem.txt
+-r requirements-scope.txt
+moderngl  # Full-app renderer; also checked by setup on macOS
 #webp
 mido
 glfw  # Python bindings - requires libglfw3-dev system package (installed via system-requirements.txt)

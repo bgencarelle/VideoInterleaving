@@ -18,17 +18,10 @@ or compiled installations; this list does not guarantee old-macOS wheel support.
 
 ## Install
 
-From the repository root, use `bash setup_app.sh --modem`. This delegates
-immediately to decoder setup, before full-app dependency/service checks.
-On MacPorts Macs, `bash setup_app.sh --modem --native` additionally offers
-matching native packages for confirmation. MacPorts Python is preferred when
-creating a new environment; an existing bundle environment or explicit
-`MODEM_PYTHON` takes precedence. A separately installed Python is not converted
-into a MacPorts Python: choose `/opt/local/bin/python3.12` explicitly if needed.
-If no arguments are given on a MacPorts-only Mac, root setup offers this route
-interactively. `--modem --dry-run` prints the delegation without running it.
-WAV/headless/noninteractive flags can be passed through the root route.
-
+The root `setup_app.sh` is the full-application installer restored from `main`,
+with modem/scope dependencies and automatic MacPorts/Homebrew selection added.
+Run it without arguments for full application setup. It does not delegate to
+this standalone bundle. Use the bundle launchers below for decoder-only setup.
 
 From `modem_bundle/`, run `./setup_decode.command` on macOS/Linux or
 `setup_decode.cmd` on Windows. Double-clicking the launchers also works where
@@ -101,7 +94,7 @@ MacPorts Python/Tk extensions cannot be used by an unrelated Python 3.12.
 
 For Homebrew Python, native setup requests the matching versioned
 `python-tk@X.Y` and PortAudio as needed. Scientific packages come from pip.
-The root `setup_app.sh` remains the full-app Homebrew installer on macOS;
+The root `setup_app.sh` supports both MacPorts and Homebrew for the full app;
 `integration_reference/` remains a frozen archive.
 
 ### Windows
