@@ -98,3 +98,7 @@ were run.
 Decoder installation: run `setup_decode.command` (macOS/Linux) or
 `setup_decode.cmd` (Windows). See [DECODE_SETUP.md](DECODE_SETUP.md) for
 MacPorts, selecting Python, native packages, and WAV/headless options.
+
+Decoder installation: run `setup_decode.command` (macOS/Linux) or
+`setup_decode.cmd` (Windows). See [DECODE_SETUP.md](DECODE_SETUP.md) for
+MacPorts, selecting Python, native packages, and WAV/headless options.
