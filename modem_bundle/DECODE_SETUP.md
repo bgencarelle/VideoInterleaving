@@ -18,6 +18,18 @@ or compiled installations; this list does not guarantee old-macOS wheel support.
 
 ## Install
 
+From the repository root, use `bash setup_app.sh --modem`. This delegates
+immediately to decoder setup, before full-app dependency/service checks.
+On MacPorts Macs, `bash setup_app.sh --modem --native` additionally offers
+matching native packages for confirmation. MacPorts Python is preferred when
+creating a new environment; an existing bundle environment or explicit
+`MODEM_PYTHON` takes precedence. A separately installed Python is not converted
+into a MacPorts Python: choose `/opt/local/bin/python3.12` explicitly if needed.
+If no arguments are given on a MacPorts-only Mac, root setup offers this route
+interactively. `--modem --dry-run` prints the delegation without running it.
+WAV/headless/noninteractive flags can be passed through the root route.
+
+
 From `modem_bundle/`, run `./setup_decode.command` on macOS/Linux or
 `setup_decode.cmd` on Windows. Double-clicking the launchers also works where
 file associations permit it. They find Python 3.11+, show failures, and wait

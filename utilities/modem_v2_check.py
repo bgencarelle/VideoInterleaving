@@ -159,7 +159,8 @@ def do_bench(args):
             ready = _prepared(im, n+1, len(frames), False)
             audio = V2.encode(image_values(ready, coder.shapes), layout, coder,
                               n+1, 1, len(frames))
-            emulator = IMP.Emulator(IMP.Settings(**settings))
+            emulator = IMP.Emulato
+            r(IMP.Settings(**settings))
             receiver = V2.Receiver(layout, coder)
             got = []
             signal = np.concatenate([np.zeros((300, 2), np.float32), audio])

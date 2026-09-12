@@ -15,8 +15,24 @@ done
 selected=""
 if [ -n "${MODEM_PYTHON:-}" ]; then
     candidates=("$MODEM_PYTHON")
+elif [ -x .venv/bin/python ]; then
+    # Preserve the interpreter already selected for this bundle.
+    candidates=("$PWD/.venv/bin/python")
 else
-    candidates=(python3 /opt/local/bin/python3.12 /opt/local/bin/python3.11 python)
+    candidates=()
+    if [[ "$OSTYPE" == darwin* ]]; then
+        modem_port=$(command -v port 2>/dev/null || true)
+        if [ -z "$modem_port" ] && [ -x /opt/local/bin/port ]; then modem_port=/opt/local/bin/port; fi
+        if [ -n "$modem_port" ]; then
+            modem_port_bin=$(dirname "$modem_port")
+            echo "MacPorts detected: $modem_port"
+            for modem_version in 3.12 3.13 3.14 3.11; do
+                candidates+=("$modem_port_bin/python$modem_version")
+            done
+            candidates+=("$modem_port_bin/python3")
+        fi
+    fi
+    candidates+=(python3 python)
 fi
 for candidate in "${candidates[@]}"; do
     if "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 11))' >/dev/null 2>&1; then

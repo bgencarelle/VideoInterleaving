@@ -8,6 +8,56 @@ trap 'setup_status=$?; if [ "$setup_status" -ne 0 ]; then printf "Setup failed (
 PROJECT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 VENV_DIR="$PROJECT_DIR/.venv"
 
+# Decoder-only routing must happen before full-app Python/GPU/service checks.
+MODEM_ONLY=false
+MODEM_DRY_RUN=false
+MODEM_ARGS=()
+for setup_arg in "$@"; do
+    case "$setup_arg" in
+        --modem|--decoder-only) MODEM_ONLY=true ;;
+        --dry-run) MODEM_DRY_RUN=true ;;
+        *) MODEM_ARGS+=("$setup_arg") ;;
+    esac
+done
+
+# A MacPorts-only Mac should get an actionable choice at the familiar entry point.
+if [ "$#" -eq 0 ] && [[ "$OSTYPE" == darwin* ]] && \
+   ! command -v brew >/dev/null 2>&1 && \
+   [ ! -x /opt/homebrew/bin/brew ] && [ ! -x /usr/local/bin/brew ]; then
+    if command -v port >/dev/null 2>&1 || [ -x /opt/local/bin/port ]; then
+        echo "MacPorts detected. Decoder-only setup is available without Homebrew."
+        if [ -t 0 ]; then
+            read -r -p "Run decoder-only setup? [y/N] " modem_answer || modem_answer=n
+            case "$modem_answer" in y|Y|yes|YES) MODEM_ONLY=true ;; esac
+        fi
+        if [ "$MODEM_ONLY" != true ]; then
+            echo "Run: bash setup_app.sh --modem --native" >&2
+            echo "Full-app macOS setup still requires Homebrew." >&2
+            exit 1
+        fi
+    fi
+fi
+if [ "$MODEM_ONLY" = true ]; then
+    # Native installs remain a separate, confirmed --native action.
+    MODEM_INSTALL=true
+    for setup_arg in ${MODEM_ARGS[@]+"${MODEM_ARGS[@]}"}; do
+        case "$setup_arg" in --package-manager|--help|-h) MODEM_INSTALL=false ;; esac
+    done
+    if [ "$MODEM_INSTALL" = true ]; then MODEM_ARGS=(--install ${MODEM_ARGS[@]+"${MODEM_ARGS[@]}"}); fi
+    if [ "$MODEM_DRY_RUN" = true ]; then
+        printf 'Decoder-only route (no changes): bash %q' "$PROJECT_DIR/modem_bundle/setup_decode.command"
+        printf ' %q' ${MODEM_ARGS[@]+"${MODEM_ARGS[@]}"}
+        printf '\n'
+        exit 0
+    fi
+    if [ ! -f "$PROJECT_DIR/modem_bundle/setup_decode.command" ]; then
+        echo "Decoder setup launcher missing; update the complete checkout." >&2
+        exit 1
+    fi
+    export MODEM_NO_PAUSE=1
+    exec bash "$PROJECT_DIR/modem_bundle/setup_decode.command" ${MODEM_ARGS[@]+"${MODEM_ARGS[@]}"}
+fi
+
 # --- Per-mode source trees -------------------------------------------------
 # Each mode wants differently prepared material, so they do not share a folder:
 #   sbs   - side-by-side frames for the video modes
