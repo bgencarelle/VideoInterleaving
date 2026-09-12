@@ -34,6 +34,7 @@ from .imaging import DEFAULT_PROFILE, fit_shapes, plane_shapes, values_image
 from .transport2 import PRESETS, RATE, SourceCoder
 from .progressive import Receiver
 from .reference_receiver import Receiver as ReferenceReceiver
+from .waveform_receiver import Receiver as WaveformReceiver
 from .timing import expand_timestamp, ProgressSummary, TimingStats
 from .presentation import DeadlinePresentationBuffer
 from .impairments import Emulator, add_arguments, settings_from_args
@@ -62,18 +63,23 @@ def live_results(sd, input_device, channels, layout, coder, settings, stop, repo
     if channel_count > int(device_info['max_input_channels']):
         raise ValueError('Selected input channels are unavailable on this device')
     emulator = Emulator(settings)
-    # Calibrate once, then consume each symbol once and publish usable previews.
-    receiver = receiver_factory(layout, coder)
+    native = getattr(receiver_factory, 'native_waveform', False)
+    receiver = None if native else receiver_factory(layout, coder)
     with open_input(sd, input_device, channel_count,
                     device_info['default_samplerate']) as stream:
         capture_rate = float(stream.samplerate)
-        converter = CaptureResampler(capture_rate, 2)
-        read_size = max(1, round(256*capture_rate/RATE))
+        converter = None if native else CaptureResampler(capture_rate, 2)
+        read_size = 256 if native else max(1, round(256*capture_rate/RATE))
+        if native:
+            receiver = receiver_factory(layout, coder)
         capture = BufferedInput(stream, read_size)
         startup = {'input_latency_ms': stream.latency*1000,
-                'capture_rate_hz': capture_rate, 'decode_rate_hz': RATE,
+                'capture_rate_hz': capture_rate,
+                'decode_rate_hz': capture_rate if native else RATE,
+                'modem_clock': 'packet_reference' if native else 'resampled_device_rate',
                 'input_channels': [c+1 for c in channels],
-                'resample_filter_delay_ms': converter.filter_delay_ms,
+                'resample_filter_delay_ms': (None if converter is None
+                                              else converter.filter_delay_ms),
                 'capture_buffer_capacity_ms': capture.capacity_ms}
         gate = AudioGate(capture_rate)
         announced = False
@@ -91,7 +97,8 @@ def live_results(sd, input_device, channels, layout, coder, settings, stop, repo
                     gate.reset()
                     receiver.reset(preserve_timing=True)
                     emulator = Emulator(settings)
-                    converter.reset()
+                    if converter is not None:
+                        converter.reset()
                 was_active = gate.active
                 input_samples = len(audio)
                 audio = gate.process(audio[:, channels])
@@ -99,18 +106,30 @@ def live_results(sd, input_device, channels, layout, coder, settings, stop, repo
                     if was_active:
                         receiver.reset(preserve_timing=True)
                         emulator = Emulator(settings)
-                        converter.reset()
+                        if converter is not None:
+                            converter.reset()
                     health = CaptureHealth(time.monotonic())
                     continue
                 if not announced:
                     report(startup)
                     announced = True
                 started = time.perf_counter()
-                audio = converter.process(audio)
+                if converter is not None:
+                    audio = converter.process(audio)
                 if len(audio):
                     audio = emulator.process(audio)
                     for at in range(0, len(audio), 256):
                         for result in receiver.feed(audio[at:at+256]):
+                            if native:
+                                # Metadata only: preserve the existing scheduler's
+                                # 48 kHz sample units without resampling audio or
+                                # using the device rate to steer the packet clock.
+                                units = RATE/capture_rate
+                                result.rate_error = (1+result.rate_error)*units-1
+                                result.extra['playback_speed'] = 1/(1+result.rate_error)
+                                for key in ('packet_duration_samples', 'packet_age_samples'):
+                                    if key in result.extra:
+                                        result.extra[key] *= units
                             result.extra['input_channels'] = [c+1 for c in channels]
                             yield result
                 health.record(input_samples, capture_rate, time.perf_counter()-started, overflow, skipped)
@@ -121,8 +140,8 @@ def main(argv=None):
     p.add_argument('--device', type=device, help='Input device ID or name substring')
     p.add_argument('--channels', type=pair, default=(0, 1),
                    help='Ordered input pair, 1-based (default: 1,2)')
-    p.add_argument('--receiver', choices=('progressive', 'reference'), default='progressive',
-                   help='reference: experimental first-pass reference events, no acquisition searches')
+    p.add_argument('--receiver', choices=('progressive', 'reference', 'waveform'), default='progressive',
+                   help='waveform: native ADC samples, packet-local reference clock')
     p.add_argument('--wav', type=Path, help='Receive a baked/recorded 48 kHz PCM16 WAV')
     p.add_argument('--list-devices', action='store_true')
     p.add_argument('-v', '--verbose', action='store_true',
@@ -188,7 +207,8 @@ def main(argv=None):
         return target
 
     def receive():
-        receiver_factory = ReferenceReceiver if args.receiver == 'reference' else Receiver
+        receiver_factory = {'progressive': Receiver, 'reference': ReferenceReceiver,
+                            'waveform': WaveformReceiver}[args.receiver]
         receiver = receiver_factory(layout, coder)
         emulator = Emulator(settings)
         def process(audio):

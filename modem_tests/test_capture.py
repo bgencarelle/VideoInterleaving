@@ -97,7 +97,7 @@ class CaptureTests(unittest.TestCase):
             rate_error=0., extra={'input_channels':[4,2]})
         for options, expected in (([],(0,1)),(['--channels','4,2'],(3,1))):
             closed=[]; calls=[]
-            def live(sd,device,channels,layout,coder,settings,stop,report):
+            def live(sd,device,channels,layout,coder,settings,stop,report,*,receiver_factory):
                 calls.append((device,channels))
                 try:yield result
                 finally:closed.append(True)
@@ -114,7 +114,7 @@ class CaptureTests(unittest.TestCase):
         import contextlib
         import io
         from utilities import modem_v2_check as utility
-        def broken(*args):
+        def broken(*args, **kwargs):
             raise RuntimeError('device disconnected')
             yield
         with patch.object(utility,'_sounddevice',return_value=object()), \
@@ -204,8 +204,10 @@ class CaptureTests(unittest.TestCase):
         with patch.object(decoder,'BufferedInput',Buffer), \
              patch.object(decoder,'Receiver') as receiver,patch.object(decoder,'Emulator'), \
              patch.object(stop,'wait'):
+            receiver.native_waveform = False
             self.assertEqual(list(decoder.live_results(sd,1,None,None,None,None,
-                                                      stop,reports.append)),[])
+                                                      stop,reports.append,
+                                                      receiver_factory=receiver)),[])
             receiver.return_value.feed.assert_not_called()
         self.assertEqual(reports,[])
         self.assertEqual(len(calls),1)
