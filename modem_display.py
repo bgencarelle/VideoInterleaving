@@ -1,5 +1,11 @@
 """VideoInterleaving clock/selector -> baked RGBA composite -> stereo modem.
 
+Transmits with the v2 transport by default; --modem-transport v3 switches the
+encoder. The two are NOT interoperable -- v3 uses a countable biphase preamble
+where v2 uses a random-phase noise burst, so a v2 receiver will sit silently on
+v3 audio and vice versa. Match the transport to the receiver you are running:
+modem_v2_check for v2, modem_v3_check for v3.
+
 Transmits with the v2 transport. The shared-time path is unchanged: v2's header
 keeps a 32-bit millisecond field, so reserve() still projects a send deadline,
 the image index is still evaluated at that instant, and the receiver can still
@@ -9,7 +15,11 @@ import json
 from pathlib import Path
 import time
 import wave
-from animation_modem.transport2 import PRESETS, RATE, SourceCoder, encode, pack_folders
+from animation_modem.transport2 import PRESETS, RATE, SourceCoder, pack_folders
+from animation_modem import transport2 as _v2
+from animation_modem import transport3 as _v3
+
+TRANSPORTS = {'v2': _v2.encode, 'v3': _v3.encode}
 from animation_modem.imaging import (DEFAULT_PROFILE, burn_counters, fit_shapes,
                                      image_values, plane_shapes)
 from animation_modem.audio_common import device, pair, pcm
@@ -28,7 +38,8 @@ def fixed_pair(value):
 
 
 def packet(library, layout, coder, absolute, selection, numbered=False,
-           background=(4,4,4), rotation=0, mirror=False, target_time_ns=None):
+           background=(4,4,4), rotation=0, mirror=False, target_time_ns=None,
+           transport='v2'):
     import time as _time
     index,main,front=selection
     started=_time.perf_counter()
@@ -39,13 +50,14 @@ def packet(library, layout, coder, absolute, selection, numbered=False,
     # v2 identifies frames on a 16-bit index/count, so a long bake wraps rather
     # than raising. The absolute frame number stays 32-bit.
     stamp_ms=0 if target_time_ns is None else (int(target_time_ns)//1_000_000) & 0xffffffff
+    encode=TRANSPORTS[transport]
     audio=encode(values,layout,coder,absolute & 0xffffffff,
                  (index % 0xffff)+1,max(1,min(library.frames,0xffff)),stamp_ms=stamp_ms,
                  flags=pack_folders(main,front))
     ms=(_time.perf_counter()-started)*1000
     return audio, {'frame':absolute,'source_index':index,'face_folder':main,
                    'float_folder':front,'layout':layout.name,'encode_ms':ms,
-                   'target_time_ns':target_time_ns}, im
+                   'transport':transport,'target_time_ns':target_time_ns}, im
 
 
 def run_modem(args):
@@ -55,6 +67,9 @@ def run_modem(args):
     # The wire format is fixed and independent of the bake's own profile; the
     # bake profile only affects how much source detail exists to send.
     layout=PRESETS[getattr(args,'modem_preset',None) or 'wide']
+    transport=getattr(args,'modem_transport',None) or 'v2'
+    if transport not in TRANSPORTS:
+        raise ValueError(f'Unknown transport {transport!r}; choose v2 or v3')
     coder=SourceCoder(fit_shapes(plane_shapes(DEFAULT_PROFILE),layout.capacity))
     selected=fixed_pair(args.modem_pair)
     if selected is not None:
@@ -85,7 +100,8 @@ def run_modem(args):
                 # Inspection export: deterministic forward source order at 15 fps.
                 audio,report,_=packet(library,layout,coder,n+1,
                                       (n%library.frames,*selected),
-                                      args.modem_numbered,background,rotation,mirror)
+                                      args.modem_numbered,background,rotation,mirror,
+                                      transport=transport)
                 sink.writeframesraw(pcm(audio))
                 if args.modem_log_frames:print(json.dumps(report),flush=True)
         print(f'[MODEM] Wrote {limit} independent frames to {path}')
@@ -140,7 +156,7 @@ def run_modem(args):
                 encode_started=time.perf_counter()
                 audio,report,_=packet(library,layout,coder,n+1,(index,*folders),
                                       args.modem_numbered,background,rotation,mirror,
-                                      target_time_ns)
+                                      target_time_ns,transport=transport)
                 elapsed_ms=(time.perf_counter()-encode_started)*1000
                 # Extra preparation time changes the send deadline, not the
                 # animation epoch. Slow machines skip stale work and retry.
