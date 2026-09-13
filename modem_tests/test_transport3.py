@@ -237,3 +237,68 @@ class InteropTests(V3Base):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class HeaderTrimTests(V3Base):
+    """header_split halves header symbols; header_width must stay conservative."""
+
+    def trim(self, **kw):
+        from animation_modem import transport2 as t2
+        return t2.Layout(top_bin=54, image_symbols=15, name='trim',
+                         progressive=True, **kw)
+
+    def roundtrip(self, layout, speed=1.0, noise=.004, frames=4):
+        coder = v2.SourceCoder(self.shapes)
+        audio = np.concatenate([
+            v3.encode(self.values, layout, coder, n+1, 1, frames)
+            for n in range(frames)]).astype(np.float64)
+        if speed != 1.0:
+            k = np.arange(len(audio))
+            audio = np.stack([np.interp(np.arange(int(len(audio)/speed))*speed, k, audio[:, c])
+                              for c in range(2)], axis=1)
+        audio = (audio+np.random.default_rng(0).normal(0, noise, audio.shape)).astype(np.float32)
+        rx = v3.Receiver(layout, coder)
+        got = []
+        for i in range(0, len(audio), 1024):
+            got += rx.feed(audio[i:i+1024])
+        got += rx.flush()
+        return sum(1 for g in got if g.identity == 'verified_header')
+
+    def test_defaults_match_v2(self):
+        base = self.trim()
+        self.assertEqual(base.header_width, 20)
+        self.assertFalse(base.header_split)
+        self.assertEqual(base.header_symbols, v2.PRESETS['wide'].header_symbols)
+
+    def test_split_halves_the_header_symbols(self):
+        self.assertEqual(self.trim(header_split=True).header_symbols, 2)
+
+    def test_split_raises_the_frame_rate(self):
+        self.assertGreater(self.trim(header_split=True).fps, self.trim().fps)
+
+    def test_split_still_decodes(self):
+        self.assertEqual(self.roundtrip(self.trim(header_split=True)), 4)
+
+    def test_split_keeps_the_slow_end_of_the_speed_range(self):
+        for speed in (.25, .5, .75):
+            with self.subTest(speed=speed):
+                self.assertEqual(self.roundtrip(self.trim(header_split=True),
+                                                speed=speed), 4)
+
+    def test_widening_header_bins_costs_the_fast_end(self):
+        """Guards the finding: header_width, not header_split, breaks fast play.
+
+        The header lives on the lowest carriers precisely because those survive
+        a speed shift. Widening moves it onto bins that do not.
+        """
+        wide = self.roundtrip(self.trim(header_width=40, header_split=True),
+                              speed=1.35, noise=.02)
+        narrow = self.roundtrip(self.trim(header_split=True),
+                                speed=1.35, noise=.02)
+        self.assertGreater(narrow, wide)
+
+    def test_presets_are_untouched(self):
+        for name, layout in v2.PRESETS.items():
+            with self.subTest(preset=name):
+                self.assertEqual(layout.header_width, 20)
+                self.assertFalse(layout.header_split)

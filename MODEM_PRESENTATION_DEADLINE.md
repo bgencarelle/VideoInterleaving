@@ -1,8 +1,8 @@
 # Full frame or deadline preview
 
 Base: `ae5c591662ac0638798129295d0b3db245b522a9` on `modem`.
-Keep your existing receive command, including `--receiver reference` and your
-working device/channel selection. This applies to both GUI receivers.
+Use the default V2 progressive receiver with your working device/channel
+selection. This applies to both V2 GUI receivers.
 
 - A valid shared-time presentation timestamp remains authoritative. The GUI
   shows the latest available reconstruction at that instant, then refinements.

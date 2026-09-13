@@ -283,11 +283,24 @@ def encode(values, layout, coder, absolute, index, count, stamp_ms=0, flags=0,
                       magic=MAGIC if layout.progressive else b'V2')
     bits = np.unpackbits(np.frombuffer(raw, np.uint8)).reshape(HEADER_SLOTS, 2)
     qpsk = ((bits[:, 0]*2.-1) + 1j*(bits[:, 1]*2.-1))/np.sqrt(2)
-    room = layout.header_symbols*len(header)
-    spread = np.resize(qpsk, room).reshape(layout.header_symbols, len(header))
-    for s in range(layout.header_symbols):
-        grid[2+s, header, 0] = spread[s]*HEADER_GAIN
-        grid[2+s, header, 1] = spread[s]*HEADER_GAIN
+    if layout.header_split:
+        # Different halves on each channel rather than the same bits twice.
+        # v2 spent 4 symbols -- 48.6% of the packet's fixed overhead -- on a
+        # header it then sent identically on both channels. Splitting halves
+        # the symbol count; the cost is the ~3 dB diversity combine, which the
+        # CRC still catches when it fails.
+        room = layout.header_symbols*layout.header_lanes
+        spread = np.resize(qpsk, room).reshape(layout.header_symbols,
+                                               len(header), 2)
+        for s in range(layout.header_symbols):
+            grid[2+s, header, 0] = spread[s, :, 0]*HEADER_GAIN
+            grid[2+s, header, 1] = spread[s, :, 1]*HEADER_GAIN
+    else:
+        room = layout.header_symbols*len(header)
+        spread = np.resize(qpsk, room).reshape(layout.header_symbols, len(header))
+        for s in range(layout.header_symbols):
+            grid[2+s, header, 0] = spread[s]*HEADER_GAIN
+            grid[2+s, header, 1] = spread[s]*HEADER_GAIN
 
     room = layout.image_symbols*len(data)*4
     sent = np.zeros(room)

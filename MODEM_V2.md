@@ -54,9 +54,8 @@ means more *values*, and the layout work below is worth about +15%.
 **On an analog path the channel costs 9–16 dB.** That is where every
 optimisation below applies, and none of them help on a clean cable.
 
-Use `utilities/modem_link_budget.py` against a real bake to see which regime
-you are in. It separates the source-coding ceiling from the channel's
-contribution and reports the transmit-power split.
+Compare decoded images against their prepared source images to distinguish
+source-coding loss from additional channel loss.
 
 ---
 
@@ -246,7 +245,7 @@ never correct an index that disagrees with the other modes.
 | `cb84f3f2` | Receive path 1.5× faster, byte-identical output. Bounded sync search, O(N) energy, no SVDs. |
 | `560e2030` | Input band-pass, input `blocksize=256`, `--quiet` back to off. |
 | `8d7f3e74` | `--modem-index-offset-ms`. |
-| `c3eee2b9` | `utilities/modem_link_budget.py`. |
+| `c3eee2b9` | Historical link-budget experiment (tool subsequently removed). |
 
 ### Landed but wrong shape
 

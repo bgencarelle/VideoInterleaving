@@ -54,6 +54,10 @@ class Layout:
     image_symbols: int = 15    # more symbols -> bigger picture, lower frame rate
     name: str = 'wide'
     progressive: bool = False
+    header_width: int = 20     # header carriers; wider -> fewer header symbols
+    header_split: bool = False # halve header symbols by sending different
+                               # halves on each channel instead of the same
+                               # bits twice, trading diversity for frame rate
 
     def __post_init__(self):
         if not (isinstance(self.top_bin,int) and 10<=self.top_bin<=63
@@ -80,12 +84,21 @@ class Layout:
 
     @cached_property
     def header_bins(self):
-        """The lowest data carriers -- the ones that survive tape and roll-off."""
-        return self.data_bins[:min(20, len(self.data_bins))]
+        """The lowest data carriers -- the ones that survive tape and roll-off.
+
+        Widening this trades robustness for frame rate: the header moves onto
+        higher carriers, which tape treats worse, but needs fewer symbols.
+        """
+        return self.data_bins[:min(max(1, self.header_width), len(self.data_bins))]
+
+    @cached_property
+    def header_lanes(self):
+        """Independent header slots per symbol. Two channels when split."""
+        return len(self.header_bins)*(2 if self.header_split else 1)
 
     @cached_property
     def header_symbols(self):
-        return -(-HEADER_SLOTS//len(self.header_bins))
+        return -(-HEADER_SLOTS//self.header_lanes)
 
     @cached_property
     def symbols(self):
@@ -543,8 +556,15 @@ def decode_packet(samples, layout, coder, *, body=None):
     fields = None
     # Both channels carry the same symbols, so their mean is a genuine
     # diversity combine; fall back to each channel alone if one is corrupted.
-    for pick in (equal[2:end, header].mean(axis=-1),
-                 equal[2:end, header, 0], equal[2:end, header, 1]):
+    if layout.header_split:
+        # Each channel carries a different half, so there is no diversity to
+        # combine: interleave the two lanes back into one slot sequence.
+        picks = [np.stack([equal[2:end, header, 0], equal[2:end, header, 1]],
+                          axis=-1).reshape(layout.header_symbols, -1)]
+    else:
+        picks = [equal[2:end, header].mean(axis=-1),
+                 equal[2:end, header, 0], equal[2:end, header, 1]]
+    for pick in picks:
         flat = pick.ravel()[:HEADER_SLOTS]/HEADER_GAIN
         if len(flat) < HEADER_SLOTS:
             continue
