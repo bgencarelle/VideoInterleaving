@@ -1,31 +1,29 @@
 #!/usr/bin/env python3
 """Fixed-format v3 image/audio link.
 
-Same arguments as modem_v2_check.py. Same wire body: 48 kHz stereo, wide
-layout, color 40x48 luma plus 20x24 chroma, 2880 values, deterministic built-in
-allocation, identical 16-byte CRC header.
+48 kHz stereo, wide layout, color 40x48 luma plus 20x24 chroma, 2880 values,
+deterministic built-in allocation, 16-byte CRC header.
 
   python utilities/modem_v3_check.py write --modem-dir images_modem --out clean.wav
   python utilities/modem_v3_check.py read --wav clean.wav
   python utilities/modem_v3_check.py live-receive --device "BlackHole 2ch"
   python utilities/modem_v3_check.py live-send --device "BlackHole 2ch" --modem-dir images_modem
 
-What changed from v2, and why:
+How acquisition works:
 
 * The preamble is an LTC-style biphase-mark word, so edge intervals take two
   values and playback speed falls out of `measured / nominal` the way a timer
-  capture gives it to an LTC reader. v2 instead correlated against 48 scaled
-  templates on every unlocked buffer, which is where essentially all of its CPU
-  went. Acquisition still falls back to correlation when the signal is too weak
-  to count edges on, but that route is decimated rather than run continuously.
+  capture gives it to an LTC reader -- roughly 26 us per buffer against the
+  5.5 ms a scaled-template correlation bank costs. Correlation remains as a
+  fallback for signal too weak to count edges on, decimated rather than run on
+  every unlocked buffer.
 
-* The preamble is on both channels. v2 left channel 1 silent through it.
+* The preamble is on both channels, and `encode` normalises up as well as
+  down so the payload uses the available headroom.
 
-* `encode` normalises up as well as down, recovering headroom v2 discarded.
-
-v3 packets are NOT decodable by modem_v2_check and vice versa: the body format
-is identical but the preamble is not, so neither receiver will acquire the
-other's audio. Bake and decode with the same version.
+Presets are not interchangeable: orthogonal training and header placement are
+part of the wire format, so transmitter and receiver must name the same one. A
+mismatch reports "Nothing decoded" rather than producing a garbled picture.
 """
 import argparse
 from contextlib import closing
@@ -39,7 +37,6 @@ import numpy as np
 from PIL import Image, ImageOps
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from animation_modem import transport2 as V2                   # noqa: E402
 from animation_modem import transport3 as V3                   # noqa: E402
 from animation_modem import impairments as IMP                 # noqa: E402
 from animation_modem.audio_common import (pcm, pair, device,   # noqa: E402
@@ -47,8 +44,8 @@ from animation_modem.audio_common import (pcm, pair, device,   # noqa: E402
 from animation_modem.imaging import (burn_counters, fit_shapes,  # noqa: E402
                                      image_values, plane_shapes, values_image)
 
-PRESETS = V2.PRESETS
-RATE = V2.RATE
+PRESETS = V3.ALL_PRESETS
+RATE = V3.RATE
 
 
 def frames_from(args, profile='color'):
@@ -81,7 +78,7 @@ def coder_for(profile, allocation, layout):
     if sum(int(np.prod(s)) for s in shapes) > layout.capacity:
         shapes = fit_shapes(shapes, layout.capacity)
     table = np.load(allocation) if allocation else None
-    return V2.SourceCoder(shapes, table), shapes
+    return V3.SourceCoder(shapes, table), shapes
 
 
 def receive_for(args, layout, coder):
@@ -172,12 +169,14 @@ def do_bench(args):
     channels = [('clean', {}),
                 ('cassette-ish', dict(lowpass_hz=10000, noise_dbfs=-45)),
                 ('worn deck', dict(lowpass_hz=8000, noise_dbfs=-40, crosstalk=.07))]
-    versions = [('v2', V2.encode, lambda: V2.Receiver(layout, coder, recovery=False, fast=True)),
-                ('v3', V3.encode, lambda: V3.Receiver(layout, coder))]
-    print(f'  {"channel":<16}{"ver":>5}{"PSNR":>8}{"headers":>9}'
+    # v2 is gone; compare the v3 layouts against each other instead.
+    versions = [(name, V3.encode,
+                 (lambda l=PRESETS[name]: V3.Receiver(l, coder)), PRESETS[name])
+                for name in ('wide-v3', 'wide-v3-fast')]
+    print(f'  {"channel":<16}{"preset":>13}{"PSNR":>8}{"headers":>9}'
           f'{"tier":>10}{"coverage":>10}{"cpu %":>8}')
     for name, settings in channels:
-        for vname, enc, make in versions:
+        for vname, enc, make, layout in versions:
             quality, hdr, tier, coverage = [], 0, {}, []
             elapsed = samples = 0
             for n, im in enumerate(frames[:args.frames]):
@@ -201,14 +200,12 @@ def do_bench(args):
                     tier[good[0].tier] = tier.get(good[0].tier, 0)+1
                     coverage.append(good[0].coverage or 0)
                     hdr += good[0].identity == 'verified_header'
-            print(f'  {name if vname=="v2" else "":<16}{vname:>5}'
+            print(f'  {name if vname=="wide-v3" else "":<16}{vname:>13}'
                   f'{np.mean(quality) if quality else float("nan"):>8.2f}'
                   f'{hdr:>9}{max(tier, key=tier.get) if tier else "-":>10}'
                   f'{np.mean(coverage) if coverage else float("nan"):>10.3f}'
                   f'{100*elapsed/(samples/RATE):>8.1f}')
-    print('\n  cpu % is one core at this host clock, decode only. v3 wins most of'
-          ' its margin when the receiver is NOT locked;'
-          ' a clean locked link is similar.')
+    print('\n  cpu % is one core at this host clock, decode only.')
 
 
 def do_live_send(args):
@@ -374,7 +371,9 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest='command', required=True)
-    p.set_defaults(preset='wide', profile='color', allocation=None, gain=1.0)
+    # v3 defaults to its own preset: 'wide' works but leaves the training
+    # improvement on the table, and the two are not interchangeable on the wire.
+    p.set_defaults(preset='wide-v3', profile='color', allocation=None, gain=1.0)
 
     def shared(q):
         q.add_argument('--modem-dir', type=Path, help='Bake to read frames from')
@@ -382,20 +381,24 @@ def main(argv=None):
         q.add_argument('--stride', type=int, default=1)
     b = sub.add_parser('bench', help='Offline v2/v3 comparison'); shared(b)
     b.add_argument('--allocation', type=Path)
-    b.add_argument('--preset', choices=list(PRESETS), default='wide')
+    b.add_argument('--preset', choices=list(PRESETS), default='wide-v3')
     w = sub.add_parser('write'); shared(w)
+    w.add_argument('--preset', choices=list(PRESETS), default='wide-v3')
     w.add_argument('--out', type=Path, default=Path('v3_test.wav'))
     w.add_argument('-f', '--numbered', action='store_true')
     r = sub.add_parser('read')
+    r.add_argument('--preset', choices=list(PRESETS), default='wide-v3')
     r.add_argument('--wav', type=Path, required=True)
     r.add_argument('--channels', type=pair, default=(0, 1))
     r.add_argument('--save-frames', type=Path)
     ls = sub.add_parser('live-send'); shared(ls)
+    ls.add_argument('--preset', choices=list(PRESETS), default='wide-v3')
     ls.add_argument('--device', type=device)
     ls.add_argument('--channels', type=pair, default=(0, 1))
     ls.add_argument('-f', '--numbered', action='store_true')
     ls.add_argument('--list-devices', action='store_true')
     lr = sub.add_parser('live-receive')
+    lr.add_argument('--preset', choices=list(PRESETS), default='wide-v3')
     lr.add_argument('--receiver', choices=('v3',), default='v3',
                     help='Kept for argument parity with v2; v3 has one receiver')
     lr.add_argument('--device', type=device)

@@ -1,6 +1,6 @@
 """Image <-> value-vector conversion for the v2 transport.
 
-These were living in utilities/modem_v2_check.py, which put them out of reach
+These were living in the check utility, which put them out of reach
 of modem_display.py -- the runtime cannot import from utilities/. Nothing here
 touches the wire format; it is the source-coding half, shared by the tool and
 the runtime so both produce byte-identical value vectors.

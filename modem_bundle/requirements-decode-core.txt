@@ -1,4 +1,0 @@
-# Current decoder imports these even for headless WAV reception.
-numpy>=1.24
-scipy>=1.10
-Pillow>=9.5

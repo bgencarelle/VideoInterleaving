@@ -1,7 +1,7 @@
 """Pilot correction follows time drift beyond the spacing alias of carriers."""
 import unittest
 import numpy as np
-from animation_modem import transport2 as v
+from animation_modem import transport3 as v
 from animation_modem.imaging import plane_shapes
 
 

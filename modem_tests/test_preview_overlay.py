@@ -1,7 +1,7 @@
 import unittest
 import numpy as np
 from PIL import Image
-from animation_modem.transport2 import Decoded
+from animation_modem.transport3 import Decoded
 from animation_modem.imaging import values_image
 from animation_modem.preview_overlay import PreviewOverlay
 

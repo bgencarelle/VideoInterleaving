@@ -3,7 +3,7 @@ import unittest
 from fractions import Fraction
 import numpy as np
 from scipy.signal import resample_poly
-from animation_modem import transport2 as v
+from animation_modem import transport3 as v
 
 
 class RecoveredClockTests(unittest.TestCase):

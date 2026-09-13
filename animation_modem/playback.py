@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import threading
 import numpy as np
 from .audio_common import sounddevice, route
-from .transport2 import PRESETS, RATE
+from .core import PRESETS, RATE
 
 _DEFAULT = PRESETS['wide']   # layouts pass their own geometry
 

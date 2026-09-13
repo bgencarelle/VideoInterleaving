@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 import numpy as np
 from animation_modem.playback import PacketOutput
-from animation_modem.transport2 import PRESETS, Receiver, SourceCoder, encode
+from animation_modem.transport3 import PRESETS, Receiver, SourceCoder, encode
 from animation_modem.imaging import (DEFAULT_PROFILE, fit_shapes, image_values,
                                      plane_shapes)
 

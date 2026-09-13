@@ -2,7 +2,7 @@
 import unittest
 import numpy as np
 from animation_modem.presentation import DeadlinePresentationBuffer
-from animation_modem.transport2 import Decoded
+from animation_modem.transport3 import Decoded
 
 
 class PresentationDeadlineTests(unittest.TestCase):

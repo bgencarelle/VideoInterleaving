@@ -2,7 +2,7 @@
 
 The wire body is byte-identical to v2 -- same OFDM grid, same carriers, same
 16-byte CRC header, same source coding. Only the preamble and the way the
-receiver finds it change, so `transport2.decode_packet` demodulates a v3 packet
+receiver finds it change, so `core.decode_packet` demodulates a v3 packet
 unmodified once the timing is known.
 
 Three changes, in order of how much they matter:
@@ -33,8 +33,8 @@ import numpy as np
 from functools import lru_cache
 from scipy.signal import correlate
 
-from . import transport2 as v2
-from .transport2 import (RATE, N, CP, SYMBOL, SYNC_LEN, GUARD, HEADER_GAIN,
+from . import core as v2
+from .core import (RATE, N, CP, SYMBOL, SYNC_LEN, GUARD, HEADER_GAIN,
                          IMAGE_GAIN, HEADER_SLOTS, HEADER_FORMAT, HEADER_BYTES,
                          Layout, PRESETS, SourceCoder, Decoded, coefficient_slots,
                          phases, pack_header, pack_folders, decode_packet,
@@ -72,6 +72,28 @@ def _biphase(bits=PREAMBLE_BITS, half=HALF, amplitude=PREAMBLE_AMPLITUDE):
     wave = np.asarray(out, float)
     return wave*(amplitude/np.max(np.abs(wave)))
 
+
+# v3-only layouts. These live here rather than in core.PRESETS because
+# orthogonal training needs v3's encoder: a v2 transmitter cannot produce them,
+# and transport2's own tests round-trip every entry in PRESETS.
+V3_PRESETS = {
+    # Recommended default: same band and cadence as 'wide', but both channels
+    # drive both training symbols. Same peak, twice the training energy, and
+    # measured +1.2 dB clean / +2.1 dB at tape noise / +4.1 dB at heavy noise,
+    # with the 0.25-1.6x playback range unchanged.
+    'wide-v3': Layout(top_bin=54, image_symbols=15, name='wide-v3',
+                      progressive=True, orthogonal_training=True),
+    # Trades the top of the speed range for frame rate: the header goes out as
+    # two symbols instead of four, 14.35 -> 15.71 fps, but 1.6x playback stops
+    # decoding. For a stable transport, not a drifting deck.
+    'wide-v3-fast': Layout(top_bin=54, image_symbols=15, name='wide-v3-fast',
+                           progressive=True, orthogonal_training=True,
+                           header_split=True),
+    # Cassette band with the same training improvement.
+    'tape-v3': Layout(top_bin=27, image_symbols=35, name='tape-v3',
+                      progressive=True, orthogonal_training=True),
+}
+ALL_PRESETS = {**PRESETS, **V3_PRESETS}
 
 PREAMBLE = _biphase()
 PREAMBLE_ENERGY = float(np.einsum('i,i->', PREAMBLE, PREAMBLE, optimize=False))
@@ -213,7 +235,7 @@ def _scaled_preamble(scale):
 def _fit_preamble(samples, at, scale, reach=.02, iterations=5, fast=True):
     """Refine position and dilation against the known preamble.
 
-    Same two-parameter projected fit as transport2._fit_sync. Edge capture
+    Same two-parameter projected fit as core._fit_sync. Edge capture
     already lands inside 0.5%, so `reach` is small and the loop is short --
     this is a refinement, not a search.
     """
@@ -276,8 +298,23 @@ def encode(values, layout, coder, absolute, index, count, stamp_ms=0, flags=0,
     pilots = np.searchsorted(carriers, layout.pilots)
     header = np.searchsorted(carriers, layout.header_bins)
     grid = np.zeros((layout.symbols, len(carriers), 2), complex)
-    grid[0, :, 0] = 1
-    grid[1, :, 1] = 1
+    if layout.orthogonal_training:
+        # v2 sends [1,0] then [0,1]: half of every training symbol is silence.
+        # Rows [1,1] and [1,-1] fill both channels for the same 288 samples and
+        # the same per-channel peak, doubling the energy behind the estimate.
+        #
+        # Channel 1 is pre-rotated onto channel 0's phase so that the scramble
+        # applied below leaves the training matrix orthogonal; without this the
+        # two independent phases can very nearly cancel and the 2x2 solve
+        # becomes singular on some carriers.
+        tone = phases(layout)
+        lock0 = tone[0, :, 0]*np.conj(tone[0, :, 1])
+        lock1 = tone[1, :, 0]*np.conj(tone[1, :, 1])
+        grid[0, :, 0], grid[0, :, 1] = 1, lock0
+        grid[1, :, 0], grid[1, :, 1] = 1, -lock1
+    else:
+        grid[0, :, 0] = 1
+        grid[1, :, 1] = 1
 
     raw = pack_header(flags, layout.top_bin, absolute, index, count, stamp_ms,
                       magic=MAGIC if layout.progressive else b'V2')
@@ -335,7 +372,7 @@ def encode(values, layout, coder, absolute, index, count, stamp_ms=0, flags=0,
 class Receiver:
     """Edge-gated acquisition with a correlation fallback.
 
-    Drop-in for transport2.Receiver: same constructor, same `feed`/`flush`
+    Drop-in for core.Receiver: same constructor, same `feed`/`flush`
     contract, same Decoded results. `acquisition_path` in `extra` reports which
     route found each packet, so a deployment can see how often it is paying for
     the fallback.

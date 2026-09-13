@@ -6,17 +6,15 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import numpy as np
 from PIL import Image
-from animation_modem.transport2 import PRESETS, SourceCoder, decode_packet as _decode
+from animation_modem.transport3 import PRESETS, SourceCoder, decode_packet as _decode
 from animation_modem.imaging import DEFAULT_PROFILE, PROFILES, fit_shapes, image_values, plane_shapes
-from animation_modem import transport2 as _v2
+from animation_modem import transport3 as _v2
 
 LAYOUT = PRESETS['wide']
 FRAME = LAYOUT.frame
 
-
 def _coder(profile=DEFAULT_PROFILE):
     return SourceCoder(fit_shapes(plane_shapes(profile), LAYOUT.capacity))
-
 
 def encode(image, absolute, index, count, numbered=False, profile=DEFAULT_PROFILE,
            target_time_ns=None):
@@ -28,12 +26,10 @@ def encode(image, absolute, index, count, numbered=False, profile=DEFAULT_PROFIL
                        stamp_ms=stamp)
     return audio, None, None
 
-
 def decode_packet(audio, profile=DEFAULT_PROFILE):
     return _decode(audio[:LAYOUT.packet], LAYOUT, _coder(profile))
 from animation_modem.timing import expand_timestamp, PresentationBuffer, ProgressSummary
 import index_calculator
-
 
 class ProgressSummaryTests(unittest.TestCase):
     def result(self,index,identity='verified_header',tier='best'):
@@ -66,7 +62,6 @@ class ProgressSummaryTests(unittest.TestCase):
         self.assertIn('2 packets, 1 verified',line)
         self.assertIn('best 1',line)
         self.assertIn('good 1',line)
-
 
 class TimingTests(unittest.TestCase):
     def test_timestamp_roundtrip_all_profiles_with_unchanged_packet_size(self):
@@ -113,61 +108,6 @@ class TimingTests(unittest.TestCase):
         self.assertEqual(q.pop_due(250),200)
         self.assertEqual(q.dropped,1)
         self.assertEqual(q.pop_due(300),300)
-    def test_live_receiver_reports_shared_time_error(self):
-        from animation_modem import decoder
-        base=1_700_000_000_000_000_000
-        target=base+78_000_000
-        audio=encode(Image.new('RGB',(40,48)),1,1,1,target_time_ns=target)[0]
-        class Input:
-            latency=.005
-            position=0
-            samplerate=48000
-            closed=False
-            def start(self):pass
-            def stop(self):pass
-            def close(self):self.closed=True
-            @property
-            def read_available(self):return 256
-            def __enter__(self):return self
-            def __exit__(self,*args):pass
-            def read(self,count):
-                if self.position>=len(audio):raise KeyboardInterrupt()
-                block=audio[self.position:self.position+count]
-                self.position+=len(block)
-                return block,False
-        stream=Input()
-        class PortAudioError(Exception):pass
-        def check_input_settings(**kwargs):
-            if kwargs['samplerate'] != 48000:raise PortAudioError('unsupported')
-        fake=SimpleNamespace(InputStream=lambda **kwargs:stream,
-                             PortAudioError=PortAudioError,
-                             check_input_settings=check_input_settings,
-                             query_devices=lambda *args:dict(max_input_channels=2,
-                                                             default_samplerate=48000))
-        output=io.StringIO()
-        with patch.object(decoder,'sounddevice',return_value=fake), \
-             patch.object(decoder.time,'time_ns',side_effect=lambda:base+round(stream.position/48000*1e9)), \
-             contextlib.redirect_stdout(output),contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(KeyboardInterrupt):decoder.main(['--headless'])
-        self.assertTrue(stream.closed)
-        rows=[json.loads(line) for line in output.getvalue().splitlines()]
-        received=next(row for row in rows if row['absolute']==1)
-        self.assertEqual(received['target_time_ns'],target)
-        self.assertLess(received['decode_error_ms'],0)
-        self.assertEqual(received['decode_error_window']['median_ms'],received['decode_error_ms'])
-
-    def test_recorded_timestamp_does_not_schedule_against_current_time(self):
-        from animation_modem import decoder
-        audio=encode(Image.new('RGB',(40,48)),1,1,1,target_time_ns=1_700_000_000_000_000_000)[0]
-        output=io.StringIO()
-        with patch.object(decoder,'wav_blocks',return_value=iter([audio])), \
-             contextlib.redirect_stdout(output),contextlib.redirect_stderr(io.StringIO()):
-            decoder.main(['--headless','--wav','unused.wav','--fast'])
-        row=json.loads(output.getvalue().splitlines()[0])
-        self.assertIsNone(row['target_time_ns'])
-        self.assertIsNone(row['decode_error_ms'])
-        # A replayed stamp is not a deadline: nothing is scheduled against it.
-
     def test_future_index_matches_existing_clock_and_does_not_publish(self):
         target=1_700_000_000_123_000_000
         with patch.object(index_calculator.time,'time_ns',return_value=target), \

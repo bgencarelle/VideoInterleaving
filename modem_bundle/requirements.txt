@@ -1,3 +1,0 @@
-# Live decoder only. Tk and PortAudio are OS/Python-installation dependencies.
--r requirements-decode-core.txt
-sounddevice>=0.4.6

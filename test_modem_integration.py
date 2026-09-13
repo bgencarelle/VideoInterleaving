@@ -14,18 +14,20 @@ from utilities.convert_to_modem import bake_tree
 from utilities.bake_assets import write_slab
 from modem_bake import ModemLibrary
 from modem_display import packet, run_modem
-from animation_modem import transport2 as v2
+from animation_modem import transport3 as v3
 from animation_modem.imaging import DEFAULT_PROFILE, fit_shapes, plane_shapes
 
-LAYOUT = v2.PRESETS['wide']
+# modem_display now defaults to the v3 preset, so the harness must decode with
+# the same layout the transmitter uses.
+LAYOUT = v3.V3_PRESETS['wide-v3']
 
 
-def v2_coder():
-    return v2.SourceCoder(fit_shapes(plane_shapes(DEFAULT_PROFILE), LAYOUT.capacity))
+def v3_coder():
+    return v3.SourceCoder(fit_shapes(plane_shapes(DEFAULT_PROFILE), LAYOUT.capacity))
 
 
 def decode_packet(audio):
-    return v2.decode_packet(audio[:LAYOUT.packet], LAYOUT, v2_coder())
+    return v3.decode_packet(audio[:LAYOUT.packet], LAYOUT, v3_coder())
 
 REPO=Path(__file__).resolve().parent
 
@@ -57,7 +59,7 @@ class ModemIntegrationTests(unittest.TestCase):
                                       Image.new('RGBA',(40,48),(200,40,20,128)))
         expected=Image.alpha_composite(expected,Image.new('RGBA',(40,48),(10,30,240,128))).convert('RGB')
         self.assertLessEqual(abs(np.asarray(image,dtype=float)-np.asarray(expected)).max(),1)
-        audio,report,_=packet(lib,LAYOUT,v2_coder(),500,(1,1,0),True)
+        audio,report,_=packet(lib,LAYOUT,v3_coder(),500,(1,1,0),True)
         decoded=decode_packet(audio)
         self.assertEqual((decoded.absolute,decoded.index,decoded.count),(500,2,3))
         self.assertEqual((report['face_folder'],report['float_folder']),(1,0))
@@ -142,7 +144,7 @@ class ModemIntegrationTests(unittest.TestCase):
         # The index offset must reach the clock formula without disturbing the
         # transmitted timestamp: presentation time is unchanged above.
         self.assertTrue(all(call.kwargs['time_offset_ns']==33_300_000 for call in target_clock.call_args_list))
-        # v2 carries the shared-time millisecond field as stamp_ms; the
+        # The shared-time millisecond field rides in stamp_ms; the
         # scheduling contract is unchanged, only the header layout moved.
         self.assertTrue(all(x.stamp_ms for x in emitted))
 
@@ -166,7 +168,7 @@ runpy.run_path(sys.argv[1],run_name='__main__')
                           cwd=self.root,text=True,capture_output=True,timeout=30)
         self.assertEqual(r.returncode,0,r.stdout+r.stderr)
         # The transmit path is v2 now, so read it back with the v2 tool.
-        r=subprocess.run([sys.executable,str(REPO/'utilities'/'modem_v2_check.py'),
+        r=subprocess.run([sys.executable,str(REPO/'utilities'/'modem_v3_check.py'),
                            'read','--wav',str(wav)],
                           cwd=self.root,text=True,capture_output=True,timeout=60)
         self.assertEqual(r.returncode,0,r.stderr)

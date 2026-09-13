@@ -1,7 +1,7 @@
 import argparse
 import wave
 import numpy as np
-from .transport2 import PRESETS, RATE, N
+from .core import PRESETS, RATE, N
 
 
 def device(value):

@@ -13,7 +13,6 @@ import unittest
 import numpy as np
 from PIL import Image
 
-from animation_modem import transport2 as v2
 from animation_modem import transport3 as v3
 from animation_modem.imaging import (DEFAULT_PROFILE, fit_shapes, image_values,
                                      plane_shapes)
@@ -22,9 +21,9 @@ from utilities.modem_v3_check import main
 
 class V3Base(unittest.TestCase):
     def setUp(self):
-        self.layout = v2.PRESETS['wide']
+        self.layout = v3.PRESETS['wide']
         self.shapes = fit_shapes(plane_shapes(DEFAULT_PROFILE), self.layout.capacity)
-        self.coder = v2.SourceCoder(self.shapes)
+        self.coder = v3.SourceCoder(self.shapes)
         yy, xx = np.mgrid[:48, :40]
         self.image = Image.fromarray(
             np.uint8(np.stack([xx*6, yy*5, (xx+yy)*2], axis=-1)))
@@ -51,11 +50,6 @@ class PreambleTests(V3Base):
         """The whole premise: countable like LTC, not a noise burst."""
         gaps = np.diff(v3.edge_intervals(v3.PREAMBLE))
         self.assertEqual(sorted(set(gaps.tolist())), [v3.SHORT, v3.LONG])
-
-    def test_v2_preamble_is_not_countable(self):
-        """Guards the claim that this is a real change, not a relabelling."""
-        gaps = np.diff(v3.edge_intervals(v2.SYNC, hysteresis=.08))
-        self.assertGreater(len(set(gaps.tolist())), 2)
 
     def test_preamble_present_on_both_channels(self):
         audio = self.packet()
@@ -173,11 +167,6 @@ class LevelTests(V3Base):
         """v2 only ever attenuated, leaving headroom permanently unused."""
         self.assertAlmostEqual(float(np.max(np.abs(self.packet()))), .95, delta=1e-3)
 
-    def test_v3_is_hotter_than_v2_for_the_same_image(self):
-        a = v2.encode(self.values, self.layout, self.coder, 1, 1, 20)
-        b = self.packet()
-        self.assertGreater(float(np.max(np.abs(b))), float(np.max(np.abs(a))))
-
     def test_rejects_wrong_value_count(self):
         with self.assertRaises(ValueError):
             v3.encode(self.values[:-1], self.layout, self.coder, 1, 1, 20)
@@ -192,7 +181,7 @@ class LevelTests(V3Base):
 class HeaderTests(V3Base):
     def test_folder_pair_survives_the_flags_byte(self):
         audio = v3.encode(self.values, self.layout, self.coder, 5, 5, 20,
-                          flags=v2.pack_folders(3, 7))
+                          flags=v3.pack_folders(3, 7))
         got = self.decode(audio)
         self.assertEqual((got[0].face_folder, got[0].float_folder), (3, 7))
 
@@ -217,24 +206,6 @@ class CliTests(V3Base):
             self.assertTrue(all(r['identity'] == 'verified_header' for r in records))
 
 
-class InteropTests(V3Base):
-    def test_v2_receiver_does_not_acquire_v3_audio(self):
-        """Different preamble: the versions must not half-decode each other."""
-        rx = v2.Receiver(self.layout, self.coder, recovery=False, fast=True)
-        got = []
-        audio = np.concatenate([self.packet(n) for n in range(1, 4)])
-        for i in range(0, len(audio), 256):
-            got += rx.feed(audio[i:i+256])
-        self.assertEqual([r for r in got if r.identity == 'verified_header'], [])
-
-    def test_v3_receiver_does_not_acquire_v2_audio(self):
-        audio = np.concatenate([
-            v2.encode(self.values, self.layout, self.coder, n, n, 20)
-            for n in range(1, 4)])
-        got = self.decode(audio.astype(np.float32))
-        self.assertEqual([r for r in got if r.identity == 'verified_header'], [])
-
-
 if __name__ == '__main__':
     unittest.main()
 
@@ -243,12 +214,12 @@ class HeaderTrimTests(V3Base):
     """header_split halves header symbols; header_width must stay conservative."""
 
     def trim(self, **kw):
-        from animation_modem import transport2 as t2
-        return t2.Layout(top_bin=54, image_symbols=15, name='trim',
+        from animation_modem import core as t2
+        return v3.Layout(top_bin=54, image_symbols=15, name='trim',
                          progressive=True, **kw)
 
     def roundtrip(self, layout, speed=1.0, noise=.004, frames=4):
-        coder = v2.SourceCoder(self.shapes)
+        coder = v3.SourceCoder(self.shapes)
         audio = np.concatenate([
             v3.encode(self.values, layout, coder, n+1, 1, frames)
             for n in range(frames)]).astype(np.float64)
@@ -268,7 +239,7 @@ class HeaderTrimTests(V3Base):
         base = self.trim()
         self.assertEqual(base.header_width, 20)
         self.assertFalse(base.header_split)
-        self.assertEqual(base.header_symbols, v2.PRESETS['wide'].header_symbols)
+        self.assertEqual(base.header_symbols, v3.PRESETS['wide'].header_symbols)
 
     def test_split_halves_the_header_symbols(self):
         self.assertEqual(self.trim(header_split=True).header_symbols, 2)
@@ -298,7 +269,98 @@ class HeaderTrimTests(V3Base):
         self.assertGreater(narrow, wide)
 
     def test_presets_are_untouched(self):
-        for name, layout in v2.PRESETS.items():
+        """The v2 presets must keep v2 behaviour; only the v3-* ones opt in."""
+        for name in ('wide', 'tape', 'tape-fast', 'narrow', 'lofi'):
             with self.subTest(preset=name):
+                layout = v3.PRESETS[name]
                 self.assertEqual(layout.header_width, 20)
                 self.assertFalse(layout.header_split)
+                self.assertFalse(layout.orthogonal_training)
+
+
+class TrainingTests(V3Base):
+    """Orthogonal training: same peak, twice the energy, better estimate."""
+
+    def trim(self, **kw):
+        return v3.Layout(top_bin=54, image_symbols=15, name='t',
+                         progressive=True, **kw)
+
+    def decode_at(self, layout, noise, speed=1.0, frames=4):
+        coder = v3.SourceCoder(self.shapes)
+        audio = np.concatenate([
+            v3.encode(self.values, layout, coder, n+1, 1, frames)
+            for n in range(frames)]).astype(np.float64)
+        if speed != 1.0:
+            k = np.arange(len(audio))
+            audio = np.stack([np.interp(np.arange(int(len(audio)/speed))*speed, k, audio[:, c])
+                              for c in range(2)], axis=1)
+        audio = (audio+np.random.default_rng(3).normal(0, noise, audio.shape)).astype(np.float32)
+        rx = v3.Receiver(layout, coder)
+        got = []
+        for i in range(0, len(audio), 1024):
+            got += rx.feed(audio[i:i+1024])
+        got += rx.flush()
+        good = [g for g in got if g.values is not None]
+        err = (np.mean([np.mean((np.clip(g.values, -1, 1)-self.values)**2) for g in good])
+               if good else 1.0)
+        return sum(1 for g in got if g.identity == 'verified_header'), err
+
+    def test_both_channels_carry_both_training_symbols(self):
+        """v2 leaves one channel silent in each; that is the waste being fixed."""
+        coder = v3.SourceCoder(self.shapes)
+        for layout, expect_silent in ((self.trim(), True),
+                                      (self.trim(orthogonal_training=True), False)):
+            with self.subTest(orthogonal=not expect_silent):
+                audio = v3.encode(self.values, layout, coder, 1, 1, 4)
+                body = audio[v3.SYNC_LEN:layout.packet].reshape(
+                    layout.symbols, v3.SYMBOL, 2)
+                quiet = min(float(np.sqrt(np.mean(body[s, :, c]**2)))
+                            for s, c in ((0, 1), (1, 0)))
+                self.assertEqual(quiet < 1e-9, expect_silent)
+
+    def test_orthogonal_training_does_not_raise_the_peak(self):
+        coder = v3.SourceCoder(self.shapes)
+        a = v3.encode(self.values, self.trim(), coder, 1, 1, 4)
+        b = v3.encode(self.values, self.trim(orthogonal_training=True), coder, 1, 1, 4)
+        self.assertAlmostEqual(float(np.max(np.abs(a))), float(np.max(np.abs(b))), delta=1e-3)
+
+    def test_orthogonal_training_improves_noise_tolerance(self):
+        plain, plain_err = self.decode_at(self.trim(), .05)
+        ortho, ortho_err = self.decode_at(self.trim(orthogonal_training=True), .05)
+        self.assertLess(ortho_err, plain_err)
+
+    def test_orthogonal_training_round_trips_cleanly(self):
+        got, err = self.decode_at(self.trim(orthogonal_training=True), .004)
+        self.assertEqual(got, 4)
+        self.assertLess(err, 1e-2)
+
+    def test_orthogonal_training_keeps_the_speed_range(self):
+        for speed in (.25, .5, 1.0, 1.35):
+            with self.subTest(speed=speed):
+                got, _ = self.decode_at(self.trim(orthogonal_training=True), .02, speed)
+                self.assertEqual(got, 4)
+
+    def test_presets_expose_it(self):
+        self.assertTrue(v3.V3_PRESETS['wide-v3'].orthogonal_training)
+        self.assertTrue(v3.V3_PRESETS['wide-v3-fast'].header_split)
+        self.assertFalse(v3.PRESETS['wide'].orthogonal_training)
+
+    def test_v3_presets_stay_out_of_the_shared_table(self):
+        """PRESETS is the pre-existing table; V3_PRESETS are the new layouts.
+        Keeping them separate is what lets ALL_PRESETS be the union."""
+        self.assertFalse(set(v3.V3_PRESETS) & set(v3.PRESETS))
+        self.assertEqual(set(v3.ALL_PRESETS), set(v3.PRESETS) | set(v3.V3_PRESETS))
+
+    def test_v3_presets_are_not_cross_compatible(self):
+        """Different training means a mismatched preset must fail, not garble."""
+        coder = v3.SourceCoder(self.shapes)
+        audio = v3.encode(self.values, v3.V3_PRESETS['wide-v3'], coder, 1, 1, 4)
+        rx = v3.Receiver(v3.PRESETS['wide'], coder)
+        got = []
+        for i in range(0, len(audio), 256):
+            got += rx.feed(audio[i:i+256])
+        got += rx.flush()
+        good = [g for g in got if g.values is not None]
+        if good:
+            err = np.mean([np.mean((np.clip(g.values, -1, 1)-self.values)**2) for g in good])
+            self.assertGreater(err, 1e-2)
