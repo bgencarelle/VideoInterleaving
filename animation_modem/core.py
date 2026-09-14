@@ -27,7 +27,21 @@ import numpy as np
 from scipy.fft import dctn, idctn, rfft
 from scipy.signal import resample_poly, firwin, butter, sosfiltfilt
 
-RATE = 48000
+REFERENCE_RATE = 48000
+# The rate the sample geometry was designed around, and the only rate this
+# package ever *writes down*: it is stamped into WAV headers and used to turn a
+# sample count into a nominal duration for reporting. Nothing requests it from
+# hardware. The wire format is defined in SAMPLES -- 2768 of them per lean-v3
+# frame -- so RECEIVING is indifferent to the capture clock: a faster one just
+# oversamples, and the preamble's edge intervals report the cadence.
+#
+# SENDING is not symmetric, which is why this constant also caps the emitted
+# band. Playing the sample array out of a faster device scales the carriers up
+# with the clock -- 40.5 kHz at 96 kHz, 81 kHz at 192 kHz -- which is above
+# both a cheap DAC's reconstruction filter and any sane receiver's Nyquist. So
+# a transmitter resamples to its device instead, holding the emitted band at
+# 375-20250 Hz whatever the device is set to. See `band_limited`.
+RATE = REFERENCE_RATE      # historical name, kept for existing imports
 N, CP = 128, 16
 SYMBOL = N + CP
 LOW_BIN = 3
@@ -144,14 +158,29 @@ class Layout:
     def frame(self):
         return self.packet + GUARD
 
+    def fps_at(self, rate):
+        """Frames per second on a clock actually running at `rate`.
+
+        Frame length is a sample count, so the frame rate is whatever the
+        hardware clock makes of it: 17.34 fps at 48 kHz, 15.93 at 44.1 kHz.
+        Neither is more correct than the other, and neither is requested.
+        """
+        return rate/self.frame
+
+    def band_at(self, rate):
+        """Carrier edges in hertz on a clock actually running at `rate`."""
+        c = self.carriers
+        return (float(c[0]*rate/N), float(c[-1]*rate/N))
+
     @cached_property
     def fps(self):
-        return RATE/self.frame
+        """Frame rate at the reference clock. For labels, not for scheduling."""
+        return self.fps_at(REFERENCE_RATE)
 
     @cached_property
     def band(self):
-        c = self.carriers
-        return (float(c[0]*RATE/N), float(c[-1]*RATE/N))
+        """Carrier edges at the reference clock. For labels, not for filters."""
+        return self.band_at(REFERENCE_RATE)
 
     @cached_property
     def capacity(self):
@@ -160,13 +189,20 @@ class Layout:
 
     @cached_property
     def max_speed(self):
-        """Playback speed above which the top carrier folds past Nyquist."""
-        return (RATE/2)/self.band[1]
+        """Playback speed above which the top carrier folds past Nyquist.
 
-    def describe(self):
-        return (f'{self.name}: {self.band[0]:.0f}-{self.band[1]:.0f} Hz, '
-                f'{self.fps:.2f} fps, {self.capacity} values, '
-                f'{len(self.data_bins)} data bins, up to {self.max_speed:.2f}x speed')
+        Nyquist and the carrier both scale with the sample clock, so this ratio
+        is pure geometry -- N/(2*top_bin) -- and identical at every rate. It was
+        written as (RATE/2)/band[1], which looked rate-dependent and was not.
+        """
+        return N/(2*self.top_bin)
+
+    def describe(self, rate=REFERENCE_RATE):
+        low, high = self.band_at(rate)
+        return (f'{self.name}: {low:.0f}-{high:.0f} Hz, '
+                f'{self.fps_at(rate):.2f} fps, {self.capacity} values, '
+                f'{len(self.data_bins)} data bins, up to {self.max_speed:.2f}x speed '
+                f'(at {rate:g} Hz)')
 
 
 PRESETS = {
@@ -332,6 +368,98 @@ def _body_walk(layout):
     """Only the useful FFT windows; skip sync, guards and unused CP samples."""
     return (SYNC_LEN + np.arange(layout.symbols)[:, None]*SYMBOL +
             CP-4 + np.arange(N)[None, :]).ravel()
+
+
+def emit_ratio(rate, reference=REFERENCE_RATE, limit=16):
+    """up/down for a transmitter on `rate`, or None when nothing is needed.
+
+    Only rates ABOVE the reference produce a ratio. Below it, the natural
+    sample array already sits inside the reference band -- 18.6 kHz at
+    44.1 kHz -- and resampling up to reclaim the last 1.6 kHz would push the
+    top carrier from 0.84 of that device's Nyquist to 0.92, which is the wrong
+    direction for the reconstruction filter on a cheap DAC. Quiet and low is
+    the safe failure here.
+
+    The ratio is deliberately coarse. Exact rationals are brutal off the
+    44.1 kHz family -- 88.2 kHz is 147/80, and a polyphase filter with a
+    transition band that narrow relative to 147x needs ~15000 taps, about
+    5 ms per frame on a desktop and far worse on a Pi. 11/6 costs 1129 taps
+    and lands 0.23% off. That residual does not have to be corrected, because
+    the receiver measures the scale that actually arrives and reports it: it is
+    a real 1.0023x transmission, not an error, and the decoder's range is
+    +/-15%. Rates that ARE clean multiples (96, 192 kHz) stay exact.
+    """
+    rate = int(round(rate))
+    if rate <= reference:
+        return None
+    ratio = Fraction(rate, int(reference)).limit_denominator(limit)
+    return None if ratio == 1 else (ratio.numerator, ratio.denominator)
+
+
+@lru_cache(maxsize=8)
+def _emit_filter(up, down, top_bin=54, guard=1.185):
+    """Anti-image filter with the carriers well clear of its transition band.
+
+    resample_poly's default is ~20*up taps, whose transition band is wide
+    enough to start attenuating the top carrier at 20.25 kHz. The passband has
+    to reach the carriers and the stopband has to start by the reference
+    Nyquist; `guard` is that ratio, 24000/20250, and is not a free parameter.
+    """
+    edge = top_bin/N                       # carrier top, in reference Nyquist
+    width = max(edge*(guard-1), .02)       # transition available, normalised
+    taps = int(2*np.ceil(4/(width/max(up, down)))+1)
+    return firwin(taps, 1/max(up, down), window=('kaiser', 8.6))
+
+
+def band_limited(packet, rate, reference=REFERENCE_RATE, top_bin=54, pad=64):
+    """Hold a transmitter's carriers at the reference band, whatever its clock.
+
+    This is the one place the two directions differ. A receiver can be clocked
+    anywhere, because oversampling costs nothing and the preamble reports the
+    cadence. A transmitter cannot: the band it emits is its own clock times the
+    carrier geometry, so a device sitting at 96 kHz would put the picture at
+    750-40500 Hz, where a low-end DAC's reconstruction filter removes it and no
+    receiver below 81 kHz can hear it at all.
+
+    Resampling the packet to the device's rate holds the emitted band at
+    375-20250 Hz and the frame at 17.34 fps at every device rate. Note what is
+    NOT happening: the device is not asked to change rate, and nothing is
+    requested of it. The signal is adapted to the hardware, which is the whole
+    point -- the alternative is demanding 48 kHz and failing on anything else.
+
+    Zero padding either side keeps the resampler's transient out of the
+    preamble; the frame already opens with 16 idle samples and closes with
+    GUARD, so the trimmed result is sample-accurate at both ends.
+    """
+    packet = np.asarray(packet, np.float32)
+    ratio = emit_ratio(rate, reference)
+    if ratio is None:
+        return packet
+    up, down = ratio
+    want = int(round(len(packet)*up/down))
+    quiet = np.zeros((pad, packet.shape[1]), np.float32)
+    out = resample_poly(np.concatenate([quiet, packet, quiet]), up, down,
+                        axis=0, window=_emit_filter(up, down, top_bin))
+    begin = int(round(pad*up/down))
+    out = out[begin:begin+want]
+    if len(out) < want:                    # never hand back a short frame
+        out = np.concatenate([out, np.zeros((want-len(out), packet.shape[1]))])
+    # Restore the level `encode` set. Interpolation reconstructs intersample
+    # peaks the original array only implied: measured +2.3 dB here, which
+    # would clip a packet encoded to 0.95 and cost far more than the resampling
+    # bought. Scaling the whole packet is safe for the same reason encode can
+    # normalise at all -- the training symbols carry the scale, so the
+    # receiver's channel estimate divides it straight back out.
+    peak, want_peak = float(np.max(np.abs(out))), float(np.max(np.abs(packet)))
+    if peak > 0 and want_peak > 0:
+        out = out*(want_peak/peak)
+    return np.asarray(out, np.float32)
+
+
+def emit_length(samples, rate, reference=REFERENCE_RATE):
+    """How many samples `band_limited` will return for a length of `samples`."""
+    ratio = emit_ratio(rate, reference)
+    return samples if ratio is None else int(round(samples*ratio[0]/ratio[1]))
 
 
 def resample_packet(samples, rate, length, taps=8, offset=0.0, fast=False):
@@ -611,13 +739,13 @@ def decode_packet(samples, layout, coder, *, body=None):
 
 
 @lru_cache(maxsize=8)
-def _sync_filter(cutoff):
-    return firwin(33,cutoff,fs=RATE)
+def _sync_filter(cutoff, rate=REFERENCE_RATE):
+    return firwin(33, cutoff, fs=rate)
 
 
 @lru_cache(maxsize=4)
-def _conditioning_filter(cutoff):
-    return butter(4, cutoff, btype='highpass', fs=RATE, output='sos')
+def _conditioning_filter(cutoff, rate=REFERENCE_RATE):
+    return butter(4, cutoff, btype='highpass', fs=rate, output='sos')
 
 
 def _recovery_quality(result):

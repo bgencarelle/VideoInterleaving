@@ -26,9 +26,15 @@ Any chroma plane off the luma aspect ratio gets letterboxed by image_values and
 loses 2-4 dB, so the fit happens once, here, on the full-resolution frame.
 
 Frame rate is set by the wire, not by the capture: at lean-v3 a packet is 2768
-samples, so the modem consumes 17.34 pictures a second and the capture is
-throttled to match. Grabbing faster only wastes CPU; grabbing slower repeats
+samples, so the modem consumes one picture every 2768 samples and the capture
+is throttled to match. Grabbing faster only wastes CPU; grabbing slower repeats
 the last frame rather than stalling the stream.
+
+How many pictures a second that is depends on the rate the output device is
+already set to -- 17.34 at 48 kHz, 15.93 at 44.1 kHz -- and no rate is
+requested of it. The real figure is printed once the stream is open, and the
+capture is re-paced to it then. The receiver does not need to be told either:
+it reads the cadence off the preamble.
 
 Screen capture needs `mss` (pip install mss), or use --source ffmpeg, which is
 much faster on macOS and does the scaling itself.
@@ -51,8 +57,9 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from animation_modem import transport3 as V3                      # noqa: E402
-from animation_modem.audio_common import device, pair, pcm        # noqa: E402
-from animation_modem.core import RATE, SourceCoder                # noqa: E402
+from animation_modem.audio_common import (device, pair, pcm,      # noqa: E402
+                                          wire_notice)
+from animation_modem.core import REFERENCE_RATE as RATE, SourceCoder  # noqa: E402
 from animation_modem.imaging import (PROFILES, burn_counters,     # noqa: E402
                                      fit_shapes, image_values, plane_shapes)
 from animation_modem.playback import PacketOutput                 # noqa: E402
@@ -356,6 +363,17 @@ class Throttled:
             if proc is not None:
                 proc.stdout.close()
 
+    def retune(self, hz):
+        """Follow the wire rate once the audio device has reported its own.
+
+        The frame rate is the device's sample rate over the frame length, so it
+        is not known until the stream is open -- after the capture thread has
+        already started. Rather than requesting a rate to make the number
+        predictable, the capture is re-paced to the rate that turned up.
+        """
+        with self._lock:
+            self._period = 1.0/max(hz, .1)
+
     def __call__(self):
         with self._lock:
             if self._error is not None:
@@ -491,6 +509,16 @@ def to_device(args, layout, coder, prepare, grab):
     started = time.perf_counter()
     with PacketOutput(device(args.device), channels, args.latency,
                       frame=layout.frame, packet=layout.packet) as output:
+        # The device is open now, so the real wire rate is finally known. A
+        # capture paced at the reference frame rate would drift against a
+        # 44.1 kHz device by 8% -- one wasted or repeated grab every 12 frames.
+        if not args.capture_fps and args.source != 'camera' and hasattr(grab, 'retune'):
+            grab.retune(output.fps)
+        if not args.quiet:
+            print(f'output {output.rate:g} Hz, {output.fps:.2f} fps')
+        notice = wire_notice(layout, output.rate)
+        if notice:
+            print(notice, file=sys.stderr)
         try:
             while not args.frames or sent < args.frames:
                 if not output.ready():
@@ -614,9 +642,11 @@ def main(argv=None):
     grab = raw if (args.write and getattr(raw, 'sequential', False)) \
         else Throttled(raw, capture_hz)
     print(f'{layout.describe()}')
+    # Frame rate here is the reference figure. Live output reprints it from the
+    # device's own rate once the stream is open, which is the one that governs.
     print(f'profile {args.profile}: {PROFILES[args.profile][0][0]}x'
           f'{PROFILES[args.profile][0][1]}, {coder.count} coefficients, '
-          f'{layout.fps:.2f} fps')
+          f'{layout.fps:.2f} fps at {RATE:g} Hz')
     try:
         if args.write:
             to_wav(args, layout, coder, prepare, grab)

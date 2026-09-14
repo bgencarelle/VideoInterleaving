@@ -281,12 +281,18 @@ class DeviceLoopTests(unittest.TestCase):
     """
 
     class FakeOutput:
+        # A real PacketOutput publishes the rate the device came up at, and the
+        # frame rate that follows from it; the send loop re-paces capture to it
+        # rather than assuming the reference figure.
+        rate = 48000.0
+
         def __init__(self, *a, **kw):
             self.sent = []
             self.deadline_misses = 0
             self.starvations = 0
             self.finished = False
             self._ready = True
+            self.fps = self.rate/kw.get('frame', v3.ALL_PRESETS['lean-v3'].frame)
 
         def __enter__(self):
             return self

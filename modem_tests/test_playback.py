@@ -24,11 +24,20 @@ class Stop(Exception):pass
 
 
 class Stream:
+    """A device that reports its own rate, because a real one always does.
+
+    PortAudio fills `samplerate` in whether or not the caller asked for a
+    value, so a fake that omits it cannot catch the case this suite cares
+    about: output must follow the device instead of assuming 48 kHz.
+    """
+    rate=48000
+
     def __init__(self, **kw):
         self.kw=kw
         self.active=False
         self.latency=.005
         self.time=10.0
+        self.samplerate=kw.get('samplerate', self.rate)
     def start(self):self.active=True
     def stop(self):self.active=False
     def close(self):pass

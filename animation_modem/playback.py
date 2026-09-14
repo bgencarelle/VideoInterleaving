@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import threading
 import numpy as np
 from .audio_common import sounddevice, route
-from .core import PRESETS, RATE
+from .core import PRESETS, band_limited, emit_length
 
 _DEFAULT = PRESETS['wide']   # layouts pass their own geometry
 
@@ -59,14 +59,34 @@ class PacketOutput:
         self.lock = threading.Lock()
         self.done = threading.Event()
         self.sd = sounddevice()
+        # No samplerate= here on purpose. The packet is a sample array, not a
+        # duration, so it plays correctly out of a device running at whatever
+        # rate its owner has already set; the receiver reads the resulting
+        # cadence off the preamble. Demanding 48 kHz either failed outright on
+        # a device that does not offer it, or made PortAudio resample behind
+        # our back -- a conversion nobody asked for and nobody could see.
         self.stream = self.sd.OutputStream(
-            samplerate=RATE, channels=max(channels)+1, dtype='float32',
+            channels=max(channels)+1, dtype='float32',
             device=device, blocksize=256, latency=requested_latency,
             callback=self._callback, finished_callback=self.done.set)
+        # Whatever the device reported once it was open. Everything below that
+        # converts samples to seconds uses this, never a constant.
+        self.rate = float(self.stream.samplerate)
+        # Callers hand over reference-geometry packets and this adapts them to
+        # the device, because this is the only object that knows what the
+        # device turned out to be. Above the reference rate that means
+        # resampling so the carriers stay at 375-20250 Hz instead of riding the
+        # clock up out of the DAC's passband; at or below it, nothing happens.
+        self.emit_frame = emit_length(self.frame, self.rate)
+        self.emit_packet = emit_length(self.packet, self.rate)
+        self.fps = self.rate/self.emit_frame
 
     def __enter__(self):
         # Timed output starts at reservation; legacy output starts on first submit.
         print(json.dumps({'output_latency_ms': self.stream.latency*1000,
+                          'device_rate_hz': self.rate,
+                          'frame_rate_fps': round(self.fps, 3),
+                          'emit_frame_samples': self.emit_frame,
                           'pending_frames': 1, 'block_samples': 256}), file=sys.stderr)
         self.started = False
         return self
@@ -98,17 +118,18 @@ class PacketOutput:
         now = self.stream.time
         after = time.time_ns()
         wall_ns = (before + after)//2
-        earliest = now + self.stream.latency + 256/RATE + prepare_ms/1000
+        earliest = now + self.stream.latency + 256/self.rate + prepare_ms/1000
         with self.lock:
             start = max(self.next_start or earliest, earliest)
-        target = wall_ns + round((start-now + self.packet/RATE + receive_margin_ms/1000)*1e9)
+        target = wall_ns + round((start-now + self.emit_packet/self.rate + receive_margin_ms/1000)*1e9)
         # Select the image at the exact timestamp the header can represent.
         return Slot(start, (target//1_000_000)*1_000_000)
 
     def submit(self, audio, slot=None):
+        """Take a reference-geometry frame; emit one this device can carry."""
         if np.shape(audio) != (self.frame, 2) or not np.isfinite(audio).all():
             raise ValueError('Expected one finite stereo modem frame')
-        prepared = route(audio, self.channels)
+        prepared = route(band_limited(audio, self.rate), self.channels)
         self.check()
         if slot is not None and self.stream.time + self.stream.latency >= slot.start_time:
             self.deadline_misses += 1
@@ -118,7 +139,7 @@ class PacketOutput:
                 raise RuntimeError('Wait for ready() before submitting another packet')
             self.pending = prepared
             self.pending_start = slot.start_time if slot else None
-            if slot:self.next_start = slot.start_time + self.frame/RATE
+            if slot:self.next_start = slot.start_time + self.emit_frame/self.rate
         if not self.started:
             self.stream.start()
             self.started = True
@@ -135,12 +156,12 @@ class PacketOutput:
                 while written < frames:
                     if self.current is None:
                         if self.pending is not None and self.pending_start is not None:
-                            here = timing.outputBufferDacTime + written/RATE
-                            gap = round((self.pending_start-here)*RATE)
+                            here = timing.outputBufferDacTime + written/self.rate
+                            gap = round((self.pending_start-here)*self.rate)
                             if gap > 0:
                                 written += min(gap, frames-written)
                                 continue  # Intentional silence before the reserved send time.
-                            if gap < -48:  # 1 ms tolerance matches header timestamp precision.
+                            if gap < -.001*self.rate:  # 1 ms, matching header timestamp precision.
                                 self.pending = None
                                 self.pending_start = None
                                 self.deadline_misses += 1

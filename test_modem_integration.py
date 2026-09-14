@@ -110,7 +110,11 @@ class ModemIntegrationTests(unittest.TestCase):
         import folder_selector
         emitted=[]
         class Output:
-            def __init__(self,*args,**kwargs):pass
+            # A real PacketOutput reports the rate its device came up at; the
+            # send path prints it rather than assuming the reference figure.
+            rate=48000.0
+            def __init__(self,*args,**kwargs):
+                self.fps=self.rate/kwargs.get('frame',2768)
             def __enter__(self):return self
             def __exit__(self,*args):pass
             def ready(self):return True

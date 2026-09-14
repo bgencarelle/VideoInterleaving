@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """Fixed-format v3 image/audio link.
 
-48 kHz stereo, wide layout, color 40x48 luma plus 20x24 chroma, 2880 values,
+Stereo, wide layout, color 40x48 luma plus 20x24 chroma, 2880 values,
 deterministic built-in allocation, 16-byte CRC header.
+
+No sample rate is requested of any device. Streams open at whatever rate the
+device is already set to, and the rate they report is read back and used for
+buffer sizing and for reporting speeds, durations and carrier frequencies.
+Files carry their own rate in the header. 48 kHz remains the reference the
+geometry was designed against, and is what `write` stamps into a new file.
 
   python utilities/modem_v3_check.py write --modem-dir images_modem --out clean.wav
   python utilities/modem_v3_check.py read --wav clean.wav
@@ -40,12 +46,17 @@ from animation_modem.live_picture import LivePicture
 from animation_modem import transport3 as V3                   # noqa: E402
 from animation_modem import impairments as IMP                 # noqa: E402
 from animation_modem.audio_common import (pcm, pair, device,   # noqa: E402
-                                          wav_blocks, sounddevice)
+                                          wav_blocks, wav_rate, wire_notice,
+                                          sounddevice)
 from animation_modem.imaging import (burn_counters, fit_shapes,  # noqa: E402
                                      image_values, plane_shapes, values_image)
 
 PRESETS = V3.ALL_PRESETS
-RATE = V3.RATE
+# Used to stamp files this tool authors, and as the geometry the reported
+# playback speed is measured against. Live audio never sees it: both live paths
+# take the rate from the device once it is open.
+REFERENCE_RATE = V3.REFERENCE_RATE
+RATE = REFERENCE_RATE          # existing name, same meaning
 
 
 def frames_from(args, profile='color'):
@@ -82,9 +93,16 @@ def coder_for(profile, allocation, layout):
     return V3.SourceCoder(shapes, table), shapes
 
 
-def receive_for(args, layout, coder):
-    """The v3 receiver. Playback speed comes from biphase pulse timing."""
-    return V3.Receiver(layout, coder, recovery=False, fast=True)
+def receive_for(args, layout, coder, input_rate=None):
+    """The v3 receiver. Playback speed comes from biphase pulse timing.
+
+    `input_rate` is whatever the source turned out to be running at -- an open
+    device's reported rate, or a WAV header's. It is not requested anywhere and
+    decoding does not depend on it; it only lets the results come back in
+    seconds and hertz instead of samples and cycles per sample.
+    """
+    return V3.Receiver(layout, coder, recovery=False, fast=True,
+                       input_rate=input_rate)
 
 
 def _prepared(image, absolute, count, numbered=False):
@@ -99,7 +117,10 @@ def psnr(a, b):
 
 
 def record(r):
-    speed = 1/(1+r.rate_error)
+    # The decoder reports speed against the clock the audio arrived on. Falling
+    # back to 1/(1+rate_error) reproduces that for results from a source whose
+    # rate was never learned -- the same number, just without the units.
+    speed = r.extra.get('playback_speed', 1/(1+r.rate_error))
     return {'status': r.status, 'identity': r.identity, 'frame': r.absolute,
             'index': r.index, 'source_index': r.source_index, 'count': r.count,
             'face_folder': r.face_folder, 'float_folder': r.float_folder,
@@ -112,17 +133,21 @@ def do_write(args):
     frames, profile = frames_from(args)
     layout = PRESETS[args.preset]
     coder, _ = coder_for(profile, args.allocation, layout)
-    print(layout.describe())
+    # A file we author has no device to ask, so it is stamped at the reference
+    # rate. `read` takes the rate from the header, so a file resampled to any
+    # other rate afterwards still decodes.
+    fps = layout.fps_at(REFERENCE_RATE)
+    print(layout.describe(REFERENCE_RATE))
     path = Path(args.out)
     with wave.open(str(path), 'wb') as sink:
-        sink.setparams((2, 2, RATE, 0, 'NONE', 'not compressed'))
+        sink.setparams((2, 2, REFERENCE_RATE, 0, 'NONE', 'not compressed'))
         for n, im in enumerate(frames):
             values = image_values(_prepared(im, n+1, len(frames), args.numbered),
                                   coder.shapes)
             audio = V3.encode(values, layout, coder, n+1, (n % len(frames))+1,
-                              len(frames), stamp_ms=n*int(1000/layout.fps))
+                              len(frames), stamp_ms=n*int(1000/fps))
             sink.writeframesraw(pcm(audio*args.gain))
-    seconds = len(frames)/layout.fps
+    seconds = len(frames)/fps
     print(f'wrote {len(frames)} frames, {seconds:.1f} s, peak gain {args.gain} -> {path}')
     print('v3 preamble: biphase, both channels. v2 receivers will not acquire this.')
 
@@ -130,7 +155,12 @@ def do_write(args):
 def do_read(args):
     layout = PRESETS[args.preset]
     coder, _ = coder_for(args.profile, args.allocation, layout)
-    receiver = receive_for(args, layout, coder)
+    # Read the file's rate; do not require one. A 44.1 kHz capture of a 48 kHz
+    # transmission is a real recording, not a malformed one.
+    rate = wav_rate(args.wav)
+    receiver = receive_for(args, layout, coder, input_rate=rate)
+    if rate != REFERENCE_RATE:
+        print(f'{args.wav}: {rate} Hz, decoding at that rate', file=sys.stderr)
     if args.save_frames:
         Path(args.save_frames).mkdir(parents=True, exist_ok=True)
     tiers, rates, seen = {}, [], 0
@@ -143,14 +173,14 @@ def do_read(args):
     for r in results():
         seen += 1
         tiers[r.tier] = tiers.get(r.tier, 0) + 1
-        rates.append(r.rate_error)
+        rates.append(record(r)['playback_speed'])
         print(json.dumps(record(r)), flush=True)
         if args.save_frames and r.values is not None:
             name = f'{r.absolute:06d}' if r.absolute is not None else f'x{seen:06d}'
             values_image(r.values, coder.shapes).save(
                 Path(args.save_frames)/f'frame_{name}.png')
     if rates:
-        speed = 1/(1+float(np.median(rates)))
+        speed = float(np.median(rates))
         print(f'\n{seen} packets. tiers {tiers}. '
               f'median playback speed {speed:.4f}x '
               f'({100*(speed-1):+.2f}% off nominal)', file=sys.stderr)
@@ -218,15 +248,9 @@ def do_live_send(args):
         raise SystemExit('Live transport uses lean-v3 / color-lean')
     layout = PRESETS['lean-v3']
     coder, _ = coder_for('color-lean', None, layout)
-    print(layout.describe())
-    packets = [V3.encode(image_values(
-                   _prepared(im, n+1, len(frames), args.numbered), coder.shapes),
-               layout, coder, n+1, (n % len(frames))+1, len(frames),
-               stamp_ms=n*int(1000/layout.fps))*args.gain
-               for n, im in enumerate(frames)]
-    print(f'{len(packets)} packets ready, {layout.fps:.2f} fps. Ctrl-C to stop.')
     state = {'packet': 0, 'position': 0, 'sent': 0}
     channels = args.channels
+    packets = []
 
     def callback(outdata, count, timing, status):
         outdata.fill(0)
@@ -243,15 +267,37 @@ def do_live_send(args):
                 state['packet'] = (state['packet']+1) % len(packets)
                 state['sent'] += 1
 
-    with sd.OutputStream(samplerate=RATE, channels=max(channels)+1, dtype='float32',
-                         device=args.device, blocksize=256, latency='low',
-                         callback=callback):
+    # Built but not started, so the device can report its rate before anything
+    # is encoded. No samplerate= is passed: the device keeps whatever its owner
+    # set it to, and the frame rate and header timestamps follow from that.
+    stream = sd.OutputStream(channels=max(channels)+1, dtype='float32',
+                             device=args.device, blocksize=256, latency='low',
+                             callback=callback)
+    try:
+        rate = float(stream.samplerate)
+        # Band-limited once here, not per callback: these packets repeat.
+        emitted = V3.emit_length(layout.frame, rate)
+        fps = rate/emitted
+        print(layout.describe(rate))
+        packets.extend(V3.band_limited(V3.encode(image_values(
+                           _prepared(im, n+1, len(frames), args.numbered), coder.shapes),
+                       layout, coder, n+1, (n % len(frames))+1, len(frames),
+                       stamp_ms=n*int(1000/fps))*args.gain, rate)
+                       for n, im in enumerate(frames))
+        print(f'{len(packets)} packets ready, {fps:.2f} fps at {rate:g} Hz, '
+              f'{emitted} samples each. Ctrl-C to stop.')
+        notice = wire_notice(layout, rate)
+        if notice:
+            print(notice, file=sys.stderr)
+        stream.start()
         try:
             while True:
                 time.sleep(1)
                 print(f'  sent {state["sent"]} packets', end='\r', flush=True)
         except KeyboardInterrupt:
             print(f'\nstopped after {state["sent"]} packets')
+    finally:
+        stream.close()
 
 
 def do_live_receive(args):
@@ -260,6 +306,12 @@ def do_live_receive(args):
     v3 emits one result per packet rather than progressive previews, so there
     is no partial-refinement scheduler here: a packet either reconstructs or it
     does not, and the newest complete picture wins.
+
+    No sample rate is requested. The stream is opened at whatever the device is
+    already set to, and that rate -- read back from the open stream -- is the
+    only one used anywhere. Pulse timing makes the decode itself indifferent to
+    it, so the rate serves buffer sizing, the displayed frame duration and the
+    reported numbers, and nothing else.
     """
     import threading
     import signal
@@ -279,12 +331,17 @@ def do_live_receive(args):
     lock = threading.Lock()
     errors = []
     active = {'stream': None}
+    # Filled in by the capture thread once the device says what it is doing.
+    opened = threading.Event()
+    source = {'rate': None}
 
     from animation_modem.audio_buffer import AudioBuffer
+    # Sized in samples until the rate is known, which is the honest unit: a
+    # frame is 2768 samples wherever it is played. --buffer-ms cannot be
+    # converted yet, so it waits for the first reconfigure below.
     minimum_buffer = ((layout.frame+255)//256)*256
-    capacity = (int(RATE*args.buffer_ms/1000) if args.buffer_ms is not None
-                else args.buffer_frames*layout.frame)
-    audio_buffer = AudioBuffer(max(minimum_buffer, capacity), layout.frame)
+    audio_buffer = AudioBuffer(max(minimum_buffer, args.buffer_frames*layout.frame),
+                               layout.frame)
     reports = queue.Queue(maxsize=1)
 
     def offer_report(result, summary):
@@ -328,14 +385,22 @@ def do_live_receive(args):
             count = max(channels)+1
             if count > int(info['max_input_channels']):
                 raise ValueError('Selected input channels unavailable')
-            with sd.InputStream(samplerate=RATE, channels=count, dtype='float32',
+            # No samplerate=. Asking for 48 kHz on a device set to 44.1 either
+            # failed to open or silently inserted PortAudio's resampler; the
+            # decoder wants neither, because it can read the cadence itself.
+            with sd.InputStream(channels=count, dtype='float32',
                                 device=args.device, blocksize=256) as stream:
                 active['stream'] = stream
-                device_text = (f'Input: {info["name"]} | channels '
+                rate = float(stream.samplerate)
+                source['rate'] = rate
+                opened.set()
+                device_text = (f'Input: {info["name"]} | {rate:g} Hz | channels '
                                f'{channels[0]+1},{channels[1]+1}')
                 with lock:
                     latest['device'] = device_text
-                print(f'{device_text} | lean-v3 / color-lean; Ctrl-C to stop', file=sys.stderr, flush=True)
+                print(f'{device_text} | lean-v3 / color-lean, '
+                      f'{layout.fps_at(rate):.2f} fps; Ctrl-C to stop',
+                      file=sys.stderr, flush=True)
                 while not stop.is_set():
                     audio, overflowed = stream.read(256)
                     audio_buffer.put(np.asarray(audio)[:, channels], overflowed)
@@ -344,11 +409,21 @@ def do_live_receive(args):
                 errors.append(exc)
         finally:
             active['stream'] = None
+            opened.set()          # Release the decoder; it checks for a rate.
             audio_buffer.close()
 
     def receive():
         try:
-            receiver = V3.Receiver(layout, coder, pulse_only=True)
+            # Wait for the device to say what it is running at rather than
+            # deciding for it. A failed open sets the event with no rate, and
+            # this thread retires instead of decoding against a guess.
+            while not opened.wait(.1):
+                if stop.is_set():
+                    return
+            rate = source['rate']
+            if rate is None:
+                return
+            receiver = V3.Receiver(layout, coder, pulse_only=True, input_rate=rate)
             seen = 0
             last_summary = time.monotonic()
             peak = 0.0
@@ -365,11 +440,12 @@ def do_live_receive(args):
                 results = receiver.feed(audio)
                 seen += len(results)
                 for result in results:
+                    # frame_seconds now comes from the decoder, which knows both
+                    # the measured scale and the clock it was measured on.
                     result.extra.update(shapes=coder.shapes,
-                                        frame_seconds=layout.frame*(1+result.rate_error)/RATE,
                                         complete=result.identity == 'verified_header' and result.status == 'received')
-                period_samples = max(256, round(layout.frame*(1+receiver.rate)))
-                capacity = (int(RATE*args.buffer_ms/1000) if args.buffer_ms is not None
+                period_samples = max(256, round(layout.frame*(1+receiver.rate_error)))
+                capacity = (int(rate*args.buffer_ms/1000) if args.buffer_ms is not None
                             else args.buffer_frames*period_samples)
                 audio_buffer.configure(max(256, capacity), min(period_samples, 1024))
                 newest = results[-1] if results else None
@@ -381,9 +457,11 @@ def do_live_receive(args):
                 summary = None
                 if not args.silent and now-last_summary >= args.summary_seconds:
                     summary = {'receiver_packets': seen,
+                               'input_rate_hz': rate,
+                               'nominal_fps': round(layout.fps_at(rate), 3),
                                'input_overflows': audio_buffer.input_overflows,
                                'buffer_dropped_samples': audio_buffer.dropped_samples,
-                               'buffer_capacity_ms': round(1000*audio_buffer.capacity/RATE, 1),
+                               'buffer_capacity_ms': round(1000*audio_buffer.capacity/rate, 1),
                                'input_peak': round(peak, 6)}
                     last_summary, peak = now, 0.0
                 if (newest is not None and (verbose or args.save_frames)) or summary is not None:

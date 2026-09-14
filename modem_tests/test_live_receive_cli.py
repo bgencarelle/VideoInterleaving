@@ -50,7 +50,11 @@ class ReceiverWindowTests(unittest.TestCase):
     def test_slow_logging_does_not_block_picture_updates(self):
         self.run_window('<q>', slow_logging=True)
 
-    def run_window(self, quit_key, slow_logging=False):
+    def test_window_updates_on_a_device_that_is_not_at_48k(self):
+        """The receiver never asks for a rate, so 44.1 kHz is just a device."""
+        self.run_window('<q>', device_rate=44100)
+
+    def run_window(self, quit_key, slow_logging=False, device_rate=48000):
         import signal
         import threading
         log_started = threading.Event()
@@ -120,6 +124,9 @@ class ReceiverWindowTests(unittest.TestCase):
 
         class Stream:
             pos = 0
+            # PortAudio reports the rate the device is running at, whether or
+            # not one was requested. Nothing under test may request one.
+            samplerate = device_rate
 
             def __enter__(self):
                 return self
@@ -138,6 +145,9 @@ class ReceiverWindowTests(unittest.TestCase):
         sd = Mock()
         sd.query_devices.return_value = {'name': 'test stereo', 'max_input_channels': 2}
         sd.InputStream.return_value = Stream()
+        self.addCleanup(lambda: self.assertNotIn(
+            'samplerate', sd.InputStream.call_args.kwargs,
+            'live-receive must open the device at whatever rate it is set to'))
         tk = types.SimpleNamespace(Tk=lambda: root, Label=lambda *a, **kw: Mock())
         image_tk = types.ModuleType('PIL.ImageTk')
         image_tk.PhotoImage = Photo
@@ -167,7 +177,7 @@ class HeadlessShutdownTests(unittest.TestCase):
         old_handler = signal.getsignal(signal.SIGINT)
         sd = Mock()
         sd.query_devices.return_value = {'name': 'test', 'max_input_channels': 2}
-        stream = Mock()
+        stream = Mock(samplerate=48000)
         sd.InputStream.return_value.__enter__ = Mock(return_value=stream)
         sd.InputStream.return_value.__exit__ = Mock(return_value=False)
 

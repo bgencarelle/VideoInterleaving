@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 import time
 import wave
-from animation_modem.transport3 import RATE, SourceCoder, pack_folders
+from animation_modem.transport3 import REFERENCE_RATE as RATE, SourceCoder, pack_folders
 from animation_modem import transport3 as _v3
 
 PRESETS = _v3.ALL_PRESETS
@@ -76,7 +76,7 @@ def run_modem(args):
     mirror=args.mirror if args.mirror is not None else bool(getattr(settings,'INITIAL_MIRROR',0))
     print(f'[MODEM] {root}: {library.frames} images, {len(library.mains)} face / '
           f'{len(library.floats)} float folders, bake profile {library.profile}; '
-          f'source {settings.IPS} ips, transport {layout.fps:.2f} fps at {RATE} Hz stereo')
+          f'source {settings.IPS} ips, transport {layout.fps:.2f} fps at the {RATE} Hz reference')
     print(f'[MODEM] {layout.describe()}')
     print('[MODEM] Face order:',[str(p.relative_to(library.root)) for p in library.mains])
     print('[MODEM] Float order:',[str(p.relative_to(library.root)) for p in library.floats])
@@ -118,6 +118,9 @@ def run_modem(args):
     poll_seconds=1 / (settings.FPS or 60)
     with PacketOutput(device(args.scope_device),channels,output_latency,
                       frame=layout.frame,packet=layout.packet) as output:
+        # The device kept whatever rate it was set to; this is the cadence the
+        # packets will actually leave at.
+        print(f'[MODEM] output {output.rate:g} Hz, {output.fps:.2f} fps')
         while not args.modem_frames or n < args.modem_frames:
             started=time.perf_counter()
             index,_=index_calculator.update_index(library.frames,settings.PINGPONG)

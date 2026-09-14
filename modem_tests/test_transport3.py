@@ -84,9 +84,15 @@ class SpeedTests(V3Base):
         noise = np.random.default_rng(0).normal(0, .2, 4096)
         self.assertIsNone(v3.measure_speed(noise))
 
-    def test_rejects_speeds_outside_the_configured_range(self):
+    def test_rejects_scales_outside_the_configured_range(self):
+        """Bounds are on scale, which is what edge timing actually measures.
+
+        A 1.9x packet has scale ~0.53. Asking only for 0.91..1.11 -- the window
+        a 44.1 kHz capture of a normal-speed signal would sit in -- must reject
+        it, and must do so without any reference to a sample rate.
+        """
         audio = np.asarray(self.warp(self.packet(), 1.9)[:, 0])
-        self.assertIsNone(v3.measure_speed(audio, min_speed=.9, max_speed=1.1))
+        self.assertIsNone(v3.measure_speed(audio, min_scale=1/1.1, max_scale=1/.9))
 
 
 class ReceiveTests(V3Base):
@@ -379,11 +385,11 @@ class BandTests(V3Base):
         audio = np.concatenate([
             v3.encode(self.values, layout, coder, n+1, 1, frames)
             for n in range(frames)]).astype(float)
-        if hi and hi < v3.RATE/2*.97:
-            audio = sosfiltfilt(butter(10, hi/(v3.RATE/2), 'low', output='sos'),
+        if hi and hi < v3.REFERENCE_RATE/2*.97:
+            audio = sosfiltfilt(butter(10, hi/(v3.REFERENCE_RATE/2), 'low', output='sos'),
                                 audio, axis=0)
         if lo > 20:
-            audio = sosfiltfilt(butter(10, lo/(v3.RATE/2), 'high', output='sos'),
+            audio = sosfiltfilt(butter(10, lo/(v3.REFERENCE_RATE/2), 'high', output='sos'),
                                 audio, axis=0)
         audio = (audio+np.random.default_rng(0).normal(0, noise, audio.shape)
                  ).astype(np.float32)
@@ -396,8 +402,9 @@ class BandTests(V3Base):
                 sum(1 for g in got if g.identity == 'verified_header'))
 
     def edges(self, layout):
-        return (float(layout.carriers.min())*v3.RATE/v3.N,
-                float(layout.top_bin)*v3.RATE/v3.N)
+        # Band limits are a property of a clock, so these are the limits at the
+        # reference clock -- the one the impairment filters below run at.
+        return layout.band_at(v3.REFERENCE_RATE)
 
     def test_spreading_takes_power_off_the_lowest_carrier(self):
         """Stacked on carrier 0, the whole picture rides the band's bottom edge."""
@@ -437,7 +444,7 @@ class BandTests(V3Base):
         for name in ('mid-v3', 'mid-v3-fast'):
             with self.subTest(preset=name):
                 layout = v3.V3_PRESETS[name]
-                self.assertLess(layout.top_bin*v3.RATE/v3.N, 15000)
+                self.assertLess(layout.band_at(v3.REFERENCE_RATE)[1], 15000)
                 self.assertTrue(layout.spread_carriers)
 
     def test_mid_preset_round_trips_inside_its_band(self):

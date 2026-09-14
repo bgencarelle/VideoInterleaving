@@ -5,7 +5,16 @@ The wire body is byte-identical to v2 -- same OFDM grid, same carriers, same
 receiver finds it change, so `core.decode_packet` demodulates a v3 packet
 unmodified once the timing is known.
 
-Three changes, in order of how much they matter:
+Four changes, in order of how much they matter:
+
+0. Because timing comes from counting edges, the receiver never needs to know
+   its own sample rate, and so never asks a device to run at one. A capture at
+   44.1, 96 or 192 kHz differs from a 48 kHz one by a constant factor on every
+   interval, which is indistinguishable from a deck running slow or fast -- and
+   the decoder already corrects for that. `input_rate`, when a caller passes the
+   rate an open device reported, is used only to separate the two for reporting
+   and to keep the speed window centred on the capture clock. It is not an
+   input to demodulation, and there is no default: unknown stays unknown.
 
 1. The preamble is an LTC-style biphase-mark word instead of a random-phase
    noise burst. Edge intervals take exactly two values, so playback speed comes
@@ -36,12 +45,13 @@ from functools import lru_cache
 from scipy.signal import correlate
 
 from . import core as v2
-from .core import (RATE, N, CP, SYMBOL, SYNC_LEN, GUARD, HEADER_GAIN,
+from .core import (REFERENCE_RATE, N, CP, SYMBOL, SYNC_LEN, GUARD, HEADER_GAIN,
                          IMAGE_GAIN, HEADER_SLOTS, HEADER_FORMAT, HEADER_BYTES,
                          Layout, PRESETS, SourceCoder, Decoded, coefficient_slots,
                          phases, pack_header, pack_folders, decode_packet,
                          default_allocation, resample_packet, _sample_at,
-                         _body_walk, _decode_tables, FOLDER_LIMIT)
+                         _body_walk, _decode_tables, FOLDER_LIMIT,
+                         band_limited, emit_length, emit_ratio)
 
 # --------------------------------------------------------------------------
 # Preamble
@@ -175,15 +185,19 @@ def _runs(gaps, tolerance=.28):
     return out
 
 
-def measure_speed(samples, min_speed=.25, max_speed=2.0):
-    """Playback speed and preamble position from edge intervals alone.
+def measure_speed(samples, min_scale=.5, max_scale=4.0):
+    """Timing scale and preamble position from edge intervals alone.
 
     Intervals cluster at SHORT and LONG = 2*SHORT. Clustering on the observed
     ratio rather than thresholding against fixed constants is what lifts the
     capture range past the +/-15% an LTC reader's fixed windows allow.
 
     Returns (position, scale, confidence) or None. `scale` is received duration
-    over nominal, matching transport2's convention.
+    over nominal, in samples of whatever clock captured them. Bounds are given
+    in scale rather than playback speed because this function never learns the
+    sample rate: a 96 kHz capture of a normal-speed signal and a half-speed
+    48 kHz one are the same measurement, and only a caller that knows the rate
+    can tell them apart.
     """
     at = edge_intervals(samples)
     if len(at) < MIN_RUN+1:
@@ -204,7 +218,7 @@ def measure_speed(samples, min_speed=.25, max_speed=2.0):
         # per-edge sample quantisation averages out over the whole word.
         span = float(at[end] - at[start])
         scale = span/NOMINAL_SPAN
-        if not min_speed*.98 <= 1/scale <= max_speed*1.02:
+        if not .98*min_scale <= scale <= 1.02*max_scale:
             continue
         if abs(unit/SHORT - scale) > .15*scale:
             continue                       # unit and span must agree
@@ -214,12 +228,16 @@ def measure_speed(samples, min_speed=.25, max_speed=2.0):
     return None
 
 
-def measure_pulses(samples, min_speed=.25, max_speed=2.0):
+def measure_pulses(samples, min_scale=.5, max_scale=4.0):
     """Read the biphase word and fit its transition times, without a speed sweep.
 
     Schmitt edges reject chatter. Interpolated zero crossings remove integer
     sample quantisation before fitting elapsed time against the known pulse
     count. The full short/long word must match; payload crossings are ignored.
+
+    This is the whole reason the decoder needs no sample rate: an LTC reader
+    counts its own clock between transitions and never asks what that clock is.
+    Bounds are in scale, for the reason given on `measure_speed`.
     """
     samples = np.asarray(samples)
     edges = edge_intervals(samples)
@@ -232,8 +250,8 @@ def measure_pulses(samples, min_speed=.25, max_speed=2.0):
     positions = left + values/(values-samples[left+1])
     words = np.lib.stride_tricks.sliding_window_view(positions, count)
     scales = (words[:, -1]-words[:, 0])/NOMINAL_SPAN
-    # Allow sample interpolation error near the endpoints of the speed range.
-    valid = (scales >= .98/max_speed) & (scales <= 1.02/min_speed)
+    # Allow sample interpolation error near the endpoints of the scale range.
+    valid = (scales >= .98*min_scale) & (scales <= 1.02*max_scale)
     expected = NOMINAL_GAPS[None, :]*scales[:, None]
     valid &= np.all(np.abs(np.diff(words, axis=1)-expected) <=
                     np.maximum(.8, .28*expected), axis=1)
@@ -450,9 +468,24 @@ class Receiver:
 
     def __init__(self, layout, coder, threshold=.4, rate_window=None,
                  min_speed=.25, max_speed=2.0, recovery=False, fast=True,
-                 pulse_only=True):
+                 pulse_only=True, input_rate=None):
+        """`input_rate` is reported by the open device; it is never requested.
+
+        Decoding itself does not use it. Timing comes from preamble edges, in
+        samples, so the receiver works at any capture rate the hardware happens
+        to be set to. What the rate buys is interpretation: without it a scale
+        of 2.0 could be a 96 kHz capture or a half-speed deck, and the two are
+        indistinguishable from the samples. Given the rate, the acquisition
+        window is placed around the capture clock -- so min_speed/max_speed keep
+        meaning transport speed at 44.1, 96 or 192 kHz instead of quietly
+        turning into a rate limit -- and the reported speed, frame duration and
+        carrier frequencies come out in real units. Left None, the receiver
+        assumes nothing and reports the sample-domain numbers only.
+        """
         if not (0 < min_speed <= 1 <= max_speed and min_speed >= .25 and max_speed <= 2):
-            raise ValueError('Supported search range: .25 <= min_speed <= 1 <= max_speed <= 2')
+            raise ValueError('Supported speed range: .25 <= min_speed <= 1 <= max_speed <= 2')
+        if input_rate is not None and not (np.isfinite(input_rate) and input_rate > 0):
+            raise ValueError('Input rate must be a positive number of hertz, or None')
         if coder.count > layout.capacity:
             raise ValueError('Source coder exceeds layout capacity')
         self.layout, self.coder, self.threshold = layout, coder, threshold
@@ -460,18 +493,27 @@ class Receiver:
         self.fast = bool(fast)
         self.pulse_only = bool(pulse_only)
         self.min_speed, self.max_speed = min_speed, max_speed
-        self.keep = int(np.ceil(len(PREAMBLE)*1.2/min_speed)) + 64
+        self.input_rate = None if input_rate is None else float(input_rate)
+        # Capture clock over reference clock. One full sample period of the
+        # wire geometry occupies this many samples of the device's own clock,
+        # so it is exactly the factor that separates rate from speed.
+        self.clock = 1. if input_rate is None else float(input_rate)/REFERENCE_RATE
+        self.min_scale = self.clock/max_speed
+        self.max_scale = self.clock/min_speed
+        self.keep = int(np.ceil(len(PREAMBLE)*1.2*self.max_scale)) + 64
         self.reset()
 
     def reset(self, preserve_timing=False):
-        rate = self.rate if preserve_timing else 0.
+        rate_error = self.rate_error if preserve_timing else 0.
         confidence = self.confidence if preserve_timing else 0.
         if not hasattr(self, '_storage'):
             self._storage = np.empty((32768, 2), np.float32)
         self._write_end = 0
         self.buffer = self._storage[:0]
         self.offset = 0
-        self.rate, self.confidence = rate, confidence
+        # Timing scale minus one, NOT a sample rate. `input_rate` is the
+        # device's clock; this is how far the wire ran from nominal on it.
+        self.rate_error, self.confidence = rate_error, confidence
         self.pending = None
         self.search_after = SYNC_LEN
         self.acquire_ms = 0.
@@ -497,9 +539,9 @@ class Receiver:
         #    next preamble is one frame away and only needs verifying.
         if self.predicted is not None and self.confidence:
             at = self.predicted - self.offset
-            need = at + len(PREAMBLE)*(1+self.rate) + 24
+            need = at + len(PREAMBLE)*(1+self.rate_error) + 24
             if 0 <= at and need <= len(self.buffer):
-                fit = _fit_preamble(self.buffer, at, 1+self.rate, reach=0,
+                fit = _fit_preamble(self.buffer, at, 1+self.rate_error, reach=0,
                                     iterations=2, fast=self.fast)
                 if fit[2] >= max(self.threshold, .5):
                     self.acquisition_path = 'coast'
@@ -517,7 +559,7 @@ class Receiver:
             self.predicted = None
         # 2. Edge capture. This is the common path and the cheap one.
         for channel in range(window.shape[1]):
-            measured = measure_speed(window[:, channel], self.min_speed, self.max_speed)
+            measured = measure_speed(window[:, channel], self.min_scale, self.max_scale)
             if measured is None:
                 continue
             position, scale, _ = measured
@@ -555,14 +597,14 @@ class Receiver:
         if self.predicted is not None and self.confidence:
             at = self.predicted-self.offset
             left = max(0, int(at)-24)
-            right = int(at+len(PREAMBLE)*(1+self.rate))+24
+            right = int(at+len(PREAMBLE)*(1+self.rate_error))+24
             if at >= 0 and right > len(self.buffer):
                 self.waiting = True
                 return None
             if at >= 0:
                 for channel in range(2):
                     measured = measure_pulses(self.buffer[left:right, channel],
-                                              self.min_speed, self.max_speed)
+                                              self.min_scale, self.max_scale)
                     if measured is not None:
                         position, scale, confidence = measured
                         self.acquisition_path = 'coast'
@@ -571,7 +613,7 @@ class Receiver:
             self.predicted = None
         window = self.buffer[:max(1024, 2*self.keep)]
         for channel in range(2):
-            measured = measure_pulses(window[:, channel], self.min_speed, self.max_speed)
+            measured = measure_pulses(window[:, channel], self.min_scale, self.max_scale)
             if measured is not None:
                 self.acquisition_path = 'edge'
                 self.edge_hits += 1
@@ -579,8 +621,8 @@ class Receiver:
         return None
 
     def _correlate(self, window):
-        scales = np.geomspace(1/self.max_speed, 1/self.min_speed,
-                              max(2, int(np.ceil(np.log(self.max_speed/self.min_speed)/.09))+1))
+        scales = np.geomspace(self.min_scale, self.max_scale,
+                              max(2, int(np.ceil(np.log(self.max_scale/self.min_scale)/.09))+1))
         best = None
         for scale in scales:
             template = _scaled_preamble(float(scale))
@@ -684,15 +726,33 @@ class Receiver:
             result.extra.update(sync_score=score, at=self.offset+begin,
                                 input_path='v3', acquisition_path=self.acquisition_path,
                                 timing_method='pulse' if self.pulse_only else 'waveform',
-                                playback_speed=1/scale, complete=True,
-                                input_top_hz=self.layout.top_bin*RATE/N/scale,
-                                input_nyquist_hz=RATE/2, resample_taps=taps,
+                                # Sample-domain truth, always available: how
+                                # much longer the packet is than the geometry
+                                # says, and where the top carrier sits in
+                                # cycles per captured sample.
+                                timing_scale=scale, complete=True,
+                                top_bin_cycles_per_sample=self.layout.top_bin/N/scale,
+                                # Real time, against the reference geometry and
+                                # the capture clock. Identical to 1/scale when
+                                # the device happens to run at the reference
+                                # rate, which is why this was safe to hardcode
+                                # for as long as the rate was being demanded.
+                                playback_speed=self.clock/scale,
+                                resample_taps=taps,
                                 decode_ms=(time.perf_counter()-started)*1000,
                                 acquire_ms=self.acquire_ms)
+            if self.input_rate is not None:
+                # Hertz and seconds exist only once a device has told us what
+                # it is running at. Nothing here asked it to run at anything.
+                result.extra.update(
+                    input_rate=self.input_rate,
+                    input_nyquist_hz=self.input_rate/2,
+                    input_top_hz=result.extra['top_bin_cycles_per_sample']*self.input_rate,
+                    frame_seconds=self.layout.frame*scale/self.input_rate)
             result.extra['receive_cpu_ms'] = result.extra['decode_ms']+self.acquire_ms
             self.pending = None
             if result.values is not None:
-                self.rate, self.confidence = scale-1, score
+                self.rate_error, self.confidence = scale-1, score
                 # Contiguous frames: predict rather than search next time.
                 # Point at the next PREAMBLE, not the next frame start. The
                 # preamble sits 16 samples into the frame, and _fit_preamble
@@ -705,7 +765,7 @@ class Receiver:
                 self._drop(max(1, int(np.floor(begin+self.layout.packet*scale))))
             else:
                 self.confidence = 0.
-                self.rate = 0.
+                self.rate_error = 0.
                 self.predicted = None
                 self._drop(max(1, int(begin+16*scale+1)))
         return out
