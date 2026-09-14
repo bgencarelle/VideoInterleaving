@@ -58,7 +58,7 @@ from animation_modem import transport3 as V3                   # noqa: E402
 from animation_modem import impairments as IMP                 # noqa: E402
 from animation_modem.audio_common import (pcm, pair, device,   # noqa: E402
                                           wav_blocks, wav_rate, wire_notice,
-                                          sounddevice)
+                                          InputLevel, sounddevice)
 from animation_modem.imaging import (burn_counters, fit_shapes,  # noqa: E402
                                      image_values, plane_shapes, values_image)
 
@@ -222,8 +222,9 @@ def do_read(args):
     tiers, rates, seen = {}, [], 0
 
     def results():
+        level = InputLevel()
         for block in wav_blocks(args.wav, args.channels, 1024):
-            yield from receiver.feed(block)
+            yield from receiver.feed(level.process(block))
         yield from receiver.flush()
 
     for r in results():
@@ -393,7 +394,7 @@ def do_live_receive(args):
     active = {'stream': None}
     # Filled in by the capture thread once the device says what it is doing.
     opened = threading.Event()
-    source = {'rate': None}
+    source = {'rate': None, 'level': InputLevel()}
 
     from animation_modem.audio_buffer import AudioBuffer
     # Sized in samples until the rate is known, which is the honest unit: a
@@ -461,9 +462,14 @@ def do_live_receive(args):
                     latest['device'] = device_text
                 print(f'{device_text} | preset and profile read from the '
                       f'signal; Ctrl-C to stop', file=sys.stderr, flush=True)
+                # Levelled here, on the way in, so the decoder's absolute
+                # acquisition threshold sees a usable amplitude whatever the
+                # deck or interface hands over.
+                level = source['level']
                 while not stop.is_set():
                     audio, overflowed = stream.read(256)
-                    audio_buffer.put(np.asarray(audio)[:, channels], overflowed)
+                    audio_buffer.put(level.process(np.asarray(audio)[:, channels]),
+                                     overflowed)
         except Exception as exc:
             if not stop.is_set():
                 errors.append(exc)
@@ -524,6 +530,8 @@ def do_live_receive(args):
                 summary = None
                 if not args.silent and now-last_summary >= args.summary_seconds:
                     summary = {'receiver_packets': seen,
+                               'input_gain': round(source['level'].gain, 4),
+                               'input_limited_blocks': source['level'].limited,
                                'input_rate_hz': rate,
                                'nominal_fps': round(layout.fps_at(rate), 3),
                                'input_overflows': audio_buffer.input_overflows,
@@ -688,8 +696,10 @@ def main(argv=None):
                            help='Override the audio capacity in milliseconds')
     lr.add_argument('--save-frames', type=Path,
                     help='Save newest pictures; slow disk writes may skip frames')
-    lr.add_argument('--on-loss', choices=('hold', 'black', 'damaged'), default='hold',
-                    help='Hold the last good image, show black, or show damaged images')
+    lr.add_argument('--on-loss', choices=('hold', 'black', 'damaged'), default='damaged',
+                    help='Show damaged images (default), hold the last good '
+                         'one, or show black. A picture whose header did not '
+                         'verify still decodes; holding hides it.')
     lr.add_argument('--headless', action='store_true',
                     help='JSON only, no window; implies --verbose')
     lr.add_argument('-v', '--verbose', action='store_true',

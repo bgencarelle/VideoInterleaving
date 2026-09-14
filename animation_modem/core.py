@@ -76,6 +76,13 @@ class Layout:
     orthogonal_training: bool = False  # drive both channels in both training
                                # symbols instead of one at a time; same peak,
                                # twice the energy, half the estimator error
+    dense_header: bool = False # carry image on the data carriers the header
+                               # symbols leave idle. The header only occupies
+                               # header_width of the band, so the rest of every
+                               # header symbol was silence -- 30 of 50 carriers
+                               # x 4 symbols on lean-v3, 480 slots, +21.8%.
+                               # Free in level terms: the preamble holds the
+                               # packet peak either way, so nothing renormalises
 
     def __post_init__(self):
         if not (isinstance(self.top_bin,int) and 10<=self.top_bin<=63
@@ -189,9 +196,37 @@ class Layout:
         return self.band_at(REFERENCE_RATE)
 
     @cached_property
+    def wire_magic(self):
+        """Two header bytes that say which wire generation this is.
+
+        Dense layouts need their own, and it is not decoration. lean-v3 and
+        lean-v3-dense have the same packet length, the same top_bin and a
+        bit-identical header -- only the image carriers differ -- so the CRC
+        cannot tell them apart. A receiver trying candidates would verify the
+        header of a dense packet against the sparse layout and reconstruct the
+        picture at the wrong geometry: garbage, silently, which is exactly what
+        the magic exists to prevent. It also stops a transmitter from before
+        dense_header being mistaken for one after it.
+        """
+        if self.dense_header:
+            return b'V4'
+        return b'V3' if self.progressive else b'V2'
+
+    @cached_property
+    def spare_bins(self):
+        """Data carriers a header symbol does not use. Idle unless dense."""
+        taken = set(self.header_bins.tolist())
+        return np.array([b for b in self.data_bins if b not in taken])
+
+    @cached_property
+    def header_capacity(self):
+        """Image values reclaimed from the header symbols' idle carriers."""
+        return self.header_symbols*len(self.spare_bins)*4 if self.dense_header else 0
+
+    @cached_property
     def capacity(self):
         """Real image values carried per packet."""
-        return self.image_symbols*len(self.data_bins)*4
+        return self.header_capacity + self.image_symbols*len(self.data_bins)*4
 
     @cached_property
     def max_speed(self):
@@ -322,19 +357,51 @@ def coefficient_slots(layout, shapes):
         yy,xx = np.mgrid[:h,:w]
         ranks.extend(np.hypot(yy/h,xx/w).ravel())
     source_order = np.argsort(ranks, kind='stable')
-    slots = np.arange(layout.capacity).reshape(
-        layout.image_symbols, len(layout.data_bins), 2, 2)
-    if layout.spread_carriers:
-        lanes = len(layout.data_bins)
-        middle_out = np.argsort(np.abs(np.arange(lanes) - (lanes-1)/2),
-                                kind='stable')
-        low_to_high = slots[:, middle_out].transpose(0, 2, 3, 1).ravel()[:count]
-    else:
-        low_to_high = slots.transpose(1,0,2,3).ravel()[:count]
+    low_to_high = _slot_order(layout)[:count]
     mapping = np.empty(count, dtype=int)
     mapping[source_order] = low_to_high
     mapping.setflags(write=False)
     return mapping
+
+
+@lru_cache(maxsize=32)
+def _slot_order(layout):
+    """Wire slots from coarsest-friendly to harshest, over every carrying cell.
+
+    A "cell" is one (symbol, data carrier) that carries image. With
+    dense_header there are two blocks of them -- the header symbols' idle
+    carriers first, then the image symbols -- laid out in the flat array in
+    exactly that order, which is what `encode` and `decode_packet` scatter into
+    and gather from.
+
+    Sorting rather than transposing is what lets one expression cover both
+    blocks, which are not the same width and so cannot be one rectangular
+    array. The keys reproduce the old transposes exactly, and a test asserts
+    that for every preset and profile: lexsort takes its LAST key as primary,
+    so spread walks symbol, then channel, then real/imaginary, then carrier
+    (coarse coefficients across the whole band), and the default walks carrier
+    outermost (coarse coefficients stacked on the lowest carrier).
+    """
+    lanes = len(layout.data_bins)
+    symbols, carriers = [], []
+    if layout.dense_header:
+        spare = np.flatnonzero(np.isin(layout.data_bins, layout.spare_bins))
+        symbols.append(np.repeat(np.arange(layout.header_symbols), len(spare)))
+        carriers.append(np.tile(spare, layout.header_symbols))
+    symbols.append(np.repeat(np.arange(layout.image_symbols), lanes)
+                   + layout.header_symbols)
+    carriers.append(np.tile(np.arange(lanes), layout.image_symbols))
+    symbol = np.repeat(np.concatenate(symbols), 4)
+    carrier = np.repeat(np.concatenate(carriers), 4)
+    channel = np.tile(np.array([0, 0, 1, 1]), len(symbol)//4)
+    part = np.tile(np.array([0, 1, 0, 1]), len(symbol)//4)
+    if layout.spread_carriers:
+        # Middle-out, so the strongest terms sit where no channel rolls off.
+        rank = np.empty(lanes, int)
+        rank[np.argsort(np.abs(np.arange(lanes)-(lanes-1)/2), kind='stable')] = \
+            np.arange(lanes)
+        return np.lexsort((rank[carrier], part, channel, symbol))
+    return np.lexsort((part, channel, symbol, carrier))
 
 
 # --------------------------------------------------------------------------
@@ -819,7 +886,7 @@ def decode_packet(samples, layout, coder, *, body=None, coders=None):
                 HEADER_FORMAT, raw[:HEADER_BYTES])
             # Six bits of band, two of picture geometry, one byte as before.
             top, code = packed & TOP_BIN_MASK, packed >> 6
-            expected_magic = b'V3' if layout.progressive else b'V2'
+            expected_magic = layout.wire_magic
             if magic == expected_magic and top == layout.top_bin and 1 <= index <= count:
                 fields = (hflags, absolute, index, count, stamp, code)
                 break
@@ -830,13 +897,27 @@ def decode_packet(samples, layout, coder, *, body=None, coders=None):
               coherence > (.65 if layout.top_bin <= 13 else .4))
     if fields is None and not usable:
         return Decoded('lost', pilot_error=pilot_error, coverage=coverage)
+    values_parts, weight_parts, noise_parts = [], [], []
+    if layout.header_capacity:
+        # Image carried on the carriers the header symbols leave idle, taken
+        # first to match the order `encode` scatters into.
+        spare = np.searchsorted(carriers, layout.spare_bins)
+        early = equal[2:end, spare]/IMAGE_GAIN
+        shape = (layout.header_symbols, len(spare), 2, 2)
+        values_parts.append(np.stack([early.real, early.imag], axis=-1).ravel())
+        weight_parts.append(np.broadcast_to(weights[spare][None, :, :, None],
+                                            shape).ravel())
+        noise_parts.append(np.broadcast_to(variance[spare][None, :, :, None],
+                                           shape).ravel())
     block = equal[end:, data]/IMAGE_GAIN
-    sent = np.stack([block.real, block.imag], axis=-1).ravel()
-    per = np.broadcast_to(weights[data][None, :, :, None],
-                          (layout.image_symbols, len(data), 2, 2)).ravel()
+    shape = (layout.image_symbols, len(data), 2, 2)
+    values_parts.append(np.stack([block.real, block.imag], axis=-1).ravel())
+    weight_parts.append(np.broadcast_to(weights[data][None, :, :, None], shape).ravel())
+    noise_parts.append(np.broadcast_to(variance[data][None, :, :, None], shape).ravel())
+    sent = np.concatenate(values_parts)
+    per = np.concatenate(weight_parts)
     coverage = float(np.mean(per >= .55))
-    per_noise = np.broadcast_to(variance[data][None, :, :, None],
-                               (layout.image_symbols, len(data), 2, 2)).ravel()
+    per_noise = np.concatenate(noise_parts)
     # Geometry the sender declared, when it verified and we can honour it.
     declared = profile_name(fields[5]) if fields is not None else None
     picture = coder

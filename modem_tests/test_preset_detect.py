@@ -104,6 +104,47 @@ class PresetDetectionTests(unittest.TestCase):
         self.assertEqual(calls[-5:], ['mid-v3']*5)
         self.assertLessEqual(len(calls), len(PROGRESSIVE)+5)
 
+    def test_a_short_recording_still_decodes(self):
+        """Regression. Waiting for the longest candidate before trying any of
+        them meant tape-v3's 6192-sample packet set a floor on the whole
+        receiver: a one- or two-frame lean-v3 file (2768 and 5536 samples)
+        decoded NOTHING, silently, while three frames worked. The shortest
+        candidate is what decides when decoding can start."""
+        longest = max(l.packet for l, _, _ in candidates())
+        shortest = min(l.packet for l, _, _ in candidates())
+        self.assertLess(shortest*2, longest, 'the gap this test exists for')
+        for frames in (1, 2, 3):
+            with self.subTest(frames=frames):
+                audio, values = send('lean-v3', 'color-lean', frames=frames)
+                self.assertLess(len(audio), longest if frames < 3 else 1 << 30)
+                rx = receiver(candidates=candidates())
+                out = rx.feed(audio)+rx.flush()
+                good = [r for r in out if r.identity == 'verified_header']
+                self.assertEqual(len(good), frames)
+                self.assertEqual(rx.detected, 'lean-v3')
+                for r in good:
+                    self.assertLess(
+                        np.sqrt(np.mean((r.values-values)**2)), 1e-4)
+
+    def test_a_candidate_is_not_retried_while_waiting(self):
+        """Feeding in small blocks must not re-run the candidates already
+        ruled out at the same position."""
+        audio, _ = send('lean-v3', 'color-lean', frames=2)
+        rx = receiver(candidates=candidates())
+        calls = []
+        real = rx._demodulate
+
+        def counted(begin, scale, layout, coder, coders):
+            calls.append(layout.name)
+            return real(begin, scale, layout, coder, coders)
+        rx._demodulate = counted
+        out = []
+        for i in range(0, len(audio), 256):       # small blocks, many retries
+            out += rx.feed(audio[i:i+256])
+        out += rx.flush()
+        self.assertEqual(len([r for r in out if r.identity == 'verified_header']), 2)
+        self.assertLessEqual(calls.count('lean-v3'), 2 + 1)
+
     def test_without_candidates_nothing_changes(self):
         """The search is opt-in. A receiver given none behaves as before and
         simply fails to read a preset it was not built for."""

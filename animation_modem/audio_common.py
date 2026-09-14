@@ -30,6 +30,176 @@ def pcm(data):
     return np.rint(np.clip(data, -1, 1)*32767).astype('<i2').tobytes()
 
 
+class InputLevel:
+    """Bring each received channel to the level the decoder's thresholds expect.
+
+    Acquisition uses an ABSOLUTE threshold: `edge_intervals` triggers a Schmitt
+    at +/-0.066, which is 12% of the preamble's nominal 0.55. A quiet input
+    never crosses it. Measured, a signal at 0.12 of nominal decodes every frame
+    and one at 0.06 finds zero edges and acquires nothing at all -- not a
+    degraded picture, silence.
+
+    PER CHANNEL, against what the preamble should be. The preamble is
+    transmitted IDENTICALLY on both channels, so whatever difference in level
+    arrives between them is the recording, not the signal: one tape track
+    biased hotter than the other, one leg of a cable padded. A single gain for
+    the pair leaves that difference in place, and measured it costs the quieter
+    channel entirely -- at 1.0/0.03 the loud channel shows 389 preamble edges
+    and the quiet one ZERO. Acquisition still succeeds off the loud channel, so
+    nothing looks wrong, but the both-channel preamble is half of v3's
+    acquisition margin and a dropout on the survivor then has nothing to fall
+    back to.
+
+    Correcting it does not destroy anything the decoder wanted. Amplitude
+    between the channels is not information here; the transmitter sent them
+    equal. The inter-channel PHASE is information -- it is head azimuth, and
+    `_channel_skew` reports it -- and a real gain per channel does not touch
+    phase. Crosstalk is reported after this correction rather than before,
+    which is the more useful of the two.
+
+    The preamble holds the packet peak in about three frames in four, so a
+    slow per-channel peak IS a preamble measurement, without needing to find
+    the preamble first.
+
+    Two brakes. `balance_db` caps how far apart the two gains may go, so a dead
+    channel is never amplified into loud hiss that manufactures false edges.
+    And the gain is near-constant across a packet -- `step_db` a block, about
+    0.2 dB a packet -- because a packet's channel estimate comes from the
+    training symbols at its front, so a gain that drifts within one scales the
+    coefficients against an estimate taken at a different level.
+    """
+
+    def __init__(self, target=.7, ceiling=.95, floor=1e-4, step_db=.02,
+                 jump_db=6., release=.995, limits=(1e-3, 1e3), window=(.25, .98),
+                 balance_db=20.):
+        if not 0 < target < ceiling <= 1:
+            raise ValueError('Need 0 < target < ceiling <= 1')
+        if not 0 < window[0] < target < window[1]:
+            raise ValueError('Target must sit inside the do-nothing window')
+        self.target, self.ceiling, self.floor = target, ceiling, floor
+        self.window = window
+        self.step = 10**(step_db/20)
+        self.jump = 10**(jump_db/20)
+        self.release = release
+        self.low, self.high = limits
+        self.balance = 10**(balance_db/20)
+        self.gain = np.ones(2)
+        self.peak = np.zeros(2)
+        self.limited = 0          # blocks the limiter had to pull down
+
+    def process(self, audio):
+        audio = np.asarray(audio, np.float32)
+        if audio.ndim != 2 or audio.shape[1] != 2 or not len(audio):
+            return audio
+        # Fast attack, slow release, tracked separately for each channel.
+        self.peak = np.maximum(np.max(np.abs(audio), axis=0), self.peak*self.release)
+        alive = self.peak > self.floor
+        scaled = self.peak*self.gain
+        # Leave a level that is already fine exactly alone. `encode` normalises
+        # a packet to 0.95, so a healthy input is already where it belongs and
+        # any gain would only add drift: measured, levelling a nominal signal
+        # unconditionally moved reconstruction error from 0.0000 to 0.0016.
+        settled = (scaled >= self.window[0]) & (scaled <= self.window[1])
+        wanted = self.target/np.maximum(self.peak, self.floor)
+        ratio = wanted/self.gain
+        far = (ratio > self.jump) | (ratio < 1/self.jump)
+        moved = np.where(far, wanted,          # nothing decoding; do not crawl
+                         self.gain*np.clip(ratio, 1/self.step, self.step))
+        self.gain = np.where(alive & ~settled, moved, self.gain)
+        self.gain = np.clip(self.gain, self.low, self.high)
+        # Never boost one channel more than balance_db past the other: a dead
+        # leg would otherwise be lifted until its own noise floor triggers the
+        # Schmitt, inventing edges where there is no preamble at all.
+        ceiling_gain = self.gain.min()*self.balance
+        self.gain = np.minimum(self.gain, ceiling_gain)
+        out = audio*self.gain
+        top = np.max(np.abs(out), axis=0)
+        hot = top > self.ceiling
+        if np.any(hot):
+            # Feed-forward limit. Pulling the gain down immediately, and
+            # keeping it down, beats clipping: a clipped OFDM symbol is
+            # broadband distortion across every carrier at once.
+            self.gain = np.where(hot, self.gain*self.ceiling/np.maximum(top, 1e-12),
+                                 self.gain)
+            self.limited += 1
+            out = audio*self.gain
+        return out.astype(np.float32)
+
+
+class InputLevel:
+    """Bring received audio to the level the decoder's fixed thresholds expect.
+
+    Acquisition uses an ABSOLUTE threshold: `edge_intervals` triggers a Schmitt
+    at +/-0.066, which is 12% of the preamble's nominal 0.55 amplitude. A quiet
+    input never crosses it. Measured, a signal at 0.12 of nominal still decodes
+    every frame, and at 0.06 the receiver finds ZERO edges and acquires
+    nothing -- not a degraded picture, silence. That is what this exists for.
+    It is not a cosmetic level control.
+
+    ONE gain for both channels, never two. Levelling them separately would
+    flatten the amplitude difference between them, and that difference is part
+    of what the 2x2 channel estimate solves for and what skew and crosstalk
+    report. A stereo pair off a tape head is not two independent signals.
+
+    The gain is near-constant across a packet on purpose. A packet is 2768
+    samples and its channel estimate comes from the training symbols at the
+    front, so a gain that moves within one scales the reconstructed
+    coefficients against an estimate taken at a different level. Tracking is
+    therefore slow -- `step_db` per block, about 0.2 dB across a packet -- with
+    two exceptions where slowness would be worse than a jump: an input far
+    enough out that nothing is decoding anyway, and a peak that would clip.
+    """
+
+    def __init__(self, target=.7, ceiling=.95, floor=1e-4, step_db=.02,
+                 jump_db=6., release=.995, limits=(1e-3, 1e3), window=(.25, .98)):
+        if not 0 < target < ceiling <= 1:
+            raise ValueError('Need 0 < target < ceiling <= 1')
+        if not 0 < window[0] < target < window[1]:
+            raise ValueError('Target must sit inside the do-nothing window')
+        self.target, self.ceiling, self.floor = target, ceiling, floor
+        self.window = window
+        self.step = 10**(step_db/20)
+        self.jump = 10**(jump_db/20)
+        self.release = release
+        self.low, self.high = limits
+        self.gain = 1.0
+        self.peak = 0.0
+        self.limited = 0          # blocks the limiter had to pull down
+
+    def process(self, audio):
+        audio = np.asarray(audio, np.float32)
+        if not len(audio):
+            return audio
+        loudest = float(np.max(np.abs(audio)))
+        # Fast attack, slow release, across BOTH channels together.
+        self.peak = max(loudest, self.peak*self.release)
+        # Do nothing to a level that is already fine. `encode` normalises a
+        # packet to 0.95, so a healthy input arrives near the top of the
+        # window and any gain at all would only add drift: measured, levelling
+        # a nominal signal unconditionally moved reconstruction error from
+        # 0.0000 to 0.0016 for no reason. The floor is well clear of the
+        # 0.114 peak where acquisition was last measured to still work.
+        settled = self.window[0] <= self.peak*self.gain <= self.window[1]
+        if self.peak > self.floor and not settled:
+            wanted = self.target/self.peak
+            ratio = wanted/self.gain
+            if ratio > self.jump or ratio < 1/self.jump:
+                self.gain = wanted        # nothing is decoding; do not crawl
+            else:
+                self.gain *= min(max(ratio, 1/self.step), self.step)
+            self.gain = min(max(self.gain, self.low), self.high)
+        out = audio*self.gain
+        top = float(np.max(np.abs(out)))
+        if top > self.ceiling:
+            # Feed-forward limit. Pulling the gain down immediately, and
+            # keeping it down, beats clipping: a clipped OFDM symbol is
+            # broadband distortion across every carrier at once.
+            self.gain *= self.ceiling/top
+            self.limited += 1
+            out = audio*self.gain
+        return out.astype(np.float32)
+
+
 def wire_notice(layout, rate, reference=REFERENCE_RATE):
     """Report the band a transmitter is actually putting on the wire.
 

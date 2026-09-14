@@ -183,3 +183,40 @@ runpy.run_path(sys.argv[1],run_name='__main__')
 
 
 if __name__=='__main__':unittest.main()
+
+
+class ModemPresetGuardTests(unittest.TestCase):
+    """main.py --mode modem reaches run_modem, which took any preset name.
+
+    Two of them encoded a file that nothing could read: a v2 layout stamps a
+    different magic, so the v3 receiver never finds it. The WAV wrote and said
+    "Wrote N frames". modem_screen and live-send already refused this.
+    """
+
+    def args(self, preset):
+        return SimpleNamespace(
+            modem_dir='unused', modem_pair=None, modem_wav=None,
+            modem_channels='1,2', modem_latency='low', rotation=None,
+            mirror=None, modem_clock=255, modem_frame_duration=1,
+            modem_time_offset_ms=0, modem_prepare_ms=10,
+            modem_receive_margin_ms=15, modem_frames=1, modem_numbered=False,
+            modem_log_frames=False, scope_device=None,
+            modem_index_offset_ms=0.0, modem_preset=preset)
+
+    def test_a_v2_preset_is_refused_before_it_writes_anything(self):
+        for name, layout in v3.ALL_PRESETS.items():
+            if layout.progressive:
+                continue
+            with self.subTest(preset=name):
+                with self.assertRaisesRegex(ValueError, 'v2 wire format'):
+                    run_modem(self.args(name))
+
+    def test_an_unknown_preset_names_the_real_ones(self):
+        with self.assertRaisesRegex(ValueError, 'Unknown --modem-preset'):
+            run_modem(self.args('lean'))
+
+    def test_the_guard_runs_before_the_bake_is_opened(self):
+        """modem_dir is deliberately nonexistent above: a bad preset must fail
+        on the preset, not on something incidental further in."""
+        with self.assertRaisesRegex(ValueError, 'v2 wire format'):
+            run_modem(self.args('tape'))

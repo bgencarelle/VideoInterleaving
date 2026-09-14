@@ -119,6 +119,31 @@ V3_PRESETS = {
     'mid-v3-fast': Layout(top_bin=39, image_symbols=21, name='mid-v3-fast',
                           progressive=True, orthogonal_training=True,
                           spread_carriers=True, header_split=True),
+    # lean-v3's geometry with the header left at the BOTTOM of the band.
+    #
+    # For tape. spread_carriers moves the header to the middle -- 6750-14250 Hz
+    # on this layout -- which is chosen to survive a channel that rolls off at
+    # its own bottom edge. A cassette deck has the opposite problem: it rolls
+    # off at the top, and the middle is exactly where it stops. Measured with
+    # -45 dBFS hiss, lean-v3 loses every header below a 9 kHz low-pass and all
+    # of them by 8 kHz, while still decoding all four pictures -- so the symptom
+    # is a black screen, not a broken one, because only a verified header is
+    # held for display. Here the header sits at 375-8625 Hz and survives 8 kHz
+    # plus flutter, 4/4, at the full 17.34 fps.
+    #
+    # What it gives up is narrow: spread only buys a 300 Hz high-pass, and both
+    # placements lose every header by 375 Hz.
+    'lean-v3-tape': Layout(top_bin=54, image_symbols=11, name='lean-v3-tape',
+                           progressive=True, orthogonal_training=True),
+    # lean-v3 with the header symbols' idle carriers carrying image. Identical
+    # frame, identical band, identical frame rate: 2768 samples and 17.34 fps
+    # at 48 kHz. The header only ever used 20 of the 50 data carriers, so the
+    # other 30 were silence in all four header symbols -- 480 slots, 2200 ->
+    # 2680, +21.8%, enough for the full 2880-value 'color' picture to shrink
+    # far less. Costs nothing in level: the preamble holds the packet peak.
+    'lean-v3-dense': Layout(top_bin=54, image_symbols=11, name='lean-v3-dense',
+                            progressive=True, orthogonal_training=True,
+                            spread_carriers=True, dense_header=True),
 }
 ALL_PRESETS = {**PRESETS, **V3_PRESETS}
 
@@ -413,7 +438,7 @@ def encode(values, layout, coder, absolute, index, count, stamp_ms=0, flags=0,
         grid[1, :, 1] = 1
 
     raw = pack_header(flags, layout.top_bin, absolute, index, count, stamp_ms,
-                      magic=MAGIC if layout.progressive else b'V2',
+                      magic=layout.wire_magic,
                       profile=profile)
     bits = np.unpackbits(np.frombuffer(raw, np.uint8)).reshape(HEADER_SLOTS, 2)
     qpsk = ((bits[:, 0]*2.-1) + 1j*(bits[:, 1]*2.-1))/np.sqrt(2)
@@ -436,10 +461,19 @@ def encode(values, layout, coder, absolute, index, count, stamp_ms=0, flags=0,
             grid[2+s, header, 0] = spread[s]*HEADER_GAIN
             grid[2+s, header, 1] = spread[s]*HEADER_GAIN
 
-    room = layout.image_symbols*len(data)*4
-    sent = np.zeros(room)
+    sent = np.zeros(layout.capacity)
     sent[coefficient_slots(layout, tuple(coder.shapes))] = coder.forward(values)
-    block = sent.reshape(layout.image_symbols, len(data), 2, 2)
+    head = layout.header_capacity
+    if head:
+        # The header occupies header_width carriers; the rest of every header
+        # symbol was silence. Same symbols, different carriers, so the header
+        # is untouched -- and the preamble still holds the packet peak, so this
+        # costs nothing in level. Written first in the flat slot array.
+        spare = np.searchsorted(carriers, layout.spare_bins)
+        early = sent[:head].reshape(layout.header_symbols, len(spare), 2, 2)
+        grid[2:2+layout.header_symbols, spare, :] = \
+            (early[..., 0] + 1j*early[..., 1])*IMAGE_GAIN
+    block = sent[head:].reshape(layout.image_symbols, len(data), 2, 2)
     grid[2+layout.header_symbols:, data, :] = (block[..., 0] + 1j*block[..., 1])*IMAGE_GAIN
     grid[2:, pilots, :] = 1
 
@@ -538,6 +572,11 @@ class Receiver:
         # device's clock; this is how far the wire ran from nominal on it.
         self.rate_error, self.confidence = rate_error, confidence
         self.pending = None
+        # Candidates already ruled out at the current pending position. Without
+        # it, every feed() that arrives while waiting for a longer candidate
+        # re-runs the short ones that already failed -- measured at 21 decode
+        # attempts for six frames where 13 is the whole search.
+        self._tried = 0
         self.search_after = SYNC_LEN
         self.acquire_ms = 0.
         self.acquisition_path = 'edge'
@@ -719,7 +758,7 @@ class Receiver:
             body = body.reshape(layout.symbols, N, 2)
         return decode_packet(None, layout, coder, body=body, coders=coders), taps
 
-    def _identify(self, begin, scale):
+    def _identify(self, begin, scale, final=False):
         """Decode, working out which preset is on the wire if asked to.
 
         Tried shortest packet first, and only the ones the buffer can already
@@ -728,21 +767,36 @@ class Receiver:
         have to agree. Once one verifies it is adopted and every later packet
         takes the single-layout path, so the search is paid once per lock, not
         per frame.
+
+        Returns (result, taps, wait). `wait` asks the caller for more samples:
+        nothing has verified yet but a longer candidate has not been reachable.
+        Waiting for the longest candidate up front instead would be simpler and
+        wrong -- tape-v3's packet is 6192 samples, so any recording shorter than
+        that would decode nothing at all, however short its own packets are.
         """
         if not self.candidates or self.detected is not None:
-            return self._demodulate(begin, scale, self.layout, self.coder, self.coders)
+            result, taps = self._demodulate(begin, scale, self.layout,
+                                            self.coder, self.coders)
+            return result, taps, False
         room = len(self.buffer)-begin
-        for layout, coder, coders in self.candidates:
+        for index in range(self._tried, len(self.candidates)):
+            layout, coder, coders = self.candidates[index]
             if (layout.packet-1)*scale+1 > room:
                 break                     # sorted by length; the rest are longer
+            self._tried = index+1         # ruled out; do not retry on more audio
             result, taps = self._demodulate(begin, scale, layout, coder, coders)
             if result.identity == 'verified_header':
                 self.layout, self.coder, self.coders = layout, coder, coders
                 self.detected = layout.name
-                return result, taps
-        # Nothing verified. Fall back to the layout this receiver was built
-        # with, so an unidentifiable packet fails exactly as it does today.
-        return self._demodulate(begin, scale, self.layout, self.coder, self.coders)
+                return result, taps, False
+        if self._tried < len(self.candidates) and not final:
+            return None, 0, True
+        # Every candidate that could be tried has failed. Fall back to the
+        # layout this receiver was built with, so an unidentifiable packet
+        # fails exactly the way it does without a candidate list at all.
+        result, taps = self._demodulate(begin, scale, self.layout,
+                                        self.coder, self.coders)
+        return result, taps, False
 
     def _drain(self, final=False):
         import time
@@ -767,18 +821,21 @@ class Receiver:
                 at, scale, score = acquired
                 self.search_after = SYNC_LEN
                 self.pending = (at-16*scale, scale, score)
+                self._tried = 0
             begin, scale, score = self.pending
-            # While the preset is still unknown every candidate has to be
-            # reachable, so wait for the longest. One lock's worth of extra
-            # latency, then never again.
-            longest = (self.candidates[-1][0].packet
-                       if self.candidates and self.detected is None
-                       else self.layout.packet)
-            end = begin + (longest-1)*scale + 1
+            # While the preset is unknown, the SHORTEST candidate is the one
+            # that decides when decoding can start; _identify asks for more
+            # samples if it needs them for a longer one.
+            searching = self.candidates and self.detected is None
+            want = (self.candidates[0][0].packet if searching
+                    else self.layout.packet)
+            end = begin + (want-1)*scale + 1
             if len(self.buffer) < end - (2 if final else 0):
                 break
             started = time.perf_counter()
-            result, taps = self._identify(begin, scale)
+            result, taps, wait = self._identify(begin, scale, final)
+            if wait:
+                break                     # a longer candidate needs more audio
             result.rate_error = scale-1
             result.rate_confidence = score
             result.extra.update(sync_score=score, at=self.offset+begin,

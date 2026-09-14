@@ -58,12 +58,25 @@ def packet(library, layout, coder, absolute, selection, numbered=False,
 
 def run_modem(args):
     import settings
+    # Checked before anything is opened or written. --modem-preset takes any
+    # name argparse was given, and a v2 layout was accepted here and then
+    # produced a file nothing could read: it stamps a different magic, so a v3
+    # receiver never finds it. The WAV wrote and said "Wrote N frames".
+    # modem_screen and live-send already refuse this; run_modem did not.
+    wanted=getattr(args,'modem_preset',None) or 'wide-v3'
+    usable=[n for n,l in PRESETS.items() if l.progressive]
+    if wanted not in PRESETS:
+        raise ValueError(f'Unknown --modem-preset {wanted!r}. Choose one of: '
+                         +', '.join(usable))
+    if not PRESETS[wanted].progressive:
+        raise ValueError(f'--modem-preset {wanted} is v2 wire format and '
+                         f'nothing decodes it. Choose one of: '+', '.join(usable))
     root=args.modem_dir or getattr(settings,'MODEM_DIR',settings.IMAGES_DIR+'_modem')
     library=ModemLibrary(root)
     # The transmitted geometry is independent of the bake's own profile; the
     # bake profile only affects how much source detail exists to send. What is
     # sent is declared in the header, so the receiver follows it.
-    layout=PRESETS[getattr(args,'modem_preset',None) or 'wide-v3']
+    layout=PRESETS[wanted]
     coder=SourceCoder(fit_shapes(plane_shapes(DEFAULT_PROFILE),layout.capacity))
     selected=fixed_pair(args.modem_pair)
     if selected is not None:

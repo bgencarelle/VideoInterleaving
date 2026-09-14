@@ -10,7 +10,10 @@ class LiveReceiveTests(unittest.TestCase):
         with patch.object(check, 'do_live_receive') as receive:
             check.main(['live-receive', '--device', '0', '--headless'])
         args = receive.call_args.args[0]
-        self.assertEqual((args.device, args.on_loss, args.buffer_frames), (0, 'hold', 2))
+        # 'damaged' is the default: a picture whose header did not verify has
+        # still decoded, and holding the last good frame hides it.
+        self.assertEqual((args.device, args.on_loss, args.buffer_frames),
+                         (0, 'damaged', 2))
 
     def test_device_query_failure_stops_receiver(self):
         sd = Mock()
