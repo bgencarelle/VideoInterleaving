@@ -309,11 +309,29 @@ def fitter(profile, rotate=0, mirror=False, letterbox=True):
     Fitting happens once here on the source frame rather than per plane.
     image_values pads each plane independently, so handing it an off-aspect
     picture puts bars in luma AND chroma at different scales.
+
+    The target is tiny -- 40x48 -- and the source may not be. mss hands back
+    the whole backing buffer, so on a Retina panel LANCZOS runs from 3840x2400
+    straight down to 40 pixels wide. Measured, that costs 75-88 ms per frame
+    against a 57.7 ms packet budget: the capture alone cannot keep up with the
+    wire. Striding to roughly 4x the target first is a view, so it is free, and
+    LANCZOS then filters an image ~600x smaller. Measured 0.35 ms against 75 ms
+    for 43.6 dB of agreement with the direct resize -- on a deliberately
+    alias-hostile test pattern, and invisible at 40x48.
+
+    ffmpeg sources already scale before Python sees them, so the stride is a
+    no-op there.
     """
     size = PROFILES[profile][0]
+    target = max(size)*4
 
     def prepare(raw):
-        im = Image.fromarray(np.asarray(raw, np.uint8), 'RGB')
+        raw = np.asarray(raw, np.uint8)
+        h, w = raw.shape[:2]
+        step = max(1, min(w//target, h//target))
+        if step > 1:
+            raw = raw[::step, ::step]
+        im = Image.fromarray(raw, 'RGB')
         if rotate:
             im = im.rotate(-rotate, expand=True)
         if mirror:
@@ -432,7 +450,15 @@ def to_device(args, layout, coder, prepare, grab):
           f'({sent/max(elapsed,1e-9):.2f} fps), {misses} deadline misses')
 
 
-def main(argv=None):
+def parser():
+    """Built separately from main() so it can be inspected without running.
+
+    to_device reads args.prepare_ms and args.receive_margin_ms, which were
+    never defined here: every test used --write, which never reaches that
+    branch, so the live path raised AttributeError on the first packet with
+    full test coverage passing. test_modem_screen now walks the module's AST
+    for every args.X it reads and asserts the parser defines it.
+    """
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--source', choices=('screen', 'ffmpeg', 'video', 'camera', 'test'),
@@ -444,6 +470,12 @@ def main(argv=None):
     ap.add_argument('--device', type=device, help='Audio output device')
     ap.add_argument('--channels', type=pair, default=(0, 1))
     ap.add_argument('--latency', default='low')
+    ap.add_argument('--prepare-ms', type=float, default=10.0,
+                    help='Minimum encoding lead before a send deadline. Raise '
+                         'it if --log-frames shows deadline misses.')
+    ap.add_argument('--receive-margin-ms', type=float, default=15.0,
+                    help='Time after packet completion reserved for the '
+                         'receiver to decode and display')
     ap.add_argument('--region', help='Screen region as left,top,width,height')
     ap.add_argument('--display', type=int, help='avfoundation screen index')
     ap.add_argument('--camera', type=int, default=0, help='Camera index')
@@ -472,16 +504,20 @@ def main(argv=None):
     ap.add_argument('--log-frames', action='store_true')
     ap.add_argument('--quiet', action='store_true')
     ap.add_argument('--list-devices', action='store_true')
-    args = ap.parse_args(argv)
+    return ap
+
+
+def main(argv=None):
+    args = parser().parse_args(argv)
 
     if args.list_devices:
         from animation_modem.audio_common import sounddevice
         print(sounddevice().query_devices())
         return
     if args.source == 'video' and not args.file:
-        ap.error('--source video needs --file')
+        raise SystemExit('--source video needs --file')
     if not np.isfinite(args.gain) or args.gain <= 0:
-        ap.error('--gain must be finite and positive')
+        raise SystemExit('--gain must be finite and positive')
 
     layout, coder, shapes = build(args)
     prepare = fitter(args.profile, args.rotate, args.mirror, not args.crop)

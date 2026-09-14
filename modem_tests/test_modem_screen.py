@@ -68,6 +68,46 @@ class FitterTests(unittest.TestCase):
         self.assertEqual(turned.size, PROFILES['color'][0])
 
 
+class PrescaleTests(unittest.TestCase):
+    """A 40x48 target from a Retina grab is a 96:1 reduction. Going straight
+    to LANCZOS costs more per frame than the whole packet budget."""
+
+    def test_large_frames_cost_about_the_same_as_small_ones(self):
+        import time
+        prepare = modem_screen.fitter('color-lean')
+
+        def cost(w, h):
+            raw = np.random.default_rng(0).integers(0, 256, (h, w, 3), dtype=np.uint8)
+            prepare(raw)
+            began = time.perf_counter()
+            for _ in range(4):
+                prepare(raw)
+            return (time.perf_counter()-began)/4
+
+        small, large = cost(320, 426), cost(2560, 1600)
+        # Without the stride prescale this ratio was ~25x.
+        self.assertLess(large, small*4)
+
+    def test_prescale_keeps_the_exact_output_size(self):
+        for profile in ('color', 'color-lean', 'mono'):
+            with self.subTest(profile=profile):
+                prepare = modem_screen.fitter(profile)
+                for w, h in ((320, 426), (1920, 1080), (3840, 2400)):
+                    self.assertEqual(
+                        prepare(np.zeros((h, w, 3), np.uint8)).size,
+                        PROFILES[profile][0])
+
+    def test_prescale_preserves_the_picture(self):
+        """Striding must not shift or blank the image."""
+        yy, xx = np.mgrid[:1600, :2560]
+        raw = np.zeros((1600, 2560, 3), np.uint8)
+        raw[:, :, 0] = np.uint8(128+120*np.sin(xx/200))
+        raw[:, :, 1] = np.uint8(128+120*np.cos(yy/160))
+        out = np.asarray(modem_screen.fitter('color-lean')(raw), float)
+        self.assertGreater(out.std(), 10.0)
+        self.assertGreater(out[:, :, 0].std(), 5.0)
+
+
 class TestSourceTests(unittest.TestCase):
     def test_test_source_moves(self):
         grab = modem_screen.test_source()
@@ -204,3 +244,110 @@ class VideoSourceTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ArgumentSurfaceTests(unittest.TestCase):
+    """to_device read args.prepare_ms and args.receive_margin_ms, which the
+    parser never defined. Every test used --write, which never reaches that
+    branch, so the live path died on its first packet with the suite green."""
+
+    def test_every_args_attribute_is_defined(self):
+        import ast
+        import inspect
+        source = inspect.getsource(modem_screen)
+        used = {n.attr for n in ast.walk(ast.parse(source))
+                if isinstance(n, ast.Attribute)
+                and isinstance(n.value, ast.Name) and n.value.id == 'args'}
+        defined = set(vars(modem_screen.parser().parse_args(['--source', 'test'])))
+        self.assertEqual(used-defined, set(),
+                         'read from args but never added to the parser')
+
+    def test_no_dead_arguments(self):
+        import ast
+        import inspect
+        source = inspect.getsource(modem_screen)
+        used = {n.attr for n in ast.walk(ast.parse(source))
+                if isinstance(n, ast.Attribute)
+                and isinstance(n.value, ast.Name) and n.value.id == 'args'}
+        defined = set(vars(modem_screen.parser().parse_args(['--source', 'test'])))
+        self.assertEqual(defined-used, set(), 'defined but never read')
+
+
+class DeviceLoopTests(unittest.TestCase):
+    """Exercise to_device against a fake PacketOutput.
+
+    The real one needs an audio device, which CI does not have -- which is
+    exactly why this branch went untested and shipped broken.
+    """
+
+    class FakeOutput:
+        def __init__(self, *a, **kw):
+            self.sent = []
+            self.deadline_misses = 0
+            self.starvations = 0
+            self.finished = False
+            self._ready = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def ready(self):
+            return self._ready
+
+        def reserve(self, prepare_ms, receive_margin_ms):
+            self.reserved = (prepare_ms, receive_margin_ms)
+            import types
+            return types.SimpleNamespace(start_time=0., target_time_ns=1_000_000)
+
+        def submit(self, audio, slot=None):
+            self.sent.append(np.asarray(audio))
+            return True
+
+        def finish(self):
+            self.finished = True
+
+    def run_loop(self, argv, output):
+        import contextlib
+        real = modem_screen.PacketOutput
+        modem_screen.PacketOutput = lambda *a, **kw: output
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                modem_screen.main(argv)
+        finally:
+            modem_screen.PacketOutput = real
+
+    def test_live_loop_sends_packets(self):
+        out = self.FakeOutput()
+        self.run_loop(['--source', 'test', '--frames', '5'], out)
+        layout = v3.ALL_PRESETS['lean-v3']
+        self.assertEqual(len(out.sent), 5)
+        self.assertTrue(out.finished)
+        for audio in out.sent:
+            self.assertEqual(audio.shape, (layout.frame, 2))
+            self.assertTrue(np.isfinite(audio).all())
+
+    def test_live_loop_passes_the_timing_arguments(self):
+        out = self.FakeOutput()
+        self.run_loop(['--source', 'test', '--frames', '2',
+                       '--prepare-ms', '22', '--receive-margin-ms', '33'], out)
+        self.assertEqual(out.reserved, (22.0, 33.0))
+
+    def test_live_packets_decode(self):
+        out = self.FakeOutput()
+        self.run_loop(['--source', 'test', '--frames', '4'], out)
+        layout = v3.ALL_PRESETS['lean-v3']
+        shapes = fit_shapes(plane_shapes('color-lean'), layout.capacity)
+        coder = SourceCoder(shapes)
+        stream = np.concatenate(out.sent).astype(np.float32)
+        rx = v3.Receiver(layout, coder)
+        got = []
+        for i in range(0, len(stream), 1024):
+            got += rx.feed(stream[i:i+1024])
+        got += rx.flush()
+        self.assertEqual(len(got), 4)
+        self.assertTrue(all(g.identity == 'verified_header' for g in got))
+        for g in got:
+            self.assertGreater(float(np.std(g.values)), .01)
