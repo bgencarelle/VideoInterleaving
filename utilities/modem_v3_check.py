@@ -530,7 +530,7 @@ def do_live_receive(args):
                 summary = None
                 if not args.silent and now-last_summary >= args.summary_seconds:
                     summary = {'receiver_packets': seen,
-                               'input_gain': round(source['level'].gain, 4),
+                               'input_gain': [round(g, 4) for g in source['level'].gain],
                                'input_limited_blocks': source['level'].limited,
                                'input_rate_hz': rate,
                                'nominal_fps': round(layout.fps_at(rate), 3),

@@ -66,31 +66,93 @@ class QuietInputTests(unittest.TestCase):
             self.assertLess(error, 1e-6)      # float32 round trip only
         block = np.asarray(audio[:256]*.95, np.float32)
         np.testing.assert_array_equal(level.process(block), block)
-        self.assertEqual(level.gain, 1.0)
+        np.testing.assert_array_equal(level.gain, [1.0, 1.0])
 
     def test_silence_does_not_run_the_gain_away(self):
         level = InputLevel()
         quiet = np.zeros((256, 2), np.float32)
         for _ in range(500):
             level.process(quiet)
-        self.assertEqual(level.gain, 1.0)
+        np.testing.assert_array_equal(level.gain, [1.0, 1.0])
 
 
-class BothChannelsTests(unittest.TestCase):
-    def test_one_gain_for_the_pair_not_two(self):
-        """Levelling the channels separately would flatten the amplitude
-        difference between them, which is part of what the 2x2 channel estimate
-        solves for and what skew and crosstalk report."""
-        level = InputLevel()
-        block = np.zeros((256, 2), np.float32)
-        block[:, 0] = .05*np.sin(np.linspace(0, 40, 256))
-        block[:, 1] = .01*np.sin(np.linspace(0, 40, 256))
-        before = np.max(np.abs(block[:, 0]))/np.max(np.abs(block[:, 1]))
-        for _ in range(200):
-            out = level.process(block)
-        after = np.max(np.abs(out[:, 0]))/np.max(np.abs(out[:, 1]))
-        self.assertAlmostEqual(after, before, places=4)
-        self.assertGreater(level.gain, 2)        # it did boost the pair
+THRESHOLD = v3.EDGE_HYSTERESIS*v3.PREAMBLE_AMPLITUDE
+
+
+def levelled(signal):
+    level = InputLevel()
+    out = [level.process(np.asarray(signal[i:i+256], np.float32))
+           for i in range(0, len(signal), 256)]
+    return np.concatenate(out), level
+
+
+class ChannelBalanceTests(unittest.TestCase):
+    """One tape track biased hotter than the other is a recording artefact.
+
+    The preamble is transmitted IDENTICALLY on both channels, so whatever
+    level difference arrives between them was added by the path. Levelling the
+    pair with a single gain leaves it in place, which costs the quieter channel
+    its share of acquisition entirely.
+    """
+
+    def test_a_single_gain_would_leave_the_quiet_channel_below_threshold(self):
+        """Why per-channel. Measured on the common-gain behaviour this
+        replaced: the loud channel showed 389 preamble edges and the quiet one
+        zero, while acquisition still succeeded off the loud one -- so nothing
+        looked wrong, and half of v3's acquisition margin was gone."""
+        audio, _, _ = transmission()
+        pair = audio.copy()
+        pair[:, 1] *= .03
+        common = pair*(.7/np.max(np.abs(pair)))      # what one gain would do
+        self.assertGreater(len(v3.edge_intervals(common[:3000, 0].astype(np.float32))), 100)
+        self.assertEqual(len(v3.edge_intervals(common[:3000, 1].astype(np.float32))), 0)
+
+    def test_both_channels_come_back_above_the_threshold(self):
+        audio, values, coder = transmission()
+        for quiet in (.25, .08, .03):
+            with self.subTest(right=quiet):
+                pair = audio.copy()
+                pair[:, 1] *= quiet
+                out, _ = levelled(pair)
+                for channel in (0, 1):
+                    edges = len(v3.edge_intervals(out[:3000, channel]))
+                    self.assertGreater(edges, 20, f'channel {channel} lost its preamble')
+                    self.assertGreater(np.max(np.abs(out[:, channel])), 2*THRESHOLD)
+
+    def test_a_dead_channel_is_not_amplified_into_false_edges(self):
+        """The brake on the other side. Lifting a silent leg until its own hiss
+        crosses the Schmitt would invent a preamble that was never sent."""
+        audio, _, _ = transmission()
+        pair = audio.copy()
+        pair[:, 1] = np.random.default_rng(1).normal(0, 1e-4, len(pair))
+        out, level = levelled(pair)
+        self.assertLessEqual(level.gain[1]/level.gain[0], level.balance+1e-9)
+        self.assertEqual(len(v3.edge_intervals(out[:3000, 1])), 0)
+
+    def test_azimuth_is_untouched_by_levelling(self):
+        """Amplitude between the channels is not information; phase is. A real
+        gain per channel cannot move phase, and head azimuth is phase."""
+        audio, values, coder = transmission()
+        n = len(audio)
+        for tau in (.42, -1.5):
+            delayed = audio.copy()
+            ramp = np.exp(-2j*np.pi*np.fft.rfftfreq(n)*tau)
+            delayed[:, 0] = np.fft.irfft(np.fft.rfft(delayed[:, 0])*ramp, n)
+            skews = []
+            for quiet in (1.0, .08):
+                pair = delayed.copy()
+                pair[:, 1] *= quiet
+                rx = v3.Receiver(LAYOUT, coder)
+                level = InputLevel()
+                out = []
+                for i in range(0, len(pair), 256):
+                    out += rx.feed(level.process(np.asarray(pair[i:i+256], np.float32)))
+                out += rx.flush()
+                good = [r for r in out if r.identity == 'verified_header']
+                self.assertEqual(len(good), 6)
+                skews.append(np.median([r.extra['skew_samples'] for r in good]))
+            self.assertAlmostEqual(skews[0], tau, delta=.01)
+            self.assertAlmostEqual(skews[0], skews[1], places=6)
 
 
 class LimiterTests(unittest.TestCase):
@@ -143,11 +205,11 @@ class StabilityTests(unittest.TestCase):
                            np.float32)
         for _ in range(400):                      # converge first
             level.process(block)
-        settled = level.gain
+        settled = level.gain.copy()
         for _ in range(LAYOUT.frame//256 + 1):    # one packet's worth
             level.process(block)
-        drift = 20*np.log10(max(level.gain, 1e-12)/max(settled, 1e-12))
-        self.assertLess(abs(drift), .3)
+        drift = 20*np.log10(np.maximum(level.gain, 1e-12)/np.maximum(settled, 1e-12))
+        self.assertLess(float(np.max(np.abs(drift))), .3)
 
 
 class OnLossDefaultTests(unittest.TestCase):
