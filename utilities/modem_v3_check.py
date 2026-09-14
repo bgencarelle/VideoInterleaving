@@ -36,6 +36,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from animation_modem.live_picture import LivePicture
 from animation_modem import transport3 as V3                   # noqa: E402
 from animation_modem import impairments as IMP                 # noqa: E402
 from animation_modem.audio_common import (pcm, pair, device,   # noqa: E402
@@ -129,7 +130,6 @@ def do_write(args):
 def do_read(args):
     layout = PRESETS[args.preset]
     coder, _ = coder_for(args.profile, args.allocation, layout)
-    print(layout.describe(), file=sys.stderr)
     receiver = receive_for(args, layout, coder)
     if args.save_frames:
         Path(args.save_frames).mkdir(parents=True, exist_ok=True)
@@ -214,8 +214,10 @@ def do_live_send(args):
     if args.list_devices:
         print(sd.query_devices()); return
     frames, profile = frames_from(args)
-    layout = PRESETS[args.preset]
-    coder, _ = coder_for(profile, args.allocation, layout)
+    if (args.preset, args.profile) != ('lean-v3', 'color-lean'):
+        raise SystemExit('Live transport uses lean-v3 / color-lean')
+    layout = PRESETS['lean-v3']
+    coder, _ = coder_for('color-lean', None, layout)
     print(layout.describe())
     packets = [V3.encode(image_values(
                    _prepared(im, n+1, len(frames), args.numbered), coder.shapes),
@@ -261,26 +263,63 @@ def do_live_receive(args):
     """
     import threading
     import signal
+    import queue
     sd = sounddevice()
     if args.list_devices:
         print(sd.query_devices()); return
-    layout = PRESETS[args.preset]
-    coder, _ = coder_for(args.profile, args.allocation, layout)
+    layout = PRESETS['lean-v3']
+    coder, _ = coder_for('color-lean', None, layout)
     verbose = args.verbose or args.headless
     if args.silent:
         verbose = False
     if args.save_frames:
         Path(args.save_frames).mkdir(parents=True, exist_ok=True)
     stop = threading.Event()
-    latest = {'result': None}
+    latest = {'picture': LivePicture(args.on_loss), 'device': 'Opening audio input…'}
     lock = threading.Lock()
     errors = []
     active = {'stream': None}
 
     from animation_modem.audio_buffer import AudioBuffer
     minimum_buffer = ((layout.frame+255)//256)*256
-    audio_buffer = AudioBuffer(max(minimum_buffer, int(RATE*args.buffer_ms/1000)),
-                               layout.frame)
+    capacity = (int(RATE*args.buffer_ms/1000) if args.buffer_ms is not None
+                else args.buffer_frames*layout.frame)
+    audio_buffer = AudioBuffer(max(minimum_buffer, capacity), layout.frame)
+    reports = queue.Queue(maxsize=1)
+
+    def offer_report(result, summary):
+        # Never make decoding wait for terminal output or filesystem writes.
+        try:
+            reports.put_nowait((result, summary))
+        except queue.Full:
+            try:
+                reports.get_nowait()
+            except queue.Empty:
+                pass
+            reports.put_nowait((result, summary))
+
+    def report():
+        try:
+            while not stop.is_set():
+                try:
+                    result, summary = reports.get(timeout=.1)
+                except queue.Empty:
+                    continue
+                if result is not None:
+                    if verbose:
+                        print(json.dumps(record(result)), flush=True)
+                    if args.save_frames and result.values is not None:
+                        name = (f'{result.absolute:06d}' if result.absolute is not None
+                                else f'x{time.monotonic_ns()}')
+                        values_image(result.values, result.extra['shapes']).save(
+                            Path(args.save_frames)/f'frame_{name}.png')
+                if summary is not None:
+                    print(json.dumps(summary), file=sys.stderr, flush=True)
+        except Exception as exc:
+            if not stop.is_set():
+                errors.append(exc)
+                stop.set()
+                audio_buffer.close()
 
     def capture():
         try:
@@ -292,11 +331,11 @@ def do_live_receive(args):
             with sd.InputStream(samplerate=RATE, channels=count, dtype='float32',
                                 device=args.device, blocksize=256) as stream:
                 active['stream'] = stream
-                if not args.silent:
-                    print(f'Listening on {info["name"]}: {args.preset}, '
-                          f'{args.profile}, pulse timing, channels '
-                          f'{channels[0]+1},{channels[1]+1}; Ctrl-C to stop',
-                          file=sys.stderr, flush=True)
+                device_text = (f'Input: {info["name"]} | channels '
+                               f'{channels[0]+1},{channels[1]+1}')
+                with lock:
+                    latest['device'] = device_text
+                print(f'{device_text} | lean-v3 / color-lean; Ctrl-C to stop', file=sys.stderr, flush=True)
                 while not stop.is_set():
                     audio, overflowed = stream.read(256)
                     audio_buffer.put(np.asarray(audio)[:, channels], overflowed)
@@ -323,26 +362,32 @@ def do_live_receive(args):
                 peak = max(peak, float(np.max(np.abs(audio))))
                 if gap:
                     receiver.reset()
-                for r in receiver.feed(audio):
-                    seen += 1
-                    if verbose:
-                        print(json.dumps(record(r)), flush=True)
-                    if r.values is not None:
-                        with lock:
-                            latest['result'] = r
-                        if args.save_frames:
-                            name = (f'{r.absolute:06d}' if r.absolute is not None
-                                    else f'x{seen:06d}')
-                            values_image(r.values, coder.shapes).save(
-                                Path(args.save_frames)/f'frame_{name}.png')
+                results = receiver.feed(audio)
+                seen += len(results)
+                for result in results:
+                    result.extra.update(shapes=coder.shapes,
+                                        frame_seconds=layout.frame*(1+result.rate_error)/RATE,
+                                        complete=result.identity == 'verified_header' and result.status == 'received')
+                period_samples = max(256, round(layout.frame*(1+receiver.rate)))
+                capacity = (int(RATE*args.buffer_ms/1000) if args.buffer_ms is not None
+                            else args.buffer_frames*period_samples)
+                audio_buffer.configure(max(256, capacity), min(period_samples, 1024))
+                newest = results[-1] if results else None
+                if newest is not None:
+                    with lock:
+                        for result in results:
+                            latest['picture'].push(result, time.monotonic())
                 now = time.monotonic()
+                summary = None
                 if not args.silent and now-last_summary >= args.summary_seconds:
-                    print(json.dumps({'receiver_packets': seen,
-                                      'input_overflows': audio_buffer.input_overflows,
-                                      'buffer_dropped_samples': audio_buffer.dropped_samples,
-                                      'input_peak': round(peak, 6)}),
-                          file=sys.stderr, flush=True)
+                    summary = {'receiver_packets': seen,
+                               'input_overflows': audio_buffer.input_overflows,
+                               'buffer_dropped_samples': audio_buffer.dropped_samples,
+                               'buffer_capacity_ms': round(1000*audio_buffer.capacity/RATE, 1),
+                               'input_peak': round(peak, 6)}
                     last_summary, peak = now, 0.0
+                if (newest is not None and (verbose or args.save_frames)) or summary is not None:
+                    offer_report(newest, summary)
         except Exception as exc:
             if not stop.is_set():
                 errors.append(exc)
@@ -350,10 +395,12 @@ def do_live_receive(args):
             stop.set()
             audio_buffer.close()
 
+    report_thread = threading.Thread(target=report, daemon=True)
     capture_thread = threading.Thread(target=capture, daemon=True)
     thread = threading.Thread(target=receive, daemon=True)
     previous_sigint = signal.signal(signal.SIGINT, lambda signum, frame: stop.set())
     try:
+        report_thread.start()
         capture_thread.start()
         thread.start()
         if args.headless:
@@ -374,11 +421,13 @@ def do_live_receive(args):
                 stop.set()
                 root.destroy()
             root.report_callback_exception = callback_error
-            root.title('v3 stereo image receiver')
+            root.title('Stereo image receiver — lean-v3 / color-lean')
             initial = ImageTk.PhotoImage(Image.new('RGB', size, 'black'))
             label = tk.Label(root, background='black', image=initial)
             label.image = initial
             label.pack()
+            device_label = tk.Label(root, text=latest['device'])
+            device_label.pack(fill='x', padx=6)
             status = tk.Label(root, text='Waiting for signal', width=1, height=2,
                               anchor='w', justify='left', wraplength=size[0]-12)
             status.pack(fill='x', padx=6)
@@ -390,28 +439,29 @@ def do_live_receive(args):
             root.bind('<q>', lambda event: close())
             root.bind('<Q>', lambda event: close())
 
+            rendered = [None]
+
             def refresh():
                 if stop.is_set():
                     root.destroy()
                     return
                 with lock:
-                    r = latest['result']
-                    latest['result'] = None
-                if r is not None and r.values is not None:
+                    r = latest['picture'].current(time.monotonic())
+                    device_text = latest['device']
+                device_label.config(text=device_text)
+                if r is not rendered[0]:
                     canvas = Image.new('RGB', size, 'black')
-                    scaled = ImageOps.contain(values_image(r.values, coder.shapes),
-                                              size, Image.Resampling.NEAREST)
-                    canvas.paste(scaled, ((size[0]-scaled.width)//2,
-                                          (size[1]-scaled.height)//2))
+                    if r is not None:
+                        scaled = ImageOps.contain(values_image(r.values, r.extra['shapes']),
+                                                  size, Image.Resampling.NEAREST)
+                        canvas.paste(scaled, ((size[0]-scaled.width)//2,
+                                              (size[1]-scaled.height)//2))
+                        status.config(text=f'lean-v3 / color-lean | frame {r.absolute} | {r.status}')
+                    else:
+                        status.config(text='Missing or damaged frame')
                     label.image.paste(canvas)
-                    folders = ('?' if r.face_folder is None
-                               else f'{r.face_folder}/{r.float_folder}')
-                    status.config(
-                        text=f'Frame {r.absolute} | src {r.source_index}/{r.count} '
-                             f'| folders {folders}\n{r.status} | {r.identity} '
-                             f'| tier {r.tier} | {r.extra.get("acquisition_path","?")}')
-                if not stop.is_set():
-                    root.after(10, refresh)
+                    rendered[0] = r
+                root.after(10, refresh)
             refresh()
             try:
                 root.mainloop()
@@ -421,7 +471,7 @@ def do_live_receive(args):
         stop.set()
         audio_buffer.close()
         try:
-            for worker in (thread, capture_thread):
+            for worker in (thread, capture_thread, report_thread):
                 if worker.ident is not None:
                     worker.join(timeout=1)
             stream = active['stream']
@@ -454,48 +504,53 @@ def main(argv=None):
     b.add_argument('--allocation', type=Path)
     b.add_argument('--preset', choices=list(PRESETS), default='wide-v3')
     w = sub.add_parser('write'); shared(w)
-    w.add_argument('--preset', choices=list(PRESETS), default='wide-v3')
+    w.add_argument('--preset', choices=list(PRESETS), default='lean-v3')
+    w.set_defaults(profile='color-lean')
     w.add_argument('--out', type=Path, default=Path('v3_test.wav'))
     w.add_argument('-f', '--numbered', action='store_true')
     r = sub.add_parser('read')
-    r.add_argument('--preset', choices=list(PRESETS), default='wide-v3')
+    r.add_argument('--preset', choices=list(PRESETS), default='lean-v3',
+                   help='Override only for older experimental recordings')
     r.add_argument('--profile', choices=['color', 'color-lean', 'detail', 'mono'],
-                   default='color')
+                   default='color-lean')
     r.add_argument('--wav', type=Path, required=True)
     r.add_argument('--channels', type=pair, default=(0, 1))
     r.add_argument('--save-frames', type=Path)
     ls = sub.add_parser('live-send'); shared(ls)
-    ls.add_argument('--preset', choices=list(PRESETS), default='wide-v3')
+    ls.add_argument('--preset', choices=['lean-v3'], default='lean-v3')
+    ls.set_defaults(profile='color-lean')
     ls.add_argument('--device', type=device)
     ls.add_argument('--channels', type=pair, default=(0, 1))
     ls.add_argument('-f', '--numbered', action='store_true')
     ls.add_argument('--list-devices', action='store_true')
     lr = sub.add_parser('live-receive')
-    lr.add_argument('--preset', choices=list(PRESETS), default='wide-v3')
-    lr.add_argument('--profile', choices=['color', 'color-lean', 'detail', 'mono'],
-                    default='color', help='Must match the sender profile')
-    lr.add_argument('--receiver', choices=('v3',), default='v3',
-                    help='Kept for argument parity with v2; v3 has one receiver')
     lr.add_argument('--device', type=device)
     lr.add_argument('--channels', type=pair, default=(0, 1),
                     help='Ordered 1-based input pair (default: 1,2)')
-    lr.add_argument('--buffer-ms', type=float, default=250,
-                    help='Maximum queued audio in milliseconds; at least one packet')
-    lr.add_argument('--save-frames', type=Path)
+    buffering = lr.add_mutually_exclusive_group()
+    buffering.add_argument('--buffer-frames', type=int, choices=(1, 2), default=2,
+                           help='Keep only the newest one or two detected frame intervals (default: 2)')
+    buffering.add_argument('--buffer-ms', type=float,
+                           help='Override the audio capacity in milliseconds')
+    lr.add_argument('--save-frames', type=Path,
+                    help='Save newest pictures; slow disk writes may skip frames')
+    lr.add_argument('--on-loss', choices=('hold', 'black', 'damaged'), default='hold',
+                    help='Hold the last good image, show black, or show damaged images')
     lr.add_argument('--headless', action='store_true',
                     help='JSON only, no window; implies --verbose')
     lr.add_argument('-v', '--verbose', action='store_true',
-                    help='Per-packet JSON. Off by default: a live link is 14 a second.')
+                    help='JSON for newest decoded pictures; slow output may skip records')
     lr.add_argument('--silent', action='store_true',
-                    help='No output at all, not even the periodic summary')
+                    help='Suppress packet output and summaries; input device is still shown')
     lr.add_argument('--summary-seconds', type=float, default=30.0,
                     help='Fallback digest interval when no source index is decoding')
     lr.add_argument('--width', type=int, default=480)
     lr.add_argument('--height', type=int, default=576)
     lr.add_argument('--list-devices', action='store_true')
     args = p.parse_args(argv)
-    if not np.isfinite(getattr(args, 'buffer_ms', 250)) or getattr(args, 'buffer_ms', 250) <= 0:
-        p.error('--buffer-ms must be finite and positive')
+    if getattr(args, 'buffer_ms', None) is not None:
+        if not np.isfinite(args.buffer_ms) or args.buffer_ms <= 0:
+            p.error('--buffer-ms must be finite and positive')
     if getattr(args, 'frames', 1) < 1 or getattr(args, 'stride', 1) < 1:
         p.error('--frames and --stride must be positive')
     if not np.isfinite(getattr(args, 'gain', 1)) or getattr(args, 'gain', 1) <= 0:

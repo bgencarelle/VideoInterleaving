@@ -62,8 +62,8 @@ class AudioBufferTests(unittest.TestCase):
             buffer.put(np.full((20, 2), n))
         batch, gap = buffer.take(timeout=0)
         self.assertTrue(gap)
-        self.assertEqual(buffer.dropped_samples, 60)
-        np.testing.assert_array_equal(batch, 3)
+        self.assertEqual(buffer.dropped_samples, 20)
+        np.testing.assert_array_equal(batch[:, 0], np.repeat([1, 2, 3], 20))
         buffer.put(np.full((20, 2), 4))
         self.assertFalse(buffer.take(timeout=0)[1])
 
@@ -87,3 +87,33 @@ class AudioBufferTests(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertEqual(got[0][0].shape, (10, 2))
         self.assertIsNone(buffer.take(timeout=0))
+
+
+class FreshnessTests(unittest.TestCase):
+    def test_long_decoder_pause_retains_only_recent_frames(self):
+        layout = v3.ALL_PRESETS['lean-v3']
+        coder = v3.SourceCoder(plane_shapes('color-lean'))
+        buffer = AudioBuffer(3*layout.frame, layout.frame)
+        audio = np.concatenate([
+            *[v3.encode(np.zeros(coder.count), layout, coder, n, n, 30)
+              for n in range(1, 31)],
+            np.zeros((137, 2))]).astype(np.float32)
+        # Capture continues while the decoder does no work for 30 frames.
+        for offset in range(0, len(audio), 256):
+            buffer.put(audio[offset:offset+256])
+        recent, gap = buffer.take(timeout=0)
+        self.assertTrue(gap)
+        np.testing.assert_array_equal(recent, audio[-3*layout.frame:])
+        rx = v3.Receiver(layout, coder)
+        decoded = rx.feed(recent)+rx.flush()
+        self.assertEqual([r.absolute for r in decoded], [29, 30])
+        self.assertEqual(buffer.dropped_samples, len(audio)-len(recent))
+
+    def test_queue_trims_part_of_an_old_capture_block(self):
+        buffer = AudioBuffer(10, 4)
+        buffer.put(np.arange(8)[:, None])
+        buffer.put(np.arange(8, 15)[:, None])
+        audio, gap = buffer.take(timeout=0)
+        np.testing.assert_array_equal(audio[:, 0], np.arange(5, 15))
+        self.assertTrue(gap)
+        self.assertEqual(buffer.dropped_samples, 5)

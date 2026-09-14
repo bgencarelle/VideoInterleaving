@@ -13,8 +13,7 @@ scope_screen.py:
 
 Receive with:
 
-    python utilities/modem_v3_check.py live-receive --preset lean-v3 \
-        --profile color-lean
+    python utilities/modem_v3_check.py live-receive --device "BlackHole 2ch"
 
 BE REALISTIC ABOUT THE RESOLUTION. The picture is whatever the profile says:
 40x48 colour for 'color' and 'color-lean', 48x60 grey for 'mono'. That is a
@@ -603,6 +602,8 @@ def main(argv=None):
     if not np.isfinite(args.gain) or args.gain <= 0:
         raise SystemExit('--gain must be finite and positive')
 
+    if not args.write and (args.preset, args.profile) != ('lean-v3', 'color-lean'):
+        raise SystemExit('Live transport uses lean-v3 / color-lean; other layouts are offline experiments only')
     layout, coder, shapes = build(args)
     prepare = fitter(args.profile, args.rotate, args.mirror, not args.crop)
     raw = source_for(args, layout.fps)

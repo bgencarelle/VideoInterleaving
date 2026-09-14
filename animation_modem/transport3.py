@@ -240,6 +240,21 @@ def measure_pulses(samples, min_speed=.25, max_speed=2.0):
     nominal = NOMINAL_EDGES.astype(float)+.5
     centered = nominal-nominal.mean()
     for word in words[valid]:
+        # Linear zero-crossing interpolation is biased when a speed change
+        # puts a pulse edge between samples. Refine those SAME observed edges
+        # on a bandlimited interpolant; this does not search speeds/templates.
+        if (word[-1]-word[0])/NOMINAL_SPAN < .999:
+            refined = word.copy()
+            mono = samples[:, None]
+            for _ in range(3):
+                probes = np.concatenate([refined, refined-.05, refined+.05])
+                amplitudes = _sample_at(mono, probes, taps=16)[:, 0]
+                center, minus, plus = np.split(amplitudes, 3)
+                derivative = (plus-minus)/.1
+                delta = np.divide(center, derivative, out=np.zeros_like(center),
+                                  where=np.abs(derivative) > 1e-6)
+                refined = np.clip(refined-np.clip(delta, -.25, .25), word-.5, word+.5)
+            word = refined
         scale = float(np.dot(word-word.mean(), centered)/np.dot(centered, centered))
         position = float(word.mean()-scale*nominal.mean())
         residual = float(np.sqrt(np.mean((word-position-scale*nominal)**2)))
@@ -651,11 +666,17 @@ class Receiver:
             if len(self.buffer) < end - (2 if final else 0):
                 break
             started = time.perf_counter()
+            taps = 0
             if scale == 1 and begin == int(begin) and begin >= 0:
                 packet = self.buffer[int(begin):int(begin)+self.layout.packet]
                 body = packet[SYNC_LEN:].reshape(self.layout.symbols, SYMBOL, 2)[:, CP-4:CP-4+N]
             else:
-                body = _sample_at(self.buffer, begin+_body_walk(self.layout)*scale)
+                # Faster playback moves surviving carriers toward input
+                # Nyquist, where the short interpolator has phase-dependent
+                # attenuation. Use a longer kernel only when it is needed.
+                highest = self.layout.top_bin/N/scale
+                taps = 32 if highest > .44 else 8
+                body = _sample_at(self.buffer, begin+_body_walk(self.layout)*scale, taps=taps)
                 body = body.reshape(self.layout.symbols, N, 2)
             result = decode_packet(None, self.layout, self.coder, body=body)
             result.rate_error = scale-1
@@ -664,6 +685,8 @@ class Receiver:
                                 input_path='v3', acquisition_path=self.acquisition_path,
                                 timing_method='pulse' if self.pulse_only else 'waveform',
                                 playback_speed=1/scale, complete=True,
+                                input_top_hz=self.layout.top_bin*RATE/N/scale,
+                                input_nyquist_hz=RATE/2, resample_taps=taps,
                                 decode_ms=(time.perf_counter()-started)*1000,
                                 acquire_ms=self.acquire_ms)
             result.extra['receive_cpu_ms'] = result.extra['decode_ms']+self.acquire_ms

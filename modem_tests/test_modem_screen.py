@@ -131,7 +131,7 @@ class RoundTripTests(unittest.TestCase):
         import json
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            main(['read', '--preset', preset, '--profile', profile,
+            main(['read',
                   '--wav', str(path)])
         return [json.loads(l) for l in out.getvalue().splitlines()
                 if l.startswith('{')]
@@ -156,7 +156,7 @@ class RoundTripTests(unittest.TestCase):
             from utilities.modem_v3_check import main
             import contextlib
             with contextlib.redirect_stdout(io.StringIO()):
-                main(['read', '--preset', 'lean-v3', '--profile', 'color-lean',
+                main(['read',
                       '--wav', str(wav), '--save-frames', str(frames)])
             pngs = sorted(frames.glob('*.png'))
             self.assertEqual(len(pngs), 4)
@@ -172,7 +172,7 @@ class RoundTripTests(unittest.TestCase):
             with contextlib.redirect_stderr(err), \
                  contextlib.redirect_stdout(io.StringIO()):
                 modem_screen.main(['--source', 'test', '--preset', 'lofi',
-                                   '--profile', 'color',
+                                   '--profile', 'mono',
                                    '--write', str(Path(d)/'x.wav'),
                                    '--frames', '1'])
         self.assertIn('WARNING', err.getvalue())

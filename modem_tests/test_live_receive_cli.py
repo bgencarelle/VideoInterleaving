@@ -8,11 +8,9 @@ from utilities import modem_v3_check as check
 class LiveReceiveTests(unittest.TestCase):
     def test_live_receiver_accepts_matching_profile(self):
         with patch.object(check, 'do_live_receive') as receive:
-            check.main(['live-receive', '--device', '0', '--preset', 'lean-v3',
-                        '--profile', 'color-lean', '--headless'])
+            check.main(['live-receive', '--device', '0', '--headless'])
         args = receive.call_args.args[0]
-        self.assertEqual((args.device, args.preset, args.profile),
-                         (0, 'lean-v3', 'color-lean'))
+        self.assertEqual((args.device, args.on_loss, args.buffer_frames), (0, 'hold', 2))
 
     def test_device_query_failure_stops_receiver(self):
         sd = Mock()
@@ -27,7 +25,7 @@ class LiveReceiveTests(unittest.TestCase):
     def assert_startup_fails(self, sd, message):
         def immediate_thread(*, target, **kwargs):
             worker = Mock(ident=None)
-            worker.start.side_effect = target
+            worker.start.side_effect = target if target.__name__ != 'report' else None
             worker.is_alive.return_value = False
             return worker
 
@@ -49,8 +47,14 @@ class ReceiverWindowTests(unittest.TestCase):
     def test_window_quits_with_ctrl_c(self):
         self.run_window('SIGINT')
 
-    def run_window(self, quit_key):
+    def test_slow_logging_does_not_block_picture_updates(self):
+        self.run_window('<q>', slow_logging=True)
+
+    def run_window(self, quit_key, slow_logging=False):
         import signal
+        import threading
+        log_started = threading.Event()
+        release_log = threading.Event()
         previous_sigint = signal.getsignal(signal.SIGINT)
         import time
         import types
@@ -97,6 +101,7 @@ class ReceiverWindowTests(unittest.TestCase):
                         except Exception as exc:
                             self.report_callback_exception(type(exc), exc, exc.__traceback__)
                     if len(shown) >= 3:
+                        release_log.set()
                         if quit_key == 'SIGINT':
                             signal.raise_signal(signal.SIGINT)
                         else:
@@ -136,11 +141,19 @@ class ReceiverWindowTests(unittest.TestCase):
         tk = types.SimpleNamespace(Tk=lambda: root, Label=lambda *a, **kw: Mock())
         image_tk = types.ModuleType('PIL.ImageTk')
         image_tk.PhotoImage = Photo
-        with patch.object(check, 'sounddevice', return_value=sd), \
+        def delayed_record(result):
+            log_started.set()
+            release_log.wait(2)
+            return {}
+
+        with patch.object(check, 'record', side_effect=delayed_record), \
+             patch.object(check, 'sounddevice', return_value=sd), \
              patch.dict('sys.modules', {'tkinter': tk, 'PIL.ImageTk': image_tk}), \
              patch('PIL.ImageTk', image_tk, create=True):
-            check.main(['live-receive', '--device', '0', '--preset', 'lean-v3',
-                        '--profile', 'color-lean', '--silent'])
+            check.main(['live-receive', '--device', '0', '--verbose' if slow_logging else '--silent'])
+        if slow_logging:
+            self.assertTrue(log_started.is_set())
+            self.assertTrue(release_log.is_set())
         self.assertIs(signal.getsignal(signal.SIGINT), previous_sigint)
         self.assertTrue(root.closed)
         self.assertGreaterEqual(len(shown), 3)

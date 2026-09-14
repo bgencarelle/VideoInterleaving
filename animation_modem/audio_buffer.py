@@ -25,7 +25,7 @@ class AudioBuffer:
                 return
             if overflowed:
                 self.input_overflows += 1
-            if overflowed or self._samples+len(audio) > self.capacity:
+            if overflowed:
                 self.dropped_samples += self._samples
                 self._chunks.clear()
                 self._samples = 0
@@ -36,6 +36,19 @@ class AudioBuffer:
                 self._gap = True
             self._chunks.append(audio)
             self._samples += len(audio)
+            # Keep the newest contiguous tail instead of flushing the queue
+            # and waiting for it to fill again after every scheduling stall.
+            excess = max(0, self._samples-self.capacity)
+            self.dropped_samples += excess
+            if excess:
+                self._gap = True
+            while excess:
+                oldest = self._chunks.popleft()
+                take = min(excess, len(oldest))
+                if take < len(oldest):
+                    self._chunks.appendleft(oldest[take:])
+                self._samples -= take
+                excess -= take
             self._condition.notify()
 
     def take(self, timeout=.1):
@@ -55,4 +68,22 @@ class AudioBuffer:
     def close(self):
         with self._condition:
             self.closed = True
+            self._condition.notify_all()
+
+    def configure(self, capacity, batch):
+        """Follow the detected packet duration, including playback speed."""
+        with self._condition:
+            self.capacity = max(1, int(capacity))
+            self.batch = max(1, min(int(batch), self.capacity))
+            excess = max(0, self._samples-self.capacity)
+            self.dropped_samples += excess
+            if excess:
+                self._gap = True
+            while excess:
+                oldest = self._chunks.popleft()
+                take = min(excess, len(oldest))
+                if take < len(oldest):
+                    self._chunks.appendleft(oldest[take:])
+                self._samples -= take
+                excess -= take
             self._condition.notify_all()
