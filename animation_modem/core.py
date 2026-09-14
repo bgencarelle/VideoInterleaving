@@ -50,6 +50,9 @@ class Layout:
     header_split: bool = False # halve header symbols by sending different
                                # halves on each channel instead of the same
                                # bits twice, trading diversity for frame rate
+    spread_carriers: bool = False  # place the coarsest coefficients across the
+                               # whole band, strongest on the middle carriers,
+                               # instead of stacking them on the lowest one
     orthogonal_training: bool = False  # drive both channels in both training
                                # symbols instead of one at a time; same peak,
                                # twice the energy, half the estimator error
@@ -67,7 +70,24 @@ class Layout:
     def pilots(self):
         if self.progressive:
             # Two low-band pilots survive roll-off; bins 1 and 2 carry images.
-            return np.array([3, 5, 21, 45])
+            base = np.array([3, 5, 21, 45])
+            if self.top_bin >= base[-1]:
+                return base
+            # A narrower progressive layout cannot use the wide-band pilots:
+            # bins 21 and 45 fall outside its carriers entirely, and indexing
+            # with them raised IndexError from encode(). Keep the low pair,
+            # which is the point of the progressive placement, and fold the
+            # upper pair proportionally into whatever band remains.
+            upper = np.round(base[2:]*self.top_bin/base[-1]).astype(int)
+            pilots = np.unique(np.concatenate([base[:2], upper]))
+            pilots = pilots[(pilots >= self.carriers.min()) &
+                            (pilots <= self.top_bin)]
+            if len(pilots) < 4:
+                spare = np.setdiff1d(self.carriers, pilots)
+                need = min(4-len(pilots), len(spare))
+                pick = spare[np.linspace(0, len(spare)-1, need).round().astype(int)]
+                pilots = np.unique(np.concatenate([pilots, pick]))
+            return pilots
         c = self.carriers
         if len(c)<12:
             return c[np.linspace(0,len(c)-1,4).round().astype(int)]
@@ -79,12 +99,29 @@ class Layout:
 
     @cached_property
     def header_bins(self):
-        """The lowest data carriers -- the ones that survive tape and roll-off.
+        """Where the frame header rides.
 
-        Widening this trades robustness for frame rate: the header moves onto
-        higher carriers, which tape treats worse, but needs fewer symbols.
+        By default the lowest data carriers. That is only the right answer if
+        the bottom of the band is intact: with progressive layouts the lowest
+        carrier is bin 1, sitting on the declared bottom edge, so a channel that
+        rolls off anywhere near its own stated limit takes the header out.
+        Measured on wide-v3, filtering at the declared 375 Hz bottom edge left
+        every picture decodable and verified zero headers.
+
+        Under spread_carriers the header moves to the middle of the band
+        instead, next to the strongest image carriers, so identity survives
+        wherever the picture does.
+
+        Widening trades robustness for frame rate: fewer header symbols, but
+        the header reaches further toward the edges.
         """
-        return self.data_bins[:min(max(1, self.header_width), len(self.data_bins))]
+        want = min(max(1, self.header_width), len(self.data_bins))
+        bins = self.data_bins
+        if not self.spread_carriers:
+            return bins[:want]
+        middle_out = np.argsort(np.abs(np.arange(len(bins)) - (len(bins)-1)/2),
+                                kind='stable')
+        return np.sort(bins[np.sort(middle_out[:want])])
 
     @cached_property
     def header_lanes(self):
@@ -214,11 +251,26 @@ class SourceCoder:
 
 @lru_cache(maxsize=32)
 def coefficient_slots(layout, shapes):
-    """Source coefficient -> wire slot, coarse image first in audio frequency.
+    """Source coefficient -> wire slot.
 
-    Sort all planes together by normalized spatial frequency. Place the three
-    DC terms first, then progressively finer features on ascending carriers.
-    Each carrier spans all image symbols and both stereo channels.
+    Default (carrier-major): sort all planes together by normalized spatial
+    frequency, then fill carrier 0 across every symbol before moving up. Coarse
+    image lands lowest in audio frequency.
+
+    That default puts almost everything on one carrier. Luma DC leaves the
+    source coder around 37 against a median coefficient of 0.0029 -- an 82 dB
+    spread -- so measured, carrier 0 alone carries 99.5% of image power and the
+    top three carriers carry 100.0%. With progressive layouts carrier 0 is bin
+    1, sitting exactly on the bottom edge of the declared band, which is where
+    every real channel is already rolling off. Filtering wide-v3 at its own
+    declared 375 Hz bottom edge cost 19 dB and every header; filtering at its
+    declared 20.25 kHz top edge cost 0.01 dB, because the top of the band was
+    carrying nothing.
+
+    spread_carriers changes the fill order so the carrier varies fastest: the
+    coarsest coefficients go out across ALL carriers rather than stacking on
+    one, and carriers are visited middle-out so the highest-energy terms sit
+    where no channel rolls off. Same slots, same capacity, different mapping.
     """
     count = sum(h*w for h,w in shapes)
     if not layout.progressive:
@@ -230,7 +282,13 @@ def coefficient_slots(layout, shapes):
     source_order = np.argsort(ranks, kind='stable')
     slots = np.arange(layout.capacity).reshape(
         layout.image_symbols, len(layout.data_bins), 2, 2)
-    low_to_high = slots.transpose(1,0,2,3).ravel()[:count]
+    if layout.spread_carriers:
+        lanes = len(layout.data_bins)
+        middle_out = np.argsort(np.abs(np.arange(lanes) - (lanes-1)/2),
+                                kind='stable')
+        low_to_high = slots[:, middle_out].transpose(0, 2, 3, 1).ravel()[:count]
+    else:
+        low_to_high = slots.transpose(1,0,2,3).ravel()[:count]
     mapping = np.empty(count, dtype=int)
     mapping[source_order] = low_to_high
     mapping.setflags(write=False)

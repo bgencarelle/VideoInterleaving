@@ -54,7 +54,8 @@ def frames_from(args, profile='color'):
         from modem_bake import ModemLibrary
         library = ModemLibrary(args.modem_dir)
         picks = range(0, min(library.frames, args.frames*args.stride), args.stride)
-        return [library.composite(i, 0, 0) for i in picks], 'color'
+        return ([library.composite(i, 0, 0) for i in picks],
+                getattr(args, 'profile', None) or 'color')
     out = []
     for t in range(args.frames):
         rng = np.random.default_rng(4242)
@@ -70,7 +71,7 @@ def frames_from(args, profile='color'):
         for c, k in enumerate((1., .82, .70)):
             im[:, :, c] = np.where(mask, tex*k, 4)
         out.append(Image.fromarray(np.uint8(np.clip(im, 0, 255))))
-    return out, profile
+    return out, getattr(args, 'profile', None) or profile
 
 
 def coder_for(profile, allocation, layout):
@@ -376,6 +377,10 @@ def main(argv=None):
     p.set_defaults(preset='wide-v3', profile='color', allocation=None, gain=1.0)
 
     def shared(q):
+        q.add_argument('--profile', choices=['color', 'color-lean', 'detail', 'mono'],
+                       default='color',
+                       help="Plane geometry. 'color-lean' quarters chroma: same "
+                            "picture, 2160 coefficients instead of 2880.")
         q.add_argument('--modem-dir', type=Path, help='Bake to read frames from')
         q.add_argument('--frames', type=int, default=24)
         q.add_argument('--stride', type=int, default=1)
@@ -388,6 +393,8 @@ def main(argv=None):
     w.add_argument('-f', '--numbered', action='store_true')
     r = sub.add_parser('read')
     r.add_argument('--preset', choices=list(PRESETS), default='wide-v3')
+    r.add_argument('--profile', choices=['color', 'color-lean', 'detail', 'mono'],
+                   default='color')
     r.add_argument('--wav', type=Path, required=True)
     r.add_argument('--channels', type=pair, default=(0, 1))
     r.add_argument('--save-frames', type=Path)

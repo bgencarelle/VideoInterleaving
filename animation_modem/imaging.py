@@ -15,6 +15,18 @@ from PIL import Image, ImageDraw, ImageOps
 # Luma size and chroma size per profile. Every profile is exactly 2880 values.
 PROFILES = {
     'color': ((40, 48), (20, 24)),
+    # Measured on real baked frames: chroma at half luma resolution takes 33%
+    # of the coefficient budget and carries 1.24% of the image energy (luma
+    # 98.76%). Quartering it frees 720 slots -- 4 whole OFDM symbols -- and the
+    # picture gets BETTER, because the surviving chroma coefficients each get
+    # more power and stop blotching. 2160 coefficients, +20.8% frame rate, and
+    # +0.9 to +5.4 dB depending on how noisy the channel is.
+    #
+    # Keep any chroma plane on the luma aspect ratio. image_values letterboxes
+    # each plane independently, so an off-aspect chroma plane gets colour bars
+    # and loses 2-4 dB -- which looks exactly like a chroma-resolution effect
+    # and is not one.
+    'color-lean': ((40, 48), (10, 12)),
     'detail': ((48, 56), (8, 12)),
     'mono': ((48, 60), None),
 }

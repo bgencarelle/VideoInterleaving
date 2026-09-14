@@ -364,3 +364,150 @@ class TrainingTests(V3Base):
         if good:
             err = np.mean([np.mean((np.clip(g.values, -1, 1)-self.values)**2) for g in good])
             self.assertGreater(err, 1e-2)
+
+
+class BandTests(V3Base):
+    """A layout must work inside the band it declares, at both edges."""
+
+    def build(self, **kw):
+        return v3.Layout(top_bin=54, image_symbols=15, name='b',
+                         progressive=True, orthogonal_training=True, **kw)
+
+    def filtered(self, layout, lo=0., hi=None, noise=.005, frames=3):
+        from scipy.signal import butter, sosfiltfilt
+        coder = v3.SourceCoder(self.shapes)
+        audio = np.concatenate([
+            v3.encode(self.values, layout, coder, n+1, 1, frames)
+            for n in range(frames)]).astype(float)
+        if hi and hi < v3.RATE/2*.97:
+            audio = sosfiltfilt(butter(10, hi/(v3.RATE/2), 'low', output='sos'),
+                                audio, axis=0)
+        if lo > 20:
+            audio = sosfiltfilt(butter(10, lo/(v3.RATE/2), 'high', output='sos'),
+                                audio, axis=0)
+        audio = (audio+np.random.default_rng(0).normal(0, noise, audio.shape)
+                 ).astype(np.float32)
+        rx = v3.Receiver(layout, coder)
+        got = []
+        for i in range(0, len(audio), 1024):
+            got += rx.feed(audio[i:i+1024])
+        got += rx.flush()
+        return (sum(1 for g in got if g.values is not None),
+                sum(1 for g in got if g.identity == 'verified_header'))
+
+    def edges(self, layout):
+        return (float(layout.carriers.min())*v3.RATE/v3.N,
+                float(layout.top_bin)*v3.RATE/v3.N)
+
+    def test_spreading_takes_power_off_the_lowest_carrier(self):
+        """Stacked on carrier 0, the whole picture rides the band's bottom edge."""
+        def share(layout):
+            coder = v3.SourceCoder(self.shapes)
+            sent = np.zeros(layout.capacity)
+            sent[v3.coefficient_slots(layout, tuple(coder.shapes))] = \
+                coder.forward(self.values)
+            block = sent.reshape(layout.image_symbols, len(layout.data_bins), 2, 2)
+            power = np.sum(block**2, axis=(0, 2, 3))
+            return float(power[0]/power.sum())
+        self.assertGreater(share(self.build()), .9)
+        self.assertLess(share(self.build(spread_carriers=True)), .1)
+
+    def test_spread_layout_survives_its_own_declared_band(self):
+        layout = self.build(spread_carriers=True)
+        lo, hi = self.edges(layout)
+        pics, verified = self.filtered(layout, lo, hi)
+        self.assertEqual(pics, 3)
+        self.assertEqual(verified, 3)
+
+    def test_unspread_layout_loses_identity_at_its_own_bottom_edge(self):
+        """Guards the finding, so the default is not mistaken for safe."""
+        layout = self.build()
+        lo, hi = self.edges(layout)
+        pics, verified = self.filtered(layout, lo, hi)
+        self.assertEqual(pics, 3)
+        self.assertEqual(verified, 0)
+
+    def test_header_moves_to_mid_band_when_spread(self):
+        plain, spread = self.build(), self.build(spread_carriers=True)
+        self.assertEqual(int(plain.header_bins.min()), int(plain.carriers.min()))
+        self.assertGreater(int(spread.header_bins.min()), int(spread.carriers.min()))
+        self.assertLess(int(spread.header_bins.max()), spread.top_bin)
+
+    def test_mid_presets_stay_under_15_khz(self):
+        for name in ('mid-v3', 'mid-v3-fast'):
+            with self.subTest(preset=name):
+                layout = v3.V3_PRESETS[name]
+                self.assertLess(layout.top_bin*v3.RATE/v3.N, 15000)
+                self.assertTrue(layout.spread_carriers)
+
+    def test_mid_preset_round_trips_inside_its_band(self):
+        layout = v3.V3_PRESETS['mid-v3']
+        lo, hi = self.edges(layout)
+        pics, verified = self.filtered(layout, lo, hi)
+        self.assertEqual((pics, verified), (3, 3))
+
+    def test_pilots_stay_inside_the_carrier_range(self):
+        """Regression: pilots were hardcoded [3,5,21,45] for any progressive
+        layout, so top_bin < 45 raised IndexError from encode()."""
+        for top_bin in range(10, 64):
+            with self.subTest(top_bin=top_bin):
+                layout = v3.Layout(top_bin=top_bin, image_symbols=8, name='p',
+                                   progressive=True)
+                self.assertTrue((layout.pilots >= layout.carriers.min()).all())
+                self.assertTrue((layout.pilots <= top_bin).all())
+
+    def test_narrow_progressive_layout_encodes(self):
+        layout = v3.V3_PRESETS['tape-v3']
+        coder = v3.SourceCoder(v3.fit_shapes(self.shapes, layout.capacity)
+                               if hasattr(v3, 'fit_shapes') else self.shapes)
+        v3.encode(np.zeros(coder.count), layout, coder, 1, 1, 4)
+
+
+class LeanChromaTests(V3Base):
+    """Chroma at half luma resolution costs a third of the budget for ~1% of
+    the image energy. The lean profile quarters it."""
+
+    def shapes_for(self, profile):
+        from animation_modem.imaging import plane_shapes
+        return plane_shapes(profile)
+
+    def test_lean_profile_is_a_quarter_of_the_chroma(self):
+        full = self.shapes_for('color')
+        lean = self.shapes_for('color-lean')
+        self.assertEqual(full[0], lean[0])                      # luma unchanged
+        self.assertEqual(int(np.prod(lean[1]))*4, int(np.prod(full[1])))
+
+    def test_lean_profile_frees_four_symbols(self):
+        import numpy as np
+        full = sum(int(np.prod(s)) for s in self.shapes_for('color'))
+        lean = sum(int(np.prod(s)) for s in self.shapes_for('color-lean'))
+        self.assertEqual(full, 2880)
+        self.assertEqual(lean, 2160)
+        self.assertGreater(v3.V3_PRESETS['lean-v3'].fps,
+                           v3.V3_PRESETS['wide-v3'].fps)
+
+    def test_chroma_planes_keep_the_luma_aspect(self):
+        """Off-aspect chroma gets letterboxed by image_values and loses 2-4 dB,
+        which is easy to misread as a chroma-resolution result."""
+        from animation_modem.imaging import PROFILES
+        for name in ('color', 'color-lean'):
+            with self.subTest(profile=name):
+                size, chroma = PROFILES[name]
+                self.assertAlmostEqual(size[0]/size[1], chroma[0]/chroma[1], places=3)
+
+    def test_lean_preset_round_trips(self):
+        from animation_modem.imaging import plane_shapes
+        layout = v3.V3_PRESETS['lean-v3']
+        shapes = plane_shapes('color-lean')
+        coder = v3.SourceCoder(shapes)
+        self.assertLessEqual(coder.count, layout.capacity)
+        values = image_values(self.image, shapes)
+        audio = v3.encode(values, layout, coder, 1, 1, 4)
+        rx = v3.Receiver(layout, coder)
+        got = []
+        for i in range(0, len(audio), 256):
+            got += rx.feed(audio[i:i+256])
+        got += rx.flush()
+        self.assertEqual([g.absolute for g in got], [1])
+        self.assertEqual(got[0].identity, 'verified_header')
+        self.assertLess(np.sqrt(np.mean((got[0].values-values)**2)), 1e-2)

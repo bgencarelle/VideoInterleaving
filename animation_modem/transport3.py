@@ -92,6 +92,20 @@ V3_PRESETS = {
     # Cassette band with the same training improvement.
     'tape-v3': Layout(top_bin=27, image_symbols=35, name='tape-v3',
                       progressive=True, orthogonal_training=True),
+    # Lean chroma (profile 'color-lean', 2160 coefficients) fits 11 symbols.
+    'lean-v3': Layout(top_bin=54, image_symbols=11, name='lean-v3',
+                      progressive=True, orthogonal_training=True,
+                      spread_carriers=True),
+    # Sub-15 kHz. top_bin 39 = 14625 Hz, which clears 15 kHz with margin and
+    # fits inside anything that passes FM-radio bandwidth. 35 data carriers, so
+    # the full 2880-value colour picture needs 21 image symbols.
+    'mid-v3': Layout(top_bin=39, image_symbols=21, name='mid-v3',
+                     progressive=True, orthogonal_training=True,
+                     spread_carriers=True),
+    # Same band, header halved, for frame rate on a stable transport.
+    'mid-v3-fast': Layout(top_bin=39, image_symbols=21, name='mid-v3-fast',
+                          progressive=True, orthogonal_training=True,
+                          spread_carriers=True, header_split=True),
 }
 ALL_PRESETS = {**PRESETS, **V3_PRESETS}
 
@@ -289,10 +303,14 @@ def _fit_preamble(samples, at, scale, reach=.02, iterations=5, fast=True):
 def encode(values, layout, coder, absolute, index, count, stamp_ms=0, flags=0,
            headroom=.95):
     """One v3 packet: v2's body, a countable stereo preamble, correct level."""
-    if len(values) != coder.count or not np.isfinite(values).all():
+    # A coder that transmits fewer coefficients than it consumes (a truncating
+    # coder) has a different input length from its slot count, so validate
+    # against the input size it declares.
+    expected = getattr(coder, 'source_count', coder.count)
+    if len(values) != expected or not np.isfinite(values).all():
         raise ValueError('Expected one finite value per source coefficient')
-    if len(values) > layout.capacity:
-        raise ValueError(f'{len(values)} values exceed capacity {layout.capacity}')
+    if coder.count > layout.capacity:
+        raise ValueError(f'{coder.count} coefficients exceed capacity {layout.capacity}')
     carriers = layout.carriers
     data = np.searchsorted(carriers, layout.data_bins)
     pilots = np.searchsorted(carriers, layout.pilots)
