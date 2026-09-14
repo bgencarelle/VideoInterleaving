@@ -261,6 +261,7 @@ def do_live_receive(args):
     does not, and the newest complete picture wins.
     """
     import threading
+    import signal
     sd = sounddevice()
     if args.list_devices:
         print(sd.query_devices()); return
@@ -275,24 +276,35 @@ def do_live_receive(args):
     latest = {'result': None}
     lock = threading.Lock()
     errors = []
+    active = {'stream': None}
 
     def receive():
-        receiver = V3.Receiver(layout, coder)
-        channels = (0, 1) if args.channels is None else args.channels
-        info = sd.query_devices(args.device, 'input')
-        count = max(channels)+1
-        if count > int(info['max_input_channels']):
-            errors.append(ValueError('Selected input channels unavailable'))
-            return
         try:
+            receiver = V3.Receiver(layout, coder)
+            channels = (0, 1) if args.channels is None else args.channels
+            info = sd.query_devices(args.device, 'input')
+            count = max(channels)+1
+            if count > int(info['max_input_channels']):
+                raise ValueError('Selected input channels unavailable')
             with sd.InputStream(samplerate=RATE, channels=count, dtype='float32',
                                 device=args.device, blocksize=256) as stream:
+                active['stream'] = stream
+                if not args.silent:
+                    print(f'Listening on {info["name"]}: {args.preset}, '
+                          f'{args.profile}, channels {channels[0]+1},{channels[1]+1}',
+                          file=sys.stderr, flush=True)
                 seen = 0
+                overflows = 0
+                last_summary = time.monotonic()
+                peak = 0.0
                 while not stop.is_set():
                     audio, overflowed = stream.read(256)
+                    audio = np.asarray(audio)[:, channels]
+                    peak = max(peak, float(np.max(np.abs(audio))))
                     if overflowed:
+                        overflows += 1
                         receiver.reset(preserve_timing=True)
-                    for r in receiver.feed(np.asarray(audio)[:, channels]):
+                    for r in receiver.feed(audio):
                         seen += 1
                         if verbose:
                             print(json.dumps(record(r)), flush=True)
@@ -304,9 +316,18 @@ def do_live_receive(args):
                                         else f'x{seen:06d}')
                                 values_image(r.values, coder.shapes).save(
                                     Path(args.save_frames)/f'frame_{name}.png')
+                    now = time.monotonic()
+                    if not args.silent and now-last_summary >= args.summary_seconds:
+                        print(json.dumps({'receiver_packets': seen,
+                                          'input_overflows': overflows,
+                                          'input_peak': round(peak, 6)}),
+                              file=sys.stderr, flush=True)
+                        last_summary, peak = now, 0.0
         except Exception as exc:
-            errors.append(exc)
+            if not stop.is_set():
+                errors.append(exc)
         finally:
+            active['stream'] = None
             # Always release the main loop. Catching only Exception meant a
             # thread that died any other way -- a closed device, SystemExit
             # from a shutting-down host -- left --headless spinning forever
@@ -314,56 +335,81 @@ def do_live_receive(args):
             stop.set()
 
     thread = threading.Thread(target=receive, daemon=True)
-    thread.start()
-    if args.headless:
-        try:
-            while not stop.is_set():
-                time.sleep(.5)
-        except KeyboardInterrupt:
-            stop.set()
-    else:
-        import tkinter as tk
-        from PIL import ImageTk
-        size = (args.width, args.height)
-        root = tk.Tk()
-        root.title('v3 stereo image receiver')
-        initial = ImageTk.PhotoImage(Image.new('RGB', size, 'black'))
-        label = tk.Label(root, background='black', image=initial)
-        label.image = initial
-        label.pack()
-        status = tk.Label(root, text='Waiting for signal', width=1, height=2,
-                          anchor='w', justify='left', wraplength=size[0]-12)
-        status.pack(fill='x', padx=6)
+    previous_sigint = signal.signal(signal.SIGINT, lambda signum, frame: stop.set())
+    try:
+        thread.start()
+        if args.headless:
+            try:
+                while not stop.is_set():
+                    time.sleep(.5)
+            except KeyboardInterrupt:
+                stop.set()
+        else:
+            import tkinter as tk
+            from PIL import ImageTk
+            size = (args.width, args.height)
+            root = tk.Tk()
+            def callback_error(exc_type, exc, traceback):
+                # A Tk callback exception otherwise leaves the first picture on
+                # screen forever because refresh never schedules its next call.
+                errors.append(exc)
+                stop.set()
+                root.destroy()
+            root.report_callback_exception = callback_error
+            root.title('v3 stereo image receiver')
+            initial = ImageTk.PhotoImage(Image.new('RGB', size, 'black'))
+            label = tk.Label(root, background='black', image=initial)
+            label.image = initial
+            label.pack()
+            status = tk.Label(root, text='Waiting for signal', width=1, height=2,
+                              anchor='w', justify='left', wraplength=size[0]-12)
+            status.pack(fill='x', padx=6)
 
-        def close():
-            stop.set(); root.destroy()
-        root.protocol('WM_DELETE_WINDOW', close)
+            def close():
+                stop.set(); root.destroy()
+            root.protocol('WM_DELETE_WINDOW', close)
+            root.bind('<Escape>', lambda event: close())
+            root.bind('<q>', lambda event: close())
+            root.bind('<Q>', lambda event: close())
 
-        def refresh():
-            with lock:
-                r = latest['result']
-                latest['result'] = None
-            if r is not None and r.values is not None:
-                canvas = Image.new('RGB', size, 'black')
-                scaled = ImageOps.contain(values_image(r.values, coder.shapes),
-                                          size, Image.Resampling.NEAREST)
-                canvas.paste(scaled, ((size[0]-scaled.width)//2,
-                                      (size[1]-scaled.height)//2))
-                label.image.paste(canvas)
-                folders = ('?' if r.face_folder is None
-                           else f'{r.face_folder}/{r.float_folder}')
-                status.config(
-                    text=f'Frame {r.absolute} | src {r.source_index}/{r.count} '
-                         f'| folders {folders}\n{r.status} | {r.identity} '
-                         f'| tier {r.tier} | {r.extra.get("acquisition_path","?")}')
-            if not stop.is_set():
-                root.after(10, refresh)
-        refresh()
+            def refresh():
+                if stop.is_set():
+                    root.destroy()
+                    return
+                with lock:
+                    r = latest['result']
+                    latest['result'] = None
+                if r is not None and r.values is not None:
+                    canvas = Image.new('RGB', size, 'black')
+                    scaled = ImageOps.contain(values_image(r.values, coder.shapes),
+                                              size, Image.Resampling.NEAREST)
+                    canvas.paste(scaled, ((size[0]-scaled.width)//2,
+                                          (size[1]-scaled.height)//2))
+                    label.image.paste(canvas)
+                    folders = ('?' if r.face_folder is None
+                               else f'{r.face_folder}/{r.float_folder}')
+                    status.config(
+                        text=f'Frame {r.absolute} | src {r.source_index}/{r.count} '
+                             f'| folders {folders}\n{r.status} | {r.identity} '
+                             f'| tier {r.tier} | {r.extra.get("acquisition_path","?")}')
+                if not stop.is_set():
+                    root.after(10, refresh)
+            refresh()
+            try:
+                root.mainloop()
+            finally:
+                stop.set()
+    finally:
+        stop.set()
         try:
-            root.mainloop()
+            if thread.ident is not None:
+                thread.join(timeout=1)
+                stream = active['stream']
+                if thread.is_alive() and stream is not None:
+                    stream.abort()
+                    thread.join(timeout=1)
         finally:
-            stop.set()
-            thread.join(timeout=1)
+            signal.signal(signal.SIGINT, previous_sigint)
     if errors:
         raise SystemExit(str(errors[0]))
 
@@ -406,6 +452,8 @@ def main(argv=None):
     ls.add_argument('--list-devices', action='store_true')
     lr = sub.add_parser('live-receive')
     lr.add_argument('--preset', choices=list(PRESETS), default='wide-v3')
+    lr.add_argument('--profile', choices=['color', 'color-lean', 'detail', 'mono'],
+                    default='color', help='Must match the sender profile')
     lr.add_argument('--receiver', choices=('v3',), default='v3',
                     help='Kept for argument parity with v2; v3 has one receiver')
     lr.add_argument('--device', type=device)

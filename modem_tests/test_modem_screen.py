@@ -351,3 +351,363 @@ class DeviceLoopTests(unittest.TestCase):
         self.assertTrue(all(g.identity == 'verified_header' for g in got))
         for g in got:
             self.assertGreater(float(np.std(g.values)), .01)
+
+
+class LiveCaptureRegressionTests(unittest.TestCase):
+    def test_device_parser_accepts_already_parsed_indices(self):
+        from animation_modem.audio_common import device
+        for value, expected in [('02', 2), ('0', 0), (2, 2), (0, 0),
+                                ('BlackHole 2ch', 'BlackHole 2ch'), (None, None)]:
+            with self.subTest(value=value):
+                self.assertEqual(device(device(value)), expected)
+
+    def test_numeric_device_reaches_output(self):
+        from unittest.mock import patch
+        out = DeviceLoopTests.FakeOutput()
+        with patch.object(modem_screen, 'PacketOutput', return_value=out) as output:
+            modem_screen.main(['--source', 'test', '--device', '02', '--frames', '1'])
+        self.assertEqual(output.call_args.args[0], 2)
+        self.assertEqual(len(out.sent), 1)
+
+    def test_screen_capture_and_cleanup_share_worker_thread(self):
+        import threading
+        import types
+        from unittest.mock import patch
+        calls = []
+        captured = threading.Event()
+
+        class FakeMSS:
+            monitors = [None, {}]
+
+            def __init__(self):
+                calls.append(('open', threading.get_ident()))
+
+            def grab(self, mon):
+                calls.append(('grab', threading.get_ident()))
+                if sum(name == 'grab' for name, _ in calls) >= 2:
+                    captured.set()
+                return types.SimpleNamespace(raw=bytes([1, 2, 3, 255]), height=1, width=1)
+
+            def close(self):
+                calls.append(('close', threading.get_ident()))
+
+        with patch.dict('sys.modules', {'mss': types.SimpleNamespace(MSS=FakeMSS)}):
+            grab = modem_screen.Throttled(modem_screen.screen_source(), 100)
+            try:
+                self.assertTrue(captured.wait(2))
+                np.testing.assert_array_equal(grab(), [[[3, 2, 1]]])
+            finally:
+                grab.close()
+        self.assertEqual(calls[-1][0], 'close')
+        self.assertEqual(len({ident for _, ident in calls}), 1)
+        self.assertNotEqual(calls[0][1], threading.get_ident())
+
+    def test_startup_failure_is_reported(self):
+        def fail():
+            raise ValueError('camera unavailable')
+        with self.assertRaisesRegex(RuntimeError, 'camera unavailable'):
+            modem_screen.Throttled(fail, 30)
+
+    def test_background_failure_is_reported_instead_of_freezing(self):
+        import threading
+        release = threading.Event()
+        calls = 0
+
+        def source():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return np.zeros((1, 1, 3), np.uint8)
+            release.wait(2)
+            raise ValueError('capture disconnected')
+
+        grab = modem_screen.Throttled(source, 100)
+        try:
+            release.set()
+            grab._thread.join(2)
+            with self.assertRaisesRegex(RuntimeError, 'capture disconnected'):
+                grab()
+        finally:
+            grab.close()
+
+    def test_ffmpeg_failure_does_not_generate_black_frames(self):
+        import types
+        from unittest.mock import patch
+        proc = types.SimpleNamespace(stdout=io.BytesIO(b''), poll=lambda: 0)
+        with patch.object(modem_screen.shutil, 'which', return_value='/usr/bin/ffmpeg'), \
+             patch.object(modem_screen.subprocess, 'Popen', return_value=proc) as popen:
+            grab = modem_screen.camera_source()
+        self.assertTrue(popen.call_args.kwargs['start_new_session'])
+        try:
+            with self.assertRaisesRegex(RuntimeError, 'FFmpeg capture ended'):
+                grab()
+        finally:
+            grab.close()
+
+
+class CameraRateTests(unittest.TestCase):
+    def test_camera_uses_supported_default_and_honors_override(self):
+        from unittest.mock import patch
+        for flags, expected in [([], 30), (['--capture-fps', '15'], 15)]:
+            args = modem_screen.parser().parse_args(['--source', 'camera'] + flags)
+            with patch.object(modem_screen, 'camera_source') as camera:
+                modem_screen.source_for(args, 17.34)
+            self.assertEqual(camera.call_args.args[1], expected)
+
+    def test_camera_pipe_is_drained_at_capture_rate(self):
+        from unittest.mock import patch
+        frame = np.zeros((10, 10, 3), np.uint8)
+        for flags, expected in [([], 30), (['--capture-fps', '15'], 15)]:
+            with patch.object(modem_screen, 'source_for', return_value=lambda: frame), \
+                 patch.object(modem_screen, 'Throttled') as throttle, \
+                 patch.object(modem_screen, 'to_device'):
+                modem_screen.main(['--source', 'camera', '--frames', '1'] + flags)
+            self.assertEqual(throttle.call_args.args[1], expected)
+
+
+class CapturePipeTests(unittest.TestCase):
+    def test_ppm_short_reads_and_frame_boundaries(self):
+        class ShortReads(io.BytesIO):
+            def read(self, count=-1):
+                return super().read(min(count, 7))
+
+        frames = [np.full((24, 32, 3), n, np.uint8) for n in (10, 32, 255)]
+        stream = ShortReads(b''.join(b'P6\n32 24\n255\n'+f.tobytes() for f in frames))
+        for expected in frames:
+            np.testing.assert_array_equal(modem_screen._read_ppm(stream), expected)
+        with self.assertRaisesRegex(RuntimeError, 'FFmpeg capture ended'):
+            modem_screen._read_ppm(stream)
+
+    def test_stalled_capture_is_not_silently_repeated(self):
+        from unittest.mock import patch
+        grab = modem_screen.Throttled(lambda: np.zeros((2, 2, 3), np.uint8), 30)
+        grab.close()
+        with patch.object(modem_screen.time, 'monotonic', return_value=grab._updated+6):
+            with self.assertRaisesRegex(RuntimeError, 'Capture stalled'):
+                grab()
+
+    def test_ffmpeg_preserves_aspect_and_delivers_changing_frames(self):
+        import shutil
+        if not shutil.which('ffmpeg'):
+            self.skipTest('ffmpeg not installed')
+        with tempfile.TemporaryDirectory() as d:
+            for width, height in ((80, 60), (60, 80), (96, 54)):
+                for n in range(12):
+                    frame = np.full((height, width, 3), 20+n*15, np.uint8)
+                    Image.fromarray(frame).save(Path(d)/f'f{n:03d}.png')
+                grab = modem_screen.ffmpeg_source(f'image2:{d}/f%03d.png', 30, width=96)
+                try:
+                    frames = [grab() for _ in range(12)]
+                    for n, frame in enumerate(frames):
+                        self.assertAlmostEqual(frame.shape[1]/frame.shape[0], width/height,
+                                               delta=.02)
+                        self.assertAlmostEqual(float(frame.mean()), 20+n*15, delta=1)
+                    with self.assertRaisesRegex(RuntimeError, 'FFmpeg capture ended'):
+                        grab()
+                finally:
+                    grab.close()
+                    grab.proc.stdout.close()
+
+
+class CaptureTimingTests(unittest.TestCase):
+    def test_timestamp_gaps_do_not_duplicate_the_first_frame(self):
+        import shutil
+        from unittest.mock import patch
+        if not shutil.which('ffmpeg'):
+            self.skipTest('ffmpeg not installed')
+        real_popen = subprocess.Popen
+
+        def gapped_input(cmd, **kwargs):
+            cmd = list(cmd)
+            at = cmd.index('-vf')+1
+            cmd[at] += ',setpts=100*PTS'
+            return real_popen(cmd, **kwargs)
+
+        with tempfile.TemporaryDirectory() as d:
+            for n in range(8):
+                Image.new('RGB', (32, 24), (n*25, 0, 0)).save(Path(d)/f'f{n:03d}.png')
+            with patch.object(modem_screen.subprocess, 'Popen', side_effect=gapped_input):
+                grab = modem_screen.ffmpeg_source(f'image2:{d}/f%03d.png', 30, width=32)
+            try:
+                for n in range(8):
+                    self.assertAlmostEqual(float(grab()[:, :, 0].mean()), n*25, delta=1)
+                with self.assertRaisesRegex(RuntimeError, 'FFmpeg capture ended'):
+                    grab()
+            finally:
+                grab.close()
+                grab.proc.stdout.close()
+            self.assertIsNotNone(grab.proc.poll())
+
+    def test_shutdown_unblocks_capture_and_reaps_child(self):
+        from unittest.mock import patch
+        import sys
+        real_popen = subprocess.Popen
+        # Emit one complete image, then block forever like a stalled camera.
+        code = "import sys,time; sys.stdout.buffer.write(b'P6\\n1 1\\n255\\nabc'); sys.stdout.buffer.flush(); time.sleep(60)"
+
+        def blocked_camera(cmd, **kwargs):
+            return real_popen([sys.executable, '-c', code], **kwargs)
+
+        with patch.object(modem_screen.shutil, 'which', return_value='ffmpeg'), \
+             patch.object(modem_screen.subprocess, 'Popen', side_effect=blocked_camera):
+            raw = modem_screen.camera_source()
+        capture = modem_screen.Throttled(raw, 30)
+        capture.close()
+        capture.close()  # cleanup is idempotent
+        self.assertFalse(capture._thread.is_alive())
+        self.assertIsNotNone(raw.proc.poll())
+        self.assertTrue(raw.proc.stdout.closed)
+
+
+class LiveCaptureRegressionTests(unittest.TestCase):
+    def test_device_parser_accepts_already_parsed_indices(self):
+        from animation_modem.audio_common import device
+        for value, expected in [('02', 2), ('0', 0), (2, 2), (0, 0),
+                                ('BlackHole 2ch', 'BlackHole 2ch'), (None, None)]:
+            with self.subTest(value=value):
+                self.assertEqual(device(device(value)), expected)
+
+    def test_numeric_device_reaches_output(self):
+        from unittest.mock import patch
+        out = DeviceLoopTests.FakeOutput()
+        with patch.object(modem_screen, 'PacketOutput', return_value=out) as output:
+            modem_screen.main(['--source', 'test', '--device', '02', '--frames', '1'])
+        self.assertEqual(output.call_args.args[0], 2)
+        self.assertEqual(len(out.sent), 1)
+
+    def test_screen_capture_and_cleanup_share_worker_thread(self):
+        import threading
+        import types
+        from unittest.mock import patch
+        calls = []
+        captured = threading.Event()
+
+        class FakeMSS:
+            monitors = [None, {}]
+
+            def __init__(self):
+                calls.append(('open', threading.get_ident()))
+
+            def grab(self, mon):
+                calls.append(('grab', threading.get_ident()))
+                if sum(name == 'grab' for name, _ in calls) >= 2:
+                    captured.set()
+                return types.SimpleNamespace(raw=bytes([1, 2, 3, 255]), height=1, width=1)
+
+            def close(self):
+                calls.append(('close', threading.get_ident()))
+
+        with patch.dict('sys.modules', {'mss': types.SimpleNamespace(MSS=FakeMSS)}):
+            grab = modem_screen.Throttled(modem_screen.screen_source(), 100)
+            try:
+                self.assertTrue(captured.wait(2))
+                np.testing.assert_array_equal(grab(), [[[3, 2, 1]]])
+            finally:
+                grab.close()
+        self.assertEqual(calls[-1][0], 'close')
+        self.assertEqual(len({ident for _, ident in calls}), 1)
+        self.assertNotEqual(calls[0][1], threading.get_ident())
+
+    def test_startup_failure_is_reported(self):
+        def fail():
+            raise ValueError('camera unavailable')
+        with self.assertRaisesRegex(RuntimeError, 'camera unavailable'):
+            modem_screen.Throttled(fail, 30)
+
+    def test_background_failure_is_reported_instead_of_freezing(self):
+        import threading
+        release = threading.Event()
+        calls = 0
+
+        def source():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return np.zeros((1, 1, 3), np.uint8)
+            release.wait(2)
+            raise ValueError('capture disconnected')
+
+        grab = modem_screen.Throttled(source, 100)
+        try:
+            release.set()
+            grab._thread.join(2)
+            with self.assertRaisesRegex(RuntimeError, 'capture disconnected'):
+                grab()
+        finally:
+            grab.close()
+
+    def test_ffmpeg_failure_does_not_generate_black_frames(self):
+        import types
+        from unittest.mock import patch
+        proc = types.SimpleNamespace(stdout=io.BytesIO(b''))
+        with patch.object(modem_screen.shutil, 'which', return_value='/usr/bin/ffmpeg'), \
+             patch.object(modem_screen.subprocess, 'Popen', return_value=proc) as popen:
+            grab = modem_screen.camera_source()
+        self.assertIsNone(popen.call_args.kwargs['stderr'])
+        with self.assertRaisesRegex(RuntimeError, 'FFmpeg capture ended'):
+            grab()
+
+
+class CameraRateTests(unittest.TestCase):
+    def test_camera_uses_supported_default_and_honors_override(self):
+        from unittest.mock import patch
+        for flags, expected in [([], 30), (['--capture-fps', '15'], 15)]:
+            args = modem_screen.parser().parse_args(['--source', 'camera'] + flags)
+            with patch.object(modem_screen, 'camera_source') as camera:
+                modem_screen.source_for(args, 17.34)
+            self.assertEqual(camera.call_args.args[1], expected)
+
+    def test_camera_pipe_is_drained_at_capture_rate(self):
+        from unittest.mock import patch
+        frame = np.zeros((10, 10, 3), np.uint8)
+        for flags, expected in [([], 30), (['--capture-fps', '15'], 15)]:
+            with patch.object(modem_screen, 'source_for', return_value=lambda: frame), \
+                 patch.object(modem_screen, 'Throttled') as throttle, \
+                 patch.object(modem_screen, 'to_device'):
+                modem_screen.main(['--source', 'camera', '--frames', '1'] + flags)
+            self.assertEqual(throttle.call_args.args[1], expected)
+
+
+class CapturePipeTests(unittest.TestCase):
+    def test_ppm_short_reads_and_frame_boundaries(self):
+        class ShortReads(io.BytesIO):
+            def read(self, count=-1):
+                return super().read(min(count, 7))
+
+        frames = [np.full((24, 32, 3), n, np.uint8) for n in (10, 32, 255)]
+        stream = ShortReads(b''.join(b'P6\n32 24\n255\n'+f.tobytes() for f in frames))
+        for expected in frames:
+            np.testing.assert_array_equal(modem_screen._read_ppm(stream), expected)
+        with self.assertRaisesRegex(RuntimeError, 'FFmpeg capture ended'):
+            modem_screen._read_ppm(stream)
+
+    def test_stalled_capture_is_not_silently_repeated(self):
+        from unittest.mock import patch
+        grab = modem_screen.Throttled(lambda: np.zeros((2, 2, 3), np.uint8), 30)
+        grab.close()
+        with patch.object(modem_screen.time, 'monotonic', return_value=grab._updated+6):
+            with self.assertRaisesRegex(RuntimeError, 'Capture stalled'):
+                grab()
+
+    def test_ffmpeg_preserves_aspect_and_delivers_changing_frames(self):
+        import shutil
+        if not shutil.which('ffmpeg'):
+            self.skipTest('ffmpeg not installed')
+        with tempfile.TemporaryDirectory() as d:
+            for width, height in ((80, 60), (60, 80), (96, 54)):
+                for n in range(12):
+                    frame = np.full((height, width, 3), 20+n*15, np.uint8)
+                    Image.fromarray(frame).save(Path(d)/f'f{n:03d}.png')
+                grab = modem_screen.ffmpeg_source(f'image2:{d}/f%03d.png', 30, width=96)
+                try:
+                    frames = [grab() for _ in range(12)]
+                    for n, frame in enumerate(frames):
+                        self.assertAlmostEqual(frame.shape[1]/frame.shape[0], width/height,
+                                               delta=.02)
+                        self.assertAlmostEqual(float(frame.mean()), 20+n*15, delta=1)
+                    with self.assertRaisesRegex(RuntimeError, 'FFmpeg capture ended'):
+                        grab()
+                finally:
+                    grab.proc.terminate()
+                    grab.proc.wait(timeout=5)
+                    grab.proc.stdout.close()

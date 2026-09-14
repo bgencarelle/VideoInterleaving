@@ -5,7 +5,7 @@ from .core import PRESETS, RATE, N
 
 
 def device(value):
-    return int(value) if value and value.isdecimal() else value
+    return int(value) if isinstance(value, str) and value.isdecimal() else value
 
 
 def pair(value):

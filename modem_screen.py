@@ -40,6 +40,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -92,6 +93,24 @@ def _region(text):
     return parts
 
 
+def _read_ppm(stream):
+    """Read one self-describing RGB frame from FFmpeg's image2pipe output."""
+    if stream.readline() != b'P6\n':
+        raise RuntimeError('FFmpeg capture ended without a complete frame. '
+                           'See FFmpeg errors above; check the capture '
+                           'device, supported frame rate, and permissions.')
+    dimensions = stream.readline()
+    while dimensions.startswith(b'#'):
+        dimensions = stream.readline()
+    w, h = map(int, dimensions.split())
+    if w <= 0 or h <= 0 or stream.readline().strip() != b'255':
+        raise RuntimeError('Invalid RGB frame header from FFmpeg')
+    buf = _read_exact(stream, w*h*3)
+    if buf is None:
+        raise RuntimeError('FFmpeg capture ended partway through a frame')
+    return np.frombuffer(buf, np.uint8).reshape(h, w, 3)
+
+
 def screen_source(region=None):
     """Grab the screen through mss.
 
@@ -103,15 +122,22 @@ def screen_source(region=None):
         from mss import MSS as _MSS
     except ImportError:
         from mss import mss as _MSS
-    sct = _MSS()
-    mon = sct.monitors[1] if region is None else {
-        'left': region[0], 'top': region[1],
-        'width': region[2], 'height': region[3]}
+    sct = None
 
     def grab():
+        nonlocal sct
+        if sct is None:
+            sct = _MSS()
+        mon = sct.monitors[1] if region is None else {
+            'left': region[0], 'top': region[1],
+            'width': region[2], 'height': region[3]}
         shot = sct.grab(mon)
         raw = np.frombuffer(shot.raw, np.uint8).reshape(shot.height, shot.width, 4)
         return raw[:, :, 2::-1]          # BGRA -> RGB
+    def close():
+        if sct is not None:
+            sct.close()
+    grab.close = close
     return grab
 
 
@@ -122,22 +148,14 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320):
     ffmpeg uses avfoundation / x11grab / gdigrab and scales before handing the
     frame over, so Python receives a small RGB array and does no image work.
 
-    The output size is pinned so each frame is a known number of bytes; reading
-    it back from ffmpeg's stderr is fragile.
+    PPM frames carry their dimensions in the pipe. Scale by width and preserve
+    the actual input aspect, including for cameras unrelated to screen size.
     """
     if shutil.which('ffmpeg') is None:
         raise SystemExit('ffmpeg not found. brew install ffmpeg / apt install ffmpeg')
-    try:
-        import mss as _mss
-        with (_mss.MSS() if hasattr(_mss, 'MSS') else _mss.mss()) as _s:
-            mon = _s.monitors[1]
-            sw, sh = mon['width'], mon['height']
-    except Exception:
-        sw, sh = 1920, 1080
-    if region:
-        sw, sh = region[2], region[3]
     w = int(width)
-    h = max(2, int(round(w*sh/float(sw)))//2*2)
+    if w < 1:
+        raise ValueError('Capture width must be positive')
 
     if spec:
         fmt, src = spec.split(':', 1)
@@ -148,32 +166,64 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320):
     else:
         fmt, src = 'x11grab', os.environ.get('DISPLAY', ':0.0')
 
-    cmd = ['ffmpeg', '-loglevel', 'error', '-f', fmt,
+    cmd = ['ffmpeg', '-nostdin', '-loglevel', 'error', '-f', fmt,
            '-framerate', str(int(max(fps, 1)))]
     if fmt == 'x11grab' and region:
         cmd += ['-video_size', f'{region[2]}x{region[3]}',
                 '-i', f'{src}+{region[0]},{region[1]}']
     else:
         cmd += ['-i', src]
-    cmd += ['-vf', f'scale={w}:{h}', '-pix_fmt', 'rgb24',
-            '-f', 'rawvideo', '-an', '-sn', '-']
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL, bufsize=0)
-    nbytes = w*h*3
-    last = [np.zeros((h, w, 3), np.uint8)]
+    cmd += ['-vf', f'scale={w}:-1', '-pix_fmt', 'rgb24',
+            '-fps_mode', 'passthrough',
+            '-c:v', 'ppm', '-f', 'image2pipe', '-an', '-sn', '-']
+    # Device timestamps are not necessarily a constant-rate timeline. The
+    # default sync mode can emit thousands of duplicates to fill their gaps.
+    # This pipe needs exactly one image for each input frame.
+    errors = tempfile.TemporaryFile()
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                                stderr=errors, bufsize=0, start_new_session=True)
+    except BaseException:
+        errors.close()
+        raise
+    closed = threading.Event()
+    close_lock = threading.Lock()
 
     def grab():
-        buf = _read_exact(proc.stdout, nbytes)
-        if buf is None:
-            return last[0]
-        last[0] = np.frombuffer(buf, np.uint8).reshape(h, w, 3)
-        return last[0]
+        try:
+            return _read_ppm(proc.stdout)
+        except RuntimeError as exc:
+            with close_lock:
+                if closed.is_set():
+                    raise
+                errors.seek(0)
+                detail = errors.read().decode('utf-8', errors='replace').strip()
+            raise RuntimeError(f'{exc}\n{detail}' if detail else str(exc)) from exc
+
+    def close():
+        with close_lock:
+            if closed.is_set():
+                return
+            closed.set()
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=2)
+            finally:
+                errors.close()
+        # Closing stdout is left to the capture worker after its read exits.
+
     grab.proc = proc
-    grab.size = (w, h)
+    grab.close = close
+    grab.paced = True  # the device already paces the pipe; drain it continuously
     return grab
 
 
-def camera_source(index=0, fps=15, width=320, spec=None):
+def camera_source(index=0, fps=30, width=320, spec=None):
     """Webcam through ffmpeg, same reasoning as screen capture."""
     if sys.platform == 'darwin':
         spec = spec or f'avfoundation:{index}'
@@ -264,39 +314,72 @@ class Throttled:
 
     def __init__(self, grab, hz):
         self._grab = grab
-        self._latest = grab()
-        if self._latest is None:
-            raise SystemExit('Capture produced no frames')
+        self._latest = None
+        self._error = None
+        self._updated = None
+        self._ready = threading.Event()
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self.grabs = 0
         self._period = 1.0/max(hz, .1)
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+        try:
+            self._ready.wait()
+            self()
+        except BaseException:
+            self.close()
+            raise
 
     def _run(self):
-        while not self._stop.is_set():
-            began = time.perf_counter()
-            try:
+        try:
+            while not self._stop.is_set():
+                began = time.perf_counter()
                 frame = self._grab()
-            except Exception:
-                break
+                if frame is None:
+                    raise RuntimeError('Capture produced no frames')
+                with self._lock:
+                    self._latest = frame
+                    self._updated = time.monotonic()
+                    self.grabs += 1
+                self._ready.set()
+                rest = self._period-(time.perf_counter()-began)
+                if rest > 0 and not getattr(self._grab, 'paced', False):
+                    self._stop.wait(rest)
+        except BaseException as exc:
             with self._lock:
-                self._latest = frame
-                self.grabs += 1
-            rest = self._period-(time.perf_counter()-began)
-            if rest > 0:
-                self._stop.wait(rest)
+                self._error = exc
+        finally:
+            self._ready.set()
+            if hasattr(self._grab, 'close'):
+                self._grab.close()
+            proc = getattr(self._grab, 'proc', None)
+            if proc is not None:
+                proc.stdout.close()
 
     def __call__(self):
         with self._lock:
+            if self._error is not None:
+                raise RuntimeError(f'Capture failed: {self._error}') from self._error
+            if self._updated is not None and time.monotonic()-self._updated > max(5, 3*self._period):
+                raise RuntimeError('Capture stalled: no new frame for over '
+                                   f'{max(5, 3*self._period):g} seconds')
             return self._latest
 
     def close(self):
         self._stop.set()
         proc = getattr(self._grab, 'proc', None)
         if proc is not None:
-            proc.terminate()
+            if hasattr(self._grab, 'close'):
+                self._grab.close()
+            else:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=2)
+        self._thread.join(timeout=2)
 
 
 # --------------------------------------------------------------------------
@@ -374,7 +457,7 @@ def source_for(args, fps):
         return ffmpeg_source(args.ffmpeg_input, args.capture_fps or fps,
                              region, args.display, args.capture_width)
     if args.source == 'camera':
-        return camera_source(args.camera, args.capture_fps or fps,
+        return camera_source(args.camera, args.capture_fps or 30,
                              args.capture_width, args.ffmpeg_input)
     if args.source == 'video':
         return video_source(args.file, not args.no_loop, realtime=not args.write)
@@ -484,8 +567,9 @@ def parser():
     ap.add_argument('--file', help='Video file for --source video')
     ap.add_argument('--no-loop', action='store_true', help='Play a file once')
     ap.add_argument('--capture-fps', type=int,
-                    help='Capture rate. Defaults to the wire rate; higher only '
-                         'costs CPU because the newest frame wins either way.')
+                    help='Capture rate. Defaults to 30 fps for cameras and the '
+                         'wire rate for other sources. Choose a rate supported '
+                         'by your capture device.')
     ap.add_argument('--capture-width', type=int, default=320,
                     help='Width ffmpeg scales to before Python sees the frame')
     ap.add_argument('--rotate', type=int, default=0, choices=(0, 90, 180, 270))
@@ -525,8 +609,9 @@ def main(argv=None):
     # Throttling exists so a slow capture cannot stall the audio callback and a
     # fast one cannot burn a core. Neither applies when rendering to a file, and
     # a throttle there would sample the same frame repeatedly.
+    capture_hz = args.capture_fps or (30 if args.source == 'camera' else layout.fps)
     grab = raw if (args.write and getattr(raw, 'sequential', False)) \
-        else Throttled(raw, args.capture_fps or layout.fps)
+        else Throttled(raw, capture_hz)
     print(f'{layout.describe()}')
     print(f'profile {args.profile}: {PROFILES[args.profile][0][0]}x'
           f'{PROFILES[args.profile][0][1]}, {coder.count} coefficients, '
@@ -544,4 +629,7 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print('\nStopped.', file=sys.stderr)
