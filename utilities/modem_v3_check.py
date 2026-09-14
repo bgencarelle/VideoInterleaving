@@ -50,7 +50,7 @@ import time
 import wave
 
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageFilter
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from animation_modem.live_picture import LivePicture

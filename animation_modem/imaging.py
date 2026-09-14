@@ -29,6 +29,7 @@ PROFILES = {
     'color-lean': ((40, 48), (10, 12)),
     'detail': ((48, 56), (8, 12)),
     'mono': ((48, 60), None),
+    'color-dct': ((80, 96), (40, 48))
 }
 DEFAULT_PROFILE = 'color'
 

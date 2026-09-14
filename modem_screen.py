@@ -54,7 +54,7 @@ import threading
 import time
 
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageEnhance
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 if ROOT_DIR not in sys.path:
@@ -65,7 +65,7 @@ from animation_modem.audio_common import (device, pair, pcm,      # noqa: E402
                                           wire_notice)
 from animation_modem.core import REFERENCE_RATE as RATE, SourceCoder  # noqa: E402
 from animation_modem.imaging import (PROFILES, burn_counters,     # noqa: E402
-                                     fit_shapes, image_values, plane_shapes)
+                                     fit_shapes, image_values, image_values_dct, plane_shapes)
 from animation_modem.playback import PacketOutput                 # noqa: E402
 
 
@@ -441,8 +441,17 @@ def fitter(profile, rotate=0, mirror=False, letterbox=True):
         if mirror:
             im = ImageOps.mirror(im)
         if letterbox:
-            return ImageOps.pad(im, size, Image.LANCZOS, color=(4, 4, 4))
-        return ImageOps.fit(im, size, Image.LANCZOS)
+            im = ImageOps.pad(im, size, Image.LANCZOS, color=(1, 1, 1))
+        else:
+            im = im.resize(size, Image.LANCZOS)
+
+        # Color enhancements to sharpen outlines before DCT frequency truncation
+        im = ImageEnhance.Color(im).enhance(1.2)
+        im = ImageEnhance.Contrast(im).enhance(1.1)
+        im = ImageEnhance.Brightness(im).enhance(1.1)
+
+        return im
+
     return prepare
 
 
@@ -472,6 +481,9 @@ def build(args):
 
 def source_for(args, fps):
     region = _region(args.region)
+    if args.source == 'mouse-follow':
+        from mouse_follow import mouse_follow_source
+        return mouse_follow_source(initial_width=args.capture_width)
     if args.source == 'screen':
         return screen_source(region)
     if args.source == 'ffmpeg':
@@ -577,10 +589,10 @@ def parser():
     """
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--source', choices=('screen', 'ffmpeg', 'video', 'camera', 'test'),
+    ap.add_argument('--source', choices=('screen', 'ffmpeg', 'video', 'camera', 'test', 'mouse-follow'),
                     default='test',
-                    help='screen = mss (simple, slow on macOS); ffmpeg = the '
-                         'platform fast path; camera = webcam; test = no devices')
+                    help='screen = mss (simple, slow on macOS); ffmpeg = platform fast path; '
+                         'camera = webcam; test = no devices; mouse-follow = dynamic cursor tracking')
     ap.add_argument('--preset', choices=list(V3.ALL_PRESETS), default='lean-v3')
     ap.add_argument('--profile', choices=list(PROFILES), default='color-lean')
     ap.add_argument('--device', type=device, help='Audio output device')
