@@ -51,7 +51,8 @@ from .core import (REFERENCE_RATE, N, CP, SYMBOL, SYNC_LEN, GUARD, HEADER_GAIN,
                          phases, pack_header, pack_folders, decode_packet,
                          default_allocation, resample_packet, _sample_at,
                          _body_walk, _decode_tables, FOLDER_LIMIT,
-                         band_limited, emit_length, emit_ratio)
+                         band_limited, emit_length, emit_ratio,
+                         PROFILE_CODES, profile_code, profile_name)
 
 # --------------------------------------------------------------------------
 # Preamble
@@ -371,8 +372,15 @@ def _fit_preamble(samples, at, scale, reach=.02, iterations=5, fast=True):
 # --------------------------------------------------------------------------
 
 def encode(values, layout, coder, absolute, index, count, stamp_ms=0, flags=0,
-           headroom=.95):
-    """One v3 packet: v2's body, a countable stereo preamble, correct level."""
+           headroom=.95, profile=0):
+    """One v3 packet: v2's body, a countable stereo preamble, correct level.
+
+    `profile` is the picture geometry's wire code, from `profile_code`. It goes
+    in the two spare bits of the header's top_bin byte, so a receiver holding
+    the matching coders reconstructs whatever is sent without being told
+    separately. Declaring it wrong is worse than not declaring it: the receiver
+    will believe the header over its own assumption.
+    """
     # A coder that transmits fewer coefficients than it consumes (a truncating
     # coder) has a different input length from its slot count, so validate
     # against the input size it declares.
@@ -405,7 +413,8 @@ def encode(values, layout, coder, absolute, index, count, stamp_ms=0, flags=0,
         grid[1, :, 1] = 1
 
     raw = pack_header(flags, layout.top_bin, absolute, index, count, stamp_ms,
-                      magic=MAGIC if layout.progressive else b'V2')
+                      magic=MAGIC if layout.progressive else b'V2',
+                      profile=profile)
     bits = np.unpackbits(np.frombuffer(raw, np.uint8)).reshape(HEADER_SLOTS, 2)
     qpsk = ((bits[:, 0]*2.-1) + 1j*(bits[:, 1]*2.-1))/np.sqrt(2)
     if layout.header_split:
@@ -468,7 +477,7 @@ class Receiver:
 
     def __init__(self, layout, coder, threshold=.4, rate_window=None,
                  min_speed=.25, max_speed=2.0, recovery=False, fast=True,
-                 pulse_only=True, input_rate=None):
+                 pulse_only=True, input_rate=None, coders=None, candidates=None):
         """`input_rate` is reported by the open device; it is never requested.
 
         Decoding itself does not use it. Timing comes from preamble edges, in
@@ -489,6 +498,20 @@ class Receiver:
         if coder.count > layout.capacity:
             raise ValueError('Source coder exceeds layout capacity')
         self.layout, self.coder, self.threshold = layout, coder, threshold
+        # Profile code -> coder. With it, the picture geometry follows what the
+        # transmitter declares in each header rather than a launch argument.
+        self.coders = dict(coders) if coders else None
+        # (layout, coder, coders) triples to identify the sender's preset by
+        # trying them. Preset cannot be signalled the way profile is: the
+        # header carries top_bin, but you need the layout to know where the
+        # header IS, so reading it first is circular. The preamble is the one
+        # part that does not depend on the layout, so acquisition still works
+        # -- and from there the CRC decides, at 1.4 ms an attempt, once.
+        self.candidates = sorted(candidates or [], key=lambda c: c[0].packet)
+        for cand, cand_coder, _ in self.candidates:
+            if cand_coder.count > cand.capacity:
+                raise ValueError(f'Coder exceeds {cand.name} capacity')
+        self.detected = None
         self.recovery = bool(recovery)
         self.fast = bool(fast)
         self.pulse_only = bool(pulse_only)
@@ -680,6 +703,47 @@ class Receiver:
     def flush(self):
         return self._drain(final=True)
 
+    def _demodulate(self, begin, scale, layout, coder, coders):
+        """One decode attempt at a given layout. Returns (result, taps)."""
+        taps = 0
+        if scale == 1 and begin == int(begin) and begin >= 0:
+            packet = self.buffer[int(begin):int(begin)+layout.packet]
+            body = packet[SYNC_LEN:].reshape(layout.symbols, SYMBOL, 2)[:, CP-4:CP-4+N]
+        else:
+            # Faster playback moves surviving carriers toward input Nyquist,
+            # where the short interpolator has phase-dependent attenuation.
+            # Use a longer kernel only when it is needed.
+            highest = layout.top_bin/N/scale
+            taps = 32 if highest > .44 else 8
+            body = _sample_at(self.buffer, begin+_body_walk(layout)*scale, taps=taps)
+            body = body.reshape(layout.symbols, N, 2)
+        return decode_packet(None, layout, coder, body=body, coders=coders), taps
+
+    def _identify(self, begin, scale):
+        """Decode, working out which preset is on the wire if asked to.
+
+        Tried shortest packet first, and only the ones the buffer can already
+        hold. The header CRC decides: a wrong layout reshapes the body wrongly,
+        so the 32-bit check fails on top of a magic and a top_bin that also
+        have to agree. Once one verifies it is adopted and every later packet
+        takes the single-layout path, so the search is paid once per lock, not
+        per frame.
+        """
+        if not self.candidates or self.detected is not None:
+            return self._demodulate(begin, scale, self.layout, self.coder, self.coders)
+        room = len(self.buffer)-begin
+        for layout, coder, coders in self.candidates:
+            if (layout.packet-1)*scale+1 > room:
+                break                     # sorted by length; the rest are longer
+            result, taps = self._demodulate(begin, scale, layout, coder, coders)
+            if result.identity == 'verified_header':
+                self.layout, self.coder, self.coders = layout, coder, coders
+                self.detected = layout.name
+                return result, taps
+        # Nothing verified. Fall back to the layout this receiver was built
+        # with, so an unidentifiable packet fails exactly as it does today.
+        return self._demodulate(begin, scale, self.layout, self.coder, self.coders)
+
     def _drain(self, final=False):
         import time
         out = []
@@ -704,23 +768,17 @@ class Receiver:
                 self.search_after = SYNC_LEN
                 self.pending = (at-16*scale, scale, score)
             begin, scale, score = self.pending
-            end = begin + (self.layout.packet-1)*scale + 1
+            # While the preset is still unknown every candidate has to be
+            # reachable, so wait for the longest. One lock's worth of extra
+            # latency, then never again.
+            longest = (self.candidates[-1][0].packet
+                       if self.candidates and self.detected is None
+                       else self.layout.packet)
+            end = begin + (longest-1)*scale + 1
             if len(self.buffer) < end - (2 if final else 0):
                 break
             started = time.perf_counter()
-            taps = 0
-            if scale == 1 and begin == int(begin) and begin >= 0:
-                packet = self.buffer[int(begin):int(begin)+self.layout.packet]
-                body = packet[SYNC_LEN:].reshape(self.layout.symbols, SYMBOL, 2)[:, CP-4:CP-4+N]
-            else:
-                # Faster playback moves surviving carriers toward input
-                # Nyquist, where the short interpolator has phase-dependent
-                # attenuation. Use a longer kernel only when it is needed.
-                highest = self.layout.top_bin/N/scale
-                taps = 32 if highest > .44 else 8
-                body = _sample_at(self.buffer, begin+_body_walk(self.layout)*scale, taps=taps)
-                body = body.reshape(self.layout.symbols, N, 2)
-            result = decode_packet(None, self.layout, self.coder, body=body)
+            result, taps = self._identify(begin, scale)
             result.rate_error = scale-1
             result.rate_confidence = score
             result.extra.update(sync_score=score, at=self.offset+begin,
@@ -738,7 +796,7 @@ class Receiver:
                                 # rate, which is why this was safe to hardcode
                                 # for as long as the rate was being demanded.
                                 playback_speed=self.clock/scale,
-                                resample_taps=taps,
+                                preset=self.layout.name, resample_taps=taps,
                                 decode_ms=(time.perf_counter()-started)*1000,
                                 acquire_ms=self.acquire_ms)
             if self.input_rate is not None:

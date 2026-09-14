@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Fixed-format v3 image/audio link.
+"""Self-describing v3 image/audio link.
 
-Stereo, wide layout, color 40x48 luma plus 20x24 chroma, 2880 values,
-deterministic built-in allocation, 16-byte CRC header.
+Stereo, deterministic built-in allocation, 16-byte CRC header. Nothing about
+the format has to be named at both ends: the receiver takes the sample rate
+from its device, the picture geometry from the header, and the wire layout by
+decoding against each candidate until one verifies.
 
 No sample rate is requested of any device. Streams open at whatever rate the
 device is already set to, and the rate they report is read back and used for
@@ -26,9 +28,18 @@ How acquisition works:
 * The preamble is on both channels, and `encode` normalises up as well as
   down so the payload uses the available headroom.
 
-Presets are not interchangeable: orthogonal training and header placement are
-part of the wire format, so transmitter and receiver must name the same one. A
-mismatch reports "Nothing decoded" rather than producing a garbled picture.
+Neither preset nor profile has to be named at both ends any more.
+
+The profile rides in two spare header bits, so a receiver holding every coder
+reconstructs the geometry that was sent. The preset cannot be signalled that
+way -- you need the layout to know where the header is, which is circular --
+so it is identified instead: the preamble is layout-independent, so acquisition
+works regardless, and from there the receiver decodes against each candidate
+until the header CRC verifies, then pins that layout. One attempt costs 1.4 ms
+and is paid once per lock, not per frame.
+
+`--preset` and `--profile` on the receiving side are therefore only fallbacks
+for a packet whose header never verified.
 """
 import argparse
 from contextlib import closing
@@ -88,12 +99,53 @@ def frames_from(args, profile='color'):
 def coder_for(profile, allocation, layout):
     shapes = plane_shapes(profile)
     if sum(int(np.prod(s)) for s in shapes) > layout.capacity:
+        # Both ends run this same deterministic shrink, so a profile too big
+        # for the layout still agrees end to end -- the wire code names the
+        # profile, and the layout decides what fits.
         shapes = fit_shapes(shapes, layout.capacity)
     table = np.load(allocation) if allocation else None
     return V3.SourceCoder(shapes, table), shapes
 
 
-def receive_for(args, layout, coder, input_rate=None):
+def coders_for(layout, allocation=None):
+    """Every profile the wire can name, so a receiver can follow the header.
+
+    Built once at startup. The transmitter declares its geometry in two spare
+    header bits; holding all four coders is what lets that declaration mean
+    something instead of needing a matching argument on both ends.
+    """
+    return {V3.profile_code(name): coder_for(name, allocation, layout)[0]
+            for name in V3.PROFILE_CODES}
+
+
+def live_presets():
+    """Presets a v3 receiver can identify by trying them.
+
+    Only progressive layouts: the others are v2 wire format with a different
+    magic, so they are not candidates at all.
+    """
+    return [n for n, l in PRESETS.items() if l.progressive]
+
+
+def candidates_for(allocation=None):
+    """(layout, default coder, coders) for every preset worth trying.
+
+    Preset cannot be signalled in the header the way profile is -- you need
+    the layout to know where the header is -- so it is identified by decoding
+    against each candidate and letting the CRC decide. 28 coders cost 27 ms at
+    startup and one attempt costs 1.4 ms, paid once per lock rather than per
+    frame.
+    """
+    out = []
+    for name in live_presets():
+        layout = PRESETS[name]
+        coders = coders_for(layout, allocation)
+        out.append((layout, coders[V3.profile_code('color-lean')], coders))
+    return out
+
+
+def receive_for(args, layout, coder, input_rate=None, coders=None,
+                candidates=None):
     """The v3 receiver. Playback speed comes from biphase pulse timing.
 
     `input_rate` is whatever the source turned out to be running at -- an open
@@ -102,7 +154,8 @@ def receive_for(args, layout, coder, input_rate=None):
     seconds and hertz instead of samples and cycles per sample.
     """
     return V3.Receiver(layout, coder, recovery=False, fast=True,
-                       input_rate=input_rate)
+                       input_rate=input_rate, coders=coders,
+                       candidates=candidates)
 
 
 def _prepared(image, absolute, count, numbered=False):
@@ -145,7 +198,8 @@ def do_write(args):
             values = image_values(_prepared(im, n+1, len(frames), args.numbered),
                                   coder.shapes)
             audio = V3.encode(values, layout, coder, n+1, (n % len(frames))+1,
-                              len(frames), stamp_ms=n*int(1000/fps))
+                              len(frames), stamp_ms=n*int(1000/fps),
+                              profile=V3.profile_code(profile))
             sink.writeframesraw(pcm(audio*args.gain))
     seconds = len(frames)/fps
     print(f'wrote {len(frames)} frames, {seconds:.1f} s, peak gain {args.gain} -> {path}')
@@ -158,7 +212,9 @@ def do_read(args):
     # Read the file's rate; do not require one. A 44.1 kHz capture of a 48 kHz
     # transmission is a real recording, not a malformed one.
     rate = wav_rate(args.wav)
-    receiver = receive_for(args, layout, coder, input_rate=rate)
+    receiver = receive_for(args, layout, coder, input_rate=rate,
+                           coders=coders_for(layout, args.allocation),
+                           candidates=candidates_for(args.allocation))
     if rate != REFERENCE_RATE:
         print(f'{args.wav}: {rate} Hz, decoding at that rate', file=sys.stderr)
     if args.save_frames:
@@ -177,7 +233,7 @@ def do_read(args):
         print(json.dumps(record(r)), flush=True)
         if args.save_frames and r.values is not None:
             name = f'{r.absolute:06d}' if r.absolute is not None else f'x{seen:06d}'
-            values_image(r.values, coder.shapes).save(
+            values_image(r.values, r.extra.get('shapes', coder.shapes)).save(
                 Path(args.save_frames)/f'frame_{name}.png')
     if rates:
         speed = float(np.median(rates))
@@ -244,10 +300,13 @@ def do_live_send(args):
     if args.list_devices:
         print(sd.query_devices()); return
     frames, profile = frames_from(args)
-    if (args.preset, args.profile) != ('lean-v3', 'color-lean'):
-        raise SystemExit('Live transport uses lean-v3 / color-lean')
-    layout = PRESETS['lean-v3']
-    coder, _ = coder_for('color-lean', None, layout)
+    # Preset stays fixed -- it is wire format the receiver cannot negotiate.
+    # Profile is declared in the header, so any of them is live now.
+    if not PRESETS[args.preset].progressive:
+        raise SystemExit(f'{args.preset} is v2 wire format; live needs a '
+                         f'progressive preset')
+    layout = PRESETS[args.preset]
+    coder, _ = coder_for(profile, None, layout)
     state = {'packet': 0, 'position': 0, 'sent': 0}
     channels = args.channels
     packets = []
@@ -282,7 +341,8 @@ def do_live_send(args):
         packets.extend(V3.band_limited(V3.encode(image_values(
                            _prepared(im, n+1, len(frames), args.numbered), coder.shapes),
                        layout, coder, n+1, (n % len(frames))+1, len(frames),
-                       stamp_ms=n*int(1000/fps))*args.gain, rate)
+                       stamp_ms=n*int(1000/fps),
+                       profile=V3.profile_code(profile))*args.gain, rate)
                        for n, im in enumerate(frames))
         print(f'{len(packets)} packets ready, {fps:.2f} fps at {rate:g} Hz, '
               f'{emitted} samples each. Ctrl-C to stop.')
@@ -339,7 +399,8 @@ def do_live_receive(args):
     # Sized in samples until the rate is known, which is the honest unit: a
     # frame is 2768 samples wherever it is played. --buffer-ms cannot be
     # converted yet, so it waits for the first reconfigure below.
-    minimum_buffer = ((layout.frame+255)//256)*256
+    widest = max(PRESETS[n].frame for n in live_presets())
+    minimum_buffer = ((widest+255)//256)*256
     audio_buffer = AudioBuffer(max(minimum_buffer, args.buffer_frames*layout.frame),
                                layout.frame)
     reports = queue.Queue(maxsize=1)
@@ -398,9 +459,8 @@ def do_live_receive(args):
                                f'{channels[0]+1},{channels[1]+1}')
                 with lock:
                     latest['device'] = device_text
-                print(f'{device_text} | lean-v3 / color-lean, '
-                      f'{layout.fps_at(rate):.2f} fps; Ctrl-C to stop',
-                      file=sys.stderr, flush=True)
+                print(f'{device_text} | preset and profile read from the '
+                      f'signal; Ctrl-C to stop', file=sys.stderr, flush=True)
                 while not stop.is_set():
                     audio, overflowed = stream.read(256)
                     audio_buffer.put(np.asarray(audio)[:, channels], overflowed)
@@ -423,7 +483,9 @@ def do_live_receive(args):
             rate = source['rate']
             if rate is None:
                 return
-            receiver = V3.Receiver(layout, coder, pulse_only=True, input_rate=rate)
+            receiver = V3.Receiver(layout, coder, pulse_only=True, input_rate=rate,
+                                   coders=coders_for(layout),
+                                   candidates=candidates_for())
             seen = 0
             last_summary = time.monotonic()
             peak = 0.0
@@ -442,9 +504,14 @@ def do_live_receive(args):
                 for result in results:
                     # frame_seconds now comes from the decoder, which knows both
                     # the measured scale and the clock it was measured on.
-                    result.extra.update(shapes=coder.shapes,
-                                        complete=result.identity == 'verified_header' and result.status == 'received')
-                period_samples = max(256, round(layout.frame*(1+receiver.rate_error)))
+                    # shapes comes from the decoder now: it reports the
+                    # geometry it actually reconstructed, which is the sender's
+                    # when the header verified and ours when it did not.
+                    result.extra.update(
+                        complete=result.identity == 'verified_header' and result.status == 'received')
+                # receiver.layout is whichever preset identified itself.
+                period_samples = max(256, round(receiver.layout.frame *
+                                                (1+receiver.rate_error)))
                 capacity = (int(rate*args.buffer_ms/1000) if args.buffer_ms is not None
                             else args.buffer_frames*period_samples)
                 audio_buffer.configure(max(256, capacity), min(period_samples, 1024))
@@ -499,7 +566,7 @@ def do_live_receive(args):
                 stop.set()
                 root.destroy()
             root.report_callback_exception = callback_error
-            root.title('Stereo image receiver — lean-v3 / color-lean')
+            root.title('Stereo image receiver')
             initial = ImageTk.PhotoImage(Image.new('RGB', size, 'black'))
             label = tk.Label(root, background='black', image=initial)
             label.image = initial
@@ -534,7 +601,12 @@ def do_live_receive(args):
                                                   size, Image.Resampling.NEAREST)
                         canvas.paste(scaled, ((size[0]-scaled.width)//2,
                                               (size[1]-scaled.height)//2))
-                        status.config(text=f'lean-v3 / color-lean | frame {r.absolute} | {r.status}')
+                        # Profile is whatever this packet declared, so show
+                        # the one on screen rather than one assumed at startup.
+                        shown = r.extra.get('profile') or 'profile unverified'
+                        found = r.extra.get('preset', '?')
+                        status.config(text=f'{found} / {shown} | '
+                                           f'frame {r.absolute} | {r.status}')
                     else:
                         status.config(text='Missing or damaged frame')
                     label.image.paste(canvas)
@@ -567,14 +639,16 @@ def main(argv=None):
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest='command', required=True)
     # v3 defaults to its own preset: 'wide' works but leaves the training
-    # improvement on the table, and the two are not interchangeable on the wire.
+    # improvement on the table. Both decode without being named: the receiver
+    # identifies the layout from the signal.
     p.set_defaults(preset='wide-v3', profile='color', allocation=None, gain=1.0)
 
     def shared(q):
         q.add_argument('--profile', choices=['color', 'color-lean', 'detail', 'mono'],
                        default='color',
-                       help="Plane geometry. 'color-lean' quarters chroma: same "
-                            "picture, 2160 coefficients instead of 2880.")
+                       help="Plane geometry to SEND. 'color-lean' quarters "
+                            "chroma: same picture, 2160 coefficients instead "
+                            "of 2880. Receivers read it from the header.")
         q.add_argument('--modem-dir', type=Path, help='Bake to read frames from')
         q.add_argument('--frames', type=int, default=24)
         q.add_argument('--stride', type=int, default=1)
@@ -588,15 +662,17 @@ def main(argv=None):
     w.add_argument('-f', '--numbered', action='store_true')
     r = sub.add_parser('read')
     r.add_argument('--preset', choices=list(PRESETS), default='lean-v3',
-                   help='Override only for older experimental recordings')
+                   help='Fallback only. The preset is identified from the '
+                        'signal; this is what gets used if no header verifies.')
     r.add_argument('--profile', choices=['color', 'color-lean', 'detail', 'mono'],
-                   default='color-lean')
+                   default='color-lean',
+                   help='Fallback only. The profile is read from the header.')
     r.add_argument('--wav', type=Path, required=True)
     r.add_argument('--channels', type=pair, default=(0, 1))
     r.add_argument('--save-frames', type=Path)
     ls = sub.add_parser('live-send'); shared(ls)
-    ls.add_argument('--preset', choices=['lean-v3'], default='lean-v3')
-    ls.set_defaults(profile='color-lean')
+    ls.add_argument('--preset', choices=list(PRESETS), default='lean-v3')
+    ls.set_defaults(profile='color-lean')   # the receiver follows the header
     ls.add_argument('--device', type=device)
     ls.add_argument('--channels', type=pair, default=(0, 1))
     ls.add_argument('-f', '--numbered', action='store_true')

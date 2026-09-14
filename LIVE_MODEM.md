@@ -1,8 +1,25 @@
-# Fixed live modem
+# Self-describing live modem
 
-The live transport is `lean-v3` with `color-lean`: stereo, 2768 samples per
-frame. There is no mode word and no new wire overhead. Playback speed comes
-from preamble pulse timing.
+Stereo, and nothing else fixed. There is no mode word and no new wire
+overhead; playback speed comes from preamble pulse timing.
+
+Three things used to have to be named identically at both ends. None of them
+does now:
+
+| | how the receiver gets it |
+|---|---|
+| sample rate | read off the device it opened, and the cadence off the preamble |
+| profile | declared in two spare bits of the header's top_bin byte |
+| preset | identified by decoding against each candidate until the CRC verifies |
+
+`lean-v3` with `color-lean` is still the default on both senders -- 2768
+samples per frame, about 17.34 fps at 48 kHz -- but it is a default, not a
+requirement. Any progressive preset and any profile can be sent live.
+
+The one thing that still cannot be worked out is the transport generation: a
+v2 layout puts a different magic on the wire and no v3 candidate is looking for
+it, so live refuses those. A custom `--allocation` also stays shared state --
+it is not on the wire, so there is nothing to detect it from.
 
 ## No sample rate is requested
 
@@ -80,15 +97,21 @@ that information visible in the window.
   program. Headless reception supports Ctrl-C as well.
 
 The older `--buffer-ms` override is retained for compatibility. Prefer frame
-counts. Live reception no longer accepts preset/profile arguments. Offline
-experiments can still use explicit formats; those are not live compatibility
-guarantees.
+counts.
+
+Live reception takes no preset or profile argument at all, and `read`'s are
+fallbacks used only when no header verifies. Identifying the preset costs one
+decode attempt per candidate -- about 1.4 ms each, so roughly 10 ms against a
+58 ms frame -- and is paid once per lock, not per frame, because the layout is
+adopted as soon as one verifies. Acquisition can do this because the preamble
+is the one part of the packet that does not depend on the layout.
 
 ## Image and audio trade-offs
 
-Grayscale images use the same fixed colour geometry with neutral chroma;
-the receiver displays them without a format flag. This does not reclaim the
-chroma bandwidth. The image format remains 40x48 luma and 10x12 chroma planes.
+`color-lean` is 40x48 luma with 10x12 chroma planes. `mono` sends luma only,
+and the receiver now reconstructs it at the right geometry rather than needing
+a matching flag -- on `lean-v3` it is shrunk to fit 2200 slots, the same
+deterministic shrink both ends apply.
 
 The carrier band is 375–20250 Hz and requires stereo; it is held there on any
 sending device above the reference rate and scales down below it, as above.

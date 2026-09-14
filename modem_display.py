@@ -1,8 +1,8 @@
 """VideoInterleaving clock/selector -> baked RGBA composite -> stereo modem.
 
-Transmits with the v3 transport. Receive with utilities/modem_v3_check.py, and
-use the same --modem-preset at both ends: the presets are not interchangeable
-on the wire. The shared-time path is unchanged: v2's header
+Transmits with the v3 transport. Receive with utilities/modem_v3_check.py,
+which needs no matching argument: it identifies the preset from the signal and
+reads the profile out of the header. The shared-time path is unchanged: v2's header
 keeps a 32-bit millisecond field, so reserve() still projects a send deadline,
 the image index is still evaluated at that instant, and the receiver can still
 hold the frame until then. Only the encoder underneath changed.
@@ -46,7 +46,10 @@ def packet(library, layout, coder, absolute, selection, numbered=False,
     stamp_ms=0 if target_time_ns is None else (int(target_time_ns)//1_000_000) & 0xffffffff
     audio=_v3.encode(values,layout,coder,absolute & 0xffffffff,
                  (index % 0xffff)+1,max(1,min(library.frames,0xffff)),stamp_ms=stamp_ms,
-                 flags=pack_folders(main,front))
+                 flags=pack_folders(main,front),
+                 # The coder below is built from DEFAULT_PROFILE, so that is
+                 # what the header must declare: the receiver believes it.
+                 profile=_v3.profile_code(DEFAULT_PROFILE))
     ms=(_time.perf_counter()-started)*1000
     return audio, {'frame':absolute,'source_index':index,'face_folder':main,
                    'float_folder':front,'layout':layout.name,'encode_ms':ms,
@@ -57,8 +60,9 @@ def run_modem(args):
     import settings
     root=args.modem_dir or getattr(settings,'MODEM_DIR',settings.IMAGES_DIR+'_modem')
     library=ModemLibrary(root)
-    # The wire format is fixed and independent of the bake's own profile; the
-    # bake profile only affects how much source detail exists to send.
+    # The transmitted geometry is independent of the bake's own profile; the
+    # bake profile only affects how much source detail exists to send. What is
+    # sent is declared in the header, so the receiver follows it.
     layout=PRESETS[getattr(args,'modem_preset',None) or 'wide-v3']
     coder=SourceCoder(fit_shapes(plane_shapes(DEFAULT_PROFILE),layout.capacity))
     selected=fixed_pair(args.modem_pair)

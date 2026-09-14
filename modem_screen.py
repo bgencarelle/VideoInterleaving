@@ -15,6 +15,10 @@ Receive with:
 
     python utilities/modem_v3_check.py live-receive --device "BlackHole 2ch"
 
+The receiver takes no --preset or --profile: the profile is declared in the
+header, and the preset is identified by decoding against each candidate until
+one verifies. Any progressive preset and any profile can be sent live.
+
 BE REALISTIC ABOUT THE RESOLUTION. The picture is whatever the profile says:
 40x48 colour for 'color' and 'color-lean', 48x60 grey for 'mono'. That is a
 silhouette, a face, a moving shape, a lava lamp. It is not a desktop, and text
@@ -497,7 +501,8 @@ def to_wav(args, layout, coder, prepare, grab):
                 image = burn_counters(image, n+1, n+1, count)
             audio = V3.encode(image_values(image, coder.shapes), layout, coder,
                               n+1, (n % count)+1, count,
-                              stamp_ms=int(n*1000/layout.fps))
+                              stamp_ms=int(n*1000/layout.fps),
+                              profile=V3.profile_code(args.profile))
             sink.writeframesraw(pcm(audio*args.gain))
     print(f'wrote {count} frames, {count/layout.fps:.1f} s at {layout.fps:.2f} fps '
           f'-> {args.write}')
@@ -534,7 +539,8 @@ def to_device(args, layout, coder, prepare, grab):
                 audio = V3.encode(image_values(image, coder.shapes), layout,
                                   coder, (sent+1) & 0xffffffff, (sent % 0xffff)+1,
                                   0xffff, stamp_ms=int(
-                                      (slot.target_time_ns//1_000_000) & 0xffffffff))
+                                      (slot.target_time_ns//1_000_000) & 0xffffffff),
+                                  profile=V3.profile_code(args.profile))
                 encode_ms = (time.perf_counter()-began)*1000
                 if output.submit(audio, slot):
                     sent += 1
@@ -630,8 +636,15 @@ def main(argv=None):
     if not np.isfinite(args.gain) or args.gain <= 0:
         raise SystemExit('--gain must be finite and positive')
 
-    if not args.write and (args.preset, args.profile) != ('lean-v3', 'color-lean'):
-        raise SystemExit('Live transport uses lean-v3 / color-lean; other layouts are offline experiments only')
+    # Neither preset nor profile has to be agreed out of band any more. The
+    # profile is declared in the header; the preset is identified by the
+    # receiver decoding against each candidate until the CRC verifies. What is
+    # still fixed is the transport generation: a v2 layout puts a different
+    # magic on the wire and a v3 receiver is not looking for it.
+    if not args.write and not V3.ALL_PRESETS[args.preset].progressive:
+        raise SystemExit(f'{args.preset} is v2 wire format; live needs a '
+                         f'progressive preset (wide, wide-v3, wide-v3-fast, '
+                         f'tape-v3, lean-v3, mid-v3, mid-v3-fast)')
     layout, coder, shapes = build(args)
     prepare = fitter(args.profile, args.rotate, args.mirror, not args.crop)
     raw = source_for(args, layout.fps)

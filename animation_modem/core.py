@@ -13,8 +13,14 @@ transport3 owns the preamble, acquisition, encoding and the Receiver. It
 imports from here rather than the other way round, so this module has no
 knowledge of how a packet was found.
 
-The file keeps its name to avoid churning every import in the tree. Static
-preset/profile/allocation must still match at both endpoints.
+The file keeps its name to avoid churning every import in the tree.
+
+Of the three things that used to have to match at both endpoints, two no longer
+do. Profile travels in two spare header bits. Preset is identified by decoding
+against candidates and letting the header CRC pick, since it cannot be
+signalled -- you need the layout to know where the header is. The allocation
+table is still shared state: it is not on the wire and there is nothing to
+detect it from, so a custom --allocation must match at both ends.
 """
 import struct
 import zlib
@@ -502,16 +508,50 @@ HEADER_FORMAT = '>2sBBIHHI'      # magic, flags, top_bin, absolute, index, count
 # decodes from it and the picture is unaffected either way.
 FOLDER_LIMIT = 16
 
+# Picture geometry, in the two spare bits of the top_bin byte. top_bin is
+# validated to 10..63 by Layout, so bits 6 and 7 of that byte have always been
+# zero: claiming them costs nothing and the header does not grow. The flags
+# byte had no room -- both its nibbles are folder indices.
+#
+# THIS TUPLE IS WIRE ORDER. Appending a fifth entry is not possible (two bits
+# hold four), and reordering or replacing an entry does not fail loudly: an old
+# transmitter keeps sending the same number and a new receiver reconstructs the
+# wrong geometry from it. Change it only alongside the magic.
+PROFILE_CODES = ('color', 'color-lean', 'detail', 'mono')
+TOP_BIN_MASK = 0x3f
+
+
+def profile_code(name):
+    """Wire code for a profile name, for the transmitter to declare."""
+    try:
+        return PROFILE_CODES.index(name)
+    except ValueError:
+        raise ValueError(f'Profile {name!r} has no wire code. '
+                         f'Known: {", ".join(PROFILE_CODES)}') from None
+
+
+def profile_name(code):
+    """Profile a received code names, or None if this build has no such code."""
+    code = int(code) & 3
+    return PROFILE_CODES[code] if code < len(PROFILE_CODES) else None
+
 
 def pack_folders(face, float_folder):
     """Pack a folder pair into the flags byte, wrapping past FOLDER_LIMIT."""
     return ((int(face) % FOLDER_LIMIT) << 4) | (int(float_folder) % FOLDER_LIMIT)
 
 
-def pack_header(flags, top_bin, absolute, index, count, stamp_ms, magic=b'V2'):
+def pack_header(flags, top_bin, absolute, index, count, stamp_ms, magic=b'V2',
+                profile=0):
     if not (0 <= absolute <= 0xffffffff and 1 <= index <= count <= 0xffff):
         raise ValueError('Frame/index/count outside the header ranges')
-    raw = struct.pack(HEADER_FORMAT, magic, flags & 0xff, top_bin & 0xff,
+    if not 0 <= top_bin <= TOP_BIN_MASK:
+        # Masking to 0xff would have silently handed bit 6 to the profile.
+        raise ValueError(f'top_bin must fit six bits, 0..{TOP_BIN_MASK}')
+    if not 0 <= profile <= 3:
+        raise ValueError('Profile code must fit the two spare header bits')
+    raw = struct.pack(HEADER_FORMAT, magic, flags & 0xff,
+                      (top_bin & TOP_BIN_MASK) | (int(profile) << 6),
                       absolute, index, count, stamp_ms & 0xffffffff)
     return raw + struct.pack('>I', zlib.crc32(raw))
 
@@ -695,7 +735,18 @@ def _channel_skew(h, carriers):
             'crosstalk': mixed/energy if energy else 0.}
 
 
-def decode_packet(samples, layout, coder, *, body=None):
+def decode_packet(samples, layout, coder, *, body=None, coders=None):
+    """`coders` maps a profile code to the coder that reconstructs it.
+
+    The transmitter declares its picture geometry in the header, so a receiver
+    given this mapping follows whatever arrives instead of having to be told
+    out of band. The header is verified before any reconstruction happens, so
+    selecting on it costs nothing: no demodulation is repeated.
+
+    Without the mapping, or for a packet whose header did not verify, `coder`
+    is used as before -- a picture with no confirmed geometry is reconstructed
+    on the caller's assumption, and `extra['profile']` stays None to say so.
+    """
     carriers = layout.carriers
     data, pilots, header, _, _ = _decode_tables(layout)
     if body is None:
@@ -764,11 +815,13 @@ def decode_packet(samples, layout, coder, *, body=None):
         bits = np.stack([flat.real > 0, flat.imag > 0], axis=-1).ravel()
         raw = np.packbits(bits).tobytes()
         if zlib.crc32(raw[:HEADER_BYTES]) == struct.unpack('>I', raw[HEADER_BYTES:])[0]:
-            magic, hflags, top, absolute, index, count, stamp = struct.unpack(
+            magic, hflags, packed, absolute, index, count, stamp = struct.unpack(
                 HEADER_FORMAT, raw[:HEADER_BYTES])
+            # Six bits of band, two of picture geometry, one byte as before.
+            top, code = packed & TOP_BIN_MASK, packed >> 6
             expected_magic = b'V3' if layout.progressive else b'V2'
             if magic == expected_magic and top == layout.top_bin and 1 <= index <= count:
-                fields = (hflags, absolute, index, count, stamp)
+                fields = (hflags, absolute, index, count, stamp, code)
                 break
 
     # Do not reconstruct an image that the checks have already rejected.
@@ -784,8 +837,13 @@ def decode_packet(samples, layout, coder, *, body=None):
     coverage = float(np.mean(per >= .55))
     per_noise = np.broadcast_to(variance[data][None, :, :, None],
                                (layout.image_symbols, len(data), 2, 2)).ravel()
-    slots = coefficient_slots(layout, tuple(coder.shapes))
-    values = coder.inverse(sent[slots], per[slots], per_noise[slots])
+    # Geometry the sender declared, when it verified and we can honour it.
+    declared = profile_name(fields[5]) if fields is not None else None
+    picture = coder
+    if fields is not None and coders:
+        picture = coders.get(fields[5], coder)
+    slots = coefficient_slots(layout, tuple(picture.shapes))
+    values = picture.inverse(sent[slots], per[slots], per_noise[slots])
     tier = ('best' if coverage >= .95 else 'better' if coverage >= .7
             else 'good' if coverage >= .35 else 'poor')
     if fields is None:
@@ -795,14 +853,16 @@ def decode_packet(samples, layout, coder, *, body=None):
                        coverage=coverage, tier=tier if usable else 'none',
                        extra={'timing_drift_samples': timing_drift,
                               'clock_error': float(np.median(clock_errors)) if clock_errors else None,
+                              'profile': declared, 'shapes': tuple(picture.shapes),
                               **(skew or {})})
-    flags, absolute, index, count, stamp = fields
+    flags, absolute, index, count, stamp, _ = fields
     return Decoded('received' if pilot_error < .15 else 'degraded', values=values,
                    absolute=absolute, index=index, count=count, stamp_ms=stamp,
                    flags=flags, pilot_error=pilot_error, coverage=coverage,
                    identity='verified_header', tier=tier,
                    extra={'timing_drift_samples': timing_drift,
                               'clock_error': float(np.median(clock_errors)) if clock_errors else None,
+                              'profile': declared, 'shapes': tuple(picture.shapes),
                               **(skew or {})})
 
 

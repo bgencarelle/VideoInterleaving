@@ -334,8 +334,9 @@ def configure_runtime():
     parser.add_argument("--modem-frames", type=int, default=0, help="0 = unlimited live / one source pass for WAV")
     parser.add_argument("--modem-wav", help="Export a deterministic pair to PCM16 WAV instead of live playback")
     parser.add_argument("--modem-preset", default=None,
-                        help="Wire layout, default 'wide-v3'. Transmitter and receiver "
-                             "must use the same one; the presets are not interchangeable.")
+                        help="Wire layout, default 'wide-v3'. The receiver "
+                             "identifies it from the signal; it does not have "
+                             "to be told.")
     parser.add_argument("--modem-pair", help="Fixed zero-based face,float pair for inspection, e.g. 1,0")
     parser.add_argument("-f", "--modem-numbered", action="store_true", help="Burn absolute and source-index counters into modem pixels")
     parser.add_argument("--modem-index-offset-ms", type=float, default=0.0,

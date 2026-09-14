@@ -1,4 +1,4 @@
-"""Fixed-format image handling and display-loss policies."""
+"""Latest-picture selection and display-loss policies."""
 import unittest
 import numpy as np
 from PIL import Image
