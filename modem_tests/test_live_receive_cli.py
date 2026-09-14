@@ -25,13 +25,18 @@ class LiveReceiveTests(unittest.TestCase):
         self.assert_startup_fails(sd, 'Selected input channels unavailable')
 
     def assert_startup_fails(self, sd, message):
-        # Bound the main-loop wait so regressions fail instead of hanging CI.
+        def immediate_thread(*, target, **kwargs):
+            worker = Mock(ident=None)
+            worker.start.side_effect = target
+            worker.is_alive.return_value = False
+            return worker
+
         with patch.object(check, 'sounddevice', return_value=sd), \
              patch.object(check.time, 'sleep', side_effect=AssertionError('Receiver did not stop')), \
-             patch('threading.Thread') as thread:
-            thread.return_value.start.side_effect = lambda: thread.call_args.kwargs['target']()
+             patch('threading.Thread', side_effect=immediate_thread):
             with self.assertRaisesRegex(SystemExit, message):
                 check.main(['live-receive', '--device', '0', '--headless'])
+
 
 
 class ReceiverWindowTests(unittest.TestCase):

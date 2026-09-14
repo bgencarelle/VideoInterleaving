@@ -14,9 +14,8 @@ How acquisition works:
 * The preamble is an LTC-style biphase-mark word, so edge intervals take two
   values and playback speed falls out of `measured / nominal` the way a timer
   capture gives it to an LTC reader -- roughly 26 us per buffer against the
-  5.5 ms a scaled-template correlation bank costs. Correlation remains as a
-  fallback for signal too weak to count edges on, decimated rather than run on
-  every unlocked buffer.
+  5.5 ms a scaled-template correlation bank costs. The default path measures
+  transition times directly, without a speed sweep or waveform correlation.
 
 * The preamble is on both channels, and `encode` normalises up as well as
   down so the payload uses the available headroom.
@@ -83,7 +82,7 @@ def coder_for(profile, allocation, layout):
 
 
 def receive_for(args, layout, coder):
-    """The v3 receiver. Edge-gated, coasting, correlation only as fallback."""
+    """The v3 receiver. Playback speed comes from biphase pulse timing."""
     return V3.Receiver(layout, coder, recovery=False, fast=True)
 
 
@@ -278,9 +277,13 @@ def do_live_receive(args):
     errors = []
     active = {'stream': None}
 
-    def receive():
+    from animation_modem.audio_buffer import AudioBuffer
+    minimum_buffer = ((layout.frame+255)//256)*256
+    audio_buffer = AudioBuffer(max(minimum_buffer, int(RATE*args.buffer_ms/1000)),
+                               layout.frame)
+
+    def capture():
         try:
-            receiver = V3.Receiver(layout, coder)
             channels = (0, 1) if args.channels is None else args.channels
             info = sd.query_devices(args.device, 'input')
             count = max(channels)+1
@@ -291,52 +294,67 @@ def do_live_receive(args):
                 active['stream'] = stream
                 if not args.silent:
                     print(f'Listening on {info["name"]}: {args.preset}, '
-                          f'{args.profile}, channels {channels[0]+1},{channels[1]+1}',
+                          f'{args.profile}, pulse timing, channels '
+                          f'{channels[0]+1},{channels[1]+1}; Ctrl-C to stop',
                           file=sys.stderr, flush=True)
-                seen = 0
-                overflows = 0
-                last_summary = time.monotonic()
-                peak = 0.0
                 while not stop.is_set():
                     audio, overflowed = stream.read(256)
-                    audio = np.asarray(audio)[:, channels]
-                    peak = max(peak, float(np.max(np.abs(audio))))
-                    if overflowed:
-                        overflows += 1
-                        receiver.reset(preserve_timing=True)
-                    for r in receiver.feed(audio):
-                        seen += 1
-                        if verbose:
-                            print(json.dumps(record(r)), flush=True)
-                        if r.values is not None:
-                            with lock:
-                                latest['result'] = r
-                            if args.save_frames:
-                                name = (f'{r.absolute:06d}' if r.absolute is not None
-                                        else f'x{seen:06d}')
-                                values_image(r.values, coder.shapes).save(
-                                    Path(args.save_frames)/f'frame_{name}.png')
-                    now = time.monotonic()
-                    if not args.silent and now-last_summary >= args.summary_seconds:
-                        print(json.dumps({'receiver_packets': seen,
-                                          'input_overflows': overflows,
-                                          'input_peak': round(peak, 6)}),
-                              file=sys.stderr, flush=True)
-                        last_summary, peak = now, 0.0
+                    audio_buffer.put(np.asarray(audio)[:, channels], overflowed)
         except Exception as exc:
             if not stop.is_set():
                 errors.append(exc)
         finally:
             active['stream'] = None
-            # Always release the main loop. Catching only Exception meant a
-            # thread that died any other way -- a closed device, SystemExit
-            # from a shutting-down host -- left --headless spinning forever
-            # with no output and no way out but Ctrl-C.
-            stop.set()
+            audio_buffer.close()
 
+    def receive():
+        try:
+            receiver = V3.Receiver(layout, coder, pulse_only=True)
+            seen = 0
+            last_summary = time.monotonic()
+            peak = 0.0
+            while not stop.is_set():
+                batch = audio_buffer.take()
+                if batch is None:
+                    if audio_buffer.closed:
+                        break
+                    continue
+                audio, gap = batch
+                peak = max(peak, float(np.max(np.abs(audio))))
+                if gap:
+                    receiver.reset()
+                for r in receiver.feed(audio):
+                    seen += 1
+                    if verbose:
+                        print(json.dumps(record(r)), flush=True)
+                    if r.values is not None:
+                        with lock:
+                            latest['result'] = r
+                        if args.save_frames:
+                            name = (f'{r.absolute:06d}' if r.absolute is not None
+                                    else f'x{seen:06d}')
+                            values_image(r.values, coder.shapes).save(
+                                Path(args.save_frames)/f'frame_{name}.png')
+                now = time.monotonic()
+                if not args.silent and now-last_summary >= args.summary_seconds:
+                    print(json.dumps({'receiver_packets': seen,
+                                      'input_overflows': audio_buffer.input_overflows,
+                                      'buffer_dropped_samples': audio_buffer.dropped_samples,
+                                      'input_peak': round(peak, 6)}),
+                          file=sys.stderr, flush=True)
+                    last_summary, peak = now, 0.0
+        except Exception as exc:
+            if not stop.is_set():
+                errors.append(exc)
+        finally:
+            stop.set()
+            audio_buffer.close()
+
+    capture_thread = threading.Thread(target=capture, daemon=True)
     thread = threading.Thread(target=receive, daemon=True)
     previous_sigint = signal.signal(signal.SIGINT, lambda signum, frame: stop.set())
     try:
+        capture_thread.start()
         thread.start()
         if args.headless:
             try:
@@ -401,13 +419,15 @@ def do_live_receive(args):
                 stop.set()
     finally:
         stop.set()
+        audio_buffer.close()
         try:
-            if thread.ident is not None:
-                thread.join(timeout=1)
-                stream = active['stream']
-                if thread.is_alive() and stream is not None:
-                    stream.abort()
-                    thread.join(timeout=1)
+            for worker in (thread, capture_thread):
+                if worker.ident is not None:
+                    worker.join(timeout=1)
+            stream = active['stream']
+            if capture_thread.is_alive() and stream is not None:
+                stream.abort()
+                capture_thread.join(timeout=1)
         finally:
             signal.signal(signal.SIGINT, previous_sigint)
     if errors:
@@ -459,6 +479,8 @@ def main(argv=None):
     lr.add_argument('--device', type=device)
     lr.add_argument('--channels', type=pair, default=(0, 1),
                     help='Ordered 1-based input pair (default: 1,2)')
+    lr.add_argument('--buffer-ms', type=float, default=250,
+                    help='Maximum queued audio in milliseconds; at least one packet')
     lr.add_argument('--save-frames', type=Path)
     lr.add_argument('--headless', action='store_true',
                     help='JSON only, no window; implies --verbose')
@@ -472,6 +494,8 @@ def main(argv=None):
     lr.add_argument('--height', type=int, default=576)
     lr.add_argument('--list-devices', action='store_true')
     args = p.parse_args(argv)
+    if not np.isfinite(getattr(args, 'buffer_ms', 250)) or getattr(args, 'buffer_ms', 250) <= 0:
+        p.error('--buffer-ms must be finite and positive')
     if getattr(args, 'frames', 1) < 1 or getattr(args, 'stride', 1) < 1:
         p.error('--frames and --stride must be positive')
     if not np.isfinite(getattr(args, 'gain', 1)) or getattr(args, 'gain', 1) <= 0:

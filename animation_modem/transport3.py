@@ -23,7 +23,9 @@ Three changes, in order of how much they matter:
    .95`), so a typical packet left ~2.8 dB of headroom unused on top of a
    payload already sitting ~21 dB below full scale.
 
-Correlation has not gone away. Edge timing is a per-sample decision and has no
+The default receiver reads pulse transitions only. The legacy waveform path
+remains available with pulse_only=False for comparison. In that legacy path,
+correlation has not gone away. Edge timing is a per-sample decision and has no
 processing gain, so it degrades below roughly 10 dB SNR while a 256-sample
 correlation is still locking at -5 dB. Acquisition therefore gates on edges and
 falls back to correlation, which is only reached on genuinely marginal signal
@@ -212,6 +214,41 @@ def measure_speed(samples, min_speed=.25, max_speed=2.0):
     return None
 
 
+def measure_pulses(samples, min_speed=.25, max_speed=2.0):
+    """Read the biphase word and fit its transition times, without a speed sweep.
+
+    Schmitt edges reject chatter. Interpolated zero crossings remove integer
+    sample quantisation before fitting elapsed time against the known pulse
+    count. The full short/long word must match; payload crossings are ignored.
+    """
+    samples = np.asarray(samples)
+    edges = edge_intervals(samples)
+    count = len(NOMINAL_EDGES)
+    if len(edges) < count:
+        return None
+    crossings = np.flatnonzero(np.diff(np.signbit(samples)))
+    left = crossings[np.searchsorted(crossings, edges-1, side='right')-1]
+    values = samples[left]
+    positions = left + values/(values-samples[left+1])
+    words = np.lib.stride_tricks.sliding_window_view(positions, count)
+    scales = (words[:, -1]-words[:, 0])/NOMINAL_SPAN
+    # Allow sample interpolation error near the endpoints of the speed range.
+    valid = (scales >= .98/max_speed) & (scales <= 1.02/min_speed)
+    expected = NOMINAL_GAPS[None, :]*scales[:, None]
+    valid &= np.all(np.abs(np.diff(words, axis=1)-expected) <=
+                    np.maximum(.8, .28*expected), axis=1)
+    nominal = NOMINAL_EDGES.astype(float)+.5
+    centered = nominal-nominal.mean()
+    for word in words[valid]:
+        scale = float(np.dot(word-word.mean(), centered)/np.dot(centered, centered))
+        position = float(word.mean()-scale*nominal.mean())
+        residual = float(np.sqrt(np.mean((word-position-scale*nominal)**2)))
+        confidence = max(0., 1-residual/(SHORT*scale))
+        if confidence >= .7:
+            return position, scale, confidence
+    return None
+
+
 def preamble_correlation(x, limit=None, template=None, energy=None):
     """Normalised correlation against the preamble. The low-SNR fallback."""
     if template is None:
@@ -388,7 +425,7 @@ def encode(values, layout, coder, absolute, index, count, stamp_ms=0, flags=0,
 # --------------------------------------------------------------------------
 
 class Receiver:
-    """Edge-gated acquisition with a correlation fallback.
+    """Pulse-timed acquisition; legacy correlation is explicitly opt-in.
 
     Drop-in for core.Receiver: same constructor, same `feed`/`flush`
     contract, same Decoded results. `acquisition_path` in `extra` reports which
@@ -397,7 +434,8 @@ class Receiver:
     """
 
     def __init__(self, layout, coder, threshold=.4, rate_window=None,
-                 min_speed=.25, max_speed=2.0, recovery=False, fast=True):
+                 min_speed=.25, max_speed=2.0, recovery=False, fast=True,
+                 pulse_only=True):
         if not (0 < min_speed <= 1 <= max_speed and min_speed >= .25 and max_speed <= 2):
             raise ValueError('Supported search range: .25 <= min_speed <= 1 <= max_speed <= 2')
         if coder.count > layout.capacity:
@@ -405,6 +443,7 @@ class Receiver:
         self.layout, self.coder, self.threshold = layout, coder, threshold
         self.recovery = bool(recovery)
         self.fast = bool(fast)
+        self.pulse_only = bool(pulse_only)
         self.min_speed, self.max_speed = min_speed, max_speed
         self.keep = int(np.ceil(len(PREAMBLE)*1.2/min_speed)) + 64
         self.reset()
@@ -433,6 +472,8 @@ class Receiver:
     # -- acquisition ------------------------------------------------------
 
     def _acquire(self):
+        if self.pulse_only:
+            return self._acquire_pulses()
         window = self.buffer[:max(1024, 2*self.keep)]
         self.waiting = False
         if not np.any(window):
@@ -493,6 +534,35 @@ class Receiver:
             self.fallback_every = min(self.fallback_every*2, 64)
         return found
 
+    def _acquire_pulses(self):
+        """Measure every preamble; prediction only limits which samples to read."""
+        self.waiting = False
+        if self.predicted is not None and self.confidence:
+            at = self.predicted-self.offset
+            left = max(0, int(at)-24)
+            right = int(at+len(PREAMBLE)*(1+self.rate))+24
+            if at >= 0 and right > len(self.buffer):
+                self.waiting = True
+                return None
+            if at >= 0:
+                for channel in range(2):
+                    measured = measure_pulses(self.buffer[left:right, channel],
+                                              self.min_speed, self.max_speed)
+                    if measured is not None:
+                        position, scale, confidence = measured
+                        self.acquisition_path = 'coast'
+                        self.locked_packets += 1
+                        return position+left, scale, confidence
+            self.predicted = None
+        window = self.buffer[:max(1024, 2*self.keep)]
+        for channel in range(2):
+            measured = measure_pulses(window[:, channel], self.min_speed, self.max_speed)
+            if measured is not None:
+                self.acquisition_path = 'edge'
+                self.edge_hits += 1
+                return measured
+        return None
+
     def _correlate(self, window):
         scales = np.geomspace(1/self.max_speed, 1/self.min_speed,
                               max(2, int(np.ceil(np.log(self.max_speed/self.min_speed)/.09))+1))
@@ -526,8 +596,11 @@ class Receiver:
         if block.ndim != 2 or block.shape[1] != 2 or not np.isfinite(block).all():
             raise ValueError('Receiver requires finite stereo samples')
         out = []
-        for start in range(0, len(block), 256):
-            self._append(block[start:start+256])
+        # Consume queued audio in larger pieces. A partial packet remains
+        # pending until its complete body is available; no decode per sample.
+        step = min(1024, self.keep) if self.pulse_only else 256
+        for start in range(0, len(block), step):
+            self._append(block[start:start+step])
             out.extend(self._drain())
         return out
 
@@ -589,6 +662,7 @@ class Receiver:
             result.rate_confidence = score
             result.extra.update(sync_score=score, at=self.offset+begin,
                                 input_path='v3', acquisition_path=self.acquisition_path,
+                                timing_method='pulse' if self.pulse_only else 'waveform',
                                 playback_speed=1/scale, complete=True,
                                 decode_ms=(time.perf_counter()-started)*1000,
                                 acquire_ms=self.acquire_ms)
