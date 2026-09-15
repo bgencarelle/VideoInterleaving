@@ -11,7 +11,7 @@ import numpy as np
 
 from animation_modem import core, transport3 as v3
 from animation_modem.imaging import (PROFILE_GRIDS, PROFILES, fit_shapes,
-                                     plane_shapes, wire_profiles)
+                                     plane_grids, plane_shapes, wire_profiles)
 
 WIDE = v3.ALL_PRESETS['wide-v3']        # 2880 slots: every profile fits whole
 LEAN = v3.ALL_PRESETS['lean-v3']
@@ -19,9 +19,11 @@ LEAN = v3.ALL_PRESETS['lean-v3']
 
 def coder_for(name, layout):
     shapes = plane_shapes(name)
+    grids = plane_grids(name)
     if sum(int(np.prod(s)) for s in shapes) > layout.capacity:
         shapes = fit_shapes(shapes, layout.capacity)
-    return v3.SourceCoder(shapes)
+        grids = shapes
+    return v3.SourceCoder(shapes, grids=grids)
 
 
 def coders_for(layout):
@@ -32,15 +34,10 @@ class ProfileCodeTests(unittest.TestCase):
     def test_the_code_table_matches_the_profiles_that_exist(self):
         """Wire order against the real table. These drifting apart is the one
         way this silently sends the wrong geometry."""
-        # Every profile is transmittable, but not every one has its OWN
-        # code: a truncating profile sends the same slots as the profile it
-        # truncates, so it aliases onto that code (see PROFILE_ALIASES).
-        self.assertEqual(set(v3.PROFILE_CODES) | set(core.PROFILE_ALIASES),
-                         set(wire_profiles()))
+        # Every profile holds its own code now -- no aliases, nothing to opt
+        # into, nothing for the two ends to disagree about.
+        self.assertEqual(set(v3.PROFILE_CODES), set(wire_profiles()))
         self.assertLessEqual(len(v3.PROFILE_CODES), 4, 'two bits hold four')
-        for name, target in core.PROFILE_ALIASES.items():
-            self.assertEqual(plane_shapes(name), plane_shapes(target),
-                             'an alias must put the same shapes on the wire')
         self.assertTrue(set(PROFILE_GRIDS) <= set(PROFILES))
 
     def test_names_and_codes_round_trip(self):
@@ -78,7 +75,7 @@ class ProfileNegotiationTests(unittest.TestCase):
 
     def send(self, name, layout, frames=3):
         coder = coder_for(name, layout)
-        values = np.random.default_rng(9).uniform(-.2, .2, coder.count)
+        values = np.random.default_rng(9).uniform(-.2, .2, coder.source_count)
         audio = np.concatenate([
             v3.encode(values, layout, coder, n, n, frames,
                       profile=v3.profile_code(name))
@@ -89,13 +86,21 @@ class ProfileNegotiationTests(unittest.TestCase):
         for name in v3.PROFILE_CODES:
             with self.subTest(profile=name):
                 audio, coder, values = self.send(name, WIDE)
-                wrong = coder_for('detail' if name != 'detail' else 'mono', WIDE)
+                wrong = coder_for('mono' if name != 'mono' else 'color', WIDE)
                 out = self.decode(audio, WIDE, wrong, coders_for(WIDE))
                 self.assertEqual([r.absolute for r in out], [1, 2, 3])
                 for r in out:
                     self.assertEqual(r.extra['profile'], name)
-                    self.assertEqual(tuple(r.extra['shapes']), tuple(coder.shapes))
-                    self.assertLess(np.sqrt(np.mean((r.values-values)**2)), 1e-4)
+                    self.assertEqual(tuple(r.extra['shapes']), tuple(coder.grids))
+                    # A truncating profile is LOSSY by construction -- it sends
+                    # a corner of the spectrum and zero-fills the rest -- and
+                    # these values are uniform noise, which is the worst case
+                    # for that: its energy is spread over every frequency, all
+                    # of it above the corner discarded. What the wire has to
+                    # preserve is the coefficients it carried, not the ones it
+                    # deliberately dropped.
+                    limit = .25 if coder.truncated else 1e-4
+                    self.assertLess(np.sqrt(np.mean((r.values-values)**2)), limit)
 
     def test_it_works_on_the_live_layout_where_profiles_get_shrunk(self):
         """lean-v3 holds 2200 slots, so 'color' is fit_shapes-shrunk. Both ends
@@ -104,7 +109,7 @@ class ProfileNegotiationTests(unittest.TestCase):
         out = self.decode(audio, LEAN, coder_for('color-lean', LEAN),
                           coders_for(LEAN))
         self.assertEqual(out[0].extra['profile'], 'color')
-        self.assertEqual(tuple(out[0].extra['shapes']), tuple(coder.shapes))
+        self.assertEqual(tuple(out[0].extra['shapes']), tuple(coder.grids))
         self.assertLess(np.sqrt(np.mean((out[0].values-values)**2)), 1e-4)
 
     def test_without_the_mapping_nothing_changes(self):
@@ -126,7 +131,7 @@ class ProfileNegotiationTests(unittest.TestCase):
         no spare bit left to express "undeclared".
         """
         coder = coder_for('color-lean', WIDE)
-        values = np.random.default_rng(2).uniform(-.2, .2, coder.count)
+        values = np.random.default_rng(2).uniform(-.2, .2, coder.source_count)
         # profile=0 is exactly what an old encoder puts on the wire.
         audio = v3.encode(values, WIDE, coder, 1, 1, 1, profile=0)
         out = self.decode(audio, WIDE, coder, coders_for(WIDE))
@@ -203,7 +208,10 @@ class LiveGuardTests(unittest.TestCase):
         from pathlib import Path
         with tempfile.TemporaryDirectory() as d:
             out = str(Path(d)/'mono.wav')
+            # lean-v3 explicitly: the sender's default preset is hires-v3
+            # now, and this test is about what a SHRUNK profile declares.
             modem_screen.main(['--source', 'test', '--profile', 'mono',
+                               '--preset', 'lean-v3',
                                '--frames', '2', '--write', out])
             with wave.open(out) as w:
                 raw = np.frombuffer(w.readframes(w.getnframes()), '<i2')
@@ -216,7 +224,7 @@ class LiveGuardTests(unittest.TestCase):
                 self.assertEqual(r.identity, 'verified_header')
                 self.assertEqual(r.extra['profile'], 'mono')
                 self.assertEqual(tuple(r.extra['shapes']),
-                                 tuple(coder_for('mono', LEAN).shapes))
+                                 tuple(coder_for('mono', LEAN).grids))
 
 
 if __name__ == '__main__':

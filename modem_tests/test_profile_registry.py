@@ -5,11 +5,13 @@ which did not define it. That is an ImportError at module load -- the sender
 could not start at all, on any profile, and no test noticed because nothing
 imported modem_screen. There is now one that does, in a subprocess.
 
-The profile table is the other half. Two bits hold four codes, so a fifth
-profile has nowhere of its own to go; taking an existing slot is a WIRE BREAK,
+The profile table is the other half. Two bits hold four codes, and they are
+spent: color, color-lean, color-dct, mono. Reassigning one is a WIRE BREAK,
 because a recording carries the number and not its meaning and the CRC covers
-the number. A truncating profile escapes that by sending the same slots in the
-same shapes as the profile it truncates, and aliasing onto its code.
+the number -- so it is done deliberately or not at all. 'detail' gave up code 2
+to 'color-dct' rather than color-dct being aliased onto another profile's code,
+because an alias cannot be read off the wire and a receiver that guessed wrong
+would show a frequency-distorted picture that looks plausible.
 """
 import subprocess
 import sys
@@ -54,19 +56,19 @@ class SenderImportTests(unittest.TestCase):
 
 
 class ProfileCodeTests(unittest.TestCase):
-    def test_a_truncating_profile_is_transmittable_by_alias(self):
-        """color-dct puts the same 2880 slots in the same plane shapes as
-        'color', so it rides 'color's code rather than taking 'detail's."""
-        import modem_screen
-        args = modem_screen.parser().parse_args(['--profile', 'color-dct'])
-        self.assertEqual(args.profile, 'color-dct')
-        self.assertEqual(v3.profile_code('color-dct'), v3.profile_code('color'))
-        self.assertEqual(plane_shapes('color-dct'), plane_shapes('color'))
+    def test_the_truncating_profile_holds_its_own_code(self):
+        """Not an alias. Two header bits hold four codes and they are ours to
+        spend, so color-dct is named on the wire like any other profile and
+        the receiver reads it rather than being told out of band."""
+        self.assertEqual(v3.PROFILE_CODES[2], 'color-dct')
+        self.assertEqual(v3.profile_name(2), 'color-dct')
+        self.assertNotEqual(v3.profile_code('color-dct'), v3.profile_code('color'))
 
-    def test_detail_kept_its_code(self):
-        """The swap that would have broken every existing recording."""
-        self.assertEqual(v3.PROFILE_CODES[2], 'detail')
-        self.assertEqual(v3.profile_name(2), 'detail')
+    def test_it_is_the_default(self):
+        import modem_screen
+        from animation_modem.imaging import DEFAULT_PROFILE
+        self.assertEqual(DEFAULT_PROFILE, 'color-dct')
+        self.assertEqual(modem_screen.parser().parse_args([]).profile, 'color-dct')
 
     def test_build_accepts_it_and_gives_the_coder_the_finer_grid(self):
         import argparse
@@ -86,9 +88,10 @@ class ProfileCodeTests(unittest.TestCase):
                 self.assertEqual(v3.profile_name(code), name)
 
     def test_the_header_field_cannot_name_a_fifth_profile(self):
-        """Why an alias and not a fifth code: the field is two bits, and both
-        the flags byte and the rest of the top_bin byte are spoken for. A code
-        above 3 does not fail, it WRAPS, which is the whole hazard."""
+        """Four codes, all spent. The field is two bits and both the flags
+        byte and the rest of the top_bin byte are spoken for, so a fifth
+        profile has nowhere to go -- and a code above 3 does not fail, it
+        WRAPS, which is why adding one quietly is the hazard."""
         self.assertEqual(len(v3.PROFILE_CODES), 4)
         for code in range(4, 8):
             self.assertEqual(v3.profile_name(code), v3.PROFILE_CODES[code & 3])
@@ -96,8 +99,9 @@ class ProfileCodeTests(unittest.TestCase):
 
 class TruncationTests(unittest.TestCase):
     def test_truncating_does_not_change_the_slot_count(self):
-        """The thing that makes the alias safe, and also the thing that makes
-        this NOT a bandwidth saving: same wire, finer source."""
+        """Truncation changes the SOURCE, not the wire. Same slot count, same
+        plane shapes, four times the pixels behind them -- which is also why it
+        is not a bandwidth saving on its own."""
         wire = v3.SourceCoder(plane_shapes('color-dct'),
                               grids=plane_grids('color-dct'))
         plain = v3.SourceCoder(plane_shapes('color'))
@@ -145,13 +149,14 @@ if __name__ == '__main__':
     unittest.main()
 
 
-class AliasRoundTripTests(unittest.TestCase):
-    """A truncating profile on the wire, decoded both ways.
+class WireDeclarationTests(unittest.TestCase):
+    """A truncating profile on the wire, read back off the header.
 
-    The wire cannot say whether color-dct or color was sent -- same code, same
-    slots, same shapes. That is exactly what makes the alias safe rather than a
-    hazard: a receiver that knows nothing reconstructs the correctly-exposed
-    low-passed picture at the small size, and one that opts in gets the grid.
+    color-dct holds code 2, so the receiver is TOLD which was sent and
+    reconstructs on the matching grid. This used to be an alias onto color's
+    code, which meant the wire could not say, and a receiver that had not been
+    configured out of band produced a plausible-looking wrong picture. Spending
+    a code removed that failure mode entirely.
     """
 
     def send(self, profile='color-dct'):

@@ -697,42 +697,32 @@ FOLDER_LIMIT = 16
 # hold four), and reordering or replacing an entry does not fail loudly: an old
 # transmitter keeps sending the same number and a new receiver reconstructs the
 # wrong geometry from it. Change it only alongside the magic.
-PROFILE_CODES = ('color', 'color-lean', 'detail', 'mono')
-# 'color-dct' is deliberately absent and rides code 0 rather than taking
-# 'detail's slot. Taking it would have been a WIRE BREAK rather than a rename:
-# a recording made before the swap says 2 and meant 48x56+8x12, and a build
-# after it would reconstruct 40x48+20x24 from the same number with a PASSING
-# CRC, because the CRC covers the code and not its meaning.
+PROFILE_CODES = ('color', 'color-lean', 'color-dct', 'mono')
+# Two header bits, four codes, and they are ours to spend. 'color-dct' holds
+# code 2, which 'detail' used to occupy -- 'detail' is gone rather than
+# aliased, because an alias is a promise that two things are interchangeable on
+# the wire and they are not: a truncating profile is reconstructed on a finer
+# grid, and a receiver that guessed wrong would show a frequency-distorted
+# picture that looks plausible.
 #
-# Riding code 0 is NOT backward compatibility, and it is important not to read
-# it as such. A truncating profile puts the same 2880 slots in the same plane
-# shapes on the wire, so nothing malfunctions -- but the allocation is built
-# against the sampling grid's frequencies, which differ per slot from the
-# shapes', so a receiver that has not opted in reconstructs a picture that is
-# both mis-exposed and frequency-distorted, not merely smaller. A uniform
-# correction cannot fix it and cannot be signalled either: `encode` normalises
-# the packet and the channel estimate divides that straight back out, so any
-# whole-packet scale is absorbed.
+# Spending the code instead of aliasing is what makes the DCT path safe to
+# default to. The profile travels in the header like every other, the receiver
+# reads it, and there is no shared state for the two ends to disagree about.
 #
-# So a truncating profile is SHARED STATE, exactly like a custom --allocation:
-# not on the wire, nothing to detect it from, and both ends have to be set the
-# same way. That is why the sender warns and the receiver needs
-# --prefer-profile. It is the same bargain the allocation table already makes,
-# and it is the reason this is not on by default.
-PROFILE_ALIASES = {'color-dct': 'color'}
+# This is a WIRE BREAK for anything recorded when code 2 meant 'detail'. That
+# is deliberate and the magic is not bumped for it, because nothing in this
+# project has such a recording worth keeping; if that ever stops being true,
+# bump Layout.wire_magic in the same commit as the change.
 TOP_BIN_MASK = 0x3f
 
 
 def profile_code(name):
     """Wire code for a profile name, for the transmitter to declare."""
-    name = PROFILE_ALIASES.get(name, name)
     try:
         return PROFILE_CODES.index(name)
     except ValueError:
         raise ValueError(f'Profile {name!r} has no wire code. '
-                         f'Known: {", ".join(PROFILE_CODES)}'
-                         + (f', {", ".join(PROFILE_ALIASES)}'
-                            if PROFILE_ALIASES else '')) from None
+                         f'Known: {", ".join(PROFILE_CODES)}') from None
 
 
 def profile_name(code):

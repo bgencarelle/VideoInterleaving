@@ -226,6 +226,7 @@ class VideoSourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             wav = Path(d)/'v.wav'
             modem_screen.main(['--source', 'video', '--file', str(self.clip),
+                               '--preset', 'lean-v3', '--profile', 'color-lean',
                                '--write', str(wav), '--frames', '5'])
             layout = v3.ALL_PRESETS['lean-v3']
             shapes = fit_shapes(plane_shapes('color-lean'), layout.capacity)
@@ -327,7 +328,8 @@ class DeviceLoopTests(unittest.TestCase):
 
     def test_live_loop_sends_packets(self):
         out = self.FakeOutput()
-        self.run_loop(['--source', 'test', '--frames', '5'], out)
+        self.run_loop(['--source', 'test', '--frames', '5',
+                       '--preset', 'lean-v3', '--profile', 'color-lean'], out)
         layout = v3.ALL_PRESETS['lean-v3']
         self.assertEqual(len(out.sent), 5)
         self.assertTrue(out.finished)
@@ -343,7 +345,8 @@ class DeviceLoopTests(unittest.TestCase):
 
     def test_live_packets_decode(self):
         out = self.FakeOutput()
-        self.run_loop(['--source', 'test', '--frames', '4'], out)
+        self.run_loop(['--source', 'test', '--frames', '4',
+                       '--preset', 'lean-v3', '--profile', 'color-lean'], out)
         layout = v3.ALL_PRESETS['lean-v3']
         shapes = fit_shapes(plane_shapes('color-lean'), layout.capacity)
         coder = SourceCoder(shapes)

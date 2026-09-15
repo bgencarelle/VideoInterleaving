@@ -27,12 +27,12 @@ PROFILES = {
     # and loses 2-4 dB -- which looks exactly like a chroma-resolution effect
     # and is not one.
     'color-lean': ((40, 48), (10, 12)),
-    'detail': ((48, 56), (8, 12)),
     'mono': ((48, 60), None),
-    # Identical wire shapes to 'color'. The difference is PROFILE_GRIDS: the
-    # coefficients are taken from a 2x finer sampling grid and truncated to
-    # this corner, so the same 2880 slots carry a low-passed 80x96 rather than
-    # a box-downsampled 40x48.
+    # The default. Identical wire shapes to 'color' -- same 2880 slots, same
+    # plane geometry -- but PROFILE_GRIDS samples 2x finer and truncates to
+    # this corner, so those slots carry a low-passed 80x96 picture instead of a
+    # box-downsampled 40x48 one. It holds its own wire code, so the receiver
+    # reads it from the header and nothing has to be agreed out of band.
     'color-dct': ((40, 48), (20, 24)),
 }
 # Sampling grid per profile, where it differs from the transmitted shape.
@@ -41,18 +41,20 @@ PROFILES = {
 # outside the coder instead transforms twice and is catastrophic: measured, a
 # picture reading 39 dB clean collapsed to 8 dB PSNR at -45 dBFS noise.
 #
-# Worth little even done right: +0.1 to +0.5 dB typical against box-
-# downsampling at the same slot count, negative on some content, because
-# box-downsampling already captures what those coefficients can carry. It costs
-# nothing to offer now that the transform is in the right place, but it is not
-# the resolution win the name suggests, and it is not a bandwidth win either --
-# the slot count is unchanged.
+# What it buys is CONTENT-DEPENDENT, and the honest summary is that it depends
+# entirely on whether the source has detail above the wire shape. Against a
+# high-resolution source at the same slot count it reads +0.6 to +2.1 dB on a
+# portrait and +2.5 to +2.8 on hard edges; against a source already AT the wire
+# shape it loses 1.35 to 8.42 dB, because truncation can only preserve what was
+# sampled. Live capture and an 80x96 bake are the first case; a 40x48 bake is
+# the second. It is not a bandwidth saving either way -- the slot count is
+# unchanged.
 PROFILE_GRIDS = {'color-dct': ((80, 96), (40, 48))}
-DEFAULT_PROFILE = 'color'
+DEFAULT_PROFILE = 'color-dct'
 
 
 def wire_profiles():
-    """Profiles a transmitter can name, directly or by alias."""
+    """Profiles a transmitter can name. Every one holds its own wire code."""
     return tuple(PROFILES)
 
 

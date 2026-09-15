@@ -65,9 +65,9 @@ from animation_modem.audio_common import (device, pair, pcm,      # noqa: E402
                                           wire_notice)
 from animation_modem.core import (REFERENCE_RATE as RATE,        # noqa: E402
                                   SourceCoder, bound_emission)
-from animation_modem.imaging import (PROFILES, burn_counters,     # noqa: E402
-                                     fit_shapes, image_values, plane_grids,
-                                     plane_shapes, wire_profiles)
+from animation_modem.imaging import (DEFAULT_PROFILE, PROFILES,  # noqa: E402
+                                     burn_counters, fit_shapes, image_values,
+                                     plane_grids, plane_shapes, wire_profiles)
 from animation_modem.playback import PacketOutput                 # noqa: E402
 
 
@@ -494,14 +494,9 @@ def build(args):
                 f'--profile {args.profile}.')
     coder = SourceCoder(shapes, table, grids=grids)
     if coder.truncated:
-        print(f'NOTE: profile {args.profile} samples at '
-              f'{grids[0][1]}x{grids[0][0]} and sends the low-frequency corner. '
-              f'The wire cannot say so -- it carries the same {coder.count} '
-              f'slots as {V3.PROFILE_CODES[V3.profile_code(args.profile)]} -- so '
-              f'the receiver must be told: '
-              f'modem_v3_check.py live-receive --prefer-profile {args.profile}. '
-              f'Without that the picture still decodes, but mis-exposed and '
-              f'frequency-distorted. Shared state, like --allocation.',
+        print(f'{args.profile}: sampling {grids[0][1]}x{grids[0][0]} and sending '
+              f'the low-frequency corner in {coder.count} slots. The profile is '
+              f'declared in the header, so the receiver needs no argument.',
               file=sys.stderr)
     asked = int(sum(np.prod(s) for s in wanted))
     if coder.count < asked:
@@ -638,11 +633,18 @@ def parser():
                     default='test',
                     help='screen = mss (simple, slow on macOS); ffmpeg = platform fast path; '
                          'camera = webcam; test = no devices; mouse-follow = dynamic cursor tracking')
-    ap.add_argument('--preset', choices=list(V3.ALL_PRESETS), default='lean-v3')
+    ap.add_argument('--preset', choices=list(V3.ALL_PRESETS), default='hires-v3',
+                    help='Wire layout. The default holds the 2880 slots the '
+                         'default profile needs, at 16.48 fps; lean-v3 and the '
+                         '14k presets hold fewer and shrink the picture.')
     # Only the profiles the header can name. PROFILES also holds bake-only
     # geometry (see BAKE_ONLY), which argparse should refuse outright rather
     # than accept into a run that cannot transmit it.
-    ap.add_argument('--profile', choices=list(wire_profiles()), default='color-lean')
+    ap.add_argument('--profile', choices=list(wire_profiles()),
+                    default=DEFAULT_PROFILE,
+                    help='Picture geometry. The default samples 2x finer than '
+                         'it transmits and sends the low-frequency corner; the '
+                         'receiver reads which was sent from the header.')
     ap.add_argument('--device', type=device, help='Audio output device')
     ap.add_argument('--channels', type=pair, default=(0, 1))
     ap.add_argument('--latency', default='low')

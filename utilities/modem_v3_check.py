@@ -35,9 +35,9 @@ from animation_modem import impairments as IMP                 # noqa: E402
 from animation_modem.audio_common import (pcm, pair, device,   # noqa: E402
                                           wav_blocks, wav_rate, wire_notice,
                                           InputLevel, sounddevice)
-from animation_modem.imaging import (burn_counters, fit_shapes, image_values,
-                                     plane_grids, plane_shapes,
-                                     values_image, wire_profiles)
+from animation_modem.imaging import (DEFAULT_PROFILE, burn_counters,
+                                     fit_shapes, image_values, plane_grids,
+                                     plane_shapes, values_image, wire_profiles)
 # Decoded-picture window, in screen pixels. 480x576 is a whole-number 12x of a
 # 40x48 picture and 6x of color-dct's 80x96, so neither lands on a fractional
 # scale and neither needs resampling to fill it.
@@ -109,36 +109,29 @@ def coder_for(profile, allocation, layout, strict=True):
     return V3.SourceCoder(shapes, table, grids=grids), grids
 
 
-def coders_for(layout, allocation=None, prefer=None):
-    """code -> coder, so the receiver can follow the header's declaration.
+def coders_for(layout, allocation=None):
+    """code -> coder, so the receiver follows the header's declaration.
 
-    `prefer` opts into a truncating profile. A truncating profile aliases onto
-    the code of the profile it truncates (color-dct onto color), because the
-    slots and shapes are identical and two header bits hold only four codes --
-    so the wire cannot say which of the two was sent. A receiver that does not
-    opt in reconstructs the correctly-exposed low-passed picture at the small
-    size, which is why the alias is safe; a receiver that does opt in gets the
-    finer grid. Like --allocation, it is shared state that is not on the wire
-    and both ends have to be set the same way to get the benefit.
+    Every profile holds its own code, color-dct included, so there is nothing
+    to opt into and nothing for the two ends to disagree about. That is the
+    whole reason color-dct was given a code of its own rather than aliased onto
+    color's: an alias cannot be read off the wire, and a receiver that guessed
+    wrong would show a frequency-distorted picture that looks plausible.
     """
-    table = {V3.profile_code(name): coder_for(name, allocation, layout,
-                                              strict=False)[0]
-             for name in V3.PROFILE_CODES}
-    if prefer in V3.PROFILE_ALIASES:
-        table[V3.profile_code(prefer)] = coder_for(prefer, allocation, layout,
-                                                   strict=False)[0]
-    return table
+    return {V3.profile_code(name): coder_for(name, allocation, layout,
+                                             strict=False)[0]
+            for name in V3.PROFILE_CODES}
 
 
 def live_presets():
     return [n for n, l in PRESETS.items() if l.progressive]
 
 
-def candidates_for(allocation=None, prefer=None):
+def candidates_for(allocation=None):
     out = []
     for name in live_presets():
         layout = PRESETS[name]
-        coders = coders_for(layout, allocation, prefer=prefer)
+        coders = coders_for(layout, allocation)
         out.append((layout, coders[V3.profile_code('color-lean')], coders))
     return out
 
@@ -212,11 +205,8 @@ def do_read(args):
     coder, _ = coder_for(args.profile, args.allocation, layout)
     rate = wav_rate(args.wav)
     receiver = receive_for(args, layout, coder, input_rate=rate,
-                           coders=coders_for(layout, args.allocation,
-                                             prefer=getattr(args, 'profile', None)),
-                           candidates=candidates_for(
-                               args.allocation,
-                               prefer=getattr(args, 'profile', None)))
+                           coders=coders_for(layout, args.allocation),
+                           candidates=candidates_for(args.allocation))
     if rate != REFERENCE_RATE:
         print(f'{args.wav}: {rate} Hz, decoding at that rate', file=sys.stderr)
     if args.save_frames:
@@ -433,14 +423,9 @@ def do_live_receive(args):
             rate = source['rate']
             if rate is None:
                 return
-            # `prefer` opts into a truncating profile, which the wire cannot
-            # signal -- see coders_for. live-receive has no --profile, so this
-            # follows --prefer-profile when one was given and is None otherwise,
-            # which is the plain non-truncating behaviour.
-            prefer = getattr(args, 'prefer_profile', None)
             receiver = V3.Receiver(layout, coder, pulse_only=True, input_rate=rate,
-                                   coders=coders_for(layout, prefer=prefer),
-                                   candidates=candidates_for(prefer=prefer))
+                                   coders=coders_for(layout, args.allocation),
+                                   candidates=candidates_for(args.allocation))
             seen = 0
             last_summary = time.monotonic()
             peak = 0.0
@@ -575,11 +560,12 @@ def do_live_receive(args):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest='command', required=True)
-    p.set_defaults(preset='wide-v3', profile='color', allocation=None, gain=1.0)
+    p.set_defaults(preset='wide-v3', profile=DEFAULT_PROFILE, allocation=None, gain=1.0)
 
     def shared(q):
-        q.add_argument('--profile', choices=['color', 'color-lean', 'color-dct', 'detail', 'mono'],
-                       default='color', help="Plane geometry to SEND.")
+        q.add_argument('--profile', choices=list(wire_profiles()),
+                       default=DEFAULT_PROFILE, help='Plane geometry to SEND. '
+                       'The receiver reads it from the header.')
         q.add_argument('--modem-dir', type=Path)
         q.add_argument('--frames', type=int, default=24)
         q.add_argument('--stride', type=int, default=1)
@@ -624,13 +610,6 @@ def main(argv=None):
     allocation(ls)
     ls.add_argument('--list-devices', action='store_true')
     lr = sub.add_parser('live-receive')
-    lr.add_argument('--prefer-profile', choices=sorted(V3.PROFILE_ALIASES),
-                    help='Opt into a truncating profile. These share the wire '
-                         'code of the profile they truncate, because the slots '
-                         'and shapes are identical and two header bits hold '
-                         'only four codes -- so the signal cannot say which was '
-                         'sent. Without this the picture still decodes, at the '
-                         'smaller size. Like --allocation, both ends must agree.')
     lr.add_argument('--device', type=device)
     lr.add_argument('--channels', type=pair, default=(0, 1))
     buffering = lr.add_mutually_exclusive_group()
