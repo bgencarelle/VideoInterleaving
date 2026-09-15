@@ -248,7 +248,18 @@ class Layout:
 
 PRESETS = {
     # today's band and cadence, for a cable or a digital loopback
-    'wide': Layout(top_bin=54, image_symbols=15, name='wide', progressive=True),
+    # progressive=True puts carrier 0 on bin 1 (375 Hz), which is exactly where
+    # every real channel's phase is already bending. That costs nothing in a
+    # magnitude sense -- and everything in a time-domain one: a filter down
+    # there rings for milliseconds, far past the 0.33 ms the 16-sample cyclic
+    # prefix can absorb, so its tail smears across symbol boundaries and biases
+    # the low carriers. The low carriers are where the coarse Y, Cb and Cr
+    # coefficients live, and biasing them unevenly is a colour cast.
+    #
+    # Measured (tests/test_eq_dispersion.py), plane-gain spread under a pure
+    # allpass at 300 Hz -- no magnitude change anywhere -- is 11.22 dB on bin 1
+    # and 0.73 dB starting at bin 3. Two carriers buys a 15x reduction.
+    'wide': Layout(top_bin=54, image_symbols=15, name='wide'),
     # cassette: 10 kHz ceiling, full picture, slower
     'tape': Layout(top_bin=27, image_symbols=35, name='tape'),
     # cassette: 10 kHz ceiling, keeps the frame rate, smaller picture
