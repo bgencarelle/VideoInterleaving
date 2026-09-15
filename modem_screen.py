@@ -481,7 +481,18 @@ def build(args):
     shapes = fit_shapes(wanted, layout.capacity)
     if shapes != wanted:
         grids = shapes          # see coder_for: a shrunk corner is not a corner
-    coder = SourceCoder(shapes, grids=grids)
+    table = None
+    if getattr(args, 'allocation', None):
+        import numpy as _np
+        table = _np.load(args.allocation)
+        want = int(sum(_np.prod(s) for s in shapes))
+        if table.shape != (want,):
+            raise SystemExit(
+                f'Allocation {args.allocation} has {table.size} weights but '
+                f'{args.preset}/{args.profile} needs {want}. Refit with '
+                f'fit_allocation.py --preset {args.preset} '
+                f'--profile {args.profile}.')
+    coder = SourceCoder(shapes, table, grids=grids)
     if coder.truncated:
         print(f'NOTE: profile {args.profile} samples at '
               f'{grids[0][1]}x{grids[0][0]} and sends the low-frequency corner. '
@@ -663,6 +674,13 @@ def parser():
     ap.add_argument('--gain', type=float, default=1.0,
                     help='Output scale. v3 already normalises to 0.95; above '
                          '1.0 clips.')
+    ap.add_argument('--allocation', metavar='NPY',
+                    help='Power allocation table from fit_allocation.py, '
+                         'fitted to the pictures actually being sent. Measured '
+                         '+3.4 to +3.8 dB on a held-out frame for no extra '
+                         'slots. SHARED STATE: not on the wire, so the receiver '
+                         'needs the same file, and it only fits the '
+                         'preset/profile pair it was fitted for.')
     ap.add_argument('--emit-ceiling', type=float, metavar='HZ',
                     help='Hold the emitted spectrum under HZ. top_bin bounds '
                          'the carriers, not the emission: the preamble is '

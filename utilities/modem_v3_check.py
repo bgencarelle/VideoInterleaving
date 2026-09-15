@@ -78,7 +78,7 @@ def frames_from(args, profile='color'):
     return out, getattr(args, 'profile', None) or profile
 
 
-def coder_for(profile, allocation, layout):
+def coder_for(profile, allocation, layout, strict=True):
     shapes = plane_shapes(profile)
     grids = plane_grids(profile)
     if sum(int(np.prod(s)) for s in shapes) > layout.capacity:
@@ -88,6 +88,24 @@ def coder_for(profile, allocation, layout):
         shapes = fit_shapes(shapes, layout.capacity)
         grids = shapes
     table = np.load(allocation) if allocation else None
+    if table is not None:
+        want = int(sum(np.prod(s) for s in shapes))
+        if table.shape != (want,):
+            # A table is fitted for ONE (preset, profile) pair, because its
+            # length is that pair's slot count. Where the caller named the pair,
+            # a mismatch is a mistake and has to say so. Where we are SCANNING
+            # -- candidate presets, or the four profile coders a receiver holds
+            # to follow the header -- a mismatch just means this table is not
+            # for that one, and falling back to the default table is how the
+            # scan keeps working at all.
+            if strict:
+                raise SystemExit(
+                    f'Allocation {allocation} has {table.size} weights but '
+                    f'{layout.name}/{profile} needs {want}. A table only fits '
+                    f'the preset and profile it was fitted for -- refit with '
+                    f'fit_allocation.py --preset {layout.name} '
+                    f'--profile {profile}.')
+            table = None
     return V3.SourceCoder(shapes, table, grids=grids), grids
 
 
@@ -103,10 +121,12 @@ def coders_for(layout, allocation=None, prefer=None):
     finer grid. Like --allocation, it is shared state that is not on the wire
     and both ends have to be set the same way to get the benefit.
     """
-    table = {V3.profile_code(name): coder_for(name, allocation, layout)[0]
+    table = {V3.profile_code(name): coder_for(name, allocation, layout,
+                                              strict=False)[0]
              for name in V3.PROFILE_CODES}
     if prefer in V3.PROFILE_ALIASES:
-        table[V3.profile_code(prefer)] = coder_for(prefer, allocation, layout)[0]
+        table[V3.profile_code(prefer)] = coder_for(prefer, allocation, layout,
+                                                   strict=False)[0]
     return table
 
 
@@ -563,14 +583,24 @@ def main(argv=None):
         q.add_argument('--modem-dir', type=Path)
         q.add_argument('--frames', type=int, default=24)
         q.add_argument('--stride', type=int, default=1)
-    b = sub.add_parser('bench'); shared(b)
-    b.add_argument('--allocation', type=Path)
+
+    def allocation(q):
+        q.add_argument('--allocation', type=Path,
+                       help='Power allocation table from fit_allocation.py, '
+                            'fitted to the pictures actually being sent. '
+                            'Measured +3.4 to +3.8 dB on a held-out frame, for '
+                            'no extra slots. SHARED STATE: not on the wire and '
+                            'nothing detects it, so both ends need the same '
+                            'file, and it only fits the preset/profile pair it '
+                            'was made for.')
+    b = sub.add_parser('bench'); shared(b); allocation(b)
     b.add_argument('--preset', choices=list(PRESETS), default='wide-v3')
     w = sub.add_parser('write'); shared(w)
     w.add_argument('--preset', choices=list(PRESETS), default='lean-v3')
     w.set_defaults(profile='color-lean')
     w.add_argument('--out', type=Path, default=Path('v3_test.wav'))
     w.add_argument('-f', '--numbered', action='store_true')
+    allocation(w)
     r = sub.add_parser('read')
     r.add_argument('--preset', choices=list(PRESETS), default='lean-v3',
                    help='Fallback only. The preset is identified from the '
@@ -584,12 +614,14 @@ def main(argv=None):
     r.add_argument('--wav', type=Path, required=True)
     r.add_argument('--channels', type=pair, default=(0, 1))
     r.add_argument('--save-frames', type=Path)
+    allocation(r)
     ls = sub.add_parser('live-send'); shared(ls)
     ls.add_argument('--preset', choices=list(PRESETS), default='lean-v3')
     ls.set_defaults(profile='color-lean')
     ls.add_argument('--device', type=device)
     ls.add_argument('--channels', type=pair, default=(0, 1))
     ls.add_argument('-f', '--numbered', action='store_true')
+    allocation(ls)
     ls.add_argument('--list-devices', action='store_true')
     lr = sub.add_parser('live-receive')
     lr.add_argument('--prefer-profile', choices=sorted(V3.PROFILE_ALIASES),
@@ -625,6 +657,7 @@ def main(argv=None):
                          'as sent, which is what you want when judging a '
                          'decode; smooth is Lanczos and looks better but hides '
                          'dead pixels, blocking and chroma blotching.')
+    allocation(lr)
     lr.add_argument('--list-devices', action='store_true')
     args = p.parse_args(argv)
     {'bench': do_bench, 'write': do_write, 'read': do_read,
