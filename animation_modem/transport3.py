@@ -70,6 +70,8 @@ PREAMBLE_AMPLITUDE = .55
 # 7.7 dB further down than it needed to be.
 
 SHORT, LONG = HALF, 2*HALF
+RELOCK_AFTER = 4           # unverified packets before a detected preset is
+                           # abandoned and the candidate search runs again
 EDGE_HYSTERESIS = .12      # Schmitt threshold, relative to preamble amplitude
 
 
@@ -565,6 +567,9 @@ class Receiver:
         # header IS, so reading it first is circular. The preamble is the one
         # part that does not depend on the layout, so acquisition still works
         # -- and from there the CRC decides, at 1.4 ms an attempt, once.
+        # What to fall back to when a lock is abandoned. Without it, relocking
+        # would have to keep decoding against the preset that stopped working.
+        self._start = (layout, coder, self.coders)
         self.candidates = sorted(candidates or [], key=lambda c: c[0].packet)
         for cand, cand_coder, _ in self.candidates:
             if cand_coder.count > cand.capacity:
@@ -601,6 +606,12 @@ class Receiver:
         # re-runs the short ones that already failed -- measured at 21 decode
         # attempts for six frames where 13 is the whole search.
         self._tried = 0
+        # Packets since the locked preset last verified a header. A lock is
+        # adopted once and then short-circuits the candidate search, which is
+        # right while one transmission runs and wrong the moment a DIFFERENT
+        # one starts: the receiver would keep decoding the new signal against
+        # the old preset forever, and the only cure was restarting it.
+        self._since_lock = 0
         self.search_after = SYNC_LEN
         self.acquire_ms = 0.
         self.acquisition_path = 'edge'
@@ -860,6 +871,22 @@ class Receiver:
             result, taps, wait = self._identify(begin, scale, final)
             if wait:
                 break                     # a longer candidate needs more audio
+            # Give the lock up after a run of failures, so a new transmission
+            # on a different preset is found without restarting the receiver.
+            # RELOCK_AFTER is deliberately not 1: a single unverified header is
+            # ordinary on a marginal channel, and re-running the candidate
+            # search on every one of those would cost 1.4 ms an attempt and
+            # risk adopting a wrong layout off a lucky CRC.
+            if self.detected is not None:
+                if result.identity == 'verified_header':
+                    self._since_lock = 0
+                else:
+                    self._since_lock += 1
+                    if self._since_lock >= RELOCK_AFTER:
+                        self.layout, self.coder, self.coders = self._start
+                        self.detected = None
+                        self._tried = 0
+                        self._since_lock = 0
             result.rate_error = scale-1
             result.rate_confidence = score
             result.extra.update(sync_score=score, at=self.offset+begin,
