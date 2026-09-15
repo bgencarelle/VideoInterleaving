@@ -10,7 +10,7 @@ import unittest
 import numpy as np
 
 from animation_modem import core, transport3 as v3
-from animation_modem.imaging import (BAKE_ONLY, PROFILES, fit_shapes,
+from animation_modem.imaging import (PROFILE_GRIDS, PROFILES, fit_shapes,
                                      plane_shapes, wire_profiles)
 
 WIDE = v3.ALL_PRESETS['wide-v3']        # 2880 slots: every profile fits whole
@@ -32,11 +32,16 @@ class ProfileCodeTests(unittest.TestCase):
     def test_the_code_table_matches_the_profiles_that_exist(self):
         """Wire order against the real table. These drifting apart is the one
         way this silently sends the wrong geometry."""
-        # PROFILES also carries bake-only geometry that has no wire code --
-        # see BAKE_ONLY. The transmittable set is what has to match the table.
-        self.assertEqual(set(v3.PROFILE_CODES), set(wire_profiles()))
+        # Every profile is transmittable, but not every one has its OWN
+        # code: a truncating profile sends the same slots as the profile it
+        # truncates, so it aliases onto that code (see PROFILE_ALIASES).
+        self.assertEqual(set(v3.PROFILE_CODES) | set(core.PROFILE_ALIASES),
+                         set(wire_profiles()))
         self.assertLessEqual(len(v3.PROFILE_CODES), 4, 'two bits hold four')
-        self.assertTrue(set(BAKE_ONLY) <= set(PROFILES))
+        for name, target in core.PROFILE_ALIASES.items():
+            self.assertEqual(plane_shapes(name), plane_shapes(target),
+                             'an alias must put the same shapes on the wire')
+        self.assertTrue(set(PROFILE_GRIDS) <= set(PROFILES))
 
     def test_names_and_codes_round_trip(self):
         for name in v3.PROFILE_CODES:

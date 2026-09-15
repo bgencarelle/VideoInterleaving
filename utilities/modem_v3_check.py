@@ -36,7 +36,8 @@ from animation_modem.audio_common import (pcm, pair, device,   # noqa: E402
                                           wav_blocks, wav_rate, wire_notice,
                                           InputLevel, sounddevice)
 from animation_modem.imaging import (burn_counters, fit_shapes, image_values,
-                                     plane_shapes, values_image, values_image_dct)
+                                     plane_grids, plane_shapes,
+                                     values_image, wire_profiles)
 PRESETS = V3.ALL_PRESETS
 REFERENCE_RATE = V3.REFERENCE_RATE
 RATE = REFERENCE_RATE
@@ -69,26 +70,45 @@ def frames_from(args, profile='color'):
 
 def coder_for(profile, allocation, layout):
     shapes = plane_shapes(profile)
+    grids = plane_grids(profile)
     if sum(int(np.prod(s)) for s in shapes) > layout.capacity:
+        # Shrinking a truncating profile drops the finer grid with it: the
+        # corner must stay a corner of something, and there is no reason to
+        # believe a shrunk-then-truncated geometry is the right trade.
         shapes = fit_shapes(shapes, layout.capacity)
+        grids = shapes
     table = np.load(allocation) if allocation else None
-    return V3.SourceCoder(shapes, table), shapes
+    return V3.SourceCoder(shapes, table, grids=grids), grids
 
 
-def coders_for(layout, allocation=None):
-    return {V3.profile_code(name): coder_for(name, allocation, layout)[0]
-            for name in V3.PROFILE_CODES}
+def coders_for(layout, allocation=None, prefer=None):
+    """code -> coder, so the receiver can follow the header's declaration.
+
+    `prefer` opts into a truncating profile. A truncating profile aliases onto
+    the code of the profile it truncates (color-dct onto color), because the
+    slots and shapes are identical and two header bits hold only four codes --
+    so the wire cannot say which of the two was sent. A receiver that does not
+    opt in reconstructs the correctly-exposed low-passed picture at the small
+    size, which is why the alias is safe; a receiver that does opt in gets the
+    finer grid. Like --allocation, it is shared state that is not on the wire
+    and both ends have to be set the same way to get the benefit.
+    """
+    table = {V3.profile_code(name): coder_for(name, allocation, layout)[0]
+             for name in V3.PROFILE_CODES}
+    if prefer in V3.PROFILE_ALIASES:
+        table[V3.profile_code(prefer)] = coder_for(prefer, allocation, layout)[0]
+    return table
 
 
 def live_presets():
     return [n for n, l in PRESETS.items() if l.progressive]
 
 
-def candidates_for(allocation=None):
+def candidates_for(allocation=None, prefer=None):
     out = []
     for name in live_presets():
         layout = PRESETS[name]
-        coders = coders_for(layout, allocation)
+        coders = coders_for(layout, allocation, prefer=prefer)
         out.append((layout, coders[V3.profile_code('color-lean')], coders))
     return out
 
@@ -132,7 +152,7 @@ def do_write(args):
         sink.setparams((2, 2, REFERENCE_RATE, 0, 'NONE', 'not compressed'))
         for n, im in enumerate(frames):
             values = image_values(_prepared(im, n+1, len(frames), args.numbered),
-                                  coder.shapes)
+                                  coder.grids)
             audio = V3.encode(values, layout, coder, n+1, (n % len(frames))+1,
                               len(frames), stamp_ms=n*int(1000/fps),
                               profile=V3.profile_code(profile))
@@ -146,8 +166,11 @@ def do_read(args):
     coder, _ = coder_for(args.profile, args.allocation, layout)
     rate = wav_rate(args.wav)
     receiver = receive_for(args, layout, coder, input_rate=rate,
-                           coders=coders_for(layout, args.allocation),
-                           candidates=candidates_for(args.allocation))
+                           coders=coders_for(layout, args.allocation,
+                                             prefer=getattr(args, 'profile', None)),
+                           candidates=candidates_for(
+                               args.allocation,
+                               prefer=getattr(args, 'profile', None)))
     if rate != REFERENCE_RATE:
         print(f'{args.wav}: {rate} Hz, decoding at that rate', file=sys.stderr)
     if args.save_frames:
@@ -168,7 +191,7 @@ def do_read(args):
         if args.save_frames and r.values is not None:
             name = f'{r.absolute:06d}' if r.absolute is not None else f'x{seen:06d}'
             prof = r.extra.get('profile') or r.extra.get('profile_name')
-            img = values_image_dct(r.values) if prof == 'color-dct' else values_image(r.values, r.extra.get('shapes', coder.shapes))
+            img = values_image(r.values, r.extra.get('shapes', coder.grids))
             img.save(Path(args.save_frames)/f'frame_{name}.png')
     if rates:
         speed = float(np.median(rates))
@@ -313,7 +336,7 @@ def do_live_receive(args):
                         name = (f'{result.absolute:06d}' if result.absolute is not None
                                 else f'x{time.monotonic_ns()}')
                         prof = result.extra.get('profile') or result.extra.get('profile_name')
-                        img = values_image_dct(result.values) if prof == 'color-dct' else values_image(result.values, result.extra['shapes'])
+                        img = values_image(result.values, result.extra['shapes'])
                         img.save(Path(args.save_frames)/f'frame_{name}.png')
                 if summary is not None:
                     print(json.dumps(summary), file=sys.stderr, flush=True)
@@ -359,9 +382,14 @@ def do_live_receive(args):
             rate = source['rate']
             if rate is None:
                 return
+            # `prefer` opts into a truncating profile, which the wire cannot
+            # signal -- see coders_for. live-receive has no --profile, so this
+            # follows --prefer-profile when one was given and is None otherwise,
+            # which is the plain non-truncating behaviour.
+            prefer = getattr(args, 'prefer_profile', None)
             receiver = V3.Receiver(layout, coder, pulse_only=True, input_rate=rate,
-                                   coders=coders_for(layout),
-                                   candidates=candidates_for())
+                                   coders=coders_for(layout, prefer=prefer),
+                                   candidates=candidates_for(prefer=prefer))
             seen = 0
             last_summary = time.monotonic()
             peak = 0.0
@@ -440,6 +468,7 @@ def do_live_receive(args):
                 stop.set(); root.destroy()
             root.protocol('WM_DELETE_WINDOW', close)
             root.bind('<Escape>', lambda event: close())
+            root.bind('<q>', lambda event: close())
 
             rendered = [None]
 
@@ -454,12 +483,9 @@ def do_live_receive(args):
                 if r is not rendered[0]:
                     canvas = Image.new('RGB', size, 'black')
                     if r is not None:
-                        prof = r.extra.get('profile') or r.extra.get('profile_name')
-                        if prof == 'color-dct':
-                            img = values_image_dct(r.values)
-                        else:
-                            img = values_image(r.values, r.extra['shapes'])
-
+                        prof = (r.extra.get('profile')
+                                or r.extra.get('profile_name'))
+                        img = values_image(r.values, r.extra['shapes'])
                         scaled = ImageOps.contain(img, size, Image.Resampling.NEAREST)
                         canvas.paste(scaled, ((size[0]-scaled.width)//2, (size[1]-scaled.height)//2))
                         shown = prof or 'profile unverified'
@@ -508,8 +534,15 @@ def main(argv=None):
     w.add_argument('--out', type=Path, default=Path('v3_test.wav'))
     w.add_argument('-f', '--numbered', action='store_true')
     r = sub.add_parser('read')
-    r.add_argument('--preset', choices=list(PRESETS), default='lean-v3')
-    r.add_argument('--profile', choices=['color', 'color-lean', 'color-dct', 'detail', 'mono'], default='color-lean')
+    r.add_argument('--preset', choices=list(PRESETS), default='lean-v3',
+                   help='Fallback only. The preset is identified from the '
+                        'signal by decoding against each candidate and letting '
+                        'the header CRC pick; this is what gets tried first.')
+    r.add_argument('--profile', choices=list(wire_profiles()),
+                   default='color-lean',
+                   help='Fallback only. The profile is read from the header, '
+                        'so this matters just for a packet whose header never '
+                        'verifies.')
     r.add_argument('--wav', type=Path, required=True)
     r.add_argument('--channels', type=pair, default=(0, 1))
     r.add_argument('--save-frames', type=Path)
@@ -521,6 +554,13 @@ def main(argv=None):
     ls.add_argument('-f', '--numbered', action='store_true')
     ls.add_argument('--list-devices', action='store_true')
     lr = sub.add_parser('live-receive')
+    lr.add_argument('--prefer-profile', choices=sorted(V3.PROFILE_ALIASES),
+                    help='Opt into a truncating profile. These share the wire '
+                         'code of the profile they truncate, because the slots '
+                         'and shapes are identical and two header bits hold '
+                         'only four codes -- so the signal cannot say which was '
+                         'sent. Without this the picture still decodes, at the '
+                         'smaller size. Like --allocation, both ends must agree.')
     lr.add_argument('--device', type=device)
     lr.add_argument('--channels', type=pair, default=(0, 1))
     buffering = lr.add_mutually_exclusive_group()

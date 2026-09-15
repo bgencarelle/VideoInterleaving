@@ -40,7 +40,7 @@ def packet(library, layout, coder, absolute, selection, numbered=False,
     im=library.composite(index,main,front,background,rotation,mirror)
     if numbered:
         im=burn_counters(im,absolute,index+1,library.frames)
-    values=image_values(im,coder.shapes)
+    values=image_values(im,coder.grids)
     # v2 identifies frames on a 16-bit index/count, so a long bake wraps rather
     # than raising. The absolute frame number stays 32-bit.
     stamp_ms=0 if target_time_ns is None else (int(target_time_ns)//1_000_000) & 0xffffffff

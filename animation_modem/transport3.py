@@ -52,7 +52,7 @@ from .core import (REFERENCE_RATE, N, CP, SYMBOL, SYNC_LEN, GUARD, HEADER_GAIN,
                          default_allocation, resample_packet, _sample_at,
                          _body_walk, _decode_tables, FOLDER_LIMIT,
                          band_limited, emit_length, emit_ratio,
-                         PROFILE_CODES, profile_code, profile_name)
+                         PROFILE_ALIASES, PROFILE_CODES, profile_code, profile_name)
 
 # --------------------------------------------------------------------------
 # Preamble

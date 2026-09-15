@@ -29,42 +29,39 @@ PROFILES = {
     'color-lean': ((40, 48), (10, 12)),
     'detail': ((48, 56), (8, 12)),
     'mono': ((48, 60), None),
-    # A BAKE geometry, not a wire profile. convert_to_modem_dct writes slabs at
-    # this size; nothing can transmit it, for three separate reasons.
-    #
-    # It has no wire code. PROFILE_CODES holds four names and the header spends
-    # exactly two bits on the field, both nibbles of the flags byte being folder
-    # indices and top_bin needing its other six. A fifth name has nowhere to go
-    # without growing the header.
-    #
-    # It does not fit. 11520 values against lean-v3's 2200, so fit_shapes runs
-    # and lands on 34x42 luma -- SMALLER than color-lean's 40x48. Selecting it
-    # would lower the resolution, silently but for build()'s warning.
-    #
-    # And the DCT would not rescue it. SourceCoder transmits every coefficient
-    # of every plane -- count == sum(prod(shapes)) -- so the transform buys
-    # decorrelation for default_allocation, not compression. Sampling 2x finer
-    # and sending only the low-frequency corner (same slot count) was measured
-    # against this baseline across five kinds of content at 12-30 dB SNR: +0.1
-    # to +0.5 dB typical, +1.6 dB best case on a clean smooth gradient, and
-    # NEGATIVE on portrait content. Box-downsampling already captures what
-    # those coefficients can carry. Raising capacity does not help either --
-    # lean-v3's 2200 slots to wide-v3's 3000 moved a 24 dB reconstruction by
-    # +0.68 dB on graphics and -0.76 dB on portraits, because the same transmit
-    # power spread over more coefficients leaves each one weaker.
-    'color-dct': ((80, 96), (40, 48))
+    # Identical wire shapes to 'color'. The difference is PROFILE_GRIDS: the
+    # coefficients are taken from a 2x finer sampling grid and truncated to
+    # this corner, so the same 2880 slots carry a low-passed 80x96 rather than
+    # a box-downsampled 40x48.
+    'color-dct': ((40, 48), (20, 24)),
 }
-# Entries that exist as source geometry but cannot go on the wire. Kept as data
-# rather than a comment so the code table test can assert the real contract:
-# PROFILE_CODES is exactly PROFILES minus this set, and adding a profile
-# without deciding which side it falls on fails that test.
-BAKE_ONLY = ('color-dct',)
+# Sampling grid per profile, where it differs from the transmitted shape.
+# SourceCoder truncates the grid's DCT to the wire shape -- ONE transform, and
+# the allocation table built against the grid's frequencies. Pre-transforming
+# outside the coder instead transforms twice and is catastrophic: measured, a
+# picture reading 39 dB clean collapsed to 8 dB PSNR at -45 dBFS noise.
+#
+# Worth little even done right: +0.1 to +0.5 dB typical against box-
+# downsampling at the same slot count, negative on some content, because
+# box-downsampling already captures what those coefficients can carry. It costs
+# nothing to offer now that the transform is in the right place, but it is not
+# the resolution win the name suggests, and it is not a bandwidth win either --
+# the slot count is unchanged.
+PROFILE_GRIDS = {'color-dct': ((80, 96), (40, 48))}
 DEFAULT_PROFILE = 'color'
 
 
 def wire_profiles():
-    """Profiles a transmitter can actually name in the header."""
-    return tuple(name for name in PROFILES if name not in BAKE_ONLY)
+    """Profiles a transmitter can name, directly or by alias."""
+    return tuple(PROFILES)
+
+
+def plane_grids(profile=DEFAULT_PROFILE):
+    """Sampling grids for a profile: its wire shapes unless it truncates."""
+    if profile not in PROFILE_GRIDS:
+        return plane_shapes(profile)
+    size, chroma = PROFILE_GRIDS[profile]
+    return [(size[1], size[0])] + ([(chroma[1], chroma[0])]*2 if chroma else [])
 
 
 def plane_shapes(profile=DEFAULT_PROFILE):
@@ -111,7 +108,7 @@ def image_values(image, shapes):
     shapes = _shapes(shapes)
     rows, cols = shapes[0]
     padded = ImageOps.pad(image.convert('RGB'), (cols, rows),
-                          method=Image.Resampling.NEAREST, color='black')
+                          method=Image.Resampling.LANCZOS, color='black')
     planes = padded.convert('YCbCr').split()
     return np.concatenate([
         np.asarray(plane.resize((shape[1], shape[0]), Image.Resampling.BOX)).ravel()
@@ -134,39 +131,6 @@ def values_image(values, shapes):
         plane.resize(planes[0].size, Image.Resampling.BILINEAR)
         for plane in planes[1:]])).convert('RGB')
 
-
-def values_image_dct(values, shapes=None):
-    """Reconstructs an 80x96 image from truncated 2D-DCT values and target shapes."""
-    if shapes is None:
-        shapes = ((48, 40), (24, 20), (24, 20))
-    y_shape, cb_shape, cr_shape = shapes[0], shapes[1], shapes[2]
-
-    values = np.asarray(values, dtype=float)
-    y_count = y_shape[0] * y_shape[1]
-    cb_count = cb_shape[0] * cb_shape[1]
-    cr_count = cr_shape[0] * cr_shape[1]
-
-    # Reconstruct Luma
-    y_coeffs = values[:y_count].reshape(y_shape) * (127.5 * np.sqrt(80 * 96))
-    y_full = np.zeros((96, 80), dtype=float)
-    y_full[:y_shape[0], :y_shape[1]] = y_coeffs
-    y_plane = np.uint8(np.clip(_idct2(y_full), 0, 255))
-
-    # Reconstruct Chroma
-    cb_coeffs = values[y_count:y_count + cb_count].reshape(cb_shape) * (127.5 * np.sqrt(40 * 48))
-    cr_coeffs = values[y_count + cb_count:y_count + cb_count + cr_count].reshape(cr_shape) * (127.5 * np.sqrt(40 * 48))
-
-    cb_full, cr_full = np.zeros((48, 40), dtype=float), np.zeros((48, 40), dtype=float)
-    cb_full[:cb_shape[0], :cb_shape[1]] = cb_coeffs
-    cr_full[:cr_shape[0], :cr_shape[1]] = cr_coeffs
-
-    cb_sub = Image.fromarray(np.uint8(np.clip(_idct2(cb_full), 0, 255)))
-    cr_sub = Image.fromarray(np.uint8(np.clip(_idct2(cr_full), 0, 255)))
-
-    cb_plane = cb_sub.resize((80, 96), Image.Resampling.BILINEAR)
-    cr_plane = cr_sub.resize((80, 96), Image.Resampling.BILINEAR)
-
-    return Image.merge('YCbCr', (Image.fromarray(y_plane), cb_plane, cr_plane)).convert('RGB')
 
 # 3x5 digits, small enough to read on a 40x48 transmitted image.
 GLYPHS = dict(zip('0123456789AF/', [
@@ -196,53 +160,3 @@ def burn_counters(image, absolute, index, count):
     _text(out, 'A' + str(absolute).zfill(6), 0)
     _text(out, 'F' + str(index) + '/' + str(count), 7)
     return out
-
-
-# Add at the bottom of imaging.py
-import scipy.fftpack as fftpack
-
-
-def _dct2(a): return fftpack.dct(fftpack.dct(a.T, norm='ortho').T, norm='ortho')
-
-
-def _idct2(a): return fftpack.idct(fftpack.idct(a.T, norm='ortho').T, norm='ortho')
-
-
-def image_values_dct(image):
-    high_res = image.convert('RGB').resize((80, 96), Image.Resampling.NEAREST)
-    planes = high_res.convert('YCbCr').split()
-    y_dct = _dct2(np.asarray(planes[0], dtype=float))
-    y_coeffs = y_dct[:48, :40].ravel() / (127.5 * np.sqrt(80 * 96))
-
-    c_norms = []
-    for p in planes[1:]:
-        p_sub = p.resize((40, 48), Image.Resampling.LANCZOS)
-        c_dct = _dct2(np.asarray(p_sub, dtype=float))
-        c_norms.append(c_dct[:24, :20].ravel() / (127.5 * np.sqrt(40 * 48)))
-
-    return np.concatenate([y_coeffs, c_norms[0], c_norms[1]])
-
-
-def image_values_dct(image, shapes=None):
-    """Encodes an image to 2D-DCT coefficients matching the target shapes."""
-    if shapes is None:
-        shapes = ((48, 40), (24, 20), (24, 20))
-    y_shape, cb_shape, cr_shape = shapes[0], shapes[1], shapes[2]
-
-    high_res = image.convert('RGB').resize((80, 96), Image.Resampling.LANCZOS)
-    planes = high_res.convert('YCbCr').split()
-
-    # 1. Luma Plane DCT
-    y_dct = _dct2(np.asarray(planes[0], dtype=float))
-    y_coeffs = y_dct[:y_shape[0], :y_shape[1]].ravel()
-    y_norm = y_coeffs / (127.5 * np.sqrt(80 * 96))
-
-    # 2. Chroma Planes DCT
-    chroma_norms = []
-    for plane, c_shape in zip(planes[1:], [cb_shape, cr_shape]):
-        p_sub = plane.resize((40, 48), Image.Resampling.LANCZOS)
-        c_dct = _dct2(np.asarray(p_sub, dtype=float))
-        c_coeffs = c_dct[:c_shape[0], :c_shape[1]].ravel()
-        chroma_norms.append(c_coeffs / (127.5 * np.sqrt(40 * 48)))
-
-    return np.concatenate([y_norm, chroma_norms[0], chroma_norms[1]])

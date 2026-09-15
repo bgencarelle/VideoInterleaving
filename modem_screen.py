@@ -66,8 +66,8 @@ from animation_modem.audio_common import (device, pair, pcm,      # noqa: E402
 from animation_modem.core import (REFERENCE_RATE as RATE,        # noqa: E402
                                   SourceCoder, bound_emission)
 from animation_modem.imaging import (PROFILES, burn_counters,     # noqa: E402
-                                     fit_shapes, image_values, plane_shapes,
-                                     wire_profiles)
+                                     fit_shapes, image_values, plane_grids,
+                                     plane_shapes, wire_profiles)
 from animation_modem.playback import PacketOutput                 # noqa: E402
 
 
@@ -477,8 +477,21 @@ def build(args):
         raise SystemExit(str(exc)) from None
     layout = V3.ALL_PRESETS[args.preset]
     wanted = plane_shapes(args.profile)
+    grids = plane_grids(args.profile)
     shapes = fit_shapes(wanted, layout.capacity)
-    coder = SourceCoder(shapes)
+    if shapes != wanted:
+        grids = shapes          # see coder_for: a shrunk corner is not a corner
+    coder = SourceCoder(shapes, grids=grids)
+    if coder.truncated:
+        print(f'NOTE: profile {args.profile} samples at '
+              f'{grids[0][1]}x{grids[0][0]} and sends the low-frequency corner. '
+              f'The wire cannot say so -- it carries the same {coder.count} '
+              f'slots as {V3.PROFILE_CODES[V3.profile_code(args.profile)]} -- so '
+              f'the receiver must be told: '
+              f'modem_v3_check.py live-receive --prefer-profile {args.profile}. '
+              f'Without that the picture still decodes, but mis-exposed and '
+              f'frequency-distorted. Shared state, like --allocation.',
+              file=sys.stderr)
     asked = int(sum(np.prod(s) for s in wanted))
     if coder.count < asked:
         got = (shapes[0][1], shapes[0][0])
@@ -486,7 +499,7 @@ def build(args):
               f'profile {args.profile} wants {asked}. Picture shrunk to '
               f'{got[0]}x{got[1]} ({coder.count} coefficients). Pick a preset '
               f'with more capacity, or a smaller profile.', file=sys.stderr)
-    return layout, coder, shapes
+    return layout, coder, grids
 
 
 def source_for(args, fps):
@@ -521,7 +534,7 @@ def to_wav(args, layout, coder, prepare, grab):
             image = prepare(grab())
             if args.numbered:
                 image = burn_counters(image, n+1, n+1, count)
-            audio = V3.encode(image_values(image, coder.shapes), layout, coder,
+            audio = V3.encode(image_values(image, coder.grids), layout, coder,
                               n+1, (n % count)+1, count,
                               stamp_ms=int(n*1000/layout.fps),
                               profile=V3.profile_code(args.profile))
@@ -559,14 +572,21 @@ def to_device(args, layout, coder, prepare, grab):
                 image = prepare(grab())
                 if args.numbered:
                     image = burn_counters(image, sent+1, sent+1, 0xffff)
-                audio = V3.encode(image_values(image, coder.shapes), layout,
+                audio = V3.encode(image_values(image, coder.grids), layout,
                                   coder, (sent+1) & 0xffffffff, (sent % 0xffff)+1,
                                   0xffff, stamp_ms=int(
                                       (slot.target_time_ns//1_000_000) & 0xffffffff),
                                   profile=V3.profile_code(args.profile))
-                # Before submit: the device's own rate is handled downstream by
-                # band_limited, and the ceiling is stated in real hertz.
-                audio = bound_emission(audio, args.emit_ceiling, output.rate)
+                # RATE, not output.rate. The packet is still on the REFERENCE
+                # grid here -- band_limited resamples it to the device further
+                # down, holding the carriers at the same hertz -- so the filter
+                # has to be designed against the rate the array is actually at.
+                # Passing the device rate put the real cutoff at ceiling*48000/
+                # device: 7008 Hz instead of 14000 on a 96 kHz device, which
+                # removes most of mid-14k's 375-12750 Hz band and decodes
+                # nothing. Filtering here and resampling after is the right
+                # order anyway: the emitted band then lands where this says.
+                audio = bound_emission(audio, args.emit_ceiling, RATE)
                 encode_ms = (time.perf_counter()-began)*1000
                 if output.submit(audio, slot):
                     sent += 1

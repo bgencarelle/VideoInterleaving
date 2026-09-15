@@ -153,5 +153,53 @@ class RollOffTests(unittest.TestCase):
         self.assertEqual(sum(1 for r in out if r.identity == 'verified_header'), 4)
 
 
+class DeviceRateTests(unittest.TestCase):
+    """The ceiling is in hertz, and the packet is on the reference grid.
+
+    bound_emission runs BEFORE band_limited resamples to the device, so the
+    filter must be designed against REFERENCE_RATE whatever the device is set
+    to. Designing it against the device rate scales the real cutoff by
+    REFERENCE_RATE/device: on a 96 kHz device a 14000 Hz ceiling actually cut
+    at 7008 Hz, which removes most of mid-14k's 375-12750 Hz band, and the
+    live receiver decoded nothing at all.
+    """
+
+    def test_the_cutoff_does_not_follow_the_device_rate(self):
+        layout = v3.ALL_PRESETS['mid-14k']
+        coder, values, audio = transmission(layout, 'color-lean')
+        bounded = bound_emission(audio, 14000, RATE)
+        top = layout.band_at(RATE)[1]
+        kept = np.abs(np.fft.rfft(bounded[:, 0]))
+        freqs = np.fft.rfftfreq(len(bounded), 1/RATE)
+        # energy must survive right up to the carriers, not be cut at half
+        band = kept[(freqs > top-1500) & (freqs < top)]
+        self.assertGreater(float(np.max(band))/float(np.max(kept)), 1e-3)
+        self.assertEqual(decode(layout, coder, bounded, values)[:2], (4, 4))
+
+    def test_a_ceiling_designed_against_the_wrong_rate_breaks_it(self):
+        """The bug, stated as the measurement that would have caught it."""
+        layout = v3.ALL_PRESETS['mid-14k']
+        coder, values, audio = transmission(layout, 'color-lean')
+        wrong = bound_emission(audio, 14000, 96000)      # what the live path did
+        self.assertLess(occupied(wrong), 9000)
+        headers, _, error = decode(layout, coder, wrong, values)
+        self.assertTrue(headers == 0 or error > .05,
+                        'cutting at 7 kHz must visibly break mid-14k')
+
+    def test_the_live_sender_designs_against_the_reference_rate(self):
+        """Pins the call site itself, since the failure is invisible at 48 kHz
+        -- REFERENCE_RATE and the device rate are the same number there."""
+        import ast
+        from pathlib import Path
+        source = (Path(__file__).resolve().parent.parent/'modem_screen.py').read_text()
+        calls = [n for n in ast.walk(ast.parse(source))
+                 if isinstance(n, ast.Call)
+                 and getattr(n.func, 'id', None) == 'bound_emission']
+        self.assertTrue(calls, 'modem_screen must apply the ceiling')
+        for call in calls:
+            self.assertEqual(getattr(call.args[2], 'id', None), 'RATE',
+                             'bound_emission takes the rate the packet is AT')
+
+
 if __name__ == '__main__':
     unittest.main()
