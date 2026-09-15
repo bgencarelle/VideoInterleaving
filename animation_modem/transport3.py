@@ -499,10 +499,11 @@ class Receiver:
         block = np.asarray(block, np.float32)
         if block.ndim != 2 or block.shape[1] != 2 or not np.isfinite(block).all():
             raise ValueError('Receiver requires finite stereo samples')
+
         out = []
         step = min(1024, self.keep) if self.pulse_only else 256
         for start in range(0, len(block), step):
-            self._append(block[start:start+step])
+            self._append(block[start:start + step])
             out.extend(self._drain())
         return out
 
