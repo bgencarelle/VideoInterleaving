@@ -38,6 +38,16 @@ from animation_modem.audio_common import (pcm, pair, device,   # noqa: E402
 from animation_modem.imaging import (burn_counters, fit_shapes, image_values,
                                      plane_grids, plane_shapes,
                                      values_image, wire_profiles)
+# Decoded-picture window, in screen pixels. 480x576 is a whole-number 12x of a
+# 40x48 picture and 6x of color-dct's 80x96, so neither lands on a fractional
+# scale and neither needs resampling to fill it.
+WINDOW = (480, 576)
+# raw = NEAREST, smooth = LANCZOS. raw is the default deliberately: this is a
+# diagnostic display as much as a picture, and a smoothed one hides exactly
+# what you want to see -- single dead pixels, blocking, chroma blotching. Smooth
+# is there for looking at the result rather than debugging it.
+SCALING = {'raw': Image.Resampling.NEAREST, 'smooth': Image.Resampling.LANCZOS}
+
 PRESETS = V3.ALL_PRESETS
 REFERENCE_RATE = V3.REFERENCE_RATE
 RATE = REFERENCE_RATE
@@ -131,6 +141,21 @@ def psnr(a, b):
     return float('inf') if err <= 0 else 10*np.log10(255.0**2/err)
 
 
+def picture_size(shapes):
+    """WxH of the decoded picture, BEFORE any display scaling.
+
+    The luma plane's shape is (rows, cols) and the picture is cols x rows.
+    Worth reporting on its own rather than leaving as `shapes`, because the
+    number people actually want -- how big is the image I am looking at -- is
+    otherwise buried in a nested list, and the window scales it up by 6x or
+    12x before anyone sees it.
+    """
+    if not shapes:
+        return None
+    rows, cols = tuple(shapes[0])
+    return f'{cols}x{rows}'
+
+
 def record(r):
     speed = r.extra.get('playback_speed', 1/(1+r.rate_error))
     return {'status': r.status, 'identity': r.identity, 'frame': r.absolute,
@@ -138,6 +163,7 @@ def record(r):
             'face_folder': r.face_folder, 'float_folder': r.float_folder,
             'tier': r.tier, 'coverage': r.coverage, 'pilot_error': r.pilot_error,
             'playback_speed': speed, 'playback_rate_pct': round(100*(speed-1), 3),
+            'picture': picture_size(r.extra.get('shapes')),
             **r.extra}
 
 
@@ -175,7 +201,7 @@ def do_read(args):
         print(f'{args.wav}: {rate} Hz, decoding at that rate', file=sys.stderr)
     if args.save_frames:
         Path(args.save_frames).mkdir(parents=True, exist_ok=True)
-    tiers, rates, seen = {}, [], 0
+    tiers, rates, seen, pictures = {}, [], 0, []
 
     def results():
         level = InputLevel()
@@ -186,8 +212,11 @@ def do_read(args):
     for r in results():
         seen += 1
         tiers[r.tier] = tiers.get(r.tier, 0) + 1
-        rates.append(record(r)['playback_speed'])
-        print(json.dumps(record(r)), flush=True)
+        line = record(r)
+        rates.append(line['playback_speed'])
+        if line.get('picture'):
+            pictures.append(line['picture'])
+        print(json.dumps(line), flush=True)
         if args.save_frames and r.values is not None:
             name = f'{r.absolute:06d}' if r.absolute is not None else f'x{seen:06d}'
             prof = r.extra.get('profile') or r.extra.get('profile_name')
@@ -195,7 +224,9 @@ def do_read(args):
             img.save(Path(args.save_frames)/f'frame_{name}.png')
     if rates:
         speed = float(np.median(rates))
-        print(f'\n{seen} packets. tiers {tiers}. median playback speed {speed:.4f}x', file=sys.stderr)
+        print(f'\n{seen} packets. tiers {tiers}. median playback speed '
+              f'{speed:.4f}x' + (f'. picture {pictures[-1]}' if pictures else ''),
+              file=sys.stderr)
 
 
 def do_bench(args):
@@ -418,7 +449,9 @@ def do_live_receive(args):
                 now = time.monotonic()
                 summary = None
                 if not args.silent and now-last_summary >= args.summary_seconds:
-                    summary = {'receiver_packets': seen, 'input_rate_hz': rate}
+                    summary = {'receiver_packets': seen, 'input_rate_hz': rate,
+                               'picture': (picture_size(newest.extra.get('shapes'))
+                                           if newest is not None else None)}
                     last_summary, peak = now, 0.0
                 if (newest is not None and (verbose or args.save_frames)) or summary is not None:
                     offer_report(newest, summary)
@@ -447,6 +480,7 @@ def do_live_receive(args):
             import tkinter as tk
             from PIL import ImageTk
             size = (args.width, args.height)
+            resample = SCALING[args.scaling]
             root = tk.Tk()
             def callback_error(exc_type, exc, traceback):
                 errors.append(exc)
@@ -486,11 +520,15 @@ def do_live_receive(args):
                         prof = (r.extra.get('profile')
                                 or r.extra.get('profile_name'))
                         img = values_image(r.values, r.extra['shapes'])
-                        scaled = ImageOps.contain(img, size, Image.Resampling.NEAREST)
+                        scaled = ImageOps.contain(img, size, resample)
                         canvas.paste(scaled, ((size[0]-scaled.width)//2, (size[1]-scaled.height)//2))
                         shown = prof or 'profile unverified'
                         found = r.extra.get('preset', '?')
-                        status.config(text=f'{found} / {shown} | frame {r.absolute} | {r.status}')
+                        native = picture_size(r.extra.get('shapes')) or '?'
+                        status.config(
+                            text=f'{found} / {shown} | {native} -> '
+                                 f'{scaled.width}x{scaled.height} {args.scaling}'
+                                 f' | frame {r.absolute} | {r.status}')
                     else:
                         status.config(text='Missing or damaged frame')
                     label.image.paste(canvas)
@@ -572,8 +610,21 @@ def main(argv=None):
     lr.add_argument('-v', '--verbose', action='store_true')
     lr.add_argument('--silent', action='store_true')
     lr.add_argument('--summary-seconds', type=float, default=30.0)
-    lr.add_argument('--width', type=int, default=480)
-    lr.add_argument('--height', type=int, default=576)
+    lr.add_argument('--width', type=int, default=WINDOW[0],
+                    help='Decoded-picture window width in screen pixels '
+                         f'(default {WINDOW[0]}). The picture itself is '
+                         'whatever the profile sends -- 40x48, or 80x96 for '
+                         'color-dct -- and is scaled up to fit this.')
+    lr.add_argument('--height', type=int, default=WINDOW[1],
+                    help=f'Window height in screen pixels (default {WINDOW[1]}). '
+                         'The default pair is a whole-number multiple of both '
+                         'picture sizes, 12x of 40x48 and 6x of 80x96.')
+    lr.add_argument('--scaling', choices=sorted(SCALING), default='raw',
+                    help='How to scale the picture up to the window. raw '
+                         '(default) is nearest-neighbour and shows the pixels '
+                         'as sent, which is what you want when judging a '
+                         'decode; smooth is Lanczos and looks better but hides '
+                         'dead pixels, blocking and chroma blotching.')
     lr.add_argument('--list-devices', action='store_true')
     args = p.parse_args(argv)
     {'bench': do_bench, 'write': do_write, 'read': do_read,
