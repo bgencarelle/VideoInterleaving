@@ -62,7 +62,7 @@ def bake_tree_dct(source, output, jpeg_layout='sbs'):
             rgba = Image.fromarray(np.dstack([rgb, alpha]))
 
         # High-pass unsharp mask to boost edge coefficients before DCT truncation
-        rgba = rgba.filter(ImageFilter.UnsharpMask(radius=2, percent=140, threshold=2))
+        #rgba = rgba.filter(ImageFilter.UnsharpMask(radius=2, percent=140, threshold=2))
         return rgba
 
     entries = []

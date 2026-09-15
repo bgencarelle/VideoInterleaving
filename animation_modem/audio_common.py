@@ -2,7 +2,7 @@ import argparse
 import wave
 import numpy as np
 from .core import PRESETS, REFERENCE_RATE, N
-
+from scipy.signal import butter, sosfilt
 
 def device(value):
     return int(value) if isinstance(value, str) and value.isdecimal() else value
@@ -124,6 +124,11 @@ class InputLevel:
             self.limited += 1
             out = audio*self.gain
         return out.astype(np.float32)
+
+def apply_subbass_cut(samples, cutoff_hz=120.0, rate=48000.0):
+    """2nd-order Butterworth high-pass filter to strip AC-coupling tilt & sub-100 Hz phase arcs."""
+    sos = butter(2, cutoff_hz, btype='highpass', fs=rate, output='sos')
+    return sosfilt(sos, samples, axis=0)
 
 
 def wire_notice(layout, rate, reference=REFERENCE_RATE):

@@ -11,3 +11,11 @@ SimpleWebsocketServer
 PyOpenGL  # Legacy renderer fallback (GLES2 / GL2.1)
 # sounddevice is shared by scope/modem and specified in requirements-modem.txt.
 tzdata  # IANA timezone database fallback for zoneinfo (notably Windows)
+pyautogui
+pynput
+numpy>=1.24
+scipy>=1.10
+Pillow>=9.5
+sounddevice>=0.4.6
+pyautogui
+pynput

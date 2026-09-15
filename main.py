@@ -131,6 +131,9 @@ def configure_runtime():
         help="Path to image source folder (overrides settings.py)"
     )
 
+    parser.add_argument("--modem-allocation", metavar="NPY",
+                        help="Power allocation table from fit_allocation.py")
+
     # --- Options for --mode scope (XY output on the sound card) ---
     parser.add_argument("--xy-dir", help="Baked XY libraries (default: settings.XY_DIR)")
     scope_render = parser.add_mutually_exclusive_group()

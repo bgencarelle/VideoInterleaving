@@ -96,7 +96,19 @@ def run_modem(args):
               f'Picture shrunk to {shapes[0][1]}x{shapes[0][0]}, and any finer '
               f'sampling grid is dropped with it. Pick a preset with more '
               f'capacity -- hires-v3 holds 2880 at 16.48 fps.')
-    coder=SourceCoder(shapes,grids=grids)
+
+    # Load custom power allocation table if provided
+    table = None
+    if getattr(args, 'modem_allocation', None):
+        import numpy as np
+        table = np.load(args.modem_allocation)
+        want = int(sum(np.prod(s) for s in shapes))
+        if table.shape != (want,):
+            raise ValueError(
+                f'Allocation {args.modem_allocation} has {table.size} weights but '
+                f'{wanted}/{profile} needs {want}.')
+
+    coder=SourceCoder(shapes, allocation=table, grids=grids)
     selected=fixed_pair(args.modem_pair)
     if selected is not None:
         if selected[0]>=len(library.mains) or selected[1]>=len(library.floats):

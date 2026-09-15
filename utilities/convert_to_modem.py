@@ -61,8 +61,8 @@ def bake_tree(source, output, profile='color', jpeg_layout='sbs'):
             rgba = Image.fromarray(np.dstack([rgb, alpha]))
 
         # High-pass sharpening for DCT profile to preserve edge coefficients
-        if profile == 'color-dct':
-            rgba = rgba.filter(ImageFilter.UnsharpMask(radius=2, percent=130, threshold=2))
+       # if profile == 'color-dct':
+           # rgba = rgba.filter(ImageFilter.UnsharpMask(radius=2, percent=130, threshold=2))
 
         return rgba
 

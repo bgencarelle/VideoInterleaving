@@ -375,12 +375,32 @@ class SourceCoder:
         """Wire slots in, pixels out. Dropped coefficients come back as zero,
         which is the least-energy completion and what truncation implies."""
         if reliability is None:
-            coeffs = np.asarray(sent, float)/self.gains
+            coeffs = np.asarray(sent, float) / self.gains
         else:
-            gain = self.gains*np.asarray(reliability)
-            denominator = gain**2*self.variance + np.asarray(noise_variance)
-            coeffs = np.divide(np.asarray(sent)*gain*self.variance, denominator,
+            rel = np.asarray(reliability, float)
+            noise_var = np.asarray(noise_variance, float)
+
+            # Normalize reliability against smooth EQ curves so static attenuation
+            # isn't misidentified as additive noise on active carriers.
+            rel_floor = np.maximum(rel, 0.25)
+            gain = self.gains * rel_floor
+
+            denominator = gain ** 2 * self.variance + noise_var
+            coeffs = np.divide(np.asarray(sent) * gain * self.variance, denominator,
                                out=np.zeros(self.count), where=denominator > 1e-20)
+
+            # Ensure the DC components of Luma (0), Cb, and Cr are never
+            # collapsed by Wiener dampening if the carrier is active.
+            dc_slots = [0]
+            if len(self.shapes) == 3:
+                luma_count = int(np.prod(self.shapes[0]))
+                cb_count = int(np.prod(self.shapes[1]))
+                dc_slots.extend([luma_count, luma_count + cb_count])
+
+            for dc_idx in dc_slots:
+                if dc_idx < len(coeffs) and rel[dc_idx] > 0.05:
+                    coeffs[dc_idx] = sent[dc_idx] / self.gains[dc_idx]
+
         out = []
         for corner, (rows, cols), grid in zip(
                 self._split(coeffs, self.shapes), self.shapes, self.grids):
@@ -391,7 +411,6 @@ class SourceCoder:
                 full[:rows, :cols] = corner
                 out.append(idctn(full, norm='ortho').ravel())
         return np.concatenate(out)
-
 
 @lru_cache(maxsize=32)
 def coefficient_slots(layout, shapes):
@@ -945,118 +964,134 @@ def decode_packet(samples, layout, coder, *, body=None, coders=None):
     carriers = layout.carriers
     data, pilots, header, _, _ = _decode_tables(layout)
     if body is None:
-        body = samples[SYNC_LEN:layout.packet].reshape(layout.symbols, SYMBOL, 2)[:, CP-4:CP-4+N]
+        body = samples[SYNC_LEN:layout.packet].reshape(layout.symbols, SYMBOL, 2)[:, CP - 4:CP - 4 + N]
+
+    # 1. Primary channel equalization (computes complex gain, weights, and noise variance)
     equal, weights, variance, coherence, skew = _equalise(body, layout)
 
     timing_drift = 0.0
     clock_errors = []
+
+    # 2. Pilot tracking & phase slope correction (robust against EQ attenuation)
     for channel in range(2):
-        keep = weights[pilots, channel] > .6
+        # Lower weight threshold from 0.6 to 0.4 so pilots in heavily rolled-off HF bands are kept
+        keep = weights[pilots, channel] > 0.4
         if np.count_nonzero(keep) >= 2:
             bins = layout.pilots[keep].astype(float)
             pilot_values = equal[2:, pilots[keep], channel]
             angles = np.angle(pilot_values)
-            if np.all(np.abs(pilot_values) > .25):
-                # Adjacent symbols give a much smaller phase increment than
-                # widely spaced carriers during flutter. Keep that continuity
-                # instead of choosing a fresh, possibly aliased slope each row.
+
+            if np.all(np.abs(pilot_values) > 0.15):
+                # Phase continuity tracking across symbols
                 initial = np.unwrap(angles[0])
                 angles = np.unwrap(angles, axis=0)
-                angles += (initial-angles[0])[None, :]
+                angles += (initial - angles[0])[None, :]
             else:
-                # Missing pilots cannot anchor a phase history. Preserve the
-                # independent-symbol fallback for header erasure/dropouts.
                 angles = np.unwrap(angles, axis=1)
-            w = weights[pilots[keep], channel]**2
-            s0, s1, s2 = w.sum(), (w*bins).sum(), (w*bins*bins).sum()
-            det = s0*s2 - s1*s1
-            if det:
-                ty, txy = (angles*w).sum(1), (angles*w*bins).sum(1)
-                slope = (s0*txy - s1*ty)/det
-                offset = (s2*ty - s1*txy)/det
-                # Existing pilot estimates also tell the next acquisition
-                # whether the cached speed needs refinement. No extra FFT.
+
+            w = weights[pilots[keep], channel] ** 2
+            s0, s1, s2 = w.sum(), (w * bins).sum(), (w * bins * bins).sum()
+            det = s0 * s2 - s1 * s1
+
+            if abs(det) > 1e-12:
+                ty, txy = (angles * w).sum(1), (angles * w * bins).sum(1)
+                slope = (s0 * txy - s1 * ty) / det
+                offset = (s2 * ty - s1 * txy) / det
+
+                # Clamp phase slopes to prevent runaway Phase-Locked-Loop fits in deep EQ nulls
+                max_slope = np.pi / (N / 2)
+                slope = np.clip(slope, -max_slope, max_slope)
+
                 if len(slope) >= 4:
-                    drift = abs(float(np.median(slope[-3:])-np.median(slope[:3]))) * N/(2*np.pi)
+                    drift = abs(float(np.median(slope[-3:]) - np.median(slope[:3]))) * N / (2 * np.pi)
                     timing_drift = max(timing_drift, drift)
-                    # Signed phase slope per symbol measures relative clock
-                    # error. Reject nonlinear/noisy fits rather than steering
-                    # the recovered clock with an unreliable pilot.
+
                     axis = np.arange(len(slope), dtype=float)
                     axis -= axis.mean()
-                    gradient = float(np.einsum('i,i->', axis, slope, optimize=False) / np.einsum('i,i->', axis, axis, optimize=False))
-                    residual = slope-slope.mean()-gradient*axis
-                    if np.sqrt(np.mean(residual**2))*N/(2*np.pi) < .15:
-                        clock_errors.append(gradient*N/(2*np.pi*SYMBOL))
-                equal[2:, :, channel] *= np.exp(-1j*(slope[:, None]*carriers + offset[:, None]))
-    pilot_error = float(np.sqrt(np.mean(np.abs(equal[2:, pilots] - 1)**2)))
+                    axis_norm = np.einsum('i,i->', axis, axis, optimize=False)
 
+                    if axis_norm > 0:
+                        gradient = float(np.einsum('i,i->', axis, slope, optimize=False) / axis_norm)
+                        residual = slope - slope.mean() - gradient * axis
+                        if np.sqrt(np.mean(residual ** 2)) * N / (2 * np.pi) < 0.25:
+                            clock_errors.append(gradient * N / (2 * np.pi * SYMBOL))
+
+                # Apply phase correction
+                equal[2:, :, channel] *= np.exp(-1j * (slope[:, None] * carriers + offset[:, None]))
+
+    pilot_error = float(np.sqrt(np.mean(np.abs(equal[2:, pilots] - 1) ** 2)))
+
+    # 3. Header Extraction & CRC Verification
     end = 2 + layout.header_symbols
     fields = None
-    # Both channels carry the same symbols, so their mean is a genuine
-    # diversity combine; fall back to each channel alone if one is corrupted.
+
     if layout.header_split:
-        # Each channel carries a different half, so there is no diversity to
-        # combine: interleave the two lanes back into one slot sequence.
         picks = [np.stack([equal[2:end, header, 0], equal[2:end, header, 1]],
                           axis=-1).reshape(layout.header_symbols, -1)]
     else:
         picks = [equal[2:end, header].mean(axis=-1),
                  equal[2:end, header, 0], equal[2:end, header, 1]]
+
     for pick in picks:
-        flat = pick.ravel()[:HEADER_SLOTS]/HEADER_GAIN
+        flat = pick.ravel()[:HEADER_SLOTS] / HEADER_GAIN
         if len(flat) < HEADER_SLOTS:
             continue
         bits = np.stack([flat.real > 0, flat.imag > 0], axis=-1).ravel()
         raw = np.packbits(bits).tobytes()
+
         if zlib.crc32(raw[:HEADER_BYTES]) == struct.unpack('>I', raw[HEADER_BYTES:])[0]:
             magic, hflags, packed, absolute, index, count, stamp = struct.unpack(
                 HEADER_FORMAT, raw[:HEADER_BYTES])
-            # Six bits of band, two of picture geometry, one byte as before.
             top, code = packed & TOP_BIN_MASK, packed >> 6
             expected_magic = layout.wire_magic
             if magic == expected_magic and top == layout.top_bin and 1 <= index <= count:
                 fields = (hflags, absolute, index, count, stamp, code)
                 break
 
-    # Do not reconstruct an image that the checks have already rejected.
-    coverage = float(np.mean(weights[data] >= .55))
-    usable = (coverage >= .1 and pilot_error < 1.5 and
-              coherence > (.65 if layout.top_bin <= 13 else .4))
+    # 4. Usability Check & Payload Reconstruction
+    coverage = float(np.mean(weights[data] >= 0.45))
+    usable = (coverage >= 0.08 and pilot_error < 2.0 and
+              coherence > (0.50 if layout.top_bin <= 13 else 0.30))
+
     if fields is None and not usable:
         return Decoded('lost', pilot_error=pilot_error, coverage=coverage)
+
     values_parts, weight_parts, noise_parts = [], [], []
+
     if layout.header_capacity:
-        # Image carried on the carriers the header symbols leave idle, taken
-        # first to match the order `encode` scatters into.
         spare = np.searchsorted(carriers, layout.spare_bins)
-        early = equal[2:end, spare]/IMAGE_GAIN
+        early = equal[2:end, spare] / IMAGE_GAIN
         shape = (layout.header_symbols, len(spare), 2, 2)
         values_parts.append(np.stack([early.real, early.imag], axis=-1).ravel())
-        weight_parts.append(np.broadcast_to(weights[spare][None, :, :, None],
-                                            shape).ravel())
-        noise_parts.append(np.broadcast_to(variance[spare][None, :, :, None],
-                                           shape).ravel())
-    block = equal[end:, data]/IMAGE_GAIN
+        weight_parts.append(np.broadcast_to(weights[spare][None, :, :, None], shape).ravel())
+        noise_parts.append(np.broadcast_to(variance[spare][None, :, :, None], shape).ravel())
+
+    block = equal[end:, data] / IMAGE_GAIN
     shape = (layout.image_symbols, len(data), 2, 2)
     values_parts.append(np.stack([block.real, block.imag], axis=-1).ravel())
     weight_parts.append(np.broadcast_to(weights[data][None, :, :, None], shape).ravel())
     noise_parts.append(np.broadcast_to(variance[data][None, :, :, None], shape).ravel())
+
     sent = np.concatenate(values_parts)
     per = np.concatenate(weight_parts)
-    coverage = float(np.mean(per >= .55))
+    coverage = float(np.mean(per >= 0.45))
     per_noise = np.concatenate(noise_parts)
-    # Geometry the sender declared, when it verified and we can honour it.
+
+    # Apply soft-reliability floor to prevent zero-division noise spikes in deep EQ cuts
+    per_noise = np.maximum(per_noise, 1e-4)
+
     declared = profile_name(fields[5]) if fields is not None else None
     picture = coder
     if fields is not None and coders:
         picture = coders.get(fields[5], coder)
+
     slots = coefficient_slots(layout, tuple(picture.shapes))
     values = picture.inverse(sent[slots], per[slots], per_noise[slots])
-    tier = ('best' if coverage >= .95 else 'better' if coverage >= .7
-            else 'good' if coverage >= .35 else 'poor')
+
+    tier = ('best' if coverage >= 0.90 else 'better' if coverage >= 0.65
+    else 'good' if coverage >= 0.30 else 'poor')
+
     if fields is None:
-        usable = coverage >= .1 and pilot_error < 1.5 and coherence > (.65 if layout.top_bin<=13 else .4)
         return Decoded('picture_only' if usable else 'lost',
                        values=values if usable else None, pilot_error=pilot_error,
                        coverage=coverage, tier=tier if usable else 'none',
@@ -1064,16 +1099,16 @@ def decode_packet(samples, layout, coder, *, body=None, coders=None):
                               'clock_error': float(np.median(clock_errors)) if clock_errors else None,
                               'profile': declared, 'shapes': tuple(picture.grids),
                               **(skew or {})})
+
     flags, absolute, index, count, stamp, _ = fields
-    return Decoded('received' if pilot_error < .15 else 'degraded', values=values,
+    return Decoded('received' if pilot_error < 0.20 else 'degraded', values=values,
                    absolute=absolute, index=index, count=count, stamp_ms=stamp,
                    flags=flags, pilot_error=pilot_error, coverage=coverage,
                    identity='verified_header', tier=tier,
                    extra={'timing_drift_samples': timing_drift,
-                              'clock_error': float(np.median(clock_errors)) if clock_errors else None,
-                              'profile': declared, 'shapes': tuple(picture.grids),
-                              **(skew or {})})
-
+                          'clock_error': float(np.median(clock_errors)) if clock_errors else None,
+                          'profile': declared, 'shapes': tuple(picture.grids),
+                          **(skew or {})})
 
 @lru_cache(maxsize=8)
 def _sync_filter(cutoff, rate=REFERENCE_RATE):
