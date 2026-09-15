@@ -170,6 +170,23 @@ V3_PRESETS = {
     'lean-14k': Layout(top_bin=34, image_symbols=11, name='lean-14k',
                        progressive=True, orthogonal_training=True,
                        spread_carriers=True, dense_header=True),
+    # Sized for 'color-dct', which needs 2880 slots to carry an 80x96 picture.
+    #
+    # lean-v3 holds 2200 and lean-v3-dense 2680, so neither fits it: fit_shapes
+    # runs, the grid collapses to the wire shape, and the whole point is lost
+    # silently. 12 image symbols with dense_header lands on EXACTLY 2880, at
+    # 16.48 fps -- 95% of lean-v3's rate for four times the pixels. wide-v3
+    # also fits 2880 but only at 14.35 fps.
+    #
+    # Measured against a high-resolution source, which is what live capture is:
+    # lean-v3 + color-lean reads 33.03 / 29.31 / 27.52 dB at -45/-38/-32 dBFS,
+    # and this pair reads 35.65 / 30.79 / 28.18. Up to +2.6 dB AND 80x96
+    # instead of 40x48. The gain is real only because the source has detail
+    # above 40x48 to preserve; on a bake that is already 40x48 there is nothing
+    # above the cut and truncation is pure loss.
+    'hires-v3': Layout(top_bin=54, image_symbols=12, name='hires-v3',
+                       progressive=True, orthogonal_training=True,
+                       spread_carriers=True, dense_header=True),
 }
 ALL_PRESETS = {**PRESETS, **V3_PRESETS}
 

@@ -15,8 +15,9 @@ from animation_modem.transport3 import REFERENCE_RATE as RATE, SourceCoder, pack
 from animation_modem import transport3 as _v3
 
 PRESETS = _v3.ALL_PRESETS
-from animation_modem.imaging import (DEFAULT_PROFILE, burn_counters, fit_shapes,
-                                     image_values, plane_shapes)
+from animation_modem.imaging import (DEFAULT_PROFILE, PROFILES, burn_counters,
+                                     fit_shapes, image_values, plane_grids,
+                                     plane_shapes)
 from animation_modem.audio_common import device, pair, pcm
 from animation_modem.playback import PacketOutput, latency
 from modem_bake import ModemLibrary
@@ -33,7 +34,8 @@ def fixed_pair(value):
 
 
 def packet(library, layout, coder, absolute, selection, numbered=False,
-           background=(4,4,4), rotation=0, mirror=False, target_time_ns=None):
+           background=(4,4,4), rotation=0, mirror=False, target_time_ns=None,
+           profile=DEFAULT_PROFILE):
     import time as _time
     index,main,front=selection
     started=_time.perf_counter()
@@ -47,9 +49,11 @@ def packet(library, layout, coder, absolute, selection, numbered=False,
     audio=_v3.encode(values,layout,coder,absolute & 0xffffffff,
                  (index % 0xffff)+1,max(1,min(library.frames,0xffff)),stamp_ms=stamp_ms,
                  flags=pack_folders(main,front),
-                 # The coder below is built from DEFAULT_PROFILE, so that is
-                 # what the header must declare: the receiver believes it.
-                 profile=_v3.profile_code(DEFAULT_PROFILE))
+                 # Whatever the coder was actually built from, which is no
+                 # longer always DEFAULT_PROFILE: a bake declares its own, and
+                 # the header must agree with the coder or the receiver
+                 # reconstructs the wrong geometry and believes it.
+                 profile=_v3.profile_code(profile))
     ms=(_time.perf_counter()-started)*1000
     return audio, {'frame':absolute,'source_index':index,'face_folder':main,
                    'float_folder':front,'layout':layout.name,'encode_ms':ms,
@@ -73,11 +77,26 @@ def run_modem(args):
                          f'nothing decodes it. Choose one of: '+', '.join(usable))
     root=args.modem_dir or getattr(settings,'MODEM_DIR',settings.IMAGES_DIR+'_modem')
     library=ModemLibrary(root)
-    # The transmitted geometry is independent of the bake's own profile; the
-    # bake profile only affects how much source detail exists to send. What is
-    # sent is declared in the header, so the receiver follows it.
+    # Follow the BAKE's profile. It used to be pinned to DEFAULT_PROFILE, which
+    # was fine while every bake was 40x48 and wrong the moment one is not: a
+    # bake made at 80x96 for color-dct would have been box-downsampled straight
+    # back to 40x48 and the extra detail thrown away before it reached the wire.
+    # --modem-profile overrides for comparisons.
     layout=PRESETS[wanted]
-    coder=SourceCoder(fit_shapes(plane_shapes(DEFAULT_PROFILE),layout.capacity))
+    profile=getattr(args,'modem_profile',None) or library.profile
+    if profile not in PROFILES:
+        raise ValueError(f'Unknown profile {profile!r}. Choose one of: '
+                         +', '.join(PROFILES))
+    wanted_shapes=plane_shapes(profile)
+    shapes=fit_shapes(wanted_shapes,layout.capacity)
+    grids=plane_grids(profile) if shapes==wanted_shapes else shapes
+    if shapes!=wanted_shapes:
+        print(f'[MODEM] WARNING: preset {wanted} holds {layout.capacity} values '
+              f'and profile {profile} wants {sum(int(__import__("numpy").prod(s)) for s in wanted_shapes)}. '
+              f'Picture shrunk to {shapes[0][1]}x{shapes[0][0]}, and any finer '
+              f'sampling grid is dropped with it. Pick a preset with more '
+              f'capacity -- hires-v3 holds 2880 at 16.48 fps.')
+    coder=SourceCoder(shapes,grids=grids)
     selected=fixed_pair(args.modem_pair)
     if selected is not None:
         if selected[0]>=len(library.mains) or selected[1]>=len(library.floats):
@@ -107,7 +126,8 @@ def run_modem(args):
                 # Inspection export: deterministic forward source order at 15 fps.
                 audio,report,_=packet(library,layout,coder,n+1,
                                       (n%library.frames,*selected),
-                                      args.modem_numbered,background,rotation,mirror)
+                                      args.modem_numbered,background,rotation,mirror,
+                                      profile=profile)
                 sink.writeframesraw(pcm(audio))
                 if args.modem_log_frames:print(json.dumps(report),flush=True)
         print(f'[MODEM] Wrote {limit} independent frames to {path}')
@@ -165,7 +185,7 @@ def run_modem(args):
                 encode_started=time.perf_counter()
                 audio,report,_=packet(library,layout,coder,n+1,(index,*folders),
                                       args.modem_numbered,background,rotation,mirror,
-                                      target_time_ns)
+                                      target_time_ns,profile)
                 elapsed_ms=(time.perf_counter()-encode_started)*1000
                 # Extra preparation time changes the send deadline, not the
                 # animation epoch. Slow machines skip stale work and retry.

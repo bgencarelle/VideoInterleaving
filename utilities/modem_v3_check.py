@@ -215,7 +215,7 @@ def do_bench(args):
             elapsed = samples = 0
             for n, im in enumerate(frames[:args.frames]):
                 ready = _prepared(im, n+1, len(frames), False)
-                audio = enc(image_values(ready, coder.shapes), layout, coder, n+1, 1, len(frames))
+                audio = enc(image_values(ready, coder.grids), layout, coder, n+1, 1, len(frames))
                 emulator = IMP.Emulator(IMP.Settings(**settings))
                 receiver = make()
                 signal = np.concatenate([np.zeros((300, 2), np.float32), audio])
@@ -269,7 +269,7 @@ def do_live_send(args):
         emitted = V3.emit_length(layout.frame, rate)
         fps = rate/emitted
         packets.extend(V3.band_limited(V3.encode(image_values(
-                           _prepared(im, n+1, len(frames), args.numbered), coder.shapes),
+                           _prepared(im, n+1, len(frames), args.numbered), coder.grids),
                        layout, coder, n+1, (n % len(frames))+1, len(frames),
                        stamp_ms=n*int(1000/fps),
                        profile=V3.profile_code(profile))*args.gain, rate)

@@ -56,6 +56,16 @@ def wire_profiles():
     return tuple(PROFILES)
 
 
+def source_size(profile=DEFAULT_PROFILE):
+    """(width, height) of the pixels a bake must hold for this profile.
+
+    For a truncating profile that is the SAMPLING grid, not the wire shape:
+    color-dct puts 40x48 on the wire but needs 80x96 pixels behind it, and a
+    bake at 40x48 gives it nothing to truncate.
+    """
+    return PROFILE_GRIDS.get(profile, PROFILES[profile])[0]
+
+
 def plane_grids(profile=DEFAULT_PROFILE):
     """Sampling grids for a profile: its wire shapes unless it truncates."""
     if profile not in PROFILE_GRIDS:

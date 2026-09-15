@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import numpy as np
 from PIL import Image
-from animation_modem.imaging import PROFILES
+from animation_modem.imaging import PROFILES, source_size
 
 
 class ModemLibrary:
@@ -14,9 +14,13 @@ class ModemLibrary:
         if manifest.get('format')!='video-interleaving-modem' or manifest.get('version')!=1:
             raise ValueError('Unsupported modem bake format')
         self.profile=manifest['profile']
-        if self.profile not in PROFILES or tuple(manifest['size'])!=PROFILES[self.profile][0]:
+        # Against the SAMPLING size, not the wire shape. A truncating profile
+        # bakes bigger than it transmits -- color-dct is 80x96 pixels behind a
+        # 40x48 wire shape -- so checking the wire shape here rejects exactly
+        # the bakes that profile exists for.
+        if self.profile not in PROFILES or tuple(manifest['size'])!=source_size(self.profile):
             raise ValueError('Invalid modem bake profile/dimensions')
-        self.size=PROFILES[self.profile][0]
+        self.size=source_size(self.profile)
         groups={'main':{},'float':{}}
         self.slabs={}
         seen=set()
