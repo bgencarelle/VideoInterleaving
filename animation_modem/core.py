@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.fft import dctn, idctn, rfft
-from scipy.signal import resample_poly, firwin, butter, sosfiltfilt
+from scipy.signal import resample_poly, firwin, butter, sosfiltfilt, filtfilt
 
 REFERENCE_RATE = 48000
 # The rate the sample geometry was designed around, and the only rate this
@@ -529,6 +529,52 @@ def band_limited(packet, rate, reference=REFERENCE_RATE, top_bin=54, pad=64):
     return np.asarray(out, np.float32)
 
 
+EMIT_TAPS = 63             # see bound_emission; bounded by CP, not by choice
+
+
+def bound_emission(packet, ceiling_hz, rate=REFERENCE_RATE, taps=EMIT_TAPS):
+    """Hold the EMITTED spectrum under `ceiling_hz`, not just the carriers.
+
+    top_bin bounds where the information is. It does not bound what goes out
+    of the DAC, because the preamble is biphase-mark -- square edges, harmonics
+    all the way up. Measured: tape-v3 puts its carriers at 375-10125 Hz and
+    still emits 99.99% of its energy out to 23152 Hz, and lean-v3 to 23090 Hz.
+    Every preset has essentially the same tail, because it is the same preamble.
+
+    So a channel with a hard ceiling needs this as well as a low top_bin. A
+    channel that merely ROLLS OFF does not: it removes the tail itself, and the
+    decoder does not miss it -- a 14 kHz low-pass on the receive side costs
+    nothing measurable, and even 8 kHz still decodes 4/4.
+
+    The filter has to be GENTLE, which is the counter-intuitive part. A sharper
+    one rings longer, and anything longer than the cyclic prefix (CP = 16
+    samples) smears across the symbol boundary and breaks orthogonality.
+    Measured at top_bin 37 with the cut at 14 kHz, reconstruction error rose
+    with sharpness rather than falling: 255 taps 0.036, 511 taps 0.045, 1023
+    taps 0.050, 2047 taps 0.060. Going the other way, at top_bin 34 -- 63 taps
+    0.0062, 31 taps 0.0027, 17 taps 0.0010 -- but the gentler the filter the
+    more of the tail survives, so 63 taps is the knee: 99.99% of the energy
+    lands at 13973 Hz for a cut of 14000.
+
+    The carriers need room under the cut for the same reason. At a 14 kHz cut,
+    top_bin 37 (13875 Hz, 125 Hz of guard) costs 0.036 while top_bin 34
+    (12750 Hz, 1250 Hz of guard) costs 0.0062. Pair this with a preset whose
+    top_bin leaves that room -- `mid-14k` is built for exactly this cut.
+    """
+    packet = np.asarray(packet, np.float32)
+    if not ceiling_hz or ceiling_hz >= rate/2:
+        return packet
+    peak = float(np.max(np.abs(packet)))
+    window = firwin(int(taps) | 1, ceiling_hz, fs=rate, window=('kaiser', 8.6))
+    out = filtfilt(window, [1.0], packet, axis=0)
+    got = float(np.max(np.abs(out)))
+    if peak > 0 and got > 0:
+        # Same argument as band_limited: the training symbols carry the scale,
+        # so the receiver's channel estimate divides a whole-packet gain out.
+        out = out*(peak/got)
+    return np.asarray(out, np.float32)
+
+
 def emit_length(samples, rate, reference=REFERENCE_RATE):
     """How many samples `band_limited` will return for a length of `samples`."""
     ratio = emit_ratio(rate, reference)
@@ -584,7 +630,17 @@ FOLDER_LIMIT = 16
 # hold four), and reordering or replacing an entry does not fail loudly: an old
 # transmitter keeps sending the same number and a new receiver reconstructs the
 # wrong geometry from it. Change it only alongside the magic.
-PROFILE_CODES = ('color', 'color-lean', 'detail', 'mono')
+PROFILE_CODES = ('color', 'color-lean', 'color-dct', 'mono')
+
+def profile_code(name):
+    """Wire code for a profile name, for the transmitter to declare."""
+    if name == 'color-dct':
+        return 0  # Shares 2,880-coefficient wire slot 0 with 'color'
+    try:
+        return PROFILE_CODES.index(name)
+    except ValueError:
+        raise ValueError(f'Profile {name!r} has no wire code. '
+                         f'Known: {", ".join(PROFILE_CODES)}') from None
 TOP_BIN_MASK = 0x3f
 
 

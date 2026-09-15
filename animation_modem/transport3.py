@@ -144,6 +144,30 @@ V3_PRESETS = {
     'lean-v3-dense': Layout(top_bin=54, image_symbols=11, name='lean-v3-dense',
                             progressive=True, orthogonal_training=True,
                             spread_carriers=True, dense_header=True),
+    # Sub-14 kHz, for a channel with a ceiling rather than a roll-off.
+    #
+    # mid-v3 stops at 14625 Hz, which clears 15 kHz but not 14. top_bin 34 is
+    # 12750 Hz, and the 1250 Hz of headroom under a 14 kHz cut is the point:
+    # paired with core.bound_emission the whole emission lands with 99.99% of
+    # its energy at 13973 Hz, at a reconstruction error of 0.0062. Crowding the
+    # cut instead -- top_bin 37, 13875 Hz, 125 Hz of guard -- costs 0.036 for
+    # the same ceiling, because the filter's transition band eats the top
+    # carriers. The guard is cheaper than the carriers it buys back.
+    #
+    # dense_header pays for the bins top_bin gives up: 2280 -> 2680, which is
+    # enough to carry the full 2880-value 'color' picture at 38x46 rather than
+    # dropping to a lean profile. 11.41 fps, the same as mid-v3.
+    'mid-14k': Layout(top_bin=34, image_symbols=21, name='mid-14k',
+                      progressive=True, orthogonal_training=True,
+                      spread_carriers=True, dense_header=True),
+    # Same band, lean-v3's frame rate. 11 image symbols instead of 21, so the
+    # picture drops to 30x36 -- but 17.34 fps under 14 kHz, which the 21-symbol
+    # version cannot do. Measured, that budget costs about 1 dB on graphic
+    # content and GAINS about 1 dB on smooth content and hard edges, because
+    # fewer coefficients means more power in each and less aliasing.
+    'lean-14k': Layout(top_bin=34, image_symbols=11, name='lean-14k',
+                       progressive=True, orthogonal_training=True,
+                       spread_carriers=True, dense_header=True),
 }
 ALL_PRESETS = {**PRESETS, **V3_PRESETS}
 

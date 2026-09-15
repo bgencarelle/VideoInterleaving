@@ -63,9 +63,11 @@ if ROOT_DIR not in sys.path:
 from animation_modem import transport3 as V3                      # noqa: E402
 from animation_modem.audio_common import (device, pair, pcm,      # noqa: E402
                                           wire_notice)
-from animation_modem.core import REFERENCE_RATE as RATE, SourceCoder  # noqa: E402
+from animation_modem.core import (REFERENCE_RATE as RATE,        # noqa: E402
+                                  SourceCoder, bound_emission)
 from animation_modem.imaging import (PROFILES, burn_counters,     # noqa: E402
-                                     fit_shapes, image_values, image_values_dct, plane_shapes)
+                                     fit_shapes, image_values, plane_shapes,
+                                     wire_profiles)
 from animation_modem.playback import PacketOutput                 # noqa: E402
 
 
@@ -465,6 +467,14 @@ def build(args):
     """
     if args.profile not in PROFILES:
         raise SystemExit(f'Unknown profile {args.profile}')
+    # Fail here rather than on the first encode. The header spends two bits on
+    # the profile, so only the four in PROFILE_CODES can be named on the wire;
+    # a profile that exists in PROFILES but has no code would otherwise run all
+    # the way to V3.encode before raising, after the device was already open.
+    try:
+        V3.profile_code(args.profile)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
     layout = V3.ALL_PRESETS[args.preset]
     wanted = plane_shapes(args.profile)
     shapes = fit_shapes(wanted, layout.capacity)
@@ -515,6 +525,7 @@ def to_wav(args, layout, coder, prepare, grab):
                               n+1, (n % count)+1, count,
                               stamp_ms=int(n*1000/layout.fps),
                               profile=V3.profile_code(args.profile))
+            audio = bound_emission(audio, args.emit_ceiling, RATE)
             sink.writeframesraw(pcm(audio*args.gain))
     print(f'wrote {count} frames, {count/layout.fps:.1f} s at {layout.fps:.2f} fps '
           f'-> {args.write}')
@@ -553,6 +564,9 @@ def to_device(args, layout, coder, prepare, grab):
                                   0xffff, stamp_ms=int(
                                       (slot.target_time_ns//1_000_000) & 0xffffffff),
                                   profile=V3.profile_code(args.profile))
+                # Before submit: the device's own rate is handled downstream by
+                # band_limited, and the ceiling is stated in real hertz.
+                audio = bound_emission(audio, args.emit_ceiling, output.rate)
                 encode_ms = (time.perf_counter()-began)*1000
                 if output.submit(audio, slot):
                     sent += 1
@@ -594,7 +608,10 @@ def parser():
                     help='screen = mss (simple, slow on macOS); ffmpeg = platform fast path; '
                          'camera = webcam; test = no devices; mouse-follow = dynamic cursor tracking')
     ap.add_argument('--preset', choices=list(V3.ALL_PRESETS), default='lean-v3')
-    ap.add_argument('--profile', choices=list(PROFILES), default='color-lean')
+    # Only the profiles the header can name. PROFILES also holds bake-only
+    # geometry (see BAKE_ONLY), which argparse should refuse outright rather
+    # than accept into a run that cannot transmit it.
+    ap.add_argument('--profile', choices=list(wire_profiles()), default='color-lean')
     ap.add_argument('--device', type=device, help='Audio output device')
     ap.add_argument('--channels', type=pair, default=(0, 1))
     ap.add_argument('--latency', default='low')
@@ -626,6 +643,15 @@ def parser():
     ap.add_argument('--gain', type=float, default=1.0,
                     help='Output scale. v3 already normalises to 0.95; above '
                          '1.0 clips.')
+    ap.add_argument('--emit-ceiling', type=float, metavar='HZ',
+                    help='Hold the emitted spectrum under HZ. top_bin bounds '
+                         'the carriers, not the emission: the preamble is '
+                         'square-edged and every preset emits out past 23 kHz '
+                         'without this. Only needed for a channel with a hard '
+                         'ceiling -- one that merely rolls off removes the tail '
+                         'itself at no cost. Pair with a preset that leaves '
+                         'guard under the cut, such as mid-14k or lean-14k for '
+                         '--emit-ceiling 14000.')
     ap.add_argument('--frames', type=int, help='Stop after this many packets')
     ap.add_argument('--seconds', type=float, default=10.0,
                     help='Duration for --write when --frames is not given')

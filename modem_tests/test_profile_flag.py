@@ -10,7 +10,8 @@ import unittest
 import numpy as np
 
 from animation_modem import core, transport3 as v3
-from animation_modem.imaging import PROFILES, fit_shapes, plane_shapes
+from animation_modem.imaging import (BAKE_ONLY, PROFILES, fit_shapes,
+                                     plane_shapes, wire_profiles)
 
 WIDE = v3.ALL_PRESETS['wide-v3']        # 2880 slots: every profile fits whole
 LEAN = v3.ALL_PRESETS['lean-v3']
@@ -31,8 +32,11 @@ class ProfileCodeTests(unittest.TestCase):
     def test_the_code_table_matches_the_profiles_that_exist(self):
         """Wire order against the real table. These drifting apart is the one
         way this silently sends the wrong geometry."""
-        self.assertEqual(set(v3.PROFILE_CODES), set(PROFILES))
+        # PROFILES also carries bake-only geometry that has no wire code --
+        # see BAKE_ONLY. The transmittable set is what has to match the table.
+        self.assertEqual(set(v3.PROFILE_CODES), set(wire_profiles()))
         self.assertLessEqual(len(v3.PROFILE_CODES), 4, 'two bits hold four')
+        self.assertTrue(set(BAKE_ONLY) <= set(PROFILES))
 
     def test_names_and_codes_round_trip(self):
         for name in v3.PROFILE_CODES:
