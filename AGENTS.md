@@ -1,8 +1,9 @@
 # AGENTS.md
 
 Flat, single-package Python app (no `pyproject.toml`/setup.py). Entry point is
-`main.py`. The current branch is `modem`; the mode docs (`MODEM_MODE.md`,
-`SCOPE_MODE.md`) are authoritative for their subsystems.
+`main.py`. The current branch is `main` (modem — and scope inside it — was
+merged back); the mode docs (`MODEM_MODE.md`, `SCOPE_MODE.md`) are
+authoritative for their subsystems.
 
 ## Modes
 
@@ -42,8 +43,8 @@ as ignored (with a `⚠️`), not silently dropped.
   exits on a busy port, but scope mode deliberately skips it (it binds nothing).
   Ports 2423/2424 are reserved for asciiweb.
 - Image scan caches live in `_cache/generated_lists_<src>_<mode>_<port>/` and
-  are wiped at startup; `--rebuild` forces regeneration. `logs/` holds per-run
-  logs (stdout is teed there).
+are wiped at startup; `--rebuild` forces regeneration. `logs/` holds per-run
+logs (stdout and stderr are teed there).
 
 ## Bakes (all gitignored, never commit)
 
@@ -56,14 +57,19 @@ as ignored (with a `⚠️`), not silently dropped.
 
 ## Tests
 
-`unittest` style, run from the repo root (tests import `animation_modem.*` and
-`utilities.*` directly):
+`unittest` style, run from the repo root (tests import `animation_modem.*`,
+`utilities.*`, and the app modules directly):
 
 ```bash
 .venv/bin/python -m unittest discover -s modem_tests -v
 .venv/bin/python -m unittest test_modem_integration test_lazy_imports -v
+.venv/bin/python -m unittest test_ascii_converter_adjustments test_ascii_scaling -v
 ```
 
+- `test_ascii_converter_adjustments` / `test_ascii_scaling` live at the repo
+  root, outside `modem_tests/`: they pin the ascii grading knobs
+  (`--ascii-contrast`/`--ascii-brightness`/`--ascii-gamma`) and the
+  neutral-at-1.0 contrast that keeps the shipped picture byte-identical.
 - Failing on the current checkout (pre-existing, matches `.pytest_cache`):
   `test_modem_screen` ffmpeg-failure (needs ffmpeg/live capture),
   `test_pilot_continuity` smooth-drift steps (-0.25, 0.18),
