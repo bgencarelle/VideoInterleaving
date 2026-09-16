@@ -70,18 +70,24 @@ MIDI_MODE = False
 # --- SERVER MODE CONFIGURATION ---
 SERVER_MODE = True      # Enable headless streaming
 HEADLESS_USE_GL = True  # new: disable ModernGL headless on VPS
-SERVER_CAPTURE_RATE = FPS // 2   #  FPS by 2
+# Web/ascii capture rate, decoupled from FPS: this is the bandwidth knob for
+# slow links. The index still advances at IPS (30), so at 10fps the stream
+# carries every third index -- but each frame it carries is the CURRENT one,
+# never a backlog. Raise toward IPS on fast links for per-index fidelity.
+SERVER_CAPTURE_RATE = 15
 
 # --- ASCII MODE SETTINGS ---
 ASCII_MODE = False
 ASCII_COLOR = True
 ASCII_COLOR_BLUR = 7  # 0 = off, odd integer = blur strength (3, 5, 7)
-ASCII_FPS = SERVER_CAPTURE_RATE // 2
+# Independent of SERVER_CAPTURE_RATE: ascii frames are a few KB of text, so
+# the telnet/websocket rate is not the bandwidth problem the JPEG stream is.
+ASCII_FPS = 15
 ASCII_WIDTH = 60 # keep aspect ratio 3:2
 ASCII_HEIGHT = 40
 ASCII_SOURCE_IMAGE_ASPECT_RATIO = 1.333333333
-JPEG_QUALITY = 75# Image quality
-HEADLESS_RES = (480, 600)   # Resolution for the virtual screen
+JPEG_QUALITY = 60# Image quality (lower = fewer bytes per frame on slow links)
+HEADLESS_RES = (320, 400)   # Resolution for the virtual screen (web frame size)
 
 # --- SCOPE MODE (XY output via the sound card) ---
 # Scope refresh defaults to IPS. For completed vector/raster passes, one trace

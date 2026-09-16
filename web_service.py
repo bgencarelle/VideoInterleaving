@@ -345,6 +345,7 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
 
     def _scope_luma_stream(self):
         """multipart JPEG of the source luminance, not the rendered trace."""
+        _tight_stream_socket(self.connection)
         try:
             import cv2
             from scope_out import Scope
@@ -403,6 +404,7 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
         slow client or a heavy size setting therefore costs frames on the
         preview and nothing at all on the trace deadline.
         """
+        _tight_stream_socket(self.connection)
         size, exposure = _scope_opts(self.path)
         try:
             self.send_response(200)
@@ -493,6 +495,27 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
         self.send_error(404)
 
 
+def _tight_stream_socket(conn):
+    """Minimal buffering for MJPEG streams.
+
+    The frame exchange (and the scope tap) only ever holds the LATEST frame,
+    so the kernel send buffer is the only place stale frames can pile up: a
+    client that reads slowly would otherwise sit on seconds of hidden backlog
+    and fall behind the local display. Cap it to a couple of frames, disable
+    Nagle, and bound the write: a client too slow for even that raises
+    socket.timeout, the handler disconnects it, and the page rejoins on the
+    current frame (index.html's watchdog, scope.html's drop-on-hide +
+    reconnect).
+    """
+    try:
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 32768)
+        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        conn.settimeout(15)
+    except (OSError, AttributeError):
+        pass  # already closed or unsupported platform: non-critical
+
+
 class StreamHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
     # Timeout for streaming connections
     timeout = 15
@@ -548,15 +571,7 @@ class StreamHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
             _current_viewer_count += 1
         _set_heartbeat(cid)
 
-        try:
-            # 1. Keepalive (Detect broken pipes)
-            self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            # 2. No Delay (Disable Nagle's Algorithm) - CRITICAL for streaming latency
-            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        except (OSError, AttributeError) as e:
-            # Socket options may fail on some platforms or if connection is already closed
-            # This is non-critical, so we silently continue
-            pass
+        _tight_stream_socket(self.connection)
 
         self.send_response(200)
         self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
