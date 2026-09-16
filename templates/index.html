@@ -97,16 +97,27 @@
       startStream();
     }
 
-    // Auto-resume when page becomes visible (user returns to tab)
+    // Restart whenever the page becomes visible. Chrome fires no error
+    // when an MJPEG stream that has already delivered frames ends (a
+    // server-side stall timeout or a frozen tab will end it), and the old
+    // img.complete/naturalWidth check misses exactly that case: complete
+    // is true and the picture just sits there, stale, forever. Restart
+    // unconditionally -- the server sends the current frame immediately
+    // on connect, so a healthy stream resumes seamlessly.
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden) {
-        // Page became visible - resume stream if it's not already running
-        if (!img.src || img.complete === false || img.naturalWidth === 0) {
-          console.log("Page visible - resuming stream");
-          resume();
-        }
+        console.log("Page visible - restarting stream");
+        resume();
       }
     });
+
+    // Watchdog: the stream can also die while the tab is fully visible
+    // (a producer pause past STREAM_STALL_TIMEOUT disconnects it, and
+    // nothing fires an error). Re-issue the src every 30s; a healthy
+    // stream continues seamlessly, a dead one comes back to life.
+    setInterval(() => {
+      if (!document.hidden) startStream();
+    }, 30000);
 
     // Auto-resume on page load/reload
     window.addEventListener('load', () => {

@@ -241,7 +241,9 @@
         }
 
         // --- 4. CONNECTION ---
+        let currentTerm = null;
         function connect(term) {
+            currentTerm = term;
             const protocol = location.protocol === 'https:' ? 'wss://' : 'ws://';
             const wsUrl = (location.port === "" || location.port === "80" || location.port === "443")
                 ? protocol + location.hostname + "/ascii_ws/"
@@ -257,8 +259,11 @@
             };
             ws.onmessage = (ev) => term.write(ev.data);
             ws.onclose = () => {
+                // A newer socket may have taken over (the visible-tab
+                // reconnect races this 1s timer when the tab was frozen)
+                if (connectedWS !== ws) return;
                 connectedWS = null;
-                setTimeout(() => connect(term), 1000);
+                setTimeout(() => { if (!connectedWS) connect(term); }, 1000);
             }
             ws.onerror = () => ws.close();
         }
@@ -295,6 +300,17 @@
 
         // Internal var to expose WS to key listener
         let connectedWS = null;
+
+        // Reconnect as soon as the tab is visible again. Chrome freezes
+        // timers in background tabs, so the 1s auto-reconnect in
+        // ws.onclose never fires while hidden; this nudges a socket that
+        // died silently back to life. A live OPEN socket is left alone.
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden && currentTerm &&
+                (!connectedWS || connectedWS.readyState !== WebSocket.OPEN)) {
+                connect(currentTerm);
+            }
+        });
     </script>
 </body>
 

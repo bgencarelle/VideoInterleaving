@@ -98,12 +98,21 @@ def broadcast_loop():
         dead_clients = []
         for client in list(clients):
             try:
-                # --- THE "LEAKY BUCKET" FIX ---
-                # Check the internal library buffer.
-                # If 'sendq' has data, the client is lagging (tab hidden).
-                # Skip this frame for this specific client.
-                # if hasattr(client, 'sendq') and client.sendq:
-                #     continue
+                # --- NEAR-ZERO BUFFERING ---
+                # The library never blocks on a slow client: sendMessage
+                # just appends to client.sendq, and the select loop drains
+                # it once the socket is writable. A tab the browser has
+                # frozen or throttled stops reading, its queue grows without
+                # bound, and when it wakes it replays the entire backlog --
+                # minutes of stale frames. We do not want history on the
+                # screen, we want the current frame: so if a client is still
+                # draining more than a couple of frames, throw the backlog
+                # away and enqueue only this one. A healthy client's queue
+                # empties between broadcasts (the select loop runs every
+                # 0.1s and frames arrive at ~15fps), so it never trips this;
+                # a frozen one caps at three frames.
+                if len(client.sendq) >= 3:
+                    client.sendq.clear()
 
                 # If buffer is empty, send the new frame
                 client.sendMessage(payload)
