@@ -14,7 +14,7 @@ class SpeedCompensationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.layout = v.ALL_PRESETS['lean-v3']
-        cls.coder = v.SourceCoder(plane_shapes('color-lean'))
+        cls.coder = v.SourceCoder(plane_shapes('lean-dct'))
         cls.values = np.random.default_rng(3).uniform(-.2, .2, cls.coder.count)
         cls.audio = np.concatenate([
             v.encode(cls.values, cls.layout, cls.coder, n, n, 6)

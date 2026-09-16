@@ -26,9 +26,9 @@ specific to one (preset, profile) pair, because its length is that pair's slot
 count; the loader checks.
 
     python3 utilities/fit_allocation.py --modem-dir images_modem \\
-            --preset lean-14k --profile color --out lean14k.npy
+            --preset lean-14k --profile color-dct --out lean14k.npy
 
-    python3 modem_screen.py --preset lean-14k --profile color \\
+    python3 modem_screen.py --preset lean-14k --profile color-dct \\
             --allocation lean14k.npy --device "BlackHole 2ch"
     python3 utilities/modem_v3_check.py live-receive \\
             --allocation lean14k.npy --device "BlackHole 2ch"

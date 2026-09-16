@@ -43,7 +43,7 @@ def captured_at(audio, rate):
 class RateIndependentDecodeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.coder = v3.SourceCoder(plane_shapes('color-lean'))
+        cls.coder = v3.SourceCoder(plane_shapes('lean-dct'))
         cls.values = np.random.default_rng(11).uniform(-.2, .2, cls.coder.count)
         cls.audio = np.concatenate([
             v3.encode(cls.values, LAYOUT, cls.coder, n, n, 4)
@@ -173,7 +173,7 @@ class BandLimitedSenderTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.coder = v3.SourceCoder(plane_shapes('color-lean'))
+        cls.coder = v3.SourceCoder(plane_shapes('lean-dct'))
         cls.values = np.random.default_rng(23).uniform(-.2, .2, cls.coder.count)
         cls.packets = [v3.encode(cls.values, LAYOUT, cls.coder, n, n, 4)
                        for n in range(1, 5)]
@@ -305,7 +305,7 @@ class AnyRateWavTests(unittest.TestCase):
         from animation_modem.audio_common import pcm, wav_rate
         from utilities import modem_v3_check as check
 
-        coder = v3.SourceCoder(plane_shapes('color-lean'))
+        coder = v3.SourceCoder(plane_shapes('lean-dct'))
         values = np.random.default_rng(7).uniform(-.2, .2, coder.count)
         audio = np.concatenate([v3.encode(values, LAYOUT, coder, n, n, 3)
                                 for n in range(1, 4)])

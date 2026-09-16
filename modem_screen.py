@@ -20,9 +20,10 @@ header, and the preset is identified by decoding against each candidate until
 one verifies. Any progressive preset and any profile can be sent live.
 
 BE REALISTIC ABOUT THE RESOLUTION. The picture is whatever the profile says:
-40x48 colour for 'color' and 'color-lean', 48x60 grey for 'mono'. That is a
-silhouette, a face, a moving shape, a lava lamp. It is not a desktop, and text
-will not survive.
+40x48 colour for 'color-dct', the same luma with quarter chroma for 'lean-dct'
+-- each sampled 2x finer and DCT-truncated, so the source bake is 80x96. That
+is a silhouette, a face, a moving shape, a lava lamp. It is not a desktop, and
+text will not survive.
 
 Unlike scope_screen this wants COLOUR, so ffmpeg is asked for rgb24 rather than
 gray, and the frame is fitted to the profile's aspect rather than the screen's.
@@ -462,15 +463,17 @@ def build(args):
 
     fit_shapes quietly scales the planes down until they fit the preset, so a
     mismatched pair still runs -- it just sends a much smaller picture than the
-    profile names. 'lofi' with 'color' yields 378 coefficients rather than
-    2880, and nothing says so. Silent resolution loss is worse than an error.
+    profile names. A narrow preset with 'color-dct' yields far fewer than 2880
+    coefficients, and nothing says so. Silent resolution loss is worse than an
+    error.
     """
     if args.profile not in PROFILES:
         raise SystemExit(f'Unknown profile {args.profile}')
     # Fail here rather than on the first encode. The header spends two bits on
-    # the profile, so only the four in PROFILE_CODES can be named on the wire;
-    # a profile that exists in PROFILES but has no code would otherwise run all
-    # the way to V3.encode before raising, after the device was already open.
+    # the profile, so only the entries in PROFILE_CODES can be named on the
+    # wire; a profile that exists in PROFILES but has no code would otherwise
+    # run all the way to V3.encode before raising, after the device was already
+    # open.
     try:
         V3.profile_code(args.profile)
     except ValueError as exc:
@@ -637,14 +640,14 @@ def parser():
                     help='Wire layout. The default holds the 2880 slots the '
                          'default profile needs, at 16.48 fps; lean-v3 and the '
                          '14k presets hold fewer and shrink the picture.')
-    # Only the profiles the header can name. PROFILES also holds bake-only
-    # geometry (see BAKE_ONLY), which argparse should refuse outright rather
-    # than accept into a run that cannot transmit it.
+    # The profiles the header can name. Every one is DCT-sampled; the bake and
+    # the wire shapes both come from the profile's geometry.
     ap.add_argument('--profile', choices=list(wire_profiles()),
                     default=DEFAULT_PROFILE,
-                    help='Picture geometry. The default samples 2x finer than '
+                    help='Picture geometry. Each samples a grid 2x finer than '
                          'it transmits and sends the low-frequency corner; the '
-                         'receiver reads which was sent from the header.')
+                         'receiver reads which was sent from the header. '
+                         'lean-dct quarters chroma for a noisier tape.')
     ap.add_argument('--device', type=device, help='Audio output device')
     ap.add_argument('--channels', type=pair, default=(0, 1))
     ap.add_argument('--latency', default='low')
@@ -714,15 +717,10 @@ def main(argv=None):
     if not np.isfinite(args.gain) or args.gain <= 0:
         raise SystemExit('--gain must be finite and positive')
 
-    # Neither preset nor profile has to be agreed out of band any more. The
-    # profile is declared in the header; the preset is identified by the
-    # receiver decoding against each candidate until the CRC verifies. What is
-    # still fixed is the transport generation: a v2 layout puts a different
-    # magic on the wire and a v3 receiver is not looking for it.
-    if not args.write and not V3.ALL_PRESETS[args.preset].progressive:
-        raise SystemExit(f'{args.preset} is v2 wire format; live needs a '
-                         f'progressive preset (wide, wide-v3, wide-v3-fast, '
-                         f'tape-v3, lean-v3, mid-v3, mid-v3-fast)')
+    # Neither preset nor profile has to be agreed out of band. The profile is
+    # declared in the header; the preset is identified by the receiver decoding
+    # against each candidate until the CRC verifies. Every preset is
+    # progressive, so nothing further is refused.
     layout, coder, shapes = build(args)
     prepare = fitter(args.profile, args.rotate, args.mirror, not args.crop)
     raw = source_for(args, layout.fps)

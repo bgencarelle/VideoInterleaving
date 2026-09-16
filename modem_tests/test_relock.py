@@ -22,7 +22,7 @@ def coder_for(profile, layout):
     return v3.SourceCoder(shapes)
 
 
-def stream(preset, frames=6, seed=6, profile='color-lean'):
+def stream(preset, frames=6, seed=6, profile='lean-dct'):
     layout = v3.ALL_PRESETS[preset]
     coder = coder_for(profile, layout)
     values = np.random.default_rng(seed).uniform(-.2, .2, coder.count)
@@ -37,7 +37,7 @@ def candidates(names=('lean-v3', 'mid-14k', 'tape-v3', 'wide-v3')):
     out = []
     for name in names:
         layout = v3.ALL_PRESETS[name]
-        coder = coder_for('color-lean', layout)
+        coder = coder_for('lean-dct', layout)
         out.append((layout, coder, None))
     return sorted(out, key=lambda c: c[0].packet)
 
@@ -57,7 +57,7 @@ def verified(results):
 class RelockTests(unittest.TestCase):
     def receiver(self):
         start = v3.ALL_PRESETS['lean-v3']
-        return v3.Receiver(start, coder_for('color-lean', start),
+        return v3.Receiver(start, coder_for('lean-dct', start),
                            candidates=candidates())
 
     def test_a_second_transmission_on_another_preset_is_found(self):

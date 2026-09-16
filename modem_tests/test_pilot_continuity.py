@@ -7,7 +7,7 @@ from animation_modem.imaging import plane_shapes
 
 class PilotContinuityTests(unittest.TestCase):
     def test_smooth_symbol_drift_preserves_image(self):
-        layout=v.PRESETS['wide']
+        layout=v.ALL_PRESETS['wide-v3']
         coder=v.SourceCoder(plane_shapes())
         values=np.random.default_rng(75).uniform(-.2,.2,coder.count)
         packet=v.encode(values,layout,coder,1,1,1)

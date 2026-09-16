@@ -64,5 +64,5 @@ reproduced by this short experiment, and this patch is not a hard CPU budget.
 For a physical input, use the usual command and the known working device:
 
 ```bash
-python utilities/modem_v2_check.py live-receive --device 1 --channels 1,2
+python utilities/modem_v3_check.py live-receive --device 1 --channels 1,2
 ```

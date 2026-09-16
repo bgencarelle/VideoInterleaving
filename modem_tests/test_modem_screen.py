@@ -45,7 +45,7 @@ class ReadExactTests(unittest.TestCase):
 
 class FitterTests(unittest.TestCase):
     def test_output_is_exactly_the_profile_size(self):
-        for profile in ('color', 'color-lean', 'mono'):
+        for profile in ('color-dct', 'lean-dct'):
             with self.subTest(profile=profile):
                 prepare = modem_screen.fitter(profile)
                 out = prepare(np.zeros((480, 640, 3), np.uint8))
@@ -54,18 +54,18 @@ class FitterTests(unittest.TestCase):
     def test_letterbox_preserves_aspect_and_crop_fills(self):
         raw = np.zeros((100, 400, 3), np.uint8)
         raw[:, :, 0] = 255
-        boxed = np.asarray(modem_screen.fitter('color', letterbox=True)(raw))
-        filled = np.asarray(modem_screen.fitter('color', letterbox=False)(raw))
+        boxed = np.asarray(modem_screen.fitter('color-dct', letterbox=True)(raw))
+        filled = np.asarray(modem_screen.fitter('color-dct', letterbox=False)(raw))
         self.assertLess(boxed[:, :, 0].mean(), filled[:, :, 0].mean())
 
     def test_rotation_and_mirror_apply(self):
         raw = np.zeros((64, 48, 3), np.uint8)
         raw[:, :10] = 255
-        plain = np.asarray(modem_screen.fitter('color')(raw))
-        flipped = np.asarray(modem_screen.fitter('color', mirror=True)(raw))
+        plain = np.asarray(modem_screen.fitter('color-dct')(raw))
+        flipped = np.asarray(modem_screen.fitter('color-dct', mirror=True)(raw))
         self.assertFalse(np.array_equal(plain, flipped))
-        turned = modem_screen.fitter('color', rotate=90)(raw)
-        self.assertEqual(turned.size, PROFILES['color'][0])
+        turned = modem_screen.fitter('color-dct', rotate=90)(raw)
+        self.assertEqual(turned.size, PROFILES['color-dct'][0])
 
 
 class PrescaleTests(unittest.TestCase):
@@ -74,7 +74,7 @@ class PrescaleTests(unittest.TestCase):
 
     def test_large_frames_cost_about_the_same_as_small_ones(self):
         import time
-        prepare = modem_screen.fitter('color-lean')
+        prepare = modem_screen.fitter('lean-dct')
 
         def cost(w, h):
             raw = np.random.default_rng(0).integers(0, 256, (h, w, 3), dtype=np.uint8)
@@ -89,7 +89,7 @@ class PrescaleTests(unittest.TestCase):
         self.assertLess(large, small*4)
 
     def test_prescale_keeps_the_exact_output_size(self):
-        for profile in ('color', 'color-lean', 'mono'):
+        for profile in ('color-dct', 'lean-dct'):
             with self.subTest(profile=profile):
                 prepare = modem_screen.fitter(profile)
                 for w, h in ((320, 426), (1920, 1080), (3840, 2400)):
@@ -103,7 +103,7 @@ class PrescaleTests(unittest.TestCase):
         raw = np.zeros((1600, 2560, 3), np.uint8)
         raw[:, :, 0] = np.uint8(128+120*np.sin(xx/200))
         raw[:, :, 1] = np.uint8(128+120*np.cos(yy/160))
-        out = np.asarray(modem_screen.fitter('color-lean')(raw), float)
+        out = np.asarray(modem_screen.fitter('lean-dct')(raw), float)
         self.assertGreater(out.std(), 10.0)
         self.assertGreater(out[:, :, 0].std(), 5.0)
 
@@ -141,7 +141,7 @@ class RoundTripTests(unittest.TestCase):
             wav = Path(d)/'live.wav'
             modem_screen.main(['--source', 'test', '--write', str(wav),
                                '--frames', '6'])
-            records = self.decode(wav, 'lean-v3', 'color-lean')
+            records = self.decode(wav, 'lean-v3', 'lean-dct')
             self.assertEqual([r['frame'] for r in records], [1, 2, 3, 4, 5, 6])
             self.assertTrue(all(r['identity'] == 'verified_header' for r in records))
 
@@ -171,8 +171,8 @@ class RoundTripTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             with contextlib.redirect_stderr(err), \
                  contextlib.redirect_stdout(io.StringIO()):
-                modem_screen.main(['--source', 'test', '--preset', 'lofi',
-                                   '--profile', 'mono',
+                modem_screen.main(['--source', 'test', '--preset', 'lean-v3',
+                                   '--profile', 'color-dct',
                                    '--write', str(Path(d)/'x.wav'),
                                    '--frames', '1'])
         self.assertIn('WARNING', err.getvalue())
@@ -185,7 +185,7 @@ class RoundTripTests(unittest.TestCase):
             with contextlib.redirect_stderr(err), \
                  contextlib.redirect_stdout(io.StringIO()):
                 modem_screen.main(['--source', 'test', '--preset', 'lean-v3',
-                                   '--profile', 'color-lean',
+                                   '--profile', 'lean-dct',
                                    '--write', str(Path(d)/'x.wav'),
                                    '--frames', '1'])
         self.assertNotIn('WARNING', err.getvalue())
@@ -226,10 +226,10 @@ class VideoSourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             wav = Path(d)/'v.wav'
             modem_screen.main(['--source', 'video', '--file', str(self.clip),
-                               '--preset', 'lean-v3', '--profile', 'color-lean',
+                               '--preset', 'lean-v3', '--profile', 'lean-dct',
                                '--write', str(wav), '--frames', '5'])
             layout = v3.ALL_PRESETS['lean-v3']
-            shapes = fit_shapes(plane_shapes('color-lean'), layout.capacity)
+            shapes = fit_shapes(plane_shapes('lean-dct'), layout.capacity)
             coder = SourceCoder(shapes)
             from animation_modem.audio_common import wav_blocks
             rx = v3.Receiver(layout, coder)
@@ -329,7 +329,7 @@ class DeviceLoopTests(unittest.TestCase):
     def test_live_loop_sends_packets(self):
         out = self.FakeOutput()
         self.run_loop(['--source', 'test', '--frames', '5',
-                       '--preset', 'lean-v3', '--profile', 'color-lean'], out)
+                       '--preset', 'lean-v3', '--profile', 'lean-dct'], out)
         layout = v3.ALL_PRESETS['lean-v3']
         self.assertEqual(len(out.sent), 5)
         self.assertTrue(out.finished)
@@ -346,9 +346,9 @@ class DeviceLoopTests(unittest.TestCase):
     def test_live_packets_decode(self):
         out = self.FakeOutput()
         self.run_loop(['--source', 'test', '--frames', '4',
-                       '--preset', 'lean-v3', '--profile', 'color-lean'], out)
+                       '--preset', 'lean-v3', '--profile', 'lean-dct'], out)
         layout = v3.ALL_PRESETS['lean-v3']
-        shapes = fit_shapes(plane_shapes('color-lean'), layout.capacity)
+        shapes = fit_shapes(plane_shapes('lean-dct'), layout.capacity)
         coder = SourceCoder(shapes)
         stream = np.concatenate(out.sent).astype(np.float32)
         rx = v3.Receiver(layout, coder)

@@ -46,14 +46,14 @@ float folder. It mirrors the source tree and records the source order in
 `modem.json`.
 
 ```bash
-python utilities/convert_to_modem.py \
+python utilities/convert_to_modem_dct.py \
   --input-dir images \
-  --output-dir images_modem \
-  --profile color
+  --output-dir images_modem
 ```
 
-`--profile` accepts `color`, `detail`, or `mono`; the decoder identifies the
-profile from the transmitted frame. The default is `color`. Use `--jpeg-layout
+The 2D-DCT baker always downsamples to an 80x96 RGBA canvas and writes
+`profile: color-dct` in `modem.json`; the decoder identifies the profile from
+the transmitted frame. Use `--jpeg-layout
 rgb` when JPEGs are ordinary RGB images. The default `sbs` follows the project
 convention used by `utilities/convert_to_xy.py`: the left half is colour and
 the right half is a matte. PNG/WebP alpha is read directly.

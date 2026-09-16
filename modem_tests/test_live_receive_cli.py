@@ -72,9 +72,10 @@ class ReceiverWindowTests(unittest.TestCase):
         from animation_modem.imaging import image_values
 
         layout = check.PRESETS['lean-v3']
-        coder, _ = check.coder_for('color-lean', None, layout)
+        coder, grids = check.coder_for('lean-dct', None, layout)
         packets = [check.V3.encode(
-            image_values(Image.new('RGB', (40, 48), (n*12, 30, 180)), coder.shapes),
+            image_values(Image.new('RGB', grids[0][::-1], (n*12, 30, 180)),
+                         coder.grids),
             layout, coder, n+1, n+1, 20) for n in range(20)]
         audio = np.concatenate(packets + [np.zeros((1024, 2))]).astype(np.float32)
         shown = []
@@ -276,13 +277,13 @@ class PictureSizeReportTests(unittest.TestCase):
     def test_a_shrunk_picture_reports_what_it_actually_is(self):
         """The case this exists for. fit_shapes quietly reduces a profile that
         does not fit its preset, and the only previous sign was a nested list
-        that still said 'color'."""
+        that still said 'color-dct'."""
         from animation_modem.core import Decoded
         r = Decoded(status='received', identity='verified_header')
-        r.extra = {'shapes': [[46, 38], [23, 19], [23, 19]], 'profile': 'color'}
+        r.extra = {'shapes': [[46, 38], [23, 19], [23, 19]], 'profile': 'color-dct'}
         line = check.record(r)
         self.assertEqual(line['picture'], '38x46')
-        self.assertEqual(line['profile'], 'color')
+        self.assertEqual(line['profile'], 'color-dct')
 
     def test_the_window_status_names_both_sizes(self):
         """Native and scaled, so it is clear which number is the picture and

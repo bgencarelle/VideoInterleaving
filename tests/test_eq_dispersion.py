@@ -20,11 +20,11 @@ from scipy.signal import butter, sosfilt, lfilter, firwin
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from animation_modem.core import PRESETS, SourceCoder, N, CP, SYNC_LEN, decode_packet
-from animation_modem.transport3 import encode
+from animation_modem.core import SourceCoder, N, CP, SYNC_LEN, decode_packet
+from animation_modem.transport3 import ALL_PRESETS, encode
 
-LAYOUT = PRESETS['wide']
-SHAPES = [(40, 48), (10, 12), (10, 12)]          # color-lean
+LAYOUT = ALL_PRESETS['wide-v3']
+SHAPES = [(40, 48), (10, 12), (10, 12)]          # lean-dct
 
 
 def _plane(rows, cols, seed):

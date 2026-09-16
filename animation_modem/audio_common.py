@@ -1,7 +1,7 @@
 import argparse
 import wave
 import numpy as np
-from .core import PRESETS, REFERENCE_RATE, N
+from .core import Layout, REFERENCE_RATE, N
 from scipy.signal import butter, sosfilt
 
 def device(value):
@@ -194,11 +194,17 @@ def route(data, channels):
     return out
 
 
-# Data occupies bins 3..54 only. Everything outside carries no information, but
+# Data occupies bins 1..54 only. Everything outside carries no information, but
 # it does inflate the peak and window energy that sync_correlation normalises
 # by, which is what pushes the score under threshold on an analog source. The
 # demodulator's FFT already rejects it; the acquisition detector does not.
-BAND = (600.0, 22000.0)          # comfortably outside 1125 Hz .. 20250 Hz
+BAND = (200.0, 22000.0)          # comfortably outside 375 Hz .. 20250 Hz
+
+# transport3 owns the preset table, but it imports this module, so the guard
+# band cannot be read off ALL_PRESETS. This is the live default spelled out as
+# a bare Layout instead; modem_tests/test_guard_band.py pins it to
+# transport3's 'wide-v3' so the two cannot drift apart silently.
+WIDE_V3 = Layout(top_bin=54, image_symbols=15, name='wide-v3')
 
 
 class InputFilter:
@@ -213,7 +219,7 @@ class InputFilter:
         high, low = band
         if not (0 < high < low < rate/2):
             raise ValueError(f'Input band must satisfy 0 < high < low < {rate/2}')
-        carriers = PRESETS['wide'].carriers
+        carriers = WIDE_V3.carriers
         # Carrier frequencies follow the clock the audio is actually arriving
         # on, so the guard band has to be computed against that same clock.
         lowest, highest = carriers[0]*rate/N, carriers[-1]*rate/N

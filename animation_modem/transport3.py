@@ -1,19 +1,16 @@
 """V3 transport: countable preamble, edge-capture acquisition, corrected level.
 
-The wire body is byte-identical to v2 -- same OFDM grid, same carriers, same
-16-byte CRC header, same source coding. Only the preamble and the way the
-receiver finds it change, so `core.decode_packet` demodulates a v3 packet
-unmodified once the timing is known.
+This is the only transport. It owns the preamble and the way the receiver finds
+the packet; `core.decode_packet` demodulates once the timing is known.
 """
 import numpy as np
 from functools import lru_cache
 from scipy.signal import correlate
 from .audio_common import (pcm, pair, device, wav_blocks, wav_rate, wire_notice,
                            InputLevel, sounddevice)
-from . import core as v2
 from .core import (REFERENCE_RATE, N, CP, SYMBOL, SYNC_LEN, GUARD, HEADER_GAIN,
                          IMAGE_GAIN, HEADER_SLOTS, HEADER_FORMAT, HEADER_BYTES,
-                         Layout, PRESETS, SourceCoder, Decoded, coefficient_slots,
+                         Layout, SourceCoder, Decoded, coefficient_slots,
                          phases, pack_header, pack_folders, decode_packet,
                          default_allocation, resample_packet, _sample_at,
                          _body_walk, _decode_tables, FOLDER_LIMIT,
@@ -78,7 +75,7 @@ V3_PRESETS = {
                        progressive=True, orthogonal_training=True,
                        spread_carriers=True, dense_header=True),
 }
-ALL_PRESETS = {**PRESETS, **V3_PRESETS}
+ALL_PRESETS = dict(V3_PRESETS)
 
 PREAMBLE = _biphase()
 PREAMBLE_ENERGY = float(np.einsum('i,i->', PREAMBLE, PREAMBLE, optimize=False))

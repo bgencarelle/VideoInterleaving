@@ -1,55 +1,46 @@
-"""Image <-> value-vector conversion for the v2 transport.
+"""Image <-> value-vector conversion for the modem transport.
 
 These were living in the check utility, which put them out of reach
 of modem_display.py -- the runtime cannot import from utilities/. Nothing here
 touches the wire format; it is the source-coding half, shared by the tool and
 the runtime so both produce byte-identical value vectors.
 
-The normal wire format is fixed: color, 40x48 luma with 20x24 chroma, 2880
-values. `plane_shapes` still accepts the other profiles for offline
-comparisons, and `fit_shapes` trims a profile into a smaller layout's budget.
+The wire format is the DCT family: `color-dct` at 2880 values, `lean-dct` at
+2160, and `fit_shapes` trims a profile into a smaller layout's budget.
 """
 import numpy as np
 from PIL import Image, ImageDraw, ImageOps
 
-# Luma size and chroma size per profile. Every profile is exactly 2880 values.
+# Luma size and chroma size per profile, on the wire. Every profile is a
+# sampling grid truncated by the DCT -- there is no box-downsampled format any
+# more. 'color-dct' sends 2880 values; 'lean-dct' quarters chroma (2160 values),
+# which leaves each surviving chroma coefficient more power on a noisy tape for
+# the same slot budget the transport wastes the gap in.
+#
+# Keep any chroma plane on the luma aspect ratio. image_values letterboxes each
+# plane independently, so an off-aspect chroma plane gets colour bars and loses
+# 2-4 dB -- which looks exactly like a chroma-resolution effect and is not one.
 PROFILES = {
-    'color': ((40, 48), (20, 24)),
-    # Measured on real baked frames: chroma at half luma resolution takes 33%
-    # of the coefficient budget and carries 1.24% of the image energy (luma
-    # 98.76%). Quartering it frees 720 slots -- 4 whole OFDM symbols -- and the
-    # picture gets BETTER, because the surviving chroma coefficients each get
-    # more power and stop blotching. 2160 coefficients, +20.8% frame rate, and
-    # +0.9 to +5.4 dB depending on how noisy the channel is.
-    #
-    # Keep any chroma plane on the luma aspect ratio. image_values letterboxes
-    # each plane independently, so an off-aspect chroma plane gets colour bars
-    # and loses 2-4 dB -- which looks exactly like a chroma-resolution effect
-    # and is not one.
-    'color-lean': ((40, 48), (10, 12)),
-    'mono': ((48, 60), None),
-    # The default. Identical wire shapes to 'color' -- same 2880 slots, same
-    # plane geometry -- but PROFILE_GRIDS samples 2x finer and truncates to
-    # this corner, so those slots carry a low-passed 80x96 picture instead of a
-    # box-downsampled 40x48 one. It holds its own wire code, so the receiver
-    # reads it from the header and nothing has to be agreed out of band.
     'color-dct': ((40, 48), (20, 24)),
+    'lean-dct': ((40, 48), (10, 12)),
 }
-# Sampling grid per profile, where it differs from the transmitted shape.
-# SourceCoder truncates the grid's DCT to the wire shape -- ONE transform, and
-# the allocation table built against the grid's frequencies. Pre-transforming
-# outside the coder instead transforms twice and is catastrophic: measured, a
-# picture reading 39 dB clean collapsed to 8 dB PSNR at -45 dBFS noise.
+# Sampling grid per profile. SourceCoder truncates the grid's DCT to the wire
+# shape -- ONE transform, and the allocation table built against the grid's
+# frequencies. Pre-transforming outside the coder instead transforms twice and
+# is catastrophic: measured, a picture reading 39 dB clean collapsed to 8 dB
+# PSNR at -45 dBFS noise.
 #
 # What it buys is CONTENT-DEPENDENT, and the honest summary is that it depends
 # entirely on whether the source has detail above the wire shape. Against a
 # high-resolution source at the same slot count it reads +0.6 to +2.1 dB on a
 # portrait and +2.5 to +2.8 on hard edges; against a source already AT the wire
 # shape it loses 1.35 to 8.42 dB, because truncation can only preserve what was
-# sampled. Live capture and an 80x96 bake are the first case; a 40x48 bake is
-# the second. It is not a bandwidth saving either way -- the slot count is
-# unchanged.
-PROFILE_GRIDS = {'color-dct': ((80, 96), (40, 48))}
+# sampled. Live capture and an 80x96 bake are the first case; a bake at the
+# wire shape is the second. It is not a bandwidth saving either way -- the
+# transmitted shape is unchanged. 'lean-dct' shares the 80x96 luma grid and
+# samples chroma 2x finer than the quarter-size corner it transmits.
+PROFILE_GRIDS = {'color-dct': ((80, 96), (40, 48)),
+                 'lean-dct': ((80, 96), (20, 24))}
 DEFAULT_PROFILE = 'color-dct'
 
 

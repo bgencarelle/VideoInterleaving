@@ -202,8 +202,9 @@ images_xy/
 !animation_modem/*.py
 .modem-bake-*/
 
-# Modem baked RGBA libraries and local test exports
-*_modem/
-!animation_modem/
-!animation_modem/*.py
-.modem-bake-*/
+# Root-level modem experiment artifacts: probe recordings, fitted allocation
+# tables, default WAV outputs (modem_v3_check write -> v3_test.wav), captured
+# receive logs. Bakes live in *_modem/ above.
+/*.wav
+/*.npy
+/receive.jsonl

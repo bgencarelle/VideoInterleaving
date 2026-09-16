@@ -5,13 +5,10 @@ which did not define it. That is an ImportError at module load -- the sender
 could not start at all, on any profile, and no test noticed because nothing
 imported modem_screen. There is now one that does, in a subprocess.
 
-The profile table is the other half. Two bits hold four codes, and they are
-spent: color, color-lean, color-dct, mono. Reassigning one is a WIRE BREAK,
-because a recording carries the number and not its meaning and the CRC covers
-the number -- so it is done deliberately or not at all. 'detail' gave up code 2
-to 'color-dct' rather than color-dct being aliased onto another profile's code,
-because an alias cannot be read off the wire and a receiver that guessed wrong
-would show a frequency-distorted picture that looks plausible.
+The profile table is the other half. Two header bits hold four codes; two are
+spent -- color-dct, lean-dct -- and two are reserved. Reassigning one is a WIRE
+BREAK, because a recording carries the number and not its meaning and the CRC
+covers the number -- so it is done deliberately or not at all.
 """
 import subprocess
 import sys
@@ -56,13 +53,14 @@ class SenderImportTests(unittest.TestCase):
 
 
 class ProfileCodeTests(unittest.TestCase):
-    def test_the_truncating_profile_holds_its_own_code(self):
-        """Not an alias. Two header bits hold four codes and they are ours to
-        spend, so color-dct is named on the wire like any other profile and
-        the receiver reads it rather than being told out of band."""
-        self.assertEqual(v3.PROFILE_CODES[2], 'color-dct')
-        self.assertEqual(v3.profile_name(2), 'color-dct')
-        self.assertNotEqual(v3.profile_code('color-dct'), v3.profile_code('color'))
+    def test_every_profile_holds_its_own_code(self):
+        """Not an alias. Two header bits hold four codes and two are spent, so
+        each profile is named on the wire and the receiver reads it rather than
+        being told out of band."""
+        self.assertEqual(v3.PROFILE_CODES[0], 'color-dct')
+        self.assertEqual(v3.profile_name(0), 'color-dct')
+        self.assertEqual(v3.profile_code('color-dct'), 0)
+        self.assertEqual(v3.profile_code('lean-dct'), 1)
 
     def test_it_is_the_default(self):
         import modem_screen
@@ -87,14 +85,13 @@ class ProfileCodeTests(unittest.TestCase):
                 code = v3.profile_code(name)
                 self.assertEqual(v3.profile_name(code), name)
 
-    def test_the_header_field_cannot_name_a_fifth_profile(self):
-        """Four codes, all spent. The field is two bits and both the flags
-        byte and the rest of the top_bin byte are spoken for, so a fifth
-        profile has nowhere to go -- and a code above 3 does not fail, it
-        WRAPS, which is why adding one quietly is the hazard."""
-        self.assertEqual(len(v3.PROFILE_CODES), 4)
-        for code in range(4, 8):
-            self.assertEqual(v3.profile_name(code), v3.PROFILE_CODES[code & 3])
+    def test_the_header_field_cannot_name_a_third_profile(self):
+        """Two codes spent, two reserved. The field is two bits and a code above
+        1 must read back as None rather than wrapping to a real profile, which
+        is what a recording carrying the number would decode to."""
+        self.assertEqual(len(v3.PROFILE_CODES), 2)
+        self.assertIsNone(v3.profile_name(2))
+        self.assertIsNone(v3.profile_name(3))
 
 
 class TruncationTests(unittest.TestCase):
@@ -104,7 +101,7 @@ class TruncationTests(unittest.TestCase):
         is not a bandwidth saving on its own."""
         wire = v3.SourceCoder(plane_shapes('color-dct'),
                               grids=plane_grids('color-dct'))
-        plain = v3.SourceCoder(plane_shapes('color'))
+        plain = v3.SourceCoder(plane_shapes('color-dct'))
         self.assertEqual(wire.count, plain.count)
         self.assertEqual(wire.source_count, 4*plain.source_count)
 
@@ -121,9 +118,10 @@ class TruncationTests(unittest.TestCase):
         sparse = coder.forward(flat)
         self.assertLess(float(np.mean(np.abs(sparse) > 1e-9)), .01)
 
-    def test_a_plain_profile_is_bit_identical_to_before(self):
-        """grids defaults to shapes, so nothing that does not opt in moves."""
-        shapes = plane_shapes('color-lean')
+    def test_a_plain_profile_is_count_preserving(self):
+        """grids defaults to shapes, so a coder built without grids transmits
+        the wire shapes directly."""
+        shapes = plane_shapes('lean-dct')
         coder = v3.SourceCoder(shapes)
         self.assertFalse(coder.truncated)
         self.assertEqual(coder.count, sum(int(np.prod(s)) for s in shapes))
@@ -152,11 +150,10 @@ if __name__ == '__main__':
 class WireDeclarationTests(unittest.TestCase):
     """A truncating profile on the wire, read back off the header.
 
-    color-dct holds code 2, so the receiver is TOLD which was sent and
-    reconstructs on the matching grid. This used to be an alias onto color's
-    code, which meant the wire could not say, and a receiver that had not been
-    configured out of band produced a plausible-looking wrong picture. Spending
-    a code removed that failure mode entirely.
+    The declaration travels with the packet, so the receiver is TOLD which
+    profile was sent and reconstructs on the matching grid. Encoding with a
+    grid and decoding without one is the one mismatched pair the receiver
+    cannot catch, because the allocation table matched the grid.
     """
 
     def send(self, profile='color-dct'):
@@ -187,7 +184,7 @@ class WireDeclarationTests(unittest.TestCase):
         why a truncating profile is shared state like --allocation.
         """
         layout, audio, values = self.send()
-        plain = v3.SourceCoder(plane_shapes('color'))
+        plain = v3.SourceCoder(plane_shapes('color-dct'))
         got = self.decode(layout, audio, plain)
         self.assertEqual(len(got), 1)
         self.assertEqual(len(got[0].values), plain.count)
@@ -216,7 +213,7 @@ class WireDeclarationTests(unittest.TestCase):
         end to end and arrives as exactly nothing."""
         from animation_modem.imaging import image_values
         layout = v3.ALL_PRESETS['wide-v3']
-        coder = v3.SourceCoder(plane_shapes('color'))
+        coder = v3.SourceCoder(plane_shapes('color-dct'))
         values = np.random.default_rng(8).uniform(-.3, .3, coder.source_count)
         plain = self.decode(layout, v3.encode(values, layout, coder, 1, 1, 1), coder)
         halved = self.decode(

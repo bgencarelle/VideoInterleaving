@@ -53,14 +53,14 @@ REFERENCE_RATE = V3.REFERENCE_RATE
 RATE = REFERENCE_RATE
 
 
-def frames_from(args, profile='color'):
+def frames_from(args, profile=DEFAULT_PROFILE):
     """Real composites from a bake, or a synthetic stand-in."""
     if args.modem_dir:
         from modem_bake import ModemLibrary
         library = ModemLibrary(args.modem_dir)
         picks = range(0, min(library.frames, args.frames*args.stride), args.stride)
         return ([library.composite(i, 0, 0) for i in picks],
-                getattr(args, 'profile', None) or 'color')
+                getattr(args, 'profile', None) or DEFAULT_PROFILE)
     out = []
     for t in range(args.frames):
         rng = np.random.default_rng(4242)
@@ -112,11 +112,9 @@ def coder_for(profile, allocation, layout, strict=True):
 def coders_for(layout, allocation=None):
     """code -> coder, so the receiver follows the header's declaration.
 
-    Every profile holds its own code, color-dct included, so there is nothing
-    to opt into and nothing for the two ends to disagree about. That is the
-    whole reason color-dct was given a code of its own rather than aliased onto
-    color's: an alias cannot be read off the wire, and a receiver that guessed
-    wrong would show a frequency-distorted picture that looks plausible.
+    Every profile holds its own code, so there is nothing to opt into and
+    nothing for the two ends to disagree about. The coder for whatever the
+    header names is selected by code, not by guesswork.
     """
     return {V3.profile_code(name): coder_for(name, allocation, layout,
                                              strict=False)[0]
@@ -124,7 +122,7 @@ def coders_for(layout, allocation=None):
 
 
 def live_presets():
-    return [n for n, l in PRESETS.items() if l.progressive]
+    return list(PRESETS)
 
 
 def candidates_for(allocation=None):
@@ -132,7 +130,7 @@ def candidates_for(allocation=None):
     for name in live_presets():
         layout = PRESETS[name]
         coders = coders_for(layout, allocation)
-        out.append((layout, coders[V3.profile_code('color-lean')], coders))
+        out.append((layout, coders[V3.profile_code(DEFAULT_PROFILE)], coders))
     return out
 
 
@@ -240,7 +238,7 @@ def do_read(args):
 
 
 def do_bench(args):
-    """Compare v2 and v3 across simulated channels, at equal settings."""
+    """Compare v3 variants across simulated channels, at equal settings."""
     frames, profile = frames_from(args)
     layout = PRESETS[args.preset]
     coder, _ = coder_for(profile, args.allocation, layout)
@@ -280,8 +278,6 @@ def do_live_send(args):
     if args.list_devices:
         print(sd.query_devices()); return
     frames, profile = frames_from(args)
-    if not PRESETS[args.preset].progressive:
-        raise SystemExit(f'{args.preset} is v2 wire format; live needs a progressive preset')
     layout = PRESETS[args.preset]
     coder, _ = coder_for(profile, None, layout)
     state = {'packet': 0, 'position': 0, 'sent': 0}
@@ -333,7 +329,7 @@ def do_live_receive(args):
     if args.list_devices:
         print(sd.query_devices()); return
     layout = PRESETS['lean-v3']
-    coder, _ = coder_for('color-lean', None, layout)
+    coder, _ = coder_for(DEFAULT_PROFILE, None, layout)
     verbose = args.verbose or args.headless
     if args.silent:
         verbose = False
@@ -583,7 +579,6 @@ def main(argv=None):
     b.add_argument('--preset', choices=list(PRESETS), default='wide-v3')
     w = sub.add_parser('write'); shared(w)
     w.add_argument('--preset', choices=list(PRESETS), default='lean-v3')
-    w.set_defaults(profile='color-lean')
     w.add_argument('--out', type=Path, default=Path('v3_test.wav'))
     w.add_argument('-f', '--numbered', action='store_true')
     allocation(w)
@@ -593,7 +588,7 @@ def main(argv=None):
                         'signal by decoding against each candidate and letting '
                         'the header CRC pick; this is what gets tried first.')
     r.add_argument('--profile', choices=list(wire_profiles()),
-                   default='color-lean',
+                   default=DEFAULT_PROFILE,
                    help='Fallback only. The profile is read from the header, '
                         'so this matters just for a packet whose header never '
                         'verifies.')
@@ -603,7 +598,6 @@ def main(argv=None):
     allocation(r)
     ls = sub.add_parser('live-send'); shared(ls)
     ls.add_argument('--preset', choices=list(PRESETS), default='lean-v3')
-    ls.set_defaults(profile='color-lean')
     ls.add_argument('--device', type=device)
     ls.add_argument('--channels', type=pair, default=(0, 1))
     ls.add_argument('-f', '--numbered', action='store_true')

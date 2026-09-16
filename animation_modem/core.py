@@ -1,8 +1,8 @@
 """Shared modem engine: wire geometry, source coding and packet demodulation.
 
-This is everything both sides need once timing is known. The v2 transmitter and
-its correlation-bank receiver have been removed; transport3 is the only
-transport. What remains here is version-independent:
+This is everything both sides need once timing is known. transport3 is the
+only transport -- the pre-v3 wire is gone, so everything here is
+version-independent:
 
   Layout            carriers, pilots, header placement, frame geometry
   SourceCoder       DCT with a power allocation, and the Wiener inverse
@@ -50,7 +50,6 @@ REFERENCE_RATE = 48000
 RATE = REFERENCE_RATE      # historical name, kept for existing imports
 N, CP = 128, 16
 SYMBOL = N + CP
-LOW_BIN = 3
 SYNC_LEN = 288
 GUARD = 32                 # idle tail; not required for EOF decoding
 HEADER_BYTES = 16          # + CRC32 = 20 bytes = 160 bits = 80 QPSK
@@ -65,7 +64,7 @@ class Layout:
     top_bin: int = 54          # highest carrier; 54 -> 20.25 kHz, 27 -> 10.1 kHz
     image_symbols: int = 15    # more symbols -> bigger picture, lower frame rate
     name: str = 'wide'
-    progressive: bool = False
+    progressive: bool = True
     header_width: int = 20     # header carriers; wider -> fewer header symbols
     header_split: bool = False # halve header symbols by sending different
                                # halves on each channel instead of the same
@@ -91,34 +90,31 @@ class Layout:
 
     @cached_property
     def carriers(self):
-        return np.arange(1 if self.progressive else LOW_BIN, self.top_bin + 1)
+        # Progressive placement: bin 1 is the bottom carrier. The two low-band
+        # pilots survive any real channel; bins 1 and 2 carry images.
+        return np.arange(1, self.top_bin + 1)
 
     @cached_property
     def pilots(self):
-        if self.progressive:
-            # Two low-band pilots survive roll-off; bins 1 and 2 carry images.
-            base = np.array([3, 5, 21, 45])
-            if self.top_bin >= base[-1]:
-                return base
-            # A narrower progressive layout cannot use the wide-band pilots:
-            # bins 21 and 45 fall outside its carriers entirely, and indexing
-            # with them raised IndexError from encode(). Keep the low pair,
-            # which is the point of the progressive placement, and fold the
-            # upper pair proportionally into whatever band remains.
-            upper = np.round(base[2:]*self.top_bin/base[-1]).astype(int)
-            pilots = np.unique(np.concatenate([base[:2], upper]))
-            pilots = pilots[(pilots >= self.carriers.min()) &
-                            (pilots <= self.top_bin)]
-            if len(pilots) < 4:
-                spare = np.setdiff1d(self.carriers, pilots)
-                need = min(4-len(pilots), len(spare))
-                pick = spare[np.linspace(0, len(spare)-1, need).round().astype(int)]
-                pilots = np.unique(np.concatenate([pilots, pick]))
-            return pilots
-        c = self.carriers
-        if len(c)<12:
-            return c[np.linspace(0,len(c)-1,4).round().astype(int)]
-        return c[np.linspace(3, len(c)-4, 4).round().astype(int)]
+        # Two low-band pilots survive roll-off; bins 1 and 2 carry images.
+        base = np.array([3, 5, 21, 45])
+        if self.top_bin >= base[-1]:
+            return base
+        # A narrower progressive layout cannot use the wide-band pilots:
+        # bins 21 and 45 fall outside its carriers entirely, and indexing
+        # with them raised IndexError from encode(). Keep the low pair,
+        # which is the point of the progressive placement, and fold the
+        # upper pair proportionally into whatever band remains.
+        upper = np.round(base[2:]*self.top_bin/base[-1]).astype(int)
+        pilots = np.unique(np.concatenate([base[:2], upper]))
+        pilots = pilots[(pilots >= self.carriers.min()) &
+                        (pilots <= self.top_bin)]
+        if len(pilots) < 4:
+            spare = np.setdiff1d(self.carriers, pilots)
+            need = min(4-len(pilots), len(spare))
+            pick = spare[np.linspace(0, len(spare)-1, need).round().astype(int)]
+            pilots = np.unique(np.concatenate([pilots, pick]))
+        return pilots
 
     @cached_property
     def data_bins(self):
@@ -210,7 +206,7 @@ class Layout:
         """
         if self.dense_header:
             return b'V4'
-        return b'V3' if self.progressive else b'V2'
+        return b'V3'
 
     @cached_property
     def spare_bins(self):
@@ -246,29 +242,10 @@ class Layout:
                 f'(at {rate:g} Hz)')
 
 
-PRESETS = {
-    # today's band and cadence, for a cable or a digital loopback
-    # progressive=True puts carrier 0 on bin 1 (375 Hz), which is exactly where
-    # every real channel's phase is already bending. That costs nothing in a
-    # magnitude sense -- and everything in a time-domain one: a filter down
-    # there rings for milliseconds, far past the 0.33 ms the 16-sample cyclic
-    # prefix can absorb, so its tail smears across symbol boundaries and biases
-    # the low carriers. The low carriers are where the coarse Y, Cb and Cr
-    # coefficients live, and biasing them unevenly is a colour cast.
-    #
-    # Measured (tests/test_eq_dispersion.py), plane-gain spread under a pure
-    # allpass at 300 Hz -- no magnitude change anywhere -- is 11.22 dB on bin 1
-    # and 0.73 dB starting at bin 3. Two carriers buys a 15x reduction.
-    'wide': Layout(top_bin=54, image_symbols=15, name='wide'),
-    # cassette: 10 kHz ceiling, full picture, slower
-    'tape': Layout(top_bin=27, image_symbols=35, name='tape'),
-    # cassette: 10 kHz ceiling, keeps the frame rate, smaller picture
-    'tape-fast': Layout(top_bin=27, image_symbols=15, name='tape-fast'),
-    # worn deck or acoustic coupling
-    'narrow': Layout(top_bin=21, image_symbols=44, name='narrow'),
-    # Very limited-bandwidth tape: deliberately coarse, but below 3.75 kHz.
-    'lofi': Layout(top_bin=10, image_symbols=24, name='lofi'),
-}
+# The v2 wire presets (wide, tape, tape-fast, narrow, lofi) are gone. Every
+# live layout is progressive (v3/v4); the progressive table lives in
+# transport3.V3_PRESETS so it can express header_split and dense_header
+# variants.
 
 
 @lru_cache(maxsize=32)
@@ -338,7 +315,7 @@ class SourceCoder:
         # mxn, comes back scaled by sqrt(mn/MN) -- half amplitude for a 2x grid.
         # Undoing it here means a receiver that knows nothing about grids
         # reconstructs the correctly-exposed low-passed picture rather than a
-        # dim one, which is what lets color-dct share 'color's wire code.
+        # dim one, which is what makes truncation shareable across geometry.
         sigma = (self._allocation() if allocation is None
                  else np.asarray(allocation, float))
         if sigma.shape != (self.count,) or not np.all(np.isfinite(sigma) & (sigma > 0)):
@@ -435,30 +412,16 @@ class SourceCoder:
 
 @lru_cache(maxsize=32)
 def coefficient_slots(layout, shapes):
-    """Source coefficient -> wire slot.
+    """Source coefficient -> wire slot, all layouts progressive.
 
-    Default (carrier-major): sort all planes together by normalized spatial
-    frequency, then fill carrier 0 across every symbol before moving up. Coarse
-    image lands lowest in audio frequency.
-
-    That default puts almost everything on one carrier. Luma DC leaves the
-    source coder around 37 against a median coefficient of 0.0029 -- an 82 dB
-    spread -- so measured, carrier 0 alone carries 99.5% of image power and the
-    top three carriers carry 100.0%. With progressive layouts carrier 0 is bin
-    1, sitting exactly on the bottom edge of the declared band, which is where
-    every real channel is already rolling off. Filtering wide-v3 at its own
-    declared 375 Hz bottom edge cost 19 dB and every header; filtering at its
-    declared 20.25 kHz top edge cost 0.01 dB, because the top of the band was
-    carrying nothing.
-
-    spread_carriers changes the fill order so the carrier varies fastest: the
-    coarsest coefficients go out across ALL carriers rather than stacking on
-    one, and carriers are visited middle-out so the highest-energy terms sit
-    where no channel rolls off. Same slots, same capacity, different mapping.
+    Coefficients are ranked by normalized spatial frequency so the coarse image
+    lands where the band is healthiest. With spread_carriers the carrier varies
+    fastest: the coarsest coefficients go out across ALL carriers rather than
+    stacking on one, and carriers are visited middle-out so the highest-energy
+    terms sit where no channel rolls off. Same slots, same capacity, different
+    mapping.
     """
     count = sum(h*w for h,w in shapes)
-    if not layout.progressive:
-        return np.arange(count)
     ranks = []
     for h,w in shapes:
         yy,xx = np.mgrid[:h,:w]
@@ -733,26 +696,15 @@ FOLDER_LIMIT = 16
 # zero: claiming them costs nothing and the header does not grow. The flags
 # byte had no room -- both its nibbles are folder indices.
 #
-# THIS TUPLE IS WIRE ORDER. Appending a fifth entry is not possible (two bits
-# hold four), and reordering or replacing an entry does not fail loudly: an old
-# transmitter keeps sending the same number and a new receiver reconstructs the
-# wrong geometry from it. Change it only alongside the magic.
-PROFILE_CODES = ('color', 'color-lean', 'color-dct', 'mono')
-# Two header bits, four codes, and they are ours to spend. 'color-dct' holds
-# code 2, which 'detail' used to occupy -- 'detail' is gone rather than
-# aliased, because an alias is a promise that two things are interchangeable on
-# the wire and they are not: a truncating profile is reconstructed on a finer
-# grid, and a receiver that guessed wrong would show a frequency-distorted
-# picture that looks plausible.
-#
-# Spending the code instead of aliasing is what makes the DCT path safe to
-# default to. The profile travels in the header like every other, the receiver
-# reads it, and there is no shared state for the two ends to disagree about.
-#
-# This is a WIRE BREAK for anything recorded when code 2 meant 'detail'. That
-# is deliberate and the magic is not bumped for it, because nothing in this
-# project has such a recording worth keeping; if that ever stops being true,
-# bump Layout.wire_magic in the same commit as the change.
+# THIS TUPLE IS WIRE ORDER, and it is a WIRE BREAK: the pre-DCT set
+# ('color', 'color-lean', 'color-dct', 'mono') is gone, so an old recording
+# whose header names code 0 or 3 now decodes as a different (or no) geometry.
+# That is deliberate -- see the purge; the magic is not bumped because nothing
+# old is worth keeping. Order after code 1 is reserved for future DCT variants.
+PROFILE_CODES = ('color-dct', 'lean-dct')
+# Two header bits hold four codes; two are spent, two reserved. The DCT grid
+# travels in the header like every other profile, the receiver reads it, and
+# there is no shared state for the two ends to disagree about.
 TOP_BIN_MASK = 0x3f
 
 
@@ -776,7 +728,7 @@ def pack_folders(face, float_folder):
     return ((int(face) % FOLDER_LIMIT) << 4) | (int(float_folder) % FOLDER_LIMIT)
 
 
-def pack_header(flags, top_bin, absolute, index, count, stamp_ms, magic=b'V2',
+def pack_header(flags, top_bin, absolute, index, count, stamp_ms, magic=b'V3',
                 profile=0):
     if not (0 <= absolute <= 0xffffffff and 1 <= index <= count <= 0xffff):
         raise ValueError('Frame/index/count outside the header ranges')

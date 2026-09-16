@@ -8,7 +8,7 @@ from animation_modem import transport3 as v2
 
 class FastDecodeTests(unittest.TestCase):
     def test_long_stream_and_changing_speed(self):
-        layout = v2.PRESETS['wide']
+        layout = v2.ALL_PRESETS['wide-v3']
         coder = v2.SourceCoder([(12, 12)]*3)
         values = np.random.default_rng(17).uniform(-.25, .25, coder.count)
         packets = []
@@ -31,7 +31,7 @@ class FastDecodeTests(unittest.TestCase):
             self.assertLess(np.sqrt(np.mean((result.values-values)**2)), .03)
 
     def test_reset_discards_partial_packet_and_reuses_storage(self):
-        layout = v2.PRESETS['wide']
+        layout = v2.ALL_PRESETS['wide-v3']
         coder = v2.SourceCoder([(12, 12)]*3)
         receiver = v2.Receiver(layout, coder, recovery=False, fast=True)
         values = np.zeros(coder.count)

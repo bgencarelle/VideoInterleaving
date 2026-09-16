@@ -2,10 +2,10 @@
 
 Transmits with the v3 transport. Receive with utilities/modem_v3_check.py,
 which needs no matching argument: it identifies the preset from the signal and
-reads the profile out of the header. The shared-time path is unchanged: v2's header
-keeps a 32-bit millisecond field, so reserve() still projects a send deadline,
-the image index is still evaluated at that instant, and the receiver can still
-hold the frame until then. Only the encoder underneath changed.
+reads the profile out of the header. The shared-time path is unchanged: the
+header keeps a 32-bit millisecond field, so reserve() still projects a send
+deadline, the image index is still evaluated at that instant, and the receiver
+can still hold the frame until then. Only the encoder underneath changed.
 """
 import json
 from pathlib import Path
@@ -43,8 +43,8 @@ def packet(library, layout, coder, absolute, selection, numbered=False,
     if numbered:
         im=burn_counters(im,absolute,index+1,library.frames)
     values=image_values(im,coder.grids)
-    # v2 identifies frames on a 16-bit index/count, so a long bake wraps rather
-    # than raising. The absolute frame number stays 32-bit.
+    # Frames are identified on a 16-bit index/count, so a long bake wraps
+    # rather than raising. The absolute frame number stays 32-bit.
     stamp_ms=0 if target_time_ns is None else (int(target_time_ns)//1_000_000) & 0xffffffff
     audio=_v3.encode(values,layout,coder,absolute & 0xffffffff,
                  (index % 0xffff)+1,max(1,min(library.frames,0xffff)),stamp_ms=stamp_ms,
@@ -63,18 +63,12 @@ def packet(library, layout, coder, absolute, selection, numbered=False,
 def run_modem(args):
     import settings
     # Checked before anything is opened or written. --modem-preset takes any
-    # name argparse was given, and a v2 layout was accepted here and then
-    # produced a file nothing could read: it stamps a different magic, so a v3
-    # receiver never finds it. The WAV wrote and said "Wrote N frames".
-    # modem_screen and live-send already refuse this; run_modem did not.
+    # name argparse was given, and every layout here is progressive v3 wire
+    # format that a v3 receiver can find.
     wanted=getattr(args,'modem_preset',None) or 'wide-v3'
-    usable=[n for n,l in PRESETS.items() if l.progressive]
     if wanted not in PRESETS:
         raise ValueError(f'Unknown --modem-preset {wanted!r}. Choose one of: '
-                         +', '.join(usable))
-    if not PRESETS[wanted].progressive:
-        raise ValueError(f'--modem-preset {wanted} is v2 wire format and '
-                         f'nothing decodes it. Choose one of: '+', '.join(usable))
+                         +', '.join(PRESETS))
     root=args.modem_dir or getattr(settings,'MODEM_DIR',settings.IMAGES_DIR+'_modem')
     library=ModemLibrary(root)
     # Follow the BAKE's profile. It used to be pinned to DEFAULT_PROFILE, which

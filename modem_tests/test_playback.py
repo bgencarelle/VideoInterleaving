@@ -7,11 +7,11 @@ import unittest
 from unittest.mock import patch
 import numpy as np
 from animation_modem.playback import PacketOutput
-from animation_modem.transport3 import PRESETS, Receiver, SourceCoder, encode
+from animation_modem.transport3 import ALL_PRESETS, Receiver, SourceCoder, encode
 from animation_modem.imaging import (DEFAULT_PROFILE, fit_shapes, image_values,
                                      plane_shapes)
 
-LAYOUT = PRESETS['wide']
+LAYOUT = ALL_PRESETS['wide-v3']
 FRAME = LAYOUT.frame
 
 

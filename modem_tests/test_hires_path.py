@@ -64,9 +64,10 @@ def psnr(a, b, size=(320, 384)):
     return float('inf') if err <= 0 else 10*np.log10(1/err)
 
 
-def through(layout, profile, image, noise_dbfs=None):
+def through(layout, profile, image, noise_dbfs=None, grids=True):
     from animation_modem import impairments as IMP
-    coder = SourceCoder(plane_shapes(profile), grids=plane_grids(profile))
+    coder = SourceCoder(plane_shapes(profile),
+                        grids=plane_grids(profile) if grids else None)
     audio = v3.encode(image_values(image, coder.grids), layout, coder, 1, 1, 1,
                       profile=v3.profile_code(profile))
     signal = np.concatenate([np.zeros((300, 2)), audio])
@@ -106,17 +107,22 @@ class ResolutionTests(unittest.TestCase):
         self.assertEqual(coder.count, 2880)
         self.assertEqual(coder.source_count, 4*2880)
 
-    def test_it_beats_the_current_live_default_on_a_detailed_source(self):
-        """lean-v3 + color-lean is what live sends today. This is the claim:
-        more picture, same wire, nearly the same rate."""
+    def test_the_same_wire_at_a_higher_rate(self):
+        """hires-v3 and wide-v3 carry nearly the same slots; hires is 15% faster.
+        The claim is that the speed does not cost picture: wider bandwidth at
+        the same slot count is the trade, and unlike lean-v3 it does not shrink
+        the profile."""
         source = detailed()
-        lean = v3.ALL_PRESETS['lean-v3']
+        wide = v3.ALL_PRESETS['wide-v3']
+        self.assertAlmostEqual(wide.capacity/HIRES.capacity, 3000/2880)
+        self.assertGreater(HIRES.fps, wide.fps*1.14)
         for noise in (-45, -38):
             with self.subTest(noise=noise):
-                now, _ = through(lean, 'color-lean', source, noise)
-                new, _ = through(HIRES, 'color-dct', source, noise)
-                self.assertIsNotNone(new)
-                self.assertGreater(psnr(source, new), psnr(source, now))
+                at_wide_rate, _ = through(wide, 'color-dct', source, noise)
+                at_hires_rate, _ = through(HIRES, 'color-dct', source, noise)
+                self.assertIsNotNone(at_hires_rate)
+                self.assertGreater(psnr(source, at_hires_rate),
+                                   psnr(source, at_wide_rate)-1.5)
 
     def test_and_loses_on_a_source_with_no_detail_to_keep(self):
         """The honest other half, so this is not sold as free.
@@ -124,13 +130,13 @@ class ResolutionTests(unittest.TestCase):
         Controlled: SAME preset, SAME 2880 slots, only the sampling grid
         differs. Truncation can only preserve what was sampled, so a source
         already at the wire shape has nothing above the cut and pays the
-        truncation for nothing. Comparing against color-lean instead would
-        confound this with a budget difference and read as a win.
+        truncation for nothing. Comparing against a different budget instead
+        would confound this and read as a win.
         """
         flat = native()
         for noise in (None, -45, -38):
             with self.subTest(noise=noise):
-                plain, _ = through(HIRES, 'color', flat, noise)
+                plain, _ = through(HIRES, 'color-dct', flat, noise, grids=False)
                 truncated, _ = through(HIRES, 'color-dct', flat, noise)
                 self.assertLess(psnr(flat, truncated, (40, 48)),
                                 psnr(flat, plain, (40, 48)))
@@ -139,7 +145,7 @@ class ResolutionTests(unittest.TestCase):
         """Same controlled pair the other way round: with detail present, the
         finer grid wins at an identical slot count."""
         source = detailed()
-        plain, a = through(HIRES, 'color', source, -38)
+        plain, a = through(HIRES, 'color-dct', source, -38, grids=False)
         truncated, b = through(HIRES, 'color-dct', source, -38)
         self.assertEqual(a.count, b.count)
         self.assertGreater(psnr(source, truncated), psnr(source, plain))
@@ -148,8 +154,7 @@ class ResolutionTests(unittest.TestCase):
 class BakeTests(unittest.TestCase):
     def test_a_bake_declares_the_size_its_profile_samples_at(self):
         self.assertEqual(source_size('color-dct'), (80, 96))
-        self.assertEqual(source_size('color'), (40, 48))
-        self.assertEqual(source_size('color-lean'), (40, 48))
+        self.assertEqual(source_size('lean-dct'), (80, 96))
 
     def test_the_library_accepts_an_80x96_color_dct_bake(self):
         """It used to check manifest size against the WIRE shape, which
@@ -178,8 +183,8 @@ class BakeTests(unittest.TestCase):
             self.assertEqual(library.composite(0, 0, 0).size, (80, 96))
 
     def test_a_mismatched_bake_is_still_refused(self):
-        """The check is moved, not removed: an 80x96 manifest claiming a
-        40x48 profile must still fail."""
+        """The check is moved, not removed: an 80x96 bake claiming a 40x48
+        profile must still fail."""
         from modem_bake import ModemLibrary
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -188,7 +193,7 @@ class BakeTests(unittest.TestCase):
             np.save(folder/'frames.npy', np.zeros((1, 96, 80, 4), np.uint8))
             (root/'modem.json').write_text(json.dumps({
                 'format': 'video-interleaving-modem', 'version': 1,
-                'profile': 'color', 'size': [80, 96], 'folders': []}))
+                'profile': 'lean-dct', 'size': [40, 48], 'folders': []}))
             with self.assertRaises(ValueError):
                 ModemLibrary(root)
 

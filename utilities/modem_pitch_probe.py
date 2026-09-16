@@ -20,11 +20,12 @@ from scipy.signal import resample_poly
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from animation_modem import transport3 as v
-from animation_modem.imaging import image_values, plane_shapes
+from animation_modem.imaging import image_values, plane_grids, plane_shapes
 
 
 def setup():
-    return v.PRESETS['wide'], v.SourceCoder(plane_shapes())
+    return v.ALL_PRESETS['wide-v3'], v.SourceCoder(plane_shapes(),
+                                                   grids=plane_grids())
 
 
 def write(path, audio):

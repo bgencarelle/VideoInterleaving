@@ -86,7 +86,8 @@ class ProfileNegotiationTests(unittest.TestCase):
         for name in v3.PROFILE_CODES:
             with self.subTest(profile=name):
                 audio, coder, values = self.send(name, WIDE)
-                wrong = coder_for('mono' if name != 'mono' else 'color', WIDE)
+                other = 'lean-dct' if name == 'color-dct' else 'color-dct'
+                wrong = coder_for(other, WIDE)
                 out = self.decode(audio, WIDE, wrong, coders_for(WIDE))
                 self.assertEqual([r.absolute for r in out], [1, 2, 3])
                 for r in out:
@@ -103,45 +104,60 @@ class ProfileNegotiationTests(unittest.TestCase):
                     self.assertLess(np.sqrt(np.mean((r.values-values)**2)), limit)
 
     def test_it_works_on_the_live_layout_where_profiles_get_shrunk(self):
-        """lean-v3 holds 2200 slots, so 'color' is fit_shapes-shrunk. Both ends
-        run the same deterministic shrink, so the code still names it."""
-        audio, coder, values = self.send('color', LEAN)
-        out = self.decode(audio, LEAN, coder_for('color-lean', LEAN),
+        """lean-v3 holds 2200 slots, so 'color-dct' is fit_shapes-shrunk. Both
+        ends run the same deterministic shrink, so the code still names it."""
+        audio, coder, values = self.send('color-dct', LEAN)
+        out = self.decode(audio, LEAN, coder_for('lean-dct', LEAN),
                           coders_for(LEAN))
-        self.assertEqual(out[0].extra['profile'], 'color')
+        self.assertEqual(out[0].extra['profile'], 'color-dct')
         self.assertEqual(tuple(out[0].extra['shapes']), tuple(coder.grids))
         self.assertLess(np.sqrt(np.mean((out[0].values-values)**2)), 1e-4)
 
     def test_without_the_mapping_nothing_changes(self):
         """Opting in is what makes the receiver follow the header. A caller
         that does not pass coders keeps its own geometry, as before."""
-        audio, coder, values = self.send('color-lean', WIDE)
+        coder = coder_for('lean-dct', WIDE)
+        # Low-frequency content: everything survives the truncating coder's
+        # corner, so the round trip is lossless and the comparison is exact.
+        layers = []
+        for grid in coder.grids:
+            h, w = grid
+            yy, xx = np.mgrid[0:h, 0:w]
+            layers.append((.15+.1*np.sin(xx/20)+.08*np.cos(yy/24)).ravel())
+        values = np.concatenate(layers)
+        audio = np.concatenate([
+            v3.encode(values, WIDE, coder, n, n, 3,
+                      profile=v3.profile_code('lean-dct'))
+            for n in range(1, 4)])
         out = self.decode(audio, WIDE, coder)
         self.assertEqual([r.absolute for r in out], [1, 2, 3])
-        self.assertLess(np.sqrt(np.mean((out[0].values-values)**2)), 1e-4)
+        # float32 wire round-trip floor, not truncation: the source is far
+        # inside the corner so it survives the DCT losslessly.
+        self.assertLess(np.sqrt(np.mean((out[0].values-values)**2)), 1e-3)
         # The declaration is still reported, even when it is not acted on.
-        self.assertEqual(out[0].extra['profile'], 'color-lean')
+        self.assertEqual(out[0].extra['profile'], 'lean-dct')
 
     def test_an_undeclared_profile_reads_as_code_zero(self):
         """Guards the compatibility hazard rather than hiding it.
 
-        A transmitter from before this change leaves the bits zero, which is
-        indistinguishable from declaring PROFILE_CODES[0]. A receiver holding
-        the mapping will believe it. Both ends have to move together; there is
-        no spare bit left to express "undeclared".
+        A transmitter that leaves the bits zero is indistinguishable from
+        declaring PROFILE_CODES[0]. A receiver holding the mapping will believe
+        it. Both ends have to move together; there is no spare bit left to
+        express "undeclared".
         """
-        coder = coder_for('color-lean', WIDE)
+        coder = coder_for('lean-dct', WIDE)
         values = np.random.default_rng(2).uniform(-.2, .2, coder.source_count)
-        # profile=0 is exactly what an old encoder puts on the wire.
+        # profile=0 is exactly what an encoder without a declaration puts on
+        # the wire.
         audio = v3.encode(values, WIDE, coder, 1, 1, 1, profile=0)
         out = self.decode(audio, WIDE, coder, coders_for(WIDE))
         self.assertEqual(out[0].extra['profile'], v3.PROFILE_CODES[0])
 
     def test_a_declared_profile_does_not_loosen_the_band_check(self):
         """The other six bits still have to match the layout."""
-        audio, coder, _ = self.send('color', WIDE)
+        audio, coder, _ = self.send('color-dct', WIDE)
         out = self.decode(audio, v3.ALL_PRESETS['mid-v3'],
-                          coder_for('color', v3.ALL_PRESETS['mid-v3']))
+                          coder_for('color-dct', v3.ALL_PRESETS['mid-v3']))
         self.assertTrue(all(r.identity != 'verified_header' for r in out))
 
 
@@ -149,9 +165,9 @@ class LiveGuardTests(unittest.TestCase):
     """Live pins the preset, not the profile.
 
     Preset is wire format the receiver cannot negotiate -- training layout,
-    header placement, band -- and live-receive is fixed on lean-v3, so a
-    mismatch decodes nothing. Profile is declared in the header now, so
-    refusing one at the transmitter stopped protecting anything.
+    header placement, band -- though every preset is progressive now, so the
+    generation guard that used to live here is gone. Profile is declared in
+    the header, so refusing one at the transmitter would protect nothing.
     """
 
     def setUp(self):
@@ -164,31 +180,21 @@ class LiveGuardTests(unittest.TestCase):
         self.quiet.__enter__()
         self.addCleanup(lambda: self.quiet.__exit__(None, None, None))
 
-    def test_a_v2_preset_is_still_refused_live(self):
-        """Generation is the one thing left that cannot be worked out: a v2
-        layout puts a different magic on the wire and no v3 candidate is
-        looking for it."""
+    def test_every_preset_is_allowed_live(self):
+        """No generation guard exists any more: every preset is progressive."""
         import modem_screen
-        with self.assertRaisesRegex(SystemExit, 'v2 wire format'):
-            modem_screen.main(['--source', 'test', '--preset', 'tape'])
-
-    def test_a_progressive_preset_is_allowed_live(self):
-        """This is what the old guard blocked: it named lean-v3 alone."""
-        import modem_screen
-        for name, layout in v3.ALL_PRESETS.items():
-            if not layout.progressive:
-                continue
-            with self.subTest(preset=name):
-                try:
-                    modem_screen.main(['--source', 'test', '--preset', name,
-                                       '--frames', '0'])
-                except SystemExit as exc:
-                    self.assertNotIn('preset', str(exc))
-                except Exception:
-                    pass          # anything past the guard is not our concern
+        import tempfile
+        from pathlib import Path
+        for name in v3.ALL_PRESETS.keys():
+            with self.subTest(preset=name), tempfile.TemporaryDirectory() as d:
+                # --write takes the same guard path and needs no audio device.
+                out = str(Path(d)/'x.wav')
+                modem_screen.main(['--source', 'test', '--preset', name,
+                                   '--frames', '1', '--write', out])
+                self.assertTrue(Path(out).exists())
 
     def test_every_profile_is_allowed_live(self):
-        """The message named color-lean and this is what it blocked."""
+        """The old refusal named a profile and this is what it blocked."""
         import modem_screen
         import tempfile
         from pathlib import Path
@@ -207,24 +213,24 @@ class LiveGuardTests(unittest.TestCase):
         import wave
         from pathlib import Path
         with tempfile.TemporaryDirectory() as d:
-            out = str(Path(d)/'mono.wav')
-            # lean-v3 explicitly: the sender's default preset is hires-v3
-            # now, and this test is about what a SHRUNK profile declares.
-            modem_screen.main(['--source', 'test', '--profile', 'mono',
+            out = str(Path(d)/'shrunken.wav')
+            # lean-v3 explicitly: the sender's default preset is hires-v3 now,
+            # and this test is about what a SHRUNK profile declares.
+            modem_screen.main(['--source', 'test', '--profile', 'color-dct',
                                '--preset', 'lean-v3',
                                '--frames', '2', '--write', out])
             with wave.open(out) as w:
                 raw = np.frombuffer(w.readframes(w.getnframes()), '<i2')
             audio = raw.reshape(-1, 2).astype(np.float32)/32768
-            rx = v3.Receiver(LEAN, coder_for('color-lean', LEAN),
+            rx = v3.Receiver(LEAN, coder_for('color-dct', LEAN),
                              coders=coders_for(LEAN))
             got = rx.feed(audio)+rx.flush()
             self.assertTrue(got)
             for r in got:
                 self.assertEqual(r.identity, 'verified_header')
-                self.assertEqual(r.extra['profile'], 'mono')
+                self.assertEqual(r.extra['profile'], 'color-dct')
                 self.assertEqual(tuple(r.extra['shapes']),
-                                 tuple(coder_for('mono', LEAN).grids))
+                                 tuple(coder_for('color-dct', LEAN).grids))
 
 
 if __name__ == '__main__':

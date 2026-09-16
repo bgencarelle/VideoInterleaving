@@ -405,66 +405,57 @@ sudo apt install chrony
 
 ---
 
-## 6. Modem v2 test tool
+## 6. Modem link test tool
 
-`utilities/modem_v2_check.py` exercises the proposed v2 transport
-(`animation_modem/transport2.py`). v2 is not wired into `main.py`; this tool is
-the only way to run it.
+`utilities/modem_v3_check.py` exercises the self-describing v3 transport
+(`animation_modem/transport3.py`) without needing a device: `write` encodes a
+bake (or synthetic frames) to a WAV, `read` decodes it back and prints one JSON
+line per packet. `bench` compares v3 preset variants across simulated channels.
+`live-send` and `live-receive` run the same link through a real audio device.
 
-Build the power-allocation table first. v2's source coder is guessing without
-it, and the table is a constant derived from the bake, so it only needs
-rebuilding when the images change:
-
-```bash
-python utilities/modem_v2_check.py allocate --modem-dir images_modem \
-    --out modem_allocation.npy
-```
-
-Presets choose the occupied band and the frame-rate/resolution trade:
-`wide` (1125-20250 Hz, 14.35 fps), `tape` (1125-10125 Hz, 7.71 fps, same
-picture), `tape-fast` (1125-10125 Hz, 14.35 fps, smaller picture), `narrow`
-(1125-7875 Hz). Narrow bands survive tape roll-off and tolerate more playback
-speed error: `tape` decodes up to 2.37x where `wide` aliases above 1.19x.
-
-### Live link
-
-Two terminals, receiver first:
+Nothing about the format must be named at both ends. The receiver takes the
+sample rate from its device, the picture geometry from the packet header, and
+the wire layout by decoding against each candidate preset until one verifies.
+Only a power-allocation table from `fit_allocation.py` is shared state, and it
+is optional.
 
 ```bash
-python utilities/modem_v2_check.py live-receive --device "BlackHole 2ch" --preset tape
-python utilities/modem_v2_check.py live-send --modem-dir images_modem \
-    --device "BlackHole 2ch" --preset tape --allocation modem_allocation.npy
+python utilities/modem_v3_check.py write --modem-dir images_modem --out clean.wav
+python utilities/modem_v3_check.py read --wav clean.wav
+python utilities/modem_v3_check.py bench
 ```
 
-`live-receive` opens a window showing the newest decoded frame, and prints one
-JSON line per packet with status, frame identity, quality tier, bin coverage
-and `playback_rate_pct` -- through a tape deck that last field is the deck's
+Live, two terminals, receiver first:
+
+```bash
+python utilities/modem_v3_check.py live-receive --device "BlackHole 2ch"
+python utilities/modem_v3_check.py live-send --modem-dir images_modem \
+    --device "BlackHole 2ch"
+```
+
+Presets choose the occupied band and the frame-rate/resolution trade, from
+`wide-v3` (up to 20250 Hz, 13.4 fps, 3000 slots) through `lean-v3` down to the
+14 kHz `mid-14k`/`lean-14k`, and `hires-v3` for a full 2880-slot 80x96 picture.
+Profiles choose the plane geometry sent on the wire: `color-dct` (2880
+coefficients) or `lean-dct` (2160, quartered chroma), both declared in the
+header.
+
+`live-receive` opens a window showing the newest decoded frame and prints one
+JSON line per packet with status, identity, puzzle tier, geometry and the
+median playback speed -- through a tape deck, that last field is the deck's
 speed error, measured live. `--headless` gives JSON with no window, `--quiet`
-the window with no JSON, and `--width`/`--height` size it.
+the window with no JSON, and `--width`/`--height` size the display.
 
 Nothing is queued or scheduled: whatever decoded most recently is what is on
 screen. For an analog source that is the only model that means anything, since
 a timestamp recorded onto tape says nothing about the current wall clock.
 
-`--list-devices` on either lists PortAudio devices. `--channels` is a one-based
-pair, default `1,2`.
+`--list-devices` on either live command lists PortAudio devices.
+`--channels` is a one-based pair, default `1,2`.
 
 `live-send` runs no shared-clock scheduling. It keeps the carrier fed and
 identity travels in the header, which is the only model that means anything for
 playback off tape.
-
-### Offline and tape
-
-`bench` compares v1 against v2 across simulated channels. `write` encodes a
-bake to WAV for recording; `read` decodes a captured WAV. Both take
-`--allocation` and `--preset`. `--save-frames DIR` on `read` or `live-receive`
-writes PNGs; `-f` on the send side burns counters into the pixels.
-
-**Known limitation:** allocation currently loses about 3 dB on a rolled-off
-channel instead of the measured gain. `decode_packet` computes per-carrier
-`weights` and discards them for the image path, and `SourceCoder.inverse`
-divides by the allocation gain rather than Wiener-filtering with it. Until
-those are joined up, v2 trails v1 on the channels it was built for.
 
 ## Project Structure
 
@@ -477,7 +468,7 @@ those are joined up, v2 trails v1 on the channels it was built for.
 * `ascii_server.py`: Raw TCP server for Telnet streaming.
 * `ascii_converter.py`: Vectorized image-to-text conversion engine.
 * `MODEM_MODE.md`: Stereo modem integration, bake and run instructions.
-* `utilities/convert_to_modem.py`: Prebakes project face/float layers to RGBA slabs.
+* `utilities/convert_to_modem_dct.py`: Prebakes project face/float layers to RGBA DCT slabs.
 * `modem_display.py`: Composites baked layers and drives the frame-independent modem.
 * `settings.py`: Global configuration constants.
 * `tools/`: Helper scripts (e.g., `convert_to_sbs_fixed.py`).

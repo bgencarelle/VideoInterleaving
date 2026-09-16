@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import numpy as np
 from PIL import Image
-from utilities.convert_to_modem import bake_tree
+from utilities.convert_to_modem_dct import bake_tree_dct as bake_tree
 from utilities.bake_assets import write_slab
 from modem_bake import ModemLibrary
 from modem_display import packet, run_modem
@@ -55,9 +55,9 @@ class ModemIntegrationTests(unittest.TestCase):
         self.assertEqual([p.name for p in lib.mains],['0_rest','2_face','10_face'])
         self.assertEqual(lib.frames,3)
         image=lib.composite(1,1,0)
-        expected=Image.alpha_composite(Image.new('RGBA',(40,48),(4,4,4,255)),
-                                      Image.new('RGBA',(40,48),(200,40,20,128)))
-        expected=Image.alpha_composite(expected,Image.new('RGBA',(40,48),(10,30,240,128))).convert('RGB')
+        expected=Image.alpha_composite(Image.new('RGBA',(80,96),(4,4,4,255)),
+                                      Image.new('RGBA',(80,96),(200,40,20,128)))
+        expected=Image.alpha_composite(expected,Image.new('RGBA',(80,96),(10,30,240,128))).convert('RGB')
         self.assertLessEqual(abs(np.asarray(image,dtype=float)-np.asarray(expected)).max(),1)
         audio,report,_=packet(lib,LAYOUT,v3_coder(),500,(1,1,0),True)
         decoded=decode_packet(audio)
@@ -171,7 +171,6 @@ runpy.run_path(sys.argv[1],run_name='__main__')
                            '--modem-wav',str(wav),'--modem-frames','5','-f'],
                           cwd=self.root,text=True,capture_output=True,timeout=30)
         self.assertEqual(r.returncode,0,r.stdout+r.stderr)
-        # The transmit path is v2 now, so read it back with the v2 tool.
         r=subprocess.run([sys.executable,str(REPO/'utilities'/'modem_v3_check.py'),
                            'read','--wav',str(wav)],
                           cwd=self.root,text=True,capture_output=True,timeout=60)
@@ -186,11 +185,10 @@ if __name__=='__main__':unittest.main()
 
 
 class ModemPresetGuardTests(unittest.TestCase):
-    """main.py --mode modem reaches run_modem, which took any preset name.
+    """main.py --mode modem reaches run_modem, which validates --modem-preset.
 
-    Two of them encoded a file that nothing could read: a v2 layout stamps a
-    different magic, so the v3 receiver never finds it. The WAV wrote and said
-    "Wrote N frames". modem_screen and live-send already refused this.
+    Names are checked before anything is opened or written, so a typo cannot
+    produce a file of the default preset under a wrong name.
     """
 
     def args(self, preset):
@@ -203,14 +201,6 @@ class ModemPresetGuardTests(unittest.TestCase):
             modem_log_frames=False, scope_device=None,
             modem_index_offset_ms=0.0, modem_preset=preset)
 
-    def test_a_v2_preset_is_refused_before_it_writes_anything(self):
-        for name, layout in v3.ALL_PRESETS.items():
-            if layout.progressive:
-                continue
-            with self.subTest(preset=name):
-                with self.assertRaisesRegex(ValueError, 'v2 wire format'):
-                    run_modem(self.args(name))
-
     def test_an_unknown_preset_names_the_real_ones(self):
         with self.assertRaisesRegex(ValueError, 'Unknown --modem-preset'):
             run_modem(self.args('lean'))
@@ -218,5 +208,5 @@ class ModemPresetGuardTests(unittest.TestCase):
     def test_the_guard_runs_before_the_bake_is_opened(self):
         """modem_dir is deliberately nonexistent above: a bad preset must fail
         on the preset, not on something incidental further in."""
-        with self.assertRaisesRegex(ValueError, 'v2 wire format'):
+        with self.assertRaisesRegex(ValueError, 'Unknown --modem-preset'):
             run_modem(self.args('tape'))

@@ -31,10 +31,10 @@ def coder_for(profile, layout):
 
 
 def through(layout, frames=4, **impairment):
-    coder = coder_for('color-lean', layout)
+    coder = coder_for('lean-dct', layout)
     values = np.random.default_rng(6).uniform(-.2, .2, coder.count)
     clean = np.concatenate([v3.encode(values, layout, coder, n, n, frames,
-                                      profile=v3.profile_code('color-lean'))
+                                      profile=v3.profile_code('lean-dct'))
                             for n in range(1, frames+1)])
     emulator = IMP.Emulator(IMP.Settings(**impairment))
     signal = np.concatenate([np.zeros((300, 2)), clean])
@@ -70,10 +70,10 @@ class HeaderPlacementTests(unittest.TestCase):
     def test_it_survives_flutter_on_top_of_the_rolloff(self):
         """Tape wobbles as well as rolling off; timing comes from the preamble,
         which neither layout puts in the affected band."""
-        coder = coder_for('color-lean', TAPE)
+        coder = coder_for('lean-dct', TAPE)
         values = np.random.default_rng(6).uniform(-.2, .2, coder.count)
         clean = np.concatenate([v3.encode(values, TAPE, coder, n, n, 4,
-                                          profile=v3.profile_code('color-lean'))
+                                          profile=v3.profile_code('lean-dct'))
                                 for n in range(1, 5)])
         signal = np.concatenate([np.zeros((300, 2)), clean])
         n = np.arange(len(signal))
@@ -108,16 +108,16 @@ class HeaderPlacementTests(unittest.TestCase):
         neither needs naming at the receiver."""
         self.assertEqual(TAPE.packet, LEAN.packet)
         cands = sorted(
-            [(l, coder_for('color-lean', l),
+            [(l, coder_for('lean-dct', l),
               {v3.profile_code(p): coder_for(p, l) for p in v3.PROFILE_CODES})
              for l in (LEAN, TAPE)], key=lambda c: c[0].packet)
         for layout in (LEAN, TAPE):
             with self.subTest(sent=layout.name):
-                coder = coder_for('color-lean', layout)
+                coder = coder_for('lean-dct', layout)
                 values = np.random.default_rng(2).uniform(-.2, .2, coder.count)
                 audio = v3.encode(values, layout, coder, 1, 1, 1,
-                                  profile=v3.profile_code('color-lean'))
-                rx = v3.Receiver(LEAN, coder_for('color-lean', LEAN),
+                                  profile=v3.profile_code('lean-dct'))
+                rx = v3.Receiver(LEAN, coder_for('lean-dct', LEAN),
                                  candidates=cands)
                 out = rx.feed(np.asarray(audio, np.float32))+rx.flush()
                 self.assertEqual(rx.detected, layout.name)

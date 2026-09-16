@@ -34,7 +34,7 @@ def coder_for(profile, layout):
     return v3.SourceCoder(shapes), shapes
 
 
-def transmission(layout, profile='color', frames=4):
+def transmission(layout, profile='color-dct', frames=4):
     coder, shapes = coder_for(profile, layout)
     values = np.random.default_rng(6).uniform(-.2, .2, coder.count)
     audio = np.concatenate([
@@ -64,7 +64,7 @@ class PreambleTailTests(unittest.TestCase):
         care what top_bin is."""
         layout = v3.ALL_PRESETS['tape-v3']
         self.assertLess(layout.band_at(RATE)[1], 10500)
-        coder, values, audio = transmission(layout, 'color-lean')
+        coder, values, audio = transmission(layout, 'lean-dct')
         self.assertGreater(occupied(audio), 20000)
 
     def test_the_tail_is_the_preamble_not_the_carriers(self):
@@ -89,7 +89,7 @@ class CeilingTests(unittest.TestCase):
         layout = v3.ALL_PRESETS['lean-14k']
         self.assertAlmostEqual(layout.fps, lean.fps, places=6)
         self.assertLess(layout.band_at(RATE)[1], 14000)
-        coder, values, audio = transmission(layout, 'color-lean')
+        coder, values, audio = transmission(layout, 'lean-dct')
         bounded = bound_emission(audio, 14000, RATE)
         self.assertLess(occupied(bounded), 14000)
         self.assertEqual(decode(layout, coder, bounded, values)[:2], (4, 4))
@@ -166,7 +166,7 @@ class DeviceRateTests(unittest.TestCase):
 
     def test_the_cutoff_does_not_follow_the_device_rate(self):
         layout = v3.ALL_PRESETS['mid-14k']
-        coder, values, audio = transmission(layout, 'color-lean')
+        coder, values, audio = transmission(layout, 'lean-dct')
         bounded = bound_emission(audio, 14000, RATE)
         top = layout.band_at(RATE)[1]
         kept = np.abs(np.fft.rfft(bounded[:, 0]))
@@ -179,7 +179,7 @@ class DeviceRateTests(unittest.TestCase):
     def test_a_ceiling_designed_against_the_wrong_rate_breaks_it(self):
         """The bug, stated as the measurement that would have caught it."""
         layout = v3.ALL_PRESETS['mid-14k']
-        coder, values, audio = transmission(layout, 'color-lean')
+        coder, values, audio = transmission(layout, 'lean-dct')
         wrong = bound_emission(audio, 14000, 96000)      # what the live path did
         self.assertLess(occupied(wrong), 9000)
         headers, _, error = decode(layout, coder, wrong, values)

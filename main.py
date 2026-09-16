@@ -325,7 +325,7 @@ def configure_runtime():
     )
 
     # Modem is independent of the XY waveform and the video/GL display stack.
-    parser.add_argument("--modem-dir", help="RGBA modem bake from utilities/convert_to_modem.py")
+    parser.add_argument("--modem-dir", help="RGBA modem bake from utilities/convert_to_modem_dct.py")
     parser.add_argument("--modem-channels", default="1,2", help="1-based stereo output pair")
     parser.add_argument("--modem-latency", default="low", help="low, high, or seconds")
     parser.add_argument("--modem-time-offset-ms", type=float, default=0.0,
@@ -371,7 +371,8 @@ def configure_runtime():
         if not math.isfinite(args.modem_frame_duration) or args.modem_frame_duration <= 0:
             parser.error("--modem-frame-duration must be finite and positive")
         if args.scope_ask:
-            parser.error("Modem mode takes --device explicitly; use modem_receive.py --list-devices")
+            parser.error("Modem mode takes --device explicitly; use "
+                         "utilities/modem_v3_check.py live-receive --list-devices")
         # --dir names the directory to use, in this mode as in every other.
         # It is not a source tree to append a suffix to; only the fallback,
         # when no directory is given at all, derives one from IMAGES_DIR.
@@ -385,7 +386,7 @@ def configure_runtime():
             parser.error(f"Directory not found: {args.modem_dir}")
         if not os.path.isfile(os.path.join(args.modem_dir, "modem.json")):
             parser.error(f"No modem.json in {args.modem_dir}; "
-                         "run utilities/convert_to_modem.py first")
+                         "run utilities/convert_to_modem_dct.py first")
         settings.CLOCK_MODE = args.modem_clock
         os.makedirs(LOGS_DIR, exist_ok=True)
         # Baked-only mode: no image scan, cache removal, ports, or GL setup.

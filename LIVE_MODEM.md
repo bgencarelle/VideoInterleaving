@@ -12,14 +12,18 @@ does now:
 | profile | declared in two spare bits of the header's top_bin byte |
 | preset | identified by decoding against each candidate until the CRC verifies |
 
-`lean-v3` with `color-lean` is still the default on both senders -- 2768
-samples per frame, about 17.34 fps at 48 kHz -- but it is a default, not a
-requirement. Any progressive preset and any profile can be sent live.
+The senders do not agree on a default and do not need to: `modem_screen.py`
+starts from `hires-v3` with `color-dct` (2912 samples per frame, about
+16.48 fps at 48 kHz), `utilities/modem_v3_check.py live-send` from `lean-v3`
+(2768 samples, 17.34 fps), and baked playback through `modem_display.py`
+from `wide-v3` (3344 samples, 14.35 fps), taking its profile from the bake's
+`modem.json`. None of these is a requirement. Any preset and any v3 profile
+can be sent live.
 
-The one thing that still cannot be worked out is the transport generation: a
-v2 layout puts a different magic on the wire and no v3 candidate is looking for
-it, so live refuses those. A custom `--allocation` also stays shared state --
-it is not on the wire, so there is nothing to detect it from.
+The v2 layouts are gone outright, so there is no transport generation left to
+disagree about. The one thing that is still shared state is a custom
+`--allocation` -- it is not on the wire, so there is nothing to detect it
+from, and both ends need the same file.
 
 ## No sample rate is requested
 
@@ -108,10 +112,11 @@ is the one part of the packet that does not depend on the layout.
 
 ## Image and audio trade-offs
 
-`color-lean` is 40x48 luma with 10x12 chroma planes. `mono` sends luma only,
-and the receiver now reconstructs it at the right geometry rather than needing
-a matching flag -- on `lean-v3` it is shrunk to fit 2200 slots, the same
-deterministic shrink both ends apply.
+`color-dct` puts 40x48 luma with 20x24 chroma planes on the wire (2880 DCT
+coefficients), sampled from an 80x96 RGBA bake so truncation carries detail the
+wire shape cannot. `lean-dct` sends the same luma with 10x12 chroma planes
+(2160 coefficients). The receiver reconstructs at whatever geometry the header
+names.
 
 The carrier band is 375–20250 Hz and requires stereo; it is held there on any
 sending device above the reference rate and scales down below it, as above.

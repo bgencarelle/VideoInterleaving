@@ -21,7 +21,7 @@ from utilities.modem_v3_check import main
 
 class V3Base(unittest.TestCase):
     def setUp(self):
-        self.layout = v3.PRESETS['wide']
+        self.layout = v3.ALL_PRESETS['wide-v3']
         self.shapes = fit_shapes(plane_shapes(DEFAULT_PROFILE), self.layout.capacity)
         self.coder = v3.SourceCoder(self.shapes)
         yy, xx = np.mgrid[:48, :40]
@@ -170,7 +170,7 @@ class ReceiveTests(V3Base):
 
 class LevelTests(V3Base):
     def test_encode_normalises_up_not_only_down(self):
-        """v2 only ever attenuated, leaving headroom permanently unused."""
+        """The pre-DCT encoder only ever attenuated, leaving headroom unused."""
         self.assertAlmostEqual(float(np.max(np.abs(self.packet()))), .95, delta=1e-3)
 
     def test_rejects_wrong_value_count(self):
@@ -241,11 +241,11 @@ class HeaderTrimTests(V3Base):
         got += rx.flush()
         return sum(1 for g in got if g.identity == 'verified_header')
 
-    def test_defaults_match_v2(self):
+    def test_defaults_match_wide_v3(self):
         base = self.trim()
         self.assertEqual(base.header_width, 20)
         self.assertFalse(base.header_split)
-        self.assertEqual(base.header_symbols, v3.PRESETS['wide'].header_symbols)
+        self.assertEqual(base.header_symbols, v3.ALL_PRESETS['wide-v3'].header_symbols)
 
     def test_split_halves_the_header_symbols(self):
         self.assertEqual(self.trim(header_split=True).header_symbols, 2)
@@ -273,15 +273,6 @@ class HeaderTrimTests(V3Base):
         narrow = self.roundtrip(self.trim(header_split=True),
                                 speed=1.35, noise=.02)
         self.assertGreater(narrow, wide)
-
-    def test_presets_are_untouched(self):
-        """The v2 presets must keep v2 behaviour; only the v3-* ones opt in."""
-        for name in ('wide', 'tape', 'tape-fast', 'narrow', 'lofi'):
-            with self.subTest(preset=name):
-                layout = v3.PRESETS[name]
-                self.assertEqual(layout.header_width, 20)
-                self.assertFalse(layout.header_split)
-                self.assertFalse(layout.orthogonal_training)
 
 
 class TrainingTests(V3Base):
@@ -312,7 +303,7 @@ class TrainingTests(V3Base):
         return sum(1 for g in got if g.identity == 'verified_header'), err
 
     def test_both_channels_carry_both_training_symbols(self):
-        """v2 leaves one channel silent in each; that is the waste being fixed."""
+        """The old mono-lane training left one channel silent; orthogonality fixes it."""
         coder = v3.SourceCoder(self.shapes)
         for layout, expect_silent in ((self.trim(), True),
                                       (self.trim(orthogonal_training=True), False)):
@@ -347,29 +338,8 @@ class TrainingTests(V3Base):
                 self.assertEqual(got, 4)
 
     def test_presets_expose_it(self):
-        self.assertTrue(v3.V3_PRESETS['wide-v3'].orthogonal_training)
-        self.assertTrue(v3.V3_PRESETS['wide-v3-fast'].header_split)
-        self.assertFalse(v3.PRESETS['wide'].orthogonal_training)
-
-    def test_v3_presets_stay_out_of_the_shared_table(self):
-        """PRESETS is the pre-existing table; V3_PRESETS are the new layouts.
-        Keeping them separate is what lets ALL_PRESETS be the union."""
-        self.assertFalse(set(v3.V3_PRESETS) & set(v3.PRESETS))
-        self.assertEqual(set(v3.ALL_PRESETS), set(v3.PRESETS) | set(v3.V3_PRESETS))
-
-    def test_v3_presets_are_not_cross_compatible(self):
-        """Different training means a mismatched preset must fail, not garble."""
-        coder = v3.SourceCoder(self.shapes)
-        audio = v3.encode(self.values, v3.V3_PRESETS['wide-v3'], coder, 1, 1, 4)
-        rx = v3.Receiver(v3.PRESETS['wide'], coder)
-        got = []
-        for i in range(0, len(audio), 256):
-            got += rx.feed(audio[i:i+256])
-        got += rx.flush()
-        good = [g for g in got if g.values is not None]
-        if good:
-            err = np.mean([np.mean((np.clip(g.values, -1, 1)-self.values)**2) for g in good])
-            self.assertGreater(err, 1e-2)
+        self.assertTrue(v3.ALL_PRESETS['wide-v3'].orthogonal_training)
+        self.assertTrue(v3.ALL_PRESETS['wide-v3-fast'].header_split)
 
 
 class BandTests(V3Base):
@@ -479,33 +449,33 @@ class LeanChromaTests(V3Base):
         return plane_shapes(profile)
 
     def test_lean_profile_is_a_quarter_of_the_chroma(self):
-        full = self.shapes_for('color')
-        lean = self.shapes_for('color-lean')
+        full = self.shapes_for('color-dct')
+        lean = self.shapes_for('lean-dct')
         self.assertEqual(full[0], lean[0])                      # luma unchanged
         self.assertEqual(int(np.prod(lean[1]))*4, int(np.prod(full[1])))
 
     def test_lean_profile_frees_four_symbols(self):
         import numpy as np
-        full = sum(int(np.prod(s)) for s in self.shapes_for('color'))
-        lean = sum(int(np.prod(s)) for s in self.shapes_for('color-lean'))
+        full = sum(int(np.prod(s)) for s in self.shapes_for('color-dct'))
+        lean = sum(int(np.prod(s)) for s in self.shapes_for('lean-dct'))
         self.assertEqual(full, 2880)
         self.assertEqual(lean, 2160)
-        self.assertGreater(v3.V3_PRESETS['lean-v3'].fps,
-                           v3.V3_PRESETS['wide-v3'].fps)
+        self.assertGreater(v3.ALL_PRESETS['lean-v3'].fps,
+                           v3.ALL_PRESETS['wide-v3'].fps)
 
     def test_chroma_planes_keep_the_luma_aspect(self):
         """Off-aspect chroma gets letterboxed by image_values and loses 2-4 dB,
         which is easy to misread as a chroma-resolution result."""
         from animation_modem.imaging import PROFILES
-        for name in ('color', 'color-lean'):
+        for name in ('color-dct', 'lean-dct'):
             with self.subTest(profile=name):
                 size, chroma = PROFILES[name]
                 self.assertAlmostEqual(size[0]/size[1], chroma[0]/chroma[1], places=3)
 
     def test_lean_preset_round_trips(self):
         from animation_modem.imaging import plane_shapes
-        layout = v3.V3_PRESETS['lean-v3']
-        shapes = plane_shapes('color-lean')
+        layout = v3.ALL_PRESETS['lean-v3']
+        shapes = plane_shapes('lean-dct')
         coder = v3.SourceCoder(shapes)
         self.assertLessEqual(coder.count, layout.capacity)
         values = image_values(self.image, shapes)

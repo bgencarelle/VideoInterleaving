@@ -34,7 +34,7 @@ def candidates():
         layout = v3.ALL_PRESETS[name]
         coders = {v3.profile_code(p): coder_for(p, layout)
                   for p in v3.PROFILE_CODES}
-        out.append((layout, coders[v3.profile_code('color-lean')], coders))
+        out.append((layout, coders[v3.profile_code('lean-dct')], coders))
     return out
 
 
@@ -50,14 +50,14 @@ def send(preset, profile, frames=3):
 
 
 def receiver(**kw):
-    """Always built on lean-v3/color-lean, so it is wrong for most senders."""
-    return v3.Receiver(LEAN, coder_for('color-lean', LEAN), **kw)
+    """Always built on lean-v3/lean-dct, so it is wrong for most senders."""
+    return v3.Receiver(LEAN, coder_for('lean-dct', LEAN), **kw)
 
 
 class PresetDetectionTests(unittest.TestCase):
     def test_every_progressive_preset_identifies_itself(self):
         for preset in PROGRESSIVE:
-            for profile in ('color-lean', 'mono'):
+            for profile in v3.PROFILE_CODES:
                 with self.subTest(preset=preset, profile=profile):
                     audio, values = send(preset, profile)
                     rx = receiver(candidates=candidates())
@@ -71,24 +71,10 @@ class PresetDetectionTests(unittest.TestCase):
                         self.assertLess(
                             np.sqrt(np.mean((r.values-values)**2)), 1e-4)
 
-    def test_layouts_of_the_same_length_are_still_told_apart(self):
-        """wide and wide-v3 share a packet length AND a top_bin. Only the
-        training structure differs, so nothing but the CRC separates them."""
-        self.assertEqual(v3.ALL_PRESETS['wide'].packet,
-                         v3.ALL_PRESETS['wide-v3'].packet)
-        self.assertEqual(v3.ALL_PRESETS['wide'].top_bin,
-                         v3.ALL_PRESETS['wide-v3'].top_bin)
-        for preset in ('wide', 'wide-v3'):
-            with self.subTest(preset=preset):
-                audio, _ = send(preset, 'color-lean')
-                rx = receiver(candidates=candidates())
-                rx.feed(audio), rx.flush()
-                self.assertEqual(rx.detected, preset)
-
     def test_the_search_is_paid_once_not_per_frame(self):
         """Adopting the layout is the point; re-searching every packet would
         cost 1.4 ms x candidates x frame rate forever."""
-        audio, _ = send('mid-v3', 'color-lean', frames=6)
+        audio, _ = send('mid-v3', 'lean-dct', frames=6)
         rx = receiver(candidates=candidates())
         calls = []
         real = rx._demodulate
@@ -115,7 +101,7 @@ class PresetDetectionTests(unittest.TestCase):
         self.assertLess(shortest*2, longest, 'the gap this test exists for')
         for frames in (1, 2, 3):
             with self.subTest(frames=frames):
-                audio, values = send('lean-v3', 'color-lean', frames=frames)
+                audio, values = send('lean-v3', 'lean-dct', frames=frames)
                 self.assertLess(len(audio), longest if frames < 3 else 1 << 30)
                 rx = receiver(candidates=candidates())
                 out = rx.feed(audio)+rx.flush()
@@ -129,7 +115,7 @@ class PresetDetectionTests(unittest.TestCase):
     def test_a_candidate_is_not_retried_while_waiting(self):
         """Feeding in small blocks must not re-run the candidates already
         ruled out at the same position."""
-        audio, _ = send('lean-v3', 'color-lean', frames=2)
+        audio, _ = send('lean-v3', 'lean-dct', frames=2)
         rx = receiver(candidates=candidates())
         calls = []
         real = rx._demodulate
@@ -148,7 +134,7 @@ class PresetDetectionTests(unittest.TestCase):
     def test_without_candidates_nothing_changes(self):
         """The search is opt-in. A receiver given none behaves as before and
         simply fails to read a preset it was not built for."""
-        audio, _ = send('mid-v3', 'color-lean')
+        audio, _ = send('mid-v3', 'lean-dct')
         rx = receiver()
         out = rx.feed(audio)+rx.flush()
         self.assertIsNone(rx.detected)
@@ -160,12 +146,6 @@ class PresetDetectionTests(unittest.TestCase):
         out = rx.feed(noise)+rx.flush()
         self.assertIsNone(rx.detected)
         self.assertTrue(all(r.identity != 'verified_header' for r in out))
-
-    def test_a_v2_layout_is_not_a_candidate(self):
-        """Non-progressive presets are a different wire generation with a
-        different magic; including them would only waste attempts."""
-        for layout, _, _ in candidates():
-            self.assertTrue(layout.progressive)
 
 
 class DocumentationTests(unittest.TestCase):

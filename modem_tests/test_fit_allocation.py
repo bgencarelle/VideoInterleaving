@@ -77,7 +77,7 @@ def through(layout, coder, image, noise_dbfs=-38):
 
 class FitTests(unittest.TestCase):
     def setUp(self):
-        self.shapes, self.grids = fa.geometry('color', LEAN14)
+        self.shapes, self.grids = fa.geometry('color-dct', LEAN14)
         self.count = int(sum(np.prod(s) for s in self.shapes))
 
     def test_the_table_is_one_positive_weight_per_slot(self):
@@ -118,7 +118,7 @@ class FitTests(unittest.TestCase):
 class PairingTests(unittest.TestCase):
     """A table belongs to one (preset, profile) pair."""
 
-    def table(self, tmp, preset='lean-14k', profile='color'):
+    def table(self, tmp, preset='lean-14k', profile='color-dct'):
         path = Path(tmp)/'a.npy'
         fa.main(['--preset', preset, '--profile', profile, '--frames', '4',
                  '--out', str(path)])
@@ -130,7 +130,7 @@ class PairingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = self.table(tmp)
             with self.assertRaises(SystemExit) as caught:
-                check.coder_for('color', path, v3.ALL_PRESETS['hires-v3'])
+                check.coder_for('color-dct', path, v3.ALL_PRESETS['hires-v3'])
             self.assertIn('2880', str(caught.exception))
 
     def test_scanning_falls_back_instead_of_dying(self):
@@ -149,8 +149,8 @@ class PairingTests(unittest.TestCase):
         from utilities import modem_v3_check as check
         with tempfile.TemporaryDirectory() as tmp:
             path = self.table(tmp)
-            plain = check.coder_for('color', None, LEAN14)[0]
-            fitted = check.coder_for('color', path, LEAN14, strict=False)[0]
+            plain = check.coder_for('color-dct', None, LEAN14)[0]
+            fitted = check.coder_for('color-dct', path, LEAN14, strict=False)[0]
             self.assertFalse(np.allclose(plain.gains, fitted.gains))
 
 

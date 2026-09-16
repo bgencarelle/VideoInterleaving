@@ -39,7 +39,7 @@ def delayed(audio, tau, channel=0):
 class ChannelSkewTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.coder = v3.SourceCoder(plane_shapes('color-lean'))
+        cls.coder = v3.SourceCoder(plane_shapes('lean-dct'))
         cls.values = np.random.default_rng(3).uniform(-.2, .2, cls.coder.count)
         cls.audio = np.concatenate([
             v3.encode(cls.values, LAYOUT, cls.coder, n, n, 4)

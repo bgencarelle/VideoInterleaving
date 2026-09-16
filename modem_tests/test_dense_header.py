@@ -25,7 +25,7 @@ def round_trip(layout, shapes, seed=4, frames=2):
     coder = v3.SourceCoder(shapes)
     values = np.random.default_rng(seed).uniform(-.2, .2, coder.count)
     audio = np.concatenate([v3.encode(values, layout, coder, n, n, frames,
-                                      profile=v3.profile_code('color-lean'))
+                                      profile=v3.profile_code('lean-dct'))
                             for n in range(1, frames+1)])
     rx = v3.Receiver(layout, coder)
     out = rx.feed(np.asarray(audio, np.float32))+rx.flush()
@@ -53,7 +53,7 @@ class DenseHeaderTests(unittest.TestCase):
         """Filling the header symbols raises no peak, because the preamble
         holds it. If it did, everything would renormalise down and the extra
         capacity would have been bought with SNR."""
-        shapes = plane_shapes('color-lean')
+        shapes = plane_shapes('lean-dct')
         _, _, lean = round_trip(LEAN, shapes)
         _, _, dense = round_trip(DENSE, shapes)
         self.assertAlmostEqual(float(np.max(np.abs(dense))),
@@ -86,15 +86,15 @@ class DenseHeaderTests(unittest.TestCase):
         def coders(layout):
             return {v3.profile_code(p): v3.SourceCoder(
                 _fit(plane_shapes(p), layout.capacity)) for p in v3.PROFILE_CODES}
-        cands = sorted([(l, coders(l)[v3.profile_code('color-lean')], coders(l))
+        cands = sorted([(l, coders(l)[v3.profile_code('lean-dct')], coders(l))
                         for l in (LEAN, DENSE)], key=lambda c: c[0].packet)
         for layout in (LEAN, DENSE):
             with self.subTest(sent=layout.name):
-                shapes = plane_shapes('color-lean')
+                shapes = plane_shapes('lean-dct')
                 coder = v3.SourceCoder(shapes)
                 values = np.random.default_rng(8).uniform(-.2, .2, coder.count)
                 audio = v3.encode(values, layout, coder, 1, 1, 1,
-                                  profile=v3.profile_code('color-lean'))
+                                  profile=v3.profile_code('lean-dct'))
                 rx = v3.Receiver(LEAN, v3.SourceCoder(shapes), candidates=cands)
                 out = rx.feed(np.asarray(audio, np.float32))+rx.flush()
                 self.assertEqual(rx.detected, layout.name)

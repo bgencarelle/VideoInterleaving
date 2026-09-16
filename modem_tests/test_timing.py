@@ -6,11 +6,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import numpy as np
 from PIL import Image
-from animation_modem.transport3 import PRESETS, SourceCoder, decode_packet as _decode
+from animation_modem.transport3 import ALL_PRESETS, SourceCoder, decode_packet as _decode
 from animation_modem.imaging import DEFAULT_PROFILE, PROFILES, fit_shapes, image_values, plane_shapes
 from animation_modem import transport3 as _v2
 
-LAYOUT = PRESETS['wide']
+LAYOUT = ALL_PRESETS['wide-v3']
 FRAME = LAYOUT.frame
 
 def _coder(profile=DEFAULT_PROFILE):
@@ -18,7 +18,7 @@ def _coder(profile=DEFAULT_PROFILE):
 
 def encode(image, absolute, index, count, numbered=False, profile=DEFAULT_PROFILE,
            target_time_ns=None):
-    """v1's call shape over the v2 encoder, so these timing tests stay readable."""
+    """v1's call shape over the v3 encoder, so these timing tests stay readable."""
     coder = _coder(profile)
     stamp = 0 if target_time_ns is None else (int(target_time_ns)//1_000_000) & 0xffffffff
     audio = _v2.encode(image_values(image, coder.shapes), LAYOUT, coder,
@@ -74,7 +74,8 @@ class TimingTests(unittest.TestCase):
                     result=decode_packet(audio,profile)
                     self.assertEqual(audio.shape,(FRAME,2))
                     self.assertEqual((result.absolute,result.index,result.count),(0xffffffff,2221,2221))
-                    # v2 carries milliseconds; the epoch resolves the same way.
+                    # The packet carries milliseconds; the epoch resolves the
+                    # same way.
                     self.assertEqual(expand_timestamp(result.stamp_ms,stamp+5_000_000),
                                      (stamp//1_000_000)*1_000_000)
     def test_legacy_packets_have_no_timestamp(self):
@@ -82,8 +83,8 @@ class TimingTests(unittest.TestCase):
         self.assertFalse(decode_packet(audio).stamp_ms)
     def test_erased_header_never_supplies_trusted_time(self):
         audio,_,_=encode(Image.new('RGB',(40,48)),1,1,1,target_time_ns=1_700_000_000_000_000_000)
-        # Erase the header symbols. v2 places them after two training symbols,
-        # on the lowest carriers, so wipe that span rather than v1's offsets.
+        # Erase the header symbols: they sit after two training symbols, on the
+        # lowest carriers, so wipe that span rather than v1's offsets.
         start=_v2.SYNC_LEN+2*_v2.SYMBOL
         audio[start:start+LAYOUT.header_symbols*_v2.SYMBOL]=0
         result=decode_packet(audio)
