@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>ASCII/Video Fade Test</title>
+    <style>
+        :root {
+            --bg: #000000;
+        }
+
+        html,
+        body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg);
+            overflow: hidden;
+        }
+
+        #container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background-color: var(--bg);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        #stage {
+            position: relative;
+            /* Dimensions will be set by JS based on video aspect ratio */
+            width: 100%;
+            height: 100%;
+            background-color: var(--bg);
+            overflow: hidden;
+        }
+
+        .layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            border: 0;
+            margin: 0;
+            padding: 0;
+            opacity: 0;
+            transition: opacity 1000ms ease-in-out;
+            will-change: opacity;
+            background-color: #000000;
+        }
+
+        #video-layer {
+            object-fit: contain;
+        }
+
+        .layer.active {
+            opacity: 1;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="container">
+        <div id="stage">
+            <img id="video-layer" class="layer" src="/video_feed" alt="Video feed" />
+            <iframe id="ascii-layer" class="layer" src="/ascii" scrolling="no"></iframe>
+        </div>
+    </div>
+
+    <script>
+        const STAGE = document.getElementById('stage');
+        const ASCII_LAYER = document.getElementById('ascii-layer');
+        const VIDEO_LAYER = document.getElementById('video-layer');
+        let isAsciiVisible = true;
+
+        function getRandomTime(min, max) {
+            return Math.floor(Math.random() * (max - min + 1) + min);
+        }
+
+        /* --- STAGE SCALING LOGIC --- */
+        function scaleStage() {
+            const container = document.getElementById('container');
+            const cw = container.clientWidth;
+            const ch = container.clientHeight;
+            if (!cw || !ch) return;
+
+            // Determine aspect ratio of the video feed
+            let videoAR = 1.5; // Default 3:2 to avoid zero-size containers
+            if (VIDEO_LAYER.naturalWidth > 0 && VIDEO_LAYER.naturalHeight > 0) {
+                videoAR = VIDEO_LAYER.naturalWidth / VIDEO_LAYER.naturalHeight;
+            }
+
+            const containerAR = cw / ch;
+            let finalW, finalH;
+
+            if (containerAR > videoAR) {
+                // Container is wider than video: fit height
+                finalH = ch;
+                finalW = finalH * videoAR;
+            } else {
+                // Container is taller than video (mobile): fit width
+                finalW = cw;
+                finalH = finalW / videoAR;
+            }
+
+            STAGE.style.width = Math.floor(finalW) + 'px';
+            STAGE.style.height = Math.floor(finalH) + 'px';
+        }
+
+        function triggerFade() {
+            const fadeDuration = getRandomTime(1000, 3000);
+            ASCII_LAYER.style.transitionDuration = `${fadeDuration}ms`;
+            VIDEO_LAYER.style.transitionDuration = `${fadeDuration}ms`;
+
+            if (isAsciiVisible) {
+                // Switch to Video
+                ASCII_LAYER.classList.remove('active');
+                VIDEO_LAYER.classList.add('active');
+                // Ensure z-index follows visibility to prevent iframe interaction blocks
+                ASCII_LAYER.style.zIndex = 10;
+                VIDEO_LAYER.style.zIndex = 20;
+                isAsciiVisible = false;
+            } else {
+                // Switch to ASCII
+                VIDEO_LAYER.classList.remove('active');
+                ASCII_LAYER.classList.add('active');
+                VIDEO_LAYER.style.zIndex = 10;
+                ASCII_LAYER.style.zIndex = 20;
+                isAsciiVisible = true;
+            }
+
+            const displayTime = getRandomTime(1000, 3000);
+            setTimeout(triggerFade, fadeDuration + displayTime);
+        }
+
+        // Initialize: start with ASCII visible and on top
+        ASCII_LAYER.classList.add('active');
+        ASCII_LAYER.style.zIndex = 20;
+        VIDEO_LAYER.style.zIndex = 10;
+
+        // Scaling listeners
+        window.addEventListener('load', scaleStage);
+        window.addEventListener('resize', scaleStage);
+
+        // Polling loop to catch video metadata and handle dynamic resizing
+        let scaleTries = 0;
+        const scaleTimer = setInterval(() => {
+            scaleStage();
+            scaleTries++;
+            // Poll for a while on load, then slow down
+            if (scaleTries > 30) clearInterval(scaleTimer);
+        }, 300);
+
+        // Start the loop
+        setTimeout(triggerFade, getRandomTime(1000, 3000));
+    </script>
+</body>
+
+</html>
