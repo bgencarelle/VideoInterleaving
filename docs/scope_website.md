@@ -180,4 +180,4 @@ consistent with the rest of the monitor, which is the argument for leaving it
 and the argument for not exposing it.
 
 Still open from earlier passes: no `vi-scope.service`, no `--scope` shortcut in
-`run_app.sh`, and the PipeWire-vs-ALSA question that decides the unit's shape.
+`scripts/run_app.sh`, and the PipeWire-vs-ALSA question that decides the unit's shape.

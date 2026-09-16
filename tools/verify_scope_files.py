@@ -1,7 +1,7 @@
 """
 verify_scope_files.py -- confirm the scope files are the right files.
 
-Run from the repo root:  python verify_scope_files.py
+Run from the repo root:  python tools/verify_scope_files.py
 
 Checks each file exists, is the module it claims to be (not another one saved
 under the wrong name), compiles, and exposes the symbols the others import.
@@ -31,10 +31,10 @@ EXPECTED = [
     ("scope_display.py",
      "scope_display.py -- the scope-mode engine",
      ["run_scope"]),
-    ("test_scope_pair.py",
+    (os.path.join("tests", "test_scope_pair.py"),
      "test_scope_pair.py -- output one main/float pair",
      ["main", "render_trace", "advance", "TraceSim"]),
-    ("test_scope_stochastic.py",
+    (os.path.join("tests", "test_scope_stochastic.py"),
      "Regression checks for no-Z stochastic, stipple, and fusion renderers",
      ["test_stochastic_shape_range_and_determinism",
       "test_stochastic_trace_chaining", "test_brightness_is_visit_density",
@@ -50,7 +50,7 @@ EXPECTED = [
       "test_baker_streams_large_thumbnail_arrays_to_an_atomic_memmap",
       "test_fixed_calibration_respects_autofit_toggle",
       "test_legacy_three_channel_bake_mix_emits_all_four_paths"]),
-    ("scope_screen.py",
+    (os.path.join("tools", "scope_screen.py"),
      "scope_screen.py -- use an oscilloscope as a (very) low resolution",
      ["screen_source", "video_source", "test_source"]),
     ("scope_controls.py",

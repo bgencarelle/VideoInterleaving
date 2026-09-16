@@ -171,7 +171,7 @@ class DocumentationTests(unittest.TestCase):
         root = pathlib.Path(__file__).resolve().parent.parent
         for name in ('animation_modem/core.py', 'animation_modem/transport3.py',
                      'utilities/modem_v3_check.py', 'modem_screen.py',
-                     'modem_display.py', 'LIVE_MODEM.md'):
+                     'modem_display.py', 'docs/LIVE_MODEM.md'):
             yield root/name
 
     def test_no_file_still_promises_matched_arguments(self):

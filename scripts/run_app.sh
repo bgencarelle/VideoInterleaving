@@ -13,7 +13,7 @@ LOG_FILE=${LOG_FILE:-""}            # Optional log file path (empty = stdout onl
 # --- INITIALIZATION ---
 # Get the directory where this script is located
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-PROJECT_DIR="$SCRIPT_DIR"
+PROJECT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)   # repo root = parent of scripts/
 VENV_DIR="$PROJECT_DIR/.venv"
 
 # Change to project directory (fixes stalling if run from wrong location)
@@ -22,7 +22,7 @@ cd "$PROJECT_DIR"
 # Verify project directory
 if [ ! -f "$PROJECT_DIR/main.py" ]; then
     echo "❌ ERROR: main.py not found in $PROJECT_DIR" >&2
-    echo "   Please ensure this script is in the VideoInterleaving project directory" >&2
+    echo "   Please ensure this script is in the VideoInterleaving project's scripts/ directory" >&2
     exit 1
 fi
 

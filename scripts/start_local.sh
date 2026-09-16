@@ -1,8 +1,9 @@
 #!/bin/bash
 
-# Get the directory where this script is located
+# Get the repo root (this script lives in scripts/)
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-VENV_DIR="$SCRIPT_DIR/.venv"
+PROJECT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
+VENV_DIR="$PROJECT_DIR/.venv"
 
 # Deactivate any existing virtual environment first
 if command -v deactivate &> /dev/null; then
@@ -44,5 +45,7 @@ done
 if [[ "$ARGS" != *"--mode"* ]]; then
     ARGS="$ARGS --mode local"
 fi
+
+cd "$PROJECT_DIR"
 
 python3 main.py $ARGS

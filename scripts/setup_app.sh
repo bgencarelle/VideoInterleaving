@@ -4,7 +4,7 @@ set -euo pipefail  # Better error handling: exit on error, undefined vars, pipe 
 trap 'setup_status=$?; if [ "$setup_status" -ne 0 ]; then printf "Setup failed (exit %s). See the error above.\n" "$setup_status" >&2; fi' EXIT
 
 # --- CONFIGURATION ---
-PROJECT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+PROJECT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)  # repo root = parent of scripts/
 VENV_DIR="$PROJECT_DIR/.venv"
 PYTHON_BIN=python3
 

@@ -1,6 +1,6 @@
 """A mode must not pay for the dependencies of the modes that are not running.
 
-Run with: python -m unittest test_lazy_imports
+Run with: python -m unittest tests.test_lazy_imports
 
 main.py used to import every mode's entry point at module level, so one
 missing library took down modes that had no use for it: a box without
@@ -26,7 +26,7 @@ def module_level_imports(filename):
 
     A try/except around an import still runs it, so it counts here.
     """
-    tree = ast.parse(Path(__file__).with_name(filename).read_text(),
+    tree = ast.parse((Path(__file__).resolve().parents[1] / filename).read_text(),
                      filename=filename)
     names = set()
     for node in tree.body:                       # top level only, by construction
@@ -97,7 +97,7 @@ class MidiIsNotARequirementOfEveryClock(unittest.TestCase):
             print("OK")
         """)
         r = subprocess.run([sys.executable, "-c", script],
-                           cwd=str(Path(__file__).parent),
+                           cwd=str(Path(__file__).resolve().parents[1]),
                            capture_output=True, text=True, timeout=120)
         self.assertEqual(r.returncode, 0, r.stderr[-2000:])
         self.assertIn("OK", r.stdout)

@@ -18,7 +18,10 @@ differ from the driving index -- so the scope follows the screen exactly.
 """
 import os
 import threading
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root
 
 import settings
 from scope_bake import XYLibrary, merge, raster_frame, SweepSource

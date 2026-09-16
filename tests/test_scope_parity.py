@@ -99,7 +99,7 @@ def main():
 
     print("\nboth callers go through TraceEmitter, not render_luma directly")
     import re
-    for path in ("scope_display.py", "scope_screen.py"):
+    for path in ("scope_display.py", "tools/scope_screen.py"):
         try:
             src = open(path, encoding="utf-8", errors="replace").read()
         except OSError:

@@ -7,13 +7,13 @@ local, web, and ASCII modes are left on their existing paths.
 
 ## Install modem dependencies
 
-Normal `setup_app.sh` setup now includes modem dependencies through
+Normal `scripts/setup_app.sh` setup now includes modem dependencies through
 `requirements.txt` -> `requirements-modem.txt`, and verifies them in `.venv`.
 An existing environment is updated when either requirements file changes or a
 modem import is missing. System packages include SciPy and Pillow's Tk bridge
 on Debian, Tk bindings on every supported platform, and PortAudio.
 
-For an existing checkout, rerun your usual `setup_app.sh` command. To verify
+For an existing checkout, rerun your usual `scripts/setup_app.sh` command. To verify
 without changing the environment or touching audio devices:
 
 ```bash

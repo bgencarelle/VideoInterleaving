@@ -216,7 +216,7 @@ def main():
     if args.png:
         try:
             import cv2, importlib.util
-            spec = importlib.util.spec_from_file_location("t", "test_scope_pair.py")
+            spec = importlib.util.spec_from_file_location("t", "tests/test_scope_pair.py")
             t = importlib.util.module_from_spec(spec)
             saved, sys.argv = sys.argv, ["x"]
             spec.loader.exec_module(t)

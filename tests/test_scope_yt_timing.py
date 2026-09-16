@@ -11,7 +11,7 @@ import numpy as np
 from scope_bake import TraceEmitter, render_luma, render_yt_grid, yt_timeline
 from scope_out import (Scope, clip_for_trigger, marker_window,
                        yt_trigger_frame)
-from test_scope_web import _extract_fn
+from tests.test_scope_web import _extract_fn
 
 
 class FixedYtTests(unittest.TestCase):
@@ -151,7 +151,7 @@ class FixedYtTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "Node is needed for browser parity")
     def test_browser_fixed_timing_matches_python(self):
-        page = Path(__file__).parent.joinpath("static", "scope_renderer.js").read_text()
+        page = Path(__file__).resolve().parents[1].joinpath("static", "scope_renderer.js").read_text()
         js = _extract_fn(page, "buildYtTrace")
         g = self.a.copy(); g[:4] = 0.; g[7] = 0.; g[7, 12] = .9
         for n, marker in ((3200,48),(1600,24)):
@@ -168,7 +168,7 @@ class FixedYtTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "Node is needed for browser integration")
     def test_browser_render_entry_uses_timing_rate_and_marker_settings(self):
-        page=Path(__file__).parent.joinpath("static", "scope_renderer.js").read_text()
+        page=Path(__file__).resolve().parents[1].joinpath("static", "scope_renderer.js").read_text()
         functions="\n".join(_extract_fn(page,name) for name in
                             ("boxGrid","buildTrace","buildYtTrace","addYtTrigger",
                              "markerWindow","prependMarker","renderFromLuma"))

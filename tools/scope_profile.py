@@ -16,7 +16,8 @@ import time
 
 import numpy as np
 
-ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # repo root
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
@@ -41,7 +42,7 @@ def main():
     args = ap.parse_args()
 
     import importlib.util
-    spec = importlib.util.spec_from_file_location("ss", os.path.join(ROOT_DIR, "scope_screen.py"))
+    spec = importlib.util.spec_from_file_location("ss", os.path.join(THIS_DIR, "scope_screen.py"))
     ss = importlib.util.module_from_spec(spec)
     saved, sys.argv = sys.argv, ["x"]
     spec.loader.exec_module(ss)

@@ -29,7 +29,7 @@ def v3_coder():
 def decode_packet(audio):
     return v3.decode_packet(audio[:LAYOUT.packet], LAYOUT, v3_coder())
 
-REPO=Path(__file__).resolve().parent
+REPO=Path(__file__).resolve().parents[1]
 
 
 def source_tree(root, count=3):

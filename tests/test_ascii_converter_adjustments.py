@@ -128,7 +128,7 @@ class AsciiContrastCommandLineTest(unittest.TestCase):
         self.addCleanup(self.restore)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        path = Path(__file__).with_name("main.py")
+        path = Path(__file__).resolve().parents[1] / "main.py"
         tree = ast.parse(path.read_text(), filename=str(path))
         stop = next(i for i, node in enumerate(tree.body)
                     if isinstance(node, ast.Assign)

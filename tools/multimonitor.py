@@ -19,6 +19,10 @@ import urllib.request
 import urllib.error
 import threading
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root
+
 from server_config import ServerConfig, MODE_WEB, MODE_LOCAL, MODE_ASCII, MODE_ASCIIWEB
 
 # Default ports for each mode (from server_config.py defaults)

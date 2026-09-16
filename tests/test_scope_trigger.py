@@ -170,7 +170,7 @@ class MeasurementToolsTests(unittest.TestCase):
     """
 
     def source_of(self, filename):
-        return Path(__file__).with_name(filename).read_text()
+        return (Path(__file__).resolve().parents[1] / filename).read_text()
 
     def test_the_calibration_bench_disables_the_marker(self):
         src = self.source_of("scope_out.py")

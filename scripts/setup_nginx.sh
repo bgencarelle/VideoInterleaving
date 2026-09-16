@@ -26,7 +26,7 @@ set -euo pipefail
 # --- CONFIGURATION ---
 NGINX_AVAILABLE="/etc/nginx/sites-available/videointerleaving"
 NGINX_ENABLED="/etc/nginx/sites-enabled/videointerleaving"
-PROJECT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+PROJECT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)  # repo root = parent of scripts/
 
 # Parse command line arguments
 DRY_RUN=false

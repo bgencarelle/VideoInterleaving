@@ -129,7 +129,7 @@ class CommandLineTests(unittest.TestCase):
         self.addCleanup(self.restore)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        path = Path(__file__).with_name("main.py")
+        path = Path(__file__).resolve().parents[1] / "main.py"
         tree = ast.parse(path.read_text(), filename=str(path))
         stop = next(i for i, node in enumerate(tree.body)
                     if isinstance(node, ast.Assign)
@@ -188,7 +188,7 @@ class CommandLineTests(unittest.TestCase):
         # is the check that a CLI override is not silently dropped there.
         settings.INITIAL_ROTATION = 270
         settings.INITIAL_MIRROR = 1
-        source = Path(__file__).with_name("display_manager.py").read_text()
+        source = (Path(__file__).resolve().parents[1] / "display_manager.py").read_text()
         tree = ast.parse(source)
         cls = next(n for n in ast.walk(tree)
                    if isinstance(n, ast.ClassDef) and n.name == "DisplayState")

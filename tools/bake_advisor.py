@@ -1,8 +1,8 @@
 """
 bake_advisor.py -- what --thumb-width does YOUR content actually need?
 
-    python bake_advisor.py --xy-dir images_xy
-    python bake_advisor.py --xy-dir images_xy --rate 96000 --fps 30 --fields 2
+    python tools/bake_advisor.py --xy-dir images_xy
+    python tools/bake_advisor.py --xy-dir images_xy --rate 96000 --fps 30 --fields 2
 
 For raster the thumbnail is a hard ceiling on grid size, while stochastic uses
 its stored spatial field directly. Compact bakes store two 128px channels (raw
@@ -34,8 +34,11 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root
 
 
 def _fake_audio():
