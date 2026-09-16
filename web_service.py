@@ -203,6 +203,44 @@ class RobustHandlerMixin:
             print(f"⚠️ [Web Error] {e}", file=sys.stderr)
 
 
+def _scope_opts(path):
+    """(size, exposure) from the query string, clamped.
+
+    Size is the resolution knob AND the cpu knob and there is no way to
+    separate them: the scanlines are about 92 rows, so below ~400 px they
+    merge and the picture turns into a blob. 512 is the smallest that still
+    resolves features. Cost here is 2.4 / 4.4 / 8.0 / 13.7 ms at
+    256 / 384 / 512 / 700; a Pi will be several times that.
+    """
+    size, exposure = 512, 1.0
+    try:
+        q = parse_qs(urlparse(path).query)
+        size = max(128, min(768, int(q.get("size", [size])[0])))
+        exposure = max(0.1, min(4.0, float(q.get("exposure", [exposure])[0])))
+    except Exception:
+        pass
+    return size, exposure
+
+
+def _scope_jpeg(size, pts=None, quality=82, exposure=1.0):
+    """Render the parked trace to JPEG bytes, or None if there is nothing."""
+    try:
+        import cv2
+        from scope_out import Scope
+        from scope_bake import preview_frame
+        if pts is None:
+            Scope.want_tap(3.0)
+            _, pts = Scope.read_tap()
+        if pts is None:
+            return None
+        img = preview_frame(pts, size=size, exposure=exposure)
+        ok, buf = cv2.imencode(".jpg", img[:, :, ::-1],
+                               [cv2.IMWRITE_JPEG_QUALITY, quality])
+        return buf.tobytes() if ok else None
+    except Exception:
+        return None
+
+
 class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
     # Short timeout to prevent Slow Loris attacks on control pages
     timeout = 5
@@ -223,6 +261,29 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps(monitor_data).encode('utf-8'))
+
+        elif self.path.startswith("/scope/stream.mjpg"):
+            self._scope_mjpeg()
+
+        elif self.path.startswith("/scope/luma.mjpg"):
+            # The LUMINANCE the trace was built from, as MJPEG. The browser
+            # renders its own trace from this, at its own AudioContext rate,
+            # and plays it on its own sound card -- which is the only place it
+            # can reach the visitor's scope from.
+            self._scope_luma_stream()
+
+        elif self.path.startswith("/scope/frame.jpg"):
+            # Single still, for anything that will not hold a connection open.
+            _sz, _ex = _scope_opts(self.path)
+            blob = _scope_jpeg(_sz, exposure=_ex)
+            if blob is None:
+                self.send_response(204); self.end_headers(); return
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(blob)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(blob)
 
         elif self.path == "/log":
             try:
@@ -281,6 +342,155 @@ class MonitorHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):
 
         else:
             self.send_error(404)
+
+    def _scope_luma_stream(self):
+        """multipart JPEG of the source luminance, not the rendered trace."""
+        try:
+            import cv2
+            from scope_out import Scope
+        except Exception:
+            self.send_error(503); return
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type",
+                             "multipart/x-mixed-replace; boundary=frame")
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+            self.end_headers()
+        except (OSError, AttributeError):
+            return
+        last, idle = -1, 0.0
+        # q88: below about q80 the compression pushes cells across `trim`,
+        # which flips them from drawn to undrawn and reroutes the serpentine.
+        # Visually harmless but it is a cliff, not a slope, so stay above it.
+        enc = [cv2.IMWRITE_JPEG_QUALITY, 88]
+        try:
+            while True:
+                Scope.want_tap(3.0)
+                seq, lum = Scope.read_luma()
+                if lum is None or seq == last:
+                    time.sleep(0.01); idle += 0.01
+                    if idle > 30.0:
+                        # Nothing is producing. Returning frees the thread and
+                        # the client reconnects; holding the socket open would
+                        # look healthy to the browser while delivering nothing,
+                        # which is the failure that hides itself.
+                        return
+                    continue
+                idle = 0.0; last = seq
+                ok, buf = cv2.imencode(".jpg", lum, enc)
+                if not ok:
+                    continue
+                try:
+                    self.wfile.write(HEADER_BOUNDARY)
+                    self.wfile.write(HEADER_CTYPE_JPEG)
+                    self.wfile.write(buf.tobytes())
+                    self.wfile.write(HEADER_NEWLINE)
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError,
+                        ConnectionAbortedError, OSError):
+                    return
+                time.sleep(1.0 / max(getattr(settings, "IPS", 30), 1))
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError,
+                socket.timeout, OSError):
+            return
+        except Exception as e:
+            print(f"[Scope luma] {e}", file=sys.stderr)
+
+    def _scope_mjpeg(self):
+        """multipart/x-mixed-replace, same shape as StreamHandler.
+
+        Rendering runs HERE, on the request thread, not in the audio path.  A
+        slow client or a heavy size setting therefore costs frames on the
+        preview and nothing at all on the trace deadline.
+        """
+        size, exposure = _scope_opts(self.path)
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type",
+                             "multipart/x-mixed-replace; boundary=frame")
+            self.send_header("Cache-Control",
+                             "no-store, no-cache, must-revalidate, max-age=0")
+            self.send_header("Pragma", "no-cache")
+            self.end_headers()
+        except (OSError, AttributeError):
+            return
+
+        last_seq = -1
+        idle = 0.0
+        try:
+            from scope_out import Scope
+        except Exception:
+            return
+        try:
+            while True:
+                Scope.want_tap(3.0)          # holding the connection IS the ask
+                seq, pts = Scope.read_tap()
+                if pts is None or seq == last_seq:
+                    time.sleep(0.02)
+                    idle += 0.02
+                    if idle > 30.0:          # nothing is producing; let go
+                        return
+                    continue
+                idle = 0.0
+                last_seq = seq
+                blob = _scope_jpeg(size, pts, exposure=exposure)
+                if blob is None:
+                    continue
+                try:
+                    self.wfile.write(HEADER_BOUNDARY)
+                    self.wfile.write(HEADER_CTYPE_JPEG)
+                    self.wfile.write(blob)
+                    self.wfile.write(HEADER_NEWLINE)
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError,
+                        ConnectionAbortedError, OSError):
+                    return
+                # Cap the preview well under the trace rate. The picture only
+                # changes at IPS anyway, and this is the CPU knob.
+                time.sleep(1.0 / max(getattr(settings, "SCOPE_PREVIEW_FPS", 12), 1))
+        except (BrokenPipeError, ConnectionResetError,
+                ConnectionAbortedError, socket.timeout, OSError):
+            return
+        except Exception as e:
+            print(f"[Scope preview] {e}", file=sys.stderr)
+
+    def do_POST(self):
+        """Control endpoints.
+
+        The first POST handler in this file.  Note the ASCII panel in
+        HTML_TEMPLATE already POSTs to /ascii/size, which has never had a
+        handler and whose get_ascii_dimensions() helper is not defined
+        anywhere -- so that panel has always been dead.  This does not revive
+        it; it only adds the scope one.
+        """
+        if self.path == "/scope/device":
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                if length > 4096:                      # nothing legitimate is
+                    self.send_error(413)               # anywhere near this
+                    return
+                body = self.rfile.read(length) if length else b"{}"
+                payload = json.loads(body.decode("utf-8") or "{}")
+                # "" and null both mean the system default, which is what the
+                # page sends for its first option.
+                spec = payload.get("device")
+                if isinstance(spec, str) and not spec.strip():
+                    spec = None
+
+                import scope_display
+                scope_display.request_device(spec)
+                result = {"ok": True, "requested": spec}
+            except Exception as e:
+                result = {"ok": False, "error": str(e)}
+            blob = json.dumps(result).encode("utf-8")
+            self.send_response(200 if result.get("ok") else 400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(blob)))
+            self.end_headers()
+            self.wfile.write(blob)
+            return
+
+        self.send_error(404)
 
 
 class StreamHandler(RobustHandlerMixin, http.server.BaseHTTPRequestHandler):

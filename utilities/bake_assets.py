@@ -9,6 +9,7 @@ import logging
 import os
 import sys
 import time
+import tempfile
 import numpy as np
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
@@ -25,6 +26,42 @@ import settings
 # Force RGBA for consistency (Main + Float compatibility)
 CHANNELS = 4
 HEADLESS_RES = getattr(settings, 'HEADLESS_RES', (640, 480))
+
+
+def write_slab(files, dest_file, resolution, loader=None,
+               resample=Image.Resampling.NEAREST):
+    """Shared disk-backed RGBA bake, atomically installed after completion.
+
+    The original asset baker uses its existing resize behaviour. Modem baking
+    supplies the project's SBS/alpha loader and a smaller target resolution.
+    """
+    if not files or min(resolution) <= 0:
+        raise ValueError('A slab needs images and a positive resolution')
+    dest_file = Path(dest_file)
+    dest_file.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix='.slab-', suffix='.npy', dir=dest_file.parent)
+    os.close(fd)
+    slab = None
+    try:
+        w, h = resolution
+        slab = np.lib.format.open_memmap(temp_name, mode='w+', dtype=np.uint8,
+                                         shape=(len(files), h, w, CHANNELS))
+        for i, path in enumerate(files):
+            if loader is None:
+                with Image.open(path) as source:
+                    im = source.convert('RGBA')
+            else:
+                im = loader(path).convert('RGBA')
+            slab[i] = np.asarray(im.resize((w, h), resample))
+        slab.flush()
+        del slab
+        slab = None
+        os.replace(temp_name, dest_file)
+    finally:
+        if slab is not None:
+            del slab
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
 
 
 def setup_logging(log_level: str = "INFO") -> None:
@@ -66,26 +103,7 @@ def process_folder_to_slab(args: Tuple[Path, Path, Tuple[int, int]]) -> Optional
     Path(dest_file).parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        # Shape: (Frames, Height, Width, RGBA)
-        slab = np.lib.format.open_memmap(
-            dest_file,
-            mode='w+',
-            dtype=np.uint8,
-            shape=(count, h, w, CHANNELS)
-        )
-
-        # 3. Fill the Slab
-        for i, fp in enumerate(files):
-            with Image.open(fp) as im:
-                # Convert & Resize
-                im = im.convert('RGBA')
-                im = im.resize((w, h), Image.NEAREST)  # Nearest is fastest, use BILINEAR for quality
-
-                # Write directly to disk-backed memory
-                slab[i] = np.asarray(im)
-
-        # Flush changes to disk
-        slab.flush()
+        write_slab(files, dest_file, resolution)
         return None  # Success
 
     except Exception as e:

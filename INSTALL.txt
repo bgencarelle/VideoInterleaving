@@ -1,0 +1,99 @@
+Scope mode for VideoInterleaving -- file manifest
+=================================================
+
+MODIFY  (overwrite the repo's copies)
+    modify/main.py                  --mode scope and its --scope-* options
+    modify/settings.py              XY_DIR discovery, SCOPE_* defaults
+    modify/server_config.py         MODE_SCOPE (monitor port only, no servers)
+    modify/requirements.txt         + sounddevice
+    modify/system-requirements.txt  + libportaudio2
+    modify/gitignore.txt            -> rename to .gitignore (baked libs, *.npy)
+
+ADD  (new files)
+    add/scope_out.py                -> repo root   audio engine
+    add/scope_bake.py               -> repo root   library format + geometry
+    add/scope_display.py            -> repo root   the mode engine
+    add/test_scope_pair.py          -> repo root   preview / inspection tool
+    add/utilities/convert_to_xy.py  -> utilities/  offline baker
+    add/SCOPE_MODE.md               -> repo root   documentation
+
+UNTOUCHED
+    image_display.py, renderer.py, image_loader.py, display_manager.py,
+    folder_selector.py, index_calculator.py, make_file_lists.py,
+    midi_control.py, event_handler.py, and all server modules.
+
+
+DEPENDENCIES
+    sudo apt install libportaudio2      (Linux; macOS needs nothing extra)
+    pip install sounddevice
+    numpy / opencv / pillow are already required by the existing pipeline.
+    The RUNTIME is numpy-only -- opencv and pillow are needed by the baker.
+
+
+FIRST RUN
+
+  1. Bake the libraries (offline, once)
+
+        python utilities/convert_to_xy.py -i images -o images_xy
+
+     Bake from the highest-resolution sources you have (PNG/WebP with real
+     alpha beats the SBS JPEGs -- compression noise on the matte edge becomes
+     ragged contours). Vectorization reduces via the vertex budget, so
+     pre-downscaled sources only lose detail.
+
+  2. Bench-check the physical chain, before any content is involved
+
+        python scope_out.py
+
+     Draws a circle and a rotating square. Scope in XY mode, ~200 mV/div.
+     Fix here: mirrored/rotated output, OS volume at 100%, balance centred,
+     audio "enhancements" off, WASAPI rather than MME on Windows.
+
+  3. Inspect one folder pair on screen and scope together
+
+        python test_scope_pair.py --xy-dir images_xy --raster \
+               --fps 30 --ips 30 --trim 0.10 --exposure 0.4 --play
+
+     Keys: space play/pause, arrows step, r vector<->raster, m occlusion cull,
+     +/- intensity, [/] gamma, d density, ,/. speed, l pingpong<->loop, q quit.
+
+     Use folder 1 or higher: folder_selector deliberately skips main folder 0,
+     which is the background plate the artwork never shows.
+
+  4. Run the mode
+
+        python main.py --mode scope --dir images --xy-dir images_xy \
+               --scope-raster --scope-trim 0.10 --scope-ask
+
+
+CONFIGURATION
+    Flows CLI -> settings.SCOPE_* -> scope_display, the same way ASCII mode
+    flows through settings.ASCII_MODE. An installation can be configured once
+    in settings.py and launched with a bare --mode scope.
+
+    Scope options passed to another mode are reported as ignored, not silently
+    dropped.
+
+
+WHY SCOPE CANNOT RUN ALONGSIDE THE VIDEO
+    folder_selector.update_folder_selection() is stateful AND stochastic --
+    its RNG is seeded from time.time(). Two independent callers advance two
+    independent sequences and pick DIFFERENT folders, so two processes would
+    show different content within seconds of the first switch, not merely
+    drift. Scope mode is the sole caller in its own process, exactly as
+    image_display is in the others.
+
+
+THE ONE NUMBER THAT GOVERNS EVERYTHING
+    samples per trace = sample_rate / fps
+
+    At 48 kHz and 30 fps that is 1600 -- the entire resolution budget for one
+    image. Frame rate is not an independent parameter; it falls out of the
+    path length. Related invariant:
+
+    beam time per index = sample_rate / ips        (fixed)
+
+    Lowering fps below ips does NOT buy more samples per index; it buys fewer
+    indices, because each trace takes longer and the ones arriving meanwhile
+    are dropped. fps = ips is therefore the default: every index shown, each
+    getting the maximum possible samples in one continuous trace.

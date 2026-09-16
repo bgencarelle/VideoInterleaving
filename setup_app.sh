@@ -1,9 +1,12 @@
 #!/bin/bash
 set -euo pipefail  # Better error handling: exit on error, undefined vars, pipe failures
 
+trap 'setup_status=$?; if [ "$setup_status" -ne 0 ]; then printf "Setup failed (exit %s). See the error above.\n" "$setup_status" >&2; fi' EXIT
+
 # --- CONFIGURATION ---
 PROJECT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 VENV_DIR="$PROJECT_DIR/.venv"
+PYTHON_BIN=python3
 
 # Parse command line arguments
 DRY_RUN=false
@@ -92,7 +95,7 @@ check_port_available() {
 detect_port_usage() {
     local ports_in_use=()
     local ports_available=()
-    
+
     for port in "${DEFAULT_PORTS[@]}"; do
         if check_port_available "$port"; then
             ports_available+=("$port")
@@ -102,7 +105,7 @@ detect_port_usage() {
             log_verbose "Port $port is in use by: $process"
         fi
     done
-    
+
     if [ ${#ports_in_use[@]} -gt 0 ]; then
         log_warning "Some ports are already in use: ${ports_in_use[*]}"
         log_info "This is normal if services are already running"
@@ -113,17 +116,17 @@ detect_port_usage() {
 preflight_checks() {
     local errors=0
     local warnings=0
-    
+
     log_step "🔍 Running Pre-flight Checks..."
-    
+
     # Check Python version
-    if ! python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)" 2>/dev/null; then
-        log_error "Python 3.11+ required. Found: $(python3 --version 2>&1)"
+    if ! "$PYTHON_BIN" -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)" 2>/dev/null; then
+        log_error "Python 3.11+ required. Found: $("$PYTHON_BIN" --version 2>&1)"
         errors=$((errors + 1))
     else
-        log_success "Python version: $(python3 --version 2>&1)"
+        log_success "Python version: $("$PYTHON_BIN" --version 2>&1)"
     fi
-    
+
     # Check project directory structure
     if [ ! -f "$PROJECT_DIR/requirements.txt" ]; then
         log_error "requirements.txt not found in $PROJECT_DIR"
@@ -131,14 +134,14 @@ preflight_checks() {
     else
         log_success "requirements.txt found"
     fi
-    
+
     if [ ! -f "$PROJECT_DIR/main.py" ]; then
         log_warning "main.py not found - project may be incomplete"
         warnings=$((warnings + 1))
     else
         log_success "main.py found"
     fi
-    
+
     # Check disk space (at least 1GB free)
     if command -v df >/dev/null 2>&1; then
         local available_space=$(df "$PROJECT_DIR" | tail -1 | awk '{print $4}')
@@ -149,7 +152,7 @@ preflight_checks() {
             log_verbose "Disk space: $(df -h "$PROJECT_DIR" | tail -1 | awk '{print $4}') available"
         fi
     fi
-    
+
     # Check if systemd is available (Linux)
     if [[ "$OSTYPE" == "linux-gnu"* ]]; then
         if ! command -v systemctl >/dev/null 2>&1; then
@@ -159,10 +162,10 @@ preflight_checks() {
             log_success "systemd available"
         fi
     fi
-    
+
     # Check port availability
     detect_port_usage
-    
+
     # Summary
     if [ "$errors" -gt 0 ]; then
         log_error "Pre-flight checks failed with $errors error(s)"
@@ -183,11 +186,14 @@ fi
 log_info "Running as User: $USERNAME"
 log_info "Project Dir:     $PROJECT_DIR"
 
-# Run pre-flight checks
-if ! preflight_checks; then
-    log_error "Exiting due to validation errors"
-    exit 1
-fi
+# Python may be supplied by the selected package manager below.
+# Validate checkout inputs before installing anything.
+for requirement in requirements.txt requirements-modem.txt requirements-scope.txt system-requirements.txt utilities/check_modem_setup.py; do
+    if [ ! -f "$PROJECT_DIR/$requirement" ]; then
+        log_error "Missing $requirement; update the complete checkout"
+        exit 1
+    fi
+done
 
 # --------------------------------------------
 # 0. OS Detection & Package Manager Setup
@@ -198,17 +204,27 @@ detect_os() {
     local pkg_update_cmd=""
     local pkg_install_cmd=""
     local needs_sudo=true
-    
+
     if [[ "$OSTYPE" == "darwin"* ]]; then
         # macOS
         os="macos"
-        if command -v brew >/dev/null 2>&1; then
+        local port_bin brew_bin
+        port_bin=$(command -v port || true)
+        brew_bin=$(command -v brew || true)
+        if [ -z "$port_bin" ] && [ -x /opt/local/bin/port ]; then port_bin=/opt/local/bin/port; fi
+        if [ -z "$brew_bin" ] && [ -x /opt/homebrew/bin/brew ]; then brew_bin=/opt/homebrew/bin/brew; fi
+        if [ -z "$brew_bin" ] && [ -x /usr/local/bin/brew ]; then brew_bin=/usr/local/bin/brew; fi
+        if [ -n "$port_bin" ]; then
+            pkg_manager="port"
+            pkg_update_cmd="$port_bin selfupdate"
+            pkg_install_cmd="$port_bin install"
+        elif [ -n "$brew_bin" ]; then
             pkg_manager="brew"
-            pkg_update_cmd="brew update"
-            pkg_install_cmd="brew install"
+            pkg_update_cmd="$brew_bin update"
+            pkg_install_cmd="$brew_bin install"
             needs_sudo=false
         else
-            echo "❌ ERROR: Homebrew not found. Install from https://brew.sh"
+            echo "ERROR: Install MacPorts (https://www.macports.org/install.php) or Homebrew (https://brew.sh), then rerun setup." >&2
             exit 1
         fi
     elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
@@ -241,8 +257,8 @@ detect_os() {
                     pkg_install_cmd="pacman -S --noconfirm"
                     ;;
                 *)
-                    echo "⚠️  WARNING: Unsupported Linux distribution: $ID"
-                    echo "   Attempting Debian/Ubuntu package names..."
+                    echo "⚠️  WARNING: Unsupported Linux distribution: $ID" >&2
+                    echo "   Attempting Debian/Ubuntu package names..." >&2
                     os="debian"
                     pkg_manager="apt"
                     pkg_update_cmd="apt update -qq"
@@ -250,17 +266,17 @@ detect_os() {
                     ;;
             esac
         else
-            echo "⚠️  WARNING: Cannot detect Linux distribution. Assuming Debian/Ubuntu."
+            echo "⚠️  WARNING: Cannot detect Linux distribution. Assuming Debian/Ubuntu." >&2
             os="debian"
             pkg_manager="apt"
             pkg_update_cmd="apt update -qq"
             pkg_install_cmd="apt install -y"
         fi
     else
-        echo "❌ ERROR: Unsupported OS: $OSTYPE"
+        echo "❌ ERROR: Unsupported OS: $OSTYPE" >&2
         exit 1
     fi
-    
+
     echo "$os|$pkg_manager|$pkg_update_cmd|$pkg_install_cmd|$needs_sudo"
 }
 
@@ -277,6 +293,7 @@ read_pkg_file() {
 # Get platform-specific packages based on README.md instructions
 get_packages_for_platform() {
     local os=$1
+    local manager=${2:-}
     local pkg_list=""
 
     case "$os" in
@@ -293,7 +310,7 @@ get_packages_for_platform() {
         rhel)
             # From README.md (Fedora/CentOS)
             pkg_list="python3 python3-pip python3-devel gcc gcc-c++ make cmake pkgconfig \
-libwebp-devel libjpeg-turbo-devel SDL2-devel alsa-lib-devel \
+libwebp-devel libjpeg-turbo-devel SDL2-devel alsa-lib-devel portaudio python3-tkinter python3-opencv \
 mesa-libGL-devel mesa-libGLU-devel mesa-libEGL-devel mesa-libGLES-devel \
 libglvnd-devel glfw-devel mesa-utils \
 chrony ninja-build bind-utils certbot python3-certbot-nginx"
@@ -301,12 +318,16 @@ chrony ninja-build bind-utils certbot python3-certbot-nginx"
         arch)
             # Arch Linux equivalents
             pkg_list="python python-pip base-devel cmake pkg-config ninja \
-libwebp libjpeg-turbo sdl2 alsa-lib mesa glu glfw \
+libwebp libjpeg-turbo sdl2 alsa-lib mesa glu glfw portaudio tk python-opencv ffmpeg \
 chrony bind-tools certbot certbot-nginx"
             ;;
         macos)
-            # From README.md (macOS/Homebrew) - minimal set
-            pkg_list="python webp pkg-config sdl2 chrony jpeg-turbo"
+            # Package names differ by manager (MacPorts uses webp, not libwebp).
+            if [ "$manager" = port ]; then
+                pkg_list="python312 py312-pip py312-numpy py312-scipy py312-Pillow py312-tkinter py312-opencv4 portaudio webp pkgconfig libsdl2 chrony libjpeg-turbo glfw ffmpeg"
+            else
+                pkg_list="python@3.12 python-tk@3.12 portaudio webp pkg-config sdl2 chrony jpeg-turbo glfw ffmpeg"
+            fi
             # Note: certbot on macOS is typically installed via pip or brew separately
             ;;
         *)
@@ -338,7 +359,8 @@ remap_packages_for_platform() {
                     log_info "Remapping $pkg -> libjpeg-dev (generic fallback)" >&2
                     remapped="$remapped libjpeg-dev"
                 else
-                    log_warning "No libjpeg-turbo package found for: $pkg — skipping" >&2
+                    log_warning "No libjpeg-turbo replacement found for: $pkg — retaining for failure report" >&2
+                    remapped="$remapped $pkg"
                 fi
                 ;;
             wlrctl)
@@ -358,61 +380,66 @@ remap_packages_for_platform() {
     echo "$remapped" | sed 's/^ *//'
 }
 
-# Install system packages
+# Attempt every native package and retain the complete output for diagnosis.
 install_system_packages() {
-    local os=$1
-    local pkg_manager=$2
-    local update_cmd=$3
-    local install_cmd=$4
-    local needs_sudo=$5
-    
-    echo ">>> 📦 Installing system libraries ($pkg_manager)..."
-    
-    local packages=$(get_packages_for_platform "$os")
-    
-    if [ -z "$packages" ]; then
-        echo "⚠️  WARNING: No packages defined for platform: $os"
-        return
-    fi
-
-    # Remap package names for Debian-based distros (handles Armbian, etc.)
-    if [ "$pkg_manager" = "apt" ]; then
-        # Update package lists first so apt-cache is accurate
-        if [ "$DRY_RUN" = false ]; then
-            if [ "$needs_sudo" = "true" ]; then
-                sudo $update_cmd || true
-            else
-                $update_cmd || true
-            fi
-        fi
-        packages=$(remap_packages_for_platform "$packages")
-        if [ -z "$packages" ]; then
-            log_warning "No installable packages remain after remapping"
-            return
-        fi
-    fi
-    
+    local os=$1 pkg_manager=$2 update_cmd=$3 install_cmd=$4 needs_sudo=$5
+    local packages package status
+    local failure_count=0
+    local failures=()
+    local prefix=()
+    local update_words=() install_words=()
+    local install_log="$PROJECT_DIR/setup-packages.log"
+    packages=$(get_packages_for_platform "$os" "$pkg_manager")
+    read -r -a update_words <<< "$update_cmd"
+    read -r -a install_words <<< "$install_cmd"
+    if [ "$needs_sudo" = true ]; then prefix=(sudo); fi
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] Would run: $update_cmd"
-        if [ "$needs_sudo" = "true" ]; then
-            echo "[DRY-RUN] Would run: sudo $install_cmd $packages"
-        else
-            echo "[DRY-RUN] Would run: $install_cmd $packages"
-        fi
-        echo "[DRY-RUN] Packages to install: $packages"
-        return
+        echo "[DRY-RUN] Would update $pkg_manager and attempt each package separately: $packages"
+        return 0
     fi
-    
-    # Install packages (update already done above for apt)
-    if [ "$needs_sudo" = "true" ]; then
-        if [ "$pkg_manager" != "apt" ]; then
-            sudo $update_cmd || true
-        fi
-        sudo $install_cmd $packages
+    : > "$install_log"
+    # Confirm credentials once; cancelled sudo must not trigger a prompt per package.
+    if [ "$needs_sudo" = true ]; then sudo -v; fi
+    echo ">>> Installing system libraries ($pkg_manager); log: $install_log"
+    # The older dnf/yum command strings include shell '|| true'. Do not pass
+    # those tokens as package-manager arguments. Exit 100 means updates exist.
+    if [ "$pkg_manager" = dnf ] || [ "$pkg_manager" = yum ]; then
+        update_words=("$pkg_manager" check-update -q)
+    fi
+    if ${prefix[@]+"${prefix[@]}"} "${update_words[@]}" >> "$install_log" 2>&1; then
+        status=0
     else
-        # Homebrew doesn't need sudo
-        $update_cmd || true
-        $install_cmd $packages
+        status=$?
+    fi
+    if [ "$status" -ne 0 ] && ! { [ "$status" -eq 100 ] && { [ "$pkg_manager" = dnf ] || [ "$pkg_manager" = yum ]; }; }; then
+        failures+=("Package index update (exit $status)")
+        failure_count=$((failure_count + 1))
+        echo "Package index update failed; attempting packages using the available index." >&2
+    fi
+    if [ "$pkg_manager" = apt ]; then
+        packages=$(remap_packages_for_platform "$packages")
+    fi
+    for package in $packages; do
+        printf '\n>>> %s: %s\n' "$pkg_manager" "$package" | tee -a "$install_log"
+        if ${prefix[@]+"${prefix[@]}"} "${install_words[@]}" "$package" 2>&1 | tee -a "$install_log"; then
+            echo "Installed/available: $package"
+        else
+            # PIPESTATUS must be captured before running another command.
+            local pipeline_status=("${PIPESTATUS[@]}")
+            status=${pipeline_status[0]}
+            if [ "$status" -eq 0 ]; then status=${pipeline_status[1]}; fi
+            failures+=("$package (exit $status)")
+            failure_count=$((failure_count + 1))
+            echo "FAILED: $package; continuing with remaining packages." >&2
+        fi
+    done
+    if [ "$failure_count" -gt 0 ]; then
+        {
+            printf '\nSystem dependency failures (%s):\n' "$failure_count"
+            printf '  - %s\n' "${failures[@]}"
+            printf 'Full output: %s\nFix these failures and rerun setup. Python/service setup has not started.\n' "$install_log"
+        } | tee -a "$install_log" >&2
+        return 1
     fi
 }
 
@@ -436,8 +463,29 @@ NEEDS_SUDO=$(echo "$OS_INFO" | cut -d'|' -f5)
 
 echo "    OS: $OS | Package Manager: $PKG_MANAGER"
 
+# Use the interpreter belonging to the native Tk/scientific packages.
+if [ "$PKG_MANAGER" = port ]; then
+    manager_executable=${PKG_INSTALL% install}
+    PYTHON_BIN="$(dirname "$manager_executable")/python3.12"
+    export PATH="$(dirname "$manager_executable"):$PATH"
+elif [ "$PKG_MANAGER" = brew ]; then
+    manager_executable=${PKG_INSTALL% install}
+    PYTHON_BIN="$("$manager_executable" --prefix)/opt/python@3.12/bin/python3.12"
+    export PATH="$(dirname "$manager_executable"):$PATH"
+fi
+
 # Install system packages
 install_system_packages "$OS" "$PKG_MANAGER" "$PKG_UPDATE" "$PKG_INSTALL" "$NEEDS_SUDO"
+
+if [ "$DRY_RUN" = false ]; then
+    if ! preflight_checks; then
+        log_error "Exiting due to validation errors"
+        exit 1
+    fi
+else
+    log_info "[DRY-RUN] Would validate Python and dependencies with $PYTHON_BIN"
+fi
+
 
 # Add user to video/render groups (Linux only)
 if [[ "$OSTYPE" == "linux-gnu"* ]] && [ "$HAS_GPU" = true ] && [ "$USERNAME" != "root" ]; then
@@ -445,14 +493,14 @@ if [[ "$OSTYPE" == "linux-gnu"* ]] && [ "$HAS_GPU" = true ] && [ "$USERNAME" != 
     user_groups=$(groups "$USERNAME" 2>/dev/null || id -Gn "$USERNAME" 2>/dev/null || echo "")
     needs_video=false
     needs_render=false
-    
+
     if ! echo "$user_groups" | grep -q "\bvideo\b"; then
         needs_video=true
     fi
     if ! echo "$user_groups" | grep -q "\brender\b"; then
         needs_render=true
     fi
-    
+
     if [ "$needs_video" = true ] || [ "$needs_render" = true ]; then
         if [ "$DRY_RUN" = true ]; then
             log_info "[DRY-RUN] Would add user $USERNAME to groups: video, render"
@@ -468,30 +516,51 @@ if [[ "$OSTYPE" == "linux-gnu"* ]] && [ "$HAS_GPU" = true ] && [ "$USERNAME" != 
 fi
 
 # --- VENV DETECTION & VALIDATION ---
+requirements_hash() {
+    "$PYTHON_BIN" - "$PROJECT_DIR" <<'PYHASH'
+import hashlib, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+h = hashlib.sha256()
+for name in ('requirements.txt', 'requirements-modem.txt', 'requirements-scope.txt'):
+    h.update(name.encode()); h.update((root / name).read_bytes())
+print(h.hexdigest())
+PYHASH
+}
+
 check_venv_valid() {
     if [ ! -d "$VENV_DIR" ]; then
         return 1  # Venv doesn't exist
     fi
-    
+
     if [ ! -f "$VENV_DIR/bin/python" ]; then
         return 1  # Python executable missing
     fi
-    
+
     # Check Python version matches
     local venv_python_version=$("$VENV_DIR/bin/python" --version 2>&1 | awk '{print $2}')
-    local system_python_version=$(python3 --version 2>&1 | awk '{print $2}')
-    
+    local system_python_version=$("$PYTHON_BIN" --version 2>&1 | awk '{print $2}')
+
     if [ "$venv_python_version" != "$system_python_version" ]; then
         log_verbose "Venv Python version ($venv_python_version) differs from system ($system_python_version)"
         return 1
     fi
-    
+
+    if ! "$VENV_DIR/bin/python" - "$PYTHON_BIN" <<'PYCHECK'
+import pathlib, subprocess, sys
+selected = subprocess.check_output([sys.argv[1], '-c', 'import sys; print(sys.base_prefix)'], text=True).strip()
+sys.exit(pathlib.Path(selected).resolve() != pathlib.Path(sys.base_prefix).resolve())
+PYCHECK
+    then
+        log_verbose "Venv belongs to a different Python installation"
+        return 1
+    fi
+
     # Check if key packages are installed
     if ! "$VENV_DIR/bin/python" -c "import moderngl" 2>/dev/null; then
         log_verbose "Key package 'moderngl' not found in venv"
         return 1
     fi
-    
+
     return 0  # Venv is valid
 }
 
@@ -506,12 +575,12 @@ VENV_NEEDS_UPDATE=false
 if check_venv_valid; then
     log_success "Existing venv found and validated"
     VENV_NEEDS_CREATE=false
-    
+
     # Check if requirements are up to date
     if [ -f "$PROJECT_DIR/requirements.txt" ]; then
-        req_hash=$(md5sum "$PROJECT_DIR/requirements.txt" 2>/dev/null | awk '{print $1}' || echo "")
+        req_hash=$(requirements_hash)
         venv_req_hash_file="$VENV_DIR/.requirements_hash"
-        
+
         if [ -f "$venv_req_hash_file" ]; then
             stored_hash=$(cat "$venv_req_hash_file" 2>/dev/null || echo "")
             if [ "$req_hash" != "$stored_hash" ]; then
@@ -545,17 +614,17 @@ if [ "$DRY_RUN" = true ]; then
     else
         log_info "[DRY-RUN] Venv is up to date - no changes needed"
     fi
-    
+
     if [ "$VENV_NEEDS_CREATE" = true ] || [ "$VENV_NEEDS_UPDATE" = true ]; then
         if [ "$OS" = "macos" ] || [ "$USERNAME" = "$(whoami)" ]; then
             if [ "$VENV_NEEDS_CREATE" = true ]; then
-                log_info "[DRY-RUN] Would run: python3 -m venv --system-site-packages $VENV_DIR"
+                log_info "[DRY-RUN] Would run: $PYTHON_BIN -m venv --system-site-packages $VENV_DIR"
             fi
             log_info "[DRY-RUN] Would run: $VENV_DIR/bin/pip install --upgrade pip wheel"
             log_info "[DRY-RUN] Would run: $VENV_DIR/bin/pip install -r $PROJECT_DIR/requirements.txt"
         else
             if [ "$VENV_NEEDS_CREATE" = true ]; then
-                log_info "[DRY-RUN] Would run: sudo -u $USERNAME python3 -m venv --system-site-packages $VENV_DIR"
+                log_info "[DRY-RUN] Would run: sudo -u $USERNAME $PYTHON_BIN -m venv --system-site-packages $VENV_DIR"
             fi
             log_info "[DRY-RUN] Would run: sudo -u $USERNAME $VENV_DIR/bin/pip install --upgrade pip wheel"
             log_info "[DRY-RUN] Would run: sudo -u $USERNAME $VENV_DIR/bin/pip install -r $PROJECT_DIR/requirements.txt"
@@ -564,7 +633,7 @@ if [ "$DRY_RUN" = true ]; then
 else
     if [ "$VENV_NEEDS_CREATE" = true ]; then
         # Remove existing invalid venv
-        if [ -d "$VENV_DIR" ]; then 
+        if [ -d "$VENV_DIR" ]; then
             log_info "Removing existing venv..."
             rm -rf "$VENV_DIR"
         fi
@@ -572,9 +641,9 @@ else
         # Create venv with appropriate ownership
         log_info "Creating venv..."
         if [ "$OS" = "macos" ] || [ "$USERNAME" = "$(whoami)" ]; then
-            python3 -m venv --system-site-packages "$VENV_DIR"
+            "$PYTHON_BIN" -m venv --system-site-packages "$VENV_DIR"
         else
-            sudo -u "$USERNAME" python3 -m venv --system-site-packages "$VENV_DIR"
+            sudo -u "$USERNAME" "$PYTHON_BIN" -m venv --system-site-packages "$VENV_DIR"
         fi
         log_success "Venv created"
     fi
@@ -583,7 +652,7 @@ else
     if [ "$VENV_NEEDS_CREATE" = true ] || [ "$VENV_NEEDS_UPDATE" = true ]; then
         VENV_PIP="$VENV_DIR/bin/pip"
         log_info "Installing/updating Python packages..."
-        
+
         if [ "$OS" = "macos" ] || [ "$USERNAME" = "$(whoami)" ]; then
             "$VENV_PIP" install --upgrade pip wheel
             "$VENV_PIP" install -r "$PROJECT_DIR/requirements.txt"
@@ -591,14 +660,30 @@ else
             sudo -u "$USERNAME" "$VENV_PIP" install --upgrade pip wheel
             sudo -u "$USERNAME" "$VENV_PIP" install -r "$PROJECT_DIR/requirements.txt"
         fi
-        
+
         # Store requirements hash
         if [ -f "$PROJECT_DIR/requirements.txt" ]; then
-            md5sum "$PROJECT_DIR/requirements.txt" 2>/dev/null | awk '{print $1}' > "$VENV_DIR/.requirements_hash" || true
+            requirements_hash > "$VENV_DIR/.requirements_hash"
         fi
-        
+
         log_success "Python packages installed/updated"
     fi
+fi
+
+# Scope uses OpenCV for baking/video and mss for screen capture. Avoid
+# installing a second OpenCV over compatible OS/MacPorts bindings.
+if [ "$DRY_RUN" = false ]; then
+    if ! "$VENV_DIR/bin/python" -c 'import cv2' >/dev/null 2>&1; then
+        if [ "$OS" = macos ] || [ "$USERNAME" = "$(whoami)" ]; then
+            "$VENV_DIR/bin/python" -m pip install 'opencv-python>=4.5'
+        else
+            sudo -u "$USERNAME" "$VENV_DIR/bin/python" -m pip install 'opencv-python>=4.5'
+        fi
+    fi
+    "$VENV_DIR/bin/python" "$PROJECT_DIR/utilities/check_modem_setup.py"
+    "$VENV_DIR/bin/python" -c 'import cv2, mss; print("Scope dependencies available (OpenCV and mss).")'
+else
+    log_info "[DRY-RUN] Would check modem/scope imports and install OpenCV if missing"
 fi
 
 # --------------------------------------------
@@ -643,43 +728,43 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
             echo "wayland"
             return
         fi
-        
+
         if [ -n "${DISPLAY:-}" ]; then
             echo "x11"
             return
         fi
-        
+
         if [ -S "/tmp/.X11-unix/X0" ] 2>/dev/null; then
             echo "x11"
             return
         fi
-        
+
         for socket in /tmp/.X11-unix/X*; do
             if [ -S "$socket" ] 2>/dev/null; then
                 echo "x11"
                 return
             fi
         done
-        
+
         if [ -c "/dev/fb0" ] 2>/dev/null; then
             echo "framebuffer"
             return
         fi
-        
+
         echo "x11"
     }
 
     get_user_display() {
         local user=$1
         local display=""
-        
+
         if command -v loginctl >/dev/null 2>&1; then
             local session=$(loginctl list-sessions --user="$user" --no-legend 2>/dev/null | head -n1 | awk '{print $1}')
             if [ -n "$session" ]; then
                 display=$(loginctl show-session "$session" -p Display --value 2>/dev/null || echo "")
             fi
         fi
-        
+
         if [ -z "$display" ]; then
             if [ -S "/tmp/.X11-unix/X0" ] 2>/dev/null; then
                 display=":0"
@@ -693,7 +778,7 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
                 done
             fi
         fi
-        
+
         echo "${display:-:0}"
     }
 
@@ -701,18 +786,18 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
         local user=$1
         local xauth_path=""
         local home_dir=$(eval echo ~"$user")
-        
+
         if [ -f "$home_dir/.Xauthority" ]; then
             xauth_path="$home_dir/.Xauthority"
         fi
-        
+
         if [ -z "$xauth_path" ] && command -v loginctl >/dev/null 2>&1; then
             local session=$(loginctl list-sessions --user="$user" --no-legend 2>/dev/null | head -n1 | awk '{print $1}')
             if [ -n "$session" ]; then
                 xauth_path=$(loginctl show-session "$session" -p XAuthority --value 2>/dev/null || echo "")
             fi
         fi
-        
+
         echo "$xauth_path"
     }
 fi
@@ -757,7 +842,7 @@ fi
     DISPLAY_TYPE=$(detect_display)
     DISPLAY_VAR=$(get_user_display "$USERNAME")
     XAUTH_PATH=$(get_xauthority "$USERNAME")
-    
+
     # Build display environment block
     if [ "$DISPLAY_TYPE" = "wayland" ]; then
         WAYLAND_DISPLAY_VAR=${WAYLAND_DISPLAY:-wayland-0}
@@ -773,13 +858,13 @@ Environment=XAUTHORITY=$XAUTH_PATH"
     else
         ENV_DISPLAY="# Framebuffer mode - no DISPLAY needed"
     fi
-    
+
     # Check which services exist
     WEB_SERVICE_EXISTS=false
     ASCII_SERVICE_EXISTS=false
     ASCIIWEB_SERVICE_EXISTS=false
     LOCAL_SERVICE_EXISTS=false
-    
+
     if check_systemd_service_exists "vi-web.service"; then
         WEB_SERVICE_EXISTS=true
         log_info "Existing vi-web.service found"
@@ -796,7 +881,7 @@ Environment=XAUTHORITY=$XAUTH_PATH"
         LOCAL_SERVICE_EXISTS=true
         log_info "Existing vi-local.service found"
     fi
-    
+
     if [ "$DRY_RUN" = true ]; then
         if [ "$WEB_SERVICE_EXISTS" = true ]; then
             log_info "[DRY-RUN] Would update /etc/systemd/system/vi-web.service"
@@ -952,7 +1037,7 @@ EOF
         if [ "$LOCAL_SERVICE_EXISTS" = true ]; then
             backup_systemd_service "vi-local.service"
         fi
-        
+
         # Stop services before rewriting (good practice)
         # Only stop if services are actually running to avoid errors on low-end systems
         log_info "Stopping existing services before update..."
@@ -962,7 +1047,7 @@ EOF
                 sudo systemctl stop "$service.service" 2>/dev/null || true
             fi
         done
-        
+
         # Create/update services
         if [ "$WEB_SERVICE_EXISTS" = true ]; then
             log_info "Updating vi-web.service..."
@@ -1057,7 +1142,7 @@ EOF
         if [ "$DRY_RUN" = false ] && [ -d "$USER_HOME" ]; then
             log_info "Creating user service for local mode (better GUI compatibility)..."
             mkdir -p "$USER_SERVICE_DIR"
-            
+
             # Create user service
             cat <<EOF > "$USER_SERVICE_DIR/vi-local.service"
 [Unit]
@@ -1083,7 +1168,7 @@ EOF
             log_success "User service created at $USER_SERVICE_DIR/vi-local.service"
             log_info "Enable with: systemctl --user enable --now vi-local.service"
         fi
-        
+
         # Also create system service as fallback (but note it may not work for GUI)
         log_info "Creating system service for local mode (fallback)..."
         sudo tee "/etc/systemd/system/vi-local.service" > /dev/null <<EOF
@@ -1115,11 +1200,11 @@ EOF
         log_info "Reloading systemd daemon..."
 sudo systemctl daemon-reload
         log_success "Systemd daemon reloaded"
-        
+
         # Restart services that existed before (they were updated)
         log_info "Restarting updated services..."
         services_restarted=0
-        
+
         # Check and restart each service if it existed
         if [ "$WEB_SERVICE_EXISTS" = true ]; then
             if sudo systemctl is-enabled --quiet vi-web.service 2>/dev/null; then
@@ -1132,7 +1217,7 @@ sudo systemctl daemon-reload
                 fi
             fi
         fi
-        
+
         if [ "$ASCII_SERVICE_EXISTS" = true ]; then
             if sudo systemctl is-enabled --quiet vi-ascii.service 2>/dev/null; then
                 log_info "Restarting vi-ascii.service..."
@@ -1144,7 +1229,7 @@ sudo systemctl daemon-reload
                 fi
             fi
         fi
-        
+
         if [ "$ASCIIWEB_SERVICE_EXISTS" = true ]; then
             if sudo systemctl is-enabled --quiet vi-asciiweb.service 2>/dev/null; then
                 log_info "Restarting vi-asciiweb.service..."
@@ -1156,7 +1241,7 @@ sudo systemctl daemon-reload
                 fi
             fi
         fi
-        
+
         if [ "$LOCAL_SERVICE_EXISTS" = true ]; then
             if sudo systemctl is-enabled --quiet vi-local.service 2>/dev/null; then
                 log_info "Restarting vi-local.service (system service)..."
@@ -1167,7 +1252,7 @@ sudo systemctl daemon-reload
                     log_warning "Failed to restart vi-local.service (system) (may not be running)"
                 fi
             fi
-            
+
             # Also restart user service for local mode if it exists
             USER_HOME=$(eval echo ~"$USERNAME" 2>/dev/null || getent passwd "$USERNAME" 2>/dev/null | cut -d: -f6 || echo "")
             if [ -n "$USER_HOME" ] && [ -f "$USER_HOME/.config/systemd/user/vi-local.service" ]; then
@@ -1177,14 +1262,14 @@ sudo systemctl daemon-reload
                 fi
             fi
         fi
-        
+
         if [ "$services_restarted" -gt 0 ]; then
             log_success "Restarted $services_restarted service(s)"
         else
             log_info "No services were restarted (either new services or not enabled)"
         fi
     fi
-    
+
     echo ""
     log_info "To enable and start services, run:"
     echo "   👉 Web Mode:   systemctl enable --now vi-web"
@@ -1197,9 +1282,9 @@ sudo systemctl daemon-reload
 else
     log_step "⚙️  Skipping Systemd Services (not available on this system)"
     if [ "$OS" = "macos" ]; then
-        log_info "On macOS, run manually: $VENV_DIR/bin/python -O main.py --mode <web|ascii|asciiweb|local>"
+        log_info "On macOS, run manually: $VENV_DIR/bin/python -O main.py --mode <web|ascii|asciiweb|local|scope|modem>"
     else
-        log_info "Run manually: $VENV_DIR/bin/python -O main.py --mode <web|ascii|asciiweb|local>"
+        log_info "Run manually: $VENV_DIR/bin/python -O main.py --mode <web|ascii|asciiweb|local|scope|modem>"
     fi
 fi
 
@@ -1208,7 +1293,7 @@ fi
 # --------------------------------------------
 if command -v ufw >/dev/null 2>&1; then
     log_step "🔥 Configuring Firewall..."
-    
+
     # Check if firewall is active
     firewall_status=$(ufw status 2>/dev/null | head -1 || echo "inactive")
     if echo "$firewall_status" | grep -q "inactive"; then
@@ -1216,7 +1301,7 @@ if command -v ufw >/dev/null 2>&1; then
     else
         log_success "UFW firewall is active"
     fi
-    
+
     ports_to_add=(
         "1978/tcp:Monitor (WEB mode)"
         "1980/tcp:Monitor (ASCIIWEB mode)"
@@ -1227,7 +1312,7 @@ if command -v ufw >/dev/null 2>&1; then
         "8080/tcp:Web stream"
         "8888/tcp:Monitor (LOCAL mode)"
     )
-    
+
     if [ "$DRY_RUN" = true ]; then
         for port_info in "${ports_to_add[@]}"; do
             port=$(echo "$port_info" | cut -d: -f1)
@@ -1261,7 +1346,7 @@ if [ "$DRY_RUN" = true ]; then
     log_info "Run without --dry-run to apply these changes"
 else
     log_success "App Setup Complete"
-    
+
     # Summary of what was done
     echo ""
     log_info "Summary:"
@@ -1272,7 +1357,7 @@ else
     else
         echo "   ⏭️  Python virtual environment (already up to date)"
     fi
-    
+
     if [[ "$OSTYPE" == "linux-gnu"* ]] && command -v systemctl >/dev/null 2>&1; then
         if [ "$WEB_SERVICE_EXISTS" = true ] || [ "$ASCII_SERVICE_EXISTS" = true ] || [ "$ASCIIWEB_SERVICE_EXISTS" = true ] || [ "$LOCAL_SERVICE_EXISTS" = true ]; then
             echo "   ✅ Updated systemd services"

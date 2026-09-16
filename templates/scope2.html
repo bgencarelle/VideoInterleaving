@@ -1,0 +1,271 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scope Monitor — Stream & Audio</title>
+    <style>
+        body {
+            background: #111;
+            color: #0f0;
+            font-family: monospace;
+            padding: 1em;
+            margin: 0;
+            box-sizing: border-box;
+        }
+
+        a {
+            color: #0f0;
+        }
+
+        h2.section {
+            color: #0f0;
+            border-bottom: 1px solid #333;
+            padding-bottom: 0.5em;
+            margin-top: 1.5em;
+        }
+
+        .control-panel {
+            margin-top: 2em;
+            padding: 1em;
+            border: 1px solid #333;
+            background: #0a0a0a;
+        }
+
+        .control-panel h2 {
+            margin-top: 0;
+            color: #0f0;
+            border-bottom: 1px solid #333;
+            padding-bottom: 0.5em;
+        }
+
+        .dim-controls {
+            display: flex;
+            gap: 1em;
+            align-items: center;
+            margin: 1em 0;
+            flex-wrap: wrap;
+        }
+
+        .dim-controls select {
+            background: #111;
+            border: 1px solid #333;
+            color: #0f0;
+            padding: 0.5em;
+            font-family: monospace;
+            min-width: 150px;
+        }
+
+        .dim-controls button, .preset-btn {
+            background: #0f0;
+            color: #000;
+            border: none;
+            padding: 0.5em 1em;
+            font-family: monospace;
+            cursor: pointer;
+            font-weight: bold;
+        }
+
+        .preset-btn {
+            background: #222;
+            color: #0f0;
+            border: 1px solid #333;
+            font-weight: normal;
+        }
+
+        .dim-controls button:hover, .preset-btn:hover {
+            background: #0a0;
+            color: #000;
+        }
+
+        .dim-controls button:disabled {
+            background: #333;
+            color: #666;
+            cursor: default;
+        }
+
+        .current-dims {
+            color: #0f0;
+            font-weight: bold;
+            margin: 0.5em 0;
+        }
+
+        .warn {
+            color: #fa0;
+            font-size: 0.9em;
+        }
+
+        .scope-wrap {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            width: 100%;
+        }
+
+        /* Fit the complete scope screen inside the viewport, like web/ASCII. */
+        #scope-img {
+            background: #000;
+            border: 1px solid #333;
+            width: 100%;
+            height: 100vh;
+            display: block;
+            box-sizing: border-box;
+            object-fit: contain;
+        }
+
+        .scope-meta {
+            color: #888;
+            margin-top: 0.5em;
+            font-size: 0.9em;
+        }
+
+        .scope-meta label {
+            color: #0f0;
+            margin-right: 1em;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+
+<div class="scope-wrap">
+    <img id="scope-img" alt="scope output">
+    <div class="scope-meta">
+        <label><input type="checkbox" id="preview-on" checked> live preview</label>
+        <label>quality
+            <select id="preview-size">
+                <option value="256">256</option>
+                <option value="384">384</option>
+                <option value="512">512</option>
+                <option value="700" selected>700 &mdash; default, sharpest</option>
+            </select>
+        </label>
+        <label>exposure
+            <select id="preview-exposure">
+                <option value="0.4">0.4</option>
+                <option value="0.7">0.7</option>
+                <option value="1.0" selected>1.0</option>
+                <option value="1.6">1.6</option>
+            </select>
+        </label>
+        <span id="preview-note"></span>
+    </div>
+</div>
+
+<div class="control-panel" id="local-audio">
+    <h2>Play on your own scope</h2>
+    <div class="current-dims" id="local-status">Not running.</div>
+    <div class="dim-controls">
+        <button id="local-btn" onclick="toggleLocal()">Start audio</button>
+      <span id="output-label" aria-live="polite">Output: system default</span>
+        <label>trim
+            <select id="local-trim">
+                <option value="0.02">0.02</option>
+                <option value="0.10" selected>0.10</option>
+                <option value="0.16">0.16</option>
+            </select>
+        </label>
+        <label>gamma
+            <select id="local-gamma">
+                <option value="1.8">1.8</option>
+                <option value="2.2" selected>2.2</option>
+                <option value="2.6">2.6</option>
+            </select>
+        </label>
+    </div>
+    <div class="dim-controls">
+        <button class="preset-btn" id="sink-btn" onclick="chooseOutput()">
+            Choose output device
+        </button>
+        <select id="sink-select" style="display:none"></select>
+        <span id="sink-status"></span>
+    </div>
+    <div class="warn">
+        Connect your scope to this machine's audio output and set it to XY.
+        Left is X, right is Y. Turn the volume up full &mdash; the level is the
+        picture size, and anything the operating system does to the signal
+        (EQ, "enhancements", spatial audio) will distort it.
+        <br><br>
+        Audio goes to your system's default output unless you pick another.
+        Where supported, the picker requests output access only. Otherwise,
+        select the output in system sound settings before starting.
+        This page never requests microphone access.
+    </div>
+    <img id="luma-src" style="display:none" alt="">
+</div>
+
+<script src="/static/scope_renderer.js"></script>
+<script>
+    // ---------------------------------------------------------------- preview
+    const img = document.getElementById("scope-img");
+    const onBox = document.getElementById("preview-on");
+    const sizeSel = document.getElementById("preview-size");
+    const expSel = document.getElementById("preview-exposure");
+
+    function note(t) {
+        document.getElementById("preview-note").textContent = t;
+    }
+
+    function startPreview() {
+        const s = sizeSel.value;
+        img.src = "scope/stream.mjpg?size=" + s
+                + "&exposure=" + expSel.value + "&t=" + Date.now();
+        note(Number(s) < 512
+                ? "below 512 the scanlines merge \u2014 expect a blob, not features"
+                : "");
+    }
+
+    function stopPreview() {
+        img.removeAttribute("src");
+        note("preview off");
+    }
+
+    onBox.onchange = () => onBox.checked ? startPreview() : stopPreview();
+    sizeSel.onchange = () => {
+        if (onBox.checked) startPreview();
+    };
+    expSel.onchange = () => {
+        if (onBox.checked) startPreview();
+    };
+
+    img.onerror = () => {
+        note("preview dropped, reconnecting\u2026");
+        setTimeout(() => {
+            if (onBox.checked && !document.hidden) startPreview();
+        }, 2000);
+    };
+    setInterval(() => {
+        if (onBox.checked && !document.hidden && localRunning !== null) startPreview();
+    }, 55 * 60 * 1000);
+
+    document.addEventListener("visibilitychange", () => {
+        if (document.hidden) {
+            img.removeAttribute("src");
+        } else {
+            if (onBox.checked) startPreview();
+            lastChange = Date.now();
+            if (localRunning && lumImg && !lumImg.getAttribute("src")) {
+                lumImg.src = "scope/luma.mjpg?t=" + Date.now();
+            }
+        }
+    });
+
+    startPreview();
+
+    let lastData = {};
+    async function poll() {
+        try {
+            const response = await fetch("data", {cache: "no-store"});
+            if (!response.ok) throw new Error("Monitor unavailable");
+            lastData = await response.json();
+        } catch (e) {
+            // Retain the last known settings during a monitor interruption.
+            note("Monitor unreachable; retaining the last audio settings.");
+        }
+    }
+    poll();
+    setInterval(poll, 1000);
+</script>
+<script src="/static/scope_audio.js"></script>
+</body>
+</html>

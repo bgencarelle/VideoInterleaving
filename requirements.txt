@@ -1,7 +1,21 @@
-# Packages without system equivalents - install via pip
+# Application Python dependencies; compatible system packages are reused.
+# Include modem baking/reception and scope audio/image/capture dependencies.
+-r requirements-modem.txt
+-r requirements-scope.txt
+moderngl  # Full-app renderer; also checked by setup on macOS
 #webp
 mido
 glfw  # Python bindings - requires libglfw3-dev system package (installed via system-requirements.txt)
 PyTurboJPEG==1.8.2
 SimpleWebsocketServer
 PyOpenGL  # Legacy renderer fallback (GLES2 / GL2.1)
+# sounddevice is shared by scope/modem and specified in requirements-modem.txt.
+tzdata  # IANA timezone database fallback for zoneinfo (notably Windows)
+pyautogui
+pynput
+numpy>=1.24
+scipy>=1.10
+Pillow>=9.5
+sounddevice>=0.4.6
+pyautogui
+pynput

@@ -13,6 +13,8 @@ It is designed to run on everything from high-end workstations to headless Raspb
     * **Local Window**: GPU-accelerated OpenGL display (GLFW).
     * **Web Stream**: Low-latency MJPEG stream for browsers.
     * **ASCII Stream**: Real-time text-mode video over Telnet/TCP.
+    * **Oscilloscope XY**: Vector, scanline raster, or no-Z stochastic bitmap
+      rendering through a stereo audio interface.
 * **Performance First**: Uses Side-by-Side (SBS) JPEGs and TurboJPEG for maximum throughput on low-power CPUs.
 * **Sync**: Supports free-running, MIDI, MTC, and Client/Server index synchronization.
 
@@ -33,7 +35,8 @@ sudo ./setup_app.sh
 This script will:
 * Install all system packages from `system-requirements.txt`
 * Create a Python virtual environment with `--system-site-packages` enabled
-* Install all Python packages from `requirements.txt`
+* Install all Python packages from `requirements.txt` (including `requirements-modem.txt`)
+* Verify modem NumPy/SciPy, Pillow/Tk, and PortAudio bindings without opening audio devices
 * Auto-detect your display environment (X11/Wayland/framebuffer)
 * Create systemd services for web, ASCII, and local modes
 
@@ -53,7 +56,7 @@ sudo apt install $(grep -v '^#' system-requirements.txt | tr '\n' ' ')
 
 ```bash
 sudo dnf install python3 python3-pip python3-devel gcc gcc-c++ make cmake pkgconfig \
-    libwebp-devel libjpeg-turbo-devel SDL2-devel alsa-lib-devel \
+    libwebp-devel libjpeg-turbo-devel SDL2-devel alsa-lib-devel portaudio python3-tkinter \
     mesa-libGL-devel mesa-libGLU-devel mesa-libEGL-devel mesa-libGLES-devel \
     libglvnd-devel glfw-devel mesa-utils chrony ninja-build bind-utils
 ```
@@ -61,7 +64,7 @@ sudo dnf install python3 python3-pip python3-devel gcc gcc-c++ make cmake pkgcon
 **macOS (Homebrew):**
 
 ```bash
-brew install python webp pkg-config sdl2 chrony jpeg-turbo 
+brew install python python-tk portaudio webp pkg-config sdl2 chrony jpeg-turbo
 ```
 
 #### Python Environment
@@ -85,8 +88,15 @@ Install Dependencies:
 ```bash
 pip install --upgrade pip
 pip install -r requirements.txt
+python utilities/check_modem_setup.py
 ```
-> **Note:** `requirements.txt` only contains Python packages (system packages live in `system-requirements.txt`).
+> **Note:** `requirements.txt` includes `requirements-modem.txt`. Compatible system NumPy/SciPy/Pillow installs are reused; pip supplies missing or newer required versions. Debian system packages live in `system-requirements.txt`.
+
+For Homebrew, [Python Tk bindings](https://formulae.brew.sh/formula/python-tk)
+must match the Python interpreter used to create `.venv`. If using a versioned
+Python formula, install the corresponding `python-tk@<major.minor>` formula.
+[PortAudio](https://formulae.brew.sh/formula/portaudio) supplies the native audio library.
+The import check also verifies Pillow's compiled Tk bridge without opening a window.
 
 ---
 
@@ -128,10 +138,133 @@ python main.py --mode ascii --dir ./images_tiny
 * Connect via Terminal: `telnet <IP> 2323` or `nc <IP> 2323`
 * *Note: Use smaller resolution images (e.g., 150px wide) for ASCII to save CPU.*
 
+Tone is graded once, in `ascii_converter.to_ascii`: saturation on S, then
+contrast and brightness on V, then gamma on the grey the character is chosen
+from. The last three are settable per run, in that order of application:
+
+```bash
+python main.py --mode ascii --dir ./images_tiny \
+  --ascii-contrast 1.4 --ascii-brightness 1.2 --ascii-gamma 0.9
+```
+
+* `--ascii-contrast` scales about mid-grey, so `1.0` is exactly neutral, above
+  1 pushes lights and darks apart, and `0` flattens everything to one tone.
+* `--ascii-brightness` is a straight multiply on value; `0` is black.
+* `--ascii-gamma` is the exponent applied to the grey the character comes from;
+  below 1 lifts shadows. It must be above 0 — at exactly 0 every non-zero input
+  becomes full white, which is a discontinuity rather than an endpoint.
+
+The shipped contrast default is `1.0`. `ASCII_CONTRAST` sat at 1.2 in
+`constantStorage/ascii_constants.py` for a long time while the code that read
+it was gone, so wiring it up at 1.2 would have changed every existing
+installation's picture. Saturation is still set in that file.
+
 **3. Start Local Mode (Windowed):**
 ```bash
 python main.py --mode local --dir ./images_sbs
 ```
+
+**4. Start Oscilloscope Mode (Osci-style bitmap walk, no Z channel):**
+
+```bash
+python utilities/convert_to_xy.py -i ./images -o ./images_xy
+python main.py --mode scope --xy-dir ./images_xy --scope-mode stochastic
+```
+
+Stochastic uses Osci-render's bitmap walk (`radius 10`, no added edge term)
+and scales Osci's full-resolution stride to the baked thumbnail (`auto`
+resolves to stride 1 at the compact default width 128). Its portrait default is
+`gamma 2`, equivalent to Osci's Image Threshold 0.1. Osci's UI default maps to
+gamma 6 and suppresses too many facial midtones in this material. It runs
+continuously across audio buffers. Use the existing `--scope-gamma` argument
+to tune the active renderer.
+Its 48 kHz target clock is independent of the image rate and of faster DAC
+sample rates; use `--scope-walk-hz` only when deliberately changing that walk.
+
+The separate `stipple` renderer implements the stable image-driven alternative:
+
+```bash
+python main.py --mode scope --xy-dir ./images_xy --scope-mode stipple \
+  --scope-stipple-points 768
+```
+
+It selects deterministic luminance-weighted positions, orders them by
+unrestricted Euclidean proximity, and resamples that finished route. It has no
+cardinal-direction crawl, visited-map reset, random reseed, or target clock.
+New bakes store a 1024-point source-detail candidate cloud for this mode, so
+the route keeps 256px coordinate placement without retaining a complete 256px
+image plane for every frame.
+
+Fusion builds corresponding position arrays for the selected renderers and
+selects corresponding entries by luminance instead of switching whole traces:
+
+```bash
+python main.py --mode scope --xy-dir ./images_xy --scope-mode fusion --scope-fusion vrs
+```
+
+`--scope-fusion` accepts `vrs`, `vr`, `sv`, and `sr`. A persistent temporal
+selector gives bright positions more nearby DAC samples and dark positions
+fewer, using the existing raster and stochastic gamma controls. Equal or
+all-dark candidates remain evenly interleaved. No XY coordinates are
+arithmetically averaged. Press `f` in fusion mode to cycle.
+
+A conventional single-input scope, using its own timebase, needs nothing
+special: every trace already carries one unique rising edge on X, so put the X
+lead on the scope's single input, set it to Y-T, choose a rising-edge trigger
+near +0.95, and set a timebase covering one complete trace (the rate is printed
+at startup).
+
+```bash
+python main.py --mode scope --xy-dir ./images_xy --device BlackHole
+```
+
+The trigger is on by default because it costs an XY display essentially
+nothing. It gets its own samples rather than overwriting the picture, so a
+3200-sample trace becomes 3224 and the refresh rate pays instead of the image. The marker
+sweeps rather than dwelling — an edge trigger fires on the crossing, so parking
+at the extremes only makes them bright — and it is parked outside the ±0.9
+picture box, the same off-screen excursion `--scope-overscan` uses. Set the
+scope so ±0.9 fills the screen and the marker deflects past the phosphor
+entirely. `--no-scope-trigger` removes it; `--scope-trigger-us 500` lengthens
+it from the 250 µs default; `--scope-trigger-shape step` restores the original
+two-dwell marker for a scope whose trigger will not hold on a ramp (it shows as
+two bright dots in XY). It is a runtime setting and needs no rebake, and it
+constrains nothing — every renderer, `--scope-mix` and `--scope-realtime`
+included, carries it.
+
+Row timing is separate. `--scope-yt-timing fixed` gives every row an equal time
+slot, so unrelated brightness cannot move or resize a row and the picture stays
+registered — at the cost of the tonal balance whole-trace weighting gives you,
+and a negative rail where empty rows sit. `dwell` is the default and the
+long-standing behaviour. Fixed timing is raster-only; asking for it elsewhere
+prints a line and falls back rather than refusing to start. `--scope-yt` is
+kept as a deprecated spelling of `--scope-yt-timing fixed`. See
+`scope_arguments.md` for the sample layout and tradeoffs.
+
+The compact bake stores raw luminance and alpha at 128px. That is above the
+normal raster sweep grid, while stochastic can still use the field directly.
+Stipple's separately baked source-detail coordinates preserve the useful
+high-resolution placement. A typical 32-folder library is about 3.7 GB rather
+than the 18-25 GB produced by the former 256px, three-channel format.
+
+Press `v` while it is running to cycle vector, raster, stochastic, stipple,
+and fusion. Press `i` to toggle alpha-aware luminance inversion, or start with
+`--scope-invert`; vector keeps its baked geometry but shifts dwell toward
+originally dark stroke regions, and transparent padding remains dark. `r` or
+`R` rotates the complete scope output by 90° and `m` mirrors it left-right,
+both matching local display mode.
+
+Orientation can also be set from the command line, in local mode as well as
+scope mode: `--rotation {0,90,180,270}` and `--mirror` / `--no-mirror`. They
+default to `INITIAL_ROTATION` and `INITIAL_MIRROR` in
+`constantStorage/display_constants.py`, so turning a display sideways no
+longer means editing a constant:
+
+```bash
+python main.py --mode local --rotation 90 --mirror
+```
+
+See `SCOPE_MODE.md` for wiring, sample-budget, and renderer details.
 
 ### The `settings.py` Way (Legacy)
 
@@ -272,6 +405,58 @@ sudo apt install chrony
 
 ---
 
+## 6. Modem link test tool
+
+`utilities/modem_v3_check.py` exercises the self-describing v3 transport
+(`animation_modem/transport3.py`) without needing a device: `write` encodes a
+bake (or synthetic frames) to a WAV, `read` decodes it back and prints one JSON
+line per packet. `bench` compares v3 preset variants across simulated channels.
+`live-send` and `live-receive` run the same link through a real audio device.
+
+Nothing about the format must be named at both ends. The receiver takes the
+sample rate from its device, the picture geometry from the packet header, and
+the wire layout by decoding against each candidate preset until one verifies.
+Only a power-allocation table from `fit_allocation.py` is shared state, and it
+is optional.
+
+```bash
+python utilities/modem_v3_check.py write --modem-dir images_modem --out clean.wav
+python utilities/modem_v3_check.py read --wav clean.wav
+python utilities/modem_v3_check.py bench
+```
+
+Live, two terminals, receiver first:
+
+```bash
+python utilities/modem_v3_check.py live-receive --device "BlackHole 2ch"
+python utilities/modem_v3_check.py live-send --modem-dir images_modem \
+    --device "BlackHole 2ch"
+```
+
+Presets choose the occupied band and the frame-rate/resolution trade, from
+`wide-v3` (up to 20250 Hz, 13.4 fps, 3000 slots) through `lean-v3` down to the
+14 kHz `mid-14k`/`lean-14k`, and `hires-v3` for a full 2880-slot 80x96 picture.
+Profiles choose the plane geometry sent on the wire: `color-dct` (2880
+coefficients) or `lean-dct` (2160, quartered chroma), both declared in the
+header.
+
+`live-receive` opens a window showing the newest decoded frame and prints one
+JSON line per packet with status, identity, puzzle tier, geometry and the
+median playback speed -- through a tape deck, that last field is the deck's
+speed error, measured live. `--headless` gives JSON with no window, `--quiet`
+the window with no JSON, and `--width`/`--height` size the display.
+
+Nothing is queued or scheduled: whatever decoded most recently is what is on
+screen. For an analog source that is the only model that means anything, since
+a timestamp recorded onto tape says nothing about the current wall clock.
+
+`--list-devices` on either live command lists PortAudio devices.
+`--channels` is a one-based pair, default `1,2`.
+
+`live-send` runs no shared-clock scheduling. It keeps the carrier fed and
+identity travels in the header, which is the only model that means anything for
+playback off tape.
+
 ## Project Structure
 
 * `main.py`: Entry point. Parses CLI args and launches threads.
@@ -282,6 +467,9 @@ sudo apt install chrony
 * `web_service.py`: Flask-less HTTP server for MJPEG streaming and System Monitoring.
 * `ascii_server.py`: Raw TCP server for Telnet streaming.
 * `ascii_converter.py`: Vectorized image-to-text conversion engine.
+* `MODEM_MODE.md`: Stereo modem integration, bake and run instructions.
+* `utilities/convert_to_modem_dct.py`: Prebakes project face/float layers to RGBA DCT slabs.
+* `modem_display.py`: Composites baked layers and drives the frame-independent modem.
 * `settings.py`: Global configuration constants.
 * `tools/`: Helper scripts (e.g., `convert_to_sbs_fixed.py`).
 
