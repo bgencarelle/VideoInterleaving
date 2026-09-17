@@ -241,10 +241,11 @@ class Layout:
                 f'(at {rate:g} Hz)')
 
 
-# The v2 wire presets (wide, tape, tape-fast, narrow, lofi) are gone. Every
-# live layout is progressive (v3/v4); the progressive table lives in
-# transport3.V3_PRESETS so it can express header_split and dense_header
-# variants.
+# The v2 wire presets (wide, tape, tape-fast, narrow, lofi) are gone, and so
+# is the v3 preset table: every live layout is progressive, and there is
+# exactly one of them -- transport3.WIRE. Layouts here are constructed
+# directly (tests, probes) so geometry variants stay expressible without a
+# table.
 
 
 @lru_cache(maxsize=32)
@@ -860,6 +861,12 @@ def _channel_equalizer(spectrum, layout):
 
 def _equalise(body, layout):
     spectrum = rfft(body, n=N, axis=1, workers=1)
+    return _equalise_spectrum(spectrum, layout)
+
+
+def _equalise_spectrum(spectrum, layout):
+    """The apply step of ``_equalise``, on a spectrum the caller may have
+    corrected first (see ``_refine_drift``)."""
     inv00, inv01, inv10, inv11, weights, variance, coherence, skew = \
         _channel_equalizer(spectrum, layout)
     spec = spectrum[:, layout.carriers, :]
@@ -988,6 +995,114 @@ def _correct_header(raw, flat, tolerance, layout):
     return None
 
 
+# A packet whose timing drifts more than this many samples across the frame
+# gets the header-as-pilots refit below. Clean wires measure ~2e-8, so this
+# stays far below any real wow while never firing on a clean packet (which
+# then takes the byte-identical old path and pays nothing).
+DRIFT_REFIT = 0.25
+
+
+def _refine_drift(spectrum, layout, fields):
+    """Second pass over a drifted packet, using its header as extra pilots.
+
+    Why a second pass is needed at all: the two training symbols disagree
+    under drift -- row 1 arrives rotated by 2*pi*k*drift/N per carrier -- and
+    the joint channel solve blends them like a two-path fade. Measured on a
+    +-0.25 sample/symbol drift that costs up to 30% of a top carrier's
+    AMPLITUDE, which no phase rotation of the body can restore: the estimate
+    itself is wrong. The pilot tracker's slope fit also aliases once the
+    inter-pilot phase exceeds pi, so late symbols keep most of their drift.
+
+    The fix uses only facts the wire already carries, on the spectrum that
+    already exists (no new FFTs -- the re-solve below is cheap per-carrier
+    algebra, and the body is never resampled):
+      * the header bits, once the CRC has verified them, are known QPSK on
+        every header carrier for the early symbols -- where drift is small
+        enough that no angle wraps;
+      * the four pilots are known (=1) on every symbol;
+      * the drift phase is one global ramp rate in the symbol number.
+
+    Anchor fits on the header rows give the rate; dividing it back out of
+    training row 1 in the frequency domain re-solves the channel with both
+    training rows in agreement; the body's drift is then a clean ramp through
+    the origin, corrected with the global rate plus a per-row offset snapped
+    from the pilots. Returns the refined (equal, weights, variance,
+    pilot_error), or None if the header will not re-verify from the corrected
+    symbols -- the caller then keeps its first result, so a failed refit can
+    only cost the improvement, never the packet.
+    """
+    carriers = layout.carriers
+    data, pilots, header, _, _ = _decode_tables(layout)
+    end = 2 + layout.header_symbols
+    pb = layout.pilots.astype(float)
+    hb = layout.header_bins.astype(float)
+
+    # The header word the CRC already verified, back as the QPSK the
+    # transmitter put on the wire (encode's non-split placement). Skipped
+    # entirely for split headers, which interleave the channels differently.
+    flags, absolute, index, count, stamp, code = fields
+    raw = pack_header(flags, layout.top_bin, absolute, index, count, stamp,
+                      magic=layout.wire_magic, profile=code)
+    bits = np.unpackbits(np.frombuffer(raw, np.uint8)).reshape(HEADER_SLOTS, 2)
+    spread = np.resize(((bits[:, 0]*2.-1) + 1j*(bits[:, 1]*2.-1))/np.sqrt(2),
+                       layout.header_symbols*len(header)).reshape(
+                           layout.header_symbols, len(header))
+
+    # Rate from anchor fits on the header rows, on the FIRST (pre-tracker)
+    # equalisation. 24 known points per row (20 header + 4 pilots); drift is
+    # small here so carrier unwrapping is safe.
+    equal0, weights0, _, _, _ = _equalise_spectrum(spectrum, layout)
+    ms = np.arange(2, end)
+    slopes = []
+    for s in range(layout.header_symbols):
+        slope = 0.
+        for ch in range(2):
+            known = np.concatenate([
+                equal0[2+s, header, ch]/(HEADER_GAIN*spread[s]),
+                equal0[2+s, pilots, ch]])
+            bins = np.concatenate([hb, pb])
+            order = np.argsort(bins)
+            ang = np.unwrap(np.angle(known[order]))
+            w = np.concatenate([weights0[header, ch],
+                                weights0[pilots, ch]])[order]
+            A = np.vstack([bins[order], np.ones_like(bins[order])]).T
+            sol = np.linalg.lstsq(A*w[:, None], ang*w, rcond=None)[0]
+            slope += float(sol[0])/2
+        slopes.append(slope)
+    rate = float(np.linalg.lstsq(
+        np.vstack([ms, np.ones_like(ms)]).T, np.array(slopes),
+        rcond=None)[0][0])
+
+    # Re-solve the channel with row 1's drift phase divided out, so both
+    # training rows describe the same channel again.
+    spec2 = spectrum.copy()
+    spec2[1, carriers, :] *= np.exp(-1j*rate*carriers)[:, None]
+    equal, weights, variance, _, _ = _equalise_spectrum(spec2, layout)
+
+    # The body's drift is now a ramp through the origin: one global rate in
+    # the symbol number, plus a per-row offset snapped from the pilots.
+    rows = np.arange(2, layout.symbols)
+    for ch in range(2):
+        pred = rate*rows[:, None]*pb[None, :]
+        meas = np.angle(equal[2:, pilots, ch])
+        snap = meas + 2*np.pi*np.round((pred-meas)/(2*np.pi))
+        w = weights[pilots, ch]**2
+        doff = (w*(snap-pred)).sum(1)/max(w.sum(), 1e-12)
+        equal[2:, :, ch] *= np.exp(
+            -1j*(rate*rows[:, None]*carriers[None, :] + doff[:, None]))
+
+    # The corrected symbols must still say what the CRC verified.
+    pick = equal[2:end, header].mean(axis=-1)
+    flat = pick.ravel()[:HEADER_SLOTS]/HEADER_GAIN
+    hbits = np.stack([flat.real > 0, flat.imag > 0], axis=-1).ravel()
+    raw2 = np.packbits(hbits).tobytes()
+    if _resolve_header(raw2, layout) is None and \
+            _correct_header(raw2, flat, 2, layout) is None:
+        return None
+    pilot_error = float(np.sqrt(np.mean(np.abs(equal[2:, pilots]-1)**2)))
+    return equal, weights, variance, pilot_error
+
+
 def decode_packet(samples, layout, coder, *, body=None, coders=None,
                   header_tolerance=2):
     """`coders` maps a profile code to the coder that reconstructs it.
@@ -1007,7 +1122,11 @@ def decode_packet(samples, layout, coder, *, body=None, coders=None,
         body = samples[SYNC_LEN:layout.packet].reshape(layout.symbols, SYMBOL, 2)[:, CP - 4:CP - 4 + N]
 
     # 1. Primary channel equalization (computes complex gain, weights, and noise variance)
-    equal, weights, variance, coherence, skew = _equalise(body, layout)
+    # The spectrum is kept: a drifted packet's refit below re-solves the
+    # channel from it rather than paying a second FFT.
+    spectrum = rfft(body, n=N, axis=1, workers=1)
+    equal, weights, variance, coherence, skew = _equalise_spectrum(
+        spectrum, layout)
 
     timing_drift = 0.0
     clock_errors = []
@@ -1083,6 +1202,38 @@ def decode_packet(samples, layout, coder, *, body=None, coders=None,
             fields = _correct_header(raw, flat, header_tolerance, layout)
         if fields:
             break
+
+    # 3b. Header-as-pilots refit on drifted packets. The gate is the timing
+    # drift the tracker already measured, so clean packets take the
+    # byte-identical path above and pay nothing; and a refit that cannot
+    # re-verify the header changes nothing below, by construction.
+    if (fields is not None and not layout.header_split
+            and timing_drift > DRIFT_REFIT):
+        refined = _refine_drift(spectrum, layout, fields)
+        if refined is not None:
+            equal, weights, variance = refined[:3]
+            pilot_error = refined[3]
+
+    # 3c. Clipping discount. Symmetric clipping preserves zero crossings, so
+    # the header's signs verify untouched -- but the image amplitudes inherit
+    # the odd-harmonic spray, heaviest at the low bins, and the Wiener trusts
+    # those carriers at face value. Detect flat tops in the time samples
+    # (clean packets sit ~2e-4 near peak, clipped ~3.6e-3); where found,
+    # meter the distortion from the low pilots (known symbols) and add it to
+    # the noise variance there, so contaminated slots soften instead of
+    # blowing up. Clean packets skip everything below untouched.
+    if fields is not None and body.size:
+        peak = float(np.max(np.abs(body)))
+        if peak > 0 and float(np.mean(np.abs(body) > 0.98*peak)) > 1e-3:
+            low_pilots = pilots[layout.pilots <= 10]
+            if len(low_pilots):
+                extra_var = float(np.mean(
+                    np.abs(equal[2:, low_pilots]-1)**2))
+                low = carriers <= 12
+                if variance.ndim == 2:
+                    variance[low, :] += extra_var
+                else:
+                    variance[low] += extra_var
 
     # 4. Usability Check & Payload Reconstruction
     coverage = float(np.mean(weights[data] >= 0.45))

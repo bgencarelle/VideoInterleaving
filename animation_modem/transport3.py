@@ -15,7 +15,8 @@ from .core import (REFERENCE_RATE, N, CP, SYMBOL, SYNC_LEN, GUARD, HEADER_GAIN,
                          default_allocation, resample_packet, _sample_at,
                          _body_walk, _decode_tables, FOLDER_LIMIT,
                          band_limited, emit_length, emit_ratio,
-                         PROFILE_CODES, profile_code, profile_name)
+                         PROFILE_CODES, profile_code, profile_name,
+                         _recovery_quality)
 
 # --------------------------------------------------------------------------
 # Preamble
@@ -328,6 +329,16 @@ def encode(values, layout, coder, absolute, index, count, stamp_ms=0, flags=0,
 # Receive
 # --------------------------------------------------------------------------
 
+# A measured scale this far from unity earns a second decode at unity scale,
+# best of the two kept. Dispersion biases the edge estimator (measured
+# +0.26% under a highpassed channel); demodulating at a biased scale
+# mis-stretches the walk and destroys amplitudes while the bits survive, so
+# the biased path decodes "verified" garbage. Unity is right whenever the
+# medium runs true; when it genuinely does not, the measured scale wins the
+# comparison below. Clean packets (scale ~= 1) never pay the second attempt.
+SCALE_SANITY = 1e-3
+
+
 class Receiver:
     def __init__(self, layout, coder, threshold=.4, rate_window=None,
                  min_speed=.25, max_speed=2.0, recovery=False, fast=True,
@@ -513,8 +524,23 @@ class Receiver:
 
     def _demodulate(self, begin, scale, layout, coder, coders):
         """One decode attempt at a given layout. Returns (result, taps)."""
+        result, taps = self._demodulate_once(begin, scale, layout, coder,
+                                             coders)
+        if abs(scale-1.0) > SCALE_SANITY:
+            alt, alt_taps = self._demodulate_once(begin, 1.0, layout, coder,
+                                                  coders, fast=False)
+            if _recovery_quality(alt) > _recovery_quality(result):
+                return alt, alt_taps
+        return result, taps
+
+    def _demodulate_once(self, begin, scale, layout, coder, coders,
+                         fast=True):
+        """A single demodulate + decode. The unity-scale retry above always
+        goes through the resampling path: _identify sized the buffer for the
+        measured scale, so the fast slice is not guaranteed room."""
         taps = 0
-        if scale == 1 and begin == int(begin) and begin >= 0:
+        if (fast and scale == 1 and begin == int(begin) and begin >= 0
+                and int(begin)+layout.packet <= len(self.buffer)):
             packet = self.buffer[int(begin):int(begin)+layout.packet]
             body = packet[SYNC_LEN:].reshape(layout.symbols, SYMBOL, 2)[:, CP-4:CP-4+N]
         else:
