@@ -78,7 +78,7 @@ def frames_from(args, profile=DEFAULT_PROFILE):
     return out, getattr(args, 'profile', None) or profile
 
 
-def coder_for(profile, allocation, layout, strict=True):
+def coder_for(profile, layout):
     shapes = plane_shapes(profile)
     grids = plane_grids(profile)
     if sum(int(np.prod(s)) for s in shapes) > layout.capacity:
@@ -87,41 +87,25 @@ def coder_for(profile, allocation, layout, strict=True):
         # believe a shrunk-then-truncated geometry is the right trade.
         shapes = fit_shapes(shapes, layout.capacity)
         grids = shapes
-    table = np.load(allocation) if allocation else None
-    if table is not None:
-        want = int(sum(np.prod(s) for s in shapes))
-        if table.shape != (want,):
-            # A table is fitted for ONE profile, because its length is that
-            # profile's slot count. Where the caller named the profile, a
-            # mismatch is a mistake and has to say so. Where we are SCANNING the
-            # profile coders a receiver holds to follow the header, a mismatch
-            # just means this table is not for that one, and falling back to the
-            # default table is how the scan keeps working at all.
-            if strict:
-                raise SystemExit(
-                    f'Allocation {allocation} has {table.size} weights but '
-                    f'{profile} needs {want}. A table only fits the profile it '
-                    f'was fitted for -- refit with fit_allocation.py '
-                    f'--profile {profile}.')
-            table = None
-    return V3.SourceCoder(shapes, table, grids=grids), grids
+    return V3.SourceCoder(shapes, grids=grids), grids
 
 
-def coders_for(layout, allocation=None):
+def coders_for(layout):
     """code -> coder, so the receiver follows the header's declaration.
 
     Every profile holds its own code, so there is nothing to opt into and
     nothing for the two ends to disagree about. The coder for whatever the
-    header names is selected by code, not by guesswork.
+    header names is selected by code, not by guesswork. The allocation is
+    the deterministic built-in table -- fitted .npy tables are not read:
+    measured, they lose on the spread wire.
     """
-    return {V3.profile_code(name): coder_for(name, allocation, layout,
-                                             strict=False)[0]
+    return {V3.profile_code(name): coder_for(name, layout)[0]
             for name in V3.PROFILE_CODES}
 
 
-def candidates_for(allocation=None):
+def candidates_for():
     """The one wire, carrying every profile coder the header may name."""
-    coders = coders_for(WIRE, allocation)
+    coders = coders_for(WIRE)
     return [(WIRE, coders[V3.profile_code(DEFAULT_PROFILE)], coders)]
 
 
@@ -158,6 +142,35 @@ def picture_size(shapes):
     return f'{cols}x{rows}'
 
 
+def level_text(lv):
+    """One-line stereo meter plus verdict, for the live window.
+
+    lv is (peak L/R, rms L/R) in dBFS off the raw input -- the hardware
+    truth, before levelling. Thresholds match utilities/audio_levels.py:
+    silence under -50 on both legs, one dead leg, hot near full scale,
+    and L/R imbalance past 6 dB (the wire sends identical stereo, so a
+    real imbalance is routing, not content).
+    """
+    if lv is None:
+        return 'levels: waiting for input…'
+    pl, pr, _, _ = lv
+
+    def bar(v, width=14, floor=-60.0):
+        fill = int(round((max(v, floor)-floor)/(0-floor)*width))
+        return '#'*fill + '.'*(width-fill)
+
+    text = f'L [{bar(pl)}] {pl:5.1f}  R [{bar(pr)}] {pr:5.1f} dBFS pk'
+    if pl < -50 and pr < -50:
+        return text + '  -- SILENCE in, nothing to show'
+    if pl < -50 or pr < -50:
+        return text + '  -- ONE LEG DEAD, check routing'
+    if max(pl, pr) > -3:
+        return text + '  -- HOT, back the source off'
+    if abs(pl-pr) > 6:
+        return text + '  -- L/R IMBALANCE'
+    return text
+
+
 def record(r):
     speed = r.extra.get('playback_speed', 1/(1+r.rate_error))
     return {'status': r.status, 'identity': r.identity, 'frame': r.absolute,
@@ -172,7 +185,7 @@ def record(r):
 def do_write(args):
     frames, profile = frames_from(args)
     layout = WIRE
-    coder, _ = coder_for(profile, args.allocation, layout)
+    coder, _ = coder_for(profile, layout)
     fps = layout.fps_at(REFERENCE_RATE)
     print(layout.describe(REFERENCE_RATE))
     path = Path(args.out)
@@ -191,11 +204,11 @@ def do_write(args):
 
 def do_read(args):
     layout = WIRE
-    coder, _ = coder_for(args.profile, args.allocation, layout)
+    coder, _ = coder_for(args.profile, layout)
     rate = wav_rate(args.wav)
     receiver = receive_for(args, layout, coder, input_rate=rate,
-                           coders=coders_for(layout, args.allocation),
-                           candidates=candidates_for(args.allocation))
+                           coders=coders_for(layout),
+                           candidates=candidates_for())
     if rate != REFERENCE_RATE:
         print(f'{args.wav}: {rate} Hz, decoding at that rate', file=sys.stderr)
     if args.save_frames:
@@ -237,7 +250,7 @@ def do_bench(args):
     """Decode the one wire across simulated channels."""
     frames, profile = frames_from(args)
     layout = WIRE
-    coder, _ = coder_for(profile, args.allocation, layout)
+    coder, _ = coder_for(profile, layout)
     channels = [('clean', {}),
                 ('cassette-ish', dict(lowpass_hz=10000, noise_dbfs=-45)),
                 ('worn deck', dict(lowpass_hz=8000, noise_dbfs=-40, crosstalk=.07))]
@@ -273,7 +286,7 @@ def do_live_send(args):
         print(sd.query_devices()); return
     frames, profile = frames_from(args)
     layout = WIRE
-    coder, _ = coder_for(profile, None, layout)
+    coder, _ = coder_for(profile, layout)
     state = {'packet': 0, 'position': 0, 'sent': 0}
     channels = args.channels
     packets = []
@@ -323,14 +336,15 @@ def do_live_receive(args):
     if args.list_devices:
         print(sd.query_devices()); return
     layout = WIRE
-    coder, _ = coder_for(DEFAULT_PROFILE, None, layout)
+    coder, _ = coder_for(DEFAULT_PROFILE, layout)
     verbose = args.verbose or args.headless
     if args.silent:
         verbose = False
     if args.save_frames:
         Path(args.save_frames).mkdir(parents=True, exist_ok=True)
     stop = threading.Event()
-    latest = {'picture': LivePicture(args.on_loss), 'device': 'Opening audio input…'}
+    latest = {'picture': LivePicture(args.on_loss), 'device': 'Opening audio input…',
+              'levels': None}
     lock = threading.Lock()
     errors = []
     active = {'stream': None}
@@ -395,6 +409,18 @@ def do_live_receive(args):
                 level = source['level']
                 while not stop.is_set():
                     audio, overflowed = stream.read(256)
+                    # Meter the raw input, before levelling: this is the
+                    # hardware truth the window reports (a levelled signal
+                    # would hide a dead or screaming leg).
+                    ino = np.asarray(audio)[:, channels]
+                    peak = 20*np.log10(np.maximum(
+                        np.max(np.abs(ino), axis=0), 1e-9))
+                    rms = 20*np.log10(np.maximum(
+                        np.sqrt(np.mean(ino**2, axis=0)), 1e-9))
+                    with lock:
+                        latest['levels'] = (
+                            float(peak[0]), float(peak[1]),
+                            float(rms[0]), float(rms[1]))
                     audio_buffer.put(level.process(np.asarray(audio)[:, channels]), overflowed)
         except Exception as exc:
             if not stop.is_set():
@@ -413,8 +439,8 @@ def do_live_receive(args):
             if rate is None:
                 return
             receiver = V3.Receiver(layout, coder, pulse_only=True, input_rate=rate,
-                                   coders=coders_for(layout, args.allocation),
-                                   candidates=candidates_for(args.allocation))
+                                   coders=coders_for(layout),
+                                   candidates=candidates_for())
             # Same audio-path wiring as read/bench: impairments sit between the
             # input stream and the demodulator.
             emulator = IMP.Emulator(IMP.settings_from_args(args))
@@ -501,6 +527,11 @@ def do_live_receive(args):
                               anchor='w', justify='left', wraplength=window[0]-12,
                               background='black', foreground='white')
             status.pack(fill='x', padx=6)
+            levels = tk.Label(root, text='levels: --', font='TkFixedFont',
+                              width=1, height=2, anchor='w', justify='left',
+                              wraplength=window[0]-12,
+                              background='black', foreground='white')
+            levels.pack(fill='x', padx=6)
 
             def close():
                 stop.set(); root.destroy()
@@ -517,7 +548,9 @@ def do_live_receive(args):
                 with lock:
                     r = latest['picture'].current(time.monotonic())
                     device_text = latest['device']
+                    level_line = level_text(latest['levels'])
                 device_label.config(text=device_text)
+                levels.config(text=level_line)
                 if r is not rendered[0]:
                     if r is None:
                         status.config(text='Missing or damaged frame')
@@ -568,7 +601,7 @@ def do_live_receive(args):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest='command', required=True)
-    p.set_defaults(profile=DEFAULT_PROFILE, allocation=None, gain=1.0)
+    p.set_defaults(profile=DEFAULT_PROFILE, gain=1.0)
 
     def shared(q):
         q.add_argument('--profile', choices=list(wire_profiles()),
@@ -578,20 +611,10 @@ def main(argv=None):
         q.add_argument('--frames', type=int, default=24)
         q.add_argument('--stride', type=int, default=1)
 
-    def allocation(q):
-        q.add_argument('--allocation', type=Path,
-                       help='Power allocation table from fit_allocation.py, '
-                            'fitted to the pictures actually being sent. '
-                            'Measured +3.4 to +3.8 dB on a held-out frame, for '
-                            'no extra slots. SHARED STATE: not on the wire and '
-                            'nothing detects it, so both ends need the same '
-                            'file, and it only fits the profile it was made '
-                            'for.')
-    b = sub.add_parser('bench'); shared(b); allocation(b)
+    b = sub.add_parser('bench'); shared(b)
     w = sub.add_parser('write'); shared(w)
     w.add_argument('--out', type=Path, default=Path('v3_test.wav'))
     w.add_argument('-f', '--numbered', action='store_true')
-    allocation(w)
     r = sub.add_parser('read')
     r.add_argument('--profile', choices=list(wire_profiles()),
                    default=DEFAULT_PROFILE,
@@ -602,12 +625,10 @@ def main(argv=None):
     r.add_argument('--channels', type=pair, default=(0, 1))
     r.add_argument('--save-frames', type=Path)
     IMP.add_arguments(r)
-    allocation(r)
     ls = sub.add_parser('live-send'); shared(ls)
     ls.add_argument('--device', type=device)
     ls.add_argument('--channels', type=pair, default=(0, 1))
     ls.add_argument('-f', '--numbered', action='store_true')
-    allocation(ls)
     ls.add_argument('--list-devices', action='store_true')
     lr = sub.add_parser('live-receive')
     lr.add_argument('--device', type=device)
@@ -642,7 +663,6 @@ def main(argv=None):
                          'machines. smooth is '
                          'Lanczos and looks better but hides dead pixels, '
                          'blocking and chroma blotching.')
-    allocation(lr)
     lr.add_argument('--list-devices', action='store_true')
     IMP.add_arguments(lr)
     args = p.parse_args(argv)

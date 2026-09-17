@@ -38,7 +38,7 @@ class Slot:
 class PacketOutput:
     def __init__(self, device=None, channels=(0, 1), requested_latency='low',
                  frame=_DEFAULT.frame, packet=_DEFAULT.packet):
-        # The wire carries its own geometry -- 3056 samples -- so the packet
+        # The wire carries its own geometry -- 3200 samples -- so the packet
         # size is taken from it instead of a module constant.
         self.frame = int(frame)
         self.packet = int(packet)

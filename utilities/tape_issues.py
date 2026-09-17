@@ -26,7 +26,7 @@ REPO = Path(__file__).resolve().parent.parent
 OUT = REPO/'scratch'/'tape_issues'
 RATE = 48000
 lay = V3.WIRE
-coder, grids = coder_for('color-dct', None, lay)
+coder, grids = coder_for('color-dct', lay)
 
 
 def minphase_curve(wire, freqs, db):

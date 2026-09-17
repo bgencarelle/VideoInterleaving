@@ -18,6 +18,8 @@ subsystems.
 - `tools/` — standalone diagnostic/inspection tools. Nothing imports them; the
   ones that need app modules insert the repo root into `sys.path` themselves.
 - `tests/` — root-level test suites; `modem_tests/` is the modem package suite.
+- `scratch/` — temp directory for measurement scripts, review PNGs, and other
+  working artifacts. Excluded from git; never commit it, never import from it.
 
 ## Modes
 

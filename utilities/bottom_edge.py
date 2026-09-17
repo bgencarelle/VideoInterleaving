@@ -2,9 +2,8 @@
 """Bottom-edge margin probe: steep highpass + noise, verify counts.
 
 Takes an optional tree path (default: this repo) so a baseline checkout can
-be measured the same way; without presets the fallback is gone, so an old
-tree argument is the only comparison left. Synthetic gradient content, 8
-packets per point -- a quick margin check, not a battery.
+be measured the same way. Synthetic gradient content, 8 packets per point --
+a quick margin check, not a battery.
 
 Run from anywhere:
 
@@ -24,7 +23,7 @@ def main(argv=None):
     sys.path.insert(0, tree)
     from animation_modem import transport3 as v3
     from animation_modem.imaging import (fit_shapes, image_values,
-                                         plane_grids, plane_shapes)
+                                         plane_shapes)
     layout = v3.WIRE
     tag = f'WIRE@{tree}'
     coder_shapes = fit_shapes(plane_shapes('color-dct'), layout.capacity)

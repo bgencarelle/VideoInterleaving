@@ -410,14 +410,12 @@ sudo apt install chrony
 `utilities/modem_v3_check.py` exercises the self-describing v3 transport
 (`animation_modem/transport3.py`) without needing a device: `write` encodes a
 bake (or synthetic frames) to a WAV, `read` decodes it back and prints one JSON
-line per packet. `bench` compares v3 preset variants across simulated channels.
+line per packet. `bench` compares the wire across simulated channels.
 `live-send` and `live-receive` run the same link through a real audio device.
 
 Nothing about the format must be named at both ends. The receiver takes the
 sample rate from its device, the picture geometry from the packet header, and
-the wire layout by decoding against each candidate preset until one verifies.
-Only a power-allocation table from `fit_allocation.py` is shared state, and it
-is optional.
+the wire layout is fixed. Nothing is shared state.
 
 ```bash
 python utilities/modem_v3_check.py write --modem-dir images_modem --out clean.wav

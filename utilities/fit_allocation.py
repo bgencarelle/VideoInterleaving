@@ -28,10 +28,10 @@ the wire; the loader checks.
     python3 utilities/fit_allocation.py --modem-dir images_modem \\
             --profile color-dct --out color-dct.npy
 
-    python3 modem_screen.py --profile color-dct \\
-            --allocation color-dct.npy --device "BlackHole 2ch"
-    python3 utilities/modem_v3_check.py live-receive \\
-            --allocation color-dct.npy --device "BlackHole 2ch"
+No sender or receiver reads fitted tables: measured, they lose on the
+spread wire, so the ship path always uses the deterministic built-in
+allocation. Fitting remains as a research tool (and a V4 candidate), not
+a launch argument.
 """
 import argparse
 from pathlib import Path

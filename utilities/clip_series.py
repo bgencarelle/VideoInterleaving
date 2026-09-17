@@ -25,7 +25,7 @@ from utilities.modem_v3_check import coder_for
 REPO = Path(__file__).resolve().parent.parent
 OUT = REPO/'scratch'/'clip_review'
 lay = V3.WIRE
-coder, grids = coder_for('color-dct', None, lay)
+coder, grids = coder_for('color-dct', lay)
 
 
 def soft_clip(w, drive, peak=0.95):

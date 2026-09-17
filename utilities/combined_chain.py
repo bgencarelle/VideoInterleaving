@@ -26,7 +26,7 @@ REPO = Path(__file__).resolve().parent.parent
 OUT = REPO/'scratch'/'combined'
 RATE = 48000
 lay = V3.WIRE
-coder, grids = coder_for('color-dct', None, lay)
+coder, grids = coder_for('color-dct', lay)
 CENTERS = [31.5, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
 
 

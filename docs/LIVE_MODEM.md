@@ -24,9 +24,8 @@ the bake path. None of these is a requirement. Any preset and any v3 profile
 can be sent live.
 
 The v2 layouts are gone outright, so there is no transport generation left to
-disagree about. The one thing that is still shared state is a custom
-`--allocation` -- it is not on the wire, so there is nothing to detect it
-from, and both ends need the same file.
+disagree about. Nothing is shared state: the receiver reads the sample rate
+off its device, the profile off the header, and the wire is fixed.
 
 ## No sample rate is requested
 

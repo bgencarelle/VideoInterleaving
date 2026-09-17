@@ -32,7 +32,7 @@ TREBLE = [-12, -8, -4, 0, 2, 2, 0, -4, -10, -16]
 TILT12 = [-6, -4, -2, 0, 2, 4, 6, 8, 10, 12]
 
 lay = V3.WIRE
-coder, grids = coder_for('color-dct', None, lay)
+coder, grids = coder_for('color-dct', lay)
 
 
 def load_wav(path):

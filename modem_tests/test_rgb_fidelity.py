@@ -25,7 +25,7 @@ from utilities.modem_v3_check import coder_for
 
 LIB = ModemLibrary('images_modem')
 LAYOUT = v3.WIRE
-CODER, GRIDS = coder_for('color-dct', None, LAYOUT)
+CODER, GRIDS = coder_for('color-dct', LAYOUT)
 FRAMES = 4
 PX = np.random.default_rng(11).integers(0, 80, 400)
 PY = np.random.default_rng(11).integers(0, 96, 400)

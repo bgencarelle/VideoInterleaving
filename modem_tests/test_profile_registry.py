@@ -181,7 +181,7 @@ class WireDeclarationTests(unittest.TestCase):
         Nothing malfunctions -- same slots, same shapes, header verifies, a
         picture comes out. But the allocation was built against the sampling
         grid, so the picture is mis-exposed and frequency-distorted. That is
-        why a truncating profile is shared state like --allocation.
+        why a truncating profile is shared state both ends must agree on.
         """
         layout, audio, values = self.send()
         plain = v3.SourceCoder(plane_shapes('color-dct'))

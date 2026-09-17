@@ -39,7 +39,7 @@ def bench(tag, fn, T):
 
 def main(argv=None):
     from scipy.fft import idctn
-    coder, grids = coder_for('color-dct', None, lay)
+    coder, grids = coder_for('color-dct', lay)
     lib = ModemLibrary(REPO/'images_modem')
     vals = image_values(lib.composite(0, 1, 0), grids)
     packet = np.asarray(V3.encode(vals, lay, coder, 1, 1, 1), np.float32)

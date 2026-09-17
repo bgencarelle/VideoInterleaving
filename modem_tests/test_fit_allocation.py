@@ -14,9 +14,7 @@ The table is not on the wire and nothing detects it, so both ends need the same
 file -- and it fits exactly one profile, because its length is that profile's
 slot count on the wire.
 """
-import tempfile
 import unittest
-from pathlib import Path
 
 import numpy as np
 from PIL import Image
@@ -122,44 +120,6 @@ class FitTests(unittest.TestCase):
     def test_fitting_on_nothing_is_refused_rather_than_guessed(self):
         with self.assertRaises(SystemExit):
             fa.main(['--frames', '0', '--out', '/dev/null'])
-
-
-class PairingTests(unittest.TestCase):
-    """A table belongs to one profile."""
-
-    def table(self, tmp, profile='color-dct'):
-        path = Path(tmp)/'a.npy'
-        fa.main(['--profile', profile, '--frames', '4', '--out', str(path)])
-        return path
-
-    def test_a_named_profile_refuses_a_table_of_the_wrong_length(self):
-        """Where the caller named the profile, a mismatch is a mistake."""
-        from utilities import modem_v3_check as check
-        with tempfile.TemporaryDirectory() as tmp:
-            path = self.table(tmp, profile='lean-dct')
-            with self.assertRaises(SystemExit) as caught:
-                check.coder_for('color-dct', path, WIRE)
-            self.assertIn('2880', str(caught.exception))
-
-    def test_scanning_falls_back_instead_of_dying(self):
-        """Candidate detection builds a coder for the wire, so a table that
-        does not fit must not stop the wire being tried -- that would make
-        --allocation and candidate detection mutually exclusive."""
-        from utilities import modem_v3_check as check
-        with tempfile.TemporaryDirectory() as tmp:
-            path = self.table(tmp, profile='lean-dct')
-            coders = check.coders_for(WIRE, path)
-            self.assertTrue(coders)
-            candidates = check.candidates_for(path)
-            self.assertGreaterEqual(len(candidates), 1)
-
-    def test_the_fitted_profile_still_gets_the_table_while_scanning(self):
-        from utilities import modem_v3_check as check
-        with tempfile.TemporaryDirectory() as tmp:
-            path = self.table(tmp)
-            plain = check.coder_for('color-dct', None, WIRE)[0]
-            fitted = check.coder_for('color-dct', path, WIRE, strict=False)[0]
-            self.assertFalse(np.allclose(plain.gains, fitted.gains))
 
 
 if __name__ == '__main__':

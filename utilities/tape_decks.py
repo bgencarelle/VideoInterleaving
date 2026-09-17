@@ -29,7 +29,7 @@ REPO = Path(__file__).resolve().parent.parent
 OUT = REPO/'scratch'/'deck_review'
 RATE = 48000
 lay = V3.WIRE
-coder, grids = coder_for('color-dct', None, lay)
+coder, grids = coder_for('color-dct', lay)
 
 
 # wav wobble: [(rate deviation, Hz)] sinusoidal FM, integrated to positions

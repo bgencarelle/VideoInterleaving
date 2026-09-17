@@ -72,7 +72,7 @@ class ReceiverWindowTests(unittest.TestCase):
         from animation_modem.imaging import image_values
 
         layout = check.WIRE
-        coder, grids = check.coder_for('lean-dct', None, layout)
+        coder, grids = check.coder_for('lean-dct', layout)
         packets = [check.V3.encode(
             image_values(Image.new('RGB', grids[0][::-1], (n*12, 30, 180)),
                          coder.grids),
@@ -296,3 +296,31 @@ class PictureSizeReportTests(unittest.TestCase):
         self.assertIn('picture_size(', source)
         self.assertIn("native", source)
         self.assertIn('scaled.width', source)
+
+
+class LevelMeterTests(unittest.TestCase):
+    """The window's level line reports hardware truth, not decode health."""
+
+    def test_no_input_yet(self):
+        self.assertIn('waiting', check.level_text(None))
+
+    def test_healthy_stereo_is_quiet(self):
+        line = check.level_text((-12.0, -13.5, -20.0, -21.0))
+        self.assertIn('L [', line)
+        self.assertIn('R [', line)
+        self.assertNotIn('--', line)
+
+    def test_silence_names_itself(self):
+        self.assertIn('SILENCE', check.level_text((-70.0, -70.0, -70.0, -70.0)))
+
+    def test_dead_leg_names_itself(self):
+        line = check.level_text((-12.0, -70.0, -20.0, -70.0))
+        self.assertIn('ONE LEG DEAD', line)
+
+    def test_hot_names_itself(self):
+        line = check.level_text((-1.5, -10.0, -8.0, -15.0))
+        self.assertIn('HOT', line)
+
+    def test_imbalance_names_itself(self):
+        line = check.level_text((-12.0, -25.0, -20.0, -30.0))
+        self.assertIn('IMBALANCE', line)
