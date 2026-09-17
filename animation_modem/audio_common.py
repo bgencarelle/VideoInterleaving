@@ -31,55 +31,39 @@ def pcm(data):
 
 
 class InputLevel:
-    """Bring each received channel to the level the decoder's thresholds expect.
+    """Lift a too-quiet input up to the level the decoder's thresholds expect.
 
     Acquisition uses an ABSOLUTE threshold: `edge_intervals` triggers a Schmitt
-    at +/-0.066, which is 12% of the preamble's nominal 0.55. A quiet input
-    never crosses it. Measured, a signal at 0.12 of nominal decodes every frame
-    and one at 0.06 finds zero edges and acquires nothing at all -- not a
-    degraded picture, silence.
+    at +/-0.066, 12% of the preamble's nominal 0.55. A quiet input never crosses
+    it; measured, 0.12 of nominal decodes every frame and 0.06 acquires nothing
+    at all. The leveller's only job is to lift such a signal back into the
+    decodable range. It is one-way: it never reduces a hot input. Hot input is
+    the limiter's job, and the two are decoupled so they cannot pump each other.
 
     PER CHANNEL, against what the preamble should be. The preamble is
-    transmitted IDENTICALLY on both channels, so whatever difference in level
-    arrives between them is the recording, not the signal: one tape track
-    biased hotter than the other, one leg of a cable padded. A single gain for
-    the pair leaves that difference in place, and measured it costs the quieter
-    channel entirely -- at 1.0/0.03 the loud channel shows 389 preamble edges
-    and the quiet one ZERO. Acquisition still succeeds off the loud channel, so
-    nothing looks wrong, but the both-channel preamble is half of v3's
-    acquisition margin and a dropout on the survivor then has nothing to fall
-    back to.
+    transmitted IDENTICALLY on both channels, so whatever level difference
+    arrives between them is the recording, not the signal. A single pair gain
+    leaves that difference in place and costs the quieter channel entirely.
+    Amplitude between channels is not information (inter-channel PHASE is --
+    head azimuth -- and a real gain does not touch it), so a per-channel lift
+    is safe.
 
-    Correcting it does not destroy anything the decoder wanted. Amplitude
-    between the channels is not information here; the transmitter sent them
-    equal. The inter-channel PHASE is information -- it is head azimuth, and
-    `_channel_skew` reports it -- and a real gain per channel does not touch
-    phase. Crosstalk is reported after this correction rather than before,
-    which is the more useful of the two.
+    The lift engages only below the do-nothing floor `window[0]`, tracked on a
+    slow per-channel peak (fast attack, slow release). A channel already at or
+    above that floor is left exactly alone, and a stale lift unwinds toward
+    unity once the raw channel is no longer weak. `balance_db` caps how far the
+    two gains may separate, so a dead leg is not lifted into loud hiss that
+    manufactures false edges, and `step_db`/`jump_db` keep the gain near-constant
+    within a packet -- its channel estimate comes from the training symbols at
+    its front.
 
-    The preamble holds the packet peak in about three frames in four, so a
-    slow per-channel peak IS a preamble measurement, without needing to find
-    the preamble first.
-
-    Two brakes. `balance_db` caps how far apart the two gains may go, so a dead
-    channel is never amplified into loud hiss that manufactures false edges.
-    And the gain is near-constant across a packet -- `step_db` a block, about
-    0.2 dB a packet -- because a packet's channel estimate comes from the
-    training symbols at its front, so a gain that drifts within one scales the
-    coefficients against an estimate taken at a different level.
-
-    And one return spring. The limiter below can only pull gain down, and the
-    window above freezes whatever it lands on -- so after one hot transient a
-    nominal signal would sit attenuated forever, operators crank volumes to
-    compensate, and the two fight. While the raw signal is healthy on its own
-    (inside the window and under the ceiling) the gain therefore relaxes toward
-    unity at the same slow step: gain differs from 1.0 only while the wire is
-    unusable. A weak signal keeps its lift, a dead leg stays frozen, a hot
-    input stays under the limiter -- those are the cases that need the gain.
+    Hot input goes through a feed-forward limiter that scales the block down to
+    `ceiling` without touching the levelling gain, so a hot transient can never
+    ratchet the leveller and there is no return spring for the two to fight.
     """
 
     def __init__(self, target=.7, ceiling=.95, floor=1e-4, step_db=.02,
-                 jump_db=6., release=.995, limits=(1e-3, 1e3), window=(.25, .98),
+                 jump_db=6., release=.995, limits=(1.0, 1e3), window=(.25, .98),
                  balance_db=20.):
         if not 0 < target < ceiling <= 1:
             raise ValueError('Need 0 < target < ceiling <= 1')
@@ -92,7 +76,8 @@ class InputLevel:
         self.release = release
         self.low, self.high = limits
         self.balance = 10**(balance_db/20)
-        self.gain = np.ones(2)
+        self.gain = np.ones(2)      # leveller: lift-only, >= 1.0
+        self.limit = np.ones(2)     # limiter: hot side, <= 1.0, independent
         self.peak = np.zeros(2)
         self.limited = 0          # blocks the limiter had to pull down
 
@@ -104,50 +89,45 @@ class InputLevel:
         self.peak = np.maximum(np.max(np.abs(audio), axis=0), self.peak*self.release)
         alive = self.peak > self.floor
         scaled = self.peak*self.gain
-        # Leave a level that is already fine exactly alone. `encode` normalises
-        # a packet to 0.95, so a healthy input is already where it belongs and
-        # any gain would only add drift: measured, levelling a nominal signal
-        # unconditionally moved reconstruction error from 0.0000 to 0.0016.
-        settled = (scaled >= self.window[0]) & (scaled <= self.window[1])
-        wanted = self.target/np.maximum(self.peak, self.floor)
+        # Lift-only, with a dead-zone. Engage only while the post-gain level is
+        # still below the do-nothing floor: once a weak channel reaches the
+        # window it freezes there, so the tracked peak's slow release cannot
+        # make the gain creep. The target is floored at unity, so the leveller
+        # never reduces a hot channel -- that is the limiter's job.
+        lifting = alive & (scaled < self.window[0])
+        wanted = np.maximum(self.target/np.maximum(self.peak, self.floor), 1.0)
         ratio = wanted/self.gain
-        far = (ratio > self.jump) | (ratio < 1/self.jump)
-        moved = np.where(far, wanted,          # nothing decoding; do not crawl
-                         self.gain*np.clip(ratio, 1/self.step, self.step))
-        self.gain = np.where(alive & ~settled, moved, self.gain)
+        far = ratio > self.jump
+        moved = np.where(far, wanted, self.gain*np.clip(ratio, 1/self.step, self.step))
+        self.gain = np.where(lifting, moved, self.gain)
         self.gain = np.clip(self.gain, self.low, self.high)
         # Never boost one channel more than balance_db past the other: a dead
         # leg would otherwise be lifted until its own noise floor triggers the
         # Schmitt, inventing edges where there is no preamble at all.
         ceiling_gain = self.gain.min()*self.balance
         self.gain = np.minimum(self.gain, ceiling_gain)
-        # Relax to unity while the raw signal is healthy on its own. Gain is
-        # only ever needed while the wire is unusable (too weak to acquire,
-        # or being limited); a healthy raw peak means neither, so a stale
-        # lift or limiter pull-down unwinds instead of ratcheting forever.
-        # Gated on this block's own peak, not the tracked one (which decays
-        # slowly by design and would stall the return for seconds after one
-        # hot transient), and under the ceiling so it can never fight the
-        # limiter below: clipped-flat audio peaks at 1.0 and stays governed
-        # there. Pausing on odd blocks only modulates the return speed, never
-        # its direction, so there is nothing here that can oscillate.
-        instant = np.max(np.abs(audio), axis=0)
-        healthy = (instant >= self.window[0]) & (instant <= self.ceiling)
+        # Unwind a stale lift once the RAW channel is no longer weak. This only
+        # ever walks a lift (> 1.0) back to unity; the limiter below never
+        # touches this gain, so there is no hot-side spring to pump against it.
         toward = np.where(self.gain > 1.0,
-                          np.maximum(1.0, self.gain/self.step),
-                          np.minimum(1.0, self.gain*self.step))
-        self.gain = np.where(healthy, toward, self.gain)
+                          np.maximum(1.0, self.gain/self.step), self.gain)
+        self.gain = np.where(alive & (self.peak >= self.window[0]), toward, self.gain)
         out = audio*self.gain
+        # Limiter (hot side), its own gain, decoupled from the leveller. Instant
+        # attack pulls `limit` down to hold the block at the ceiling; it only
+        # releases back toward unity while the tracked (sustained) input peak is
+        # under the ceiling, so a still-hot signal stays uniformly attenuated
+        # instead of breathing block-to-block. `limit` persists, so the cut is
+        # uniform across a packet -- and it never touches the levelling gain, so
+        # the two cannot pump each other.
         top = np.max(np.abs(out), axis=0)
         hot = top > self.ceiling
-        if np.any(hot):
-            # Feed-forward limit. Pulling the gain down immediately, and
-            # keeping it down, beats clipping: a clipped OFDM symbol is
-            # broadband distortion across every carrier at once.
-            self.gain = np.where(hot, self.gain*self.ceiling/np.maximum(top, 1e-12),
-                                 self.gain)
-            self.limited += 1
-            out = audio*self.gain
+        attack = np.minimum(self.limit, self.ceiling/np.maximum(top, 1e-12))
+        release = np.minimum(1.0, self.limit*self.step)
+        self.limit = np.where(hot, attack,
+                              np.where(self.peak <= self.ceiling, release, self.limit))
+        self.limited += int(np.any(hot))
+        out = out*self.limit
         return out.astype(np.float32)
 
 
