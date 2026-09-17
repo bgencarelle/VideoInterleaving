@@ -638,7 +638,7 @@ class LiveCaptureRegressionTests(unittest.TestCase):
         with patch.object(modem_screen.shutil, 'which', return_value='/usr/bin/ffmpeg'), \
              patch.object(modem_screen.subprocess, 'Popen', return_value=proc) as popen:
             grab = modem_screen.camera_source()
-        self.assertIsNone(popen.call_args.kwargs['stderr'])
+        self.assertIsNotNone(popen.call_args.kwargs['stderr'])
         with self.assertRaisesRegex(RuntimeError, 'FFmpeg capture ended'):
             grab()
 

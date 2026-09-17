@@ -1,14 +1,36 @@
 """Read baked modem layers and composite the project's face/float selection."""
 import json
+import os
+import re
 from pathlib import Path
 import numpy as np
 from PIL import Image
 from animation_modem.imaging import PROFILES, source_size
 
 
+def natural_sort_key(s):
+    return [int(text) if text.isdigit() else text.lower()
+            for text in re.split(r'(\d+)', s)]
+
+
+def check_folder_prefix(folder_path, allowed_type):
+    """True if the folder name matches the strict numeric prefix rules.
+
+    allowed_type: 'main' (0-254) or 'float' (255).
+    """
+    prefix_part = os.path.basename(folder_path).partition('_')[0]
+    if not prefix_part.isdigit():
+        return False
+    prefix = int(prefix_part)
+    if allowed_type == 'main':
+        return 0 <= prefix <= 254
+    if allowed_type == 'float':
+        return prefix == 255
+    return False
+
+
 class ModemLibrary:
     def __init__(self, root):
-        from make_file_lists import natural_sort_key, check_folder_prefix
         self.root=Path(root).resolve()
         manifest=json.loads((self.root/'modem.json').read_text())
         if manifest.get('format')!='video-interleaving-modem' or manifest.get('version')!=1:
