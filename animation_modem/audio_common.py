@@ -67,6 +67,15 @@ class InputLevel:
     0.2 dB a packet -- because a packet's channel estimate comes from the
     training symbols at its front, so a gain that drifts within one scales the
     coefficients against an estimate taken at a different level.
+
+    And one return spring. The limiter below can only pull gain down, and the
+    window above freezes whatever it lands on -- so after one hot transient a
+    nominal signal would sit attenuated forever, operators crank volumes to
+    compensate, and the two fight. While the raw signal is healthy on its own
+    (inside the window and under the ceiling) the gain therefore relaxes toward
+    unity at the same slow step: gain differs from 1.0 only while the wire is
+    unusable. A weak signal keeps its lift, a dead leg stays frozen, a hot
+    input stays under the limiter -- those are the cases that need the gain.
     """
 
     def __init__(self, target=.7, ceiling=.95, floor=1e-4, step_db=.02,
@@ -112,6 +121,22 @@ class InputLevel:
         # Schmitt, inventing edges where there is no preamble at all.
         ceiling_gain = self.gain.min()*self.balance
         self.gain = np.minimum(self.gain, ceiling_gain)
+        # Relax to unity while the raw signal is healthy on its own. Gain is
+        # only ever needed while the wire is unusable (too weak to acquire,
+        # or being limited); a healthy raw peak means neither, so a stale
+        # lift or limiter pull-down unwinds instead of ratcheting forever.
+        # Gated on this block's own peak, not the tracked one (which decays
+        # slowly by design and would stall the return for seconds after one
+        # hot transient), and under the ceiling so it can never fight the
+        # limiter below: clipped-flat audio peaks at 1.0 and stays governed
+        # there. Pausing on odd blocks only modulates the return speed, never
+        # its direction, so there is nothing here that can oscillate.
+        instant = np.max(np.abs(audio), axis=0)
+        healthy = (instant >= self.window[0]) & (instant <= self.ceiling)
+        toward = np.where(self.gain > 1.0,
+                          np.maximum(1.0, self.gain/self.step),
+                          np.minimum(1.0, self.gain*self.step))
+        self.gain = np.where(healthy, toward, self.gain)
         out = audio*self.gain
         top = np.max(np.abs(out), axis=0)
         hot = top > self.ceiling
