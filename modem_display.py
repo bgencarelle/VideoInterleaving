@@ -1,8 +1,8 @@
 """VideoInterleaving clock/selector -> baked RGBA composite -> stereo modem.
 
-Transmits with the v3 transport. Receive with utilities/modem_v3_check.py,
-which needs no matching argument: it identifies the preset from the signal and
-reads the profile out of the header. The shared-time path is unchanged: the
+Transmits with the v3 transport on the one wire. Receive with
+utilities/modem_v3_check.py, which needs no matching argument: it reads the
+profile out of the header. The shared-time path is unchanged: the
 header keeps a 32-bit millisecond field, so reserve() still projects a send
 deadline, the image index is still evaluated at that instant, and the receiver
 can still hold the frame until then. Only the encoder underneath changed.
@@ -14,7 +14,6 @@ import wave
 from animation_modem.transport3 import REFERENCE_RATE as RATE, SourceCoder, pack_folders
 from animation_modem import transport3 as _v3
 
-PRESETS = _v3.ALL_PRESETS
 from animation_modem.imaging import (DEFAULT_PROFILE, PROFILES, burn_counters,
                                      fit_shapes, image_values, plane_grids,
                                      plane_shapes)
@@ -62,13 +61,8 @@ def packet(library, layout, coder, absolute, selection, numbered=False,
 
 def run_modem(args):
     import settings
-    # Checked before anything is opened or written. --modem-preset takes any
-    # name argparse was given, and every layout here is progressive v3 wire
-    # format that a v3 receiver can find.
-    wanted=getattr(args,'modem_preset',None) or 'wide-v3'
-    if wanted not in PRESETS:
-        raise ValueError(f'Unknown --modem-preset {wanted!r}. Choose one of: '
-                         +', '.join(PRESETS))
+    # The wire is fixed; there is no preset to choose or validate.
+    layout=_v3.WIRE
     root=args.modem_dir or getattr(settings,'MODEM_DIR',settings.IMAGES_DIR+'_modem')
     library=ModemLibrary(root)
     # Follow the BAKE's profile. It used to be pinned to DEFAULT_PROFILE, which
@@ -76,7 +70,6 @@ def run_modem(args):
     # bake made at 80x96 for color-dct would have been box-downsampled straight
     # back to 40x48 and the extra detail thrown away before it reached the wire.
     # --modem-profile overrides for comparisons.
-    layout=PRESETS[wanted]
     profile=getattr(args,'modem_profile',None) or library.profile
     if profile not in PROFILES:
         raise ValueError(f'Unknown profile {profile!r}. Choose one of: '
@@ -85,11 +78,11 @@ def run_modem(args):
     shapes=fit_shapes(wanted_shapes,layout.capacity)
     grids=plane_grids(profile) if shapes==wanted_shapes else shapes
     if shapes!=wanted_shapes:
-        print(f'[MODEM] WARNING: preset {wanted} holds {layout.capacity} values '
+        print(f'[MODEM] WARNING: the wire holds {layout.capacity} values '
               f'and profile {profile} wants {sum(int(__import__("numpy").prod(s)) for s in wanted_shapes)}. '
               f'Picture shrunk to {shapes[0][1]}x{shapes[0][0]}, and any finer '
-              f'sampling grid is dropped with it. Pick a preset with more '
-              f'capacity -- hires-v3 holds 2880 at 16.48 fps.')
+              f'sampling grid is dropped with it. Raise image_symbols in '
+              f'transport3.WIRE to carry the full picture.')
 
     # Load custom power allocation table if provided
     table = None

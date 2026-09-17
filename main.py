@@ -336,16 +336,12 @@ def configure_runtime():
                         help="Minimum encoding lead before a send deadline (default 10)")
     parser.add_argument("--modem-frames", type=int, default=0, help="0 = unlimited live / one source pass for WAV")
     parser.add_argument("--modem-wav", help="Export a deterministic pair to PCM16 WAV instead of live playback")
-    parser.add_argument("--modem-preset", default=None,
-                        help="Wire layout, default 'wide-v3'. The receiver "
-                             "identifies it from the signal; it does not have "
-                             "to be told.")
     parser.add_argument("--modem-profile", default=None,
                         help="Picture geometry to send. Defaults to the bake's "
                              "own profile, which is the right answer unless "
                              "you are comparing. 'color-dct' needs a bake at "
-                             "80x96 and a preset holding 2880 values, such as "
-                             "hires-v3; the receiver reads it from the header.")
+                             "80x96 and the wire holding 2880 values; the "
+                             "receiver reads it from the header.")
     parser.add_argument("--modem-pair", help="Fixed zero-based face,float pair for inspection, e.g. 1,0")
     parser.add_argument("-f", "--modem-numbered", action="store_true", help="Burn absolute and source-index counters into modem pixels")
     parser.add_argument("--modem-index-offset-ms", type=float, default=0.0,

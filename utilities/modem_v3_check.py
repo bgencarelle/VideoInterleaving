@@ -48,7 +48,7 @@ WINDOW = (480, 576)
 # is there for looking at the result rather than debugging it.
 SCALING = {'raw': Image.Resampling.NEAREST, 'smooth': Image.Resampling.LANCZOS}
 
-PRESETS = V3.ALL_PRESETS
+WIRE = V3.WIRE
 REFERENCE_RATE = V3.REFERENCE_RATE
 RATE = REFERENCE_RATE
 
@@ -91,19 +91,17 @@ def coder_for(profile, allocation, layout, strict=True):
     if table is not None:
         want = int(sum(np.prod(s) for s in shapes))
         if table.shape != (want,):
-            # A table is fitted for ONE (preset, profile) pair, because its
-            # length is that pair's slot count. Where the caller named the pair,
-            # a mismatch is a mistake and has to say so. Where we are SCANNING
-            # -- candidate presets, or the four profile coders a receiver holds
-            # to follow the header -- a mismatch just means this table is not
-            # for that one, and falling back to the default table is how the
-            # scan keeps working at all.
+            # A table is fitted for ONE profile, because its length is that
+            # profile's slot count. Where the caller named the profile, a
+            # mismatch is a mistake and has to say so. Where we are SCANNING the
+            # profile coders a receiver holds to follow the header, a mismatch
+            # just means this table is not for that one, and falling back to the
+            # default table is how the scan keeps working at all.
             if strict:
                 raise SystemExit(
                     f'Allocation {allocation} has {table.size} weights but '
-                    f'{layout.name}/{profile} needs {want}. A table only fits '
-                    f'the preset and profile it was fitted for -- refit with '
-                    f'fit_allocation.py --preset {layout.name} '
+                    f'{profile} needs {want}. A table only fits the profile it '
+                    f'was fitted for -- refit with fit_allocation.py '
                     f'--profile {profile}.')
             table = None
     return V3.SourceCoder(shapes, table, grids=grids), grids
@@ -121,17 +119,10 @@ def coders_for(layout, allocation=None):
             for name in V3.PROFILE_CODES}
 
 
-def live_presets():
-    return list(PRESETS)
-
-
 def candidates_for(allocation=None):
-    out = []
-    for name in live_presets():
-        layout = PRESETS[name]
-        coders = coders_for(layout, allocation)
-        out.append((layout, coders[V3.profile_code(DEFAULT_PROFILE)], coders))
-    return out
+    """The one wire, carrying every profile coder the header may name."""
+    coders = coders_for(WIRE, allocation)
+    return [(WIRE, coders[V3.profile_code(DEFAULT_PROFILE)], coders)]
 
 
 def receive_for(args, layout, coder, input_rate=None, coders=None,
@@ -180,7 +171,7 @@ def record(r):
 
 def do_write(args):
     frames, profile = frames_from(args)
-    layout = PRESETS[args.preset]
+    layout = WIRE
     coder, _ = coder_for(profile, args.allocation, layout)
     fps = layout.fps_at(REFERENCE_RATE)
     print(layout.describe(REFERENCE_RATE))
@@ -199,7 +190,7 @@ def do_write(args):
 
 
 def do_read(args):
-    layout = PRESETS[args.preset]
+    layout = WIRE
     coder, _ = coder_for(args.profile, args.allocation, layout)
     rate = wav_rate(args.wav)
     receiver = receive_for(args, layout, coder, input_rate=rate,
@@ -209,12 +200,17 @@ def do_read(args):
         print(f'{args.wav}: {rate} Hz, decoding at that rate', file=sys.stderr)
     if args.save_frames:
         Path(args.save_frames).mkdir(parents=True, exist_ok=True)
+    # The audio-path emulator sits between the file and the receiver, so a
+    # recorded signal can be re-impaired on the way in -- the same vocabulary
+    # as do_bench ('clean'/'mild'/'rough' plus per-knob overrides). It has an
+    # identity fast-path when nothing is enabled.
+    emulator = IMP.Emulator(IMP.settings_from_args(args))
     tiers, rates, seen, pictures = {}, [], 0, []
 
     def results():
         level = InputLevel()
         for block in wav_blocks(args.wav, args.channels, 1024):
-            yield from receiver.feed(level.process(block))
+            yield from receiver.feed(emulator.process(level.process(block)))
         yield from receiver.flush()
 
     for r in results():
@@ -238,16 +234,14 @@ def do_read(args):
 
 
 def do_bench(args):
-    """Compare v3 variants across simulated channels, at equal settings."""
+    """Decode the one wire across simulated channels."""
     frames, profile = frames_from(args)
-    layout = PRESETS[args.preset]
+    layout = WIRE
     coder, _ = coder_for(profile, args.allocation, layout)
     channels = [('clean', {}),
                 ('cassette-ish', dict(lowpass_hz=10000, noise_dbfs=-45)),
                 ('worn deck', dict(lowpass_hz=8000, noise_dbfs=-40, crosstalk=.07))]
-    versions = [(name, V3.encode,
-                 (lambda l=PRESETS[name]: V3.Receiver(l, coder)), PRESETS[name])
-                for name in ('wide-v3', 'wide-v3-fast')]
+    versions = [('wire', V3.encode, lambda: V3.Receiver(WIRE, coder), WIRE)]
     for name, settings in channels:
         for vname, enc, make, layout in versions:
             quality, hdr, tier, coverage = [], 0, {}, []
@@ -278,7 +272,7 @@ def do_live_send(args):
     if args.list_devices:
         print(sd.query_devices()); return
     frames, profile = frames_from(args)
-    layout = PRESETS[args.preset]
+    layout = WIRE
     coder, _ = coder_for(profile, None, layout)
     state = {'packet': 0, 'position': 0, 'sent': 0}
     channels = args.channels
@@ -328,7 +322,7 @@ def do_live_receive(args):
     sd = sounddevice()
     if args.list_devices:
         print(sd.query_devices()); return
-    layout = PRESETS['lean-v3']
+    layout = WIRE
     coder, _ = coder_for(DEFAULT_PROFILE, None, layout)
     verbose = args.verbose or args.headless
     if args.silent:
@@ -344,8 +338,7 @@ def do_live_receive(args):
     source = {'rate': None, 'level': InputLevel()}
 
     from animation_modem.audio_buffer import AudioBuffer
-    widest = max(PRESETS[n].frame for n in live_presets())
-    minimum_buffer = ((widest+255)//256)*256
+    minimum_buffer = ((WIRE.frame+255)//256)*256
     audio_buffer = AudioBuffer(max(minimum_buffer, args.buffer_frames*layout.frame), layout.frame)
     reports = queue.Queue(maxsize=1)
 
@@ -422,6 +415,9 @@ def do_live_receive(args):
             receiver = V3.Receiver(layout, coder, pulse_only=True, input_rate=rate,
                                    coders=coders_for(layout, args.allocation),
                                    candidates=candidates_for(args.allocation))
+            # Same audio-path wiring as read/bench: impairments sit between the
+            # input stream and the demodulator.
+            emulator = IMP.Emulator(IMP.settings_from_args(args))
             seen = 0
             last_summary = time.monotonic()
             peak = 0.0
@@ -435,7 +431,7 @@ def do_live_receive(args):
                 peak = max(peak, float(np.max(np.abs(audio))))
                 if gap:
                     receiver.reset()
-                results = receiver.feed(audio)
+                results = receiver.feed(emulator.process(audio))
                 seen += len(results)
                 for result in results:
                     result.extra.update(complete=result.identity == 'verified_header' and result.status == 'received')
@@ -480,7 +476,12 @@ def do_live_receive(args):
         else:
             import tkinter as tk
             from PIL import ImageTk
-            size = (args.width, args.height)
+            # The decoded picture is tiny (80x96 for color-dct, 40x48 for
+            # lean-dct). Blow it up by an integer factor and hand only that to
+            # Tk, instead of allocating a full-window RGB canvas and pasting
+            # into it every frame -- that canvas churn is what made the window
+            # heavy on older machines.
+            window = (args.width, args.height)
             resample = SCALING[args.scaling]
             root = tk.Tk()
             def callback_error(exc_type, exc, traceback):
@@ -489,14 +490,16 @@ def do_live_receive(args):
                 root.destroy()
             root.report_callback_exception = callback_error
             root.title('Stereo image receiver')
-            initial = ImageTk.PhotoImage(Image.new('RGB', size, 'black'))
-            label = tk.Label(root, background='black', image=initial)
-            label.image = initial
-            label.pack()
-            device_label = tk.Label(root, text=latest['device'])
+            root.configure(background='black')
+            root.geometry(f'{window[0]}x{window[1]}')
+            photo = tk.Label(root, background='black')
+            photo.pack(expand=True)
+            device_label = tk.Label(root, text=latest['device'],
+                                    background='black', foreground='white')
             device_label.pack(fill='x', padx=6)
             status = tk.Label(root, text='Waiting for signal', width=1, height=2,
-                              anchor='w', justify='left', wraplength=size[0]-12)
+                              anchor='w', justify='left', wraplength=window[0]-12,
+                              background='black', foreground='white')
             status.pack(fill='x', padx=6)
 
             def close():
@@ -516,23 +519,32 @@ def do_live_receive(args):
                     device_text = latest['device']
                 device_label.config(text=device_text)
                 if r is not rendered[0]:
-                    canvas = Image.new('RGB', size, 'black')
-                    if r is not None:
+                    if r is None:
+                        status.config(text='Missing or damaged frame')
+                    else:
                         prof = (r.extra.get('profile')
                                 or r.extra.get('profile_name'))
                         img = values_image(r.values, r.extra['shapes'])
-                        scaled = ImageOps.contain(img, size, resample)
-                        canvas.paste(scaled, ((size[0]-scaled.width)//2, (size[1]-scaled.height)//2))
-                        shown = prof or 'profile unverified'
+                        # An integer upscale is a plain pixel repeat, which is
+                        # exactly what nearest wants and is the cheap path.
+                        # Anything that must downscale, or was asked to
+                        # smooth, still goes through PIL.
+                        zoom = min(window[0]//img.width, window[1]//img.height)
+                        if zoom >= 1 and resample is Image.Resampling.NEAREST:
+                            scaled = img.resize((img.width*zoom, img.height*zoom),
+                                                Image.Resampling.NEAREST)
+                            shown = f'{scaled.width}x{scaled.height} x{zoom}'
+                        else:
+                            scaled = ImageOps.contain(img, window, resample)
+                            shown = f'{scaled.width}x{scaled.height} {args.scaling}'
+                        photo.image = ImageTk.PhotoImage(scaled)
+                        photo.configure(image=photo.image)
                         found = r.extra.get('preset', '?')
                         native = picture_size(r.extra.get('shapes')) or '?'
                         status.config(
-                            text=f'{found} / {shown} | {native} -> '
-                                 f'{scaled.width}x{scaled.height} {args.scaling}'
+                            text=f'{found} / {prof or "profile unverified"} | '
+                                 f'{native} -> {shown}'
                                  f' | frame {r.absolute} | {r.status}')
-                    else:
-                        status.config(text='Missing or damaged frame')
-                    label.image.paste(canvas)
                     rendered[0] = r
                 root.after(10, refresh)
             refresh()
@@ -556,7 +568,7 @@ def do_live_receive(args):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest='command', required=True)
-    p.set_defaults(preset='wide-v3', profile=DEFAULT_PROFILE, allocation=None, gain=1.0)
+    p.set_defaults(profile=DEFAULT_PROFILE, allocation=None, gain=1.0)
 
     def shared(q):
         q.add_argument('--profile', choices=list(wire_profiles()),
@@ -573,20 +585,14 @@ def main(argv=None):
                             'Measured +3.4 to +3.8 dB on a held-out frame, for '
                             'no extra slots. SHARED STATE: not on the wire and '
                             'nothing detects it, so both ends need the same '
-                            'file, and it only fits the preset/profile pair it '
-                            'was made for.')
+                            'file, and it only fits the profile it was made '
+                            'for.')
     b = sub.add_parser('bench'); shared(b); allocation(b)
-    b.add_argument('--preset', choices=list(PRESETS), default='wide-v3')
     w = sub.add_parser('write'); shared(w)
-    w.add_argument('--preset', choices=list(PRESETS), default='lean-v3')
     w.add_argument('--out', type=Path, default=Path('v3_test.wav'))
     w.add_argument('-f', '--numbered', action='store_true')
     allocation(w)
     r = sub.add_parser('read')
-    r.add_argument('--preset', choices=list(PRESETS), default='lean-v3',
-                   help='Fallback only. The preset is identified from the '
-                        'signal by decoding against each candidate and letting '
-                        'the header CRC pick; this is what gets tried first.')
     r.add_argument('--profile', choices=list(wire_profiles()),
                    default=DEFAULT_PROFILE,
                    help='Fallback only. The profile is read from the header, '
@@ -595,9 +601,9 @@ def main(argv=None):
     r.add_argument('--wav', type=Path, required=True)
     r.add_argument('--channels', type=pair, default=(0, 1))
     r.add_argument('--save-frames', type=Path)
+    IMP.add_arguments(r)
     allocation(r)
     ls = sub.add_parser('live-send'); shared(ls)
-    ls.add_argument('--preset', choices=list(PRESETS), default='lean-v3')
     ls.add_argument('--device', type=device)
     ls.add_argument('--channels', type=pair, default=(0, 1))
     ls.add_argument('-f', '--numbered', action='store_true')
@@ -610,7 +616,10 @@ def main(argv=None):
     buffering.add_argument('--buffer-frames', type=int, choices=(1, 2), default=2)
     buffering.add_argument('--buffer-ms', type=float)
     lr.add_argument('--save-frames', type=Path)
-    lr.add_argument('--on-loss', choices=('hold', 'black', 'damaged'), default='damaged')
+    lr.add_argument('--on-loss', choices=('hold', 'damaged'), default='damaged',
+                    help='hold = keep the last good frame; damaged = show the '
+                         'partial decode as-is. There is no black option: the '
+                         'picture path never emits black.')
     lr.add_argument('--headless', action='store_true')
     lr.add_argument('-v', '--verbose', action='store_true')
     lr.add_argument('--silent', action='store_true')
@@ -628,10 +637,14 @@ def main(argv=None):
                     help='How to scale the picture up to the window. raw '
                          '(default) is nearest-neighbour and shows the pixels '
                          'as sent, which is what you want when judging a '
-                         'decode; smooth is Lanczos and looks better but hides '
-                         'dead pixels, blocking and chroma blotching.')
+                         'decode; an integer multiple is applied as a plain '
+                         'pixel repeat, which costs almost nothing on old '
+                         'machines. smooth is '
+                         'Lanczos and looks better but hides dead pixels, '
+                         'blocking and chroma blotching.')
     allocation(lr)
     lr.add_argument('--list-devices', action='store_true')
+    IMP.add_arguments(lr)
     args = p.parse_args(argv)
     {'bench': do_bench, 'write': do_write, 'read': do_read,
      'live-send': do_live_send, 'live-receive': do_live_receive}[args.command](args)

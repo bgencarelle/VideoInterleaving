@@ -25,6 +25,7 @@ detect it from, so a custom --allocation must match at both ends.
 import struct
 import zlib
 import time
+from itertools import combinations
 from functools import lru_cache, cached_property
 from fractions import Fraction
 from dataclasses import dataclass, field
@@ -122,29 +123,27 @@ class Layout:
 
     @cached_property
     def header_bins(self):
-        """Where the frame header rides.
+        """Where the frame header rides: the lowest data carriers, always.
 
-        By default the lowest data carriers. That is only the right answer if
-        the bottom of the band is intact: with progressive layouts the lowest
-        carrier is bin 1, sitting on the declared bottom edge, so a channel that
-        rolls off anywhere near its own stated limit takes the header out.
-        Measured on wide-v3, filtering at the declared 375 Hz bottom edge left
-        every picture decodable and verified zero headers.
+        The header is deliberately independent of ``spread_carriers``, which
+        places the IMAGE coefficients. Colour immunity to EQ comes from
+        spreading the image planes; the header gains nothing from riding high,
+        and loses a lot. A channel that cuts the top of the band (a narrow path)
+        or playback faster than the aliasing speed takes the top carriers out
+        first, and a header living up there goes with them -- measured: a
+        full-band header loses identity entirely under a 15 kHz lowpass or 2x
+        playback, while a low-band header keeps it.
 
-        Under spread_carriers the header moves to the middle of the band
-        instead, next to the strongest image carriers, so identity survives
-        wherever the picture does.
+        The old reason for riding mid-band was that bin 1 sits on the declared
+        bottom edge, so a bottom roll-off killed a header concentrated there.
+        With ``header_width`` spanning many carriers that is no longer a single
+        point of failure: measured, a 375 Hz highpass still verifies.
 
-        Widening trades robustness for frame rate: fewer header symbols, but
-        the header reaches further toward the edges.
+        Widening trades header-symbol count for frame rate: fewer header
+        symbols and a higher frame rate, but the header reaches toward the top.
         """
         want = min(max(1, self.header_width), len(self.data_bins))
-        bins = self.data_bins
-        if not self.spread_carriers:
-            return bins[:want]
-        middle_out = np.argsort(np.abs(np.arange(len(bins)) - (len(bins)-1)/2),
-                                kind='stable')
-        return np.sort(bins[np.sort(middle_out[:want])])
+        return self.data_bins[:want]
 
     @cached_property
     def header_lanes(self):
@@ -832,27 +831,42 @@ def _channel_equalizer(spectrum, layout):
         h = np.stack([received[0]*inverse_phase[0, :, 0, None],
                       received[1]*inverse_phase[1, :, 1, None]], axis=-1)
     noise = max(float(np.mean(np.abs(spectrum[:, unused])**2)), 1e-12)
-    # Keep these tiny products out of matmul/BLAS; do not suppress FP errors.
-    hH = h.conj().transpose(0, 2, 1)
-    gram = np.einsum('kij,kjl->kil', hH, h, optimize=False)
-    gram[:, 0, 0] += 4*noise
-    gram[:, 1, 1] += 4*noise
-    det = gram[:, 0, 0]*gram[:, 1, 1] - gram[:, 0, 1]*gram[:, 1, 0]
-    adj = np.empty_like(gram)
-    adj[:, 0, 0], adj[:, 1, 1] = gram[:, 1, 1], gram[:, 0, 0]
-    adj[:, 0, 1], adj[:, 1, 0] = -gram[:, 0, 1], -gram[:, 1, 0]
-    inverse = np.einsum('kij,kjl->kil', adj/det[:, None, None], hH, optimize=False)
-    weights = np.clip(np.real(np.einsum('kij,kji->ki', inverse, h, optimize=False)), 0, 1)
-    variance = .5*noise*np.sum(np.abs(inverse)**2, axis=-1)/IMAGE_GAIN**2
+    # The MMSE equaliser for a 2x2 channel has a closed form -- gram is the
+    # per-carrier Hermitian product, its inverse is the adjugate over the
+    # determinant, and the pre-multiply against hH falls out by hand. Expanding
+    # it here instead of through einsum keeps the (K,2,2) gram/inverse
+    # intermediates out of the per-packet path: on the M4 those cost more in
+    # dispatch than in arithmetic, and the cheap hardware this targets loses
+    # the same ratio again. The products are identical to the matrix route.
+    h00, h01, h10, h11 = h[:, 0, 0], h[:, 0, 1], h[:, 1, 0], h[:, 1, 1]
+    gram00 = h00.conj()*h00 + h10.conj()*h10 + 4*noise
+    gram10 = h01.conj()*h00 + h11.conj()*h10
+    gram11 = h01.conj()*h01 + h11.conj()*h11 + 4*noise
+    det = gram00*gram11 - gram10*gram10.conj()
+    inv00 = (gram11*h00.conj() - gram10.conj()*h10.conj())/det
+    inv01 = (gram11*h01.conj() - gram10.conj()*h11.conj())/det
+    inv10 = (-gram10*h00.conj() + gram00*h10.conj())/det
+    inv11 = (-gram10*h01.conj() + gram00*h11.conj())/det
+    weights = np.clip(np.stack([np.real(inv00*h00 + inv01*h10),
+                                np.real(inv10*h01 + inv11*h11)], axis=-1), 0, 1)
+    variance = .5*noise*np.stack([np.abs(inv00)**2 + np.abs(inv01)**2,
+                                  np.abs(inv10)**2 + np.abs(inv11)**2],
+                                 axis=-1)/IMAGE_GAIN**2
     coherence = abs(np.sum(h[1:]*h[:-1].conj())) / max(
         np.sqrt(np.sum(abs(h[1:])**2)*np.sum(abs(h[:-1])**2)), 1e-20)
-    return inverse, weights, variance, float(coherence), _channel_skew(h, carriers)
+    return inv00, inv01, inv10, inv11, weights, variance, \
+        float(coherence), _channel_skew(h, carriers)
 
 
 def _equalise(body, layout):
     spectrum = rfft(body, n=N, axis=1, workers=1)
-    inverse, weights, variance, coherence, skew = _channel_equalizer(spectrum, layout)
-    equal = np.einsum('kij,skj->ski', inverse, spectrum[:, layout.carriers, :])*_decode_tables(layout)[4]
+    inv00, inv01, inv10, inv11, weights, variance, coherence, skew = \
+        _channel_equalizer(spectrum, layout)
+    spec = spectrum[:, layout.carriers, :]
+    equal = np.empty_like(spec)
+    equal[..., 0] = inv00*spec[..., 0] + inv01*spec[..., 1]
+    equal[..., 1] = inv10*spec[..., 0] + inv11*spec[..., 1]
+    equal *= _decode_tables(layout)[4]
     return equal, weights, variance, coherence, skew
 
 
@@ -922,7 +936,60 @@ def _channel_skew(h, carriers):
             'crosstalk': mixed/energy if energy else 0.}
 
 
-def decode_packet(samples, layout, coder, *, body=None, coders=None):
+def _resolve_header(raw, layout):
+    """CRC + structure check on a hard-decoded header word -> fields or None.
+
+    The CRC32 sits stored plain beside the 16 payload bytes, so a single bit
+    error -- in the data or in the stored CRC itself -- fails the check
+    wholesale. There is no redundancy budget for forward error correction: the
+    header is 20 bytes out of a 2880-value budget. The fallback is to borrow
+    soft information instead (see _correct_header), not to spend more wire.
+    """
+    if zlib.crc32(raw[:HEADER_BYTES]) != struct.unpack('>I', raw[HEADER_BYTES:])[0]:
+        return None
+    magic, hflags, packed, absolute, index, count, stamp = struct.unpack(
+        HEADER_FORMAT, raw[:HEADER_BYTES])
+    top, code = packed & TOP_BIN_MASK, packed >> 6
+    if magic != layout.wire_magic or top != layout.top_bin or not 1 <= index <= count:
+        return None
+    return (hflags, absolute, index, count, stamp, code)
+
+
+# How many of the least-reliable header bits the tolerance search is willing to
+# flip at all. It bounds the flip space: r corrections over this many candidate
+# positions is sum_{k<=r} C(HC, k) CRC32 checks, all C-speed, and is only ever
+# paid when the straight CRC failed.
+HEADER_FLIP_CANDIDATES = 14
+
+
+def _correct_header(raw, flat, tolerance, layout):
+    """Correct up to `tolerance` hard-decision errors using soft reliability.
+
+    A hard bit that actually flipped is almost certainly one of the weakest
+    |value| components sitting near the decision line, so only the
+    HEADER_FLIP_CANDIDATES least reliable bits are ever candidates. Running the
+    flip combinations through the CRC turns the all-or-nothing CRC from a pure
+    error *detector* into an outward FEC check: the correction is accepted only
+    when the CRC verifies the corrected word end to end. Clean packets never pay
+    the search (their straight CRC passed); it exists to turn ``lost`` verdicts
+    into verified identities where the hard decision was marginal.
+    """
+    reliability = np.stack([np.abs(flat.real), np.abs(flat.imag)], axis=-1).ravel()
+    candidates = np.argsort(reliability, kind='stable')[:HEADER_FLIP_CANDIDATES]
+    depth_max = min(tolerance, HEADER_FLIP_CANDIDATES - 1)
+    for depth in range(1, depth_max + 1):
+        for combo in combinations(candidates, depth):
+            word = bytearray(raw)
+            for p in combo:
+                word[p >> 3] ^= 1 << (7 - (p & 7))
+            fields = _resolve_header(bytes(word), layout)
+            if fields:
+                return fields
+    return None
+
+
+def decode_packet(samples, layout, coder, *, body=None, coders=None,
+                  header_tolerance=2):
     """`coders` maps a profile code to the coder that reconstructs it.
 
     The transmitter declares its picture geometry in the header, so a receiver
@@ -1011,15 +1078,11 @@ def decode_packet(samples, layout, coder, *, body=None, coders=None):
             continue
         bits = np.stack([flat.real > 0, flat.imag > 0], axis=-1).ravel()
         raw = np.packbits(bits).tobytes()
-
-        if zlib.crc32(raw[:HEADER_BYTES]) == struct.unpack('>I', raw[HEADER_BYTES:])[0]:
-            magic, hflags, packed, absolute, index, count, stamp = struct.unpack(
-                HEADER_FORMAT, raw[:HEADER_BYTES])
-            top, code = packed & TOP_BIN_MASK, packed >> 6
-            expected_magic = layout.wire_magic
-            if magic == expected_magic and top == layout.top_bin and 1 <= index <= count:
-                fields = (hflags, absolute, index, count, stamp, code)
-                break
+        fields = _resolve_header(raw, layout)
+        if fields is None and header_tolerance:
+            fields = _correct_header(raw, flat, header_tolerance, layout)
+        if fields:
+            break
 
     # 4. Usability Check & Payload Reconstruction
     coverage = float(np.mean(weights[data] >= 0.45))
@@ -1029,32 +1092,48 @@ def decode_packet(samples, layout, coder, *, body=None, coders=None):
     if fields is None and not usable:
         return Decoded('lost', pilot_error=pilot_error, coverage=coverage)
 
-    values_parts, weight_parts, noise_parts = [], [], []
+    # 4b. Payload assembly. sent/per/per_noise are filled once into their
+    # final (symbol, carrier, channel, IQ) layout instead of building broadcast
+    # views that ravel-copy and concatenate -- the same bytes with far fewer
+    # per-packet temporaries. Every part spans (symbols, bins, channels) with
+    # the I/Q pair interleaved, so filling the re-shaped views writes exactly
+    # the layout the coefficient gather expects.
+    total = layout.capacity
+    sent = np.empty(total, dtype=float)
+    per = np.empty(total, dtype=float)
+    per_noise = np.empty(total, dtype=float)
+    off = 0
 
     if layout.header_capacity:
         spare = np.searchsorted(carriers, layout.spare_bins)
+        hs, n = layout.header_symbols, len(spare)
         early = equal[2:end, spare] / IMAGE_GAIN
-        shape = (layout.header_symbols, len(spare), 2, 2)
-        values_parts.append(np.stack([early.real, early.imag], axis=-1).ravel())
-        weight_parts.append(np.broadcast_to(weights[spare][None, :, :, None], shape).ravel())
-        noise_parts.append(np.broadcast_to(variance[spare][None, :, :, None], shape).ravel())
+        v = sent[off:off + 4*hs*n].reshape(hs, n, 2, 2)
+        v[..., 0] = early.real
+        v[..., 1] = early.imag
+        p = per[off:off + 4*hs*n].reshape(hs, n, 2, 2)
+        p[...] = weights[spare][None, :, :, None]
+        pn = per_noise[off:off + 4*hs*n].reshape(hs, n, 2, 2)
+        pn[...] = variance[spare][None, :, :, None]
+        off += 4*hs*n
 
     block = equal[end:, data] / IMAGE_GAIN
-    shape = (layout.image_symbols, len(data), 2, 2)
-    values_parts.append(np.stack([block.real, block.imag], axis=-1).ravel())
-    weight_parts.append(np.broadcast_to(weights[data][None, :, :, None], shape).ravel())
-    noise_parts.append(np.broadcast_to(variance[data][None, :, :, None], shape).ravel())
+    s, b = layout.image_symbols, len(data)
+    v = sent[off:off + 4*s*b].reshape(s, b, 2, 2)
+    v[..., 0] = block.real
+    v[..., 1] = block.imag
+    p = per[off:off + 4*s*b].reshape(s, b, 2, 2)
+    p[...] = weights[data][None, :, :, None]
+    pn = per_noise[off:off + 4*s*b].reshape(s, b, 2, 2)
+    pn[...] = variance[data][None, :, :, None]
 
-    sent = np.concatenate(values_parts)
-    per = np.concatenate(weight_parts)
     coverage = float(np.mean(per >= 0.45))
-    per_noise = np.concatenate(noise_parts)
 
     # Guard against exact zeros only. An absolute floor here is not scale-free:
     # on a quiet or attenuated channel the real post-equaliser variance sits far
     # below 1e-4, so the floor dominated the Wiener denominator and applied an
     # extra, carrier-dependent shrink on top of the de-bias above.
-    per_noise = np.maximum(per_noise, 1e-20)
+    per_noise[per_noise < 1e-20] = 1e-20
 
     declared = profile_name(fields[5]) if fields is not None else None
     picture = coder

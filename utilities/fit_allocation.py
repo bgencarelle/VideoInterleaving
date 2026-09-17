@@ -22,16 +22,16 @@ both and take the picture.
 
 The table is SHARED STATE. It is not on the wire and there is nothing to
 detect it from, so the receiver must be given the same file. It is also
-specific to one (preset, profile) pair, because its length is that pair's slot
-count; the loader checks.
+specific to one profile, because its length is that profile's slot count on
+the wire; the loader checks.
 
     python3 utilities/fit_allocation.py --modem-dir images_modem \\
-            --preset lean-14k --profile color-dct --out lean14k.npy
+            --profile color-dct --out color-dct.npy
 
-    python3 modem_screen.py --preset lean-14k --profile color-dct \\
-            --allocation lean14k.npy --device "BlackHole 2ch"
+    python3 modem_screen.py --profile color-dct \\
+            --allocation color-dct.npy --device "BlackHole 2ch"
     python3 utilities/modem_v3_check.py live-receive \\
-            --allocation lean14k.npy --device "BlackHole 2ch"
+            --allocation color-dct.npy --device "BlackHole 2ch"
 """
 import argparse
 from pathlib import Path
@@ -43,8 +43,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from animation_modem import transport3 as V3                     # noqa: E402
 from animation_modem.imaging import (fit_shapes, image_values,   # noqa: E402
                                      plane_grids, plane_shapes)
-
-PRESETS = V3.ALL_PRESETS
 
 
 def geometry(profile, layout):
@@ -98,7 +96,6 @@ def main(argv=None):
     p.add_argument('--modem-dir', type=Path,
                    help='Bake to fit against. Without one, synthetic frames '
                         'are used, which is only useful for a smoke test.')
-    p.add_argument('--preset', choices=list(PRESETS), default='lean-14k')
     p.add_argument('--profile', default=None,
                    help="Defaults to the bake's own profile.")
     p.add_argument('--frames', type=int, default=32)
@@ -110,12 +107,12 @@ def main(argv=None):
     if not frames:
         raise SystemExit('No frames to fit against')
     profile = args.profile or bake_profile
-    layout = PRESETS[args.preset]
+    layout = V3.WIRE
     shapes, grids = geometry(profile, layout)
     sigma = fit(frames, shapes, grids)
     np.save(args.out, sigma)
     spread = 20*np.log10(float(np.max(sigma))/float(np.min(sigma)))
-    print(f'{args.preset} / {profile}: {len(sigma)} slots from {len(frames)} '
+    print(f'{profile}: {len(sigma)} slots from {len(frames)} '
           f'frames -> {args.out}')
     print(f'  picture {shapes[0][1]}x{shapes[0][0]}, '
           f'{layout.fps:.2f} fps, {layout.band_at(48000)[1]:.0f} Hz')

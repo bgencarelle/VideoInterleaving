@@ -106,7 +106,7 @@ SCOPE_DC_COMP = None      # Hz. Cancel the output's AC coupling at this corner
                           # so flat regions of a trace do not sag. Start at 30.
                           # Costs amplitude (~26% at a 20 Hz corner, ~47% at
                           # 50 Hz), so raise the scope gain to compensate.
-SCOPE_PREVIEW_FPS = 12    # /scope/stream.mjpg frame rate. THE cpu knob for
+SCOPE_PREVIEW_FPS = 15    # /scope/stream.mjpg frame rate. THE cpu knob for
                           # the web preview, together with ?size=. Rendering
                           # runs on the request thread, so this never costs the
                           # trace deadline -- but on a Pi keep it low.

@@ -15,9 +15,8 @@ Receive with:
 
     python utilities/modem_v3_check.py live-receive --device "BlackHole 2ch"
 
-The receiver takes no --preset or --profile: the profile is declared in the
-header, and the preset is identified by decoding against each candidate until
-one verifies. Any progressive preset and any profile can be sent live.
+The receiver takes no --preset or --profile: the wire is fixed and the profile
+is declared in the header.
 
 BE REALISTIC ABOUT THE RESOLUTION. The picture is whatever the profile says:
 40x48 colour for 'color-dct', the same luma with quarter chroma for 'lean-dct'
@@ -30,9 +29,9 @@ gray, and the frame is fitted to the profile's aspect rather than the screen's.
 Any chroma plane off the luma aspect ratio gets letterboxed by image_values and
 loses 2-4 dB, so the fit happens once, here, on the full-resolution frame.
 
-Frame rate is set by the wire, not by the capture: at lean-v3 a packet is 2768
-samples, so the modem consumes one picture every 2768 samples and the capture
-is throttled to match. Grabbing faster only wastes CPU; grabbing slower repeats
+Frame rate is set by the wire, not by the capture: a packet is 3200 samples,
+so the modem consumes one picture every 3200 samples and the capture is
+throttled to match. Grabbing faster only wastes CPU; grabbing slower repeats
 the last frame rather than stalling the stream.
 
 How many pictures a second that is depends on the rate the output device is
@@ -461,11 +460,10 @@ def fitter(profile, rotate=0, mirror=False, letterbox=True):
 def build(args):
     """Layout and coder, warning loudly if the picture had to shrink.
 
-    fit_shapes quietly scales the planes down until they fit the preset, so a
-    mismatched pair still runs -- it just sends a much smaller picture than the
-    profile names. A narrow preset with 'color-dct' yields far fewer than 2880
-    coefficients, and nothing says so. Silent resolution loss is worse than an
-    error.
+    fit_shapes quietly scales the planes down until they fit the wire, so a
+    profile that asks for more coefficients than the wire carries still runs --
+    it just sends a much smaller picture than the profile names. Nothing says
+    so, and silent resolution loss is worse than an error.
     """
     if args.profile not in PROFILES:
         raise SystemExit(f'Unknown profile {args.profile}')
@@ -478,7 +476,7 @@ def build(args):
         V3.profile_code(args.profile)
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
-    layout = V3.ALL_PRESETS[args.preset]
+    layout = V3.WIRE
     wanted = plane_shapes(args.profile)
     grids = plane_grids(args.profile)
     shapes = fit_shapes(wanted, layout.capacity)
@@ -492,9 +490,8 @@ def build(args):
         if table.shape != (want,):
             raise SystemExit(
                 f'Allocation {args.allocation} has {table.size} weights but '
-                f'{args.preset}/{args.profile} needs {want}. Refit with '
-                f'fit_allocation.py --preset {args.preset} '
-                f'--profile {args.profile}.')
+                f'{args.profile} needs {want}. Refit with '
+                f'fit_allocation.py --profile {args.profile}.')
     coder = SourceCoder(shapes, table, grids=grids)
     if coder.truncated:
         print(f'{args.profile}: sampling {grids[0][1]}x{grids[0][0]} and sending '
@@ -504,10 +501,11 @@ def build(args):
     asked = int(sum(np.prod(s) for s in wanted))
     if coder.count < asked:
         got = (shapes[0][1], shapes[0][0])
-        print(f'WARNING: preset {args.preset} holds {layout.capacity} values, '
-              f'profile {args.profile} wants {asked}. Picture shrunk to '
-              f'{got[0]}x{got[1]} ({coder.count} coefficients). Pick a preset '
-              f'with more capacity, or a smaller profile.', file=sys.stderr)
+        print(f'WARNING: the wire holds {layout.capacity} values, profile '
+              f'{args.profile} wants {asked}. Picture shrunk to '
+              f'{got[0]}x{got[1]} ({coder.count} coefficients). Raise '
+              f'image_symbols in transport3.WIRE, or use a smaller profile.',
+              file=sys.stderr)
     return layout, coder, grids
 
 
@@ -636,10 +634,6 @@ def parser():
                     default='test',
                     help='screen = mss (simple, slow on macOS); ffmpeg = platform fast path; '
                          'camera = webcam; test = no devices; mouse-follow = dynamic cursor tracking')
-    ap.add_argument('--preset', choices=list(V3.ALL_PRESETS), default='hires-v3',
-                    help='Wire layout. The default holds the 2880 slots the '
-                         'default profile needs, at 16.48 fps; lean-v3 and the '
-                         '14k presets hold fewer and shrink the picture.')
     # The profiles the header can name. Every one is DCT-sampled; the bake and
     # the wire shapes both come from the profile's geometry.
     ap.add_argument('--profile', choices=list(wire_profiles()),
@@ -692,9 +686,8 @@ def parser():
                          'square-edged and every preset emits out past 23 kHz '
                          'without this. Only needed for a channel with a hard '
                          'ceiling -- one that merely rolls off removes the tail '
-                         'itself at no cost. Pair with a preset that leaves '
-                         'guard under the cut, such as mid-14k or lean-14k for '
-                         '--emit-ceiling 14000.')
+                         'itself at no cost. The full-band header rides the top '
+                         'carriers, so a low cut costs header diversity.')
     ap.add_argument('--frames', type=int, help='Stop after this many packets')
     ap.add_argument('--seconds', type=float, default=10.0,
                     help='Duration for --write when --frames is not given')
@@ -717,10 +710,8 @@ def main(argv=None):
     if not np.isfinite(args.gain) or args.gain <= 0:
         raise SystemExit('--gain must be finite and positive')
 
-    # Neither preset nor profile has to be agreed out of band. The profile is
-    # declared in the header; the preset is identified by the receiver decoding
-    # against each candidate until the CRC verifies. Every preset is
-    # progressive, so nothing further is refused.
+    # Neither preset nor profile has to be agreed out of band. The wire is
+    # fixed and the profile is declared in the header, so nothing is refused.
     layout, coder, shapes = build(args)
     prepare = fitter(args.profile, args.rotate, args.mirror, not args.crop)
     raw = source_for(args, layout.fps)

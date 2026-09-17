@@ -8,7 +8,7 @@ from animation_modem import transport3 as v
 
 class RecoveredClockTests(unittest.TestCase):
     def setUp(self):
-        self.layout = v.ALL_PRESETS['wide-v3']
+        self.layout = v.WIRE
         self.coder = v.SourceCoder([(12,12)]*3)
         self.values = np.random.default_rng(21).uniform(-.2,.2,self.coder.count)
 

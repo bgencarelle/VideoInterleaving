@@ -17,9 +17,8 @@ from modem_display import packet, run_modem
 from animation_modem import transport3 as v3
 from animation_modem.imaging import DEFAULT_PROFILE, fit_shapes, plane_shapes
 
-# modem_display now defaults to the v3 preset, so the harness must decode with
-# the same layout the transmitter uses.
-LAYOUT = v3.V3_PRESETS['wide-v3']
+# There is one wire now, so the harness decodes with it directly.
+LAYOUT = v3.WIRE
 
 
 def v3_coder():
@@ -182,31 +181,3 @@ runpy.run_path(sys.argv[1],run_name='__main__')
 
 
 if __name__=='__main__':unittest.main()
-
-
-class ModemPresetGuardTests(unittest.TestCase):
-    """main.py --mode modem reaches run_modem, which validates --modem-preset.
-
-    Names are checked before anything is opened or written, so a typo cannot
-    produce a file of the default preset under a wrong name.
-    """
-
-    def args(self, preset):
-        return SimpleNamespace(
-            modem_dir='unused', modem_pair=None, modem_wav=None,
-            modem_channels='1,2', modem_latency='low', rotation=None,
-            mirror=None, modem_clock=255, modem_frame_duration=1,
-            modem_time_offset_ms=0, modem_prepare_ms=10,
-            modem_receive_margin_ms=15, modem_frames=1, modem_numbered=False,
-            modem_log_frames=False, scope_device=None,
-            modem_index_offset_ms=0.0, modem_preset=preset)
-
-    def test_an_unknown_preset_names_the_real_ones(self):
-        with self.assertRaisesRegex(ValueError, 'Unknown --modem-preset'):
-            run_modem(self.args('lean'))
-
-    def test_the_guard_runs_before_the_bake_is_opened(self):
-        """modem_dir is deliberately nonexistent above: a bad preset must fail
-        on the preset, not on something incidental further in."""
-        with self.assertRaisesRegex(ValueError, 'Unknown --modem-preset'):
-            run_modem(self.args('tape'))

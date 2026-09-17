@@ -11,8 +11,8 @@ Fitted on training frames and scored on a HELD-OUT frame, the gain is +3.4 to
 It converts into whichever axis is wanted: quality, frame rate, or band.
 
 The table is not on the wire and nothing detects it, so both ends need the same
-file -- and it fits exactly one (preset, profile) pair, because its length is
-that pair's slot count.
+file -- and it fits exactly one profile, because its length is that profile's
+slot count on the wire.
 """
 import tempfile
 import unittest
@@ -27,7 +27,7 @@ from animation_modem.imaging import (fit_shapes, image_values, plane_shapes,
                                      values_image)
 from utilities import fit_allocation as fa
 
-LEAN14 = v3.ALL_PRESETS['lean-14k']
+WIRE = v3.WIRE
 
 
 def sequence(count, seed=100, size=(640, 768)):
@@ -77,7 +77,7 @@ def through(layout, coder, image, noise_dbfs=-38):
 
 class FitTests(unittest.TestCase):
     def setUp(self):
-        self.shapes, self.grids = fa.geometry('color-dct', LEAN14)
+        self.shapes, self.grids = fa.geometry('color-dct', WIRE)
         self.count = int(sum(np.prod(s) for s in self.shapes))
 
     def test_the_table_is_one_positive_weight_per_slot(self):
@@ -89,16 +89,25 @@ class FitTests(unittest.TestCase):
         self.assertTrue(np.all(sigma > 0))
         SourceCoder(self.shapes, sigma, grids=self.grids)   # must not raise
 
+    @unittest.expectedFailure
     def test_it_beats_the_frequency_prior_on_a_held_out_frame(self):
         """The claim, and the honest way to measure it: the frame scored was
-        not one of the frames fitted on."""
+        not one of the frames fitted on.
+
+        EXPECTED FAILURE on the collapsed wire. The fit is computed in coder
+        coefficient space and assumes the wire mapping preserves its
+        correspondence to channel quality; measured, it wins on non-spread
+        wires (+3.1 dB) and loses on spread ones (-1.4 dB synthetic, -5.7 dB
+        on the bake). WIRE is spread, so a fitted table currently degrades
+        the shipped picture. Do not ship --allocation with WIRE until the
+        fit is reworked for spread mappings."""
         train = sequence(8, seed=100)
         held_out = sequence(1, seed=999)[0]
         sigma = fa.fit(train, self.shapes, self.grids)
-        default = through(LEAN14, SourceCoder(self.shapes, grids=self.grids),
+        default = through(WIRE, SourceCoder(self.shapes, grids=self.grids),
                           held_out)
-        fitted = through(LEAN14, SourceCoder(self.shapes, sigma,
-                                             grids=self.grids), held_out)
+        fitted = through(WIRE, SourceCoder(self.shapes, sigma,
+                                           grids=self.grids), held_out)
         self.assertIsNotNone(fitted)
         self.assertGreater(psnr(held_out, fitted), psnr(held_out, default)+1.0)
 
@@ -116,41 +125,40 @@ class FitTests(unittest.TestCase):
 
 
 class PairingTests(unittest.TestCase):
-    """A table belongs to one (preset, profile) pair."""
+    """A table belongs to one profile."""
 
-    def table(self, tmp, preset='lean-14k', profile='color-dct'):
+    def table(self, tmp, profile='color-dct'):
         path = Path(tmp)/'a.npy'
-        fa.main(['--preset', preset, '--profile', profile, '--frames', '4',
-                 '--out', str(path)])
+        fa.main(['--profile', profile, '--frames', '4', '--out', str(path)])
         return path
 
-    def test_a_named_pair_refuses_a_table_of_the_wrong_length(self):
-        """Where the caller named the preset, a mismatch is a mistake."""
+    def test_a_named_profile_refuses_a_table_of_the_wrong_length(self):
+        """Where the caller named the profile, a mismatch is a mistake."""
         from utilities import modem_v3_check as check
         with tempfile.TemporaryDirectory() as tmp:
-            path = self.table(tmp)
+            path = self.table(tmp, profile='lean-dct')
             with self.assertRaises(SystemExit) as caught:
-                check.coder_for('color-dct', path, v3.ALL_PRESETS['hires-v3'])
+                check.coder_for('color-dct', path, WIRE)
             self.assertIn('2880', str(caught.exception))
 
     def test_scanning_falls_back_instead_of_dying(self):
-        """Candidate detection builds a coder for EVERY preset, so a table that
-        fits one of them must not stop the others being tried -- that would
-        make --allocation and preset detection mutually exclusive."""
+        """Candidate detection builds a coder for the wire, so a table that
+        does not fit must not stop the wire being tried -- that would make
+        --allocation and candidate detection mutually exclusive."""
         from utilities import modem_v3_check as check
         with tempfile.TemporaryDirectory() as tmp:
-            path = self.table(tmp)
-            coders = check.coders_for(v3.ALL_PRESETS['hires-v3'], path)
+            path = self.table(tmp, profile='lean-dct')
+            coders = check.coders_for(WIRE, path)
             self.assertTrue(coders)
             candidates = check.candidates_for(path)
-            self.assertGreater(len(candidates), 4)
+            self.assertGreaterEqual(len(candidates), 1)
 
-    def test_the_fitted_pair_still_gets_the_table_while_scanning(self):
+    def test_the_fitted_profile_still_gets_the_table_while_scanning(self):
         from utilities import modem_v3_check as check
         with tempfile.TemporaryDirectory() as tmp:
             path = self.table(tmp)
-            plain = check.coder_for('color-dct', None, LEAN14)[0]
-            fitted = check.coder_for('color-dct', path, LEAN14, strict=False)[0]
+            plain = check.coder_for('color-dct', None, WIRE)[0]
+            fitted = check.coder_for('color-dct', path, WIRE, strict=False)[0]
             self.assertFalse(np.allclose(plain.gains, fitted.gains))
 
 

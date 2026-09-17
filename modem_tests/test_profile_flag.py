@@ -6,6 +6,7 @@ whatever a transmitter sends instead of both ends needing the same launch
 argument. The header does not grow and the CRC already covers it.
 """
 import unittest
+from dataclasses import replace
 
 import numpy as np
 
@@ -13,8 +14,11 @@ from animation_modem import core, transport3 as v3
 from animation_modem.imaging import (PROFILE_GRIDS, PROFILES, fit_shapes,
                                      plane_grids, plane_shapes, wire_profiles)
 
-WIDE = v3.ALL_PRESETS['wide-v3']        # 2880 slots: every profile fits whole
-LEAN = v3.ALL_PRESETS['lean-v3']
+WIDE = v3.WIRE                          # 3280 slots: every profile fits whole
+# A deliberately narrow wire, only to keep the fit_shapes-shrink path under
+# test: color-dct (2880) does not fit, so both ends must run the same
+# deterministic shrink and still agree on the declared geometry.
+SMALL = replace(v3.WIRE, top_bin=32, name='small')
 
 
 def coder_for(name, layout):
@@ -103,12 +107,12 @@ class ProfileNegotiationTests(unittest.TestCase):
                     limit = .25 if coder.truncated else 1e-4
                     self.assertLess(np.sqrt(np.mean((r.values-values)**2)), limit)
 
-    def test_it_works_on_the_live_layout_where_profiles_get_shrunk(self):
-        """lean-v3 holds 2200 slots, so 'color-dct' is fit_shapes-shrunk. Both
+    def test_it_works_on_a_narrow_wire_where_profiles_get_shrunk(self):
+        """SMALL holds 1696 slots, so 'color-dct' is fit_shapes-shrunk. Both
         ends run the same deterministic shrink, so the code still names it."""
-        audio, coder, values = self.send('color-dct', LEAN)
-        out = self.decode(audio, LEAN, coder_for('lean-dct', LEAN),
-                          coders_for(LEAN))
+        audio, coder, values = self.send('color-dct', SMALL)
+        out = self.decode(audio, SMALL, coder_for('lean-dct', SMALL),
+                          coders_for(SMALL))
         self.assertEqual(out[0].extra['profile'], 'color-dct')
         self.assertEqual(tuple(out[0].extra['shapes']), tuple(coder.grids))
         self.assertLess(np.sqrt(np.mean((out[0].values-values)**2)), 1e-4)
@@ -156,18 +160,16 @@ class ProfileNegotiationTests(unittest.TestCase):
     def test_a_declared_profile_does_not_loosen_the_band_check(self):
         """The other six bits still have to match the layout."""
         audio, coder, _ = self.send('color-dct', WIDE)
-        out = self.decode(audio, v3.ALL_PRESETS['mid-v3'],
-                          coder_for('color-dct', v3.ALL_PRESETS['mid-v3']))
+        out = self.decode(audio, SMALL, coder_for('color-dct', SMALL))
         self.assertTrue(all(r.identity != 'verified_header' for r in out))
 
 
 class LiveGuardTests(unittest.TestCase):
-    """Live pins the preset, not the profile.
+    """Live pins the wire, not the profile.
 
-    Preset is wire format the receiver cannot negotiate -- training layout,
-    header placement, band -- though every preset is progressive now, so the
-    generation guard that used to live here is gone. Profile is declared in
-    the header, so refusing one at the transmitter would protect nothing.
+    The wire is fixed -- training layout, header placement, band -- so there
+    is nothing left to negotiate and no generation guard. Profile is declared
+    in the header, so refusing one at the transmitter would protect nothing.
     """
 
     def setUp(self):
@@ -180,18 +182,17 @@ class LiveGuardTests(unittest.TestCase):
         self.quiet.__enter__()
         self.addCleanup(lambda: self.quiet.__exit__(None, None, None))
 
-    def test_every_preset_is_allowed_live(self):
-        """No generation guard exists any more: every preset is progressive."""
+    def test_the_wire_renders_live(self):
+        """No generation guard exists any more: the wire is fixed."""
         import modem_screen
         import tempfile
         from pathlib import Path
-        for name in v3.ALL_PRESETS.keys():
-            with self.subTest(preset=name), tempfile.TemporaryDirectory() as d:
-                # --write takes the same guard path and needs no audio device.
-                out = str(Path(d)/'x.wav')
-                modem_screen.main(['--source', 'test', '--preset', name,
-                                   '--frames', '1', '--write', out])
-                self.assertTrue(Path(out).exists())
+        with tempfile.TemporaryDirectory() as d:
+            # --write takes the same guard path and needs no audio device.
+            out = str(Path(d)/'x.wav')
+            modem_screen.main(['--source', 'test', '--frames', '1',
+                               '--write', out])
+            self.assertTrue(Path(out).exists())
 
     def test_every_profile_is_allowed_live(self):
         """The old refusal named a profile and this is what it blocked."""
@@ -207,30 +208,27 @@ class LiveGuardTests(unittest.TestCase):
                 self.assertTrue(Path(out).exists())
 
     def test_what_is_written_declares_itself(self):
-        """A profile too big for lean-v3 is shrunk, and still names itself."""
+        """A rendered packet names its profile in the header."""
         import modem_screen
         import tempfile
         import wave
         from pathlib import Path
         with tempfile.TemporaryDirectory() as d:
-            out = str(Path(d)/'shrunken.wav')
-            # lean-v3 explicitly: the sender's default preset is hires-v3 now,
-            # and this test is about what a SHRUNK profile declares.
+            out = str(Path(d)/'declared.wav')
             modem_screen.main(['--source', 'test', '--profile', 'color-dct',
-                               '--preset', 'lean-v3',
                                '--frames', '2', '--write', out])
             with wave.open(out) as w:
                 raw = np.frombuffer(w.readframes(w.getnframes()), '<i2')
             audio = raw.reshape(-1, 2).astype(np.float32)/32768
-            rx = v3.Receiver(LEAN, coder_for('color-dct', LEAN),
-                             coders=coders_for(LEAN))
+            rx = v3.Receiver(WIDE, coder_for('color-dct', WIDE),
+                             coders=coders_for(WIDE))
             got = rx.feed(audio)+rx.flush()
             self.assertTrue(got)
             for r in got:
                 self.assertEqual(r.identity, 'verified_header')
                 self.assertEqual(r.extra['profile'], 'color-dct')
                 self.assertEqual(tuple(r.extra['shapes']),
-                                 tuple(coder_for('color-dct', LEAN).grids))
+                                 tuple(coder_for('color-dct', WIDE).grids))
 
 
 if __name__ == '__main__':

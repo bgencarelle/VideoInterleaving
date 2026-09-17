@@ -18,7 +18,7 @@ import numpy as np
 from animation_modem import transport3 as v3
 from animation_modem.imaging import plane_shapes
 
-LAYOUT = v3.ALL_PRESETS['lean-v3']
+LAYOUT = v3.WIRE
 
 
 def delayed(audio, tau, channel=0):

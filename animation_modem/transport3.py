@@ -43,39 +43,25 @@ def _biphase(bits=PREAMBLE_BITS, half=HALF, amplitude=PREAMBLE_AMPLITUDE):
     return wave*(amplitude/np.max(np.abs(wave)))
 
 
-V3_PRESETS = {
-    'wide-v3': Layout(top_bin=54, image_symbols=15, name='wide-v3',
-                      progressive=True, orthogonal_training=True),
-    'wide-v3-fast': Layout(top_bin=54, image_symbols=15, name='wide-v3-fast',
-                           progressive=True, orthogonal_training=True,
-                           header_split=True),
-    'tape-v3': Layout(top_bin=27, image_symbols=35, name='tape-v3',
-                      progressive=True, orthogonal_training=True),
-    'lean-v3': Layout(top_bin=54, image_symbols=11, name='lean-v3',
-                      progressive=True, orthogonal_training=True,
-                      spread_carriers=True),
-    'mid-v3': Layout(top_bin=39, image_symbols=21, name='mid-v3',
-                     progressive=True, orthogonal_training=True,
-                     spread_carriers=True),
-    'mid-v3-fast': Layout(top_bin=39, image_symbols=21, name='mid-v3-fast',
-                          progressive=True, orthogonal_training=True,
-                          spread_carriers=True, header_split=True),
-    'lean-v3-tape': Layout(top_bin=54, image_symbols=11, name='lean-v3-tape',
-                           progressive=True, orthogonal_training=True),
-    'lean-v3-dense': Layout(top_bin=54, image_symbols=11, name='lean-v3-dense',
-                            progressive=True, orthogonal_training=True,
-                            spread_carriers=True, dense_header=True),
-    'mid-14k': Layout(top_bin=34, image_symbols=21, name='mid-14k',
-                      progressive=True, orthogonal_training=True,
-                      spread_carriers=True, dense_header=True),
-    'lean-14k': Layout(top_bin=34, image_symbols=11, name='lean-14k',
-                       progressive=True, orthogonal_training=True,
-                       spread_carriers=True, dense_header=True),
-    'hires-v3': Layout(top_bin=54, image_symbols=12, name='hires-v3',
-                       progressive=True, orthogonal_training=True,
-                       spread_carriers=True, dense_header=True),
-}
-ALL_PRESETS = dict(V3_PRESETS)
+# The one wire. There is exactly one layout now; the old preset table is gone.
+#
+# Chosen by the EQ+noise sweep: 54 top bin (375-20250 Hz), carriers spread so
+# the image planes ride the middle of the band and EQ tints nothing, a LOW-band
+# header on the lowest data carriers so identity survives a top-band cut and
+# fast playback, and dense_header so the header symbols' idle carriers still
+# carry image -- which pays for dropping to 14 image symbols while holding
+# the full 2880-coefficient color-dct picture. 3280 values at 15.00 fps.
+#
+# The header is low AND narrow (header_width=20, four header symbols) on
+# purpose, independent of spread_carriers. Measured: widening to 27 drops
+# treble+noise identity from ~30/32 to ~19/32 -- the top header carriers sit
+# in the treble cut, buried, and three symbols give the tolerance search less
+# to work with. A full-band header (the old header_width=50) is faster but
+# loses identity under a 15 kHz lowpass or 2x playback; a split header was
+# measured strictly worse still. Change the wire HERE, nowhere else.
+WIRE = Layout(top_bin=54, image_symbols=14, name='wire',
+              progressive=True, orthogonal_training=True,
+              spread_carriers=True, dense_header=True, header_width=20)
 
 PREAMBLE = _biphase()
 PREAMBLE_ENERGY = float(np.einsum('i,i->', PREAMBLE, PREAMBLE, optimize=False))
@@ -345,7 +331,8 @@ def encode(values, layout, coder, absolute, index, count, stamp_ms=0, flags=0,
 class Receiver:
     def __init__(self, layout, coder, threshold=.4, rate_window=None,
                  min_speed=.25, max_speed=2.0, recovery=False, fast=True,
-                 pulse_only=True, input_rate=None, coders=None, candidates=None):
+                 pulse_only=True, input_rate=None, coders=None, candidates=None,
+                 header_tolerance=2):
         if not (0 < min_speed <= 1 <= max_speed and min_speed >= .25 and max_speed <= 2):
             raise ValueError('Supported speed range: .25 <= min_speed <= 1 <= max_speed <= 2')
         if input_rate is not None and not (np.isfinite(input_rate) and input_rate > 0):
@@ -365,6 +352,7 @@ class Receiver:
         self.pulse_only = bool(pulse_only)
         self.min_speed, self.max_speed = min_speed, max_speed
         self.input_rate = None if input_rate is None else float(input_rate)
+        self.header_tolerance = int(header_tolerance)
         self.clock = 1. if input_rate is None else float(input_rate)/REFERENCE_RATE
         self.min_scale = self.clock/max_speed
         self.max_scale = self.clock/min_speed
@@ -535,7 +523,8 @@ class Receiver:
             body = _sample_at(self.buffer, begin+_body_walk(layout)*scale, taps=taps)
             body = body.reshape(layout.symbols, N, 2)
 
-        return decode_packet(None, layout, coder, body=body, coders=coders), taps
+        return decode_packet(None, layout, coder, body=body, coders=coders,
+                             header_tolerance=self.header_tolerance), taps
 
     def _identify(self, begin, scale, final=False):
         if not self.candidates or self.detected is not None:

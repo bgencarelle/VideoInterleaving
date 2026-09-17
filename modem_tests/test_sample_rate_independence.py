@@ -23,7 +23,7 @@ from animation_modem import transport3 as v3
 from animation_modem.core import REFERENCE_RATE
 from animation_modem.imaging import plane_shapes
 
-LAYOUT = v3.ALL_PRESETS['lean-v3']
+LAYOUT = v3.WIRE
 
 
 def captured_at(audio, rate):
@@ -281,13 +281,13 @@ class SenderNoticeTests(unittest.TestCase):
         self.assertIn('375-20250 Hz', notice)      # where the carriers stay
         self.assertIn('40500', notice)             # where they would have gone
         self.assertIn('2/1', notice)
-        self.assertIn('17.34 fps', notice)
+        self.assertIn('15.00 fps', notice)
 
     def test_a_slower_device_reports_a_band_that_only_scaled_down(self):
         from animation_modem.audio_common import wire_notice
         notice = wire_notice(LAYOUT, 44100)
         self.assertIn('345-18605 Hz', notice)
-        self.assertIn('15.93 fps', notice)
+        self.assertIn('13.78 fps', notice)
 
     def test_a_coarse_ratio_admits_its_own_offset(self):
         from animation_modem.audio_common import wire_notice

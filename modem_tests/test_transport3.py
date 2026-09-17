@@ -21,7 +21,7 @@ from utilities.modem_v3_check import main
 
 class V3Base(unittest.TestCase):
     def setUp(self):
-        self.layout = v3.ALL_PRESETS['wide-v3']
+        self.layout = v3.WIRE
         self.shapes = fit_shapes(plane_shapes(DEFAULT_PROFILE), self.layout.capacity)
         self.coder = v3.SourceCoder(self.shapes)
         yy, xx = np.mgrid[:48, :40]
@@ -241,11 +241,11 @@ class HeaderTrimTests(V3Base):
         got += rx.flush()
         return sum(1 for g in got if g.identity == 'verified_header')
 
-    def test_defaults_match_wide_v3(self):
+    def test_defaults_match_the_declared_header_width(self):
         base = self.trim()
         self.assertEqual(base.header_width, 20)
         self.assertFalse(base.header_split)
-        self.assertEqual(base.header_symbols, v3.ALL_PRESETS['wide-v3'].header_symbols)
+        self.assertEqual(base.header_symbols, 4)
 
     def test_split_halves_the_header_symbols(self):
         self.assertEqual(self.trim(header_split=True).header_symbols, 2)
@@ -337,9 +337,8 @@ class TrainingTests(V3Base):
                 got, _ = self.decode_at(self.trim(orthogonal_training=True), .02, speed)
                 self.assertEqual(got, 4)
 
-    def test_presets_expose_it(self):
-        self.assertTrue(v3.ALL_PRESETS['wide-v3'].orthogonal_training)
-        self.assertTrue(v3.ALL_PRESETS['wide-v3-fast'].header_split)
+    def test_the_wire_exposes_it(self):
+        self.assertTrue(v3.WIRE.orthogonal_training)
 
 
 class BandTests(V3Base):
@@ -397,31 +396,33 @@ class BandTests(V3Base):
         self.assertEqual(verified, 3)
 
     def test_unspread_layout_loses_identity_at_its_own_bottom_edge(self):
-        """Guards the finding, so the default is not mistaken for safe."""
+        """Guards the finding, so the default is not mistaken for safe.
+
+        The picture decodes, but identity is fragile: the header rides the
+        band's bottom edge and a deck that rolls off there strips it. The
+        tolerance engine (header_tolerance=2) rescues at most a single
+        marginal header on this wire (verified 1 of 3); the finding that the
+        unspread default is NOT robust at its own bottom edge still holds.
+        """
         layout = self.build()
         lo, hi = self.edges(layout)
         pics, verified = self.filtered(layout, lo, hi)
         self.assertEqual(pics, 3)
-        self.assertEqual(verified, 0)
+        self.assertLess(verified, 3)
 
-    def test_header_moves_to_mid_band_when_spread(self):
+    def test_header_rides_the_lowest_data_carriers_even_when_spread(self):
+        """The header is decoupled from spread_carriers: it needs the safe end
+        of the band whether or not the IMAGE planes are spread."""
         plain, spread = self.build(), self.build(spread_carriers=True)
-        self.assertEqual(int(plain.header_bins.min()), int(plain.carriers.min()))
-        self.assertGreater(int(spread.header_bins.min()), int(spread.carriers.min()))
-        self.assertLess(int(spread.header_bins.max()), spread.top_bin)
+        for layout in (plain, spread):
+            with self.subTest(spread=layout.spread_carriers):
+                self.assertTrue(np.array_equal(
+                    layout.header_bins,
+                    layout.data_bins[:len(layout.header_bins)]))
+                self.assertEqual(int(layout.header_bins.min()),
+                                 int(layout.data_bins.min()))
 
-    def test_mid_presets_stay_under_15_khz(self):
-        for name in ('mid-v3', 'mid-v3-fast'):
-            with self.subTest(preset=name):
-                layout = v3.V3_PRESETS[name]
-                self.assertLess(layout.band_at(v3.REFERENCE_RATE)[1], 15000)
-                self.assertTrue(layout.spread_carriers)
 
-    def test_mid_preset_round_trips_inside_its_band(self):
-        layout = v3.V3_PRESETS['mid-v3']
-        lo, hi = self.edges(layout)
-        pics, verified = self.filtered(layout, lo, hi)
-        self.assertEqual((pics, verified), (3, 3))
 
     def test_pilots_stay_inside_the_carrier_range(self):
         """Regression: pilots were hardcoded [3,5,21,45] for any progressive
@@ -434,7 +435,8 @@ class BandTests(V3Base):
                 self.assertTrue((layout.pilots <= top_bin).all())
 
     def test_narrow_progressive_layout_encodes(self):
-        layout = v3.V3_PRESETS['tape-v3']
+        layout = v3.Layout(top_bin=27, image_symbols=35, name='narrow',
+                           progressive=True, orthogonal_training=True)
         coder = v3.SourceCoder(v3.fit_shapes(self.shapes, layout.capacity)
                                if hasattr(v3, 'fit_shapes') else self.shapes)
         v3.encode(np.zeros(coder.count), layout, coder, 1, 1, 4)
@@ -460,8 +462,6 @@ class LeanChromaTests(V3Base):
         lean = sum(int(np.prod(s)) for s in self.shapes_for('lean-dct'))
         self.assertEqual(full, 2880)
         self.assertEqual(lean, 2160)
-        self.assertGreater(v3.ALL_PRESETS['lean-v3'].fps,
-                           v3.ALL_PRESETS['wide-v3'].fps)
 
     def test_chroma_planes_keep_the_luma_aspect(self):
         """Off-aspect chroma gets letterboxed by image_values and loses 2-4 dB,
@@ -472,9 +472,9 @@ class LeanChromaTests(V3Base):
                 size, chroma = PROFILES[name]
                 self.assertAlmostEqual(size[0]/size[1], chroma[0]/chroma[1], places=3)
 
-    def test_lean_preset_round_trips(self):
+    def test_lean_profile_round_trips(self):
         from animation_modem.imaging import plane_shapes
-        layout = v3.ALL_PRESETS['lean-v3']
+        layout = v3.WIRE
         shapes = plane_shapes('lean-dct')
         coder = v3.SourceCoder(shapes)
         self.assertLessEqual(coder.count, layout.capacity)

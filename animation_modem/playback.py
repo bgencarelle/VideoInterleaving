@@ -11,10 +11,10 @@ from dataclasses import dataclass
 import threading
 import numpy as np
 from .audio_common import sounddevice, route
-from .transport3 import ALL_PRESETS
+from .transport3 import WIRE
 from .core import band_limited, emit_length
 
-_DEFAULT = ALL_PRESETS['wide-v3']   # layouts pass their own geometry
+_DEFAULT = WIRE   # layouts pass their own geometry
 
 
 def latency(value):
@@ -38,8 +38,8 @@ class Slot:
 class PacketOutput:
     def __init__(self, device=None, channels=(0, 1), requested_latency='low',
                  frame=_DEFAULT.frame, packet=_DEFAULT.packet):
-        # Layouts carry their own geometry -- wide-v3 is 3344 samples, tape-v3
-        # another count -- so the packet size cannot be a module constant.
+        # The wire carries its own geometry -- 3056 samples -- so the packet
+        # size is taken from it instead of a module constant.
         self.frame = int(frame)
         self.packet = int(packet)
         if not 0 < self.packet <= self.frame:

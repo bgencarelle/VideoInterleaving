@@ -71,7 +71,7 @@ class ReceiverWindowTests(unittest.TestCase):
         from PIL import Image
         from animation_modem.imaging import image_values
 
-        layout = check.PRESETS['lean-v3']
+        layout = check.WIRE
         coder, grids = check.coder_for('lean-dct', None, layout)
         packets = [check.V3.encode(
             image_values(Image.new('RGB', grids[0][::-1], (n*12, 30, 180)),
@@ -85,6 +85,12 @@ class ReceiverWindowTests(unittest.TestCase):
             closed = False
 
             def title(self, text):
+                pass
+
+            def configure(self, **kwargs):
+                pass
+
+            def geometry(self, spec):
                 pass
 
             def protocol(self, name, callback):
@@ -123,9 +129,6 @@ class ReceiverWindowTests(unittest.TestCase):
 
         class Photo:
             def __init__(self, image):
-                pass
-
-            def paste(self, image):
                 shown.append(np.asarray(image).copy())
 
         class Stream:
@@ -271,7 +274,7 @@ class PictureSizeReportTests(unittest.TestCase):
         and reads backwards from the size anyone wants."""
         from animation_modem.core import Decoded
         r = Decoded(status='received', identity='verified_header')
-        r.extra = {'shapes': [[96, 80], [48, 40], [48, 40]], 'preset': 'hires-v3'}
+        r.extra = {'shapes': [[96, 80], [48, 40], [48, 40]], 'profile': 'color-dct'}
         self.assertEqual(check.record(r)['picture'], '80x96')
 
     def test_a_shrunk_picture_reports_what_it_actually_is(self):

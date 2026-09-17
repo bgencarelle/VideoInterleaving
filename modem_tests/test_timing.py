@@ -6,11 +6,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import numpy as np
 from PIL import Image
-from animation_modem.transport3 import ALL_PRESETS, SourceCoder, decode_packet as _decode
+from animation_modem.transport3 import WIRE, SourceCoder, decode_packet as _decode
 from animation_modem.imaging import DEFAULT_PROFILE, PROFILES, fit_shapes, image_values, plane_shapes
 from animation_modem import transport3 as _v2
 
-LAYOUT = ALL_PRESETS['wide-v3']
+LAYOUT = WIRE
 FRAME = LAYOUT.frame
 
 def _coder(profile=DEFAULT_PROFILE):

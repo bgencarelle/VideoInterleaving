@@ -5,6 +5,28 @@ face and float layers, composites one complete RGBA image at a time, and sends
 it through the frame-independent stereo audio modem. The existing scope,
 local, web, and ASCII modes are left on their existing paths.
 
+## Tape direction and defaults
+
+The target medium is analog tape: noisy, warbly, band-limited. The long-term
+goal is one tape-compatible bandwidth carrying the baked 80x96 resolution with
+cheap, deterministic (classical-computing) decode. Timing sync is
+pulse-counted, LTC-style (`measure_pulses`, `pulse_only`), not FFT-correlated.
+Recovery priority on bad tape: the image must still DECODE with acceptable
+color; losing detail/softness is fine. The V4 goal is a wire whose whole band
+fits inside the tape bandwidth -- the picture rides fully within the medium
+instead of relying on graceful degradation when the band exceeds it.
+The `V3_PRESETS` table is interim — the most tape-compatible (preset, profile)
+pair becomes the default, then the sprawl gets refactored away. The chosen
+default is `wide-v3` + `color-dct`: the full 2880-slot picture at 375-20250 Hz,
+14.35 fps. It was picked over the 15% faster `hires-v3` because on the bench's
+`--noise-dbfs` sweep it verified 24/24 at -35 dBFS where hires-v3 lost 5, and
+over the `lean-*` presets because those shrink the picture. Preset/profile
+choices are validated by SYNTHETIC IDEAL round trips in `tools/bench_modem.py`
+(decode cost + fidelity on a clean wire, with cheap `--band-limit-hz` and
+`--noise-dbfs` recovery-margin probes); tape emulation is kept to a minimum
+because it cannot be made realistic — real tape measurements are done on
+hardware, outside the simulations. See AGENTS.md "Long-term direction".
+
 ## Install modem dependencies
 
 Normal `scripts/setup_app.sh` setup now includes modem dependencies through
@@ -75,7 +97,7 @@ python main.py --mode modem \
   --modem-wav modem_test.wav \
   --modem-frames 100 \
   -f
-python modem_receive.py --wav modem_test.wav
+python utilities/modem_v3_check.py read --wav modem_test.wav
 ```
 
 The `-f`/`--modem-numbered` flag burns the absolute modem frame and source
@@ -87,14 +109,14 @@ invoke the project's stochastic folder selector.
 List PortAudio devices using the receiver wrapper:
 
 ```bash
-python modem_receive.py --list-devices
+python utilities/modem_v3_check.py live-receive --list-devices
 ```
 
 Start the receiver on the input side, then the modem mode on the output side.
 BlackHole or a stereo cable can connect the two:
 
 ```bash
-python modem_receive.py --device BlackHole --channels 1,2 --emulate clean
+python utilities/modem_v3_check.py live-receive --device BlackHole --channels 1,2 --emulate clean
 python main.py --mode modem --modem-dir images_modem \
   --device BlackHole --modem-channels 1,2 -f
 ```
@@ -143,7 +165,7 @@ are now accounted for automatically.
 
 ```bash
 # Receiver machine (GUI; headless reports decode timing only):
-python modem_receive.py --device "BlackHole 2ch" --channels 1,2
+python utilities/modem_v3_check.py live-receive --device "BlackHole 2ch" --channels 1,2
 
 # Transmitter machine:
 python main.py --mode modem --modem-dir images_modem \
@@ -193,16 +215,20 @@ current shared time and are not used to delay replay.
 
 ## Receiver
 
-`modem_receive.py` is the existing modem decoder packaged as a repository
-entry point. It has the same WAV/live, `--headless`, `--fast`, frame-saving, and
-audio-emulation options as the standalone modem project. The emulation presets
+The decoder lives in `utilities/modem_v3_check.py` under the `read` (WAV file)
+and `live-receive` (audio device) subcommands. The audio-path emulation presets
 are applied after channel selection and before demodulation:
 
 ```bash
-python modem_receive.py --device BlackHole --emulate mild
-python modem_receive.py --device BlackHole --emulate rough
-python modem_receive.py --device BlackHole --lowpass-hz 12000 --noise-dbfs -45
+python utilities/modem_v3_check.py read --wav wifi_vst_out.wav --emulate mild
+python utilities/modem_v3_check.py read --wav wifi_vst_out.wav --emulate rough
+python utilities/modem_v3_check.py read --wav wifi_vst_out.wav --lowpass-hz 12000 --noise-dbfs -45
+python utilities/modem_v3_check.py live-receive --device BlackHole --emulate mild
 ```
+
+The `read` subcommand is what Audacity/VST round-trips use: record a VST-processed
+transmission, then decode it with the emulation flags as a cross-check of what the
+medium is doing on its own.
 
 `animation_modem/` contains the transport package. It remains independent of
 the project's image renderer and can be used by another application.

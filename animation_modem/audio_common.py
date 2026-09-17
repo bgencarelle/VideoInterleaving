@@ -195,42 +195,56 @@ def route(data, channels):
 
 
 # Data occupies bins 1..54 only. Everything outside carries no information, but
-# it does inflate the peak and window energy that sync_correlation normalises
-# by, which is what pushes the score under threshold on an analog source. The
-# demodulator's FFT already rejects it; the acquisition detector does not.
-BAND = (200.0, 22000.0)          # comfortably outside 375 Hz .. 20250 Hz
+# the lowest bin sits one bin from DC: a program tone, turntable rumble or a low
+# EQ shelf below the band leaks into it with a phase that advances symbol to
+# symbol. The training cannot predict a rotating leak the way it predicts a
+# static EQ, so the bottom carrier's channel estimate is poisoned and identity
+# is lost. Guarding one carrier above the band bottom removes the whole class,
+# at the cost of the bottom carrier -- which the per-carrier equalizer already
+# restores, the same way it restores a few dB of tone control.
+GUARD_BINS = 1
 
-# transport3 owns the preset table, but it imports this module, so the guard
-# band cannot be read off ALL_PRESETS. This is the live default spelled out as
-# a bare Layout instead; modem_tests/test_guard_band.py pins it to
-# transport3's 'wide-v3' so the two cannot drift apart silently.
-WIDE_V3 = Layout(top_bin=54, image_symbols=15, name='wide-v3')
+# transport3 owns the wire, but it imports this module, so the guard band
+# cannot be read off transport3.WIRE. This is the live wire spelled out as a
+# bare Layout instead; modem_tests/test_guard_band.py pins it to transport3's
+# WIRE so the two cannot drift apart silently.
+WIRE = Layout(top_bin=54, image_symbols=14, name='wire',
+              progressive=True, orthogonal_training=True,
+              spread_carriers=True, dense_header=True, header_width=20)
 
 
 class InputFilter:
-    """Stateful band-pass applied to received audio before acquisition.
+    """Stateful guard band applied to received audio before acquisition.
 
-    Removes turntable rumble, mains hum and out-of-band hiss. Costs about
-    0.4 dB on a clean source and makes full-scale rumble a non-event.
+    A high-pass one carrier above the band bottom, plus a low-pass one carrier
+    above the top: out-of-band energy carries no picture, and below the bottom
+    it actively corrupts the channel estimate. Order 4, not sharper -- measured,
+    a 6th- or 8th-order rolloff disperses enough group delay at the front of
+    the packet to move the detected preamble against the body and lose the
+    header, and a causal rolloff *at* the edge does the same.
     """
 
-    def __init__(self, band=BAND, order=4, rate=REFERENCE_RATE):
+    def __init__(self, rate=REFERENCE_RATE, band=None, order=4):
         from scipy.signal import butter
-        high, low = band
+        carriers = WIRE.carriers
+        # Carrier frequencies follow the clock the audio is actually arriving
+        # on, so the guard has to be computed against that same clock.
+        lowest, highest = carriers[0]*rate/N, carriers[-1]*rate/N
+        if band is None:
+            high = lowest + GUARD_BINS*rate/N
+            low = highest + rate/N
+        else:
+            high, low = band
         if not (0 < high < low < rate/2):
             raise ValueError(f'Input band must satisfy 0 < high < low < {rate/2}')
-        carriers = WIDE_V3.carriers
-        # Carrier frequencies follow the clock the audio is actually arriving
-        # on, so the guard band has to be computed against that same clock.
-        lowest, highest = carriers[0]*rate/N, carriers[-1]*rate/N
-        if high > lowest or low < highest:
-            raise ValueError(f'Input band must span the carriers '
-                             f'({lowest:.0f}..{highest:.0f} Hz)')
-        self.rate = rate
+        self.rate, self.high, self.low = rate, high, low
         self.sos = np.concatenate([
             butter(order, high, btype='highpass', fs=rate, output='sos'),
             butter(order, low, btype='lowpass', fs=rate, output='sos')])
         self.zi = np.zeros((len(self.sos), 2, 2))
+
+    def reset(self):
+        self.zi = np.zeros_like(self.zi)
 
     def process(self, data):
         from scipy.signal import sosfilt
@@ -239,6 +253,20 @@ class InputFilter:
             return data
         out, self.zi = sosfilt(self.sos, data, axis=0, zi=self.zi)
         return out.astype(np.float32)
+
+    def filtfilt(self, data):
+        """Zero-phase form for a whole recording, where one exists.
+
+        The receiver's timing is edge-counted, so a causal rolloff anywhere near
+        an edge can move the detected preamble against the body; zero-phase has
+        no such cost. That makes it the right guard for the offline `read` path,
+        which is where recordings of real tape and processor chains are decoded.
+        """
+        from scipy.signal import sosfiltfilt
+        data = np.asarray(data, np.float32)
+        if not len(data):
+            return data
+        return sosfiltfilt(self.sos, data, axis=0).astype(np.float32)
 
 
 def band(value):

@@ -125,7 +125,7 @@ class TestSourceTests(unittest.TestCase):
 
 
 class RoundTripTests(unittest.TestCase):
-    def decode(self, path, preset, profile):
+    def decode(self, path):
         from utilities.modem_v3_check import main
         import contextlib
         import json
@@ -141,7 +141,7 @@ class RoundTripTests(unittest.TestCase):
             wav = Path(d)/'live.wav'
             modem_screen.main(['--source', 'test', '--write', str(wav),
                                '--frames', '6'])
-            records = self.decode(wav, 'lean-v3', 'lean-dct')
+            records = self.decode(wav)
             self.assertEqual([r['frame'] for r in records], [1, 2, 3, 4, 5, 6])
             self.assertTrue(all(r['identity'] == 'verified_header' for r in records))
 
@@ -164,28 +164,14 @@ class RoundTripTests(unittest.TestCase):
                 arr = np.asarray(Image.open(png).convert('RGB'), float)
                 self.assertGreater(arr.std(), 5.0, f'{png.name} is flat')
 
-    def test_mismatched_preset_warns_instead_of_shrinking_silently(self):
-        """fit_shapes will quietly scale a picture down to fit any preset."""
+    def test_a_normal_render_does_not_warn(self):
+        """The wire holds every shipped profile whole, so no shrink, no warning."""
         import contextlib
         err = io.StringIO()
         with tempfile.TemporaryDirectory() as d:
             with contextlib.redirect_stderr(err), \
                  contextlib.redirect_stdout(io.StringIO()):
-                modem_screen.main(['--source', 'test', '--preset', 'lean-v3',
-                                   '--profile', 'color-dct',
-                                   '--write', str(Path(d)/'x.wav'),
-                                   '--frames', '1'])
-        self.assertIn('WARNING', err.getvalue())
-        self.assertIn('shrunk', err.getvalue())
-
-    def test_matched_preset_is_silent(self):
-        import contextlib
-        err = io.StringIO()
-        with tempfile.TemporaryDirectory() as d:
-            with contextlib.redirect_stderr(err), \
-                 contextlib.redirect_stdout(io.StringIO()):
-                modem_screen.main(['--source', 'test', '--preset', 'lean-v3',
-                                   '--profile', 'lean-dct',
+                modem_screen.main(['--source', 'test', '--profile', 'color-dct',
                                    '--write', str(Path(d)/'x.wav'),
                                    '--frames', '1'])
         self.assertNotIn('WARNING', err.getvalue())
@@ -226,9 +212,9 @@ class VideoSourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             wav = Path(d)/'v.wav'
             modem_screen.main(['--source', 'video', '--file', str(self.clip),
-                               '--preset', 'lean-v3', '--profile', 'lean-dct',
+                               '--profile', 'lean-dct',
                                '--write', str(wav), '--frames', '5'])
-            layout = v3.ALL_PRESETS['lean-v3']
+            layout = v3.WIRE
             shapes = fit_shapes(plane_shapes('lean-dct'), layout.capacity)
             coder = SourceCoder(shapes)
             from animation_modem.audio_common import wav_blocks
@@ -293,7 +279,7 @@ class DeviceLoopTests(unittest.TestCase):
             self.starvations = 0
             self.finished = False
             self._ready = True
-            self.fps = self.rate/kw.get('frame', v3.ALL_PRESETS['lean-v3'].frame)
+            self.fps = self.rate/kw.get('frame', v3.WIRE.frame)
 
         def __enter__(self):
             return self
@@ -329,8 +315,8 @@ class DeviceLoopTests(unittest.TestCase):
     def test_live_loop_sends_packets(self):
         out = self.FakeOutput()
         self.run_loop(['--source', 'test', '--frames', '5',
-                       '--preset', 'lean-v3', '--profile', 'lean-dct'], out)
-        layout = v3.ALL_PRESETS['lean-v3']
+                       '--profile', 'lean-dct'], out)
+        layout = v3.WIRE
         self.assertEqual(len(out.sent), 5)
         self.assertTrue(out.finished)
         for audio in out.sent:
@@ -346,8 +332,8 @@ class DeviceLoopTests(unittest.TestCase):
     def test_live_packets_decode(self):
         out = self.FakeOutput()
         self.run_loop(['--source', 'test', '--frames', '4',
-                       '--preset', 'lean-v3', '--profile', 'lean-dct'], out)
-        layout = v3.ALL_PRESETS['lean-v3']
+                       '--profile', 'lean-dct'], out)
+        layout = v3.WIRE
         shapes = fit_shapes(plane_shapes('lean-dct'), layout.capacity)
         coder = SourceCoder(shapes)
         stream = np.concatenate(out.sent).astype(np.float32)

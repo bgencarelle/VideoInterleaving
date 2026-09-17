@@ -12,7 +12,7 @@ from animation_modem.imaging import plane_shapes
 
 class PulseTimingTests(unittest.TestCase):
     def test_speed_changes_and_dropouts_need_no_correlation(self):
-        layout = v3.ALL_PRESETS['lean-v3']
+        layout = v3.WIRE
         coder = v3.SourceCoder(plane_shapes('lean-dct'))
         values = np.random.default_rng(15).uniform(-.2, .2, coder.count)
         speeds = (.5, .8, 1.0, 1.1, .75, 1.0)
@@ -35,7 +35,7 @@ class PulseTimingTests(unittest.TestCase):
             self.assertEqual(r.identity, 'verified_header')
 
     def test_silence_and_noise_never_trigger_a_speed_search(self):
-        layout = v3.ALL_PRESETS['lean-v3']
+        layout = v3.WIRE
         rx = v3.Receiver(layout, v3.SourceCoder(plane_shapes('lean-dct')))
         noise = np.random.default_rng(12).normal(0, .03, (8000, 2))
         with patch.object(rx, '_correlate', side_effect=AssertionError('speed sweep')):
@@ -91,7 +91,7 @@ class AudioBufferTests(unittest.TestCase):
 
 class FreshnessTests(unittest.TestCase):
     def test_long_decoder_pause_retains_only_recent_frames(self):
-        layout = v3.ALL_PRESETS['lean-v3']
+        layout = v3.WIRE
         coder = v3.SourceCoder(plane_shapes('lean-dct'))
         buffer = AudioBuffer(3*layout.frame, layout.frame)
         audio = np.concatenate([

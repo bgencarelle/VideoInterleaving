@@ -433,12 +433,14 @@ python utilities/modem_v3_check.py live-send --modem-dir images_modem \
     --device "BlackHole 2ch"
 ```
 
-Presets choose the occupied band and the frame-rate/resolution trade, from
-`wide-v3` (up to 20250 Hz, 13.4 fps, 3000 slots) through `lean-v3` down to the
-14 kHz `mid-14k`/`lean-14k`, and `hires-v3` for a full 2880-slot 80x96 picture.
-Profiles choose the plane geometry sent on the wire: `color-dct` (2880
-coefficients) or `lean-dct` (2160, quartered chroma), both declared in the
-header.
+Presets choose the occupied band and the frame-rate/resolution trade.
+`wide-v3` is the ship default: the full 2880-slot 80x96 picture at 375-20250 Hz,
+14.35 fps, chosen over the 15% faster `hires-v3` because it keeps identity at a
+2 dB lower noise floor (24/24 vs 19/24 at -35 dBFS on the synthetic bench). The
+14 kHz `mid-14k`/`lean-14k` trade band for margin; `tape-v3` (375-10125 Hz,
+7.7 fps) is the most tape-worn option. Profiles choose the plane geometry sent
+on the wire: `color-dct` (2880 coefficients) or `lean-dct` (2160, quartered
+chroma), both declared in the header.
 
 `live-receive` opens a window showing the newest decoded frame and prints one
 JSON line per packet with status, identity, puzzle tier, geometry and the

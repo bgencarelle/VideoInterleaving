@@ -71,7 +71,7 @@ class ProfileCodeTests(unittest.TestCase):
     def test_build_accepts_it_and_gives_the_coder_the_finer_grid(self):
         import argparse
         import modem_screen
-        args = argparse.Namespace(profile='color-dct', preset='wide-v3')
+        args = argparse.Namespace(profile='color-dct')
         layout, coder, grids = modem_screen.build(args)
         self.assertTrue(coder.truncated)
         self.assertEqual(coder.count, 2880)
@@ -158,7 +158,7 @@ class WireDeclarationTests(unittest.TestCase):
 
     def send(self, profile='color-dct'):
         from animation_modem.imaging import image_values
-        layout = v3.ALL_PRESETS['wide-v3']
+        layout = v3.WIRE
         coder = v3.SourceCoder(plane_shapes(profile),
                                grids=plane_grids(profile))
         y, x = np.mgrid[0:coder.grids[0][0], 0:coder.grids[0][1]]
@@ -212,7 +212,7 @@ class WireDeclarationTests(unittest.TestCase):
         back out, so any uniform gain applied to every coefficient is absorbed
         end to end and arrives as exactly nothing."""
         from animation_modem.imaging import image_values
-        layout = v3.ALL_PRESETS['wide-v3']
+        layout = v3.WIRE
         coder = v3.SourceCoder(plane_shapes('color-dct'))
         values = np.random.default_rng(8).uniform(-.3, .3, coder.source_count)
         plain = self.decode(layout, v3.encode(values, layout, coder, 1, 1, 1), coder)

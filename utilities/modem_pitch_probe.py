@@ -24,8 +24,7 @@ from animation_modem.imaging import image_values, plane_grids, plane_shapes
 
 
 def setup():
-    return v.ALL_PRESETS['wide-v3'], v.SourceCoder(plane_shapes(),
-                                                   grids=plane_grids())
+    return v.WIRE, v.SourceCoder(plane_shapes(), grids=plane_grids())
 
 
 def write(path, audio):

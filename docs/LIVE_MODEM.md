@@ -12,12 +12,15 @@ does now:
 | profile | declared in two spare bits of the header's top_bin byte |
 | preset | identified by decoding against each candidate until the CRC verifies |
 
-The senders do not agree on a default and do not need to: `modem_screen.py`
-starts from `hires-v3` with `color-dct` (2912 samples per frame, about
-16.48 fps at 48 kHz), `utilities/modem_v3_check.py live-send` from `lean-v3`
-(2768 samples, 17.34 fps), and baked playback through `modem_display.py`
-from `wide-v3` (3344 samples, 14.35 fps), taking its profile from the bake's
-`modem.json`. None of these is a requirement. Any preset and any v3 profile
+The senders agree on the ship default but do not need to: `modem_screen.py`
+and baked playback through `modem_display.py` both default to `wide-v3`
+(full 2880-slot 80x96 picture at 375-20250 Hz, 3344 samples per frame, about
+14.35 fps at 48 kHz), taking their profile from `color-dct` / the bake's
+`modem.json`. `utilities/modem_v3_check.py live-send` defaults to `wide-v3`
+too. `hires-v3` (2912 samples, 16.48 fps) is the same picture 15% faster but
+loses identity under noise sooner; `tape-v3` (375-10125 Hz, 7.7 fps) trades
+most of the band for margin on tape-worn media; `main.py --mode modem` follows
+the bake path. None of these is a requirement. Any preset and any v3 profile
 can be sent live.
 
 The v2 layouts are gone outright, so there is no transport generation left to
