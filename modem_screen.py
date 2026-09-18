@@ -561,7 +561,17 @@ def to_wav(args, layout, coder, prepare, grab):
     channels = 2
     with wave.open(args.write, 'wb') as sink:
         sink.setparams((channels, 2, RATE, 0, 'NONE', 'not compressed'))
+        # Pace captures at the wire's frame rate: --write records what the
+        # encoder would have sent live, so each grab must happen when that
+        # packet would air. Unpaced, all 200 grabs land in the first few ms
+        # and a screen/test source records one frozen instant. A slow
+        # machine simply falls behind (delay <= 0 skips the sleep); it never
+        # sleeps into the past or queues stale captures.
+        start = time.perf_counter()
         for n in range(count):
+            delay = start + n/layout.fps - time.perf_counter()
+            if delay > 0:
+                time.sleep(delay)
             image = prepare(grab())
             if args.numbered:
                 image = burn_counters(image, n+1, n+1, count)
@@ -578,7 +588,7 @@ def to_wav(args, layout, coder, prepare, grab):
             audio = bound_emission(audio, args.emit_ceiling, RATE)
             sink.writeframesraw(pcm(audio*args.gain))
     print(f'wrote {count} frames, {count/layout.fps:.1f} s at {layout.fps:.2f} fps '
-          f'-> {args.write}')
+          f'(captured over {time.perf_counter()-start:.1f} s) -> {args.write}')
 
 
 def to_device(args, layout, coder, prepare, grab):
