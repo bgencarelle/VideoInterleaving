@@ -580,7 +580,7 @@ def to_device(args, layout, coder, prepare, grab):
     started = time.perf_counter()
     # WIRE_HD frame=3488 needs blocksize that divides evenly
     # 3488 = 32 * 109. Use blocksize=32 for integer blocks with reasonable callback rate.
-    blocksize = 32 if layout.name == 'wire-hd' else 256
+    blocksize = 64 if layout.name == 'wire-hd' else 256
     with PacketOutput(device(args.device), channels, args.latency,
                       frame=layout.frame, packet=layout.packet,
                       blocksize=blocksize) as output:
