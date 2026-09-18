@@ -28,13 +28,15 @@ def coder_for(profile, layout=None):
     if profile == V5_PROFILE:
         # hd-dwt is CDF 9/7, NOT SourceCoder DCT. It must fit to the shared
         # mono budget exactly like modem_screen.build (not layout.capacity),
-        # via imaging.hd_dwt_shapes() (divisor=8 keeps every plane cleanly
-        # halvable at both levels): any difference in shapes changes the gains
-        # tables and the wire cannot round trip. grids == shapes: the full
-        # pyramid fits the budget losslessly (see modem_screen.build).
+        # via imaging.hd_dwt_shapes(): any difference in shapes changes the
+        # gains tables and the wire cannot round trip. grids == the baked
+        # 80x96 (plane_grids), NOT shapes -- the grid's full 2-level pyramid
+        # is truncated to the wire budget and the decoder reconstructs the
+        # soft full-resolution picture (same idea as v3/v4 DCT truncation).
         from .wavelet import Cdf97Coder
         shapes = imaging.hd_dwt_shapes()
-        return Cdf97Coder(shapes, grids=shapes, levels=2), shapes
+        grids = imaging.plane_grids(V5_PROFILE)
+        return Cdf97Coder(shapes, grids=grids, levels=2), shapes
     grids = imaging.plane_grids(profile)
     if layout is not None and \
             sum(int(np.prod(s)) for s in shapes) > layout.capacity:
@@ -127,10 +129,13 @@ class V5Engine(Engine):
         from . import imaging
         from .wavelet import Cdf97Coder
         # Must match modem_screen.build and tools/decode_wav.py exactly: fit
-        # to the shared mono budget (imaging.hd_dwt_shapes), grids == shapes
-        # so the 2-level pyramid fits the budget losslessly.
+        # the wire shapes to the shared mono budget (imaging.hd_dwt_shapes),
+        # grids == the baked 80x96 so the truncated DWT decodes at full
+        # resolution (soft); the wire carries the first `count` packed
+        # coefficients of the grid pyramid.
         shapes = imaging.hd_dwt_shapes()
-        return Cdf97Coder(shapes, grids=shapes, levels=2), shapes
+        grids = imaging.plane_grids(V5_PROFILE)
+        return Cdf97Coder(shapes, grids=grids, levels=2), shapes
 
     def encode(self, values, coder, absolute, index, count, stamp_ms=0,
                headroom=.95, profile=0):

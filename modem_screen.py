@@ -472,28 +472,25 @@ def build(args):
     # v5 profile uses different wire layout
     if args.profile == 'hd-dwt':
         layout = V3.WIRE_HD
-        # hd_dwt_shapes() is the single source of truth for the v5 geometry:
-        # the encoder fits the planes to the wire's real value budget
-        # (imaging.HD_MONO_CAPACITY = layout.capacity = 3680) with divisor=8
-        # so the 2-level pyramid + half-res chroma halve cleanly, and the
-        # decoder fits to the SAME shapes or the gains tables disagree and
-        # the wire cannot round trip.
+        # hd_dwt_shapes() is the single source of truth for the v5 wire
+        # geometry: the encoder fits the planes to the wire's real value
+        # budget (imaging.HD_MONO_CAPACITY = layout.capacity = 3680), and the
+        # decoder fits to the SAME shapes or the gains tables disagree and the
+        # wire cannot round trip.
         shapes = hd_dwt_shapes()
-        # grids == shapes (NO oversampling): a 3-level CDF 9/7 pyramid of an
-        # oversampled source needs its finest LL subband to invert -- more than
-        # the luma slots on this wire -- so any truncation of it is
-        # un-decodable by construction. With the grid equal to the wire shape
-        # the whole pyramid fits exactly (count == source count) and the
-        # transform round-trips losslessly. Detail refinement via
-        # resolution-progressive decode is the documented v5 next step. The
-        # 2-level pyramid of the fitted planes halves cleanly (divisor=8 --
-        # chroma is half-res, so luma needs to be divisible by 8); a third
-        # level would hit odd sample rows.
+        # grids == the baked 80x96 resolution, NOT the wire shapes. The full
+        # grid pyramid cannot ride the wire, so the encoder keeps only the
+        # first `count` packed coefficients -- the coarsest level's four bands
+        # always ride in full (the half-res picture) and the finest detail
+        # bands truncate, JPEG2000-style. The decoder zero-fills the dropped
+        # tails and reconstructs the full soft 80x96 picture -- the DWT
+        # analogue of v3/v4's DCT truncation, at the same baked resolution.
         from animation_modem.wavelet import Cdf97Coder
-        coder = Cdf97Coder(shapes, grids=shapes, levels=2)
-        print(f'hd-dwt: sending {shapes[0][1]}x{shapes[0][0]} 2-level CDF 9/7 '
-              f'DWT in {coder.count} slots @ {layout.fps:.1f} fps mono.',
-              file=sys.stderr)
+        grids = plane_grids('hd-dwt')
+        coder = Cdf97Coder(shapes, grids=grids, levels=2)
+        print(f'hd-dwt: sending {coder.count} packed CDF 9/7 coefficients of '
+              f'the {shapes[0][1]}x{shapes[0][0]} grid -> decodes 80x96 @ '
+              f'{layout.fps:.1f} fps mono.', file=sys.stderr)
         return layout, coder, shapes
     
     # v3/v4 profiles

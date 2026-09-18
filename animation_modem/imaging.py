@@ -9,27 +9,31 @@ The wire format is the DCT family: `color-dct` at 2880 values and
 `color-wavelet` at 2880 values (same wire shape, wavelet transform),
 and `fit_shapes` trims a profile into a smaller layout's budget.
 
-v5: `hd-dwt` at 11520 values (80x96 luma + 40x48 chroma), 3-level CDF 9/7 DWT,
-LDPC FEC, mono, 30 fps.
+v5: `hd-dwt` at 11520 values (80x96 luma + 40x48 chroma), 2-level CDF 9/7 DWT,
+truncated onto the WIRE_HD mono budget (~3360 values), standard V3 header
+(profile=2). The decoder reconstructs the full 80x96 grid -- the baked
+resolution -- soft where the wire could not carry the detail bands.
 """
 import numpy as np
 from PIL import Image, ImageDraw, ImageOps
 
 # Luma size and chroma size per profile, on the wire.
 # v3/v4: 40x48 luma + 20x24 chroma = 2880 slots
-# v5: 56x44 luma + 28x22 chroma = 3696 slots (matches WIRE_HD capacity ~3680)
+# v5: fitted to the WIRE_HD value budget (see HD_MONO_CAPACITY / hd_dwt_shapes)
 PROFILES = {
     'color-dct': ((40, 48), (20, 24)),
     'color-wavelet': ((40, 48), (20, 24)),
     'hd-dwt': ((56, 44), (28, 22)),
 }
-# Sampling grid per profile. SourceCoder truncates the grid's transform to the wire
-# shape -- ONE transform, and the allocation table built against the grid's
-# frequencies.
-# v5: 3-level CDF 9/7 on 96x112 source (divisible by 8) -> keeps 56x44 wire coefficients
+# Sampling grid per profile -- the DECODE resolution, always the baked 80x96.
+# SourceCoder truncates the grid's transform to the wire shape -- ONE transform,
+# and the allocation table built against the grid's frequencies.
+# v5: 2-level CDF 9/7 on the same 80x96 grid as v3/v4 (divisible by 8), keeping
+# only the first ~3360 packed coefficients; the decoder reconstructs the soft
+# full-resolution 80x96 picture (JPEG2000-style truncation).
 PROFILE_GRIDS = {'color-dct': ((80, 96), (40, 48)),
                  'color-wavelet': ((80, 96), (40, 48)),
-                 'hd-dwt': ((96, 112), (48, 56))}
+                 'hd-dwt': ((80, 96), (40, 48))}
 DEFAULT_PROFILE = 'color-dct'
 # v5 mono wire budget. WIRE_HD's real per-frame value budget is
 # Layout.capacity = header_capacity + image_symbols*data_bins*4 = 3680, so
@@ -40,14 +44,16 @@ HD_MONO_CAPACITY = 3680
 
 
 def hd_dwt_shapes():
-    """Wire shapes for hd-dwt, identical at both ends (see HD_MONO_CAPACITY).
+    """Wire shapes for hd-dwt: the truncation budget, identical at both ends.
 
-    divisor=8: with levels=2, every plane must halve cleanly at both levels,
-    so luma dims need d/2 and d/4 even -- and chroma is half-res, so it needs
-    d'/4 even too, i.e. luma divisible by 8. A divisor of 4 (luma 44x52) is
-    NOT enough: chroma rows 22 -> 11 at level 2, odd, and the lifting splits
-    break. Watch this if levels ever changes: divisor must be 2**levels *
-    max(1, luma//chroma per axis).
+    The wire carries the first rows*cols packed coefficients of the grid's
+    pyramid, so this sets how much detail survives. It is NOT the decode
+    resolution -- grids == the baked 80x96 (PROFILE_GRIDS['hd-dwt']) and the
+    decoder reconstructs the full soft picture, JPEG2000-style.
+
+    divisor=8 keeps the fit level-safe if grids ever equals shapes again (with
+    levels=2 every plane must halve cleanly at both levels, and chroma is
+    half-res, so luma dims need d/2 and d/4 even, i.e. divisible by 8).
     """
     return fit_shapes(plane_shapes('hd-dwt'), HD_MONO_CAPACITY, divisor=8)
 

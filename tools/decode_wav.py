@@ -21,10 +21,10 @@ import numpy as np
 from PIL import Image
 
 from animation_modem import transport3 as V3
-from animation_modem.imaging import hd_dwt_shapes, values_image
+from animation_modem.imaging import hd_dwt_shapes, plane_grids, values_image
 from animation_modem.wavelet import Cdf97Coder
 
-SCALE = 4  # nice view size for the ~56x40 luma grid
+SCALE = 4  # nice view size for the decoded 80x96 grid (320x384 PNG)
 
 
 def load_wav(path):
@@ -43,12 +43,15 @@ def load_wav(path):
 def build_coder():
     """Matched construction: same shapes/grids as modem_screen.build.
 
-    grids == shapes: the full 2-level pyramid of the wire-sized planes fits
-    the wire's value budget exactly, so the transform round-trips losslessly
-    instead of zero-filling the finest LL subband (see modem_screen.build).
+    grids == the baked 80x96 resolution (NOT the wire shapes): the grid's full
+    2-level CDF 9/7 pyramid is truncated to the wire budget, and the decoder
+    zero-fills the dropped detail tails and reconstructs the full soft 80x96
+    picture (JPEG2000-style, like v3/v4's DCT truncation). The returned
+    `grids` are what the frames must render at.
     """
     shapes = hd_dwt_shapes()
-    return Cdf97Coder(shapes, grids=shapes, levels=2), shapes
+    grids = plane_grids('hd-dwt')
+    return Cdf97Coder(shapes, grids=grids, levels=2), grids
 
 
 def main():
