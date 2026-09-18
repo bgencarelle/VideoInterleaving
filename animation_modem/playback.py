@@ -37,7 +37,7 @@ class Slot:
 
 class PacketOutput:
     def __init__(self, device=None, channels=(0, 1), requested_latency='low',
-                 frame=_DEFAULT.frame, packet=_DEFAULT.packet):
+                 frame=_DEFAULT.frame, packet=_DEFAULT.packet, force_rate=None):
         # The wire carries its own geometry -- 3200 samples -- so the packet
         # size is taken from it instead of a module constant.
         self.frame = int(frame)
@@ -60,16 +60,15 @@ class PacketOutput:
         self.lock = threading.Lock()
         self.done = threading.Event()
         self.sd = sounddevice()
-        # No samplerate= here on purpose. The packet is a sample array, not a
-        # duration, so it plays correctly out of a device running at whatever
-        # rate its owner has already set; the receiver reads the resulting
-        # cadence off the preamble. Demanding 48 kHz either failed outright on
-        # a device that does not offer it, or made PortAudio resample behind
-        # our back -- a conversion nobody asked for and nobody could see.
-        self.stream = self.sd.OutputStream(
+        # force_rate: force device to specific sample rate (e.g., 48000)
+        # Use for layouts where frame size must be integer at that rate.
+        stream_kwargs = dict(
             channels=max(channels)+1, dtype='float32',
             device=device, blocksize=256, latency=requested_latency,
             callback=self._callback, finished_callback=self.done.set)
+        if force_rate is not None:
+            stream_kwargs['samplerate'] = force_rate
+        self.stream = self.sd.OutputStream(**stream_kwargs)
         # Whatever the device reported once it was open. Everything below that
         # converts samples to seconds uses this, never a constant.
         self.rate = float(self.stream.samplerate)

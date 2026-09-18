@@ -578,8 +578,11 @@ def to_device(args, layout, coder, prepare, grab):
     channels = args.channels
     sent = misses = 0
     started = time.perf_counter()
+    # Force 48000 Hz for WIRE_HD to ensure integer frame blocks at 96000 Hz device rate
+    force_rate = 48000 if layout.name == 'wire-hd' else None
     with PacketOutput(device(args.device), channels, args.latency,
-                      frame=layout.frame, packet=layout.packet) as output:
+                      frame=layout.frame, packet=layout.packet,
+                      force_rate=force_rate) as output:
         # The device is open now, so the real wire rate is finally known. A
         # capture paced at the reference frame rate would drift against a
         # 44.1 kHz device by 8% -- one wasted or repeated grab every 12 frames.
