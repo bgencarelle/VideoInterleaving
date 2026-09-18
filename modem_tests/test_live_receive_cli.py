@@ -72,7 +72,7 @@ class ReceiverWindowTests(unittest.TestCase):
         from animation_modem.imaging import image_values
 
         layout = check.WIRE
-        coder, grids = check.coder_for('lean-dct', layout)
+        coder, grids = check.coder_for('color-dct', layout)
         packets = [check.V3.encode(
             image_values(Image.new('RGB', grids[0][::-1], (n*12, 30, 180)),
                          coder.grids),

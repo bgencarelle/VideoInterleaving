@@ -505,7 +505,7 @@ def do_live_receive(args):
             import tkinter as tk
             from PIL import ImageTk
             # The decoded picture is tiny (80x96 for color-dct, 40x48 for
-            # lean-dct). Blow it up by an integer factor and hand only that to
+            # color-wavelet). Blow it up by an integer factor and hand only that to
             # Tk, instead of allocating a full-window RGB canvas and pasting
             # into it every frame -- that canvas churn is what made the window
             # heavy on older machines.

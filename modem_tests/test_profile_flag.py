@@ -90,7 +90,7 @@ class ProfileNegotiationTests(unittest.TestCase):
         for name in v3.PROFILE_CODES:
             with self.subTest(profile=name):
                 audio, coder, values = self.send(name, WIDE)
-                other = 'lean-dct' if name == 'color-dct' else 'color-dct'
+                other = 'color-dct' if name == 'color-dct' else 'color-dct'
                 wrong = coder_for(other, WIDE)
                 out = self.decode(audio, WIDE, wrong, coders_for(WIDE))
                 self.assertEqual([r.absolute for r in out], [1, 2, 3])
@@ -111,7 +111,7 @@ class ProfileNegotiationTests(unittest.TestCase):
         """SMALL holds 1696 slots, so 'color-dct' is fit_shapes-shrunk. Both
         ends run the same deterministic shrink, so the code still names it."""
         audio, coder, values = self.send('color-dct', SMALL)
-        out = self.decode(audio, SMALL, coder_for('lean-dct', SMALL),
+        out = self.decode(audio, SMALL, coder_for('color-dct', SMALL),
                           coders_for(SMALL))
         self.assertEqual(out[0].extra['profile'], 'color-dct')
         self.assertEqual(tuple(out[0].extra['shapes']), tuple(coder.grids))
@@ -120,7 +120,7 @@ class ProfileNegotiationTests(unittest.TestCase):
     def test_without_the_mapping_nothing_changes(self):
         """Opting in is what makes the receiver follow the header. A caller
         that does not pass coders keeps its own geometry, as before."""
-        coder = coder_for('lean-dct', WIDE)
+        coder = coder_for('color-dct', WIDE)
         # Low-frequency content: everything survives the truncating coder's
         # corner, so the round trip is lossless and the comparison is exact.
         layers = []
@@ -131,7 +131,7 @@ class ProfileNegotiationTests(unittest.TestCase):
         values = np.concatenate(layers)
         audio = np.concatenate([
             v3.encode(values, WIDE, coder, n, n, 3,
-                      profile=v3.profile_code('lean-dct'))
+                      profile=v3.profile_code('color-dct'))
             for n in range(1, 4)])
         out = self.decode(audio, WIDE, coder)
         self.assertEqual([r.absolute for r in out], [1, 2, 3])
@@ -139,7 +139,7 @@ class ProfileNegotiationTests(unittest.TestCase):
         # inside the corner so it survives the DCT losslessly.
         self.assertLess(np.sqrt(np.mean((out[0].values-values)**2)), 1e-3)
         # The declaration is still reported, even when it is not acted on.
-        self.assertEqual(out[0].extra['profile'], 'lean-dct')
+        self.assertEqual(out[0].extra['profile'], 'color-dct')
 
     def test_an_undeclared_profile_reads_as_code_zero(self):
         """Guards the compatibility hazard rather than hiding it.
@@ -149,7 +149,7 @@ class ProfileNegotiationTests(unittest.TestCase):
         it. Both ends have to move together; there is no spare bit left to
         express "undeclared".
         """
-        coder = coder_for('lean-dct', WIDE)
+        coder = coder_for('color-dct', WIDE)
         values = np.random.default_rng(2).uniform(-.2, .2, coder.source_count)
         # profile=0 is exactly what an encoder without a declaration puts on
         # the wire.

@@ -55,6 +55,11 @@ SYNC_LEN = 288
 GUARD = 32                 # idle tail; not required for EOF decoding
 HEADER_BYTES = 16          # + CRC32 = 20 bytes = 160 bits = 80 QPSK
 HEADER_SLOTS = 80          # placed identically on BOTH channels, for diversity
+
+# v5: mono, no profile, no folders
+HEADER_BYTES_V5 = 14       # + CRC32 = 18 bytes = 144 bits = 72 QPSK
+HEADER_SLOTS_V5 = 72
+HEADER_FORMAT_V5 = '>2sIHHI'   # magic, absolute, index, count, stamp_ms
 # Preamble scales searched at acquisition. Wide enough for half speed and
 # double speed; the picture itself dies above ~1.19x from aliasing anyway.
 
@@ -707,9 +712,9 @@ FOLDER_LIMIT = 16
 # ('color', 'color-lean', 'color-dct', 'mono') is gone, so an old recording
 # whose header names code 0 or 3 now decodes as a different (or no) geometry.
 # That is deliberate -- see the purge; the magic is not bumped because nothing
-# old is worth keeping. Codes 2 and 3 are the wavelet transforms; they reuse
-# codes the DCT era never spent, so no DCT recording changes meaning.
-PROFILE_CODES = ('color-dct', 'lean-dct', 'color-wavelet', 'lean-wavelet')
+# old is worth keeping. Codes 2 and 3 were wavelet; keeping two codes for the
+# two transforms. Code 2 is reserved for future v5 (which uses different header format).
+PROFILE_CODES = ('color-dct', 'color-wavelet', 'hd-dwt')
 # Two header bits hold four codes. The transform (DCT vs wavelet) rides in the
 # profile name, so the receiver reads the whole story from the header and there
 # is no shared state for the two ends to disagree about.
@@ -729,6 +734,30 @@ def profile_name(code):
     """Profile a received code names, or None if this build has no such code."""
     code = int(code) & 3
     return PROFILE_CODES[code] if code < len(PROFILE_CODES) else None
+
+
+# v5: single profile, no code in header
+V5_PROFILE = 'hd-dwt'
+
+def pack_header_v5(absolute, index, count, stamp_ms, magic=b'V5'):
+    """Pack v5 header: no flags, no top_bin, no profile, no folders."""
+    if not (0 <= absolute <= 0xffffffff and 1 <= index <= count <= 0xffff):
+        raise ValueError('Frame/index/count outside the header ranges')
+    raw = struct.pack(HEADER_FORMAT_V5, magic, absolute, index, count, stamp_ms & 0xffffffff)
+    return raw + struct.pack('>I', zlib.crc32(raw))
+
+
+def unpack_header_v5(raw, magic=b'V5'):
+    """Unpack v5 header, verify CRC and magic."""
+    if len(raw) != HEADER_BYTES_V5 + 4:
+        return None
+    payload, crc_bytes = raw[:HEADER_BYTES_V5], raw[HEADER_BYTES_V5:]
+    if zlib.crc32(payload) != struct.unpack('>I', crc_bytes)[0]:
+        return None
+    m, absolute, index, count, stamp_ms = struct.unpack(HEADER_FORMAT_V5, payload)
+    if m != magic:
+        return None
+    return dict(absolute=absolute, index=index, count=count, stamp_ms=stamp_ms)
 
 
 def pack_folders(face, float_folder):

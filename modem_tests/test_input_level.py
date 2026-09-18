@@ -18,11 +18,11 @@ LAYOUT = v3.WIRE
 
 
 def transmission(frames=6):
-    coder = v3.SourceCoder(plane_shapes('lean-dct'))
+    coder = v3.SourceCoder(plane_shapes('color-dct'))
     values = np.random.default_rng(3).uniform(-.2, .2, coder.count)
     audio = np.concatenate([
         v3.encode(values, LAYOUT, coder, n, n, frames,
-                  profile=v3.profile_code('lean-dct'))
+                  profile=v3.profile_code('color-dct'))
         for n in range(1, frames+1)])
     return audio, values, coder
 

@@ -19,8 +19,8 @@ The receiver takes no --preset or --profile: the wire is fixed and the profile
 is declared in the header.
 
 BE REALISTIC ABOUT THE RESOLUTION. The picture is whatever the profile says:
-40x48 colour for 'color-dct', the same luma with quarter chroma for 'lean-dct'
--- each sampled 2x finer and DCT-truncated, so the source bake is 80x96. That
+40x48 colour for 'color-dct' (DCT) or 'color-wavelet' (wavelet) -- each
+sampled 2x finer and truncated, so the source bake is 80x96. That
 is a silhouette, a face, a moving shape, a lava lamp. It is not a desktop, and
 text will not survive.
 
@@ -468,6 +468,28 @@ def build(args):
     """
     if args.profile not in PROFILES:
         raise SystemExit(f'Unknown profile {args.profile}')
+    
+    # v5 profile uses different wire layout
+    if args.profile == 'hd-dwt':
+        layout = V3.WIRE_HD
+        wanted = plane_shapes('hd-dwt')
+        grids = plane_grids('hd-dwt')
+        # For mono: capacity = image_symbols * data_carriers * 2 + header_symbols * (spare+header)_carriers * 2
+        # data_carriers=50, spare=30, header=20, image_symbols=16, header_symbols=4
+        # Total = 16*50*2 + 4*(30+20)*2 = 1600 + 400 = 2000
+        mono_capacity = 2000
+        shapes = fit_shapes(wanted, mono_capacity)
+        # NOTE: do NOT set grids = shapes when fitted!
+        # The grid is the SOURCE resolution; shrinking the wire shape
+        # does not change the source grid. See coder_for comment.
+        from animation_modem.wavelet import Cdf97Coder
+        coder = Cdf97Coder(shapes, grids=grids, levels=3)
+        print(f'hd-dwt: sampling {grids[0][1]}x{grids[0][0]} and sending '
+              f'via 3-level CDF 9/7 DWT in {coder.count} slots @ {layout.fps:.1f} fps mono.',
+              file=sys.stderr)
+        return layout, coder, shapes
+    
+    # v3/v4 profiles
     # Fail here rather than on the first encode. The header spends two bits on
     # the profile, so only the entries in PROFILE_CODES can be named on the
     # wire; a profile that exists in PROFILES but has no code would otherwise
@@ -527,16 +549,24 @@ def to_wav(args, layout, coder, prepare, grab):
     """Render to a file instead of a device. Needs no audio hardware."""
     import wave
     count = args.frames or int(round(layout.fps*args.seconds))
+    # v5 uses stereo like v3/v4
+    channels = 2
     with wave.open(args.write, 'wb') as sink:
-        sink.setparams((2, 2, RATE, 0, 'NONE', 'not compressed'))
+        sink.setparams((channels, 2, RATE, 0, 'NONE', 'not compressed'))
         for n in range(count):
             image = prepare(grab())
             if args.numbered:
                 image = burn_counters(image, n+1, n+1, count)
-            audio = V3.encode(image_values(image, coder.grids), layout, coder,
-                              n+1, (n % count)+1, count,
-                              stamp_ms=int(n*1000/layout.fps),
-                              profile=V3.profile_code(args.profile))
+            if args.profile == 'hd-dwt':
+                audio = V3.encode_v5(image_values(image, coder.grids), layout, coder,
+                                     n+1, (n % count)+1, count,
+                                     stamp_ms=int(n*1000/layout.fps),
+                                     headroom=0.95, profile=2)
+            else:
+                audio = V3.encode(image_values(image, coder.grids), layout, coder,
+                                  n+1, (n % count)+1, count,
+                                  stamp_ms=int(n*1000/layout.fps),
+                                  profile=V3.profile_code(args.profile))
             audio = bound_emission(audio, args.emit_ceiling, RATE)
             sink.writeframesraw(pcm(audio*args.gain))
     print(f'wrote {count} frames, {count/layout.fps:.1f} s at {layout.fps:.2f} fps '
@@ -544,6 +574,7 @@ def to_wav(args, layout, coder, prepare, grab):
 
 
 def to_device(args, layout, coder, prepare, grab):
+    # v5 uses stereo like v3/v4
     channels = args.channels
     sent = misses = 0
     started = time.perf_counter()
@@ -571,11 +602,18 @@ def to_device(args, layout, coder, prepare, grab):
                 image = prepare(grab())
                 if args.numbered:
                     image = burn_counters(image, sent+1, sent+1, 0xffff)
-                audio = V3.encode(image_values(image, coder.grids), layout,
-                                  coder, (sent+1) & 0xffffffff, (sent % 0xffff)+1,
-                                  0xffff, stamp_ms=int(
-                                      (slot.target_time_ns//1_000_000) & 0xffffffff),
-                                  profile=V3.profile_code(args.profile))
+                if args.profile == 'hd-dwt':
+                    audio = V3.encode_v5(image_values(image, coder.grids), layout,
+                                         coder, (sent+1) & 0xffffffff, (sent % 0xffff)+1,
+                                         0xffff, stamp_ms=int(
+                                             (slot.target_time_ns//1_000_000) & 0xffffffff),
+                                         headroom=0.95, profile=2)
+                else:
+                    audio = V3.encode(image_values(image, coder.grids), layout,
+                                      coder, (sent+1) & 0xffffffff, (sent % 0xffff)+1,
+                                      0xffff, stamp_ms=int(
+                                          (slot.target_time_ns//1_000_000) & 0xffffffff),
+                                      profile=V3.profile_code(args.profile))
                 # RATE, not output.rate. The packet is still on the REFERENCE
                 # grid here -- band_limited resamples it to the device further
                 # down, holding the carriers at the same hertz -- so the filter
@@ -626,14 +664,13 @@ def parser():
                     default='test',
                     help='screen = mss (simple, slow on macOS); ffmpeg = platform fast path; '
                          'camera = webcam; test = no devices; mouse-follow = dynamic cursor tracking')
-    # The profiles the header can name. Every one is DCT-sampled; the bake and
+    # The profiles the header can name. Every one is DCT/wavelet-sampled; the bake and
     # the wire shapes both come from the profile's geometry.
     ap.add_argument('--profile', choices=list(wire_profiles()),
                     default=DEFAULT_PROFILE,
                     help='Picture geometry. Each samples a grid 2x finer than '
                          'it transmits and sends the low-frequency corner; the '
-                         'receiver reads which was sent from the header. '
-                         'lean-dct quarters chroma for a noisier tape.')
+                         'receiver reads which was sent from the header.')
     ap.add_argument('--device', type=device, help='Audio output device')
     ap.add_argument('--channels', type=pair, default=(0, 1))
     ap.add_argument('--latency', default='low')

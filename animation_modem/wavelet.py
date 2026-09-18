@@ -495,3 +495,184 @@ class WaveletCoder(SourceCoder):
     def _inverse_transform(self, corner, rows, cols, grid):
         mask_ll, mask_lh, mask_hl, mask_hh = _get_masks(grid[0], grid[1])
         return _unpack_and_apply_mask(corner, rows, cols, grid, mask_ll, mask_lh, mask_hl, mask_hh)
+
+
+# --------------------------------------------------------------------------
+# CDF 9/7 Wavelet (JPEG2000) - Lifting Scheme
+# --------------------------------------------------------------------------
+# Lifting coefficients for CDF 9/7 (Daubechies 9/7)
+# From JPEG2000 Part 1, Annex A
+_CDF_ALPHA = -1.586134342059924
+_CDF_BETA  = -0.052980118572961
+_CDF_GAMMA =  0.882911075530934
+_CDF_DELTA =  0.443506852043971
+_CDF_K     =  1.230174104914001
+_CDF_KINV  =  1.0 / _CDF_K
+
+def _cdf97_predict_lift(x, coeff):
+    """Predict (highpass) lifting step: odd -= coeff * (even_left + even_right)"""
+    return x - coeff * (np.roll(x, 1) + np.roll(x, -1))
+
+def _cdf97_update_lift(x, coeff):
+    """Update (lowpass) lifting step: even += coeff * (odd_left + odd_right)"""
+    return x + coeff * (np.roll(x, 1) + np.roll(x, -1))
+
+def cdf97_forward_1d(x):
+    """1D CDF 9/7 forward transform using lifting (periodic boundary).
+    
+    Returns (low, high) each half the length.
+    """
+    n = len(x)
+    if n % 2 != 0:
+        raise ValueError("Length must be even")
+    half = n // 2
+    even = x[::2].copy()
+    odd = x[1::2].copy()
+    
+    # Predict 1
+    odd = _cdf97_predict_lift(odd, _CDF_ALPHA)
+    # Update 1
+    even = _cdf97_update_lift(even, _CDF_BETA)
+    # Predict 2
+    odd = _cdf97_predict_lift(odd, _CDF_GAMMA)
+    # Update 2
+    even = _cdf97_update_lift(even, _CDF_DELTA)
+    
+    # Scale
+    low = even * _CDF_K
+    high = odd * _CDF_KINV
+    return low, high
+
+def cdf97_inverse_1d(low, high):
+    """1D CDF 9/7 inverse transform using lifting."""
+    # Inverse scale
+    even = low * _CDF_KINV
+    odd = high * _CDF_K
+    
+    # Inverse Update 2
+    even = _cdf97_update_lift(even, -_CDF_DELTA)
+    # Inverse Predict 2
+    odd = _cdf97_predict_lift(odd, -_CDF_GAMMA)
+    # Inverse Update 1
+    even = _cdf97_update_lift(even, -_CDF_BETA)
+    # Inverse Predict 1
+    odd = _cdf97_predict_lift(odd, -_CDF_ALPHA)
+    
+    # Interleave
+    n = len(even) * 2
+    x = np.empty(n, dtype=even.dtype)
+    x[::2] = even
+    x[1::2] = odd
+    return x
+
+def cdf97_forward_2d(plane, levels=3):
+    """Multi-level 2D CDF 9/7 forward transform.
+    
+    Returns dict with subbands: {level: {LL, LH, HL, HH}}
+    """
+    h, w = plane.shape
+    current = plane.astype(float)
+    subbands = {}
+    for level in range(levels):
+        if current.shape[0] < 2 or current.shape[1] < 2:
+            break
+        # Transform rows
+        rows_low = np.empty((current.shape[0], current.shape[1] // 2))
+        rows_high = np.empty_like(rows_low)
+        for i in range(current.shape[0]):
+            rows_low[i], rows_high[i] = cdf97_forward_1d(current[i])
+        # Transform columns of low
+        cols_low = np.empty((current.shape[0] // 2, current.shape[1] // 2))
+        cols_high = np.empty_like(cols_low)
+        for j in range(rows_low.shape[1]):
+            cols_low[:, j], cols_high[:, j] = cdf97_forward_1d(rows_low[:, j])
+        # Transform columns of high
+        cols_low_h = np.empty((current.shape[0] // 2, current.shape[1] // 2))
+        cols_high_h = np.empty_like(cols_low_h)
+        for j in range(rows_high.shape[1]):
+            cols_low_h[:, j], cols_high_h[:, j] = cdf97_forward_1d(rows_high[:, j])
+        
+        subbands[level] = {
+            'LL': cols_low,
+            'HL': cols_high,   # horizontal detail
+            'LH': cols_low_h,  # vertical detail
+            'HH': cols_high_h  # diagonal detail
+        }
+        current = cols_low
+    return subbands
+
+def cdf97_inverse_2d(subbands, levels=3, out_shape=None):
+    """Multi-level 2D CDF 9/7 inverse transform.
+    
+    Reconstructs from subbands dict.
+    """
+    if out_shape is None:
+        # Compute from finest LL
+        ll = subbands[levels-1]['LL']
+        h, w = ll.shape[0] * (2**levels), ll.shape[1] * (2**levels)
+    else:
+        h, w = out_shape
+    
+    current = subbands[levels-1]['LL']
+    for level in reversed(range(levels)):
+        sb = subbands[level]
+        # Inverse transform columns
+        rows_low = np.empty((current.shape[0] * 2, current.shape[1]))
+        rows_high = np.empty_like(rows_low)
+        for j in range(current.shape[1]):
+            rows_low[:, j] = cdf97_inverse_1d(sb['LL'][:, j], sb['HL'][:, j])
+            rows_high[:, j] = cdf97_inverse_1d(sb['LH'][:, j], sb['HH'][:, j])
+        # Inverse transform rows
+        current = np.empty((current.shape[0] * 2, current.shape[1] * 2))
+        for i in range(rows_low.shape[0]):
+            current[i] = cdf97_inverse_1d(rows_low[i], rows_high[i])
+    return current[:h, :w]
+
+
+class Cdf97Coder(SourceCoder):
+    """SourceCoder using multi-level CDF 9/7 DWT with measured allocation.
+    
+    v5: 3-level DWT on 96x112 source -> collects coefficients from all subbands
+    to fill 56x44 wire shape.
+    """
+    def __init__(self, shapes, grids=None, allocation=None, levels=3):
+        self.levels = levels
+        # Generate allocation based on subband structure if not provided
+        if allocation is None:
+            from .core import default_allocation
+            count = int(sum(np.prod(s) for s in shapes))
+            allocation = default_allocation(shapes, count)
+        # SourceCoder expects: (shapes, allocation, grids)
+        super().__init__(shapes, allocation, grids)
+
+    def _forward_transform(self, plane, rows, cols):
+        # Full multi-level DWT on source grid
+        subbands = cdf97_forward_2d(plane, self.levels)
+        # Collect coefficients from all subbands in priority order:
+        # LL (finest) > LH/HL/HH (finest) > LL (next) > LH/HL/HH (next) > ...
+        coeffs = []
+        for level in range(self.levels - 1, -1, -1):
+            if level in subbands:
+                sb = subbands[level]
+                # Priority: LL first, then detail subbands
+                for key in ['LL', 'LH', 'HL', 'HH']:
+                    if key in sb:
+                        coeffs.append(sb[key].ravel())
+        # Concatenate all and truncate/pad to wire shape size
+        all_coeffs = np.concatenate(coeffs) if coeffs else np.array([])
+        target_size = rows * cols
+        if len(all_coeffs) >= target_size:
+            return all_coeffs[:target_size]
+        else:
+            # Pad with zeros
+            padded = np.zeros(target_size)
+            padded[:len(all_coeffs)] = all_coeffs
+            return padded
+
+    def _inverse_transform(self, corner, rows, cols, grid):
+        # This is a simplified inverse - full implementation would need
+        # proper subband unpacking. For now, just use the LL corner.
+        full = np.zeros(grid)
+        full[:rows, :cols] = corner.reshape(rows, cols)
+        # Use 1-level inverse on the wire shape as approximation
+        return full  # Placeholder

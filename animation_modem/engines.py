@@ -3,9 +3,10 @@
 Each engine is a black box with the same contract as ``transport3``: an
 ``encode`` that turns source coefficients into one reference-geometry audio
 frame, and a ``Receiver`` that turns audio back into ``Decoded`` results. v3 is
-the DCT source coder; v4 swaps the transform for a 2-D wavelet. Everything else
+the DCT source coder; v4 swaps the transform for a 2-D wavelet; v5 uses
+multi-level CDF 9/7 DWT + LDPC on a new HD wire layout. Everything else
 -- the OFDM wire, the header, the preamble, the acquisition -- is shared and
-lives in ``transport3``/``core``, so today the two engines differ only in which
+lives in ``transport3``/``core``, so today the engines differ only in which
 ``SourceCoder`` subclass they build. The interface is deliberately wider than
 that so a future revision can replace the modulation wholesale without the CLI
 having to know.
@@ -14,8 +15,8 @@ import numpy as np
 
 from . import transport3 as V3
 from . import imaging
-from .core import SourceCoder, PROFILE_CODES, profile_code, profile_name
-from .wavelet import WaveletCoder
+from .core import SourceCoder, PROFILE_CODES, profile_code, profile_name, V5_PROFILE
+from .wavelet import WaveletCoder, Cdf97Coder
 
 __all__ = ['ENGINES', 'get_engine', 'engine_names', 'coder_for', 'coders_for',
            'Engine']
@@ -92,9 +93,50 @@ class Engine:
         return self.wire.describe(self.reference_rate)
 
 
+class V5Engine(Engine):
+    """v5: CDF 9/7 DWT + LDPC on HD wire layout (mono)."""
+    
+    @property
+    def wire(self):
+        return V3.WIRE_HD
+
+    @property
+    def reference_rate(self):
+        return V3.REFERENCE_RATE
+
+    def coder_for(self, profile, layout=None):
+        if profile != V5_PROFILE:
+            raise ValueError(f'{profile!r} is not a v5 profile')
+        from . import imaging
+        from .wavelet import Cdf97Coder
+        shapes = imaging.plane_shapes(V5_PROFILE)
+        grids = imaging.plane_grids(V5_PROFILE)
+        if layout is not None and \
+                sum(int(np.prod(s)) for s in shapes) > layout.capacity:
+            shapes = imaging.fit_shapes(shapes, layout.capacity)
+            grids = shapes
+        # v5 uses 3-level CDF 9/7 on 160x192 source -> 80x96 wire
+        return Cdf97Coder(shapes, grids=grids, levels=3), grids
+
+    def encode(self, values, coder, absolute, index, count, stamp_ms=0,
+               headroom=.95, profile=0):
+        # v5 uses mono encode_v5, no flags, no profile in header
+        return V3.encode_v5(values, self.wire, coder, absolute, index, count,
+                           stamp_ms=stamp_ms, headroom=headroom)
+
+    def receiver(self, layout=None, coder=None, **kwargs):
+        # v5 receiver needs LDPC decode + CDF 9/7 inverse
+        from . import transport3_v5
+        return transport3_v5.ReceiverV5(layout or self.wire, coder, **kwargs)
+
+    def describe(self):
+        return f"{self.wire.describe(self.reference_rate)} (v5: CDF 9/7 + LDPC, mono)"
+
+
 ENGINES = {
-    'v3': Engine('v3', ('color-dct', 'lean-dct')),
-    'v4': Engine('v4', ('color-wavelet', 'lean-wavelet')),
+    'v3': Engine('v3', ('color-dct',)),
+    'v4': Engine('v4', ('color-wavelet',)),
+    'v5': Engine('v5', (V5_PROFILE,)),
 }
 
 

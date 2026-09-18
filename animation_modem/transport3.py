@@ -64,6 +64,37 @@ WIRE = Layout(top_bin=54, image_symbols=14, name='wire',
               progressive=True, orthogonal_training=True,
               spread_carriers=True, dense_header=True, header_width=20)
 
+# v5: HD layout - improved quality at same wire size, with CDF 9/7 + LDPC
+# Top bin 54 -> 375-20250 Hz carriers, spread for EQ immunity
+# image_symbols=16 gives ~18 fps @ 48 kHz, ~3800 capacity (vs 2880 v3/v4)
+# header_width=20, dense_header reclaims header symbol carriers
+WIRE_HD = Layout(top_bin=54, image_symbols=16, name='wire-hd',
+                 progressive=True, orthogonal_training=True,
+                 spread_carriers=True, dense_header=True, header_width=20)
+
+# v5 preamble: shorter biphase-mark for 1600-sample frame
+# 12 bits = 1.5kHz/3kHz edges, ~192 samples @ 8 samples/half-bit
+HALF_V5 = 8
+PREAMBLE_BITS_V5 = (0, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1)
+PREAMBLE_AMPLITUDE_V5 = .55
+
+def _biphase_v5(bits=PREAMBLE_BITS_V5, half=HALF_V5, amplitude=PREAMBLE_AMPLITUDE_V5):
+    level, out = 1., []
+    for bit in bits:
+        level = -level
+        out += [level]*half
+        if bit:
+            level = -level
+        out += [level]*half
+    wave = np.asarray(out, float)
+    return wave*(amplitude/np.max(np.abs(wave)))
+
+PREAMBLE_V5 = _biphase_v5()
+PREAMBLE_ENERGY_V5 = float(np.einsum('i,i->', PREAMBLE_V5, PREAMBLE_V5, optimize=False))
+NOMINAL_EDGES_V5 = np.flatnonzero(np.diff(np.signbit(PREAMBLE_V5)))
+NOMINAL_SPAN_V5 = float(NOMINAL_EDGES_V5[-1] - NOMINAL_EDGES_V5[0])
+MAGIC_V5 = b'V5'
+
 PREAMBLE = _biphase()
 PREAMBLE_ENERGY = float(np.einsum('i,i->', PREAMBLE, PREAMBLE, optimize=False))
 NOMINAL_EDGES = np.flatnonzero(np.diff(np.signbit(PREAMBLE)))
@@ -254,6 +285,162 @@ def _fit_preamble(samples, at, scale, reach=.02, iterations=5, fast=True):
 
 
 # --------------------------------------------------------------------------
+# v5 Preamble detection (uses PREAMBLE_V5)
+# --------------------------------------------------------------------------
+
+NOMINAL_GAPS_V5 = np.diff(NOMINAL_EDGES_V5).astype(float)
+MIN_RUN_V5 = len(NOMINAL_GAPS_V5) - 4
+
+def _runs_v5(gaps, tolerance=.28):
+    out = []
+    start = 0
+    n = len(gaps)
+    while start < n:
+        unit = float(np.min(gaps[start:start+MIN_RUN_V5])) if start < n else 0.
+        if unit <= 0:
+            start += 1
+            continue
+        end = start
+        while end < n:
+            g = gaps[end]
+            near_short = abs(g-unit) <= tolerance*unit
+            near_long = abs(g-2*unit) <= tolerance*2*unit
+            if not (near_short or near_long):
+                break
+            end += 1
+        if end-start >= MIN_RUN_V5:
+            out.append((start, end, unit))
+            start = end
+        else:
+            start += 1
+    return out
+
+def measure_speed_v5(samples, min_scale=.5, max_scale=4.0):
+    at = edge_intervals(samples)
+    if len(at) < MIN_RUN_V5+1:
+        return None
+    gaps = np.diff(at).astype(float)
+    for start, end, unit in _runs_v5(gaps):
+        run = gaps[start:end]
+        short = run[run < 1.5*unit]
+        long = run[run >= 1.5*unit]
+        if len(short) < 4 or len(long) < 2:
+            continue
+        unit = float(np.mean(short))
+        if not 1.7 <= float(np.mean(long))/max(unit, 1e-9) <= 2.3:
+            continue
+        span = float(at[end] - at[start])
+        scale = span/NOMINAL_SPAN_V5
+        if not .98*min_scale <= scale <= 1.02*max_scale:
+            continue
+        if abs(unit/SHORT - scale) > .15*scale:
+            continue
+        position = float(at[start]) - NOMINAL_EDGES_V5[0]*scale
+        agreement = 1.0 - min(1.0, float(np.std(short))/max(unit, 1e-9))
+        return position, scale, agreement
+    return None
+
+def preamble_correlation_v5(x, limit=None, template=None, energy=None):
+    if template is None:
+        template, energy = PREAMBLE_V5, PREAMBLE_ENERGY_V5
+    x = np.asarray(x, float)
+    n = len(x) - len(template) + 1
+    if limit is not None:
+        n = max(0, min(n, limit))
+    if n <= 0:
+        return np.empty(0)
+    peak = float(np.max(np.abs(x)))
+    if peak == 0:
+        return np.zeros(n)
+    x = x/peak
+    cumulative = np.empty(len(x)+1)
+    cumulative[0] = 0.
+    np.cumsum(x*x, out=cumulative[1:])
+    window = cumulative[len(template):] - cumulative[:-len(template)]
+    floor = 64*np.finfo(float).eps*float(np.max(window))
+    corr = correlate(x[:n+len(template)-1], template, mode='valid', method='auto')
+    score = np.zeros(n)
+    ok = window[:n] > floor
+    score[ok] = np.abs(corr[ok])/np.sqrt(window[:n][ok]*energy)
+    return np.minimum(score, 1.0)
+
+@lru_cache(maxsize=64)
+def _scaled_preamble_v5(scale):
+    if scale == 1.0:
+        return PREAMBLE_V5
+    length = int(round(len(PREAMBLE_V5)*scale))
+    return np.interp(np.arange(length)/scale, np.arange(len(PREAMBLE_V5)), PREAMBLE_V5)
+
+def _fit_preamble_v5(samples, at, scale, reach=.02, iterations=5, fast=True):
+    radius = 12
+    left = max(0, int(at)-radius)
+    right = min(len(samples), int(at + len(PREAMBLE_V5)*scale) + radius)
+    local = samples[left:right]
+    if len(local) < len(PREAMBLE_V5)//2:
+        return float(at), float(scale), 0.
+    best = (0., float(at-left), float(scale))
+    for s in (np.linspace(scale*(1-reach), scale*(1+reach), 7) if reach else ()):
+        template = _scaled_preamble_v5(float(s))
+        energy = float(np.einsum('i,i->', template, template, optimize=False))
+        scores = preamble_correlation_v5(local, 2*radius+1, template, energy)
+        if len(scores):
+            p = int(np.argmax(scores))
+            if scores[p] > best[0]:
+                best = (float(scores[p]), float(p), float(s))
+    _, position, s = best
+    reference = PREAMBLE_V5
+    energy = PREAMBLE_ENERGY_V5
+    for _ in range(iterations):
+        z = resample_packet(local, s-1, len(PREAMBLE_V5), offset=position, fast=fast)
+        scores = (abs(np.einsum('i,i->', reference, z, optimize=False)) /
+                  np.sqrt(energy*np.maximum((z*z).sum(0), 1e-20)))
+        if len(scores):
+            p = int(np.argmax(scores))
+            if scores[p] > best[0]:
+                best = (float(scores[p]), float(position + p), float(s))
+    return best[1], best[2], best[0]
+
+def measure_pulses_v5(samples, min_scale=.5, max_scale=4.0):
+    """v5 preamble detection using shorter PREAMBLE_V5."""
+    samples = np.asarray(samples)
+    edges = edge_intervals(samples)
+    count = len(NOMINAL_EDGES_V5)
+    if len(edges) < count:
+        return None
+    crossings = np.flatnonzero(np.diff(np.signbit(samples)))
+    left = crossings[np.searchsorted(crossings, edges-1, side='right')-1]
+    values = samples[left]
+    positions = left + values/(values-samples[left+1])
+    words = np.lib.stride_tricks.sliding_window_view(positions, count)
+    scales = (words[:, -1]-words[:, 0])/NOMINAL_SPAN_V5
+    valid = (scales >= .98*min_scale) & (scales <= 1.02*max_scale)
+    expected = NOMINAL_GAPS_V5[None, :]*scales[:, None]
+    valid &= np.all(np.abs(np.diff(words, axis=1) - expected) <=
+                    np.maximum(1.2, 0.45 * expected), axis=1)
+    nominal = NOMINAL_EDGES_V5.astype(float)+.5
+    centered = nominal-nominal.mean()
+    for word in words[valid]:
+        if (word[-1]-word[0])/NOMINAL_SPAN_V5 < .999:
+            refined = word.copy()
+            for _ in range(3):
+                probes = np.concatenate([refined, refined-.05, refined+.05])
+                amplitudes = _sample_at(samples[None, :], probes, taps=16)[:, 0]
+                center, minus, plus = np.split(amplitudes, 3)
+                derivative = (plus-minus)/.1
+                delta = np.divide(center, derivative, out=np.zeros_like(center),
+                                  where=np.abs(derivative) > 1e-6)
+                refined = np.clip(refined-np.clip(delta, -.25, .25), word-.5, word+.5)
+            word = refined
+        scale = float(np.dot(word-word.mean(), centered)/np.dot(centered, centered))
+        position = float(word.mean()-scale*nominal.mean())
+        residual = float(np.sqrt(np.mean((word-position-scale*nominal)**2)))
+        confidence = max(0., 1 - residual / (SHORT * scale))
+        if confidence >= 0.45:
+            return position, scale, confidence
+    return None
+
+
+# --------------------------------------------------------------------------
 # Encode
 # --------------------------------------------------------------------------
 
@@ -316,13 +503,30 @@ def encode(values, layout, coder, absolute, index, count, stamp_ms=0, flags=0,
     wave = np.concatenate([wave[:, -CP:], wave], axis=1).reshape(-1, 2)
 
     out = np.zeros((layout.frame, 2), np.float32)
+    out[SYNC_LEN:layout.packet] = wave
+    # Peak normalize only the OFDM part, not the preamble
+    peak = float(np.max(np.abs(out[SYNC_LEN:layout.packet])))
+    if peak > 0:
+        out[SYNC_LEN:layout.packet] *= headroom/peak
+    # Add preamble at full amplitude AFTER normalization
     out[16:16+len(PREAMBLE), 0] = PREAMBLE
     out[16:16+len(PREAMBLE), 1] = PREAMBLE
-    out[SYNC_LEN:layout.packet] = wave
-    peak = float(np.max(np.abs(out)))
-    if peak > 0:
-        out *= headroom/peak
     return out
+
+
+# --------------------------------------------------------------------------
+# v5 Encode (stereo, compatible with v3/v4 wire format)
+# --------------------------------------------------------------------------
+
+def encode_v5(values, layout, coder, absolute, index, count, stamp_ms=0,
+              headroom=.95, profile=2):
+    """Encode for v5: stereo output, V3 header format, V3 preamble.
+    
+    Uses profile=2 (hd-dwt) in standard V3 header. Wire format identical to v3/v4.
+    """
+    # Use the standard v3 encode - same wire format, just different coder
+    return encode(values, layout, coder, absolute, index, count,
+                  stamp_ms=stamp_ms, headroom=headroom, profile=profile)
 
 
 # --------------------------------------------------------------------------

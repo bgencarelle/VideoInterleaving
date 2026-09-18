@@ -442,40 +442,21 @@ class BandTests(V3Base):
         v3.encode(np.zeros(coder.count), layout, coder, 1, 1, 4)
 
 
-class LeanChromaTests(V3Base):
-    """Chroma at half luma resolution costs a third of the budget for ~1% of
-    the image energy. The lean profile quarters it."""
-
-    def shapes_for(self, profile):
-        from animation_modem.imaging import plane_shapes
-        return plane_shapes(profile)
-
-    def test_lean_profile_is_a_quarter_of_the_chroma(self):
-        full = self.shapes_for('color-dct')
-        lean = self.shapes_for('lean-dct')
-        self.assertEqual(full[0], lean[0])                      # luma unchanged
-        self.assertEqual(int(np.prod(lean[1]))*4, int(np.prod(full[1])))
-
-    def test_lean_profile_frees_four_symbols(self):
-        import numpy as np
-        full = sum(int(np.prod(s)) for s in self.shapes_for('color-dct'))
-        lean = sum(int(np.prod(s)) for s in self.shapes_for('lean-dct'))
-        self.assertEqual(full, 2880)
-        self.assertEqual(lean, 2160)
-
+class ChromaTests(V3Base):
+    """Chroma planes maintain the luma aspect ratio."""
     def test_chroma_planes_keep_the_luma_aspect(self):
         """Off-aspect chroma gets letterboxed by image_values and loses 2-4 dB,
         which is easy to misread as a chroma-resolution result."""
         from animation_modem.imaging import PROFILES
-        for name in ('color-dct', 'lean-dct'):
+        for name in ('color-dct', 'color-wavelet'):
             with self.subTest(profile=name):
                 size, chroma = PROFILES[name]
                 self.assertAlmostEqual(size[0]/size[1], chroma[0]/chroma[1], places=3)
 
-    def test_lean_profile_round_trips(self):
+    def test_color_dct_round_trips(self):
         from animation_modem.imaging import plane_shapes
         layout = v3.WIRE
-        shapes = plane_shapes('lean-dct')
+        shapes = plane_shapes('color-dct')
         coder = v3.SourceCoder(shapes)
         self.assertLessEqual(coder.count, layout.capacity)
         values = image_values(self.image, shapes)

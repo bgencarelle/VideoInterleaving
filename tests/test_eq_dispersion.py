@@ -24,7 +24,7 @@ from animation_modem.core import SourceCoder, N, CP, SYNC_LEN, decode_packet
 from animation_modem.transport3 import WIRE, encode
 
 LAYOUT = WIRE
-SHAPES = [(40, 48), (10, 12), (10, 12)]          # lean-dct
+SHAPES = [(48, 40), (24, 20), (24, 20)]          # color-dct (luma: 48x40, chroma: 24x20)
 
 
 def _plane(rows, cols, seed):
@@ -35,7 +35,7 @@ def _plane(rows, cols, seed):
 def _reference():
     coder = SourceCoder(SHAPES)
     vals = np.concatenate([_plane(*s, i).ravel() for i, s in enumerate(SHAPES)])
-    packet = encode(vals, LAYOUT, coder, absolute=1, index=1, count=1, profile=1)
+    packet = encode(vals, LAYOUT, coder, absolute=1, index=1, count=1, profile=0)
     return coder, vals, packet
 
 

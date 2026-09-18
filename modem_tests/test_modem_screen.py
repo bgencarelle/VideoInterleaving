@@ -45,7 +45,7 @@ class ReadExactTests(unittest.TestCase):
 
 class FitterTests(unittest.TestCase):
     def test_output_is_exactly_the_profile_size(self):
-        for profile in ('color-dct', 'lean-dct'):
+        for profile in ('color-dct', 'color-dct'):
             with self.subTest(profile=profile):
                 prepare = modem_screen.fitter(profile)
                 out = prepare(np.zeros((480, 640, 3), np.uint8))
@@ -74,7 +74,7 @@ class PrescaleTests(unittest.TestCase):
 
     def test_large_frames_cost_about_the_same_as_small_ones(self):
         import time
-        prepare = modem_screen.fitter('lean-dct')
+        prepare = modem_screen.fitter('color-dct')
 
         def cost(w, h):
             raw = np.random.default_rng(0).integers(0, 256, (h, w, 3), dtype=np.uint8)
@@ -89,7 +89,7 @@ class PrescaleTests(unittest.TestCase):
         self.assertLess(large, small*4)
 
     def test_prescale_keeps_the_exact_output_size(self):
-        for profile in ('color-dct', 'lean-dct'):
+        for profile in ('color-dct', 'color-dct'):
             with self.subTest(profile=profile):
                 prepare = modem_screen.fitter(profile)
                 for w, h in ((320, 426), (1920, 1080), (3840, 2400)):
@@ -103,7 +103,7 @@ class PrescaleTests(unittest.TestCase):
         raw = np.zeros((1600, 2560, 3), np.uint8)
         raw[:, :, 0] = np.uint8(128+120*np.sin(xx/200))
         raw[:, :, 1] = np.uint8(128+120*np.cos(yy/160))
-        out = np.asarray(modem_screen.fitter('lean-dct')(raw), float)
+        out = np.asarray(modem_screen.fitter('color-dct')(raw), float)
         self.assertGreater(out.std(), 10.0)
         self.assertGreater(out[:, :, 0].std(), 5.0)
 
@@ -212,10 +212,10 @@ class VideoSourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             wav = Path(d)/'v.wav'
             modem_screen.main(['--source', 'video', '--file', str(self.clip),
-                               '--profile', 'lean-dct',
+                               '--profile', 'color-dct',
                                '--write', str(wav), '--frames', '5'])
             layout = v3.WIRE
-            shapes = fit_shapes(plane_shapes('lean-dct'), layout.capacity)
+            shapes = fit_shapes(plane_shapes('color-dct'), layout.capacity)
             coder = SourceCoder(shapes)
             from animation_modem.audio_common import wav_blocks
             rx = v3.Receiver(layout, coder)
@@ -315,7 +315,7 @@ class DeviceLoopTests(unittest.TestCase):
     def test_live_loop_sends_packets(self):
         out = self.FakeOutput()
         self.run_loop(['--source', 'test', '--frames', '5',
-                       '--profile', 'lean-dct'], out)
+                       '--profile', 'color-dct'], out)
         layout = v3.WIRE
         self.assertEqual(len(out.sent), 5)
         self.assertTrue(out.finished)
@@ -332,9 +332,9 @@ class DeviceLoopTests(unittest.TestCase):
     def test_live_packets_decode(self):
         out = self.FakeOutput()
         self.run_loop(['--source', 'test', '--frames', '4',
-                       '--profile', 'lean-dct'], out)
+                       '--profile', 'color-dct'], out)
         layout = v3.WIRE
-        shapes = fit_shapes(plane_shapes('lean-dct'), layout.capacity)
+        shapes = fit_shapes(plane_shapes('color-dct'), layout.capacity)
         coder = SourceCoder(shapes)
         stream = np.concatenate(out.sent).astype(np.float32)
         rx = v3.Receiver(layout, coder)

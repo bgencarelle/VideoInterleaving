@@ -28,7 +28,7 @@ class LivePictureTests(unittest.TestCase):
 
     def test_grayscale_uses_unchanged_color_wire_format(self):
         layout = v.WIRE
-        coder = SourceCoder(plane_shapes('lean-dct'))
+        coder = SourceCoder(plane_shapes('color-dct'))
         grey = np.tile(np.linspace(20, 230, 40, dtype=np.uint8), (48, 1))
         image = Image.fromarray(grey).convert('RGB')
         audio = v.encode(image_values(image, coder.shapes), layout, coder, 1, 1, 1)

@@ -6,7 +6,7 @@ could not start at all, on any profile, and no test noticed because nothing
 imported modem_screen. There is now one that does, in a subprocess.
 
 The profile table is the other half. Two header bits hold four codes; two are
-spent -- color-dct, lean-dct -- and two are reserved. Reassigning one is a WIRE
+spent -- color-dct, color-wavelet. Reassigning one is a WIRE
 BREAK, because a recording carries the number and not its meaning and the CRC
 covers the number -- so it is done deliberately or not at all.
 """
@@ -54,15 +54,15 @@ class SenderImportTests(unittest.TestCase):
 
 class ProfileCodeTests(unittest.TestCase):
     def test_every_profile_holds_its_own_code(self):
-        """Not an alias. Two header bits hold four codes; all four are spent --
-        the DCT pair and the wavelet pair -- so each profile is named on the
+        """Not an alias. Two header bits hold four codes; two are spent --
+        color-dct and color-wavelet -- so each profile is named on the
         wire and the receiver reads it rather than being told out of band."""
         self.assertEqual(v3.PROFILE_CODES[0], 'color-dct')
+        self.assertEqual(v3.PROFILE_CODES[1], 'color-wavelet')
         self.assertEqual(v3.profile_name(0), 'color-dct')
+        self.assertEqual(v3.profile_name(1), 'color-wavelet')
         self.assertEqual(v3.profile_code('color-dct'), 0)
-        self.assertEqual(v3.profile_code('lean-dct'), 1)
-        self.assertEqual(v3.profile_code('color-wavelet'), 2)
-        self.assertEqual(v3.profile_code('lean-wavelet'), 3)
+        self.assertEqual(v3.profile_code('color-wavelet'), 1)
 
     def test_it_is_the_default(self):
         import modem_screen
@@ -87,15 +87,15 @@ class ProfileCodeTests(unittest.TestCase):
                 code = v3.profile_code(name)
                 self.assertEqual(v3.profile_name(code), name)
 
-    def test_all_four_codes_are_spent_and_the_transform_rides_the_name(self):
-        """All four codes are now spent -- two DCT, two wavelet. A receiver
+    def test_both_codes_are_spent_and_the_transform_rides_the_name(self):
+        """Two codes are spent -- color-dct and color-wavelet. A receiver
         follows the name straight to the right coder, so a wavelet recording
-        decodes with the wavelet inverse and a DCT recording with the DCT."""
-        self.assertEqual(len(v3.PROFILE_CODES), 4)
-        self.assertEqual(v3.profile_name(2), 'color-wavelet')
-        self.assertEqual(v3.profile_name(3), 'lean-wavelet')
-        for name, code in (('color-dct', 0), ('lean-dct', 1),
-                           ('color-wavelet', 2), ('lean-wavelet', 3)):
+        decodes with the wavelet inverse and a DCT recording with the DCT.
+        Code 2 is reserved for hd-dwt (v5, different header format)."""
+        self.assertEqual(len(v3.PROFILE_CODES), 3)
+        self.assertEqual(v3.profile_name(1), 'color-wavelet')
+        self.assertEqual(v3.profile_name(2), 'hd-dwt')
+        for name, code in (('color-dct', 0), ('color-wavelet', 1), ('hd-dwt', 2)):
             self.assertEqual(v3.profile_name(code), name)
 
 
@@ -126,7 +126,7 @@ class TruncationTests(unittest.TestCase):
     def test_a_plain_profile_is_count_preserving(self):
         """grids defaults to shapes, so a coder built without grids transmits
         the wire shapes directly."""
-        shapes = plane_shapes('lean-dct')
+        shapes = plane_shapes('color-dct')
         coder = v3.SourceCoder(shapes)
         self.assertFalse(coder.truncated)
         self.assertEqual(coder.count, sum(int(np.prod(s)) for s in shapes))

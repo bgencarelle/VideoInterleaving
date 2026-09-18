@@ -54,9 +54,11 @@ class DenseHeaderTests(unittest.TestCase):
         """Filling the header symbols raises no peak, because the preamble
         holds it. If it did, everything would renormalise down and the extra
         capacity would have been bought with SNR."""
-        shapes = plane_shapes('lean-dct')
-        _, _, sparse = round_trip(SPARSE, shapes, profile='lean-dct')
-        _, _, dense = round_trip(DENSE, shapes, profile='lean-dct')
+        # SPARSE capacity is 2800, color-dct is 2880 - use fitted shapes for SPARSE
+        sparse_shapes = _fit(plane_shapes('color-dct'), SPARSE.capacity)
+        dense_shapes = plane_shapes('color-dct')
+        _, _, sparse = round_trip(SPARSE, sparse_shapes, profile='color-dct')
+        _, _, dense = round_trip(DENSE, dense_shapes, profile='color-dct')
         self.assertAlmostEqual(float(np.max(np.abs(dense))),
                                float(np.max(np.abs(sparse))), places=6)
 
@@ -87,16 +89,18 @@ class DenseHeaderTests(unittest.TestCase):
         def coders(layout):
             return {v3.profile_code(p): v3.SourceCoder(
                 _fit(plane_shapes(p), layout.capacity)) for p in v3.PROFILE_CODES}
-        cands = sorted([(l, coders(l)[v3.profile_code('lean-dct')], coders(l))
+        cands = sorted([(l, coders(l)[v3.profile_code('color-dct')], coders(l))
                         for l in (SPARSE, DENSE)], key=lambda c: c[0].packet)
+        # Use fitted shapes for SPARSE since color-dct (2880) doesn't fit in SPARSE (2800)
+        sparse_shapes = _fit(plane_shapes('color-dct'), SPARSE.capacity)
         for layout in (SPARSE, DENSE):
             with self.subTest(sent=layout.name):
-                shapes = plane_shapes('lean-dct')
+                shapes = sparse_shapes if layout is SPARSE else plane_shapes('color-dct')
                 coder = v3.SourceCoder(shapes)
                 values = np.random.default_rng(8).uniform(-.2, .2, coder.count)
                 audio = v3.encode(values, layout, coder, 1, 1, 1,
-                                  profile=v3.profile_code('lean-dct'))
-                rx = v3.Receiver(SPARSE, v3.SourceCoder(shapes), candidates=cands)
+                                  profile=v3.profile_code('color-dct'))
+                rx = v3.Receiver(SPARSE, v3.SourceCoder(sparse_shapes), candidates=cands)
                 out = rx.feed(np.asarray(audio, np.float32))+rx.flush()
                 self.assertEqual(rx.detected, layout.name)
                 self.assertLess(

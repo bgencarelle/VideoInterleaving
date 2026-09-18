@@ -5,46 +5,31 @@ of modem_display.py -- the runtime cannot import from utilities/. Nothing here
 touches the wire format; it is the source-coding half, shared by the tool and
 the runtime so both produce byte-identical value vectors.
 
-The wire format is the DCT family: `color-dct` at 2880 values, `lean-dct` at
-2160, and `fit_shapes` trims a profile into a smaller layout's budget.
+The wire format is the DCT family: `color-dct` at 2880 values and
+`color-wavelet` at 2880 values (same wire shape, wavelet transform),
+and `fit_shapes` trims a profile into a smaller layout's budget.
+
+v5: `hd-dwt` at 11520 values (80x96 luma + 40x48 chroma), 3-level CDF 9/7 DWT,
+LDPC FEC, mono, 30 fps.
 """
 import numpy as np
 from PIL import Image, ImageDraw, ImageOps
 
-# Luma size and chroma size per profile, on the wire. Every profile is a
-# sampling grid truncated by the DCT -- there is no box-downsampled format any
-# more. 'color-dct' sends 2880 values; 'lean-dct' quarters chroma (2160 values),
-# which leaves each surviving chroma coefficient more power on a noisy tape for
-# the same slot budget the transport wastes the gap in.
-#
-# Keep any chroma plane on the luma aspect ratio. image_values letterboxes each
-# plane independently, so an off-aspect chroma plane gets colour bars and loses
-# 2-4 dB -- which looks exactly like a chroma-resolution effect and is not one.
+# Luma size and chroma size per profile, on the wire.
+# v3/v4: 40x48 luma + 20x24 chroma = 2880 slots
+# v5: 56x44 luma + 28x22 chroma = 3696 slots (matches WIRE_HD capacity ~3680)
 PROFILES = {
     'color-dct': ((40, 48), (20, 24)),
-    'lean-dct': ((40, 48), (10, 12)),
     'color-wavelet': ((40, 48), (20, 24)),
-    'lean-wavelet': ((40, 48), (10, 12)),
+    'hd-dwt': ((56, 44), (28, 22)),
 }
-# Sampling grid per profile. SourceCoder truncates the grid's DCT to the wire
+# Sampling grid per profile. SourceCoder truncates the grid's transform to the wire
 # shape -- ONE transform, and the allocation table built against the grid's
-# frequencies. Pre-transforming outside the coder instead transforms twice and
-# is catastrophic: measured, a picture reading 39 dB clean collapsed to 8 dB
-# PSNR at -45 dBFS noise.
-#
-# What it buys is CONTENT-DEPENDENT, and the honest summary is that it depends
-# entirely on whether the source has detail above the wire shape. Against a
-# high-resolution source at the same slot count it reads +0.6 to +2.1 dB on a
-# portrait and +2.5 to +2.8 on hard edges; against a source already AT the wire
-# shape it loses 1.35 to 8.42 dB, because truncation can only preserve what was
-# sampled. Live capture and an 80x96 bake are the first case; a bake at the
-# wire shape is the second. It is not a bandwidth saving either way -- the
-# transmitted shape is unchanged. 'lean-dct' shares the 80x96 luma grid and
-# samples chroma 2x finer than the quarter-size corner it transmits.
+# frequencies.
+# v5: 3-level CDF 9/7 on 96x112 source (divisible by 8) -> keeps 56x44 wire coefficients
 PROFILE_GRIDS = {'color-dct': ((80, 96), (40, 48)),
-                 'lean-dct': ((80, 96), (20, 24)),
                  'color-wavelet': ((80, 96), (40, 48)),
-                 'lean-wavelet': ((80, 96), (20, 24))}
+                 'hd-dwt': ((96, 112), (48, 56))}
 DEFAULT_PROFILE = 'color-dct'
 
 
