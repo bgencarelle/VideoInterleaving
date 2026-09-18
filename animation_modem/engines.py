@@ -25,6 +25,15 @@ __all__ = ['ENGINES', 'get_engine', 'engine_names', 'coder_for', 'coders_for',
 def coder_for(profile, layout=None):
     """Build the right coder (DCT or wavelet) for a profile name."""
     shapes = imaging.plane_shapes(profile)
+    if profile == V5_PROFILE:
+        # hd-dwt is CDF 9/7, NOT SourceCoder DCT. It must fit to the shared
+        # mono budget exactly like modem_screen.build (not layout.capacity):
+        # any difference in shapes changes the gains tables and the wire
+        # cannot round trip. grids == shapes: the full pyramid fits the
+        # budget losslessly (see modem_screen.build).
+        from .wavelet import Cdf97Coder
+        shapes = imaging.fit_shapes(shapes, imaging.HD_MONO_CAPACITY)
+        return Cdf97Coder(shapes, grids=shapes, levels=2), shapes
     grids = imaging.plane_grids(profile)
     if layout is not None and \
             sum(int(np.prod(s)) for s in shapes) > layout.capacity:
@@ -94,8 +103,15 @@ class Engine:
 
 
 class V5Engine(Engine):
-    """v5: CDF 9/7 DWT + LDPC on HD wire layout (mono)."""
-    
+    """v5: CDF 9/7 DWT on the HD wire layout.
+
+    Uses the standard V3 wire format and the standard V3.Receiver (edge
+    pulse acquisition, OFDM demod) with the matched CDF 9/7 coder and a
+    profile=2 header -- the receiver auto-detects hd-dwt from the header the
+    same way it auto-detects v3/v4. The experimental mono/LDPC receiver
+    (transport3_v5.ReceiverV5) is parked, not in the live path.
+    """
+
     @property
     def wire(self):
         return V3.WIRE_HD
@@ -109,34 +125,31 @@ class V5Engine(Engine):
             raise ValueError(f'{profile!r} is not a v5 profile')
         from . import imaging
         from .wavelet import Cdf97Coder
-        shapes = imaging.plane_shapes(V5_PROFILE)
-        grids = imaging.plane_grids(V5_PROFILE)
-        if layout is not None and \
-                sum(int(np.prod(s)) for s in shapes) > layout.capacity:
-            shapes = imaging.fit_shapes(shapes, layout.capacity)
-            grids = shapes
-        # v5 uses 3-level CDF 9/7 on 160x192 source -> 80x96 wire
-        return Cdf97Coder(shapes, grids=grids, levels=3), grids
+        # Must match modem_screen.build and tools/decode_wav.py exactly: fit
+        # to the shared mono budget (HD_MONO_CAPACITY), grids == shapes so the
+        # 2-level pyramid fits the budget losslessly.
+        shapes = imaging.fit_shapes(imaging.plane_shapes(V5_PROFILE),
+                                    imaging.HD_MONO_CAPACITY)
+        return Cdf97Coder(shapes, grids=shapes, levels=2), shapes
 
     def encode(self, values, coder, absolute, index, count, stamp_ms=0,
                headroom=.95, profile=0):
-        # v5 uses mono encode_v5, no flags, no profile in header
-        return V3.encode_v5(values, self.wire, coder, absolute, index, count,
-                           stamp_ms=stamp_ms, headroom=headroom)
+        # Standard v3 wire format; the header carries profile=2 (hd-dwt).
+        return V3.encode(values, self.wire, coder, absolute, index, count,
+                         stamp_ms=stamp_ms, headroom=headroom,
+                         profile=profile or 2)
 
     def receiver(self, layout=None, coder=None, **kwargs):
-        # v5 receiver needs LDPC decode + CDF 9/7 inverse
-        from . import transport3_v5
-        return transport3_v5.ReceiverV5(layout or self.wire, coder, **kwargs)
+        return V3.Receiver(layout or self.wire, coder, **kwargs)
 
     def describe(self):
-        return f"{self.wire.describe(self.reference_rate)} (v5: CDF 9/7 + LDPC, mono)"
+        return f"{self.wire.describe(self.reference_rate)} (v5: CDF 9/7, profile=2 header)"
 
 
 ENGINES = {
     'v3': Engine('v3', ('color-dct',)),
     'v4': Engine('v4', ('color-wavelet',)),
-    'v5': Engine('v5', (V5_PROFILE,)),
+    'v5': V5Engine('v5', (V5_PROFILE,)),
 }
 
 

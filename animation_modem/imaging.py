@@ -31,6 +31,11 @@ PROFILE_GRIDS = {'color-dct': ((80, 96), (40, 48)),
                  'color-wavelet': ((80, 96), (40, 48)),
                  'hd-dwt': ((96, 112), (48, 56))}
 DEFAULT_PROFILE = 'color-dct'
+# v5 mono wire budget (WIRE_HD image_symbols*data_carriers*2 + header spare
+# slots). The encoder fits the hd-dwt planes to this and the decoder must fit
+# to the SAME number or the gains tables disagree and the wire cannot round
+# trip. Single source of truth for both ends.
+HD_MONO_CAPACITY = 2000
 
 
 def wire_profiles():

@@ -509,13 +509,24 @@ _CDF_DELTA =  0.443506852043971
 _CDF_K     =  1.230174104914001
 _CDF_KINV  =  1.0 / _CDF_K
 
-def _cdf97_predict_lift(x, coeff):
-    """Predict (highpass) lifting step: odd -= coeff * (even_left + even_right)"""
-    return x - coeff * (np.roll(x, 1) + np.roll(x, -1))
+def _cdf97_predict_lift(odd, even, coeff):
+    """Predict step: odd[k] += coeff*(even[k] + even[k+1]), k+1 wraps.
 
-def _cdf97_update_lift(x, coeff):
-    """Update (lowpass) lifting step: even += coeff * (odd_left + odd_right)"""
-    return x + coeff * (np.roll(x, 1) + np.roll(x, -1))
+    The lifted pair must MIX the two polyphase components -- odd[k]'s
+    neighbours in the interleaved signal are even[k] and even[k+1]. Lifting the
+    odd sequence against itself (an np.roll on the SAME sequence) is not the
+    CDF 9/7 predict step and is not invertible. Periodic boundary: the
+    successor of the last even sample is the first one.
+    """
+    return odd + coeff * (even + np.roll(even, -1))
+
+def _cdf97_update_lift(even, odd, coeff):
+    """Update step: even[k] += coeff*(odd[k-1] + odd[k]), k-1 wraps.
+
+    Mirror of :func:`_cdf97_predict_lift`: even[k]'s neighbours are odd[k-1]
+    (periodically the last odd sample) and odd[k].
+    """
+    return even + coeff * (np.roll(odd, 1) + odd)
 
 def cdf97_forward_1d(x):
     """1D CDF 9/7 forward transform using lifting (periodic boundary).
@@ -530,13 +541,13 @@ def cdf97_forward_1d(x):
     odd = x[1::2].copy()
     
     # Predict 1
-    odd = _cdf97_predict_lift(odd, _CDF_ALPHA)
+    odd = _cdf97_predict_lift(odd, even, _CDF_ALPHA)
     # Update 1
-    even = _cdf97_update_lift(even, _CDF_BETA)
+    even = _cdf97_update_lift(even, odd, _CDF_BETA)
     # Predict 2
-    odd = _cdf97_predict_lift(odd, _CDF_GAMMA)
+    odd = _cdf97_predict_lift(odd, even, _CDF_GAMMA)
     # Update 2
-    even = _cdf97_update_lift(even, _CDF_DELTA)
+    even = _cdf97_update_lift(even, odd, _CDF_DELTA)
     
     # Scale
     low = even * _CDF_K
@@ -550,13 +561,13 @@ def cdf97_inverse_1d(low, high):
     odd = high * _CDF_K
     
     # Inverse Update 2
-    even = _cdf97_update_lift(even, -_CDF_DELTA)
+    even = _cdf97_update_lift(even, odd, -_CDF_DELTA)
     # Inverse Predict 2
-    odd = _cdf97_predict_lift(odd, -_CDF_GAMMA)
+    odd = _cdf97_predict_lift(odd, even, -_CDF_GAMMA)
     # Inverse Update 1
-    even = _cdf97_update_lift(even, -_CDF_BETA)
+    even = _cdf97_update_lift(even, odd, -_CDF_BETA)
     # Inverse Predict 1
-    odd = _cdf97_predict_lift(odd, -_CDF_ALPHA)
+    odd = _cdf97_predict_lift(odd, even, -_CDF_ALPHA)
     
     # Interleave
     n = len(even) * 2
@@ -603,30 +614,74 @@ def cdf97_forward_2d(plane, levels=3):
 
 def cdf97_inverse_2d(subbands, levels=3, out_shape=None):
     """Multi-level 2D CDF 9/7 inverse transform.
-    
-    Reconstructs from subbands dict.
+
+    Reconstructs from a subbands dict. Each level's LL is the RECONSTRUCTED
+    output of the coarser level ('current'), never a transmitted LL -- only
+    the coarsest level supplies one. That is the pyramid identity: a
+    non-redundant dict (deeper LL replaces shallower LL) inverts exactly like
+    a full one, and detail bands missing from the wire zero-fill as
+    (soft, low-passed) content instead of collapsing the output.
     """
+    deepest = max(subbands)  # coarsest present level (forward may early-out)
     if out_shape is None:
-        # Compute from finest LL
-        ll = subbands[levels-1]['LL']
-        h, w = ll.shape[0] * (2**levels), ll.shape[1] * (2**levels)
+        ll = subbands[deepest]['LL']
+        h = ll.shape[0] * (2 ** (deepest + 1))
+        w = ll.shape[1] * (2 ** (deepest + 1))
     else:
         h, w = out_shape
-    
-    current = subbands[levels-1]['LL']
-    for level in reversed(range(levels)):
+
+    current = subbands[deepest]['LL']
+    for level in range(deepest, -1, -1):
         sb = subbands[level]
-        # Inverse transform columns
+        # Inverse transform columns: low side is 'current' (this level's LL),
+        # high side is the transmitted HL/LH/HH details.
         rows_low = np.empty((current.shape[0] * 2, current.shape[1]))
         rows_high = np.empty_like(rows_low)
         for j in range(current.shape[1]):
-            rows_low[:, j] = cdf97_inverse_1d(sb['LL'][:, j], sb['HL'][:, j])
+            rows_low[:, j] = cdf97_inverse_1d(current[:, j], sb['HL'][:, j])
             rows_high[:, j] = cdf97_inverse_1d(sb['LH'][:, j], sb['HH'][:, j])
         # Inverse transform rows
         current = np.empty((current.shape[0] * 2, current.shape[1] * 2))
         for i in range(rows_low.shape[0]):
             current[i] = cdf97_inverse_1d(rows_low[i], rows_high[i])
     return current[:h, :w]
+
+
+def _cdf97_subband_dims(grid_rows, grid_cols, levels):
+    """Subband size at each DWT depth, matching ``cdf97_forward_2d``.
+
+    dims[0] is the finest level's subband size (grid halved once), dims[k]
+    the size after k+1 halvings. The loop mirrors forward's early-out when a
+    side would drop below 2 samples.
+    """
+    dims = []
+    rows, cols = grid_rows, grid_cols
+    for _ in range(levels):
+        if rows < 2 or cols < 2:
+            break
+        rows, cols = rows // 2, cols // 2
+        dims.append((rows, cols))
+    return dims
+
+
+def _cdf97_pack_order(dims):
+    """Coefficient order shared by forward and inverse.
+
+    Non-redundant pyramid, JPEG2000-style: the deepest level carries all four
+    bands, every shallower level carries only its three detail bands (its LL
+    is represented by the deeper levels). Packed that way the total is exactly
+    the plane size and a full pyramid round-trips losslessly; a truncated set
+    zero-fills whatever the wire could not carry. The inverse must unpack in
+    exactly this order or the subbands swap.
+    """
+    order = []
+    deepest = len(dims) - 1
+    for level in range(deepest, -1, -1):
+        rows, cols = dims[level]
+        bands = ('LL', 'LH', 'HL', 'HH') if level == deepest else ('LH', 'HL', 'HH')
+        for band in bands:
+            order.append((level, band, rows, cols))
+    return order
 
 
 class Cdf97Coder(SourceCoder):
@@ -646,33 +701,37 @@ class Cdf97Coder(SourceCoder):
         super().__init__(shapes, allocation, grids)
 
     def _forward_transform(self, plane, rows, cols):
-        # Full multi-level DWT on source grid
+        # Full multi-level DWT on source grid, packed in shared order and
+        # truncated/padded to the wire shape. Truncation lands mid-subband:
+        # the inverse zero-fills dropped tails (JPEG2000 truncation semantics).
         subbands = cdf97_forward_2d(plane, self.levels)
-        # Collect coefficients from all subbands in priority order:
-        # LL (finest) > LH/HL/HH (finest) > LL (next) > LH/HL/HH (next) > ...
-        coeffs = []
-        for level in range(self.levels - 1, -1, -1):
-            if level in subbands:
-                sb = subbands[level]
-                # Priority: LL first, then detail subbands
-                for key in ['LL', 'LH', 'HL', 'HH']:
-                    if key in sb:
-                        coeffs.append(sb[key].ravel())
-        # Concatenate all and truncate/pad to wire shape size
-        all_coeffs = np.concatenate(coeffs) if coeffs else np.array([])
-        target_size = rows * cols
-        if len(all_coeffs) >= target_size:
-            return all_coeffs[:target_size]
-        else:
-            # Pad with zeros
-            padded = np.zeros(target_size)
-            padded[:len(all_coeffs)] = all_coeffs
-            return padded
+        dims = _cdf97_subband_dims(plane.shape[0], plane.shape[1], self.levels)
+        order = _cdf97_pack_order(dims)
+        out = np.concatenate([subbands[level][band].ravel()
+                              for level, band, _, _ in order])
+        target = rows * cols
+        if len(out) >= target:
+            return out[:target]
+        padded = np.zeros(target)
+        padded[:len(out)] = out
+        return padded
 
     def _inverse_transform(self, corner, rows, cols, grid):
-        # This is a simplified inverse - full implementation would need
-        # proper subband unpacking. For now, just use the LL corner.
-        full = np.zeros(grid)
-        full[:rows, :cols] = corner.reshape(rows, cols)
-        # Use 1-level inverse on the wire shape as approximation
-        return full  # Placeholder
+        # Unpack the flat wire corner back into subbands in the shared order
+        # (zero-filling every dropped tail), then run the true multi-level
+        # inverse. The output is the full source grid, soft where the wire
+        # could not carry the detail bands.
+        dims = _cdf97_subband_dims(grid[0], grid[1], self.levels)
+        order = _cdf97_pack_order(dims)
+        flat = np.asarray(corner).ravel()
+        subbands = {}
+        idx = 0
+        for level, band, sr, sc in order:
+            full = np.zeros((sr, sc), dtype=flat.dtype)
+            n = sr * sc
+            take = min(n, len(flat) - idx)
+            if take > 0:
+                full.ravel()[:take] = flat[idx:idx + take]
+                idx += take
+            subbands.setdefault(level, {})[band] = full
+        return cdf97_inverse_2d(subbands, self.levels, out_shape=tuple(grid))

@@ -1,0 +1,135 @@
+#!/usr/bin/env python
+"""Offline hd-dwt WAV -> PNG decoder.
+
+Decodes a recorded v5 (hd-dwt, WIRE_HD) stereo WAV into per-frame PNGs using
+the standard v3 Receiver -- the same acquisition path that live-receive uses
+(pulse_only=True). The coder is constructed EXACTLY as modem_screen.build does
+so the gains tables and geometry match the transmitter (the header's profile
+code 2 is cross-checked against 'hd-dwt').
+
+Usage:
+  .venv/bin/python tools/decode_wav.py test.wav --out scratch/decode --frames 30
+"""
+import argparse
+import sys
+import wave
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import numpy as np
+from PIL import Image
+
+from animation_modem import transport3 as V3
+from animation_modem.imaging import (HD_MONO_CAPACITY, fit_shapes,
+                                     plane_shapes, values_image)
+from animation_modem.wavelet import Cdf97Coder
+
+SCALE = 4  # grid is 112x96; 4x is a comfortable view size
+
+
+def load_wav(path):
+    """Stereo int16 WAV -> (n, 2) float32 in [-1, 1], plus sample rate."""
+    with wave.open(str(path), 'rb') as w:
+        channels, width, rate, nframes = w.getnchannels(), w.getsampwidth(), \
+            w.getframerate(), w.getnframes()
+        if channels != 2 or width != 2:
+            raise SystemExit(f'Expected a stereo 16-bit WAV, got '
+                             f'{channels}ch x {width}B')
+        raw = w.readframes(nframes)
+    audio = np.frombuffer(raw, '<i2').astype(np.float32) / 32768.0
+    return audio.reshape(-1, 2), rate
+
+
+def build_coder():
+    """Matched construction: same shapes/grids as modem_screen.build.
+
+    grids == shapes: the full 3-level pyramid of the wire-sized planes fits the
+    mono budget exactly, so the transform round-trips losslessly instead of
+    zero-filling the finest LL subband (see modem_screen.build).
+    """
+    shapes = fit_shapes(plane_shapes('hd-dwt'), HD_MONO_CAPACITY)
+    return Cdf97Coder(shapes, grids=shapes, levels=2), shapes
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('wav', help='path to the recorded stereo WAV')
+    ap.add_argument('--out', default='scratch/decode',
+                    help='directory for the decoded PNGs')
+    ap.add_argument('--frames', type=int, default=60,
+                    help='max frames to decode (0 = all)')
+    ap.add_argument('--start', type=int, default=0,
+                    help='frame to start decoding from')
+    ap.add_argument('--scale', type=int, default=SCALE,
+                    help='upscale factor for the saved PNG')
+    args = ap.parse_args()
+
+    audio, rate = load_wav(args.wav)
+    coder, grids = build_coder()
+    layout = V3.WIRE_HD
+    coders = {2: coder}
+    rx = V3.Receiver(layout, coder, coders=coders,
+                     candidates=[(layout, coder, coders)], input_rate=rate)
+
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+
+    frame_samples = layout.frame             # stereo pairs per frame
+    start_at = args.start * frame_samples
+    total = len(audio)
+    limit = min(total, start_at + (args.frames or (1 << 62)) * frame_samples)
+
+    sent = 0
+    decoded = 0
+    seen = {}
+    files = []
+    for i in range(start_at, limit, frame_samples):
+        chunk = audio[i:i + frame_samples]
+        if len(chunk) < frame_samples:
+            chunk = np.vstack([chunk, np.zeros((frame_samples - len(chunk), 2))])
+        for result in rx.feed(chunk):
+            sent += 1
+            seen[result.identity] = seen.get(result.identity, 0) + 1
+            if result.values is None:
+                continue
+            decoded += 1
+            img = values_image(result.values, grids).resize(
+                (grids[0][1] * args.scale, grids[0][0] * args.scale),
+                Image.Resampling.NEAREST)
+            idx = result.absolute if result.absolute is not None else decoded
+            name = out / f'frame_{idx:05d}.png'
+            img.save(name)
+            files.append((name, result.identity, result.status,
+                          result.extra.get('profile'),
+                          float(np.std(result.values))))
+    for result in rx.flush():
+        sent += 1
+        seen[result.identity] = seen.get(result.identity, 0) + 1
+        if result.values is not None:
+            decoded += 1
+            img = values_image(result.values, grids).resize(
+                (grids[0][1] * args.scale, grids[0][0] * args.scale),
+                Image.Resampling.NEAREST)
+            idx = result.absolute if result.absolute is not None else decoded
+            name = out / f'frame_{idx:05d}.png'
+            img.save(name)
+            files.append((name, result.identity, result.status,
+                          result.extra.get('profile'),
+                          float(np.std(result.values))))
+
+    print(f'input: {rate} Hz, {total // frame_samples} frames, '
+          f'peak {float(np.max(np.abs(audio))):.3f}')
+    print(f'wire: {layout.name} frame={layout.frame} capacity={layout.capacity}')
+    print(f'coder: {type(coder).__name__} shapes={coder.shapes} '
+          f'grids={coder.grids} count={coder.count}')
+    print(f'packets: {sent} decoded images: {decoded} identities: {seen}')
+    for name, ident, status, prof, std in files[:8]:
+        print(f'  {name.name}: {ident}/{status} profile={prof} '
+              f'values_std={std:.2f}')
+    if files:
+        print(f'PNGs written to {out}/')
+
+
+if __name__ == '__main__':
+    main()

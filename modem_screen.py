@@ -66,9 +66,10 @@ from animation_modem.audio_common import (device, pair, pcm,      # noqa: E402
 from animation_modem.core import (REFERENCE_RATE as RATE,        # noqa: E402
                                   SourceCoder, bound_emission)
 from animation_modem.wavelet import WaveletCoder                 # noqa: E402
-from animation_modem.imaging import (DEFAULT_PROFILE, PROFILES,  # noqa: E402
-                                     burn_counters, fit_shapes, image_values,
-                                     plane_grids, plane_shapes, wire_profiles)
+from animation_modem.imaging import (DEFAULT_PROFILE, HD_MONO_CAPACITY,  # noqa: E402
+                                     PROFILES, burn_counters, fit_shapes,
+                                     image_values, plane_grids, plane_shapes,
+                                     wire_profiles)
 from animation_modem.playback import PacketOutput                 # noqa: E402
 
 
@@ -473,19 +474,26 @@ def build(args):
     if args.profile == 'hd-dwt':
         layout = V3.WIRE_HD
         wanted = plane_shapes('hd-dwt')
-        grids = plane_grids('hd-dwt')
         # For mono: capacity = image_symbols * data_carriers * 2 + header_symbols * (spare+header)_carriers * 2
         # data_carriers=50, spare=30, header=20, image_symbols=16, header_symbols=4
         # Total = 16*50*2 + 4*(30+20)*2 = 1600 + 400 = 2000
-        mono_capacity = 2000
-        shapes = fit_shapes(wanted, mono_capacity)
-        # NOTE: do NOT set grids = shapes when fitted!
-        # The grid is the SOURCE resolution; shrinking the wire shape
-        # does not change the source grid. See coder_for comment.
+        # Shared with the decoder (imaging.HD_MONO_CAPACITY) so both ends fit
+        # the planes to the same budget and the gains tables agree.
+        shapes = fit_shapes(wanted, HD_MONO_CAPACITY)
+        # grids == shapes (NO oversampling): a 3-level CDF 9/7 pyramid of an
+        # oversampled 96x112 source needs its finest LL subband (2688 values)
+        # to invert -- more than the 1280 luma slots on this wire -- so any
+        # truncation of it is un-decodable by construction. With the grid equal
+        # to the wire shape the whole pyramid fits exactly (count == source
+        # count) and the transform round-trips losslessly. Detail refinement
+        # via resolution-progressive decode is the documented v5 next step.
         from animation_modem.wavelet import Cdf97Coder
-        coder = Cdf97Coder(shapes, grids=grids, levels=3)
-        print(f'hd-dwt: sampling {grids[0][1]}x{grids[0][0]} and sending '
-              f'via 3-level CDF 9/7 DWT in {coder.count} slots @ {layout.fps:.1f} fps mono.',
+        # levels=2: (32,40)/(16,20) halve cleanly to (8,10)/(4,5); a third
+        # level would hit an odd 5-sample row on chroma. The 2-level pyramid
+        # fits the budget exactly (count == source count), lossless round trip.
+        coder = Cdf97Coder(shapes, grids=shapes, levels=2)
+        print(f'hd-dwt: sending {shapes[0][1]}x{shapes[0][0]} 2-level CDF 9/7 '
+              f'DWT in {coder.count} slots @ {layout.fps:.1f} fps mono.',
               file=sys.stderr)
         return layout, coder, shapes
     
