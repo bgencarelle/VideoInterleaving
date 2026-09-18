@@ -31,11 +31,25 @@ PROFILE_GRIDS = {'color-dct': ((80, 96), (40, 48)),
                  'color-wavelet': ((80, 96), (40, 48)),
                  'hd-dwt': ((96, 112), (48, 56))}
 DEFAULT_PROFILE = 'color-dct'
-# v5 mono wire budget (WIRE_HD image_symbols*data_carriers*2 + header spare
-# slots). The encoder fits the hd-dwt planes to this and the decoder must fit
-# to the SAME number or the gains tables disagree and the wire cannot round
-# trip. Single source of truth for both ends.
-HD_MONO_CAPACITY = 2000
+# v5 mono wire budget. WIRE_HD's real per-frame value budget is
+# Layout.capacity = header_capacity + image_symbols*data_bins*4 = 3680, so
+# hd-dwt fits to THAT, not the old hand-derived 2000. The encoder fits the
+# planes to this and the decoder must fit to the SAME number or the gains
+# tables disagree and the wire cannot round trip. Single source of truth.
+HD_MONO_CAPACITY = 3680
+
+
+def hd_dwt_shapes():
+    """Wire shapes for hd-dwt, identical at both ends (see HD_MONO_CAPACITY).
+
+    divisor=8: with levels=2, every plane must halve cleanly at both levels,
+    so luma dims need d/2 and d/4 even -- and chroma is half-res, so it needs
+    d'/4 even too, i.e. luma divisible by 8. A divisor of 4 (luma 44x52) is
+    NOT enough: chroma rows 22 -> 11 at level 2, odd, and the lifting splits
+    break. Watch this if levels ever changes: divisor must be 2**levels *
+    max(1, luma//chroma per axis).
+    """
+    return fit_shapes(plane_shapes('hd-dwt'), HD_MONO_CAPACITY, divisor=8)
 
 
 def wire_profiles():
@@ -69,19 +83,21 @@ def plane_shapes(profile=DEFAULT_PROFILE):
     return [(size[1], size[0])] + ([(chroma[1], chroma[0])]*2 if chroma else [])
 
 
-def fit_shapes(shapes, capacity):
+def fit_shapes(shapes, capacity, divisor=2):
     """Shrink plane shapes to fit a layout's value budget, keeping the aspect.
 
-    Only the narrow presets need this: tape-fast must not try to push 2880
-    values through 1260 slots. The fixed wide format never triggers it.
+    Widths/heights step by `divisor` so callers can keep planes subdividable:
+    CDF 9/7 at `levels` needs every plane halvable cleanly at every level --
+    and chroma is half-res, so the fit must step luma dims by
+    2**levels * 2 = 8 for levels=2 (see hd_dwt_shapes).
     """
     if sum(int(np.prod(s)) for s in shapes) <= capacity:
         return list(shapes)
     rows, cols = shapes[0]
     aspect = cols/rows
     best = None
-    for width in range(2, cols+1, 2):
-        for height in range(2, rows+1, 2):
+    for width in range(divisor, cols+1, divisor):
+        for height in range(divisor, rows+1, divisor):
             trial = [(height, width)]
             if len(shapes) == 3:
                 trial += [(height//2, width//2)]*2

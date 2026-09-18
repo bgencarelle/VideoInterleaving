@@ -27,12 +27,13 @@ def coder_for(profile, layout=None):
     shapes = imaging.plane_shapes(profile)
     if profile == V5_PROFILE:
         # hd-dwt is CDF 9/7, NOT SourceCoder DCT. It must fit to the shared
-        # mono budget exactly like modem_screen.build (not layout.capacity):
-        # any difference in shapes changes the gains tables and the wire
-        # cannot round trip. grids == shapes: the full pyramid fits the
-        # budget losslessly (see modem_screen.build).
+        # mono budget exactly like modem_screen.build (not layout.capacity),
+        # via imaging.hd_dwt_shapes() (divisor=8 keeps every plane cleanly
+        # halvable at both levels): any difference in shapes changes the gains
+        # tables and the wire cannot round trip. grids == shapes: the full
+        # pyramid fits the budget losslessly (see modem_screen.build).
         from .wavelet import Cdf97Coder
-        shapes = imaging.fit_shapes(shapes, imaging.HD_MONO_CAPACITY)
+        shapes = imaging.hd_dwt_shapes()
         return Cdf97Coder(shapes, grids=shapes, levels=2), shapes
     grids = imaging.plane_grids(profile)
     if layout is not None and \
@@ -126,10 +127,9 @@ class V5Engine(Engine):
         from . import imaging
         from .wavelet import Cdf97Coder
         # Must match modem_screen.build and tools/decode_wav.py exactly: fit
-        # to the shared mono budget (HD_MONO_CAPACITY), grids == shapes so the
-        # 2-level pyramid fits the budget losslessly.
-        shapes = imaging.fit_shapes(imaging.plane_shapes(V5_PROFILE),
-                                    imaging.HD_MONO_CAPACITY)
+        # to the shared mono budget (imaging.hd_dwt_shapes), grids == shapes
+        # so the 2-level pyramid fits the budget losslessly.
+        shapes = imaging.hd_dwt_shapes()
         return Cdf97Coder(shapes, grids=shapes, levels=2), shapes
 
     def encode(self, values, coder, absolute, index, count, stamp_ms=0,

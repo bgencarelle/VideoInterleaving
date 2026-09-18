@@ -21,11 +21,10 @@ import numpy as np
 from PIL import Image
 
 from animation_modem import transport3 as V3
-from animation_modem.imaging import (HD_MONO_CAPACITY, fit_shapes,
-                                     plane_shapes, values_image)
+from animation_modem.imaging import hd_dwt_shapes, values_image
 from animation_modem.wavelet import Cdf97Coder
 
-SCALE = 4  # grid is 112x96; 4x is a comfortable view size
+SCALE = 4  # nice view size for the ~56x40 luma grid
 
 
 def load_wav(path):
@@ -44,11 +43,11 @@ def load_wav(path):
 def build_coder():
     """Matched construction: same shapes/grids as modem_screen.build.
 
-    grids == shapes: the full 3-level pyramid of the wire-sized planes fits the
-    mono budget exactly, so the transform round-trips losslessly instead of
-    zero-filling the finest LL subband (see modem_screen.build).
+    grids == shapes: the full 2-level pyramid of the wire-sized planes fits
+    the wire's value budget exactly, so the transform round-trips losslessly
+    instead of zero-filling the finest LL subband (see modem_screen.build).
     """
-    shapes = fit_shapes(plane_shapes('hd-dwt'), HD_MONO_CAPACITY)
+    shapes = hd_dwt_shapes()
     return Cdf97Coder(shapes, grids=shapes, levels=2), shapes
 
 
