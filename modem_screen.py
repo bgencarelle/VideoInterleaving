@@ -65,6 +65,7 @@ from animation_modem.audio_common import (device, pair, pcm,      # noqa: E402
                                           wire_notice)
 from animation_modem.core import (REFERENCE_RATE as RATE,        # noqa: E402
                                   SourceCoder, bound_emission)
+from animation_modem.wavelet import WaveletCoder                 # noqa: E402
 from animation_modem.imaging import (DEFAULT_PROFILE, PROFILES,  # noqa: E402
                                      burn_counters, fit_shapes, image_values,
                                      plane_grids, plane_shapes, wire_profiles)
@@ -482,7 +483,8 @@ def build(args):
     shapes = fit_shapes(wanted, layout.capacity)
     if shapes != wanted:
         grids = shapes          # see coder_for: a shrunk corner is not a corner
-    coder = SourceCoder(shapes, grids=grids)
+    coder_cls = WaveletCoder if 'wavelet' in args.profile else SourceCoder
+    coder = coder_cls(shapes, grids=grids)
     if coder.truncated:
         print(f'{args.profile}: sampling {grids[0][1]}x{grids[0][0]} and sending '
               f'the low-frequency corner in {coder.count} slots. The profile is '

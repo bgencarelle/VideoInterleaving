@@ -356,8 +356,12 @@ class SourceCoder:
         planes = self._split(np.asarray(values, float), self.grids)
         kept = []
         for plane, (rows, cols) in zip(planes, self.shapes):
-            kept.append(dctn(plane, norm='ortho')[:rows, :cols].ravel())
+            kept.append(self._forward_transform(plane, rows, cols).ravel())
         return np.concatenate(kept)*self.gains
+
+    def _forward_transform(self, plane, rows, cols):
+        """Grid pixels in, kept wire coefficients out (the ``rows x cols`` corner)."""
+        return dctn(plane, norm='ortho')[:rows, :cols]
 
     def inverse(self, sent, reliability=None, noise_variance=None):
         """Wire slots in, pixels out. Dropped coefficients come back as zero,
@@ -402,13 +406,16 @@ class SourceCoder:
         out = []
         for corner, (rows, cols), grid in zip(
                 self._split(coeffs, self.shapes), self.shapes, self.grids):
-            if (rows, cols) == tuple(grid):
-                out.append(idctn(corner, norm='ortho').ravel())
-            else:
-                full = np.zeros(grid)
-                full[:rows, :cols] = corner
-                out.append(idctn(full, norm='ortho').ravel())
+            out.append(self._inverse_transform(corner, rows, cols, grid).ravel())
         return np.concatenate(out)
+
+    def _inverse_transform(self, corner, rows, cols, grid):
+        """Kept wire coefficients in, grid pixels out."""
+        if (rows, cols) == tuple(grid):
+            return idctn(corner, norm='ortho')
+        full = np.zeros(grid)
+        full[:rows, :cols] = corner
+        return idctn(full, norm='ortho')
 
 @lru_cache(maxsize=32)
 def coefficient_slots(layout, shapes):
@@ -700,11 +707,12 @@ FOLDER_LIMIT = 16
 # ('color', 'color-lean', 'color-dct', 'mono') is gone, so an old recording
 # whose header names code 0 or 3 now decodes as a different (or no) geometry.
 # That is deliberate -- see the purge; the magic is not bumped because nothing
-# old is worth keeping. Order after code 1 is reserved for future DCT variants.
-PROFILE_CODES = ('color-dct', 'lean-dct')
-# Two header bits hold four codes; two are spent, two reserved. The DCT grid
-# travels in the header like every other profile, the receiver reads it, and
-# there is no shared state for the two ends to disagree about.
+# old is worth keeping. Codes 2 and 3 are the wavelet transforms; they reuse
+# codes the DCT era never spent, so no DCT recording changes meaning.
+PROFILE_CODES = ('color-dct', 'lean-dct', 'color-wavelet', 'lean-wavelet')
+# Two header bits hold four codes. The transform (DCT vs wavelet) rides in the
+# profile name, so the receiver reads the whole story from the header and there
+# is no shared state for the two ends to disagree about.
 TOP_BIN_MASK = 0x3f
 
 

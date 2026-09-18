@@ -23,6 +23,8 @@ from PIL import Image, ImageDraw, ImageOps
 PROFILES = {
     'color-dct': ((40, 48), (20, 24)),
     'lean-dct': ((40, 48), (10, 12)),
+    'color-wavelet': ((40, 48), (20, 24)),
+    'lean-wavelet': ((40, 48), (10, 12)),
 }
 # Sampling grid per profile. SourceCoder truncates the grid's DCT to the wire
 # shape -- ONE transform, and the allocation table built against the grid's
@@ -40,7 +42,9 @@ PROFILES = {
 # transmitted shape is unchanged. 'lean-dct' shares the 80x96 luma grid and
 # samples chroma 2x finer than the quarter-size corner it transmits.
 PROFILE_GRIDS = {'color-dct': ((80, 96), (40, 48)),
-                 'lean-dct': ((80, 96), (20, 24))}
+                 'lean-dct': ((80, 96), (20, 24)),
+                 'color-wavelet': ((80, 96), (40, 48)),
+                 'lean-wavelet': ((80, 96), (20, 24))}
 DEFAULT_PROFILE = 'color-dct'
 
 

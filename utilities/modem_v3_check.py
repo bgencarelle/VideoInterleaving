@@ -31,13 +31,14 @@ from PIL import Image, ImageOps, ImageFilter
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from animation_modem.live_picture import LivePicture
 from animation_modem import transport3 as V3                   # noqa: E402
+from animation_modem import engines as ENG                     # noqa: E402
 from animation_modem import impairments as IMP                 # noqa: E402
 from animation_modem.audio_common import (pcm, pair, device,   # noqa: E402
                                           wav_blocks, wav_rate, wire_notice,
                                           InputLevel, sounddevice)
-from animation_modem.imaging import (DEFAULT_PROFILE, burn_counters,
-                                     fit_shapes, image_values, plane_grids,
-                                     plane_shapes, values_image, wire_profiles)
+from animation_modem.imaging import (DEFAULT_PROFILE, burn_counters,   # noqa: E402
+                                     image_values, values_image,
+                                     wire_profiles)
 # Decoded-picture window, in screen pixels. 480x576 is a whole-number 12x of a
 # 40x48 picture and 6x of color-dct's 80x96, so neither lands on a fractional
 # scale and neither needs resampling to fill it.
@@ -48,6 +49,8 @@ WINDOW = (480, 576)
 # is there for looking at the result rather than debugging it.
 SCALING = {'raw': Image.Resampling.NEAREST, 'smooth': Image.Resampling.LANCZOS}
 
+# Back-compat aliases: the v3 engine is the default, and these names are what
+# the tests and fit_allocation import.
 WIRE = V3.WIRE
 REFERENCE_RATE = V3.REFERENCE_RATE
 RATE = REFERENCE_RATE
@@ -59,8 +62,7 @@ def frames_from(args, profile=DEFAULT_PROFILE):
         from modem_bake import ModemLibrary
         library = ModemLibrary(args.modem_dir)
         picks = range(0, min(library.frames, args.frames*args.stride), args.stride)
-        return ([library.composite(i, 0, 0) for i in picks],
-                getattr(args, 'profile', None) or DEFAULT_PROFILE)
+        return ([library.composite(i, 0, 0) for i in picks], profile)
     out = []
     for t in range(args.frames):
         rng = np.random.default_rng(4242)
@@ -75,45 +77,34 @@ def frames_from(args, profile=DEFAULT_PROFILE):
         for c, k in enumerate((1., .82, .70)):
             im[:, :, c] = np.where(mask, tex*k, 4)
         out.append(Image.fromarray(np.uint8(np.clip(im, 0, 255))))
-    return out, getattr(args, 'profile', None) or profile
+    return out, profile
 
 
-def coder_for(profile, layout):
-    shapes = plane_shapes(profile)
-    grids = plane_grids(profile)
-    if sum(int(np.prod(s)) for s in shapes) > layout.capacity:
-        # Shrinking a truncating profile drops the finer grid with it: the
-        # corner must stay a corner of something, and there is no reason to
-        # believe a shrunk-then-truncated geometry is the right trade.
-        shapes = fit_shapes(shapes, layout.capacity)
-        grids = shapes
-    return V3.SourceCoder(shapes, grids=grids), grids
+def coder_for(profile, layout=None):
+    """Back-compat: build the coder for a profile (DCT or wavelet by name)."""
+    return ENG.coder_for(profile, layout)
 
 
 def coders_for(layout):
-    """code -> coder, so the receiver follows the header's declaration.
+    """code -> coder for every profile the header may name, across all engines.
 
-    Every profile holds its own code, so there is nothing to opt into and
-    nothing for the two ends to disagree about. The coder for whatever the
-    header names is selected by code, not by guesswork. The allocation is
-    the deterministic built-in table -- fitted .npy tables are not read:
-    measured, they lose on the spread wire.
+    The receiver follows the header's declaration, so it is told which engine
+    (DCT or wavelet) sent the picture rather than guessing out of band.
     """
-    return {V3.profile_code(name): coder_for(name, layout)[0]
-            for name in V3.PROFILE_CODES}
+    return ENG.coders_for(layout)
 
 
-def candidates_for():
+def candidates_for(engine):
     """The one wire, carrying every profile coder the header may name."""
-    coders = coders_for(WIRE)
-    return [(WIRE, coders[V3.profile_code(DEFAULT_PROFILE)], coders)]
+    coders = coders_for(engine.wire)
+    return [(engine.wire, coders[engine.profile_code(engine.profiles[0])], coders)]
 
 
-def receive_for(args, layout, coder, input_rate=None, coders=None,
+def receive_for(args, engine, layout, coder, input_rate=None, coders=None,
                 candidates=None):
-    return V3.Receiver(layout, coder, recovery=False, fast=True,
-                       input_rate=input_rate, coders=coders,
-                       candidates=candidates)
+    return engine.receiver(layout, coder, recovery=False, fast=True,
+                           input_rate=input_rate, coders=coders,
+                           candidates=candidates)
 
 
 def _prepared(image, absolute, count, numbered=False):
@@ -183,33 +174,38 @@ def record(r):
 
 
 def do_write(args):
-    frames, profile = frames_from(args)
-    layout = WIRE
-    coder, _ = coder_for(profile, layout)
-    fps = layout.fps_at(REFERENCE_RATE)
-    print(layout.describe(REFERENCE_RATE))
+    engine = ENG.get_engine(args.codec)
+    profile = args.profile or engine.profiles[0]
+    frames, _ = frames_from(args, profile)
+    layout = engine.wire
+    coder, _ = engine.coder_for(profile, layout)
+    rate = engine.reference_rate
+    fps = layout.fps_at(rate)
+    print(layout.describe(rate))
     path = Path(args.out)
     with wave.open(str(path), 'wb') as sink:
-        sink.setparams((2, 2, REFERENCE_RATE, 0, 'NONE', 'not compressed'))
+        sink.setparams((2, 2, rate, 0, 'NONE', 'not compressed'))
         for n, im in enumerate(frames):
             values = image_values(_prepared(im, n+1, len(frames), args.numbered),
                                   coder.grids)
-            audio = V3.encode(values, layout, coder, n+1, (n % len(frames))+1,
-                              len(frames), stamp_ms=n*int(1000/fps),
-                              profile=V3.profile_code(profile))
+            audio = engine.encode(values, coder, n+1, (n % len(frames))+1,
+                                  len(frames), stamp_ms=n*int(1000/fps),
+                                  profile=engine.profile_code(profile))
             sink.writeframesraw(pcm(audio*args.gain))
     seconds = len(frames)/fps
     print(f'wrote {len(frames)} frames, {seconds:.1f} s, peak gain {args.gain} -> {path}')
 
 
 def do_read(args):
-    layout = WIRE
-    coder, _ = coder_for(args.profile, layout)
+    engine = ENG.get_engine(args.codec)
+    profile = args.profile or engine.profiles[0]
+    layout = engine.wire
+    coder, _ = engine.coder_for(profile, layout)
     rate = wav_rate(args.wav)
-    receiver = receive_for(args, layout, coder, input_rate=rate,
+    receiver = receive_for(args, engine, layout, coder, input_rate=rate,
                            coders=coders_for(layout),
-                           candidates=candidates_for())
-    if rate != REFERENCE_RATE:
+                           candidates=candidates_for(engine))
+    if rate != engine.reference_rate:
         print(f'{args.wav}: {rate} Hz, decoding at that rate', file=sys.stderr)
     if args.save_frames:
         Path(args.save_frames).mkdir(parents=True, exist_ok=True)
@@ -248,13 +244,15 @@ def do_read(args):
 
 def do_bench(args):
     """Decode the one wire across simulated channels."""
-    frames, profile = frames_from(args)
-    layout = WIRE
-    coder, _ = coder_for(profile, layout)
+    engine = ENG.get_engine(args.codec)
+    profile = args.profile or engine.profiles[0]
+    frames, _ = frames_from(args, profile)
+    layout = engine.wire
+    coder, _ = engine.coder_for(profile, layout)
     channels = [('clean', {}),
                 ('cassette-ish', dict(lowpass_hz=10000, noise_dbfs=-45)),
                 ('worn deck', dict(lowpass_hz=8000, noise_dbfs=-40, crosstalk=.07))]
-    versions = [('wire', V3.encode, lambda: V3.Receiver(WIRE, coder), WIRE)]
+    versions = [('wire', engine.encode, lambda: engine.receiver(layout, coder), layout)]
     for name, settings in channels:
         for vname, enc, make, layout in versions:
             quality, hdr, tier, coverage = [], 0, {}, []
@@ -284,9 +282,11 @@ def do_live_send(args):
     sd = sounddevice()
     if args.list_devices:
         print(sd.query_devices()); return
-    frames, profile = frames_from(args)
-    layout = WIRE
-    coder, _ = coder_for(profile, layout)
+    engine = ENG.get_engine(args.codec)
+    profile = args.profile or engine.profiles[0]
+    frames, _ = frames_from(args, profile)
+    layout = engine.wire
+    coder, _ = engine.coder_for(profile, layout)
     state = {'packet': 0, 'position': 0, 'sent': 0}
     channels = args.channels
     packets = []
@@ -310,13 +310,13 @@ def do_live_send(args):
                              callback=callback)
     try:
         rate = float(stream.samplerate)
-        emitted = V3.emit_length(layout.frame, rate)
+        emitted = engine.emit_length(layout.frame, rate)
         fps = rate/emitted
-        packets.extend(V3.band_limited(V3.encode(image_values(
+        packets.extend(engine.adapt(engine.encode(image_values(
                            _prepared(im, n+1, len(frames), args.numbered), coder.grids),
-                       layout, coder, n+1, (n % len(frames))+1, len(frames),
+                       coder, n+1, (n % len(frames))+1, len(frames),
                        stamp_ms=n*int(1000/fps),
-                       profile=V3.profile_code(profile))*args.gain, rate)
+                       profile=engine.profile_code(profile))*args.gain, rate)
                        for n, im in enumerate(frames))
         stream.start()
         try:
@@ -335,8 +335,10 @@ def do_live_receive(args):
     sd = sounddevice()
     if args.list_devices:
         print(sd.query_devices()); return
-    layout = WIRE
-    coder, _ = coder_for(DEFAULT_PROFILE, layout)
+    engine = ENG.get_engine(args.codec)
+    profile = args.profile or engine.profiles[0]
+    layout = engine.wire
+    coder, _ = engine.coder_for(profile, layout)
     verbose = args.verbose or args.headless
     if args.silent:
         verbose = False
@@ -352,7 +354,7 @@ def do_live_receive(args):
     source = {'rate': None, 'level': InputLevel()}
 
     from animation_modem.audio_buffer import AudioBuffer
-    minimum_buffer = ((WIRE.frame+255)//256)*256
+    minimum_buffer = ((layout.frame+255)//256)*256
     audio_buffer = AudioBuffer(max(minimum_buffer, args.buffer_frames*layout.frame), layout.frame)
     reports = queue.Queue(maxsize=1)
 
@@ -438,9 +440,9 @@ def do_live_receive(args):
             rate = source['rate']
             if rate is None:
                 return
-            receiver = V3.Receiver(layout, coder, pulse_only=True, input_rate=rate,
-                                   coders=coders_for(layout),
-                                   candidates=candidates_for())
+            receiver = engine.receiver(layout, coder, pulse_only=True, input_rate=rate,
+                                       coders=coders_for(layout),
+                                       candidates=candidates_for(engine))
             # Same audio-path wiring as read/bench: impairments sit between the
             # input stream and the demodulator.
             emulator = IMP.Emulator(IMP.settings_from_args(args))
@@ -600,24 +602,30 @@ def do_live_receive(args):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    codec = argparse.ArgumentParser(add_help=False)
+    codec.add_argument('--codec', choices=list(ENG.engine_names()), default='v3',
+                       help='Codec engine: v3 is DCT, v4 is wavelet. Each revision '
+                            'lives in one script so they can be A/B tested without '
+                            'hunting down separate tools.')
     sub = p.add_subparsers(dest='command', required=True)
-    p.set_defaults(profile=DEFAULT_PROFILE, gain=1.0)
+    p.set_defaults(profile=None, gain=1.0)
 
     def shared(q):
         q.add_argument('--profile', choices=list(wire_profiles()),
-                       default=DEFAULT_PROFILE, help='Plane geometry to SEND. '
-                       'The receiver reads it from the header.')
+                       default=None, help='Plane geometry to SEND. Defaults to '
+                       'the engine\'s primary profile. The receiver reads it '
+                       'from the header.')
         q.add_argument('--modem-dir', type=Path)
         q.add_argument('--frames', type=int, default=24)
         q.add_argument('--stride', type=int, default=1)
 
-    b = sub.add_parser('bench'); shared(b)
-    w = sub.add_parser('write'); shared(w)
+    b = sub.add_parser('bench', parents=[codec]); shared(b)
+    w = sub.add_parser('write', parents=[codec]); shared(w)
     w.add_argument('--out', type=Path, default=Path('v3_test.wav'))
     w.add_argument('-f', '--numbered', action='store_true')
-    r = sub.add_parser('read')
+    r = sub.add_parser('read', parents=[codec])
     r.add_argument('--profile', choices=list(wire_profiles()),
-                   default=DEFAULT_PROFILE,
+                   default=None,
                    help='Fallback only. The profile is read from the header, '
                         'so this matters just for a packet whose header never '
                         'verifies.')
@@ -625,12 +633,12 @@ def main(argv=None):
     r.add_argument('--channels', type=pair, default=(0, 1))
     r.add_argument('--save-frames', type=Path)
     IMP.add_arguments(r)
-    ls = sub.add_parser('live-send'); shared(ls)
+    ls = sub.add_parser('live-send', parents=[codec]); shared(ls)
     ls.add_argument('--device', type=device)
     ls.add_argument('--channels', type=pair, default=(0, 1))
     ls.add_argument('-f', '--numbered', action='store_true')
     ls.add_argument('--list-devices', action='store_true')
-    lr = sub.add_parser('live-receive')
+    lr = sub.add_parser('live-receive', parents=[codec])
     lr.add_argument('--device', type=device)
     lr.add_argument('--channels', type=pair, default=(0, 1))
     buffering = lr.add_mutually_exclusive_group()

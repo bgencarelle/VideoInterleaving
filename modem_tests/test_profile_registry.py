@@ -54,13 +54,15 @@ class SenderImportTests(unittest.TestCase):
 
 class ProfileCodeTests(unittest.TestCase):
     def test_every_profile_holds_its_own_code(self):
-        """Not an alias. Two header bits hold four codes and two are spent, so
-        each profile is named on the wire and the receiver reads it rather than
-        being told out of band."""
+        """Not an alias. Two header bits hold four codes; all four are spent --
+        the DCT pair and the wavelet pair -- so each profile is named on the
+        wire and the receiver reads it rather than being told out of band."""
         self.assertEqual(v3.PROFILE_CODES[0], 'color-dct')
         self.assertEqual(v3.profile_name(0), 'color-dct')
         self.assertEqual(v3.profile_code('color-dct'), 0)
         self.assertEqual(v3.profile_code('lean-dct'), 1)
+        self.assertEqual(v3.profile_code('color-wavelet'), 2)
+        self.assertEqual(v3.profile_code('lean-wavelet'), 3)
 
     def test_it_is_the_default(self):
         import modem_screen
@@ -85,13 +87,16 @@ class ProfileCodeTests(unittest.TestCase):
                 code = v3.profile_code(name)
                 self.assertEqual(v3.profile_name(code), name)
 
-    def test_the_header_field_cannot_name_a_third_profile(self):
-        """Two codes spent, two reserved. The field is two bits and a code above
-        1 must read back as None rather than wrapping to a real profile, which
-        is what a recording carrying the number would decode to."""
-        self.assertEqual(len(v3.PROFILE_CODES), 2)
-        self.assertIsNone(v3.profile_name(2))
-        self.assertIsNone(v3.profile_name(3))
+    def test_all_four_codes_are_spent_and_the_transform_rides_the_name(self):
+        """All four codes are now spent -- two DCT, two wavelet. A receiver
+        follows the name straight to the right coder, so a wavelet recording
+        decodes with the wavelet inverse and a DCT recording with the DCT."""
+        self.assertEqual(len(v3.PROFILE_CODES), 4)
+        self.assertEqual(v3.profile_name(2), 'color-wavelet')
+        self.assertEqual(v3.profile_name(3), 'lean-wavelet')
+        for name, code in (('color-dct', 0), ('lean-dct', 1),
+                           ('color-wavelet', 2), ('lean-wavelet', 3)):
+            self.assertEqual(v3.profile_name(code), name)
 
 
 class TruncationTests(unittest.TestCase):

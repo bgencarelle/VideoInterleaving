@@ -1,0 +1,18 @@
+**Swap the DCT for a wavelet.**
+
+Everything else stays: same wire, same 2880 slots, same power allocation, same header, same acquisition. Only the transform inside `SourceCoder` changes — `dctn`/`idctn` become a 2-D DWT, and instead of keeping the top-left rectangle you keep the coarsest subbands.
+
+**Why it might win.** Two properties, both in the regime you're actually in:
+
+- **Ringing stays local.** Wavelet basis functions are spatially localized; DCT basis functions span the whole plane. Truncating a whole-plane DCT means one hard edge — a silhouette against flat background, which is your content — ripples across the entire frame. A wavelet confines it near the edge.
+- **Better energy compaction at low rates.** You're sending 2880 coefficients for 11520 pixels. That's the region where wavelets beat DCT; it's why JPEG2000 exists.
+
+**Why it fits this design particularly well.** JPEG2000's whole architecture is "transform the image, order the coefficients, truncate wherever you run out of room." That is *exactly* what `shapes` vs `grids` already does here. The modem accidentally built a wavelet-shaped pipeline around a DCT.
+
+**Why the DCT is there.** Not because it was chosen for this — it predates the truncation. It was in the codebase for the power allocation, and truncation got bolted on afterwards.
+
+**What I actually know.** Nothing measured. That's from the literature, not from your frames. The claim is plausible enough to test and not to act on.
+
+**The test is small.** Swap the transform, keep everything else byte-identical, compare on your bake at the same slot count. Hours, not days. If it wins it's free picture at the same bandwidth and frame rate — the axis the allocation fit was chasing before it turned out to lose on spread wires.
+
+**One thing I'd check first**, given how this session has gone: the allocation prior is `1/(1+12·f)` over DCT spatial frequency. Wavelet coefficients aren't indexed by frequency that way — they're indexed by subband and position. So the allocation would need rethinking at the same time, and getting that wrong is exactly the failure that made `color-dct` read 8 dB PSNR before I found the double transform. Worth doing both together rather than swapping the transform and hoping the old table still fits.
