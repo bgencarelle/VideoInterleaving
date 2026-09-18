@@ -37,7 +37,7 @@ class Slot:
 
 class PacketOutput:
     def __init__(self, device=None, channels=(0, 1), requested_latency='low',
-                 frame=_DEFAULT.frame, packet=_DEFAULT.packet, force_rate=None):
+                 frame=_DEFAULT.frame, packet=_DEFAULT.packet, blocksize=256):
         # The wire carries its own geometry -- 3200 samples -- so the packet
         # size is taken from it instead of a module constant.
         self.frame = int(frame)
@@ -60,15 +60,13 @@ class PacketOutput:
         self.lock = threading.Lock()
         self.done = threading.Event()
         self.sd = sounddevice()
-        # force_rate: force device to specific sample rate (e.g., 48000)
-        # Use for layouts where frame size must be integer at that rate.
-        stream_kwargs = dict(
+        # No forced sample rate - device runs at its native rate.
+        # blocksize: choose so frame divides evenly at device rate.
+        # For WIRE_HD at 96kHz: frame=3488*2=6976 samples, blocksize=64 -> 109 blocks
+        self.stream = self.sd.OutputStream(
             channels=max(channels)+1, dtype='float32',
-            device=device, blocksize=256, latency=requested_latency,
+            device=device, blocksize=blocksize, latency=requested_latency,
             callback=self._callback, finished_callback=self.done.set)
-        if force_rate is not None:
-            stream_kwargs['samplerate'] = force_rate
-        self.stream = self.sd.OutputStream(**stream_kwargs)
         # Whatever the device reported once it was open. Everything below that
         # converts samples to seconds uses this, never a constant.
         self.rate = float(self.stream.samplerate)
