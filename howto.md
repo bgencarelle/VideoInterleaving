@@ -148,12 +148,14 @@ Decoder options:
 --frames N                Decode N frames; 0 means all.
 --scale N                 PNG display scale; native output is 80x96.
 --max-carrier-hz HZ      Ignore carriers above HZ during decoding.
---raw                     Disable temporal/spatial chroma stabilization.
+--stabilize-chroma        Opt into experimental chroma stabilization.
+--raw                     Compatibility option; raw decoding is now default.
 -v|--verbose              Print acquisition and recovery diagnostics.
 ```
 
-Use `--raw` for measurements. Use the default stabilized mode for a smoother
-preview of damaged lossy-media recordings.
+Raw decoding is the default and should be used for tape and measurements.
+`--stabilize-chroma` is an experimental lossy-media preview option, not a tape
+recovery feature.
 
 ## Test an impaired WAV without changing the file
 

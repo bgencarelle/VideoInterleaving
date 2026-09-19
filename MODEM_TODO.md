@@ -31,6 +31,8 @@ before adding frame-rate or image-size features.
 - [ ] Compare clean/compressed results separately for luminance and chroma:
   record decoded PSNR/error, color-plane histograms, gradients, and the number
   of distinct output colors.
+- [x] Run raw Y/Cb/Cr survival measurements on the MP3-320 ceiling sweep.
+  The damage is not chroma-only: both luma and chroma degrade substantially.
 - [ ] Test whether protecting low-frequency chroma coefficients improves color
   continuity without reducing clean recovery or damaged-channel recovery.
 - [ ] Test coefficient weighting/quantization that sacrifices high-frequency
@@ -239,11 +241,39 @@ recovery is not acceptable.
 Try these before changing the wire format. The goal is to preserve useful color
 while allowing fine detail to degrade.
 
+#### Implementation note — 2026-09-19
+
+Confidence-gated chroma stabilization was enabled by default in the live-picture
+and offline-WAV display paths. On the 60-frame MP3-320 fixture it added about
+**0.089 seconds total**, or **1.5 ms/frame / 5.2%**, including PNG output.
+
+**Tape reevaluation, 2026-09-19:** real tape performance was reported as nearly
+entirely degraded after this change. Tape is the primary target, and its pilot
+error/coverage must not trigger MP3-oriented temporal blending and blur.
+Stabilization has therefore been removed from live reception and raw offline
+decoding is again the default. `tools/decode_wav.py --stabilize-chroma` is now
+an explicit lossy-media preview experiment; `--raw` remains accepted for
+compatibility. Do not restore stabilization as a default without real tape
+evidence.
+
+If the runtime cost is too high, first revert the integration rather than the
+underlying decoder:
+
+1. Remove the `stabilize_chroma(...)` calls from `animation_modem/live_picture.py`.
+2. Make `tools/decode_wav.py --raw` the default again, or remove its default
+   stabilization call.
+3. Keep `animation_modem/imaging.py` and its tests temporarily; the helper can
+   remain available for an opt-in mode while performance is evaluated.
+
+If the feature is abandoned entirely, also remove `stabilize_chroma` from
+`animation_modem/imaging.py` and remove `modem_tests/test_chroma_recovery.py`.
+The separate `max_carrier_hz` decoder option in `core.py`, `transport3.py`, and
+`tools/decode_wav.py` is opt-in and is not required for this rollback.
+
 - [ ] Use existing per-slot reliability and noise variance to measure chroma
   confidence separately from luma confidence.
 - [x] Initial confidence-gated Cb/Cr shrinkage: suppress unreliable chroma
   detail before it creates false color bands.
-  chroma detail before it creates false color bands.
 - [x] Hold/blend toward the previous frame's chroma, or use a short temporal
   average, when
   current chroma low-frequency coefficients are unreliable. Keep current luma.
@@ -289,6 +319,28 @@ Only pursue these if decode-only mitigation is insufficient:
 Current evidence: FLAC is perfect; 320k joint-stereo MP3 is usable but
 degraded; lower carrier ceilings improve the compressed path. External pilot
 tones did not show a clear benefit and became harmful at high levels.
+
+### Codec-model constraint
+
+MP3/AAC/ATRAC are perceptual **audio** codecs. They optimize for what a human
+listener is unlikely to hear, not for preservation of the phase, amplitude, and
+cross-carrier relationships that carry image information. A modem waveform can
+therefore remain loud and apparently intact while its visual symbols are
+irreversibly damaged. This is a wire-format problem, not something that can be
+solved generally by decoder-side smoothing or by choosing the visually best
+decoded frame.
+
+- [ ] Stop treating decode-only chroma stabilization as the lossy-media
+  solution; retain it only as graceful degradation.
+- [ ] Define a codec-aware lossy profile with a heavily protected, independently
+  recoverable visual base layer before adding detail.
+- [ ] Give broad luma structure and average Cb/Cr color explicit protection;
+  spend remaining capacity on detail only after the base layer survives.
+- [ ] Use separate luma-only and chroma-only synthetic fixtures to measure which
+  wire components survive each target codec, rather than inferring survival
+  from RGB or from auditory transfer measurements.
+- [ ] Require objective Y/Cb/Cr metrics and recognizability after the actual
+  codec round trip; do not use visual inspection alone to select a profile.
 
 ### Diagnostic sweep requirements
 

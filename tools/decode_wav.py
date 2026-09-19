@@ -62,8 +62,10 @@ def main():
                      help='upscale factor for the saved PNG')
     ap.add_argument('--max-carrier-hz', type=float, default=None,
                      help='Ignore decoded carriers above this frequency')
+    ap.add_argument('--stabilize-chroma', action='store_true',
+                     help='Opt into experimental temporal/spatial chroma stabilization')
     ap.add_argument('--raw', action='store_true',
-                     help='Disable decode-side chroma stabilization')
+                     help='Deprecated compatibility option; raw decoding is the default')
     ap.add_argument('-v', '--verbose', action='store_true',
                     help='Print per-channel recovery diagnostics, including failed acquisition')
     args = ap.parse_args()
@@ -110,7 +112,7 @@ def main():
             if result.values is None:
                 continue
             decoded += 1
-            if not args.raw:
+            if args.stabilize_chroma:
                 result.values = stabilize_chroma(
                     result.values, previous_values, result.extra.get('shapes', grids),
                     result.pilot_error, result.coverage)
@@ -129,7 +131,7 @@ def main():
         seen[result.identity] = seen.get(result.identity, 0) + 1
         if result.values is not None:
             decoded += 1
-            if not args.raw:
+            if args.stabilize_chroma:
                 result.values = stabilize_chroma(
                     result.values, previous_values, result.extra.get('shapes', grids),
                     result.pilot_error, result.coverage)
