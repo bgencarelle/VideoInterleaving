@@ -16,7 +16,8 @@ WIRE_HD budget. Same detail as v3; the extra capacity buys robustness, not
 resolution. See wavelet.Cdf97Coder.
 """
 import numpy as np
-from PIL import Image, ImageDraw, ImageOps
+from PIL import Image, ImageDraw
+from .aspect import aspect_code, ASPECT_RATIOS
 
 # Luma size and chroma size per profile, on the wire.
 # v3/v4: 40x48 luma + 20x24 chroma = 2880 slots
@@ -112,13 +113,39 @@ def _shapes(spec):
     return list(getattr(spec, 'shapes', spec))
 
 
+def prepare_image(image, preset='auto'):
+    """Squeeze the whole source to native geometry and retain its display preset."""
+    code = aspect_code(image.size, preset)
+    image = image.convert('RGB').resize((80, 96), Image.Resampling.LANCZOS)
+    image.info['aspect_code'] = code
+    return image
+
+
+def display_image(result, shapes=None, *, scale=1, bounds=None):
+    """Shared live/export rendering, after native reconstruction.
+
+    Height sets the export scale; width restores the signalled ratio. Native
+    preset zero leaves the unscaled reconstruction pixel-identical. Window
+    rendering resizes once directly from the decoded grid with smooth filtering.
+    """
+    image = values_image(result.values, result.extra.get('shapes', shapes))
+    ratio = result.extra.get('aspect', ASPECT_RATIOS[0])
+    height = max(1, round(image.height * scale))
+    width = max(1, round(height * ratio))
+    if bounds is not None:
+        width = min(bounds[0], max(1, round(bounds[1] * ratio)))
+        height = min(bounds[1], max(1, round(width / ratio)))
+    if (width, height) == image.size:
+        return image
+    return image.resize((width, height), Image.Resampling.LANCZOS)
+
+
 def image_values(image, shapes):
     """One finite value per source coefficient, in [-1, 1], luma plane first."""
     shapes = _shapes(shapes)
     rows, cols = shapes[0]
-    padded = ImageOps.pad(image.convert('RGB'), (cols, rows),
-                          method=Image.Resampling.LANCZOS, color='black')
-    planes = padded.convert('YCbCr').split()
+    sampled = image.convert('RGB').resize((cols, rows), Image.Resampling.LANCZOS)
+    planes = sampled.convert('YCbCr').split()
     return np.concatenate([
         np.asarray(plane.resize((shape[1], shape[0]), Image.Resampling.BOX)).ravel()
         for plane, shape in zip(planes, shapes)]).astype(float)/127.5 - 1

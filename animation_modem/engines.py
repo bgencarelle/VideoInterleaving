@@ -82,10 +82,10 @@ class Engine:
         return profile_name(code)
 
     def encode(self, values, coder, absolute, index, count, stamp_ms=0, flags=0,
-               headroom=.95, profile=0):
+               headroom=.95, profile=0, aspect_code=0):
         return V3.encode(values, self.wire, coder, absolute, index, count,
                          stamp_ms=stamp_ms, flags=flags, headroom=headroom,
-                         profile=profile)
+                          profile=profile, aspect_code=aspect_code)
 
     def receiver(self, layout=None, coder=None, **kwargs):
         return V3.Receiver(layout or self.wire, coder, **kwargs)
@@ -127,11 +127,11 @@ class V5Engine(Engine):
         return coder, coder.shapes
 
     def encode(self, values, coder, absolute, index, count, stamp_ms=0,
-               headroom=.95, profile=0):
+               headroom=.95, profile=0, aspect_code=0):
         # Standard v3 wire format; the header carries profile=2 (hd-dwt).
         return V3.encode(values, self.wire, coder, absolute, index, count,
                          stamp_ms=stamp_ms, headroom=headroom,
-                         profile=profile or 2)
+                          profile=profile or 2, aspect_code=aspect_code)
 
     def receiver(self, layout=None, coder=None, **kwargs):
         return V3.Receiver(layout or self.wire, coder, **kwargs)

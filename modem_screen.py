@@ -25,9 +25,9 @@ is a silhouette, a face, a moving shape, a lava lamp. It is not a desktop, and
 text will not survive.
 
 Unlike scope_screen this wants COLOUR, so ffmpeg is asked for rgb24 rather than
-gray, and the frame is fitted to the profile's aspect rather than the screen's.
-Any chroma plane off the luma aspect ratio gets letterboxed by image_values and
-loses 2-4 dB, so the fit happens once, here, on the full-resolution frame.
+gray. Every source, including cameras, is stretched to the native 80x96 grid.
+The source aspect's nearest preset travels in the header and is restored only
+for display. --aspect overrides automatic selection; no bars are transmitted.
 
 Frame rate is set by the wire, not by the capture: a packet is 3200 samples,
 so the modem consumes one picture every 3200 samples and the capture is
@@ -71,6 +71,7 @@ from animation_modem.imaging import (DEFAULT_PROFILE, PROFILES, burn_counters,  
                                      source_size,
                                      plane_grids, plane_shapes, wire_profiles)
 from animation_modem.playback import PacketOutput                 # noqa: E402
+from animation_modem.aspect import ASPECT_CHOICES, aspect_code     # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -411,38 +412,23 @@ class Throttled:
 # Frame preparation
 # --------------------------------------------------------------------------
 
-def fitter(profile, rotate=0, mirror=False, letterbox=True):
-    """Full-resolution RGB array -> a PIL image the profile's exact size.
+def fitter(profile, rotate=0, mirror=False, letterbox=False, aspect='auto'):
+    """Full source -> native 80x96 image with aspect metadata.
 
-    Fitting happens once here on the source frame rather than per plane.
-    image_values pads each plane independently, so handing it an off-aspect
-    picture puts bars in luma AND chroma at different scales.
-
-    The target is tiny -- 40x48 -- and the source may not be. mss hands back
-    the whole backing buffer, so on a Retina panel LANCZOS runs from 3840x2400
-    straight down to 40 pixels wide. Measured, that costs 75-88 ms per frame
-    against a 57.7 ms packet budget: the capture alone cannot keep up with the
-    wire. Striding to roughly 4x the target first is a view, so it is free, and
-    LANCZOS then filters an image ~600x smaller. Measured 0.35 ms against 75 ms
-    for 43.6 dB of agreement with the direct resize -- on a deliberately
-    alias-hostile test pattern, and invisible at 40x48.
-
-    ffmpeg sources already scale before Python sees them, so the stride is a
-    no-op there.
+    Striding to roughly 4x the target keeps large desktop captures cheap.
+    Measure geometry before that approximation and account for rotation.
+    Explicit letterbox=True is retained for old diagnostic callers only;
+    streaming always stretches the whole picture.
     """
-    # hd-dwt fits to its SAMPLING grid (80x96), not PROFILES[profile][0]:
-    # that entry is its wire budget, 56x44 -- landscape -- so fitting to it
-    # squeezed the source into a landscape box that image_values then
-    # letterboxed into the portrait 80x96 grid: a third of every decoded
-    # frame was black bars and the picture never filled the receiver window.
-    # The DCT/wavelet profiles keep their pinned 40x48 fit (same aspect as
-    # the grid, so no bars; test_modem_screen.FitterTests pins it).
-    size = source_size(profile) if profile == 'hd-dwt' else PROFILES[profile][0]
+    # Every codec samples the native grid. Display geometry is metadata, not
+    # padding; derive it from the actual capture, including camera renegotiation.
+    size = source_size(profile)
     target = max(size)*4
 
     def prepare(raw):
         raw = np.asarray(raw, np.uint8)
         h, w = raw.shape[:2]
+        code = aspect_code((h, w) if rotate in (90, 270) else (w, h), aspect)
         step = max(1, min(w//target, h//target))
         if step > 1:
             raw = raw[::step, ::step]
@@ -460,7 +446,7 @@ def fitter(profile, rotate=0, mirror=False, letterbox=True):
         im = ImageEnhance.Color(im).enhance(1.2)
         im = ImageEnhance.Contrast(im).enhance(1.1)
         im = ImageEnhance.Brightness(im).enhance(1.1)
-
+        im.info['aspect_code'] = code
         return im
 
     return prepare
@@ -569,18 +555,19 @@ def to_wav(args, layout, coder, prepare, grab):
             if delay > 0:
                 time.sleep(delay)
             image = prepare(grab())
+            code = image.info.get('aspect_code', 0)
             if args.numbered:
                 image = burn_counters(image, n+1, n+1, count)
             if args.profile == 'hd-dwt':
                 audio = V3.encode_v5(image_values(image, coder.grids), layout, coder,
                                      n+1, (n % count)+1, count,
                                      stamp_ms=int(n*1000/layout.fps),
-                                     headroom=0.95, profile=2)
+                                     headroom=0.95, profile=2, aspect_code=code)
             else:
                 audio = V3.encode(image_values(image, coder.grids), layout, coder,
                                   n+1, (n % count)+1, count,
                                   stamp_ms=int(n*1000/layout.fps),
-                                  profile=V3.profile_code(args.profile))
+                                  profile=V3.profile_code(args.profile), aspect_code=code)
             audio = bound_emission(audio, args.emit_ceiling, RATE)
             sink.writeframesraw(pcm(audio*args.gain))
     print(f'wrote {count} frames, {count/layout.fps:.1f} s at {layout.fps:.2f} fps '
@@ -625,6 +612,7 @@ def to_device(args, layout, coder, prepare, grab):
                     continue
                 began = time.perf_counter()
                 image = prepare(grab())
+                code = image.info.get('aspect_code', 0)
                 if args.numbered:
                     image = burn_counters(image, sent+1, sent+1, 0xffff)
                 if args.profile == 'hd-dwt':
@@ -632,13 +620,13 @@ def to_device(args, layout, coder, prepare, grab):
                                          coder, (sent+1) & 0xffffffff, (sent % 0xffff)+1,
                                          0xffff, stamp_ms=int(
                                              (slot.target_time_ns//1_000_000) & 0xffffffff),
-                                         headroom=0.95, profile=2)
+                                         headroom=0.95, profile=2, aspect_code=code)
                 else:
                     audio = V3.encode(image_values(image, coder.grids), layout,
                                       coder, (sent+1) & 0xffffffff, (sent % 0xffff)+1,
                                       0xffff, stamp_ms=int(
                                           (slot.target_time_ns//1_000_000) & 0xffffffff),
-                                      profile=V3.profile_code(args.profile))
+                                      profile=V3.profile_code(args.profile), aspect_code=code)
                 # RATE, not output.rate. The packet is still on the REFERENCE
                 # grid here -- band_limited resamples it to the device further
                 # down, holding the carriers at the same hertz -- so the filter
@@ -729,8 +717,12 @@ def parser():
                     help='Width ffmpeg scales to before Python sees the frame')
     ap.add_argument('--rotate', type=int, default=0, choices=(0, 90, 180, 270))
     ap.add_argument('--mirror', action='store_true')
+    ap.add_argument('--aspect', choices=ASPECT_CHOICES, default='auto',
+                    help='Display aspect: auto selects the nearest preset from '
+                         'each source frame (including cameras), after rotation. '
+                         'All sources are stretched to 80x96 without bars.')
     ap.add_argument('--crop', action='store_true',
-                    help='Fill the frame and crop instead of letterboxing')
+                    help='Legacy alias for the default full-frame stretch')
     ap.add_argument('--numbered', action='store_true',
                     help='Burn frame counters into the picture')
     ap.add_argument('--gain', type=float, default=1.0,
@@ -765,11 +757,13 @@ def main(argv=None):
         raise SystemExit('--source video needs --file')
     if not np.isfinite(args.gain) or args.gain <= 0:
         raise SystemExit('--gain must be finite and positive')
+    if args.crop and not args.quiet:
+        print('--crop: full-frame stretching is now the default.')
 
     # Neither preset nor profile has to be agreed out of band. The wire is
     # fixed and the profile is declared in the header, so nothing is refused.
     layout, coder, shapes = build(args)
-    prepare = fitter(args.profile, args.rotate, args.mirror, not args.crop)
+    prepare = fitter(args.profile, args.rotate, args.mirror, aspect=args.aspect)
     raw = source_for(args, layout.fps)
     # Throttling exists so a slow capture cannot stall the audio callback and a
     # fast one cannot burn a core. Neither applies when rendering to a file, and

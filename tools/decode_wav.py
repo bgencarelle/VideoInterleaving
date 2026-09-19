@@ -18,11 +18,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
-from PIL import Image
 
 from animation_modem import transport3 as V3
-from animation_modem.imaging import values_image
+from animation_modem.imaging import display_image
 from animation_modem.wavelet import hd_dwt_coder
+from animation_modem.audio_common import InputLevel
 
 SCALE = 4  # nice view size for the decoded 80x96 grid (320x384 PNG)
 
@@ -59,7 +59,9 @@ def main():
     ap.add_argument('--start', type=int, default=0,
                     help='frame to start decoding from')
     ap.add_argument('--scale', type=int, default=SCALE,
-                    help='upscale factor for the saved PNG')
+                     help='upscale factor for the saved PNG')
+    ap.add_argument('-v', '--verbose', action='store_true',
+                    help='Print per-channel recovery diagnostics, including failed acquisition')
     args = ap.parse_args()
 
     audio, rate = load_wav(args.wav)
@@ -67,7 +69,12 @@ def main():
     layout = V3.WIRE_HD
     coders = {2: coder}
     rx = V3.Receiver(layout, coder, coders=coders,
-                     candidates=[(layout, coder, coders)], input_rate=rate)
+                     candidates=[(layout, coder, coders)], input_rate=rate,
+                     diagnostics=args.verbose)
+    level = InputLevel()
+    if args.verbose:
+        import json
+        from utilities.modem_v3_check import record, recovery_record
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -81,19 +88,23 @@ def main():
     decoded = 0
     seen = {}
     files = []
-    for i in range(start_at, limit, frame_samples):
-        chunk = audio[i:i + frame_samples]
-        if len(chunk) < frame_samples:
-            chunk = np.vstack([chunk, np.zeros((frame_samples - len(chunk), 2))])
-        for result in rx.feed(chunk):
+    reported = start_at
+    for i in range(start_at, limit, 256):
+        chunk = audio[i:min(i + 256, limit)]
+        results = rx.feed(level.process(chunk))
+        if args.verbose and i + len(chunk) - reported >= rate:
+            print(json.dumps(recovery_record(rx, level,
+                             audio_seconds=round((i+len(chunk))/rate, 3))), flush=True)
+            reported = i + len(chunk)
+        for result in results:
+            if args.verbose:
+                print(json.dumps(record(result)), flush=True)
             sent += 1
             seen[result.identity] = seen.get(result.identity, 0) + 1
             if result.values is None:
                 continue
             decoded += 1
-            img = values_image(result.values, grids).resize(
-                (grids[0][1] * args.scale, grids[0][0] * args.scale),
-                Image.Resampling.NEAREST)
+            img = display_image(result, grids, scale=args.scale)
             idx = result.absolute if result.absolute is not None else decoded
             name = out / f'frame_{idx:05d}.png'
             img.save(name)
@@ -101,13 +112,13 @@ def main():
                           result.extra.get('profile'),
                           float(np.std(result.values))))
     for result in rx.flush():
+        if args.verbose:
+            print(json.dumps(record(result)), flush=True)
         sent += 1
         seen[result.identity] = seen.get(result.identity, 0) + 1
         if result.values is not None:
             decoded += 1
-            img = values_image(result.values, grids).resize(
-                (grids[0][1] * args.scale, grids[0][0] * args.scale),
-                Image.Resampling.NEAREST)
+            img = display_image(result, grids, scale=args.scale)
             idx = result.absolute if result.absolute is not None else decoded
             name = out / f'frame_{idx:05d}.png'
             img.save(name)
@@ -115,6 +126,8 @@ def main():
                           result.extra.get('profile'),
                           float(np.std(result.values))))
 
+    if args.verbose:
+        print(json.dumps(recovery_record(rx, level, final=True)), flush=True)
     print(f'input: {rate} Hz, {total // frame_samples} frames, '
           f'peak {float(np.max(np.abs(audio))):.3f}')
     print(f'wire: {layout.name} frame={layout.frame} capacity={layout.capacity}')

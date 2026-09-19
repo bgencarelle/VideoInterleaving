@@ -1189,7 +1189,7 @@ ERASED_WEIGHT = 0.05
 
 
 def decode_packet(samples, layout, coder, *, body=None, coders=None,
-                  header_tolerance=2):
+                  header_tolerance=2, diagnostics=False):
     """Decode one packet; if both inputs together fail, try each alone.
 
     One mangled input (pitch-shifted, heavily processed) poisons the joint
@@ -1202,13 +1202,23 @@ def decode_packet(samples, layout, coder, *, body=None, coders=None,
     if body is None:
         body = samples[SYNC_LEN:layout.packet].reshape(layout.symbols, SYMBOL, 2)[:, CP - 4:CP - 4 + N]
     best = _decode_once(layout, coder, body, coders, header_tolerance)
+    def quality(result, channel):
+        return {'input': channel, 'status': result.status,
+                'identity': result.identity, 'pilot_error': result.pilot_error,
+                'coverage': result.coverage, 'has_picture': result.values is not None}
+
+    attempts = [quality(best, 'joint')] if diagnostics else None
     if best.identity == 'verified_header' and best.pilot_error is not None \
             and best.pilot_error < SINGLE_INPUT_RETRY:
+        if diagnostics:
+            best.extra['decode_attempts'] = attempts
         return best
     verified = best.identity == 'verified_header'
     joint, used = best, None
     for drop in (0, 1):
         alt = _decode_once(layout, coder, body, coders, header_tolerance, drop)
+        if diagnostics:
+            attempts.append(quality(alt, 1 - drop))
         # One input's pilot error counts one leg, so it reads lower than a
         # joint decode's even when both legs are equally damaged (both
         # heavily compressed: 0.8 vs 1.1, yet 3 dB WORSE). Against a verified
@@ -1228,6 +1238,8 @@ def decode_packet(samples, layout, coder, *, body=None, coders=None,
             if key in joint.extra:
                 best.extra[key] = joint.extra[key]
         best.extra['single_input'] = used
+    if diagnostics:
+        best.extra['decode_attempts'] = attempts
     return best
 
 
@@ -1440,11 +1452,16 @@ def _decode_once(layout, coder, body, coders, header_tolerance, drop_rx=None):
                               **(skew or {})})
 
     flags, absolute, index, count, stamp, _ = fields
+    # Keep the packed word intact through CRC checks and header-as-pilot refits.
+    # Only the public result exposes the masked frame counter.
+    from .aspect import unpack_absolute, ASPECT_RATIOS
+    absolute, aspect_code = unpack_absolute(absolute)
     return Decoded('received' if pilot_error < 0.20 else 'degraded', values=values,
                    absolute=absolute, index=index, count=count, stamp_ms=stamp,
                    flags=flags, pilot_error=pilot_error, coverage=coverage,
                    identity='verified_header', tier=tier,
-                   extra={'timing_drift_samples': timing_drift,
+                   extra={'aspect_code': aspect_code, 'aspect': ASPECT_RATIOS[aspect_code],
+                          'timing_drift_samples': timing_drift,
                           'clock_error': float(np.median(clock_errors)) if clock_errors else None,
                           'profile': declared, 'shapes': tuple(picture.grids),
                           **(skew or {})})
@@ -1475,4 +1492,3 @@ def _recovery_quality(result):
         return (False, False, -float('inf'))
     return (True, result.identity == 'verified_header',
             -float(result.pilot_error if result.pilot_error is not None else np.inf))
-

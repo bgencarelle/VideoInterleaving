@@ -209,17 +209,13 @@ class DisplayOptionTests(unittest.TestCase):
             check.main(['live-receive', '--device', '0', '--headless', *extra])
         return receive.call_args.args[0]
 
-    def test_raw_is_the_default(self):
-        """Nearest-neighbour, deliberately. This doubles as a diagnostic
-        display, and smoothing hides the artefacts worth seeing."""
+    def test_smooth_is_the_default(self):
+        """Anamorphic restoration always uses smooth interpolation."""
         args = self.parsed()
-        self.assertEqual(args.scaling, 'raw')
-        self.assertIs(check.SCALING[args.scaling], Image.Resampling.NEAREST)
-
-    def test_smooth_is_lanczos(self):
-        args = self.parsed('--scaling', 'smooth')
         self.assertEqual(args.scaling, 'smooth')
-        self.assertIs(check.SCALING[args.scaling], Image.Resampling.LANCZOS)
+
+    def test_legacy_raw_option_remains_accepted(self):
+        self.assertEqual(self.parsed('--scaling', 'raw').scaling, 'raw')
 
     def test_an_unknown_scaling_is_refused(self):
         with self.assertRaises(SystemExit):
@@ -244,20 +240,16 @@ class DisplayOptionTests(unittest.TestCase):
 
 
 class DisplayScalingTests(unittest.TestCase):
-    def test_the_chosen_filter_is_what_reaches_the_window(self):
-        """Pins the wiring, not just the flag: raw and smooth must actually
-        produce different pixels, and raw must be the one that does not
-        invent intermediate values."""
+    def test_aspect_renderer_uses_smooth_pixels(self):
         import numpy as np
-        from PIL import Image as _Image, ImageOps
-        picture = _Image.fromarray(np.uint8([[0, 255], [255, 0]]*1).repeat(
-            24, 0).repeat(20, 1)[:48, :40][..., None].repeat(3, 2))
-        raw = ImageOps.contain(picture, check.WINDOW, check.SCALING['raw'])
-        smooth = ImageOps.contain(picture, check.WINDOW, check.SCALING['smooth'])
-        self.assertNotEqual(list(raw.getdata()), list(smooth.getdata()))
-        levels = {p[0] for p in raw.getdata()}
-        self.assertTrue(levels <= {0, 255},
-                        'raw scaling must not create intermediate values')
+        from animation_modem.core import Decoded
+        pixels = np.uint8([[0, 255], [255, 0]]).repeat(48, 0).repeat(40, 1)
+        result = Decoded('received', values=pixels.ravel()/127.5-1,
+                         extra={'shapes': [(96, 80)], 'aspect': 16/9})
+        smooth = check.display_image(result, bounds=check.WINDOW)
+        self.assertEqual(smooth.size, (480, 270))
+        levels = np.unique(np.asarray(smooth))
+        self.assertTrue(np.any((levels > 0) & (levels < 255)))
 
 
 class PictureSizeReportTests(unittest.TestCase):

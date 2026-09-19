@@ -446,7 +446,8 @@ def measure_pulses_v5(samples, min_scale=.5, max_scale=4.0):
 # --------------------------------------------------------------------------
 
 def encode(values, layout, coder, absolute, index, count, stamp_ms=0, flags=0,
-           headroom=.95, profile=0):
+           headroom=.95, profile=0, aspect_code=0):
+    from .aspect import pack_absolute
     expected = getattr(coder, 'source_count', coder.count)
     if len(values) != expected or not np.isfinite(values).all():
         raise ValueError('Expected one finite value per source coefficient')
@@ -467,7 +468,7 @@ def encode(values, layout, coder, absolute, index, count, stamp_ms=0, flags=0,
         grid[0, :, 0] = 1
         grid[1, :, 1] = 1
 
-    raw = pack_header(flags, layout.top_bin, absolute, index, count, stamp_ms,
+    raw = pack_header(flags, layout.top_bin, pack_absolute(absolute, aspect_code), index, count, stamp_ms,
                       magic=layout.wire_magic,
                       profile=profile)
     bits = np.unpackbits(np.frombuffer(raw, np.uint8)).reshape(HEADER_SLOTS, 2)
@@ -520,14 +521,15 @@ def encode(values, layout, coder, absolute, index, count, stamp_ms=0, flags=0,
 # --------------------------------------------------------------------------
 
 def encode_v5(values, layout, coder, absolute, index, count, stamp_ms=0,
-              headroom=.95, profile=2):
+              headroom=.95, profile=2, aspect_code=0):
     """Encode for v5: stereo output, V3 header format, V3 preamble.
     
     Uses profile=2 (hd-dwt) in standard V3 header. Wire format identical to v3/v4.
     """
     # Use the standard v3 encode - same wire format, just different coder
     return encode(values, layout, coder, absolute, index, count,
-                  stamp_ms=stamp_ms, headroom=headroom, profile=profile)
+                  stamp_ms=stamp_ms, headroom=headroom, profile=profile,
+                  aspect_code=aspect_code)
 
 
 # --------------------------------------------------------------------------
@@ -548,7 +550,7 @@ class Receiver:
     def __init__(self, layout, coder, threshold=.4, rate_window=None,
                  min_speed=.25, max_speed=2.0, recovery=False, fast=True,
                  pulse_only=True, input_rate=None, coders=None, candidates=None,
-                 header_tolerance=2):
+                 header_tolerance=2, diagnostics=False):
         if not (0 < min_speed <= 1 <= max_speed and min_speed >= .25 and max_speed <= 2):
             raise ValueError('Supported speed range: .25 <= min_speed <= 1 <= max_speed <= 2')
         if input_rate is not None and not (np.isfinite(input_rate) and input_rate > 0):
@@ -569,6 +571,8 @@ class Receiver:
         self.min_speed, self.max_speed = min_speed, max_speed
         self.input_rate = None if input_rate is None else float(input_rate)
         self.header_tolerance = int(header_tolerance)
+        self.diagnostics = bool(diagnostics)
+        self.resets = -1  # Construction is not an input discontinuity.
         self.clock = 1. if input_rate is None else float(input_rate)/REFERENCE_RATE
         self.min_scale = self.clock/max_speed
         self.max_scale = self.clock/min_speed
@@ -576,6 +580,7 @@ class Receiver:
         self.reset()
 
     def reset(self, preserve_timing=False):
+        self.resets += 1
         rate_error = self.rate_error if preserve_timing else 0.
         confidence = self.confidence if preserve_timing else 0.
         if not hasattr(self, '_storage'):
@@ -597,6 +602,29 @@ class Receiver:
         self.edge_hits = 0
         self.correlation_hits = 0
         self.locked_packets = 0
+        self._aspect_code = 0
+        self._pulse_channels = [None, None]
+        self._timing_channel = None
+        self._diagnostic_counts = {'attempted': 0, 'verified': 0, 'pictures': 0,
+                                   'lost': 0, 'single_input': 0, 'no_preamble': 0}
+        self._last_decode = None
+
+    def diagnostic_state(self):
+        """Bounded snapshot, including failures which never produce a picture.
+
+        The caller decides when/where to report it; no I/O runs in the decoder.
+        Counts and sample positions are since the last input discontinuity.
+        """
+        return {'receiver_resets': self.resets, 'sample_offset': self.offset,
+                'buffer_samples': len(self.buffer), 'wire': self.layout.name,
+                'detected': self.detected, 'pending': self.pending is not None,
+                'predicted_sample': self.predicted, 'confidence': self.confidence,
+                'timing_scale': 1+self.rate_error,
+                'timing_channel': self._timing_channel,
+                'pulse_channels': list(self._pulse_channels),
+                'since_verified_header': self._since_lock,
+                'decode_counts': dict(self._diagnostic_counts),
+                'last_decode': self._last_decode}
 
     def _acquire(self):
         if self.pulse_only:
@@ -678,13 +706,22 @@ class Receiver:
         """
         expected = self.clock*(1+self.rate_error) if self.confidence else self.clock
         best = None
+        if self.diagnostics:
+            self._pulse_channels = [None, None]
+            self._timing_channel = None
         for channel in range(2):
             measured = measure_pulses(window[:, channel], self.min_scale, self.max_scale)
             if measured is None:
                 continue
+            if self.diagnostics:
+                self._pulse_channels[channel] = {
+                    'at_in_window': float(measured[0]), 'scale': float(measured[1]),
+                    'confidence': float(measured[2])}
             miss = abs(measured[1]/expected - 1)
             if best is None or miss < best[0] - 1e-4:
                 best = (miss, measured)
+                if self.diagnostics:
+                    self._timing_channel = channel
         return None if best is None else best[1]
 
     def _correlate(self, window):
@@ -772,7 +809,8 @@ class Receiver:
             body = body.reshape(layout.symbols, N, 2)
 
         return decode_packet(None, layout, coder, body=body, coders=coders,
-                             header_tolerance=self.header_tolerance), taps
+                              header_tolerance=self.header_tolerance,
+                              diagnostics=self.diagnostics), taps
 
     def _identify(self, begin, scale, final=False):
         if not self.candidates or self.detected is not None:
@@ -812,6 +850,8 @@ class Receiver:
                 if acquired is None:
                     if self.waiting:
                         break
+                    if self.diagnostics:
+                        self._diagnostic_counts['no_preamble'] += 1
                     self.search_after = len(self.buffer)+256
                     if len(self.buffer) > self.keep:
                         self._drop(len(self.buffer)-self.keep)
@@ -842,6 +882,15 @@ class Receiver:
                         self._tried = 0
                         self._since_lock = 0
             result.rate_error = scale-1
+            # A damaged header cannot change display geometry. Keep the last
+            # verified preset until a new header arrives (native after reset).
+            from .aspect import ASPECT_RATIOS
+            if result.identity == 'verified_header':
+                self._aspect_code = result.extra['aspect_code']
+            else:
+                result.extra.update(aspect_code=self._aspect_code,
+                                    aspect=ASPECT_RATIOS[self._aspect_code],
+                                    aspect_inferred=True)
             result.rate_confidence = score
             result.extra.update(sync_score=score, at=self.offset+begin,
                                 input_path='v3', acquisition_path=self.acquisition_path,
@@ -859,6 +908,21 @@ class Receiver:
                     input_top_hz=result.extra['top_bin_cycles_per_sample']*self.input_rate,
                     frame_seconds=self.layout.frame*scale/self.input_rate)
             result.extra['receive_cpu_ms'] = result.extra['decode_ms']+self.acquire_ms
+            if self.diagnostics:
+                counts = self._diagnostic_counts
+                counts['attempted'] += 1
+                counts['verified'] += int(result.identity == 'verified_header')
+                counts['pictures'] += int(result.values is not None)
+                counts['lost'] += int(result.values is None)
+                counts['single_input'] += int('single_input' in result.extra)
+                self._last_decode = {
+                    'at': float(self.offset+begin), 'frame': result.absolute,
+                    'status': result.status, 'identity': result.identity,
+                    'single_input': result.extra.get('single_input'),
+                    'pilot_error': result.pilot_error, 'coverage': result.coverage,
+                    'attempts': result.extra.get('decode_attempts', [])}
+                result.extra.update(timing_channel=self._timing_channel,
+                                    pulse_channels=list(self._pulse_channels))
             self.pending = None
             if result.values is not None:
                 self.rate_error, self.confidence = scale-1, score

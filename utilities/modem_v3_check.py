@@ -26,7 +26,7 @@ import time
 import wave
 
 import numpy as np
-from PIL import Image, ImageOps, ImageFilter
+from PIL import Image, ImageFilter
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from animation_modem.live_picture import LivePicture
@@ -37,17 +37,15 @@ from animation_modem.audio_common import (pcm, pair, device,   # noqa: E402
                                           wav_blocks, wav_rate, wire_notice,
                                           InputLevel, sounddevice)
 from animation_modem.imaging import (DEFAULT_PROFILE, burn_counters,   # noqa: E402
-                                     image_values, values_image,
+                                     image_values, values_image, prepare_image, display_image,
                                      wire_profiles)
+from animation_modem.aspect import ASPECT_CHOICES, aspect_code
 # Decoded-picture window, in screen pixels. 480x576 is a whole-number 12x of a
 # 40x48 picture and 6x of color-dct's 80x96, so neither lands on a fractional
 # scale and neither needs resampling to fill it.
 WINDOW = (480, 576)
-# raw = NEAREST, smooth = LANCZOS. raw is the default deliberately: this is a
-# diagnostic display as much as a picture, and a smoothed one hides exactly
-# what you want to see -- single dead pixels, blocking, chroma blotching. Smooth
-# is there for looking at the result rather than debugging it.
-SCALING = {'raw': Image.Resampling.NEAREST, 'smooth': Image.Resampling.LANCZOS}
+# Keep the old CLI spelling accepted, but all aspect restoration is smooth.
+SCALING = ('raw', 'smooth')
 
 # Back-compat aliases: the v3 engine is the default, and these names are what
 # the tests and fit_allocation import.
@@ -118,7 +116,8 @@ def receive_for(args, engine, layout, coder, input_rate=None, coders=None,
                 candidates=None):
     return engine.receiver(layout, coder, recovery=False, fast=True,
                            input_rate=input_rate, coders=coders,
-                           candidates=candidates)
+                           candidates=candidates,
+                           diagnostics=getattr(args, 'verbose', False))
 
 
 def _prepared(image, absolute, count, numbered=False):
@@ -187,6 +186,16 @@ def record(r):
             **r.extra}
 
 
+def recovery_record(receiver, level, **extra):
+    """Copy/paste-friendly heartbeat, even if acquisition produces no frames.
+
+    Channel indices are zero-based: 0 = left, 1 = right. Pulse measurements
+    describe the last acquisition search; last_decode may be older during loss.
+    """
+    return {'event': 'receiver_diagnostics', **receiver.diagnostic_state(),
+            **level.diagnostic_state(), **extra}
+
+
 def do_write(args):
     engine = ENG.get_engine(args.codec)
     profile = args.profile or engine.profiles[0]
@@ -200,11 +209,13 @@ def do_write(args):
     with wave.open(str(path), 'wb') as sink:
         sink.setparams((2, 2, rate, 0, 'NONE', 'not compressed'))
         for n, im in enumerate(frames):
+            code = aspect_code(im.size, args.aspect)
+            im = prepare_image(im, args.aspect)
             values = image_values(_prepared(im, n+1, len(frames), args.numbered),
                                   coder.grids)
             audio = engine.encode(values, coder, n+1, (n % len(frames))+1,
                                   len(frames), stamp_ms=n*int(1000/fps),
-                                  profile=engine.profile_code(profile))
+                                  profile=engine.profile_code(profile), aspect_code=code)
             sink.writeframesraw(pcm(audio*args.gain))
     seconds = len(frames)/fps
     print(f'wrote {len(frames)} frames, {seconds:.1f} s, peak gain {args.gain} -> {path}')
@@ -232,9 +243,25 @@ def do_read(args):
 
     def results():
         level = InputLevel()
-        for block in wav_blocks(args.wav, args.channels, 1024):
-            yield from receiver.feed(emulator.process(level.process(block)))
+        samples, reported = 0, 0
+        # Match live levelling block size; its slow release is block-counted.
+        for block in wav_blocks(args.wav, args.channels, 256):
+            samples += len(block)
+            decoded = receiver.feed(emulator.process(level.process(block)))
+            if args.verbose:
+                for result in decoded:
+                    result.extra.update(level.diagnostic_state())
+                if samples-reported >= rate:
+                    print(json.dumps(recovery_record(receiver, level,
+                                     audio_seconds=round(samples/rate, 3))),
+                          file=sys.stderr, flush=True)
+                    reported = samples
+            yield from decoded
         yield from receiver.flush()
+        if args.verbose:
+            print(json.dumps(recovery_record(receiver, level,
+                             audio_seconds=round(samples/rate, 3), final=True)),
+                  file=sys.stderr, flush=True)
 
     for r in results():
         seen += 1
@@ -247,7 +274,7 @@ def do_read(args):
         if args.save_frames and r.values is not None:
             name = f'{r.absolute:06d}' if r.absolute is not None else f'x{seen:06d}'
             prof = r.extra.get('profile') or r.extra.get('profile_name')
-            img = values_image(r.values, r.extra.get('shapes', coder.grids))
+            img = display_image(r, coder.grids)
             img.save(Path(args.save_frames)/f'frame_{name}.png')
     if rates:
         speed = float(np.median(rates))
@@ -327,10 +354,12 @@ def do_live_send(args):
         emitted = engine.emit_length(layout.frame, rate)
         fps = rate/emitted
         packets.extend(engine.adapt(engine.encode(image_values(
-                           _prepared(im, n+1, len(frames), args.numbered), coder.grids),
+                           _prepared(prepare_image(im, args.aspect), n+1,
+                                     len(frames), args.numbered), coder.grids),
                        coder, n+1, (n % len(frames))+1, len(frames),
                        stamp_ms=n*int(1000/fps),
-                       profile=engine.profile_code(profile))*args.gain, rate)
+                        profile=engine.profile_code(profile),
+                        aspect_code=aspect_code(im.size, args.aspect))*args.gain, rate)
                        for n, im in enumerate(frames))
         stream.start()
         try:
@@ -396,7 +425,7 @@ def do_live_receive(args):
                         name = (f'{result.absolute:06d}' if result.absolute is not None
                                 else f'x{time.monotonic_ns()}')
                         prof = result.extra.get('profile') or result.extra.get('profile_name')
-                        img = values_image(result.values, result.extra['shapes'])
+                        img = display_image(result)
                         img.save(Path(args.save_frames)/f'frame_{name}.png')
                 if summary is not None:
                     print(json.dumps(summary), file=sys.stderr, flush=True)
@@ -456,7 +485,8 @@ def do_live_receive(args):
                 return
             receiver = engine.receiver(layout, coder, pulse_only=True, input_rate=rate,
                                        coders=coders_for(layout),
-                                       candidates=candidates_for(engine))
+                                       candidates=candidates_for(engine),
+                                       diagnostics=verbose)
             # Same audio-path wiring as read/bench: impairments sit between the
             # input stream and the demodulator.
             emulator = IMP.Emulator(IMP.settings_from_args(args))
@@ -477,6 +507,8 @@ def do_live_receive(args):
                 seen += len(results)
                 for result in results:
                     result.extra.update(complete=result.identity == 'verified_header' and result.status == 'received')
+                    if verbose:
+                        result.extra.update(source['level'].diagnostic_state())
                 period_samples = max(256, round(receiver.layout.frame * (1+receiver.rate_error)))
                 capacity = (int(rate*args.buffer_ms/1000) if args.buffer_ms is not None else args.buffer_frames*period_samples)
                 audio_buffer.configure(max(256, capacity), min(period_samples, 1024))
@@ -487,10 +519,16 @@ def do_live_receive(args):
                             latest['picture'].push(result, time.monotonic())
                 now = time.monotonic()
                 summary = None
-                if not args.silent and now-last_summary >= args.summary_seconds:
+                interval = min(args.summary_seconds, 1.) if verbose else args.summary_seconds
+                if not args.silent and now-last_summary >= interval:
                     summary = {'receiver_packets': seen, 'input_rate_hz': rate,
-                               'picture': (picture_size(newest.extra.get('shapes'))
-                                           if newest is not None else None)}
+                                'picture': (picture_size(newest.extra.get('shapes'))
+                                            if newest is not None else None)}
+                    if verbose:
+                        summary.update(recovery_record(receiver, source['level'],
+                                       input_peak_levelled=peak,
+                                       display_policy=args.on_loss,
+                                       latest_picture_status=(newest.status if newest else None)))
                     last_summary, peak = now, 0.0
                 if (newest is not None and (verbose or args.save_frames)) or summary is not None:
                     offer_report(newest, summary)
@@ -524,7 +562,6 @@ def do_live_receive(args):
             # into it every frame -- that canvas churn is what made the window
             # heavy on older machines.
             window = (args.width, args.height)
-            resample = SCALING[args.scaling]
             root = tk.Tk()
             def callback_error(exc_type, exc, traceback):
                 errors.append(exc)
@@ -573,19 +610,8 @@ def do_live_receive(args):
                     else:
                         prof = (r.extra.get('profile')
                                 or r.extra.get('profile_name'))
-                        img = values_image(r.values, r.extra['shapes'])
-                        # An integer upscale is a plain pixel repeat, which is
-                        # exactly what nearest wants and is the cheap path.
-                        # Anything that must downscale, or was asked to
-                        # smooth, still goes through PIL.
-                        zoom = min(window[0]//img.width, window[1]//img.height)
-                        if zoom >= 1 and resample is Image.Resampling.NEAREST:
-                            scaled = img.resize((img.width*zoom, img.height*zoom),
-                                                Image.Resampling.NEAREST)
-                            shown = f'{scaled.width}x{scaled.height} x{zoom}'
-                        else:
-                            scaled = ImageOps.contain(img, window, resample)
-                            shown = f'{scaled.width}x{scaled.height} {args.scaling}'
+                        scaled = display_image(r, bounds=window)
+                        shown = f'{scaled.width}x{scaled.height} smooth'
                         photo.image = ImageTk.PhotoImage(scaled)
                         photo.configure(image=photo.image)
                         found = r.extra.get('preset', '?')
@@ -635,6 +661,7 @@ def main(argv=None):
 
     b = sub.add_parser('bench', parents=[codec]); shared(b)
     w = sub.add_parser('write', parents=[codec]); shared(w)
+    w.add_argument('--aspect', choices=ASPECT_CHOICES, default='auto')
     w.add_argument('--out', type=Path, default=Path('v3_test.wav'))
     w.add_argument('-f', '--numbered', action='store_true')
     r = sub.add_parser('read', parents=[codec])
@@ -646,8 +673,11 @@ def main(argv=None):
     r.add_argument('--wav', type=Path, required=True)
     r.add_argument('--channels', type=pair, default=(0, 1))
     r.add_argument('--save-frames', type=Path)
+    r.add_argument('-v', '--verbose', action='store_true',
+                   help='Per-channel recovery diagnostics, including no-decode heartbeats')
     IMP.add_arguments(r)
     ls = sub.add_parser('live-send', parents=[codec]); shared(ls)
+    ls.add_argument('--aspect', choices=ASPECT_CHOICES, default='auto')
     ls.add_argument('--device', type=device)
     ls.add_argument('--channels', type=pair, default=(0, 1))
     ls.add_argument('-f', '--numbered', action='store_true')
@@ -676,15 +706,9 @@ def main(argv=None):
                     help=f'Window height in screen pixels (default {WINDOW[1]}). '
                          'The default pair is a whole-number multiple of both '
                          'picture sizes, 12x of 40x48 and 6x of 80x96.')
-    lr.add_argument('--scaling', choices=sorted(SCALING), default='raw',
-                    help='How to scale the picture up to the window. raw '
-                         '(default) is nearest-neighbour and shows the pixels '
-                         'as sent, which is what you want when judging a '
-                         'decode; an integer multiple is applied as a plain '
-                         'pixel repeat, which costs almost nothing on old '
-                         'machines. smooth is '
-                         'Lanczos and looks better but hides dead pixels, '
-                         'blocking and chroma blotching.')
+    lr.add_argument('--scaling', choices=sorted(SCALING), default='smooth',
+                    help='Aspect restoration uses smooth interpolation. '
+                         'raw is accepted as a legacy alias for smooth.')
     lr.add_argument('--list-devices', action='store_true')
     IMP.add_arguments(lr)
     args = p.parse_args(argv)

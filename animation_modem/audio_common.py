@@ -93,6 +93,10 @@ class InputLevel:
         self.peak = np.zeros(2)
         self.limited = 0          # blocks the limiter had to pull down
 
+    def diagnostic_state(self):
+        return {'input_gain': self.gain.tolist(), 'input_peak': self.peak.tolist(),
+                'limiter_blocks': self.limited}
+
     def process(self, audio):
         audio = np.asarray(audio, np.float32)
         if audio.ndim != 2 or audio.shape[1] != 2 or not len(audio):
@@ -301,4 +305,3 @@ def band(value):
     except ValueError:
         raise argparse.ArgumentTypeError('Use HIGHPASS,LOWPASS in Hz, e.g. 600,22000')
     return (high, low)
-

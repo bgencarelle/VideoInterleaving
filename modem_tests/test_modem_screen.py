@@ -11,7 +11,7 @@ from PIL import Image
 import modem_screen
 from animation_modem import transport3 as v3
 from animation_modem.core import SourceCoder
-from animation_modem.imaging import PROFILES, fit_shapes, image_values, plane_shapes
+from animation_modem.imaging import PROFILES, fit_shapes, image_values, plane_shapes, source_size
 
 
 class ReadExactTests(unittest.TestCase):
@@ -45,11 +45,11 @@ class ReadExactTests(unittest.TestCase):
 
 class FitterTests(unittest.TestCase):
     def test_output_is_exactly_the_profile_size(self):
-        for profile in ('color-dct', 'color-dct'):
+        for profile in PROFILES:
             with self.subTest(profile=profile):
                 prepare = modem_screen.fitter(profile)
                 out = prepare(np.zeros((480, 640, 3), np.uint8))
-                self.assertEqual(out.size, PROFILES[profile][0])
+                self.assertEqual(out.size, source_size(profile))
 
     def test_hd_dwt_fits_the_full_80x96_picture(self):
         """hd-dwt's PROFILES entry is its 56x44 wire budget, not its picture.
@@ -76,7 +76,7 @@ class FitterTests(unittest.TestCase):
         flipped = np.asarray(modem_screen.fitter('color-dct', mirror=True)(raw))
         self.assertFalse(np.array_equal(plain, flipped))
         turned = modem_screen.fitter('color-dct', rotate=90)(raw)
-        self.assertEqual(turned.size, PROFILES['color-dct'][0])
+        self.assertEqual(turned.size, source_size('color-dct'))
 
 
 class PrescaleTests(unittest.TestCase):
@@ -100,13 +100,13 @@ class PrescaleTests(unittest.TestCase):
         self.assertLess(large, small*4)
 
     def test_prescale_keeps_the_exact_output_size(self):
-        for profile in ('color-dct', 'color-dct'):
+        for profile in PROFILES:
             with self.subTest(profile=profile):
                 prepare = modem_screen.fitter(profile)
                 for w, h in ((320, 426), (1920, 1080), (3840, 2400)):
                     self.assertEqual(
                         prepare(np.zeros((h, w, 3), np.uint8)).size,
-                        PROFILES[profile][0])
+                        source_size(profile))
 
     def test_prescale_preserves_the_picture(self):
         """Striding must not shift or blank the image."""

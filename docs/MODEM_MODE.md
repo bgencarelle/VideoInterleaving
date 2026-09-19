@@ -1,5 +1,59 @@
 # Modem mode
 
+## Standalone sender: anamorphic aspect and recovery diagnostics
+
+On `standalone-modem`, `modem_screen.py` sends screen, video, camera, test,
+and mouse-follow sources. Each frame is stretched directly to **80x96** with
+no letterbox bars. The default `--aspect auto` measures the actual captured
+dimensions after rotation, including camera frames and changing capture sizes,
+and selects the nearest preset by proportional distortion. Arbitrary ratios
+are approximated by the eight wire presets:
+
+`5:6`, `1:1`, `4:3`, `3:2`, `16:9`, `2.39:1`, `3:4`, `9:16`.
+
+Use `--aspect 16:9` (or another preset) to override detection. `--aspect native`
+selects `5:6`. The `write` and `live-send` commands in
+`utilities/modem_v3_check.py` accept the same option, using each input image's
+dimensions. Already-baked padding cannot be recovered from aspect metadata.
+
+The top three bits of the existing 32-bit `absolute` header word carry the
+aspect code; the lower 29 carry the wrapping frame counter. `count` is unchanged.
+Update sender and receiver together: old receivers interpret non-native aspect
+bits as part of the frame number. Header verification/refitting uses the packed
+word, while all public decoded frame numbers are masked. `extra['aspect']` is
+the numeric width/height ratio, and `extra['aspect_code']` is the preset index.
+Headerless pictures inherit the last verified aspect, or native after reset.
+
+Live viewing, `--save-frames`, and `tools/decode_wav.py` restore aspect with
+Lanczos interpolation after native reconstruction. Native, unscaled export
+remains 80x96; other exports retain height 96 and round the aspect-correct width
+to the nearest pixel. `decode_wav --scale` scales that output height. The old
+`--scaling raw` option is accepted as a smooth-rendering alias.
+
+For damaged-channel testing, use verbose decode and copy the JSON output
+covering clean → damaged → clean:
+
+```bash
+.venv/bin/python utilities/modem_v3_check.py live-receive \
+  --device "BlackHole 2ch" --verbose
+.venv/bin/python utilities/modem_v3_check.py read \
+  --wav scratch/stuck.wav --verbose --save-frames scratch/stuck-frames
+.venv/bin/python tools/decode_wav.py scratch/stuck.wav \
+  --frames 0 --verbose --out scratch/stuck-preview
+```
+
+Verbose mode includes gains, tracked input peaks, limiter counts, both channels'
+latest pulse measurements, selected timing channel, joint/single-input decode
+attempts, and cumulative failures. Once-per-second diagnostic heartbeats continue
+when no pictures decode; a final heartbeat is printed for offline files. Channel
+0 is left, channel 1 is right. Counts/sample positions restart on an input-gap
+reset, whose cumulative count is reported. Diagnostic snapshots are bounded and
+do not add demodulation attempts. They expose the current recovery behavior;
+the unreproduced stuck-channel bug still needs a damaged-signal trace.
+
+Keep work local to this checkout, using `scratch/` for temporary WAVs, decoded
+images, and logs. The historical integrated-mode instructions follow below.
+
 The `modem` branch adds an output mode that reuses VideoInterleaving's baked
 face and float layers, composites one complete RGBA image at a time, and sends
 it through the frame-independent stereo audio modem. The existing scope,
