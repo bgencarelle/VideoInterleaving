@@ -286,6 +286,7 @@ class DeviceLoopTests(unittest.TestCase):
 
         def __init__(self, *a, **kw):
             self.sent = []
+            self.completed = 0
             self.deadline_misses = 0
             self.starvations = 0
             self.finished = False
@@ -311,6 +312,7 @@ class DeviceLoopTests(unittest.TestCase):
             return True
 
         def finish(self):
+            self.completed = len(self.sent)
             self.finished = True
 
     def run_loop(self, argv, output):

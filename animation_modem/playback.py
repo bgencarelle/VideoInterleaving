@@ -47,6 +47,7 @@ class PacketOutput:
         self.channels = channels
         self.pending = None
         self.pending_start = None
+        self.pending_delay = None
         self.next_start = None
         self.scheduled = False
         self.deadline_misses = 0
@@ -137,6 +138,7 @@ class PacketOutput:
                 raise RuntimeError('Wait for ready() before submitting another packet')
             self.pending = prepared
             self.pending_start = slot.start_time if slot else None
+            self.pending_delay = None
             if slot:self.next_start = slot.start_time + self.emit_frame/self.rate
         if not self.started:
             self.stream.start()
@@ -150,22 +152,34 @@ class PacketOutput:
         eof = False
         try:
             with self.lock:
+                if status.output_underflow:
+                    # A real gap invalidates the sample-counted reservation.
+                    self.pending_delay = None
                 written = 0
                 while written < frames:
                     if self.current is None:
                         if self.pending is not None and self.pending_start is not None:
-                            here = timing.outputBufferDacTime + written/self.rate
-                            gap = round((self.pending_start-here)*self.rate)
+                            if self.pending_delay is None:
+                                here = timing.outputBufferDacTime + written/self.rate
+                                self.pending_delay = round((self.pending_start-here)*self.rate)
+                            gap = self.pending_delay
                             if gap > 0:
-                                written += min(gap, frames-written)
+                                take = min(gap, frames-written)
+                                written += take
+                                self.pending_delay -= take
+                                # Once placed on the output sample timeline, count
+                                # samples to the boundary. Re-reading DAC timestamps
+                                # each block turns host timestamp jitter into drops.
                                 continue  # Intentional silence before the reserved send time.
                             if gap < -.001*self.rate:  # 1 ms, matching header timestamp precision.
                                 self.pending = None
                                 self.pending_start = None
+                                self.pending_delay = None
                                 self.deadline_misses += 1
                                 continue  # Device missed the deadline; never present stale metadata.
                         self.current, self.pending = self.pending, None
                         self.pending_start = None
+                        self.pending_delay = None
                         if self.current is None:
                             eof = self.finishing
                             if not eof and not self.scheduled:self.starvations += 1

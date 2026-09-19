@@ -693,16 +693,18 @@ def to_device(args, layout, coder, prepare, grab):
                               f'to {prepare_ms:.1f} ms', file=sys.stderr)
                 if not args.quiet and sent and sent % 30 == 0:
                     elapsed = time.perf_counter()-started
-                    print(f'  {sent} packets, {sent/elapsed:5.2f} fps out, '
-                          f'{misses} missed, {output.starvations} starved',
+                    print(f'  {sent} queued, {output.completed} played, '
+                          f'{output.completed/elapsed:5.2f} fps out, '
+                          f'{output.deadline_misses} missed, {output.starvations} starved',
                           end='\r', flush=True)
         except KeyboardInterrupt:
             pass
         finally:
             output.finish()
     elapsed = time.perf_counter()-started
-    print(f'\nsent {sent} packets in {elapsed:.1f} s '
-          f'({sent/max(elapsed,1e-9):.2f} fps), {misses} deadline misses')
+    print(f'\nqueued {sent} packets, played {output.completed} in {elapsed:.1f} s '
+          f'({output.completed/max(elapsed,1e-9):.2f} fps), '
+          f'{output.deadline_misses} deadline misses')
 
 
 def parser():

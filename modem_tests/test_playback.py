@@ -169,6 +169,40 @@ class PlaybackTests(unittest.TestCase):
         self.assertIsNone(self.output.pending)
         self.assertEqual(self.output.deadline_misses,1)
 
+    def test_dac_timestamp_jitter_does_not_drop_reserved_packet(self):
+        slot = self.output.reserve()
+        packet = np.ones((FRAME, 2), np.float32)
+        self.assertTrue(self.output.submit(packet, slot))
+        # Establish a boundary 384 samples away, then report a spurious
+        # 10 ms DAC jump. The uninterrupted output still has 128 samples to go.
+        first = np.empty((256, 4), np.float32)
+        self.output._callback(first, 256,
+                              SimpleNamespace(outputBufferDacTime=slot.start_time-384/48000),
+                              SimpleNamespace(output_underflow=False))
+        rest = np.empty((128+FRAME, 4), np.float32)
+        self.output._callback(rest, len(rest),
+                              SimpleNamespace(outputBufferDacTime=slot.start_time+.010),
+                              SimpleNamespace(output_underflow=False))
+        self.assertTrue(np.all(first == 0))
+        self.assertTrue(np.all(rest[:128] == 0))
+        np.testing.assert_array_equal(rest[128:, [3, 1]], packet)
+        self.assertEqual(self.output.completed, 1)
+        self.assertEqual(self.output.deadline_misses, 0)
+
+    def test_underflow_invalidates_sample_counted_wait(self):
+        slot = self.output.reserve()
+        self.output.submit(np.ones((FRAME, 2), np.float32), slot)
+        out = np.empty((256, 4), np.float32)
+        self.output._callback(out, 256,
+                              SimpleNamespace(outputBufferDacTime=slot.start_time-.020),
+                              SimpleNamespace(output_underflow=False))
+        self.output._callback(out, 256,
+                              SimpleNamespace(outputBufferDacTime=slot.start_time+.010),
+                              SimpleNamespace(output_underflow=True))
+        self.assertTrue(np.all(out == 0))
+        self.assertTrue(self.output.ready())
+        self.assertEqual(self.output.deadline_misses, 1)
+
     def test_missed_dac_deadline_drops_whole_packet(self):
         with patch('animation_modem.playback.time.time_ns',return_value=1_700_000_000_000_000_000):
             slot=self.output.reserve()
