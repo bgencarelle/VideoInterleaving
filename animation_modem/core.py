@@ -841,6 +841,22 @@ class Decoded:
         return None if self.index is None else self.index - 1
 
 
+@dataclass
+class _DecodeCandidate:
+    """Demodulated candidate before the expensive source inverse.
+
+    Recovery may inspect up to three candidates (joint, left-only, right-only),
+    but only the selected candidate needs to become pixels.  Keep this private:
+    it is an execution detail, not another wire/result type.
+    """
+    result: Decoded
+    sent: np.ndarray
+    per: np.ndarray
+    per_noise: np.ndarray
+    picture: object
+    slots: np.ndarray
+
+
 @lru_cache(maxsize=32)
 def _decode_tables(layout):
     """Fixed wire geometry and phase inverses, shared by every packet."""
@@ -1201,22 +1217,29 @@ def decode_packet(samples, layout, coder, *, body=None, coders=None,
     """
     if body is None:
         body = samples[SYNC_LEN:layout.packet].reshape(layout.symbols, SYMBOL, 2)[:, CP - 4:CP - 4 + N]
-    best = _decode_once(layout, coder, body, coders, header_tolerance)
-    def quality(result, channel):
+    # The FFT is independent of which receiver leg is dropped.  Compute it
+    # once, then let each recovery candidate share the spectrum.  Candidates
+    # defer source reconstruction until selection below.
+    spectrum = rfft(body, n=N, axis=1, workers=1)
+    best = _decode_once(layout, coder, body, coders, header_tolerance,
+                        spectrum=spectrum, probe=True)
+    def quality(candidate, channel):
+        result = candidate.result
         return {'input': channel, 'status': result.status,
                 'identity': result.identity, 'pilot_error': result.pilot_error,
-                'coverage': result.coverage, 'has_picture': result.values is not None}
+                'coverage': result.coverage, 'has_picture': candidate.sent is not None}
 
     attempts = [quality(best, 'joint')] if diagnostics else None
-    if best.identity == 'verified_header' and best.pilot_error is not None \
-            and best.pilot_error < SINGLE_INPUT_RETRY:
+    if best.result.identity == 'verified_header' and best.result.pilot_error is not None \
+            and best.result.pilot_error < SINGLE_INPUT_RETRY:
         if diagnostics:
-            best.extra['decode_attempts'] = attempts
-        return best
-    verified = best.identity == 'verified_header'
+            best.result.extra['decode_attempts'] = attempts
+        return _materialize_candidate(best)
+    verified = best.result.identity == 'verified_header'
     joint, used = best, None
     for drop in (0, 1):
-        alt = _decode_once(layout, coder, body, coders, header_tolerance, drop)
+        alt = _decode_once(layout, coder, body, coders, header_tolerance, drop,
+                           spectrum=spectrum, probe=True)
         if diagnostics:
             attempts.append(quality(alt, 1 - drop))
         # One input's pilot error counts one leg, so it reads lower than a
@@ -1225,25 +1248,51 @@ def decode_packet(samples, layout, coder, *, body=None, coders=None,
         # joint decode, a single input must be genuinely clean to win -- the
         # case it exists for, one mangled leg, measures ~0.001. Against a
         # joint decode that failed outright, anything better wins.
-        if verified and not (alt.identity == 'verified_header'
-                             and alt.pilot_error < SINGLE_INPUT_RETRY):
+        if verified and not (alt.result.identity == 'verified_header'
+                             and alt.result.pilot_error < SINGLE_INPUT_RETRY):
             continue
-        if _recovery_quality(alt) > _recovery_quality(best):
+        if _candidate_quality(alt) > _candidate_quality(best):
             best, used = alt, 1 - drop
     if used is not None:
         # Skew and crosstalk describe the physical path, which only the joint
         # solve sees (one input alone has no second row to compare): keep
         # them, and say which input the picture came from.
         for key in ('skew_samples', 'skew_spread', 'crosstalk'):
-            if key in joint.extra:
-                best.extra[key] = joint.extra[key]
-        best.extra['single_input'] = used
+            if key in joint.result.extra:
+                best.result.extra[key] = joint.result.extra[key]
+        best.result.extra['single_input'] = used
     if diagnostics:
-        best.extra['decode_attempts'] = attempts
-    return best
+        best.result.extra['decode_attempts'] = attempts
+    return _materialize_candidate(best)
 
 
-def _decode_once(layout, coder, body, coders, header_tolerance, drop_rx=None):
+def _candidate_quality(candidate):
+    """Rank a probe without reconstructing its image."""
+    result = candidate.result
+    if candidate.sent is None:
+        return (False, False, -float('inf'))
+    return (True, result.identity == 'verified_header',
+            -float(result.pilot_error if result.pilot_error is not None else np.inf))
+
+
+def _materialize_candidate(candidate):
+    """Run the source inverse only for the selected demodulation candidate."""
+    if candidate.sent is None:
+        return candidate.result
+    values = candidate.picture.inverse(candidate.sent[candidate.slots],
+                                      candidate.per[candidate.slots],
+                                      candidate.per_noise[candidate.slots])
+    if not np.isfinite(values).all():
+        # Keep the result usable for diagnostics; callers already treat a
+        # non-finite picture as unrecoverable. Normally this path is never hit.
+        candidate.result.values = None
+    else:
+        candidate.result.values = values
+    return candidate.result
+
+
+def _decode_once(layout, coder, body, coders, header_tolerance, drop_rx=None,
+                 *, spectrum=None, probe=False):
     """`coders` maps a profile code to the coder that reconstructs it.
 
     The transmitter declares its picture geometry in the header, so a receiver
@@ -1261,7 +1310,8 @@ def _decode_once(layout, coder, body, coders, header_tolerance, drop_rx=None):
     # 1. Primary channel equalization (computes complex gain, weights, and noise variance)
     # The spectrum is kept: a drifted packet's refit below re-solves the
     # channel from it rather than paying a second FFT.
-    spectrum = rfft(body, n=N, axis=1, workers=1)
+    if spectrum is None:
+        spectrum = rfft(body, n=N, axis=1, workers=1)
     equal, weights, variance, coherence, skew = _equalise_spectrum(
         spectrum, layout, drop_rx)
 
@@ -1379,7 +1429,10 @@ def _decode_once(layout, coder, body, coders, header_tolerance, drop_rx=None):
               coherence > (0.50 if layout.top_bin <= 13 else 0.30))
 
     if fields is None and not usable:
-        return Decoded('lost', pilot_error=pilot_error, coverage=coverage)
+        result = Decoded('lost', pilot_error=pilot_error, coverage=coverage)
+        if probe:
+            return _DecodeCandidate(result, None, None, None, coder, None)
+        return result
 
     # 4b. Payload assembly. sent/per/per_noise are filled once into their
     # final (symbol, carrier, channel, IQ) layout instead of building broadcast
@@ -1437,34 +1490,40 @@ def _decode_once(layout, coder, body, coders, header_tolerance, drop_rx=None):
         picture = coders.get(fields[5], coder)
 
     slots = coder_slots(layout, picture)
-    values = picture.inverse(sent[slots], per[slots], per_noise[slots])
+    values = None if probe else picture.inverse(sent[slots], per[slots], per_noise[slots])
 
     tier = ('best' if coverage >= 0.90 else 'better' if coverage >= 0.65
     else 'good' if coverage >= 0.30 else 'poor')
 
     if fields is None:
-        return Decoded('picture_only' if usable else 'lost',
-                       values=values if usable else None, pilot_error=pilot_error,
-                       coverage=coverage, tier=tier if usable else 'none',
-                       extra={'timing_drift_samples': timing_drift,
-                              'clock_error': float(np.median(clock_errors)) if clock_errors else None,
-                              'profile': declared, 'shapes': tuple(picture.grids),
-                              **(skew or {})})
+        result = Decoded('picture_only' if usable else 'lost',
+                         values=values if usable else None, pilot_error=pilot_error,
+                         coverage=coverage, tier=tier if usable else 'none',
+                         extra={'timing_drift_samples': timing_drift,
+                                'clock_error': float(np.median(clock_errors)) if clock_errors else None,
+                                'profile': declared, 'shapes': tuple(picture.grids),
+                                **(skew or {})})
+        if probe:
+            return _DecodeCandidate(result, sent, per, per_noise, picture, slots)
+        return result
 
     flags, absolute, index, count, stamp, _ = fields
     # Keep the packed word intact through CRC checks and header-as-pilot refits.
     # Only the public result exposes the masked frame counter.
     from .aspect import unpack_absolute, ASPECT_RATIOS
     absolute, aspect_code = unpack_absolute(absolute)
-    return Decoded('received' if pilot_error < 0.20 else 'degraded', values=values,
-                   absolute=absolute, index=index, count=count, stamp_ms=stamp,
-                   flags=flags, pilot_error=pilot_error, coverage=coverage,
-                   identity='verified_header', tier=tier,
-                   extra={'aspect_code': aspect_code, 'aspect': ASPECT_RATIOS[aspect_code],
-                          'timing_drift_samples': timing_drift,
-                          'clock_error': float(np.median(clock_errors)) if clock_errors else None,
-                          'profile': declared, 'shapes': tuple(picture.grids),
-                          **(skew or {})})
+    result = Decoded('received' if pilot_error < 0.20 else 'degraded', values=values,
+                     absolute=absolute, index=index, count=count, stamp_ms=stamp,
+                     flags=flags, pilot_error=pilot_error, coverage=coverage,
+                     identity='verified_header', tier=tier,
+                     extra={'aspect_code': aspect_code, 'aspect': ASPECT_RATIOS[aspect_code],
+                            'timing_drift_samples': timing_drift,
+                            'clock_error': float(np.median(clock_errors)) if clock_errors else None,
+                            'profile': declared, 'shapes': tuple(picture.grids),
+                            **(skew or {})})
+    if probe:
+        return _DecodeCandidate(result, sent, per, per_noise, picture, slots)
+    return result
 
 @lru_cache(maxsize=8)
 def _sync_filter(cutoff, rate=REFERENCE_RATE):
