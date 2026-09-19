@@ -40,12 +40,12 @@ requested of it. The real figure is printed once the stream is open, and the
 capture is re-paced to it then. The receiver does not need to be told either:
 it reads the cadence off the preamble.
 
-Screen capture needs `mss` (pip install mss), or use --source ffmpeg, which is
-much faster on macOS and does the scaling itself.
+Screen capture uses FFmpeg's platform backend and scales before piping to Python.
 """
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -156,6 +156,25 @@ def screen_source(region=None):
     return grab
 
 
+def screen_capture_source(fps, region=None, display=None, width=320, spec=None):
+    """Keep screen capture and full-resolution scaling outside the audio process."""
+    if sys.platform == 'darwin' and spec is None and display is None:
+        # AVFoundation indices include cameras and vary with connected devices.
+        # Discover the first screen rather than accidentally opening a webcam.
+        if shutil.which('ffmpeg') is None:
+            raise SystemExit('ffmpeg not found. brew install ffmpeg')
+        listing = subprocess.run(
+            ['ffmpeg', '-nostdin', '-hide_banner', '-f', 'avfoundation',
+             '-list_devices', 'true', '-i', ''],
+            capture_output=True, text=True, timeout=15)
+        match = re.search(r'\[(\d+)\]\s+Capture screen', listing.stderr)
+        if match is None:
+            raise SystemExit('No FFmpeg screen device found; specify --display or '
+                             '--ffmpeg-input.\n' + listing.stderr)
+        display = int(match.group(1))
+    return ffmpeg_source(spec, fps, region, display, width)
+
+
 def ffmpeg_source(spec, fps, region=None, display=None, width=320):
     """Capture through ffmpeg's platform fast path.
 
@@ -188,8 +207,13 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320):
                 '-i', f'{src}+{region[0]},{region[1]}']
     else:
         cmd += ['-i', src]
+    filters = []
+    if region and fmt != 'x11grab':
+        filters.append(f'crop={region[2]}:{region[3]}:{region[0]}:{region[1]}')
     if w is not None:
-        cmd += ['-vf', f'scale={w}:-1']
+        filters.append(f'scale={w}:-1')
+    if filters:
+        cmd += ['-vf', ','.join(filters)]
     cmd += ['-pix_fmt', 'rgb24',
             '-fps_mode', 'passthrough',
             '-c:v', 'ppm', '-f', 'image2pipe', '-an', '-sn', '-']
@@ -527,7 +551,9 @@ def source_for(args, fps):
         from mouse_follow import mouse_follow_source
         return mouse_follow_source(initial_width=args.capture_width)
     if args.source == 'screen':
-        return screen_source(region)
+        return screen_capture_source(args.capture_fps or fps, region,
+                                     args.display, args.capture_width,
+                                     args.ffmpeg_input)
     if args.source == 'ffmpeg':
         return ffmpeg_source(args.ffmpeg_input, args.capture_fps or fps,
                              region, args.display, args.capture_width)
@@ -692,7 +718,8 @@ def parser():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--source', choices=('screen', 'ffmpeg', 'video', 'camera', 'test', 'mouse-follow'),
                     default='test',
-                    help='screen = mss (simple, slow on macOS); ffmpeg = platform fast path; '
+                    help='screen = FFmpeg screen capture (auto-detected on macOS); '
+                         'ffmpeg = explicit platform capture; '
                          'camera = webcam; test = no devices; mouse-follow = dynamic cursor tracking')
     # The profiles the header can name. Every one is DCT/wavelet-sampled; the bake and
     # the wire shapes both come from the profile's geometry.
