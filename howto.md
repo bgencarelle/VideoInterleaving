@@ -56,7 +56,8 @@ Video file:
 Useful sender options:
 
 ```text
---profile color-dct|color-wavelet|hd-dwt
+--profile color-dct|color-wavelet|hd-dwt|tape-80x60
+--wire wide|tape
 --aspect auto|native|16:9|4:3|...
 --encode-filter box|nearest|lanczos|bicubic
 --rotate 0|90|180|270
@@ -69,6 +70,42 @@ Useful sender options:
 --log-frames
 --quiet
 ```
+
+### Wire/profile choices
+
+| Profile and wire | Picture | Rate at 48 kHz | Information band | Purpose |
+|---|---:|---:|---:|---|
+| `hd-dwt`, `wide` | 80x96 | 13.76 fps | 375–20,250 Hz | Wide-band reference |
+| `hd-dwt`, `tape` | 80x96 | 8.72 fps | 375–12,750 Hz | Full HD-DWT payload in tape band |
+| `tape-80x60`, `tape` | 80x60 | 25.21 fps | 375–12,750 Hz | Fast redundant tape profile |
+
+Both tape wires bound the **whole emitted waveform**, including preamble
+harmonics, at 14 kHz. `tape-80x60` sends every one of its 360 DCT coefficients
+twice, on opposite stereo channels and frequency-diverse carriers.
+
+For a genuinely band-limited HD-DWT transmission, use `--wire tape`. It
+reallocates the complete payload below 12.75 kHz, bounds total emission at
+14 kHz, and lowers frame rate instead of discarding upper carriers:
+
+```bash
+.venv/bin/python modem_screen.py --source test --profile hd-dwt \
+  --wire tape --frames 30 --write scratch/tape-wire.wav
+```
+
+For the 25 fps lower-resolution tape profile:
+
+```bash
+.venv/bin/python modem_screen.py --source test --profile tape-80x60 \
+  --wire tape --frames 50 --write scratch/tape-80x60.wav
+```
+
+This reconstructs 80x60 at 25.21 fps using luma-heavy DCT allocation. It is a
+real 375-12750 Hz wire with total emission bounded at 14 kHz. Every coefficient
+has a diversified opposite-channel copy.
+
+At a 96 kHz output-device rate, the sender resamples automatically: carrier
+frequencies and picture rate remain the values above. The device receives twice
+as many samples per frame; it does not play the modem twice as fast.
 
 `--write` creates a WAV instead of opening an audio device. This is the best
 way to make a repeatable test recording:
@@ -92,6 +129,9 @@ Run this in a second terminal:
 .venv/bin/python utilities/modem_v3_check.py live-receive \
   --device "BlackHole 2ch"
 ```
+
+The receiver automatically identifies wide HD, full-payload tape HD, and the
+80x60 tape wire. It does not need `--codec`, `--profile`, or `--wire` arguments.
 
 Useful receiver options:
 
@@ -146,7 +186,8 @@ Decoder options:
 ```text
 --start N                 Start at frame N.
 --frames N                Decode N frames; 0 means all.
---scale N                 PNG display scale; native output is 80x96.
+--scale N                 PNG display scale; native output follows the profile
+                          (80x96 or 80x60).
 --max-carrier-hz HZ      Ignore carriers above HZ during decoding.
 --stabilize-chroma        Opt into experimental chroma stabilization.
 --raw                     Compatibility option; raw decoding is now default.
@@ -156,6 +197,14 @@ Decoder options:
 Raw decoding is the default and should be used for tape and measurements.
 `--stabilize-chroma` is an experimental lossy-media preview option, not a tape
 recovery feature.
+
+The offline decoder also identifies all three wire/profile combinations
+automatically:
+
+```bash
+.venv/bin/python tools/decode_wav.py scratch/tape-80x60.wav \
+  --out scratch/tape-80x60-decoded --frames 0 --raw
+```
 
 ## Test an impaired WAV without changing the file
 
@@ -222,6 +271,40 @@ Measure luma and chroma independently against reference PNGs:
 ```
 
 This reports separate Y, Cb, and Cr PSNR, SSIM, MAE, and normalized RMSE.
+
+## Run the 96 kHz synthetic tape matrix
+
+Full-payload 80x96 tape wire:
+
+```bash
+.venv/bin/python tools/test_tape_matrix.py \
+  --profile hd-dwt \
+  --frames 30 \
+  --out scratch/tape-matrix-hd
+```
+
+Redundant 80x60/25 fps tape wire:
+
+```bash
+.venv/bin/python tools/test_tape_matrix.py \
+  --profile tape-80x60 \
+  --frames 50 \
+  --out scratch/tape-matrix-80x60
+```
+
+Run selected cases with repeated `--only`:
+
+```bash
+.venv/bin/python tools/test_tape_matrix.py \
+  --profile tape-80x60 \
+  --only type-ii --only worn-deck
+```
+
+The matrix assumes 96 kHz playback and covers band limits, colored hiss,
+wow/flutter, azimuth, crosstalk, gain mismatch, DC/hum, bias leakage,
+saturation, dropouts, approximate NR pumping, and combined Type I/II/worn-deck
+cases. Results are written to `summary.csv` with Y/Cb/Cr PSNR and SSIM. These
+are deterministic regression tests, not substitutes for a real tape capture.
 
 ## Synthetic modem bench
 

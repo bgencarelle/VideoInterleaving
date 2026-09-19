@@ -86,13 +86,17 @@ class Layout:
                                # header_width of the band, so the rest of every
                                # header symbol was silence -- 30 of 50 carriers
                                # x 4 symbols on lean-v3, 480 slots, +21.8%.
-                               # Free in level terms: the preamble holds the
-                               # packet peak either way, so nothing renormalises
+                                # Free in level terms: the preamble holds the
+                                # packet peak either way, so nothing renormalises
+    emission_ceiling: float = 0 # mandatory whole-packet low-pass; unlike a
+                                # carrier ceiling this also bounds preamble edges
 
     def __post_init__(self):
         if not (isinstance(self.top_bin,int) and 10<=self.top_bin<=63
                 and isinstance(self.image_symbols,int) and self.image_symbols>0):
             raise ValueError('Layout requires top_bin 10..63 and positive image_symbols')
+        if not np.isfinite(self.emission_ceiling) or self.emission_ceiling < 0:
+            raise ValueError('emission_ceiling must be finite and nonnegative')
 
     @cached_property
     def carriers(self):
@@ -729,7 +733,7 @@ FOLDER_LIMIT = 16
 # That is deliberate -- see the purge; the magic is not bumped because nothing
 # old is worth keeping. Codes 2 and 3 were wavelet; keeping two codes for the
 # two transforms. Code 2 is reserved for future v5 (which uses different header format).
-PROFILE_CODES = ('color-dct', 'color-wavelet', 'hd-dwt')
+PROFILE_CODES = ('color-dct', 'color-wavelet', 'hd-dwt', 'tape-80x60')
 # Two header bits hold four codes. The transform (DCT vs wavelet) rides in the
 # profile name, so the receiver reads the whole story from the header and there
 # is no shared state for the two ends to disagree about.

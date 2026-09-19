@@ -22,6 +22,7 @@ import numpy as np
 from animation_modem import transport3 as V3
 from animation_modem.imaging import display_image, stabilize_chroma
 from animation_modem.wavelet import hd_dwt_coder
+from animation_modem.engines import coders_for
 from animation_modem.audio_common import InputLevel
 
 SCALE = 4  # nice view size for the decoded 80x96 grid (320x384 PNG)
@@ -73,9 +74,14 @@ def main():
     audio, rate = load_wav(args.wav)
     coder, grids = build_coder()
     layout = V3.WIRE_HD
-    coders = {2: coder}
+    candidates = []
+    for wire, profile in ((V3.WIRE_HD, 2), (V3.WIRE_TAPE, 2),
+                          (V3.WIRE_TAPE_25, 3)):
+        wire_coders = coders_for(wire)
+        candidates.append((wire, wire_coders[profile], wire_coders))
+    coders = coders_for(layout)
     rx = V3.Receiver(layout, coder, coders=coders,
-                     candidates=[(layout, coder, coders)], input_rate=rate,
+                     candidates=candidates, input_rate=rate,
                      diagnostics=args.verbose,
                      max_carrier_hz=args.max_carrier_hz)
     level = InputLevel()
@@ -86,13 +92,17 @@ def main():
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    frame_samples = layout.frame             # stereo pairs per frame
-    start_at = args.start * frame_samples
+    # Wire candidates have different frame lengths. Feed the complete recording
+    # and apply --start/--frames to decoded pictures, not to a guessed number of
+    # input samples from the fallback wire.
+    frame_samples = layout.frame
+    start_at = 0
     total = len(audio)
-    limit = min(total, start_at + (args.frames or (1 << 62)) * frame_samples)
+    limit = total
 
     sent = 0
     decoded = 0
+    available = 0
     seen = {}
     files = []
     previous_values = None
@@ -110,6 +120,9 @@ def main():
             sent += 1
             seen[result.identity] = seen.get(result.identity, 0) + 1
             if result.values is None:
+                continue
+            available += 1
+            if available <= args.start or (args.frames and decoded >= args.frames):
                 continue
             decoded += 1
             if args.stabilize_chroma:
@@ -130,6 +143,9 @@ def main():
         sent += 1
         seen[result.identity] = seen.get(result.identity, 0) + 1
         if result.values is not None:
+            available += 1
+            if available <= args.start or (args.frames and decoded >= args.frames):
+                continue
             decoded += 1
             if args.stabilize_chroma:
                 result.values = stabilize_chroma(
@@ -146,11 +162,13 @@ def main():
 
     if args.verbose:
         print(json.dumps(recovery_record(rx, level, final=True)), flush=True)
-    print(f'input: {rate} Hz, {total // frame_samples} frames, '
+    active = rx.layout
+    active_coder = rx.coder
+    print(f'input: {rate} Hz, {total // active.frame} frames, '
           f'peak {float(np.max(np.abs(audio))):.3f}')
-    print(f'wire: {layout.name} frame={layout.frame} capacity={layout.capacity}')
-    print(f'coder: {type(coder).__name__} shapes={coder.shapes} '
-          f'grids={coder.grids} count={coder.count}')
+    print(f'wire: {active.name} frame={active.frame} capacity={active.capacity}')
+    print(f'coder: {type(active_coder).__name__} shapes={active_coder.shapes} '
+          f'grids={active_coder.grids} count={active_coder.count}')
     print(f'packets: {sent} decoded images: {decoded} identities: {seen}')
     for name, ident, status, prof, std in files[:8]:
         print(f'  {name.name}: {ident}/{status} profile={prof} '

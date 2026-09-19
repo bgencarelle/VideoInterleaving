@@ -130,6 +130,54 @@ class CoderRecoveryTests(unittest.TestCase):
         err = lambda v: np.mean((v - self.clean)**2)
         self.assertLess(err(with_copies), err(without)*.8)
 
+    def test_luma_first_gate_keeps_shape_before_detail_and_color(self):
+        """At one confidence, broad luma must be the last thing erased."""
+        confidence = np.full(self.coder.n_orig, .50)
+        gate = self.coder.recovery_gate(confidence)
+        y_ll = 0
+        y_detail = (96 >> 2)*(80 >> 2)
+        cb_detail = self.coder.keep[0] + (48 >> 2)*(40 >> 2)
+        self.assertGreater(gate[y_ll], gate[y_detail])
+        self.assertGreater(gate[y_detail], gate[cb_detail])
+        self.assertEqual(gate[cb_detail], 0.0)
+
+    def test_high_confidence_coefficients_are_untouched(self):
+        gate = self.coder.recovery_gate(np.full(self.coder.n_orig, .85))
+        np.testing.assert_array_equal(gate, np.ones(self.coder.n_orig))
+
+    def test_unreliable_luma_detail_becomes_soft_not_a_false_edge(self):
+        """A large low-confidence tape error must not become image detail."""
+        index = (96 >> 2)*(80 >> 2) + 17       # luma LH, not protected LL
+        sent = self.sent.copy()
+        rel = np.ones(self.coder.count)
+        noise = np.full(self.coder.count, 1e-6)
+        sent[index] += 8.0
+        rel[index] = .02
+        noise[index] = .5
+        # Remove any repeat so the test represents one untrustworthy reading.
+        copies = np.flatnonzero(self.coder.copy_of == index) + self.coder.n_orig
+        rel[copies] = 1e-6
+        noise[copies] = .5
+        got = self.coder.inverse(sent, rel, noise)
+        quiet = self.coder.inverse(self.sent, rel, noise)
+        false_detail = np.mean((got[:96*80] - quiet[:96*80])**2)
+
+        # The former Wiener-only result, retained here as the regression
+        # baseline: posterior weighting alone leaves a visible random edge.
+        def old_luma(observed):
+            a = self.coder.gains*np.maximum(rel, 1e-6)
+            num, den = a*observed/noise, a*a/noise
+            top = num[:self.coder.n_orig].copy()
+            bottom = den[:self.coder.n_orig].copy()
+            np.add.at(top, self.coder.copy_of, num[self.coder.n_orig:])
+            np.add.at(bottom, self.coder.copy_of, den[self.coder.n_orig:])
+            kept = self.coder.variance*top/(1 + self.coder.variance*bottom)
+            flat = np.zeros(96*80)
+            flat[:self.coder.keep[0]] = kept[:self.coder.keep[0]]
+            return self.coder._unpack(flat, 96, 80).ravel()
+        old_false_detail = np.mean((old_luma(sent) - old_luma(self.sent))**2)
+        self.assertLess(false_detail, old_false_detail*.01)
+
 
 class BandTableTests(unittest.TestCase):
     def test_band_rms_table_matches_its_measurement(self):

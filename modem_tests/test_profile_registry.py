@@ -92,10 +92,11 @@ class ProfileCodeTests(unittest.TestCase):
         follows the name straight to the right coder, so a wavelet recording
         decodes with the wavelet inverse and a DCT recording with the DCT.
         Code 2 is reserved for hd-dwt (v5, different header format)."""
-        self.assertEqual(len(v3.PROFILE_CODES), 3)
+        self.assertEqual(len(v3.PROFILE_CODES), 4)
         self.assertEqual(v3.profile_name(1), 'color-wavelet')
         self.assertEqual(v3.profile_name(2), 'hd-dwt')
-        for name, code in (('color-dct', 0), ('color-wavelet', 1), ('hd-dwt', 2)):
+        for name, code in (('color-dct', 0), ('color-wavelet', 1),
+                           ('hd-dwt', 2), ('tape-80x60', 3)):
             self.assertEqual(v3.profile_name(code), name)
 
 

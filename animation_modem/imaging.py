@@ -28,6 +28,9 @@ PROFILES = {
     'color-dct': ((40, 48), (20, 24)),
     'color-wavelet': ((40, 48), (20, 24)),
     'hd-dwt': ((40, 48), (20, 24)),
+    # 25 fps tape profile: every DCT value is sent twice on diverse stereo
+    # slots. 20x15 keeps exact 4:3 luma geometry; coarse chroma suppresses bands.
+    'tape-80x60': ((20, 15), (6, 5)),
 }
 # Sampling grid per profile -- the DECODE resolution, always the baked 80x96.
 # SourceCoder truncates the grid's transform to the wire shape -- ONE transform,
@@ -37,7 +40,8 @@ PROFILES = {
 # full-resolution 80x96 picture (JPEG2000-style truncation).
 PROFILE_GRIDS = {'color-dct': ((80, 96), (40, 48)),
                  'color-wavelet': ((80, 96), (40, 48)),
-                 'hd-dwt': ((80, 96), (40, 48))}
+                  'hd-dwt': ((80, 96), (40, 48)),
+                  'tape-80x60': ((80, 60), (40, 30))}
 DEFAULT_PROFILE = 'color-dct'
 # v5 wire budget: WIRE_HD's Layout.capacity = header_capacity +
 # image_symbols*data_bins*4 = 3680. wavelet.hd_dwt_coder() fills exactly this

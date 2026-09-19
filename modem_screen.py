@@ -494,10 +494,13 @@ def build(args):
     """
     if args.profile not in PROFILES:
         raise SystemExit(f'Unknown profile {args.profile}')
+    wire = getattr(args, 'wire', 'wide')
+    if wire == 'tape' and args.profile not in ('hd-dwt', 'tape-80x60'):
+        raise SystemExit('--wire tape requires hd-dwt or tape-80x60')
     
     # v5 profile uses different wire layout
     if args.profile == 'hd-dwt':
-        layout = V3.WIRE_HD
+        layout = V3.WIRE_TAPE if wire == 'tape' else V3.WIRE_HD
         # wavelet.hd_dwt_coder() is the one constructor, shared with the
         # receiver and tools: both ends must build it identically.
         from animation_modem.wavelet import hd_dwt_coder
@@ -521,14 +524,19 @@ def build(args):
         V3.profile_code(args.profile)
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
-    layout = V3.WIRE
+    layout = V3.WIRE_TAPE_25 if args.profile == 'tape-80x60' else V3.WIRE
     wanted = plane_shapes(args.profile)
     grids = plane_grids(args.profile)
     shapes = fit_shapes(wanted, layout.capacity)
     if shapes != wanted:
         grids = shapes          # see coder_for: a shrunk corner is not a corner
-    coder_cls = WaveletCoder if 'wavelet' in args.profile else SourceCoder
-    coder = coder_cls(shapes, grids=grids)
+    if args.profile == 'tape-80x60':
+        from animation_modem.wavelet import tape_80x60_coder
+        coder = tape_80x60_coder()
+        shapes, grids = coder.shapes, coder.grids
+    else:
+        coder_cls = WaveletCoder if 'wavelet' in args.profile else SourceCoder
+        coder = coder_cls(shapes, grids=grids)
     if coder.truncated:
         print(f'{args.profile}: sampling {grids[0][1]}x{grids[0][0]} and sending '
               f'the low-frequency corner in {coder.count} slots. The profile is '
@@ -730,6 +738,10 @@ def parser():
                     help='Picture geometry. Each samples a grid 2x finer than '
                          'it transmits and sends the low-frequency corner; the '
                          'receiver reads which was sent from the header.')
+    ap.add_argument('--wire', choices=('wide', 'tape'), default='wide',
+                    help='wide uses carriers through 20.25 kHz; tape reallocates '
+                         'the complete hd-dwt picture below 12.75 kHz and bounds '
+                         'the emitted waveform at 14 kHz (lower frame rate)')
     ap.add_argument('--device', type=device, help='Audio output device')
     ap.add_argument('--channels', type=pair, default=(0, 1))
     ap.add_argument('--latency', default='low')
@@ -788,6 +800,10 @@ def parser():
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    # Keep the selected wire explicit at the CLI boundary; build() also uses a
+    # compatibility fallback for older tests/callers that construct Namespace.
+    if args.wire == 'tape' and args.profile not in ('hd-dwt', 'tape-80x60'):
+        raise SystemExit('--wire tape requires hd-dwt or tape-80x60')
 
     if args.list_devices:
         from animation_modem.audio_common import sounddevice

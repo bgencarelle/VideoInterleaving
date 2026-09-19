@@ -104,12 +104,20 @@ def candidates_for(engine):
     The requested engine's wire goes first so its coder is the fallback.
     """
     out, seen = [], set()
-    for eng in [engine, *ENG.ENGINES.values()]:
-        if eng.wire.name in seen:
-            continue
-        seen.add(eng.wire.name)
-        coders = coders_for(eng.wire)
-        out.append((eng.wire, coders[eng.profile_code(eng.profiles[0])], coders))
+
+    def add(layout, profile):
+        if layout.name in seen:
+            return
+        seen.add(layout.name)
+        coders = coders_for(layout)
+        fallback = coders[V3.profile_code(profile)]
+        out.append((layout, fallback, coders))
+
+    add(engine.wire, engine.profiles[0])
+    add(V3.WIRE_TAPE, 'hd-dwt')
+    add(V3.WIRE_TAPE_25, 'tape-80x60')
+    for eng in ENG.ENGINES.values():
+        add(eng.wire, eng.profiles[0])
     return out
 
 

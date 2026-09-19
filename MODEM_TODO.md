@@ -371,3 +371,134 @@ near-DC tones.
   dropouts.
 - [ ] Record practical settings and failure characteristics for each medium;
   do not optimize only for a synthetic maximum-bitrate case.
+
+### Real tape signal-chain variables
+
+Do not model a tape machine as only a low-pass filter plus white noise.
+Recording normally uses ultrasonic **AC bias** (while electronics or capture
+hardware may also introduce DC offset), and consumer decks may apply
+Dolby/dbx-style noise reduction. Noise reduction is level- and
+frequency-dependent companding, so it can change carrier amplitudes over time
+and damage OFDM relationships despite an apparently adequate passband.
+
+- [ ] Record whether tape tests use no NR, Dolby B/C/S, dbx, or another system,
+  and whether playback matches the recording setting.
+- [ ] Capture silence and a zero-centered test signal to measure DC offset,
+  bias leakage, mains hum, and stationary noise before testing pictures.
+- [ ] Compare NR off against each available NR mode using the same recording,
+  level, and source waveform.
+- [ ] Measure level sweeps as well as frequency sweeps to expose companding,
+  pumping, attack/release behavior, and modulation of nearby carriers.
+- [ ] Check for ultrasonic bias leakage or intermodulation in the digitized
+  recording; do not assume a 48 kHz capture represents energy above Nyquist.
+- [ ] Keep real tape captures as the authority. Synthetic DC offset and simple
+  companding tests may reproduce a failure but are not substitutes for the
+  actual deck and tape formulation.
+
+### Revised tape direction: robust high-resolution encode/decode
+
+Real tape currently shows substantially more noise and color banding than the
+phaser/distortion emulator. That emulator is not a sufficient acceptance test:
+its damage is comparatively smooth and deterministic, while tape combines
+colored noise, dropouts, azimuth/skew, wow/flutter, saturation, crosstalk, bias
+leakage, and possibly time-varying noise-reduction gain.
+
+The active direction remains the baked **80x96 higher-resolution image**. Do
+not abandon it for a permanently coarse wire. Improve encoding, acquisition,
+reliability estimation, and reconstruction so tape noise removes trustworthy
+detail progressively rather than filling the high-resolution result with false
+detail and false color. Stereo redundancy remains an experiment, but resolution
+is a fixed design objective rather than the first thing traded away.
+
+Implemented experiment: `modem_screen.py --profile hd-dwt --wire tape` uses a
+real lower-band encoder. It reallocates the complete 3680-slot HD-DWT payload
+to carriers at 375-12750 Hz using 30 image symbols, reconstructs the same 80x96
+image at 8.72 fps, and mandatorily limits the whole emitted waveform (including
+the preamble) to 14 kHz. This is categorically different from `--emit-ceiling`
+on the wide wire, which discards already-allocated upper carriers. Validate the
+new wire on real tape before making it the default.
+
+The 8.72 fps result is a capacity baseline, **not an acceptable final frame
+rate**. Its arithmetic is: 34 carriers minus 4 pilots = 30 data carriers;
+stereo complex symbols carry 120 real coefficient slots per image symbol; four
+dense header symbols reclaim 160 slots; `(3680-160)/120` therefore requires 30
+image symbols. With training, header, sync, and guard this is 5504 samples, or
+8.72 fps at 48 kHz. Do not blindly tune that number: improve source allocation.
+
+Promising next tape coder: retain all 1920 luma wavelet coefficients but retain
+only the 120-coefficient LL base from each chroma plane. That is 2160 original
+coefficients, still reconstructing the 80x96 luma image with stable coarse
+color. A 19-image-symbol tape frame has 2440 slots, leaving 280 strategically
+placed repeats and producing 3920 samples / **12.24 fps**. This directly spends
+capacity according to the stated priority (luma first) instead of transmitting
+480 chroma coefficients per plane plus 800 generic repeats. Benchmark this
+profile against the 8.72 fps full-payload baseline and real tape before choosing
+the final wire. Also evaluate whether a stronger header code can safely use
+both stereo header lanes; existing `header_split` alone is known to lose
+diversity and is not the answer merely because it reaches 9.2 fps.
+
+Implemented lower-resolution alternative: `--profile tape-80x60 --wire tape`
+uses the same 375-12750 Hz carriers and 14 kHz whole-waveform ceiling, but a
+1904-sample frame runs at **25.21 fps**. Its 760-slot budget carries 360
+luma-prioritized DCT values (20x15 luma and 6x5 Cb/Cr), each sent twice on
+frequency-diverse opposite-channel slots (720 total), reconstructed on an
+80x60 / 40x30 sampling grid. This is genuinely lower
+resolution and is separate from the high-resolution tape direction; compare
+both on real tape rather than replacing the 80x96 goal silently.
+
+- [ ] Re-run the same real tape capture with V3/color-DCT and V5/HD-DWT, using
+  identical levels, frames, deck settings, and objective Y/Cb/Cr measurements.
+- [ ] Treat V3 as a serious tape candidate. Its naturally coarse 40x48 luma and
+  20x24 chroma representation, DCT energy compaction, and lack of a multilevel
+  inverse-wavelet reconstruction may fail more gracefully under coefficient
+  noise than V5.
+- [ ] Test stereo-redundant protection for the most important high-resolution
+  coefficients instead of using stereo only as a 2x-capacity MIMO path.
+- [ ] Do not place duplicate coefficients on the same frequencies on both
+  channels. Diversify copies across channel, carrier, symbol/time, and tape
+  direction so one dropout or narrow noisy band does not erase both.
+- [ ] Decode each channel independently first, then fuse per coefficient using
+  pilot error, equalizer variance, clipping, and consistency between copies.
+  Do not average an obviously bad copy into a good one.
+- [ ] Protect luma DC/low DCT terms and average Cb/Cr first. Erase uncertain
+  detail coefficients to zero so the result becomes softer rather than noisy
+  or falsely colored.
+- [ ] Preserve the 80x96 reconstruction while making uncertain detail decay
+  toward a stable estimate rather than random noise or false color.
+
+### Optional calibration leader and stronger preamble
+
+A long optional leader may train the receiver for a particular deck, tape,
+noise-reduction setting, level, and capture interface. A single constant tone
+only measures one frequency and cannot characterize the stereo matrix, colored
+noise, azimuth, companding, or carrier-dependent phase. Test a deterministic
+multi-frequency, multi-level stereo calibration sequence instead.
+
+- [ ] Design an optional leader of up to about 10 seconds containing silence,
+  known pulse timing, stepped levels, per-carrier probes, both stereo polarities,
+  and repeated known OFDM symbols.
+- [ ] Estimate DC offset, noise floor/covariance, hum and narrow interferers,
+  per-carrier complex gain, stereo crosstalk, channel skew/azimuth, clipping,
+  and level-dependent companding from the leader.
+- [ ] Use the learned channel only as a prior. Continue tracking pilots and
+  pulse timing per packet because wow/flutter, dropouts, and NR gain vary after
+  the leader.
+- [ ] Keep every frame independently acquirable with the existing pulse-counted
+  timing path. Starting playback mid-tape must still work without the leader;
+  do not replace edge-counted acquisition with FFT correlation.
+- [ ] Evaluate a stronger per-frame preamble with more robust in-band edges or
+  repeated timing evidence, measuring the bandwidth/frame-rate cost against
+  real tape acquisition failures.
+- [ ] Store and report calibration confidence. Fall back safely to the ordinary
+  decoder when the leader is absent, stale, or inconsistent with current audio.
+
+### Future idea: holographic-style block spreading
+
+Keep this as an idea, not the current direction. Distribute each important
+high-resolution coefficient across channel, carrier, and a short bounded time
+window using a deterministic orthogonal transform such as Walsh-Hadamard plus
+interleaving and redundancy. Local wire damage would then become diffuse weak
+image error rather than loss of one region or color component. Use short,
+independently recoverable blocks and erase unreliable observations before the
+inverse transform; one unbounded transform would spread a severe error across
+the whole picture and make recovery latency unacceptable.

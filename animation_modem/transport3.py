@@ -15,7 +15,8 @@ from .core import (REFERENCE_RATE, N, CP, SYMBOL, SYNC_LEN, GUARD, HEADER_GAIN,
                          phases, pack_header, pack_folders, decode_packet,
                          default_allocation, resample_packet, _sample_at,
                          _body_walk, _decode_tables, FOLDER_LIMIT,
-                         band_limited, emit_length, emit_ratio,
+                          band_limited, emit_length, emit_ratio,
+                          bound_emission,
                          PROFILE_CODES, profile_code, profile_name,
                          _recovery_quality)
 
@@ -45,7 +46,8 @@ def _biphase(bits=PREAMBLE_BITS, half=HALF, amplitude=PREAMBLE_AMPLITUDE):
     return wave*(amplitude/np.max(np.abs(wave)))
 
 
-# The one wire. There is exactly one layout now; the old preset table is gone.
+# The normal wide wire. The old preset table is gone; WIRE_TAPE below is the
+# explicit lower-band HD alternative rather than another preset permutation.
 #
 # Chosen by the EQ+noise sweep: 54 top bin (375-20250 Hz), carriers spread so
 # the image planes ride the middle of the band and EQ tints nothing, a LOW-band
@@ -72,6 +74,24 @@ WIRE = Layout(top_bin=54, image_symbols=14, name='wire',
 WIRE_HD = Layout(top_bin=54, image_symbols=16, name='wire-hd',
                  progressive=True, orthogonal_training=True,
                  spread_carriers=True, dense_header=True, header_width=20)
+
+# The actual tape wire: the complete 3680-slot HD-DWT payload is reallocated
+# below 12.75 kHz rather than encoded wide and filtered afterward. Thirty image
+# symbols retain the full 80x96 reconstruction at 8.72 fps. The mandatory
+# 14 kHz emission ceiling also removes the square-edged preamble's ultrasonic
+# tail, so the whole waveform -- not merely its information carriers -- fits.
+WIRE_TAPE = Layout(top_bin=34, image_symbols=30, name='wire-tape',
+                   progressive=True, orthogonal_training=True,
+                   spread_carriers=True, dense_header=True, header_width=20,
+                   emission_ceiling=14000)
+
+# Fast lower-resolution tape wire. Five image symbols plus the dense header
+# carry 760 values in 1904 samples: 25.21 fps at 48 kHz. The tape-80x60 DCT
+# profile uses 748 of those slots and reconstructs an 80x60 image.
+WIRE_TAPE_25 = Layout(top_bin=34, image_symbols=5, name='wire-tape-25',
+                      progressive=True, orthogonal_training=True,
+                      spread_carriers=True, dense_header=True, header_width=20,
+                      emission_ceiling=14000)
 
 # v5 preamble: shorter biphase-mark for 1600-sample frame
 # 12 bits = 1.5kHz/3kHz edges, ~192 samples @ 8 samples/half-bit
@@ -513,7 +533,7 @@ def encode(values, layout, coder, absolute, index, count, stamp_ms=0, flags=0,
     # Add preamble at full amplitude AFTER normalization
     out[16:16+len(PREAMBLE), 0] = PREAMBLE
     out[16:16+len(PREAMBLE), 1] = PREAMBLE
-    return out
+    return bound_emission(out, layout.emission_ceiling, REFERENCE_RATE)
 
 
 # --------------------------------------------------------------------------

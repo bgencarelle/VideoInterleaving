@@ -32,6 +32,10 @@ def coder_for(profile, layout=None):
         from .wavelet import hd_dwt_coder
         coder = hd_dwt_coder()
         return coder, coder.shapes
+    if profile == 'tape-80x60':
+        from .wavelet import tape_80x60_coder
+        coder = tape_80x60_coder()
+        return coder, coder.grids
     grids = imaging.plane_grids(profile)
     if layout is not None and \
             sum(int(np.prod(s)) for s in shapes) > layout.capacity:

@@ -11,6 +11,7 @@ allocation and Wiener de-bias inherited from ``SourceCoder`` still apply) and
 trivial to invert exactly with periodic boundaries.
 """
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 from .core import SourceCoder, _slot_order
 
@@ -764,7 +765,32 @@ class Cdf97Coder(SourceCoder):
         gains = np.sqrt(full/np.mean(full))
         self.gains = gains/np.sqrt(np.mean(gains**2))
         self.variance = sigma**2
+        # Posterior-confidence floors for tape recovery. Luma LL carries the
+        # broad brightness and shape, so it survives at very low confidence.
+        # Detail needs stronger evidence, and false chroma is more objectionable
+        # than missing chroma detail. The gate acts after repeat fusion and does
+        # not alter coefficients whose posterior confidence is at least .85.
+        floors = []
+        for plane, ((rows, cols), k) in enumerate(zip(self.grids, self.keep)):
+            ll = (rows >> self.levels) * (cols >> self.levels)
+            if plane == 0:
+                floors.extend([.05]*ll + [.45]*(k-ll))
+            else:
+                floors.extend([.25]*ll + [.65]*(k-ll))
+        self.recovery_floor = np.asarray(floors)
         self._slots = {}
+
+    def recovery_gate(self, confidence):
+        """Luma-first coefficient gate for a noisy tape posterior.
+
+        Below each band's floor the observation is an erasure. Between the
+        floor and .85 it fades in; above .85 it is untouched. This preserves
+        the current wire and turns uncertain detail into softness instead of
+        synthesizing high-resolution noise.
+        """
+        confidence = np.asarray(confidence, float)
+        return np.clip((confidence - self.recovery_floor) /
+                       (.85 - self.recovery_floor), 0.0, 1.0)
 
     def forward(self, values):
         """Pixels in (source_count), wire values out (count): originals, then copies."""
@@ -796,6 +822,8 @@ class Cdf97Coder(SourceCoder):
             np.add.at(top, cp, num[n0:])
             np.add.at(bottom, cp, den[n0:])
             kept = self.variance*top/(1 + self.variance*bottom)
+            confidence = self.variance*bottom/(1 + self.variance*bottom)
+            kept *= self.recovery_gate(confidence)
         out, offset = [], 0
         for (rows, cols), k in zip(self.grids, self.keep):
             flat = np.zeros(rows*cols)
@@ -852,6 +880,85 @@ class Cdf97Coder(SourceCoder):
             subbands.setdefault(level, {})[band] = flat[idx:idx+sr*sc].reshape(sr, sc)
             idx += sr*sc
         return cdf97_inverse_2d(subbands, self.levels, out_shape=(rows, cols))
+
+
+class StereoRepeatCoder(SourceCoder):
+    """DCT coder whose complete compact picture is repeated on the other leg."""
+
+    MIN_COPY_SPREAD = 8
+
+    def __init__(self, shapes, grids):
+        super().__init__(shapes, grids=grids)
+        self.n_orig = self.count
+        self.base_gains = self.gains.copy()
+        self.copy_of = np.arange(self.n_orig)
+        self.count = 2*self.n_orig
+        self.gains = np.concatenate([self.base_gains, self.base_gains])
+        self._slots = {}
+
+    def forward(self, values):
+        planes = self._split(np.asarray(values, float), self.grids)
+        kept = [self._forward_transform(plane, rows, cols).ravel()
+                for plane, (rows, cols) in zip(planes, self.shapes)]
+        base = np.concatenate(kept)*self.base_gains
+        return np.concatenate([base, base])
+
+    def inverse(self, sent, reliability=None, noise_variance=None):
+        y = np.asarray(sent, float)
+        if reliability is None:
+            x = y/self.gains
+            kept = (x[:self.n_orig] + x[self.n_orig:])/2
+        else:
+            a = self.gains*np.maximum(np.asarray(reliability, float), 1e-6)
+            nv = np.maximum(np.asarray(noise_variance, float), 1e-20)
+            num = a*y/nv
+            den = a*a/nv
+            top = num[:self.n_orig] + num[self.n_orig:]
+            bottom = den[:self.n_orig] + den[self.n_orig:]
+            prior = self.variance
+            kept = prior*top/(1 + prior*bottom)
+        out = []
+        for corner, (rows, cols), grid in zip(
+                self._split(kept, self.shapes), self.shapes, self.grids):
+            out.append(self._inverse_transform(corner, rows, cols, grid).ravel())
+        return np.concatenate(out)
+
+    def slots(self, layout):
+        if layout in self._slots:
+            return self._slots[layout]
+        if self.count > layout.capacity:
+            raise ValueError(f'{self.count} values exceed {layout.name} capacity')
+        bins, chans = _slot_carriers(layout)
+        order = _slot_order(layout)
+        by_channel = [order[chans[order] == channel] for channel in (0, 1)]
+        per_leg = self.n_orig//2
+        # Alternate coefficient homes across legs so luma and chroma are not
+        # concentrated on one track. Leave enough opposite-leg slots for every
+        # copy before considering the layout's unused tail.
+        originals = np.column_stack([by_channel[0][:per_leg],
+                                     by_channel[1][:per_leg]]).ravel()
+        pools = [by_channel[0][per_leg:], by_channel[1][per_leg:]]
+        mapping = np.empty(self.count, int)
+        mapping[:self.n_orig] = originals
+        # Solve each cross-leg assignment globally. A greedy nearest-free pick
+        # strands edge carriers at the end and forces a few adjacent copies even
+        # though a fully frequency-diverse matching exists.
+        for other, pool in enumerate(pools):
+            home_indices = np.flatnonzero(chans[originals] != other)
+            home = originals[home_indices]
+            distance = np.abs(bins[home, None]-bins[pool][None, :])
+            cost = (1e6*(distance < self.MIN_COPY_SPREAD) +
+                    np.abs(bins[pool]-TAPE_CENTRE_BIN)[None, :])
+            rows, columns = linear_sum_assignment(cost)
+            mapping[self.n_orig+home_indices[rows]] = pool[columns]
+        mapping.setflags(write=False)
+        self._slots[layout] = mapping
+        return mapping
+
+
+def tape_80x60_coder():
+    return StereoRepeatCoder([(15, 20), (5, 6), (5, 6)],
+                             [(60, 80), (30, 40), (30, 40)])
 
 
 def _slot_carriers(layout):
