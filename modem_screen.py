@@ -271,7 +271,10 @@ def camera_source(index=0, fps=30, width=320, spec=None):
     Keep full-resolution RGB traffic out of Python's audio-producing process.
     """
     if sys.platform == 'darwin':
-        spec = spec or f'avfoundation:{index}'
+        # AVFoundation's input is a video:audio pair.  Leaving the audio side
+        # implicit can make FFmpeg select a different format and reject a
+        # camera framerate that the video device explicitly advertises.
+        spec = spec or f'avfoundation:{index}:none'
     elif sys.platform.startswith('win'):
         spec = spec or 'dshow:video=Integrated Camera'
     else:
