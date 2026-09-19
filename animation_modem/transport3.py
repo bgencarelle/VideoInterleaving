@@ -91,6 +91,14 @@ WIRE_TAPE_25 = Layout(top_bin=34, image_symbols=5, name='wire-tape-25',
                       spread_carriers=True, dense_header=True, header_width=20,
                       emission_ceiling=14000)
 
+# V6 comparison wire: both DCT and CDF 9/7 carry the same 2,880 analog
+# originals plus 720 opposite-track foundation copies.  Forty spare values are
+# deliberately left unused rather than changing one transform's budget.
+WIRE_V6 = Layout(top_bin=34, image_symbols=29, name='wire-v6',
+                 progressive=True, orthogonal_training=True,
+                 spread_carriers=True, dense_header=True, header_width=20,
+                 emission_ceiling=14000)
+
 # v5 preamble: shorter biphase-mark for 1600-sample frame
 # 12 bits = 1.5kHz/3kHz edges, ~192 samples @ 8 samples/half-bit
 HALF_V5 = 8

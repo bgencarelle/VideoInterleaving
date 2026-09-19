@@ -32,6 +32,13 @@ PROFILES = {
     # slots. 20x15 keeps exact 4:3 luma geometry; coarse chroma suppresses bands.
     'tape-80x60': ((20, 15), (6, 5)),
 }
+# V6 reuses header codes 0/1 only inside its distinct frame geometry. Keep
+# these names out of wire_profiles(): that function is the pinned legacy
+# four-code registry, not a list of every experimental source coder.
+EXPERIMENTAL_PROFILES = {
+    'v6-dct': ((40, 48), (20, 24)),
+    'v6-wavelet': ((40, 48), (20, 24)),
+}
 # Sampling grid per profile -- the DECODE resolution, always the baked 80x96.
 # SourceCoder truncates the grid's transform to the wire shape -- ONE transform,
 # and the allocation table built against the grid's frequencies.
@@ -42,6 +49,8 @@ PROFILE_GRIDS = {'color-dct': ((80, 96), (40, 48)),
                  'color-wavelet': ((80, 96), (40, 48)),
                   'hd-dwt': ((80, 96), (40, 48)),
                   'tape-80x60': ((80, 60), (40, 30))}
+EXPERIMENTAL_GRIDS = {'v6-dct': ((80, 96), (40, 48)),
+                      'v6-wavelet': ((80, 96), (40, 48))}
 DEFAULT_PROFILE = 'color-dct'
 # v5 wire budget: WIRE_HD's Layout.capacity = header_capacity +
 # image_symbols*data_bins*4 = 3680. wavelet.hd_dwt_coder() fills exactly this
@@ -66,22 +75,26 @@ def source_size(profile=DEFAULT_PROFILE):
     color-dct puts 40x48 on the wire but needs 80x96 pixels behind it, and a
     bake at 40x48 gives it nothing to truncate.
     """
-    return PROFILE_GRIDS.get(profile, PROFILES[profile])[0]
+    profiles = {**PROFILES, **EXPERIMENTAL_PROFILES}
+    return {**PROFILE_GRIDS, **EXPERIMENTAL_GRIDS}.get(profile,
+                                                        profiles[profile])[0]
 
 
 def plane_grids(profile=DEFAULT_PROFILE):
     """Sampling grids for a profile: its wire shapes unless it truncates."""
-    if profile not in PROFILE_GRIDS:
+    grids = {**PROFILE_GRIDS, **EXPERIMENTAL_GRIDS}
+    if profile not in grids:
         return plane_shapes(profile)
-    size, chroma = PROFILE_GRIDS[profile]
+    size, chroma = grids[profile]
     return [(size[1], size[0])] + ([(chroma[1], chroma[0])]*2 if chroma else [])
 
 
 def plane_shapes(profile=DEFAULT_PROFILE):
     """Row/column shapes of the planes a profile transmits, luma first."""
-    if profile not in PROFILES:
+    profiles = {**PROFILES, **EXPERIMENTAL_PROFILES}
+    if profile not in profiles:
         raise ValueError(f'Unknown profile: {profile}')
-    size, chroma = PROFILES[profile]
+    size, chroma = profiles[profile]
     return [(size[1], size[0])] + ([(chroma[1], chroma[0])]*2 if chroma else [])
 
 

@@ -12,16 +12,13 @@ does now:
 | profile | declared in two spare bits of the header's top_bin byte |
 | preset | identified by decoding against each candidate until the CRC verifies |
 
-The senders agree on the ship default but do not need to: `modem_screen.py`
-and baked playback through `modem_display.py` both default to `wide-v3`
-(full 2880-slot 80x96 picture at 375-20250 Hz, 3344 samples per frame, about
-14.35 fps at 48 kHz), taking their profile from `color-dct` / the bake's
-`modem.json`. `utilities/modem_v3_check.py live-send` defaults to `wide-v3`
-too. `hires-v3` (2912 samples, 16.48 fps) is the same picture 15% faster but
-loses identity under noise sooner; `tape-v3` (375-10125 Hz, 7.7 fps) trades
-most of the band for margin on tape-worn media; `main.py --mode modem` follows
-the bake path. None of these is a requirement. Any preset and any v3 profile
-can be sent live.
+The current user-facing choices are self-describing and detected by the
+receiver automatically: wide 80x96 (`--wire wide`), redundant tape 80x96
+(`--wire tape --profile hd-dwt`), and redundant tape 80x60
+(`--wire tape --profile tape-80x60`). At 48 kHz they run at approximately
+13.76, 16.48, and 25.21 fps respectively. The tape wires use 375-12750 Hz
+carriers and limit the complete waveform to 14 kHz. The receiver does not need
+the sender's wire or profile arguments.
 
 The v2 layouts are gone outright, so there is no transport generation left to
 disagree about. Nothing is shared state: the receiver reads the sample rate
@@ -37,8 +34,8 @@ buffer sizing, the displayed frame duration, and the reported speeds and
 frequencies. Nothing else. `read` takes the rate from the WAV header the same
 way, so a 44.1 kHz recording of a 48 kHz transmission decodes as what it is.
 
-48 kHz remains the reference the geometry was designed against — 17.34 fps,
-carriers at 375–20250 Hz — and is what `write` stamps into a new file. It is a
+48 kHz remains the reference clock the geometry was designed against; each
+wire's frame rate is listed above, and `write` stamps 48 kHz into a new file. It is a
 label, not a request. A receiver at 44.1 kHz sees the same transmission as a
 0.919 timing scale and reports a true 1.00x playback speed; measured picture
 error across 44.1, 48, 88.2, 96, 176.4 and 192 kHz inputs stays under 0.004
@@ -54,7 +51,7 @@ of a 96 kHz device would put the picture at 750–40500 Hz, past a low-end DAC's
 reconstruction filter and past any sane receiver's Nyquist.
 
 So a transmitter resamples to its device instead, holding the emitted carriers
-at 375–20250 Hz and the frame at 17.34 fps whatever the device is set to.
+at 375–20250 Hz while preserving whichever wire's frame rate is selected.
 Nothing is asked of the hardware; the signal adapts to it. Energy above 24 kHz
 measures 57 dB down, and the kept band is bit-identical in level to the
 reference — resampling overshoots intersample peaks by about 2.3 dB, so the
@@ -93,10 +90,10 @@ that information visible in the window.
   Capacity follows the measured frame duration. Oldest audio is discarded on
   overflow and the pulse reader reacquires after the gap. This bounds queued
   work, not operating-system stalls or physical audio-device latency.
-- `--on-loss hold` keeps the last verified, non-degraded picture (default).
-- `--on-loss black` blanks damaged or overdue frames.
-- `--on-loss damaged` shows recoverable damaged pictures, otherwise black.
-  Missing-frame timeouts follow measured playback speed with a small margin.
+- `--on-loss hold` keeps the last good picture.
+- `--on-loss damaged` shows a recoverable damaged picture as-is; if no new
+  picture can be decoded, the last good picture is held. The modem video path
+  never emits or displays black as a fallback.
 - Logging and image saving use a separate worker with only one pending item.
   Slow outputs may skip records/images rather than stall the decoder.
 - Q, Escape, or window close quits the receiver; terminal Ctrl-C quits either
@@ -114,11 +111,12 @@ is the one part of the packet that does not depend on the layout.
 
 ## Image and audio trade-offs
 
-`color-dct` puts 40x48 luma with 20x24 chroma planes on the wire (2880 DCT
-coefficients), sampled from an 80x96 RGBA bake so truncation carries detail the
-wire shape cannot. `lean-dct` sends the same luma with 10x12 chroma planes
-(2160 coefficients). The receiver reconstructs at whatever geometry the header
-names.
+The tape 80x96 coder puts 24x28 luma and 8x8 Cb/Cr DCT coefficients on the
+wire, duplicates all 800 retained values across opposite stereo legs and
+separated carriers, and reconstructs at 80x96. The tape 80x60 coder puts 20x15
+luma and 6x5 Cb/Cr coefficients on the wire, duplicates all 360 retained
+values, and reconstructs at 80x60. The receiver reconstructs the geometry named
+by the header.
 
 The carrier band is 375–20250 Hz and requires stereo; it is held there on any
 sending device above the reference rate and scales down below it, as above.

@@ -3,8 +3,9 @@
 ## Standalone sender: anamorphic aspect and recovery diagnostics
 
 On `standalone-modem`, `modem_screen.py` sends screen, video, camera, test,
-and mouse-follow sources. Each frame is stretched directly to **80x96** with
-no letterbox bars. The default `--aspect auto` measures the actual captured
+and mouse-follow sources. The standard high-resolution frame is stretched
+directly to **80x96** with no letterbox bars. The `tape-80x60` profile instead
+uses an 80x60 reconstruction grid. The default `--aspect auto` measures the actual captured
 dimensions after rotation, including camera frames and changing capture sizes,
 and selects the nearest preset by proportional distortion. Arbitrary ratios
 are approximated by the eight wire presets:
@@ -18,11 +19,14 @@ dimensions. Already-baked padding cannot be recovered from aspect metadata.
 
 For encoder filter comparisons, `modem_screen.py` and the `write`/`live-send`
 commands accept `--encode-filter box|nearest|lanczos|bicubic` (default: `lanczos`).
-This selects the source-to-80x96 preparation filter; decoded display still
+This selects the first source-to-80x96 preparation filter; decoded display still
 defaults to nearest-neighbour independently. Bicubic offers a less aggressive
 filtered alternative to Lanczos. Capture pre-scaling by ffmpeg and the screen
 fitter's fast striding happen before this filter, so comparisons measure the
-final preparation stage rather than an unfiltered full-resolution source.
+final preparation stage rather than an unfiltered full-resolution source. The
+subsequent conversion from the prepared image to each profile's coefficient
+grid currently also uses Lanczos; `--encode-filter nearest` therefore does not
+make the entire encoder spatially nearest-neighbour.
 
 The top three bits of the existing 32-bit `absolute` header word carry the
 aspect code; the lower 29 carry the wrapping frame counter. `count` is unchanged.
@@ -78,17 +82,13 @@ Recovery priority on bad tape: the image must still DECODE with acceptable
 color; losing detail/softness is fine. The V4 goal is a wire whose whole band
 fits inside the tape bandwidth -- the picture rides fully within the medium
 instead of relying on graceful degradation when the band exceeds it.
-The `V3_PRESETS` table is interim — the most tape-compatible (preset, profile)
-pair becomes the default, then the sprawl gets refactored away. The chosen
-default is `wide-v3` + `color-dct`: the full 2880-slot picture at 375-20250 Hz,
-14.35 fps. It was picked over the 15% faster `hires-v3` because on the bench's
-`--noise-dbfs` sweep it verified 24/24 at -35 dBFS where hires-v3 lost 5, and
-over the `lean-*` presets because those shrink the picture. Preset/profile
-choices are validated by SYNTHETIC IDEAL round trips in `tools/bench_modem.py`
-(decode cost + fidelity on a clean wire, with cheap `--band-limit-hz` and
-`--noise-dbfs` recovery-margin probes); tape emulation is kept to a minimum
-because it cannot be made realistic — real tape measurements are done on
-hardware, outside the simulations. See AGENTS.md "Long-term direction".
+The current tape alternatives are explicit rather than preset variants:
+`--wire tape --profile hd-dwt` is the redundant 80x96 wire at 16.48 fps, and
+`--wire tape --profile tape-80x60` is the redundant 80x60 wire at 25.21 fps.
+Both use 375-12750 Hz carriers and a 14 kHz whole-waveform ceiling. The wide
+80x96 wire remains the reference. Profile choices are validated by clean
+round trips and synthetic probes, but real tape measurements remain necessary.
+See AGENTS.md "Long-term direction".
 
 ## Install modem dependencies
 

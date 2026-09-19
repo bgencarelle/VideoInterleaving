@@ -301,7 +301,7 @@ This reports separate Y, Cb, and Cr PSNR, SSIM, MAE, and normalized RMSE.
 
 ## Run the 96 kHz synthetic tape matrix
 
-Full-payload 80x96 tape wire:
+Redundant 80x96 tape wire:
 
 ```bash
 .venv/bin/python tools/test_tape_matrix.py \

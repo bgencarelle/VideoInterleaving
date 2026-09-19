@@ -492,11 +492,24 @@ def build(args):
     it just sends a much smaller picture than the profile names. Nothing says
     so, and silent resolution loss is worse than an error.
     """
-    if args.profile not in PROFILES:
+    if args.profile not in PROFILES and args.profile not in ('v6-dct', 'v6-wavelet'):
         raise SystemExit(f'Unknown profile {args.profile}')
     wire = getattr(args, 'wire', 'wide')
     if wire == 'tape' and args.profile not in ('hd-dwt', 'tape-80x60'):
         raise SystemExit('--wire tape requires hd-dwt or tape-80x60')
+    if wire == 'v6' and args.profile not in ('v6-dct', 'v6-wavelet'):
+        raise SystemExit('--wire v6 requires v6-dct or v6-wavelet')
+    if args.profile in ('v6-dct', 'v6-wavelet'):
+        if wire != 'v6':
+            raise SystemExit(f'--profile {args.profile} requires --wire v6')
+        from animation_modem.v6 import coder_for as v6_coder_for
+        layout = V3.WIRE_V6
+        coder = v6_coder_for(args.profile.removeprefix('v6-'))
+        coder.slots(layout)  # precompute the diversity assignment before live output
+        print(f'{args.profile}: {coder.n_orig} analog values + '
+              f'{len(coder.copy_of)} coarse Y/Cb/Cr copies -> decodes 80x96 '
+              f'@ {layout.fps:.2f} fps.', file=sys.stderr)
+        return layout, coder, coder.grids
     
     # v5 profile uses different wire layout
     if args.profile == 'hd-dwt':
@@ -562,6 +575,15 @@ def build(args):
     return layout, coder, grids
 
 
+def wire_profile_code(profile):
+    """V6 reuses codes 0/1 inside its distinct frame geometry."""
+    if profile == 'v6-dct':
+        return 0
+    if profile == 'v6-wavelet':
+        return 1
+    return V3.profile_code(profile)
+
+
 def source_for(args, fps):
     region = _region(args.region)
     if args.source == 'mouse-follow':
@@ -618,7 +640,7 @@ def to_wav(args, layout, coder, prepare, grab):
                 audio = V3.encode(image_values(image, coder.grids), layout, coder,
                                   n+1, (n % count)+1, count,
                                   stamp_ms=int(n*1000/layout.fps),
-                                  profile=V3.profile_code(args.profile), aspect_code=code)
+                                  profile=wire_profile_code(args.profile), aspect_code=code)
             audio = bound_emission(audio, args.emit_ceiling, RATE)
             sink.writeframesraw(pcm(audio*args.gain))
     print(f'wrote {count} frames, {count/layout.fps:.1f} s at {layout.fps:.2f} fps '
@@ -677,7 +699,7 @@ def to_device(args, layout, coder, prepare, grab):
                                       coder, (sent+1) & 0xffffffff, (sent % 0xffff)+1,
                                       0xffff, stamp_ms=int(
                                           (slot.target_time_ns//1_000_000) & 0xffffffff),
-                                      profile=V3.profile_code(args.profile), aspect_code=code)
+                                       profile=wire_profile_code(args.profile), aspect_code=code)
                 # RATE, not output.rate. The packet is still on the REFERENCE
                 # grid here -- band_limited resamples it to the device further
                 # down, holding the carriers at the same hertz -- so the filter
@@ -742,12 +764,12 @@ def parser():
                          'camera = webcam; test = no devices; mouse-follow = dynamic cursor tracking')
     # The profiles the header can name. Every one is DCT/wavelet-sampled; the bake and
     # the wire shapes both come from the profile's geometry.
-    ap.add_argument('--profile', choices=list(wire_profiles()),
+    ap.add_argument('--profile', choices=list(wire_profiles()) + ['v6-dct', 'v6-wavelet'],
                     default=DEFAULT_PROFILE,
                     help='Picture geometry. Each samples a grid 2x finer than '
                          'it transmits and sends the low-frequency corner; the '
                          'receiver reads which was sent from the header.')
-    ap.add_argument('--wire', choices=('wide', 'tape'), default='wide',
+    ap.add_argument('--wire', choices=('wide', 'tape', 'v6'), default='wide',
                     help='wide uses carriers through 20.25 kHz; tape reallocates '
                          'the complete hd-dwt picture below 12.75 kHz and bounds '
                          'the emitted waveform at 14 kHz (lower frame rate)')
@@ -813,6 +835,8 @@ def main(argv=None):
     # compatibility fallback for older tests/callers that construct Namespace.
     if args.wire == 'tape' and args.profile not in ('hd-dwt', 'tape-80x60'):
         raise SystemExit('--wire tape requires hd-dwt or tape-80x60')
+    if args.wire == 'v6' and args.profile not in ('v6-dct', 'v6-wavelet'):
+        raise SystemExit('--wire v6 requires v6-dct or v6-wavelet')
 
     if args.list_devices:
         from animation_modem.audio_common import sounddevice

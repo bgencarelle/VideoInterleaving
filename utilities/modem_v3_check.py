@@ -110,12 +110,15 @@ def candidates_for(engine):
             return
         seen.add(layout.name)
         coders = coders_for(layout)
-        fallback = coders[V3.profile_code(profile)]
+        code = ({'v6-dct': 0, 'v6-wavelet': 1}.get(profile)
+                if layout.name == 'wire-v6' else V3.profile_code(profile))
+        fallback = coders[code]
         out.append((layout, fallback, coders))
 
     add(engine.wire, engine.profiles[0])
     add(V3.WIRE_TAPE, 'hd-dwt')
     add(V3.WIRE_TAPE_25, 'tape-80x60')
+    add(V3.WIRE_V6, 'v6-dct')
     for eng in ENG.ENGINES.values():
         add(eng.wire, eng.profiles[0])
     return out
@@ -654,14 +657,16 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     codec = argparse.ArgumentParser(add_help=False)
     codec.add_argument('--codec', choices=list(ENG.engine_names()), default='v3',
-                       help='Codec engine: v3 is DCT, v4 is wavelet. Each revision '
+                       help='Codec engine: v3 is DCT, v4 is wavelet, and v6 compares '
+                            'protected analog DCT/wavelet on one tape wire. Each revision '
                             'lives in one script so they can be A/B tested without '
                             'hunting down separate tools.')
     sub = p.add_subparsers(dest='command', required=True)
     p.set_defaults(profile=None, gain=1.0)
 
     def shared(q):
-        q.add_argument('--profile', choices=list(wire_profiles()),
+        q.add_argument('--profile',
+                       choices=list(wire_profiles()) + ['v6-dct', 'v6-wavelet'],
                        default=None, help='Plane geometry to SEND. Defaults to '
                        'the engine\'s primary profile. The receiver reads it '
                        'from the header.')
@@ -677,7 +682,8 @@ def main(argv=None):
     w.add_argument('--out', type=Path, default=Path('v3_test.wav'))
     w.add_argument('-f', '--numbered', action='store_true')
     r = sub.add_parser('read', parents=[codec])
-    r.add_argument('--profile', choices=list(wire_profiles()),
+    r.add_argument('--profile',
+                   choices=list(wire_profiles()) + ['v6-dct', 'v6-wavelet'],
                    default=None,
                    help='Fallback only. The profile is read from the header, '
                         'so this matters just for a packet whose header never '

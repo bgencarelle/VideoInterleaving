@@ -24,6 +24,10 @@ __all__ = ['ENGINES', 'get_engine', 'engine_names', 'coder_for', 'coders_for',
 
 def coder_for(profile, layout=None):
     """Build the right coder (DCT or wavelet) for a profile name."""
+    if profile in ('v6-dct', 'v6-wavelet'):
+        from .v6 import coder_for as v6_coder_for
+        coder = v6_coder_for(profile.removeprefix('v6-'))
+        return coder, coder.grids
     shapes = imaging.plane_shapes(profile)
     if profile == V5_PROFILE:
         if layout is not None and layout.name == 'wire-tape':
@@ -55,6 +59,9 @@ def coders_for(layout):
     This is what lets one receiver auto-detect v3 or v4 from the header instead
     of being told out of band -- the transition property "do both on decode".
     """
+    if layout.name == 'wire-v6':
+        return {0: coder_for('v6-dct', layout)[0],
+                1: coder_for('v6-wavelet', layout)[0]}
     return {profile_code(name): coder_for(name, layout)[0]
             for name in PROFILE_CODES}
 
@@ -152,10 +159,41 @@ class V5Engine(Engine):
         return f"{self.wire.describe(self.reference_rate)} (v5: CDF 9/7, profile=2 header)"
 
 
+class V6Engine(Engine):
+    """Analog DCT/wavelet candidates with identical selective protection."""
+
+    @property
+    def wire(self):
+        return V3.WIRE_V6
+
+    def coder_for(self, profile, layout=None):
+        if profile not in self.profiles:
+            raise ValueError(f'{profile!r} is not a v6 profile')
+        return coder_for(profile, layout or self.wire)
+
+    def coders_for(self, layout):
+        return coders_for(layout)
+
+    def profile_code(self, name):
+        if name == 'v6-dct':
+            return 0
+        if name == 'v6-wavelet':
+            return 1
+        raise ValueError(f'{name!r} is not a v6 profile')
+
+    def profile_name(self, code):
+        return self.profiles[int(code) & 1]
+
+    def describe(self):
+        return (f'{self.wire.describe(self.reference_rate)} '
+                '(v6: 2880 analog values + 720 foundation copies)')
+
+
 ENGINES = {
     'v3': Engine('v3', ('color-dct',)),
     'v4': Engine('v4', ('color-wavelet',)),
     'v5': V5Engine('v5', (V5_PROFILE,)),
+    'v6': V6Engine('v6', ('v6-dct', 'v6-wavelet')),
 }
 
 

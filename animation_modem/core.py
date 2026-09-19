@@ -212,6 +212,11 @@ class Layout:
         the magic exists to prevent. It also stops a transmitter from before
         dense_header being mistaken for one after it.
         """
+        # V6 shares the tape carrier band with two shorter dense layouts. Its
+        # own magic makes an isolated/damaged packet unambiguous without
+        # relying on finding the following preamble to infer frame length.
+        if self.name == 'wire-v6':
+            return b'V6'
         if self.dense_header:
             return b'V4'
         return b'V3'

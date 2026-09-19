@@ -7,6 +7,49 @@ generated WAVs, PNGs, and logs under `scratch/`; do not commit them.
 in one terminal, then one sender string in another. Offline WAV success alone
 does not validate live scheduling, device-rate adaptation, or acquisition.
 
+## V6 analog comparison candidate
+
+V6 is additive and experimental; it has not passed the real-tape acceptance
+gate. Its DCT and CDF 9/7 variants use the same 5,360-sample wire frame, 8.96
+fps rate, 375–12,750 Hz carriers, 14 kHz whole-waveform ceiling, 2,880 analog
+coefficient originals, and 720 protected foundation copies. The copied
+foundation is 20x24 luma plus 10x12 Cb and Cr. Every copy is placed in another
+OFDM symbol, on the opposite tape track, and at least eight carriers away.
+
+Run the fixed-frame synthetic comparison (diagnostic only):
+
+```bash
+.venv/bin/python tools/bench_v6.py --frames 4
+.venv/bin/python tools/bench_v6.py \
+  --source path/to/rgb-sbs-frame.jpg --crop-left-half --frames 4
+```
+
+Each JSON line reports pulse acquisition, verified identity, recovered pictures,
+source fidelity, damage relative to the transform's own clean decode, bandwidth,
+frame rate, decode cost, and frame latency separately.
+
+Offline DCT round trip:
+
+```bash
+.venv/bin/python utilities/modem_v3_check.py write \
+  --codec v6 --profile v6-dct --frames 24 --out scratch/v6-dct.wav
+.venv/bin/python utilities/modem_v3_check.py read \
+  --codec v6 --wav scratch/v6-dct.wav
+```
+
+Replace `v6-dct` with `v6-wavelet` for the transform-controlled alternative.
+For live loopback, start the receiver first:
+
+```bash
+.venv/bin/python utilities/modem_v3_check.py live-receive \
+  --codec v6 --device "BlackHole 2ch"
+.venv/bin/python utilities/modem_v3_check.py live-send \
+  --codec v6 --profile v6-dct --device "BlackHole 2ch"
+```
+
+These commands keep raw display/reconstruction defaults. Do not enable chroma
+stabilization when collecting baseline results.
+
 ## What to compare
 
 | Label | Sender arguments | Picture | Rate | Information band |
@@ -22,6 +65,28 @@ separated carriers.
 
 The receiver detects these combinations automatically. Do not pass a codec,
 profile, wire, or carrier cutoff to the receiver.
+
+## Encoder and display filtering
+
+The normal sender default is `--encode-filter lanczos`. This is spatial
+anti-aliasing during source preparation, not temporal smoothing, but the
+conversion from the prepared image to the profile's coefficient grid also
+currently uses Lanczos. Therefore `--encode-filter nearest` disables only the
+first resize; it does not make the complete encoder nearest-neighbour.
+
+For controlled filter comparisons, repeat the same test with:
+
+```bash
+.venv/bin/python modem_screen.py --source test \
+  --profile tape-80x60 --wire tape --encode-filter nearest \
+  --frames 50 --write scratch/wire-test/tape-80x60-nearest.wav
+```
+
+The decoder does not apply temporal or chroma stabilization unless
+`--stabilize-chroma` is explicitly supplied. Offline decoding is raw by
+default; live display also defaults to `--scaling raw` (nearest-neighbour).
+Do not use `--stabilize-chroma` or `--scaling smooth` for baseline wire
+measurements.
 
 ## 1. Clean file round-trip
 
