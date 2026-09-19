@@ -1,323 +1,187 @@
-# Modem TODO (standalone-modem)
+# Modem TODO — next-session handoff
 
-## Verify current implementation
+## Ground rules
 
-* [ ] Run `modem_tests`.
+- The modem is experimental and always in testing; it is not shipping.
+- **Backward compatibility is not required.** Wire format, CLI, recordings,
+  defaults, and internals may change when that improves the current design.
+- Update sender and receiver together. Do not add compatibility code for old
+  revisions or expect old recordings to decode.
+- Work only in the modem subsystem unless the task explicitly says otherwise.
+- Preserve the 80x96 wire image and never introduce a black-frame fallback.
+- Timing acquisition remains pulse-counted through `measure_pulses`, not FFT
+  correlation.
 
-  * Expected: 258 tests run.
-  * Only the 3 known failures remain:
+## Current priority
 
-    * `test_rgb_fidelity`
-    * `test_rolloff_engine…`
-    * `test_unspread_layout…`
+### 1. Run final software verification
 
-* [ ] Run:
+- [ ] Run the modem suite:
+
+  ```bash
+  .venv/bin/python -m unittest discover -s modem_tests -v
+  ```
+
+  The last full run before the recent capture/scheduling changes ran 268 tests.
+  Its only residual issues were the existing `test_rgb_fidelity` missing-bake
+  import error and the two known failures in `test_rolloff_engine…` and
+  `test_unspread_layout…`. Reassess rather than blindly accepting those if the
+  result changes.
+
+- [ ] Run the focused integration/lazy-import checks:
+
+  ```bash
+  .venv/bin/python -m unittest \
+    tests.test_modem_integration tests.test_lazy_imports -v
+  ```
+
+- [ ] Confirm `git diff --check` is clean.
+- [ ] Preserve `scratch/`; it contains test artifacts and is intentionally
+  untracked.
+
+### 2. Validate through real analog audio/cassette
+
+This is the next product-level test. Do this before adding robustness features.
+
+- [ ] Record and replay using the same deck and tape.
+- [ ] Confirm sustained auto-detection and acceptable image/color recovery.
+- [ ] Test clean → damaged/dropout → clean recovery.
+- [ ] Note deck, tape type, levels, sample rate, duration, verified-frame rate,
+  and visible failure mode.
+- [ ] Save a short representative clean recording and a recovery/damage
+  recording as local regression fixtures. Do not commit large captures without
+  explicit approval.
+
+Known-good live commands:
+
+```bash
+python3 modem_screen.py --profile hd-dwt --device "BlackHole 2ch" \
+  --source screen --capture-width 320 --encode-filter box \
+  --prepare-ms 80 --log-frames
+
+python3 utilities/modem_v3_check.py live-receive \
+  --device "BlackHole 2ch" --channels 1,2 --on-loss damaged \
+  --scaling raw --verbose --summary-seconds 2
+```
+
+For sender health, use **played**, not queued, as the meaningful count. Expected
+live behavior is approximately 13.76 played fps, zero underflows, and deadline
+misses at or near zero.
+
+### 3. Run real-image codec comparison last
+
+- [ ] After all other tests, provide a valid `images_modem/modem.json` bake and
+  run:
 
   ```bash
   tools/compare_codecs.py --modem-dir images_modem
   ```
 
-  * Confirm the current codec improves results on every channel except `clean`.
+- [ ] Confirm the current codec improves every impaired channel; a small loss
+  on the clean channel is currently expected. This remains blocked until the
+  bake exists.
 
-* [ ] Test live transmission over BlackHole.
+## Confirmed working — do not reopen without contradictory evidence
 
-  * `hd-dwt` fills the window.
-  * Zero deadline misses.
-  * Receiver auto-detects the stream without requiring `--codec`.
+### Live capture and playback
 
-* [ ] Test a real cassette round-trip using the same deck and tape.
+- [x] Camera capture uses the device's default capture dimensions and FFmpeg
+  scales to `--capture-width` before RGB frames enter Python.
+- [x] Screen capture uses FFmpeg, auto-detects the macOS screen device, and
+  scales before frames enter Python.
+- [x] Scheduled audio waits are sample-counted after placement; DAC timestamp
+  jitter no longer discards nearly every queued packet.
+- [x] `hd-dwt` fills the receiver window.
+- [x] Playback stays near 13.76 fps with deadline misses near zero.
+- [x] The receiver continuously detects and displays the stream without a
+  `--codec` argument.
 
-  * Confirm decode reliability and image quality.
+### Damaged-channel recovery
 
-## Open bug: channel does not recover after damage
+- [x] Clean → damaged → clean recovery was confirmed live and offline.
+- [x] A damaged channel holds its existing `InputLevel` gain.
+- [x] Re-admission requires approximately three consecutive good packets.
+- [x] Re-admission performs one-step gain recalibration from the preamble.
+- [x] Verbose diagnostics expose pulses, timing channel, gains, peaks, limiter
+  counts, decode attempts/results, resets, and no-decode heartbeats.
 
-Under heavy compression or distortion on the left channel, one channel can remain undecoded even after the signal becomes clean again.
+Do not redesign recovery unless a new recording reproduces a failure. If one
+does, save it and reproduce it offline before changing receiver state.
 
-This has not yet been reproduced from an offline recording.
+### Aspect and image preparation
 
-* [ ] Capture approximately 20 seconds from BlackHole:
+- [x] Every source is stretched to the native 80x96 wire image without bars.
+- [x] `--aspect auto` chooses the nearest preset from actual source dimensions
+  after rotation; explicit presets override it and `native` means 5:6.
+- [x] Aspect code occupies bits 29–31 of `absolute`; public frame counters use
+  the lower 29 bits.
+- [x] All eight presets round-trip through sender, receiver, live display,
+  saved frames, and WAV decoding.
+- [x] Decoded display/export defaults to nearest-neighbour to preserve decoded
+  pixels; `--scaling smooth` explicitly enables Lanczos.
+- [x] Encoder preparation supports `box`, `nearest`, `lanczos`, and `bicubic`;
+  Lanczos remains the general default. Box is the current recommended screen
+  test setting.
 
-  1. clean signal
-  2. introduce damage
-  3. return to clean signal
+Aspect codes:
 
-* [ ] Save the capture as:
+| Code | Display aspect |
+|---:|:---|
+| 0 | native 5:6 |
+| 1 | 1:1 |
+| 2 | 4:3 |
+| 3 | 3:2 |
+| 4 | 16:9 |
+| 5 | 2.39:1 |
+| 6 | 3:4 |
+| 7 | 9:16 |
 
-  ```text
-  stuck.wav
-  ```
-
-* [ ] Decode `stuck.wav` using the current modem-check CLI.
-
-* [ ] Reproduce the stuck-channel state offline.
-
-* [ ] Identify which receiver state fails to recover after clean packets return.
-
-## Next: low-cost robustness improvements
-
-### Pitch-shift correction
-
-* [ ] Estimate pitch shift from the preamble.
-
-  * Measure the edge ratio using `measure_pulses`.
-  * Compare it with the nominal cadence.
-
-* [ ] Correct each symbol using the measured ratio `r`.
-
-  * Option A: resample by `1/r`.
-  * Option B: sample the spectrum at `r * k`.
-
-### Pitch-to-hue control
-
-Use intentional pitch changes as a display control while cancelling tape-speed variation.
-
-* [ ] Compute:
-
-  ```text
-  intentional_pitch = edge_ratio / cadence_ratio
-  ```
-
-* [ ] Apply a deadband of approximately `0.3–0.5` semitone.
-
-* [ ] Smooth the estimate over `3–5` frames.
-
-* [ ] Map one octave to `360°` of hue rotation.
-
-* [ ] Rotate `Cb/Cr` at display time.
-
-* [ ] Only apply hue rotation when both channels show the corresponding pitch shift.
-
-### Per-channel recovery
-
-* [ ] When one channel becomes damaged, hold that channel's existing `InputLevel` gain.
-
-* [ ] Require approximately 3 consecutive good packets before re-admitting the channel.
-
-* [ ] On re-admission, perform a one-step gain recalibration from that channel's preamble.
-
-### Constant frequency-offset correction
-
-* [ ] Estimate a constant frequency offset independently for each channel using the training symbols.
-
-* [ ] Apply the correction before symbol decoding.
-
-### Independent channel timing
-
-* [ ] Detect when `skew_samples` is large enough to indicate channel timing misalignment.
-
-* [ ] Maintain separate timing estimates for the left and right channels when needed.
-
-* [ ] Verify this improves tolerance to cassette-head azimuth error.
-
-## Wire-format notes
-
-* The wire format changed in patch 4.
-* Sender and receiver must be updated together.
-* Recordings created before that wire-format change are not expected to decode with the current implementation.
-* Mono transmission is possible, but equivalent quality is approximately 7 fps.
-
-# Anamorphic aspect support
-
-## Goal
-
-Transmit every image using the native `80x96` wire geometry without letterboxing, while preserving the source aspect ratio for display.
-
-The sender stretches the source to exactly `80x96`.
-
-The receiver decodes the normal `80x96` image, reads the transmitted aspect preset, then stretches the image to the intended display aspect.
-
-Benefits:
-
-* no bandwidth spent on black letterbox bars;
-* all transmitted pixels carry image content;
-* codec internals remain unchanged;
-* the wire image remains `80x96`.
-
-For example, a `16:9` source is stretched to `80x96` before transmission and restored to `16:9` only after decode.
-
-## Aspect signalling
-
-Store the aspect preset in the **top 3 bits** of the 32-bit `absolute` field.
-
-Bit layout:
+Packing remains:
 
 ```text
-31        29 28                         0
-+-----------+----------------------------+
-| aspect    |        frame counter       |
-| 3 bits    |          29 bits           |
-+-----------+----------------------------+
-```
-
-Bits `29–31` carry the 3-bit aspect preset.
-
-Bits `0–28` remain the frame counter.
-
-Encode with:
-
-```text
-encoded_absolute =
-    (absolute & 0x1fffffff) |
-    (aspect_code << 29)
-```
-
-Decode with:
-
-```text
+encoded_absolute = (absolute & 0x1fffffff) | (aspect_code << 29)
 aspect_code = encoded_absolute >> 29
 absolute = encoded_absolute & 0x1fffffff
 ```
 
-A 29-bit frame counter is vastly larger than required for a tape-length recording, so sacrificing the top 3 bits has no practical effect on usable recording duration.
+## Deferred until analog validation is complete
 
-Do not use `count` for aspect signalling because:
+Do not start these merely because they are unchecked. Use analog results to
+decide whether they are necessary and in what order.
 
-* live transmission uses `0xffff`;
-* that value would appear as preset code `7`;
-* repurposing its bits would impose unnecessary recording-length limits;
-* other code already depends on `count`.
+### Pitch-shift correction
 
-## Aspect presets
+- [ ] Estimate pitch shift from the `measure_pulses` preamble edge ratio versus
+  nominal cadence.
+- [ ] Correct symbols either by resampling by `1/r` or sampling the spectrum at
+  `r*k`; benchmark both before choosing.
 
-| Code | Display aspect |
-| ---- | -------------- |
-| 0    | Native `5:6`   |
-| 1    | `1:1`          |
-| 2    | `4:3`          |
-| 3    | `3:2`          |
-| 4    | `16:9`         |
-| 5    | `2.39:1`       |
-| 6    | `3:4`          |
-| 7    | `9:16`         |
+### Pitch-to-hue control
 
-Preset `0` represents the existing native output.
+- [ ] Derive `intentional_pitch = edge_ratio / cadence_ratio` so tape-speed
+  variation is cancelled.
+- [ ] Apply a 0.3–0.5 semitone deadband and smooth over 3–5 frames.
+- [ ] Map one octave to 360 degrees and rotate Cb/Cr at display time.
+- [ ] Apply hue only when both channels agree on the intentional shift.
 
-## Implementation tasks
+### Constant frequency-offset correction
 
-### 1. Audit uses of `absolute`
+- [ ] Estimate a constant offset independently per channel from training
+  symbols and correct it before symbol decoding.
 
-Before changing the header:
+### Independent channel timing — later
 
-* [ ] Find every downstream use of `absolute`.
+- [ ] Detect materially large `skew_samples`.
+- [ ] Maintain separate channel timing only when needed.
+- [ ] Verify improvement against real cassette-head azimuth error.
 
-* [ ] Verify that nothing expects bits `29–31` to contain frame-counter data.
+### Optional 96x80 landscape profile — later
 
-* [ ] Check:
+Aspect signalling already restores landscape display geometry. A 96x80 wire
+profile is **not** needed to solve aspect ratio; it could only reduce anamorphic
+squeeze and coefficient loss for wide images.
 
-  * frame ordering;
-  * `LivePicture`;
-  * presentation logic;
-  * `--save-frames` filenames;
-  * wraparound handling;
-  * comparisons and indexing based on frame number.
-
-* [ ] After packet decode, ensure all frame-number logic uses the masked 29-bit value.
-
-### 2. Sender
-
-Update `modem_screen` and the current modem write/live-send path.
-
-* [ ] Add:
-
-  ```text
-  --aspect PRESET
-  ```
-
-* [ ] Map `PRESET` to a 3-bit aspect code.
-
-* [ ] Resize the source directly to `80x96`.
-
-  * Do not letterbox.
-  * Do not add black bars.
-
-* [ ] Put the aspect code into bits `29–31` of `absolute`:
-
-  ```text
-  encoded_absolute =
-      (absolute & 0x1fffffff) |
-      (aspect_code << 29)
-  ```
-
-* [ ] Leave codec processing unchanged after the `80x96` image is produced.
-
-### 3. Receiver
-
-Update `decode_packet` / `Receiver`.
-
-* [ ] Extract the aspect code from bits `29–31`:
-
-  ```text
-  aspect_code = absolute >> 29
-  ```
-
-* [ ] Mask `absolute` back to the 29-bit frame counter:
-
-  ```text
-  absolute &= 0x1fffffff
-  ```
-
-* [ ] Convert `aspect_code` to the corresponding display aspect.
-
-* [ ] Store it in:
-
-  ```text
-  extra["aspect"]
-  ```
-
-* [ ] Ensure all downstream frame-number logic sees only the masked value.
-
-### 4. Display and saved output
-
-Update:
-
-* live display;
-* `--save-frames`;
-* `tools/decode_wav`.
-
-For each decoded frame:
-
-* [ ] Decode normally at `80x96`.
-
-* [ ] Read `extra["aspect"]`.
-
-* [ ] Stretch the decoded image to the requested display aspect.
-
-* [ ] Use smooth interpolation.
-
-* [ ] Do not use `NEAREST`.
-
-* [ ] Keep preset `0` identical to the current native output.
-
-### 5. Tests
-
-* [ ] Round-trip all 8 aspect presets.
-
-* [ ] Verify the transmitted image remains exactly `80x96`.
-
-* [ ] Verify bits `29–31` contain the correct aspect code.
-
-* [ ] Verify bits `0–28` preserve the frame counter.
-
-* [ ] Verify the receiver masks `absolute` before frame ordering or indexing.
-
-* [ ] Verify preset `0` produces exactly the existing native geometry.
-
-* [ ] Verify non-native presets contain no sender-generated letterbox bars.
-
-* [ ] Verify live display and saved frames restore the same aspect ratio.
-
-## Compatibility
-
-Sender and receiver should be updated together.
-
-A receiver that does not understand the aspect bits may still decode the image payload, but it can interpret `absolute` as a very large frame number and will ignore the intended display aspect.
-
-## Later: landscape transmission profile
-
-A separate `96x80` landscape transmission grid could reduce anamorphic squeezing for wide sources.
-
-* [ ] Keep this as a separate transmission profile.
-
-* [ ] Use an available profile/header code rather than overloading the aspect preset.
-
-* [ ] Implement only after the `80x96` anamorphic path is complete and tested.
+- [ ] Consider it only if analog testing shows a meaningful landscape-quality
+  problem.
+- [ ] If implemented, use a separate profile/header code rather than an aspect
+  preset.
