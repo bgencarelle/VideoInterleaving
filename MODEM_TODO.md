@@ -14,6 +14,39 @@
 
 ## Current priority
 
+### 0. Investigate severe color banding after audio compression
+
+Real recording tests show that audio compression can leave the decoded picture
+recognizable but introduce severe color banding. Treat this as a new priority
+before adding frame-rate or image-size features.
+
+- [ ] Preserve a clean reference recording and an audio-compressed copy of the
+  same transmission, using identical source frames and modem settings.
+- [ ] Identify whether the banding is introduced by:
+  - chroma coefficients being lost or over-weighted;
+  - repeated coefficient copies combining inconsistently;
+  - per-channel recovery selecting mismatched color information;
+  - audio-codec clipping, companding, or level normalization;
+  - inverse-wavelet ringing or coefficient quantization.
+- [ ] Compare clean/compressed results separately for luminance and chroma:
+  record decoded PSNR/error, color-plane histograms, gradients, and the number
+  of distinct output colors.
+- [ ] Test whether protecting low-frequency chroma coefficients improves color
+  continuity without reducing clean recovery or damaged-channel recovery.
+- [ ] Test coefficient weighting/quantization that sacrifices high-frequency
+  detail before average color. The picture must remain decodable with useful
+  color when compression is severe.
+- [ ] Test whether codec-specific preprocessing (level headroom, DC/low-band
+  protection, or reduced chroma amplitude) prevents the artifact.
+- [ ] Add a repeatable compressed-audio fixture and regression test once the
+  failure mechanism is understood.
+- [ ] Accept a fix only if it reduces banding on the compressed recording while
+  preserving clean-image fidelity, color, and the existing recovery behavior.
+
+Do not assume this is a display-scaling problem: decoded display defaults to
+nearest-neighbour specifically to preserve received values. First inspect the
+received coefficient values and the audio path before changing presentation.
+
 ### 1. Run final software verification
 
 - [ ] Run the modem suite:
