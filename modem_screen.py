@@ -240,8 +240,12 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320):
     return grab
 
 
-def camera_source(index=0, fps=30, width=None, spec=None):
-    """Webcam at the device's default dimensions unless explicitly resized."""
+def camera_source(index=0, fps=30, width=320, spec=None):
+    """Capture at device-default dimensions, then resize before the Python pipe.
+
+    Output scaling preserves the camera aspect without forcing a capture mode.
+    Keep full-resolution RGB traffic out of Python's audio-producing process.
+    """
     if sys.platform == 'darwin':
         spec = spec or f'avfoundation:{index}'
     elif sys.platform.startswith('win'):
@@ -529,7 +533,7 @@ def source_for(args, fps):
                              region, args.display, args.capture_width)
     if args.source == 'camera':
         return camera_source(args.camera, args.capture_fps or 30,
-                             spec=args.ffmpeg_input)
+                             width=args.capture_width, spec=args.ffmpeg_input)
     if args.source == 'video':
         return video_source(args.file, not args.no_loop, realtime=not args.write)
     return test_source()
