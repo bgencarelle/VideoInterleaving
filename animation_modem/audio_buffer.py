@@ -70,6 +70,15 @@ class AudioBuffer:
             self.closed = True
             self._condition.notify_all()
 
+    def reset(self):
+        """Discard buffered samples at a capture-device discontinuity."""
+        with self._condition:
+            self.dropped_samples += self._samples
+            self._chunks.clear()
+            self._samples = 0
+            self._gap = True
+            self._condition.notify_all()
+
     def configure(self, capacity, batch):
         """Follow the detected packet duration, including playback speed."""
         with self._condition:

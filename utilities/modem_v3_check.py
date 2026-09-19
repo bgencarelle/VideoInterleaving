@@ -406,7 +406,7 @@ def do_live_receive(args):
     errors = []
     active = {'stream': None}
     opened = threading.Event()
-    source = {'rate': None, 'level': InputLevel()}
+    source = {'rate': None, 'generation': 0, 'level': InputLevel()}
 
     from animation_modem.audio_buffer import AudioBuffer
     minimum_buffer = ((layout.frame+255)//256)*256
@@ -448,44 +448,67 @@ def do_live_receive(args):
                 audio_buffer.close()
 
     def capture():
-        try:
-            channels = (0, 1) if args.channels is None else args.channels
-            info = sd.query_devices(args.device, 'input')
-            count = max(channels)+1
-            if count > int(info['max_input_channels']):
-                raise ValueError('Selected input channels unavailable')
-            with sd.InputStream(channels=count, dtype='float32',
-                                device=args.device, blocksize=256) as stream:
-                active['stream'] = stream
-                rate = float(stream.samplerate)
-                source['rate'] = rate
-                opened.set()
-                device_text = f'Input: {info["name"]} | {rate:g} Hz'
-                with lock:
-                    latest['device'] = device_text
-                level = source['level']
-                while not stop.is_set():
-                    audio, overflowed = stream.read(256)
-                    # Meter the raw input, before levelling: this is the
-                    # hardware truth the window reports (a levelled signal
-                    # would hide a dead or screaming leg).
-                    ino = np.asarray(audio)[:, channels]
-                    peak = 20*np.log10(np.maximum(
-                        np.max(np.abs(ino), axis=0), 1e-9))
-                    rms = 20*np.log10(np.maximum(
-                        np.sqrt(np.mean(ino**2, axis=0)), 1e-9))
+        channels = (0, 1) if args.channels is None else args.channels
+        connected = False
+        while not stop.is_set():
+            try:
+                info = sd.query_devices(args.device, 'input')
+                count = max(channels)+1
+                if count > int(info['max_input_channels']):
+                    raise ValueError('Selected input channels unavailable')
+                with sd.InputStream(channels=count, dtype='float32',
+                                    device=args.device, blocksize=256) as stream:
+                    active['stream'] = stream
+                    rate = float(stream.samplerate)
+                    connected = True
+                    old_rate = source['rate']
+                    if old_rate is not None and abs(rate-old_rate) > .5:
+                        # A device-rate change invalidates the decoder's sample
+                        # geometry. Drop queued old-rate audio and let receive()
+                        # build a fresh pulse-counted receiver at the new rate.
+                        audio_buffer.reset()
+                    source['rate'] = rate
+                    source['generation'] += 1
+                    opened.set()
+                    device_text = f'Input: {info["name"]} | {rate:g} Hz'
                     with lock:
-                        latest['levels'] = (
-                            float(peak[0]), float(peak[1]),
-                            float(rms[0]), float(rms[1]))
-                    audio_buffer.put(level.process(np.asarray(audio)[:, channels]), overflowed)
-        except Exception as exc:
-            if not stop.is_set():
-                errors.append(exc)
-        finally:
-            active['stream'] = None
-            opened.set()
-            audio_buffer.close()
+                        latest['device'] = device_text
+                    level = source['level']
+                    while not stop.is_set():
+                        audio, overflowed = stream.read(256)
+                        # Meter the raw input, before levelling: this is the
+                        # hardware truth the window reports.
+                        ino = np.asarray(audio)[:, channels]
+                        peak = 20*np.log10(np.maximum(
+                            np.max(np.abs(ino), axis=0), 1e-9))
+                        rms = 20*np.log10(np.maximum(
+                            np.sqrt(np.mean(ino**2, axis=0)), 1e-9))
+                        with lock:
+                            latest['levels'] = (
+                                float(peak[0]), float(peak[1]),
+                                float(rms[0]), float(rms[1]))
+                        audio_buffer.put(level.process(
+                            np.asarray(audio)[:, channels]), overflowed)
+            except Exception as exc:
+                if stop.is_set():
+                    break
+                if not connected:
+                    # A startup failure is actionable (bad device, channel
+                    # selection or permissions), unlike a later stream ending
+                    # because the device was reconfigured.
+                    errors.append(exc)
+                    stop.set()
+                    break
+                # PortAudio commonly reports a changed device rate as a stream
+                # termination. Reopen instead of turning a recoverable device
+                # event into a fatal receiver error.
+                with lock:
+                    latest['device'] = f'Reconnecting audio input: {exc}'
+                time.sleep(.25)
+            finally:
+                active['stream'] = None
+        opened.set()
+        audio_buffer.close()
 
     def receive():
         try:
@@ -495,6 +518,7 @@ def do_live_receive(args):
             rate = source['rate']
             if rate is None:
                 return
+            generation = source['generation']
             receiver = engine.receiver(layout, coder, pulse_only=True, input_rate=rate,
                                        coders=coders_for(layout),
                                        candidates=candidates_for(engine),
@@ -512,6 +536,14 @@ def do_live_receive(args):
                         break
                     continue
                 audio, gap = batch
+                if source['generation'] != generation:
+                    rate = source['rate']
+                    generation = source['generation']
+                    receiver = engine.receiver(
+                        layout, coder, pulse_only=True, input_rate=rate,
+                        coders=coders_for(layout), candidates=candidates_for(engine),
+                        diagnostics=verbose)
+                    gap = True
                 peak = max(peak, float(np.max(np.abs(audio))))
                 if gap:
                     receiver.reset()
