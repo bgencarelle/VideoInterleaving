@@ -1,5 +1,11 @@
 # Modem common-use how-to
 
+For step-by-step clean, 96 kHz, live-loopback, real-tape, and objective scoring
+procedures for the new wires, see [`docs/TAPE_WIRE_TESTING.md`](docs/TAPE_WIRE_TESTING.md).
+
+Every modem change should be tested with a live sender/receiver command pair;
+the relevant copy-paste commands are included in that guide.
+
 Run commands from this directory. Use the repository virtual environment:
 
 ```bash
