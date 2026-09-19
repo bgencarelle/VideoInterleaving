@@ -207,7 +207,7 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320,
         cmd += ['-video_size', f'{region[2]}x{region[3]}',
                 '-i', f'{src}+{region[0]},{region[1]}']
     else:
-        if video_size is not None and fmt == 'avfoundation':
+        if video_size is not None and fmt in ('avfoundation', 'v4l2', 'dshow'):
             cmd += ['-video_size', f'{video_size[0]}x{video_size[1]}']
         cmd += ['-i', src]
     filters = []
@@ -267,23 +267,32 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320,
     return grab
 
 
-def _lowest_camera_mode(index, fps):
-    """Return the smallest AVFoundation video mode supporting ``fps``."""
+def _lowest_camera_mode(fmt, source, fps):
+    """Return the smallest advertised camera mode supporting ``fps``.
+
+    FFmpeg exposes the mode list for AVFoundation, V4L2 and DirectShow. The
+    text differs slightly, so accept both AVFoundation's ``@[15 30]fps`` form
+    and backend lines that put the rate after the dimensions.
+    """
     if shutil.which('ffmpeg') is None:
         return None
     try:
         probe = subprocess.run(
-            ['ffmpeg', '-nostdin', '-hide_banner', '-f', 'avfoundation',
-             '-list_options', 'true', '-i', f'{index}:none'],
+            ['ffmpeg', '-nostdin', '-hide_banner', '-f', fmt,
+             '-list_options', 'true', '-i', source],
             capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.SubprocessError):
         return None
     modes = []
     for line in (probe.stderr or '').splitlines():
-        match = re.search(r'(\d+)x(\d+)@\[([^\]]+)\]fps', line)
+        match = re.search(r'(\d+)x(\d+)', line)
         if not match:
             continue
-        rates = [float(value) for value in re.findall(r'\d+(?:\.\d+)?', match.group(3))]
+        # Do not treat the width and height as frame rates. AVFoundation puts
+        # rates in brackets; V4L2/DirectShow commonly put them later on the
+        # same line or on a following mode line.
+        tail = line[match.end():]
+        rates = [float(value) for value in re.findall(r'\d+(?:\.\d+)?', tail)]
         size = (int(match.group(1)), int(match.group(2)))
         if any(abs(rate-fps) < .01 for rate in rates):
             modes.append(size)
@@ -307,13 +316,16 @@ def camera_source(index=0, fps=30, width=320, spec=None):
         # AVFoundation may open a 1080p/portrait mode and do the expensive
         # capture first.  If probing is unavailable, retain FFmpeg's default.
         source_index = spec.split(':', 1)[1].split(':', 1)[0]
-        mode = _lowest_camera_mode(source_index, fps)
+        mode = _lowest_camera_mode('avfoundation',
+                                   f'{source_index}:none', fps)
         return ffmpeg_source(spec, fps, width=width, video_size=mode)
     elif sys.platform.startswith('win'):
         spec = spec or 'dshow:video=Integrated Camera'
     else:
         spec = spec or f'v4l2:/dev/video{index}'
-    return ffmpeg_source(spec, fps, width=width)
+    fmt, source = spec.split(':', 1)
+    mode = _lowest_camera_mode(fmt, source, fps)
+    return ffmpeg_source(spec, fps, width=width, video_size=mode)
 
 
 def video_source(path, loop=True, realtime=True):
