@@ -51,6 +51,17 @@ class FitterTests(unittest.TestCase):
                 out = prepare(np.zeros((480, 640, 3), np.uint8))
                 self.assertEqual(out.size, PROFILES[profile][0])
 
+    def test_hd_dwt_fits_the_full_80x96_picture(self):
+        """hd-dwt's PROFILES entry is its 56x44 wire budget, not its picture.
+        Fitting to it letterboxed a third of every decoded frame black."""
+        # A source already at the picture's 5:6 aspect must fill it edge to edge.
+        out = modem_screen.fitter('hd-dwt')(np.full((480, 400, 3), 200, np.uint8))
+        self.assertEqual(out.size, (80, 96))
+        from animation_modem.imaging import image_values, plane_grids
+        luma = image_values(out, plane_grids('hd-dwt'))[:80*96].reshape(96, 80)
+        # Letterbox bars pad with black (-1); a filled frame has none.
+        self.assertGreater(luma.min(), -.9)
+
     def test_letterbox_preserves_aspect_and_crop_fills(self):
         raw = np.zeros((100, 400, 3), np.uint8)
         raw[:, :, 0] = 255

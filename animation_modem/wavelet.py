@@ -517,29 +517,35 @@ def _cdf97_predict_lift(odd, even, coeff):
     odd sequence against itself (an np.roll on the SAME sequence) is not the
     CDF 9/7 predict step and is not invertible. Periodic boundary: the
     successor of the last even sample is the first one.
+
+    Works along the LAST axis, so a 2-D array lifts every row at once.
     """
-    return odd + coeff * (even + np.roll(even, -1))
+    return odd + coeff * (even + np.roll(even, -1, axis=-1))
 
 def _cdf97_update_lift(even, odd, coeff):
     """Update step: even[k] += coeff*(odd[k-1] + odd[k]), k-1 wraps.
 
     Mirror of :func:`_cdf97_predict_lift`: even[k]'s neighbours are odd[k-1]
-    (periodically the last odd sample) and odd[k].
+    (periodically the last odd sample) and odd[k]. Last axis, like predict.
     """
-    return even + coeff * (np.roll(odd, 1) + odd)
+    return even + coeff * (np.roll(odd, 1, axis=-1) + odd)
 
-def cdf97_forward_1d(x):
+def cdf97_forward_1d(x, axis=-1):
     """1D CDF 9/7 forward transform using lifting (periodic boundary).
-    
-    Returns (low, high) each half the length.
+
+    Returns (low, high) each half the length along `axis`. Any other axes are
+    transformed independently in one vectorised pass -- the 2-D transform
+    below relies on that. The per-row Python loop it replaces cost ~25 ms a
+    frame for hd-dwt, more than the sender's 10 ms prepare lead, so every live
+    packet missed its deadline and nothing was ever sent.
     """
-    n = len(x)
+    x = np.moveaxis(np.asarray(x, float), axis, -1)
+    n = x.shape[-1]
     if n % 2 != 0:
         raise ValueError("Length must be even")
-    half = n // 2
-    even = x[::2].copy()
-    odd = x[1::2].copy()
-    
+    even = x[..., ::2]
+    odd = x[..., 1::2]
+
     # Predict 1
     odd = _cdf97_predict_lift(odd, even, _CDF_ALPHA)
     # Update 1
@@ -548,18 +554,20 @@ def cdf97_forward_1d(x):
     odd = _cdf97_predict_lift(odd, even, _CDF_GAMMA)
     # Update 2
     even = _cdf97_update_lift(even, odd, _CDF_DELTA)
-    
+
     # Scale
     low = even * _CDF_K
     high = odd * _CDF_KINV
-    return low, high
+    return np.moveaxis(low, -1, axis), np.moveaxis(high, -1, axis)
 
-def cdf97_inverse_1d(low, high):
-    """1D CDF 9/7 inverse transform using lifting."""
+def cdf97_inverse_1d(low, high, axis=-1):
+    """1D CDF 9/7 inverse transform using lifting, along `axis`."""
+    low = np.moveaxis(np.asarray(low), axis, -1)
+    high = np.moveaxis(np.asarray(high), axis, -1)
     # Inverse scale
     even = low * _CDF_KINV
     odd = high * _CDF_K
-    
+
     # Inverse Update 2
     even = _cdf97_update_lift(even, odd, -_CDF_DELTA)
     # Inverse Predict 2
@@ -568,41 +576,30 @@ def cdf97_inverse_1d(low, high):
     even = _cdf97_update_lift(even, odd, -_CDF_BETA)
     # Inverse Predict 1
     odd = _cdf97_predict_lift(odd, even, -_CDF_ALPHA)
-    
+
     # Interleave
-    n = len(even) * 2
-    x = np.empty(n, dtype=even.dtype)
-    x[::2] = even
-    x[1::2] = odd
-    return x
+    x = np.empty(even.shape[:-1] + (even.shape[-1] * 2,), dtype=even.dtype)
+    x[..., ::2] = even
+    x[..., 1::2] = odd
+    return np.moveaxis(x, -1, axis)
 
 def cdf97_forward_2d(plane, levels=3):
     """Multi-level 2D CDF 9/7 forward transform.
-    
-    Returns dict with subbands: {level: {LL, LH, HL, HH}}
+
+    Returns dict with subbands: {level: {LL, LH, HL, HH}}. Rows, then the
+    columns of each half, each as one vectorised 1-D pass.
     """
-    h, w = plane.shape
-    current = plane.astype(float)
+    current = np.asarray(plane, float)
     subbands = {}
     for level in range(levels):
         if current.shape[0] < 2 or current.shape[1] < 2:
             break
         # Transform rows
-        rows_low = np.empty((current.shape[0], current.shape[1] // 2))
-        rows_high = np.empty_like(rows_low)
-        for i in range(current.shape[0]):
-            rows_low[i], rows_high[i] = cdf97_forward_1d(current[i])
-        # Transform columns of low
-        cols_low = np.empty((current.shape[0] // 2, current.shape[1] // 2))
-        cols_high = np.empty_like(cols_low)
-        for j in range(rows_low.shape[1]):
-            cols_low[:, j], cols_high[:, j] = cdf97_forward_1d(rows_low[:, j])
-        # Transform columns of high
-        cols_low_h = np.empty((current.shape[0] // 2, current.shape[1] // 2))
-        cols_high_h = np.empty_like(cols_low_h)
-        for j in range(rows_high.shape[1]):
-            cols_low_h[:, j], cols_high_h[:, j] = cdf97_forward_1d(rows_high[:, j])
-        
+        rows_low, rows_high = cdf97_forward_1d(current, axis=1)
+        # Transform columns of low, then of high
+        cols_low, cols_high = cdf97_forward_1d(rows_low, axis=0)
+        cols_low_h, cols_high_h = cdf97_forward_1d(rows_high, axis=0)
+
         subbands[level] = {
             'LL': cols_low,
             'HL': cols_high,   # horizontal detail
@@ -635,15 +632,10 @@ def cdf97_inverse_2d(subbands, levels=3, out_shape=None):
         sb = subbands[level]
         # Inverse transform columns: low side is 'current' (this level's LL),
         # high side is the transmitted HL/LH/HH details.
-        rows_low = np.empty((current.shape[0] * 2, current.shape[1]))
-        rows_high = np.empty_like(rows_low)
-        for j in range(current.shape[1]):
-            rows_low[:, j] = cdf97_inverse_1d(current[:, j], sb['HL'][:, j])
-            rows_high[:, j] = cdf97_inverse_1d(sb['LH'][:, j], sb['HH'][:, j])
+        rows_low = cdf97_inverse_1d(current, sb['HL'], axis=0)
+        rows_high = cdf97_inverse_1d(sb['LH'], sb['HH'], axis=0)
         # Inverse transform rows
-        current = np.empty((current.shape[0] * 2, current.shape[1] * 2))
-        for i in range(rows_low.shape[0]):
-            current[i] = cdf97_inverse_1d(rows_low[i], rows_high[i])
+        current = cdf97_inverse_1d(rows_low, rows_high, axis=1)
     return current[:h, :w]
 
 

@@ -95,9 +95,23 @@ def coders_for(layout):
 
 
 def candidates_for(engine):
-    """The one wire, carrying every profile coder the header may name."""
-    coders = coders_for(engine.wire)
-    return [(engine.wire, coders[engine.profile_code(engine.profiles[0])], coders)]
+    """Every wire any engine sends, each carrying every coder its header may name.
+
+    v5 rides WIRE_HD (3488-sample frames), not WIRE, so a receiver offered
+    only its own --codec's wire heard a v5 sender as nothing at all -- no
+    error, zero packets. The Receiver already tries candidates in packet
+    order and locks onto whichever verifies (relocking after RELOCK_AFTER
+    misses), so offering all wires makes --codec a hint, not a requirement.
+    The requested engine's wire goes first so its coder is the fallback.
+    """
+    out, seen = [], set()
+    for eng in [engine, *ENG.ENGINES.values()]:
+        if eng.wire.name in seen:
+            continue
+        seen.add(eng.wire.name)
+        coders = coders_for(eng.wire)
+        out.append((eng.wire, coders[eng.profile_code(eng.profiles[0])], coders))
+    return out
 
 
 def receive_for(args, engine, layout, coder, input_rate=None, coders=None,

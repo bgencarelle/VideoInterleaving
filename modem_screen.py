@@ -68,6 +68,7 @@ from animation_modem.core import (REFERENCE_RATE as RATE,        # noqa: E402
 from animation_modem.wavelet import WaveletCoder                 # noqa: E402
 from animation_modem.imaging import (DEFAULT_PROFILE, PROFILES, burn_counters,  # noqa: E402
                                      fit_shapes, hd_dwt_shapes, image_values,
+                                     source_size,
                                      plane_grids, plane_shapes, wire_profiles)
 from animation_modem.playback import PacketOutput                 # noqa: E402
 
@@ -429,7 +430,14 @@ def fitter(profile, rotate=0, mirror=False, letterbox=True):
     ffmpeg sources already scale before Python sees them, so the stride is a
     no-op there.
     """
-    size = PROFILES[profile][0]
+    # hd-dwt fits to its SAMPLING grid (80x96), not PROFILES[profile][0]:
+    # that entry is its wire budget, 56x44 -- landscape -- so fitting to it
+    # squeezed the source into a landscape box that image_values then
+    # letterboxed into the portrait 80x96 grid: a third of every decoded
+    # frame was black bars and the picture never filled the receiver window.
+    # The DCT/wavelet profiles keep their pinned 40x48 fit (same aspect as
+    # the grid, so no bars; test_modem_screen.FitterTests pins it).
+    size = source_size(profile) if profile == 'hd-dwt' else PROFILES[profile][0]
     target = max(size)*4
 
     def prepare(raw):
@@ -592,8 +600,15 @@ def to_device(args, layout, coder, prepare, grab):
     channels = args.channels
     sent = misses = 0
     started = time.perf_counter()
-    # WIRE_HD frame=3488 needs blocksize that divides evenly
-    # 3488 = 32 * 109. Use blocksize=32 for integer blocks with reasonable callback rate.
+    # The send lead reserve() grants must cover the encode, or submit()
+    # refuses the packet as stale. A miss never advances next_start, so the
+    # next reserve() grants the SAME short lead: an encode slower than
+    # --prepare-ms misses every packet forever and nothing is ever sent (this
+    # is how hd-dwt stalled while its CDF 9/7 took ~25 ms against 10 ms).
+    # After a miss, grow the lead to the slowest encode seen plus a margin.
+    prepare_ms = args.prepare_ms
+    slowest_ms = 0.0
+    # WIRE_HD frame=3488 = 32 * 109, so blocksize=109 gives integer blocks.
     blocksize = 109 if layout.name == 'wire-hd' else 256
     with PacketOutput(device(args.device), channels, args.latency,
                       frame=layout.frame, packet=layout.packet,
@@ -613,7 +628,7 @@ def to_device(args, layout, coder, prepare, grab):
                 if not output.ready():
                     time.sleep(.002)
                     continue
-                slot = output.reserve(args.prepare_ms, args.receive_margin_ms)
+                slot = output.reserve(prepare_ms, args.receive_margin_ms)
                 if slot is None:
                     continue
                 began = time.perf_counter()
@@ -643,7 +658,11 @@ def to_device(args, layout, coder, prepare, grab):
                 # order anyway: the emitted band then lands where this says.
                 audio = bound_emission(audio, args.emit_ceiling, RATE)
                 encode_ms = (time.perf_counter()-began)*1000
-                if output.submit(audio, slot):
+                accepted = output.submit(audio, slot)
+                # Through submit(): it resamples to the device rate BEFORE its
+                # deadline check, so that cost is part of the lead too.
+                slowest_ms = max(slowest_ms, (time.perf_counter()-began)*1000)
+                if accepted:
                     sent += 1
                     if args.log_frames:
                         print(json.dumps({
@@ -653,6 +672,11 @@ def to_device(args, layout, coder, prepare, grab):
                             'starvations': output.starvations}), flush=True)
                 else:
                     misses += 1
+                    wanted = slowest_ms*1.5 + 2
+                    if wanted > prepare_ms:
+                        prepare_ms = wanted
+                        print(f'\nencode took {slowest_ms:.1f} ms; send lead raised '
+                              f'to {prepare_ms:.1f} ms', file=sys.stderr)
                 if not args.quiet and sent and sent % 30 == 0:
                     elapsed = time.perf_counter()-started
                     print(f'  {sent} packets, {sent/elapsed:5.2f} fps out, '
@@ -764,8 +788,9 @@ def main(argv=None):
     print(f'{layout.describe()}')
     # Frame rate here is the reference figure. Live output reprints it from the
     # device's own rate once the stream is open, which is the one that governs.
-    print(f'profile {args.profile}: {PROFILES[args.profile][0][0]}x'
-          f'{PROFILES[args.profile][0][1]}, {coder.count} coefficients, '
+    picture = source_size(args.profile)
+    print(f'profile {args.profile}: {picture[0]}x{picture[1]} picture, '
+          f'{coder.count} coefficients, '
           f'{layout.fps:.2f} fps at {RATE:g} Hz')
     try:
         if args.write:
