@@ -175,7 +175,8 @@ def screen_capture_source(fps, region=None, display=None, width=320, spec=None):
     return ffmpeg_source(spec, fps, region, display, width)
 
 
-def ffmpeg_source(spec, fps, region=None, display=None, width=320):
+def ffmpeg_source(spec, fps, region=None, display=None, width=320,
+                  video_size=None):
     """Capture through ffmpeg's platform fast path.
 
     mss goes via CoreGraphics on macOS and costs tens of milliseconds a grab.
@@ -206,6 +207,8 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320):
         cmd += ['-video_size', f'{region[2]}x{region[3]}',
                 '-i', f'{src}+{region[0]},{region[1]}']
     else:
+        if video_size is not None and fmt == 'avfoundation':
+            cmd += ['-video_size', f'{video_size[0]}x{video_size[1]}']
         cmd += ['-i', src]
     filters = []
     if region and fmt != 'x11grab':
@@ -264,17 +267,48 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320):
     return grab
 
 
-def camera_source(index=0, fps=30, width=320, spec=None):
-    """Capture at device-default dimensions, then resize before the Python pipe.
+def _lowest_camera_mode(index, fps):
+    """Return the smallest AVFoundation video mode supporting ``fps``."""
+    if shutil.which('ffmpeg') is None:
+        return None
+    try:
+        probe = subprocess.run(
+            ['ffmpeg', '-nostdin', '-hide_banner', '-f', 'avfoundation',
+             '-list_options', 'true', '-i', f'{index}:none'],
+            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    modes = []
+    for line in (probe.stderr or '').splitlines():
+        match = re.search(r'(\d+)x(\d+)@\[([^\]]+)\]fps', line)
+        if not match:
+            continue
+        rates = [float(value) for value in re.findall(r'\d+(?:\.\d+)?', match.group(3))]
+        size = (int(match.group(1)), int(match.group(2)))
+        if any(abs(rate-fps) < .01 for rate in rates):
+            modes.append(size)
+    return min(modes, key=lambda size: size[0]*size[1]) if modes else None
 
-    Output scaling preserves the camera aspect without forcing a capture mode.
-    Keep full-resolution RGB traffic out of Python's audio-producing process.
+
+def camera_source(index=0, fps=30, width=320, spec=None):
+    """Capture the smallest supported mode, then resize before the Python pipe.
+
+    Output scaling preserves the camera aspect. Keep full-resolution RGB traffic
+    out of Python's audio-producing process, and do not make the camera deliver
+    a larger sensor mode than the modem can use.
     """
     if sys.platform == 'darwin':
         # AVFoundation's input is a video:audio pair.  Leaving the audio side
         # implicit can make FFmpeg select a different format and reject a
         # camera framerate that the video device explicitly advertises.
         spec = spec or f'avfoundation:{index}:none'
+        # Select the smallest sensor mode before opening the device.  The
+        # later `scale=` filter only limits pipe traffic; without this probe
+        # AVFoundation may open a 1080p/portrait mode and do the expensive
+        # capture first.  If probing is unavailable, retain FFmpeg's default.
+        source_index = spec.split(':', 1)[1].split(':', 1)[0]
+        mode = _lowest_camera_mode(source_index, fps)
+        return ffmpeg_source(spec, fps, width=width, video_size=mode)
     elif sys.platform.startswith('win'):
         spec = spec or 'dshow:video=Integrated Camera'
     else:
