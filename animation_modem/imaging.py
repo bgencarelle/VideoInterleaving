@@ -121,12 +121,13 @@ def prepare_image(image, preset='auto'):
     return image
 
 
-def display_image(result, shapes=None, *, scale=1, bounds=None):
+def display_image(result, shapes=None, *, scale=1, bounds=None, smooth=False):
     """Shared live/export rendering, after native reconstruction.
 
     Height sets the export scale; width restores the signalled ratio. Native
     preset zero leaves the unscaled reconstruction pixel-identical. Window
-    rendering resizes once directly from the decoded grid with smooth filtering.
+    rendering uses nearest-neighbour to preserve decoded pixel values by default.
+    Smooth interpolation is opt-in.
     """
     image = values_image(result.values, result.extra.get('shapes', shapes))
     ratio = result.extra.get('aspect', ASPECT_RATIOS[0])
@@ -137,7 +138,8 @@ def display_image(result, shapes=None, *, scale=1, bounds=None):
         height = min(bounds[1], max(1, round(width / ratio)))
     if (width, height) == image.size:
         return image
-    return image.resize((width, height), Image.Resampling.LANCZOS)
+    return image.resize((width, height), Image.Resampling.LANCZOS if smooth
+                        else Image.Resampling.NEAREST)
 
 
 def image_values(image, shapes):

@@ -95,7 +95,7 @@ class AspectTests(unittest.TestCase):
             if code == 0:
                 np.testing.assert_array_equal(saved, native)
             else:
-                self.assertFalse(np.array_equal(saved, native.resize(saved.size, Image.Resampling.NEAREST)))
+                np.testing.assert_array_equal(saved, native.resize(saved.size, Image.Resampling.NEAREST))
 
     def test_headerless_picture_keeps_last_verified_aspect(self):
         engine = ENG.get_engine('v3')

@@ -209,10 +209,10 @@ class DisplayOptionTests(unittest.TestCase):
             check.main(['live-receive', '--device', '0', '--headless', *extra])
         return receive.call_args.args[0]
 
-    def test_smooth_is_the_default(self):
-        """Anamorphic restoration always uses smooth interpolation."""
+    def test_raw_is_the_default(self):
+        """Anamorphic restoration preserves decoded pixels by default."""
         args = self.parsed()
-        self.assertEqual(args.scaling, 'smooth')
+        self.assertEqual(args.scaling, 'raw')
 
     def test_legacy_raw_option_remains_accepted(self):
         self.assertEqual(self.parsed('--scaling', 'raw').scaling, 'raw')
@@ -246,7 +246,7 @@ class DisplayScalingTests(unittest.TestCase):
         pixels = np.uint8([[0, 255], [255, 0]]).repeat(48, 0).repeat(40, 1)
         result = Decoded('received', values=pixels.ravel()/127.5-1,
                          extra={'shapes': [(96, 80)], 'aspect': 16/9})
-        smooth = check.display_image(result, bounds=check.WINDOW)
+        smooth = check.display_image(result, bounds=check.WINDOW, smooth=True)
         self.assertEqual(smooth.size, (480, 270))
         levels = np.unique(np.asarray(smooth))
         self.assertTrue(np.any((levels > 0) & (levels < 255)))

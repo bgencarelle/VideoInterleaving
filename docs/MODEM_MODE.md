@@ -25,10 +25,11 @@ the numeric width/height ratio, and `extra['aspect_code']` is the preset index.
 Headerless pictures inherit the last verified aspect, or native after reset.
 
 Live viewing, `--save-frames`, and `tools/decode_wav.py` restore aspect with
-Lanczos interpolation after native reconstruction. Native, unscaled export
+nearest-neighbour scaling after native reconstruction, preserving decoded pixel
+values by default. Native, unscaled export
 remains 80x96; other exports retain height 96 and round the aspect-correct width
-to the nearest pixel. `decode_wav --scale` scales that output height. The old
-`--scaling raw` option is accepted as a smooth-rendering alias.
+to the nearest pixel. `decode_wav --scale` scales that output height. Live viewing
+defaults to `--scaling raw`; use `--scaling smooth` to opt into Lanczos.
 
 For damaged-channel testing, use verbose decode and copy the JSON output
 covering clean → damaged → clean:

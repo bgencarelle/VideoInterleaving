@@ -44,7 +44,7 @@ from animation_modem.aspect import ASPECT_CHOICES, aspect_code
 # 40x48 picture and 6x of color-dct's 80x96, so neither lands on a fractional
 # scale and neither needs resampling to fill it.
 WINDOW = (480, 576)
-# Keep the old CLI spelling accepted, but all aspect restoration is smooth.
+# Raw preserves decoded pixels; smooth interpolation is explicitly opt-in.
 SCALING = ('raw', 'smooth')
 
 # Back-compat aliases: the v3 engine is the default, and these names are what
@@ -610,8 +610,9 @@ def do_live_receive(args):
                     else:
                         prof = (r.extra.get('profile')
                                 or r.extra.get('profile_name'))
-                        scaled = display_image(r, bounds=window)
-                        shown = f'{scaled.width}x{scaled.height} smooth'
+                        scaled = display_image(r, bounds=window,
+                                               smooth=args.scaling == 'smooth')
+                        shown = f'{scaled.width}x{scaled.height} {args.scaling}'
                         photo.image = ImageTk.PhotoImage(scaled)
                         photo.configure(image=photo.image)
                         found = r.extra.get('preset', '?')
@@ -706,9 +707,9 @@ def main(argv=None):
                     help=f'Window height in screen pixels (default {WINDOW[1]}). '
                          'The default pair is a whole-number multiple of both '
                          'picture sizes, 12x of 40x48 and 6x of 80x96.')
-    lr.add_argument('--scaling', choices=sorted(SCALING), default='smooth',
-                    help='Aspect restoration uses smooth interpolation. '
-                         'raw is accepted as a legacy alias for smooth.')
+    lr.add_argument('--scaling', choices=sorted(SCALING), default='raw',
+                    help='raw (default) preserves decoded pixel values using '
+                         'nearest-neighbour; smooth opts into Lanczos interpolation.')
     lr.add_argument('--list-devices', action='store_true')
     IMP.add_arguments(lr)
     args = p.parse_args(argv)
