@@ -6,7 +6,7 @@ from scipy.signal import resample_poly
 
 from animation_modem import transport3 as V3
 from animation_modem.core import decode_packet
-from animation_modem.wavelet import hd_dwt_coder
+from animation_modem.wavelet import hd_dwt_coder, tape_80x96_coder
 from animation_modem.engines import coder_for
 from animation_modem.imaging import source_size
 
@@ -14,15 +14,26 @@ from animation_modem.imaging import source_size
 class TapeWireTests(unittest.TestCase):
     def setUp(self):
         self.layout = V3.WIRE_TAPE
-        self.coder = hd_dwt_coder()
+        self.coder = tape_80x96_coder()
         self.values = np.random.default_rng(44).uniform(
             -.7, .7, self.coder.source_count)
 
-    def test_complete_hd_payload_fits_without_shrinking(self):
+    def test_redundant_80x96_payload_fits(self):
         self.assertGreaterEqual(self.layout.capacity, self.coder.count)
         self.assertEqual(self.coder.source_count, 96*80 + 2*48*40)
+        self.assertEqual(self.coder.n_orig, 800)
+        self.assertEqual(self.coder.count, 1600)
         self.assertEqual(self.layout.band, (375.0, 12750.0))
-        self.assertLess(self.layout.fps, V3.WIRE_HD.fps)
+        self.assertGreater(self.layout.fps, 16)
+
+    def test_every_80x96_value_has_a_diverse_opposite_leg_copy(self):
+        from animation_modem.wavelet import _slot_carriers
+        slots = self.coder.slots(self.layout)
+        bins, channels = _slot_carriers(self.layout)
+        home, copy = slots[:self.coder.n_orig], slots[self.coder.n_orig:]
+        self.assertTrue(np.all(channels[home] != channels[copy]))
+        self.assertTrue(np.all(np.abs(bins[home]-bins[copy]) >=
+                               self.coder.MIN_COPY_SPREAD))
 
     def test_packet_round_trips_on_the_narrow_wire(self):
         audio = V3.encode(self.values, self.layout, self.coder, 1, 1, 1,
@@ -91,7 +102,7 @@ class FastTapeWireTests(unittest.TestCase):
 
 class CleanRateTests(unittest.TestCase):
     def test_both_tape_profiles_decode_cleanly_at_48_and_96_khz(self):
-        cases = [(V3.WIRE_TAPE, hd_dwt_coder(), 2),
+        cases = [(V3.WIRE_TAPE, tape_80x96_coder(), 2),
                  (V3.WIRE_TAPE_25, coder_for('tape-80x60', V3.WIRE_TAPE_25)[0], 3)]
         for layout, coder, profile in cases:
             with self.subTest(wire=layout.name):

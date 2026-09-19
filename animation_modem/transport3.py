@@ -75,12 +75,10 @@ WIRE_HD = Layout(top_bin=54, image_symbols=16, name='wire-hd',
                  progressive=True, orthogonal_training=True,
                  spread_carriers=True, dense_header=True, header_width=20)
 
-# The actual tape wire: the complete 3680-slot HD-DWT payload is reallocated
-# below 12.75 kHz rather than encoded wide and filtered afterward. Thirty image
-# symbols retain the full 80x96 reconstruction at 8.72 fps. The mandatory
-# 14 kHz emission ceiling also removes the square-edged preamble's ultrasonic
-# tail, so the whole waveform -- not merely its information carriers -- fits.
-WIRE_TAPE = Layout(top_bin=34, image_symbols=30, name='wire-tape',
+# High-resolution tape wire: 12 image symbols hold 1600 slots at 16.48 fps.
+# Its 80x96 tape coder sends 800 luma-heavy DCT values twice on diversified
+# stereo slots. The mandatory 14 kHz ceiling removes preamble harmonics too.
+WIRE_TAPE = Layout(top_bin=34, image_symbols=12, name='wire-tape',
                    progressive=True, orthogonal_training=True,
                    spread_carriers=True, dense_header=True, header_width=20,
                    emission_ceiling=14000)

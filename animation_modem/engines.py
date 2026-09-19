@@ -26,6 +26,10 @@ def coder_for(profile, layout=None):
     """Build the right coder (DCT or wavelet) for a profile name."""
     shapes = imaging.plane_shapes(profile)
     if profile == V5_PROFILE:
+        if layout is not None and layout.name == 'wire-tape':
+            from .wavelet import tape_80x96_coder
+            coder = tape_80x96_coder()
+            return coder, coder.grids
         # hd-dwt is CDF 9/7 with repeat copies, NOT SourceCoder DCT, and both
         # ends must build it identically or the wire cannot round trip:
         # wavelet.hd_dwt_coder() is the one constructor.
@@ -126,8 +130,12 @@ class V5Engine(Engine):
         if profile != V5_PROFILE:
             raise ValueError(f'{profile!r} is not a v5 profile')
         # One constructor for every sender, receiver and tool.
-        from .wavelet import hd_dwt_coder
-        coder = hd_dwt_coder()
+        if layout is not None and layout.name == 'wire-tape':
+            from .wavelet import tape_80x96_coder
+            coder = tape_80x96_coder()
+        else:
+            from .wavelet import hd_dwt_coder
+            coder = hd_dwt_coder()
         return coder, coder.shapes
 
     def encode(self, values, coder, absolute, index, count, stamp_ms=0,

@@ -961,6 +961,13 @@ def tape_80x60_coder():
                              [(60, 80), (30, 40), (30, 40)])
 
 
+def tape_80x96_coder():
+    coder = StereoRepeatCoder([(28, 24), (8, 8), (8, 8)],
+                              [(96, 80), (48, 40), (48, 40)])
+    coder.profile_name = 'tape-80x96'
+    return coder
+
+
 def _slot_carriers(layout):
     """Carrier bin and stereo channel of every flat wire slot.
 

@@ -1508,6 +1508,7 @@ def _decode_once(layout, coder, body, coders, header_tolerance, drop_rx=None,
     picture = coder
     if fields is not None and coders:
         picture = coders.get(fields[5], coder)
+    declared = getattr(picture, 'profile_name', declared)
 
     slots = coder_slots(layout, picture)
     values = None if probe else picture.inverse(sent[slots], per[slots], per_noise[slots])

@@ -410,32 +410,23 @@ detail progressively rather than filling the high-resolution result with false
 detail and false color. Stereo redundancy remains an experiment, but resolution
 is a fixed design objective rather than the first thing traded away.
 
-Implemented experiment: `modem_screen.py --profile hd-dwt --wire tape` uses a
-real lower-band encoder. It reallocates the complete 3680-slot HD-DWT payload
-to carriers at 375-12750 Hz using 30 image symbols, reconstructs the same 80x96
-image at 8.72 fps, and mandatorily limits the whole emitted waveform (including
-the preamble) to 14 kHz. This is categorically different from `--emit-ceiling`
-on the wide wire, which discards already-allocated upper carriers. Validate the
-new wire on real tape before making it the default.
+Implemented replacement: `modem_screen.py --profile hd-dwt --wire tape` now
+uses the redundancy lesson from the fast profile instead of forcing all 3,680
+wide-wire values into the tape band. It reconstructs 80x96 from 800
+luma-heavy DCT coefficients (24x28 luma and 8x8 Cb/Cr), sends every value
+twice on opposite tracks and carriers separated by at least eight bins, and
+uses a 12-image-symbol / 2,912-sample frame for **16.48 fps**. Carriers remain
+375-12750 Hz and the whole emitted waveform is limited to 14 kHz. The old 8.72
+fps full-payload tape experiment was noisier without visibly useful resolution
+and has been replaced rather than retained as a user-facing wire.
 
-The 8.72 fps result is a capacity baseline, **not an acceptable final frame
-rate**. Its arithmetic is: 34 carriers minus 4 pilots = 30 data carriers;
-stereo complex symbols carry 120 real coefficient slots per image symbol; four
-dense header symbols reclaim 160 slots; `(3680-160)/120` therefore requires 30
-image symbols. With training, header, sync, and guard this is 5504 samples, or
-8.72 fps at 48 kHz. Do not blindly tune that number: improve source allocation.
-
-Promising next tape coder: retain all 1920 luma wavelet coefficients but retain
-only the 120-coefficient LL base from each chroma plane. That is 2160 original
-coefficients, still reconstructing the 80x96 luma image with stable coarse
-color. A 19-image-symbol tape frame has 2440 slots, leaving 280 strategically
-placed repeats and producing 3920 samples / **12.24 fps**. This directly spends
-capacity according to the stated priority (luma first) instead of transmitting
-480 chroma coefficients per plane plus 800 generic repeats. Benchmark this
-profile against the 8.72 fps full-payload baseline and real tape before choosing
-the final wire. Also evaluate whether a stronger header code can safely use
-both stereo header lanes; existing `header_split` alone is known to lose
-diversity and is not the answer merely because it reaches 9.2 fps.
+Synthetic 96 kHz matrix result after replacement: Type II luma improved from
+about 17.5 dB PSNR on the discarded full-payload wire to 22.2 dB (SSIM 0.79),
+though the 80x60 profile remains cleaner at 26.6 dB / 0.91. The current combined
+`worn-deck` synthetic case acquired no 80x96 packets in a 12-frame run, so the
+next work on this profile is preamble/header acquisition under combined
+wow/flutter, hiss, clipping, and dropouts. Do not hide that acquisition failure
+behind the improved Type II image score; compare it with real tape.
 
 Implemented lower-resolution alternative: `--profile tape-80x60 --wire tape`
 uses the same 375-12750 Hz carriers and 14 kHz whole-waveform ceiling, but a

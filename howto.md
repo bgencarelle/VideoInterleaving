@@ -82,16 +82,16 @@ Useful sender options:
 | Profile and wire | Picture | Rate at 48 kHz | Information band | Purpose |
 |---|---:|---:|---:|---|
 | `hd-dwt`, `wide` | 80x96 | 13.76 fps | 375–20,250 Hz | Wide-band reference |
-| `hd-dwt`, `tape` | 80x96 | 8.72 fps | 375–12,750 Hz | Full HD-DWT payload in tape band |
+| `hd-dwt`, `tape` | 80x96 | 16.48 fps | 375–12,750 Hz | Redundant luma-first tape coder |
 | `tape-80x60`, `tape` | 80x60 | 25.21 fps | 375–12,750 Hz | Fast redundant tape profile |
 
 Both tape wires bound the **whole emitted waveform**, including preamble
-harmonics, at 14 kHz. `tape-80x60` sends every one of its 360 DCT coefficients
-twice, on opposite stereo channels and frequency-diverse carriers.
+harmonics, at 14 kHz. Both send every retained DCT coefficient twice, on
+opposite stereo channels and frequency-diverse carriers.
 
-For a genuinely band-limited HD-DWT transmission, use `--wire tape`. It
-reallocates the complete payload below 12.75 kHz, bounds total emission at
-14 kHz, and lowers frame rate instead of discarding upper carriers:
+For the high-resolution tape transmission, use `--wire tape`. It reconstructs
+80x96 from 800 luma-heavy DCT coefficients, duplicates every coefficient,
+stays below 12.75 kHz, and bounds total emission at 14 kHz:
 
 ```bash
 .venv/bin/python modem_screen.py --source test --profile hd-dwt \
@@ -136,7 +136,7 @@ Run this in a second terminal:
   --device "BlackHole 2ch"
 ```
 
-The receiver automatically identifies wide HD, full-payload tape HD, and the
+The receiver automatically identifies wide HD, redundant 80x96 tape, and the
 80x60 tape wire. It does not need `--codec`, `--profile`, or `--wire` arguments.
 
 Useful receiver options:

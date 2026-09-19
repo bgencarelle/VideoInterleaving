@@ -12,12 +12,13 @@ does not validate live scheduling, device-rate adaptation, or acquisition.
 | Label | Sender arguments | Picture | Rate | Information band |
 |---|---|---:|---:|---:|
 | Wide reference | `--profile hd-dwt --wire wide` | 80x96 | 13.76 fps | 375–20,250 Hz |
-| Full tape HD | `--profile hd-dwt --wire tape` | 80x96 | 8.72 fps | 375–12,750 Hz |
+| Redundant tape HD | `--profile hd-dwt --wire tape` | 80x96 | 16.48 fps | 375–12,750 Hz |
 | Fast tape | `--profile tape-80x60 --wire tape` | 80x60 | 25.21 fps | 375–12,750 Hz |
 
 Both tape wires limit the complete emitted signal, including preamble
-harmonics, to 14 kHz. The fast profile sends every one of its 360 DCT
-coefficients twice on opposite stereo channels and separated carriers.
+harmonics, to 14 kHz. The 80x96 profile sends 800 luma-heavy DCT coefficients
+twice; the fast profile sends 360. Copies use opposite stereo channels and
+separated carriers.
 
 The receiver detects these combinations automatically. Do not pass a codec,
 profile, wire, or carrier cutoff to the receiver.
@@ -104,7 +105,7 @@ Then run one sender at a time:
 .venv/bin/python modem_screen.py --source test \
   --profile hd-dwt --wire wide --device "BlackHole 2ch"
 
-# Full-payload tape wire
+# Redundant 80x96 tape wire
 .venv/bin/python modem_screen.py --source test \
   --profile hd-dwt --wire tape --device "BlackHole 2ch"
 
@@ -211,7 +212,7 @@ capture must be scored against the clean output from the same profile.
 
 ## 6. Run the synthetic 96 kHz tape matrix
 
-Full-payload tape HD:
+Redundant 80x96 tape profile:
 
 ```bash
 .venv/bin/python tools/test_tape_matrix.py \

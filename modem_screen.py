@@ -503,15 +503,24 @@ def build(args):
         layout = V3.WIRE_TAPE if wire == 'tape' else V3.WIRE_HD
         # wavelet.hd_dwt_coder() is the one constructor, shared with the
         # receiver and tools: both ends must build it identically.
-        from animation_modem.wavelet import hd_dwt_coder
-        coder = hd_dwt_coder()
+        if wire == 'tape':
+            from animation_modem.wavelet import tape_80x96_coder
+            coder = tape_80x96_coder()
+        else:
+            from animation_modem.wavelet import hd_dwt_coder
+            coder = hd_dwt_coder()
         shapes = coder.shapes
         # Lay out the slots now (~20 ms, cached after): computed lazily on the
         # first encode it would cost the first live packet its deadline.
         coder.slots(layout)
-        print(f'hd-dwt: {coder.n_orig} CDF 9/7 values (half-res pyramid of the '
-              f'80x96 grid) + {len(coder.copy_of)} repeat copies -> decodes 80x96 '
-              f'@ {layout.fps:.1f} fps.', file=sys.stderr)
+        if wire == 'tape':
+            print(f'tape-80x96: {coder.n_orig} luma-heavy DCT values + '
+                  f'{len(coder.copy_of)} opposite-leg copies -> decodes 80x96 '
+                  f'@ {layout.fps:.1f} fps.', file=sys.stderr)
+        else:
+            print(f'hd-dwt: {coder.n_orig} CDF 9/7 values (half-res pyramid of the '
+                  f'80x96 grid) + {len(coder.copy_of)} repeat copies -> decodes 80x96 '
+                  f'@ {layout.fps:.1f} fps.', file=sys.stderr)
         return layout, coder, shapes
     
     # v3/v4 profiles
@@ -832,7 +841,8 @@ def main(argv=None):
     # Frame rate here is the reference figure. Live output reprints it from the
     # device's own rate once the stream is open, which is the one that governs.
     picture = source_size(args.profile)
-    print(f'profile {args.profile}: {picture[0]}x{picture[1]} picture, '
+    label = getattr(coder, 'profile_name', args.profile)
+    print(f'profile {label}: {picture[0]}x{picture[1]} picture, '
           f'{coder.count} coefficients, '
           f'{layout.fps:.2f} fps at {RATE:g} Hz')
     try:
