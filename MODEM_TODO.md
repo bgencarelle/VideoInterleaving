@@ -218,3 +218,104 @@ squeeze and coefficient loss for wide images.
   problem.
 - [ ] If implemented, use a separate profile/header code rather than an aspect
   preset.
+
+## New investigation: lossy audio compression and color banding
+
+Testing shows that FLAC is clean, while lossy audio can leave severe color
+banding. The practical target is deliberately limited to three media classes:
+
+1. MiniDisc-style ATRAC audio;
+2. MP3;
+3. M4A/AAC.
+
+This is not a perfection target. A successful result is a recognizable picture
+with stable average color and graceful loss of fine detail. Clean-wire fidelity
+is not required after lossy compression, and occasional damaged detail is
+acceptable. Persistent false color, severe posterization, or total loss of
+recovery is not acceptable.
+
+### First priority: decode-only mitigation (current wire unchanged)
+
+Try these before changing the wire format. The goal is to preserve useful color
+while allowing fine detail to degrade.
+
+- [ ] Use existing per-slot reliability and noise variance to measure chroma
+  confidence separately from luma confidence.
+- [x] Initial confidence-gated Cb/Cr shrinkage: suppress unreliable chroma
+  detail before it creates false color bands.
+  chroma detail before it creates false color bands.
+- [x] Hold/blend toward the previous frame's chroma, or use a short temporal
+  average, when
+  current chroma low-frequency coefficients are unreliable. Keep current luma.
+- [x] Initial confidence-gated spatial chroma smoothing, limited to
+  low-confidence regions; do not blur reliable chroma or luma.
+- [ ] Evaluate per-plane and per-coefficient candidate selection rather than
+  selecting one whole-frame stereo leg for every plane.
+- [ ] Calibrate the Wiener/noise model for codec-shaped errors, which may be
+  structured rather than Gaussian.
+- [ ] Test a small chroma-only dither or constrained color reconstruction as a
+  last-resort visual mitigation. Measure whether it hides banding without
+  adding unacceptable noise.
+- [ ] Compare every mitigation against the unmodified decoder using decoded
+  PNGs, chroma gradients, distinct-color counts, and color-plane error.
+
+Decode-only constraints:
+
+- [ ] Do not alter luma unless evidence shows luma is the source of the color
+  error.
+- [ ] Do not turn damaged chroma into black or clear a picture.
+- [ ] Preserve the current damaged-frame and hold-last-good policies.
+- [ ] Keep the clean-wire result byte-identical where confidence is high.
+
+### Later: codec-friendly wire/profile experiments
+
+Only pursue these if decode-only mitigation is insufficient:
+
+- [ ] Test a 14–18 kHz carrier ceiling and retain the best measured point.
+- [ ] Protect low-frequency Cb/Cr coefficients with more repeats and robust
+  lower-band carrier placement.
+- [ ] Interleave important coefficients across time, frequency, and stereo legs.
+- [ ] Use short independently recoverable source blocks with local checksums;
+  never use one unbounded variable-length payload.
+- [ ] Test codec-friendly modulation with fewer stronger carriers and smoother
+  symbol transitions.
+- [ ] Compare ATRAC/MiniDisc-style, MP3, and AAC/M4A paths at practical recording
+  settings. Opus is not a target medium for this project.
+- [ ] Use joint stereo where available and avoid normalization/clipping where
+  possible.
+- [ ] If source compression is added, spend saved capacity on FEC and chroma
+  protection before fine detail.
+
+Current evidence: FLAC is perfect; 320k joint-stereo MP3 is usable but
+degraded; lower carrier ceilings improve the compressed path. External pilot
+tones did not show a clear benefit and became harmful at high levels.
+
+### Diagnostic sweep requirements
+
+The codec diagnostic must cover the complete audio baseband, not only the modem
+carrier range. Sweep from **0 Hz through Nyquist (24 kHz at 48 kHz sample
+rate)**, including near-DC, the modem band, and the upper edge. Exact DC is a
+special case because audio paths may remove it; test both DC and a small set of
+near-DC tones.
+
+- [ ] Run a deterministic linear/log sweep from 0 to 24 kHz with known phase.
+- [ ] Run stepped tones at every modem carrier plus extra points around band
+  edges and suspected codec transitions.
+- [ ] Run white-noise and pink-noise controls across the full baseband.
+- [ ] Run impulse and abrupt-transition tests to expose codec pre-echo,
+  post-echo, ringing, and frame-boundary smearing.
+- [ ] Measure magnitude, phase, coherence, and time-domain ringing before and
+  after MP3/AAC conversion.
+- [ ] Repeat the sweep using visual static, spatial-frequency sweeps, and
+  coefficient-domain random modem frames so image damage can be mapped back to
+  audio frequency and wavelet plane.
+
+### Lossy acceptance criteria
+
+- [ ] Recognizable image survives all three target media classes.
+- [ ] Average color remains stable; no persistent severe color banding.
+- [ ] Fine detail may soften or disappear before color and broad shapes fail.
+- [ ] The decoder continues to recover after ordinary codec damage and short
+  dropouts.
+- [ ] Record practical settings and failure characteristics for each medium;
+  do not optimize only for a synthetic maximum-bitrate case.

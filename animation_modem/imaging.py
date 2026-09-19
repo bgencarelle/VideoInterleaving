@@ -16,6 +16,7 @@ WIRE_HD budget. Same detail as v3; the extra capacity buys robustness, not
 resolution. See wavelet.Cdf97Coder.
 """
 import numpy as np
+from scipy.ndimage import gaussian_filter
 from PIL import Image, ImageDraw
 from .aspect import aspect_code, ASPECT_RATIOS
 
@@ -174,6 +175,43 @@ def values_image(values, shapes):
     return Image.merge('YCbCr', (planes[0], *[
         plane.resize(planes[0].size, Image.Resampling.BILINEAR)
         for plane in planes[1:]])).convert('RGB')
+
+
+def stabilize_chroma(values, previous, shapes, pilot_error=None, coverage=None):
+    """Blend degraded chroma toward the previous decoded picture.
+
+    Lossy audio codecs can leave a valid header and recognizable luma while
+    quantising Cb/Cr into visible bands. Keep current luma exactly; only blend
+    chroma when a same-shaped previous frame exists and confidence is low.
+    """
+    current = np.asarray(values)
+    if shapes is None:
+        return current
+    shape_list = _shapes(shapes)
+    if previous is None or current.shape != np.shape(previous) or len(shape_list) < 3:
+        return current
+    error = 0.0 if pilot_error is None else max(0.0, float(pilot_error))
+    seen = 1.0 if coverage is None else np.clip(float(coverage), 0.0, 1.0)
+    amount = max((error - .20) / .80, (0.85 - seen) / .85, 0.0)
+    amount = float(np.clip(amount * .65, 0.0, .65))
+    if amount <= 0.0:
+        return current
+    result = current.copy()
+    old = np.asarray(previous)
+    offset = shape_list[0][0] * shape_list[0][1]
+    for rows, cols in shape_list[1:]:
+        count = rows * cols
+        blended = (
+            current[offset:offset + count] * (1.0 - amount) +
+            old[offset:offset + count] * amount)
+        # Codec damage is spatially correlated at the low-resolution chroma
+        # planes. Smooth only when confidence is poor; this removes isolated
+        # false-color steps without touching luma or clean chroma.
+        sigma = min(1.6, 0.35 + 1.8 * amount)
+        result[offset:offset + count] = gaussian_filter(
+            blended.reshape(rows, cols), sigma=sigma, mode='nearest').ravel()
+        offset += count
+    return result
 
 
 # 3x5 digits, small enough to read on a 40x48 transmitted image.

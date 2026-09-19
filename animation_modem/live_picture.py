@@ -10,6 +10,12 @@ class LivePicture:
         self.candidate = None
 
     def push(self, result, now):
+        if result.values is not None:
+            from .imaging import stabilize_chroma
+            previous = self.good.values if self.good is not None else None
+            result.values = stabilize_chroma(
+                result.values, previous, result.extra.get('shapes'),
+                result.pilot_error, result.coverage)
         self.period = result.extra.get('frame_seconds', self.period)
         self.seen_at = now
         self.candidate = result

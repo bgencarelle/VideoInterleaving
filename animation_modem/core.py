@@ -1205,7 +1205,8 @@ ERASED_WEIGHT = 0.05
 
 
 def decode_packet(samples, layout, coder, *, body=None, coders=None,
-                  header_tolerance=2, diagnostics=False):
+                  header_tolerance=2, diagnostics=False,
+                  max_carrier_hz=None):
     """Decode one packet; if both inputs together fail, try each alone.
 
     One mangled input (pitch-shifted, heavily processed) poisons the joint
@@ -1222,7 +1223,8 @@ def decode_packet(samples, layout, coder, *, body=None, coders=None,
     # defer source reconstruction until selection below.
     spectrum = rfft(body, n=N, axis=1, workers=1)
     best = _decode_once(layout, coder, body, coders, header_tolerance,
-                        spectrum=spectrum, probe=True)
+                        spectrum=spectrum, probe=True,
+                        max_carrier_hz=max_carrier_hz)
     def quality(candidate, channel):
         result = candidate.result
         return {'input': channel, 'status': result.status,
@@ -1239,7 +1241,8 @@ def decode_packet(samples, layout, coder, *, body=None, coders=None,
     joint, used = best, None
     for drop in (0, 1):
         alt = _decode_once(layout, coder, body, coders, header_tolerance, drop,
-                           spectrum=spectrum, probe=True)
+                           spectrum=spectrum, probe=True,
+                           max_carrier_hz=max_carrier_hz)
         if diagnostics:
             attempts.append(quality(alt, 1 - drop))
         # One input's pilot error counts one leg, so it reads lower than a
@@ -1292,7 +1295,7 @@ def _materialize_candidate(candidate):
 
 
 def _decode_once(layout, coder, body, coders, header_tolerance, drop_rx=None,
-                 *, spectrum=None, probe=False):
+                 *, spectrum=None, probe=False, max_carrier_hz=None):
     """`coders` maps a profile code to the coder that reconstructs it.
 
     The transmitter declares its picture geometry in the header, so a receiver
@@ -1306,6 +1309,7 @@ def _decode_once(layout, coder, body, coders, header_tolerance, drop_rx=None,
     """
     carriers = layout.carriers
     data, pilots, header, _, _ = _decode_tables(layout)
+    pilot_bins = layout.pilots
 
     # 1. Primary channel equalization (computes complex gain, weights, and noise variance)
     # The spectrum is kept: a drifted packet's refit below re-solves the
@@ -1314,6 +1318,15 @@ def _decode_once(layout, coder, body, coders, header_tolerance, drop_rx=None,
         spectrum = rfft(body, n=N, axis=1, workers=1)
     equal, weights, variance, coherence, skew = _equalise_spectrum(
         spectrum, layout, drop_rx)
+    if max_carrier_hz is not None:
+        limit = float(max_carrier_hz) * N / REFERENCE_RATE
+        if not np.isfinite(limit) or limit <= 0:
+            raise ValueError('max_carrier_hz must be positive and finite')
+        active = carriers <= limit
+        weights[~active] = 0.0
+        variance[~active] = 1e6
+        pilot_bins = pilot_bins[active[pilot_bins]]
+        pilots = pilots[active[layout.pilots]]
 
     timing_drift = 0.0
     clock_errors = []
@@ -1323,7 +1336,7 @@ def _decode_once(layout, coder, body, coders, header_tolerance, drop_rx=None,
         # Lower weight threshold from 0.6 to 0.4 so pilots in heavily rolled-off HF bands are kept
         keep = weights[pilots, channel] > 0.4
         if np.count_nonzero(keep) >= 2:
-            bins = layout.pilots[keep].astype(float)
+            bins = pilot_bins[keep].astype(float)
             pilot_values = equal[2:, pilots[keep], channel]
             angles = np.angle(pilot_values)
 
@@ -1401,6 +1414,9 @@ def _decode_once(layout, coder, body, coders, header_tolerance, drop_rx=None,
             equal, weights, variance = refined[:3]
             pilot_error = (refined[3] if drop_rx is None
                            else _pilot_error(equal, weights, pilots, drop_rx))
+            if max_carrier_hz is not None:
+                weights[~active] = 0.0
+                variance[~active] = 1e6
 
     # 3c. Clipping discount. Symmetric clipping preserves zero crossings, so
     # the header's signs verify untouched -- but the image amplitudes inherit

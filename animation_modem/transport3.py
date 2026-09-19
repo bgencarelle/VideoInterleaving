@@ -550,7 +550,7 @@ class Receiver:
     def __init__(self, layout, coder, threshold=.4, rate_window=None,
                  min_speed=.25, max_speed=2.0, recovery=False, fast=True,
                  pulse_only=True, input_rate=None, coders=None, candidates=None,
-                 header_tolerance=2, diagnostics=False):
+                 header_tolerance=2, diagnostics=False, max_carrier_hz=None):
         if not (0 < min_speed <= 1 <= max_speed and min_speed >= .25 and max_speed <= 2):
             raise ValueError('Supported speed range: .25 <= min_speed <= 1 <= max_speed <= 2')
         if input_rate is not None and not (np.isfinite(input_rate) and input_rate > 0):
@@ -572,6 +572,7 @@ class Receiver:
         self.input_rate = None if input_rate is None else float(input_rate)
         self.header_tolerance = int(header_tolerance)
         self.diagnostics = bool(diagnostics)
+        self.max_carrier_hz = max_carrier_hz
         self.resets = -1  # Construction is not an input discontinuity.
         self.clock = 1. if input_rate is None else float(input_rate)/REFERENCE_RATE
         self.min_scale = self.clock/max_speed
@@ -810,7 +811,8 @@ class Receiver:
 
         return decode_packet(None, layout, coder, body=body, coders=coders,
                               header_tolerance=self.header_tolerance,
-                              diagnostics=self.diagnostics), taps
+                              diagnostics=self.diagnostics,
+                              max_carrier_hz=self.max_carrier_hz), taps
 
     def _identify(self, begin, scale, final=False):
         if not self.candidates or self.detected is not None:

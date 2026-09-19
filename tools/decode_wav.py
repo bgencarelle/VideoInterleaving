@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import numpy as np
 
 from animation_modem import transport3 as V3
-from animation_modem.imaging import display_image
+from animation_modem.imaging import display_image, stabilize_chroma
 from animation_modem.wavelet import hd_dwt_coder
 from animation_modem.audio_common import InputLevel
 
@@ -60,6 +60,10 @@ def main():
                     help='frame to start decoding from')
     ap.add_argument('--scale', type=int, default=SCALE,
                      help='upscale factor for the saved PNG')
+    ap.add_argument('--max-carrier-hz', type=float, default=None,
+                     help='Ignore decoded carriers above this frequency')
+    ap.add_argument('--raw', action='store_true',
+                     help='Disable decode-side chroma stabilization')
     ap.add_argument('-v', '--verbose', action='store_true',
                     help='Print per-channel recovery diagnostics, including failed acquisition')
     args = ap.parse_args()
@@ -70,7 +74,8 @@ def main():
     coders = {2: coder}
     rx = V3.Receiver(layout, coder, coders=coders,
                      candidates=[(layout, coder, coders)], input_rate=rate,
-                     diagnostics=args.verbose)
+                     diagnostics=args.verbose,
+                     max_carrier_hz=args.max_carrier_hz)
     level = InputLevel()
     if args.verbose:
         import json
@@ -88,6 +93,7 @@ def main():
     decoded = 0
     seen = {}
     files = []
+    previous_values = None
     reported = start_at
     for i in range(start_at, limit, 256):
         chunk = audio[i:min(i + 256, limit)]
@@ -104,6 +110,11 @@ def main():
             if result.values is None:
                 continue
             decoded += 1
+            if not args.raw:
+                result.values = stabilize_chroma(
+                    result.values, previous_values, result.extra.get('shapes', grids),
+                    result.pilot_error, result.coverage)
+            previous_values = result.values.copy()
             img = display_image(result, grids, scale=args.scale)
             idx = result.absolute if result.absolute is not None else decoded
             name = out / f'frame_{idx:05d}.png'
@@ -118,6 +129,11 @@ def main():
         seen[result.identity] = seen.get(result.identity, 0) + 1
         if result.values is not None:
             decoded += 1
+            if not args.raw:
+                result.values = stabilize_chroma(
+                    result.values, previous_values, result.extra.get('shapes', grids),
+                    result.pilot_error, result.coverage)
+            previous_values = result.values.copy()
             img = display_image(result, grids, scale=args.scale)
             idx = result.absolute if result.absolute is not None else decoded
             name = out / f'frame_{idx:05d}.png'
