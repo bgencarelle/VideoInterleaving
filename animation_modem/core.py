@@ -446,6 +446,21 @@ def coefficient_slots(layout, shapes):
     return mapping
 
 
+def coder_slots(layout, coder):
+    """Wire slot of each value a coder emits, for encode and decode alike.
+
+    A coder that knows its own importance order and wants to choose where
+    each value rides (v5's Cdf97Coder: its packed wavelet vector has no
+    rows/columns for the DCT-frequency rank above to read, and it places
+    repeat copies on carriers away from their originals) defines
+    ``slots(layout)``. Every other coder gets `coefficient_slots` unchanged.
+    """
+    slots = getattr(coder, 'slots', None)
+    if slots is not None:
+        return slots(layout)
+    return coefficient_slots(layout, tuple(coder.shapes))
+
+
 @lru_cache(maxsize=32)
 def _slot_order(layout):
     """Wire slots from coarsest-friendly to harshest, over every carrying cell.
@@ -838,7 +853,17 @@ def _decode_tables(layout):
     return (*indices, unused, phases(layout).conj())
 
 
-def _channel_equalizer(spectrum, layout):
+def _channel_equalizer(spectrum, layout, drop_rx=None):
+    """Per-carrier 2x2 MMSE equaliser from the training symbols.
+
+    `drop_rx` (0 or 1) solves from the OTHER receive channel alone. The 2x2
+    solve assumes each input is a mix of both transmitted legs (crosstalk),
+    so an input carrying energetic garbage -- one leg pitch-shifted, or
+    otherwise mangled -- is read as crosstalk and blended into the clean
+    leg's estimate, and neither leg decodes. Silence is harmless (a dead leg
+    solves to zero weight); garbage is not. decode_packet retries with each
+    input dropped when the full solve fails.
+    """
     carriers = layout.carriers
     received = spectrum[:, carriers, :]
     _, _, _, unused, inverse_phase = _decode_tables(layout)
@@ -868,7 +893,16 @@ def _channel_equalizer(spectrum, layout):
     else:
         h = np.stack([received[0]*inverse_phase[0, :, 0, None],
                       received[1]*inverse_phase[1, :, 1, None]], axis=-1)
-    noise = max(float(np.mean(np.abs(spectrum[:, unused])**2)), 1e-12)
+    if drop_rx is None:
+        noise = max(float(np.mean(np.abs(spectrum[:, unused])**2)), 1e-12)
+    else:
+        # The dropped input contributes nothing: no row in the solve, and no
+        # say in the noise floor either (its garbage would over-regularise
+        # the clean input).
+        h = h.copy()
+        h[:, drop_rx, :] = 0
+        keep = 1 - drop_rx
+        noise = max(float(np.mean(np.abs(spectrum[:, unused, keep])**2)), 1e-12)
     # The MMSE equaliser for a 2x2 channel has a closed form -- gram is the
     # per-carrier Hermitian product, its inverse is the adjugate over the
     # determinant, and the pre-multiply against hH falls out by hand. Expanding
@@ -881,10 +915,16 @@ def _channel_equalizer(spectrum, layout):
     gram10 = h01.conj()*h00 + h11.conj()*h10
     gram11 = h01.conj()*h01 + h11.conj()*h11 + 4*noise
     det = gram00*gram11 - gram10*gram10.conj()
-    inv00 = (gram11*h00.conj() - gram10.conj()*h10.conj())/det
-    inv01 = (gram11*h01.conj() - gram10.conj()*h11.conj())/det
-    inv10 = (-gram10*h00.conj() + gram00*h10.conj())/det
-    inv11 = (-gram10*h01.conj() + gram00*h11.conj())/det
+    # W = inv(gram) @ h^H, with h indexed [receive, transmit]: the entry for
+    # (transmit t, receive r) takes conj(h[r, t]). The earlier expansion read
+    # h01 where h10 belongs (and vice versa) -- invisible under no or
+    # symmetric crosstalk, where h01 ~= h10, which is every channel the tests
+    # modelled; under one-way leakage (tape azimuth) it estimated the legs
+    # with an RMS error of 0.83 against 0.00 for the textbook solve.
+    inv00 = (gram11*h00.conj() - gram10.conj()*h01.conj())/det
+    inv01 = (gram11*h10.conj() - gram10.conj()*h11.conj())/det
+    inv10 = (-gram10*h00.conj() + gram00*h01.conj())/det
+    inv11 = (-gram10*h10.conj() + gram00*h11.conj())/det
     weights = np.clip(np.stack([np.real(inv00*h00 + inv01*h10),
                                 np.real(inv10*h01 + inv11*h11)], axis=-1), 0, 1)
     variance = .5*noise*np.stack([np.abs(inv00)**2 + np.abs(inv01)**2,
@@ -901,11 +941,11 @@ def _equalise(body, layout):
     return _equalise_spectrum(spectrum, layout)
 
 
-def _equalise_spectrum(spectrum, layout):
+def _equalise_spectrum(spectrum, layout, drop_rx=None):
     """The apply step of ``_equalise``, on a spectrum the caller may have
     corrected first (see ``_refine_drift``)."""
     inv00, inv01, inv10, inv11, weights, variance, coherence, skew = \
-        _channel_equalizer(spectrum, layout)
+        _channel_equalizer(spectrum, layout, drop_rx)
     spec = spectrum[:, layout.carriers, :]
     equal = np.empty_like(spec)
     equal[..., 0] = inv00*spec[..., 0] + inv01*spec[..., 1]
@@ -1039,7 +1079,7 @@ def _correct_header(raw, flat, tolerance, layout):
 DRIFT_REFIT = 0.25
 
 
-def _refine_drift(spectrum, layout, fields):
+def _refine_drift(spectrum, layout, fields, drop_rx=None):
     """Second pass over a drifted packet, using its header as extra pilots.
 
     Why a second pass is needed at all: the two training symbols disagree
@@ -1088,7 +1128,7 @@ def _refine_drift(spectrum, layout, fields):
     # Rate from anchor fits on the header rows, on the FIRST (pre-tracker)
     # equalisation. 24 known points per row (20 header + 4 pilots); drift is
     # small here so carrier unwrapping is safe.
-    equal0, weights0, _, _, _ = _equalise_spectrum(spectrum, layout)
+    equal0, weights0, _, _, _ = _equalise_spectrum(spectrum, layout, drop_rx)
     ms = np.arange(2, end)
     slopes = []
     for s in range(layout.header_symbols):
@@ -1114,7 +1154,7 @@ def _refine_drift(spectrum, layout, fields):
     # training rows describe the same channel again.
     spec2 = spectrum.copy()
     spec2[1, carriers, :] *= np.exp(-1j*rate*carriers)[:, None]
-    equal, weights, variance, _, _ = _equalise_spectrum(spec2, layout)
+    equal, weights, variance, _, _ = _equalise_spectrum(spec2, layout, drop_rx)
 
     # The body's drift is now a ramp through the origin: one global rate in
     # the symbol number, plus a per-row offset snapped from the pilots.
@@ -1140,8 +1180,58 @@ def _refine_drift(spectrum, layout, fields):
     return equal, weights, variance, pilot_error
 
 
+# A packet decoded from both inputs with pilot error this high, or with no
+# verified header, is retried from each input alone (see _channel_equalizer).
+# Clean packets sit far below it and take exactly one decode.
+SINGLE_INPUT_RETRY = 0.20
+# Equaliser weight below which a slot is treated as erased (see decode).
+ERASED_WEIGHT = 0.05
+
+
 def decode_packet(samples, layout, coder, *, body=None, coders=None,
                   header_tolerance=2):
+    """Decode one packet; if both inputs together fail, try each alone.
+
+    One mangled input (pitch-shifted, heavily processed) poisons the joint
+    2x2 equaliser and takes the clean input down with it, so every packet
+    fails and the picture freezes. Decoding from the clean input alone
+    recovers the header and the leg it carries -- v5's repeat copies then
+    rebuild the coarse picture from that one leg. The best of the three
+    attempts by _recovery_quality is kept.
+    """
+    if body is None:
+        body = samples[SYNC_LEN:layout.packet].reshape(layout.symbols, SYMBOL, 2)[:, CP - 4:CP - 4 + N]
+    best = _decode_once(layout, coder, body, coders, header_tolerance)
+    if best.identity == 'verified_header' and best.pilot_error is not None \
+            and best.pilot_error < SINGLE_INPUT_RETRY:
+        return best
+    verified = best.identity == 'verified_header'
+    joint, used = best, None
+    for drop in (0, 1):
+        alt = _decode_once(layout, coder, body, coders, header_tolerance, drop)
+        # One input's pilot error counts one leg, so it reads lower than a
+        # joint decode's even when both legs are equally damaged (both
+        # heavily compressed: 0.8 vs 1.1, yet 3 dB WORSE). Against a verified
+        # joint decode, a single input must be genuinely clean to win -- the
+        # case it exists for, one mangled leg, measures ~0.001. Against a
+        # joint decode that failed outright, anything better wins.
+        if verified and not (alt.identity == 'verified_header'
+                             and alt.pilot_error < SINGLE_INPUT_RETRY):
+            continue
+        if _recovery_quality(alt) > _recovery_quality(best):
+            best, used = alt, 1 - drop
+    if used is not None:
+        # Skew and crosstalk describe the physical path, which only the joint
+        # solve sees (one input alone has no second row to compare): keep
+        # them, and say which input the picture came from.
+        for key in ('skew_samples', 'skew_spread', 'crosstalk'):
+            if key in joint.extra:
+                best.extra[key] = joint.extra[key]
+        best.extra['single_input'] = used
+    return best
+
+
+def _decode_once(layout, coder, body, coders, header_tolerance, drop_rx=None):
     """`coders` maps a profile code to the coder that reconstructs it.
 
     The transmitter declares its picture geometry in the header, so a receiver
@@ -1155,15 +1245,13 @@ def decode_packet(samples, layout, coder, *, body=None, coders=None,
     """
     carriers = layout.carriers
     data, pilots, header, _, _ = _decode_tables(layout)
-    if body is None:
-        body = samples[SYNC_LEN:layout.packet].reshape(layout.symbols, SYMBOL, 2)[:, CP - 4:CP - 4 + N]
 
     # 1. Primary channel equalization (computes complex gain, weights, and noise variance)
     # The spectrum is kept: a drifted packet's refit below re-solves the
     # channel from it rather than paying a second FFT.
     spectrum = rfft(body, n=N, axis=1, workers=1)
     equal, weights, variance, coherence, skew = _equalise_spectrum(
-        spectrum, layout)
+        spectrum, layout, drop_rx)
 
     timing_drift = 0.0
     clock_errors = []
@@ -1215,7 +1303,7 @@ def decode_packet(samples, layout, coder, *, body=None, coders=None,
                 # Apply phase correction
                 equal[2:, :, channel] *= np.exp(-1j * (slope[:, None] * carriers + offset[:, None]))
 
-    pilot_error = float(np.sqrt(np.mean(np.abs(equal[2:, pilots] - 1) ** 2)))
+    pilot_error = _pilot_error(equal, weights, pilots, drop_rx)
 
     # 3. Header Extraction & CRC Verification
     end = 2 + layout.header_symbols
@@ -1246,10 +1334,11 @@ def decode_packet(samples, layout, coder, *, body=None, coders=None,
     # re-verify the header changes nothing below, by construction.
     if (fields is not None and not layout.header_split
             and timing_drift > DRIFT_REFIT):
-        refined = _refine_drift(spectrum, layout, fields)
+        refined = _refine_drift(spectrum, layout, fields, drop_rx)
         if refined is not None:
             equal, weights, variance = refined[:3]
-            pilot_error = refined[3]
+            pilot_error = (refined[3] if drop_rx is None
+                           else _pilot_error(equal, weights, pilots, drop_rx))
 
     # 3c. Clipping discount. Symmetric clipping preserves zero crossings, so
     # the header's signs verify untouched -- but the image amplitudes inherit
@@ -1322,13 +1411,20 @@ def decode_packet(samples, layout, coder, *, body=None, coders=None,
     # below 1e-4, so the floor dominated the Wiener denominator and applied an
     # extra, carrier-dependent shrink on top of the de-bias above.
     per_noise[per_noise < 1e-20] = 1e-20
+    # Erasures. A slot on a leg the equaliser cannot see (muted, or dropped
+    # by the single-input retry) comes out with ~zero signal AND ~zero noise,
+    # and the Wiener then divides ~0 by ~0: v3 decoded a muted leg to values
+    # of +-70. Such a slot carries no information, so say so -- effectively
+    # infinite noise, which zeroes it (SourceCoder) or leaves the combine to
+    # its copy (Cdf97Coder).
+    per_noise[per < ERASED_WEIGHT] = 1e6
 
     declared = profile_name(fields[5]) if fields is not None else None
     picture = coder
     if fields is not None and coders:
         picture = coders.get(fields[5], coder)
 
-    slots = coefficient_slots(layout, tuple(picture.shapes))
+    slots = coder_slots(layout, picture)
     values = picture.inverse(sent[slots], per[slots], per_noise[slots])
 
     tier = ('best' if coverage >= 0.90 else 'better' if coverage >= 0.65
@@ -1361,6 +1457,17 @@ def _sync_filter(cutoff, rate=REFERENCE_RATE):
 @lru_cache(maxsize=4)
 def _conditioning_filter(cutoff, rate=REFERENCE_RATE):
     return butter(4, cutoff, btype='highpass', fs=rate, output='sos')
+
+
+def _pilot_error(equal, weights, pilots, drop_rx):
+    """RMS pilot error. From one input, only the legs it can see count: the
+    other leg equalises to zero by design, not by damage."""
+    if drop_rx is None:
+        return float(np.sqrt(np.mean(np.abs(equal[2:, pilots] - 1) ** 2)))
+    seen = [c for c in range(2) if np.mean(weights[pilots, c]) > .4]
+    if not seen:
+        return float('inf')
+    return float(np.sqrt(np.mean(np.abs(equal[2:, pilots][..., seen] - 1) ** 2)))
 
 
 def _recovery_quality(result):

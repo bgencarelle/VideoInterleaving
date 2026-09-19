@@ -4,7 +4,7 @@ Each engine is a black box with the same contract as ``transport3``: an
 ``encode`` that turns source coefficients into one reference-geometry audio
 frame, and a ``Receiver`` that turns audio back into ``Decoded`` results. v3 is
 the DCT source coder; v4 swaps the transform for a 2-D wavelet; v5 uses
-multi-level CDF 9/7 DWT + LDPC on a new HD wire layout. Everything else
+2-level CDF 9/7 DWT with repeat-protected values on the HD wire layout. Everything else
 -- the OFDM wire, the header, the preamble, the acquisition -- is shared and
 lives in ``transport3``/``core``, so today the engines differ only in which
 ``SourceCoder`` subclass they build. The interface is deliberately wider than
@@ -26,17 +26,12 @@ def coder_for(profile, layout=None):
     """Build the right coder (DCT or wavelet) for a profile name."""
     shapes = imaging.plane_shapes(profile)
     if profile == V5_PROFILE:
-        # hd-dwt is CDF 9/7, NOT SourceCoder DCT. It must fit to the shared
-        # mono budget exactly like modem_screen.build (not layout.capacity),
-        # via imaging.hd_dwt_shapes(): any difference in shapes changes the
-        # gains tables and the wire cannot round trip. grids == the baked
-        # 80x96 (plane_grids), NOT shapes -- the grid's full 2-level pyramid
-        # is truncated to the wire budget and the decoder reconstructs the
-        # soft full-resolution picture (same idea as v3/v4 DCT truncation).
-        from .wavelet import Cdf97Coder
-        shapes = imaging.hd_dwt_shapes()
-        grids = imaging.plane_grids(V5_PROFILE)
-        return Cdf97Coder(shapes, grids=grids, levels=2), shapes
+        # hd-dwt is CDF 9/7 with repeat copies, NOT SourceCoder DCT, and both
+        # ends must build it identically or the wire cannot round trip:
+        # wavelet.hd_dwt_coder() is the one constructor.
+        from .wavelet import hd_dwt_coder
+        coder = hd_dwt_coder()
+        return coder, coder.shapes
     grids = imaging.plane_grids(profile)
     if layout is not None and \
             sum(int(np.prod(s)) for s in shapes) > layout.capacity:
@@ -106,7 +101,7 @@ class Engine:
 
 
 class V5Engine(Engine):
-    """v5: CDF 9/7 DWT on the HD wire layout.
+    """v5: CDF 9/7 DWT on the HD wire layout, strongest values sent twice.
 
     Uses the standard V3 wire format and the standard V3.Receiver (edge
     pulse acquisition, OFDM demod) with the matched CDF 9/7 coder and a
@@ -126,16 +121,10 @@ class V5Engine(Engine):
     def coder_for(self, profile, layout=None):
         if profile != V5_PROFILE:
             raise ValueError(f'{profile!r} is not a v5 profile')
-        from . import imaging
-        from .wavelet import Cdf97Coder
-        # Must match modem_screen.build and tools/decode_wav.py exactly: fit
-        # the wire shapes to the shared mono budget (imaging.hd_dwt_shapes),
-        # grids == the baked 80x96 so the truncated DWT decodes at full
-        # resolution (soft); the wire carries the first `count` packed
-        # coefficients of the grid pyramid.
-        shapes = imaging.hd_dwt_shapes()
-        grids = imaging.plane_grids(V5_PROFILE)
-        return Cdf97Coder(shapes, grids=grids, levels=2), shapes
+        # One constructor for every sender, receiver and tool.
+        from .wavelet import hd_dwt_coder
+        coder = hd_dwt_coder()
+        return coder, coder.shapes
 
     def encode(self, values, coder, absolute, index, count, stamp_ms=0,
                headroom=.95, profile=0):

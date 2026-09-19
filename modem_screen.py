@@ -67,7 +67,7 @@ from animation_modem.core import (REFERENCE_RATE as RATE,        # noqa: E402
                                   SourceCoder, bound_emission)
 from animation_modem.wavelet import WaveletCoder                 # noqa: E402
 from animation_modem.imaging import (DEFAULT_PROFILE, PROFILES, burn_counters,  # noqa: E402
-                                     fit_shapes, hd_dwt_shapes, image_values,
+                                     fit_shapes, image_values,
                                      source_size,
                                      plane_grids, plane_shapes, wire_profiles)
 from animation_modem.playback import PacketOutput                 # noqa: E402
@@ -480,25 +480,17 @@ def build(args):
     # v5 profile uses different wire layout
     if args.profile == 'hd-dwt':
         layout = V3.WIRE_HD
-        # hd_dwt_shapes() is the single source of truth for the v5 wire
-        # geometry: the encoder fits the planes to the wire's real value
-        # budget (imaging.HD_MONO_CAPACITY = layout.capacity = 3680), and the
-        # decoder fits to the SAME shapes or the gains tables disagree and the
-        # wire cannot round trip.
-        shapes = hd_dwt_shapes()
-        # grids == the baked 80x96 resolution, NOT the wire shapes. The full
-        # grid pyramid cannot ride the wire, so the encoder keeps only the
-        # first `count` packed coefficients -- the coarsest level's four bands
-        # always ride in full (the half-res picture) and the finest detail
-        # bands truncate, JPEG2000-style. The decoder zero-fills the dropped
-        # tails and reconstructs the full soft 80x96 picture -- the DWT
-        # analogue of v3/v4's DCT truncation, at the same baked resolution.
-        from animation_modem.wavelet import Cdf97Coder
-        grids = plane_grids('hd-dwt')
-        coder = Cdf97Coder(shapes, grids=grids, levels=2)
-        print(f'hd-dwt: sending {coder.count} packed CDF 9/7 coefficients of '
-              f'the {shapes[0][1]}x{shapes[0][0]} grid -> decodes 80x96 @ '
-              f'{layout.fps:.1f} fps mono.', file=sys.stderr)
+        # wavelet.hd_dwt_coder() is the one constructor, shared with the
+        # receiver and tools: both ends must build it identically.
+        from animation_modem.wavelet import hd_dwt_coder
+        coder = hd_dwt_coder()
+        shapes = coder.shapes
+        # Lay out the slots now (~20 ms, cached after): computed lazily on the
+        # first encode it would cost the first live packet its deadline.
+        coder.slots(layout)
+        print(f'hd-dwt: {coder.n_orig} CDF 9/7 values (half-res pyramid of the '
+              f'80x96 grid) + {len(coder.copy_of)} repeat copies -> decodes 80x96 '
+              f'@ {layout.fps:.1f} fps.', file=sys.stderr)
         return layout, coder, shapes
     
     # v3/v4 profiles

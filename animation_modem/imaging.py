@@ -9,21 +9,23 @@ The wire format is the DCT family: `color-dct` at 2880 values and
 `color-wavelet` at 2880 values (same wire shape, wavelet transform),
 and `fit_shapes` trims a profile into a smaller layout's budget.
 
-v5: `hd-dwt` at 11520 values (80x96 luma + 40x48 chroma), 2-level CDF 9/7 DWT,
-truncated onto the WIRE_HD mono budget (~3360 values), standard V3 header
-(profile=2). The decoder reconstructs the full 80x96 grid -- the baked
-resolution -- soft where the wire could not carry the detail bands.
+v5: `hd-dwt` samples 80x96 (+ 40x48 chroma), 2-level CDF 9/7 DWT, and sends
+the half-resolution pyramid (2880 values, cut at a band boundary) plus 800
+repeat copies of its strongest values on diverse carriers -- 3680, the whole
+WIRE_HD budget. Same detail as v3; the extra capacity buys robustness, not
+resolution. See wavelet.Cdf97Coder.
 """
 import numpy as np
 from PIL import Image, ImageDraw, ImageOps
 
 # Luma size and chroma size per profile, on the wire.
 # v3/v4: 40x48 luma + 20x24 chroma = 2880 slots
-# v5: fitted to the WIRE_HD value budget (see HD_MONO_CAPACITY / hd_dwt_shapes)
+# v5: the half-resolution pyramid it carries is 40x48-equivalent too; its
+# repeat copies (wavelet.Cdf97Coder) fill the rest of the WIRE_HD budget.
 PROFILES = {
     'color-dct': ((40, 48), (20, 24)),
     'color-wavelet': ((40, 48), (20, 24)),
-    'hd-dwt': ((56, 44), (28, 22)),
+    'hd-dwt': ((40, 48), (20, 24)),
 }
 # Sampling grid per profile -- the DECODE resolution, always the baked 80x96.
 # SourceCoder truncates the grid's transform to the wire shape -- ONE transform,
@@ -35,27 +37,15 @@ PROFILE_GRIDS = {'color-dct': ((80, 96), (40, 48)),
                  'color-wavelet': ((80, 96), (40, 48)),
                  'hd-dwt': ((80, 96), (40, 48))}
 DEFAULT_PROFILE = 'color-dct'
-# v5 mono wire budget. WIRE_HD's real per-frame value budget is
-# Layout.capacity = header_capacity + image_symbols*data_bins*4 = 3680, so
-# hd-dwt fits to THAT, not the old hand-derived 2000. The encoder fits the
-# planes to this and the decoder must fit to the SAME number or the gains
-# tables disagree and the wire cannot round trip. Single source of truth.
+# v5 wire budget: WIRE_HD's Layout.capacity = header_capacity +
+# image_symbols*data_bins*4 = 3680. wavelet.hd_dwt_coder() fills exactly this
+# (2880 pyramid values + 800 copies); test_hd_dwt pins it to the layout.
 HD_MONO_CAPACITY = 3680
 
 
 def hd_dwt_shapes():
-    """Wire shapes for hd-dwt: the truncation budget, identical at both ends.
-
-    The wire carries the first rows*cols packed coefficients of the grid's
-    pyramid, so this sets how much detail survives. It is NOT the decode
-    resolution -- grids == the baked 80x96 (PROFILE_GRIDS['hd-dwt']) and the
-    decoder reconstructs the full soft picture, JPEG2000-style.
-
-    divisor=8 keeps the fit level-safe if grids ever equals shapes again (with
-    levels=2 every plane must halve cleanly at both levels, and chroma is
-    half-res, so luma dims need d/2 and d/4 even, i.e. divisible by 8).
-    """
-    return fit_shapes(plane_shapes('hd-dwt'), HD_MONO_CAPACITY, divisor=8)
+    """Plane shapes of the pyramid hd-dwt carries (before its repeat copies)."""
+    return plane_shapes('hd-dwt')
 
 
 def wire_profiles():

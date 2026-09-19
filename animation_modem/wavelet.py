@@ -12,7 +12,7 @@ trivial to invert exactly with periodic boundaries.
 """
 import numpy as np
 
-from .core import SourceCoder
+from .core import SourceCoder, _slot_order
 
 SQRT2 = float(np.sqrt(2))
 
@@ -510,25 +510,31 @@ _CDF_K     =  1.230174104914001
 _CDF_KINV  =  1.0 / _CDF_K
 
 def _cdf97_predict_lift(odd, even, coeff):
-    """Predict step: odd[k] += coeff*(even[k] + even[k+1]), k+1 wraps.
+    """Predict step: odd[k] += coeff*(even[k] + even[k+1]).
 
     The lifted pair must MIX the two polyphase components -- odd[k]'s
-    neighbours in the interleaved signal are even[k] and even[k+1]. Lifting the
-    odd sequence against itself (an np.roll on the SAME sequence) is not the
-    CDF 9/7 predict step and is not invertible. Periodic boundary: the
-    successor of the last even sample is the first one.
+    neighbours in the interleaved signal are even[k] and even[k+1].
 
+    Symmetric boundary (JPEG2000 whole-sample symmetric extension): past the
+    last sample the signal mirrors, so the missing even[k+1] of the last odd
+    sample is even[k] itself. The periodic boundary this replaces wrapped the
+    frame's right edge into its left: every edge coefficient mixed opposite
+    sides of the picture, and a truncated pyramid smeared that across the
+    border -- measured 8 dB worse than the DCT on a smooth frame, 0.7 dB with
+    this. Still exactly invertible: the inverse lifts with the same rule.
     Works along the LAST axis, so a 2-D array lifts every row at once.
     """
-    return odd + coeff * (even + np.roll(even, -1, axis=-1))
+    nxt = np.concatenate([even[..., 1:], even[..., -1:]], axis=-1)
+    return odd + coeff * (even + nxt)
 
 def _cdf97_update_lift(even, odd, coeff):
-    """Update step: even[k] += coeff*(odd[k-1] + odd[k]), k-1 wraps.
+    """Update step: even[k] += coeff*(odd[k-1] + odd[k]).
 
-    Mirror of :func:`_cdf97_predict_lift`: even[k]'s neighbours are odd[k-1]
-    (periodically the last odd sample) and odd[k]. Last axis, like predict.
+    Mirror of :func:`_cdf97_predict_lift`, same symmetric boundary: before
+    the first sample odd[-1] reflects to odd[0]. Last axis, like predict.
     """
-    return even + coeff * (np.roll(odd, 1, axis=-1) + odd)
+    prv = np.concatenate([odd[..., :1], odd[..., :-1]], axis=-1)
+    return even + coeff * (prv + odd)
 
 def cdf97_forward_1d(x, axis=-1):
     """1D CDF 9/7 forward transform using lifting (periodic boundary).
@@ -676,54 +682,195 @@ def _cdf97_pack_order(dims):
     return order
 
 
+# Per-band RMS of the packed pyramid, per plane (Y, Cb, Cr), for the value
+# scale image_values produces ([-1, 1]). Measured on 48 synthetic frames with
+# a natural-image 1/f spectrum (seed 7) at the baked 80x96 grid, 2 levels,
+# symmetric boundary; test_hd_dwt re-measures it. The bake is fixed, so the
+# table is a constant and costs no header bits -- the same bargain as
+# default_allocation, but for the wavelet's actual bands. It sets each
+# value's transmit power (sqrt of its RMS, the analog optimum) and is the
+# Wiener prior on decode.
+HD_BAND_RMS = (
+    {'LL': 1.80, 'LH': .457, 'HL': .457, 'HH': .303},
+    {'LL': .871, 'LH': .093, 'HL': .093, 'HH': .058},
+    {'LL': .891, 'LH': .135, 'HL': .135, 'HH': .085},
+)
+# Carrier the most important values should ride: low-mid, where tape keeps
+# its response (~3.75 kHz at 375 Hz/bin). The bottom two bins are avoided
+# (rumble, the guard carrier) rather than forbidden.
+TAPE_CENTRE_BIN = 10
+
+
 class Cdf97Coder(SourceCoder):
-    """SourceCoder using multi-level CDF 9/7 DWT with measured allocation.
-    
-    v5: 3-level DWT on 96x112 source -> collects coefficients from all subbands
-    to fill 56x44 wire shape.
+    """v5 source coder: 2-level CDF 9/7 on the baked grid, protected by repeats.
+
+    What rides the wire, per plane: the coarsest level's four bands and the
+    finest level's detail is dropped. That is the whole half-resolution
+    pyramid -- luma 1920 values, each chroma 480, 2880 in all -- cut at a
+    band boundary. (Cutting mid-band, as v5 first did, spent the leftover on
+    the first rows of one detail band: a sharp strip across the top of the
+    frame and nothing anywhere else.)
+
+    The wire holds `capacity` values (3680 on WIRE_HD). The 800 left over do
+    NOT buy resolution -- 800 more values cannot come close to a full 80x96
+    pyramid, 7680 luma values alone. They buy survival: the highest-energy
+    values (every LL coefficient of all three planes, then the strongest
+    detail) are sent twice. Each copy rides the OTHER stereo channel, at
+    least MIN_COPY_SPREAD carriers away from its original, preferring the
+    low-mid band tape keeps. The decoder combines the two with the
+    equaliser's per-slot reliability (maximum-ratio, then Wiener), so a copy
+    on a dead carrier costs nothing and one on a live carrier rescues it.
+
+    Measured against v3 on the same synthetic frames (tools/compare_codecs.py;
+    run it with --modem-dir for real content): -0.7 dB on a perfect channel;
+    +4.0 dB cassette (10 kHz, -45 dB); +6.0 dB worn deck; +3.1 dB at -30 dB
+    hiss; +6.9 dB through a 6 kHz lowpass; +3.4 dB with one stereo leg dead
+    (v3 gained most there from the erasure fix in decode_packet); +3.3 dB
+    under a 1 kHz bass cut; +6.4 dB clipped at half scale.
     """
-    def __init__(self, shapes, grids=None, allocation=None, levels=3):
-        self.levels = levels
-        # Generate allocation based on subband structure if not provided
-        if allocation is None:
-            from .core import default_allocation
-            count = int(sum(np.prod(s) for s in shapes))
-            allocation = default_allocation(shapes, count)
-        # SourceCoder expects: (shapes, allocation, grids)
-        super().__init__(shapes, allocation, grids)
+    MIN_COPY_SPREAD = 10
 
-    def _forward_transform(self, plane, rows, cols):
-        # Full multi-level DWT on source grid, packed in shared order and
-        # truncated/padded to the wire shape. Truncation lands mid-subband:
-        # the inverse zero-fills dropped tails (JPEG2000 truncation semantics).
+    def __init__(self, grids, capacity, levels=2):
+        self.levels = int(levels)
+        self.grids = [tuple(g) for g in grids]
+        step = 2**self.levels
+        if any(r % step or c % step for r, c in self.grids):
+            raise ValueError(f'Every grid must divide by {step} for {levels} levels')
+        # The kept region of each plane is its coarsest-level pyramid, which
+        # packs to exactly (rows/2)x(cols/2) values: reported as `shapes`.
+        self.shapes = [(r//2, c//2) for r, c in self.grids]
+        self.keep = [r*c//4 for r, c in self.grids]
+        self.n_orig = sum(self.keep)
+        self.source_count = sum(r*c for r, c in self.grids)
+        self.truncated = True
+        if capacity < self.n_orig:
+            raise ValueError(f'{capacity} slots cannot hold the {self.n_orig}-value '
+                             'half-resolution pyramid')
+        tables = HD_BAND_RMS if len(self.grids) == 3 else HD_BAND_RMS[:1]
+        sigma = np.concatenate([
+            [tables[p][band] for _, band, rows, cols in
+             _cdf97_pack_order(_cdf97_subband_dims(r, c, self.levels))
+             for _ in range(rows*cols)][:k]
+            for p, ((r, c), k) in enumerate(zip(self.grids, self.keep))])
+        # Importance rank: position in the plane's packed order over the
+        # plane's size, so every plane's LL precedes every plane's detail.
+        self.rank = np.concatenate([np.arange(k)/(r*c)
+                                    for (r, c), k in zip(self.grids, self.keep)])
+        spare = int(capacity) - self.n_orig
+        order = np.lexsort((self.rank, -sigma))       # strongest first
+        self.copy_of = np.sort(order[:spare])
+        self.count = self.n_orig + len(self.copy_of)
+        full = np.concatenate([sigma, sigma[self.copy_of]])
+        gains = np.sqrt(full/np.mean(full))
+        self.gains = gains/np.sqrt(np.mean(gains**2))
+        self.variance = sigma**2
+        self._slots = {}
+
+    def forward(self, values):
+        """Pixels in (source_count), wire values out (count): originals, then copies."""
+        planes = self._split(np.asarray(values, float), self.grids)
+        kept = np.concatenate([self._pack(plane)[:k]
+                               for plane, k in zip(planes, self.keep)])
+        return np.concatenate([kept, kept[self.copy_of]])*self.gains
+
+    def inverse(self, sent, reliability=None, noise_variance=None):
+        """Wire values in, full-grid pixels out; each repeat combined with its original.
+
+        With reliability: the slot arrives as y = gain*rel*x + n. Stacking the
+        original and its copy, the MMSE estimate of x under the prior variance
+        is var*sum(a*y/n) / (1 + var*sum(a^2/n)), a = gain*rel -- a single
+        observation reduces to SourceCoder's Wiener exactly. Without it, the
+        copies are simply averaged.
+        """
+        y = np.asarray(sent, float)
+        n0, cp = self.n_orig, self.copy_of
+        if reliability is None:
+            x = y/self.gains
+            kept = x[:n0].copy()
+            kept[cp] = (kept[cp] + x[n0:])/2
+        else:
+            a = self.gains*np.maximum(np.asarray(reliability, float), 1e-6)
+            nv = np.maximum(np.asarray(noise_variance, float), 1e-20)
+            num, den = a*y/nv, a*a/nv
+            top, bottom = num[:n0].copy(), den[:n0].copy()
+            np.add.at(top, cp, num[n0:])
+            np.add.at(bottom, cp, den[n0:])
+            kept = self.variance*top/(1 + self.variance*bottom)
+        out, offset = [], 0
+        for (rows, cols), k in zip(self.grids, self.keep):
+            flat = np.zeros(rows*cols)
+            flat[:k] = kept[offset:offset+k]
+            offset += k
+            out.append(self._unpack(flat, rows, cols).ravel())
+        return np.concatenate(out)
+
+    def slots(self, layout):
+        """Wire slot of every value (core.coder_slots calls this).
+
+        Originals, most important first, take the image slots nearest the
+        tape centre carrier. Copies then go, strongest first, to the free slot
+        on the other channel, far enough in frequency from their original,
+        nearest the tape centre. Deterministic, so both ends agree; cached.
+        """
+        if layout in self._slots:
+            return self._slots[layout]
+        if self.count > layout.capacity:
+            raise ValueError(f'{self.count} values exceed {layout.name} capacity '
+                             f'{layout.capacity}')
+        bins, chans = _slot_carriers(layout)
+        order = _slot_order(layout)
+        mapping = np.empty(self.count, int)
+        mine = np.sort(order[:self.n_orig])
+        health = np.abs(bins[mine] - TAPE_CENTRE_BIN) + 40*(bins[mine] < 3)
+        mapping[np.argsort(self.rank, kind='stable')] = \
+            mine[np.argsort(health, kind='stable')]
+        pool = np.sort(order[self.n_orig:self.count])
+        health = np.abs(bins[pool] - TAPE_CENTRE_BIN) + 40*(bins[pool] < 3)
+        taken = np.zeros(len(pool), bool)
+        for j in np.lexsort((self.rank[self.copy_of], -self.variance[self.copy_of])):
+            home = mapping[self.copy_of[j]]
+            score = (health + 100*(chans[pool] == chans[home])
+                     + 100*(np.abs(bins[pool] - bins[home]) < self.MIN_COPY_SPREAD)
+                     + 1e6*taken)
+            pick = int(np.argmin(score))
+            taken[pick] = True
+            mapping[self.n_orig + j] = pool[pick]
+        mapping.setflags(write=False)
+        self._slots[layout] = mapping
+        return mapping
+
+    def _pack(self, plane):
         subbands = cdf97_forward_2d(plane, self.levels)
-        dims = _cdf97_subband_dims(plane.shape[0], plane.shape[1], self.levels)
-        order = _cdf97_pack_order(dims)
-        out = np.concatenate([subbands[level][band].ravel()
-                              for level, band, _, _ in order])
-        target = rows * cols
-        if len(out) >= target:
-            return out[:target]
-        padded = np.zeros(target)
-        padded[:len(out)] = out
-        return padded
+        order = _cdf97_pack_order(_cdf97_subband_dims(*plane.shape, self.levels))
+        return np.concatenate([subbands[level][band].ravel()
+                               for level, band, _, _ in order])
 
-    def _inverse_transform(self, corner, rows, cols, grid):
-        # Unpack the flat wire corner back into subbands in the shared order
-        # (zero-filling every dropped tail), then run the true multi-level
-        # inverse. The output is the full source grid, soft where the wire
-        # could not carry the detail bands.
-        dims = _cdf97_subband_dims(grid[0], grid[1], self.levels)
-        order = _cdf97_pack_order(dims)
-        flat = np.asarray(corner).ravel()
-        subbands = {}
-        idx = 0
+    def _unpack(self, flat, rows, cols):
+        order = _cdf97_pack_order(_cdf97_subband_dims(rows, cols, self.levels))
+        subbands, idx = {}, 0
         for level, band, sr, sc in order:
-            full = np.zeros((sr, sc), dtype=flat.dtype)
-            n = sr * sc
-            take = min(n, len(flat) - idx)
-            if take > 0:
-                full.ravel()[:take] = flat[idx:idx + take]
-                idx += take
-            subbands.setdefault(level, {})[band] = full
-        return cdf97_inverse_2d(subbands, self.levels, out_shape=tuple(grid))
+            subbands.setdefault(level, {})[band] = flat[idx:idx+sr*sc].reshape(sr, sc)
+            idx += sr*sc
+        return cdf97_inverse_2d(subbands, self.levels, out_shape=(rows, cols))
+
+
+def _slot_carriers(layout):
+    """Carrier bin and stereo channel of every flat wire slot.
+
+    Mirrors the flat layout encode/decode_packet use: the header symbols'
+    spare carriers first, then the image symbols, each cell four values
+    (channel 0 re/im, channel 1 re/im).
+    """
+    cells = []
+    if layout.dense_header:
+        cells += [layout.spare_bins]*layout.header_symbols
+    cells += [layout.data_bins]*layout.image_symbols
+    bins = np.repeat(np.concatenate(cells), 4)
+    chans = np.tile(np.array([0, 0, 1, 1]), len(bins)//4)
+    return bins, chans
+
+
+def hd_dwt_coder():
+    """The one v5 coder. Every sender, receiver and tool builds it here."""
+    from .imaging import HD_MONO_CAPACITY, plane_grids
+    return Cdf97Coder(plane_grids('hd-dwt'), HD_MONO_CAPACITY, levels=2)

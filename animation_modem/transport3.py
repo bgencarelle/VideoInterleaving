@@ -11,6 +11,7 @@ from .audio_common import (pcm, pair, device, wav_blocks, wav_rate, wire_notice,
 from .core import (REFERENCE_RATE, N, CP, SYMBOL, SYNC_LEN, GUARD, HEADER_GAIN,
                          IMAGE_GAIN, HEADER_SLOTS, HEADER_FORMAT, HEADER_BYTES,
                          Layout, SourceCoder, Decoded, coefficient_slots,
+                         coder_slots,
                          phases, pack_header, pack_folders, decode_packet,
                          default_allocation, resample_packet, _sample_at,
                          _body_walk, _decode_tables, FOLDER_LIMIT,
@@ -486,7 +487,7 @@ def encode(values, layout, coder, absolute, index, count, stamp_ms=0, flags=0,
             grid[2+s, header, 1] = spread[s]*HEADER_GAIN
 
     sent = np.zeros(layout.capacity)
-    sent[coefficient_slots(layout, tuple(coder.shapes))] = coder.forward(values)
+    sent[coder_slots(layout, coder)] = coder.forward(values)
     head = layout.header_capacity
     if head:
         spare = np.searchsorted(carriers, layout.spare_bins)
@@ -651,23 +652,40 @@ class Receiver:
                 self.waiting = True
                 return None
             if at >= 0:
-                for channel in range(2):
-                    measured = measure_pulses(self.buffer[left:right, channel],
-                                              self.min_scale, self.max_scale)
-                    if measured is not None:
-                        position, scale, confidence = measured
-                        self.acquisition_path = 'coast'
-                        self.locked_packets += 1
-                        return position+left, scale, confidence
+                measured = self._closest_pulses(self.buffer[left:right])
+                if measured is not None:
+                    position, scale, confidence = measured
+                    self.acquisition_path = 'coast'
+                    self.locked_packets += 1
+                    return position+left, scale, confidence
             self.predicted = None
         window = self.buffer[:max(1024, 2*self.keep)]
+        measured = self._closest_pulses(window)
+        if measured is not None:
+            self.acquisition_path = 'edge'
+            self.edge_hits += 1
+        return measured
+
+    def _closest_pulses(self, window):
+        """Measure the preamble on both legs; trust the one nearer the expected speed.
+
+        The preamble rides both legs identically, so they agree unless one is
+        damaged. Taking the first leg that measured anything let a pitch-
+        shifted left leg -- whose edges read ~6% fast -- time the whole packet,
+        and the clean right leg was never consulted. Expected speed is the
+        tracked rate once locked, nominal before. Legs that agree resolve to
+        leg 0, as before.
+        """
+        expected = self.clock*(1+self.rate_error) if self.confidence else self.clock
+        best = None
         for channel in range(2):
             measured = measure_pulses(window[:, channel], self.min_scale, self.max_scale)
-            if measured is not None:
-                self.acquisition_path = 'edge'
-                self.edge_hits += 1
-                return measured
-        return None
+            if measured is None:
+                continue
+            miss = abs(measured[1]/expected - 1)
+            if best is None or miss < best[0] - 1e-4:
+                best = (miss, measured)
+        return None if best is None else best[1]
 
     def _correlate(self, window):
         scales = np.geomspace(self.min_scale, self.max_scale,
