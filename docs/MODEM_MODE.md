@@ -16,6 +16,14 @@ selects `5:6`. The `write` and `live-send` commands in
 `utilities/modem_v3_check.py` accept the same option, using each input image's
 dimensions. Already-baked padding cannot be recovered from aspect metadata.
 
+For encoder filter comparisons, `modem_screen.py` and the `write`/`live-send`
+commands accept `--encode-filter box|nearest|lanczos|bicubic` (default: `lanczos`).
+This selects the source-to-80x96 preparation filter; decoded display still
+defaults to nearest-neighbour independently. Bicubic offers a less aggressive
+filtered alternative to Lanczos. Capture pre-scaling by ffmpeg and the screen
+fitter's fast striding happen before this filter, so comparisons measure the
+final preparation stage rather than an unfiltered full-resolution source.
+
 The top three bits of the existing 32-bit `absolute` header word carry the
 aspect code; the lower 29 carry the wrapping frame counter. `count` is unchanged.
 Update sender and receiver together: old receivers interpret non-native aspect

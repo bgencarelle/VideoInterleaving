@@ -38,6 +38,7 @@ from animation_modem.audio_common import (pcm, pair, device,   # noqa: E402
                                           InputLevel, sounddevice)
 from animation_modem.imaging import (DEFAULT_PROFILE, burn_counters,   # noqa: E402
                                      image_values, values_image, prepare_image, display_image,
+                                     ENCODE_FILTERS,
                                      wire_profiles)
 from animation_modem.aspect import ASPECT_CHOICES, aspect_code
 # Decoded-picture window, in screen pixels. 480x576 is a whole-number 12x of a
@@ -210,7 +211,7 @@ def do_write(args):
         sink.setparams((2, 2, rate, 0, 'NONE', 'not compressed'))
         for n, im in enumerate(frames):
             code = aspect_code(im.size, args.aspect)
-            im = prepare_image(im, args.aspect)
+            im = prepare_image(im, args.aspect, args.encode_filter)
             values = image_values(_prepared(im, n+1, len(frames), args.numbered),
                                   coder.grids)
             audio = engine.encode(values, coder, n+1, (n % len(frames))+1,
@@ -354,7 +355,7 @@ def do_live_send(args):
         emitted = engine.emit_length(layout.frame, rate)
         fps = rate/emitted
         packets.extend(engine.adapt(engine.encode(image_values(
-                           _prepared(prepare_image(im, args.aspect), n+1,
+                           _prepared(prepare_image(im, args.aspect, args.encode_filter), n+1,
                                      len(frames), args.numbered), coder.grids),
                        coder, n+1, (n % len(frames))+1, len(frames),
                        stamp_ms=n*int(1000/fps),
@@ -663,6 +664,8 @@ def main(argv=None):
     b = sub.add_parser('bench', parents=[codec]); shared(b)
     w = sub.add_parser('write', parents=[codec]); shared(w)
     w.add_argument('--aspect', choices=ASPECT_CHOICES, default='auto')
+    w.add_argument('--encode-filter', choices=tuple(ENCODE_FILTERS), default='lanczos',
+                   help='Source-to-80x96 resize filter (default: lanczos)')
     w.add_argument('--out', type=Path, default=Path('v3_test.wav'))
     w.add_argument('-f', '--numbered', action='store_true')
     r = sub.add_parser('read', parents=[codec])
@@ -679,6 +682,8 @@ def main(argv=None):
     IMP.add_arguments(r)
     ls = sub.add_parser('live-send', parents=[codec]); shared(ls)
     ls.add_argument('--aspect', choices=ASPECT_CHOICES, default='auto')
+    ls.add_argument('--encode-filter', choices=tuple(ENCODE_FILTERS), default='lanczos',
+                    help='Source-to-80x96 resize filter (default: lanczos)')
     ls.add_argument('--device', type=device)
     ls.add_argument('--channels', type=pair, default=(0, 1))
     ls.add_argument('-f', '--numbered', action='store_true')

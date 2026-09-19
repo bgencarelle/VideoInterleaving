@@ -68,7 +68,7 @@ from animation_modem.core import (REFERENCE_RATE as RATE,        # noqa: E402
 from animation_modem.wavelet import WaveletCoder                 # noqa: E402
 from animation_modem.imaging import (DEFAULT_PROFILE, PROFILES, burn_counters,  # noqa: E402
                                      fit_shapes, image_values,
-                                     source_size,
+                                      source_size, ENCODE_FILTERS,
                                      plane_grids, plane_shapes, wire_profiles)
 from animation_modem.playback import PacketOutput                 # noqa: E402
 from animation_modem.aspect import ASPECT_CHOICES, aspect_code     # noqa: E402
@@ -168,8 +168,8 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320):
     """
     if shutil.which('ffmpeg') is None:
         raise SystemExit('ffmpeg not found. brew install ffmpeg / apt install ffmpeg')
-    w = int(width)
-    if w < 1:
+    w = int(width) if width is not None else None
+    if w is not None and w < 1:
         raise ValueError('Capture width must be positive')
 
     if spec:
@@ -188,7 +188,9 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320):
                 '-i', f'{src}+{region[0]},{region[1]}']
     else:
         cmd += ['-i', src]
-    cmd += ['-vf', f'scale={w}:-1', '-pix_fmt', 'rgb24',
+    if w is not None:
+        cmd += ['-vf', f'scale={w}:-1']
+    cmd += ['-pix_fmt', 'rgb24',
             '-fps_mode', 'passthrough',
             '-c:v', 'ppm', '-f', 'image2pipe', '-an', '-sn', '-']
     # Device timestamps are not necessarily a constant-rate timeline. The
@@ -238,8 +240,8 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320):
     return grab
 
 
-def camera_source(index=0, fps=30, width=320, spec=None):
-    """Webcam through ffmpeg, same reasoning as screen capture."""
+def camera_source(index=0, fps=30, width=None, spec=None):
+    """Webcam at the device's default dimensions unless explicitly resized."""
     if sys.platform == 'darwin':
         spec = spec or f'avfoundation:{index}'
     elif sys.platform.startswith('win'):
@@ -412,7 +414,8 @@ class Throttled:
 # Frame preparation
 # --------------------------------------------------------------------------
 
-def fitter(profile, rotate=0, mirror=False, letterbox=False, aspect='auto'):
+def fitter(profile, rotate=0, mirror=False, letterbox=False, aspect='auto',
+           encode_filter='lanczos'):
     """Full source -> native 80x96 image with aspect metadata.
 
     Striding to roughly 4x the target keeps large desktop captures cheap.
@@ -423,6 +426,7 @@ def fitter(profile, rotate=0, mirror=False, letterbox=False, aspect='auto'):
     # Every codec samples the native grid. Display geometry is metadata, not
     # padding; derive it from the actual capture, including camera renegotiation.
     size = source_size(profile)
+    resample = ENCODE_FILTERS[encode_filter]
     target = max(size)*4
 
     def prepare(raw):
@@ -438,9 +442,9 @@ def fitter(profile, rotate=0, mirror=False, letterbox=False, aspect='auto'):
         if mirror:
             im = ImageOps.mirror(im)
         if letterbox:
-            im = ImageOps.pad(im, size, Image.LANCZOS, color=(1, 1, 1))
+            im = ImageOps.pad(im, size, resample, color=(1, 1, 1))
         else:
-            im = im.resize(size, Image.LANCZOS)
+            im = im.resize(size, resample)
 
         # Color enhancements to sharpen outlines before DCT frequency truncation
         im = ImageEnhance.Color(im).enhance(1.2)
@@ -525,7 +529,7 @@ def source_for(args, fps):
                              region, args.display, args.capture_width)
     if args.source == 'camera':
         return camera_source(args.camera, args.capture_fps or 30,
-                             args.capture_width, args.ffmpeg_input)
+                             spec=args.ffmpeg_input)
     if args.source == 'video':
         return video_source(args.file, not args.no_loop, realtime=not args.write)
     return test_source()
@@ -717,6 +721,9 @@ def parser():
                     help='Width ffmpeg scales to before Python sees the frame')
     ap.add_argument('--rotate', type=int, default=0, choices=(0, 90, 180, 270))
     ap.add_argument('--mirror', action='store_true')
+    ap.add_argument('--encode-filter', choices=tuple(ENCODE_FILTERS), default='lanczos',
+                    help='Source-to-80x96 resize filter (default: lanczos). '
+                         'Applied after capture pre-scaling/striding.')
     ap.add_argument('--aspect', choices=ASPECT_CHOICES, default='auto',
                     help='Display aspect: auto selects the nearest preset from '
                          'each source frame (including cameras), after rotation. '
@@ -763,7 +770,8 @@ def main(argv=None):
     # Neither preset nor profile has to be agreed out of band. The wire is
     # fixed and the profile is declared in the header, so nothing is refused.
     layout, coder, shapes = build(args)
-    prepare = fitter(args.profile, args.rotate, args.mirror, aspect=args.aspect)
+    prepare = fitter(args.profile, args.rotate, args.mirror, aspect=args.aspect,
+                     encode_filter=args.encode_filter)
     raw = source_for(args, layout.fps)
     # Throttling exists so a slow capture cannot stall the audio callback and a
     # fast one cannot burn a core. Neither applies when rendering to a file, and

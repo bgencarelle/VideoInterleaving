@@ -113,10 +113,16 @@ def _shapes(spec):
     return list(getattr(spec, 'shapes', spec))
 
 
-def prepare_image(image, preset='auto'):
+ENCODE_FILTERS = {'box': Image.Resampling.BOX,
+                  'nearest': Image.Resampling.NEAREST,
+                  'lanczos': Image.Resampling.LANCZOS,
+                  'bicubic': Image.Resampling.BICUBIC}
+
+
+def prepare_image(image, preset='auto', encode_filter='lanczos'):
     """Squeeze the whole source to native geometry and retain its display preset."""
     code = aspect_code(image.size, preset)
-    image = image.convert('RGB').resize((80, 96), Image.Resampling.LANCZOS)
+    image = image.convert('RGB').resize((80, 96), ENCODE_FILTERS[encode_filter])
     image.info['aspect_code'] = code
     return image
 
