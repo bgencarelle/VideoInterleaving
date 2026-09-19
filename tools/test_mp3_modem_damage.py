@@ -11,6 +11,8 @@ from scipy.signal import correlate, correlation_lags
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from animation_modem import engines
+from animation_modem import transport3 as V3
+from animation_modem.core import SYNC_LEN, SYMBOL, profile_code
 
 
 RATE = 48000
@@ -43,26 +45,35 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--out', type=Path, default=Path('scratch/mp3-modem-damage'))
     parser.add_argument('--frames', type=int, default=60)
+    parser.add_argument('--profile', choices=('hd-dwt', 'tape-80x60'),
+                        default='hd-dwt')
+    parser.add_argument('--wire', choices=('wide', 'tape'), default='wide')
+    parser.add_argument('--bitrate', default='320k')
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
-    engine = engines.get_engine('v5')
-    layout = engine.wire
-    coder, _ = engine.coder_for('hd-dwt', layout)
+    if args.wire == 'tape':
+        layout = V3.WIRE_TAPE if args.profile == 'hd-dwt' else V3.WIRE_TAPE_25
+    else:
+        if args.profile != 'hd-dwt':
+            parser.error('tape-80x60 requires --wire tape')
+        layout = V3.WIRE_HD
+    coder, _ = engines.coder_for(args.profile, layout)
     rng = np.random.default_rng(20260919)
     packets = []
     for n in range(args.frames):
         values = rng.uniform(-.9, .9, coder.source_count)
-        packets.append(engine.encode(values, coder, n + 1, n + 1, args.frames,
-                                     profile=engine.profile_code('hd-dwt')))
+        packets.append(V3.encode(values, layout, coder, n + 1, n + 1,
+                                  args.frames, profile=profile_code(args.profile)))
     original = np.concatenate(packets).astype(float)
     source = args.out / 'modem-random.wav'
     write_wav(source, original)
-    mp3 = args.out / 'modem-random.mp3'
-    decoded = args.out / 'modem-random-decoded.wav'
+    stem = f"{args.profile}-{args.wire}-{args.bitrate}"
+    mp3 = args.out / f'{stem}.mp3'
+    decoded = args.out / f'{stem}-decoded.wav'
     subprocess.run(['ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
                     '-i', str(source), '-ar', str(RATE), '-ac', '2',
-                    '-c:a', 'libmp3lame', '-b:a', '320k', '-joint_stereo', '1',
+                    '-c:a', 'libmp3lame', '-b:a', args.bitrate, '-joint_stereo', '1',
                     str(mp3)], check=True)
     subprocess.run(['ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
                     '-i', str(mp3), '-ar', str(RATE), '-ac', '2',
@@ -75,8 +86,8 @@ def main():
     for n in range(usable):
         a = recovered[n*layout.frame:n*layout.frame+layout.packet]
         b = damaged[n*layout.frame:n*layout.frame+layout.packet]
-        a = a[288:].reshape(layout.symbols, 144, 2)[:, 12:140]
-        b = b[288:].reshape(layout.symbols, 144, 2)[:, 12:140]
+        a = a[SYNC_LEN:].reshape(layout.symbols, SYMBOL, 2)[:, 12:140]
+        b = b[SYNC_LEN:].reshape(layout.symbols, SYMBOL, 2)[:, 12:140]
         xa = np.fft.rfft(a, n=128, axis=1)
         xb = np.fft.rfft(b, n=128, axis=1)
         for channel in range(2):
@@ -88,6 +99,7 @@ def main():
             carrier_n += np.sum(good, axis=0)
     mean = carrier_sum / np.maximum(carrier_n, 1)
     evm = np.sqrt(carrier_sq / np.maximum(carrier_n, 1))
+    print(f'profile={args.profile} wire={args.wire} bitrate={args.bitrate}')
     print(f'frames={usable} alignment_lag={lag} samples')
     print('bin,frequency_hz,gain_db,phase_deg,evm,samples')
     for i, value in enumerate(mean):

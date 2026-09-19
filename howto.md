@@ -258,6 +258,27 @@ Measure damage on randomized real modem frames:
   --frames 60
 ```
 
+The same damage probe accepts the new wire/profile combinations. Use separate
+output directories for separate runs:
+
+```bash
+# Redundant 80x96 tape wire
+.venv/bin/python tools/test_mp3_modem_damage.py \
+  --out scratch/mp3-modem-tape-80x96-320k \
+  --frames 60 --profile hd-dwt --wire tape --bitrate 320k
+
+# Redundant 80x60 tape wire
+.venv/bin/python tools/test_mp3_modem_damage.py \
+  --out scratch/mp3-modem-tape-80x60-320k \
+  --frames 60 --profile tape-80x60 --wire tape --bitrate 320k
+```
+
+For an apples-to-apples MP3 sweep, repeat each command with `--bitrate 192k`,
+`--bitrate 256k`, and `--bitrate 320k`. The report prints per-carrier gain,
+phase, and EVM; decoded PNGs should additionally be scored against the clean
+reference with `measure_plane_survival.py`. MP3 is an offline diagnostic and
+does not replace a live device or real tape test.
+
 Decode a lossy WAV while testing carrier ceilings:
 
 ```bash
