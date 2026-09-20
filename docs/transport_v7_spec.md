@@ -735,6 +735,10 @@ source to the 80×96 preparation canvas and prepared image to the V7 coder
 grids. This intentionally produces a clean pixelated image rather than Lanczos
 ringing. Existing V3–V6 callers retain Lanczos by default; `image_values()` now
 accepts the same explicit `encode_filter` choices as `prepare_image()`.
+V7 live sending also applies a small source brightness multiplier of 1.05 by
+default, with explicit `--brightness` and `--gamma` controls for camera
+matching. These are source-only presentation adjustments; they do not alter
+the wire or decoder.
 
 Nearest live conversion increases source projection error on the checked-in
 face relative to Lanczos, but does not increase audio RMS, peak, or carrier
