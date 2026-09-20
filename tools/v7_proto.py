@@ -26,12 +26,16 @@ from scipy.signal import butter, filtfilt, firwin, savgol_filter, sosfiltfilt
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from animation_modem import v6                                         # noqa: E402
+from animation_modem import transport3 as V3                             # noqa: E402
 from animation_modem.core import SourceCoder, _sample_at               # noqa: E402
+from animation_modem.core import bound_emission                         # noqa: E402
 from animation_modem.imaging import image_values, prepare_image        # noqa: E402
 
 # ------------------------------------------------------------------ §6.1
 RATE, N, CP, SYM, F = 48000, 128, 16, 144, 24
 FRAME = F*SYM                                   # 3456 samples, 13.889 fps
+PULSE_FRAME = V3.SYNC_LEN + FRAME + 32           # 3776 samples, 12.712 fps
+PULSE_FPS = RATE/PULSE_FRAME
 BINS = np.arange(4, 35)                         # 1.5-12.75 kHz
 CONTINUAL = (4, 34)
 SCAT = {b: ((b-5)//4) % 3 for b in range(5, 34, 4)}
@@ -294,6 +298,21 @@ def encode_stream(model, values, frames, lead=0.25, tail=0.25,
     sig = np.clip(sig, -0.89, 0.89)                           # -1 dBFS safety limiter
     pad = lambda s: np.zeros((int(s*RATE), 2))
     return np.concatenate([pad(lead), sig, pad(tail)]).astype(np.float32)
+
+
+def encode_pulse_frame(model, values, counter):
+    """One V3-style pulse-framed V7 body for low-latency live transport."""
+    body = encode_frame(model, values, counter)
+    out = np.zeros((PULSE_FRAME, 2), np.float32)
+    out[V3.SYNC_LEN:V3.SYNC_LEN+FRAME] = body
+    out[16:16+len(V3.PREAMBLE), :] = V3.PREAMBLE[:, None]
+    return bound_emission(out, 14000, RATE)
+
+
+def encode_pulse_stream(model, values, start_counter=1):
+    values = list(values) if np.asarray(values).ndim != 1 else [values]
+    return np.concatenate([encode_pulse_frame(model, value, start_counter+i)
+                           for i, value in enumerate(values)])
 
 
 # ------------------------------------------------------------------ receiver: clock
@@ -825,6 +844,60 @@ def decode_stream(model, x, verbose=False, diagnostics=None):
         diagnostics['input_samples'] = int(len(x))
         info['diagnostics'] = _diagnostic_summary(
             diagnostics, (perf_counter()-started)*1000)
+    return results, info
+
+
+def decode_pulse_stream(model, x, diagnostics=None):
+    """Decode V7 bodies located by the existing pulse-counted acquisition.
+
+    This is the low-latency live path: each accepted pulse word supplies a
+    frame scale, the body is resampled directly to the reference grid, and the
+    next pulse search starts after that frame.  There is no continuous clock
+    track or buffered clock-template refinement.
+    """
+    samples = np.asarray(x, float)
+    cursor = 0
+    counter = 1
+    results = []
+    tail = model.mu.copy()
+    while cursor + V3.SYNC_LEN + 32 < len(samples):
+        measured = V3.measure_pulses(samples[cursor:].mean(axis=1),
+                                     min_scale=.5, max_scale=2.0)
+        if measured is None:
+            break
+        position, scale, confidence = measured
+        position += cursor
+        # measure_pulses() returns the first preamble edge (the encoded frame
+        # starts 16 samples earlier), matching Receiver.pending's at-16*scale
+        # correction.
+        frame_start = position - 16*scale
+        start = frame_start + V3.SYNC_LEN*scale
+        indexes = start + np.arange(FRAME)*scale
+        if indexes[-1] >= len(samples)-1:
+            break
+        body = _sample_at(samples, indexes, taps=16).astype(np.float32)
+        padded = np.pad(body, ((64, 65), (0, 0)))
+        nominal = np.array([0., FRAME])
+        offset = np.array([64., 64.])
+        try:
+            result = decode_frame(model, padded, (counter, nominal, offset),
+                                  counter, tail, cancel=False,
+                                  diagnostics=diagnostics)
+        except (FloatingPointError, np.linalg.LinAlgError, ValueError,
+                IndexError):
+            result = None
+        if result is not None:
+            result.status = 'received' if confidence >= .45 else 'degraded'
+            result.diag['pulse_confidence'] = float(confidence)
+            results.append(result)
+            if result.status != 'lost':
+                tail = result.coeffs.copy()
+        cursor = int(frame_start + PULSE_FRAME*scale)
+        counter += 1
+    info = {'frames': len(results), 'pulse_frames': counter-1,
+            'recovered': bool(results)}
+    if diagnostics is not None:
+        info['diagnostics'] = _diagnostic_summary(diagnostics, 0.0)
     return results, info
 
 

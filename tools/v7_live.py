@@ -32,7 +32,7 @@ from animation_modem.imaging import image_values, prepare_image, values_image  #
 from tools import v7_proto as P                                             # noqa: E402
 
 
-FPS = P.RATE / P.FRAME
+FPS = P.PULSE_FPS
 DEFAULT_FIXTURE = ROOT / 'modem_tests/fixtures/v6_face_1110.png'
 
 
@@ -92,8 +92,8 @@ def run_send(args):
                 if len(frames) < batch_size:
                     continue
                 values = np.asarray(frames)
-                audio = P.encode_stream(model, values, len(frames), lead=0,
-                                        tail=0, start_counter=counter)
+                audio = P.encode_pulse_stream(model, values,
+                                              start_counter=counter)
                 batches.put((counter, audio))
                 total += len(frames)
                 counter += len(frames)
@@ -101,9 +101,8 @@ def run_send(args):
         finally:
             if frames and not stop.is_set():
                 values = np.asarray(frames)
-                batches.put((counter, P.encode_stream(
-                    model, values, len(frames), lead=0, tail=0,
-                    start_counter=counter)))
+                batches.put((counter, P.encode_pulse_stream(
+                    model, values, start_counter=counter)))
                 total += len(frames)
             batches.put(sentinel)
             close = getattr(grab, 'close', None)
@@ -123,7 +122,7 @@ def run_send(args):
                     break
                 counter, audio = item
                 stream.write(np.asarray(audio, np.float32))
-                print(f'  sent through frame {counter+len(audio)//P.FRAME-1}',
+                print(f'  sent through frame {counter+len(audio)//P.PULSE_FRAME-1}',
                       flush=True)
     except KeyboardInterrupt:
         stop.set()
@@ -169,15 +168,15 @@ def run_receive(args):
         if len(audio) > P.RATE*30:
             del samples[:-int(P.RATE*20)//1024]
             audio = np.concatenate(samples)
-        if len(audio) < P.FRAME*3:
+        if len(audio) < P.PULSE_FRAME:
             return
-        if len(audio)-processed_samples < P.FRAME*args.decode_batch:
+        if len(audio)-processed_samples < P.PULSE_FRAME*args.decode_batch:
             return
         if not args.refine:
             P.REFINE = False
         try:
-            results, info = P.decode_stream(model, audio,
-                                            diagnostics=diagnostics)
+            results, info = P.decode_pulse_stream(model, audio,
+                                                  diagnostics=diagnostics)
         except (FloatingPointError, np.linalg.LinAlgError, ValueError,
                 IndexError) as exc:
             # Drop the damaged window and let the next retained clock history
@@ -207,7 +206,7 @@ def run_receive(args):
         # Keep the receiver's expensive non-streaming prototype bounded.  The
         # next decode reacquires from this short clock history instead of
         # repeatedly decoding an ever-growing capture.
-        keep = P.FRAME*args.decode_history
+        keep = P.PULSE_FRAME*args.decode_history
         if len(audio) > keep:
             samples[:] = [audio[-keep:]]
             processed_samples = len(samples[0])
