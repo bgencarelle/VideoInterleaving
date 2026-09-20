@@ -890,13 +890,22 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False):
             fs = scan + pos - 16*sc
             # A pulse can be visible before its body has arrived.  Do not let
             # that partial newest candidate hide the previous complete frame.
-            if fs + PULSE_FRAME*sc > len(samples)-1:
+            if fs + PULSE_FRAME*sc > len(samples):
                 break
-            candidates.append((fs, sc, conf))
+            aspect = 0
+            if candidates:
+                prev_fs, prev_sc, _prev_conf, _prev_aspect = candidates[-1]
+                guard = (fs-prev_fs)/prev_sc - (V3.SYNC_LEN+FRAME)
+                if conf >= .45:
+                    aspect = int(np.clip(np.rint(
+                        (guard-PULSE_GUARD_BASE)/PULSE_GUARD_STEP), 0, 7))
+                else:
+                    aspect = _prev_aspect
+            candidates.append((fs, sc, conf, aspect))
             scan = int(fs + PULSE_FRAME*sc)
         if not candidates:
             return [], {'frames': 0, 'pulse_frames': 0, 'recovered': False}
-        fs, sc, conf = candidates[-1]
+        fs, sc, conf, pending_aspect = candidates[-1]
         cursor = int(fs)
         measured = (16*sc, sc, conf)
     while cursor + V3.SYNC_LEN + 32 < len(samples):
