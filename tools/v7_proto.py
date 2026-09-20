@@ -646,6 +646,15 @@ def _pilot_patterns():
 
 
 PATS = _pilot_patterns()
+PILOT_OBS = tuple(sorted(PATS))
+PILOT_SV = np.asarray([s for s, _ in PILOT_OBS])
+PILOT_BV = np.asarray([b for _, b in PILOT_OBS])
+PILOT_PV = np.asarray([PATS[o] for o in PILOT_OBS])
+PILOT_BY_SYMBOL = tuple(
+    tuple(np.asarray([b for ss, b in PILOT_OBS if ss == s], int))
+    for s in range(F))
+PILOT_MASKS = tuple(PILOT_BV == b for b in PILOT_BINS)
+PILOT_MASK_BY_BIN = {int(b): mask for b, mask in zip(PILOT_BINS, PILOT_MASKS)}
 
 
 KNOTS = np.array([0, 4, 8, 12, 16, 20, F-1], float)
@@ -661,19 +670,17 @@ def channel_joint(Z, iters=2):
     Gauss-Newton phase step for delta. Timing error left by the clock map is
     common to all carriers of a symbol, so the pilots pin it down (§9.3).
     """
-    obs = sorted(PATS)                                    # (s, b)
-    sv = np.array([o[0] for o in obs]); bv = np.array([o[1] for o in obs])
-    pv = np.array([PATS[o] for o in obs])                 # (n, 2)
+    sv, bv, pv = PILOT_SV, PILOT_BV, PILOT_PV
     H = np.empty((F, 65, 2, 2), complex)
     for c in range(2):
-        y = np.array([Z[s, b, c] for s, b in obs])
+        y = np.array([Z[s, b, c] for s, b in PILOT_OBS])
         theta = np.zeros(len(KNOTS))
         for _ in range(iters):
             delta = _BASIS @ theta
             rot = np.exp(2j*np.pi*bv*delta[sv]/N)
             h = {}
             for b in PILOT_BINS:
-                m = bv == b
+                m = PILOT_MASK_BY_BIN[b]
                 A = pv[m]*rot[m, None]
                 gram = A.conj().T @ A
                 rhs = A.conj().T @ y[m]
@@ -702,7 +709,7 @@ def fade_and_noise(Z, H):
     freq = BINS*RATE/N/1000
     noise = np.zeros((F, 2))
     for s in range(F):
-        pil = [b for (ss, b) in PATS if ss == s]
+        pil = PILOT_BY_SYMBOL[s]
         for ch in range(2):
             pred = np.array([H[s, b, ch] @ PATS[(s, b)] for b in pil])
             obs = np.array([Z[s, b, ch] for b in pil])
