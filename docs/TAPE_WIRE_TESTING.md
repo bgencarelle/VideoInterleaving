@@ -7,14 +7,27 @@ generated WAVs, PNGs, and logs under `scratch/`; do not commit them.
 in one terminal, then one sender string in another. Offline WAV success alone
 does not validate live scheduling, device-rate adaptation, or acquisition.
 
-## V6 analog comparison candidate
+## V6 analog comparison candidates
 
 V6 is additive and experimental; it has not passed the real-tape acceptance
-gate. Its DCT and CDF 9/7 variants use the same 5,360-sample wire frame, 8.96
-fps rate, 375–12,750 Hz carriers, 14 kHz whole-waveform ceiling, 2,880 analog
-coefficient originals, and 720 protected foundation copies. The copied
-foundation is 20x24 luma plus 10x12 Cb and Cr. Every copy is placed in another
-OFDM symbol, on the opposite tape track, and at least eight carriers away.
+gate. The **baseline** DCT and CDF 9/7 variants use the same 5,360-sample wire
+frame, 8.96 fps rate, 375–12,750 Hz carriers, 14 kHz whole-waveform ceiling,
+2,880 analog coefficient originals, and 720 protected foundation copies. The
+copied foundation is 20x24 luma plus 10x12 Cb and Cr. Baseline copies are on
+another OFDM symbol, the opposite tape track, and at least eight carriers away.
+
+The newer **tape-ordered placement** is a bench-only coder on the same `WIRE_V6`;
+it is not a separate receiver candidate or live profile. It places foundation
+homes on low carriers, interleaves them in time, puts copies on the opposite
+track at least seven bins away, and avoids bin 1 for foundation homes. Run its
+shared synthetic spacing-loss comparison with:
+
+```bash
+.venv/bin/python tools/bench_v6_tape_lift.py --frames 4
+```
+
+Its results are diagnostic only: the script explicitly does not model any
+particular deck, and real tape captures remain authoritative.
 
 Run the fixed-frame synthetic comparison (diagnostic only):
 
