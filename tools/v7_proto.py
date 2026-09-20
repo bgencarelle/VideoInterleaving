@@ -34,13 +34,15 @@ from animation_modem.imaging import image_values, prepare_image        # noqa: E
 # ------------------------------------------------------------------ §6.1
 RATE, N, CP, SYM, F = 48000, 128, 16, 144, 24
 FRAME = F*SYM                                   # 3456 samples, 13.889 fps
-PULSE_FRAME = V3.SYNC_LEN + FRAME + 32           # 3776 samples, 12.712 fps
+META_SYMBOL = SYM
+PULSE_FRAME = V3.SYNC_LEN + FRAME + META_SYMBOL + 32  # 3920, 12.245 fps
 PULSE_FPS = RATE/PULSE_FRAME
 PULSE_GUARD_BASE = 32
-PULSE_GUARD_STEP = 8
 PULSE_MIN_SCALE = .25
 PULSE_MAX_SCALE = 2.0
 BINS = np.arange(4, 35)                         # 1.5-12.75 kHz
+META_PILOTS = np.asarray([b for b in BINS if b % 2 == 0])
+META_DATA_BINS = np.asarray([b for b in BINS if b % 2 == 1])
 CONTINUAL = (4, 34)
 SCAT = {b: ((b-5)//4) % 3 for b in range(5, 34, 4)}
 PILOT_BINS = sorted(set(CONTINUAL) | set(SCAT))
@@ -82,6 +84,18 @@ def clock_word(counter, profile=0, aspect=6, folders=0):
     word.append(sum(word) % 2)                                   # polarity bit 71
     assert len(word) == 72
     return word
+
+
+def metadata_word(aspect_code):
+    """8-bit live metadata payload plus CRC-16/CCITT-FALSE."""
+    payload = bytes([((int(aspect_code) & 7) << 5) | 1])
+    return payload + crc16(payload).to_bytes(2, 'big')
+
+
+def metadata_symbols(aspect_code):
+    bits = np.unpackbits(np.frombuffer(metadata_word(aspect_code), np.uint8))
+    return ((bits[0::2].astype(float)*2-1) +
+            1j*(bits[1::2].astype(float)*2-1))/np.sqrt(2)
 
 
 def parse_word(bits):
@@ -307,11 +321,23 @@ def encode_stream(model, values, frames, lead=0.25, tail=0.25,
 def encode_pulse_frame(model, values, counter, aspect_code=0):
     """One V3-style pulse-framed V7 body for low-latency live transport."""
     body = encode_frame(model, values, counter)
-    guard = PULSE_GUARD_BASE + (int(aspect_code) & 7)*PULSE_GUARD_STEP
-    out = np.zeros((V3.SYNC_LEN + FRAME + guard, 2), np.float32)
+    out = np.zeros((PULSE_FRAME, 2), np.float32)
     out[V3.SYNC_LEN:V3.SYNC_LEN+FRAME] = body
     out[16:16+len(V3.PREAMBLE), :] = V3.PREAMBLE[:, None]
-    return bound_emission(out, 14000, RATE)
+    meta = np.zeros((N//2+1, 2), complex)
+    vals = metadata_symbols(aspect_code)
+    meta[META_PILOTS, 0] = 1
+    meta[META_DATA_BINS[:len(vals)], 0] = vals
+    mx = (meta[:, 0])/np.sqrt(2)*model.phase[-1]
+    meta_wave = np.fft.irfft(mx, n=N)
+    meta_pcm = np.concatenate([meta_wave[-CP:], meta_wave])*model.scale
+    meta_start = V3.SYNC_LEN+FRAME
+    # Shape the ordinary pulse/body packet first.  The metadata symbol has its
+    # own cyclic prefix and is inserted afterward so the long packet shaper
+    # cannot smear the preceding image symbol across its pilots/data.
+    shaped = bound_emission(out, 14000, RATE)
+    shaped[meta_start:meta_start+META_SYMBOL, :] += meta_pcm[:, None]
+    return shaped
 
 
 def encode_pulse_stream(model, values, start_counter=1, aspect_codes=None):
@@ -779,7 +805,37 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
     return Result(counter, 'verified', coeffs,
                   {'noise': noise.mean(0).tolist(), 'got': int(got.sum()),
                    'head_confidence': head_confidence,
-                   'head_coverage': head_coverage})
+                   'head_coverage': head_coverage, '_H': H})
+
+
+def decode_metadata(model, samples, start, scale, channel):
+    indexes = start + np.arange(META_SYMBOL)*scale
+    if indexes[-1] >= len(samples)-1:
+        return None
+    meta = _sample_at(samples, indexes, taps=16)
+    window = meta[WIN:WIN+N]
+    z = (np.fft.rfft(window, axis=0)/model.scale *
+         np.conj(model.phase[-1])[:, None] * EARLY[:, None])
+    # The metadata symbol carries known M=1 pilots.  Estimate its own
+    # per-symbol complex response from those pilots; this avoids assuming the
+    # body-channel phase is unchanged across the symbol boundary.
+    observed = z.sum(axis=1)
+    pilot_z = observed[META_PILOTS]
+    if np.sum(np.abs(pilot_z) > 1e-6) < 2:
+        return None
+    response = (np.interp(META_DATA_BINS, META_PILOTS, pilot_z.real) +
+                1j*np.interp(META_DATA_BINS, META_PILOTS, pilot_z.imag))
+    data = np.divide(observed[META_DATA_BINS], response,
+                     out=np.zeros(len(META_DATA_BINS), complex),
+                     where=np.abs(response) > 1e-9)
+    symbols = data[:12]
+    bits = np.empty(24, np.uint8)
+    bits[0::2] = (symbols.real >= 0).astype(np.uint8)
+    bits[1::2] = (symbols.imag >= 0).astype(np.uint8)
+    raw = np.packbits(bits).tobytes()
+    if crc16(raw[:1]) != int.from_bytes(raw[1:3], 'big'):
+        return None
+    return (raw[0] >> 5) & 7
 
 
 def _diagnostic_summary(diag, elapsed_ms):
@@ -899,16 +955,7 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
             if conf < .45:
                 scan = int(fs + PULSE_FRAME*sc)
                 continue
-            aspect = 0
-            if candidates:
-                prev_fs, prev_sc, _prev_conf, _prev_aspect = candidates[-1]
-                guard = (fs-prev_fs)/prev_sc - (V3.SYNC_LEN+FRAME)
-                if conf >= .45:
-                    aspect = int(np.clip(np.rint(
-                        (guard-PULSE_GUARD_BASE)/PULSE_GUARD_STEP), 0, 7))
-                else:
-                    aspect = _prev_aspect
-            candidates.append((fs, sc, conf, aspect))
+            candidates.append((fs, sc, conf, 0))
             scan = int(fs + PULSE_FRAME*sc)
         if not candidates:
             return [], {'frames': 0, 'pulse_frames': 0, 'recovered': False}
@@ -938,17 +985,8 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
         if following is not None:
             next_position = search + following[0]
             next_start = next_position - 16*following[1]
-            guard = (next_start-frame_start)/scale - (V3.SYNC_LEN+FRAME)
             scale_agrees = abs(following[1]/scale-1) <= .03
-            guard_code = int(np.rint(
-                (guard-PULSE_GUARD_BASE)/PULSE_GUARD_STEP))
-            guard_valid = (0 <= guard_code <= 7 and
-                           abs(guard-(PULSE_GUARD_BASE +
-                                      guard_code*PULSE_GUARD_STEP)) <= 3)
-            following_valid = (following[2] >= .45 and scale_agrees and
-                               guard_valid)
-            if following_valid:
-                aspect_code = guard_code
+            following_valid = following[2] >= .45 and scale_agrees
         start = frame_start + V3.SYNC_LEN*scale
         indexes = start + np.arange(FRAME)*scale
         if indexes[-1] >= len(samples)-1:
@@ -976,6 +1014,13 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
         if result is not None:
             if result.status != 'lost':
                 result.status = 'received' if confidence >= .45 else 'degraded'
+            channel = result.diag.pop('_H', None)
+            if channel is not None and result.status != 'lost':
+                meta_start = frame_start + (V3.SYNC_LEN+FRAME)*scale
+                decoded_aspect = decode_metadata(
+                    model, samples, meta_start, scale, channel)
+                if decoded_aspect is not None:
+                    aspect_code = decoded_aspect
             result.diag['pulse_confidence'] = float(confidence)
             result.diag['aspect_code'] = aspect_code
             results.append(result)
