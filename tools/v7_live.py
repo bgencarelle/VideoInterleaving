@@ -57,7 +57,8 @@ def _capture(args):
         # it.  Some AVFoundation devices advertise 15 fps but reject a forced
         # 15-fps open unless their exact mode is selected first.
         return camera_source(args.camera, args.capture_fps,
-                             width=args.capture_width, spec=args.ffmpeg_input)
+                             width=args.capture_width, spec=args.ffmpeg_input,
+                             scale_flags=args.capture_filter)
     if args.screen_backend == 'mss':
         return screen_source(region)
     return screen_capture_source(args.capture_fps or FPS, region, args.display,
@@ -463,6 +464,11 @@ def parser():
                       help='screen capture backend; mss avoids an FFmpeg child')
     send.add_argument('--region')
     send.add_argument('--capture-width', type=int, default=160)
+    send.add_argument('--capture-filter',
+                      choices=('neighbor', 'area', 'bilinear', 'bicubic',
+                               'lanczos'),
+                      default='neighbor',
+                      help='FFmpeg camera scaler (default: neighbor)')
     send.add_argument('--capture-fps', '--fps', dest='capture_fps', type=float)
     send.add_argument('--batch-frames', type=int, default=1,
                       help='frames encoded before submission (default: 1)')

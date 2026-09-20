@@ -176,7 +176,7 @@ def screen_capture_source(fps, region=None, display=None, width=320, spec=None):
 
 
 def ffmpeg_source(spec, fps, region=None, display=None, width=320,
-                  video_size=None, raw_output=False):
+                  video_size=None, raw_output=False, scale_flags=None):
     """Capture through ffmpeg's platform fast path.
 
     mss goes via CoreGraphics on macOS and costs tens of milliseconds a grab.
@@ -214,7 +214,10 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320,
     if region and fmt != 'x11grab':
         filters.append(f'crop={region[2]}:{region[3]}:{region[0]}:{region[1]}')
     if w is not None:
-        filters.append(f'scale={w}:-1')
+        scale = f'scale={w}:-1'
+        if scale_flags:
+            scale += f':flags={scale_flags}'
+        filters.append(scale)
     if filters:
         cmd += ['-vf', ','.join(filters)]
     cmd += ['-pix_fmt', 'rgb24', '-fps_mode', 'passthrough']
@@ -224,9 +227,15 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320,
         # The explicit output size makes rawvideo framing unambiguous and
         # avoids the PPM image2pipe muxer/header work for camera frames.
         if filters:
-            cmd[cmd.index('-vf')+1] = f'scale={w}:{out_h}'
+            scale = f'scale={w}:{out_h}'
+            if scale_flags:
+                scale += f':flags={scale_flags}'
+            cmd[cmd.index('-vf')+1] = scale
         else:
-            cmd += ['-vf', f'scale={w}:{out_h}']
+            scale = f'scale={w}:{out_h}'
+            if scale_flags:
+                scale += f':flags={scale_flags}'
+            cmd += ['-vf', scale]
         raw_shape = (out_h, w)
         cmd += ['-f', 'rawvideo']
     else:
@@ -350,7 +359,8 @@ def _lowest_camera_mode_any(fmt, source):
     return size, rate
 
 
-def camera_source(index=0, fps=30, width=320, spec=None):
+def camera_source(index=0, fps=30, width=320, spec=None,
+                  scale_flags=None):
     """Capture the smallest supported mode, then resize before the Python pipe.
 
     Output scaling preserves the camera aspect. Keep full-resolution RGB traffic
@@ -375,7 +385,7 @@ def camera_source(index=0, fps=30, width=320, spec=None):
             mode = _lowest_camera_mode('avfoundation',
                                        f'{source_index}:none', fps)
         return ffmpeg_source(spec, fps, width=width, video_size=mode,
-                             raw_output=True)
+                             raw_output=True, scale_flags=scale_flags)
     elif sys.platform.startswith('win'):
         spec = spec or 'dshow:video=Integrated Camera'
     else:
@@ -387,7 +397,7 @@ def camera_source(index=0, fps=30, width=320, spec=None):
     else:
         mode = _lowest_camera_mode(fmt, source, fps)
     return ffmpeg_source(spec, fps, width=width, video_size=mode,
-                         raw_output=True)
+                         raw_output=True, scale_flags=scale_flags)
 
 
 def video_source(path, loop=True, realtime=True):
