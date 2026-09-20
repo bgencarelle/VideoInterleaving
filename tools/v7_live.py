@@ -150,8 +150,10 @@ def run_send(args):
     worker = threading.Thread(target=produce, daemon=True)
     worker.start()
     if not args.no_log:
-        print(f'V7 send: {args.source}, {FPS:.3f} fps, batch={batch_size}, '
-              f'device={args.device!r}', flush=True)
+        print(f'V7 send ready: source={args.source} device={args.device!r} '
+              f'wire={FPS:.3f}fps camera={args.camera} '
+              f'capture={args.capture_width}px/{args.capture_filter} '
+              f'encode={args.encode_filter}', flush=True)
     try:
         with sd.OutputStream(samplerate=P.RATE, channels=2, dtype='float32',
                              device=args.device, blocksize=0) as stream:
@@ -163,7 +165,7 @@ def run_send(args):
                 # sounddevice requires a C-contiguous interleaved buffer;
                 # filtering/resampling can return a strided view here.
                 stream.write(np.ascontiguousarray(audio, dtype=np.float32))
-                if not args.no_log:
+                if args.log and not args.no_log:
                     print(f'  sent through frame {counter+len(audio)//P.PULSE_FRAME-1}',
                           flush=True)
     except KeyboardInterrupt:
@@ -171,7 +173,7 @@ def run_send(args):
     finally:
         stop.set()
         worker.join(timeout=2)
-    if not args.no_log:
+    if args.log and not args.no_log:
         print(f'V7 send stopped after {total} frames', flush=True)
 
 
@@ -214,7 +216,7 @@ def run_receive(args):
         meter['peak'] = np.maximum(meter['peak'],
                                    np.max(np.abs(values), axis=0))
         meter['rms'] = np.sqrt(np.mean(values*values, axis=0))
-        has_data = bool(np.max(np.abs(values)) > 1e-7)
+        has_data = bool(np.max(np.abs(values)) > 1e-5)
         if has_data:
             meter['blocks'] += 1
             meter['input_samples'] += len(values)
@@ -351,7 +353,7 @@ def run_receive(args):
                       'recovered': info.get('recovered', False)}
             if args.diagnostics:
                 report['diagnostics'] = info.get('diagnostics')
-            if not args.no_log:
+            if (args.log or args.diagnostics) and not args.no_log:
                 print(report, flush=True)
             if args.save_dir:
                 args.save_dir.mkdir(parents=True, exist_ok=True)
@@ -372,6 +374,10 @@ def run_receive(args):
                                 device=args.device, blocksize=1024,
                                 callback=callback)
         stream.start()
+        if not args.no_log:
+            print(f'V7 receive ready: input={args.device!r} rate={P.RATE}Hz '
+                  f'channels=2 ui={"headless" if args.headless else "window"} '
+                  f'bootstrap=nearest', flush=True)
     except Exception:
         stop.set()
         raise
@@ -384,7 +390,7 @@ def run_receive(args):
                 # A damaged window must not terminate either the decoder or
                 # the UI.  The next retained pulse history can reacquire.
                 meter['status'] = f'decoder error: {type(exc).__name__}'
-                if args.diagnostics or not args.no_log:
+                if not args.no_log:
                     print({'status': 'decoder_exception',
                            'error': repr(exc)}, flush=True)
             stop.wait(.01)
@@ -484,7 +490,7 @@ def run_receive(args):
                     f'gain {meter["auto_gain"]:4.1f}x  '
                     f'timing {meter["timing_delta"] if meter["timing_delta"] is not None else "--"} ppm  '
                     f'decode {meter["decode_ms"] if meter["decode_ms"] is not None else "--"} ms | '
-                    f'incoming {meter["input_fps"]:5.2f} fps | '
+                    f'incoming {meter["input_fps"]:5.2f} fps  '
                     f'decoded {meter["decoded_fps"]:5.2f} fps'))
             if latest is not None and latest is not rendered:
                 image = values_image(latest, model.coder.grids)
@@ -552,8 +558,9 @@ def parser():
     send.add_argument('--seconds', type=float, default=0,
                       help='0 means until Ctrl-C')
     send.add_argument('--no-log', dest='no_log', action='store_true',
-                      default=True, help=argparse.SUPPRESS)
-    send.add_argument('--log', dest='no_log', action='store_false',
+                      default=False, help=argparse.SUPPRESS)
+    send.add_argument('--log', dest='log', action='store_true',
+                      default=False,
                       help='enable routine status output')
     recv = sub.add_parser('receive', help='receive V7 audio and display it')
     recv.add_argument('--device', type=_device_arg, required=True,
@@ -567,8 +574,9 @@ def parser():
                       help='hide diagnostic information from the window')
     recv.set_defaults(show_diagnostics=True)
     recv.add_argument('--no-log', dest='no_log', action='store_true',
-                      default=True, help=argparse.SUPPRESS)
-    recv.add_argument('--log', dest='no_log', action='store_false',
+                      default=False, help=argparse.SUPPRESS)
+    recv.add_argument('--log', dest='log', action='store_true',
+                      default=False,
                       help='enable routine status output')
     recv.add_argument('--save-dir', type=Path)
     recv.add_argument('--diagnostics', action='store_true',
