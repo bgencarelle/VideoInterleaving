@@ -154,6 +154,7 @@ def run_receive(args):
     model = _model(args.fixture, args.encode_filter)
     blocks = queue.Queue(maxsize=32)
     stop = threading.Event()
+    input_gap = threading.Event()
     samples = []
     processed_samples = 0
     latest = None
@@ -185,9 +186,20 @@ def run_receive(args):
             # Dropping an input block is an explicit discontinuity; keeping
             # stale audio would make the V7 clock appear to run backward.
             meter['dropped'] += 1
+            input_gap.set()
 
     def decode_available():
         nonlocal latest, processed_samples, auto_gain
+        if input_gap.is_set():
+            # Never stitch samples across a callback drop.  Keep displaying
+            # the last good image while pulse acquisition starts over.
+            input_gap.clear()
+            samples.clear()
+            processed_samples = 0
+            if args.diagnostics:
+                print({'status': 'input_gap_reacquire',
+                       'dropped': meter['dropped']}, flush=True)
+            return
         while True:
             try:
                 samples.append(blocks.get_nowait())

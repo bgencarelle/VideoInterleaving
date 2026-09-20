@@ -958,7 +958,8 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
                 IndexError):
             result = None
         if result is not None:
-            result.status = 'received' if confidence >= .45 else 'degraded'
+            if result.status != 'lost':
+                result.status = 'received' if confidence >= .45 else 'degraded'
             result.diag['pulse_confidence'] = float(confidence)
             result.diag['aspect_code'] = aspect_code
             results.append(result)
