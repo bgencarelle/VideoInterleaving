@@ -138,8 +138,9 @@ def run_send(args):
 
     worker = threading.Thread(target=produce, daemon=True)
     worker.start()
-    print(f'V7 send: {args.source}, {FPS:.3f} fps, batch={batch_size}, '
-          f'device={args.device!r}', flush=True)
+    if not args.no_log:
+        print(f'V7 send: {args.source}, {FPS:.3f} fps, batch={batch_size}, '
+              f'device={args.device!r}', flush=True)
     try:
         with sd.OutputStream(samplerate=P.RATE, channels=2, dtype='float32',
                              device=args.device, blocksize=0) as stream:
@@ -151,14 +152,16 @@ def run_send(args):
                 # sounddevice requires a C-contiguous interleaved buffer;
                 # filtering/resampling can return a strided view here.
                 stream.write(np.ascontiguousarray(audio, dtype=np.float32))
-                print(f'  sent through frame {counter+len(audio)//P.PULSE_FRAME-1}',
-                      flush=True)
+                if not args.no_log:
+                    print(f'  sent through frame {counter+len(audio)//P.PULSE_FRAME-1}',
+                          flush=True)
     except KeyboardInterrupt:
         stop.set()
     finally:
         stop.set()
         worker.join(timeout=2)
-    print(f'V7 send stopped after {total} frames', flush=True)
+    if not args.no_log:
+        print(f'V7 send stopped after {total} frames', flush=True)
 
 
 def run_receive(args):
@@ -205,7 +208,8 @@ def run_receive(args):
         elapsed = max(time.monotonic()-meter['started'], 1e-6)
         meter['input_fps'] = meter['input_samples']/(P.PULSE_FRAME*elapsed)
         if status:
-            print(f'input: {status}', file=sys.stderr, flush=True)
+            if not args.no_log:
+                print(f'input: {status}', file=sys.stderr, flush=True)
         try:
             blocks.put_nowait(np.array(indata, copy=True))
         except queue.Full:
@@ -222,7 +226,7 @@ def run_receive(args):
             input_gap.clear()
             samples.clear()
             processed_samples = 0
-            if args.diagnostics:
+            if args.diagnostics and not args.no_log:
                 print({'status': 'input_gap_reacquire',
                        'dropped': meter['dropped']}, flush=True)
             return
@@ -257,7 +261,7 @@ def run_receive(args):
             if len(audio) > keep:
                 samples[:] = [audio[-keep:]]
                 processed_samples = len(samples[0])
-            if args.diagnostics:
+            if args.diagnostics and not args.no_log:
                 print({'status': 'idle_input', 'input_peak': 0.0}, flush=True)
             return
         peak = float(np.percentile(np.abs(audio[-P.PULSE_FRAME:]), 99.5))
@@ -333,12 +337,13 @@ def run_receive(args):
                       'recovered': info.get('recovered', False)}
             if args.diagnostics:
                 report['diagnostics'] = info.get('diagnostics')
-            print(report, flush=True)
+            if not args.no_log:
+                print(report, flush=True)
             if args.save_dir:
                 args.save_dir.mkdir(parents=True, exist_ok=True)
                 values_image(latest, model.coder.grids).save(
                     args.save_dir/f'v7_{meter["decoded"]:08d}.png')
-        elif args.diagnostics:
+        elif args.diagnostics and not args.no_log:
             print({'status': 'reacquiring', **info}, flush=True)
         # Keep the receiver's expensive non-streaming prototype bounded.  The
         # next decode reacquires from this short clock history instead of
@@ -381,24 +386,26 @@ def run_receive(args):
                          background='black')
         label.configure(background='black')
         label.pack(expand=True, fill='both')
-        device_label = tk.Label(root, text=f'V7 input: {args.device}',
-                                background='black', foreground='white')
-        device_label.pack(fill='x', padx=6)
-        status_label = tk.Label(root, text='status: acquiring', anchor='w',
-                                background='black', foreground='white')
-        status_label.pack(fill='x', padx=6)
-        levels_label = tk.Label(root, text='levels: --', anchor='w',
-                                font='TkFixedFont', background='black',
-                                foreground='white')
-        levels_label.pack(fill='x', padx=6)
-        stats_label = tk.Label(root, text='frames: --', anchor='w',
-                               font='TkFixedFont', background='black',
-                               foreground='white')
-        stats_label.pack(fill='x', padx=6)
-        quality_label = tk.Label(root, text='quality: --', anchor='w',
-                                 font='TkFixedFont', background='black',
-                                 foreground='white')
-        quality_label.pack(fill='x', padx=6)
+        device_label = status_label = levels_label = stats_label = quality_label = None
+        if args.show_diagnostics:
+            device_label = tk.Label(root, text=f'V7 input: {args.device}',
+                                    background='black', foreground='white')
+            device_label.pack(fill='x', padx=6)
+            status_label = tk.Label(root, text='status: acquiring', anchor='w',
+                                    background='black', foreground='white')
+            status_label.pack(fill='x', padx=6)
+            levels_label = tk.Label(root, text='levels: --', anchor='w',
+                                    font='TkFixedFont', background='black',
+                                    foreground='white')
+            levels_label.pack(fill='x', padx=6)
+            stats_label = tk.Label(root, text='frames: --', anchor='w',
+                                   font='TkFixedFont', background='black',
+                                   foreground='white')
+            stats_label.pack(fill='x', padx=6)
+            quality_label = tk.Label(root, text='quality: --', anchor='w',
+                                     font='TkFixedFont', background='black',
+                                     foreground='white')
+            quality_label.pack(fill='x', padx=6)
 
         def tick():
             nonlocal rendered
@@ -408,30 +415,31 @@ def run_receive(args):
                 # Keep the UI alive through an unexpected damaged-frame
                 # exception; the next pulse window can still reacquire.
                 meter['status'] = f'decoder error: {type(exc).__name__}'
-                if args.diagnostics:
+                if args.diagnostics and not args.no_log:
                     print({'status': 'decoder_exception',
                            'error': repr(exc)}, flush=True)
-            peak = 20*np.log10(np.maximum(meter['peak'], 1e-9))
-            rms = 20*np.log10(np.maximum(meter['rms'], 1e-9))
-            levels_label.configure(text=(
-                f'peak L/R {peak[0]:6.1f}/{peak[1]:6.1f} dBFS | '
-                f'rms {rms[0]:6.1f}/{rms[1]:6.1f} dBFS'))
-            stats_label.configure(text=(
-                f'frames {meter["decoded"]}  verified {meter["verified"]} '
-                f'lost {meter["lost"]}  input blocks {meter["blocks"]} '
-                f'dropped {meter["dropped"]}'))
-            quality_label.configure(text=f'quality: {meter["quality"]}')
-            status_label.configure(text=(
-                f'status {meter["status"]}  frame {meter["counter"]} '
-                f'aspect {meter["aspect"]} '
-                f'(candidate {meter["aspect_candidate"]} '
-                f'x{meter["aspect_streak"]})  pulse '
-                f'{meter["pulse"] if meter["pulse"] is not None else "--"} '
-                f'gain {meter["auto_gain"]:4.1f}x  '
-                f'timing {meter["timing_delta"] if meter["timing_delta"] is not None else "--"} ppm  '
-                f'decode {meter["decode_ms"] if meter["decode_ms"] is not None else "--"} ms | '
-                f'incoming {meter["input_fps"]:5.2f} fps | '
-                f'decoded {meter["decoded_fps"]:5.2f} fps'))
+            if args.show_diagnostics:
+                peak = 20*np.log10(np.maximum(meter['peak'], 1e-9))
+                rms = 20*np.log10(np.maximum(meter['rms'], 1e-9))
+                levels_label.configure(text=(
+                    f'peak L/R {peak[0]:6.1f}/{peak[1]:6.1f} dBFS | '
+                    f'rms {rms[0]:6.1f}/{rms[1]:6.1f} dBFS'))
+                stats_label.configure(text=(
+                    f'frames {meter["decoded"]}  verified {meter["verified"]} '
+                    f'lost {meter["lost"]}  input blocks {meter["blocks"]} '
+                    f'dropped {meter["dropped"]}'))
+                quality_label.configure(text=f'quality: {meter["quality"]}')
+                status_label.configure(text=(
+                    f'status {meter["status"]}  frame {meter["counter"]} '
+                    f'aspect {meter["aspect"]} '
+                    f'(candidate {meter["aspect_candidate"]} '
+                    f'x{meter["aspect_streak"]})  pulse '
+                    f'{meter["pulse"] if meter["pulse"] is not None else "--"} '
+                    f'gain {meter["auto_gain"]:4.1f}x  '
+                    f'timing {meter["timing_delta"] if meter["timing_delta"] is not None else "--"} ppm  '
+                    f'decode {meter["decode_ms"] if meter["decode_ms"] is not None else "--"} ms | '
+                    f'incoming {meter["input_fps"]:5.2f} fps | '
+                    f'decoded {meter["decoded_fps"]:5.2f} fps'))
             if latest is not None and latest is not rendered:
                 image = values_image(latest, model.coder.grids)
                 ratio = P.V7_ASPECT_RATIOS[int(meter['aspect']) & 7]
@@ -499,6 +507,8 @@ def parser():
                       help='frames encoded before submission (default: 1)')
     send.add_argument('--seconds', type=float, default=0,
                       help='0 means until Ctrl-C')
+    send.add_argument('--no-log', action='store_true',
+                      help='suppress routine status output')
     recv = sub.add_parser('receive', help='receive V7 audio and display it')
     recv.add_argument('--device', type=_device_arg, required=True,
                       help='explicit sounddevice input, e.g. BlackHole 2ch')
@@ -506,6 +516,12 @@ def parser():
     recv.add_argument('--headless', action='store_true')
     recv.add_argument('--fullscreen', action='store_true',
                       help='fullscreen embedded display; Escape exits fullscreen')
+    recv.add_argument('--no-diagnostics', dest='show_diagnostics',
+                      action='store_false',
+                      help='hide diagnostic information from the window')
+    recv.set_defaults(show_diagnostics=True)
+    recv.add_argument('--no-log', action='store_true',
+                      help='suppress routine status output')
     recv.add_argument('--save-dir', type=Path)
     recv.add_argument('--diagnostics', action='store_true',
                       help='print decoder stage timing and counters')
