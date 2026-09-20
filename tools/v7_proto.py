@@ -154,6 +154,9 @@ HEAD_MIN_COVERAGE = .50
 LIVE_VALID_HEAD_CONFIDENCE = .85
 LIVE_VALID_HEAD_COVERAGE = .75
 LIVE_MAX_PILOT_NOISE = .08
+DISPLAY_MIN_HEAD_CONFIDENCE = .60
+DISPLAY_MIN_HEAD_COVERAGE = .50
+DISPLAY_MAX_PILOT_NOISE = 2.0
 
 # Static placement tables: V3--V6 do this kind of work once at setup, not on
 # every picture.  The flattened arrays are used by the vectorized scatter in
@@ -801,15 +804,23 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
     head_confidence = float(np.mean(conf[model.head]))
     head_coverage = float(np.mean(conf[model.head] >= .15))
     if head_confidence < HEAD_MIN_CONFIDENCE or head_coverage < HEAD_MIN_COVERAGE:
-        return Result(counter, 'lost', prev_tail.copy(), {
+        displayable = (head_confidence >= DISPLAY_MIN_HEAD_CONFIDENCE and
+                       head_coverage >= DISPLAY_MIN_HEAD_COVERAGE)
+        display_coeffs = prev_tail.copy()
+        if displayable:
+            display_coeffs[got] = current[got]
+        return Result(counter, 'lost', display_coeffs if displayable else prev_tail.copy(), {
             'noise': noise.mean(0).tolist(), 'got': int(got.sum()),
             'head_confidence': head_confidence,
-            'head_coverage': head_coverage, 'held': True})
+            'head_coverage': head_coverage, 'held': not displayable,
+            'displayable': displayable,
+            'display_coeffs': display_coeffs})
     coeffs[got] = (model.mu + xhat*gate)[got]
     return Result(counter, 'verified', coeffs,
                   {'noise': noise.mean(0).tolist(), 'got': int(got.sum()),
                    'head_confidence': head_confidence,
-                   'head_coverage': head_coverage, '_H': H})
+                   'head_coverage': head_coverage, '_H': H,
+                   'displayable': True})
 
 
 def decode_metadata(model, samples, start, scale, channel):
@@ -1062,6 +1073,10 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
                      max(result.diag.get('noise', [np.inf])) >
                      LIVE_MAX_PILOT_NOISE)):
                 result.status = 'lost'
+            result.diag['displayable'] = bool(
+                result.diag.get('displayable', False) and
+                max(result.diag.get('noise', [np.inf])) <=
+                DISPLAY_MAX_PILOT_NOISE)
             result.diag['pulse_confidence'] = float(confidence)
             result.diag['aspect_code'] = aspect_code
             result.diag['metadata_valid'] = metadata_valid

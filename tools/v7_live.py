@@ -259,7 +259,9 @@ def run_receive(args):
             times = meter['decoded_times']
             if len(times) >= 2:
                 meter['decoded_fps'] = (len(times)-1)/(times[-1]-times[0])
-            meter['status'] = result.status
+            displayable = bool(result.diag.get('displayable', False))
+            meter['status'] = ('degraded' if displayable and result.status == 'lost'
+                               else result.status)
             meter['counter'] = meter['decoded']
             meter['pulse'] = result.diag.get('pulse_confidence')
             meter['timing_delta'] = result.diag.get('timing_delta_ppm')
@@ -281,13 +283,15 @@ def run_receive(args):
                     meter['aspect_streak'] = 0
             meter['decode_ms'] = (info.get('diagnostics') or {}).get(
                 'last_elapsed_ms')
-            if result.status in ('received', 'verified'):
+            if result.status in ('received', 'verified') or displayable:
                 latest = P.values_from(model, result.coeffs)
+            if result.status in ('received', 'verified'):
                 meter['verified'] += 1
-            if result.status == 'lost':
+            if result.status == 'lost' and not displayable:
                 meter['lost'] += 1
             report = {'counter': meter['decoded'], 'wire_counter': result.counter,
-                      'status': result.status, 'clock_words': info.get('words'),
+                      'status': meter['status'], 'displayable': displayable,
+                      'clock_words': info.get('words'),
                       'input_gain': round(meter['auto_gain'], 3),
                       'head_confidence': result.diag.get('head_confidence'),
                       'head_coverage': result.diag.get('head_coverage'),
