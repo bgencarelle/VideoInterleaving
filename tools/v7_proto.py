@@ -800,6 +800,7 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
     floor = np.where(model.head, np.where(model.plane == 0, .05, .15),
                      np.where(model.plane == 0, .45, .60))
     gate = np.clip((conf-floor)/(.85-floor), 0, 1)
+    current = model.mu + xhat*gate
     coeffs = prev_tail.copy()
     head_confidence = float(np.mean(conf[model.head]))
     head_coverage = float(np.mean(conf[model.head] >= .15))

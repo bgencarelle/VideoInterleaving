@@ -241,8 +241,7 @@ def run_receive(args):
             results, info = P.decode_pulse_stream(
                 model, audio, diagnostics=diagnostics, latest_only=True,
                 input_gain=auto_gain)
-        except (FloatingPointError, np.linalg.LinAlgError, ValueError,
-                IndexError) as exc:
+        except Exception as exc:
             # Drop the damaged window and let the next retained clock history
             # reacquire.  A single bad frame must not stop the live receiver.
             results, info = [], {'words': 0,
@@ -365,7 +364,15 @@ def run_receive(args):
         quality_label.pack(fill='x', padx=6)
 
         def tick():
-            decode_available()
+            try:
+                decode_available()
+            except Exception as exc:
+                # Keep the UI alive through an unexpected damaged-frame
+                # exception; the next pulse window can still reacquire.
+                meter['status'] = f'decoder error: {type(exc).__name__}'
+                if args.diagnostics:
+                    print({'status': 'decoder_exception',
+                           'error': repr(exc)}, flush=True)
             peak = 20*np.log10(np.maximum(meter['peak'], 1e-9))
             rms = 20*np.log10(np.maximum(meter['rms'], 1e-9))
             levels_label.configure(text=(
