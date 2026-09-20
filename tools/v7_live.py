@@ -149,7 +149,6 @@ def run_receive(args):
     stop = threading.Event()
     samples = []
     processed_samples = 0
-    last_counter = None
     latest = None
     diagnostics = {} if args.diagnostics else None
     meter = {'peak': np.zeros(2), 'rms': np.zeros(2), 'blocks': 0,
@@ -178,7 +177,7 @@ def run_receive(args):
             meter['dropped'] += 1
 
     def decode_available():
-        nonlocal latest, last_counter, processed_samples
+        nonlocal latest, processed_samples
         while True:
             try:
                 samples.append(blocks.get_nowait())
@@ -209,36 +208,37 @@ def run_receive(args):
         processed_samples = len(audio)
         if results:
             result = results[-1]
-            if last_counter != result.counter:
-                last_counter = result.counter
-                latest = P.values_from(model, result.coeffs)
-                meter['decoded'] += 1
-                now = time.monotonic()
-                meter['decoded_times'].append(now)
-                times = meter['decoded_times']
-                if len(times) >= 2:
-                    meter['decoded_fps'] = (len(times)-1)/(times[-1]-times[0])
-                meter['status'] = result.status
-                meter['counter'] = result.counter
-                meter['pulse'] = result.diag.get('pulse_confidence')
-                meter['decode_ms'] = (info.get('diagnostics') or {}).get(
-                    'last_elapsed_ms')
-                if result.status in ('received', 'verified'):
-                    meter['verified'] += 1
-                if result.status == 'lost':
-                    meter['lost'] += 1
-                report = {'counter': result.counter, 'status': result.status,
-                          'clock_words': info.get('words'),
-                          'crc_ok': info.get('crc_ok'),
-                          'skipped_frames': len(info.get('skipped_frames', [])),
-                          'recovered': info.get('recovered', False)}
-                if args.diagnostics:
-                    report['diagnostics'] = info.get('diagnostics')
-                print(report, flush=True)
-                if args.save_dir:
-                    args.save_dir.mkdir(parents=True, exist_ok=True)
-                    values_image(latest, model.coder.grids).save(
-                        args.save_dir/f'v7_{result.counter:08d}.png')
+            # Each call is gated by newly arrived audio.  The short rolling
+            # history intentionally restarts the prototype's local counter,
+            # so comparing result.counter here would suppress valid frames.
+            latest = P.values_from(model, result.coeffs)
+            meter['decoded'] += 1
+            now = time.monotonic()
+            meter['decoded_times'].append(now)
+            times = meter['decoded_times']
+            if len(times) >= 2:
+                meter['decoded_fps'] = (len(times)-1)/(times[-1]-times[0])
+            meter['status'] = result.status
+            meter['counter'] = meter['decoded']
+            meter['pulse'] = result.diag.get('pulse_confidence')
+            meter['decode_ms'] = (info.get('diagnostics') or {}).get(
+                'last_elapsed_ms')
+            if result.status in ('received', 'verified'):
+                meter['verified'] += 1
+            if result.status == 'lost':
+                meter['lost'] += 1
+            report = {'counter': meter['decoded'], 'wire_counter': result.counter,
+                      'status': result.status, 'clock_words': info.get('words'),
+                      'crc_ok': info.get('crc_ok'),
+                      'skipped_frames': len(info.get('skipped_frames', [])),
+                      'recovered': info.get('recovered', False)}
+            if args.diagnostics:
+                report['diagnostics'] = info.get('diagnostics')
+            print(report, flush=True)
+            if args.save_dir:
+                args.save_dir.mkdir(parents=True, exist_ok=True)
+                values_image(latest, model.coder.grids).save(
+                    args.save_dir/f'v7_{meter["decoded"]:08d}.png')
         elif args.diagnostics:
             print({'status': 'reacquiring', **info}, flush=True)
         # Keep the receiver's expensive non-streaming prototype bounded.  The
