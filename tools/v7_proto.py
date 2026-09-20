@@ -653,8 +653,12 @@ PILOT_PV = np.asarray([PATS[o] for o in PILOT_OBS])
 PILOT_BY_SYMBOL = tuple(
     tuple(np.asarray([b for ss, b in PILOT_OBS if ss == s], int))
     for s in range(F))
+PILOT_VALUES_BY_SYMBOL = tuple(
+    np.asarray([PATS[(s, int(b))] for b in PILOT_BY_SYMBOL[s]])
+    for s in range(F))
 PILOT_MASKS = tuple(PILOT_BV == b for b in PILOT_BINS)
 PILOT_MASK_BY_BIN = {int(b): mask for b, mask in zip(PILOT_BINS, PILOT_MASKS)}
+PILOT_BIN_INDEX = np.searchsorted(PILOT_BINS, PILOT_BV)
 
 
 KNOTS = np.array([0, 4, 8, 12, 16, 20, F-1], float)
@@ -678,14 +682,14 @@ def channel_joint(Z, iters=2):
         for _ in range(iters):
             delta = _BASIS @ theta
             rot = np.exp(2j*np.pi*bv*delta[sv]/N)
-            h = {}
+            h = np.empty((len(PILOT_BINS), 2), complex)
             for b in PILOT_BINS:
                 m = PILOT_MASK_BY_BIN[b]
                 A = pv[m]*rot[m, None]
                 gram = A.conj().T @ A
                 rhs = A.conj().T @ y[m]
-                h[b] = _solve_2x2_vec(gram, rhs)
-            pred = np.array([rot[i]*(h[bv[i]] @ pv[i]) for i in range(len(y))])
+                h[PILOT_BIN_INDEX[m][0]] = _solve_2x2_vec(gram, rhs)
+            pred = rot*np.einsum('ij,ij->i', h[PILOT_BIN_INDEX], pv)
             ok = np.abs(pred) > 1e-9
             ph = np.angle(y[ok]/pred[ok]); w = np.abs(pred[ok])
             J = (2*np.pi*bv[ok]/N)[:, None]*_BASIS[sv[ok]]
@@ -696,7 +700,7 @@ def channel_joint(Z, iters=2):
             if np.max(np.abs(step)) < 1e-4:
                 break
         delta = _BASIS @ theta
-        hb = np.array([h[b] for b in PILOT_BINS])              # (pilots, 2)
+        hb = h                                                   # (pilots, 2)
         for k in range(2):
             v = hb[:, k]
             hk = np.interp(BINS, PILOT_BINS, v.real) + 1j*np.interp(BINS, PILOT_BINS, v.imag)
@@ -710,9 +714,10 @@ def fade_and_noise(Z, H):
     noise = np.zeros((F, 2))
     for s in range(F):
         pil = PILOT_BY_SYMBOL[s]
+        pvals = PILOT_VALUES_BY_SYMBOL[s]
         for ch in range(2):
-            pred = np.array([H[s, b, ch] @ PATS[(s, b)] for b in pil])
-            obs = np.array([Z[s, b, ch] for b in pil])
+            pred = np.einsum('bi,bi->b', H[s, pil, ch], pvals)
+            obs = Z[s, pil, ch]
             mag = np.abs(pred)
             ok = mag > 0.3*mag.max()
             if ok.sum() < 2:
@@ -729,7 +734,7 @@ def fade_and_noise(Z, H):
             a = float(np.angle(np.sum(rho*w))); bslope = 0.0
             corr = np.exp(u - v*freq + 1j*(a + bslope*freq))
             H[s, BINS, ch, :] *= corr[:, None]
-            pred2 = np.array([H[s, b, ch] @ PATS[(s, b)] for b in pil])
+            pred2 = np.einsum('bi,bi->b', H[s, pil, ch], pvals)
             dof = max(len(pil)-3, 1)
             noise[s, ch] = np.sum(np.abs(obs-pred2)**2)/dof
     # Smooth over +-1 symbol, without launching one tiny convolution per

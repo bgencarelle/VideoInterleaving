@@ -232,10 +232,16 @@ def run_receive(args):
         if not samples:
             return
         audio = np.concatenate(samples)
-        # Keep enough clock history for reacquisition while bounding memory.
-        if len(audio) > P.RATE*30:
-            del samples[:-int(P.RATE*20)//1024]
-            audio = np.concatenate(samples)
+        # Latest-only decoding needs the current body plus the next header;
+        # rescanning twenty seconds of old audio only burns CPU.  Keep a few
+        # complete frames for reacquisition and let the pulse decoder search
+        # that bounded tail.
+        history = P.PULSE_FRAME*max(4, args.decode_history)
+        if len(audio) > history:
+            dropped = len(audio)-history
+            audio = audio[-history:]
+            samples[:] = [audio]
+            processed_samples = max(0, processed_samples-dropped)
         if len(audio) < P.PULSE_FRAME:
             return
         if len(audio)-processed_samples < P.PULSE_FRAME*args.decode_batch:
