@@ -184,6 +184,19 @@ MONO = [blk for blk in BLOCKS if blk[0] <= 9]
 STEREO = [blk for blk in BLOCKS if blk[0] > 9]
 GROUPS = ([(b, 'M', q) for b in MONO for q in 'IQ'] +
           [(b, c, q) for b in STEREO for c in 'MS' for q in 'IQ'])
+BLOCK_BINS = np.asarray([blk[0] for blk in BLOCKS], int)
+BLOCK_SYMBOLS = np.asarray([phi + 3*np.arange(8)
+                            for _, phi in BLOCKS], int)
+_block_number = {blk: i for i, blk in enumerate(BLOCKS)}
+GROUP_BLOCK = np.asarray([_block_number[(b, phi)]
+                          for ((b, phi), _, _) in GROUPS], int)
+GROUP_STREAM_INDEX = np.asarray([0 if stream == 'M' else 1
+                                 for (_, stream, _) in GROUPS], int)
+GROUP_Q_INDEX = np.asarray([0 if q == 'I' else 1
+                            for (_, _, q) in GROUPS], int)
+BLOCK_GROUP_INDEX = np.full((len(BLOCKS), 2, 2), -1, int)
+for _gi, _bi in enumerate(GROUP_BLOCK):
+    BLOCK_GROUP_INDEX[_bi, GROUP_STREAM_INDEX[_gi], GROUP_Q_INDEX[_gi]] = _gi
 N_HEAD_G, N_TAIL_G = 2*len(MONO), 12                    # 26 head, 12 tail groups
 HEAD, BODY_END, TAIL_PER = 208, 2224, 96
 TAIL_PHASES = 7
@@ -765,54 +778,54 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
             (perf_counter()-stage_started)*1000)
     stage_started = perf_counter()
     DEBUG['Z'], DEBUG['H'], DEBUG['noise'] = Z, H, noise
-    # Per-cell 2x2 MMSE (§9.6 step 1) with priors from group powers.
+    # Per-cell 2x2 MMSE (§9.6 step 1) with priors from group powers.  Keep all
+    # blocks and both quadratures in one batch: the small solve is cheap, but
+    # entering Python once per block/channel was not.
     idx = model.rank_tables[counter % TAIL_PHASES]
     tx_var = np.array([np.mean(np.where(r >= 0, model.gain[np.maximum(r, 0)]**2 *
                                         model.lam[np.maximum(r, 0)], 0)) for r in idx])
-    group_var = {(blk, stream, q): tx_var[gi]
-                 for gi, (blk, stream, q) in enumerate(GROUPS)}
-    est = {}
-    for blk in BLOCKS:
-        b, phi = blk
-        sidx = phi + 3*np.arange(8)
-        Hc = H[sidx, b]
-        for q in 'IQ':
-            P = np.array([group_var.get((blk, 'M', q), 0.0),
-                          group_var.get((blk, 'S', q), 0.0)])
-            Psafe = P + 1e-12
-            S = (Hc*Psafe[None, None, :]) @ Hc.conj().transpose(0, 2, 1)
-            S[:, np.diag_indices(2)[0], np.diag_indices(2)[1]] += np.maximum(
-                noise[sidx], NOISE_FLOOR)
-            # Batched 2x2 solve: the old per-cell pinv/solve loop was the
-            # largest avoidable cost in the live receiver.
-            M = Psafe[None, :, None] * Hc.conj().transpose(0, 2, 1)
-            W = _solve_2x2_mat(S.transpose(0, 2, 1),
-                               M.transpose(0, 2, 1)).transpose(0, 2, 1)
-            xt = np.einsum('tij,tj->ti', W, Z[sidx, b])
-            B = W @ Hc
-            cov = W @ S @ W.conj().transpose(0, 2, 1)
-            for k in range(2):
-                if P[k] <= 0:
-                    continue
-                beta = B[:, k, k].real
-                var = np.maximum(cov[:, k, k].real-beta**2*P[k], 1e-12)
-                var = np.divide(var, beta**2, out=np.full(8, np.inf),
-                                where=beta > 1e-6)
-                est[(blk, k, q)] = (np.divide(xt[:, k], beta,
-                                               out=np.zeros(8, complex),
-                                               where=beta > 1e-6), var)
+    valid_group = BLOCK_GROUP_INDEX >= 0
+    block_priors = np.where(valid_group, tx_var[np.maximum(BLOCK_GROUP_INDEX, 0)], 0.0)
+    Hc = H[BLOCK_SYMBOLS, BLOCK_BINS[:, None]]
+    Zc = Z[BLOCK_SYMBOLS, BLOCK_BINS[:, None]]
+    estimates = np.zeros((len(BLOCKS), 2, 2, 8), complex)
+    variances = np.full((len(BLOCKS), 2, 2, 8), np.inf)
+    for q in range(2):
+        prior = block_priors[:, :, q]
+        safe = prior + 1e-12
+        S = (Hc*safe[:, None, None, :]) @ Hc.conj().transpose(0, 1, 3, 2)
+        S[..., 0, 0] += np.maximum(noise[BLOCK_SYMBOLS, 0],
+                                   NOISE_FLOOR)
+        S[..., 1, 1] += np.maximum(noise[BLOCK_SYMBOLS, 1],
+                                   NOISE_FLOOR)
+        M = safe[:, None, :, None] * Hc.conj().transpose(0, 1, 3, 2)
+        W = _solve_2x2_mat(S, M)
+        xt = np.einsum('btij,btj->bti', W, Zc)
+        B = W @ Hc
+        cov = W @ S @ W.conj().transpose(0, 1, 3, 2)
+        beta = np.diagonal(B, axis1=-2, axis2=-1).real
+        var = np.maximum(np.diagonal(cov, axis1=-2, axis2=-1).real -
+                         beta**2*prior[:, None, :], 1e-12)
+        beta_k = beta.transpose(0, 2, 1)
+        estimates[:, :, q] = np.divide(
+            xt.transpose(0, 2, 1), beta_k,
+            out=np.zeros_like(xt.transpose(0, 2, 1)),
+            where=beta_k > 1e-6)
+        variances[:, :, q] = np.divide(
+            var.transpose(0, 2, 1), beta_k**2,
+            out=np.full_like(var.transpose(0, 2, 1), np.inf),
+            where=beta_k > 1e-6)
     # Group LMMSE (§9.6 step 2) + gate (step 3).  Assemble all groups and use
     # one batched solve instead of 290 Python-level 8x8 SVD/solve calls.
     group_count = len(GROUPS)
     ranks_all = idx
     live_all = ranks_all >= 0
     y_all = np.empty((group_count, 8)); sig_all = np.empty((group_count, 8))
-    for gi, (blk, stream, q) in enumerate(GROUPS):
-        k = 0 if stream == 'M' else 1
-        val, var = est.get((blk, k, q),
-                           (np.zeros(8, complex), np.full(8, np.inf)))
-        y_all[gi] = val.real if q == 'I' else val.imag
-        sig_all[gi] = np.where(np.isfinite(var), var/2, 1e9)
+    values_all = estimates[GROUP_BLOCK, GROUP_STREAM_INDEX, GROUP_Q_INDEX]
+    vars_all = variances[GROUP_BLOCK, GROUP_STREAM_INDEX, GROUP_Q_INDEX]
+    y_all[:] = values_all.real
+    y_all[GROUP_Q_INDEX == 1] = values_all[GROUP_Q_INDEX == 1].imag
+    sig_all[:] = np.where(np.isfinite(vars_all), vars_all/2, 1e9)
     lam_all = np.where(live_all, model.lam[np.maximum(ranks_all, 0)], 1e-12)
     gain_all = np.where(live_all, model.gain[np.maximum(ranks_all, 0)], 0)
     A_all = H8[None, :, :]*gain_all[:, None, :]
