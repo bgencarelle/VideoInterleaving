@@ -289,6 +289,11 @@ def run_receive(args):
             report = {'counter': meter['decoded'], 'wire_counter': result.counter,
                       'status': result.status, 'clock_words': info.get('words'),
                       'input_gain': round(meter['auto_gain'], 3),
+                      'head_confidence': result.diag.get('head_confidence'),
+                      'head_coverage': result.diag.get('head_coverage'),
+                      'metadata_valid': result.diag.get('metadata_valid'),
+                      'timing_delta_ppm': result.diag.get('timing_delta_ppm'),
+                      'noise': result.diag.get('noise'),
                       'crc_ok': info.get('crc_ok'),
                       'skipped_frames': len(info.get('skipped_frames', [])),
                       'recovered': info.get('recovered', False)}

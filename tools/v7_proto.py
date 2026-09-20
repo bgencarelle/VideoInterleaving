@@ -153,6 +153,7 @@ HEAD_MIN_CONFIDENCE = .70
 HEAD_MIN_COVERAGE = .50
 LIVE_VALID_HEAD_CONFIDENCE = .85
 LIVE_VALID_HEAD_COVERAGE = .75
+LIVE_MAX_PILOT_NOISE = .08
 
 # Static placement tables: V3--V6 do this kind of work once at setup, not on
 # every picture.  The flattened arrays are used by the vectorized scatter in
@@ -1057,7 +1058,9 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
                      result.diag.get('head_confidence', 0) <
                      LIVE_VALID_HEAD_CONFIDENCE or
                      result.diag.get('head_coverage', 0) <
-                     LIVE_VALID_HEAD_COVERAGE)):
+                     LIVE_VALID_HEAD_COVERAGE or
+                     max(result.diag.get('noise', [np.inf])) >
+                     LIVE_MAX_PILOT_NOISE)):
                 result.status = 'lost'
             result.diag['pulse_confidence'] = float(confidence)
             result.diag['aspect_code'] = aspect_code
