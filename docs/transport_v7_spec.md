@@ -835,7 +835,48 @@ Baseline invariants:
 - degraded display only above the explicit foundation/noise quality baseline;
 - vectorized encoder, batched solves, bounded live history, and diagnostics.
 
-### 20.1 Recommended timing experiment: pilot-derived nonlinear warp
+### 20.1 Decode CPU baseline and completed optimization
+
+The decoder equalizer is now vectorized across all data blocks and both
+quadratures. The previous implementation entered Python once per block/channel
+and dispatched many tiny matrix operations. The new implementation preserves
+the same MMSE equations and quality gates while assembling the block priors and
+solves in batches.
+
+Measured on the same fixture and pulse wire:
+
+```text
+                         old EQ       vectorized EQ
+clean CPU/frame           47.7 ms          26.4 ms
+Type-I CPU/frame          55.6 ms          31.6 ms
+```
+
+This is approximately a 43--45% reduction in decoder CPU time. Direct A/B
+results matched at clean, hiss, low-pass, wow/flutter, and dropout conditions.
+Type-I remained received/displayable; RMSE changed from 0.0698 to 0.0710.
+The change is decoder-only and does not alter the wire, encoder, redundancy, or
+quality thresholds. Numba was evaluated as an optional tool but is not required
+by the runtime; the NumPy implementation is faster to deploy and has no JIT
+startup cost.
+
+### 20.2 Remaining low-risk decode work
+
+The next easy optimizations should be measured independently:
+
+- make pulse acquisition incremental instead of rescanning and concatenating a
+  large rolling audio window on every live tick;
+- move decoding to a worker so Tk meters and presentation cannot be blocked by
+  equalization;
+- render `values_image()` only when a new frame arrives, not on every UI tick;
+- lazily build alternate source models after metadata identifies the encoding,
+  while retaining the nearest bootstrap model;
+- precompute remaining noise/index lookup arrays and avoid per-frame temporary
+  dictionaries.
+
+These are CPU/latency optimizations only. Do not remove wire redundancy or
+change the 12.245-fps frame geometry without a separate resilience comparison.
+
+### 20.3 Recommended timing experiment: pilot-derived nonlinear warp
 
 The pulse endpoints correct affine frame scale. Flutter can still warp the
 middle of a frame. The safest next experiment is a gated second pass:
@@ -855,7 +896,7 @@ symbol remains an ICI limit and cannot be recovered perfectly afterward.
 Required A/B results are clean RMSE, pilot residual, timing residual, CPU time,
 latency, received/lost counts, and the existing wow/flutter matrix.
 
-### 20.2 Lower-risk experiments
+### 20.4 Lower-risk experiments
 
 - Use weighted circular pilot-phase fits with carrier outlier rejection.
 - Compare a denser pilot schedule against the lost analog payload capacity.
@@ -863,7 +904,7 @@ latency, received/lost counts, and the existing wow/flutter matrix.
   failure.
 - Add timing-loss duration and reacquisition latency to the live diagnostics.
 
-### 20.3 Deferred changes
+### 20.5 Deferred changes
 
 Do not yet add a second timing track, full-picture repetition, stronger FEC,
 temporal prediction, learned source coding, or a new modulation family. Each
