@@ -243,21 +243,24 @@ The repeat layout and coder are `[C:animation_modem/transport3.py:102-108]`,
 `[C:animation_modem/v6.py:204-216]`; receiver construction precomputes the
 global placement before packet one at `[C:animation_modem/engines.py:68-75]`.
 
-## V6 tape placement — placement state machine
+## V6 tape-ordered placement — placement state machine
 
 ```text
 CODER_CREATED
-  -> COMPUTE_RANKS [DCT normalized spatial rank or CDF97 packed rank]
-  -> TAKE_ORIGINAL_SLOTS [first n_orig _slot_order slots]
-  -> MARK_COPY_HOMES
-  -> SPLIT_REMAINING_POOL_BY_TARGET_CHANNEL
-  -> GLOBAL_LINEAR_ASSIGNMENT
-       [opposite channel, >=8-bin spread, preferably different symbol,
-        minimize distance from TAPE_CENTRE_BIN=10]
+  -> COMPUTE_RANKS [DCT normalized rank or CDF97 packed rank]
+  -> BUILD_TAPE_SLOT_ORDER
+       [bin 1 health=28; other bins by frequency; coprime symbol walk]
+  -> SELECT_FOUNDATION [720 lowest-rank values]
+  -> BUILD_LOW_CARRIER_ZONE [homes low half, copies upper half]
+  -> PAIR_COPIES
+       [opposite track, >=7-bin spread, half-packet symbol shift,
+        same I/Q part]
+  -> PLACE_REMAINING_DETAIL [rank order in unused slots]
   -> CACHE_MAPPING_PER_LAYOUT
   -> ENCODE/DECODE_USE_SAME_MAPPING
 ```
 
-The placement state is `[C:animation_modem/v6.py:150-186]`; the test invariants
-are `[C:modem_tests/test_v6.py:29-40]` and
-`[C:modem_tests/test_v6_repeat.py:25-36]`.
+This is a bench-only coder on `WIRE_V6`; it does not add a new packet length or
+magic and is not selected by the current live engine. The placement state is
+`[C:animation_modem/v6.py:92-119]`, `[C:animation_modem/v6.py:285-369]`; test
+invariants are `[C:modem_tests/test_v6_tape.py:33-66]`.

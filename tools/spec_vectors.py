@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from animation_modem import transport3 as V3  # noqa: E402
 from animation_modem.core import decode_packet  # noqa: E402
 from animation_modem.engines import coder_for  # noqa: E402
-from animation_modem.v6 import slot_symbols  # noqa: E402
+from animation_modem.v6 import slot_symbols, tape_coder  # noqa: E402
 from animation_modem.wavelet import _slot_carriers  # noqa: E402
 
 
@@ -106,8 +106,9 @@ def placement_record(layout, coder):
     }
 
 
-def current_vector(out, name, layout, profile, code, seed, tolerance):
-    coder, _ = coder_for(profile, layout)
+def current_vector(out, name, layout, profile, code, seed, tolerance,
+                   supplied_coder=None):
+    coder = supplied_coder if supplied_coder is not None else coder_for(profile, layout)[0]
     rng = np.random.default_rng(seed)
     values = rng.uniform(-.7, .7, coder.source_count)
     audio = V3.encode(values, layout, coder, 1, 1, 1, profile=code)
@@ -120,7 +121,7 @@ def current_vector(out, name, layout, profile, code, seed, tolerance):
     record = layout_record(layout, coder, profile, code)
     record.update({
         'version': name,
-        'commit': '37b93447c2eee6a8647f0bcb0ca2972dd0268375',
+        'commit': '3b250ae3f6920dfe22eb716c2336a46e08a46004',
         'seed': seed,
         'file': path.name,
         'sha256': sha256(path),
@@ -219,13 +220,16 @@ def main(argv=None):
         ('wire-tape-25', V3.WIRE_TAPE_25, 'tape-80x60', 3, .08),
         ('v6', V3.WIRE_V6, 'v6-dct', 0, .55),
         ('v6-repeat', V3.WIRE_V6_REPEAT, 'v6-repeat-dct', 0, .60),
-        ('v6-tape-placement', V3.WIRE_V6, 'v6-dct', 0, .55),
+        ('v6-tape', V3.WIRE_V6, 'v6-tape-dct', 0, .55,
+         tape_coder('dct')),
     ]
-    for index, (name, layout, profile, code, tolerance) in enumerate(cases):
+    for index, case in enumerate(cases):
+        name, layout, profile, code, tolerance, *custom = case
         records.append(current_vector(out=args.out, name=name, layout=layout,
                                       profile=profile, code=code,
                                       seed=seed + index + 1,
-                                      tolerance=tolerance))
+                                      tolerance=tolerance,
+                                      supplied_coder=custom[0] if custom else None))
 
     manifest = args.out / 'manifest.json'
     manifest.write_text(json.dumps(records, indent=2, sort_keys=True) + '\n')

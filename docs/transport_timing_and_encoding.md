@@ -8,7 +8,7 @@ labelled **UNVERIFIED**.
 ## Branch provenance
 
 The current modem implementation is in `standalone-modem`, currently at
-`37b93447` (`origin/standalone-modem`). The early V1/V2 modem history is on
+`3b250ae3` (`origin/standalone-modem`). The early V1/V2 modem history is on
 the `experiment` branch (`8224a36f`, `origin/experiment`), and the V1/V2
 source commits cited below are reachable from that history. The project also
 has separate `main` (`0e30eb25`, `origin/main`) and `scope` (`01506d18`,
@@ -27,7 +27,7 @@ branch named `modem` not present in this clone.
 ### Source-reference convention
 
 `[C:path:lines]` means the file at the current `standalone-modem` checkout,
-commit `37b93447c2eee6a8647f0bcb0ca2972dd0268375`. Historical references use
+commit `3b250ae3f6920dfe22eb716c2336a46e08a46004`. Historical references use
 `[H364:path:lines]` for the V1 introduction commit
 `364c29286a279680444cb7a1274db8de5101a79a`, `[H337:path:lines]` for the V2
 introduction commit `33734bcf4308a8f9256eff4695905b745a18d356`, and
@@ -53,7 +53,7 @@ vector script.
 | `wire-tape-25` | `d3a9cbad` | `[C:animation_modem/transport3.py:86-92]` |
 | V6 | `4a672b07` | `[C:animation_modem/v6.py:1-224]` |
 | V6 full-repeat | `914756a2`; evaluation note `37b93447` | `[C:animation_modem/transport3.py:102-108]`, `[C:MODEM_TODO.md:139-152]` |
-| V6 tape placement | `4a672b07` | `[C:animation_modem/v6.py:150-186]` |
+| V6 tape-ordered placement | `3b250ae3` | `[C:animation_modem/v6.py:92-154]`, `[C:animation_modem/v6.py:285-369]` |
 
 The V3-family current source is a single transport: V3, V5, and both tape
 wires reuse the same OFDM encoder/decoder and differ primarily in layout and
@@ -85,10 +85,13 @@ abstraction.
 | wire-tape-25 | `wire-tape-25` | `tape-80x60` code 3 | `V4` | 360-value DCT plus 360 stereo copies |
 | V6 | `wire-v6` | `v6-dct` code 0; `v6-wavelet` code 1 | `V6` | DCT or two-level CDF 9/7, 720 foundation copies |
 | V6-repeat | `wire-v6-repeat` | `v6-repeat-dct` code 0; `v6-repeat-wavelet` code 1 | `VR` | DCT or two-level CDF 9/7, every coefficient copied |
+| V6 tape-ordered placement | `wire-v6` (bench-only) | `v6-tape-dct` or `v6-tape-wavelet`; header code 0/1 | `V6` | Same V6 transforms, low-carrier/interleaved 720-foundation placement |
 
 The current four-code legacy registry is exactly
 `color-dct`, `color-wavelet`, `hd-dwt`, `tape-80x60`; V6 names are experimental
-and reuse codes 0/1 only inside their distinct wire magic and geometry.
+and reuse codes 0/1 only inside their distinct wire magic and geometry. The
+tape-ordered V6 names are coder names for the bench path, not additions to the
+current four-code registry or a new wire magic.
 `[C:animation_modem/core.py:732-766]`, `[C:animation_modem/imaging.py:27-57]`,
 `[C:animation_modem/core.py:203-224]`, `[C:animation_modem/engines.py:227-233]`
 
@@ -571,13 +574,33 @@ For reliability mode, each observation uses `a=gain*reliability`,
 `variance*sum(a^2/noise)/(1+variance*sum(a^2/noise))`. The gate is
 `clip((confidence-floor)/(.85-floor), 0, 1)`. `[C:animation_modem/v6.py:131-148]`
 
-### V6 tape placement
+### V6 baseline placement
 
 For both V6 transforms, originals are assigned in coefficient-rank order to
 the first 2,880 slots from `_slot_order()`. Each foundation copy is assigned to
 the opposite channel, at least eight carrier bins away, and preferably a
 different OFDM symbol; a SciPy linear-assignment solve chooses the mapping.
-`[C:animation_modem/v6.py:150-186]`
+`[C:animation_modem/v6.py:242-283]`
+
+### V6 tape-ordered placement (bench-only)
+
+The new tape candidate keeps `WIRE_V6`, the same 2,880 originals, and the same
+720 foundation copies; it changes only the placement and coder name. It is not
+selected by `coder_for()` or by the live engine yet. `[C:animation_modem/v6.py:353-369]`
+
+Tape placement demotes carrier bin 1 (375 Hz) with health 28 rather than
+forbidding it, uses a minimum copy spread of 7 bins, and orders slots by
+low-to-high carrier health with a coprime time walk. Foundation homes occupy a
+low-carrier zone, copies occupy the upper half of that zone on the opposite
+track, and each copy is shifted by roughly half the packet in symbol time.
+Remaining detail is ranked into the remaining slots, including high spare
+carriers in dense header symbols. `[C:animation_modem/v6.py:92-119]`,
+`[C:animation_modem/v6.py:285-350]`
+
+The tape placement invariants are: no foundation home uses a header spare or
+bin 1; homes stay at or below 4 kHz; copies stay at or below 7 kHz; every copy
+is cross-track, at least 7 bins away, and at least half an image-symbol block
+away. `[C:modem_tests/test_v6_tape.py:33-66]`
 
 The V6 wire is top bin 34, 29 image symbols, 3,640 capacity, 3,600 used
 values, and magic `V6`. `[C:animation_modem/transport3.py:94-100]`
@@ -594,8 +617,10 @@ inverse reconstruction. A failed or low-confidence coefficient is softened
 instead of being promoted to false detail or color. `[C:animation_modem/v6.py:125-148]`
 
 The V6 tests require copies to use the opposite channel, separated frequency,
-and different symbol; they also test either-track loss and the 14 kHz ceiling.
-`[C:modem_tests/test_v6.py:29-83]`, `[C:modem_tests/test_v6_repeat.py:25-63]`
+and different symbol; the tape-placement tests add low-frequency foundation
+and half-packet time-diversity checks. They also test either-track loss and the
+14 kHz ceiling. `[C:modem_tests/test_v6.py:29-83]`,
+`[C:modem_tests/test_v6_repeat.py:25-63]`, `[C:modem_tests/test_v6_tape.py:19-104]`
 
 These are diversity controls, not tape acceptance evidence. The project note
 records that full-repeat improved some isolated-track and severe synthetic
@@ -698,7 +723,7 @@ SciPy versions only. `[C:requirements-modem.txt:1-6]`, `[C:tools/spec_vectors.py
 | `wire-tape-25` | `wire-tape-25.wav` | `b78f3c5ff1a0306158452edf2b71ba26a8475db78cd669179687bcc6f6efebb9` | verified_header | 0.001059 | 0.08 |
 | V6 | `v6.wav` | `821cdf8e509838e4d9fe5ad6e4d2d71c6019d4b0f820536bee97997cc787a9aa` | verified_header | 0.004078 | 0.55 |
 | V6-repeat | `v6-repeat.wav` | `f8424ed6b95a337b5039cfe01821aa09fec07216706afa658d613a33ba37a1e0` | verified_header | 0.002618 | 0.60 |
-| V6 tape placement | `v6-tape-placement.wav` | `828d74764bf20b9dee5ec552d5ed3ef46130af49c05043c785016a5253e9bde7` | verified_header | 0.003557 | 0.55 |
+| V6 tape-ordered placement | `v6-tape.wav` | `04f28b7d3ababaa4b22f4272d132b36b1bb51f0a1b97561b05e6c3b1aa0cb531` | verified_header | 0.004291 | 0.55 |
 
 The tolerance values are clean synthetic acceptance thresholds: the V1 vector
 uses a normalized RGB-pixel threshold of 0.11 `[C:tools/spec_vectors.py:149-173]`;
@@ -865,7 +890,7 @@ vectors:
 | V5 preamble/header claims | The active V5 path uses the standard V3 preamble/header; the separate V5 preamble/header/LDPC implementation is parked. `[C:animation_modem/engines.py:129-167]` |
 | `wire-tape` transform name | The profile is named `hd-dwt` at the CLI but layout-specific construction selects DCT `StereoRepeatCoder`; this document records the implementation, not the misleading profile label. `[C:animation_modem/engines.py:34-49]` |
 | Tape/V6 whole-waveform ceiling | Only tape/V6 layouts set `emission_ceiling=14000`; wide current layouts have no whole-waveform ceiling. `[C:animation_modem/transport3.py:66-108]` |
-| V6 placement | V6 copies are opposite-channel, frequency-separated, and symbol-separated by the assignment cost; the vector script records these invariants rather than claiming independent tape-track failure. `[C:animation_modem/v6.py:169-182]` |
+| V6 placement | Baseline V6 uses global opposite-channel/frequency assignment; the new bench-only tape-ordered V6 puts the foundation on low carriers and interleaves copies in time. The vector script records both layouts without claiming independent tape-track failure. `[C:animation_modem/v6.py:92-119]`, `[C:animation_modem/v6.py:242-350]` |
 | Historical V1/V2 vectors | Regenerated from the exact pinned historical source files using `git show`; they are not decoded by current transport code. `[C:tools/spec_vectors.py:133-204]` |
 | CRC algorithm | The call, seed behavior as exposed by the code, and big-endian output are confirmed; the underlying zlib polynomial/reflection details are library-defined and therefore explicitly UNVERIFIED from repository code. `[C:animation_modem/core.py:768-806]` |
 | Color matrix | Pillow YCbCr conversion is confirmed; numeric matrix/range coefficients are not defined in this repository and remain UNVERIFIED at wire-spec level. `[C:animation_modem/imaging.py:173-181]` |
