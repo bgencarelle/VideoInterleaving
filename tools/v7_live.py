@@ -204,8 +204,8 @@ def run_receive(args):
         if not args.refine:
             P.REFINE = False
         try:
-            results, info = P.decode_pulse_stream(model, audio,
-                                                  diagnostics=diagnostics)
+            results, info = P.decode_pulse_stream(
+                model, audio, diagnostics=diagnostics, latest_only=True)
         except (FloatingPointError, np.linalg.LinAlgError, ValueError,
                 IndexError) as exc:
             # Drop the damaged window and let the next retained clock history

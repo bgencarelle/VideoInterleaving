@@ -860,7 +860,7 @@ def decode_stream(model, x, verbose=False, diagnostics=None):
     return results, info
 
 
-def decode_pulse_stream(model, x, diagnostics=None):
+def decode_pulse_stream(model, x, diagnostics=None, latest_only=False):
     """Decode V7 bodies located by the existing pulse-counted acquisition.
 
     This is the low-latency live path: each accepted pulse word supplies a
@@ -875,6 +875,26 @@ def decode_pulse_stream(model, x, diagnostics=None):
     tail = model.mu.copy()
     measured = None
     pending_aspect = 0
+    if latest_only:
+        # The live rolling buffer can contain the previous frame plus the new
+        # one.  Find all pulse starts, but run the expensive image decode only
+        # on the newest complete frame.
+        candidates = []
+        scan = 0
+        while scan + V3.SYNC_LEN + 32 < len(samples):
+            hit = V3.measure_pulses(samples[scan:].mean(axis=1),
+                                    min_scale=.5, max_scale=2.0)
+            if hit is None:
+                break
+            pos, sc, conf = hit
+            fs = scan + pos - 16*sc
+            candidates.append((fs, sc, conf))
+            scan = int(fs + PULSE_FRAME*sc)
+        if not candidates:
+            return [], {'frames': 0, 'pulse_frames': 0, 'recovered': False}
+        fs, sc, conf = candidates[-1]
+        cursor = int(fs)
+        measured = (16*sc, sc, conf)
     while cursor + V3.SYNC_LEN + 32 < len(samples):
         if measured is None:
             measured = V3.measure_pulses(samples[cursor:].mean(axis=1),
@@ -919,6 +939,8 @@ def decode_pulse_stream(model, x, diagnostics=None):
             results.append(result)
             if result.status != 'lost':
                 tail = result.coeffs.copy()
+            if latest_only:
+                break
         pending_aspect = aspect_code
         cursor = int(next_start if next_start is not None
                      else frame_start + PULSE_FRAME*scale)
