@@ -43,6 +43,7 @@ PULSE_MAX_SCALE = 2.0
 ENCODING_FILTERS = ('nearest', 'box', 'lanczos', 'bicubic')
 ENCODING_FILTER_CODES = {name: code for code, name in
                          enumerate(ENCODING_FILTERS)}
+METADATA_OPTION_MONO_SUM = 2
 # The high bit of each pair is orientation; square ignores it.
 V7_ASPECT_RATIOS = (1., 4/3, 3/2, 16/9, 1., 3/4, 2/3, 9/16)
 V7_ASPECT_NAMES = ('1:1', '4:3', '3:2', '16:9',
@@ -270,9 +271,10 @@ class Model:
     head: np.ndarray
     rank_tables: tuple
     encoding_type: int = 0
+    mono_sum: bool = False
 
 
-def build_model(fixture, target_rms, encode_filter='lanczos'):
+def build_model(fixture, target_rms, encode_filter='lanczos', mono_sum=False):
     coder = SourceCoder(v6.V6_SHAPES, grids=v6.V6_GRIDS)
     rng = np.random.default_rng(1)
     im = Image.open(fixture).convert('RGB'); W, Hh = im.size
@@ -307,7 +309,7 @@ def build_model(fixture, target_rms, encode_filter='lanczos'):
     head = np.zeros(C.shape[1], bool); head[order[:HEAD]] = True
     rank_tables = tuple(frame_ranks(order, p) for p in range(TAIL_PHASES))
     model = Model(coder, mu, lam, order, g, phase, 1.0, plane, head,
-                  rank_tables, ENCODING_FILTER_CODES[encode_filter])
+                  rank_tables, ENCODING_FILTER_CODES[encode_filter], mono_sum)
     # Fixed level (§6.6): one-off calibration on seeded synthetic coefficients
     # drawn from the variance table -- a property of the profile, never of the
     # frame being sent.
@@ -384,7 +386,8 @@ def encode_pulse_frame(model, values, counter, aspect_code=0):
     out[V3.SYNC_LEN:V3.SYNC_LEN+FRAME] = body
     out[16:16+len(V3.PREAMBLE), :] = V3.PREAMBLE[:, None]
     meta = np.zeros((N//2+1, 2), complex)
-    vals = metadata_symbols(aspect_code, model.encoding_type)
+    options = METADATA_OPTION_MONO_SUM if model.mono_sum else 0
+    vals = metadata_symbols(aspect_code, model.encoding_type, options)
     meta[META_PILOTS, 0] = 1
     meta[META_DATA_BINS[:len(vals)], 0] = vals
     mx = (meta[:, 0])/np.sqrt(2)*model.phase[-1]
@@ -942,7 +945,7 @@ def decode_stream(model, x, verbose=False, diagnostics=None):
         return y, find_words(biphase_bits(y, clock_edges(y)))
     y, words = read(x.mean(axis=1))
     # Per-channel fallback (§5.3 step 1) when M yields few words.
-    for ch in range(2):
+    for ch in range(min(2, x.shape[1])):
         if len(words) >= 2:
             break
         y, words = read(x[:, ch])
@@ -1107,7 +1110,8 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
         revision = 0
         if metadata_valid:
             aspect_code, encoding_type, revision = decoded_metadata
-            if revision != 0 or encoding_type >= len(ENCODING_FILTERS):
+            if (revision not in (0, METADATA_OPTION_MONO_SUM) or
+                    encoding_type >= len(ENCODING_FILTERS)):
                 metadata_valid = False
                 encoding_type = model.encoding_type
                 revision = 0
@@ -1119,6 +1123,10 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
             if selected_model is None:
                 selected_model = model
         body = _sample_at(samples, indexes, taps=16).astype(np.float32)
+        if body.shape[1] == 1:
+            # The demodulator is M/S two-channel internally.  A mono capture
+            # is the shared M observation, so duplicate it without inventing S.
+            body = np.repeat(body, 2, axis=1)
         nominal = np.array([0., FRAME])
         offset = np.array([64., 64.])
         try:
@@ -1152,6 +1160,7 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
             result.diag['encoding_name'] = ENCODING_FILTERS[int(encoding_type)] \
                 if 0 <= int(encoding_type) < len(ENCODING_FILTERS) else 'unknown'
             result.diag['revision'] = int(revision)
+            result.diag['mono_sum'] = revision == METADATA_OPTION_MONO_SUM
             result.diag['pulse_scale'] = float(scale)
             result.diag['frame_scale'] = float(frame_scale)
             result.diag['timing_delta_ppm'] = float(

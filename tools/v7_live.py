@@ -66,9 +66,10 @@ def _capture(args):
                                  args.capture_width, args.ffmpeg_input)
 
 
-def _model(fixture, encode_filter='nearest'):
+def _model(fixture, encode_filter='nearest', mono_sum=False):
     model = P.build_model(fixture, .1521 / np.sqrt(
-        1 + 10**(P.CLOCK_REL_DB/10)), encode_filter=encode_filter)
+        1 + 10**(P.CLOCK_REL_DB/10)), encode_filter=encode_filter,
+        mono_sum=mono_sum)
     return model
 
 
@@ -94,7 +95,7 @@ def run_send(args):
     import sounddevice as sd
     from modem_screen import Throttled
 
-    model = _model(args.fixture, args.encode_filter)
+    model = _model(args.fixture, args.encode_filter, args.mono_sum)
     raw_grab = _capture(args)
     capture_hz = args.capture_fps or (CAMERA_CAPTURE_FPS
                                       if args.source == 'camera' else FPS)
@@ -131,6 +132,8 @@ def run_send(args):
                 audio = P.encode_pulse_stream(model, values,
                                               start_counter=counter,
                                               aspect_codes=aspects)
+                if args.mono_sum:
+                    audio = audio.mean(axis=1, keepdims=True)
                 batches.put((counter, audio))
                 total += len(frames)
                 counter += len(frames)
@@ -139,9 +142,12 @@ def run_send(args):
         finally:
             if frames and not stop.is_set():
                 values = np.asarray(frames)
-                batches.put((counter, P.encode_pulse_stream(
+                audio = P.encode_pulse_stream(
                     model, values, start_counter=counter,
-                    aspect_codes=aspects)))
+                    aspect_codes=aspects)
+                if args.mono_sum:
+                    audio = audio.mean(axis=1, keepdims=True)
+                batches.put((counter, audio))
                 total += len(frames)
             batches.put(sentinel)
             close = getattr(grab, 'close', None)
@@ -156,7 +162,9 @@ def run_send(args):
               f'capture={args.capture_width}px/{args.capture_filter} '
               f'encode={args.encode_filter}', flush=True)
     try:
-        with sd.OutputStream(samplerate=P.RATE, channels=2, dtype='float32',
+        with sd.OutputStream(samplerate=P.RATE,
+                             channels=1 if args.mono_sum else 2,
+                             dtype='float32',
                              device=args.device, blocksize=0) as stream:
             while True:
                 item = batches.get()
@@ -192,6 +200,8 @@ def run_receive(args):
             name = P.ENCODING_FILTERS[int(encoding_type)]
             models[encoding_type] = _model(args.fixture, name)
         return models[encoding_type]
+    device_info = sd.query_devices(args.device, 'input')
+    input_channels = 1 if device_info['max_input_channels'] < 2 else 2
     blocks = queue.Queue(maxsize=32)
     stop = threading.Event()
     input_gap = threading.Event()
@@ -202,7 +212,8 @@ def run_receive(args):
     previous_values = None
     diagnostics = {} if args.diagnostics else None
     auto_gain = 1.0
-    meter = {'peak': np.zeros(2), 'rms': np.zeros(2), 'blocks': 0,
+    meter = {'peak': np.zeros(input_channels),
+             'rms': np.zeros(input_channels), 'blocks': 0,
              'dropped': 0, 'decoded': 0, 'verified': 0, 'lost': 0,
              'status': 'acquiring', 'counter': None, 'decode_ms': None,
              'quality': '--',
@@ -352,7 +363,8 @@ def run_receive(args):
             report = {'counter': meter['decoded'], 'wire_counter': result.counter,
                       'status': meter['status'], 'displayable': displayable,
                       'pulse_frames': info.get('pulse_frames'),
-                      'encoding': result.diag.get('encoding_name'),
+                       'encoding': result.diag.get('encoding_name'),
+                       'mono_sum': result.diag.get('mono_sum'),
                       'input_gain': round(meter['auto_gain'], 3),
                       'head_confidence': result.diag.get('head_confidence'),
                       'head_coverage': result.diag.get('head_coverage'),
@@ -380,13 +392,14 @@ def run_receive(args):
             processed_samples = len(samples[0])
 
     try:
-        stream = sd.InputStream(samplerate=P.RATE, channels=2, dtype='float32',
+        stream = sd.InputStream(samplerate=P.RATE, channels=input_channels,
+                                dtype='float32',
                                 device=args.device, blocksize=1024,
                                 callback=callback)
         stream.start()
         if not args.no_log:
             print(f'V7 receive ready: input={args.device!r} rate={P.RATE}Hz '
-                  f'channels=2 ui={"headless" if args.headless else "window"} '
+                  f'channels={input_channels} ui={"headless" if args.headless else "window"} '
                   f'bootstrap=nearest', flush=True)
     except Exception:
         stop.set()
@@ -550,6 +563,8 @@ def parser():
                       help='source brightness multiplier (default: 1.05)')
     send.add_argument('--gamma', type=float, default=1.0,
                       help='source gamma; >1 lifts midtones (default: 1.0)')
+    send.add_argument('--mono-sum', action='store_true',
+                      help='emit mono-summed M content on one channel')
     send.add_argument('--camera', type=int, default=0)
     send.add_argument('--display', type=int)
     send.add_argument('--ffmpeg-input')

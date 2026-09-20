@@ -713,7 +713,8 @@ The live metadata word is one payload byte followed by CRC-16/CCITT-FALSE:
 payload bit 7..6: aspect family: 00=1:1, 01=4:3, 10=3:2, 11=16:9
 payload bit 5:    orientation: 0=normal, 1=portrait/mirrored
 payload bit 4..3: source encoding: 00=nearest, 01=box, 10=lanczos, 11=bicubic
-payload bit 2..1: revision/extension: 00=current; other values reserved
+payload bit 2:    mono-sum option: 0=stereo M/S, 1=mono-summed M
+payload bit 1:    revision/extension: 0=current; 1 reserved
 payload bit 0:    fixed live marker
 CRC:              polynomial 0x1021, init 0xFFFF, xorout 0
 ```
@@ -806,6 +807,9 @@ default and can be hidden with `--no-diagnostics`; `--no-log` suppresses routine
 console status output for standalone embedded use. Sender and receiver print one
 hardware/status line at startup; routine per-frame output is disabled by default
 and can be enabled with `--log`.
+The sender's optional `--mono-sum` emits one audio channel containing the
+shared M signal and advertises that choice in metadata; the receiver accepts
+mono input devices automatically.
 The receiver's optional `--mono-compatible` presentation mode preserves luma
 while confidence-gating temporal/spatial chroma stabilization for mono or
 one-leg playback. It does not alter the wire or encoder.
