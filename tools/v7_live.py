@@ -30,6 +30,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from animation_modem.imaging import image_values, prepare_image, values_image  # noqa: E402
+from animation_modem.aspect import ASPECT_RATIOS                             # noqa: E402
 from tools import v7_proto as P                                             # noqa: E402
 
 
@@ -61,8 +62,9 @@ def _model(fixture, encode_filter='nearest'):
 def _values(model, frame, encode_filter='nearest'):
     image = frame if isinstance(frame, Image.Image) else Image.fromarray(frame)
     prepared = prepare_image(image, preset='auto', encode_filter=encode_filter)
-    return image_values(prepared, model.coder.grids,
-                        encode_filter=encode_filter)
+    return (image_values(prepared, model.coder.grids,
+                         encode_filter=encode_filter),
+            int(prepared.info.get('aspect_code', 0)))
 
 
 def run_send(args):
@@ -86,6 +88,7 @@ def run_send(args):
     def produce():
         nonlocal total
         frames = []
+        aspects = []
         counter = 1
         next_capture = time.monotonic()
         try:
@@ -94,22 +97,26 @@ def run_send(args):
                 delay = next_capture-time.monotonic()
                 if delay > 0:
                     time.sleep(delay)
-                frames.append(_values(model, grab(), args.encode_filter))
+                value, aspect = _values(model, grab(), args.encode_filter)
+                frames.append(value); aspects.append(aspect)
                 next_capture += 1/FPS
                 if len(frames) < batch_size:
                     continue
                 values = np.asarray(frames)
                 audio = P.encode_pulse_stream(model, values,
-                                              start_counter=counter)
+                                              start_counter=counter,
+                                              aspect_codes=aspects)
                 batches.put((counter, audio))
                 total += len(frames)
                 counter += len(frames)
                 frames = []
+                aspects = []
         finally:
             if frames and not stop.is_set():
                 values = np.asarray(frames)
                 batches.put((counter, P.encode_pulse_stream(
-                    model, values, start_counter=counter)))
+                    model, values, start_counter=counter,
+                    aspect_codes=aspects)))
                 total += len(frames)
             batches.put(sentinel)
             close = getattr(grab, 'close', None)
@@ -154,7 +161,7 @@ def run_receive(args):
     meter = {'peak': np.zeros(2), 'rms': np.zeros(2), 'blocks': 0,
              'dropped': 0, 'decoded': 0, 'verified': 0, 'lost': 0,
              'status': 'acquiring', 'counter': None, 'decode_ms': None,
-             'pulse': None, 'input_samples': 0, 'started': time.monotonic(),
+             'pulse': None, 'aspect': 0, 'input_samples': 0, 'started': time.monotonic(),
              'decoded_times': deque(maxlen=32), 'input_fps': 0.,
              'decoded_fps': 0.}
 
@@ -221,6 +228,7 @@ def run_receive(args):
             meter['status'] = result.status
             meter['counter'] = meter['decoded']
             meter['pulse'] = result.diag.get('pulse_confidence')
+            meter['aspect'] = result.diag.get('aspect_code', meter['aspect'])
             meter['decode_ms'] = (info.get('diagnostics') or {}).get(
                 'last_elapsed_ms')
             if result.status in ('received', 'verified'):
@@ -297,13 +305,16 @@ def run_receive(args):
                 f'dropped {meter["dropped"]}'))
             status_label.configure(text=(
                 f'status {meter["status"]}  frame {meter["counter"]} '
-                f'pulse {meter["pulse"] if meter["pulse"] is not None else "--"} '
+                f'aspect {meter["aspect"]}  pulse '
+                f'{meter["pulse"] if meter["pulse"] is not None else "--"} '
                 f'decode {meter["decode_ms"] if meter["decode_ms"] is not None else "--"} ms | '
                 f'incoming {meter["input_fps"]:5.2f} fps | '
                 f'decoded {meter["decoded_fps"]:5.2f} fps'))
             if latest is not None:
                 image = values_image(latest, model.coder.grids)
-                image = image.resize((400, 480), Image.Resampling.NEAREST)
+                height = 480
+                width = max(1, round(height*ASPECT_RATIOS[int(meter['aspect']) & 7]))
+                image = image.resize((width, height), Image.Resampling.NEAREST)
                 photo = ImageTk.PhotoImage(image)
                 label.configure(image=photo, text='')
                 label.image = photo

@@ -36,6 +36,8 @@ RATE, N, CP, SYM, F = 48000, 128, 16, 144, 24
 FRAME = F*SYM                                   # 3456 samples, 13.889 fps
 PULSE_FRAME = V3.SYNC_LEN + FRAME + 32           # 3776 samples, 12.712 fps
 PULSE_FPS = RATE/PULSE_FRAME
+PULSE_GUARD_BASE = 32
+PULSE_GUARD_STEP = 8
 BINS = np.arange(4, 35)                         # 1.5-12.75 kHz
 CONTINUAL = (4, 34)
 SCAT = {b: ((b-5)//4) % 3 for b in range(5, 34, 4)}
@@ -300,19 +302,21 @@ def encode_stream(model, values, frames, lead=0.25, tail=0.25,
     return np.concatenate([pad(lead), sig, pad(tail)]).astype(np.float32)
 
 
-def encode_pulse_frame(model, values, counter):
+def encode_pulse_frame(model, values, counter, aspect_code=0):
     """One V3-style pulse-framed V7 body for low-latency live transport."""
     body = encode_frame(model, values, counter)
-    out = np.zeros((PULSE_FRAME, 2), np.float32)
+    guard = PULSE_GUARD_BASE + (int(aspect_code) & 7)*PULSE_GUARD_STEP
+    out = np.zeros((V3.SYNC_LEN + FRAME + guard, 2), np.float32)
     out[V3.SYNC_LEN:V3.SYNC_LEN+FRAME] = body
     out[16:16+len(V3.PREAMBLE), :] = V3.PREAMBLE[:, None]
     return bound_emission(out, 14000, RATE)
 
 
-def encode_pulse_stream(model, values, start_counter=1):
+def encode_pulse_stream(model, values, start_counter=1, aspect_codes=None):
     values = list(values) if np.asarray(values).ndim != 1 else [values]
-    return np.concatenate([encode_pulse_frame(model, value, start_counter+i)
-                           for i, value in enumerate(values)])
+    codes = aspect_codes or [0]*len(values)
+    return np.concatenate([encode_pulse_frame(model, value, start_counter+i, code)
+                           for i, (value, code) in enumerate(zip(values, codes))])
 
 
 # ------------------------------------------------------------------ receiver: clock
@@ -869,9 +873,12 @@ def decode_pulse_stream(model, x, diagnostics=None):
     counter = 1
     results = []
     tail = model.mu.copy()
+    measured = None
+    pending_aspect = 0
     while cursor + V3.SYNC_LEN + 32 < len(samples):
-        measured = V3.measure_pulses(samples[cursor:].mean(axis=1),
-                                     min_scale=.5, max_scale=2.0)
+        if measured is None:
+            measured = V3.measure_pulses(samples[cursor:].mean(axis=1),
+                                         min_scale=.5, max_scale=2.0)
         if measured is None:
             break
         position, scale, confidence = measured
@@ -880,6 +887,17 @@ def decode_pulse_stream(model, x, diagnostics=None):
         # starts 16 samples earlier), matching Receiver.pending's at-16*scale
         # correction.
         frame_start = position - 16*scale
+        search = int(frame_start + (V3.SYNC_LEN + FRAME)*scale)
+        following = V3.measure_pulses(samples[search:].mean(axis=1),
+                                      min_scale=.5, max_scale=2.0)
+        aspect_code = pending_aspect
+        next_start = None
+        if following is not None:
+            next_position = search + following[0]
+            next_start = next_position - 16*following[1]
+            guard = (next_start-frame_start)/scale - (V3.SYNC_LEN+FRAME)
+            aspect_code = int(np.clip(np.rint(
+                (guard-PULSE_GUARD_BASE)/PULSE_GUARD_STEP), 0, 7))
         start = frame_start + V3.SYNC_LEN*scale
         indexes = start + np.arange(FRAME)*scale
         if indexes[-1] >= len(samples)-1:
@@ -897,10 +915,15 @@ def decode_pulse_stream(model, x, diagnostics=None):
         if result is not None:
             result.status = 'received' if confidence >= .45 else 'degraded'
             result.diag['pulse_confidence'] = float(confidence)
+            result.diag['aspect_code'] = aspect_code
             results.append(result)
             if result.status != 'lost':
                 tail = result.coeffs.copy()
-        cursor = int(frame_start + PULSE_FRAME*scale)
+        pending_aspect = aspect_code
+        cursor = int(next_start if next_start is not None
+                     else frame_start + PULSE_FRAME*scale)
+        measured = ((16*following[1], following[1], following[2])
+                    if following is not None else None)
         counter += 1
     info = {'frames': len(results), 'pulse_frames': counter-1,
             'recovered': bool(results)}
