@@ -121,7 +121,9 @@ def run_send(args):
                 if item is sentinel:
                     break
                 counter, audio = item
-                stream.write(np.asarray(audio, np.float32))
+                # sounddevice requires a C-contiguous interleaved buffer;
+                # filtering/resampling can return a strided view here.
+                stream.write(np.ascontiguousarray(audio, dtype=np.float32))
                 print(f'  sent through frame {counter+len(audio)//P.PULSE_FRAME-1}',
                       flush=True)
     except KeyboardInterrupt:
