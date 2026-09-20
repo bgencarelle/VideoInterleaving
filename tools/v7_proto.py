@@ -888,6 +888,10 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False):
                 break
             pos, sc, conf = hit
             fs = scan + pos - 16*sc
+            # A pulse can be visible before its body has arrived.  Do not let
+            # that partial newest candidate hide the previous complete frame.
+            if fs + PULSE_FRAME*sc > len(samples)-1:
+                break
             candidates.append((fs, sc, conf))
             scan = int(fs + PULSE_FRAME*sc)
         if not candidates:
