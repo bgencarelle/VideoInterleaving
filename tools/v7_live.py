@@ -552,8 +552,10 @@ def parser():
                       help='frames encoded before submission (default: 1)')
     send.add_argument('--seconds', type=float, default=0,
                       help='0 means until Ctrl-C')
-    send.add_argument('--no-log', action='store_true',
-                      help='suppress routine status output')
+    send.add_argument('--no-log', dest='no_log', action='store_true',
+                      default=True, help=argparse.SUPPRESS)
+    send.add_argument('--log', dest='no_log', action='store_false',
+                      help='enable routine status output')
     recv = sub.add_parser('receive', help='receive V7 audio and display it')
     recv.add_argument('--device', type=_device_arg, required=True,
                       help='explicit sounddevice input, e.g. BlackHole 2ch')

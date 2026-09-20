@@ -803,7 +803,8 @@ decoder, displays the newest usable reconstruction, and can save frames with
 The window is resizable; keyboard `F` toggles fullscreen, `I` toggles the
 diagnostic panel, and `Escape` exits fullscreen. Diagnostics are shown by
 default and can be hidden with `--no-diagnostics`; `--no-log` suppresses routine
-console status output for standalone embedded use.
+console status output for standalone embedded use. The transmitter is quiet by
+default; use sender `--log` to enable per-frame terminal output.
 
 This is deliberately not a live production integration. The current prototype
 uses the offline V7 shaping path for each batch, so batch boundaries can create
