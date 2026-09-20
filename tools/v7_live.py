@@ -214,13 +214,17 @@ def run_receive(args):
         meter['peak'] = np.maximum(meter['peak'],
                                    np.max(np.abs(values), axis=0))
         meter['rms'] = np.sqrt(np.mean(values*values, axis=0))
-        meter['blocks'] += 1
-        meter['input_samples'] += len(values)
+        has_data = bool(np.max(np.abs(values)) > 1e-7)
+        if has_data:
+            meter['blocks'] += 1
+            meter['input_samples'] += len(values)
         elapsed = max(time.monotonic()-meter['started'], 1e-6)
         meter['input_fps'] = meter['input_samples']/(P.PULSE_FRAME*elapsed)
         if status:
             if not args.no_log:
                 print(f'input: {status}', file=sys.stderr, flush=True)
+        if not has_data:
+            return
         try:
             blocks.put_nowait(np.array(indata, copy=True))
         except queue.Full:
@@ -437,6 +441,7 @@ def run_receive(args):
                                     anchor='w', justify='left')
             device_label.pack(fill='x')
             status_label = tk.Label(info_frame, text='status: acquiring', anchor='w',
+                                    justify='left',
                                     background='black', foreground='white')
             status_label.pack(fill='x')
             levels_label = tk.Label(info_frame, text='levels: --', anchor='w',
@@ -466,12 +471,16 @@ def run_receive(args):
                     f'dropped {meter["dropped"]}'))
                 quality_label.configure(text=f'quality: {meter["quality"]}')
                 status_label.configure(wraplength=max(240, root.winfo_width()-12))
+                pulse = meter['pulse']
+                pulse_text = '--' if pulse is None else f'{pulse:.4g}'
+                aspect_text = P.V7_ASPECT_NAMES[int(meter['aspect']) & 7]
+                candidate_aspect = P.V7_ASPECT_NAMES[
+                    int(meter['aspect_candidate']) & 7]
                 status_label.configure(text=(
                     f'status {meter["status"]}  frame {meter["counter"]} '
-                    f'aspect {meter["aspect"]} '
-                    f'(candidate {meter["aspect_candidate"]} '
-                    f'x{meter["aspect_streak"]})  pulse '
-                    f'{meter["pulse"] if meter["pulse"] is not None else "--"} '
+                    f'aspect {aspect_text} '
+                    f'(candidate {candidate_aspect} '
+                    f'x{meter["aspect_streak"]})  pulse {pulse_text}\n'
                     f'gain {meter["auto_gain"]:4.1f}x  '
                     f'timing {meter["timing_delta"] if meter["timing_delta"] is not None else "--"} ppm  '
                     f'decode {meter["decode_ms"] if meter["decode_ms"] is not None else "--"} ms | '
