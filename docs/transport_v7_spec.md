@@ -859,9 +859,9 @@ quality thresholds. Numba was evaluated as an optional tool but is not required
 by the runtime; the NumPy implementation is faster to deploy and has no JIT
 startup cost.
 
-### 20.2 Remaining low-risk decode work
+### 20.2 Completed low-risk decode work
 
-The next easy optimizations should be measured independently:
+The following decoder improvements are now implemented:
 
 - make pulse acquisition incremental instead of rescanning and concatenating a
   large rolling audio window on every live tick;
@@ -873,8 +873,10 @@ The next easy optimizations should be measured independently:
 - precompute remaining noise/index lookup arrays and avoid per-frame temporary
   dictionaries.
 
-These are CPU/latency optimizations only. Do not remove wire redundancy or
-change the 12.245-fps frame geometry without a separate resilience comparison.
+The worker keeps the decoder and UI presentation independent; a damaged decode
+does not terminate the display loop. These are CPU/latency optimizations only.
+Do not remove wire redundancy or change the 12.245-fps frame geometry without a
+separate resilience comparison.
 
 ### 20.3 Recommended timing experiment: pilot-derived nonlinear warp
 

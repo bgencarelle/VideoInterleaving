@@ -362,6 +362,22 @@ def run_receive(args):
         stop.set()
         raise
 
+    def decode_worker():
+        while not stop.is_set():
+            try:
+                decode_available()
+            except Exception as exc:
+                # A damaged window must not terminate either the decoder or
+                # the UI.  The next retained pulse history can reacquire.
+                meter['status'] = f'decoder error: {type(exc).__name__}'
+                if args.diagnostics and not args.no_log:
+                    print({'status': 'decoder_exception',
+                           'error': repr(exc)}, flush=True)
+            stop.wait(.01)
+
+    decoder_thread = threading.Thread(target=decode_worker, daemon=True)
+    decoder_thread.start()
+
     root = None
     label = None
     if not args.headless:
@@ -409,15 +425,6 @@ def run_receive(args):
 
         def tick():
             nonlocal rendered
-            try:
-                decode_available()
-            except Exception as exc:
-                # Keep the UI alive through an unexpected damaged-frame
-                # exception; the next pulse window can still reacquire.
-                meter['status'] = f'decoder error: {type(exc).__name__}'
-                if args.diagnostics and not args.no_log:
-                    print({'status': 'decoder_exception',
-                           'error': repr(exc)}, flush=True)
             if args.show_diagnostics:
                 peak = 20*np.log10(np.maximum(meter['peak'], 1e-9))
                 rms = 20*np.log10(np.maximum(meter['rms'], 1e-9))
@@ -472,10 +479,11 @@ def run_receive(args):
     else:
         try:
             while not stop.is_set():
-                decode_available()
-                time.sleep(.01)
+                stop.wait(.1)
         except KeyboardInterrupt:
             pass
+    stop.set()
+    decoder_thread.join(timeout=2)
     stream.stop(); stream.close()
 
 
