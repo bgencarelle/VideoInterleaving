@@ -176,7 +176,7 @@ def screen_capture_source(fps, region=None, display=None, width=320, spec=None):
 
 
 def ffmpeg_source(spec, fps, region=None, display=None, width=320,
-                  video_size=None):
+                  video_size=None, raw_output=False):
     """Capture through ffmpeg's platform fast path.
 
     mss goes via CoreGraphics on macOS and costs tens of milliseconds a grab.
@@ -217,9 +217,21 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320,
         filters.append(f'scale={w}:-1')
     if filters:
         cmd += ['-vf', ','.join(filters)]
-    cmd += ['-pix_fmt', 'rgb24',
-            '-fps_mode', 'passthrough',
-            '-c:v', 'ppm', '-f', 'image2pipe', '-an', '-sn', '-']
+    cmd += ['-pix_fmt', 'rgb24', '-fps_mode', 'passthrough']
+    raw_shape = None
+    if raw_output and video_size is not None and w is not None:
+        out_h = max(2, int(round(w*video_size[1]/video_size[0]))//2*2)
+        # The explicit output size makes rawvideo framing unambiguous and
+        # avoids the PPM image2pipe muxer/header work for camera frames.
+        if filters:
+            cmd[cmd.index('-vf')+1] = f'scale={w}:{out_h}'
+        else:
+            cmd += ['-vf', f'scale={w}:{out_h}']
+        raw_shape = (out_h, w)
+        cmd += ['-f', 'rawvideo']
+    else:
+        cmd += ['-c:v', 'ppm', '-f', 'image2pipe']
+    cmd += ['-an', '-sn', '-']
     # Device timestamps are not necessarily a constant-rate timeline. The
     # default sync mode can emit thousands of duplicates to fill their gaps.
     # This pipe needs exactly one image for each input frame.
@@ -235,6 +247,12 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320,
 
     def grab():
         try:
+            if raw_shape is not None:
+                count = raw_shape[0]*raw_shape[1]*3
+                data = _read_exact(proc.stdout, count)
+                if data is None:
+                    raise RuntimeError('FFmpeg capture ended')
+                return np.frombuffer(data, np.uint8).reshape(*raw_shape, 3)
             return _read_ppm(proc.stdout)
         except RuntimeError as exc:
             with close_lock:
@@ -356,7 +374,8 @@ def camera_source(index=0, fps=30, width=320, spec=None):
         else:
             mode = _lowest_camera_mode('avfoundation',
                                        f'{source_index}:none', fps)
-        return ffmpeg_source(spec, fps, width=width, video_size=mode)
+        return ffmpeg_source(spec, fps, width=width, video_size=mode,
+                             raw_output=True)
     elif sys.platform.startswith('win'):
         spec = spec or 'dshow:video=Integrated Camera'
     else:
@@ -367,7 +386,8 @@ def camera_source(index=0, fps=30, width=320, spec=None):
         mode, fps = selected if selected else (None, 30)
     else:
         mode = _lowest_camera_mode(fmt, source, fps)
-    return ffmpeg_source(spec, fps, width=width, video_size=mode)
+    return ffmpeg_source(spec, fps, width=width, video_size=mode,
+                         raw_output=True)
 
 
 def video_source(path, loop=True, realtime=True):

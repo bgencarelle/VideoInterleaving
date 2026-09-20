@@ -34,6 +34,7 @@ from tools import v7_proto as P                                             # no
 
 
 FPS = P.PULSE_FPS
+CAMERA_CAPTURE_FPS = 15
 DEFAULT_FIXTURE = ROOT / 'modem_tests/fixtures/v6_face_1110.png'
 
 
@@ -52,7 +53,7 @@ def _capture(args):
 
     region = _region(args.region)
     if args.source == 'camera':
-        return camera_source(args.camera, args.capture_fps,
+        return camera_source(args.camera, args.capture_fps or CAMERA_CAPTURE_FPS,
                              width=args.capture_width, spec=args.ffmpeg_input)
     if args.screen_backend == 'mss':
         return screen_source(region)
@@ -80,7 +81,8 @@ def run_send(args):
 
     model = _model(args.fixture, args.encode_filter)
     raw_grab = _capture(args)
-    capture_hz = args.capture_fps or (30 if args.source == 'camera' else FPS)
+    capture_hz = args.capture_fps or (CAMERA_CAPTURE_FPS
+                                      if args.source == 'camera' else FPS)
     # Match V3--V6: drain a paced FFmpeg source continuously and expose only
     # the newest frame to the audio encoder. Reading the pipe once per encoded
     # frame creates seconds of stale-camera latency.
@@ -457,7 +459,7 @@ def parser():
     send.add_argument('--screen-backend', choices=('mss', 'ffmpeg'), default='mss',
                       help='screen capture backend; mss avoids an FFmpeg child')
     send.add_argument('--region')
-    send.add_argument('--capture-width', type=int, default=320)
+    send.add_argument('--capture-width', type=int, default=160)
     send.add_argument('--capture-fps', '--fps', dest='capture_fps', type=float)
     send.add_argument('--batch-frames', type=int, default=1,
                       help='frames encoded before submission (default: 1)')
