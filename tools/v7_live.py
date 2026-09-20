@@ -206,7 +206,7 @@ def run_receive(args):
              'pulse': None, 'aspect': 0, 'aspect_candidate': 0,
              'aspect_streak': 0, 'input_samples': 0, 'started': time.monotonic(),
              'auto_gain': 1.0,
-             'decoded_times': deque(maxlen=32), 'input_fps': 0.,
+              'decoded_times': deque(maxlen=8), 'input_fps': 0.,
              'decoded_fps': 0.}
 
     def callback(indata, frames, timing, status):
@@ -221,8 +221,7 @@ def run_receive(args):
         elapsed = max(time.monotonic()-meter['started'], 1e-6)
         meter['input_fps'] = meter['input_samples']/(P.PULSE_FRAME*elapsed)
         if status:
-            if not args.no_log:
-                print(f'input: {status}', file=sys.stderr, flush=True)
+            print(f'input: {status}', file=sys.stderr, flush=True)
         if not has_data:
             return
         try:
@@ -241,7 +240,7 @@ def run_receive(args):
             input_gap.clear()
             samples.clear()
             processed_samples = 0
-            if args.diagnostics and not args.no_log:
+            if not args.no_log:
                 print({'status': 'input_gap_reacquire',
                        'dropped': meter['dropped']}, flush=True)
             return
@@ -385,7 +384,7 @@ def run_receive(args):
                 # A damaged window must not terminate either the decoder or
                 # the UI.  The next retained pulse history can reacquire.
                 meter['status'] = f'decoder error: {type(exc).__name__}'
-                if args.diagnostics and not args.no_log:
+                if args.diagnostics or not args.no_log:
                     print({'status': 'decoder_exception',
                            'error': repr(exc)}, flush=True)
             stop.wait(.01)
@@ -567,8 +566,10 @@ def parser():
                       action='store_false',
                       help='hide diagnostic information from the window')
     recv.set_defaults(show_diagnostics=True)
-    recv.add_argument('--no-log', action='store_true',
-                      help='suppress routine status output')
+    recv.add_argument('--no-log', dest='no_log', action='store_true',
+                      default=True, help=argparse.SUPPRESS)
+    recv.add_argument('--log', dest='no_log', action='store_false',
+                      help='enable routine status output')
     recv.add_argument('--save-dir', type=Path)
     recv.add_argument('--diagnostics', action='store_true',
                       help='print decoder stage timing and counters')

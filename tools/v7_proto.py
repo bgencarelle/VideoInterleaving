@@ -1168,7 +1168,7 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
         measured = ((16*following[1], following[1], following[2])
                     if following_valid else None)
         counter += 1
-    info = {'frames': len(results), 'pulse_frames': counter-1,
+    info = {'frames': len(results), 'pulse_frames': len(results),
             'recovered': bool(results)}
     if diagnostics is not None:
         info['diagnostics'] = _diagnostic_summary(diagnostics, 0.0)
