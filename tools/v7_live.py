@@ -151,8 +151,17 @@ def run_receive(args):
     last_counter = None
     latest = None
     diagnostics = {} if args.diagnostics else None
+    meter = {'peak': np.zeros(2), 'rms': np.zeros(2), 'blocks': 0,
+             'dropped': 0, 'decoded': 0, 'verified': 0, 'lost': 0,
+             'status': 'acquiring', 'counter': None, 'decode_ms': None,
+             'pulse': None}
 
     def callback(indata, frames, timing, status):
+        values = np.asarray(indata, float)
+        meter['peak'] = np.maximum(meter['peak'],
+                                   np.max(np.abs(values), axis=0))
+        meter['rms'] = np.sqrt(np.mean(values*values, axis=0))
+        meter['blocks'] += 1
         if status:
             print(f'input: {status}', file=sys.stderr, flush=True)
         try:
@@ -160,7 +169,7 @@ def run_receive(args):
         except queue.Full:
             # Dropping an input block is an explicit discontinuity; keeping
             # stale audio would make the V7 clock appear to run backward.
-            pass
+            meter['dropped'] += 1
 
     def decode_available():
         nonlocal latest, last_counter, processed_samples
@@ -197,6 +206,16 @@ def run_receive(args):
             if last_counter != result.counter:
                 last_counter = result.counter
                 latest = P.values_from(model, result.coeffs)
+                meter['decoded'] += 1
+                meter['status'] = result.status
+                meter['counter'] = result.counter
+                meter['pulse'] = result.diag.get('pulse_confidence')
+                meter['decode_ms'] = (info.get('diagnostics') or {}).get(
+                    'last_elapsed_ms')
+                if result.status in ('received', 'verified'):
+                    meter['verified'] += 1
+                if result.status == 'lost':
+                    meter['lost'] += 1
                 report = {'counter': result.counter, 'status': result.status,
                           'clock_words': info.get('words'),
                           'crc_ok': info.get('crc_ok'),
@@ -235,11 +254,40 @@ def run_receive(args):
         from PIL import ImageTk
         root = tk.Tk()
         root.title('V7 modem receiver')
+        root.configure(background='black')
         label = tk.Label(root, text='Acquiring V7 clock…')
-        label.pack()
+        label.configure(background='black')
+        label.pack(expand=True, fill='both')
+        device_label = tk.Label(root, text=f'V7 input: {args.device}',
+                                background='black', foreground='white')
+        device_label.pack(fill='x', padx=6)
+        status_label = tk.Label(root, text='status: acquiring', anchor='w',
+                                background='black', foreground='white')
+        status_label.pack(fill='x', padx=6)
+        levels_label = tk.Label(root, text='levels: --', anchor='w',
+                                font='TkFixedFont', background='black',
+                                foreground='white')
+        levels_label.pack(fill='x', padx=6)
+        stats_label = tk.Label(root, text='frames: --', anchor='w',
+                               font='TkFixedFont', background='black',
+                               foreground='white')
+        stats_label.pack(fill='x', padx=6)
 
         def tick():
             decode_available()
+            peak = 20*np.log10(np.maximum(meter['peak'], 1e-9))
+            rms = 20*np.log10(np.maximum(meter['rms'], 1e-9))
+            levels_label.configure(text=(
+                f'peak L/R {peak[0]:6.1f}/{peak[1]:6.1f} dBFS | '
+                f'rms {rms[0]:6.1f}/{rms[1]:6.1f} dBFS'))
+            stats_label.configure(text=(
+                f'frames {meter["decoded"]}  verified {meter["verified"]} '
+                f'lost {meter["lost"]}  input blocks {meter["blocks"]} '
+                f'dropped {meter["dropped"]}'))
+            status_label.configure(text=(
+                f'status {meter["status"]}  frame {meter["counter"]} '
+                f'pulse {meter["pulse"] if meter["pulse"] is not None else "--"} '
+                f'decode {meter["decode_ms"] if meter["decode_ms"] is not None else "--"} ms'))
             if latest is not None:
                 image = values_image(latest, model.coder.grids)
                 image = image.resize((400, 480), Image.Resampling.NEAREST)
