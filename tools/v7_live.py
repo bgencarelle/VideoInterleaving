@@ -43,7 +43,11 @@ def _capture(args):
 
     region = _region(args.region)
     if args.source == 'camera':
-        return camera_source(args.camera, args.capture_fps or 30,
+        # Do not let a 30 fps FFmpeg pipe outrun the 12.71 fps V7 consumer:
+        # unread PPM frames become visible latency. 15 fps is the closest
+        # common camera mode above the live wire cadence, and camera_source()
+        # still selects the smallest advertised mode supporting it.
+        return camera_source(args.camera, args.capture_fps or 15,
                              width=args.capture_width, spec=args.ffmpeg_input)
     if args.screen_backend == 'mss':
         return screen_source(region)
