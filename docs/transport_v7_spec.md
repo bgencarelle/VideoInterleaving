@@ -806,6 +806,9 @@ default and can be hidden with `--no-diagnostics`; `--no-log` suppresses routine
 console status output for standalone embedded use. Sender and receiver print one
 hardware/status line at startup; routine per-frame output is disabled by default
 and can be enabled with `--log`.
+The receiver's optional `--mono-compatible` presentation mode preserves luma
+while confidence-gating temporal/spatial chroma stabilization for mono or
+one-leg playback. It does not alter the wire or encoder.
 
 This is deliberately not a live production integration. The current prototype
 uses the offline V7 shaping path for each batch, so batch boundaries can create

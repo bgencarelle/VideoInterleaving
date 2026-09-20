@@ -29,7 +29,8 @@ from PIL import Image, ImageEnhance
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from animation_modem.imaging import image_values, prepare_image, values_image  # noqa: E402
+from animation_modem.imaging import (image_values, prepare_image, values_image,
+                                     stabilize_chroma)  # noqa: E402
 from tools import v7_proto as P                                             # noqa: E402
 
 
@@ -198,6 +199,7 @@ def run_receive(args):
     processed_samples = 0
     latest = None
     rendered = None
+    previous_values = None
     diagnostics = {} if args.diagnostics else None
     auto_gain = 1.0
     meter = {'peak': np.zeros(2), 'rms': np.zeros(2), 'blocks': 0,
@@ -235,7 +237,7 @@ def run_receive(args):
             input_gap.set()
 
     def decode_available():
-        nonlocal latest, processed_samples, auto_gain
+        nonlocal latest, processed_samples, auto_gain, previous_values
         if input_gap.is_set():
             # Never stitch samples across a callback drop.  Keep displaying
             # the last good image while pulse acquisition starts over.
@@ -334,7 +336,15 @@ def run_receive(args):
             meter['decode_ms'] = (info.get('diagnostics') or {}).get(
                 'last_elapsed_ms')
             if result.status in ('received', 'verified') or displayable:
-                latest = P.values_from(model, result.coeffs)
+                values = P.values_from(model, result.coeffs)
+                if args.mono_compatible:
+                    noise = result.diag.get('noise') or [0.0]
+                    values = stabilize_chroma(
+                        values, previous_values, model.coder.grids,
+                        pilot_error=max(noise),
+                        coverage=result.diag.get('head_coverage'))
+                latest = values
+                previous_values = latest.copy()
             if result.status in ('received', 'verified'):
                 meter['verified'] += 1
             if result.status == 'lost' and not displayable:
@@ -572,6 +582,8 @@ def parser():
     recv.add_argument('--no-diagnostics', dest='show_diagnostics',
                       action='store_false',
                       help='hide diagnostic information from the window')
+    recv.add_argument('--mono-compatible', action='store_true',
+                      help='stabilize weak chroma for mono/one-leg playback')
     recv.set_defaults(show_diagnostics=True)
     recv.add_argument('--no-log', dest='no_log', action='store_true',
                       default=False, help=argparse.SUPPRESS)
