@@ -163,6 +163,7 @@ def run_receive(args):
     meter = {'peak': np.zeros(2), 'rms': np.zeros(2), 'blocks': 0,
              'dropped': 0, 'decoded': 0, 'verified': 0, 'lost': 0,
              'status': 'acquiring', 'counter': None, 'decode_ms': None,
+             'quality': '--',
              'pulse': None, 'aspect': 0, 'aspect_candidate': 0,
              'aspect_streak': 0, 'input_samples': 0, 'started': time.monotonic(),
              'auto_gain': 1.0,
@@ -228,7 +229,7 @@ def run_receive(args):
             if args.diagnostics:
                 print({'status': 'idle_input', 'input_peak': 0.0}, flush=True)
             return
-        peak = float(np.percentile(np.abs(audio), 99.5))
+        peak = float(np.percentile(np.abs(audio[-P.PULSE_FRAME:]), 99.5))
         desired_gain = float(np.clip(.55/max(peak, 1e-6), .5, 32.0))
         auto_gain = (min(desired_gain, auto_gain*1.5)
                      if desired_gain > auto_gain else desired_gain)
@@ -261,6 +262,9 @@ def run_receive(args):
             meter['status'] = result.status
             meter['counter'] = meter['decoded']
             meter['pulse'] = result.diag.get('pulse_confidence')
+            meter['quality'] = (
+                f'head {result.diag.get("head_confidence", 0):.2f}/'
+                f'{result.diag.get("head_coverage", 0):.2f}')
             candidate = result.diag.get('aspect_code', meter['aspect'])
             if (result.status in ('received', 'verified') and
                     (result.diag.get('pulse_confidence') or 0) >= .45):
@@ -319,8 +323,15 @@ def run_receive(args):
         from PIL import ImageTk
         root = tk.Tk()
         root.title('V7 modem receiver')
+        root.resizable(False, False)
+        root.geometry('640x650')
         root.configure(background='black')
-        label = tk.Label(root, text='Acquiring V7 clock…')
+        image_frame = tk.Frame(root, width=620, height=480,
+                               background='black')
+        image_frame.pack_propagate(False)
+        image_frame.pack(padx=10, pady=8)
+        label = tk.Label(image_frame, text='Acquiring V7 clock…',
+                         background='black')
         label.configure(background='black')
         label.pack(expand=True, fill='both')
         device_label = tk.Label(root, text=f'V7 input: {args.device}',
@@ -337,6 +348,10 @@ def run_receive(args):
                                font='TkFixedFont', background='black',
                                foreground='white')
         stats_label.pack(fill='x', padx=6)
+        quality_label = tk.Label(root, text='quality: --', anchor='w',
+                                 font='TkFixedFont', background='black',
+                                 foreground='white')
+        quality_label.pack(fill='x', padx=6)
 
         def tick():
             decode_available()
@@ -349,6 +364,7 @@ def run_receive(args):
                 f'frames {meter["decoded"]}  verified {meter["verified"]} '
                 f'lost {meter["lost"]}  input blocks {meter["blocks"]} '
                 f'dropped {meter["dropped"]}'))
+            quality_label.configure(text=f'quality: {meter["quality"]}')
             status_label.configure(text=(
                 f'status {meter["status"]}  frame {meter["counter"]} '
                 f'aspect {meter["aspect"]} '
@@ -363,7 +379,10 @@ def run_receive(args):
                 image = values_image(latest, model.coder.grids)
                 height = 480
                 width = max(1, round(height*ASPECT_RATIOS[int(meter['aspect']) & 7]))
-                image = image.resize((width, height), Image.Resampling.NEAREST)
+                scale = min(620/width, 480/height)
+                image = image.resize((max(1, round(width*scale)),
+                                      max(1, round(height*scale))),
+                                     Image.Resampling.NEAREST)
                 photo = ImageTk.PhotoImage(image)
                 label.configure(image=photo, text='')
                 label.image = photo
