@@ -563,12 +563,16 @@ def channel_joint(Z, iters=2):
             for b in PILOT_BINS:
                 m = bv == b
                 A = pv[m]*rot[m, None]
-                h[b], *_ = np.linalg.lstsq(A, y[m], rcond=None)
+                gram = A.conj().T @ A
+                rhs = A.conj().T @ y[m]
+                h[b] = np.linalg.solve(gram, rhs)
             pred = np.array([rot[i]*(h[bv[i]] @ pv[i]) for i in range(len(y))])
             ok = np.abs(pred) > 1e-9
             ph = np.angle(y[ok]/pred[ok]); w = np.abs(pred[ok])
             J = (2*np.pi*bv[ok]/N)[:, None]*_BASIS[sv[ok]]
-            step, *_ = np.linalg.lstsq(J*w[:, None], ph*w, rcond=None)
+            JW = J*w[:, None]
+            normal = JW.T @ JW + 1e-10*np.eye(JW.shape[1])
+            step = np.linalg.solve(normal, JW.T @ (ph*w))
             theta += step
             if np.max(np.abs(step)) < 1e-4:
                 break
@@ -597,7 +601,9 @@ def fade_and_noise(Z, H):
             rho = obs[ok]/pred[ok]; fb = np.asarray(pil)[ok]*RATE/N/1000; w = mag[ok]
             if ok.sum() >= 3 and np.ptp(fb) > 3:
                 A = np.stack([np.ones(ok.sum()), -fb], 1)*w[:, None]
-                (u, v), *_ = np.linalg.lstsq(A, np.log(np.abs(rho)+1e-12)*w, rcond=None)
+                normal = A.T @ A + 1e-10*np.eye(2)
+                u, v = np.linalg.solve(
+                    normal, A.T @ (np.log(np.abs(rho)+1e-12)*w))
                 v = max(v, 0.0)
             else:
                 u, v = float(np.average(np.log(np.abs(rho)+1e-12), weights=w)), 0.0
