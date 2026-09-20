@@ -40,6 +40,13 @@ PULSE_FPS = RATE/PULSE_FRAME
 PULSE_GUARD_BASE = 32
 PULSE_MIN_SCALE = .25
 PULSE_MAX_SCALE = 2.0
+ENCODING_FILTERS = ('nearest', 'box', 'lanczos', 'bicubic')
+ENCODING_FILTER_CODES = {name: code for code, name in
+                         enumerate(ENCODING_FILTERS)}
+# The high bit of each pair is orientation; square ignores it.
+V7_ASPECT_RATIOS = (1., 4/3, 3/2, 16/9, 1., 3/4, 2/3, 9/16)
+V7_ASPECT_NAMES = ('1:1', '4:3', '3:2', '16:9',
+                   '1:1', '3:4', '2:3', '9:16')
 BINS = np.arange(4, 35)                         # 1.5-12.75 kHz
 META_PILOTS = np.asarray([b for b in BINS if b % 2 == 0])
 META_DATA_BINS = np.asarray([b for b in BINS if b % 2 == 1])
@@ -86,16 +93,30 @@ def clock_word(counter, profile=0, aspect=6, folders=0):
     return word
 
 
-def metadata_word(aspect_code):
-    """8-bit live metadata payload plus CRC-16/CCITT-FALSE."""
-    payload = bytes([((int(aspect_code) & 7) << 5) | 1])
+def metadata_word(aspect_code, encoding_type=0, revision=0):
+    """Pack aspect, source encoding, and revision into protected metadata."""
+    payload = bytes([((int(aspect_code) & 7) << 5) |
+                     ((int(encoding_type) & 3) << 3) |
+                     ((int(revision) & 3) << 1) | 1])
     return payload + crc16(payload).to_bytes(2, 'big')
 
 
-def metadata_symbols(aspect_code):
-    bits = np.unpackbits(np.frombuffer(metadata_word(aspect_code), np.uint8))
+def metadata_symbols(aspect_code, encoding_type=0, revision=0):
+    bits = np.unpackbits(np.frombuffer(
+        metadata_word(aspect_code, encoding_type, revision), np.uint8))
     return ((bits[0::2].astype(float)*2-1) +
             1j*(bits[1::2].astype(float)*2-1))/np.sqrt(2)
+
+
+def aspect_wire_code(size):
+    """Return the compact V7 family/orientation code for a source size."""
+    width, height = size
+    ratio = width/height
+    families = (1., 4/3, 3/2, 16/9)
+    family = min(range(4), key=lambda i: min(
+        abs(np.log(ratio/families[i])),
+        abs(np.log(ratio/(1/families[i])))))
+    return family | (4 if ratio < 1 and family else 0)
 
 
 def parse_word(bits):
@@ -217,6 +238,7 @@ class Model:
     plane: np.ndarray
     head: np.ndarray
     rank_tables: tuple
+    encoding_type: int = 0
 
 
 def build_model(fixture, target_rms, encode_filter='lanczos'):
@@ -254,7 +276,7 @@ def build_model(fixture, target_rms, encode_filter='lanczos'):
     head = np.zeros(C.shape[1], bool); head[order[:HEAD]] = True
     rank_tables = tuple(frame_ranks(order, p) for p in range(TAIL_PHASES))
     model = Model(coder, mu, lam, order, g, phase, 1.0, plane, head,
-                  rank_tables)
+                  rank_tables, ENCODING_FILTER_CODES[encode_filter])
     # Fixed level (§6.6): one-off calibration on seeded synthetic coefficients
     # drawn from the variance table -- a property of the profile, never of the
     # frame being sent.
@@ -331,7 +353,7 @@ def encode_pulse_frame(model, values, counter, aspect_code=0):
     out[V3.SYNC_LEN:V3.SYNC_LEN+FRAME] = body
     out[16:16+len(V3.PREAMBLE), :] = V3.PREAMBLE[:, None]
     meta = np.zeros((N//2+1, 2), complex)
-    vals = metadata_symbols(aspect_code)
+    vals = metadata_symbols(aspect_code, model.encoding_type)
     meta[META_PILOTS, 0] = 1
     meta[META_DATA_BINS[:len(vals)], 0] = vals
     mx = (meta[:, 0])/np.sqrt(2)*model.phase[-1]
@@ -850,7 +872,7 @@ def decode_metadata(model, samples, start, scale, channel):
     raw = np.packbits(bits).tobytes()
     if crc16(raw[:1]) != int.from_bytes(raw[1:3], 'big'):
         return None
-    return (raw[0] >> 5) & 7
+    return ((raw[0] >> 5) & 7, (raw[0] >> 3) & 3, (raw[0] >> 1) & 3)
 
 
 def _diagnostic_summary(diag, elapsed_ms):
@@ -934,7 +956,7 @@ def decode_stream(model, x, verbose=False, diagnostics=None):
 
 
 def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
-                        input_gain=1.0):
+                        input_gain=1.0, models=None):
     """Decode V7 bodies located by the existing pulse-counted acquisition.
 
     This is the low-latency live path: each accepted pulse word supplies a
@@ -1032,11 +1054,27 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
                         if following_valid else None)
             counter += 1
             continue
+        # Metadata is deliberately decoded before the image body.  Its pilots
+        # are self-referencing, so the bootstrap model's absolute scale cancels
+        # out; the protected encoding ID can therefore select the source model.
+        meta_start = frame_start + (V3.SYNC_LEN+FRAME)*scale
+        decoded_metadata = decode_metadata(model, samples, meta_start, scale, None)
+        metadata_valid = decoded_metadata is not None
+        encoding_type = model.encoding_type
+        revision = 0
+        if metadata_valid:
+            aspect_code, encoding_type, revision = decoded_metadata
+            if revision != 0 or encoding_type >= len(ENCODING_FILTERS):
+                metadata_valid = False
+                encoding_type = model.encoding_type
+                revision = 0
+        selected_model = ((models or {}).get(encoding_type, model)
+                          if metadata_valid else model)
         body = _sample_at(samples, indexes, taps=16).astype(np.float32)
         nominal = np.array([0., FRAME])
         offset = np.array([64., 64.])
         try:
-            result = decode_frame(model, None, (counter, nominal, offset),
+            result = decode_frame(selected_model, None, (counter, nominal, offset),
                                   counter, tail, cancel=False, direct_body=body,
                                   diagnostics=diagnostics)
         except (FloatingPointError, np.linalg.LinAlgError, ValueError,
@@ -1045,15 +1083,7 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
         if result is not None:
             if result.status != 'lost':
                 result.status = 'received' if confidence >= .45 else 'degraded'
-            channel = result.diag.pop('_H', None)
-            metadata_valid = False
-            if channel is not None and result.status != 'lost':
-                meta_start = frame_start + (V3.SYNC_LEN+FRAME)*scale
-                decoded_aspect = decode_metadata(
-                    model, samples, meta_start, scale, channel)
-                if decoded_aspect is not None:
-                    metadata_valid = True
-                    aspect_code = decoded_aspect
+            result.diag.pop('_H', None)
             if (result.status != 'lost' and
                     (not metadata_valid or
                      result.diag.get('head_confidence', 0) <
@@ -1070,6 +1100,10 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
             result.diag['pulse_confidence'] = float(confidence)
             result.diag['aspect_code'] = aspect_code
             result.diag['metadata_valid'] = metadata_valid
+            result.diag['encoding_type'] = int(encoding_type)
+            result.diag['encoding_name'] = ENCODING_FILTERS[int(encoding_type)] \
+                if 0 <= int(encoding_type) < len(ENCODING_FILTERS) else 'unknown'
+            result.diag['revision'] = int(revision)
             result.diag['pulse_scale'] = float(scale)
             result.diag['frame_scale'] = float(frame_scale)
             result.diag['timing_delta_ppm'] = float(

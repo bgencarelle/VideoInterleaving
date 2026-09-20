@@ -710,7 +710,10 @@ measured frame duration, so smooth wow/flutter is corrected across the payload.
 The live metadata word is one payload byte followed by CRC-16/CCITT-FALSE:
 
 ```text
-payload bit 7..5: aspect code
+payload bit 7..6: aspect family: 00=1:1, 01=4:3, 10=3:2, 11=16:9
+payload bit 5:    orientation: 0=normal, 1=portrait/mirrored
+payload bit 4..3: source encoding: 00=nearest, 01=box, 10=lanczos, 11=bicubic
+payload bit 2..1: revision/extension: 00=current; other values reserved
 payload bit 0:    fixed live marker
 CRC:              polynomial 0x1021, init 0xFFFF, xorout 0
 ```
@@ -718,8 +721,12 @@ CRC:              polynomial 0x1021, init 0xFFFF, xorout 0
 The 24 bits are mapped to 12 QPSK cells. Even bins in the metadata symbol are
 known M-channel pilots; odd bins carry data. Both tracks carry the mono-safe M
 signal. The metadata symbol estimates its own complex response from those
-pilots. CRC failure holds the previous aspect. The live UI additionally
-requires three consecutive reliable requests before changing aspect.
+pilots. CRC failure holds the previous metadata. The receiver decodes this
+self-referenced symbol with a bootstrap model before selecting the source
+encoding model, so sender and receiver no longer need a manually matched
+`--encode-filter`. Unknown revision values are rejected and retain the prior
+model. The live UI additionally requires three consecutive reliable requests
+before changing aspect.
 
 ### 19.3 Live source preparation
 
@@ -801,10 +808,10 @@ test.
 ### Live metadata amendment
 
 The live pulse wire no longer uses guard length as aspect metadata. The extra
-144-sample metadata symbol carries an 8-bit payload (3-bit aspect code plus a
-fixed live marker) followed by CRC-16/CCITT-FALSE. It is repeated through
+144-sample metadata symbol carries the packed aspect, encoding, and revision
+fields described above, followed by CRC-16/CCITT-FALSE. It is repeated through
 known even-bin pilots and odd-bin data carriers and decoded only when the CRC
-passes. An invalid metadata word holds the previous aspect. The UI additionally
+passes. An invalid metadata word holds the previous metadata. The UI additionally
 requires three consecutive reliable requests before changing its displayed
 aspect. This amendment is intentionally separate from the continuous-clock
 architecture described in earlier sections so the older draft remains available

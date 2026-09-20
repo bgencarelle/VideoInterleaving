@@ -30,7 +30,6 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from animation_modem.imaging import image_values, prepare_image, values_image  # noqa: E402
-from animation_modem.aspect import ASPECT_RATIOS                             # noqa: E402
 from tools import v7_proto as P                                             # noqa: E402
 
 
@@ -64,7 +63,7 @@ def _values(model, frame, encode_filter='nearest'):
     prepared = prepare_image(image, preset='auto', encode_filter=encode_filter)
     return (image_values(prepared, model.coder.grids,
                          encode_filter=encode_filter),
-            int(prepared.info.get('aspect_code', 0)))
+            P.aspect_wire_code(image.size))
 
 
 def run_send(args):
@@ -151,7 +150,15 @@ def run_send(args):
 def run_receive(args):
     import sounddevice as sd
 
-    model = _model(args.fixture, args.encode_filter)
+    # Metadata is decoded with the common bootstrap model; the body model is
+    # selected from the protected encoding ID carried by each frame.
+    model = _model(args.fixture, 'nearest')
+    models = {model.encoding_type: model}
+    for name in P.ENCODING_FILTERS:
+        if name == 'nearest':
+            continue
+        candidate = _model(args.fixture, name)
+        models[candidate.encoding_type] = candidate
     blocks = queue.Queue(maxsize=32)
     stop = threading.Event()
     input_gap = threading.Event()
@@ -240,7 +247,7 @@ def run_receive(args):
         try:
             results, info = P.decode_pulse_stream(
                 model, audio, diagnostics=diagnostics, latest_only=True,
-                input_gain=auto_gain)
+                input_gain=auto_gain, models=models)
         except Exception as exc:
             # Drop the damaged window and let the next retained clock history
             # reacquire.  A single bad frame must not stop the live receiver.
@@ -397,7 +404,8 @@ def run_receive(args):
             if latest is not None:
                 image = values_image(latest, model.coder.grids)
                 height = 480
-                width = max(1, round(height*ASPECT_RATIOS[int(meter['aspect']) & 7]))
+                width = max(1, round(height*P.V7_ASPECT_RATIOS[
+                    int(meter['aspect']) & 7]))
                 scale = min(620/width, 480/height)
                 image = image.resize((max(1, round(width*scale)),
                                       max(1, round(height*scale))),
@@ -448,8 +456,6 @@ def parser():
     recv.add_argument('--device', required=True,
                       help='explicit sounddevice input, e.g. BlackHole 2ch')
     recv.add_argument('--fixture', type=Path, default=DEFAULT_FIXTURE)
-    recv.add_argument('--encode-filter', choices=('nearest', 'box', 'lanczos', 'bicubic'),
-                      default='nearest')
     recv.add_argument('--headless', action='store_true')
     recv.add_argument('--save-dir', type=Path)
     recv.add_argument('--diagnostics', action='store_true',
