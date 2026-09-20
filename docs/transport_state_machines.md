@@ -221,7 +221,8 @@ DECODE: PULSE_ACQUIRE -> WIRE_V6_LENGTH(5360)
        -> DCT_OR_CDF97_INVERSE -> VERIFIED/DAMAGED OUTPUT
 ```
 
-The implementation is `[C:animation_modem/v6.py:77-224]` and the V6 layout is
+The implementation is `[C:animation_modem/v6.py:19-240]`,
+`[C:animation_modem/v6.py:388-415]` and the V6 layout is
 `[C:animation_modem/transport3.py:94-100]`.
 
 ## V6-repeat — encode/decode
@@ -240,7 +241,7 @@ DECODE: PULSE_ACQUIRE -> WIRE_V6_REPEAT_LENGTH(7952)
 ```
 
 The repeat layout and coder are `[C:animation_modem/transport3.py:102-108]`,
-`[C:animation_modem/v6.py:204-216]`; receiver construction precomputes the
+`[C:animation_modem/v6.py:403-414]`; receiver construction precomputes the
 global placement before packet one at `[C:animation_modem/engines.py:68-75]`.
 
 ## V6 tape-ordered placement — placement state machine

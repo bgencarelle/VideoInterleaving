@@ -51,7 +51,7 @@ vector script.
 | V5 `hd-dwt` | `34ae7739`; tape reallocations `d3a9cbad` | `[C:animation_modem/engines.py:129-170]`, `[C:animation_modem/wavelet.py:705-833]` |
 | `wire-tape` | `d3a9cbad` | `[C:animation_modem/transport3.py:78-84]`, `[C:animation_modem/engines.py:34-49]` |
 | `wire-tape-25` | `d3a9cbad` | `[C:animation_modem/transport3.py:86-92]` |
-| V6 | `4a672b07` | `[C:animation_modem/v6.py:1-224]` |
+| V6 | `4a672b07` | `[C:animation_modem/v6.py:19-240]`, `[C:animation_modem/v6.py:388-415]` |
 | V6 full-repeat | `914756a2`; evaluation note `37b93447` | `[C:animation_modem/transport3.py:102-108]`, `[C:MODEM_TODO.md:139-152]` |
 | V6 tape-ordered placement | `3b250ae3` | `[C:animation_modem/v6.py:92-154]`, `[C:animation_modem/v6.py:285-369]` |
 
@@ -257,9 +257,11 @@ The wire CRC is CRC-32/ISO-HDLC with width 32, polynomial `0x04C11DB7`
 (reflected implementation polynomial `0xEDB88320`), initial value
 `0xFFFFFFFF`, reflected input and output, and final XOR `0xFFFFFFFF`. The
 implementation invokes `zlib.crc32(payload)` with the API seed omitted/zero
-and serializes the resulting uint32 big-endian. The numeric parameters are the
-standard zlib CRC-32 contract; the repository confirms the API call and byte
-ordering but does not reimplement the polynomial. `[C:animation_modem/core.py:768-806]`
+and serializes the resulting uint32 big-endian; zlib's omitted API seed is
+equivalent to the standard external CRC initialization under its complemented
+internal convention. The standard check string `123456789` produces
+`0xCBF43926`, and the worked V6 header CRCs below match the same contract.
+`[C:animation_modem/core.py:768-806]`
 
 The eight current aspect codes are `0=5:6`, `1=1:1`, `2=4:3`, `3=3:2`,
 `4=16:9`, `5=2.39:1`, `6=3:4`, and `7=9:16`. `[C:animation_modem/aspect.py:6-26]`
@@ -431,11 +433,18 @@ sampling grid with Lanczos, converts to Pillow YCbCr, BOX-resizes each plane,
 and maps uint8 values to `[-1,1]`. Reconstruction maps back to uint8 and
 upsamples Cb/Cr with bilinear interpolation. `[C:animation_modem/imaging.py:144-149]`, `[C:animation_modem/imaging.py:173-198]`
 
-The exact RGB↔YCbCr matrix, chroma offsets, and range convention are supplied
-by Pillow's `Image.convert('YCbCr')`; this repository does not define those
-coefficients. They are therefore **UNVERIFIED at the wire-spec level** and a
-reimplementation must pin or reproduce the Pillow conversion used by the
-vector environment. `[C:animation_modem/imaging.py:173-181]`
+The recorded Pillow conversion is full-range JFIF/BT.601, with integer-rounded
+output:
+
+```text
+Y  = 0.2990 R + 0.5870 G + 0.1140 B
+Cb = -0.1687 R - 0.3313 G + 0.5000 B + 128
+Cr = 0.5000 R - 0.4187 G - 0.0813 B + 128
+```
+
+Implementations must reproduce Pillow's rounding and version behavior for
+bit-identical prepared planes.
+`[C:animation_modem/imaging.py:173-181]`
 
 For `color-dct` and `color-wavelet`, the source grid is 80x96 luma plus 40x48
 Cb/Cr; the transmitted shape is 40x48 luma plus 24x20 Cb/Cr, 2,880 values.
@@ -553,26 +562,27 @@ corners, 720 values total. `[C:animation_modem/v6.py:19-41]`
 
 The V6 DCT coder applies one DCT through `SourceCoder`; the wavelet coder uses
 two-level CDF 9/7 with the deepest LL bands as the foundation. Both transforms
-are wrapped by `ProtectedAnalogCoder`. `[C:animation_modem/v6.py:189-201]`
+are wrapped by `ProtectedAnalogCoder`. `[C:animation_modem/v6.py:157-211]`,
+`[C:animation_modem/v6.py:388-399]`
 
 Forward coding removes base gains, appends selected foundation values, then
 applies a combined gain table. Decode either averages clean copies or performs
 reliability/noise-weighted soft fusion, then applies confidence floors:
 protected luma/chroma floors are 0.05/0.15 and unprotected luma/chroma floors
-are 0.45/0.60. `[C:animation_modem/v6.py:101-148]`
+are 0.45/0.60. `[C:animation_modem/v6.py:193-240]`
 
 Full-repeat sets `copy_of=np.arange(ORIGINAL_VALUES)`, so every coefficient is
 marked protected. Consequently V6-repeat uses the protected floors for every
 luma/chroma coefficient: 0.05 for luma and 0.15 for both chroma planes; the
 0.45/0.60 unprotected floors apply only to foundation-only V6 coefficients
-outside its 720-value foundation. `[C:animation_modem/v6.py:115-119]`,
-`[C:animation_modem/v6.py:204-216]`
+outside its 720-value foundation. `[C:animation_modem/v6.py:209-212]`,
+`[C:animation_modem/v6.py:403-414]`
 
 For reliability mode, each observation uses `a=gain*reliability`,
 `precision=a^2/noise`, posterior coefficient
 `variance*sum(a*y/noise)/(1+variance*sum(a^2/noise))`, and confidence
 `variance*sum(a^2/noise)/(1+variance*sum(a^2/noise))`. The gate is
-`clip((confidence-floor)/(.85-floor), 0, 1)`. `[C:animation_modem/v6.py:131-148]`
+`clip((confidence-floor)/(.85-floor), 0, 1)`. `[C:animation_modem/v6.py:217-240]`
 
 ### V6 baseline placement
 
@@ -607,14 +617,14 @@ values, and magic `V6`. `[C:animation_modem/transport3.py:94-100]`
 
 The V6 full-repeat control keeps the same band and ceiling but expands to 47
 image symbols and 5,800 capacity. It copies all 2,880 originals, uses 5,760
-values, and identifies itself with magic `VR`. `[C:animation_modem/transport3.py:102-108]`, `[C:animation_modem/v6.py:204-216]`
+values, and identifies itself with magic `VR`. `[C:animation_modem/transport3.py:102-108]`, `[C:animation_modem/v6.py:403-414]`
 
 ### V6 recovery behavior
 
 `ProtectedAnalogCoder.inverse()` combines the original/copy observations using
 equalizer reliability and noise variance, then applies transform-specific
 inverse reconstruction. A failed or low-confidence coefficient is softened
-instead of being promoted to false detail or color. `[C:animation_modem/v6.py:125-148]`
+instead of being promoted to false detail or color. `[C:animation_modem/v6.py:217-240]`
 
 The V6 tests require copies to use the opposite channel, separated frequency,
 and different symbol; the tape-placement tests add low-frequency foundation
@@ -705,12 +715,16 @@ The script uses seed `20260920`; current wires receive successive seeds
 20260921 onward. Every vector is a one-packet 48 kHz stereo PCM16 WAV and is
 decoded immediately with the matching implementation. For V1/V2, the script
 uses `git show` to extract the pinned historical source files, so it does not
-silently substitute the current transport. `[C:tools/spec_vectors.py:1-237]`
+silently substitute the current transport. `[C:tools/spec_vectors.py:1-279]`
 
 The recorded environment for this document was Python **3.13.5**, NumPy
 **2.2.4**, and SciPy **1.18.1**. These are an execution pin, not a repository
 dependency pin: `requirements-modem.txt` currently specifies minimum NumPy and
-SciPy versions only. `[C:requirements-modem.txt:1-6]`, `[C:tools/spec_vectors.py:1-25]`
+SciPy versions only. An independent reproduction reported Python **3.11.15**,
+NumPy **2.4.4**, and SciPy **1.17.1**, reproducing the original ten transport
+vector hashes; the image-preparation vector was added afterward and should be
+rerun in that environment before treating its hash as cross-environment.
+`[C:requirements-modem.txt:1-6]`, `[C:tools/spec_vectors.py:1-25]`
 
 | Vector | File | SHA-256 | identity | measured clean RMSE | expected tolerance |
 |---|---|---|---|---:|---:|
@@ -724,24 +738,44 @@ SciPy versions only. `[C:requirements-modem.txt:1-6]`, `[C:tools/spec_vectors.py
 | V6 | `v6.wav` | `821cdf8e509838e4d9fe5ad6e4d2d71c6019d4b0f820536bee97997cc787a9aa` | verified_header | 0.004078 | 0.55 |
 | V6-repeat | `v6-repeat.wav` | `f8424ed6b95a337b5039cfe01821aa09fec07216706afa658d613a33ba37a1e0` | verified_header | 0.002618 | 0.60 |
 | V6 tape-ordered placement | `v6-tape.wav` | `04f28b7d3ababaa4b22f4272d132b36b1bb51f0a1b97561b05e6c3b1aa0cb531` | verified_header | 0.004291 | 0.55 |
+| V6 image preparation | `v6-image.wav` | `e15537e0678798523bb964fe5f24da806fc1a0566b4af6e9866bc4e85da1f49d` | verified_header | 0.031707 | 0.08 |
 
 The tolerance values are clean synthetic acceptance thresholds: the V1 vector
-uses a normalized RGB-pixel threshold of 0.11 `[C:tools/spec_vectors.py:149-173]`;
-historical V2's clean packet
-test uses 1e-3; V3/HD uses 0.01; tape tests use 0.07/0.08; and V6 random-
-coefficient tests use 0.55/0.60. `[H99:modem_tests/test_transport2.py:36-40]`, `[C:modem_tests/test_transport3.py:95-106]`, `[C:modem_tests/test_tape_wire.py:38-100]`, `[C:modem_tests/test_v6.py:42-52]`, `[C:modem_tests/test_v6_repeat.py:47-63]`
+uses a normalized RGB-pixel threshold of 0.11 `[C:tools/spec_vectors.py:191-215]`;
+historical V2's clean packet test uses 1e-3; V3/HD uses 0.01; tape tests use
+0.07/0.08; and V6 random-coefficient tests use 0.55/0.60. The image-preparation
+V6 vector uses 0.08, approximately 2.5 times its measured clean transport
+RMSE. `[H99:modem_tests/test_transport2.py:36-40]`, `[C:modem_tests/test_transport3.py:95-106]`, `[C:modem_tests/test_tape_wire.py:38-100]`, `[C:modem_tests/test_v6.py:42-52]`, `[C:modem_tests/test_v6_repeat.py:47-63]`, `[C:tools/spec_vectors.py:119-175]`
+
+The image vector uses the checked-in face fixture
+`modem_tests/fixtures/v6_face_1110.png`, made from the nonblank half of the
+middle frame `images_sbs/face/00_C_BG_faceSource_960/benFaceSource1110.jpg`.
+It runs `prepare_image(..., preset='auto', encode_filter='lanczos')` and then
+`image_values(..., coder.grids)`, so the aspect code, RGB resize, Pillow YCbCr
+conversion, BOX chroma reduction, and uint8-to-`[-1,1]` mapping are exercised.
+The prepared-plane hash is
+`d0270070c30be57d9c319223c9595ff9705e7732bc98e4205f289506d9462edc`, computed
+over concatenated little-endian float64 luma/Cb/Cr values in `coder.grids`
+order. `[C:tools/spec_vectors.py:136-175]`, `[C:animation_modem/imaging.py:144-181]`
+
+The other current V3-family vectors intentionally use seeded uniform source
+values in `[-0.7,0.7]`; they remain transport/coder vectors, not image-pipeline
+vectors. All current vectors are single clean packets decoded directly with
+`decode_packet`, so they do not by themselves prove pulse acquisition,
+multi-packet timing, dropout recovery, or relock behavior. `[C:tools/spec_vectors.py:109-133]`,
+`[C:tools/spec_vectors.py:256-274]`
 
 ## 13. One V6 DCT packet, end to end
 
 1. **Prepare source.** Convert the source to RGB, resize to 80x96, convert to
    YCbCr, and sample 96x80 luma plus 48x40 Cb/Cr values. `[C:animation_modem/imaging.py:144-149]`, `[C:animation_modem/imaging.py:173-181]`
 2. **Transform.** `SourceCoder` applies one orthonormal DCT to each sampling
-   plane and retains the 48x40 / 24x20 low-frequency corner. `[C:animation_modem/core.py:293-380]`, `[C:animation_modem/v6.py:189-192]`
+    plane and retains the 48x40 / 24x20 low-frequency corner. `[C:animation_modem/core.py:293-380]`, `[C:animation_modem/v6.py:388-392]`
 3. **Protect.** Select the 720 indices in the 24x20 / 12x10 foundation,
-   append their analog values, and apply combined source/copy gains. `[C:animation_modem/v6.py:34-41]`, `[C:animation_modem/v6.py:101-123]`
+    append their analog values, and apply combined source/copy gains. `[C:animation_modem/v6.py:34-62]`, `[C:animation_modem/v6.py:193-215]`
 4. **Place.** Rank originals by normalized spatial frequency, put them into
    `wire-v6` slots, and solve the opposite-channel, separated-frequency,
-   different-symbol copy assignment. `[C:animation_modem/v6.py:44-49]`, `[C:animation_modem/v6.py:150-186]`
+    different-symbol copy assignment. `[C:animation_modem/v6.py:44-51]`, `[C:animation_modem/v6.py:242-283]`
 5. **Build header.** Pack magic `V6`, flags, top bin 34/profile code,
    aspect-packed absolute, one-based index/count, timestamp, then CRC-32.
    For the deterministic example `magic=V6`, `flags=0`, `top_bin=34`,
@@ -768,7 +802,7 @@ coefficient tests use 0.55/0.60. `[H99:modem_tests/test_transport2.py:36-40]`, `
    payload slots. `[C:animation_modem/core.py:883-981]`, `[C:animation_modem/core.py:1076-1099]`, `[C:animation_modem/core.py:1464-1521]`
 10. **Reconstruct.** Fuse original/copy observations with reliability and
     noise variance, apply confidence floors, inverse-DCT the retained corner,
-    and return a verified 80x96 reconstructed value vector. `[C:animation_modem/v6.py:125-148]`
+    and return a verified 80x96 reconstructed value vector. `[C:animation_modem/v6.py:217-240]`
 
 ## 14. Conformance and implementation rules
 
@@ -892,8 +926,9 @@ vectors:
 | Tape/V6 whole-waveform ceiling | Only tape/V6 layouts set `emission_ceiling=14000`; wide current layouts have no whole-waveform ceiling. `[C:animation_modem/transport3.py:66-108]` |
 | V6 placement | Baseline V6 uses global opposite-channel/frequency assignment; the new bench-only tape-ordered V6 puts the foundation on low carriers and interleaves copies in time. The vector script records both layouts without claiming independent tape-track failure. `[C:animation_modem/v6.py:92-119]`, `[C:animation_modem/v6.py:242-350]` |
 | Historical V1/V2 vectors | Regenerated from the exact pinned historical source files using `git show`; they are not decoded by current transport code. `[C:tools/spec_vectors.py:133-204]` |
-| CRC algorithm | The call, seed behavior as exposed by the code, and big-endian output are confirmed; the underlying zlib polynomial/reflection details are library-defined and therefore explicitly UNVERIFIED from repository code. `[C:animation_modem/core.py:768-806]` |
-| Color matrix | Pillow YCbCr conversion is confirmed; numeric matrix/range coefficients are not defined in this repository and remain UNVERIFIED at wire-spec level. `[C:animation_modem/imaging.py:173-181]` |
+| CRC algorithm | CRC-32/ISO-HDLC parameters, the `0xCBF43926` standard check value, worked header CRCs, and big-endian serialization are mutually consistent with the `zlib.crc32` call. `[C:animation_modem/core.py:768-806]` |
+| Color matrix | The image vector and independent fit identify Pillow's conversion as full-range JFIF/BT.601 with integer rounding; Pillow/version behavior remains the compatibility dependency. `[C:animation_modem/imaging.py:173-181]`, `[C:tools/spec_vectors.py:136-175]` |
+| Vector coverage | The image vector covers preparation and one clean V6 packet; the remaining vectors are seeded transport/coder vectors, and direct single-packet decode does not cover acquisition/relock. `[C:tools/spec_vectors.py:109-175]`, `[C:tools/spec_vectors.py:256-274]` |
 | Python/NumPy/SciPy pin | Observed execution was Python 3.13.5 / NumPy 2.2.4 / SciPy 1.18.1, but requirements only specify minimum NumPy/SciPy versions. This is an environment discrepancy requiring packaging work if bit-for-bit environment pinning is required. `[C:requirements-modem.txt:1-6]` |
 | OS and pip policy | OS and pip versions are intentionally non-normative; Linux, Windows, and macOS are supported by project history, and pip resolver history was not pinned. `[C:requirements-modem.txt:1-6]` |
 | Generic `tools/decode_wav.py` receiver coverage | It does not include V6 candidates even though the utility receiver does; this is a tooling discrepancy, not a wire-format discrepancy. `[C:tools/decode_wav.py:74-86]`, `[C:utilities/modem_v3_check.py:96-128]` |

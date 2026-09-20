@@ -32,7 +32,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from animation_modem import transport3 as V3  # noqa: E402
 from animation_modem.core import decode_packet  # noqa: E402
 from animation_modem.engines import coder_for  # noqa: E402
-from animation_modem.v6 import slot_symbols, tape_coder  # noqa: E402
+from animation_modem.imaging import image_values, prepare_image  # noqa: E402
+from animation_modem.v6 import dct_coder, slot_symbols, tape_coder  # noqa: E402
 from animation_modem.wavelet import _slot_carriers  # noqa: E402
 
 
@@ -46,6 +47,10 @@ def sha256(path):
         for block in iter(lambda: stream.read(1024 * 1024), b''):
             digest.update(block)
     return digest.hexdigest()
+
+
+def sha256_bytes(data):
+    return hashlib.sha256(data).hexdigest()
 
 
 def write_wav(path, audio):
@@ -108,7 +113,8 @@ def placement_record(layout, coder):
 
 def current_vector(out, name, layout, profile, code, seed, tolerance,
                    supplied_coder=None):
-    coder = supplied_coder if supplied_coder is not None else coder_for(profile, layout)[0]
+    coder = (supplied_coder if supplied_coder is not None
+             else coder_for(profile, layout)[0])
     rng = np.random.default_rng(seed)
     values = rng.uniform(-.7, .7, coder.source_count)
     audio = V3.encode(values, layout, coder, 1, 1, 1, profile=code)
@@ -131,6 +137,42 @@ def current_vector(out, name, layout, profile, code, seed, tolerance,
     })
     if hasattr(coder, 'copy_of'):
         record['placement'] = placement_record(layout, coder)
+    return record
+
+
+def image_vector(out):
+    """Exercise source preparation plus the V6 DCT transport path."""
+    root = Path(__file__).resolve().parent.parent
+    source_path = root / 'modem_tests/fixtures/v6_face_1110.png'
+    coder = dct_coder()
+    with Image.open(source_path) as source:
+        prepared = prepare_image(source, preset='auto', encode_filter='lanczos')
+        values = image_values(prepared, coder.grids)
+    audio = V3.encode(values, V3.WIRE_V6, coder, 1, 1, 1, profile=0,
+                      aspect_code=prepared.info['aspect_code'])
+    result = decode_packet(audio, V3.WIRE_V6, coder)
+    reference = coder.inverse(coder.forward(values))
+    measured = float(np.sqrt(np.mean((result.values-reference)**2))) \
+        if result.values is not None else None
+    path = out / 'v6-image.wav'
+    write_wav(path, audio)
+    prepared_bytes = np.asarray(values, dtype='<f8').tobytes(order='C')
+    record = layout_record(V3.WIRE_V6, coder, 'v6-dct', 0)
+    record.update({
+        'version': 'v6-image',
+        'commit': '3b250ae3f6920dfe22eb716c2336a46e08a46004',
+        'source_image': 'modem_tests/fixtures/v6_face_1110.png',
+        'source_image_sha256': sha256(source_path),
+        'prepared_planes_sha256': sha256_bytes(prepared_bytes),
+        'prepared_planes_format': 'little-endian float64, coder.grids order',
+        'aspect_code': int(prepared.info['aspect_code']),
+        'file': path.name,
+        'sha256': sha256(path),
+        'decode_identity': result.identity,
+        'measured_clean_rmse': measured,
+        'expected_decode_tolerance': .08,
+    })
+    record['placement'] = placement_record(V3.WIRE_V6, coder)
     return record
 
 
@@ -230,6 +272,7 @@ def main(argv=None):
                                       seed=seed + index + 1,
                                       tolerance=tolerance,
                                       supplied_coder=custom[0] if custom else None))
+    records.append(image_vector(args.out))
 
     manifest = args.out / 'manifest.json'
     manifest.write_text(json.dumps(records, indent=2, sort_keys=True) + '\n')

@@ -29,9 +29,12 @@ testing and source links below.
 
 ## Reproducibility and diagnostics
 
-- [Deterministic vector generator](../tools/spec_vectors.py) — emits the ten
+- [Deterministic vector generator](../tools/spec_vectors.py) — emits the eleven
   documented one-packet WAV vectors under `scratch/spec-vectors/` by default.
   V1/V2 vectors extract their pinned historical source with `git show`.
+- [Image-vector fixture](../modem_tests/fixtures/v6_face_1110.png) — the small
+  checked-in face frame used to exercise real image preparation and the V6
+  DCT path.
 - [V6 tape-lift benchmark](../tools/bench_v6_tape_lift.py) — compares
   baseline, tape-ordered, full-repeat, and no-copy controls under a synthetic
   shared spacing-loss diagnostic. It is not a real-deck model.
