@@ -1123,7 +1123,9 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
             if selected_model is None:
                 selected_model = model
         body = _sample_at(samples, indexes, taps=16).astype(np.float32)
-        if body.shape[1] == 1:
+        if revision == METADATA_OPTION_MONO_SUM:
+            body = np.repeat(body.mean(axis=1, keepdims=True), 2, axis=1)
+        elif body.shape[1] == 1:
             # The demodulator is M/S two-channel internally.  A mono capture
             # is the shared M observation, so duplicate it without inventing S.
             body = np.repeat(body, 2, axis=1)
