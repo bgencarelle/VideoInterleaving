@@ -66,6 +66,7 @@ def _values(model, frame, encode_filter='nearest'):
 
 def run_send(args):
     import sounddevice as sd
+    from modem_screen import Throttled
 
     model = _model(args.fixture, args.encode_filter)
     raw_grab = _capture(args)
@@ -279,7 +280,7 @@ def parser():
                       help='screen capture backend; mss avoids an FFmpeg child')
     send.add_argument('--region')
     send.add_argument('--capture-width', type=int, default=320)
-    send.add_argument('--capture-fps', type=float)
+    send.add_argument('--capture-fps', '--fps', dest='capture_fps', type=float)
     send.add_argument('--batch-frames', type=int, default=1,
                       help='frames encoded before submission (default: 1)')
     send.add_argument('--seconds', type=float, default=0,
