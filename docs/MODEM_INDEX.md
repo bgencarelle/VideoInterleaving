@@ -38,6 +38,9 @@ testing and source links below.
   MP3 320k/V0, ATRAC1 SP, ATRAC3plus and mono; damage models in
   [`tools/v7_media.py`](../tools/v7_media.py). Needs ffmpeg with libmp3lame
   and `atracdenc` (set `$ATRACDENC`).
+- [V7 live camera/screen tool](../tools/v7_live.py) — bench-only explicit-device
+  sender and receiver. It is not wired into `main.py` or the production V3/V6
+  engine; V7 batch clock/filter boundaries remain a documented limitation.
 
 - [Deterministic vector generator](../tools/spec_vectors.py) — emits the eleven
   documented one-packet WAV vectors under `scratch/spec-vectors/` by default.

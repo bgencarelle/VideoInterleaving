@@ -239,10 +239,25 @@ def encode_frame_coeffs(model, coeffs, counter, return_X=False):
 _EMIT = firwin(63, 13500, fs=RATE, window=('kaiser', 6))
 
 
-def encode_stream(model, values, frames, lead=0.25, tail=0.25):
-    body = np.concatenate([encode_frame(model, values, i+1) for i in range(frames)])
+def encode_stream(model, values, frames, lead=0.25, tail=0.25,
+                  start_counter=1):
+    """Encode a finite stream, optionally continuing the clock counter.
+
+    Bench callers retain the original default. Live callers use
+    ``start_counter`` so successive batches form one logical frame sequence;
+    the batch boundary still remains a prototype limitation because the
+    current shaping path is offline rather than stateful.
+    """
+    if np.asarray(values).ndim == 1:
+        frames_values = [values]*frames
+    else:
+        frames_values = list(values)
+        if len(frames_values) != frames:
+            raise ValueError('values must contain exactly one vector per frame')
+    body = np.concatenate([encode_frame(model, frame, start_counter+i)
+                           for i, frame in enumerate(frames_values)])
     body = filtfilt(_EMIT, [1.0], body, axis=0)               # 14 kHz bound, no renorm
-    words = [clock_word(i+1) for i in range(frames)]
+    words = [clock_word(start_counter+i) for i in range(frames)]
     clk = clock_wave(words)
     ofdm_rms = np.sqrt(np.mean(body**2))
     clk *= ofdm_rms*10**(CLOCK_REL_DB/20)/np.sqrt(np.mean(clk**2))

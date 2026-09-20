@@ -672,3 +672,29 @@ images or downloads are needed.
 
 A.1–A.3 were one-off scratch scripts and are not checked in; the prototype
 results in §17 are reproducible with `tools/v7_bench.py`.
+
+## 18. Bench-only live camera and screen path
+
+`tools/v7_live.py` provides an explicit-device experimental sender and receiver:
+
+```bash
+.venv/bin/python tools/v7_live.py send --source camera \
+  --device 'BlackHole 2ch'
+.venv/bin/python tools/v7_live.py send --source screen \
+  --device 'BlackHole 2ch'
+.venv/bin/python tools/v7_live.py receive --device 'BlackHole 2ch'
+```
+
+The sender reuses `modem_screen.py`'s camera and FFmpeg screen capture sources,
+prepares frames with the V7 source grids, and emits bounded batches at 13.889
+fps. The receiver accumulates the explicit 48 kHz input, runs the V7 prototype
+decoder, displays the newest usable reconstruction, and can save frames with
+`--save-dir`. A `--headless` receiver is available for loopback diagnostics.
+
+This is deliberately not a live production integration. The current prototype
+uses the offline V7 shaping path for each batch, so batch boundaries can create
+filter transients; the clock counter continues between batches to expose that
+failure rather than silently resetting. It also requires a real 48 kHz device
+and does not resample to arbitrary native device rates. Real-device/tape use
+must wait for a stateful clock/filter implementation and a matched live timing
+test.
