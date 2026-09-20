@@ -976,27 +976,40 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
         # starts 16 samples earlier), matching Receiver.pending's at-16*scale
         # correction.
         frame_start = position - 16*scale
-        search = int(frame_start + (V3.SYNC_LEN + FRAME)*scale)
-        following = V3.measure_pulses(samples[search:].mean(axis=1),
-                                      min_scale=PULSE_MIN_SCALE,
-                                      max_scale=PULSE_MAX_SCALE)
-        aspect_code = pending_aspect
+        # Try both possible frame ends: legacy has its next header at the old
+        # boundary, while current V7 has a metadata symbol before that header.
+        following = None
         next_start = None
-        following_valid = False
         current_format = True
+        for search, candidate_format in (
+                (int(frame_start+PULSE_FRAME_OLD*scale), False),
+                (int(frame_start+PULSE_FRAME*scale), True)):
+            candidate = V3.measure_pulses(samples[search:].mean(axis=1),
+                                          min_scale=PULSE_MIN_SCALE,
+                                          max_scale=PULSE_MAX_SCALE)
+            if candidate is None:
+                continue
+            candidate_start = search + candidate[0] - 16*candidate[1]
+            interval = (candidate_start-frame_start)/scale
+            old_match = abs(interval-PULSE_FRAME_OLD) <= max(12, .03*PULSE_FRAME_OLD)
+            current_match = abs(interval-PULSE_FRAME) <= max(12, .03*PULSE_FRAME)
+            if (candidate[2] >= .45 and abs(candidate[1]/scale-1) <= .03 and
+                    (old_match or current_match)):
+                following = candidate
+                next_start = candidate_start
+                current_format = current_match
+                break
+        aspect_code = pending_aspect
+        following_valid = False
         frame_scale = scale
-        frame_length = PULSE_FRAME
+        frame_length = PULSE_FRAME if current_format else PULSE_FRAME_OLD
         if following is not None:
-            next_position = search + following[0]
-            next_start = next_position - 16*following[1]
-            scale_agrees = abs(following[1]/scale-1) <= .03
-            following_valid = following[2] >= .45 and scale_agrees
-            if following_valid:
-                interval = (next_start-frame_start)/scale
-                current_format = abs(interval-PULSE_FRAME) <= \
-                    abs(interval-PULSE_FRAME_OLD)
-                frame_length = PULSE_FRAME if current_format else PULSE_FRAME_OLD
-                frame_scale = (next_start-frame_start)/frame_length
+            following_valid = True
+            frame_scale = (next_start-frame_start)/frame_length
+        if not following_valid:
+            # The next header is the commit boundary.  Do not decode on a
+            # coincidental edge inside the current body/metadata.
+            break
         start = frame_start + V3.SYNC_LEN*scale
         # The first pulse measures the local playback scale at frame start;
         # consecutive pulse positions measure the actual frame duration. Use
