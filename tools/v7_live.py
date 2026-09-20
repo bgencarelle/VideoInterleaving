@@ -38,12 +38,15 @@ DEFAULT_FIXTURE = ROOT / 'modem_tests/fixtures/v6_face_1110.png'
 
 def _capture(args):
     """Build one of modem_screen's existing RGB capture sources."""
-    from modem_screen import camera_source, screen_capture_source, _region
+    from modem_screen import (camera_source, screen_capture_source,
+                              screen_source, _region)
 
     region = _region(args.region)
     if args.source == 'camera':
         return camera_source(args.camera, args.capture_fps or 30,
                              width=args.capture_width, spec=args.ffmpeg_input)
+    if args.screen_backend == 'mss':
+        return screen_source(region)
     return screen_capture_source(args.capture_fps or FPS, region, args.display,
                                  args.capture_width, args.ffmpeg_input)
 
@@ -266,10 +269,13 @@ def parser():
     send.add_argument('--camera', type=int, default=0)
     send.add_argument('--display', type=int)
     send.add_argument('--ffmpeg-input')
+    send.add_argument('--screen-backend', choices=('mss', 'ffmpeg'), default='mss',
+                      help='screen capture backend; mss avoids an FFmpeg child')
     send.add_argument('--region')
     send.add_argument('--capture-width', type=int, default=320)
     send.add_argument('--capture-fps', type=float)
-    send.add_argument('--batch-frames', type=int, default=8)
+    send.add_argument('--batch-frames', type=int, default=1,
+                      help='frames encoded before submission (default: 1)')
     send.add_argument('--seconds', type=float, default=0,
                       help='0 means until Ctrl-C')
     recv = sub.add_parser('receive', help='receive V7 audio and display it')
@@ -282,10 +288,10 @@ def parser():
     recv.add_argument('--save-dir', type=Path)
     recv.add_argument('--diagnostics', action='store_true',
                       help='print decoder stage timing and counters')
-    recv.add_argument('--decode-batch', type=int, default=4,
-                      help='new frames required before each decode (default: 4)')
-    recv.add_argument('--decode-history', type=int, default=6,
-                      help='frames retained for clock reacquisition (default: 6)')
+    recv.add_argument('--decode-batch', type=int, default=1,
+                      help='new frames required before each decode (default: 1)')
+    recv.add_argument('--decode-history', type=int, default=4,
+                      help='frames retained for clock reacquisition (default: 4)')
     recv.add_argument('--refine', action='store_true',
                       help='enable slower clock-template refinement')
     return ap

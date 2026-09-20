@@ -685,11 +685,15 @@ results in §17 are reproducible with `tools/v7_bench.py`.
 .venv/bin/python tools/v7_live.py receive --device 'BlackHole 2ch'
 ```
 
-The sender reuses `modem_screen.py`'s camera and FFmpeg screen capture sources,
+The sender reuses `modem_screen.py`'s camera and screen capture sources,
 selects the smallest camera mode supporting the requested capture rate, and
 prepares frames with the V7 source grids. Live V7 defaults to nearest-neighbor
 sampling at both the 80x96 preparation step and the coder-grid sampling step;
-`--encode-filter` can select another explicit filter. It emits bounded batches
+`--encode-filter` can select another explicit filter. Screen capture defaults to
+the existing `mss` path; `--screen-backend ffmpeg` selects the FFmpeg pipe
+explicitly. Camera capture continues to use FFmpeg because it probes the
+smallest supported device mode and performs the RGB pipe conversion. It emits
+bounded batches
 at 13.889
 fps. The receiver accumulates the explicit 48 kHz input, runs the V7 prototype
 decoder, displays the newest usable reconstruction, and can save frames with
