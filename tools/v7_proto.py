@@ -960,9 +960,12 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
                 continue
             candidates.append((fs, sc, conf, 0))
             scan = int(fs + (PULSE_FRAME_OLD-32)*sc)
-        if not candidates:
+        if len(candidates) < 2:
             return [], {'frames': 0, 'pulse_frames': 0, 'recovered': False}
-        fs, sc, conf, pending_aspect = candidates[-1]
+        # The newest complete body is the timing witness for the preceding
+        # frame.  Do not publish the newest body until its following frame has
+        # also completed a full cycle.
+        fs, sc, conf, pending_aspect = candidates[-2]
         cursor = int(fs)
         measured = (16*sc, sc, conf)
     while cursor + V3.SYNC_LEN + 32 < len(samples):
@@ -982,6 +985,8 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
         following = V3.measure_pulses(samples[search:].mean(axis=1),
                                       min_scale=PULSE_MIN_SCALE,
                                       max_scale=PULSE_MAX_SCALE)
+        if following is None:
+            break
         aspect_code = pending_aspect
         next_start = None
         following_valid = False
@@ -991,6 +996,10 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
         if following is not None:
             next_position = search + following[0]
             next_start = next_position - 16*following[1]
+            next_complete = (next_start + PULSE_FRAME*following[1] <=
+                             len(samples))
+            if not next_complete:
+                break
             scale_agrees = abs(following[1]/scale-1) <= .03
             following_valid = following[2] >= .45 and scale_agrees
             if following_valid:
