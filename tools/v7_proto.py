@@ -36,7 +36,6 @@ RATE, N, CP, SYM, F = 48000, 128, 16, 144, 24
 FRAME = F*SYM                                   # 3456 samples, 13.889 fps
 META_SYMBOL = SYM
 PULSE_FRAME = V3.SYNC_LEN + FRAME + META_SYMBOL + 32  # 3920, 12.245 fps
-PULSE_FRAME_OLD = V3.SYNC_LEN + FRAME + 32             # 3776, legacy V7
 PULSE_FPS = RATE/PULSE_FRAME
 PULSE_GUARD_BASE = 32
 PULSE_MIN_SCALE = .25
@@ -956,7 +955,7 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
         # on the newest complete frame.
         candidates = []
         scan = 0
-        while scan + V3.SYNC_LEN + 32 < len(samples):
+        while scan + V3.SYNC_LEN + META_SYMBOL + 32 < len(samples):
             hit = V3.measure_pulses(samples[scan:].mean(axis=1),
                                     min_scale=PULSE_MIN_SCALE,
                                     max_scale=PULSE_MAX_SCALE)
@@ -965,10 +964,10 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
             pos, sc, conf = hit
             fs = scan + pos - 16*sc
             if conf < .45:
-                scan = int(fs + PULSE_FRAME_OLD*sc)
+                scan = int(fs + PULSE_FRAME*sc)
                 continue
             candidates.append((fs, sc, conf, 0))
-            scan = int(fs + (PULSE_FRAME_OLD-32)*sc)
+            scan = int(fs + (PULSE_FRAME-32)*sc)
         if len(candidates) < 2:
             return [], {'frames': 0, 'pulse_frames': 0, 'recovered': False}
         # The second pulse is the first edge of the next header.  It is enough
@@ -976,7 +975,7 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
         fs, sc, conf, pending_aspect = candidates[-2]
         cursor = int(fs)
         measured = (16*sc, sc, conf)
-    while cursor + V3.SYNC_LEN + 32 < len(samples):
+    while cursor + V3.SYNC_LEN + META_SYMBOL + 32 < len(samples):
         if measured is None:
             measured = V3.measure_pulses(samples[cursor:].mean(axis=1),
                                          min_scale=PULSE_MIN_SCALE,
@@ -989,33 +988,24 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
         # starts 16 samples earlier), matching Receiver.pending's at-16*scale
         # correction.
         frame_start = position - 16*scale
-        # Try both possible frame ends: legacy has its next header at the old
-        # boundary, while current V7 has a metadata symbol before that header.
         following = None
         next_start = None
-        current_format = True
-        for search, candidate_format in (
-                (int(frame_start+PULSE_FRAME_OLD*scale), False),
-                (int(frame_start+PULSE_FRAME*scale), True)):
-            candidate = V3.measure_pulses(samples[search:].mean(axis=1),
-                                          min_scale=PULSE_MIN_SCALE,
-                                          max_scale=PULSE_MAX_SCALE)
-            if candidate is None:
-                continue
+        search = int(frame_start+PULSE_FRAME*scale)
+        candidate = V3.measure_pulses(samples[search:].mean(axis=1),
+                                      min_scale=PULSE_MIN_SCALE,
+                                      max_scale=PULSE_MAX_SCALE)
+        if candidate is not None:
             candidate_start = search + candidate[0] - 16*candidate[1]
             interval = (candidate_start-frame_start)/scale
-            old_match = abs(interval-PULSE_FRAME_OLD) <= max(12, .03*PULSE_FRAME_OLD)
             current_match = abs(interval-PULSE_FRAME) <= max(12, .03*PULSE_FRAME)
             if (candidate[2] >= .45 and abs(candidate[1]/scale-1) <= .03 and
-                    (old_match or current_match)):
+                    current_match):
                 following = candidate
                 next_start = candidate_start
-                current_format = current_match
-                break
         aspect_code = pending_aspect
         following_valid = False
         frame_scale = scale
-        frame_length = PULSE_FRAME if current_format else PULSE_FRAME_OLD
+        frame_length = PULSE_FRAME
         if following is not None:
             following_valid = True
             frame_scale = (next_start-frame_start)/frame_length
@@ -1035,7 +1025,7 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
             results.append(Result(counter, 'lost', tail.copy(), {
                 'pulse_confidence': float(confidence), 'held': True}))
             pending_aspect = aspect_code
-            frame_length = PULSE_FRAME if current_format else PULSE_FRAME_OLD
+            frame_length = PULSE_FRAME
             cursor = int(next_start if following_valid
                          else frame_start + frame_length*scale)
             measured = ((16*following[1], following[1], following[2])
@@ -1056,15 +1046,14 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
             if result.status != 'lost':
                 result.status = 'received' if confidence >= .45 else 'degraded'
             channel = result.diag.pop('_H', None)
-            metadata_valid = not current_format
+            metadata_valid = False
             if channel is not None and result.status != 'lost':
-                if current_format:
-                    meta_start = frame_start + (V3.SYNC_LEN+FRAME)*scale
-                    decoded_aspect = decode_metadata(
-                        model, samples, meta_start, scale, channel)
-                    if decoded_aspect is not None:
-                        metadata_valid = True
-                        aspect_code = decoded_aspect
+                meta_start = frame_start + (V3.SYNC_LEN+FRAME)*scale
+                decoded_aspect = decode_metadata(
+                    model, samples, meta_start, scale, channel)
+                if decoded_aspect is not None:
+                    metadata_valid = True
+                    aspect_code = decoded_aspect
             if (result.status != 'lost' and
                     (not metadata_valid or
                      result.diag.get('head_confidence', 0) <
@@ -1091,7 +1080,7 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
             if latest_only:
                 break
         pending_aspect = aspect_code
-        frame_length = PULSE_FRAME if current_format else PULSE_FRAME_OLD
+        frame_length = PULSE_FRAME
         cursor = int(next_start if following_valid
                      else frame_start + frame_length*scale)
         measured = ((16*following[1], following[1], following[2])

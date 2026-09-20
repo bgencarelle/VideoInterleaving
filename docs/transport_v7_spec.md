@@ -696,9 +696,8 @@ At the 48 kHz reference rate, a current live frame is:
 ```
 
 The body remains the 24-symbol, 128-point/16-CP V7 body. The metadata symbol
-keeps the rate above the 12 fps requirement. The previous pulse V7 prototype
-used 3,776 samples (`288 + 3456 + 32`) and had no metadata symbol; current
-receivers retain a fallback for that legacy pulse length.
+keeps the rate above the 12 fps requirement. This 3,920-sample format is the
+only supported live V7 pulse format.
 
 The pulse preamble is measured with `transport3.measure_pulses()`, not FFT
 correlation. The receiver accepts a bounded playback scale of approximately
@@ -721,9 +720,6 @@ known M-channel pilots; odd bins carry data. Both tracks carry the mono-safe M
 signal. The metadata symbol estimates its own complex response from those
 pilots. CRC failure holds the previous aspect. The live UI additionally
 requires three consecutive reliable requests before changing aspect.
-
-Legacy pulse frames without this symbol decode their body but retain the last
-confirmed/default aspect.
 
 ### 19.3 Live source preparation
 
