@@ -813,3 +813,57 @@ requires three consecutive reliable requests before changing its displayed
 aspect. This amendment is intentionally separate from the continuous-clock
 architecture described in earlier sections so the older draft remains available
 for comparison.
+
+## 20. Stability baseline and future experiments
+
+The current live pulse wire is the protected baseline. Future experiments must
+be explicit, reversible, and compared against this baseline; they must not
+silently replace a working decoder path.
+
+Baseline invariants:
+
+- 3,920-sample pulse frame at 48 kHz, approximately 12.245 fps;
+- V3–V6-style `measure_pulses()` acquisition;
+- next-header pulse as the current-frame timing/completion witness;
+- CRC-protected metadata and held/debounced aspect changes;
+- nearest-neighbor live source sampling;
+- slow-rise autoleveling and silence gating;
+- input-gap recovery and hold-last-valid-frame behavior;
+- degraded display only above the explicit foundation/noise quality baseline;
+- vectorized encoder, batched solves, bounded live history, and diagnostics.
+
+### 20.1 Recommended timing experiment: pilot-derived nonlinear warp
+
+The pulse endpoints correct affine frame scale. Flutter can still warp the
+middle of a frame. The safest next experiment is a gated second pass:
+
+1. decode with the baseline affine pulse map;
+2. estimate residual per-symbol timing from known OFDM pilot phase;
+3. fit a robust monotone low-order time map;
+4. resample the body with that map;
+5. rerun the fixed-size FFT and source reconstruction;
+6. retain the second result only if pilot residual, timing curvature, foundation
+   quality, and metadata CRC improve together.
+
+If the fit is underdetermined, non-monotone, too large, or worse than the
+baseline, retain the baseline result. Timing variation inside one useful FFT
+symbol remains an ICI limit and cannot be recovered perfectly afterward.
+
+Required A/B results are clean RMSE, pilot residual, timing residual, CPU time,
+latency, received/lost counts, and the existing wow/flutter matrix.
+
+### 20.2 Lower-risk experiments
+
+- Use weighted circular pilot-phase fits with carrier outlier rejection.
+- Compare a denser pilot schedule against the lost analog payload capacity.
+- Add per-plane quality reporting so chroma loss is not confused with timing
+  failure.
+- Add timing-loss duration and reacquisition latency to the live diagnostics.
+
+### 20.3 Deferred changes
+
+Do not yet add a second timing track, full-picture repetition, stronger FEC,
+temporal prediction, learned source coding, or a new modulation family. Each
+would change multiple variables and make the current stable emulation harder to
+audit. Every future change requires a reversible flag, clean vectors, matched
+impairment results, and a real-media acceptance plan.
