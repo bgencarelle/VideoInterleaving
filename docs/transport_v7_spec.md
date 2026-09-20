@@ -1,8 +1,10 @@
 # V7 transport specification — DRAFT
 
 **Status:** proposal with a bench-only prototype (`tools/v7_proto.py`,
-exercised by `tools/v7_bench.py`); nothing in `animation_modem/` implements it.
-§17 records what the prototype changed in this draft; the sections below are
+exercised by `tools/v7_bench.py`) and an experimental live path
+(`tools/v7_live.py`); nothing in `animation_modem/` implements it.
+§19 is the current live-wire amendment; the earlier continuous-clock sections
+remain as a design comparison.
 already corrected. It is written against `docs/transport_timing_and_encoding.md`
 at `c6ef8192` (cited as `[SPEC §n]`) and uses the same conventions:
 48 kHz reference geometry, `(samples, 2)` arrays, channel 0 then 1, I then Q.
@@ -672,6 +674,97 @@ images or downloads are needed.
 
 A.1–A.3 were one-off scratch scripts and are not checked in; the prototype
 results in §17 are reproducible with `tools/v7_bench.py`.
+
+## 19. Current live-wire amendment: pulse V7
+
+The current live sender/receiver does **not** use the continuous 72-bit clock
+track described in the original proposal. That design remains a research
+comparison. The live wire returns to the V3–V6 LTC-style pulse acquisition path
+because it provides lower latency, speed recovery, and prompt reacquisition.
+
+### 19.1 Frame geometry and cadence
+
+At the 48 kHz reference rate, a current live frame is:
+
+```text
+288 samples pulse preamble
+3456 samples V7 OFDM body: 24 × 144
+144 samples CRC metadata OFDM symbol
+32 samples guard
+--------------------------------
+3920 samples = 12.245 fps
+```
+
+The body remains the 24-symbol, 128-point/16-CP V7 body. The metadata symbol
+keeps the rate above the 12 fps requirement. The previous pulse V7 prototype
+used 3,776 samples (`288 + 3456 + 32`) and had no metadata symbol; current
+receivers retain a fallback for that legacy pulse length.
+
+The pulse preamble is measured with `transport3.measure_pulses()`, not FFT
+correlation. The receiver accepts a bounded playback scale of approximately
+0.25×–2×, resamples the body to the reference grid, and uses consecutive pulse
+positions to estimate frame-to-frame timing drift. The body walk uses the
+measured frame duration, so smooth wow/flutter is corrected across the payload.
+
+### 19.2 CRC-protected live metadata
+
+The live metadata word is one payload byte followed by CRC-16/CCITT-FALSE:
+
+```text
+payload bit 7..5: aspect code
+payload bit 0:    fixed live marker
+CRC:              polynomial 0x1021, init 0xFFFF, xorout 0
+```
+
+The 24 bits are mapped to 12 QPSK cells. Even bins in the metadata symbol are
+known M-channel pilots; odd bins carry data. Both tracks carry the mono-safe M
+signal. The metadata symbol estimates its own complex response from those
+pilots. CRC failure holds the previous aspect. The live UI additionally
+requires three consecutive reliable requests before changing aspect.
+
+Legacy pulse frames without this symbol decode their body but retain the last
+confirmed/default aspect.
+
+### 19.3 Live source preparation
+
+The live V7 path defaults to nearest-neighbor sampling at both source stages:
+source to the 80×96 preparation canvas and prepared image to the V7 coder
+grids. This intentionally produces a clean pixelated image rather than Lanczos
+ringing. Existing V3–V6 callers retain Lanczos by default; `image_values()` now
+accepts the same explicit `encode_filter` choices as `prepare_image()`.
+
+Nearest live conversion increases source projection error on the checked-in
+face relative to Lanczos, but does not increase audio RMS, peak, or carrier
+bandwidth. This is an intentional visual trade, not a claim of free fidelity.
+
+### 19.4 Timing, level, and recovery
+
+Live receive uses a slow-rise autoleveler based on the newest frame window,
+bounded to `0.5×..32×`, with prompt gain reduction. Near-silence is gated
+before pulse acquisition. Input callback drops clear the partial window and
+hold the last good image rather than stitching samples across a gap.
+
+Pulse confidence, foundation confidence/coverage, and timing delta are
+reported. A frame with an untrustworthy foundation is `lost` and holds the
+previous coefficient vector. A degraded usable frame remains distinguishable
+from a held frame.
+
+### 19.5 Capture, CPU, and live diagnostics
+
+`tools/v7_live.py` is an explicit-device experimental tool. Camera capture
+probes the lowest supported FPS and smallest resolution, and reuses the
+V3–V6 `Throttled` newest-frame capture path. Screen capture defaults to `mss`;
+FFmpeg is explicit for screen and remains the camera device/mode backend.
+
+The current prototype precomputes rank/placement tables, vectorizes group
+mixing and IFFT, batches receiver solves, caches clock templates, and reports
+stage timing. The fixed UI shows peak/RMS levels, incoming/decoded FPS,
+verified/lost counts, pulse confidence, timing delta, gain, and foundation
+quality.
+
+The live receiver decodes only the newest complete pulse frame in its bounded
+window. The V7 package remains outside the production engine registry until
+real-media validation and long-run CPU/reacquisition testing are complete.
 
 ## 18. Bench-only live camera and screen path
 
