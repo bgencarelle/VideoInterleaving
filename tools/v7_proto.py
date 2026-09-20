@@ -63,6 +63,24 @@ DEBUG = {}
 # channel interpolation between pilots sees a smooth response.
 EARLY = np.exp(2j*np.pi*np.arange(65)*(CP-WIN)/N)
 
+
+def _solve_2x2_vec(a, b):
+    """Solve batched complex 2x2 systems with no tiny-LAPACK dispatch."""
+    det = a[..., 0, 0]*a[..., 1, 1] - a[..., 0, 1]*a[..., 1, 0]
+    x0 = (a[..., 1, 1]*b[..., 0] - a[..., 0, 1]*b[..., 1])/det
+    x1 = (-a[..., 1, 0]*b[..., 0] + a[..., 0, 0]*b[..., 1])/det
+    return np.stack((x0, x1), axis=-1)
+
+
+def _solve_2x2_mat(a, b):
+    """Solve A X=B for batched 2x2 matrices."""
+    det = a[..., 0, 0]*a[..., 1, 1] - a[..., 0, 1]*a[..., 1, 0]
+    x0 = (a[..., 1, 1, None]*b[..., 0, :] -
+          a[..., 0, 1, None]*b[..., 1, :])/det[..., None]
+    x1 = (-a[..., 1, 0, None]*b[..., 0, :] +
+          a[..., 0, 0, None]*b[..., 1, :])/det[..., None]
+    return np.stack((x0, x1), axis=-2)
+
 # ------------------------------------------------------------------ §5
 BIT = 48
 SYNC = [int(c) for c in '0011111111111101']
@@ -646,7 +664,7 @@ def channel_joint(Z, iters=2):
                 A = pv[m]*rot[m, None]
                 gram = A.conj().T @ A
                 rhs = A.conj().T @ y[m]
-                h[b] = np.linalg.solve(gram, rhs)
+                h[b] = _solve_2x2_vec(gram, rhs)
             pred = np.array([rot[i]*(h[bv[i]] @ pv[i]) for i in range(len(y))])
             ok = np.abs(pred) > 1e-9
             ph = np.angle(y[ok]/pred[ok]); w = np.abs(pred[ok])
@@ -768,8 +786,8 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
             # Batched 2x2 solve: the old per-cell pinv/solve loop was the
             # largest avoidable cost in the live receiver.
             M = Psafe[None, :, None] * Hc.conj().transpose(0, 2, 1)
-            W = np.linalg.solve(S.transpose(0, 2, 1),
-                                M.transpose(0, 2, 1)).transpose(0, 2, 1)
+            W = _solve_2x2_mat(S.transpose(0, 2, 1),
+                               M.transpose(0, 2, 1)).transpose(0, 2, 1)
             xt = np.einsum('tij,tj->ti', W, Z[sidx, b])
             B = W @ Hc
             cov = W @ S @ W.conj().transpose(0, 2, 1)

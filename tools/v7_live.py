@@ -173,6 +173,7 @@ def run_receive(args):
     samples = []
     processed_samples = 0
     latest = None
+    rendered = None
     diagnostics = {} if args.diagnostics else None
     auto_gain = 1.0
     meter = {'peak': np.zeros(2), 'rms': np.zeros(2), 'blocks': 0,
@@ -379,6 +380,7 @@ def run_receive(args):
         quality_label.pack(fill='x', padx=6)
 
         def tick():
+            nonlocal rendered
             try:
                 decode_available()
             except Exception as exc:
@@ -409,7 +411,7 @@ def run_receive(args):
                 f'decode {meter["decode_ms"] if meter["decode_ms"] is not None else "--"} ms | '
                 f'incoming {meter["input_fps"]:5.2f} fps | '
                 f'decoded {meter["decoded_fps"]:5.2f} fps'))
-            if latest is not None:
+            if latest is not None and latest is not rendered:
                 image = values_image(latest, model.coder.grids)
                 height = 480
                 width = max(1, round(height*P.V7_ASPECT_RATIOS[
@@ -421,6 +423,7 @@ def run_receive(args):
                 photo = ImageTk.PhotoImage(image)
                 label.configure(image=photo, text='')
                 label.image = photo
+                rendered = latest
             root.after(10, tick)
         root.after(10, tick)
         try:
