@@ -171,24 +171,35 @@ def run_receive(args):
             return
         if not args.refine:
             P.REFINE = False
-        results, info = P.decode_stream(model, audio, diagnostics=diagnostics)
+        try:
+            results, info = P.decode_stream(model, audio,
+                                            diagnostics=diagnostics)
+        except (FloatingPointError, np.linalg.LinAlgError, ValueError,
+                IndexError) as exc:
+            # Drop the damaged window and let the next retained clock history
+            # reacquire.  A single bad frame must not stop the live receiver.
+            results, info = [], {'words': 0,
+                                 'recovery_error': type(exc).__name__}
         processed_samples = len(audio)
-        if not results:
-            return
-        result = results[-1]
-        if last_counter == result.counter:
-            return
-        last_counter = result.counter
-        latest = P.values_from(model, result.coeffs)
-        report = {'counter': result.counter, 'status': result.status,
-                  'clock_words': info.get('words'), 'crc_ok': info.get('crc_ok')}
-        if args.diagnostics:
-            report['diagnostics'] = info.get('diagnostics')
-        print(report, flush=True)
-        if args.save_dir:
-            args.save_dir.mkdir(parents=True, exist_ok=True)
-            values_image(latest, model.coder.grids).save(
-                args.save_dir/f'v7_{result.counter:08d}.png')
+        if results:
+            result = results[-1]
+            if last_counter != result.counter:
+                last_counter = result.counter
+                latest = P.values_from(model, result.coeffs)
+                report = {'counter': result.counter, 'status': result.status,
+                          'clock_words': info.get('words'),
+                          'crc_ok': info.get('crc_ok'),
+                          'skipped_frames': len(info.get('skipped_frames', [])),
+                          'recovered': info.get('recovered', False)}
+                if args.diagnostics:
+                    report['diagnostics'] = info.get('diagnostics')
+                print(report, flush=True)
+                if args.save_dir:
+                    args.save_dir.mkdir(parents=True, exist_ok=True)
+                    values_image(latest, model.coder.grids).save(
+                        args.save_dir/f'v7_{result.counter:08d}.png')
+        elif args.diagnostics:
+            print({'status': 'reacquiring', **info}, flush=True)
         # Keep the receiver's expensive non-streaming prototype bounded.  The
         # next decode reacquires from this short clock history instead of
         # repeatedly decoding an ever-growing capture.

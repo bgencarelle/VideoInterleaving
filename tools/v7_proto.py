@@ -126,6 +126,26 @@ GROUPS = ([(b, 'M', q) for b in MONO for q in 'IQ'] +
 N_HEAD_G, N_TAIL_G = 2*len(MONO), 12                    # 26 head, 12 tail groups
 HEAD, BODY_END, TAIL_PER = 208, 2224, 96
 TAIL_PHASES = 7
+HEAD_MIN_CONFIDENCE = .70
+HEAD_MIN_COVERAGE = .50
+
+# Static placement tables: V3--V6 do this kind of work once at setup, not on
+# every picture.  The flattened arrays are used by the vectorized scatter in
+# encode_frame_coeffs().
+GROUP_BINS = np.asarray([blk[0] for (blk, _, _) in GROUPS], int)
+GROUP_STREAMS = np.asarray([0 if stream == 'M' else 1
+                            for (_, stream, _) in GROUPS], int)
+GROUP_QMULT = np.asarray([1 if q == 'I' else 1j for (_, _, q) in GROUPS])
+GROUP_SYMBOLS = np.asarray([
+    phi + 3*np.arange(8) for ((b, phi), _, _) in GROUPS], int)
+SCATTERED_PILOTS = np.zeros((F, 65, 2), complex)
+for _s in range(F):
+    for _b in CONTINUAL:
+        SCATTERED_PILOTS[_s, _b] = PILOT_AMP*np.array([1, 1j*(-1)**_s])
+    for _b, _phi in SCAT.items():
+        if _s % 3 == _phi:
+            _v = (_s-_phi)//3
+            SCATTERED_PILOTS[_s, _b] = PILOT_AMP*np.array([1, 1j*(-1)**_v])
 
 
 def windows(n_groups):
@@ -168,6 +188,7 @@ class Model:
     scale: float
     plane: np.ndarray
     head: np.ndarray
+    rank_tables: tuple
 
 
 def build_model(fixture, target_rms):
@@ -201,7 +222,9 @@ def build_model(fixture, target_rms):
     g /= np.sqrt(np.mean((g*g*lam)[order[:BODY_END]]))   # unit mean slot power
     phase = np.exp(2j*np.pi*np.random.default_rng(70001).random((F, 65)))
     head = np.zeros(C.shape[1], bool); head[order[:HEAD]] = True
-    model = Model(coder, mu, lam, order, g, phase, 1.0, plane, head)
+    rank_tables = tuple(frame_ranks(order, p) for p in range(TAIL_PHASES))
+    model = Model(coder, mu, lam, order, g, phase, 1.0, plane, head,
+                  rank_tables)
     # Fixed level (§6.6): one-off calibration on seeded synthetic coefficients
     # drawn from the variance table -- a property of the profile, never of the
     # frame being sent.
@@ -218,31 +241,25 @@ def encode_frame(model, values, counter):
 
 def encode_frame_coeffs(model, coeffs, counter, return_X=False):
     c = coeffs - model.mu
-    idx = frame_ranks(model.order, counter)
+    idx = model.rank_tables[counter % TAIL_PHASES]
     X = np.zeros((F, 65, 2), complex)                        # symbol, bin, M/S
-    for gi, (blk, stream, q) in enumerate(GROUPS):
-        b, phi = blk
-        ranks = idx[gi]
-        vals = np.where(ranks >= 0, model.gain[ranks]*c[np.maximum(ranks, 0)], 0.0)
-        tx = H8 @ vals
-        syms = phi + 3*np.arange(8)
-        X[syms, b, 0 if stream == 'M' else 1] += tx*(1 if q == 'I' else 1j)
-    for s in range(F):                                       # pilots (§6.3)
-        for b in CONTINUAL:
-            X[s, b] = PILOT_AMP*np.array([1, 1j*(-1)**s])
-        for b, phi in SCAT.items():
-            if s % 3 == phi:
-                v = (s-phi)//3
-                X[s, b] = PILOT_AMP*np.array([1, 1j*(-1)**v])
+    ranks = np.maximum(idx, 0)
+    vals = model.gain[ranks]*c[ranks]
+    vals[idx < 0] = 0
+    tx = vals @ H8.T
+    np.add.at(X,
+              (GROUP_SYMBOLS.ravel(),
+               np.repeat(GROUP_BINS, 8),
+               np.repeat(GROUP_STREAMS, 8)),
+              (tx*GROUP_QMULT[:, None]).ravel())
+    X += SCATTERED_PILOTS
     if return_X:
         return X
     XL = (X[..., 0]+X[..., 1])/np.sqrt(2)*model.phase
     XR = (X[..., 0]-X[..., 1])/np.sqrt(2)*model.phase
-    out = np.empty((FRAME, 2))
-    for s in range(F):
-        for ch, Xc in enumerate((XL, XR)):
-            t = np.fft.irfft(Xc[s], n=N)*model.scale
-            out[s*SYM:(s+1)*SYM, ch] = np.concatenate([t[-CP:], t])
+    waves = np.fft.irfft(np.stack((XL, XR), axis=-1), n=N, axis=1)
+    waves *= model.scale
+    out = np.concatenate((waves[:, -CP:, :], waves), axis=1).reshape(-1, 2)
     return out
 
 
@@ -635,7 +652,7 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
     stage_started = perf_counter()
     DEBUG['Z'], DEBUG['H'], DEBUG['noise'] = Z, H, noise
     # Per-cell 2x2 MMSE (§9.6 step 1) with priors from group powers.
-    idx = frame_ranks(model.order, counter)
+    idx = model.rank_tables[counter % TAIL_PHASES]
     tx_var = np.array([np.mean(np.where(r >= 0, model.gain[np.maximum(r, 0)]**2 *
                                         model.lam[np.maximum(r, 0)], 0)) for r in idx])
     group_var = {(blk, stream, q): tx_var[gi]
@@ -709,9 +726,18 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
                      np.where(model.plane == 0, .45, .60))
     gate = np.clip((conf-floor)/(.85-floor), 0, 1)
     coeffs = prev_tail.copy()
+    head_confidence = float(np.mean(conf[model.head]))
+    head_coverage = float(np.mean(conf[model.head] >= .15))
+    if head_confidence < HEAD_MIN_CONFIDENCE or head_coverage < HEAD_MIN_COVERAGE:
+        return Result(counter, 'lost', prev_tail.copy(), {
+            'noise': noise.mean(0).tolist(), 'got': int(got.sum()),
+            'head_confidence': head_confidence,
+            'head_coverage': head_coverage, 'held': True})
     coeffs[got] = (model.mu + xhat*gate)[got]
     return Result(counter, 'verified', coeffs,
-                  {'noise': noise.mean(0).tolist(), 'got': int(got.sum())})
+                  {'noise': noise.mean(0).tolist(), 'got': int(got.sum()),
+                   'head_confidence': head_confidence,
+                   'head_coverage': head_coverage})
 
 
 def _diagnostic_summary(diag, elapsed_ms):
@@ -757,16 +783,32 @@ def decode_stream(model, x, verbose=False, diagnostics=None):
     allc = {w['counter'] for w in words}
     lo, hi = min(allc), max(allc)
     results, tail = [], model.mu.copy()
+    skipped = []
     for counter in range(lo, hi+1):
-        r = decode_frame(model, x, tm, counter, tail,
-                         cancel=bool(verified), diagnostics=diagnostics)
+        try:
+            r = decode_frame(model, x, tm, counter, tail,
+                             cancel=bool(verified), diagnostics=diagnostics)
+        except (FloatingPointError, np.linalg.LinAlgError, ValueError,
+                IndexError) as exc:
+            # A damaged frame is an ordinary transport event.  Do not abort
+            # the whole buffered run: later clock words may provide a clean
+            # re-lock point and a fresh frame.
+            skipped.append({'counter': counter, 'error': type(exc).__name__})
+            if diagnostics is not None:
+                diagnostics['decode_errors'] = diagnostics.get('decode_errors', 0)+1
+            continue
         if r is None:
+            skipped.append({'counter': counter, 'error': 'out_of_window'})
+            continue
+        if r.status == 'lost':
+            results.append(r)
             continue
         r.status = 'verified' if counter in verified else 'picture_only'
         tail = r.coeffs.copy()
         results.append(r)
     info = {'words': len(words), 'crc_ok': len(verified),
-            'frames': len(results)}
+            'frames': len(results), 'skipped_frames': skipped,
+            'recovered': bool(results and skipped)}
     if diagnostics is not None:
         diagnostics['frames'] = diagnostics.get('frames', 0) + len(results)
         counts = diagnostics.setdefault('status_counts', {})
