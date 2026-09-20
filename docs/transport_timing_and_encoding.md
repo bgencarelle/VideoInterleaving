@@ -753,6 +753,8 @@ middle frame `images_sbs/face/00_C_BG_faceSource_960/benFaceSource1110.jpg`.
 It runs `prepare_image(..., preset='auto', encode_filter='lanczos')` and then
 `image_values(..., coder.grids)`, so the aspect code, RGB resize, Pillow YCbCr
 conversion, BOX chroma reduction, and uint8-to-`[-1,1]` mapping are exercised.
+The checked-in fixture image SHA-256 is
+`f44aa3c364d8b85bda45eab46fa953421b085f037c818bf68e255259ea8f257b`.
 The prepared-plane hash is
 `d0270070c30be57d9c319223c9595ff9705e7732bc98e4205f289506d9462edc`, computed
 over concatenated little-endian float64 luma/Cb/Cr values in `coder.grids`
