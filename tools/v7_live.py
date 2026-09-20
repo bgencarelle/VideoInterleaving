@@ -133,7 +133,10 @@ def run_send(args):
                                               start_counter=counter,
                                               aspect_codes=aspects)
                 if args.mono_sum:
-                    audio = audio.mean(axis=1, keepdims=True)
+                    audio = audio.sum(axis=1, keepdims=True)/np.sqrt(2)
+                    peak = np.max(np.abs(audio))
+                    if peak > .89:
+                        audio *= .89/peak
                 batches.put((counter, audio))
                 total += len(frames)
                 counter += len(frames)
@@ -146,7 +149,10 @@ def run_send(args):
                     model, values, start_counter=counter,
                     aspect_codes=aspects)
                 if args.mono_sum:
-                    audio = audio.mean(axis=1, keepdims=True)
+                    audio = audio.sum(axis=1, keepdims=True)/np.sqrt(2)
+                    peak = np.max(np.abs(audio))
+                    if peak > .89:
+                        audio *= .89/peak
                 batches.put((counter, audio))
                 total += len(frames)
             batches.put(sentinel)
@@ -160,7 +166,8 @@ def run_send(args):
         print(f'V7 send ready: source={args.source} device={args.device!r} '
               f'wire={FPS:.3f}fps camera={args.camera} '
               f'capture={args.capture_width}px/{args.capture_filter} '
-              f'encode={args.encode_filter}', flush=True)
+              f'encode={args.encode_filter} mode={"mono-sum" if args.mono_sum else "M/S"}',
+              flush=True)
     try:
         with sd.OutputStream(samplerate=P.RATE,
                              channels=1 if args.mono_sum else 2,
@@ -222,7 +229,8 @@ def run_receive(args):
              'aspect_streak': 0, 'input_samples': 0, 'started': time.monotonic(),
              'auto_gain': 1.0,
               'decoded_times': deque(maxlen=8), 'input_fps': 0.,
-             'decoded_fps': 0.}
+             'decoded_fps': 0.,
+             'mode': 'mono-input' if input_channels == 1 else 'M/S'}
 
     def callback(indata, frames, timing, status):
         values = np.asarray(indata, float)
@@ -331,6 +339,8 @@ def run_receive(args):
             meter['quality'] = (
                 f'head {result.diag.get("head_confidence", 0):.2f}/'
                 f'{result.diag.get("head_coverage", 0):.2f}')
+            if result.diag.get('mono_sum'):
+                meter['mode'] = 'mono-sum'
             candidate = result.diag.get('aspect_code', meter['aspect'])
             if (result.status in ('received', 'verified') and
                     (result.diag.get('pulse_confidence') or 0) >= .45):
@@ -506,7 +516,8 @@ def run_receive(args):
                 candidate_aspect = P.V7_ASPECT_NAMES[
                     int(meter['aspect_candidate']) & 7]
                 status_label.configure(text=(
-                    f'status {meter["status"]}  frame {meter["counter"]} '
+                  f'status {meter["status"]}  mode {meter["mode"]}  '
+                  f'frame {meter["counter"]} '
                     f'aspect {aspect_text} '
                     f'(candidate {candidate_aspect} '
                     f'x{meter["aspect_streak"]})  pulse {pulse_text}\n'

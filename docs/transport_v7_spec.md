@@ -809,7 +809,9 @@ hardware/status line at startup; routine per-frame output is disabled by default
 and can be enabled with `--log`.
 The sender's optional `--mono-sum` emits one audio channel containing the
 shared M signal and advertises that choice in metadata; the receiver accepts
-mono input devices automatically.
+mono input devices automatically. The sender uses an energy-preserving sum
+with a safety limiter rather than a simple average, avoiding an unnecessary
+3 dB mono-level loss.
 The receiver's optional `--mono-compatible` presentation mode preserves luma
 while confidence-gating temporal/spatial chroma stabilization for mono or
 one-leg playback. It does not alter the wire or encoder.
