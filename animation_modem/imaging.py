@@ -170,11 +170,20 @@ def display_image(result, shapes=None, *, scale=1, bounds=None, smooth=False):
                         else Image.Resampling.NEAREST)
 
 
-def image_values(image, shapes):
-    """One finite value per source coefficient, in [-1, 1], luma plane first."""
+def image_values(image, shapes, encode_filter='lanczos'):
+    """One finite value per source coefficient, in [-1, 1], luma plane first.
+
+    ``encode_filter`` controls the RGB sampling step as well as the initial
+    source preparation when a caller wants a deliberately pixelated path.
+    The default remains Lanczos for the existing V3--V6 wires.
+    """
     shapes = _shapes(shapes)
     rows, cols = shapes[0]
-    sampled = image.convert('RGB').resize((cols, rows), Image.Resampling.LANCZOS)
+    try:
+        resampling = ENCODE_FILTERS[encode_filter]
+    except KeyError as exc:
+        raise ValueError(f'Unknown encode filter: {encode_filter}') from exc
+    sampled = image.convert('RGB').resize((cols, rows), resampling)
     planes = sampled.convert('YCbCr').split()
     return np.concatenate([
         np.asarray(plane.resize((shape[1], shape[0]), Image.Resampling.BOX)).ravel()

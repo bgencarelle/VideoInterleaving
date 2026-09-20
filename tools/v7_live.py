@@ -48,22 +48,23 @@ def _capture(args):
                                  args.capture_width, args.ffmpeg_input)
 
 
-def _model(fixture):
+def _model(fixture, encode_filter='nearest'):
     model = P.build_model(fixture, .1521 / np.sqrt(
-        1 + 10**(P.CLOCK_REL_DB/10)))
+        1 + 10**(P.CLOCK_REL_DB/10)), encode_filter=encode_filter)
     return model
 
 
-def _values(model, frame):
+def _values(model, frame, encode_filter='nearest'):
     image = frame if isinstance(frame, Image.Image) else Image.fromarray(frame)
-    prepared = prepare_image(image, preset='auto', encode_filter='lanczos')
-    return image_values(prepared, model.coder.grids)
+    prepared = prepare_image(image, preset='auto', encode_filter=encode_filter)
+    return image_values(prepared, model.coder.grids,
+                        encode_filter=encode_filter)
 
 
 def run_send(args):
     import sounddevice as sd
 
-    model = _model(args.fixture)
+    model = _model(args.fixture, args.encode_filter)
     grab = _capture(args)
     batches = queue.Queue(maxsize=2)
     stop = threading.Event()
@@ -83,7 +84,7 @@ def run_send(args):
                 delay = next_capture-time.monotonic()
                 if delay > 0:
                     time.sleep(delay)
-                frames.append(_values(model, grab()))
+                frames.append(_values(model, grab(), args.encode_filter))
                 next_capture += 1/FPS
                 if len(frames) < batch_size:
                     continue
@@ -132,7 +133,7 @@ def run_send(args):
 def run_receive(args):
     import sounddevice as sd
 
-    model = _model(args.fixture)
+    model = _model(args.fixture, args.encode_filter)
     blocks = queue.Queue(maxsize=32)
     stop = threading.Event()
     samples = []
@@ -260,6 +261,8 @@ def parser():
     send.add_argument('--device', required=True,
                       help='explicit sounddevice output, e.g. BlackHole 2ch')
     send.add_argument('--fixture', type=Path, default=DEFAULT_FIXTURE)
+    send.add_argument('--encode-filter', choices=('nearest', 'box', 'lanczos', 'bicubic'),
+                      default='nearest')
     send.add_argument('--camera', type=int, default=0)
     send.add_argument('--display', type=int)
     send.add_argument('--ffmpeg-input')
@@ -273,6 +276,8 @@ def parser():
     recv.add_argument('--device', required=True,
                       help='explicit sounddevice input, e.g. BlackHole 2ch')
     recv.add_argument('--fixture', type=Path, default=DEFAULT_FIXTURE)
+    recv.add_argument('--encode-filter', choices=('nearest', 'box', 'lanczos', 'bicubic'),
+                      default='nearest')
     recv.add_argument('--headless', action='store_true')
     recv.add_argument('--save-dir', type=Path)
     recv.add_argument('--diagnostics', action='store_true',

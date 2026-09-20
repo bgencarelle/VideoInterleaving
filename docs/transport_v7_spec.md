@@ -686,7 +686,11 @@ results in §17 are reproducible with `tools/v7_bench.py`.
 ```
 
 The sender reuses `modem_screen.py`'s camera and FFmpeg screen capture sources,
-prepares frames with the V7 source grids, and emits bounded batches at 13.889
+selects the smallest camera mode supporting the requested capture rate, and
+prepares frames with the V7 source grids. Live V7 defaults to nearest-neighbor
+sampling at both the 80x96 preparation step and the coder-grid sampling step;
+`--encode-filter` can select another explicit filter. It emits bounded batches
+at 13.889
 fps. The receiver accumulates the explicit 48 kHz input, runs the V7 prototype
 decoder, displays the newest usable reconstruction, and can save frames with
 `--save-dir`. A `--headless` receiver is available for loopback diagnostics.

@@ -191,7 +191,7 @@ class Model:
     rank_tables: tuple
 
 
-def build_model(fixture, target_rms):
+def build_model(fixture, target_rms, encode_filter='lanczos'):
     coder = SourceCoder(v6.V6_SHAPES, grids=v6.V6_GRIDS)
     rng = np.random.default_rng(1)
     im = Image.open(fixture).convert('RGB'); W, Hh = im.size
@@ -202,7 +202,9 @@ def build_model(fixture, target_rms):
         crop = im.crop((x, y, x+w, y+h))
         if rng.random() < .5:
             crop = crop.transpose(Image.FLIP_LEFT_RIGHT)
-        C.append(coder.forward(image_values(prepare_image(crop), coder.grids))/coder.gains)
+        C.append(coder.forward(
+            image_values(prepare_image(crop, encode_filter=encode_filter),
+                         coder.grids, encode_filter=encode_filter))/coder.gains)
     C = np.asarray(C)
     mu = np.zeros(C.shape[1]); lam = np.empty(C.shape[1])
     off, plane = 0, np.empty(C.shape[1], int)
