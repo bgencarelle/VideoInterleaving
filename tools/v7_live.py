@@ -37,6 +37,14 @@ FPS = P.PULSE_FPS
 DEFAULT_FIXTURE = ROOT / 'modem_tests/fixtures/v6_face_1110.png'
 
 
+def _device_arg(value):
+    """Accept sounddevice names or numeric device indexes."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return value
+
+
 def _capture(args):
     """Build one of modem_screen's existing RGB capture sources."""
     from modem_screen import (camera_source, screen_capture_source,
@@ -435,7 +443,7 @@ def parser():
     sub = ap.add_subparsers(dest='mode', required=True)
     send = sub.add_parser('send', help='capture camera/screen and transmit V7')
     send.add_argument('--source', choices=('camera', 'screen'), required=True)
-    send.add_argument('--device', required=True,
+    send.add_argument('--device', type=_device_arg, required=True,
                       help='explicit sounddevice output, e.g. BlackHole 2ch')
     send.add_argument('--fixture', type=Path, default=DEFAULT_FIXTURE)
     send.add_argument('--encode-filter', choices=('nearest', 'box', 'lanczos', 'bicubic'),
@@ -453,7 +461,7 @@ def parser():
     send.add_argument('--seconds', type=float, default=0,
                       help='0 means until Ctrl-C')
     recv = sub.add_parser('receive', help='receive V7 audio and display it')
-    recv.add_argument('--device', required=True,
+    recv.add_argument('--device', type=_device_arg, required=True,
                       help='explicit sounddevice input, e.g. BlackHole 2ch')
     recv.add_argument('--fixture', type=Path, default=DEFAULT_FIXTURE)
     recv.add_argument('--headless', action='store_true')
