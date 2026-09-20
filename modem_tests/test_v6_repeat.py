@@ -5,7 +5,7 @@ import numpy as np
 
 from animation_modem import transport3 as V3
 from animation_modem.core import decode_packet
-from animation_modem.v6 import ORIGINAL_VALUES, full_repeat_coder
+from animation_modem.v6 import ORIGINAL_VALUES, full_repeat_coder, slot_symbols
 from animation_modem.wavelet import _slot_carriers
 
 
@@ -24,6 +24,7 @@ class V6FullRepeatTests(unittest.TestCase):
 
     def test_every_coefficient_is_cross_track_and_frequency_diverse(self):
         bins, channels = _slot_carriers(V3.WIRE_V6_REPEAT)
+        symbols = slot_symbols(V3.WIRE_V6_REPEAT)
         for transform in ('dct', 'wavelet'):
             coder = full_repeat_coder(transform)
             slots = coder.slots(V3.WIRE_V6_REPEAT)
@@ -32,6 +33,16 @@ class V6FullRepeatTests(unittest.TestCase):
                 self.assertTrue(np.all(channels[home] != channels[copy]))
                 self.assertTrue(np.all(np.abs(bins[home]-bins[copy]) >=
                                        coder.MIN_COPY_SPREAD))
+                self.assertTrue(np.all(symbols[home] != symbols[copy]))
+
+    def test_complete_waveform_obeys_tape_ceiling(self):
+        coder = full_repeat_coder('dct')
+        values = np.random.default_rng(18).uniform(-.7, .7, coder.source_count)
+        audio = V3.encode(values, V3.WIRE_V6_REPEAT, coder, 1, 1, 1)
+        spectrum = np.sum(np.abs(np.fft.rfft(audio, axis=0))**2, axis=1)
+        frequency = np.fft.rfftfreq(len(audio), 1/V3.REFERENCE_RATE)
+        self.assertLess(float(spectrum[frequency > 14000].sum()/spectrum.sum()),
+                        1e-4)
 
     def test_clean_and_one_track_loss_round_trip(self):
         values = np.random.default_rng(15).uniform(-.7, .7, 11520)

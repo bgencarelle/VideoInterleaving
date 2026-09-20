@@ -66,8 +66,13 @@ def coders_for(layout):
         return {0: coder_for('v6-dct', layout)[0],
                 1: coder_for('v6-wavelet', layout)[0]}
     if layout.name == 'wire-v6-repeat':
-        return {0: coder_for('v6-repeat-dct', layout)[0],
-                1: coder_for('v6-repeat-wavelet', layout)[0]}
+        coders = {0: coder_for('v6-repeat-dct', layout)[0],
+                  1: coder_for('v6-repeat-wavelet', layout)[0]}
+        # The global cross-track assignment is expensive (~0.4 s per coder on
+        # a desktop). Pay it while opening the receiver, never on packet one.
+        for picture in coders.values():
+            picture.slots(layout)
+        return coders
     return {profile_code(name): coder_for(name, layout)[0]
             for name in PROFILE_CODES}
 

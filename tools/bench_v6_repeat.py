@@ -48,28 +48,38 @@ def main(argv=None):
     parser.add_argument('--source', type=Path,
                         default=Path('images_sbs/face/00_C_BG_faceSource_960/'
                                      'benFaceSource1110.jpg'))
+    parser.add_argument('--frames', type=int, default=12)
     args = parser.parse_args(argv)
     source = Image.open(args.source).convert('RGB').crop((0, 0, 720, 960))
     prepared = prepare_image(source, 'auto', 'lanczos')
-    print('control transform case acquired verified pictures rmse_vs_clean fps')
+    print('control transform case acquired expected verified pictures '
+          'unidentified rmse_vs_clean fps')
     for control, layout, factory in (
             ('foundation', V3.WIRE_V6, coder_for),
             ('full-repeat', V3.WIRE_V6_REPEAT, full_repeat_coder)):
         for code, transform in enumerate(('dct', 'wavelet')):
             coder = factory(transform)
             values = image_values(prepared, coder.grids)
-            audio = V3.encode(values, layout, coder, 1, 1, 1, profile=code)
+            audio = np.concatenate([
+                V3.encode(values, layout, coder, frame+1, frame+1,
+                          args.frames, profile=code)
+                for frame in range(args.frames)])
             clean = decode(audio, layout, coder, code)
-            reference = next(r.values for r in clean
-                             if r.identity == 'verified_header' and r.values is not None)
+            references = {r.absolute: r.values for r in clean
+                          if r.identity == 'verified_header' and r.values is not None}
+            fallback = next(iter(references.values()), None)
             for case in ('clean', 'mute-left', 'mute-right', 'lowpass-8k', 'hiss-35'):
                 results = decode(damage(audio, case), layout, coder, code)
                 pictures = [r for r in results if r.values is not None]
                 verified = sum(r.identity == 'verified_header' for r in results)
-                rmse = (float(np.mean([np.sqrt(np.mean((r.values-reference)**2))
-                                       for r in pictures])) if pictures else None)
-                print(control, transform, case, len(results), verified,
-                      len(pictures), rmse, f'{layout.fps:.3f}')
+                errors = [np.sqrt(np.mean((r.values-references.get(
+                    r.absolute, fallback))**2)) for r in pictures
+                    if fallback is not None]
+                rmse = float(np.mean(errors)) if errors else None
+                unidentified = sum(r.identity != 'verified_header' for r in pictures)
+                print(control, transform, case, len(results), args.frames,
+                      verified, len(pictures), unidentified, rmse,
+                      f'{layout.fps:.3f}')
 
 
 if __name__ == '__main__':
