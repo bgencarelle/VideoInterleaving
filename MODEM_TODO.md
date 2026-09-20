@@ -204,8 +204,8 @@ of foundation V6 vs tape placement before changing the default.
   clean controls and clean → damaged → clean transitions.
 - [ ] Choose one default profile and remove preset sprawl after validation.
 
-Real tape is authoritative. MP3/AAC/ATRAC and synthetic worn-deck experiments
-may remain secondary diagnostics, but they do not set V6's priorities or
+Real tape is authoritative. MP3/AAC/ATRAC and isolated synthetic impairment
+experiments may remain secondary diagnostics, but they do not set V6's priorities or
 justify default smoothing. Optional calibration leaders, new correction modes,
 spreading schemes, larger images and higher frame rates wait for evidence that
 they address a measured problem after the first milestone.

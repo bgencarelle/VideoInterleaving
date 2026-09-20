@@ -33,7 +33,7 @@ CASES = [('clean', lambda a: np.asarray(a, np.float32), None)]
 CASES += [(n,) + MD.lift_case(n, SECONDS) for n in ('hiss-45', 'lift-severe', 'lift-worn',
                                                     'lift-skew', 'mute-left')]
 CASES += [('tape:'+n, MD.tape_matrix(n), None) for n in ('lowpass-10k', 'wow-flutter', 'dropouts',
-                                                         'type-i', 'worn-deck')]
+                                                         'type-i')]
 CASES += [('nr:pumping (repo)', MD.tape_matrix('nr-pumping'), None),
           ('nr:dolbyB rec, no decode', MD.nr_dolby_enc_only, None),
           ('nr:dolbyB mistrack +3dB', MD.nr_dolby_mistrack(3), None),

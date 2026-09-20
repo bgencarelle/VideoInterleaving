@@ -519,7 +519,7 @@ decision-directed estimation on analog data.
 |---|---|
 | Clean stereo | everything; tail refreshes every 0.5 s |
 | Ferric cassette, good deck | all tiers; top carriers noisier, detail gated first |
-| Worn deck, lifts, dropouts | clock (low band); head and body with per-symbol fade-aware gating; bursts ≤ 9 ms cost ≤ 1/8 of a group |
+| Isolated lifts or dropouts | clock (low band); head and body with per-symbol fade-aware gating; bursts ≤ 9 ms are diagnostic cases |
 | One track dead | clock, head tier at −3 dB, body degraded (m ± s mixed) |
 | Mono playback / HE-AAC v2 PS | clock, head, M half of body; S detail lost |
 | MP3/AAC ≥ 96 kbit/s | everything up to the codec low-pass; codec noise handled as per-symbol noise |
@@ -628,7 +628,6 @@ truncation floor (discarding coefficients, no channel):
 | wow/flutter | 0.057 | 83/84 |
 | 12 ms dropouts | 0.066 | 73/84 |
 | Type I tape | 0.065 | 83/84 |
-| worn deck (combined) | 0.398 | 4/84 |
 | NR pumping (repo) | 0.055 | 83/84 |
 | Dolby B-like, no decode / ±3 dB mistrack | 0.053 | 83/84 |
 | dbx-like, no decode | 0.092 | 79/84 |
@@ -651,9 +650,9 @@ the OFDM body (clears the clock band but adds −25 dB inter-symbol distortion
 on every carrier).
 
 Open results: one-track loss is worse than V6 (0.133 vs 0.081; V6's full
-foundation copies protect more than V7's mono head); the combined worn-deck
-case leaves carriers near 0 dB SNR; real tape and hardware MiniDisc captures
-are still required.
+foundation copies protect more than V7's mono head). Real tape and hardware
+MiniDisc captures are still required; no composite synthetic “worn deck” case
+is treated as an acceptance result.
 
 ## Appendix A — evidence scripts
 

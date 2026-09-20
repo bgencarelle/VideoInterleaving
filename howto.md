@@ -324,13 +324,13 @@ Run selected cases with repeated `--only`:
 ```bash
 .venv/bin/python tools/test_tape_matrix.py \
   --profile tape-80x60 \
-  --only type-ii --only worn-deck
+  --only type-ii --only lowpass-10k
 ```
 
 The matrix assumes 96 kHz playback and covers band limits, colored hiss,
 wow/flutter, azimuth, crosstalk, gain mismatch, DC/hum, bias leakage,
-saturation, dropouts, approximate NR pumping, and combined Type I/II/worn-deck
-cases. Results are written to `summary.csv` with Y/Cb/Cr PSNR and SSIM. These
+saturation, dropouts, approximate NR pumping, and combined Type I/II cases.
+Results are written to `summary.csv` with Y/Cb/Cr PSNR and SSIM. These
 are deterministic regression tests, not substitutes for a real tape capture.
 
 ## Synthetic modem bench

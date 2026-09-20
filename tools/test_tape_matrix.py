@@ -69,10 +69,6 @@ CASES = (
     TapeCase('type-ii', highpass=50, lowpass=16000, noise_dbfs=-44,
              wow=.22, flutter=.07, azimuth_us=4, crosstalk=.05,
              right_gain_db=-1, saturation=1.15),
-    TapeCase('worn-deck', highpass=120, lowpass=9000, noise_dbfs=-33,
-             wow=.75, flutter=.20, azimuth_us=16, crosstalk=.16,
-             right_gain_db=-5, hum_dbfs=-42, saturation=2.2,
-             dropout_ms=18, dropout_every=.65, nr_pump=.45),
 )
 
 

@@ -724,7 +724,7 @@ class Cdf97Coder(SourceCoder):
 
     Measured against v3 on the same synthetic frames (tools/compare_codecs.py;
     run it with --modem-dir for real content): -0.7 dB on a perfect channel;
-    +4.0 dB cassette (10 kHz, -45 dB); +6.0 dB worn deck; +3.1 dB at -30 dB
+    +4.0 dB cassette (10 kHz, -45 dB); +3.1 dB at -30 dB
     hiss; +6.9 dB through a 6 kHz lowpass; +3.4 dB with one stereo leg dead
     (v3 gained most there from the erasure fix in decode_packet); +3.3 dB
     under a 1 kHz bass cut; +6.4 dB clipped at half scale.

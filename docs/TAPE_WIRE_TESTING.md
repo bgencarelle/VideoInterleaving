@@ -335,7 +335,7 @@ Quick selected cases:
 ```bash
 .venv/bin/python tools/test_tape_matrix.py \
   --profile tape-80x60 --frames 30 \
-  --only type-ii --only worn-deck \
+  --only type-ii --only lowpass-10k \
   --out scratch/tape-matrix-quick
 ```
 
