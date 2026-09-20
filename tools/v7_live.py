@@ -364,13 +364,19 @@ def run_receive(args):
         from PIL import ImageTk
         root = tk.Tk()
         root.title('V7 modem receiver')
-        root.resizable(False, False)
+        root.resizable(not args.fullscreen, not args.fullscreen)
         root.geometry('640x650')
         root.configure(background='black')
         image_frame = tk.Frame(root, width=620, height=480,
                                background='black')
         image_frame.pack_propagate(False)
-        image_frame.pack(padx=10, pady=8)
+        if args.fullscreen:
+            root.attributes('-fullscreen', True)
+            image_frame.pack(padx=10, pady=8, fill='both', expand=True)
+            root.bind('<Escape>', lambda _event: root.attributes(
+                '-fullscreen', False))
+        else:
+            image_frame.pack(padx=10, pady=8)
         label = tk.Label(image_frame, text='Acquiring V7 clock…',
                          background='black')
         label.configure(background='black')
@@ -428,12 +434,22 @@ def run_receive(args):
                 f'decoded {meter["decoded_fps"]:5.2f} fps'))
             if latest is not None and latest is not rendered:
                 image = values_image(latest, model.coder.grids)
-                height = 480
-                width = max(1, round(height*P.V7_ASPECT_RATIOS[
-                    int(meter['aspect']) & 7]))
-                scale = min(620/width, 480/height)
-                image = image.resize((max(1, round(width*scale)),
-                                      max(1, round(height*scale))),
+                ratio = P.V7_ASPECT_RATIOS[int(meter['aspect']) & 7]
+                if args.fullscreen:
+                    bound_w = max(1, image_frame.winfo_width())
+                    bound_h = max(1, image_frame.winfo_height())
+                    height = bound_h
+                    width = round(height*ratio)
+                    if width > bound_w:
+                        width = bound_w
+                        height = round(width/ratio)
+                else:
+                    height = 480
+                    width = max(1, round(height*ratio))
+                    scale = min(620/width, 480/height)
+                    width = round(width*scale)
+                    height = round(height*scale)
+                image = image.resize((max(1, width), max(1, height)),
                                      Image.Resampling.NEAREST)
                 photo = ImageTk.PhotoImage(image)
                 label.configure(image=photo, text='')
@@ -488,6 +504,8 @@ def parser():
                       help='explicit sounddevice input, e.g. BlackHole 2ch')
     recv.add_argument('--fixture', type=Path, default=DEFAULT_FIXTURE)
     recv.add_argument('--headless', action='store_true')
+    recv.add_argument('--fullscreen', action='store_true',
+                      help='fullscreen embedded display; Escape exits fullscreen')
     recv.add_argument('--save-dir', type=Path)
     recv.add_argument('--diagnostics', action='store_true',
                       help='print decoder stage timing and counters')
