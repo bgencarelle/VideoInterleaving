@@ -151,6 +151,8 @@ HEAD, BODY_END, TAIL_PER = 208, 2224, 96
 TAIL_PHASES = 7
 HEAD_MIN_CONFIDENCE = .70
 HEAD_MIN_COVERAGE = .50
+LIVE_VALID_HEAD_CONFIDENCE = .85
+LIVE_VALID_HEAD_COVERAGE = .75
 
 # Static placement tables: V3--V6 do this kind of work once at setup, not on
 # every picture.  The flattened arrays are used by the vectorized scatter in
@@ -1030,15 +1032,25 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
             if result.status != 'lost':
                 result.status = 'received' if confidence >= .45 else 'degraded'
             channel = result.diag.pop('_H', None)
+            metadata_valid = not current_format
             if channel is not None and result.status != 'lost':
                 if current_format:
                     meta_start = frame_start + (V3.SYNC_LEN+FRAME)*scale
                     decoded_aspect = decode_metadata(
                         model, samples, meta_start, scale, channel)
                     if decoded_aspect is not None:
+                        metadata_valid = True
                         aspect_code = decoded_aspect
+            if (result.status != 'lost' and
+                    (not metadata_valid or
+                     result.diag.get('head_confidence', 0) <
+                     LIVE_VALID_HEAD_CONFIDENCE or
+                     result.diag.get('head_coverage', 0) <
+                     LIVE_VALID_HEAD_COVERAGE)):
+                result.status = 'lost'
             result.diag['pulse_confidence'] = float(confidence)
             result.diag['aspect_code'] = aspect_code
+            result.diag['metadata_valid'] = metadata_valid
             result.diag['pulse_scale'] = float(scale)
             result.diag['frame_scale'] = float(frame_scale)
             result.diag['timing_delta_ppm'] = float(
