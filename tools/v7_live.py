@@ -358,8 +358,8 @@ def parser():
                       help='print decoder stage timing and counters')
     recv.add_argument('--decode-batch', type=int, default=1,
                       help='new frames required before each decode (default: 1)')
-    recv.add_argument('--decode-history', type=int, default=4,
-                      help='frames retained for clock reacquisition (default: 4)')
+    recv.add_argument('--decode-history', type=int, default=1,
+                      help='frames retained for clock reacquisition (default: 1)')
     recv.add_argument('--refine', action='store_true',
                       help='enable slower clock-template refinement')
     return ap
