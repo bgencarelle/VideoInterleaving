@@ -136,6 +136,21 @@ pursue more resolution or frame rate.
 - [ ] Measure the clean-detail, frame-rate and recovery costs of any redundancy.
   Preserve useful stereo capacity while protecting only what evidence justifies.
 
+### Full-repeat control evaluation — 2026-09-20
+
+The full-repeat control is implemented as `wire-v6-repeat` with
+`v6-repeat-dct` and `v6-repeat-wavelet`. It sends all 2,880 analog coefficients
+twice, across opposite tracks and separated carriers. It preserves the
+375–12,750 Hz carrier band and 14 kHz whole-waveform ceiling, but reduces the
+frame rate from 8.96 fps to approximately 6.04 fps at 48 kHz.
+
+The 12-frame synthetic matrix showed clear gains under either-track loss and
+some severe Type-I/Type-II and MP3 wavelet cases, but it was not universally
+better: DCT MP3, wow/flutter, hiss, and several wavelet low-pass cases regressed.
+The full-repeat wire is therefore a comparison/control profile, not the V6
+default. Keep its results in `scratch/` and require matched real-tape captures
+before choosing between foundation-only and full-repeat protection.
+
 ## 5. Let real tape select the final allocation
 
 - [ ] Record the same short sequence using historical V2 and the best current
