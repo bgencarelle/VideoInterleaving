@@ -307,8 +307,8 @@ def run_receive(args):
                 photo = ImageTk.PhotoImage(image)
                 label.configure(image=photo, text='')
                 label.image = photo
-            root.after(100, tick)
-        root.after(100, tick)
+            root.after(10, tick)
+        root.after(10, tick)
         try:
             root.mainloop()
         except KeyboardInterrupt:
@@ -317,7 +317,7 @@ def run_receive(args):
         try:
             while not stop.is_set():
                 decode_available()
-                time.sleep(.1)
+                time.sleep(.01)
         except KeyboardInterrupt:
             pass
     stream.stop(); stream.close()
