@@ -984,6 +984,8 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
         next_start = None
         following_valid = False
         current_format = True
+        frame_scale = scale
+        frame_length = PULSE_FRAME
         if following is not None:
             next_position = search + following[0]
             next_start = next_position - 16*following[1]
@@ -993,8 +995,14 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
                 interval = (next_start-frame_start)/scale
                 current_format = abs(interval-PULSE_FRAME) <= \
                     abs(interval-PULSE_FRAME_OLD)
+                frame_length = PULSE_FRAME if current_format else PULSE_FRAME_OLD
+                frame_scale = (next_start-frame_start)/frame_length
         start = frame_start + V3.SYNC_LEN*scale
-        indexes = start + np.arange(FRAME)*scale
+        # The first pulse measures the local playback scale at frame start;
+        # consecutive pulse positions measure the actual frame duration. Use
+        # the latter for the body walk so smooth wow/flutter is corrected
+        # across the payload instead of only at its first sample.
+        indexes = start + np.arange(FRAME)*frame_scale
         if indexes[-1] >= len(samples)-1:
             break
         if confidence < .45:
@@ -1031,6 +1039,10 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
                         aspect_code = decoded_aspect
             result.diag['pulse_confidence'] = float(confidence)
             result.diag['aspect_code'] = aspect_code
+            result.diag['pulse_scale'] = float(scale)
+            result.diag['frame_scale'] = float(frame_scale)
+            result.diag['timing_delta_ppm'] = float(
+                (frame_scale/scale-1)*1e6)
             results.append(result)
             if result.status != 'lost':
                 tail = result.coeffs.copy()

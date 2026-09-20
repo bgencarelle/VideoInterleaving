@@ -164,6 +164,7 @@ def run_receive(args):
              'dropped': 0, 'decoded': 0, 'verified': 0, 'lost': 0,
              'status': 'acquiring', 'counter': None, 'decode_ms': None,
              'quality': '--',
+             'timing_delta': None,
              'pulse': None, 'aspect': 0, 'aspect_candidate': 0,
              'aspect_streak': 0, 'input_samples': 0, 'started': time.monotonic(),
              'auto_gain': 1.0,
@@ -262,6 +263,7 @@ def run_receive(args):
             meter['status'] = result.status
             meter['counter'] = meter['decoded']
             meter['pulse'] = result.diag.get('pulse_confidence')
+            meter['timing_delta'] = result.diag.get('timing_delta_ppm')
             meter['quality'] = (
                 f'head {result.diag.get("head_confidence", 0):.2f}/'
                 f'{result.diag.get("head_coverage", 0):.2f}')
@@ -372,6 +374,7 @@ def run_receive(args):
                 f'x{meter["aspect_streak"]})  pulse '
                 f'{meter["pulse"] if meter["pulse"] is not None else "--"} '
                 f'gain {meter["auto_gain"]:4.1f}x  '
+                f'timing {meter["timing_delta"] if meter["timing_delta"] is not None else "--"} ppm  '
                 f'decode {meter["decode_ms"] if meter["decode_ms"] is not None else "--"} ms | '
                 f'incoming {meter["input_fps"]:5.2f} fps | '
                 f'decoded {meter["decoded_fps"]:5.2f} fps'))
