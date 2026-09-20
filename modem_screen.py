@@ -299,6 +299,39 @@ def _lowest_camera_mode(fmt, source, fps):
     return min(modes, key=lambda size: size[0]*size[1]) if modes else None
 
 
+def _lowest_camera_mode_any(fmt, source):
+    """Return ``(width, height), fps`` for the smallest-rate camera mode.
+
+    When the caller has no capture-rate preference, choose the lowest
+    advertised FPS first, then the smallest frame at that rate.  This avoids
+    opening a fast/high-resolution sensor mode merely because the encoder is
+    slower than the camera.
+    """
+    if shutil.which('ffmpeg') is None:
+        return None
+    try:
+        probe = subprocess.run(
+            ['ffmpeg', '-nostdin', '-hide_banner', '-f', fmt,
+             '-list_options', 'true', '-i', source],
+            capture_output=True, text=True, timeout=15)
+    except (OSError, TypeError, subprocess.SubprocessError):
+        return None
+    modes = []
+    for line in (probe.stderr or '').splitlines():
+        match = re.search(r'(\d+)x(\d+)', line)
+        if not match:
+            continue
+        rates = [float(value) for value in
+                 re.findall(r'\d+(?:\.\d+)?', line[match.end():])]
+        size = (int(match.group(1)), int(match.group(2)))
+        modes.extend((rate, size) for rate in rates if rate > 0)
+    if not modes:
+        return None
+    rate, size = min(modes, key=lambda item: (item[0],
+                                               item[1][0]*item[1][1]))
+    return size, rate
+
+
 def camera_source(index=0, fps=30, width=320, spec=None):
     """Capture the smallest supported mode, then resize before the Python pipe.
 
@@ -316,15 +349,24 @@ def camera_source(index=0, fps=30, width=320, spec=None):
         # AVFoundation may open a 1080p/portrait mode and do the expensive
         # capture first.  If probing is unavailable, retain FFmpeg's default.
         source_index = spec.split(':', 1)[1].split(':', 1)[0]
-        mode = _lowest_camera_mode('avfoundation',
-                                   f'{source_index}:none', fps)
+        if fps is None:
+            selected = _lowest_camera_mode_any(
+                'avfoundation', f'{source_index}:none')
+            mode, fps = selected if selected else (None, 30)
+        else:
+            mode = _lowest_camera_mode('avfoundation',
+                                       f'{source_index}:none', fps)
         return ffmpeg_source(spec, fps, width=width, video_size=mode)
     elif sys.platform.startswith('win'):
         spec = spec or 'dshow:video=Integrated Camera'
     else:
         spec = spec or f'v4l2:/dev/video{index}'
     fmt, source = spec.split(':', 1)
-    mode = _lowest_camera_mode(fmt, source, fps)
+    if fps is None:
+        selected = _lowest_camera_mode_any(fmt, source)
+        mode, fps = selected if selected else (None, 30)
+    else:
+        mode = _lowest_camera_mode(fmt, source, fps)
     return ffmpeg_source(spec, fps, width=width, video_size=mode)
 
 

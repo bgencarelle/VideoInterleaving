@@ -43,7 +43,7 @@ def _capture(args):
 
     region = _region(args.region)
     if args.source == 'camera':
-        return camera_source(args.camera, args.capture_fps or 30,
+        return camera_source(args.camera, args.capture_fps,
                              width=args.capture_width, spec=args.ffmpeg_input)
     if args.screen_backend == 'mss':
         return screen_source(region)
