@@ -634,39 +634,48 @@ def fade_and_noise(Z, H):
             pred2 = np.array([H[s, b, ch] @ PATS[(s, b)] for b in pil])
             dof = max(len(pil)-3, 1)
             noise[s, ch] = np.sum(np.abs(obs-pred2)**2)/dof
-    # Smooth over +-1 symbol, floor relative to pilot power.
-    k = np.array([1, 1, 1])/3
+    # Smooth over +-1 symbol, without launching one tiny convolution per
+    # channel/symbol.  The explicit edge handling matches np.convolve(...,
+    # mode='same') with zero outside the frame closely enough for this noise
+    # floor, while avoiding a surprising amount of dispatch overhead on M4.
+    sm = np.empty_like(noise)
+    if F == 1:
+        sm[:] = noise
+    else:
+        sm[0] = (noise[0]+noise[1])/3
+        sm[-1] = (noise[-2]+noise[-1])/3
+        sm[1:-1] = (noise[:-2]+noise[1:-1]+noise[2:])/3
     for ch in range(2):
-        # Additive noise does not vanish when the signal fades (a dropout
-        # leaves tiny residuals): floor each symbol at the frame median.
-        sm = np.convolve(noise[:, ch], k, mode='same')
-        noise[:, ch] = np.maximum(np.maximum(sm, np.median(sm)),
-                                  1e-5*PILOT_AMP**2*np.mean(np.abs(H[:, BINS, ch])**2))
+        noise[:, ch] = np.maximum(
+            np.maximum(sm[:, ch], np.median(sm[:, ch])),
+            1e-5*PILOT_AMP**2*np.mean(np.abs(H[:, BINS, ch])**2))
     return H, noise
 
 
 def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
-                 diagnostics=None):
+                 diagnostics=None, direct_body=None):
     started = perf_counter()
     stage_started = started
-    c0, nom, d = tmap
-    base = (counter-c0)*FRAME
-    n = base + np.arange(-64, FRAME+64, dtype=float)
-    pos = n + np.interp(n, nom, d)
-    if pos[0] < 0 or pos[-1] >= len(x)-1:
-        return None
-    seg = _sample_at(x, pos, taps=16).astype(float)            # nominal-time frame
-    # Clock cancellation (§9.2): regenerate from this frame's word, LS gain.
-    clk = clock_cancel_template(counter)
-    for ch in range(2 if cancel else 0):
-        a = np.dot(seg[:, ch], clk)/np.dot(clk, clk)
-        seg[:, ch] -= a*clk
-    seg = seg[64:64+FRAME]
-    Z = np.empty((F, 65, 2), complex)
-    for s in range(F):
-        w = seg[s*SYM+WIN:s*SYM+WIN+N]
-        Z[s] = (np.fft.rfft(w, axis=0)/model.scale*np.conj(model.phase[s])[:, None] *
-                EARLY[:, None])
+    if direct_body is None:
+        c0, nom, d = tmap
+        base = (counter-c0)*FRAME
+        n = base + np.arange(-64, FRAME+64, dtype=float)
+        pos = n + np.interp(n, nom, d)
+        if pos[0] < 0 or pos[-1] >= len(x)-1:
+            return None
+        seg = _sample_at(x, pos, taps=16).astype(float)
+        # Clock cancellation (§9.2): regenerate from this frame's word, LS gain.
+        if cancel:
+            clk = clock_cancel_template(counter)
+            for ch in range(2):
+                a = np.dot(seg[:, ch], clk)/np.dot(clk, clk)
+                seg[:, ch] -= a*clk
+        seg = seg[64:64+FRAME]
+    else:
+        seg = np.asarray(direct_body, dtype=float)
+    windows = seg.reshape(F, SYM, 2)[:, WIN:WIN+N, :]
+    Z = (np.fft.rfft(windows, axis=1)/model.scale *
+         np.conj(model.phase)[:, :, None] * EARLY[None, :, None])
     if diagnostics is not None:
         diagnostics.setdefault('stage_ms', {}).setdefault('sample_fft', []).append(
             (perf_counter()-stage_started)*1000)
@@ -876,12 +885,11 @@ def decode_pulse_stream(model, x, diagnostics=None):
         if indexes[-1] >= len(samples)-1:
             break
         body = _sample_at(samples, indexes, taps=16).astype(np.float32)
-        padded = np.pad(body, ((64, 65), (0, 0)))
         nominal = np.array([0., FRAME])
         offset = np.array([64., 64.])
         try:
-            result = decode_frame(model, padded, (counter, nominal, offset),
-                                  counter, tail, cancel=False,
+            result = decode_frame(model, None, (counter, nominal, offset),
+                                  counter, tail, cancel=False, direct_body=body,
                                   diagnostics=diagnostics)
         except (FloatingPointError, np.linalg.LinAlgError, ValueError,
                 IndexError):
