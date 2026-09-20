@@ -253,7 +253,6 @@ def run_receive(args):
             # Each call is gated by newly arrived audio.  The short rolling
             # history intentionally restarts the prototype's local counter,
             # so comparing result.counter here would suppress valid frames.
-            latest = P.values_from(model, result.coeffs)
             meter['decoded'] += 1
             now = time.monotonic()
             meter['decoded_times'].append(now)
@@ -283,6 +282,7 @@ def run_receive(args):
             meter['decode_ms'] = (info.get('diagnostics') or {}).get(
                 'last_elapsed_ms')
             if result.status in ('received', 'verified'):
+                latest = P.values_from(model, result.coeffs)
                 meter['verified'] += 1
             if result.status == 'lost':
                 meter['lost'] += 1
