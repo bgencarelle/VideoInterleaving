@@ -951,18 +951,16 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
                 break
             pos, sc, conf = hit
             fs = scan + pos - 16*sc
-            # A pulse can be visible before its body has arrived.  Do not let
-            # that partial newest candidate hide the previous complete frame.
-            if fs + PULSE_FRAME_OLD*sc > len(samples):
-                break
             if conf < .45:
                 scan = int(fs + PULSE_FRAME_OLD*sc)
                 continue
             candidates.append((fs, sc, conf, 0))
             scan = int(fs + (PULSE_FRAME_OLD-32)*sc)
-        if not candidates:
+        if len(candidates) < 2:
             return [], {'frames': 0, 'pulse_frames': 0, 'recovered': False}
-        fs, sc, conf, pending_aspect = candidates[-1]
+        # The second pulse is the first edge of the next header.  It is enough
+        # to validate the current frame duration; the next body need not exist.
+        fs, sc, conf, pending_aspect = candidates[-2]
         cursor = int(fs)
         measured = (16*sc, sc, conf)
     while cursor + V3.SYNC_LEN + 32 < len(samples):
@@ -992,10 +990,7 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
             next_position = search + following[0]
             next_start = next_position - 16*following[1]
             scale_agrees = abs(following[1]/scale-1) <= .03
-            next_complete = (next_start + PULSE_FRAME_OLD*following[1] <=
-                             len(samples))
-            following_valid = (following[2] >= .45 and scale_agrees and
-                               next_complete)
+            following_valid = following[2] >= .45 and scale_agrees
             if following_valid:
                 interval = (next_start-frame_start)/scale
                 current_format = abs(interval-PULSE_FRAME) <= \
