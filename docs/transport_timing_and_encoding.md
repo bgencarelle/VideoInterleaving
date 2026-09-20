@@ -137,6 +137,33 @@ These formulas and constants are `[C:animation_modem/core.py:37-62]`,
 
 The layout definitions are `[C:animation_modem/transport3.py:66-108]`; the
 header-symbol and packet derivations are `[C:animation_modem/core.py:157-240]`.
+
+The current sample-index layout is:
+
+```text
+0                                                                    frame-1
+|<------------------------- SYNC_LEN = 288 ------------------------->|
+|<-------------------------- packet_samples -------------------------->|<--32-->
+|    preamble / pulse word    | symbol 0 | symbol 1 | ... | symbol S-1 | guard |
+0                            288       432       576                 288+S*144
+
+Each symbol:       |<-- CP=16 -->|<----------- N=128 useful ----------->|
+symbol start:      k = 288 + s*144
+FFT sample window: k + 12       through k + 12 + 127
+```
+
+Thus `packet_samples = 288 + S*144`, `frame_samples = packet_samples + 32`,
+and the receiver's `CP-4` window intentionally overlaps four samples of the
+cyclic prefix. At 48 kHz, the current packet/frame pairs are wire
+`3168/3200`, wire-hd `3456/3488`, tape `2880/2912`, tape-25 `1872/1904`,
+V6 `5328/5360`, and V6-repeat `7920/7952`. `[C:animation_modem/core.py:37-62]`,
+`[C:animation_modem/core.py:1229-1235]`
+
+V1 and V2 use the same 288-sample sync, 144-sample symbol, and 16-sample CP
+indexing, but their historical packet/frame totals differ by layout. V1's
+fixed frame is `0..3199`, with the 3,024-sample packet followed by a 176-sample
+tail; V2 appends a 32-sample guard to each derived packet. `[H99:animation_modem/transport.py:14-24]`,
+`[H99:animation_modem/transport2.py:25-35]`
 The frame-rate values are generated again by `tools/spec_vectors.py`.
 
 ### Transmit-rate adaptation and emission ceilings
@@ -607,6 +634,39 @@ below 0.05 are assigned effectively infinite noise. `[C:animation_modem/core.py:
 If no header verifies but coverage/coherence remain usable, the decoder may
 return `picture_only`; the receiver retains the last detected layout and aspect
 for damaged-header presentation. `[C:animation_modem/core.py:1453-1554]`, `[C:animation_modem/transport3.py:920-929]`
+
+### Receiver reset, relock, and error contract
+
+`Receiver.reset(preserve_timing=False)` is the input-discontinuity boundary. It
+clears buffered samples, pending packet/acquisition state, candidate trial
+index, predicted packet, miss counters, aspect state, pulse-channel state, and
+diagnostic counters. It also clears timing confidence and rate error unless
+`preserve_timing=True`; construction performs one reset but does not count as
+an input discontinuity. `[C:animation_modem/transport3.py:610-645]`
+
+The incremental contract is:
+
+```text
+RESET/COLD
+  -> ACQUIRE [pulse edge count; correlation only if enabled as fallback]
+  -> PENDING [complete candidate packet buffered]
+  -> DECODE
+       -> VALUES_PRESENT -> LOCKED/COAST
+       -> NO_VALUES -> ACQUIRE [drop failed packet; clear prediction]
+  -> LOCKED/COAST
+       -> VERIFIED -> LOCKED/COAST [predict next frame]
+       -> UNVERIFIED -> retain layout; after 4, restore start candidate
+       -> DISCONTINUITY -> RESET
+```
+
+`flush()` drains an exact final packet without requiring its guard. A result is
+not an exception for ordinary wire damage: the decoder returns `received` or
+`degraded` when a verified header produced values, `picture_only` when values
+are usable without a verified header, and `lost` when no values are usable.
+Malformed API input and invalid constructor ranges remain exceptions; silence,
+missing preambles, CRC failure, and packet loss are ordinary diagnostic/result
+paths. `[C:animation_modem/transport3.py:816-817]`, `[C:animation_modem/transport3.py:873-975]`,
+`[C:animation_modem/core.py:1523-1554]`
 
 ## 12. Deterministic specification vectors
 
