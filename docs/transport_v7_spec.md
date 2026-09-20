@@ -800,6 +800,10 @@ pulse frame is 3,920 samples (288 preamble + 3,456 body + 144 metadata symbol
 runs the V7 prototype
 decoder, displays the newest usable reconstruction, and can save frames with
 `--save-dir`. A `--headless` receiver is available for loopback diagnostics.
+The window is resizable; keyboard `F` toggles fullscreen, `I` toggles the
+diagnostic panel, and `Escape` exits fullscreen. Diagnostics are shown by
+default and can be hidden with `--no-diagnostics`; `--no-log` suppresses routine
+console status output for standalone embedded use.
 
 This is deliberately not a live production integration. The current prototype
 uses the offline V7 shaping path for each batch, so batch boundaries can create

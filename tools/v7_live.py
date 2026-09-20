@@ -396,47 +396,65 @@ def run_receive(args):
         from PIL import ImageTk
         root = tk.Tk()
         root.title('V7 modem receiver')
-        root.resizable(not args.fullscreen, not args.fullscreen)
+        root.resizable(True, True)
         root.geometry('640x650')
         root.configure(background='black')
         image_frame = tk.Frame(root, width=620, height=480,
                                background='black')
         image_frame.pack_propagate(False)
+        info_visible = args.show_diagnostics
+        info_frame = tk.Frame(root, background='black')
         if args.fullscreen:
             root.attributes('-fullscreen', True)
-            image_frame.pack(padx=10, pady=8, fill='both', expand=True)
-            root.bind('<Escape>', lambda _event: root.attributes(
-                '-fullscreen', False))
-        else:
-            image_frame.pack(padx=10, pady=8)
+        image_frame.pack(padx=10, pady=8, fill='both', expand=True)
+
+        def toggle_fullscreen(_event=None):
+            root.attributes('-fullscreen', not root.attributes('-fullscreen'))
+
+        def toggle_information(_event=None):
+            nonlocal info_visible
+            info_visible = not info_visible
+            if info_visible:
+                info_frame.pack(fill='x', padx=6, pady=(0, 4))
+            else:
+                info_frame.pack_forget()
+
+        root.bind('<Escape>', lambda _event: root.attributes(
+            '-fullscreen', False))
+        root.bind('<KeyPress-f>', toggle_fullscreen)
+        root.bind('<KeyPress-F>', toggle_fullscreen)
+        root.bind('<KeyPress-i>', toggle_information)
+        root.bind('<KeyPress-I>', toggle_information)
         label = tk.Label(image_frame, text='Acquiring V7 clock…',
                          background='black')
         label.configure(background='black')
         label.pack(expand=True, fill='both')
         device_label = status_label = levels_label = stats_label = quality_label = None
-        if args.show_diagnostics:
-            device_label = tk.Label(root, text=f'V7 input: {args.device}',
+        if info_visible:
+            info_frame.pack(fill='x', padx=6, pady=(0, 4))
+            device_label = tk.Label(info_frame, text=f'V7 input: {args.device}',
+                                    background='black', foreground='white',
+                                    anchor='w', justify='left')
+            device_label.pack(fill='x')
+            status_label = tk.Label(info_frame, text='status: acquiring', anchor='w',
                                     background='black', foreground='white')
-            device_label.pack(fill='x', padx=6)
-            status_label = tk.Label(root, text='status: acquiring', anchor='w',
-                                    background='black', foreground='white')
-            status_label.pack(fill='x', padx=6)
-            levels_label = tk.Label(root, text='levels: --', anchor='w',
+            status_label.pack(fill='x')
+            levels_label = tk.Label(info_frame, text='levels: --', anchor='w',
                                     font='TkFixedFont', background='black',
                                     foreground='white')
-            levels_label.pack(fill='x', padx=6)
-            stats_label = tk.Label(root, text='frames: --', anchor='w',
+            levels_label.pack(fill='x')
+            stats_label = tk.Label(info_frame, text='frames: --', anchor='w',
                                    font='TkFixedFont', background='black',
                                    foreground='white')
-            stats_label.pack(fill='x', padx=6)
-            quality_label = tk.Label(root, text='quality: --', anchor='w',
+            stats_label.pack(fill='x')
+            quality_label = tk.Label(info_frame, text='quality: --', anchor='w',
                                      font='TkFixedFont', background='black',
                                      foreground='white')
-            quality_label.pack(fill='x', padx=6)
+            quality_label.pack(fill='x')
 
         def tick():
             nonlocal rendered
-            if args.show_diagnostics:
+            if info_visible:
                 peak = 20*np.log10(np.maximum(meter['peak'], 1e-9))
                 rms = 20*np.log10(np.maximum(meter['rms'], 1e-9))
                 levels_label.configure(text=(
@@ -447,6 +465,7 @@ def run_receive(args):
                     f'lost {meter["lost"]}  input blocks {meter["blocks"]} '
                     f'dropped {meter["dropped"]}'))
                 quality_label.configure(text=f'quality: {meter["quality"]}')
+                status_label.configure(wraplength=max(240, root.winfo_width()-12))
                 status_label.configure(text=(
                     f'status {meter["status"]}  frame {meter["counter"]} '
                     f'aspect {meter["aspect"]} '
@@ -461,20 +480,13 @@ def run_receive(args):
             if latest is not None and latest is not rendered:
                 image = values_image(latest, model.coder.grids)
                 ratio = P.V7_ASPECT_RATIOS[int(meter['aspect']) & 7]
-                if args.fullscreen:
-                    bound_w = max(1, image_frame.winfo_width())
-                    bound_h = max(1, image_frame.winfo_height())
-                    height = bound_h
-                    width = round(height*ratio)
-                    if width > bound_w:
-                        width = bound_w
-                        height = round(width/ratio)
-                else:
-                    height = 480
-                    width = max(1, round(height*ratio))
-                    scale = min(620/width, 480/height)
-                    width = round(width*scale)
-                    height = round(height*scale)
+                bound_w = max(1, image_frame.winfo_width())
+                bound_h = max(1, image_frame.winfo_height())
+                height = bound_h
+                width = round(height*ratio)
+                if width > bound_w:
+                    width = bound_w
+                    height = round(width/ratio)
                 image = image.resize((max(1, width), max(1, height)),
                                      Image.Resampling.NEAREST)
                 photo = ImageTk.PhotoImage(image)
