@@ -13,7 +13,9 @@ model, per-cell 2x2 MMSE, group LMMSE, confidence gate, tail store).
 """
 import sys
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 from PIL import Image
@@ -100,6 +102,14 @@ def clock_wave(words):
                 level = -level
             out += [level]*(BIT//2)
     return filtfilt(_CLOCK_LP, [1.0], np.asarray(out))
+
+
+@lru_cache(maxsize=256)
+def clock_cancel_template(counter):
+    """Cache the deterministic three-word cancellation template."""
+    clk = clock_wave((clock_word(counter-1), clock_word(counter),
+                      clock_word(counter+1)))
+    return np.asarray(clk[FRAME-64:2*FRAME+64], float)
 
 
 # ------------------------------------------------------------------ §6.4, §8
@@ -514,7 +524,7 @@ _BASIS = np.stack([np.interp(np.arange(F), KNOTS, np.eye(len(KNOTS))[k])
                    for k in range(len(KNOTS))], axis=1)          # (F, knots) hat basis
 
 
-def channel_joint(Z, iters=5):
+def channel_joint(Z, iters=2):
     """Per rx channel: static 1x2 response per pilot bin x smooth timing track.
 
     y(s,b) = exp(j*2*pi*b*delta(s)/N) * (hM(b)*pM + hS(b)*pS), delta piecewise
@@ -591,7 +601,10 @@ def fade_and_noise(Z, H):
     return H, noise
 
 
-def decode_frame(model, x, tmap, counter, prev_tail, cancel=True):
+def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
+                 diagnostics=None):
+    started = perf_counter()
+    stage_started = started
     c0, nom, d = tmap
     base = (counter-c0)*FRAME
     n = base + np.arange(-64, FRAME+64, dtype=float)
@@ -600,8 +613,7 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True):
         return None
     seg = _sample_at(x, pos, taps=16).astype(float)            # nominal-time frame
     # Clock cancellation (§9.2): regenerate from this frame's word, LS gain.
-    clk = clock_wave([clock_word(counter-1), clock_word(counter), clock_word(counter+1)])
-    clk = clk[FRAME-64:2*FRAME+64]
+    clk = clock_cancel_template(counter)
     for ch in range(2 if cancel else 0):
         a = np.dot(seg[:, ch], clk)/np.dot(clk, clk)
         seg[:, ch] -= a*clk
@@ -611,54 +623,88 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True):
         w = seg[s*SYM+WIN:s*SYM+WIN+N]
         Z[s] = (np.fft.rfft(w, axis=0)/model.scale*np.conj(model.phase[s])[:, None] *
                 EARLY[:, None])
+    if diagnostics is not None:
+        diagnostics.setdefault('stage_ms', {}).setdefault('sample_fft', []).append(
+            (perf_counter()-stage_started)*1000)
+    stage_started = perf_counter()
     H = channel_joint(Z)
     H, noise = fade_and_noise(Z, H)
+    if diagnostics is not None:
+        diagnostics.setdefault('stage_ms', {}).setdefault('channel', []).append(
+            (perf_counter()-stage_started)*1000)
+    stage_started = perf_counter()
     DEBUG['Z'], DEBUG['H'], DEBUG['noise'] = Z, H, noise
     # Per-cell 2x2 MMSE (§9.6 step 1) with priors from group powers.
     idx = frame_ranks(model.order, counter)
     tx_var = np.array([np.mean(np.where(r >= 0, model.gain[np.maximum(r, 0)]**2 *
                                         model.lam[np.maximum(r, 0)], 0)) for r in idx])
-    pw = {}
-    for gi, (blk, stream, q) in enumerate(GROUPS):
-        pw.setdefault(blk, np.zeros(2))[0 if stream == 'M' else 1] += tx_var[gi]
+    group_var = {(blk, stream, q): tx_var[gi]
+                 for gi, (blk, stream, q) in enumerate(GROUPS)}
     est = {}
-    for blk, P in pw.items():
+    for blk in BLOCKS:
         b, phi = blk
-        for t in range(8):
-            s = phi + 3*t
-            Hc = H[s, b]; Pd = np.diag(P+1e-12); Nn = np.diag(np.maximum(noise[s], NOISE_FLOOR))
-            S = Hc @ Pd @ Hc.conj().T + Nn
-            W = Pd @ Hc.conj().T @ np.linalg.pinv(S)
-            xt = W @ Z[s, b]; B = W @ Hc
-            cov = W @ S @ W.conj().T
+        sidx = phi + 3*np.arange(8)
+        Hc = H[sidx, b]
+        for q in 'IQ':
+            P = np.array([group_var.get((blk, 'M', q), 0.0),
+                          group_var.get((blk, 'S', q), 0.0)])
+            Psafe = P + 1e-12
+            S = (Hc*Psafe[None, None, :]) @ Hc.conj().transpose(0, 2, 1)
+            S[:, np.diag_indices(2)[0], np.diag_indices(2)[1]] += np.maximum(
+                noise[sidx], NOISE_FLOOR)
+            # Batched 2x2 solve: the old per-cell pinv/solve loop was the
+            # largest avoidable cost in the live receiver.
+            M = Psafe[None, :, None] * Hc.conj().transpose(0, 2, 1)
+            W = np.linalg.solve(S.transpose(0, 2, 1),
+                                M.transpose(0, 2, 1)).transpose(0, 2, 1)
+            xt = np.einsum('tij,tj->ti', W, Z[sidx, b])
+            B = W @ Hc
+            cov = W @ S @ W.conj().transpose(0, 2, 1)
             for k in range(2):
                 if P[k] <= 0:
                     continue
-                beta = B[k, k].real
-                if beta < 1e-6:
-                    est[(blk, k, t)] = (0j, np.inf); continue
-                var = max((cov[k, k].real - beta**2*P[k]), 1e-12)/beta**2
-                est[(blk, k, t)] = (xt[k]/beta, var)
-    # Group LMMSE (§9.6 step 2) + gate (step 3).
-    xhat = np.zeros_like(model.mu); conf = np.zeros_like(model.mu); got = np.zeros_like(model.mu, bool)
+                beta = B[:, k, k].real
+                var = np.maximum(cov[:, k, k].real-beta**2*P[k], 1e-12)
+                var = np.divide(var, beta**2, out=np.full(8, np.inf),
+                                where=beta > 1e-6)
+                est[(blk, k, q)] = (np.divide(xt[:, k], beta,
+                                               out=np.zeros(8, complex),
+                                               where=beta > 1e-6), var)
+    # Group LMMSE (§9.6 step 2) + gate (step 3).  Assemble all groups and use
+    # one batched solve instead of 290 Python-level 8x8 SVD/solve calls.
+    group_count = len(GROUPS)
+    ranks_all = idx
+    live_all = ranks_all >= 0
+    y_all = np.empty((group_count, 8)); sig_all = np.empty((group_count, 8))
     for gi, (blk, stream, q) in enumerate(GROUPS):
         k = 0 if stream == 'M' else 1
-        ranks = idx[gi]; live = ranks >= 0
-        y = np.empty(8); sig = np.empty(8)
-        for t in range(8):
-            val, var = est.get((blk, k, t), (0j, np.inf))
-            y[t] = val.real if q == 'I' else val.imag
-            sig[t] = var/2 if np.isfinite(var) else 1e9
-        lam = np.where(live, model.lam[np.maximum(ranks, 0)], 1e-12)
-        g = np.where(live, model.gain[np.maximum(ranks, 0)], 0)
-        A = H8*g[None, :]
-        S = A @ np.diag(lam) @ A.T + np.diag(sig)
-        K = np.diag(lam) @ A.T @ np.linalg.pinv(S)
-        xg = K @ y
-        post = lam - np.einsum('ij,ji->i', K, A @ np.diag(lam))
-        cg = np.clip(1 - post/lam, 0, 1)
-        r = ranks[live]
-        xhat[r] = xg[live]; conf[r] = cg[live]; got[r] = True
+        val, var = est.get((blk, k, q),
+                           (np.zeros(8, complex), np.full(8, np.inf)))
+        y_all[gi] = val.real if q == 'I' else val.imag
+        sig_all[gi] = np.where(np.isfinite(var), var/2, 1e9)
+    lam_all = np.where(live_all, model.lam[np.maximum(ranks_all, 0)], 1e-12)
+    gain_all = np.where(live_all, model.gain[np.maximum(ranks_all, 0)], 0)
+    A_all = H8[None, :, :]*gain_all[:, None, :]
+    S_all = (A_all*lam_all[:, None, :]) @ A_all.transpose(0, 2, 1)
+    S_all[:, np.arange(8), np.arange(8)] += sig_all
+    M_all = lam_all[:, :, None]*A_all.transpose(0, 2, 1)
+    K_all = np.linalg.solve(S_all.transpose(0, 2, 1),
+                            M_all.transpose(0, 2, 1)).transpose(0, 2, 1)
+    x_all = np.einsum('gij,gj->gi', K_all, y_all)
+    post_all = lam_all - np.einsum(
+        'gij,gji->gi', K_all,
+        A_all*lam_all[:, None, :])
+    conf_all = np.clip(1-post_all/lam_all, 0, 1)
+    xhat = np.zeros_like(model.mu); conf = np.zeros_like(model.mu)
+    got = np.zeros_like(model.mu, bool)
+    for gi in range(group_count):
+        r = ranks_all[gi, live_all[gi]]
+        xhat[r] = x_all[gi, live_all[gi]]
+        conf[r] = conf_all[gi, live_all[gi]]
+        got[r] = True
+    if diagnostics is not None:
+        diagnostics.setdefault('stage_ms', {}).setdefault('equalize', []).append(
+            (perf_counter()-stage_started)*1000)
     floor = np.where(model.head, np.where(model.plane == 0, .05, .15),
                      np.where(model.plane == 0, .45, .60))
     gate = np.clip((conf-floor)/(.85-floor), 0, 1)
@@ -668,7 +714,24 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True):
                   {'noise': noise.mean(0).tolist(), 'got': int(got.sum())})
 
 
-def decode_stream(model, x, verbose=False):
+def _diagnostic_summary(diag, elapsed_ms):
+    if diag is None:
+        return None
+    diag['decode_calls'] = diag.get('decode_calls', 0) + 1
+    diag['last_elapsed_ms'] = round(elapsed_ms, 3)
+    stages = diag.get('stage_ms', {})
+    diag['stage_summary_ms'] = {
+        name: {'count': len(values),
+               'mean': round(float(np.mean(values)), 3),
+               'p95': round(float(np.percentile(values, 95)), 3)}
+        for name, values in stages.items() if values
+    }
+    diag['stage_ms'] = {}
+    return diag
+
+
+def decode_stream(model, x, verbose=False, diagnostics=None):
+    started = perf_counter()
     x = np.asarray(x, float)
     def read(sig):
         y = clock_signal(sig)
@@ -680,7 +743,11 @@ def decode_stream(model, x, verbose=False):
             break
         y, words = read(x[:, ch])
     if not words:
-        return [], {'words': 0}
+        info = {'words': 0}
+        if diagnostics is not None:
+            info['diagnostics'] = _diagnostic_summary(
+                diagnostics, (perf_counter()-started)*1000)
+        return [], info
     # Keep words consistent with a monotone counter/time relation.
     words.sort(key=lambda w: w['bounds'][0])
     tm = time_map(words)
@@ -691,13 +758,24 @@ def decode_stream(model, x, verbose=False):
     lo, hi = min(allc), max(allc)
     results, tail = [], model.mu.copy()
     for counter in range(lo, hi+1):
-        r = decode_frame(model, x, tm, counter, tail, cancel=bool(verified))
+        r = decode_frame(model, x, tm, counter, tail,
+                         cancel=bool(verified), diagnostics=diagnostics)
         if r is None:
             continue
         r.status = 'verified' if counter in verified else 'picture_only'
         tail = r.coeffs.copy()
         results.append(r)
-    return results, {'words': len(words), 'crc_ok': len(verified)}
+    info = {'words': len(words), 'crc_ok': len(verified),
+            'frames': len(results)}
+    if diagnostics is not None:
+        diagnostics['frames'] = diagnostics.get('frames', 0) + len(results)
+        counts = diagnostics.setdefault('status_counts', {})
+        for result in results:
+            counts[result.status] = counts.get(result.status, 0) + 1
+        diagnostics['input_samples'] = int(len(x))
+        info['diagnostics'] = _diagnostic_summary(
+            diagnostics, (perf_counter()-started)*1000)
+    return results, info
 
 
 def values_from(model, coeffs):

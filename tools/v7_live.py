@@ -136,8 +136,10 @@ def run_receive(args):
     blocks = queue.Queue(maxsize=32)
     stop = threading.Event()
     samples = []
+    processed_samples = 0
     last_counter = None
     latest = None
+    diagnostics = {} if args.diagnostics else None
 
     def callback(indata, frames, timing, status):
         if status:
@@ -150,7 +152,7 @@ def run_receive(args):
             pass
 
     def decode_available():
-        nonlocal latest, last_counter
+        nonlocal latest, last_counter, processed_samples
         while True:
             try:
                 samples.append(blocks.get_nowait())
@@ -165,7 +167,12 @@ def run_receive(args):
             audio = np.concatenate(samples)
         if len(audio) < P.FRAME*3:
             return
-        results, info = P.decode_stream(model, audio)
+        if len(audio)-processed_samples < P.FRAME*args.decode_batch:
+            return
+        if not args.refine:
+            P.REFINE = False
+        results, info = P.decode_stream(model, audio, diagnostics=diagnostics)
+        processed_samples = len(audio)
         if not results:
             return
         result = results[-1]
@@ -173,13 +180,22 @@ def run_receive(args):
             return
         last_counter = result.counter
         latest = P.values_from(model, result.coeffs)
-        print({'counter': result.counter, 'status': result.status,
-               'clock_words': info.get('words'), 'crc_ok': info.get('crc_ok')},
-              flush=True)
+        report = {'counter': result.counter, 'status': result.status,
+                  'clock_words': info.get('words'), 'crc_ok': info.get('crc_ok')}
+        if args.diagnostics:
+            report['diagnostics'] = info.get('diagnostics')
+        print(report, flush=True)
         if args.save_dir:
             args.save_dir.mkdir(parents=True, exist_ok=True)
             values_image(latest, model.coder.grids).save(
                 args.save_dir/f'v7_{result.counter:08d}.png')
+        # Keep the receiver's expensive non-streaming prototype bounded.  The
+        # next decode reacquires from this short clock history instead of
+        # repeatedly decoding an ever-growing capture.
+        keep = P.FRAME*args.decode_history
+        if len(audio) > keep:
+            samples[:] = [audio[-keep:]]
+            processed_samples = len(samples[0])
 
     try:
         stream = sd.InputStream(samplerate=P.RATE, channels=2, dtype='float32',
@@ -248,6 +264,14 @@ def parser():
     recv.add_argument('--fixture', type=Path, default=DEFAULT_FIXTURE)
     recv.add_argument('--headless', action='store_true')
     recv.add_argument('--save-dir', type=Path)
+    recv.add_argument('--diagnostics', action='store_true',
+                      help='print decoder stage timing and counters')
+    recv.add_argument('--decode-batch', type=int, default=4,
+                      help='new frames required before each decode (default: 4)')
+    recv.add_argument('--decode-history', type=int, default=6,
+                      help='frames retained for clock reacquisition (default: 6)')
+    recv.add_argument('--refine', action='store_true',
+                      help='enable slower clock-template refinement')
     return ap
 
 
