@@ -896,6 +896,9 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
             # that partial newest candidate hide the previous complete frame.
             if fs + PULSE_FRAME*sc > len(samples):
                 break
+            if conf < .45:
+                scan = int(fs + PULSE_FRAME*sc)
+                continue
             aspect = 0
             if candidates:
                 prev_fs, prev_sc, _prev_conf, _prev_aspect = candidates[-1]
@@ -931,6 +934,7 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
                                       max_scale=PULSE_MAX_SCALE)
         aspect_code = pending_aspect
         next_start = None
+        following_valid = False
         if following is not None:
             next_position = search + following[0]
             next_start = next_position - 16*following[1]
@@ -941,12 +945,24 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
             guard_valid = (0 <= guard_code <= 7 and
                            abs(guard-(PULSE_GUARD_BASE +
                                       guard_code*PULSE_GUARD_STEP)) <= 3)
-            if following[2] >= .45 and scale_agrees and guard_valid:
+            following_valid = (following[2] >= .45 and scale_agrees and
+                               guard_valid)
+            if following_valid:
                 aspect_code = guard_code
         start = frame_start + V3.SYNC_LEN*scale
         indexes = start + np.arange(FRAME)*scale
         if indexes[-1] >= len(samples)-1:
             break
+        if confidence < .45:
+            results.append(Result(counter, 'lost', tail.copy(), {
+                'pulse_confidence': float(confidence), 'held': True}))
+            pending_aspect = aspect_code
+            cursor = int(next_start if following_valid
+                         else frame_start + PULSE_FRAME*scale)
+            measured = ((16*following[1], following[1], following[2])
+                        if following_valid else None)
+            counter += 1
+            continue
         body = _sample_at(samples, indexes, taps=16).astype(np.float32)
         nominal = np.array([0., FRAME])
         offset = np.array([64., 64.])
@@ -968,10 +984,10 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
             if latest_only:
                 break
         pending_aspect = aspect_code
-        cursor = int(next_start if next_start is not None
+        cursor = int(next_start if following_valid
                      else frame_start + PULSE_FRAME*scale)
         measured = ((16*following[1], following[1], following[2])
-                    if following is not None else None)
+                    if following_valid else None)
         counter += 1
     info = {'frames': len(results), 'pulse_frames': counter-1,
             'recovered': bool(results)}
