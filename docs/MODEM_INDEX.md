@@ -16,6 +16,10 @@ testing and source links below.
 3. **[V6/tape testing guide](TAPE_WIRE_TESTING.md)** — synthetic controls,
    live commands, tape-band limits, baseline V6, full-repeat, and the new
    bench-only tape-ordered V6 candidate.
+4. **[V7 transport draft](transport_v7_spec.md)** — proposed replacement
+   wire (clock/identity track, pilot-tracked OFDM, SoftCast gains, M/S),
+   with bench-only prototype results in its §17. Not implemented in
+   `animation_modem/`.
 
 ## Operational guides
 
@@ -28,6 +32,12 @@ testing and source links below.
   direction, acceptance limits, and remaining work.
 
 ## Reproducibility and diagnostics
+
+- [V7 prototype](../tools/v7_proto.py) and [bench](../tools/v7_bench.py) —
+  encode/damage/decode the face fixture across tape, tape-style NR,
+  MP3 320k/V0, ATRAC1 SP, ATRAC3plus and mono; damage models in
+  [`tools/v7_media.py`](../tools/v7_media.py). Needs ffmpeg with libmp3lame
+  and `atracdenc` (set `$ATRACDENC`).
 
 - [Deterministic vector generator](../tools/spec_vectors.py) — emits the eleven
   documented one-packet WAV vectors under `scratch/spec-vectors/` by default.
