@@ -53,7 +53,10 @@ def _capture(args):
 
     region = _region(args.region)
     if args.source == 'camera':
-        return camera_source(args.camera, args.capture_fps or CAMERA_CAPTURE_FPS,
+        # Let FFmpeg probe the lowest mode/rate when the user did not override
+        # it.  Some AVFoundation devices advertise 15 fps but reject a forced
+        # 15-fps open unless their exact mode is selected first.
+        return camera_source(args.camera, args.capture_fps,
                              width=args.capture_width, spec=args.ffmpeg_input)
     if args.screen_backend == 'mss':
         return screen_source(region)
