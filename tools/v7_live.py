@@ -39,15 +39,11 @@ DEFAULT_FIXTURE = ROOT / 'modem_tests/fixtures/v6_face_1110.png'
 def _capture(args):
     """Build one of modem_screen's existing RGB capture sources."""
     from modem_screen import (camera_source, screen_capture_source,
-                              screen_source, _region)
+                              screen_source, Throttled, _region)
 
     region = _region(args.region)
     if args.source == 'camera':
-        # Do not let a 30 fps FFmpeg pipe outrun the 12.71 fps V7 consumer:
-        # unread PPM frames become visible latency. 15 fps is the closest
-        # common camera mode above the live wire cadence, and camera_source()
-        # still selects the smallest advertised mode supporting it.
-        return camera_source(args.camera, args.capture_fps or 15,
+        return camera_source(args.camera, args.capture_fps or 30,
                              width=args.capture_width, spec=args.ffmpeg_input)
     if args.screen_backend == 'mss':
         return screen_source(region)
@@ -72,7 +68,12 @@ def run_send(args):
     import sounddevice as sd
 
     model = _model(args.fixture, args.encode_filter)
-    grab = _capture(args)
+    raw_grab = _capture(args)
+    capture_hz = args.capture_fps or (30 if args.source == 'camera' else FPS)
+    # Match V3--V6: drain a paced FFmpeg source continuously and expose only
+    # the newest frame to the audio encoder. Reading the pipe once per encoded
+    # frame creates seconds of stale-camera latency.
+    grab = Throttled(raw_grab, capture_hz)
     batches = queue.Queue(maxsize=2)
     stop = threading.Event()
     sentinel = object()
