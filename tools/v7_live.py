@@ -16,6 +16,7 @@ known live-experiment limitation; the clock counter continues across batches so
 the receiver can diagnose the behavior rather than silently restarting it.
 """
 import argparse
+from collections import deque
 import queue
 import sys
 import threading
@@ -154,7 +155,9 @@ def run_receive(args):
     meter = {'peak': np.zeros(2), 'rms': np.zeros(2), 'blocks': 0,
              'dropped': 0, 'decoded': 0, 'verified': 0, 'lost': 0,
              'status': 'acquiring', 'counter': None, 'decode_ms': None,
-             'pulse': None}
+             'pulse': None, 'input_samples': 0, 'started': time.monotonic(),
+             'decoded_times': deque(maxlen=32), 'input_fps': 0.,
+             'decoded_fps': 0.}
 
     def callback(indata, frames, timing, status):
         values = np.asarray(indata, float)
@@ -162,6 +165,9 @@ def run_receive(args):
                                    np.max(np.abs(values), axis=0))
         meter['rms'] = np.sqrt(np.mean(values*values, axis=0))
         meter['blocks'] += 1
+        meter['input_samples'] += len(values)
+        elapsed = max(time.monotonic()-meter['started'], 1e-6)
+        meter['input_fps'] = meter['input_samples']/(P.PULSE_FRAME*elapsed)
         if status:
             print(f'input: {status}', file=sys.stderr, flush=True)
         try:
@@ -207,6 +213,11 @@ def run_receive(args):
                 last_counter = result.counter
                 latest = P.values_from(model, result.coeffs)
                 meter['decoded'] += 1
+                now = time.monotonic()
+                meter['decoded_times'].append(now)
+                times = meter['decoded_times']
+                if len(times) >= 2:
+                    meter['decoded_fps'] = (len(times)-1)/(times[-1]-times[0])
                 meter['status'] = result.status
                 meter['counter'] = result.counter
                 meter['pulse'] = result.diag.get('pulse_confidence')
@@ -287,7 +298,9 @@ def run_receive(args):
             status_label.configure(text=(
                 f'status {meter["status"]}  frame {meter["counter"]} '
                 f'pulse {meter["pulse"] if meter["pulse"] is not None else "--"} '
-                f'decode {meter["decode_ms"] if meter["decode_ms"] is not None else "--"} ms'))
+                f'decode {meter["decode_ms"] if meter["decode_ms"] is not None else "--"} ms | '
+                f'incoming {meter["input_fps"]:5.2f} fps | '
+                f'decoded {meter["decoded_fps"]:5.2f} fps'))
             if latest is not None:
                 image = values_image(latest, model.coder.grids)
                 image = image.resize((400, 480), Image.Resampling.NEAREST)
