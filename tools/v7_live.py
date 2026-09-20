@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageEnhance
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -71,9 +71,19 @@ def _model(fixture, encode_filter='nearest'):
     return model
 
 
-def _values(model, frame, encode_filter='nearest'):
+def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0):
+    if gamma <= 0:
+        raise ValueError('gamma must be positive')
     image = frame if isinstance(frame, Image.Image) else Image.fromarray(frame)
     prepared = prepare_image(image, preset='auto', encode_filter=encode_filter)
+    if brightness != 1.0:
+        prepared = ImageEnhance.Brightness(prepared).enhance(brightness)
+    if gamma != 1.0:
+        values = np.asarray(prepared, np.float32)/255.0
+        values = np.clip(values, 0, 1)**(1.0/gamma)
+        adjusted = Image.fromarray(np.uint8(np.rint(values*255)), 'RGB')
+        adjusted.info.update(prepared.info)
+        prepared = adjusted
     return (image_values(prepared, model.coder.grids,
                          encode_filter=encode_filter),
             P.aspect_wire_code(image.size))
@@ -110,7 +120,8 @@ def run_send(args):
                 delay = next_capture-time.monotonic()
                 if delay > 0:
                     time.sleep(delay)
-                value, aspect = _values(model, grab(), args.encode_filter)
+                value, aspect = _values(model, grab(), args.encode_filter,
+                                        args.brightness, args.gamma)
                 frames.append(value); aspects.append(aspect)
                 next_capture += 1/FPS
                 if len(frames) < batch_size:
@@ -498,6 +509,10 @@ def parser():
     send.add_argument('--fixture', type=Path, default=DEFAULT_FIXTURE)
     send.add_argument('--encode-filter', choices=('nearest', 'box', 'lanczos', 'bicubic'),
                       default='nearest')
+    send.add_argument('--brightness', type=float, default=1.05,
+                      help='source brightness multiplier (default: 1.05)')
+    send.add_argument('--gamma', type=float, default=1.0,
+                      help='source gamma; >1 lifts midtones (default: 1.0)')
     send.add_argument('--camera', type=int, default=0)
     send.add_argument('--display', type=int)
     send.add_argument('--ffmpeg-input')
