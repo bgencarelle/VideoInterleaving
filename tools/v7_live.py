@@ -161,7 +161,8 @@ def run_receive(args):
     meter = {'peak': np.zeros(2), 'rms': np.zeros(2), 'blocks': 0,
              'dropped': 0, 'decoded': 0, 'verified': 0, 'lost': 0,
              'status': 'acquiring', 'counter': None, 'decode_ms': None,
-             'pulse': None, 'aspect': 0, 'input_samples': 0, 'started': time.monotonic(),
+             'pulse': None, 'aspect': 0, 'aspect_candidate': 0,
+             'aspect_streak': 0, 'input_samples': 0, 'started': time.monotonic(),
              'decoded_times': deque(maxlen=32), 'input_fps': 0.,
              'decoded_fps': 0.}
 
@@ -240,7 +241,19 @@ def run_receive(args):
             meter['status'] = result.status
             meter['counter'] = meter['decoded']
             meter['pulse'] = result.diag.get('pulse_confidence')
-            meter['aspect'] = result.diag.get('aspect_code', meter['aspect'])
+            candidate = result.diag.get('aspect_code', meter['aspect'])
+            if (result.status in ('received', 'verified') and
+                    (result.diag.get('pulse_confidence') or 0) >= .45):
+                if candidate == meter['aspect']:
+                    meter['aspect_streak'] = 0
+                elif candidate == meter['aspect_candidate']:
+                    meter['aspect_streak'] += 1
+                else:
+                    meter['aspect_candidate'] = candidate
+                    meter['aspect_streak'] = 1
+                if meter['aspect_streak'] >= 3:
+                    meter['aspect'] = meter['aspect_candidate']
+                    meter['aspect_streak'] = 0
             meter['decode_ms'] = (info.get('diagnostics') or {}).get(
                 'last_elapsed_ms')
             if result.status in ('received', 'verified'):
@@ -317,7 +330,9 @@ def run_receive(args):
                 f'dropped {meter["dropped"]}'))
             status_label.configure(text=(
                 f'status {meter["status"]}  frame {meter["counter"]} '
-                f'aspect {meter["aspect"]}  pulse '
+                f'aspect {meter["aspect"]} '
+                f'(candidate {meter["aspect_candidate"]} '
+                f'x{meter["aspect_streak"]})  pulse '
                 f'{meter["pulse"] if meter["pulse"] is not None else "--"} '
                 f'decode {meter["decode_ms"] if meter["decode_ms"] is not None else "--"} ms | '
                 f'incoming {meter["input_fps"]:5.2f} fps | '
