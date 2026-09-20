@@ -688,16 +688,16 @@ results in §17 are reproducible with `tools/v7_bench.py`.
 The sender reuses `modem_screen.py`'s camera and screen capture sources,
 selects the smallest camera mode supporting the requested capture rate, and
 prepares frames with the V7 source grids. Live V7 uses the V3-style
-pulse-counted frame preamble and runs at approximately 12.71 fps. Live V7
+pulse-counted frame preamble and runs at approximately 12.245 fps. Live V7
 defaults to nearest-neighbor
 sampling at both the 80x96 preparation step and the coder-grid sampling step;
 `--encode-filter` can select another explicit filter. Screen capture defaults to
 the existing `mss` path; `--screen-backend ffmpeg` selects the FFmpeg pipe
 explicitly. Camera capture continues to use FFmpeg because it probes the
-smallest supported device mode and performs the RGB pipe conversion. It emits
-bounded low-latency batches
-at 13.889
-fps. The receiver accumulates the explicit 48 kHz input, runs the V7 prototype
+smallest supported device mode and performs the RGB pipe conversion. The live
+pulse frame is 3,920 samples (288 preamble + 3,456 body + 144 metadata symbol
++ 32 guard), or 12.245 fps. The receiver accumulates the explicit 48 kHz input,
+runs the V7 prototype
 decoder, displays the newest usable reconstruction, and can save frames with
 `--save-dir`. A `--headless` receiver is available for loopback diagnostics.
 
@@ -708,3 +708,15 @@ failure rather than silently resetting. It also requires a real 48 kHz device
 and does not resample to arbitrary native device rates. Real-device/tape use
 must wait for a stateful clock/filter implementation and a matched live timing
 test.
+
+### Live metadata amendment
+
+The live pulse wire no longer uses guard length as aspect metadata. The extra
+144-sample metadata symbol carries an 8-bit payload (3-bit aspect code plus a
+fixed live marker) followed by CRC-16/CCITT-FALSE. It is repeated through
+known even-bin pilots and odd-bin data carriers and decoded only when the CRC
+passes. An invalid metadata word holds the previous aspect. The UI additionally
+requires three consecutive reliable requests before changing its displayed
+aspect. This amendment is intentionally separate from the continuous-clock
+architecture described in earlier sections so the older draft remains available
+for comparison.
