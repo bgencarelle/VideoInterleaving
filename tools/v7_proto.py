@@ -916,8 +916,9 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False):
             next_position = search + following[0]
             next_start = next_position - 16*following[1]
             guard = (next_start-frame_start)/scale - (V3.SYNC_LEN+FRAME)
-            aspect_code = int(np.clip(np.rint(
-                (guard-PULSE_GUARD_BASE)/PULSE_GUARD_STEP), 0, 7))
+            if following[2] >= .45:
+                aspect_code = int(np.clip(np.rint(
+                    (guard-PULSE_GUARD_BASE)/PULSE_GUARD_STEP), 0, 7))
         start = frame_start + V3.SYNC_LEN*scale
         indexes = start + np.arange(FRAME)*scale
         if indexes[-1] >= len(samples)-1:
