@@ -201,6 +201,18 @@ def run_receive(args):
             return
         if len(audio)-processed_samples < P.PULSE_FRAME*args.decode_batch:
             return
+        # Do not repeatedly run pulse acquisition/demodulation on an idle
+        # input device.  This is deliberately far below normal loopback levels
+        # so quiet but valid recordings still reach measure_pulses().
+        if float(np.max(np.abs(audio))) < 1e-5:
+            processed_samples = len(audio)
+            keep = P.PULSE_FRAME*args.decode_history
+            if len(audio) > keep:
+                samples[:] = [audio[-keep:]]
+                processed_samples = len(samples[0])
+            if args.diagnostics:
+                print({'status': 'idle_input', 'input_peak': 0.0}, flush=True)
+            return
         if not args.refine:
             P.REFINE = False
         try:
