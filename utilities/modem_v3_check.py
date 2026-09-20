@@ -110,8 +110,11 @@ def candidates_for(engine):
             return
         seen.add(layout.name)
         coders = coders_for(layout)
-        code = ({'v6-dct': 0, 'v6-wavelet': 1}.get(profile)
-                if layout.name == 'wire-v6' else V3.profile_code(profile))
+        v6_codes = {'v6-dct': 0, 'v6-wavelet': 1,
+                    'v6-repeat-dct': 0, 'v6-repeat-wavelet': 1}
+        code = (v6_codes.get(profile)
+                if layout.name in ('wire-v6', 'wire-v6-repeat')
+                else V3.profile_code(profile))
         fallback = coders[code]
         out.append((layout, fallback, coders))
 
@@ -119,6 +122,7 @@ def candidates_for(engine):
     add(V3.WIRE_TAPE, 'hd-dwt')
     add(V3.WIRE_TAPE_25, 'tape-80x60')
     add(V3.WIRE_V6, 'v6-dct')
+    add(V3.WIRE_V6_REPEAT, 'v6-repeat-dct')
     for eng in ENG.ENGINES.values():
         add(eng.wire, eng.profiles[0])
     return out
@@ -698,7 +702,9 @@ def main(argv=None):
 
     def shared(q):
         q.add_argument('--profile',
-                       choices=list(wire_profiles()) + ['v6-dct', 'v6-wavelet'],
+                       choices=list(wire_profiles()) + [
+                           'v6-dct', 'v6-wavelet', 'v6-repeat-dct',
+                           'v6-repeat-wavelet'],
                        default=None, help='Plane geometry to SEND. Defaults to '
                        'the engine\'s primary profile. The receiver reads it '
                        'from the header.')
@@ -715,7 +721,9 @@ def main(argv=None):
     w.add_argument('-f', '--numbered', action='store_true')
     r = sub.add_parser('read', parents=[codec])
     r.add_argument('--profile',
-                   choices=list(wire_profiles()) + ['v6-dct', 'v6-wavelet'],
+                   choices=list(wire_profiles()) + [
+                       'v6-dct', 'v6-wavelet', 'v6-repeat-dct',
+                       'v6-repeat-wavelet'],
                    default=None,
                    help='Fallback only. The profile is read from the header, '
                         'so this matters just for a packet whose header never '

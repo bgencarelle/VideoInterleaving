@@ -281,7 +281,7 @@ def _lowest_camera_mode(fmt, source, fps):
             ['ffmpeg', '-nostdin', '-hide_banner', '-f', fmt,
              '-list_options', 'true', '-i', source],
             capture_output=True, text=True, timeout=15)
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, TypeError, subprocess.SubprocessError):
         return None
     modes = []
     for line in (probe.stderr or '').splitlines():
@@ -541,22 +541,31 @@ def build(args):
     it just sends a much smaller picture than the profile names. Nothing says
     so, and silent resolution loss is worse than an error.
     """
-    if args.profile not in PROFILES and args.profile not in ('v6-dct', 'v6-wavelet'):
+    v6_profiles = ('v6-dct', 'v6-wavelet', 'v6-repeat-dct',
+                   'v6-repeat-wavelet')
+    if args.profile not in PROFILES and args.profile not in v6_profiles:
         raise SystemExit(f'Unknown profile {args.profile}')
     wire = getattr(args, 'wire', 'wide')
     if wire == 'tape' and args.profile not in ('hd-dwt', 'tape-80x60'):
         raise SystemExit('--wire tape requires hd-dwt or tape-80x60')
     if wire == 'v6' and args.profile not in ('v6-dct', 'v6-wavelet'):
         raise SystemExit('--wire v6 requires v6-dct or v6-wavelet')
-    if args.profile in ('v6-dct', 'v6-wavelet'):
-        if wire != 'v6':
-            raise SystemExit(f'--profile {args.profile} requires --wire v6')
-        from animation_modem.v6 import coder_for as v6_coder_for
-        layout = V3.WIRE_V6
-        coder = v6_coder_for(args.profile.removeprefix('v6-'))
+    if wire == 'v6-repeat' and args.profile not in ('v6-repeat-dct',
+                                                    'v6-repeat-wavelet'):
+        raise SystemExit('--wire v6-repeat requires a v6-repeat profile')
+    if args.profile in v6_profiles:
+        repeat = args.profile.startswith('v6-repeat-')
+        if wire != ('v6-repeat' if repeat else 'v6'):
+            raise SystemExit(f'--profile {args.profile} requires the matching wire')
+        from animation_modem.v6 import coder_for as v6_coder_for, full_repeat_coder
+        layout = V3.WIRE_V6_REPEAT if repeat else V3.WIRE_V6
+        coder = (full_repeat_coder(args.profile.removeprefix('v6-repeat-'))
+                 if repeat else v6_coder_for(args.profile.removeprefix('v6-')))
         coder.slots(layout)  # precompute the diversity assignment before live output
+        copy_text = ('full coefficient copies' if repeat else
+                     'coarse Y/Cb/Cr copies')
         print(f'{args.profile}: {coder.n_orig} analog values + '
-              f'{len(coder.copy_of)} coarse Y/Cb/Cr copies -> decodes 80x96 '
+              f'{len(coder.copy_of)} {copy_text} -> decodes 80x96 '
               f'@ {layout.fps:.2f} fps.', file=sys.stderr)
         return layout, coder, coder.grids
     
@@ -630,6 +639,8 @@ def wire_profile_code(profile):
         return 0
     if profile == 'v6-wavelet':
         return 1
+    if profile in ('v6-repeat-dct', 'v6-repeat-wavelet'):
+        return 0 if profile.endswith('dct') else 1
     return V3.profile_code(profile)
 
 
@@ -813,12 +824,13 @@ def parser():
                          'camera = webcam; test = no devices; mouse-follow = dynamic cursor tracking')
     # The profiles the header can name. Every one is DCT/wavelet-sampled; the bake and
     # the wire shapes both come from the profile's geometry.
-    ap.add_argument('--profile', choices=list(wire_profiles()) + ['v6-dct', 'v6-wavelet'],
+    ap.add_argument('--profile', choices=list(wire_profiles()) + [
+        'v6-dct', 'v6-wavelet', 'v6-repeat-dct', 'v6-repeat-wavelet'],
                     default=DEFAULT_PROFILE,
                     help='Picture geometry. Each samples a grid 2x finer than '
                          'it transmits and sends the low-frequency corner; the '
                          'receiver reads which was sent from the header.')
-    ap.add_argument('--wire', choices=('wide', 'tape', 'v6'), default='wide',
+    ap.add_argument('--wire', choices=('wide', 'tape', 'v6', 'v6-repeat'), default='wide',
                     help='wide uses carriers through 20.25 kHz; tape reallocates '
                          'the complete hd-dwt picture below 12.75 kHz and bounds '
                          'the emitted waveform at 14 kHz (lower frame rate)')
@@ -886,6 +898,9 @@ def main(argv=None):
         raise SystemExit('--wire tape requires hd-dwt or tape-80x60')
     if args.wire == 'v6' and args.profile not in ('v6-dct', 'v6-wavelet'):
         raise SystemExit('--wire v6 requires v6-dct or v6-wavelet')
+    if args.wire == 'v6-repeat' and args.profile not in ('v6-repeat-dct',
+                                                          'v6-repeat-wavelet'):
+        raise SystemExit('--wire v6-repeat requires a v6-repeat profile')
 
     if args.list_devices:
         from animation_modem.audio_common import sounddevice

@@ -38,6 +38,8 @@ PROFILES = {
 EXPERIMENTAL_PROFILES = {
     'v6-dct': ((40, 48), (20, 24)),
     'v6-wavelet': ((40, 48), (20, 24)),
+    'v6-repeat-dct': ((40, 48), (20, 24)),
+    'v6-repeat-wavelet': ((40, 48), (20, 24)),
 }
 # Sampling grid per profile -- the DECODE resolution, always the baked 80x96.
 # SourceCoder truncates the grid's transform to the wire shape -- ONE transform,
@@ -50,7 +52,9 @@ PROFILE_GRIDS = {'color-dct': ((80, 96), (40, 48)),
                   'hd-dwt': ((80, 96), (40, 48)),
                   'tape-80x60': ((80, 60), (40, 30))}
 EXPERIMENTAL_GRIDS = {'v6-dct': ((80, 96), (40, 48)),
-                      'v6-wavelet': ((80, 96), (40, 48))}
+                      'v6-wavelet': ((80, 96), (40, 48)),
+                      'v6-repeat-dct': ((80, 96), (40, 48)),
+                      'v6-repeat-wavelet': ((80, 96), (40, 48))}
 DEFAULT_PROFILE = 'color-dct'
 # v5 wire budget: WIRE_HD's Layout.capacity = header_capacity +
 # image_symbols*data_bins*4 = 3680. wavelet.hd_dwt_coder() fills exactly this

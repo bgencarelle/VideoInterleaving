@@ -99,6 +99,14 @@ WIRE_V6 = Layout(top_bin=34, image_symbols=29, name='wire-v6',
                  spread_carriers=True, dense_header=True, header_width=20,
                  emission_ceiling=14000)
 
+# Full-repeat V6 control: all 2,880 analog source coefficients are sent twice,
+# on opposite tracks and separated carriers.  The spare 40 slots are left
+# empty; the cost is a 6.04 fps frame rate at 48 kHz.
+WIRE_V6_REPEAT = Layout(top_bin=34, image_symbols=47, name='wire-v6-repeat',
+                        progressive=True, orthogonal_training=True,
+                        spread_carriers=True, dense_header=True, header_width=20,
+                        emission_ceiling=14000)
+
 # v5 preamble: shorter biphase-mark for 1600-sample frame
 # 12 bits = 1.5kHz/3kHz edges, ~192 samples @ 8 samples/half-bit
 HALF_V5 = 8

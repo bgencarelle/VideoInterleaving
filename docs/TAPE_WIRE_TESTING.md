@@ -50,6 +50,30 @@ For live loopback, start the receiver first:
 These commands keep raw display/reconstruction defaults. Do not enable chroma
 stabilization when collecting baseline results.
 
+## Full-repeat control
+
+The full-repeat diagnostic sends all 2,880 analog coefficients twice instead of
+copying only the 720-value foundation. It keeps the same 375–12,750 Hz band and
+14 kHz ceiling, but runs at about 6.04 fps at 48 kHz. This is the older
+“stronger copy wins” diversity behavior: copies use opposite tracks and
+separated carriers, then combine by measured reliability.
+
+Run its synthetic comparison with:
+
+```bash
+.venv/bin/python tools/bench_v6_repeat.py
+```
+
+It is also available through the normal sender/receiver commands:
+
+```bash
+.venv/bin/python utilities/modem_v3_check.py live-receive \
+  --codec v6-repeat --device "BlackHole 2ch"
+.venv/bin/python modem_screen.py --source camera \
+  --wire v6-repeat --profile v6-repeat-dct \
+  --device "BlackHole 2ch" --capture-fps 15
+```
+
 ## What to compare
 
 | Label | Sender arguments | Picture | Rate | Information band |
