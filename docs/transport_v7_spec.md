@@ -897,7 +897,20 @@ does not terminate the display loop. These are CPU/latency optimizations only.
 Do not remove wire redundancy or change the 12.245-fps frame geometry without a
 separate resilience comparison.
 
-### 20.3 Recommended timing experiment: pilot-derived nonlinear warp
+### 20.3 Stereo diversity and the current combining limit
+
+The live decoder already uses both received channels jointly. Pilot-derived
+channel matrices feed a per-cell 2×2 MMSE equalizer, followed by the grouped
+LMMSE reconstruction. This is the correct linear combiner for the current M/S
+wire; simply averaging the stereo pair would discard S information rather than
+produce free additional gain.
+
+The mono-sum mode is therefore a compatibility path for one-channel hardware,
+not a higher-quality stereo decoder. Any further stereo-pair dB improvement
+would require better channel/noise weighting validated against the tape matrix;
+no safe extra gain was found in this final pass.
+
+### 20.4 Recommended timing experiment: pilot-derived nonlinear warp
 
 The pulse endpoints correct affine frame scale. Flutter can still warp the
 middle of a frame. The safest next experiment is a gated second pass:
@@ -917,7 +930,7 @@ symbol remains an ICI limit and cannot be recovered perfectly afterward.
 Required A/B results are clean RMSE, pilot residual, timing residual, CPU time,
 latency, received/lost counts, and the existing wow/flutter matrix.
 
-### 20.4 Lower-risk experiments
+### 20.5 Lower-risk experiments
 
 - Use weighted circular pilot-phase fits with carrier outlier rejection.
 - Compare a denser pilot schedule against the lost analog payload capacity.
@@ -925,7 +938,7 @@ latency, received/lost counts, and the existing wow/flutter matrix.
   failure.
 - Add timing-loss duration and reacquisition latency to the live diagnostics.
 
-### 20.5 Deferred changes
+### 20.6 Deferred changes
 
 Do not yet add a second timing track, full-picture repetition, stronger FEC,
 temporal prediction, learned source coding, or a new modulation family. Each
