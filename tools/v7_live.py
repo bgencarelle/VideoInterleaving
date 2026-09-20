@@ -340,14 +340,14 @@ def run_receive(args):
                 meter['lost'] += 1
             report = {'counter': meter['decoded'], 'wire_counter': result.counter,
                       'status': meter['status'], 'displayable': displayable,
-                      'clock_words': info.get('words'),
+                      'pulse_frames': info.get('pulse_frames'),
+                      'encoding': result.diag.get('encoding_name'),
                       'input_gain': round(meter['auto_gain'], 3),
                       'head_confidence': result.diag.get('head_confidence'),
                       'head_coverage': result.diag.get('head_coverage'),
-                      'metadata_valid': result.diag.get('metadata_valid'),
                       'timing_delta_ppm': result.diag.get('timing_delta_ppm'),
                       'noise': result.diag.get('noise'),
-                      'crc_ok': info.get('crc_ok'),
+                      'metadata_valid': result.diag.get('metadata_valid'),
                       'skipped_frames': len(info.get('skipped_frames', [])),
                       'recovered': info.get('recovered', False)}
             if args.diagnostics:
@@ -425,10 +425,11 @@ def run_receive(args):
 
         root.bind('<Escape>', lambda _event: root.attributes(
             '-fullscreen', False))
-        root.bind('<KeyPress-f>', toggle_fullscreen)
-        root.bind('<KeyPress-F>', toggle_fullscreen)
-        root.bind('<KeyPress-i>', toggle_information)
-        root.bind('<KeyPress-I>', toggle_information)
+        root.bind_all('<KeyPress-f>', toggle_fullscreen)
+        root.bind_all('<KeyPress-F>', toggle_fullscreen)
+        root.bind_all('<KeyPress-i>', toggle_information)
+        root.bind_all('<KeyPress-I>', toggle_information)
+        root.focus_force()
         label = tk.Label(image_frame, text='Acquiring V7 clock…',
                          background='black')
         label.configure(background='black')
