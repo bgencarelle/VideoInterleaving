@@ -999,7 +999,7 @@ def decode_stream(model, x, verbose=False, diagnostics=None):
 
 
 def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
-                        input_gain=1.0, models=None):
+                        input_gain=1.0, models=None, model_factory=None):
     """Decode V7 bodies located by the existing pulse-counted acquisition.
 
     This is the low-latency live path: each accepted pulse word supplies a
@@ -1111,8 +1111,13 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
                 metadata_valid = False
                 encoding_type = model.encoding_type
                 revision = 0
-        selected_model = ((models or {}).get(encoding_type, model)
-                          if metadata_valid else model)
+        selected_model = model
+        if metadata_valid:
+            selected_model = (models or {}).get(encoding_type)
+            if selected_model is None and model_factory is not None:
+                selected_model = model_factory(encoding_type)
+            if selected_model is None:
+                selected_model = model
         body = _sample_at(samples, indexes, taps=16).astype(np.float32)
         nominal = np.array([0., FRAME])
         offset = np.array([64., 64.])

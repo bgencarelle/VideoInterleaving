@@ -168,11 +168,13 @@ def run_receive(args):
     # selected from the protected encoding ID carried by each frame.
     model = _model(args.fixture, 'nearest')
     models = {model.encoding_type: model}
-    for name in P.ENCODING_FILTERS:
-        if name == 'nearest':
-            continue
-        candidate = _model(args.fixture, name)
-        models[candidate.encoding_type] = candidate
+
+    def model_factory(encoding_type):
+        """Build an alternate source model only when metadata requests it."""
+        if encoding_type not in models:
+            name = P.ENCODING_FILTERS[int(encoding_type)]
+            models[encoding_type] = _model(args.fixture, name)
+        return models[encoding_type]
     blocks = queue.Queue(maxsize=32)
     stop = threading.Event()
     input_gap = threading.Event()
@@ -268,7 +270,8 @@ def run_receive(args):
         try:
             results, info = P.decode_pulse_stream(
                 model, audio, diagnostics=diagnostics, latest_only=True,
-                input_gain=auto_gain, models=models)
+                input_gain=auto_gain, models=models,
+                model_factory=model_factory)
         except Exception as exc:
             # Drop the damaged window and let the next retained clock history
             # reacquire.  A single bad frame must not stop the live receiver.
