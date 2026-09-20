@@ -38,6 +38,8 @@ PULSE_FRAME = V3.SYNC_LEN + FRAME + 32           # 3776 samples, 12.712 fps
 PULSE_FPS = RATE/PULSE_FRAME
 PULSE_GUARD_BASE = 32
 PULSE_GUARD_STEP = 8
+PULSE_MIN_SCALE = .25
+PULSE_MAX_SCALE = 2.0
 BINS = np.arange(4, 35)                         # 1.5-12.75 kHz
 CONTINUAL = (4, 34)
 SCAT = {b: ((b-5)//4) % 3 for b in range(5, 34, 4)}
@@ -860,7 +862,8 @@ def decode_stream(model, x, verbose=False, diagnostics=None):
     return results, info
 
 
-def decode_pulse_stream(model, x, diagnostics=None, latest_only=False):
+def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
+                        input_gain=1.0):
     """Decode V7 bodies located by the existing pulse-counted acquisition.
 
     This is the low-latency live path: each accepted pulse word supplies a
@@ -868,7 +871,7 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False):
     next pulse search starts after that frame.  There is no continuous clock
     track or buffered clock-template refinement.
     """
-    samples = np.asarray(x, float)
+    samples = np.asarray(x, float)*float(input_gain)
     cursor = 0
     counter = 1
     results = []
@@ -883,7 +886,8 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False):
         scan = 0
         while scan + V3.SYNC_LEN + 32 < len(samples):
             hit = V3.measure_pulses(samples[scan:].mean(axis=1),
-                                    min_scale=.5, max_scale=2.0)
+                                    min_scale=PULSE_MIN_SCALE,
+                                    max_scale=PULSE_MAX_SCALE)
             if hit is None:
                 break
             pos, sc, conf = hit
@@ -911,7 +915,8 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False):
     while cursor + V3.SYNC_LEN + 32 < len(samples):
         if measured is None:
             measured = V3.measure_pulses(samples[cursor:].mean(axis=1),
-                                         min_scale=.5, max_scale=2.0)
+                                         min_scale=PULSE_MIN_SCALE,
+                                         max_scale=PULSE_MAX_SCALE)
         if measured is None:
             break
         position, scale, confidence = measured
@@ -922,16 +927,22 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False):
         frame_start = position - 16*scale
         search = int(frame_start + (V3.SYNC_LEN + FRAME)*scale)
         following = V3.measure_pulses(samples[search:].mean(axis=1),
-                                      min_scale=.5, max_scale=2.0)
+                                      min_scale=PULSE_MIN_SCALE,
+                                      max_scale=PULSE_MAX_SCALE)
         aspect_code = pending_aspect
         next_start = None
         if following is not None:
             next_position = search + following[0]
             next_start = next_position - 16*following[1]
             guard = (next_start-frame_start)/scale - (V3.SYNC_LEN+FRAME)
-            if following[2] >= .45:
-                aspect_code = int(np.clip(np.rint(
-                    (guard-PULSE_GUARD_BASE)/PULSE_GUARD_STEP), 0, 7))
+            scale_agrees = abs(following[1]/scale-1) <= .03
+            guard_code = int(np.rint(
+                (guard-PULSE_GUARD_BASE)/PULSE_GUARD_STEP))
+            guard_valid = (0 <= guard_code <= 7 and
+                           abs(guard-(PULSE_GUARD_BASE +
+                                      guard_code*PULSE_GUARD_STEP)) <= 3)
+            if following[2] >= .45 and scale_agrees and guard_valid:
+                aspect_code = guard_code
         start = frame_start + V3.SYNC_LEN*scale
         indexes = start + np.arange(FRAME)*scale
         if indexes[-1] >= len(samples)-1:

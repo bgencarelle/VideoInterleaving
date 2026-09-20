@@ -158,11 +158,13 @@ def run_receive(args):
     processed_samples = 0
     latest = None
     diagnostics = {} if args.diagnostics else None
+    auto_gain = 1.0
     meter = {'peak': np.zeros(2), 'rms': np.zeros(2), 'blocks': 0,
              'dropped': 0, 'decoded': 0, 'verified': 0, 'lost': 0,
              'status': 'acquiring', 'counter': None, 'decode_ms': None,
              'pulse': None, 'aspect': 0, 'aspect_candidate': 0,
              'aspect_streak': 0, 'input_samples': 0, 'started': time.monotonic(),
+             'auto_gain': 1.0,
              'decoded_times': deque(maxlen=32), 'input_fps': 0.,
              'decoded_fps': 0.}
 
@@ -185,7 +187,7 @@ def run_receive(args):
             meter['dropped'] += 1
 
     def decode_available():
-        nonlocal latest, processed_samples
+        nonlocal latest, processed_samples, auto_gain
         while True:
             try:
                 samples.append(blocks.get_nowait())
@@ -214,11 +216,17 @@ def run_receive(args):
             if args.diagnostics:
                 print({'status': 'idle_input', 'input_peak': 0.0}, flush=True)
             return
+        peak = float(np.percentile(np.abs(audio), 99.5))
+        desired_gain = float(np.clip(.55/max(peak, 1e-6), .5, 32.0))
+        auto_gain = (min(desired_gain, auto_gain*1.5)
+                     if desired_gain > auto_gain else desired_gain)
+        meter['auto_gain'] = auto_gain
         if not args.refine:
             P.REFINE = False
         try:
             results, info = P.decode_pulse_stream(
-                model, audio, diagnostics=diagnostics, latest_only=True)
+                model, audio, diagnostics=diagnostics, latest_only=True,
+                input_gain=auto_gain)
         except (FloatingPointError, np.linalg.LinAlgError, ValueError,
                 IndexError) as exc:
             # Drop the damaged window and let the next retained clock history
@@ -262,6 +270,7 @@ def run_receive(args):
                 meter['lost'] += 1
             report = {'counter': meter['decoded'], 'wire_counter': result.counter,
                       'status': result.status, 'clock_words': info.get('words'),
+                      'input_gain': round(meter['auto_gain'], 3),
                       'crc_ok': info.get('crc_ok'),
                       'skipped_frames': len(info.get('skipped_frames', [])),
                       'recovered': info.get('recovered', False)}
@@ -334,6 +343,7 @@ def run_receive(args):
                 f'(candidate {meter["aspect_candidate"]} '
                 f'x{meter["aspect_streak"]})  pulse '
                 f'{meter["pulse"] if meter["pulse"] is not None else "--"} '
+                f'gain {meter["auto_gain"]:4.1f}x  '
                 f'decode {meter["decode_ms"] if meter["decode_ms"] is not None else "--"} ms | '
                 f'incoming {meter["input_fps"]:5.2f} fps | '
                 f'decoded {meter["decoded_fps"]:5.2f} fps'))
