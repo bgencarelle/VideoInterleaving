@@ -174,13 +174,11 @@ def variants(transform):
     )
 
 
+FIXTURE = Path('modem_tests/fixtures/v6_face_1110.png')
+
+
 def source_image(path):
-    if path is not None:
-        image = Image.open(path).convert('RGB')
-    else:
-        # Natural-image stand-in when the face source is not in the checkout.
-        from scipy.datasets import face
-        image = Image.fromarray(face())
+    image = Image.open(path).convert('RGB')
     width, height = image.size
     crop = min(width, height*3//4)
     left = (width-crop)//2
@@ -253,8 +251,8 @@ def run(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--source', type=Path, default=None,
-                        help='RGB source (default: scipy face stand-in)')
+    parser.add_argument('--source', type=Path, default=FIXTURE,
+                        help='RGB source (default: the checked-in face fixture)')
     parser.add_argument('--seconds', type=float, default=6.0)
     parser.add_argument('--transforms', nargs='+', default=['dct', 'wavelet'],
                         choices=['dct', 'wavelet'])
