@@ -217,6 +217,8 @@ class Layout:
         # relying on finding the following preamble to infer frame length.
         if self.name == 'wire-v6':
             return b'V6'
+        if self.name == 'wire-v6-repeat':
+            return b'VR'
         if self.dense_header:
             return b'V4'
         return b'V3'

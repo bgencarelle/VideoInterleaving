@@ -89,8 +89,9 @@ class ProtectedAnalogCoder:
         self.count = self.n_orig + len(self.copy_of)
         self.rank = np.asarray(rank, float)
         self.profile_name = profile_name
-        if self.n_orig != ORIGINAL_VALUES or len(self.copy_of) != FOUNDATION_VALUES:
-            raise ValueError('V6 requires 2880 originals and 720 foundation copies')
+        if self.n_orig != ORIGINAL_VALUES or len(self.copy_of) not in (
+                FOUNDATION_VALUES, ORIGINAL_VALUES):
+            raise ValueError('V6 requires 2880 originals and 720 or 2880 copies')
         if self.rank.shape != (self.n_orig,):
             raise ValueError('V6 requires one importance rank per original')
         if len(np.unique(self.copy_of)) != len(self.copy_of) or np.any(
@@ -198,6 +199,21 @@ def wavelet_coder():
     base = Cdf97Coder(V6_GRIDS, ORIGINAL_VALUES, levels=2)
     return ProtectedAnalogCoder(base, _wavelet_foundation(), base.rank,
                                 'v6-wavelet')
+
+
+@lru_cache(maxsize=2)
+def full_repeat_coder(transform):
+    """Full-repeat control: every analog coefficient has a second copy."""
+    if transform == 'dct':
+        base = SourceCoder(V6_SHAPES, grids=V6_GRIDS)
+        rank = _dct_rank()
+    elif transform == 'wavelet':
+        base = Cdf97Coder(V6_GRIDS, ORIGINAL_VALUES, levels=2)
+        rank = base.rank
+    else:
+        raise ValueError("V6 transform must be 'dct' or 'wavelet'")
+    return ProtectedAnalogCoder(base, np.arange(ORIGINAL_VALUES), rank,
+                                f'v6-repeat-{transform}')
 
 
 def coder_for(transform):
