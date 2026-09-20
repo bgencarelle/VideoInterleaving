@@ -136,44 +136,6 @@ pursue more resolution or frame rate.
 - [ ] Measure the clean-detail, frame-rate and recovery costs of any redundancy.
   Preserve useful stereo capacity while protecting only what evidence justifies.
 
-### Tape placement and shared-lift diagnostic — 2026-09-20
-
-Slot audit (`v6.slot_report`): foundation V6 put the 100 most important values
-in the dense-header spare carriers (9–12.4 kHz) and packed the 720-value
-foundation into symbols 2–10 and its copies into symbols 28–34 — high in
-frequency *and* concentrated in time.
-
-`v6.tape_coder()` (bench-only, not wired into the CLI) keeps the same wire,
-source coder and 720-copy budget but changes placement: foundation homes on
-bins 2–10 (≤3.75 kHz, bin 1 demoted for hum), copies on bins 11–18 (≤6.75 kHz)
-on the opposite track ~half a packet later, all tiers time-interleaved; the
-header spares take the least important detail. `TAPE_COPY_SPREAD` is 7 bins
-(2.6 kHz) rather than 8 to fit the low zone. `tape_coder(t, copies=False)` and
-`nocopy_coder(t)` are no-copy controls.
-
-`tools/bench_v6_tape_lift.py` (temporary) adds a shared Wallace spacing-loss
-lift (54.6·d/λ dB at 1⅞ ips, seeded events on a fixed absolute timeline,
-small per-track differences, optional skew/gain wander, −45 dBFS treble hiss).
-Stand-in source: scipy `face` (the face source is not in this checkout).
-Mean picture RMSE vs each variant's own clean decode, 6 s:
-
-| case | V6 DCT | tape DCT | repeat DCT | V6 wav | tape wav | repeat wav |
-|---|---|---|---|---|---|---|
-| hiss-45 | .037 | .017 | .033 | .026 | .016 | .027 |
-| lift-mild | .047 | .024 | .040 | .042 | .027 | .035 |
-| lift-severe | .055 | .032 | .057 | .054 | .038 | .067 |
-| lift-worn | .082 | .045 | .082 | .057 | .039 | .068 |
-| lift-skew | .101 | .064 | .087 | .153 | .101 | .104 |
-| mute-left | .068 | .071 | .011 | .070 | .066 | .006 |
-
-Clean fidelity vs source is unchanged (≈.075 DCT, ≈.080 wavelet). Under
-shared lifts the copies barely matter (no-copy tape ≈ tape); they matter for
-track loss. Full-repeat remains best only for track loss. Synthetic only —
-the hiss shape favours low carriers by construction; real tape decides.
-
-Next: per-symbol magnitude refit from pilots (separately); then real-tape A/B
-of foundation V6 vs tape placement before changing the default.
-
 ## 5. Let real tape select the final allocation
 
 - [ ] Record the same short sequence using historical V2 and the best current
