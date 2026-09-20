@@ -12,7 +12,7 @@ from functools import lru_cache
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from .core import SourceCoder, _slot_order
+from .core import N, REFERENCE_RATE, SourceCoder, _slot_order
 from .wavelet import Cdf97Coder, TAPE_CENTRE_BIN, _cdf97_subband_dims, _slot_carriers
 
 
@@ -74,12 +74,102 @@ def slot_symbols(layout):
     return np.asarray(symbols, int)
 
 
+def slot_fields(layout):
+    """Carrier bin, stereo channel, real/imag part and symbol of every slot."""
+    bins, channels = _slot_carriers(layout)
+    parts = np.tile(np.array([0, 1]), len(bins)//2)
+    return bins, channels, parts, slot_symbols(layout)
+
+
+def _interleave_step(count):
+    """A stride coprime with `count` near its golden fraction."""
+    step = max(1, int(round(count*.382)))
+    while np.gcd(step, count) != 1:
+        step += 1
+    return step
+
+
+# Tape placement. Spacing loss grows linearly with frequency in dB, so on tape
+# (and on low-bitrate lossy codecs, which also shed treble first) the safest
+# carriers are the lowest ones. Bin 1 (375 Hz) is demoted rather than forbidden:
+# it sits on the declared band edge and on 50/60 Hz hum harmonics.
+TAPE_DEMOTED_BINS = (1,)
+TAPE_DEMOTED_HEALTH = 28
+TAPE_COPY_SPREAD = 7        # bins; 2.6 kHz, ample against narrowband hum/beats
+
+
+def _tape_health(bins):
+    health = np.asarray(bins, float).copy()
+    health[np.isin(bins, TAPE_DEMOTED_BINS)] = TAPE_DEMOTED_HEALTH
+    return health
+
+
+def tape_slot_order(layout):
+    """Slots from lowest (safest) carrier upward, interleaved in time.
+
+    Within a carrier, successive values alternate track, then real/imag, and
+    walk the symbols with a coprime stride so that consecutive-importance
+    values are ~40% of a packet apart: a burst takes a scattered subset of
+    each importance tier rather than a contiguous block of it.
+    """
+    bins, channels, parts, symbols = slot_fields(layout)
+    total = int(symbols.max())+1
+    walk = (symbols*_interleave_step(total)) % total
+    return np.lexsort((channels, parts, walk, _tape_health(bins)))
+
+
+def slot_report(coder, layout, tiers=((0, 100), (0, 720), (720, 2880))):
+    """Where each importance tier actually rides (frequency, time, track).
+
+    Returns one dict per tier of originals (by rank) plus one for copies. The
+    point is to make placement auditable: priority is only as good as the
+    carriers and symbols it lands on.
+    """
+    bins, channels, _, symbols = slot_fields(layout)
+    hz = bins*(REFERENCE_RATE/N)
+    slots = coder.slots(layout)
+    by_rank = np.argsort(coder.rank, kind='stable')
+    rows = []
+
+    def describe(label, where):
+        pct = lambda x: np.percentile(x, [0, 10, 50, 90, 100]).round(0).tolist()
+        return {'tier': label, 'count': int(len(where)), 'hz': pct(hz[where]),
+                'symbols': pct(symbols[where]),
+                'distinct_symbols': int(len(np.unique(symbols[where]))),
+                'left_share': round(float(np.mean(channels[where] == 0)), 3),
+                'header_spare': int(np.sum(where < layout.header_capacity))}
+
+    for lo, hi in tiers:
+        rows.append(describe(f'rank {lo}-{hi}', slots[by_rank[lo:hi]]))
+    if len(coder.copy_of):
+        home, copy = slots[coder.copy_of], slots[coder.n_orig:]
+        row = describe('copies', copy)
+        row['copy_symbol_gap'] = np.percentile(
+            np.abs(symbols[home]-symbols[copy]), [0, 50, 100]).tolist()
+        row['copy_bin_gap'] = np.percentile(
+            np.abs(bins[home]-bins[copy]), [0, 50, 100]).tolist()
+        row['both_above_6k'] = int(np.sum((hz[home] > 6000) & (hz[copy] > 6000)))
+        row['both_below_4k'] = int(np.sum((hz[home] < 4000) & (hz[copy] < 4000)))
+        rows.append(row)
+    return rows
+
+
 class ProtectedAnalogCoder:
-    """Add unequal, soft-combined stereo protection to an analog source coder."""
+    """Add unequal, soft-combined stereo protection to an analog source coder.
+
+    ``placement='middle-out'`` is the original V6 mapping. ``placement='tape'``
+    puts the foundation on the lowest carriers and interleaves every tier in
+    time (see ``_tape_slots``). ``copy_of`` may be empty for a no-copy control.
+    """
 
     MIN_COPY_SPREAD = 8
 
-    def __init__(self, base, copy_of, rank, profile_name):
+    def __init__(self, base, copy_of, rank, profile_name, placement='middle-out'):
+        if placement not in ('middle-out', 'tape'):
+            raise ValueError("placement must be 'middle-out' or 'tape'")
+        self.placement = placement
+        if placement == 'tape':
+            self.MIN_COPY_SPREAD = TAPE_COPY_SPREAD
         self.base = base
         self.shapes = list(base.shapes)
         self.grids = list(base.grids)
@@ -90,8 +180,10 @@ class ProtectedAnalogCoder:
         self.rank = np.asarray(rank, float)
         self.profile_name = profile_name
         if self.n_orig != ORIGINAL_VALUES or len(self.copy_of) not in (
-                FOUNDATION_VALUES, ORIGINAL_VALUES):
-            raise ValueError('V6 requires 2880 originals and 720 or 2880 copies')
+                0, FOUNDATION_VALUES, ORIGINAL_VALUES):
+            raise ValueError('V6 requires 2880 originals and 0, 720 or 2880 copies')
+        if placement == 'tape' and len(self.copy_of) == ORIGINAL_VALUES:
+            raise ValueError('tape placement protects a foundation, not everything')
         if self.rank.shape != (self.n_orig,):
             raise ValueError('V6 requires one importance rank per original')
         if len(np.unique(self.copy_of)) != len(self.copy_of) or np.any(
@@ -154,6 +246,11 @@ class ProtectedAnalogCoder:
         if self.count > layout.capacity:
             raise ValueError(f'{self.count} values exceed {layout.name} capacity '
                              f'{layout.capacity}')
+        if self.placement == 'tape':
+            mapping = self._tape_slots(layout)
+            mapping.setflags(write=False)
+            self._slots[layout] = mapping
+            return mapping
         bins, channels = _slot_carriers(layout)
         symbols = slot_symbols(layout)
         order = _slot_order(layout)
@@ -184,6 +281,107 @@ class ProtectedAnalogCoder:
         mapping.setflags(write=False)
         self._slots[layout] = mapping
         return mapping
+
+    def _tape_slots(self, layout):
+        """Foundation low in frequency and spread in time; detail above it.
+
+        The lowest usable carriers form a foundation zone split into a lower
+        half (homes) and an upper half (copies). Each home carrier is paired
+        with one copy carrier; a home at (symbol s, track t, part p) has its
+        copy at (s + half a packet, other track, same part), so every copy is
+        cross-track, >= TAPE_COPY_SPREAD bins away and ~half a packet later.
+        Foundation values fill the homes in rank order, lowest carrier first.
+        Everything else follows ``tape_slot_order`` by rank, so the header
+        symbols' high spare carriers take the least important detail.
+        """
+        bins, channels, parts, symbols = slot_fields(layout)
+        order = tape_slot_order(layout)
+        mapping = np.empty(self.count, int)
+        by_rank = np.argsort(self.rank, kind='stable')
+        if not len(self.copy_of):
+            mapping[by_rank] = order[:self.n_orig]
+            return mapping
+
+        foundation = self.copy_of[np.argsort(self.rank[self.copy_of],
+                                             kind='stable')]
+        carriers = sorted(set(bins.tolist())-set(TAPE_DEMOTED_BINS))
+        per_bin = {b: int(np.sum(bins == b)) for b in carriers}
+        zone = []
+        for b in carriers:
+            zone.append(b)
+            half = len(zone)//2
+            if len(zone) % 2 == 0 and sum(per_bin[z] for z in zone[:half]) >= \
+                    len(foundation):
+                break
+        else:
+            raise ValueError(f'{layout.name} has no room for a tape foundation')
+        low, high = zone[:len(zone)//2], zone[len(zone)//2:]
+
+        lookup = {key: slot for slot, key in enumerate(
+            zip(bins.tolist(), symbols.tolist(), channels.tolist(), parts.tolist()))}
+        position_in_order = np.empty(len(order), int)
+        position_in_order[order] = np.arange(len(order))
+        homes, copies = [], []
+        for home_bin, copy_bin in zip(low, high):
+            if abs(copy_bin-home_bin) < self.MIN_COPY_SPREAD:
+                raise ValueError('tape foundation zone is too narrow for copy spread')
+            here = np.flatnonzero(bins == home_bin)
+            here = here[np.argsort(position_in_order[here], kind='stable')]
+            carried = np.unique(symbols[bins == copy_bin])
+            for slot in here:
+                s = int(symbols[slot])
+                at = int(np.searchsorted(carried, s))
+                shifted = int(carried[(at + len(carried)//2) % len(carried)])
+                homes.append(slot)
+                copies.append(lookup[(copy_bin, shifted, 1-int(channels[slot]),
+                                      int(parts[slot]))])
+        homes = np.asarray(homes[:len(foundation)])
+        copies = np.asarray(copies[:len(foundation)])
+        mapping[foundation] = homes
+        position = {int(c): j for j, c in enumerate(self.copy_of)}
+        for value, copy in zip(foundation, copies):
+            mapping[self.n_orig + position[int(value)]] = copy
+
+        used = np.zeros(len(bins), bool)
+        used[homes] = used[copies] = True
+        free = order[~used[order]]
+        rest = by_rank[~np.isin(by_rank, foundation)]
+        mapping[rest] = free[:len(rest)]
+        return mapping
+
+
+@lru_cache(maxsize=4)
+def tape_coder(transform, copies=True):
+    """V6 with tape placement (low-carrier foundation, time-interleaved).
+
+    ``copies=False`` is the matching no-copy control on the same wire.
+    """
+    if transform == 'dct':
+        base = SourceCoder(V6_SHAPES, grids=V6_GRIDS)
+        foundation, rank = _dct_foundation(), _dct_rank()
+    elif transform == 'wavelet':
+        base = Cdf97Coder(V6_GRIDS, ORIGINAL_VALUES, levels=2)
+        foundation, rank = _wavelet_foundation(), base.rank
+    else:
+        raise ValueError("V6 transform must be 'dct' or 'wavelet'")
+    copy_of = foundation if copies else np.empty(0, int)
+    name = f"v6-tape{'' if copies else '-nocopy'}-{transform}"
+    return ProtectedAnalogCoder(base, copy_of, rank, name, placement='tape')
+
+
+@lru_cache(maxsize=2)
+def nocopy_coder(transform):
+    """Original middle-out V6 placement with the foundation copies removed."""
+    if transform == 'dct':
+        base = SourceCoder(V6_SHAPES, grids=V6_GRIDS)
+        rank = _dct_rank()
+    elif transform == 'wavelet':
+        base = Cdf97Coder(V6_GRIDS, ORIGINAL_VALUES, levels=2)
+        rank = base.rank
+    else:
+        raise ValueError("V6 transform must be 'dct' or 'wavelet'")
+    return ProtectedAnalogCoder(base, np.empty(0, int), rank,
+                                f'v6-nocopy-{transform}')
 
 
 @lru_cache(maxsize=1)
