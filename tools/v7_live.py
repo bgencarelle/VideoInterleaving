@@ -29,9 +29,37 @@ from PIL import Image, ImageEnhance
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from animation_modem.imaging import (image_values, prepare_image, values_image,
-                                     stabilize_chroma)  # noqa: E402
-from tools import v7_proto as P                                             # noqa: E402
+from animation_modem.imaging import values_image                         # noqa: E402
+from tools import v7_proto as P                                           # noqa: E402
+image_values = P.image_values
+prepare_image = P.prepare_image
+try:
+    from animation_modem.imaging import stabilize_chroma                  # noqa: E402
+except ImportError:
+    from scipy.ndimage import gaussian_filter                             # noqa: E402
+
+    def stabilize_chroma(values, previous, shapes, pilot_error=None,
+                         coverage=None):
+        current = np.asarray(values)
+        if previous is None or len(shapes) < 3 or current.shape != np.shape(previous):
+            return current
+        error = 0.0 if pilot_error is None else max(0.0, float(pilot_error))
+        seen = 1.0 if coverage is None else np.clip(float(coverage), 0.0, 1.0)
+        amount = max((error - .20)/.80, (.85 - seen)/.85, 0.0)
+        amount = float(np.clip(amount*.65, 0.0, .65))
+        if amount <= 0:
+            return current
+        result = current.copy()
+        old = np.asarray(previous)
+        offset = shapes[0][0]*shapes[0][1]
+        for rows, cols in shapes[1:]:
+            count = rows*cols
+            blended = current[offset:offset+count]*(1-amount) + old[offset:offset+count]*amount
+            sigma = min(1.6, .35 + 1.8*amount)
+            result[offset:offset+count] = gaussian_filter(
+                blended.reshape(rows, cols), sigma=sigma, mode='nearest').ravel()
+            offset += count
+        return result
 from tools.v7_display import LatestFrame                                      # noqa: E402
 
 
@@ -383,6 +411,7 @@ def run_receive(args):
             if result.status == 'lost' and not displayable:
                 meter['lost'] += 1
             report = {'counter': meter['decoded'], 'wire_counter': result.counter,
+                      'source_index': result.diag.get('source_index'),
                       'status': meter['status'], 'displayable': displayable,
                       'pulse_frames': info.get('pulse_frames'),
                        'encoding': result.diag.get('encoding_name'),

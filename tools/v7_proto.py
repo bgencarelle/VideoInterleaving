@@ -25,14 +25,14 @@ from scipy.signal import butter, filtfilt, firwin, savgol_filter, sosfiltfilt
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from animation_modem import v6                                         # noqa: E402
 from animation_modem import transport3 as V3                             # noqa: E402
 from animation_modem.core import SourceCoder, _sample_at               # noqa: E402
 from animation_modem.core import bound_emission                         # noqa: E402
-from animation_modem.imaging import image_values, prepare_image        # noqa: E402
 
 # ------------------------------------------------------------------ §6.1
 RATE, N, CP, SYM, F = 48000, 128, 16, 144, 24
+V7_GRIDS = ((96, 80), (48, 40), (48, 40))
+V7_SHAPES = ((48, 40), (24, 20), (24, 20))
 FRAME = F*SYM                                   # 3456 samples, 13.889 fps
 META_SYMBOL = SYM
 PULSE_FRAME = V3.SYNC_LEN + FRAME + META_SYMBOL + 32  # 3920, 12.245 fps
@@ -43,6 +43,25 @@ PULSE_MAX_SCALE = 2.0
 ENCODING_FILTERS = ('nearest', 'box', 'lanczos', 'bicubic')
 ENCODING_FILTER_CODES = {name: code for code, name in
                          enumerate(ENCODING_FILTERS)}
+
+
+def prepare_image(image, encode_filter='lanczos'):
+    """Prepare an RGB source without depending on the application imaging API."""
+    resampling = getattr(Image.Resampling, encode_filter.upper())
+    return image.convert('RGB').resize((80, 96), resampling)
+
+
+def image_values(image, shapes=V7_SHAPES, encode_filter='lanczos'):
+    """Convert a prepared/source image to the fixed V7 YCbCr vector."""
+    resampling = getattr(Image.Resampling, encode_filter.upper())
+    rows, cols = shapes[0]
+    sampled = image.convert('RGB').resize((cols, rows), resampling)
+    planes = sampled.convert('YCbCr').split()
+    return np.concatenate([
+        np.asarray(plane.resize((shape[1], shape[0]), Image.Resampling.BOX)).ravel()
+        for plane, shape in zip(planes, shapes)]).astype(float)/127.5 - 1
+
+
 METADATA_OPTION_MONO_SUM = 2
 # The high bit of each pair is orientation; square ignores it.
 V7_ASPECT_RATIOS = (1., 4/3, 3/2, 16/9, 1., 3/4, 2/3, 9/16)
@@ -292,9 +311,17 @@ class Model:
 
 
 def build_model(fixture, target_rms, encode_filter='lanczos', mono_sum=False):
-    coder = SourceCoder(v6.V6_SHAPES, grids=v6.V6_GRIDS)
+    with Image.open(fixture) as source:
+        return build_model_from_image(source, target_rms, encode_filter,
+                                       mono_sum)
+
+
+def build_model_from_image(source, target_rms, encode_filter='lanczos',
+                           mono_sum=False):
+    """Build the fixed V7 model from an in-memory RGB source image."""
+    coder = SourceCoder(V7_SHAPES, grids=V7_GRIDS)
     rng = np.random.default_rng(1)
-    im = Image.open(fixture).convert('RGB'); W, Hh = im.size
+    im = source.convert('RGB'); W, Hh = im.size
     C = []
     for _ in range(120):
         s = rng.uniform(.45, 1.0); w = int(min(W, Hh*.75)*s); h = int(w*4/3)
@@ -308,7 +335,7 @@ def build_model(fixture, target_rms, encode_filter='lanczos', mono_sum=False):
     C = np.asarray(C)
     mu = np.zeros(C.shape[1]); lam = np.empty(C.shape[1])
     off, plane = 0, np.empty(C.shape[1], int)
-    for p, ((r, c), (gr, gc)) in enumerate(zip(v6.V6_SHAPES, v6.V6_GRIDS)):
+    for p, ((r, c), (gr, gc)) in enumerate(zip(V7_SHAPES, V7_GRIDS)):
         sl = slice(off, off+r*c); plane[sl] = p
         mu[off] = C[:, off].mean()                       # DC library mean
         L = np.mean(C[:, sl]**2, axis=0)
