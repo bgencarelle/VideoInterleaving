@@ -95,7 +95,12 @@ def _capture(args):
                              scale_flags=args.capture_filter)
     if args.screen_backend == 'mss':
         return screen_source(region)
-    return screen_capture_source(args.capture_fps or FPS, region, args.display,
+    capture_fps = args.capture_fps
+    # AVFoundation screen capture commonly exposes only the display's native
+    # refresh rate (for example 60 fps), not the modem wire rate.
+    if capture_fps is None and sys.platform == 'darwin':
+        capture_fps = 60
+    return screen_capture_source(capture_fps or FPS, region, args.display,
                                  args.capture_width, args.ffmpeg_input,
                                  args.capture_filter)
 
@@ -132,7 +137,9 @@ def run_send(args):
     model = _model(args.fixture, args.encode_filter, args.mono_sum)
     raw_grab = _capture(args)
     capture_hz = args.capture_fps or (CAMERA_CAPTURE_FPS
-                                      if args.source == 'camera' else FPS)
+                                      if args.source == 'camera' else
+                                      (60 if args.screen_backend == 'ffmpeg' and
+                                       sys.platform == 'darwin' else FPS))
     # Drain a paced FFmpeg source continuously and expose only
     # the newest frame to the audio encoder. Reading the pipe once per encoded
     # frame creates seconds of stale-camera latency.
