@@ -195,6 +195,11 @@ def camera_source(index=0, fps=30, width=320, spec=None,
 def screen_capture_source(fps, region=None, display=None, width=320,
                           spec=None, scale_flags='neighbor'):
     """Compatibility adapter for the former modem_screen API."""
+    # AVFoundation's device numbering is machine-dependent. The old screen
+    # path selected the first screen capture device; do not inherit the
+    # camera-oriented default used by the generic FFmpeg helper.
+    if display is None and sys.platform == 'darwin':
+        display = 0
     return ffmpeg_source(spec, fps, region=region, display=display,
                          width=width, scale_flags=scale_flags)
 
