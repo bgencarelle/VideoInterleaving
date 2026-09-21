@@ -7,7 +7,7 @@ from PIL import Image
 from animation_modem import v7
 
 
-FIXTURE = Path(__file__).parent / 'fixtures/v6_face_1110.png'
+FIXTURE = Path(__file__).parent / 'fixtures/v7_reference_face.png'
 
 
 class V7SpeedTests(unittest.TestCase):

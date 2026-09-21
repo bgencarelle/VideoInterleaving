@@ -11,10 +11,7 @@ from dataclasses import dataclass
 import threading
 import numpy as np
 from .audio_common import sounddevice, route
-from .transport3 import WIRE
-from .core import band_limited, emit_length, speed_length, speed_resample
-
-_DEFAULT = WIRE   # layouts pass their own geometry
+from .v7_core import band_limited, emit_length, speed_length, speed_resample
 
 
 def latency(value):
@@ -37,9 +34,11 @@ class Slot:
 
 class PacketOutput:
     def __init__(self, device=None, channels=(0, 1), requested_latency='low',
-                 frame=_DEFAULT.frame, packet=_DEFAULT.packet, speed=1.0):
-        # The wire carries its own geometry -- 3200 samples -- so the packet
-        # size is taken from it instead of a module constant.
+                 frame=None, packet=None, speed=1.0):
+        # V7 supplies its canonical packet geometry explicitly. Keeping it out
+        # of this audio adapter prevents legacy wire layouts from returning.
+        if frame is None or packet is None:
+            raise ValueError('V7 frame and packet lengths are required')
         self.frame = int(frame)
         self.packet = int(packet)
         if not 0 < self.packet <= self.frame:

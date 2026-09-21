@@ -370,8 +370,8 @@ def configure_runtime():
         if not math.isfinite(args.modem_speed) or args.modem_speed <= 0:
             parser.error("--modem-speed must be finite and positive")
         if args.scope_ask:
-            parser.error("Modem mode takes --device explicitly; use "
-                         "utilities/modem_v3_check.py live-receive --list-devices")
+            parser.error("V7 modem mode takes --device explicitly; use "
+                         "--scope-device with the selected audio device")
         # --dir names the directory to use, in this mode as in every other.
         # It is not a source tree to append a suffix to; only the fallback,
         # when no directory is given at all, derives one from IMAGES_DIR.

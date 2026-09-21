@@ -65,7 +65,7 @@ from tools.v7_display import LatestFrame                                      # 
 
 FPS = P.PULSE_FPS
 CAMERA_CAPTURE_FPS = 15
-DEFAULT_FIXTURE = ROOT / 'modem_tests/fixtures/v6_face_1110.png'
+DEFAULT_FIXTURE = ROOT / 'modem_tests/fixtures/v7_reference_face.png'
 # Main's display engine can consume this mailbox without importing the
 # transport or changing its renderer.  The standalone Tk preview uses the
 # same mailbox while this branch remains runnable by itself.
@@ -81,9 +81,9 @@ def _device_arg(value):
 
 
 def _capture(args):
-    """Build one of modem_screen's existing RGB capture sources."""
-    from modem_screen import (camera_source, screen_capture_source,
-                              screen_source, Throttled, _region)
+    """Build one of the shared RGB capture sources."""
+    from tools.v7_capture import (camera_source, screen_capture_source,
+                                  screen_source, Throttled, _region)
 
     region = _region(args.region)
     if args.source == 'camera':
@@ -110,7 +110,7 @@ def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0):
     if gamma <= 0:
         raise ValueError('gamma must be positive')
     image = frame if isinstance(frame, Image.Image) else Image.fromarray(frame)
-    prepared = prepare_image(image, preset='auto', encode_filter=encode_filter)
+    prepared = prepare_image(image, encode_filter=encode_filter)
     if brightness != 1.0:
         prepared = ImageEnhance.Brightness(prepared).enhance(brightness)
     if gamma != 1.0:
@@ -126,13 +126,13 @@ def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0):
 
 def run_send(args):
     import sounddevice as sd
-    from modem_screen import Throttled
+    from tools.v7_capture import Throttled
 
     model = _model(args.fixture, args.encode_filter, args.mono_sum)
     raw_grab = _capture(args)
     capture_hz = args.capture_fps or (CAMERA_CAPTURE_FPS
                                       if args.source == 'camera' else FPS)
-    # Match V3--V6: drain a paced FFmpeg source continuously and expose only
+    # Drain a paced FFmpeg source continuously and expose only
     # the newest frame to the audio encoder. Reading the pipe once per encoded
     # frame creates seconds of stale-camera latency.
     grab = Throttled(raw_grab, capture_hz)

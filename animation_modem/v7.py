@@ -25,10 +25,10 @@ from scipy.signal import butter, filtfilt, firwin, savgol_filter, sosfiltfilt
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from animation_modem import transport3 as V3                             # noqa: E402
-from animation_modem.core import (SourceCoder, _sample_at, speed_length,
+from animation_modem import transport3 as PULSE                             # noqa: E402
+from animation_modem.v7_core import (SourceCoder, _sample_at, speed_length,
                                   speed_resample)                  # noqa: E402
-from animation_modem.core import bound_emission                         # noqa: E402
+from animation_modem.v7_core import bound_emission                         # noqa: E402
 
 # ------------------------------------------------------------------ §6.1
 RATE, N, CP, SYM, F = 48000, 128, 16, 144, 24
@@ -36,7 +36,7 @@ V7_GRIDS = ((96, 80), (48, 40), (48, 40))
 V7_SHAPES = ((48, 40), (24, 20), (24, 20))
 FRAME = F*SYM                                   # 3456 samples, 13.889 fps
 META_SYMBOL = SYM
-PULSE_FRAME = V3.SYNC_LEN + FRAME + META_SYMBOL + 32  # 3920, 12.245 fps
+PULSE_FRAME = PULSE.SYNC_LEN + FRAME + META_SYMBOL + 32  # 3920, 12.245 fps
 PULSE_FPS = RATE/PULSE_FRAME
 PULSE_GUARD_BASE = 32
 PULSE_MIN_SCALE = .25
@@ -270,7 +270,7 @@ DISPLAY_MIN_HEAD_CONFIDENCE = .60
 DISPLAY_MIN_HEAD_COVERAGE = .50
 DISPLAY_MAX_PILOT_NOISE = 2.0
 
-# Static placement tables: V3--V6 do this kind of work once at setup, not on
+# Static placement tables: the wire generations do this kind of work once at setup, not on
 # every picture.  The flattened arrays are used by the vectorized scatter in
 # encode_frame_coeffs().
 GROUP_BINS = np.asarray([blk[0] for (blk, _, _) in GROUPS], int)
@@ -449,11 +449,11 @@ def encode_stream(model, values, frames, lead=0.25, tail=0.25,
 
 
 def encode_pulse_frame(model, values, counter, aspect_code=0, source_index=None):
-    """One V3-style pulse-framed V7 body for low-latency live transport."""
+    """One edge-counted pulse-framed V7 body for low-latency live transport."""
     body = encode_frame(model, values, counter)
     out = np.zeros((PULSE_FRAME, 2), np.float32)
-    out[V3.SYNC_LEN:V3.SYNC_LEN+FRAME] = body
-    out[16:16+len(V3.PREAMBLE), :] = V3.PREAMBLE[:, None]
+    out[PULSE.SYNC_LEN:PULSE.SYNC_LEN+FRAME] = body
+    out[16:16+len(PULSE.PREAMBLE), :] = PULSE.PREAMBLE[:, None]
     meta = np.zeros((N//2+1, 2), complex)
     options = METADATA_OPTION_MONO_SUM if model.mono_sum else 0
     if source_index is None:
@@ -464,7 +464,7 @@ def encode_pulse_frame(model, values, counter, aspect_code=0, source_index=None)
     mx = (meta[:, 0])/np.sqrt(2)*model.phase[-1]
     meta_wave = np.fft.irfft(mx, n=N)
     meta_pcm = np.concatenate([meta_wave[-CP:], meta_wave])*model.scale
-    meta_start = V3.SYNC_LEN+FRAME
+    meta_start = PULSE.SYNC_LEN+FRAME
     # Shape the ordinary pulse/body packet first.  The metadata symbol has its
     # own cyclic prefix and is inserted afterward so the long packet shaper
     # cannot smear the preceding image symbol across its pilots/data.
@@ -1102,8 +1102,8 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
         # on the newest complete frame.
         candidates = []
         scan = 0
-        while scan + V3.SYNC_LEN + META_SYMBOL + 32 < len(samples):
-            hit = V3.measure_pulses(samples[scan:].mean(axis=1),
+        while scan + PULSE.SYNC_LEN + META_SYMBOL + 32 < len(samples):
+            hit = PULSE.measure_pulses(samples[scan:].mean(axis=1),
                                     min_scale=PULSE_MIN_SCALE,
                                     max_scale=PULSE_MAX_SCALE)
             if hit is None:
@@ -1122,9 +1122,9 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
         fs, sc, conf, pending_aspect = candidates[-2]
         cursor = int(fs)
         measured = (16*sc, sc, conf)
-    while cursor + V3.SYNC_LEN + META_SYMBOL + 32 < len(samples):
+    while cursor + PULSE.SYNC_LEN + META_SYMBOL + 32 < len(samples):
         if measured is None:
-            measured = V3.measure_pulses(samples[cursor:].mean(axis=1),
+            measured = PULSE.measure_pulses(samples[cursor:].mean(axis=1),
                                          min_scale=PULSE_MIN_SCALE,
                                          max_scale=PULSE_MAX_SCALE)
         if measured is None:
@@ -1138,7 +1138,7 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
         following = None
         next_start = None
         search = int(frame_start+PULSE_FRAME*scale)
-        candidate = V3.measure_pulses(samples[search:].mean(axis=1),
+        candidate = PULSE.measure_pulses(samples[search:].mean(axis=1),
                                       min_scale=PULSE_MIN_SCALE,
                                       max_scale=PULSE_MAX_SCALE)
         if candidate is not None:
@@ -1160,7 +1160,7 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
             # The next header is the commit boundary.  Do not decode on a
             # coincidental edge inside the current body/metadata.
             break
-        start = frame_start + V3.SYNC_LEN*scale
+        start = frame_start + PULSE.SYNC_LEN*scale
         # The first pulse measures the local playback scale at frame start;
         # consecutive pulse positions measure the actual frame duration. Use
         # the latter for the body walk so smooth wow/flutter is corrected
@@ -1182,7 +1182,7 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
         # Metadata is deliberately decoded before the image body.  Its pilots
         # are self-referencing, so the bootstrap model's absolute scale cancels
         # out; the protected encoding ID can therefore select the source model.
-        meta_start = frame_start + (V3.SYNC_LEN+FRAME)*scale
+        meta_start = frame_start + (PULSE.SYNC_LEN+FRAME)*scale
         decoded_metadata = decode_metadata(model, samples, meta_start, scale, None)
         metadata_valid = decoded_metadata is not None
         encoding_type = model.encoding_type

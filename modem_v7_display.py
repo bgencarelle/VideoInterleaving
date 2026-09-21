@@ -14,7 +14,7 @@ import wave
 import numpy as np
 
 from animation_modem.audio_common import device, pair, pcm
-from animation_modem.core import speed_resample
+from animation_modem.v7_core import speed_resample
 from animation_modem.playback import PacketOutput, latency
 from modem_bake import ModemLibrary
 from animation_modem import v7 as _v7
@@ -102,7 +102,7 @@ def run_modem(args):
     # application sender and standalone receiver build identical models.  A
     # bake-derived fallback keeps custom deployments usable when they omit the
     # fixture, but that path should be paired with the same image at receive.
-    fixture = Path(__file__).resolve().parent / 'modem_tests/fixtures/v6_face_1110.png'
+    fixture = Path(__file__).resolve().parent / 'modem_tests/fixtures/v7_reference_face.png'
     if fixture.is_file():
         model = _v7.build_model(
             fixture,

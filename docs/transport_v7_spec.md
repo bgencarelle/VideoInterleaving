@@ -66,7 +66,7 @@ full modem runs; §13 lists the modem-level confirmations still required.
 ### 3.1 Gain law (the largest single win)
 
 Coefficient statistics: 120 random crops (scale 0.45–1.0) and flips of the
-supplied test image `modem_tests/fixtures/v6_face_1110.png` (SHA-256
+supplied test image `modem_tests/fixtures/v7_reference_face.png` (SHA-256
 `f44aa3c3…257b`), run through the V6 DCT source path. All [MEASURED] image
 statistics in this draft use that fixture only.
 Metric: coefficient-domain reconstruction SNR under AWGN at equal mean
@@ -662,7 +662,7 @@ Run from the repository root with `.venv/bin/python`. No external
 images or downloads are needed.
 
 - **A.1 Gain law and variance fit** (§3.1–3.2): 120 crops/flips of
-  `modem_tests/fixtures/v6_face_1110.png` only, through
+  `modem_tests/fixtures/v7_reference_face.png` only, through
   `prepare_image` → `image_values` → V6 `SourceCoder` DCT. Per-coefficient
   λ = mean square. Compare `g² ∈ {sigma_model, 1/sigma_model, λ^(−1/2), 1}`,
   each normalised to equal mean transmit power; MSE_i = λ_i·N/(g_i²·λ_i + N).
