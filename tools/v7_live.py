@@ -267,12 +267,19 @@ def run_receive(args):
                 print({'status': 'input_gap_reacquire',
                        'dropped': meter['dropped']}, flush=True)
             return
+        added = False
         while True:
             try:
                 samples.append(blocks.get_nowait())
+                added = True
             except queue.Empty:
                 break
-        if not samples:
+        if not added:
+            return
+        buffered = sum(len(block) for block in samples)
+        if buffered < P.PULSE_FRAME:
+            return
+        if buffered-processed_samples < P.PULSE_FRAME*args.decode_batch:
             return
         audio = np.concatenate(samples)
         # Latest-only decoding needs the current body plus the next header;
@@ -285,10 +292,6 @@ def run_receive(args):
             audio = audio[-history:]
             samples[:] = [audio]
             processed_samples = max(0, processed_samples-dropped)
-        if len(audio) < P.PULSE_FRAME:
-            return
-        if len(audio)-processed_samples < P.PULSE_FRAME*args.decode_batch:
-            return
         # Do not repeatedly run pulse acquisition/demodulation on an idle
         # input device.  This is deliberately far below normal loopback levels
         # so quiet but valid recordings still reach measure_pulses().

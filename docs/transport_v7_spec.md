@@ -945,3 +945,32 @@ temporal prediction, learned source coding, or a new modulation family. Each
 would change multiple variables and make the current stable emulation harder to
 audit. Every future change requires a reversible flag, clean vectors, matched
 impairment results, and a real-media acceptance plan.
+
+## Appendix A: EOF acquisition proposal
+
+This appendix records a positive acquisition proposal for later implementation;
+it does not change the V7 baseline wire.
+
+The proposal is to retain the existing body decoder and timing calculations,
+and add an explicit loud end-of-frame pulse in the existing guard budget. The
+receiver would use classical packet-clock logic:
+
+```text
+header lock → count known packet geometry → validate EOF pulse → commit frame
+```
+
+The header remains the start/timing reference and the EOF pulse becomes the
+observed packet-end reference. This has useful properties:
+
+- no packet-length or FPS increase is required;
+- acquisition no longer needs to search payload crossings;
+- the body OFDM decoder remains unchanged;
+- packet commit no longer depends on the next frame's header;
+- header/EOF distance supplies an independent timing and completeness check;
+- the approach is deterministic, inexpensive, and appropriate for noisy tape;
+- loss recovery can be an explicit timeout/reacquisition transition.
+
+An EOF-only prototype must change its encoder and decoder together. It must
+validate clean generated WAVs, playback-scale PPM, timing residuals, CPU, and
+the existing tape matrix against the baseline before any wire change is made
+default.

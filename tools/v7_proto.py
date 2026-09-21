@@ -1010,7 +1010,11 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
     next pulse search starts after that frame.  There is no continuous clock
     track or buffered clock-template refinement.
     """
-    samples = np.asarray(x, float)*float(input_gain)
+    # Live capture is float32 and _sample_at returns float32.  Promoting the
+    # complete rolling history to float64 here only doubles allocation and
+    # memory traffic; the FFT/equalizer still performs its own complex work at
+    # the precision NumPy requires.
+    samples = np.asarray(x, np.float32)*np.float32(input_gain)
     cursor = 0
     counter = 1
     results = []
