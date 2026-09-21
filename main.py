@@ -331,7 +331,8 @@ def configure_runtime():
                         help="Time after packet completion reserved for input/decode/GUI (default 15)")
     parser.add_argument("--modem-prepare-ms", type=float, default=10.0,
                         help="Minimum encoding lead before a send deadline (default 10)")
-    parser.add_argument("--modem-speed", type=float, choices=(1.0, 1.5, 2.0),
+    parser.add_argument("--modem-speed", "--speed", dest="modem_speed",
+                        type=float, choices=(1.0, 1.5, 2.0),
                         default=1.0,
                         help="V7 playback speed: 1, 1.5, or 2x; 1x is tape-safe")
     parser.add_argument("--modem-frames", type=int, default=0, help="0 = unlimited live / one source pass for WAV")

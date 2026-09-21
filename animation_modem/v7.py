@@ -1247,6 +1247,7 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
             result.diag['mono_sum'] = revision == METADATA_OPTION_MONO_SUM
             result.diag['pulse_scale'] = float(scale)
             result.diag['frame_scale'] = float(frame_scale)
+            result.diag['playback_speed'] = float(1/max(scale, 1e-9))
             result.diag['timing_delta_ppm'] = float(
                 (frame_scale/scale-1)*1e6)
             results.append(result)

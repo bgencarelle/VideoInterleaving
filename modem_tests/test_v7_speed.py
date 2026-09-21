@@ -35,6 +35,8 @@ class V7SpeedTests(unittest.TestCase):
         results, info = v7.decode_pulse_stream(model, fast)
         self.assertGreaterEqual(len(results), 2, info)
         self.assertEqual([r.diag['source_index'] for r in results[:2]], [0, 1])
+        self.assertAlmostEqual(results[0].diag['playback_speed'], 1.5,
+                               delta=.02)
 
 
 if __name__ == '__main__':
