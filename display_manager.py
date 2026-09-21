@@ -1116,8 +1116,9 @@ def display_init(state: DisplayState):
             glfw.set_window_attrib(window, glfw.DECORATED, glfw.FALSE)
         else:
             glfw.set_window_attrib(window, glfw.DECORATED, glfw.TRUE)
-            win_w = 400
-            win_h = int(win_w / (eff_w / eff_h)) if eff_h > 0 else 300
+            # Keep windowed mode at a stable 4:3 size; the renderer
+            # letterboxes source images whose aspect differs.
+            win_w, win_h = 400, 300
             current_w, current_h = glfw.get_window_size(window)
             if current_w != win_w or current_h != win_h:
                 glfw.set_window_size(window, win_w, win_h)
@@ -1188,10 +1189,9 @@ def display_init(state: DisplayState):
                     return win
                 return glfw.create_window(fs_w, fs_h, "Fullscreen", mon, None)
 
-            aspect = eff_w / eff_h
-            win_w = 400
-            win_h = int(win_w / aspect)
-            return glfw.create_window(win_w, win_h, "Windowed Mode", None, None)
+            # Windowed mode is a stable 4:3 viewport. Non-4:3 source
+            # images are fitted and letterboxed by the renderer.
+            return glfw.create_window(400, 300, "Windowed Mode", None, None)
 
         # Version-first probing (no hardware assumptions):
         # - Prefer desktop OpenGL 3.3 (ModernGL path)
@@ -1413,13 +1413,9 @@ def display_init(state: DisplayState):
                     _hide_cursor_reliable(window)
             else:
                 if current_monitor is not None:
-                    # Restore to a small window with the image's effective
-                    # aspect ratio. A fixed 400x300 here makes the toggle
-                    # path disagree with initial window creation and can
-                    # leave the image cropped until the next resize event.
-                    win_w = 400
-                    win_h = int(round(win_w / (eff_w / eff_h))) if eff_h > 0 else 300
-                    glfw.set_window_monitor(window, None, 100, 100, win_w, win_h, 0)
+                    # Restore a stable 4:3 window; the renderer letterboxes
+                    # source images whose aspect differs.
+                    glfw.set_window_monitor(window, None, 100, 100, 400, 300, 0)
                     glfw.poll_events()
                     _hide_cursor_reliable(window)
 
