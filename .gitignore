@@ -208,3 +208,6 @@ images_xy/
 /*.wav
 /*.npy
 /receive.jsonl
+
+# Local scratch artifacts
+scratch/

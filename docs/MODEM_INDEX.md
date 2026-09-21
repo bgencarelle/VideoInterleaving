@@ -23,6 +23,11 @@ testing and source links below.
 
 ## Operational guides
 
+- **[Tape-Next design proposal](TAPE_NEXT_SPEC.md)** — analysis of the existing
+  wires and a proposed 15 fps narrow-band common-color-foundation transport;
+  exact prototype budget, alternatives, and validation gates. Not implemented
+  or established as a better wire yet.
+
 - [Modem mode](MODEM_MODE.md) — sender/display behavior, aspect handling,
   source preparation, filters, and decoded display scaling.
 - [Self-describing live modem](LIVE_MODEM.md) — receiver discovery, sample
