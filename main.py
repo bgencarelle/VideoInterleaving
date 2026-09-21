@@ -338,7 +338,8 @@ def configure_runtime():
     parser.add_argument("--modem-encode-filter",
                         choices=("nearest", "box", "lanczos", "bicubic"),
                         default="nearest",
-                        help="V7 source resize filter (default: nearest)")
+                        help="V7 source resize filter (default: nearest; current "
+                             "80x96 baked assets usually make this a no-op)")
     parser.add_argument("--modem-frames", type=int, default=0, help="0 = unlimited live / one source pass for WAV")
     parser.add_argument("--modem-wav", help="Export a deterministic pair to PCM16 WAV instead of live playback")
     parser.add_argument("--modem-profile", default=None,
