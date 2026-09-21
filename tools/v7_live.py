@@ -96,7 +96,8 @@ def _capture(args):
     if args.screen_backend == 'mss':
         return screen_source(region)
     return screen_capture_source(args.capture_fps or FPS, region, args.display,
-                                 args.capture_width, args.ffmpeg_input)
+                                 args.capture_width, args.ffmpeg_input,
+                                 args.capture_filter)
 
 
 def _model(fixture, encode_filter='nearest', mono_sum=False):

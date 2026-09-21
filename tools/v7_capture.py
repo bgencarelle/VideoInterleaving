@@ -94,7 +94,8 @@ def screen_source(region=None):
     return grab
 
 
-def ffmpeg_source(spec, fps, region=None, display=None, width=320):
+def ffmpeg_source(spec, fps, region=None, display=None, width=320,
+                  scale_flags='neighbor'):
     """Capture through ffmpeg's platform fast path.
 
     mss goes via CoreGraphics on macOS and costs tens of milliseconds a grab.
@@ -109,6 +110,9 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320):
     w = int(width)
     if w < 1:
         raise ValueError('Capture width must be positive')
+    fps = 30 if fps is None else fps
+    if scale_flags not in ('neighbor', 'area', 'bilinear', 'bicubic', 'lanczos'):
+        raise ValueError(f'Unsupported FFmpeg scale flags: {scale_flags}')
 
     if spec:
         fmt, src = spec.split(':', 1)
@@ -126,7 +130,7 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320):
                 '-i', f'{src}+{region[0]},{region[1]}']
     else:
         cmd += ['-i', src]
-    cmd += ['-vf', f'scale={w}:-1', '-pix_fmt', 'rgb24',
+    cmd += ['-vf', f'scale={w}:-1:flags={scale_flags}', '-pix_fmt', 'rgb24',
             '-fps_mode', 'passthrough',
             '-c:v', 'ppm', '-f', 'image2pipe', '-an', '-sn', '-']
     # Device timestamps are not necessarily a constant-rate timeline. The
@@ -176,7 +180,8 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320):
     return grab
 
 
-def camera_source(index=0, fps=30, width=320, spec=None):
+def camera_source(index=0, fps=30, width=320, spec=None,
+                  scale_flags='neighbor'):
     """Webcam through ffmpeg, same reasoning as screen capture."""
     if sys.platform == 'darwin':
         spec = spec or f'avfoundation:{index}'
@@ -184,7 +189,14 @@ def camera_source(index=0, fps=30, width=320, spec=None):
         spec = spec or 'dshow:video=Integrated Camera'
     else:
         spec = spec or f'v4l2:/dev/video{index}'
-    return ffmpeg_source(spec, fps, width=width)
+    return ffmpeg_source(spec, fps, width=width, scale_flags=scale_flags)
+
+
+def screen_capture_source(fps, region=None, display=None, width=320,
+                          spec=None, scale_flags='neighbor'):
+    """Compatibility adapter for the former modem_screen API."""
+    return ffmpeg_source(spec, fps, region=region, display=display,
+                         width=width, scale_flags=scale_flags)
 
 
 def video_source(path, loop=True, realtime=True):
