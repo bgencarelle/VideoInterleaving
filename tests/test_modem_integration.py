@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -12,6 +13,7 @@ from PIL import Image
 
 from utilities.convert_to_modem_dct import bake_tree_dct as bake_tree
 from animation_modem import v7
+from modem_bake import ModemLibrary
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -30,6 +32,28 @@ def source_tree(root, count=3):
 
 
 class ModemV7IntegrationTests(unittest.TestCase):
+    def test_generated_bake_matches_v7_geometry(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / 'images'
+            source_tree(source)
+            bake = root / 'images_modem'
+            with contextlib.redirect_stdout(io.StringIO()):
+                bake_tree(source, bake)
+
+            library = ModemLibrary(bake)
+            self.assertEqual(library.profile, 'color-dct')
+            self.assertEqual(library.size, (80, 96))
+            self.assertEqual(library.frames, 3)
+            self.assertEqual(library.composite(0, 0, 0).size, (80, 96))
+
+            manifest_path = bake / 'modem.json'
+            manifest = json.loads(manifest_path.read_text())
+            manifest['profile'] = 'lean-dct'
+            manifest_path.write_text(json.dumps(manifest))
+            with self.assertRaises(ValueError):
+                ModemLibrary(bake)
+
     def test_main_wav_path_uses_v7_without_legacy_modem_stack(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

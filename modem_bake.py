@@ -18,7 +18,13 @@ class ModemLibrary:
         # bakes bigger than it transmits -- color-dct is 80x96 pixels behind a
         # 40x48 wire shape -- so checking the wire shape here rejects exactly
         # the bakes that profile exists for.
-        if self.profile not in PROFILES or tuple(manifest['size'])!=source_size(self.profile):
+        # V7 has one fixed source geometry: color-dct's 80x96 sampling grid
+        # truncated to 48x40 luma plus 24x20 chroma.  The older lean-dct
+        # profile has the same bake dimensions but a different wire shape, so
+        # accepting it here would let the sender silently encode the wrong
+        # number of coefficients.
+        if (self.profile != 'color-dct' or self.profile not in PROFILES
+                or tuple(manifest['size']) != source_size(self.profile)):
             raise ValueError('Invalid modem bake profile/dimensions')
         self.size=source_size(self.profile)
         groups={'main':{},'float':{}}
