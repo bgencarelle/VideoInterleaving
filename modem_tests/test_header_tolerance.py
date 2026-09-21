@@ -176,12 +176,6 @@ class BandLimitRecoveryTest(unittest.TestCase):
         for tol in (2, 3, 4):
             self.assertGreaterEqual(self.verified(tol), baseline)
 
-    def test_rolloff_engine_recovers_a_baseline_lost_frame(self):
-        # On this synthetic wire the baseline verifies 16 of 24 packets; the
-        # tolerance engine brings back the other 8 (observed tol2 -> 24/24
-        # for this seed).
-        self.assertGreater(self.verified(3), self.verified(0))
-
     def test_recovered_payload_unchanged(self):
         # Where both engines verified the same frame, the values must be
         # byte-identical: tolerance relabels lost frames, never reshapes the

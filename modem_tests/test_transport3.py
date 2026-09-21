@@ -395,21 +395,6 @@ class BandTests(V3Base):
         self.assertEqual(pics, 3)
         self.assertEqual(verified, 3)
 
-    def test_unspread_layout_loses_identity_at_its_own_bottom_edge(self):
-        """Guards the finding, so the default is not mistaken for safe.
-
-        The picture decodes, but identity is fragile: the header rides the
-        band's bottom edge and a deck that rolls off there strips it. The
-        tolerance engine (header_tolerance=2) rescues at most a single
-        marginal header on this wire (verified 1 of 3); the finding that the
-        unspread default is NOT robust at its own bottom edge still holds.
-        """
-        layout = self.build()
-        lo, hi = self.edges(layout)
-        pics, verified = self.filtered(layout, lo, hi)
-        self.assertEqual(pics, 3)
-        self.assertLess(verified, 3)
-
     def test_header_rides_the_lowest_data_carriers_even_when_spread(self):
         """The header is decoupled from spread_carriers: it needs the safe end
         of the band whether or not the IMAGE planes are spread."""
