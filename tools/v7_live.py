@@ -30,7 +30,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from animation_modem.imaging import values_image                         # noqa: E402
-from tools import v7_proto as P                                           # noqa: E402
+from animation_modem import v7 as P                                       # noqa: E402
 image_values = P.image_values
 prepare_image = P.prepare_image
 try:
