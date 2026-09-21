@@ -94,6 +94,83 @@ def screen_source(region=None):
     return grab
 
 
+def test_source():
+    """Synthetic moving colour target for capture/transport testing."""
+    start = time.perf_counter()
+
+    def grab():
+        t = time.perf_counter() - start
+        yy, xx = np.mgrid[0:240, 0:200]
+        cx, cy = 100 + 70*np.sin(t*1.1), 120 + 80*np.cos(t*.7)
+        blob = np.exp(-(((xx-cx)/38)**2 + ((yy-cy)/38)**2))
+        rgb = np.zeros((240, 200, 3))
+        rgb[:, :, 0] = .12 + .80*blob
+        rgb[:, :, 1] = .10 + .45*blob*(.5 + .5*np.sin(t))
+        rgb[:, :, 2] = .16 + .30*(xx/200)
+        return np.uint8(np.clip(rgb, 0, 1)*255)
+
+    return grab
+
+
+def mouse_follow_source(initial_width=400, aspect_ratio=4/3):
+    """Capture a zoomable screen region centered on the mouse cursor."""
+    try:
+        from mss import MSS as _MSS
+        import pyautogui
+        from pynput import keyboard
+    except ImportError as exc:
+        raise SystemExit(f'Mouse-follow capture dependency missing: {exc.name}')
+    sct = None
+    listener = None
+    screen_w, screen_h = pyautogui.size()
+    lock = threading.Lock()
+    state = {'width': int(initial_width), 'height': int(initial_width/aspect_ratio)}
+
+    def update_zoom(factor):
+        with lock:
+            width = max(20, min(screen_w, int(state['width'] * factor)))
+            state['width'] = width
+            state['height'] = max(15, min(screen_h, int(width/aspect_ratio)))
+
+    def on_press(key):
+        char = getattr(key, 'char', None)
+        if char in ('+', '='):
+            update_zoom(.9)
+        elif char == '-':
+            update_zoom(1.1)
+
+    try:
+        listener = keyboard.Listener(on_press=on_press)
+        listener.start()
+    except Exception:
+        listener = None
+
+    def grab():
+        nonlocal sct
+        if sct is None:
+            sct = _MSS()
+        mx, my = pyautogui.position()
+        with lock:
+            width, height = state['width'], state['height']
+        left = max(0, min(mx-width//2, screen_w-width))
+        top = max(0, min(my-height//2, screen_h-height))
+        shot = sct.grab({'left': int(left), 'top': int(top),
+                         'width': int(width), 'height': int(height)})
+        raw = np.frombuffer(shot.raw, np.uint8).reshape(shot.height, shot.width, 4)
+        return raw[:, :, 2::-1]
+
+    def close():
+        nonlocal sct, listener
+        if listener is not None:
+            listener.stop()
+            listener = None
+        if sct is not None:
+            sct.close()
+            sct = None
+    grab.close = close
+    return grab
+
+
 def ffmpeg_source(spec, fps, region=None, display=None, width=320,
                   scale_flags='neighbor'):
     """Capture through ffmpeg's platform fast path.

@@ -82,10 +82,15 @@ def _device_arg(value):
 
 def _capture(args):
     """Build one of the shared RGB capture sources."""
-    from tools.v7_capture import (camera_source, screen_capture_source,
-                                  screen_source, Throttled, _region)
+    from tools.v7_capture import (camera_source, mouse_follow_source,
+                                  screen_capture_source, screen_source,
+                                  test_source, Throttled, _region)
 
     region = _region(args.region)
+    if args.source == 'test':
+        return test_source()
+    if args.source == 'mouse-follow':
+        return mouse_follow_source(initial_width=args.capture_width)
     if args.source == 'camera':
         # Let FFmpeg probe the lowest mode/rate when the user did not override
         # it.  Some AVFoundation devices advertise 15 fps but reject a forced
@@ -627,7 +632,8 @@ def parser():
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest='mode', required=True)
     send = sub.add_parser('send', help='capture camera/screen and transmit V7')
-    send.add_argument('--source', choices=('camera', 'screen'), required=True)
+    send.add_argument('--source', choices=('camera', 'screen', 'test',
+                                           'mouse-follow'), required=True)
     send.add_argument('--device', type=_device_arg, required=True,
                       help='explicit sounddevice output, e.g. BlackHole 2ch')
     send.add_argument('--fixture', type=Path, default=DEFAULT_FIXTURE)
