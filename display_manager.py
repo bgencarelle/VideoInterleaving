@@ -1429,9 +1429,14 @@ def display_init(state: DisplayState):
         offset_x = (fb_w - (eff_w * scale)) / 2.0
         offset_y = (fb_h - (eff_h * scale)) / 2.0
     else:
-        scale = fb_w / eff_w
-        offset_x = 0
-        offset_y = 0
+        # Window decorations reduce the client framebuffer below the nominal
+        # 400px window size. Fit both axes so the image is never cropped in
+        # windowed mode; any spare space becomes a centered letterbox.
+        scale_x = fb_w / eff_w
+        scale_y = fb_h / eff_h
+        scale = min(scale_x, scale_y)
+        offset_x = (fb_w - (eff_w * scale)) / 2.0
+        offset_y = (fb_h - (eff_h * scale)) / 2.0
 
     renderer.set_transform_parameters(
         scale, offset_x, offset_y, state.image_size,
