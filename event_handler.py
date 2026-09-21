@@ -69,10 +69,16 @@ def register_callbacks(window, state):
         if state.fullscreen:
             # Check if fullscreen was lost (OS kicked us out)
             try:
-                from display_manager import _is_wayland_session
+                from display_manager import _is_wayland_session, _is_macos
                 is_wayland = _is_wayland_session()
+                is_macos = _is_macos()
                 
-                if is_wayland:
+                if is_macos:
+                    # macOS fullscreen is a borderless window, so there is no
+                    # monitor attachment to use as an X11-style loss signal.
+                    # Any resize still requires a fresh viewport calculation.
+                    state.needs_update = True
+                elif is_wayland:
                     # Wayland: Compare window size to monitor size
                     # If window is significantly smaller (< 90% of monitor), fullscreen was lost
                     primary_monitor = glfw.get_primary_monitor()
