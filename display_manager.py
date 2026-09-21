@@ -1381,6 +1381,7 @@ def display_init(state: DisplayState):
                 win_h = int(win_w / (eff_w / eff_h)) if eff_h > 0 else 300
                 if current_w != win_w or current_h != win_h:
                     glfw.set_window_size(window, win_w, win_h)
+                    glfw.poll_events()
                     _hide_cursor_reliable(window)
         else:
             # Non-Wayland (X11): Use set_window_monitor for proper fullscreen
@@ -1412,11 +1413,19 @@ def display_init(state: DisplayState):
                     _hide_cursor_reliable(window)
             else:
                 if current_monitor is not None:
-                    # Restore to a small window; actual sizing will be re-derived below via framebuffer size.
-                    glfw.set_window_monitor(window, None, 100, 100, 400, 300, 0)
+                    # Restore to a small window with the image's effective
+                    # aspect ratio. A fixed 400x300 here makes the toggle
+                    # path disagree with initial window creation and can
+                    # leave the image cropped until the next resize event.
+                    win_w = 400
+                    win_h = int(round(win_w / (eff_w / eff_h))) if eff_h > 0 else 300
+                    glfw.set_window_monitor(window, None, 100, 100, win_w, win_h, 0)
+                    glfw.poll_events()
                     _hide_cursor_reliable(window)
 
     fb_w, fb_h = glfw.get_framebuffer_size(window)
+    if fb_w <= 0 or fb_h <= 0:
+        fb_w, fb_h = glfw.get_window_size(window)
     if renderer.using_legacy_gl():
         glViewport(0, 0, fb_w, fb_h)
     else:
