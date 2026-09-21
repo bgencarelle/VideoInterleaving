@@ -891,6 +891,10 @@ The following decoder improvements are now implemented:
   while retaining the nearest bootstrap model;
 - precompute remaining noise/index lookup arrays and avoid per-frame temporary
   dictionaries.
+- keep live rolling audio in `float32` and avoid concatenating the retained
+  history when no new capture block has arrived;
+- publish only the newest usable decoded frame to a bounded depth-one handoff,
+  so a slow downstream consumer cannot create backlog latency.
 
 The worker keeps the decoder and UI presentation independent; a damaged decode
 does not terminate the display loop. These are CPU/latency optimizations only.
@@ -974,3 +978,54 @@ An EOF-only prototype must change its encoder and decoder together. It must
 validate clean generated WAVs, playback-scale PPM, timing residuals, CPU, and
 the existing tape matrix against the baseline before any wire change is made
 default.
+
+### A.1 Bench implementation findings
+
+The paired bench implementation replaces the proposal's broad candidate
+search with a small packet state machine. The wire remains the 3,920-sample
+format above; the final 32 guard samples carry the loud EOF marker:
+
+```text
+SEARCH_HEADER → PACKET_CLOCK → VALIDATE_EOF → COMMIT
+       ▲                              │
+       └──────── timeout/junk ───────┘
+```
+
+Header acquisition now:
+
+- qualifies polarity with a Schmitt threshold;
+- timestamps transitions at the interpolated zero crossing, using samples that
+  actually bracket zero;
+- checks the known polarity sequence and each expected short/long gap in order;
+- fits the packet origin and playback scale from the accepted edge run.
+
+EOF acquisition now:
+
+- opens only near the predicted packet end;
+- validates the known EOF polarity transitions sequentially;
+- measures the marker pulse spacing and the header-to-EOF packet duration;
+- rejects the packet before metadata, body sampling, FFT, or equalization when
+  the header or EOF state fails.
+
+After a valid EOF, the packet is committed immediately. The next header is
+used only to start acquisition of the next packet. Silence or arbitrary audio
+between EOF and that header is not treated as a packet boundary and cannot
+re-anchor the packet already committed. The OFDM body retains the existing
+affine sample walk; EOF acquisition does not add a second body timing map.
+
+The paired encoder/decoder torture run covered 19 generated WAV impairment
+cases and decoded 8/8 packets in every case. Acquisition CPU was lower in all
+19 cases, by approximately 1.4--7.1 ms per eight-packet pass. Representative
+packet-scale results were:
+
+```text
+                         baseline PPM     EOF PPM
+clean                         0              -1
+wow/flutter               -3575           -3574
+Type-I                    -2781           -2723
+Type-II                   -1748           -1693
+```
+
+These are bench results only. The existing V7 pulse wire and its
+`measure_pulses()` receiver remain the protected live baseline until the EOF
+state machine is migrated and revalidated on real media.
