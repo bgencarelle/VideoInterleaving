@@ -393,8 +393,12 @@ def run_display(clock_source=CLOCK_MODE):
                 if not state.run_mode: break
 
             if state.needs_update and not is_headless and has_gl:
-                window = display_init(state)
+                # Clear before reconfiguring. macOS applies fullscreen/windowed
+                # size changes asynchronously and can invoke the resize
+                # callback during display_init(); clearing afterward loses
+                # that callback and leaves the renderer using stale geometry.
                 state.needs_update = False
+                window = display_init(state)
                 if window is not None:
                     _hide_cursor_reliable(window)
 
