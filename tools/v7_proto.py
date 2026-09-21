@@ -342,7 +342,8 @@ def build_model_from_image(source, target_rms, encode_filter='lanczos',
         rad = np.hypot(np.arange(r)[:, None]/gr, np.arange(c)[None, :]/gc).ravel()
         f = lambda R, a, k, q: a - q*np.log1p(k*R)
         m = rad > 0
-        (a, k, q), _ = curve_fit(f, rad[m], np.log(L[m]), p0=(0, 20, 2),
+        (a, k, q), _ = curve_fit(f, rad[m], np.log(np.maximum(L[m], 1e-12)),
+                                 p0=(0, 20, 2),
                                  bounds=([-50, 0, 0], [50, 1e4, 10]), maxfev=20000)
         model = np.exp(f(rad, a, k, q)); model[0] = C[:, off].var() + 1e-6
         lam[sl] = model; off += r*c
