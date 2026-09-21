@@ -12,7 +12,7 @@ import threading
 import numpy as np
 from .audio_common import sounddevice, route
 from .transport3 import WIRE
-from .core import band_limited, emit_length
+from .core import band_limited, emit_length, speed_length, speed_resample
 
 _DEFAULT = WIRE   # layouts pass their own geometry
 
@@ -37,7 +37,7 @@ class Slot:
 
 class PacketOutput:
     def __init__(self, device=None, channels=(0, 1), requested_latency='low',
-                 frame=_DEFAULT.frame, packet=_DEFAULT.packet):
+                 frame=_DEFAULT.frame, packet=_DEFAULT.packet, speed=1.0):
         # The wire carries its own geometry -- 3200 samples -- so the packet
         # size is taken from it instead of a module constant.
         self.frame = int(frame)
@@ -45,6 +45,9 @@ class PacketOutput:
         if not 0 < self.packet <= self.frame:
             raise ValueError('Packet must be positive and fit inside the frame')
         self.channels = channels
+        self.speed = float(speed)
+        if not np.isfinite(self.speed) or self.speed <= 0:
+            raise ValueError('speed must be finite and positive')
         self.pending = None
         self.pending_start = None
         self.next_start = None
@@ -78,8 +81,12 @@ class PacketOutput:
         # device turned out to be. Above the reference rate that means
         # resampling so the carriers stay at 375-20250 Hz instead of riding the
         # clock up out of the DAC's passband; at or below it, nothing happens.
-        self.emit_frame = emit_length(self.frame, self.rate)
-        self.emit_packet = emit_length(self.packet, self.rate)
+        self.emit_frame = (emit_length(self.frame, self.rate)
+                           if self.speed == 1 else
+                           speed_length(self.frame, self.rate, self.speed))
+        self.emit_packet = (emit_length(self.packet, self.rate)
+                            if self.speed == 1 else
+                            speed_length(self.packet, self.rate, self.speed))
         self.fps = self.rate/self.emit_frame
 
     def __enter__(self):
@@ -130,7 +137,10 @@ class PacketOutput:
         """Take a reference-geometry frame; emit one this device can carry."""
         if np.shape(audio) != (self.frame, 2) or not np.isfinite(audio).all():
             raise ValueError('Expected one finite stereo modem frame')
-        prepared = route(band_limited(audio, self.rate), self.channels)
+        prepared = route(
+            band_limited(audio, self.rate) if self.speed == 1 else
+            speed_resample(audio, self.rate, self.speed),
+            self.channels)
         self.check()
         if slot is not None and self.stream.time + self.stream.latency >= slot.start_time:
             self.deadline_misses += 1

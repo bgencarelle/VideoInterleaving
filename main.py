@@ -331,6 +331,9 @@ def configure_runtime():
                         help="Time after packet completion reserved for input/decode/GUI (default 15)")
     parser.add_argument("--modem-prepare-ms", type=float, default=10.0,
                         help="Minimum encoding lead before a send deadline (default 10)")
+    parser.add_argument("--modem-speed", type=float, choices=(1.0, 1.5, 2.0),
+                        default=1.0,
+                        help="V7 playback speed: 1, 1.5, or 2x; 1x is tape-safe")
     parser.add_argument("--modem-frames", type=int, default=0, help="0 = unlimited live / one source pass for WAV")
     parser.add_argument("--modem-wav", help="Export a deterministic pair to PCM16 WAV instead of live playback")
     parser.add_argument("--modem-profile", default=None,
@@ -363,6 +366,8 @@ def configure_runtime():
             parser.error("--modem-index-offset-ms must be finite and within +/-10000")
         if not math.isfinite(args.modem_frame_duration) or args.modem_frame_duration <= 0:
             parser.error("--modem-frame-duration must be finite and positive")
+        if not math.isfinite(args.modem_speed) or args.modem_speed <= 0:
+            parser.error("--modem-speed must be finite and positive")
         if args.scope_ask:
             parser.error("Modem mode takes --device explicitly; use "
                          "utilities/modem_v3_check.py live-receive --list-devices")
@@ -884,7 +889,7 @@ except Exception as e:
 def main(clock=CLOCK_MODE):
     if cli_args.mode == "modem":
         try:
-            from modem_display import run_modem
+            from modem_v7_display import run_modem
             run_modem(cli_args)
         except KeyboardInterrupt:
             print("\n[MODEM] Shutdown requested")

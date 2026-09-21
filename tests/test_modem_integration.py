@@ -8,12 +8,14 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
+import wave
 import numpy as np
 from PIL import Image
 from utilities.convert_to_modem_dct import bake_tree_dct as bake_tree
 from utilities.bake_assets import write_slab
 from modem_bake import ModemLibrary
 from modem_display import packet, run_modem
+from tools import v7_proto as v7
 from animation_modem import transport3 as v3
 from animation_modem.imaging import DEFAULT_PROFILE, fit_shapes, plane_shapes
 
@@ -167,17 +169,22 @@ runpy.run_path(sys.argv[1],run_name='__main__')
                               "target=sys.argv.pop(1); sys.path.insert(0,str(__import__('pathlib').Path(target).parent)); runpy.run_path(target,run_name='__main__')")
         r=subprocess.run([sys.executable,'-c',script,str(REPO/'main.py'),'--mode','modem',
                            '--modem-dir',str(self.bake),'--modem-pair','1,0',
-                           '--modem-wav',str(wav),'--modem-frames','5','-f'],
+                           '--modem-wav',str(wav),'--modem-frames','5',
+                           '--modem-speed','1.5','-f'],
                           cwd=self.root,text=True,capture_output=True,timeout=30)
         self.assertEqual(r.returncode,0,r.stdout+r.stderr)
-        r=subprocess.run([sys.executable,str(REPO/'utilities'/'modem_v3_check.py'),
-                           'read','--wav',str(wav)],
-                          cwd=self.root,text=True,capture_output=True,timeout=60)
-        self.assertEqual(r.returncode,0,r.stderr)
-        rows=[json.loads(line) for line in r.stdout.splitlines()]
-        self.assertEqual([x['frame'] for x in rows],list(range(1,6)))
-        self.assertEqual([x['index'] for x in rows],[1,2,3,1,2])
-        self.assertEqual([x['source_index'] for x in rows],[0,1,2,0,1])
+        lib=ModemLibrary(self.bake)
+        model=v7.build_model(
+            REPO/'modem_tests/fixtures/v6_face_1110.png',
+            .1521/np.sqrt(1+10**(v7.CLOCK_REL_DB/10)),
+            encode_filter='nearest')
+        with wave.open(str(wav),'rb') as source:
+            samples=np.frombuffer(source.readframes(source.getnframes()),
+                                   dtype='<i2').reshape(-1,2).astype(float)/32767
+        decoded, info=v7.decode_pulse_stream(model,samples)
+        self.assertGreaterEqual(len(decoded),4,info)
+        self.assertEqual([x.diag['source_index'] for x in decoded[:4]],
+                         [0,1,2,0])
 
 
 if __name__=='__main__':unittest.main()

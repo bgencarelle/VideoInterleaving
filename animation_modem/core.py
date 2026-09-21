@@ -651,6 +651,40 @@ def emit_length(samples, rate, reference=REFERENCE_RATE):
     return samples if ratio is None else int(round(samples*ratio[0]/ratio[1]))
 
 
+def speed_length(samples, rate, speed=1.0, reference=REFERENCE_RATE):
+    """Output length for a reference packet played at ``speed``."""
+    speed = float(speed)
+    if not np.isfinite(speed) or speed <= 0:
+        raise ValueError('speed must be finite and positive')
+    return max(1, int(round(float(samples)*float(rate)/(reference*speed))))
+
+
+def speed_resample(samples, rate, speed=1.0, reference=REFERENCE_RATE):
+    """Time-compress a reference packet for a real output sample clock.
+
+    ``band_limited`` intentionally preserves the wire duration.  V7 speed
+    profiles need the opposite operation: the same reference packet must
+    occupy fewer seconds while retaining its sample-clock carrier geometry.
+    The output is exact-length so PacketOutput can schedule it safely.
+    """
+    samples = np.asarray(samples, np.float32)
+    target = speed_length(len(samples), rate, speed, reference)
+    if target == len(samples):
+        return np.ascontiguousarray(samples)
+    ratio = Fraction(target, len(samples)).limit_denominator(256)
+    out = resample_poly(samples, ratio.numerator, ratio.denominator, axis=0)
+    if len(out) < target:
+        out = np.concatenate((out, np.zeros((target-len(out), *out.shape[1:]),
+                                             dtype=out.dtype)))
+    elif len(out) > target:
+        out = out[:target]
+    src_peak = float(np.max(np.abs(samples)))
+    out_peak = float(np.max(np.abs(out)))
+    if src_peak > 0 and out_peak > src_peak:
+        out = out*(src_peak/out_peak)
+    return np.ascontiguousarray(out, dtype=np.float32)
+
+
 def resample_packet(samples, rate, length, taps=8, offset=0.0, fast=False):
     """Resample one packet, using a cheap path for normal small clock error.
 
@@ -1331,4 +1365,3 @@ def _recovery_quality(result):
         return (False, False, -float('inf'))
     return (True, result.identity == 'verified_header',
             -float(result.pilot_error if result.pilot_error is not None else np.inf))
-
