@@ -746,7 +746,32 @@ Nearest live conversion increases source projection error on the checked-in
 face relative to Lanczos, but does not increase audio RMS, peak, or carrier
 bandwidth. This is an intentional visual trade, not a claim of free fidelity.
 
-### 19.4 Timing, level, and recovery
+### 19.4 Accelerated playback profiles
+
+The canonical V7 packet remains 3,920 samples at the 48 kHz reference clock.
+An accelerated sender time-compresses each complete pulse packet before output;
+it does not use pitch-preserving time stretch:
+
+```text
+speed 1.0x: 3920 samples, 12.245 fps, body top 12.75 kHz
+speed 1.5x: 2613 samples at 48 kHz, 18.367 fps, body top 19.125 kHz
+speed 2.0x: 1960 samples at 48 kHz, 24.490 fps, body top 25.5 kHz
+```
+
+The receiver measures the resulting pulse scale and resamples the body back to
+the reference grid. `1.0x` is the tape-compatible baseline. `1.5x` is a
+digital/wideband candidate; `2.0x` requires a path whose capture Nyquist and
+analog bandwidth retain the expanded carriers, normally a 96 kHz path. At a
+fixed 48 kHz output, downsampling before 2.0x playback necessarily loses some
+highest carriers, so acquisition success alone does not prove full-band
+fidelity.
+
+Standalone sending exposes this as `tools/v7_live.py send --speed`; the
+application sender exposes `--modem-speed`. Packets are sped independently so
+the preamble, metadata, and terminal guard remain local to each packet. No
+speed field is needed on the wire: pulse timing identifies the effective speed.
+
+### 19.5 Timing, level, and recovery
 
 Live receive uses a slow-rise autoleveler based on the newest frame window,
 bounded to `0.5×..32×`, with prompt gain reduction. Near-silence is gated

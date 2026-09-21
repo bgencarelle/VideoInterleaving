@@ -170,6 +170,7 @@ def run_send(args):
                     peak = np.max(np.abs(audio))
                     if peak > .89:
                         audio *= .89/peak
+                audio = P.speed_pulse_stream(audio, args.speed)
                 batches.put((counter, audio))
                 total += len(frames)
                 counter += len(frames)
@@ -186,6 +187,7 @@ def run_send(args):
                     peak = np.max(np.abs(audio))
                     if peak > .89:
                         audio *= .89/peak
+                audio = P.speed_pulse_stream(audio, args.speed)
                 batches.put((counter, audio))
                 total += len(frames)
             batches.put(sentinel)
@@ -197,7 +199,7 @@ def run_send(args):
     worker.start()
     if not args.no_log:
         print(f'V7 send ready: source={args.source} device={args.device!r} '
-              f'wire={FPS:.3f}fps camera={args.camera} '
+              f'wire={FPS*args.speed:.3f}fps speed={args.speed:g}x camera={args.camera} '
               f'capture={args.capture_width}px/{args.capture_filter} '
               f'encode={args.encode_filter} mode={"mono-sum" if args.mono_sum else "M/S"}',
               flush=True)
@@ -633,6 +635,8 @@ def parser():
     send.add_argument('--capture-fps', '--fps', dest='capture_fps', type=float)
     send.add_argument('--batch-frames', type=int, default=1,
                       help='frames encoded before submission (default: 1)')
+    send.add_argument('--speed', type=float, choices=(1.0, 1.5, 2.0), default=1.0,
+                      help='pitch-shifted playback speed; 1.5x is safer than 2x')
     send.add_argument('--seconds', type=float, default=0,
                       help='0 means until Ctrl-C')
     send.add_argument('--no-log', dest='no_log', action='store_true',

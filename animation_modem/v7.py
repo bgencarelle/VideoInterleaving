@@ -26,7 +26,8 @@ from scipy.signal import butter, filtfilt, firwin, savgol_filter, sosfiltfilt
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from animation_modem import transport3 as V3                             # noqa: E402
-from animation_modem.core import SourceCoder, _sample_at               # noqa: E402
+from animation_modem.core import (SourceCoder, _sample_at, speed_length,
+                                  speed_resample)                  # noqa: E402
 from animation_modem.core import bound_emission                         # noqa: E402
 
 # ------------------------------------------------------------------ §6.1
@@ -60,6 +61,17 @@ def image_values(image, shapes=V7_SHAPES, encode_filter='lanczos'):
     return np.concatenate([
         np.asarray(plane.resize((shape[1], shape[0]), Image.Resampling.BOX)).ravel()
         for plane, shape in zip(planes, shapes)]).astype(float)/127.5 - 1
+
+
+def speed_pulse_stream(audio, speed=1.0, rate=RATE):
+    """Speed each pulse packet independently, preserving preamble boundaries."""
+    audio = np.asarray(audio, np.float32)
+    if len(audio) % PULSE_FRAME:
+        raise ValueError('pulse stream length must contain complete V7 packets')
+    return np.concatenate([
+        speed_resample(audio[start:start+PULSE_FRAME], rate, speed)
+        for start in range(0, len(audio), PULSE_FRAME)
+    ])
 
 
 METADATA_OPTION_MONO_SUM = 2
@@ -1232,7 +1244,6 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
             result.diag['encoding_name'] = ENCODING_FILTERS[int(encoding_type)] \
                 if 0 <= int(encoding_type) < len(ENCODING_FILTERS) else 'unknown'
             result.diag['revision'] = int(revision)
-            result.diag['source_index'] = int(source_index)
             result.diag['mono_sum'] = revision == METADATA_OPTION_MONO_SUM
             result.diag['pulse_scale'] = float(scale)
             result.diag['frame_scale'] = float(frame_scale)
