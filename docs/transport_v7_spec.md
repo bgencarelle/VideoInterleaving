@@ -767,7 +767,8 @@ highest carriers, so acquisition success alone does not prove full-band
 fidelity.
 
 Standalone sending exposes this as `tools/v7_live.py send --speed`; the
-application sender exposes `--modem-speed`. Packets are sped independently so
+application sender exposes `--modem-speed` (or its `--speed` alias). Packets
+are sped independently so
 the preamble, metadata, and terminal guard remain local to each packet. No
 speed field is needed on the wire: pulse timing identifies the effective speed.
 

@@ -260,7 +260,7 @@ def run_receive(args):
              'dropped': 0, 'decoded': 0, 'verified': 0, 'lost': 0,
              'status': 'acquiring', 'counter': None, 'decode_ms': None,
              'quality': '--',
-             'timing_delta': None,
+             'timing_delta': None, 'playback_speed': None, 'source_index': None,
              'pulse': None, 'aspect': 0, 'aspect_candidate': 0,
              'aspect_streak': 0, 'input_samples': 0, 'started': time.monotonic(),
              'auto_gain': 1.0,
@@ -373,8 +373,11 @@ def run_receive(args):
             meter['status'] = ('degraded' if displayable and result.status == 'lost'
                                else result.status)
             meter['counter'] = meter['decoded']
+            if result.diag.get('source_index') is not None:
+                meter['source_index'] = int(result.diag['source_index'])
             meter['pulse'] = result.diag.get('pulse_confidence')
             meter['timing_delta'] = result.diag.get('timing_delta_ppm')
+            meter['playback_speed'] = result.diag.get('playback_speed')
             meter['quality'] = (
                 f'head {result.diag.get("head_confidence", 0):.2f}/'
                 f'{result.diag.get("head_coverage", 0):.2f}')
@@ -418,10 +421,11 @@ def run_receive(args):
                       'pulse_frames': info.get('pulse_frames'),
                        'encoding': result.diag.get('encoding_name'),
                        'mono_sum': result.diag.get('mono_sum'),
-                      'input_gain': round(meter['auto_gain'], 3),
-                      'head_confidence': result.diag.get('head_confidence'),
-                      'head_coverage': result.diag.get('head_coverage'),
-                      'timing_delta_ppm': result.diag.get('timing_delta_ppm'),
+                       'input_gain': round(meter['auto_gain'], 3),
+                       'head_confidence': result.diag.get('head_confidence'),
+                       'head_coverage': result.diag.get('head_coverage'),
+                       'timing_delta_ppm': result.diag.get('timing_delta_ppm'),
+                       'playback_speed': result.diag.get('playback_speed'),
                       'noise': result.diag.get('noise'),
                       'metadata_valid': result.diag.get('metadata_valid'),
                       'skipped_frames': len(info.get('skipped_frames', [])),
@@ -544,28 +548,35 @@ def run_receive(args):
             if info_visible:
                 peak = 20*np.log10(np.maximum(meter['peak'], 1e-9))
                 rms = 20*np.log10(np.maximum(meter['rms'], 1e-9))
+                source_index = ('--' if meter['source_index'] is None else
+                                str(meter['source_index']))
                 levels_label.configure(text=(
                     f'peak L/R {peak[0]:6.1f}/{peak[1]:6.1f} dBFS | '
                     f'rms {rms[0]:6.1f}/{rms[1]:6.1f} dBFS'))
                 stats_label.configure(text=(
-                    f'frames {meter["decoded"]}  verified {meter["verified"]} '
+                    f'frames {meter["decoded"]}  source {source_index}  '
+                    f'verified {meter["verified"]} '
                     f'lost {meter["lost"]}  input blocks {meter["blocks"]} '
                     f'dropped {meter["dropped"]}'))
                 quality_label.configure(text=f'quality: {meter["quality"]}')
                 status_label.configure(wraplength=max(240, root.winfo_width()-12))
                 pulse = meter['pulse']
                 pulse_text = '--' if pulse is None else f'{pulse:.4g}'
+                timing = meter['timing_delta']
+                timing_text = '--' if timing is None else f'{timing:.8f}'
+                speed = meter['playback_speed']
+                speed_text = '--' if speed is None else f'{speed:.8f}x'
                 aspect_text = P.V7_ASPECT_NAMES[int(meter['aspect']) & 7]
                 candidate_aspect = P.V7_ASPECT_NAMES[
                     int(meter['aspect_candidate']) & 7]
                 status_label.configure(text=(
                   f'status {meter["status"]}  mode {meter["mode"]}  '
-                  f'frame {meter["counter"]} '
+                  f'frame {meter["counter"]}  source {source_index} '
                     f'aspect {aspect_text} '
                     f'(candidate {candidate_aspect} '
                     f'x{meter["aspect_streak"]})  pulse {pulse_text}\n'
                     f'gain {meter["auto_gain"]:4.1f}x  '
-                    f'timing {meter["timing_delta"] if meter["timing_delta"] is not None else "--"} ppm  '
+                    f'speed {speed_text}  timing {timing_text} ppm  '
                     f'decode {meter["decode_ms"] if meter["decode_ms"] is not None else "--"} ms | '
                     f'incoming {meter["input_fps"]:5.2f} fps  '
                     f'decoded {meter["decoded_fps"]:5.2f} fps'))
