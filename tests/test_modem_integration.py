@@ -99,6 +99,42 @@ runpy.run_path(target, run_name='__main__')
                 [item.diag['source_index'] for item in decoded[:4]],
                 [0, 1, 2, 0])
 
+    def test_main_runtime_images_use_fifo_and_v7(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / 'runtime_images'
+            source_tree(source)
+            wav = root / 'runtime.wav'
+            result = subprocess.run(
+                [sys.executable, str(REPO / 'main.py'),
+                 '--mode', 'modem', '--modem-source', 'images',
+                 '--dir', str(source), '--modem-pair', '1,0',
+                 '--modem-wav', str(wav), '--modem-frames', '5',
+                 '--modem-log-frames', '--rebuild'],
+                cwd=REPO, text=True, capture_output=True, timeout=30)
+            self.assertEqual(result.returncode, 0,
+                             result.stdout + result.stderr)
+            reports = [json.loads(line) for line in result.stdout.splitlines()
+                       if line.startswith('{')]
+            self.assertTrue(reports)
+            self.assertTrue(all('fifo_hits' in report for report in reports))
+            self.assertTrue(all(report['source_index_misses'] == 0
+                                for report in reports))
+
+            with wave.open(str(wav), 'rb') as source_wav:
+                samples = np.frombuffer(
+                    source_wav.readframes(source_wav.getnframes()),
+                    dtype='<i2').reshape(-1, 2).astype(float) / 32767
+            model = v7.build_model(
+                REPO / 'modem_tests/fixtures/v7_reference_face.png',
+                .1521 / np.sqrt(1 + 10**(v7.CLOCK_REL_DB / 10)),
+                encode_filter='nearest')
+            decoded, info = v7.decode_pulse_stream(model, samples)
+            self.assertGreaterEqual(len(decoded), 4, info)
+            self.assertEqual(
+                [item.diag['source_index'] for item in decoded[:4]],
+                [0, 1, 2, 0])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -322,6 +322,10 @@ def configure_runtime():
     )
 
     # Modem is independent of the XY waveform and the video/GL display stack.
+    parser.add_argument("--modem-source", choices=("bake", "images"),
+                        default="bake",
+                        help="V7 source: prebaked slabs or normal images "
+                             "encoded at runtime (default: bake)")
     parser.add_argument("--modem-dir", help="RGBA modem bake from utilities/convert_to_modem_dct.py")
     parser.add_argument("--modem-channels", default="1,2", help="1-based stereo output pair")
     parser.add_argument("--modem-latency", default="low", help="low, high, or seconds")
@@ -382,6 +386,18 @@ def configure_runtime():
         # when no directory is given at all, derives one from IMAGES_DIR.
         if args.dir:
             settings.IMAGES_DIR = os.path.abspath(args.dir)
+        if args.modem_source == "images":
+            if args.modem_dir:
+                parser.error("--modem-dir cannot be combined with --modem-source images")
+            settings.MAIN_FOLDER_PATH = os.path.join(settings.IMAGES_DIR, "face")
+            settings.FLOAT_FOLDER_PATH = os.path.join(settings.IMAGES_DIR, "float")
+            source_name = os.path.basename(os.path.normpath(settings.IMAGES_DIR)).replace(" ", "_")
+            suffix = f"{source_name}_modem"
+            settings.PROCESSED_DIR = os.path.join(CACHE_DIR, f"folders_processed_{suffix}")
+            settings.GENERATED_LISTS_DIR = os.path.join(CACHE_DIR, f"generated_lists_{suffix}")
+            os.makedirs(LOGS_DIR, exist_ok=True)
+            settings.CLOCK_MODE = args.modem_clock
+            return args, os.path.join(LOGS_DIR, "runtime_modem.log")
         if not args.modem_dir:
             args.modem_dir = (os.path.abspath(args.dir) if args.dir
                               else settings.IMAGES_DIR + "_modem")

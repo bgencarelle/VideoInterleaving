@@ -2,8 +2,8 @@
 
 This is the application adapter around the standalone V7 transport.  The V7
 encoder remains in ``tools.v7_proto`` so the standalone bench and live sender
-use the same implementation; this module owns only bake selection, shared
-clock scheduling, and audio output.
+use the same implementation; this module owns source selection, shared-clock
+scheduling, and audio output.
 """
 import json
 import math
@@ -74,9 +74,19 @@ def run_modem(args):
     import settings
     import index_calculator
 
-    root = args.modem_dir or getattr(settings, 'MODEM_DIR',
-                                    settings.IMAGES_DIR + '_modem')
-    library = ModemLibrary(root)
+    source_mode = getattr(args, 'modem_source', 'bake')
+    runtime_library = None
+    if source_mode == 'images':
+        from modem_image_source import RuntimeImageLibrary
+        library = RuntimeImageLibrary(
+            rebuild=bool(getattr(args, 'rebuild', False)),
+            capacity=getattr(settings, 'FIFO_LENGTH', 5))
+        runtime_library = library
+        root = str(library.root)
+    else:
+        root = args.modem_dir or getattr(settings, 'MODEM_DIR',
+                                        settings.IMAGES_DIR + '_modem')
+        library = ModemLibrary(root)
     if library.frames > 0xffff:
         raise ValueError('V7 source index supports at most 65535 source frames')
 
@@ -129,7 +139,7 @@ def run_modem(args):
     previous = None
     sent = 0
     speed = float(getattr(args, 'modem_speed', 1.0))
-    print(f'[MODEM/V7] {root}: {library.frames} images, '
+    print(f'[MODEM/V7] source={source_mode} {root}: {library.frames} images, '
           f'{len(library.mains)} face / {len(library.floats)} float folders; '
           f'wire {_v7.PULSE_FPS*speed:.3f} fps at {speed:g}x, '
           'source index in CRC metadata')
@@ -141,53 +151,74 @@ def run_modem(args):
             background=background, rotation=rotation, mirror=mirror,
             encode_filter=encode_filter)
         report['encode_ms'] = (time.perf_counter() - started) * 1000
+        if runtime_library is not None:
+            report['fifo_hits'] = runtime_library.fifo_hits
+            report['source_index_misses'] = runtime_library.index_misses
         return audio, report
+
+    def prefetch(index, folders):
+        if runtime_library is None:
+            return
+        runtime_library.prefetch(index, *folders)
+        if library.frames > 1:
+            runtime_library.prefetch((index + 1) % library.frames, *folders)
 
     if getattr(args, 'modem_wav', None):
         path = Path(args.modem_wav)
         path.parent.mkdir(parents=True, exist_ok=True)
         limit = args.modem_frames or library.frames
-        with wave.open(str(path), 'wb') as sink:
-            sink.setparams((2, 2, _v7.RATE, 0, 'NONE', 'not compressed'))
-            folders = selected or (0, 0)
-            for n in range(limit):
-                audio, report = make_packet(n + 1, n % library.frames, folders)
-                sink.writeframesraw(pcm(speed_resample(audio, _v7.RATE, speed)))
-                if args.modem_log_frames:
-                    print(json.dumps(report), flush=True)
-        print(f'[MODEM/V7] Wrote {limit} packets to {path}')
+        try:
+            with wave.open(str(path), 'wb') as sink:
+                sink.setparams((2, 2, _v7.RATE, 0, 'NONE', 'not compressed'))
+                folders = selected or (0, 0)
+                for n in range(limit):
+                    index = n % library.frames
+                    prefetch(index, folders)
+                    audio, report = make_packet(n + 1, index, folders)
+                    sink.writeframesraw(pcm(speed_resample(audio, _v7.RATE, speed)))
+                    if args.modem_log_frames:
+                        print(json.dumps(report), flush=True)
+            print(f'[MODEM/V7] Wrote {limit} packets to {path}')
+        finally:
+            if runtime_library is not None:
+                runtime_library.close()
         return
 
     poll_seconds = 1 / (settings.FPS or 60)
-    with PacketOutput(device(args.scope_device), channels, output_latency,
-                      frame=_v7.PULSE_FRAME, packet=_v7.PULSE_FRAME,
-                      speed=speed) as output:
-        print(f'[MODEM/V7] output {output.rate:g} Hz, {output.fps:.2f} fps')
-        while not args.modem_frames or sent < args.modem_frames:
-            started = time.perf_counter()
-            index, _ = index_calculator.update_index(library.frames, settings.PINGPONG)
-            index = max(0, min(int(index), library.frames - 1))
-            if output.ready():
-                slot = None
-                target_time_ns = None
-                if not index_calculator.midi_mode:
-                    slot = output.reserve(prepare_ms, receive_margin_ms)
-                    if slot is not None:
-                        target_time_ns = slot.target_time_ns
-                        index, _ = index_calculator.calculate_free_clock_index(
-                            library.frames, settings.PINGPONG,
-                            at_time_ns=target_time_ns,
-                            time_offset_ns=index_offset_ns, publish=False)
-                        index = max(0, min(int(index), library.frames - 1))
-                folders, previous = _folders(args, library, index, selected, previous)
-                audio, report = make_packet(sent + 1, index, folders)
-                prepare_ms = max(args.modem_prepare_ms, report['encode_ms'] * 1.5)
-                if output.submit(audio, slot):
-                    sent += 1
-                    if args.modem_log_frames:
-                        report['target_time_ns'] = target_time_ns
-                        print(json.dumps(report), flush=True)
-            delay = poll_seconds - (time.perf_counter() - started)
-            if delay > 0:
-                time.sleep(delay)
-        output.finish()
+    try:
+        with PacketOutput(device(args.scope_device), channels, output_latency,
+                          frame=_v7.PULSE_FRAME, packet=_v7.PULSE_FRAME,
+                          speed=speed) as output:
+            print(f'[MODEM/V7] output {output.rate:g} Hz, {output.fps:.2f} fps')
+            while not args.modem_frames or sent < args.modem_frames:
+                started = time.perf_counter()
+                index, _ = index_calculator.update_index(library.frames, settings.PINGPONG)
+                index = max(0, min(int(index), library.frames - 1))
+                if output.ready():
+                    slot = None
+                    target_time_ns = None
+                    if not index_calculator.midi_mode:
+                        slot = output.reserve(prepare_ms, receive_margin_ms)
+                        if slot is not None:
+                            target_time_ns = slot.target_time_ns
+                            index, _ = index_calculator.calculate_free_clock_index(
+                                library.frames, settings.PINGPONG,
+                                at_time_ns=target_time_ns,
+                                time_offset_ns=index_offset_ns, publish=False)
+                            index = max(0, min(int(index), library.frames - 1))
+                    folders, previous = _folders(args, library, index, selected, previous)
+                    prefetch(index, folders)
+                    audio, report = make_packet(sent + 1, index, folders)
+                    prepare_ms = max(args.modem_prepare_ms, report['encode_ms'] * 1.5)
+                    if output.submit(audio, slot):
+                        sent += 1
+                        if args.modem_log_frames:
+                            report['target_time_ns'] = target_time_ns
+                            print(json.dumps(report), flush=True)
+                delay = poll_seconds - (time.perf_counter() - started)
+                if delay > 0:
+                    time.sleep(delay)
+            output.finish()
+    finally:
+        if runtime_library is not None:
+            runtime_library.close()
