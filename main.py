@@ -335,6 +335,10 @@ def configure_runtime():
                         type=float, choices=(1.0, 1.5, 2.0),
                         default=1.0,
                         help="V7 playback speed: 1, 1.5, or 2x; 1x is tape-safe")
+    parser.add_argument("--modem-encode-filter",
+                        choices=("nearest", "box", "lanczos", "bicubic"),
+                        default="nearest",
+                        help="V7 source resize filter (default: nearest)")
     parser.add_argument("--modem-frames", type=int, default=0, help="0 = unlimited live / one source pass for WAV")
     parser.add_argument("--modem-wav", help="Export a deterministic pair to PCM16 WAV instead of live playback")
     parser.add_argument("--modem-profile", default=None,
