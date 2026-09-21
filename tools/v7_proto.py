@@ -49,8 +49,12 @@ V7_ASPECT_RATIOS = (1., 4/3, 3/2, 16/9, 1., 3/4, 2/3, 9/16)
 V7_ASPECT_NAMES = ('1:1', '4:3', '3:2', '16:9',
                    '1:1', '3:4', '2:3', '9:16')
 BINS = np.arange(4, 35)                         # 1.5-12.75 kHz
-META_PILOTS = np.asarray([b for b in BINS if b % 2 == 0])
-META_DATA_BINS = np.asarray([b for b in BINS if b % 2 == 1])
+# The metadata symbol has 31 usable bins.  Spread eleven pilots across the
+# band and use the remaining twenty cells for a three-byte payload plus its
+# CRC-16 (40 QPSK bits).  Keeping this inside the existing symbol preserves
+# the 3,920-sample pulse packet and its 32-sample terminal guard.
+META_PILOTS = np.asarray(BINS[::3])
+META_DATA_BINS = np.asarray([b for b in BINS if b not in set(META_PILOTS)])
 CONTINUAL = (4, 34)
 SCAT = {b: ((b-5)//4) % 3 for b in range(5, 34, 4)}
 PILOT_BINS = sorted(set(CONTINUAL) | set(SCAT))
@@ -101,7 +105,10 @@ def _bits(value, width):
     return [(value >> (width-1-i)) & 1 for i in range(width)]
 
 
-def clock_word(counter, profile=0, aspect=6, folders=0):
+def clock_word(counter, profile=0, aspect=6, folders=0, source_index=None):
+    # ``source_index`` is not part of the pulse header; the live pulse wire
+    # carries it in metadata_symbols().  The longer clock-only bench wire
+    # retains its historical identity fields for now.
     payload = (_bits(counter % (1 << 20), 20) + _bits(profile, 4) + _bits(aspect, 3) +
                _bits(folders, 8) + [0]*4)                        # 39 bits
     padded = [0] + payload
@@ -112,17 +119,27 @@ def clock_word(counter, profile=0, aspect=6, folders=0):
     return word
 
 
-def metadata_word(aspect_code, encoding_type=0, revision=0):
-    """Pack aspect, source encoding, and revision into protected metadata."""
+def metadata_word(aspect_code, encoding_type=0, revision=0, source_index=0):
+    """Pack picture identity and one-based source index into metadata.
+
+    The public/source-facing value remains zero-based, matching the bake and
+    display APIs. Wire zero is reserved so an erased field cannot masquerade
+    as the first source frame.
+    """
+    if not 0 <= int(source_index) < 0xffff:
+        raise ValueError('source_index must fit a zero-based 16-bit field')
+    wire_index = int(source_index) + 1
     payload = bytes([((int(aspect_code) & 7) << 5) |
                      ((int(encoding_type) & 3) << 3) |
-                     ((int(revision) & 3) << 1) | 1])
+                     ((int(revision) & 3) << 1) | 1,
+                     (wire_index >> 8) & 0xff,
+                     wire_index & 0xff])
     return payload + crc16(payload).to_bytes(2, 'big')
 
 
-def metadata_symbols(aspect_code, encoding_type=0, revision=0):
+def metadata_symbols(aspect_code, encoding_type=0, revision=0, source_index=0):
     bits = np.unpackbits(np.frombuffer(
-        metadata_word(aspect_code, encoding_type, revision), np.uint8))
+        metadata_word(aspect_code, encoding_type, revision, source_index), np.uint8))
     return ((bits[0::2].astype(float)*2-1) +
             1j*(bits[1::2].astype(float)*2-1))/np.sqrt(2)
 
@@ -379,7 +396,7 @@ def encode_stream(model, values, frames, lead=0.25, tail=0.25,
     return np.concatenate([pad(lead), sig, pad(tail)]).astype(np.float32)
 
 
-def encode_pulse_frame(model, values, counter, aspect_code=0):
+def encode_pulse_frame(model, values, counter, aspect_code=0, source_index=None):
     """One V3-style pulse-framed V7 body for low-latency live transport."""
     body = encode_frame(model, values, counter)
     out = np.zeros((PULSE_FRAME, 2), np.float32)
@@ -387,7 +404,9 @@ def encode_pulse_frame(model, values, counter, aspect_code=0):
     out[16:16+len(V3.PREAMBLE), :] = V3.PREAMBLE[:, None]
     meta = np.zeros((N//2+1, 2), complex)
     options = METADATA_OPTION_MONO_SUM if model.mono_sum else 0
-    vals = metadata_symbols(aspect_code, model.encoding_type, options)
+    if source_index is None:
+        source_index = counter - 1
+    vals = metadata_symbols(aspect_code, model.encoding_type, options, source_index)
     meta[META_PILOTS, 0] = 1
     meta[META_DATA_BINS[:len(vals)], 0] = vals
     mx = (meta[:, 0])/np.sqrt(2)*model.phase[-1]
@@ -402,11 +421,18 @@ def encode_pulse_frame(model, values, counter, aspect_code=0):
     return shaped
 
 
-def encode_pulse_stream(model, values, start_counter=1, aspect_codes=None):
+def encode_pulse_stream(model, values, start_counter=1, aspect_codes=None,
+                        source_indices=None):
     values = list(values) if np.asarray(values).ndim != 1 else [values]
     codes = aspect_codes or [0]*len(values)
-    return np.concatenate([encode_pulse_frame(model, value, start_counter+i, code)
-                           for i, (value, code) in enumerate(zip(values, codes))])
+    indexes = (list(source_indices) if source_indices is not None else
+               [start_counter+i-1 for i in range(len(values))])
+    if len(codes) != len(values) or len(indexes) != len(values):
+        raise ValueError('aspect_codes and source_indices must match values')
+    return np.concatenate([
+        encode_pulse_frame(model, value, start_counter+i, code, source_index)
+        for i, (value, code, source_index) in
+        enumerate(zip(values, codes, indexes))])
 
 
 # ------------------------------------------------------------------ receiver: clock
@@ -911,14 +937,18 @@ def decode_metadata(model, samples, start, scale, channel):
     data = np.divide(observed[META_DATA_BINS], response,
                      out=np.zeros(len(META_DATA_BINS), complex),
                      where=np.abs(response) > 1e-9)
-    symbols = data[:12]
-    bits = np.empty(24, np.uint8)
+    symbols = data[:20]
+    bits = np.empty(40, np.uint8)
     bits[0::2] = (symbols.real >= 0).astype(np.uint8)
     bits[1::2] = (symbols.imag >= 0).astype(np.uint8)
     raw = np.packbits(bits).tobytes()
-    if crc16(raw[:1]) != int.from_bytes(raw[1:3], 'big'):
+    if crc16(raw[:3]) != int.from_bytes(raw[3:5], 'big'):
         return None
-    return ((raw[0] >> 5) & 7, (raw[0] >> 3) & 3, (raw[0] >> 1) & 3)
+    wire_index = int.from_bytes(raw[1:3], 'big')
+    if wire_index == 0:
+        return None
+    return ((raw[0] >> 5) & 7, (raw[0] >> 3) & 3, (raw[0] >> 1) & 3,
+            wire_index - 1)
 
 
 def _diagnostic_summary(diag, elapsed_ms):
@@ -1112,8 +1142,9 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
         metadata_valid = decoded_metadata is not None
         encoding_type = model.encoding_type
         revision = 0
+        source_index = None
         if metadata_valid:
-            aspect_code, encoding_type, revision = decoded_metadata
+            aspect_code, encoding_type, revision, source_index = decoded_metadata
             if (revision not in (0, METADATA_OPTION_MONO_SUM) or
                     encoding_type >= len(ENCODING_FILTERS)):
                 metadata_valid = False
@@ -1162,10 +1193,13 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
             result.diag['pulse_confidence'] = float(confidence)
             result.diag['aspect_code'] = aspect_code
             result.diag['metadata_valid'] = metadata_valid
+            if source_index is not None:
+                result.diag['source_index'] = int(source_index)
             result.diag['encoding_type'] = int(encoding_type)
             result.diag['encoding_name'] = ENCODING_FILTERS[int(encoding_type)] \
                 if 0 <= int(encoding_type) < len(ENCODING_FILTERS) else 'unknown'
             result.diag['revision'] = int(revision)
+            result.diag['source_index'] = int(source_index)
             result.diag['mono_sum'] = revision == METADATA_OPTION_MONO_SUM
             result.diag['pulse_scale'] = float(scale)
             result.diag['frame_scale'] = float(frame_scale)

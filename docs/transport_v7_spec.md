@@ -707,27 +707,28 @@ measured frame duration, so smooth wow/flutter is corrected across the payload.
 
 ### 19.2 CRC-protected live metadata
 
-The live metadata word is one payload byte followed by CRC-16/CCITT-FALSE:
+The live metadata word is three payload bytes followed by CRC-16/CCITT-FALSE.
+The source index is zero-based in the application API and one-based on the
+wire; wire zero is therefore invalid rather than an accidental frame zero:
 
 ```text
-payload bit 7..6: aspect family: 00=1:1, 01=4:3, 10=3:2, 11=16:9
-payload bit 5:    orientation: 0=normal, 1=portrait/mirrored
-payload bit 4..3: source encoding: 00=nearest, 01=box, 10=lanczos, 11=bicubic
-payload bit 2:    mono-sum option: 0=stereo M/S, 1=mono-summed M
-payload bit 1:    revision/extension: 0=current; 1 reserved
-payload bit 0:    fixed live marker
+payload byte 0 bit 7..5: aspect code
+payload byte 0 bit 4..3: source encoding: 00=nearest, 01=box, 10=lanczos, 11=bicubic
+payload byte 0 bit 2..1: revision/extension; bit 1 advertises mono-sum
+payload byte 0 bit 0:    fixed live marker
+payload bytes 1..2:      one-based source-frame index, big-endian
 CRC:              polynomial 0x1021, init 0xFFFF, xorout 0
 ```
 
-The 24 bits are mapped to 12 QPSK cells. Even bins in the metadata symbol are
-known M-channel pilots; odd bins carry data. Both tracks carry the mono-safe M
-signal. The metadata symbol estimates its own complex response from those
-pilots. CRC failure holds the previous metadata. The receiver decodes this
-self-referenced symbol with a bootstrap model before selecting the source
-encoding model, so sender and receiver no longer need a manually matched
-`--encode-filter`. Unknown revision values are rejected and retain the prior
-model. The live UI additionally requires three consecutive reliable requests
-before changing aspect.
+The 40 bits are mapped to 20 QPSK cells. Eleven pilots are spread across the
+metadata band and the remaining twenty bins carry data. Both tracks carry the
+mono-safe M signal. The metadata symbol estimates its own complex response
+from those pilots. CRC failure holds the previous metadata. The receiver
+decodes this self-referenced symbol with a bootstrap model before selecting the
+source encoding model, so sender and receiver no longer need a manually
+matched `--encode-filter`. Unknown revision values or wire index zero are
+rejected and retain the prior metadata. The live UI additionally requires
+three consecutive reliable requests before changing aspect.
 
 ### 19.3 Live source preparation
 
