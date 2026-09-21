@@ -163,6 +163,18 @@ def metadata_symbols(aspect_code, encoding_type=0, revision=0, source_index=0):
             1j*(bits[1::2].astype(float)*2-1))/np.sqrt(2)
 
 
+def parse_metadata_word(raw):
+    """Validate and unpack the five-byte live metadata word."""
+    raw = bytes(raw)
+    if len(raw) != 5 or crc16(raw[:3]) != int.from_bytes(raw[3:5], 'big'):
+        return None
+    wire_index = int.from_bytes(raw[1:3], 'big')
+    if wire_index == 0:
+        return None
+    return ((raw[0] >> 5) & 7, (raw[0] >> 3) & 3, (raw[0] >> 1) & 3,
+            wire_index - 1)
+
+
 def aspect_wire_code(size):
     """Return the compact V7 family/orientation code for a source size."""
     width, height = size
@@ -969,14 +981,7 @@ def decode_metadata(model, samples, start, scale, channel):
     bits = np.empty(40, np.uint8)
     bits[0::2] = (symbols.real >= 0).astype(np.uint8)
     bits[1::2] = (symbols.imag >= 0).astype(np.uint8)
-    raw = np.packbits(bits).tobytes()
-    if crc16(raw[:3]) != int.from_bytes(raw[3:5], 'big'):
-        return None
-    wire_index = int.from_bytes(raw[1:3], 'big')
-    if wire_index == 0:
-        return None
-    return ((raw[0] >> 5) & 7, (raw[0] >> 3) & 3, (raw[0] >> 1) & 3,
-            wire_index - 1)
+    return parse_metadata_word(np.packbits(bits).tobytes())
 
 
 def _diagnostic_summary(diag, elapsed_ms):
