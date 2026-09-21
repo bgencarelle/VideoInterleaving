@@ -393,8 +393,10 @@ def run_display(clock_source=CLOCK_MODE):
                 if not state.run_mode: break
 
             if state.needs_update and not is_headless and has_gl:
-                window = display_init(state)
+                # Clear before reconfiguring so a resize callback raised by
+                # macOS during the transition is not discarded afterward.
                 state.needs_update = False
+                window = display_init(state)
                 if window is not None:
                     _hide_cursor_reliable(window)
 

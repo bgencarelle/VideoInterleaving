@@ -61,6 +61,9 @@ def _is_wayland_session() -> bool:
 
 
 def _session_label() -> str:
+    # XQuartz may set DISPLAY on macOS, but GLFW still uses native Cocoa.
+    if _is_macos():
+        return "macos"
     if _is_wayland_session():
         return "wayland"
     if os.environ.get("DISPLAY"):
@@ -1116,8 +1119,9 @@ def display_init(state: DisplayState):
             glfw.set_window_attrib(window, glfw.DECORATED, glfw.FALSE)
         else:
             glfw.set_window_attrib(window, glfw.DECORATED, glfw.TRUE)
-            win_w = 400
-            win_h = int(win_w / (eff_w / eff_h)) if eff_h > 0 else 300
+            # Keep windowed mode at a stable 4:3 size; the renderer
+            # letterboxes source images whose aspect differs.
+            win_w, win_h = 400, 300
             current_w, current_h = glfw.get_window_size(window)
             if current_w != win_w or current_h != win_h:
                 glfw.set_window_size(window, win_w, win_h)
@@ -1172,26 +1176,23 @@ def display_init(state: DisplayState):
                 # Additional hints to prevent fullscreen loss on monitor disconnect
                 glfw.window_hint(glfw.RESIZABLE, glfw.FALSE)  # Prevent window resizing
                 glfw.window_hint(glfw.FLOATING, glfw.FALSE)  # Keep window managed
-                # Try actual fullscreen first (even on Wayland)
-                # Fall back to borderless window if fullscreen fails
-                if is_wayland:
-                    try:
-                        # Attempt actual fullscreen on Wayland
-                        win = glfw.create_window(fs_w, fs_h, "Fullscreen", mon, None)
-                        if win:
-                            return win
-                    except Exception as e:
-                        print(f"[DISPLAY] Wayland fullscreen failed: {e}, falling back to borderless window")
-                    # Fallback: borderless fullscreen-sized window
+                # Use borderless fullscreen-sized windows on Wayland/macOS;
+                # monitor-attached fullscreen is reserved for X11.
+                if is_wayland or _is_macos():
                     glfw.window_hint(glfw.DECORATED, glfw.FALSE)
                     win = glfw.create_window(fs_w, fs_h, "Fullscreen", None, None)
+                    if win and _is_macos() and mon is not None:
+                        try:
+                            mx, my = glfw.get_monitor_pos(mon)
+                            glfw.set_window_pos(win, mx, my)
+                        except Exception:
+                            pass
                     return win
                 return glfw.create_window(fs_w, fs_h, "Fullscreen", mon, None)
 
-            aspect = eff_w / eff_h
-            win_w = 400
-            win_h = int(win_w / aspect)
-            return glfw.create_window(win_w, win_h, "Windowed Mode", None, None)
+            # Windowed mode is a stable 4:3 viewport. Non-4:3 source
+            # images are fitted and letterboxed by the renderer.
+            return glfw.create_window(400, 300, "Windowed Mode", None, None)
 
         # Version-first probing (no hardware assumptions):
         # - Prefer desktop OpenGL 3.3 (ModernGL path)
@@ -1344,12 +1345,12 @@ def display_init(state: DisplayState):
             _hide_cursor_reliable(window)
 
     # Fullscreen toggling (only if window already exists):
-    # - On Wayland, avoid set_window_monitor (can trigger compositor/device resets).
-    #   Instead, resize the existing window and toggle decoration.
-    # - On other platforms, use set_window_monitor for proper fullscreen.
+    # - Wayland/macOS use resize + decoration changes on borderless windows.
+    # - X11 uses set_window_monitor for proper fullscreen.
     if window is not None:
-        if is_wayland:
-            # Wayland: Resize existing window and toggle decoration
+        if is_wayland or _is_macos():
+            # Wayland/macOS: resize the existing borderless window and toggle
+            # decoration instead of changing monitor attachment.
             current_w, current_h = glfw.get_window_size(window)
             if state.fullscreen:
                 mon = glfw.get_primary_monitor()
@@ -1368,22 +1369,22 @@ def display_init(state: DisplayState):
                 # Only resize if size changed
                 if current_w != fs_w or current_h != fs_h:
                     glfw.set_window_size(window, fs_w, fs_h)
-                    # Note: Wayland doesn't support set_window_pos(), so we skip it
+                    # Wayland does not support set_window_pos(); macOS was
+                    # positioned when its borderless window was created.
                     _hide_cursor_reliable(window)
                 # Ensure borderless
                 glfw.set_window_attrib(window, glfw.DECORATED, glfw.FALSE)
                 _hide_cursor_reliable(window)
             else:
-                # Windowed mode: restore decoration and resize
+                # Windowed mode: restore decoration and use a stable 4:3
+                # viewport; non-4:3 source images are letterboxed.
                 glfw.set_window_attrib(window, glfw.DECORATED, glfw.TRUE)
-                # Resize to windowed size based on image aspect
-                win_w = 400
-                win_h = int(win_w / (eff_w / eff_h)) if eff_h > 0 else 300
+                win_w, win_h = 400, 300
                 if current_w != win_w or current_h != win_h:
                     glfw.set_window_size(window, win_w, win_h)
                     _hide_cursor_reliable(window)
         else:
-            # Non-Wayland (X11): Use set_window_monitor for proper fullscreen
+            # X11: Use set_window_monitor for proper fullscreen.
             # On Linux X11, set_window_monitor with current resolution does NOT change display resolution
             # This is safe for low-end Linux systems - window goes fullscreen at current resolution
             current_monitor = glfw.get_window_monitor(window)
@@ -1412,11 +1413,18 @@ def display_init(state: DisplayState):
                     _hide_cursor_reliable(window)
             else:
                 if current_monitor is not None:
-                    # Restore to a small window; actual sizing will be re-derived below via framebuffer size.
                     glfw.set_window_monitor(window, None, 100, 100, 400, 300, 0)
-                    _hide_cursor_reliable(window)
+                    glfw.poll_events()
+
+                current_w, current_h = glfw.get_window_size(window)
+                if current_w != 400 or current_h != 300:
+                    glfw.set_window_size(window, 400, 300)
+                    glfw.poll_events()
+                _hide_cursor_reliable(window)
 
     fb_w, fb_h = glfw.get_framebuffer_size(window)
+    if fb_w <= 0 or fb_h <= 0:
+        fb_w, fb_h = glfw.get_window_size(window)
     if renderer.using_legacy_gl():
         glViewport(0, 0, fb_w, fb_h)
     else:
@@ -1429,9 +1437,12 @@ def display_init(state: DisplayState):
         offset_x = (fb_w - (eff_w * scale)) / 2.0
         offset_y = (fb_h - (eff_h * scale)) / 2.0
     else:
-        scale = fb_w / eff_w
-        offset_x = 0
-        offset_y = 0
+        # Fit both axes in the 4:3 window and center any letterbox space.
+        scale_x = fb_w / eff_w
+        scale_y = fb_h / eff_h
+        scale = min(scale_x, scale_y)
+        offset_x = (fb_w - (eff_w * scale)) / 2.0
+        offset_y = (fb_h - (eff_h * scale)) / 2.0
 
     renderer.set_transform_parameters(
         scale, offset_x, offset_y, state.image_size,
