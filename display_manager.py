@@ -1413,11 +1413,19 @@ def display_init(state: DisplayState):
                     _hide_cursor_reliable(window)
             else:
                 if current_monitor is not None:
-                    # Restore a stable 4:3 window; the renderer letterboxes
-                    # source images whose aspect differs.
+                    # Leave exclusive fullscreen first. macOS completes this
+                    # transition asynchronously.
                     glfw.set_window_monitor(window, None, 100, 100, 400, 300, 0)
                     glfw.poll_events()
-                    _hide_cursor_reliable(window)
+
+                # Enforce 4:3 even on the follow-up callback, when macOS
+                # already reports a windowed monitor and may have restored
+                # the pre-fullscreen size after set_window_monitor returned.
+                current_w, current_h = glfw.get_window_size(window)
+                if current_w != 400 or current_h != 300:
+                    glfw.set_window_size(window, 400, 300)
+                    glfw.poll_events()
+                _hide_cursor_reliable(window)
 
     fb_w, fb_h = glfw.get_framebuffer_size(window)
     if fb_w <= 0 or fb_h <= 0:
