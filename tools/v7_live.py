@@ -32,11 +32,16 @@ sys.path.insert(0, str(ROOT))
 from animation_modem.imaging import (image_values, prepare_image, values_image,
                                      stabilize_chroma)  # noqa: E402
 from tools import v7_proto as P                                             # noqa: E402
+from tools.v7_display import LatestFrame                                      # noqa: E402
 
 
 FPS = P.PULSE_FPS
 CAMERA_CAPTURE_FPS = 15
 DEFAULT_FIXTURE = ROOT / 'modem_tests/fixtures/v6_face_1110.png'
+# Main's display engine can consume this mailbox without importing the
+# transport or changing its renderer.  The standalone Tk preview uses the
+# same mailbox while this branch remains runnable by itself.
+FRAME_BUFFER = LatestFrame()
 
 
 def _device_arg(value):
@@ -215,6 +220,7 @@ def run_receive(args):
     samples = []
     processed_samples = 0
     latest = None
+    display_frames = FRAME_BUFFER
     rendered = None
     previous_values = None
     diagnostics = {} if args.diagnostics else None
@@ -368,7 +374,10 @@ def run_receive(args):
                         pilot_error=max(noise),
                         coverage=result.diag.get('head_coverage'))
                 latest = values
-                previous_values = latest.copy()
+                if args.mono_compatible:
+                    previous_values = latest.copy()
+                display_frames.publish(latest, model.coder.grids,
+                                       meter['aspect'])
             if result.status in ('received', 'verified'):
                 meter['verified'] += 1
             if result.status == 'lost' and not displayable:
@@ -529,9 +538,10 @@ def run_receive(args):
                     f'decode {meter["decode_ms"] if meter["decode_ms"] is not None else "--"} ms | '
                     f'incoming {meter["input_fps"]:5.2f} fps  '
                     f'decoded {meter["decoded_fps"]:5.2f} fps'))
-            if latest is not None and latest is not rendered:
-                image = values_image(latest, model.coder.grids)
-                ratio = P.V7_ASPECT_RATIOS[int(meter['aspect']) & 7]
+            frame = display_frames.snapshot()
+            if frame is not None and frame.generation != rendered:
+                image = values_image(frame.values, frame.shapes)
+                ratio = P.V7_ASPECT_RATIOS[frame.aspect & 7]
                 bound_w = max(1, image_frame.winfo_width())
                 bound_h = max(1, image_frame.winfo_height())
                 height = bound_h
@@ -544,7 +554,7 @@ def run_receive(args):
                 photo = ImageTk.PhotoImage(image)
                 label.configure(image=photo, text='')
                 label.image = photo
-                rendered = latest
+                rendered = frame.generation
             root.after(10, tick)
         root.after(10, tick)
         try:
