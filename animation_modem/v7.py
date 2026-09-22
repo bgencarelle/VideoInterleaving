@@ -227,11 +227,11 @@ def clock_wave(words):
 
 
 @lru_cache(maxsize=256)
-def clock_cancel_template(counter):
+def clock_cancel_template(counter, dtype=float):
     """Cache the deterministic three-word cancellation template."""
     clk = clock_wave((clock_word(counter-1), clock_word(counter),
                       clock_word(counter+1)))
-    return np.asarray(clk[FRAME-64:2*FRAME+64], float)
+    return np.asarray(clk[FRAME-64:2*FRAME+64], dtype=dtype)
 
 
 # ------------------------------------------------------------------ §6.4, §8
@@ -344,6 +344,14 @@ class Model:
     # A pure function of gain, lam and rank_tables, precomputed so decode does
     # not rebuild it frame by frame (see block_priors()).
     block_prior_tables: tuple = ()
+    # Receiver-only float32 views.  Keep the canonical float64 tables as the
+    # default wire path; the opt-in ARM path reuses these instead of casting
+    # them for every decoded frame.
+    mu32: np.ndarray = field(default=None, repr=False)
+    lam32: np.ndarray = field(default=None, repr=False)
+    gain32: np.ndarray = field(default=None, repr=False)
+    phase32: np.ndarray = field(default=None, repr=False)
+    block_prior_tables32: tuple = field(default=(), repr=False)
 
 
 # The canonical V7 profile is frozen data, not a runtime computation.  Its
@@ -383,10 +391,17 @@ def _assemble(tables, phase, target_rms, encode_filter, mono_sum):
     rank_tables = tuple(frame_ranks(order, p) for p in range(TAIL_PHASES))
     gain, lam = np.asarray(tables['gain']), np.asarray(tables['lam'])
     priors = tuple(block_priors(gain, lam, idx) for idx in rank_tables)
+    mu32 = np.asarray(tables['mu'], dtype=np.float32)
+    lam32 = np.asarray(lam, dtype=np.float32)
+    gain32 = np.asarray(gain, dtype=np.float32)
+    phase32 = np.asarray(phase, dtype=np.complex64)
+    priors32 = tuple(np.asarray(table, dtype=np.float32) for table in priors)
+    for array in (mu32, lam32, gain32, phase32, *priors32):
+        array.setflags(write=False)
     return Model(coder, np.asarray(tables['mu']), lam, order, gain, phase,
                  target_rms/float(tables['unit_rms']), _planes(), head,
                  rank_tables, ENCODING_FILTER_CODES[encode_filter], mono_sum,
-                 priors)
+                 priors, mu32, lam32, gain32, phase32, priors32)
 
 
 def block_priors(gain, lam, idx):
@@ -835,6 +850,7 @@ PILOT_OBS = tuple(sorted(PATS))
 PILOT_SV = np.asarray([s for s, _ in PILOT_OBS])
 PILOT_BV = np.asarray([b for _, b in PILOT_OBS])
 PILOT_PV = np.asarray([PATS[o] for o in PILOT_OBS])
+PILOT_PV32 = PILOT_PV.astype(np.complex64)
 PILOT_BY_SYMBOL = tuple(
     tuple(np.asarray([b for ss, b in PILOT_OBS if ss == s], int))
     for s in range(F))
@@ -849,9 +865,10 @@ PILOT_BIN_INDEX = np.searchsorted(PILOT_BINS, PILOT_BV)
 KNOTS = np.array([0, 4, 8, 12, 16, 20, F-1], float)
 _BASIS = np.stack([np.interp(np.arange(F), KNOTS, np.eye(len(KNOTS))[k])
                    for k in range(len(KNOTS))], axis=1)          # (F, knots) hat basis
+_BASIS32 = _BASIS.astype(np.float32)
 
 
-def channel_joint(Z, iters=2):
+def channel_joint(Z, iters=2, force_float32=False):
     """Per rx channel: static 1x2 response per pilot bin x smooth timing track.
 
     y(s,b) = exp(j*2*pi*b*delta(s)/N) * (hM(b)*pM + hS(b)*pS), delta piecewise
@@ -859,6 +876,8 @@ def channel_joint(Z, iters=2):
     Gauss-Newton phase step for delta. Timing error left by the clock map is
     common to all carriers of a symbol, so the pilots pin it down (§9.3).
     """
+    if force_float32:
+        return _channel_joint_float32(Z, iters)
     sv, bv, pv = PILOT_SV, PILOT_BV, PILOT_PV
     H = np.empty((F, 65, 2, 2), complex)
     for c in range(2):
@@ -893,6 +912,49 @@ def channel_joint(Z, iters=2):
     return H
 
 
+def _channel_joint_float32(Z, iters=2):
+    """Float32 channel estimate used by the opt-in ARM receiver path."""
+    sv, bv, pv = PILOT_SV, PILOT_BV, PILOT_PV32
+    H = np.empty((F, 65, 2, 2), np.complex64)
+    phase = np.complex64(2j*np.pi/N)
+    frequency = bv.astype(np.float32)
+    for c in range(2):
+        y = np.asarray([Z[s, b, c] for s, b in PILOT_OBS],
+                       dtype=np.complex64)
+        theta = np.zeros(len(KNOTS), dtype=np.float32)
+        for _ in range(iters):
+            delta = _BASIS32 @ theta
+            rot = np.exp(phase*frequency*delta[sv]).astype(np.complex64)
+            h = np.empty((len(PILOT_BINS), 2), np.complex64)
+            for b in PILOT_BINS:
+                m = PILOT_MASK_BY_BIN[b]
+                A = pv[m]*rot[m, None]
+                gram = A.conj().T @ A
+                rhs = A.conj().T @ y[m]
+                h[PILOT_BIN_INDEX[m][0]] = _solve_2x2_vec(gram, rhs)
+            pred = rot*np.einsum('ij,ij->i', h[PILOT_BIN_INDEX], pv)
+            ok = np.abs(pred) > np.float32(1e-9)
+            ph = np.angle(y[ok]/pred[ok]).astype(np.float32)
+            w = np.abs(pred[ok]).astype(np.float32)
+            J = (np.float32(2*np.pi/N)*frequency[ok])[:, None] * _BASIS32[sv[ok]]
+            JW = J*w[:, None]
+            normal = JW.T @ JW + np.float32(1e-10)*np.eye(
+                JW.shape[1], dtype=np.float32)
+            step = np.linalg.solve(normal, JW.T @ (ph*w))
+            theta += step
+            if np.max(np.abs(step)) < np.float32(1e-4):
+                break
+        delta = _BASIS32 @ theta
+        for k in range(2):
+            v = h[:, k]
+            hk = (np.interp(BINS, PILOT_BINS, v.real) +
+                  1j*np.interp(BINS, PILOT_BINS, v.imag)).astype(np.complex64)
+            H[:, BINS, c, k] = (hk[None, :]*np.exp(
+                phase*BINS[None, :].astype(np.float32)*delta[:, None]
+            )).astype(np.complex64)
+    return H
+
+
 # fade_and_noise() works on every symbol and channel at once. Pilot counts
 # differ per symbol (4 or 5), so the per-symbol pilot lists are padded to a
 # fixed width with a validity mask.
@@ -905,16 +967,20 @@ for _s, (_bins, _vals) in enumerate(zip(PILOT_BY_SYMBOL, PILOT_VALUES_BY_SYMBOL)
     PILOT_PAD_VALUES[_s, :len(_bins)] = _vals
     PILOT_PAD_VALID[_s, :len(_bins)] = True
 PILOT_PAD_KHZ = PILOT_PAD_BINS*RATE/N/1000
+PILOT_PAD_VALUES32 = PILOT_PAD_VALUES.astype(np.complex64)
+PILOT_PAD_KHZ32 = PILOT_PAD_KHZ.astype(np.float32)
 PILOT_DOF = np.maximum(PILOT_PAD_VALID.sum(axis=1)-3, 1)
 _SYMBOL_INDEX = np.arange(F)[:, None]
 
 
-def fade_and_noise(Z, H):
+def fade_and_noise(Z, H, force_float32=False):
     """Per-symbol magnitude/phase refit (§9.4) and pilot-residual noise (§9.5).
 
     Batched over all symbols and both channels; same rules as the original
     per-symbol loop (equivalence is covered by modem_tests/test_v7_decode_speed).
     """
+    if force_float32:
+        return _fade_and_noise_float32(Z, H)
     freq = BINS*RATE/N/1000
     valid = PILOT_PAD_VALID[:, :, None]                                # (F, P, 1)
     Hp = H[_SYMBOL_INDEX, PILOT_PAD_BINS]                              # (F, P, 2ch, 2)
@@ -973,8 +1039,66 @@ def fade_and_noise(Z, H):
     return H, noise
 
 
+def _fade_and_noise_float32(Z, H):
+    """Float32 version of fade/noise refit for the opt-in receiver path."""
+    freq = (BINS*RATE/N/1000).astype(np.float32)
+    valid = PILOT_PAD_VALID[:, :, None]
+    Hp = H[_SYMBOL_INDEX, PILOT_PAD_BINS]
+    pred = np.einsum('spci,spi->spc', Hp, PILOT_PAD_VALUES32)
+    obs = Z[_SYMBOL_INDEX, PILOT_PAD_BINS]
+    mag = np.where(valid, np.abs(pred), np.float32(0))
+    ok = valid & (mag > np.float32(.3)*mag.max(axis=1, keepdims=True))
+    count = ok.sum(axis=1)
+    rho = np.divide(obs, pred, out=np.ones_like(obs), where=ok)
+    w = np.where(ok, mag, np.float32(0))
+    logr = np.where(ok, np.log(np.abs(rho)+np.float32(1e-12)), np.float32(0))
+    fb = np.broadcast_to(PILOT_PAD_KHZ32[:, :, None], ok.shape)
+    fmax = np.where(ok, fb, -np.inf).max(axis=1)
+    fmin = np.where(ok, fb, np.inf).min(axis=1)
+    use_ls = (count >= 3) & (fmax-fmin > np.float32(3))
+    w2 = w*w
+    s00 = w2.sum(axis=1) + np.float32(1e-10)
+    s01 = -(w2*fb).sum(axis=1)
+    s11 = (w2*fb*fb).sum(axis=1) + np.float32(1e-10)
+    r0 = (w2*logr).sum(axis=1)
+    r1 = -(w2*fb*logr).sum(axis=1)
+    det = s00*s11-s01*s01
+    safe = np.where(use_ls, det, np.float32(1))
+    u_ls = (s11*r0-s01*r1)/safe
+    v_ls = np.maximum((s00*r1-s01*r0)/safe, np.float32(0))
+    wsum = w.sum(axis=1)
+    u_avg = np.divide((w*logr).sum(axis=1), wsum,
+                      out=np.zeros_like(wsum), where=wsum > 0)
+    u = np.where(use_ls, u_ls, u_avg)
+    v = np.where(use_ls, v_ls, np.float32(0))
+    a = np.angle((rho*w).sum(axis=1)).astype(np.float32)
+    apply = count >= 2
+    corr = np.exp(u[:, None, :] - v[:, None, :]*freq[None, :, None] +
+                  np.complex64(1j)*a[:, None, :]).astype(np.complex64)
+    corr = np.where(apply[:, None, :], corr, np.complex64(1))
+    H[:, BINS] *= corr[..., None]
+    Hp2 = H[_SYMBOL_INDEX, PILOT_PAD_BINS]
+    pred2 = np.einsum('spci,spi->spc', Hp2, PILOT_PAD_VALUES32)
+    resid = np.where(valid, np.abs(obs-pred2)**2, np.float32(0)).sum(axis=1)
+    noise = np.where(apply, resid/PILOT_DOF.astype(np.float32)[:, None],
+                     np.float32(0)).astype(np.float32)
+    sm = np.empty_like(noise)
+    if F == 1:
+        sm[:] = noise
+    else:
+        sm[0] = (noise[0]+noise[1])/np.float32(3)
+        sm[-1] = (noise[-2]+noise[-1])/np.float32(3)
+        sm[1:-1] = (noise[:-2]+noise[1:-1]+noise[2:])/np.float32(3)
+    for ch in range(2):
+        noise[:, ch] = np.maximum(
+            np.maximum(sm[:, ch], np.median(sm[:, ch])),
+            np.float32(1e-5)*np.float32(PILOT_AMP)**2*np.mean(
+                np.abs(H[:, BINS, ch])**2).astype(np.float32))
+    return H, noise
+
+
 def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
-                 diagnostics=None, direct_body=None):
+                 diagnostics=None, direct_body=None, force_float32=False):
     started = perf_counter()
     stage_started = started
     if direct_body is None:
@@ -984,25 +1108,33 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
         pos = n + np.interp(n, nom, d)
         if pos[0] < 0 or pos[-1] >= len(x)-1:
             return None
-        seg = _sample_at(x, pos, taps=4).astype(float)
+        seg = _sample_at(x, pos, taps=4).astype(
+            np.float32 if force_float32 else float)
         # Clock cancellation (§9.2): regenerate from this frame's word, LS gain.
         if cancel:
-            clk = clock_cancel_template(counter)
+            clk = clock_cancel_template(
+                counter, np.float32 if force_float32 else float)
             for ch in range(2):
                 a = np.dot(seg[:, ch], clk)/np.dot(clk, clk)
                 seg[:, ch] -= a*clk
         seg = seg[64:64+FRAME]
     else:
-        seg = np.asarray(direct_body, dtype=float)
+        seg = np.asarray(direct_body,
+                         dtype=np.float32 if force_float32 else float)
     windows = seg.reshape(F, SYM, 2)[:, WIN:WIN+N, :]
-    Z = (np.fft.rfft(windows, axis=1)/model.scale *
-         np.conj(model.phase)[:, :, None] * EARLY[None, :, None])
+    if force_float32:
+        Z = (np.fft.rfft(windows, axis=1)/np.float32(model.scale) *
+             np.conj(model.phase32)[:, :, None] *
+             EARLY.astype(np.complex64)[None, :, None]).astype(np.complex64)
+    else:
+        Z = (np.fft.rfft(windows, axis=1)/model.scale *
+             np.conj(model.phase)[:, :, None] * EARLY[None, :, None])
     if diagnostics is not None:
         diagnostics.setdefault('stage_ms', {}).setdefault('sample_fft', []).append(
             (perf_counter()-stage_started)*1000)
     stage_started = perf_counter()
-    H = channel_joint(Z)
-    H, noise = fade_and_noise(Z, H)
+    H = channel_joint(Z, force_float32=force_float32)
+    H, noise = fade_and_noise(Z, H, force_float32=force_float32)
     if diagnostics is not None:
         diagnostics.setdefault('stage_ms', {}).setdefault('channel', []).append(
             (perf_counter()-stage_started)*1000)
@@ -1013,15 +1145,23 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
     # entering Python once per block/channel was not.
     idx = model.rank_tables[counter % TAIL_PHASES]
     priors = model.block_prior_tables
-    block_prior = (priors[counter % TAIL_PHASES] if priors
-                   else block_priors(model.gain, model.lam, idx))
+    if force_float32:
+        block_prior = (model.block_prior_tables32[counter % TAIL_PHASES]
+                       if model.block_prior_tables32 else
+                       block_priors(model.gain32, model.lam32, idx).astype(
+                           np.float32))
+    else:
+        block_prior = (priors[counter % TAIL_PHASES] if priors
+                       else block_priors(model.gain, model.lam, idx))
     Hc = H[BLOCK_SYMBOLS, BLOCK_BINS[:, None]]
     Zc = Z[BLOCK_SYMBOLS, BLOCK_BINS[:, None]]
-    estimates = np.zeros((len(BLOCKS), 2, 2, 8), complex)
-    variances = np.full((len(BLOCKS), 2, 2, 8), np.inf)
+    estimates = np.zeros((len(BLOCKS), 2, 2, 8),
+                         np.complex64 if force_float32 else complex)
+    variances = np.full((len(BLOCKS), 2, 2, 8), np.inf,
+                        dtype=np.float32 if force_float32 else float)
     for q in range(2):
         prior = block_prior[:, :, q]
-        safe = prior + 1e-12
+        safe = prior + (np.float32(1e-12) if force_float32 else 1e-12)
         S = (Hc*safe[:, None, None, :]) @ Hc.conj().transpose(0, 1, 3, 2)
         S[..., 0, 0] += np.maximum(noise[BLOCK_SYMBOLS, 0],
                                    NOISE_FLOOR)
@@ -1053,15 +1193,22 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
     group_count = len(GROUPS)
     ranks_all = idx
     live_all = ranks_all >= 0
-    y_all = np.empty((group_count, 8)); sig_all = np.empty((group_count, 8))
+    real_dtype = np.float32 if force_float32 else float
+    y_all = np.empty((group_count, 8), dtype=real_dtype)
+    sig_all = np.empty((group_count, 8), dtype=real_dtype)
     values_all = estimates[GROUP_BLOCK, GROUP_STREAM_INDEX, GROUP_Q_INDEX]
     vars_all = variances[GROUP_BLOCK, GROUP_STREAM_INDEX, GROUP_Q_INDEX]
     y_all[:] = values_all.real
     y_all[GROUP_Q_INDEX == 1] = values_all[GROUP_Q_INDEX == 1].imag
     sig_all[:] = np.where(np.isfinite(vars_all), vars_all/2, 1e9)
-    lam_all = np.where(live_all, model.lam[np.maximum(ranks_all, 0)], 1e-12)
-    gain_all = np.where(live_all, model.gain[np.maximum(ranks_all, 0)], 0)
-    A_all = H8[None, :, :]*gain_all[:, None, :]
+    lam_model = model.lam32 if force_float32 else model.lam
+    gain_model = model.gain32 if force_float32 else model.gain
+    lam_all = np.where(live_all, lam_model[np.maximum(ranks_all, 0)],
+                       np.array(1e-12, dtype=real_dtype))
+    gain_all = np.where(live_all, gain_model[np.maximum(ranks_all, 0)],
+                        np.array(0, dtype=real_dtype))
+    A_all = H8.astype(np.float32 if force_float32 else float)[None, :, :] * \
+        gain_all[:, None, :]
     S_all = (A_all*lam_all[:, None, :]) @ A_all.transpose(0, 2, 1)
     S_all[:, np.arange(8), np.arange(8)] += sig_all
     M_all = lam_all[:, :, None]*A_all.transpose(0, 2, 1)
@@ -1072,7 +1219,9 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
         'gij,gji->gi', K_all,
         A_all*lam_all[:, None, :])
     conf_all = np.clip(1-post_all/lam_all, 0, 1)
-    xhat = np.zeros_like(model.mu); conf = np.zeros_like(model.mu)
+    mu = model.mu32 if force_float32 else model.mu
+    xhat = np.zeros_like(mu, dtype=real_dtype)
+    conf = np.zeros_like(mu, dtype=real_dtype)
     got = np.zeros_like(model.mu, bool)
     # Every live coefficient occurs in exactly one group.  Flattening the
     # boolean selection turns the final group-order -> coefficient-order copy
@@ -1086,24 +1235,27 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
             (perf_counter()-stage_started)*1000)
     floor = np.where(model.head, np.where(model.plane == 0, .05, .15),
                      np.where(model.plane == 0, .45, .60))
+    if force_float32:
+        floor = floor.astype(np.float32)
     gate = np.clip((conf-floor)/(.85-floor), 0, 1)
-    current = model.mu + xhat*gate
-    coeffs = prev_tail.copy()
+    current = mu + xhat*gate
+    coeffs = np.asarray(prev_tail, dtype=real_dtype).copy()
     head_confidence = float(np.mean(conf[model.head]))
     head_coverage = float(np.mean(conf[model.head] >= .15))
     if head_confidence < HEAD_MIN_CONFIDENCE or head_coverage < HEAD_MIN_COVERAGE:
         displayable = (head_confidence >= DISPLAY_MIN_HEAD_CONFIDENCE and
                        head_coverage >= DISPLAY_MIN_HEAD_COVERAGE)
-        display_coeffs = prev_tail.copy()
+        display_coeffs = np.asarray(prev_tail, dtype=real_dtype).copy()
         if displayable:
             display_coeffs[got] = current[got]
-        return Result(counter, 'lost', display_coeffs if displayable else prev_tail.copy(), {
+        return Result(counter, 'lost', display_coeffs if displayable else
+                      np.asarray(prev_tail, dtype=real_dtype).copy(), {
             'noise': noise.mean(0).tolist(), 'got': int(got.sum()),
             'head_confidence': head_confidence,
             'head_coverage': head_coverage, 'held': not displayable,
             'displayable': displayable,
             'display_coeffs': display_coeffs})
-    coeffs[got] = (model.mu + xhat*gate)[got]
+    coeffs[got] = current[got]
     return Result(counter, 'verified', coeffs,
                   {'noise': noise.mean(0).tolist(), 'got': int(got.sum()),
                    'head_confidence': head_confidence,
@@ -1111,14 +1263,21 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
                    'displayable': True})
 
 
-def decode_metadata(model, samples, start, scale, channel):
+def decode_metadata(model, samples, start, scale, channel,
+                    force_float32=False):
     indexes = start + np.arange(META_SYMBOL)*scale
     if indexes[-1] >= len(samples)-1:
         return None
     meta = _sample_at(samples, indexes, taps=4)
     window = meta[WIN:WIN+N]
-    z = (np.fft.rfft(window, axis=0)/model.scale *
-         np.conj(model.phase[-1])[:, None] * EARLY[:, None])
+    if force_float32:
+        z = (np.fft.rfft(window.astype(np.float32), axis=0) /
+             np.float32(model.scale) *
+             np.conj(model.phase32[-1])[:, None] *
+             EARLY.astype(np.complex64)[:, None]).astype(np.complex64)
+    else:
+        z = (np.fft.rfft(window, axis=0)/model.scale *
+             np.conj(model.phase[-1])[:, None] * EARLY[:, None])
     # The metadata symbol carries known M=1 pilots.  Estimate its own
     # per-symbol complex response from those pilots; this avoids assuming the
     # body-channel phase is unchanged across the symbol boundary.
@@ -1128,8 +1287,11 @@ def decode_metadata(model, samples, start, scale, channel):
         return None
     response = (np.interp(META_DATA_BINS, META_PILOTS, pilot_z.real) +
                 1j*np.interp(META_DATA_BINS, META_PILOTS, pilot_z.imag))
+    if force_float32:
+        response = response.astype(np.complex64)
     data = np.divide(observed[META_DATA_BINS], response,
-                     out=np.zeros(len(META_DATA_BINS), complex),
+                     out=np.zeros(len(META_DATA_BINS),
+                                  np.complex64 if force_float32 else complex),
                      where=np.abs(response) > 1e-9)
     symbols = data[:20]
     bits = np.empty(40, np.uint8)
@@ -1154,9 +1316,10 @@ def _diagnostic_summary(diag, elapsed_ms):
     return diag
 
 
-def decode_stream(model, x, verbose=False, diagnostics=None):
+def decode_stream(model, x, verbose=False, diagnostics=None,
+                  force_float32=False):
     started = perf_counter()
-    x = np.asarray(x, float)
+    x = np.asarray(x, np.float32 if force_float32 else float)
     def read(sig):
         y = clock_signal(sig)
         return y, find_words(biphase_bits(y, clock_edges(y)))
@@ -1180,12 +1343,14 @@ def decode_stream(model, x, verbose=False, diagnostics=None):
     verified = {w['counter'] for w in words if w['verified']}
     allc = {w['counter'] for w in words}
     lo, hi = min(allc), max(allc)
-    results, tail = [], model.mu.copy()
+    results, tail = [], (model.mu32.copy() if force_float32
+                         else model.mu.copy())
     skipped = []
     for counter in range(lo, hi+1):
         try:
             r = decode_frame(model, x, tm, counter, tail,
-                             cancel=bool(verified), diagnostics=diagnostics)
+                             cancel=bool(verified), diagnostics=diagnostics,
+                             force_float32=force_float32)
         except (FloatingPointError, np.linalg.LinAlgError, ValueError,
                 IndexError) as exc:
             # A damaged frame is an ordinary transport event.  Do not abort
@@ -1248,7 +1413,8 @@ def leg_polarity(samples, previous=1, threshold=POLARITY_THRESHOLD):
 
 
 def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
-                        input_gain=1.0, models=None, model_factory=None):
+                        input_gain=1.0, models=None, model_factory=None,
+                        force_float32=False):
     """Decode V7 bodies located by the existing pulse-counted acquisition.
 
     This is the low-latency live path: each accepted pulse word supplies a
@@ -1271,7 +1437,8 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
         gain = gain[:samples.shape[1]]          # per-channel gain on mono input
     samples = samples*gain
     results, info = _decode_pulse_samples(model, samples, diagnostics,
-                                          latest_only, models, model_factory)
+                                          latest_only, models, model_factory,
+                                          force_float32)
     if results or samples.shape[1] != 2:
         return results, info
     # One leg polarity-inverted (miswired deck or cable, reversed head lead):
@@ -1281,7 +1448,7 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
     # this; silence costs one more (cheap, empty) edge scan.
     flipped, flipped_info = _decode_pulse_samples(
         model, samples*np.float32([1, -1]), diagnostics, latest_only, models,
-        model_factory)
+        model_factory, force_float32)
     if not flipped:
         return results, info
     for result in flipped:
@@ -1291,11 +1458,11 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
 
 
 def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
-                          model_factory):
+                           model_factory, force_float32=False):
     cursor = 0
     counter = 1
     results = []
-    tail = model.mu.copy()
+    tail = (model.mu32.copy() if force_float32 else model.mu.copy())
     measured = None
     pending_aspect = 0
     if latest_only:
@@ -1385,7 +1552,8 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
         # are self-referencing, so the bootstrap model's absolute scale cancels
         # out; the protected encoding ID can therefore select the source model.
         meta_start = frame_start + (PULSE.SYNC_LEN+FRAME)*scale
-        decoded_metadata = decode_metadata(model, samples, meta_start, scale, None)
+        decoded_metadata = decode_metadata(model, samples, meta_start, scale, None,
+                                           force_float32)
         metadata_valid = decoded_metadata is not None
         encoding_type = model.encoding_type
         revision = 0
@@ -1416,7 +1584,8 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
         try:
             result = decode_frame(selected_model, None, (counter, nominal, offset),
                                   counter, tail, cancel=False, direct_body=body,
-                                  diagnostics=diagnostics)
+                                  diagnostics=diagnostics,
+                                  force_float32=force_float32)
         except (FloatingPointError, np.linalg.LinAlgError, ValueError,
                 IndexError):
             result = None

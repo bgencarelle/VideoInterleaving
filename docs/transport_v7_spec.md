@@ -591,7 +591,9 @@ The runner generates 12 identical packets from the canonical reference face,
 encodes at the 48 kHz wire rate, resamples to 96 kHz, and feeds the damaged
 stream through the pulse-counted V7 decoder.  The seed defaults to `2026` and
 can be changed with `--seed`; `--frames`, `--only`, and `--out` support shorter
-diagnostic runs.  Results are written to the ignored `scratch/` directory.
+diagnostic runs.  Results are written to the ignored `scratch/` directory.  The
+opt-in `--force-float32` switch exercises the receiver's float32/complex64 FFT,
+channel, and MMSE path without changing the default decoder.
 
 The matrix deliberately excludes the former composite `worn-deck` case.  Its
 19 current cases cover clean playback, four low-pass ceilings, three hiss

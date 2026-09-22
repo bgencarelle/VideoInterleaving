@@ -193,6 +193,8 @@ def main(argv=None):
                         help='repeatable synthetic-noise seed (default: 2026)')
     parser.add_argument('--only', action='append', default=[],
                         help='run only this case; may be repeated')
+    parser.add_argument('--force-float32', action='store_true',
+                        help='use the experimental float32/complex64 decoder')
     args = parser.parse_args(argv)
     if args.frames < 3:
         parser.error('--frames must be at least 3')
@@ -217,7 +219,8 @@ def main(argv=None):
     failures = []
     for case in cases:
         damaged = impair(wire96, case, seed=args.seed)
-        results, info = v7.decode_pulse_stream(model, damaged)
+        results, info = v7.decode_pulse_stream(
+            model, damaged, force_float32=args.force_float32)
         errors = []
         quality_rows = []
         metadata = 0

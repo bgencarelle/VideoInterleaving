@@ -28,6 +28,8 @@ def parser():
     ap.add_argument('--fullscreen', action='store_true')
     ap.add_argument('--diagnostics', action='store_true')
     ap.add_argument('--mono-compatible', action='store_true')
+    ap.add_argument('--force-float32', action='store_true',
+                    help='use the experimental float32/complex64 decode path')
     return ap
 
 
@@ -43,9 +45,10 @@ def run(args):
     receiver_args = v7_live.parser().parse_args([
         'receive', '--device', str(args.device), '--headless', '--no-log',
         '--fixture', str(args.fixture),
-        *(['--diagnostics'] if args.diagnostics else []),
-        *(['--mono-compatible'] if args.mono_compatible else []),
-    ])
+         *(['--diagnostics'] if args.diagnostics else []),
+         *(['--mono-compatible'] if args.mono_compatible else []),
+         *(['--force-float32'] if args.force_float32 else []),
+     ])
     receiver = threading.Thread(target=v7_live.run_receive,
                                 args=(receiver_args,), daemon=True)
     receiver.start()

@@ -48,11 +48,15 @@ class V7FrozenTablesTests(unittest.TestCase):
             values = v7.image_values(v7.prepare_image(source, encode_filter='nearest'),
                                      model.coder.grids, encode_filter='nearest')
         audio = v7.encode_pulse_stream(model, [values]*4, 1, [6]*4)
-        results, _ = v7.decode_pulse_stream(model, audio)
-        self.assertGreaterEqual(len(results), 3)
-        for result in results:
-            error = np.sqrt(np.mean((v7.values_from(model, result.coeffs)-values)**2))
-            self.assertLess(error, .07)
+        for force_float32 in (False, True):
+            results, _ = v7.decode_pulse_stream(
+                model, audio, force_float32=force_float32)
+            with self.subTest(force_float32=force_float32):
+                self.assertGreaterEqual(len(results), 3)
+                for result in results:
+                    error = np.sqrt(np.mean(
+                        (v7.values_from(model, result.coeffs)-values)**2))
+                    self.assertLess(error, .07)
 
 if __name__ == '__main__':
     unittest.main()

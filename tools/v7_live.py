@@ -10,6 +10,7 @@ Examples::
     .venv/bin/python tools/v7_live.py send --source camera --device 'BlackHole 2ch'
     .venv/bin/python tools/v7_live.py send --source screen --device 'BlackHole 2ch'
     .venv/bin/python tools/v7_live.py receive --device 'BlackHole 2ch'
+    .venv/bin/python tools/v7_live.py receive --device 'BlackHole 2ch' --force-float32
 
 The prototype currently emits finite batches. Batch boundaries are therefore a
 known live-experiment limitation; the clock counter continues across batches so
@@ -385,7 +386,8 @@ def run_receive(args):
             results, info = P.decode_pulse_stream(
                 model, audio, diagnostics=diagnostics, latest_only=True,
                 input_gain=auto_gain, models=models,
-                model_factory=model_factory)
+                model_factory=model_factory,
+                force_float32=args.force_float32)
         except Exception as exc:
             # Drop the damaged window and let the next retained clock history
             # reacquire.  A single bad frame must not stop the live receiver.
@@ -719,6 +721,8 @@ def parser():
                       help='frames retained for clock reacquisition (default: 1)')
     recv.add_argument('--refine', action='store_true',
                       help='enable slower clock-template refinement')
+    recv.add_argument('--force-float32', action='store_true',
+                      help='use the experimental float32/complex64 decode path')
     return ap
 
 
