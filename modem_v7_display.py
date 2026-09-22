@@ -108,23 +108,13 @@ def run_modem(args):
     encode_filter = getattr(args, 'modem_encode_filter', None) or 'nearest'
 
     # The V7 statistics are a wire profile, not a property of whichever frame
-    # happens to be sent first.  Use the checked-in canonical fixture so the
-    # application sender and standalone receiver build identical models.  A
-    # bake-derived fallback keeps custom deployments usable when they omit the
-    # fixture, but that path should be paired with the same image at receive.
-    fixture = Path(__file__).resolve().parent / 'modem_tests/fixtures/v7_reference_face.png'
-    if fixture.is_file():
-        model = _v7.build_model(
-            fixture,
-            TARGET_RMS / math.sqrt(1 + 10**(_v7.CLOCK_REL_DB/10)),
-            encode_filter=encode_filter)
-    else:
-        seed_selection = (0, *(selected or (0, 0)))
-        seed_image = library.composite(*seed_selection, background, rotation, mirror)
-        model = _v7.build_model_from_image(
-            seed_image,
-            TARGET_RMS / math.sqrt(1 + 10**(_v7.CLOCK_REL_DB/10)),
-            encode_filter=encode_filter)
+    # happens to be sent first.  The canonical profile ships as frozen,
+    # hash-checked tables (animation_modem/v7_model_tables.npz), so the
+    # application sender and the standalone receiver build identical models
+    # without the reference image or any runtime derivation.
+    model = _v7.load_model(
+        TARGET_RMS / math.sqrt(1 + 10**(_v7.CLOCK_REL_DB/10)),
+        encode_filter=encode_filter)
 
     channels = pair(args.modem_channels)
     output_latency = latency(args.modem_latency)

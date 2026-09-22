@@ -334,17 +334,55 @@ class Model:
     mono_sum: bool = False
 
 
-def build_model(fixture, target_rms, encode_filter='lanczos', mono_sum=False):
-    with Image.open(fixture) as source:
-        return build_model_from_image(source, target_rms, encode_filter,
-                                       mono_sum)
+# The canonical V7 profile is frozen data, not a runtime computation.  Its
+# tables were derived once from REFERENCE_FIXTURE by derive_tables() and
+# phase_table() (tools/v7_freeze_tables.py) and are loaded from MODEL_TABLES,
+# whose SHA-256 is part of the wire definition.  Sender and receiver therefore
+# agree without the fixture image, Pillow, SciPy's curve fit or NumPy's RNG
+# stream -- any of which could drift between library versions and silently
+# desynchronise the two ends (a different phase table decodes as garbage).
+REFERENCE_FIXTURE = ROOT/'modem_tests/fixtures/v7_reference_face.png'
+MODEL_TABLES = Path(__file__).with_name('v7_model_tables.npz')
+MODEL_TABLES_SHA256 = '74b28a2ed165b5ba8e9e6d46c8f2a99127e53d03efa5a4d19fe12fa7115b1e01'
+PHASE_SEED = 70001          # provenance of the frozen phase table
+CROP_SEED = 1               # provenance of the frozen variance tables
+LEVEL_SEED = 6              # provenance of the frozen unit levels
 
 
-def build_model_from_image(source, target_rms, encode_filter='lanczos',
-                           mono_sum=False):
-    """Build the fixed V7 model from an in-memory RGB source image."""
+def phase_table():
+    """Regenerate the per-cell phase table (provenance / drift check only)."""
+    return np.exp(2j*np.pi*np.random.default_rng(PHASE_SEED).random((F, 65)))
+
+
+def _planes():
+    plane = np.empty(sum(r*c for r, c in V7_SHAPES), int)
+    off = 0
+    for p, (r, c) in enumerate(V7_SHAPES):
+        plane[off:off+r*c] = p
+        off += r*c
+    return plane
+
+
+def _assemble(tables, phase, target_rms, encode_filter, mono_sum):
+    """Model from (mu, lam, order, gain, unit_rms) tables and a phase table."""
     coder = SourceCoder(V7_SHAPES, grids=V7_GRIDS)
-    rng = np.random.default_rng(1)
+    order = np.asarray(tables['order'])
+    head = np.zeros(len(tables['lam']), bool); head[order[:HEAD]] = True
+    rank_tables = tuple(frame_ranks(order, p) for p in range(TAIL_PHASES))
+    return Model(coder, np.asarray(tables['mu']), np.asarray(tables['lam']), order,
+                 np.asarray(tables['gain']), phase,
+                 target_rms/float(tables['unit_rms']), _planes(), head,
+                 rank_tables, ENCODING_FILTER_CODES[encode_filter], mono_sum)
+
+
+def derive_tables(source, encode_filter='lanczos', phase=None):
+    """Derive a profile's statistics from an image (seeded crops + power-law fit).
+
+    Used to create the frozen canonical tables and for explicitly custom
+    profiles. The result depends on Pillow, SciPy and NumPy's RNG stream.
+    """
+    coder = SourceCoder(V7_SHAPES, grids=V7_GRIDS)
+    rng = np.random.default_rng(CROP_SEED)
     im = source.convert('RGB'); W, Hh = im.size
     C = []
     for _ in range(120):
@@ -358,9 +396,9 @@ def build_model_from_image(source, target_rms, encode_filter='lanczos',
                          coder.grids, encode_filter=encode_filter))/coder.gains)
     C = np.asarray(C)
     mu = np.zeros(C.shape[1]); lam = np.empty(C.shape[1])
-    off, plane = 0, np.empty(C.shape[1], int)
+    off = 0
     for p, ((r, c), (gr, gc)) in enumerate(zip(V7_SHAPES, V7_GRIDS)):
-        sl = slice(off, off+r*c); plane[sl] = p
+        sl = slice(off, off+r*c)
         mu[off] = C[:, off].mean()                       # DC library mean
         L = np.mean(C[:, sl]**2, axis=0)
         rad = np.hypot(np.arange(r)[:, None]/gr, np.arange(c)[None, :]/gc).ravel()
@@ -369,23 +407,64 @@ def build_model_from_image(source, target_rms, encode_filter='lanczos',
         (a, k, q), _ = curve_fit(f, rad[m], np.log(np.maximum(L[m], 1e-12)),
                                  p0=(0, 20, 2),
                                  bounds=([-50, 0, 0], [50, 1e4, 10]), maxfev=20000)
-        model = np.exp(f(rad, a, k, q)); model[0] = C[:, off].var() + 1e-6
-        lam[sl] = model; off += r*c
+        fitted = np.exp(f(rad, a, k, q)); fitted[0] = C[:, off].var() + 1e-6
+        lam[sl] = fitted; off += r*c
     order = np.argsort(-lam, kind='stable')
     g = lam**-.25
     g /= np.sqrt(np.mean((g*g*lam)[order[:BODY_END]]))   # unit mean slot power
-    phase = np.exp(2j*np.pi*np.random.default_rng(70001).random((F, 65)))
-    head = np.zeros(C.shape[1], bool); head[order[:HEAD]] = True
-    rank_tables = tuple(frame_ranks(order, p) for p in range(TAIL_PHASES))
-    model = Model(coder, mu, lam, order, g, phase, 1.0, plane, head,
-                  rank_tables, ENCODING_FILTER_CODES[encode_filter], mono_sum)
+    tables = {'mu': mu, 'lam': lam, 'order': order, 'gain': g, 'unit_rms': 1.0}
     # Fixed level (§6.6): one-off calibration on seeded synthetic coefficients
     # drawn from the variance table -- a property of the profile, never of the
-    # frame being sent.
-    synth = np.random.default_rng(6).standard_normal(len(lam))*np.sqrt(lam) + mu
-    probe = encode_frame_coeffs(model, synth, 1)
-    model.scale = target_rms/np.sqrt(np.mean(probe**2))
-    return model
+    # frame being sent.  Stored as the RMS of a unit-scale probe frame.
+    probe_model = _assemble(tables, phase_table() if phase is None else phase,
+                            1.0, encode_filter, False)
+    synth = np.random.default_rng(LEVEL_SEED).standard_normal(len(lam))*np.sqrt(lam) + mu
+    probe = encode_frame_coeffs(probe_model, synth, 1)
+    tables['unit_rms'] = float(np.sqrt(np.mean(probe**2)))
+    return tables
+
+
+@lru_cache(maxsize=1)
+def _frozen_tables():
+    import hashlib
+    blob = MODEL_TABLES.read_bytes()
+    digest = hashlib.sha256(blob).hexdigest()
+    if digest != MODEL_TABLES_SHA256:
+        raise ValueError(f'{MODEL_TABLES.name} SHA-256 {digest} does not match the '
+                         f'V7 wire definition {MODEL_TABLES_SHA256}')
+    with np.load(MODEL_TABLES, allow_pickle=False) as data:
+        return {key: data[key].copy() for key in data.files}
+
+
+def load_model(target_rms, encode_filter='lanczos', mono_sum=False):
+    """The canonical V7 model from the frozen, hash-checked tables."""
+    if encode_filter not in ENCODING_FILTER_CODES:
+        raise ValueError(f'unknown encode filter {encode_filter!r}')
+    t = _frozen_tables()
+    tables = {k: t[f'{encode_filter}/{k}'] for k in ('mu', 'lam', 'order', 'gain', 'unit_rms')}
+    return _assemble(tables, t['phase'], target_rms, encode_filter, mono_sum)
+
+
+def _is_reference(fixture):
+    return fixture is None or Path(fixture).resolve() == REFERENCE_FIXTURE.resolve()
+
+
+def build_model(fixture, target_rms, encode_filter='lanczos', mono_sum=False):
+    """Canonical frozen model for the reference fixture (or None); otherwise a
+    custom profile derived from ``fixture``, which the receiver must match."""
+    if _is_reference(fixture):
+        return load_model(target_rms, encode_filter, mono_sum)
+    with Image.open(fixture) as source:
+        return build_model_from_image(source, target_rms, encode_filter,
+                                       mono_sum)
+
+
+def build_model_from_image(source, target_rms, encode_filter='lanczos',
+                           mono_sum=False):
+    """A custom (non-canonical) V7 model derived from an in-memory image."""
+    phase = phase_table()
+    return _assemble(derive_tables(source, encode_filter, phase), phase,
+                     target_rms, encode_filter, mono_sum)
 
 
 # ------------------------------------------------------------------ encoder
