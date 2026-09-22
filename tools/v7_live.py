@@ -583,7 +583,8 @@ def run_receive(args):
                          background='black')
         label.configure(background='black')
         label.pack(expand=True, fill='both')
-        device_label = status_label = levels_label = stats_label = quality_label = None
+        device_label = status_label = levels_label = stats_label = None
+        quality_label = sync_label = None
         if info_visible:
             info_frame.pack(fill='x', padx=6, pady=(0, 4))
             device_label = tk.Label(info_frame, text=f'V7 input: {args.device}',
@@ -602,6 +603,12 @@ def run_receive(args):
                                    font='TkFixedFont', background='black',
                                    foreground='white')
             stats_label.pack(fill='x')
+            # Its own line: what is on screen, where the loop should be now,
+            # and how far apart they are.
+            sync_label = tk.Label(info_frame, text='index --', anchor='w',
+                                  font='TkFixedFont', background='black',
+                                  foreground='white')
+            sync_label.pack(fill='x')
             quality_label = tk.Label(info_frame, text='quality: --', anchor='w',
                                      font='TkFixedFont', background='black',
                                      foreground='white')
@@ -613,18 +620,14 @@ def run_receive(args):
                 peak = 20*np.log10(np.maximum(meter['peak'], 1e-9))
                 rms = 20*np.log10(np.maximum(meter['rms'], 1e-9))
                 shown = meter['shown_index']
-                index_text = (
-                    f'{"--" if shown is None else shown}'
-                    f' / {"--" if meter["max_index"] is None else meter["max_index"]}')
                 ideal, diff = live_loop_position()
-                if ideal is None:
-                    sync_text = 'ideal --  diff --'
-                else:
-                    diff_text = ('--' if diff is None else
-                                 f'{diff:+d} ({diff*1000/P.LOOP_IPS:+.0f} ms)')
-                    sync_text = f'ideal {ideal}  diff {diff_text}'
-                lag_text = ('--' if meter['lag_ms'] is None
-                            else f'{meter["lag_ms"]:+.0f} ms')
+                diff_text = ('--' if diff is None else
+                             f'{diff:+d} frames ({diff*1000/P.LOOP_IPS:+.0f} ms)')
+                sync_label.configure(text=(
+                    f'index {"--" if shown is None else shown}'
+                    f' / {"--" if meter["max_index"] is None else meter["max_index"]}'
+                    f'   calculated {"--" if ideal is None else ideal}'
+                    f'   diff {diff_text}'))
                 now = time.monotonic()
                 # Rates are recomputed at display time so they fall to 0 when
                 # input or decoding stops instead of freezing.
@@ -635,7 +638,7 @@ def run_receive(args):
                     f'peak L/R {peak[0]:6.1f}/{peak[1]:6.1f} dBFS | '
                     f'rms {rms[0]:6.1f}/{rms[1]:6.1f} dBFS'))
                 stats_label.configure(text=(
-                    f'frames {meter["decoded"]}  index {index_text}  '
+                    f'frames {meter["decoded"]}  '
                     f'verified {meter["verified"]} '
                     f'lost {meter["lost"]}  input blocks {meter["blocks"]} '
                     f'dropped {meter["dropped"]}'))
@@ -652,8 +655,7 @@ def run_receive(args):
                     int(meter['aspect_candidate']) & 7]
                 status_label.configure(text=(
                   f'status {meter["status"]}  mode {meter["mode"]}  '
-                  f'frame {meter["counter"]}  index {index_text}  {sync_text}  '
-                  f'lag at display {lag_text} '
+                  f'frame {meter["counter"]}  '
                     f'aspect {aspect_text} '
                     f'(candidate {candidate_aspect} '
                     f'x{meter["aspect_streak"]})  pulse {pulse_text}\n'

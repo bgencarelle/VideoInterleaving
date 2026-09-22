@@ -43,7 +43,7 @@ def _source_values(model, image, encode_filter='nearest'):
 
 def packet(library, model, absolute, source_index, selection, *,
            background=(4, 4, 4), rotation=0, mirror=False,
-           encode_filter='nearest', loop=None):
+           encode_filter='nearest', loop=None, direction=1):
     index, main_folder, float_folder = selection
     image = library.composite(index, main_folder, float_folder,
                               background, rotation, mirror)
@@ -51,7 +51,7 @@ def packet(library, model, absolute, source_index, selection, *,
     audio = _v7.encode_pulse_frame(
         model, values, absolute,
         aspect_code=_v7.aspect_wire_code(image.size),
-        source_index=source_index, loop=loop)
+        source_index=source_index, loop=loop, direction=direction)
     return audio, {
         'frame': absolute,
         'source_index': source_index,
@@ -87,8 +87,8 @@ def run_modem(args):
         root = args.modem_dir or getattr(settings, 'MODEM_DIR',
                                         settings.IMAGES_DIR + '_modem')
         library = ModemLibrary(root)
-    if library.frames >= _v7.LOOP_ONE_WAY:
-        raise ValueError('V7 loop metadata supports at most 32767 source frames')
+    if library.frames > _v7.MAX_SOURCE_INDEX + 1:
+        raise ValueError('V7 metadata supports at most 32767 source frames')
 
     selected = fixed_pair(getattr(args, 'modem_pair', None))
     if selected is not None:
@@ -145,12 +145,18 @@ def run_modem(args):
           f'loop N={loop.frames} p='
           f'{"none (MIDI clock)" if not loop.clocked else loop.phase} in CRC metadata')
 
-    def make_packet(absolute, index, folders):
+    def make_packet(absolute, index, folders, at_time_ns=None):
         started = time.perf_counter()
+        # Which way the loop is going at this packet's moment: a ping-pong
+        # index alone cannot say, and the receiver needs it to compare with
+        # its own clock.
+        direction = (_v7.loop_direction(_v7.loop_ticks(at_time_ns), loop)
+                     if loop.clocked and at_time_ns is not None else 1)
         audio, report = packet(
             library, model, absolute, index, (index, *folders),
             background=background, rotation=rotation, mirror=mirror,
-            encode_filter=encode_filter, loop=loop)
+            encode_filter=encode_filter, loop=loop, direction=direction)
+        report['direction'] = direction
         report['encode_ms'] = (time.perf_counter() - started) * 1000
         if runtime_library is not None:
             report['fifo_hits'] = runtime_library.fifo_hits
@@ -218,7 +224,8 @@ def run_modem(args):
                             index = max(0, min(int(index), library.frames - 1))
                     folders, previous = _folders(args, library, index, selected, previous)
                     prefetch(index, folders)
-                    audio, report = make_packet(sent + 1, index, folders)
+                    audio, report = make_packet(sent + 1, index, folders,
+                                                target_time_ns)
                     prepare_ms = max(args.modem_prepare_ms, report['encode_ms'] * 1.5)
                     if output.submit(audio, slot):
                         sent += 1

@@ -153,7 +153,8 @@ def clock_word(counter, profile=0, aspect=6, folders=0, source_index=None):
 # Five bytes, 40 QPSK bits in the metadata symbol:
 #
 #   byte 0   aspect (3) | encode filter (2) | tail slice (3)
-#   byte 1-2 source index + 1 (zero is reserved: an erased field is invalid)
+#   byte 1-2 direction (1) | source index + 1 (15) -- index zero is reserved,
+#            so an erased field is invalid; direction 0 counts up, 1 down
 #   byte 3-4 CRC-16 of bytes 0-2, XOR a mask chosen by the tail slice
 #
 # The tail slice (counter mod 7) names which 96 tail coefficients this packet
@@ -163,6 +164,8 @@ def clock_word(counter, profile=0, aspect=6, folders=0, source_index=None):
 # p and N as (computed CRC) XOR (received field) and, once each has repeated,
 # checks every packet at full CRC strength again.  See loop_index().
 TAIL_SLICE_P, TAIL_SLICE_N = 5, 6
+INDEX_DOWN = 0x8000             # index field flag: the loop is counting down
+MAX_SOURCE_INDEX = 0x7ffe       # 32766: the index field keeps 15 bits
 LOOP_ONE_WAY = 0x8000           # loop field flag: 0,1..N-1,0,1.. (no ping-pong)
 LOOP_NO_CLOCK = 0xFFFF          # p value: the index does not follow the clock
 
@@ -178,18 +181,22 @@ def _tail_slice_mask(tail_slice, loop):
 
 
 def metadata_word(aspect_code, encoding_type=0, tail_slice=0, source_index=0,
-                  loop=None):
-    """Pack picture identity, tail slice and one-based source index.
+                  loop=None, direction=1):
+    """Pack picture identity, tail slice, direction and one-based index.
 
     The public/source-facing index remains zero-based, matching the bake and
-    display APIs.  ``loop`` (a LoopInfo, or None for no loop information)
-    supplies the p/N masks for tail slices 5 and 6.
+    display APIs.  ``direction`` is +1 while the loop counts up and -1 while
+    it counts down (a ping-pong index alone cannot say which).  ``loop`` (a
+    LoopInfo, or None for no loop information) supplies the p/N masks for tail
+    slices 5 and 6.
     """
-    if not 0 <= int(source_index) < 0xffff:
-        raise ValueError('source_index must fit a zero-based 16-bit field')
+    if not 0 <= int(source_index) <= MAX_SOURCE_INDEX:
+        raise ValueError(f'source_index must be 0..{MAX_SOURCE_INDEX}')
     if not 0 <= int(tail_slice) < TAIL_PHASES:
         raise ValueError('tail_slice must be 0..6')
     wire_index = int(source_index) + 1
+    if int(direction) < 0:
+        wire_index |= INDEX_DOWN
     payload = bytes([((int(aspect_code) & 7) << 5) |
                      ((int(encoding_type) & 3) << 3) |
                      (int(tail_slice) & 7),
@@ -200,9 +207,10 @@ def metadata_word(aspect_code, encoding_type=0, tail_slice=0, source_index=0,
 
 
 def metadata_symbols(aspect_code, encoding_type=0, tail_slice=0, source_index=0,
-                     loop=None):
+                     loop=None, direction=1):
     bits = np.unpackbits(np.frombuffer(
-        metadata_word(aspect_code, encoding_type, tail_slice, source_index, loop),
+        metadata_word(aspect_code, encoding_type, tail_slice, source_index, loop,
+                      direction),
         np.uint8))
     return ((bits[0::2].astype(float)*2-1) +
             1j*(bits[1::2].astype(float)*2-1))/np.sqrt(2)
@@ -215,6 +223,7 @@ class Metadata:
     tail_slice: int
     source_index: int
     mask: int                   # computed CRC XOR received field
+    direction: int = 1          # +1 counting up, -1 counting down
 
 
 def parse_metadata_word(raw):
@@ -228,13 +237,15 @@ def parse_metadata_word(raw):
     raw = bytes(raw)
     if len(raw) != 5:
         return None
-    wire_index = int.from_bytes(raw[1:3], 'big')
+    field = int.from_bytes(raw[1:3], 'big')
+    wire_index = field & ~INDEX_DOWN
     tail_slice = raw[0] & 7
     if wire_index == 0 or tail_slice >= TAIL_PHASES:
         return None
     mask = crc16(raw[:3]) ^ int.from_bytes(raw[3:5], 'big')
     return Metadata((raw[0] >> 5) & 7, (raw[0] >> 3) & 3, tail_slice,
-                    wire_index - 1, mask)
+                    wire_index - 1, mask,
+                    -1 if field & INDEX_DOWN else 1)
 
 
 # ------------------------------------------------------------------ loop clock
@@ -303,21 +314,35 @@ def loop_index(ticks, loop):
     return raw
 
 
-def loop_lag_ticks(index, ticks, loop, expected=0):
+def loop_direction(ticks, loop):
+    """+1 while the loop counts up at ``ticks``, -1 while it counts down."""
+    if not (loop.pingpong and loop.frames > 1):
+        return 1
+    raw = (int(ticks) - loop.phase) % loop_period(loop.frames, loop.pingpong)
+    return 1 if raw < loop.frames else -1
+
+
+def loop_lag_ticks(index, ticks, loop, expected=0, direction=None):
     """How many loop ticks the picture showing ``index`` is behind the live
     loop at ``ticks`` (negative: ahead).
 
     A ping-pong index occurs twice per period, and near a turn the two
     occurrences are close together, so a single reading can be ambiguous.
-    The occurrence whose lag is nearest ``expected`` is taken: a receiver
+    ``direction`` (from the wire) settles it outright.  Otherwise the
+    occurrence whose lag is nearest ``expected`` is taken: a receiver
     passes its recent lag, and since lag changes slowly this follows the
     true branch through the turns (and recovers from a wrong first guess as
     soon as the loop moves away from a turn)."""
     period = loop_period(loop.frames, loop.pingpong)
     live = (int(ticks) - loop.phase) % period
-    raws = [int(index)]
-    if loop.pingpong and loop.frames > 1:
-        raws.append(period - 1 - int(index))
+    if loop.pingpong and loop.frames > 1 and direction is not None:
+        # The wire says which way the loop was going, so the occurrence is
+        # known: no guessing at the turns.
+        raws = [int(index) if direction > 0 else period - 1 - int(index)]
+    else:
+        raws = [int(index)]
+        if loop.pingpong and loop.frames > 1:
+            raws.append(period - 1 - int(index))
     lags = [(live - raw - expected + period//2) % period - period//2 + expected
             for raw in raws]
     return min(lags, key=lambda lag: abs(lag - expected))
@@ -817,7 +842,7 @@ def encode_stream(model, values, frames, lead=0.25, tail=0.25,
 
 
 def encode_pulse_frame(model, values, counter, aspect_code=0, source_index=None,
-                       loop=None):
+                       loop=None, direction=1):
     """One edge-counted pulse-framed V7 body for low-latency live transport.
 
     ``counter`` is the packet count: counter mod 7 picks the tail slice, which
@@ -833,7 +858,7 @@ def encode_pulse_frame(model, values, counter, aspect_code=0, source_index=None,
     if source_index is None:
         source_index = counter - 1
     vals = metadata_symbols(aspect_code, model.encoding_type,
-                            counter % TAIL_PHASES, source_index, loop)
+                            counter % TAIL_PHASES, source_index, loop, direction)
     meta[META_PILOTS, 0] = 1
     meta[META_DATA_BINS[:len(vals)], 0] = vals
     mx = (meta[:, 0])/np.sqrt(2)*model.phase[-1]
@@ -849,17 +874,19 @@ def encode_pulse_frame(model, values, counter, aspect_code=0, source_index=None,
 
 
 def encode_pulse_stream(model, values, start_counter=1, aspect_codes=None,
-                        source_indices=None, loop=None):
+                        source_indices=None, loop=None, directions=None):
     values = list(values) if np.asarray(values).ndim != 1 else [values]
     codes = aspect_codes or [0]*len(values)
     indexes = (list(source_indices) if source_indices is not None else
                [start_counter+i-1 for i in range(len(values))])
-    if len(codes) != len(values) or len(indexes) != len(values):
-        raise ValueError('aspect_codes and source_indices must match values')
+    ways = list(directions) if directions is not None else [1]*len(values)
+    if len(codes) != len(values) or len(indexes) != len(values) or len(ways) != len(values):
+        raise ValueError('aspect_codes, source_indices and directions must match values')
     return np.concatenate([
-        encode_pulse_frame(model, value, start_counter+i, code, source_index, loop)
-        for i, (value, code, source_index) in
-        enumerate(zip(values, codes, indexes))])
+        encode_pulse_frame(model, value, start_counter+i, code, source_index,
+                           loop, way)
+        for i, (value, code, source_index, way) in
+        enumerate(zip(values, codes, indexes, ways))])
 
 
 # ------------------------------------------------------------------ receiver: clock
@@ -1837,11 +1864,13 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
         encoding_type = model.encoding_type
         source_index = None
         tail_slice = None
+        direction = None
         if metadata_valid:
             aspect_code = meta.aspect_code
             encoding_type = meta.encoding_type
             source_index = meta.source_index
             tail_slice = meta.tail_slice
+            direction = meta.direction
         selected_model = model
         if metadata_valid:
             selected_model = (models or {}).get(encoding_type)
@@ -1897,6 +1926,7 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
             result.diag['encoding_name'] = ENCODING_FILTERS[int(encoding_type)] \
                 if 0 <= int(encoding_type) < len(ENCODING_FILTERS) else 'unknown'
             result.diag['tail_slice'] = tail_slice
+            result.diag['direction'] = direction
             result.diag['metadata_provisional'] = provisional
             result.diag['loop'] = state.lock.loop
             result.diag['pulse_scale'] = float(scale)

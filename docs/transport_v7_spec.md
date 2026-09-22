@@ -784,15 +784,23 @@ XOR a mask chosen by the tail slice:
 payload byte 0 bit 7..5: aspect code
 payload byte 0 bit 4..3: source encoding: 00=nearest, 01=box, 10=lanczos, 11=bicubic
 payload byte 0 bit 2..0: tail slice = packet counter mod 7 (7 is invalid)
-payload bytes 1..2:      source index + 1, big-endian (wire zero is invalid)
+payload bytes 1..2:      bit 15 direction (0 up, 1 down),
+                         bits 14..0 source index + 1 (wire zero is invalid,
+                         so indices 0..32766)
 field bytes 3..4:        CRC XOR mask
     tail slice 0-4: mask 0 (plain CRC)
     tail slice 5:   mask p (loop phase)
     tail slice 6:   mask N | 0x8000 if the loop is one-way (loop length)
+                    (the sender knows both from its own clock)
 ```
 
 The source index is zero-based in the application API and one-based on the
-wire. The index is carried whole in every packet.
+wire, and is carried in every packet. A ping-pong index occurs twice per
+period, so the direction bit says which of the two this packet is: the
+receiver then places it on the loop with no guessing, including at the turns,
+and can show which way both its own and the received index are moving. The
+15-bit index limits a library to 32,767 images, which the loop length field
+already did.
 
 **Tail slice.** It names which 96 of the 656 tail coefficients the packet
 carries (§7.4), so the receiver places them correctly and keeps them in a tail

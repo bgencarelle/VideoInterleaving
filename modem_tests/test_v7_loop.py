@@ -50,6 +50,31 @@ class V7LoopClockTests(unittest.TestCase):
             if turn > 10:
                 self.assertEqual(v7.loop_lag_ticks(index, sent_at + 3, loop), 3)
 
+    def test_direction_rides_in_the_index_field(self):
+        for direction in (1, -1):
+            raw = v7.metadata_word(3, 2, 4, source_index=12345, direction=direction)
+            meta = v7.parse_metadata_word(raw)
+            with self.subTest(direction=direction):
+                self.assertEqual(meta.source_index, 12345)
+                self.assertEqual(meta.direction, direction)
+        with self.assertRaises(ValueError):
+            v7.metadata_word(0, source_index=v7.MAX_SOURCE_INDEX + 1)
+
+    def test_direction_removes_the_turn_ambiguity(self):
+        loop = v7.LoopInfo.from_epoch(2221, BIRTH_NS)
+        period = v7.loop_period(loop.frames)
+        base = v7.loop_ticks(1_800_000_000*10**9)
+        turn = base + (loop.frames - 3 - (base - loop.phase) % period)   # just before a turn
+        for lag in (1, 5, 40, 200):
+            for step in (0, 6):            # before and after the turn
+                sent_at = turn + step
+                index = v7.loop_index(sent_at, loop)
+                way = v7.loop_direction(sent_at, loop)
+                with self.subTest(lag=lag, step=step):
+                    self.assertEqual(
+                        v7.loop_lag_ticks(index, sent_at + lag, loop, direction=way),
+                        lag)
+
     def test_loop_fields(self):
         loop = v7.LoopInfo(2221, 418, True)
         self.assertEqual(v7.LoopInfo.from_fields(loop.frames_field, loop.phase_field), loop)
@@ -111,6 +136,14 @@ class V7LoopStreamTests(unittest.TestCase):
 
     def _tail_error(self, result):
         return np.sqrt(np.mean((result.coeffs[self.tail] - self.coeffs[self.tail])**2))
+
+    def test_direction_survives_the_wire(self):
+        ways = [1 if i % 2 else -1 for i in range(8)]
+        audio = v7.encode_pulse_stream(self.model, [self.values]*8, 1, [6]*8,
+                                       source_indices=list(range(100, 108)),
+                                       loop=self.loop, directions=ways)
+        results, _ = v7.decode_pulse_stream(self.model, audio)
+        self.assertEqual([r.diag['direction'] for r in results], ways[:len(results)])
 
     def test_every_packet_is_accepted_and_the_loop_is_learned(self):
         results, _ = v7.decode_pulse_stream(self.model, self._stream(16))
