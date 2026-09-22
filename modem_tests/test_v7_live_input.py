@@ -26,6 +26,7 @@ class V7LiveInputTests(unittest.TestCase):
 
     def _run(self, audio, rate=v7.RATE):
         live = LiveInput(rate=rate)
+        state = v7.PulseState()          # as the live receiver keeps it
         taken, indices = [], []
         for start in range(0, len(audio), BLOCK):
             live.add(np.array(audio[start:start+BLOCK], copy=True))
@@ -33,7 +34,8 @@ class V7LiveInputTests(unittest.TestCase):
             if chunk is None:
                 continue
             taken.append(chunk.copy())
-            results, _ = v7.decode_pulse_stream(self.model, chunk, latest_only=True)
+            results, _ = v7.decode_pulse_stream(self.model, chunk, latest_only=True,
+                                                state=state)
             live.decoded()
             indices += [r.diag.get('source_index') for r in results]
         return live, taken, indices, len(audio)/rate

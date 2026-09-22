@@ -43,7 +43,7 @@ def _source_values(model, image, encode_filter='nearest'):
 
 def packet(library, model, absolute, source_index, selection, *,
            background=(4, 4, 4), rotation=0, mirror=False,
-           encode_filter='nearest'):
+           encode_filter='nearest', loop=None):
     index, main_folder, float_folder = selection
     image = library.composite(index, main_folder, float_folder,
                               background, rotation, mirror)
@@ -51,7 +51,7 @@ def packet(library, model, absolute, source_index, selection, *,
     audio = _v7.encode_pulse_frame(
         model, values, absolute,
         aspect_code=_v7.aspect_wire_code(image.size),
-        source_index=source_index)
+        source_index=source_index, loop=loop)
     return audio, {
         'frame': absolute,
         'source_index': source_index,
@@ -87,8 +87,8 @@ def run_modem(args):
         root = args.modem_dir or getattr(settings, 'MODEM_DIR',
                                         settings.IMAGES_DIR + '_modem')
         library = ModemLibrary(root)
-    if library.frames > 0xffff:
-        raise ValueError('V7 source index supports at most 65535 source frames')
+    if library.frames >= _v7.LOOP_ONE_WAY:
+        raise ValueError('V7 loop metadata supports at most 32767 source frames')
 
     selected = fixed_pair(getattr(args, 'modem_pair', None))
     if selected is not None:
@@ -126,20 +126,31 @@ def run_modem(args):
     prepare_ms = args.modem_prepare_ms
     receive_margin_ms = args.modem_receive_margin_ms + args.modem_time_offset_ms
     index_offset_ns = round(getattr(args, 'modem_index_offset_ms', 0.0) * 1_000_000)
+    # Loop constants for the rotating CRC field: N and the loop phase p (the
+    # clock epoch reduced modulo the loop), so any receiver with a correct
+    # clock can rebuild the live index and measure how late its picture is.
+    # Under a MIDI clock the index does not follow wall time: send N only.
+    pingpong = bool(settings.PINGPONG)
+    if index_calculator.midi_mode:
+        loop = _v7.LoopInfo(library.frames, _v7.LOOP_NO_CLOCK, pingpong)
+    else:
+        loop = _v7.LoopInfo.from_epoch(library.frames, index_calculator.launch_time,
+                                       pingpong)
     previous = None
     sent = 0
     speed = float(getattr(args, 'modem_speed', 1.0))
     print(f'[MODEM/V7] source={source_mode} {root}: {library.frames} images, '
           f'{len(library.mains)} face / {len(library.floats)} float folders; '
           f'wire {_v7.PULSE_FPS*speed:.3f} fps at {speed:g}x, '
-          'source index in CRC metadata')
+          f'loop N={loop.frames} p='
+          f'{"none (MIDI clock)" if not loop.clocked else loop.phase} in CRC metadata')
 
     def make_packet(absolute, index, folders):
         started = time.perf_counter()
         audio, report = packet(
             library, model, absolute, index, (index, *folders),
             background=background, rotation=rotation, mirror=mirror,
-            encode_filter=encode_filter)
+            encode_filter=encode_filter, loop=loop)
         report['encode_ms'] = (time.perf_counter() - started) * 1000
         if runtime_library is not None:
             report['fifo_hits'] = runtime_library.fifo_hits

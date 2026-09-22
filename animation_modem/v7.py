@@ -74,7 +74,6 @@ def speed_pulse_stream(audio, speed=1.0, rate=RATE):
     ])
 
 
-METADATA_OPTION_MONO_SUM = 2
 # The high bit of each pair is orientation; square ignores it.
 V7_ASPECT_RATIOS = (1., 4/3, 3/2, 16/9, 1., 3/4, 2/3, 9/16)
 V7_ASPECT_NAMES = ('1:1', '4:3', '3:2', '16:9',
@@ -150,41 +149,280 @@ def clock_word(counter, profile=0, aspect=6, folders=0, source_index=None):
     return word
 
 
-def metadata_word(aspect_code, encoding_type=0, revision=0, source_index=0):
-    """Pack picture identity and one-based source index into metadata.
+# ------------------------------------------------------------------ metadata
+# Five bytes, 40 QPSK bits in the metadata symbol:
+#
+#   byte 0   aspect (3) | encode filter (2) | tail slice (3)
+#   byte 1-2 source index + 1 (zero is reserved: an erased field is invalid)
+#   byte 3-4 CRC-16 of bytes 0-2, XOR a mask chosen by the tail slice
+#
+# The tail slice (counter mod 7) names which 96 tail coefficients this packet
+# carries, and also rotates what the CRC field carries: slices 0-4 a plain
+# CRC, slice 5 the CRC XOR the loop phase p, slice 6 the CRC XOR the loop
+# field (loop length N, top bit set for a one-way loop).  A receiver recovers
+# p and N as (computed CRC) XOR (received field) and, once each has repeated,
+# checks every packet at full CRC strength again.  See loop_index().
+TAIL_SLICE_P, TAIL_SLICE_N = 5, 6
+LOOP_ONE_WAY = 0x8000           # loop field flag: 0,1..N-1,0,1.. (no ping-pong)
+LOOP_NO_CLOCK = 0xFFFF          # p value: the index does not follow the clock
 
-    The public/source-facing value remains zero-based, matching the bake and
-    display APIs. Wire zero is reserved so an erased field cannot masquerade
-    as the first source frame.
+
+def _tail_slice_mask(tail_slice, loop):
+    if loop is None:
+        return 0
+    if tail_slice == TAIL_SLICE_P:
+        return loop.phase_field
+    if tail_slice == TAIL_SLICE_N:
+        return loop.frames_field
+    return 0
+
+
+def metadata_word(aspect_code, encoding_type=0, tail_slice=0, source_index=0,
+                  loop=None):
+    """Pack picture identity, tail slice and one-based source index.
+
+    The public/source-facing index remains zero-based, matching the bake and
+    display APIs.  ``loop`` (a LoopInfo, or None for no loop information)
+    supplies the p/N masks for tail slices 5 and 6.
     """
     if not 0 <= int(source_index) < 0xffff:
         raise ValueError('source_index must fit a zero-based 16-bit field')
+    if not 0 <= int(tail_slice) < TAIL_PHASES:
+        raise ValueError('tail_slice must be 0..6')
     wire_index = int(source_index) + 1
     payload = bytes([((int(aspect_code) & 7) << 5) |
                      ((int(encoding_type) & 3) << 3) |
-                     ((int(revision) & 3) << 1) | 1,
+                     (int(tail_slice) & 7),
                      (wire_index >> 8) & 0xff,
                      wire_index & 0xff])
-    return payload + crc16(payload).to_bytes(2, 'big')
+    field = crc16(payload) ^ _tail_slice_mask(int(tail_slice), loop)
+    return payload + field.to_bytes(2, 'big')
 
 
-def metadata_symbols(aspect_code, encoding_type=0, revision=0, source_index=0):
+def metadata_symbols(aspect_code, encoding_type=0, tail_slice=0, source_index=0,
+                     loop=None):
     bits = np.unpackbits(np.frombuffer(
-        metadata_word(aspect_code, encoding_type, revision, source_index), np.uint8))
+        metadata_word(aspect_code, encoding_type, tail_slice, source_index, loop),
+        np.uint8))
     return ((bits[0::2].astype(float)*2-1) +
             1j*(bits[1::2].astype(float)*2-1))/np.sqrt(2)
 
 
+@dataclass(frozen=True)
+class Metadata:
+    aspect_code: int
+    encoding_type: int
+    tail_slice: int
+    source_index: int
+    mask: int                   # computed CRC XOR received field
+
+
 def parse_metadata_word(raw):
-    """Validate and unpack the five-byte live metadata word."""
+    """Unpack the five-byte metadata word.
+
+    Returns a Metadata whose ``mask`` is the computed CRC XOR the received
+    field, or None for a structurally impossible word (wrong length, index
+    zero, tail slice 7).  The mask must be 0 on slices 0-4; on slices 5/6 it
+    is p or N, which LoopLock checks.
+    """
     raw = bytes(raw)
-    if len(raw) != 5 or crc16(raw[:3]) != int.from_bytes(raw[3:5], 'big'):
+    if len(raw) != 5:
         return None
     wire_index = int.from_bytes(raw[1:3], 'big')
-    if wire_index == 0:
+    tail_slice = raw[0] & 7
+    if wire_index == 0 or tail_slice >= TAIL_PHASES:
         return None
-    return ((raw[0] >> 5) & 7, (raw[0] >> 3) & 3, (raw[0] >> 1) & 3,
-            wire_index - 1)
+    mask = crc16(raw[:3]) ^ int.from_bytes(raw[3:5], 'big')
+    return Metadata((raw[0] >> 5) & 7, (raw[0] >> 3) & 3, tail_slice,
+                    wire_index - 1, mask)
+
+
+# ------------------------------------------------------------------ loop clock
+# The installation's image index is a pure function of wall time (see
+# index_calculator.calculate_free_clock_index): ticks since an epoch at
+# LOOP_IPS, folded ping-pong over N images.  Only the epoch modulo the loop
+# matters, so it collapses to one small constant, the loop phase p:
+#
+#     ticks = unix_ns * 30 // 1e9            (any correct clock, no epoch)
+#     index = fold((ticks - p) mod period)   period = 2N ping-pong, N one-way
+#
+# For an epoch on a whole second this is exactly the application's formula.
+# The wire carries N and p (tail slices 6 and 5), so a receiver that shares
+# nothing with the sender but a correct clock knows where the loop is and how
+# late the picture on screen is.
+LOOP_IPS = 30
+
+
+@dataclass(frozen=True)
+class LoopInfo:
+    frames: int                 # N, 1..32767 (0: no loop information)
+    phase: int = LOOP_NO_CLOCK  # p, 0..period-1, or LOOP_NO_CLOCK
+    pingpong: bool = True
+
+    @classmethod
+    def from_epoch(cls, frames, epoch_ns, pingpong=True):
+        frames = int(frames)
+        return cls(frames, loop_ticks(epoch_ns) % loop_period(frames, pingpong),
+                   bool(pingpong))
+
+    @classmethod
+    def from_fields(cls, frames_field, phase_field):
+        frames = int(frames_field) & ~LOOP_ONE_WAY
+        return cls(frames, int(phase_field), not frames_field & LOOP_ONE_WAY)
+
+    @property
+    def frames_field(self):
+        if not 0 <= self.frames < LOOP_ONE_WAY:
+            raise ValueError('loop length must fit 15 bits')
+        return self.frames | (0 if self.pingpong else LOOP_ONE_WAY)
+
+    @property
+    def phase_field(self):
+        return int(self.phase) & 0xFFFF
+
+    @property
+    def clocked(self):
+        return (self.frames > 0 and self.phase != LOOP_NO_CLOCK and
+                self.phase < loop_period(self.frames, self.pingpong))
+
+
+def loop_ticks(time_ns):
+    return int(time_ns)*LOOP_IPS//1_000_000_000
+
+
+def loop_period(frames, pingpong=True):
+    return 2*frames if pingpong and frames > 1 else max(int(frames), 1)
+
+
+def loop_index(ticks, loop):
+    """The index the loop shows at ``ticks`` (index_calculator's fold)."""
+    period = loop_period(loop.frames, loop.pingpong)
+    raw = (int(ticks) - loop.phase) % period
+    if loop.pingpong and loop.frames > 1 and raw >= loop.frames:
+        return period - 1 - raw
+    return raw
+
+
+def loop_lag_ticks(index, ticks, loop, expected=0):
+    """How many loop ticks the picture showing ``index`` is behind the live
+    loop at ``ticks`` (negative: ahead).
+
+    A ping-pong index occurs twice per period, and near a turn the two
+    occurrences are close together, so a single reading can be ambiguous.
+    The occurrence whose lag is nearest ``expected`` is taken: a receiver
+    passes its recent lag, and since lag changes slowly this follows the
+    true branch through the turns (and recovers from a wrong first guess as
+    soon as the loop moves away from a turn)."""
+    period = loop_period(loop.frames, loop.pingpong)
+    live = (int(ticks) - loop.phase) % period
+    raws = [int(index)]
+    if loop.pingpong and loop.frames > 1:
+        raws.append(period - 1 - int(index))
+    lags = [(live - raw - expected + period//2) % period - period//2 + expected
+            for raw in raws]
+    return min(lags, key=lambda lag: abs(lag - expected))
+
+
+class LoopLock:
+    """Learns p and N from tail slices 5 and 6 of the rotating CRC field.
+
+    Before a value is known its slice cannot be checked, so a value is only
+    adopted after it arrived twice in a row (damage gives random values).
+    Once known, those slices are checked like any other; a different value
+    repeated twice replaces it (a new sender run).
+    """
+    CONFIRM = 2
+
+    def __init__(self):
+        self.values = {TAIL_SLICE_P: None, TAIL_SLICE_N: None}
+        self._candidate = {TAIL_SLICE_P: (None, 0), TAIL_SLICE_N: (None, 0)}
+
+    def check(self, meta):
+        """True: CRC verified.  False: damaged.  None: cannot tell yet."""
+        if meta.tail_slice not in self.values:
+            return meta.mask == 0
+        known = self.values[meta.tail_slice]
+        value, count = self._candidate[meta.tail_slice]
+        count = count + 1 if meta.mask == value else 1
+        self._candidate[meta.tail_slice] = (meta.mask, count)
+        if known is not None and meta.mask == known:
+            return True
+        if count >= self.CONFIRM:
+            self.values[meta.tail_slice] = meta.mask
+            return True
+        return False if known is not None else None
+
+    @property
+    def loop(self):
+        p, n = self.values[TAIL_SLICE_P], self.values[TAIL_SLICE_N]
+        if n is None:
+            return None
+        return LoopInfo.from_fields(n, LOOP_NO_CLOCK if p is None else p)
+
+
+class TailStore:
+    """Receiver memory of recently received coefficients.
+
+    Each tail slice (96 of the 656 tail coefficients) arrives once per seven
+    packets.  A value is reused only until its slice comes round again
+    (max_age packets), so detail from a much older picture never lingers;
+    older values fall back to the model mean.  Head and body arrive in every
+    packet and are simply overwritten.
+    """
+
+    def __init__(self, max_age=None, enabled=True):
+        self.max_age = TAIL_PHASES - 1 if max_age is None else int(max_age)
+        self.enabled = enabled
+        self._encoding = None
+        self._values = self._age = None
+
+    def prior(self, model):
+        if (not self.enabled or self._values is None or
+                self._encoding != model.encoding_type):
+            return model.mu.copy()
+        return np.where(self._age <= self.max_age, self._values, model.mu)
+
+    def update(self, model, coeffs, tail_slice):
+        if self._values is None or self._encoding != model.encoding_type:
+            self._encoding = model.encoding_type
+            self._values = model.mu.astype(float).copy()
+            self._age = np.full(len(model.mu), np.iinfo(np.int64).max//2)
+        idx = model.rank_tables[int(tail_slice) % TAIL_PHASES]
+        got = idx[idx >= 0]
+        self._age += 1
+        self._values[got] = np.asarray(coeffs, float)[got]
+        self._age[got] = 0
+
+
+PROVISIONAL_INDEX_WINDOW = 64    # index steps a packet may move (about 26 at 1x)
+
+
+class PulseState:
+    """Everything a live receiver carries from one decode call to the next."""
+
+    def __init__(self, tail_memory=True):
+        self.tail = TailStore(enabled=tail_memory)
+        self.lock = LoopLock()
+        self.last_verified = None
+
+    def accept(self, meta):
+        """True if the metadata can be used: CRC-verified, or -- before p/N
+        are learned -- consistent with the last verified packet (same encode
+        filter and aspect, index within a few steps).  A random word passes
+        that about 1 time in 16,000, close to the CRC's own 1 in 65,536."""
+        if meta is None:
+            return False, False
+        verified = self.lock.check(meta)
+        if verified:
+            self.last_verified = meta
+            return True, False
+        last = self.last_verified
+        provisional = (verified is None and last is not None and
+                       meta.encoding_type == last.encoding_type and
+                       meta.aspect_code == last.aspect_code and
+                       abs(meta.source_index - last.source_index) <=
+                       PROVISIONAL_INDEX_WINDOW)
+        return provisional, provisional
 
 
 def aspect_wire_code(size):
@@ -339,7 +577,6 @@ class Model:
     head: np.ndarray
     rank_tables: tuple
     encoding_type: int = 0
-    mono_sum: bool = False
     # Per tail phase: the per-cell (M, S) prior power of every data block.
     # A pure function of gain, lam and rank_tables, precomputed so decode does
     # not rebuild it frame by frame (see block_priors()).
@@ -383,7 +620,7 @@ def _planes():
     return plane
 
 
-def _assemble(tables, phase, target_rms, encode_filter, mono_sum):
+def _assemble(tables, phase, target_rms, encode_filter):
     """Model from (mu, lam, order, gain, unit_rms) tables and a phase table."""
     coder = SourceCoder(V7_SHAPES, grids=V7_GRIDS)
     order = np.asarray(tables['order'])
@@ -400,7 +637,7 @@ def _assemble(tables, phase, target_rms, encode_filter, mono_sum):
         array.setflags(write=False)
     return Model(coder, np.asarray(tables['mu']), lam, order, gain, phase,
                  target_rms/float(tables['unit_rms']), _planes(), head,
-                 rank_tables, ENCODING_FILTER_CODES[encode_filter], mono_sum,
+                 rank_tables, ENCODING_FILTER_CODES[encode_filter],
                  priors, mu32, lam32, gain32, phase32, priors32)
 
 
@@ -457,7 +694,7 @@ def derive_tables(source, encode_filter='lanczos', phase=None):
     # drawn from the variance table -- a property of the profile, never of the
     # frame being sent.  Stored as the RMS of a unit-scale probe frame.
     probe_model = _assemble(tables, phase_table() if phase is None else phase,
-                            1.0, encode_filter, False)
+                            1.0, encode_filter)
     synth = np.random.default_rng(LEVEL_SEED).standard_normal(len(lam))*np.sqrt(lam) + mu
     probe = encode_frame_coeffs(probe_model, synth, 1)
     tables['unit_rms'] = float(np.sqrt(np.mean(probe**2)))
@@ -476,35 +713,33 @@ def _frozen_tables():
         return {key: data[key].copy() for key in data.files}
 
 
-def load_model(target_rms, encode_filter='lanczos', mono_sum=False):
+def load_model(target_rms, encode_filter='lanczos'):
     """The canonical V7 model from the frozen, hash-checked tables."""
     if encode_filter not in ENCODING_FILTER_CODES:
         raise ValueError(f'unknown encode filter {encode_filter!r}')
     t = _frozen_tables()
     tables = {k: t[f'{encode_filter}/{k}'] for k in ('mu', 'lam', 'order', 'gain', 'unit_rms')}
-    return _assemble(tables, t['phase'], target_rms, encode_filter, mono_sum)
+    return _assemble(tables, t['phase'], target_rms, encode_filter)
 
 
 def _is_reference(fixture):
     return fixture is None or Path(fixture).resolve() == REFERENCE_FIXTURE.resolve()
 
 
-def build_model(fixture, target_rms, encode_filter='lanczos', mono_sum=False):
+def build_model(fixture, target_rms, encode_filter='lanczos'):
     """Canonical frozen model for the reference fixture (or None); otherwise a
     custom profile derived from ``fixture``, which the receiver must match."""
     if _is_reference(fixture):
-        return load_model(target_rms, encode_filter, mono_sum)
+        return load_model(target_rms, encode_filter)
     with Image.open(fixture) as source:
-        return build_model_from_image(source, target_rms, encode_filter,
-                                       mono_sum)
+        return build_model_from_image(source, target_rms, encode_filter)
 
 
-def build_model_from_image(source, target_rms, encode_filter='lanczos',
-                           mono_sum=False):
+def build_model_from_image(source, target_rms, encode_filter='lanczos'):
     """A custom (non-canonical) V7 model derived from an in-memory image."""
     phase = phase_table()
     return _assemble(derive_tables(source, encode_filter, phase), phase,
-                     target_rms, encode_filter, mono_sum)
+                     target_rms, encode_filter)
 
 
 # ------------------------------------------------------------------ encoder
@@ -581,17 +816,24 @@ def encode_stream(model, values, frames, lead=0.25, tail=0.25,
     return np.concatenate([pad(lead), sig, pad(tail)]).astype(np.float32)
 
 
-def encode_pulse_frame(model, values, counter, aspect_code=0, source_index=None):
-    """One edge-counted pulse-framed V7 body for low-latency live transport."""
+def encode_pulse_frame(model, values, counter, aspect_code=0, source_index=None,
+                       loop=None):
+    """One edge-counted pulse-framed V7 body for low-latency live transport.
+
+    ``counter`` is the packet count: counter mod 7 picks the tail slice, which
+    the metadata names so the receiver places the tail correctly.  ``loop``
+    (LoopInfo) is carried in the rotating CRC field for receivers that want
+    the loop length and the live lag; None sends no loop information.
+    """
     body = encode_frame(model, values, counter)
     out = np.zeros((PULSE_FRAME, 2), np.float32)
     out[PULSE.SYNC_LEN:PULSE.SYNC_LEN+FRAME] = body
     out[16:16+len(PULSE.PREAMBLE), :] = PULSE.PREAMBLE[:, None]
     meta = np.zeros((N//2+1, 2), complex)
-    options = METADATA_OPTION_MONO_SUM if model.mono_sum else 0
     if source_index is None:
         source_index = counter - 1
-    vals = metadata_symbols(aspect_code, model.encoding_type, options, source_index)
+    vals = metadata_symbols(aspect_code, model.encoding_type,
+                            counter % TAIL_PHASES, source_index, loop)
     meta[META_PILOTS, 0] = 1
     meta[META_DATA_BINS[:len(vals)], 0] = vals
     mx = (meta[:, 0])/np.sqrt(2)*model.phase[-1]
@@ -607,7 +849,7 @@ def encode_pulse_frame(model, values, counter, aspect_code=0, source_index=None)
 
 
 def encode_pulse_stream(model, values, start_counter=1, aspect_codes=None,
-                        source_indices=None):
+                        source_indices=None, loop=None):
     values = list(values) if np.asarray(values).ndim != 1 else [values]
     codes = aspect_codes or [0]*len(values)
     indexes = (list(source_indices) if source_indices is not None else
@@ -615,7 +857,7 @@ def encode_pulse_stream(model, values, start_counter=1, aspect_codes=None,
     if len(codes) != len(values) or len(indexes) != len(values):
         raise ValueError('aspect_codes and source_indices must match values')
     return np.concatenate([
-        encode_pulse_frame(model, value, start_counter+i, code, source_index)
+        encode_pulse_frame(model, value, start_counter+i, code, source_index, loop)
         for i, (value, code, source_index) in
         enumerate(zip(values, codes, indexes))])
 
@@ -1428,7 +1670,7 @@ def leg_polarity(samples, previous=1, threshold=POLARITY_THRESHOLD):
 
 def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
                         input_gain=1.0, models=None, model_factory=None,
-                        force_float32=False):
+                        force_float32=False, state=None):
     """Decode V7 bodies located by the existing pulse-counted acquisition.
 
     This is the low-latency live path: each accepted pulse word supplies a
@@ -1438,6 +1680,10 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
 
     ``input_gain`` is a scalar or one gain per channel; a negative right gain
     applies a polarity correction from leg_polarity().
+
+    ``state`` (PulseState) carries the tail store and the learned loop
+    constants between calls; a live receiver passes the same one every time.
+    Without it each call starts fresh (fine for a whole recording).
     """
     # Live capture is float32 and _sample_at returns float32.  Promoting the
     # complete rolling history to float64 here only doubles allocation and
@@ -1450,9 +1696,11 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
     if gain.ndim and samples.shape[1] != len(gain):
         gain = gain[:samples.shape[1]]          # per-channel gain on mono input
     samples = samples*gain
+    if state is None:
+        state = PulseState()
     results, info = _decode_pulse_samples(model, samples, diagnostics,
                                           latest_only, models, model_factory,
-                                          force_float32)
+                                          force_float32, state)
     if results or samples.shape[1] != 2:
         return results, info
     # One leg polarity-inverted (miswired deck or cable, reversed head lead):
@@ -1462,7 +1710,7 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
     # this; silence costs one more (cheap, empty) edge scan.
     flipped, flipped_info = _decode_pulse_samples(
         model, samples*np.float32([1, -1]), diagnostics, latest_only, models,
-        model_factory, force_float32)
+        model_factory, force_float32, state)
     if not flipped:
         return results, info
     for result in flipped:
@@ -1500,11 +1748,10 @@ def pulse_frame_starts(samples):
 
 
 def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
-                           model_factory, force_float32=False):
+                           model_factory, force_float32, state):
     cursor = 0
     counter = 1
     results = []
-    tail = (model.mu32.copy() if force_float32 else model.mu.copy())
     measured = None
     pending_aspect = 0
     if latest_only:
@@ -1567,7 +1814,7 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
         if indexes[-1] >= len(samples)-1:
             break
         if confidence < .45:
-            results.append(Result(counter, 'lost', tail.copy(), {
+            results.append(Result(counter, 'lost', state.tail.prior(model), {
                 'pulse_confidence': float(confidence), 'held': True}))
             pending_aspect = aspect_code
             frame_length = PULSE_FRAME
@@ -1581,19 +1828,20 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
         # are self-referencing, so the bootstrap model's absolute scale cancels
         # out; the protected encoding ID can therefore select the source model.
         meta_start = frame_start + (PULSE.SYNC_LEN+FRAME)*scale
-        decoded_metadata = decode_metadata(model, samples, meta_start, scale, None,
-                                           force_float32)
-        metadata_valid = decoded_metadata is not None
+        meta = decode_metadata(model, samples, meta_start, scale, None,
+                               force_float32)
+        # Slices 0-4 carry a plain CRC; 5 and 6 carry it XOR p / N, which
+        # the lock learns and then checks; until then they are accepted only
+        # provisionally (see PulseState.accept).
+        metadata_valid, provisional = state.accept(meta)
         encoding_type = model.encoding_type
-        revision = 0
         source_index = None
+        tail_slice = None
         if metadata_valid:
-            aspect_code, encoding_type, revision, source_index = decoded_metadata
-            if (revision not in (0, METADATA_OPTION_MONO_SUM) or
-                    encoding_type >= len(ENCODING_FILTERS)):
-                metadata_valid = False
-                encoding_type = model.encoding_type
-                revision = 0
+            aspect_code = meta.aspect_code
+            encoding_type = meta.encoding_type
+            source_index = meta.source_index
+            tail_slice = meta.tail_slice
         selected_model = model
         if metadata_valid:
             selected_model = (models or {}).get(encoding_type)
@@ -1602,23 +1850,28 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
             if selected_model is None:
                 selected_model = model
         body = _sample_at(samples, indexes, taps=4).astype(np.float32)
-        if revision == METADATA_OPTION_MONO_SUM:
-            body = np.repeat(body.mean(axis=1, keepdims=True), 2, axis=1)
-        elif body.shape[1] == 1:
+        if body.shape[1] == 1:
             # The demodulator is M/S two-channel internally.  A mono capture
             # is the shared M observation, so duplicate it without inventing S.
             body = np.repeat(body, 2, axis=1)
         nominal = np.array([0., FRAME])
         offset = np.array([64., 64.])
+        # The rank table follows the tail slice the packet names; without
+        # verified metadata the slice is unknown and the frame is not trusted
+        # (status lost), so the local counter is only a placeholder.
+        ranks_counter = counter if tail_slice is None else tail_slice
         try:
-            result = decode_frame(selected_model, None, (counter, nominal, offset),
-                                  counter, tail, cancel=False, direct_body=body,
+            result = decode_frame(selected_model, None,
+                                  (ranks_counter, nominal, offset),
+                                  ranks_counter, state.tail.prior(selected_model),
+                                  cancel=False, direct_body=body,
                                   diagnostics=diagnostics,
                                   force_float32=force_float32)
         except (FloatingPointError, np.linalg.LinAlgError, ValueError,
                 IndexError):
             result = None
         if result is not None:
+            result.counter = counter
             if result.status != 'lost':
                 result.status = 'received' if confidence >= .45 else 'degraded'
             result.diag.pop('_H', None)
@@ -1643,16 +1896,17 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
             result.diag['encoding_type'] = int(encoding_type)
             result.diag['encoding_name'] = ENCODING_FILTERS[int(encoding_type)] \
                 if 0 <= int(encoding_type) < len(ENCODING_FILTERS) else 'unknown'
-            result.diag['revision'] = int(revision)
-            result.diag['mono_sum'] = revision == METADATA_OPTION_MONO_SUM
+            result.diag['tail_slice'] = tail_slice
+            result.diag['metadata_provisional'] = provisional
+            result.diag['loop'] = state.lock.loop
             result.diag['pulse_scale'] = float(scale)
             result.diag['frame_scale'] = float(frame_scale)
             result.diag['playback_speed'] = float(1/max(scale, 1e-9))
             result.diag['timing_delta_ppm'] = float(
                 (frame_scale/scale-1)*1e6)
             results.append(result)
-            if result.status != 'lost':
-                tail = result.coeffs.copy()
+            if result.status != 'lost' and tail_slice is not None:
+                state.tail.update(selected_model, result.coeffs, tail_slice)
             if latest_only:
                 break
         pending_aspect = aspect_code

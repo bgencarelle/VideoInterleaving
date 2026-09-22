@@ -112,10 +112,9 @@ def _capture(args):
                                  args.capture_filter)
 
 
-def _model(fixture, encode_filter='nearest', mono_sum=False):
+def _model(fixture, encode_filter='nearest'):
     model = P.build_model(fixture, .1521 / np.sqrt(
-        1 + 10**(P.CLOCK_REL_DB/10)), encode_filter=encode_filter,
-        mono_sum=mono_sum)
+        1 + 10**(P.CLOCK_REL_DB/10)), encode_filter=encode_filter)
     return model
 
 
@@ -141,7 +140,7 @@ def run_send(args):
     import sounddevice as sd
     from tools.v7_capture import Throttled
 
-    model = _model(args.fixture, args.encode_filter, args.mono_sum)
+    model = _model(args.fixture, args.encode_filter)
     raw_grab = _capture(args)
     capture_hz = args.capture_fps or (CAMERA_CAPTURE_FPS
                                       if args.source == 'camera' else
@@ -280,6 +279,9 @@ def run_receive(args):
     stop = threading.Event()
     input_gap = threading.Event()
     live_input = LiveInput(args.decode_history, args.decode_batch, rate=capture_rate)
+    # Tail store and learned loop constants (N, p) persist across decodes.
+    pulse_state = P.PulseState(tail_memory=not args.no_tail_memory)
+    lag_ticks = deque(maxlen=32)        # recent picture lags, loop ticks
     decode_times = deque(maxlen=64)     # wall time of every decode cycle
     shown_times = deque(maxlen=64)      # wall time of every published picture
     latest = None
@@ -294,9 +296,11 @@ def run_receive(args):
              'status': 'acquiring', 'counter': None, 'decode_ms': None,
              'quality': '--',
              'timing_delta': None, 'playback_speed': None, 'source_index': None,
-             # Largest source index of the running sequence; not on the wire
-             # yet, shown as '--' until it is.
-             'max_index': None,
+             # Largest source index (N-1) and the picture's lag behind the live
+             # loop, both from the loop constants in the rotating CRC field;
+             # '--' until learned (about a second) or if the sender has none.
+             'max_index': None, 'lag_ms': None, 'loop': None,
+             'shown_index': None,
              'pulse': None, 'aspect': 0, 'aspect_candidate': 0,
              'aspect_streak': 0, 'input_samples': 0, 'started': time.monotonic(),
              'auto_gain': 1.0, 'polarity': 1,
@@ -323,6 +327,27 @@ def run_receive(args):
             # stale audio would make the V7 clock appear to run backward.
             meter['dropped'] += 1
             input_gap.set()
+
+    def live_loop_position():
+        """(ideal index now, frames the picture on screen is behind it).
+
+        The ideal index is where the loop is right now on this machine's
+        clock, from the received N and p; the difference grows between
+        pictures and drops when a new one arrives.  (None, None) until the
+        loop constants are known or if the sender's index is not clocked.
+        """
+        loop = meter['loop']
+        if loop is None or not loop.clocked:
+            return None, None
+        ticks = P.loop_ticks(time.time_ns())
+        ideal = P.loop_index(ticks, loop)
+        if meter['shown_index'] is None:
+            return ideal, None
+        recent = list(lag_ticks)
+        diff = P.loop_lag_ticks(meter['shown_index'], ticks, loop,
+                                expected=round(float(np.median(recent)))
+                                if recent else 0)
+        return ideal, diff
 
     def decode_available():
         nonlocal latest, auto_gain, previous_values
@@ -371,7 +396,7 @@ def run_receive(args):
                 model, audio, diagnostics=diagnostics, latest_only=True,
                 input_gain=auto_gain, models=models,
                 model_factory=model_factory,
-                force_float32=args.force_float32)
+                force_float32=args.force_float32, state=pulse_state)
         except Exception as exc:
             # Drop the damaged window and let the next retained clock history
             # reacquire.  A single bad frame must not stop the live receiver.
@@ -400,8 +425,10 @@ def run_receive(args):
             meter['quality'] = (
                 f'head {result.diag.get("head_confidence", 0):.2f}/'
                 f'{result.diag.get("head_coverage", 0):.2f}')
-            if result.diag.get('mono_sum'):
-                meter['mode'] = 'mono-sum'
+            loop = result.diag.get('loop')
+            if loop is not None and loop.frames > 0:
+                meter['max_index'] = loop.frames - 1
+                meter['loop'] = loop
             candidate = result.diag.get('aspect_code', meter['aspect'])
             if (result.status in ('received', 'verified') and
                     (result.diag.get('pulse_confidence') or 0) >= .45):
@@ -431,6 +458,22 @@ def run_receive(args):
                 display_frames.publish(latest, model.coder.grids,
                                        meter['aspect'])
                 shown_times.append(time.monotonic())
+                meter['shown_index'] = result.diag.get('source_index')
+                # Lag: where the live loop is now (this machine's clock and
+                # the received N, p) against the index just put on screen.
+                if (loop is not None and loop.clocked and
+                        result.diag.get('source_index') is not None):
+                    # The recent median resolves ping-pong turns (see
+                    # loop_lag_ticks); the mean of recent readings gives
+                    # sub-tick resolution, since pictures fall at varying
+                    # points within a 33 ms tick.
+                    lag_ticks.append(P.loop_lag_ticks(
+                        result.diag['source_index'],
+                        P.loop_ticks(time.time_ns()), loop,
+                        expected=round(float(np.median(lag_ticks)))
+                        if lag_ticks else 0))
+                    meter['lag_ms'] = (float(np.mean(lag_ticks)) *
+                                       1000/P.LOOP_IPS)
             if result.status in ('received', 'verified'):
                 meter['verified'] += 1
             if result.status == 'lost' and not displayable:
@@ -440,7 +483,10 @@ def run_receive(args):
                       'status': meter['status'], 'displayable': displayable,
                       'pulse_frames': info.get('pulse_frames'),
                        'encoding': result.diag.get('encoding_name'),
-                       'mono_sum': result.diag.get('mono_sum'),
+                       'tail_slice': result.diag.get('tail_slice'),
+                       'max_index': meter['max_index'],
+                       'lag_ms': meter['lag_ms'],
+                       'ideal_index': live_loop_position()[0],
                        'input_gain': round(meter['auto_gain'], 3),
                        'right_polarity': meter['polarity'],
                        'incoming_fps': round(meter['input_fps'], 3),
@@ -566,9 +612,19 @@ def run_receive(args):
             if info_visible:
                 peak = 20*np.log10(np.maximum(meter['peak'], 1e-9))
                 rms = 20*np.log10(np.maximum(meter['rms'], 1e-9))
+                shown = meter['shown_index']
                 index_text = (
-                    f'{"--" if meter["source_index"] is None else meter["source_index"]}'
+                    f'{"--" if shown is None else shown}'
                     f' / {"--" if meter["max_index"] is None else meter["max_index"]}')
+                ideal, diff = live_loop_position()
+                if ideal is None:
+                    sync_text = 'ideal --  diff --'
+                else:
+                    diff_text = ('--' if diff is None else
+                                 f'{diff:+d} ({diff*1000/P.LOOP_IPS:+.0f} ms)')
+                    sync_text = f'ideal {ideal}  diff {diff_text}'
+                lag_text = ('--' if meter['lag_ms'] is None
+                            else f'{meter["lag_ms"]:+.0f} ms')
                 now = time.monotonic()
                 # Rates are recomputed at display time so they fall to 0 when
                 # input or decoding stops instead of freezing.
@@ -596,7 +652,8 @@ def run_receive(args):
                     int(meter['aspect_candidate']) & 7]
                 status_label.configure(text=(
                   f'status {meter["status"]}  mode {meter["mode"]}  '
-                  f'frame {meter["counter"]}  index {index_text} '
+                  f'frame {meter["counter"]}  index {index_text}  {sync_text}  '
+                  f'lag at display {lag_text} '
                     f'aspect {aspect_text} '
                     f'(candidate {candidate_aspect} '
                     f'x{meter["aspect_streak"]})  pulse {pulse_text}\n'
@@ -713,6 +770,8 @@ def parser():
                            'plus one frame and a small guard (default: 1)')
     recv.add_argument('--refine', action='store_true',
                       help='enable slower clock-template refinement')
+    recv.add_argument('--no-tail-memory', action='store_true',
+                      help='do not reuse tail coefficients from earlier packets')
     recv.add_argument('--force-float32', action='store_true',
                       help='use the experimental float32/complex64 decode path')
     return ap

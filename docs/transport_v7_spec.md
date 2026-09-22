@@ -366,7 +366,7 @@ BT.601 via Pillow).
 |---|---|---|
 | Head | 0–207 | mono blocks (§8.2) |
 | Body | 208–2223 | stereo blocks, every frame |
-| Tail | 2224–2879 | 96 per frame on a 7-phase rotation (phase = counter mod 7); full refresh every 7 frames (0.50 s) |
+| Tail | 2224–2879 | 96 per frame on a 7-phase rotation (phase = counter mod 7, sent as the metadata tail slice, §19.2); full refresh every 7 frames (0.50 s) |
 
 ---
 
@@ -776,28 +776,60 @@ measured frame duration, so smooth wow/flutter is corrected across the payload.
 
 ### 19.2 CRC-protected live metadata
 
-The live metadata word is three payload bytes followed by CRC-16/CCITT-FALSE.
-The source index is zero-based in the application API and one-based on the
-wire; wire zero is therefore invalid rather than an accidental frame zero:
+The live metadata word is three payload bytes followed by a 16-bit field
+holding CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF, xorout 0) of those bytes,
+XOR a mask chosen by the tail slice:
 
 ```text
 payload byte 0 bit 7..5: aspect code
 payload byte 0 bit 4..3: source encoding: 00=nearest, 01=box, 10=lanczos, 11=bicubic
-payload byte 0 bit 2..1: revision/extension; bit 1 advertises mono-sum
-payload byte 0 bit 0:    fixed live marker
-payload bytes 1..2:      one-based source-frame index, big-endian
-CRC:              polynomial 0x1021, init 0xFFFF, xorout 0
+payload byte 0 bit 2..0: tail slice = packet counter mod 7 (7 is invalid)
+payload bytes 1..2:      source index + 1, big-endian (wire zero is invalid)
+field bytes 3..4:        CRC XOR mask
+    tail slice 0-4: mask 0 (plain CRC)
+    tail slice 5:   mask p (loop phase)
+    tail slice 6:   mask N | 0x8000 if the loop is one-way (loop length)
 ```
+
+The source index is zero-based in the application API and one-based on the
+wire. The index is carried whole in every packet.
+
+**Tail slice.** It names which 96 of the 656 tail coefficients the packet
+carries (§7.4), so the receiver places them correctly and keeps them in a tail
+store until that slice comes round again (six packets later), after which they
+fall back to the model mean. Measured on the reference face with the store:
+tail error 0.044 -> 0.002 after one rotation, picture RMSE 0.0680 -> 0.0674
+(the model's own limit). `--no-tail-memory` disables the store.
+
+**Loop constants in the CRC field.** The installation's image index is a pure
+function of wall time: ticks = unix_ns x 30 // 1e9, index = ping-pong fold of
+(ticks - p) mod 2N. The epoch only matters modulo the loop, so it collapses to
+the loop phase p (418 for the birth epoch and N = 2221); for an epoch on a whole
+second this is exactly `index_calculator`'s formula. p = 0xFFFF means the index
+does not follow the clock (MIDI clock); N = 0 means no loop information. A
+receiver recovers p and N as (computed CRC) XOR (received field). A value is
+adopted after it repeats in consecutive packets of its slice and replaced by a
+different value that repeats; from then on every packet is checked at full CRC
+strength. Until then slices 5 and 6 are accepted only provisionally -- same
+encode filter and aspect as the last verified packet and index within 64 steps
+-- which a random word passes about once in 16,000. With p and N known, any
+receiver with a correct clock (NTP, or GPS offline) and no other link to the
+sender shows `index i / N-1` and the picture's lag behind the live loop. The
+lag is resolved across ping-pong turns by continuity with the recent lag and
+averaged over recent pictures for sub-tick resolution.
+
+The mono-sum option bit and the fixed live marker of the earlier word are
+gone: the decoder handles mono input by itself, and the CRC and the reserved
+wire index zero already reject damaged or erased words.
 
 The 40 bits are mapped to 20 QPSK cells. Eleven pilots are spread across the
 metadata band and the remaining twenty bins carry data. Both tracks carry the
 mono-safe M signal. The metadata symbol estimates its own complex response
-from those pilots. CRC failure holds the previous metadata. The receiver
+from those pilots. A failed check holds the previous metadata. The receiver
 decodes this self-referenced symbol with a bootstrap model before selecting the
 source encoding model, so sender and receiver no longer need a manually
-matched `--encode-filter`. Unknown revision values or wire index zero are
-rejected and retain the prior metadata. The live UI additionally requires
-three consecutive reliable requests before changing aspect.
+matched `--encode-filter`. The live UI additionally requires three consecutive
+reliable requests before changing aspect.
 
 ### 19.3 Live source preparation
 
@@ -915,8 +947,7 @@ console status output for standalone embedded use. Sender and receiver print one
 hardware/status line at startup; routine per-frame output is disabled by default
 and can be enabled with `--log`.
 The sender's optional `--mono-sum` emits one audio channel containing the
-shared M signal and advertises that choice in metadata; the receiver accepts
-mono input devices automatically. The sender uses an energy-preserving sum
+shared M signal; the receiver accepts mono input devices automatically. The sender uses an energy-preserving sum
 with a safety limiter rather than a simple average, avoiding an unnecessary
 3 dB mono-level loss.
 The receiver's optional `--mono-compatible` presentation mode preserves luma
@@ -934,8 +965,8 @@ test.
 ### Live metadata amendment
 
 The live pulse wire no longer uses guard length as aspect metadata. The extra
-144-sample metadata symbol carries the packed aspect, encoding, and revision
-fields described above, followed by CRC-16/CCITT-FALSE. It is repeated through
+144-sample metadata symbol carries the packed aspect, encoding, tail slice and
+source index described above, followed by the rotating CRC field. It is repeated through
 known even-bin pilots and odd-bin data carriers and decoded only when the CRC
 passes. An invalid metadata word holds the previous metadata. The UI additionally
 requires three consecutive reliable requests before changing its displayed
