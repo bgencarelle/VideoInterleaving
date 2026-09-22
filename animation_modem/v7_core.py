@@ -171,13 +171,20 @@ class SourceCoder:
                 out.append(idctn(full, norm='ortho').ravel())
         return np.concatenate(out)
 
+@lru_cache(maxsize=8)
 def _sinc_weight_table(taps=8, phases=4096):
-    """Quantized windowed-sinc weights for the live packet path."""
+    """Quantized windowed-sinc weights for the live packet path.
+
+    Built once per (taps, phases): rebuilding the 4096-row table on every
+    _sample_at call was about a third of V7 decode time. The cached array is
+    shared, so it is read-only.
+    """
     offsets = np.arange(-taps+1, taps+1, dtype=float)
     fraction = np.arange(phases, dtype=float)[:, None]/phases
     weights = (np.sinc(fraction-offsets[None, :]) *
                np.sinc((fraction-offsets[None, :])/taps))
     weights /= weights.sum(axis=1, keepdims=True)
+    weights.setflags(write=False)
     return weights
 
 def _sample_walk(length, taps):

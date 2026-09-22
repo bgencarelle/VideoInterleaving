@@ -332,6 +332,10 @@ class Model:
     rank_tables: tuple
     encoding_type: int = 0
     mono_sum: bool = False
+    # Per tail phase: the per-cell (M, S) prior power of every data block.
+    # A pure function of gain, lam and rank_tables, precomputed so decode does
+    # not rebuild it frame by frame (see block_priors()).
+    block_prior_tables: tuple = ()
 
 
 # The canonical V7 profile is frozen data, not a runtime computation.  Its
@@ -369,10 +373,23 @@ def _assemble(tables, phase, target_rms, encode_filter, mono_sum):
     order = np.asarray(tables['order'])
     head = np.zeros(len(tables['lam']), bool); head[order[:HEAD]] = True
     rank_tables = tuple(frame_ranks(order, p) for p in range(TAIL_PHASES))
-    return Model(coder, np.asarray(tables['mu']), np.asarray(tables['lam']), order,
-                 np.asarray(tables['gain']), phase,
+    gain, lam = np.asarray(tables['gain']), np.asarray(tables['lam'])
+    priors = tuple(block_priors(gain, lam, idx) for idx in rank_tables)
+    return Model(coder, np.asarray(tables['mu']), lam, order, gain, phase,
                  target_rms/float(tables['unit_rms']), _planes(), head,
-                 rank_tables, ENCODING_FILTER_CODES[encode_filter], mono_sum)
+                 rank_tables, ENCODING_FILTER_CODES[encode_filter], mono_sum,
+                 priors)
+
+
+def block_priors(gain, lam, idx):
+    """Per-cell prior power of each data block's M/S components for one tail
+    phase's rank table: the mean transmitted power g^2*lam of each group."""
+    ranks = np.maximum(idx, 0)
+    tx_var = np.where(idx >= 0, gain[ranks]**2*lam[ranks], 0).mean(axis=1)
+    valid_group = BLOCK_GROUP_INDEX >= 0
+    table = np.where(valid_group, tx_var[np.maximum(BLOCK_GROUP_INDEX, 0)], 0.0)
+    table.setflags(write=False)
+    return table
 
 
 def derive_tables(source, encode_filter='lanczos', phase=None):
@@ -868,35 +885,68 @@ def channel_joint(Z, iters=2):
     return H
 
 
+# fade_and_noise() works on every symbol and channel at once. Pilot counts
+# differ per symbol (4 or 5), so the per-symbol pilot lists are padded to a
+# fixed width with a validity mask.
+_PMAX = max(len(p) for p in PILOT_BY_SYMBOL)
+PILOT_PAD_BINS = np.zeros((F, _PMAX), int)
+PILOT_PAD_VALUES = np.zeros((F, _PMAX, 2), complex)
+PILOT_PAD_VALID = np.zeros((F, _PMAX), bool)
+for _s, (_bins, _vals) in enumerate(zip(PILOT_BY_SYMBOL, PILOT_VALUES_BY_SYMBOL)):
+    PILOT_PAD_BINS[_s, :len(_bins)] = _bins
+    PILOT_PAD_VALUES[_s, :len(_bins)] = _vals
+    PILOT_PAD_VALID[_s, :len(_bins)] = True
+PILOT_PAD_KHZ = PILOT_PAD_BINS*RATE/N/1000
+PILOT_DOF = np.maximum(PILOT_PAD_VALID.sum(axis=1)-3, 1)
+_SYMBOL_INDEX = np.arange(F)[:, None]
+
+
 def fade_and_noise(Z, H):
-    """Per-symbol magnitude/phase refit (§9.4) and pilot-residual noise (§9.5)."""
+    """Per-symbol magnitude/phase refit (§9.4) and pilot-residual noise (§9.5).
+
+    Batched over all symbols and both channels; same rules as the original
+    per-symbol loop (equivalence is covered by modem_tests/test_v7_decode_speed).
+    """
     freq = BINS*RATE/N/1000
-    noise = np.zeros((F, 2))
-    for s in range(F):
-        pil = PILOT_BY_SYMBOL[s]
-        pvals = PILOT_VALUES_BY_SYMBOL[s]
-        for ch in range(2):
-            pred = np.einsum('bi,bi->b', H[s, pil, ch], pvals)
-            obs = Z[s, pil, ch]
-            mag = np.abs(pred)
-            ok = mag > 0.3*mag.max()
-            if ok.sum() < 2:
-                continue
-            rho = obs[ok]/pred[ok]; fb = np.asarray(pil)[ok]*RATE/N/1000; w = mag[ok]
-            if ok.sum() >= 3 and np.ptp(fb) > 3:
-                A = np.stack([np.ones(ok.sum()), -fb], 1)*w[:, None]
-                normal = A.T @ A + 1e-10*np.eye(2)
-                u, v = np.linalg.solve(
-                    normal, A.T @ (np.log(np.abs(rho)+1e-12)*w))
-                v = max(v, 0.0)
-            else:
-                u, v = float(np.average(np.log(np.abs(rho)+1e-12), weights=w)), 0.0
-            a = float(np.angle(np.sum(rho*w))); bslope = 0.0
-            corr = np.exp(u - v*freq + 1j*(a + bslope*freq))
-            H[s, BINS, ch, :] *= corr[:, None]
-            pred2 = np.einsum('bi,bi->b', H[s, pil, ch], pvals)
-            dof = max(len(pil)-3, 1)
-            noise[s, ch] = np.sum(np.abs(obs-pred2)**2)/dof
+    valid = PILOT_PAD_VALID[:, :, None]                                # (F, P, 1)
+    Hp = H[_SYMBOL_INDEX, PILOT_PAD_BINS]                              # (F, P, 2ch, 2)
+    pred = np.einsum('spci,spi->spc', Hp, PILOT_PAD_VALUES)            # (F, P, 2ch)
+    obs = Z[_SYMBOL_INDEX, PILOT_PAD_BINS]                             # (F, P, 2ch)
+    mag = np.where(valid, np.abs(pred), 0.0)
+    ok = valid & (mag > 0.3*mag.max(axis=1, keepdims=True))
+    count = ok.sum(axis=1)                                             # (F, 2ch)
+    rho = np.divide(obs, pred, out=np.ones_like(obs), where=ok)
+    w = np.where(ok, mag, 0.0)
+    logr = np.where(ok, np.log(np.abs(rho)+1e-12), 0.0)
+    fb = np.broadcast_to(PILOT_PAD_KHZ[:, :, None], ok.shape)
+    fmax = np.where(ok, fb, -np.inf).max(axis=1)
+    fmin = np.where(ok, fb, np.inf).min(axis=1)
+    use_ls = (count >= 3) & (fmax - fmin > 3)
+    # Weighted least squares of log|rho| on [1, -f] (rows scaled by w), as a
+    # closed-form 2x2 solve with the loop's 1e-10 ridge.
+    w2 = w*w
+    s00 = w2.sum(axis=1) + 1e-10
+    s01 = -(w2*fb).sum(axis=1)
+    s11 = (w2*fb*fb).sum(axis=1) + 1e-10
+    r0 = (w2*logr).sum(axis=1)
+    r1 = -(w2*fb*logr).sum(axis=1)
+    det = s00*s11 - s01*s01
+    safe = np.where(use_ls, det, 1.0)
+    u_ls = (s11*r0 - s01*r1)/safe
+    v_ls = np.maximum((s00*r1 - s01*r0)/safe, 0.0)
+    wsum = w.sum(axis=1)
+    u_avg = np.divide((w*logr).sum(axis=1), wsum, out=np.zeros_like(wsum), where=wsum > 0)
+    u = np.where(use_ls, u_ls, u_avg)
+    v = np.where(use_ls, v_ls, 0.0)
+    a = np.angle((rho*w).sum(axis=1))
+    apply = count >= 2                                                 # else: no refit
+    corr = np.exp(u[:, None, :] - v[:, None, :]*freq[None, :, None] + 1j*a[:, None, :])
+    corr = np.where(apply[:, None, :], corr, 1.0)                      # (F, bins, 2ch)
+    H[:, BINS] *= corr[..., None]
+    Hp2 = H[_SYMBOL_INDEX, PILOT_PAD_BINS]
+    pred2 = np.einsum('spci,spi->spc', Hp2, PILOT_PAD_VALUES)
+    resid = np.where(valid, np.abs(obs-pred2)**2, 0.0).sum(axis=1)
+    noise = np.where(apply, resid/PILOT_DOF[:, None], 0.0)
     # Smooth over +-1 symbol, without launching one tiny convolution per
     # channel/symbol.  The explicit edge handling matches np.convolve(...,
     # mode='same') with zero outside the frame closely enough for this noise
@@ -954,16 +1004,15 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
     # blocks and both quadratures in one batch: the small solve is cheap, but
     # entering Python once per block/channel was not.
     idx = model.rank_tables[counter % TAIL_PHASES]
-    tx_var = np.array([np.mean(np.where(r >= 0, model.gain[np.maximum(r, 0)]**2 *
-                                        model.lam[np.maximum(r, 0)], 0)) for r in idx])
-    valid_group = BLOCK_GROUP_INDEX >= 0
-    block_priors = np.where(valid_group, tx_var[np.maximum(BLOCK_GROUP_INDEX, 0)], 0.0)
+    priors = model.block_prior_tables
+    block_prior = (priors[counter % TAIL_PHASES] if priors
+                   else block_priors(model.gain, model.lam, idx))
     Hc = H[BLOCK_SYMBOLS, BLOCK_BINS[:, None]]
     Zc = Z[BLOCK_SYMBOLS, BLOCK_BINS[:, None]]
     estimates = np.zeros((len(BLOCKS), 2, 2, 8), complex)
     variances = np.full((len(BLOCKS), 2, 2, 8), np.inf)
     for q in range(2):
-        prior = block_priors[:, :, q]
+        prior = block_prior[:, :, q]
         safe = prior + 1e-12
         S = (Hc*safe[:, None, None, :]) @ Hc.conj().transpose(0, 1, 3, 2)
         S[..., 0, 0] += np.maximum(noise[BLOCK_SYMBOLS, 0],
