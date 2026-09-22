@@ -336,9 +336,10 @@ def configure_runtime():
     parser.add_argument("--modem-prepare-ms", type=float, default=10.0,
                         help="Minimum encoding lead before a send deadline (default 10)")
     parser.add_argument("--modem-speed", "--speed", dest="modem_speed",
-                        type=float, choices=(1.0, 1.5, 2.0),
-                        default=1.0,
-                        help="V7 playback speed: 1, 1.5, or 2x; 1x is tape-safe")
+                        type=float, default=1.0,
+                        help="V7 playback speed (default 1; 1x is tape-safe). "
+                             "Any value up to the output device's limit: "
+                             "rate/28 kHz, i.e. 1.71x at 48 kHz, 3.43x at 96 kHz")
     parser.add_argument("--modem-encode-filter",
                         choices=("nearest", "box", "lanczos", "bicubic"),
                         default="nearest",

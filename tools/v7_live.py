@@ -32,6 +32,7 @@ sys.path.insert(0, str(ROOT))
 
 from animation_modem.imaging import values_image                         # noqa: E402
 from animation_modem import v7 as P                                       # noqa: E402
+from animation_modem.v7_live_input import LiveInput, windowed_rate         # noqa: E402
 image_values = P.image_values
 prepare_image = P.prepare_image
 try:
@@ -242,6 +243,22 @@ def run_send(args):
         print(f'V7 send stopped after {total} frames', flush=True)
 
 
+# Capture at the device's own rate, like the sender's PacketOutput: forcing
+# 48 kHz made PortAudio resample behind our back, and on a 96 kHz device a 2x
+# wire (carriers up to 25.5 kHz) lost its top carriers to that converter.  The
+# decoder needs no fixed rate -- it measures each frame's length from its
+# preamble -- as long as the frame scale stays within PULSE_MIN/MAX_SCALE:
+# capture rate / (48 kHz x speed) in [0.25, 2].  Above 96 kHz the capture is
+# capped at 96 kHz (a benign conversion that keeps the whole band up to 3x),
+# so 1x on a 192 kHz device still lands inside that range.
+MAX_CAPTURE_RATE = 96_000
+
+
+def capture_rate_for(device_info):
+    rate = float(device_info.get('default_samplerate') or P.RATE)
+    return min(rate, MAX_CAPTURE_RATE)
+
+
 def run_receive(args):
     import sounddevice as sd
 
@@ -258,11 +275,13 @@ def run_receive(args):
         return models[encoding_type]
     device_info = sd.query_devices(args.device, 'input')
     input_channels = 1 if device_info['max_input_channels'] < 2 else 2
+    capture_rate = capture_rate_for(device_info)
     blocks = queue.Queue(maxsize=32)
     stop = threading.Event()
     input_gap = threading.Event()
-    samples = []
-    processed_samples = 0
+    live_input = LiveInput(args.decode_history, args.decode_batch, rate=capture_rate)
+    decode_times = deque(maxlen=64)     # wall time of every decode cycle
+    shown_times = deque(maxlen=64)      # wall time of every published picture
     latest = None
     display_frames = FRAME_BUFFER
     rendered = None
@@ -275,11 +294,13 @@ def run_receive(args):
              'status': 'acquiring', 'counter': None, 'decode_ms': None,
              'quality': '--',
              'timing_delta': None, 'playback_speed': None, 'source_index': None,
+             # Largest source index of the running sequence; not on the wire
+             # yet, shown as '--' until it is.
+             'max_index': None,
              'pulse': None, 'aspect': 0, 'aspect_candidate': 0,
              'aspect_streak': 0, 'input_samples': 0, 'started': time.monotonic(),
              'auto_gain': 1.0, 'polarity': 1,
-              'decoded_times': deque(maxlen=8), 'input_fps': 0.,
-             'decoded_fps': 0.,
+             'input_fps': 0., 'decode_fps': 0., 'shown_fps': 0.,
              'mode': 'mono-input' if input_channels == 1 else 'M/S'}
 
     def callback(indata, frames, timing, status):
@@ -291,8 +312,6 @@ def run_receive(args):
         if has_data:
             meter['blocks'] += 1
             meter['input_samples'] += len(values)
-        elapsed = max(time.monotonic()-meter['started'], 1e-6)
-        meter['input_fps'] = meter['input_samples']/(P.PULSE_FRAME*elapsed)
         if status:
             print(f'input: {status}', file=sys.stderr, flush=True)
         if not has_data:
@@ -306,13 +325,12 @@ def run_receive(args):
             input_gap.set()
 
     def decode_available():
-        nonlocal latest, processed_samples, auto_gain, previous_values
+        nonlocal latest, auto_gain, previous_values
         if input_gap.is_set():
             # Never stitch samples across a callback drop.  Keep displaying
             # the last good image while pulse acquisition starts over.
             input_gap.clear()
-            samples.clear()
-            processed_samples = 0
+            live_input.reset()
             if not args.no_log:
                 print({'status': 'input_gap_reacquire',
                        'dropped': meter['dropped']}, flush=True)
@@ -320,68 +338,34 @@ def run_receive(args):
         added = False
         while True:
             try:
-                block = blocks.get_nowait()
-                # The leveler's polarity decision is applied to the stored
-                # input itself (blocks are private copies of the callback
-                # data), so the whole rolling history is corrected audio.
-                if meter['polarity'] < 0 and block.ndim == 2 and block.shape[1] == 2:
-                    block[:, 1] *= -1
-                samples.append(block)
+                # Blocks are private copies of the callback data; LiveInput
+                # applies the leveler's polarity to the stored audio itself.
+                live_input.add(blocks.get_nowait())
                 added = True
             except queue.Empty:
                 break
         if not added:
             return
-        buffered = sum(len(block) for block in samples)
-        if buffered < P.PULSE_FRAME:
-            return
-        if buffered-processed_samples < P.PULSE_FRAME*args.decode_batch:
-            return
-        audio = np.concatenate(samples)
-        # Latest-only decoding needs the current body plus the next header;
-        # rescanning twenty seconds of old audio only burns CPU.  Keep a few
-        # complete frames for reacquisition and let the pulse decoder search
-        # that bounded tail.
-        history = P.PULSE_FRAME*max(4, args.decode_history)
-        if len(audio) > history:
-            dropped = len(audio)-history
-            audio = audio[-history:]
-            samples[:] = [audio]
-            processed_samples = max(0, processed_samples-dropped)
-        # Do not repeatedly run pulse acquisition/demodulation on an idle
-        # input device.  This is deliberately far below normal loopback levels
-        # so quiet but valid recordings still reach measure_pulses().
-        if float(np.max(np.abs(audio))) < 1e-5:
-            processed_samples = len(audio)
-            keep = P.PULSE_FRAME*args.decode_history
-            if len(audio) > keep:
-                samples[:] = [audio[-keep:]]
-                processed_samples = len(samples[0])
-            if args.diagnostics and not args.no_log:
-                print({'status': 'idle_input', 'input_peak': 0.0}, flush=True)
+        # take() judges polarity, scans only new audio for frame headers and
+        # trims to the minimal buffer (two frames at the current speed plus a
+        # guard; see animation_modem/v7_live_input.py).  It returns audio
+        # only when a new header has arrived, i.e. a new frame is complete, so
+        # decode cycles follow the wire, not the capture block size, and an
+        # idle or signal-free input never reaches the demodulator.
+        now = time.monotonic()
+        audio = live_input.take(now)
+        meter['input_fps'] = live_input.incoming_fps(now)
+        meter['polarity'] = live_input.polarity
+        if audio is None:
             return
         peak = float(np.percentile(np.abs(audio[-P.PULSE_FRAME:]), 99.5))
         desired_gain = float(np.clip(.55/max(peak, 1e-6), .5, 32.0))
         auto_gain = (min(desired_gain, auto_gain*1.5)
                      if desired_gain > auto_gain else desired_gain)
         meter['auto_gain'] = auto_gain
-        # Polarity belongs with the leveler: an inverted leg is a gain of -1,
-        # applied to the stored input as blocks arrive (above).  It is judged
-        # on that already-corrected audio, so a strongly negative L/R
-        # correlation (P.leg_polarity) over the newest frame means the
-        # correction is now wrong (a rewire or new tape): toggle it and re-flip
-        # everything not yet judged (all of it at start-up, otherwise the
-        # audio since the last update, at least that newest frame).  History
-        # already judged correct is left alone.  Ambiguous frames (silence, a
-        # dead leg) keep the setting.  The decoder's own inverted-leg retry
-        # remains a fallback.
-        if P.leg_polarity(audio[-P.PULSE_FRAME:], 1) < 0:
-            meter['polarity'] = -meter['polarity']
-            unjudged = min(processed_samples, len(audio)-P.PULSE_FRAME)
-            audio[max(unjudged, 0):, 1] *= -1
-            samples[:] = [audio]
         if not args.refine:
             P.REFINE = False
+        decode_times.append(time.monotonic())
         try:
             results, info = P.decode_pulse_stream(
                 model, audio, diagnostics=diagnostics, latest_only=True,
@@ -393,18 +377,13 @@ def run_receive(args):
             # reacquire.  A single bad frame must not stop the live receiver.
             results, info = [], {'words': 0,
                                  'recovery_error': type(exc).__name__}
-        processed_samples = len(audio)
+        live_input.decoded()
         if results:
             result = results[-1]
             # Each call is gated by newly arrived audio.  The short rolling
             # history intentionally restarts the prototype's local counter,
             # so comparing result.counter here would suppress valid frames.
             meter['decoded'] += 1
-            now = time.monotonic()
-            meter['decoded_times'].append(now)
-            times = meter['decoded_times']
-            if len(times) >= 2:
-                meter['decoded_fps'] = (len(times)-1)/(times[-1]-times[0])
             displayable = bool(result.diag.get('displayable', False))
             meter['status'] = ('degraded' if displayable and result.status == 'lost'
                                else result.status)
@@ -413,7 +392,11 @@ def run_receive(args):
                 meter['source_index'] = int(result.diag['source_index'])
             meter['pulse'] = result.diag.get('pulse_confidence')
             meter['timing_delta'] = result.diag.get('timing_delta_ppm')
-            meter['playback_speed'] = result.diag.get('playback_speed')
+            # The decoder's speed is relative to 48 kHz samples; at another
+            # capture rate the same frame length means a different real speed.
+            speed = result.diag.get('playback_speed')
+            meter['playback_speed'] = (None if speed is None
+                                       else speed*capture_rate/P.RATE)
             meter['quality'] = (
                 f'head {result.diag.get("head_confidence", 0):.2f}/'
                 f'{result.diag.get("head_coverage", 0):.2f}')
@@ -447,6 +430,7 @@ def run_receive(args):
                     previous_values = latest.copy()
                 display_frames.publish(latest, model.coder.grids,
                                        meter['aspect'])
+                shown_times.append(time.monotonic())
             if result.status in ('received', 'verified'):
                 meter['verified'] += 1
             if result.status == 'lost' and not displayable:
@@ -459,10 +443,13 @@ def run_receive(args):
                        'mono_sum': result.diag.get('mono_sum'),
                        'input_gain': round(meter['auto_gain'], 3),
                        'right_polarity': meter['polarity'],
+                       'incoming_fps': round(meter['input_fps'], 3),
+                       'decode_cycles_per_s': round(windowed_rate(decode_times, time.monotonic()), 3),
                        'head_confidence': result.diag.get('head_confidence'),
                        'head_coverage': result.diag.get('head_coverage'),
                        'timing_delta_ppm': result.diag.get('timing_delta_ppm'),
-                       'playback_speed': result.diag.get('playback_speed'),
+                       'playback_speed': meter['playback_speed'],
+                       'capture_rate_hz': capture_rate,
                       'noise': result.diag.get('noise'),
                       'metadata_valid': result.diag.get('metadata_valid'),
                       'skipped_frames': len(info.get('skipped_frames', [])),
@@ -477,22 +464,16 @@ def run_receive(args):
                     args.save_dir/f'v7_{meter["decoded"]:08d}.png')
         elif args.diagnostics and not args.no_log:
             print({'status': 'reacquiring', **info}, flush=True)
-        # Keep the receiver's expensive non-streaming prototype bounded.  The
-        # next decode reacquires from this short clock history instead of
-        # repeatedly decoding an ever-growing capture.
-        keep = P.PULSE_FRAME*args.decode_history
-        if len(audio) > keep:
-            samples[:] = [audio[-keep:]]
-            processed_samples = len(samples[0])
 
     try:
-        stream = sd.InputStream(samplerate=P.RATE, channels=input_channels,
+        stream = sd.InputStream(samplerate=capture_rate, channels=input_channels,
                                 dtype='float32',
                                 device=args.device, blocksize=1024,
                                 callback=callback)
         stream.start()
         if not args.no_log:
-            print(f'V7 receive ready: input={args.device!r} rate={P.RATE}Hz '
+            print(f'V7 receive ready: input={args.device!r} '
+                  f'rate={float(stream.samplerate):g}Hz (device {float(device_info["default_samplerate"]):g}Hz) '
                   f'channels={input_channels} ui={"headless" if args.headless else "window"} '
                   f'bootstrap=nearest', flush=True)
     except Exception:
@@ -585,13 +566,20 @@ def run_receive(args):
             if info_visible:
                 peak = 20*np.log10(np.maximum(meter['peak'], 1e-9))
                 rms = 20*np.log10(np.maximum(meter['rms'], 1e-9))
-                source_index = ('--' if meter['source_index'] is None else
-                                str(meter['source_index']))
+                index_text = (
+                    f'{"--" if meter["source_index"] is None else meter["source_index"]}'
+                    f' / {"--" if meter["max_index"] is None else meter["max_index"]}')
+                now = time.monotonic()
+                # Rates are recomputed at display time so they fall to 0 when
+                # input or decoding stops instead of freezing.
+                meter['decode_fps'] = windowed_rate(decode_times, now)
+                meter['shown_fps'] = windowed_rate(shown_times, now)
+                incoming = live_input.incoming_fps(now)
                 levels_label.configure(text=(
                     f'peak L/R {peak[0]:6.1f}/{peak[1]:6.1f} dBFS | '
                     f'rms {rms[0]:6.1f}/{rms[1]:6.1f} dBFS'))
                 stats_label.configure(text=(
-                    f'frames {meter["decoded"]}  source {source_index}  '
+                    f'frames {meter["decoded"]}  index {index_text}  '
                     f'verified {meter["verified"]} '
                     f'lost {meter["lost"]}  input blocks {meter["blocks"]} '
                     f'dropped {meter["dropped"]}'))
@@ -608,7 +596,7 @@ def run_receive(args):
                     int(meter['aspect_candidate']) & 7]
                 status_label.configure(text=(
                   f'status {meter["status"]}  mode {meter["mode"]}  '
-                  f'frame {meter["counter"]}  source {source_index} '
+                  f'frame {meter["counter"]}  index {index_text} '
                     f'aspect {aspect_text} '
                     f'(candidate {candidate_aspect} '
                     f'x{meter["aspect_streak"]})  pulse {pulse_text}\n'
@@ -616,8 +604,9 @@ def run_receive(args):
                     f'{" R inverted" if meter["polarity"] < 0 else ""}  '
                     f'speed {speed_text}  timing {timing_text} ppm  '
                     f'decode {meter["decode_ms"] if meter["decode_ms"] is not None else "--"} ms | '
-                    f'incoming {meter["input_fps"]:5.2f} fps  '
-                    f'decoded {meter["decoded_fps"]:5.2f} fps'))
+                    f'incoming {incoming:5.2f} fps  '
+                    f'decode {meter["decode_fps"]:5.2f} cycles/s  '
+                    f'shown {meter["shown_fps"]:5.2f} fps'))
             frame = display_frames.snapshot()
             if frame is not None and frame.generation != rendered:
                 image = values_image(frame.values, frame.shapes)
@@ -685,8 +674,10 @@ def parser():
     send.add_argument('--capture-fps', '--fps', dest='capture_fps', type=float)
     send.add_argument('--batch-frames', type=int, default=1,
                       help='frames encoded before submission (default: 1)')
-    send.add_argument('--speed', type=float, choices=(1.0, 1.5, 2.0), default=1.0,
-                      help='pitch-shifted playback speed; 1.5x is safer than 2x')
+    send.add_argument('--speed', type=float, default=1.0,
+                      help='pitch-shifted playback speed; this sender outputs '
+                           f'{P.RATE} Hz, so at most {P.max_wire_speed(P.RATE):.2f}x '
+                           '(main.py --mode modem plays at the device rate)')
     send.add_argument('--seconds', type=float, default=0,
                       help='0 means until Ctrl-C')
     send.add_argument('--no-log', dest='no_log', action='store_true',
@@ -716,9 +707,10 @@ def parser():
     recv.add_argument('--diagnostics', action='store_true',
                       help='print decoder stage timing and counters')
     recv.add_argument('--decode-batch', type=int, default=1,
-                      help='new frames required before each decode (default: 1)')
+                      help='new frame headers required before each decode (default: 1)')
     recv.add_argument('--decode-history', type=int, default=1,
-                      help='frames retained for clock reacquisition (default: 1)')
+                      help='frames kept after a decode; the buffer holds this '
+                           'plus one frame and a small guard (default: 1)')
     recv.add_argument('--refine', action='store_true',
                       help='enable slower clock-template refinement')
     recv.add_argument('--force-float32', action='store_true',
@@ -727,8 +719,12 @@ def parser():
 
 
 if __name__ == '__main__':
-    args = parser().parse_args()
+    ap = parser()
+    args = ap.parse_args()
     if args.mode == 'send':
+        if not 0 < args.speed <= P.max_wire_speed(P.RATE):
+            ap.error(f'--speed must be above 0 and at most '
+                     f'{P.max_wire_speed(P.RATE):.2f} for this {P.RATE} Hz sender')
         run_send(args)
     else:
         run_receive(args)

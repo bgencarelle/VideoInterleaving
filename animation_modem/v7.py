@@ -537,6 +537,20 @@ def encode_frame_coeffs(model, coeffs, counter, return_X=False):
 
 
 _EMIT = firwin(63, 13500, fs=RATE, window=('kaiser', 6))
+# Pulse packets are band-limited here (bound_emission in encode_pulse_frame).
+EMISSION_EDGE_HZ = 14000
+
+
+def max_wire_speed(rate):
+    """Fastest playback speed a `rate` Hz output can carry.
+
+    Speeding the wire up multiplies every frequency, so the emission edge
+    (14 kHz at 1x) must stay below the output's Nyquist frequency: 1.71x at
+    48 kHz, 3.43x at 96 kHz.  Faster than this the speed conversion filters
+    the top carriers away (measured: 2x from a 48 kHz output passes 4 of 15
+    frames; 3.5x from 96 kHz still passes all).
+    """
+    return float(rate)/(2*EMISSION_EDGE_HZ)
 
 
 def encode_stream(model, values, frames, lead=0.25, tail=0.25,
@@ -587,7 +601,7 @@ def encode_pulse_frame(model, values, counter, aspect_code=0, source_index=None)
     # Shape the ordinary pulse/body packet first.  The metadata symbol has its
     # own cyclic prefix and is inserted afterward so the long packet shaper
     # cannot smear the preceding image symbol across its pilots/data.
-    shaped = bound_emission(out, 14000, RATE)
+    shaped = bound_emission(out, EMISSION_EDGE_HZ, RATE)
     shaped[meta_start:meta_start+META_SYMBOL, :] += meta_pcm[:, None]
     return shaped
 
@@ -1457,6 +1471,34 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
     return flipped, flipped_info
 
 
+def pulse_frame_starts(samples):
+    """Every accepted pulse header in a stereo (or (n, 1)) capture.
+
+    Returns ``(frame_start, scale, confidence)`` per header, in order, using
+    the same edge-counted acquisition as the decoder: confidence below .45 is
+    skipped, and after a hit the scan resumes just before the next expected
+    header.  A header needs SYNC_LEN + META_SYMBOL + 32 samples after its
+    scan point to be found, so callers scanning a live stream should overlap
+    successive scans by that much.
+    """
+    starts = []
+    scan = 0
+    while scan + PULSE.SYNC_LEN + META_SYMBOL + 32 < len(samples):
+        hit = PULSE.measure_pulses(samples[scan:].mean(axis=1),
+                                   min_scale=PULSE_MIN_SCALE,
+                                   max_scale=PULSE_MAX_SCALE)
+        if hit is None:
+            break
+        pos, sc, conf = hit
+        fs = scan + pos - 16*sc
+        if conf < .45:
+            scan = int(fs + PULSE_FRAME*sc)
+            continue
+        starts.append((fs, sc, conf))
+        scan = int(fs + (PULSE_FRAME-32)*sc)
+    return starts
+
+
 def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                            model_factory, force_float32=False):
     cursor = 0
@@ -1469,21 +1511,8 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
         # The live rolling buffer can contain the previous frame plus the new
         # one.  Find all pulse starts, but run the expensive image decode only
         # on the newest complete frame.
-        candidates = []
-        scan = 0
-        while scan + PULSE.SYNC_LEN + META_SYMBOL + 32 < len(samples):
-            hit = PULSE.measure_pulses(samples[scan:].mean(axis=1),
-                                    min_scale=PULSE_MIN_SCALE,
-                                    max_scale=PULSE_MAX_SCALE)
-            if hit is None:
-                break
-            pos, sc, conf = hit
-            fs = scan + pos - 16*sc
-            if conf < .45:
-                scan = int(fs + PULSE_FRAME*sc)
-                continue
-            candidates.append((fs, sc, conf, 0))
-            scan = int(fs + (PULSE_FRAME-32)*sc)
+        candidates = [(fs, sc, conf, 0)
+                      for fs, sc, conf in pulse_frame_starts(samples)]
         if len(candidates) < 2:
             return [], {'frames': 0, 'pulse_frames': 0, 'recovered': False}
         # The second pulse is the first edge of the next header.  It is enough
