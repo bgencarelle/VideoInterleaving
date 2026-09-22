@@ -319,7 +319,13 @@ def run_receive(args):
         added = False
         while True:
             try:
-                samples.append(blocks.get_nowait())
+                block = blocks.get_nowait()
+                # The leveler's polarity decision is applied to the stored
+                # input itself (blocks are private copies of the callback
+                # data), so the whole rolling history is corrected audio.
+                if meter['polarity'] < 0 and block.ndim == 2 and block.shape[1] == 2:
+                    block[:, 1] *= -1
+                samples.append(block)
                 added = True
             except queue.Empty:
                 break
@@ -358,20 +364,27 @@ def run_receive(args):
         auto_gain = (min(desired_gain, auto_gain*1.5)
                      if desired_gain > auto_gain else desired_gain)
         meter['auto_gain'] = auto_gain
-        # Polarity belongs with the leveler: an inverted leg is a gain of -1.
-        # Decided from the newest frame's L/R correlation with hysteresis
-        # (P.leg_polarity); the decoder's own inverted-leg retry stays as a
-        # per-call fallback while this settles.
-        meter['polarity'] = P.leg_polarity(audio[-P.PULSE_FRAME:],
-                                           meter['polarity'])
-        input_gain = (auto_gain if meter['polarity'] > 0
-                      else np.float32([auto_gain, -auto_gain]))
+        # Polarity belongs with the leveler: an inverted leg is a gain of -1,
+        # applied to the stored input as blocks arrive (above).  It is judged
+        # on that already-corrected audio, so a strongly negative L/R
+        # correlation (P.leg_polarity) over the newest frame means the
+        # correction is now wrong (a rewire or new tape): toggle it and re-flip
+        # everything not yet judged (all of it at start-up, otherwise the
+        # audio since the last update, at least that newest frame).  History
+        # already judged correct is left alone.  Ambiguous frames (silence, a
+        # dead leg) keep the setting.  The decoder's own inverted-leg retry
+        # remains a fallback.
+        if P.leg_polarity(audio[-P.PULSE_FRAME:], 1) < 0:
+            meter['polarity'] = -meter['polarity']
+            unjudged = min(processed_samples, len(audio)-P.PULSE_FRAME)
+            audio[max(unjudged, 0):, 1] *= -1
+            samples[:] = [audio]
         if not args.refine:
             P.REFINE = False
         try:
             results, info = P.decode_pulse_stream(
                 model, audio, diagnostics=diagnostics, latest_only=True,
-                input_gain=input_gain, models=models,
+                input_gain=auto_gain, models=models,
                 model_factory=model_factory)
         except Exception as exc:
             # Drop the damaged window and let the next retained clock history
