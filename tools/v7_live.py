@@ -276,7 +276,7 @@ def run_receive(args):
              'timing_delta': None, 'playback_speed': None, 'source_index': None,
              'pulse': None, 'aspect': 0, 'aspect_candidate': 0,
              'aspect_streak': 0, 'input_samples': 0, 'started': time.monotonic(),
-             'auto_gain': 1.0,
+             'auto_gain': 1.0, 'polarity': 1,
               'decoded_times': deque(maxlen=8), 'input_fps': 0.,
              'decoded_fps': 0.,
              'mode': 'mono-input' if input_channels == 1 else 'M/S'}
@@ -358,12 +358,20 @@ def run_receive(args):
         auto_gain = (min(desired_gain, auto_gain*1.5)
                      if desired_gain > auto_gain else desired_gain)
         meter['auto_gain'] = auto_gain
+        # Polarity belongs with the leveler: an inverted leg is a gain of -1.
+        # Decided from the newest frame's L/R correlation with hysteresis
+        # (P.leg_polarity); the decoder's own inverted-leg retry stays as a
+        # per-call fallback while this settles.
+        meter['polarity'] = P.leg_polarity(audio[-P.PULSE_FRAME:],
+                                           meter['polarity'])
+        input_gain = (auto_gain if meter['polarity'] > 0
+                      else np.float32([auto_gain, -auto_gain]))
         if not args.refine:
             P.REFINE = False
         try:
             results, info = P.decode_pulse_stream(
                 model, audio, diagnostics=diagnostics, latest_only=True,
-                input_gain=auto_gain, models=models,
+                input_gain=input_gain, models=models,
                 model_factory=model_factory)
         except Exception as exc:
             # Drop the damaged window and let the next retained clock history
@@ -435,6 +443,7 @@ def run_receive(args):
                        'encoding': result.diag.get('encoding_name'),
                        'mono_sum': result.diag.get('mono_sum'),
                        'input_gain': round(meter['auto_gain'], 3),
+                       'right_polarity': meter['polarity'],
                        'head_confidence': result.diag.get('head_confidence'),
                        'head_coverage': result.diag.get('head_coverage'),
                        'timing_delta_ppm': result.diag.get('timing_delta_ppm'),
@@ -588,7 +597,8 @@ def run_receive(args):
                     f'aspect {aspect_text} '
                     f'(candidate {candidate_aspect} '
                     f'x{meter["aspect_streak"]})  pulse {pulse_text}\n'
-                    f'gain {meter["auto_gain"]:4.1f}x  '
+                    f'gain {meter["auto_gain"]:4.1f}x'
+                    f'{" R inverted" if meter["polarity"] < 0 else ""}  '
                     f'speed {speed_text}  timing {timing_text} ppm  '
                     f'decode {meter["decode_ms"] if meter["decode_ms"] is not None else "--"} ms | '
                     f'incoming {meter["input_fps"]:5.2f} fps  '

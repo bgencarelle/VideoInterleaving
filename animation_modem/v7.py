@@ -243,8 +243,16 @@ def data_blocks():
 BLOCKS = data_blocks()
 MONO = [blk for blk in BLOCKS if blk[0] <= 9]
 STEREO = [blk for blk in BLOCKS if blk[0] > 9]
-GROUPS = ([(b, 'M', q) for b in MONO for q in 'IQ'] +
-          [(b, c, q) for b in STEREO for c in 'MS' for q in 'IQ'])
+# Stereo slot order (§8.3).  An S slot on carrier b is ordered as if it sat on
+# carrier b+S_ORDER_OFFSET, so mono playback (which loses every S slot) drops
+# less important ranks while a low-pass still removes high carriers last.
+# Offset 6 (2.25 kHz) keeps most of the mono gain at almost no low-pass cost.
+S_ORDER_OFFSET = 6
+STEREO_SLOTS = sorted(
+    [(b, c, q) for b in STEREO for c in 'MS' for q in 'IQ'],
+    key=lambda slot: (slot[0][0] + (S_ORDER_OFFSET if slot[1] == 'S' else 0),
+                      slot[1], slot[0][1], slot[2]))
+GROUPS = [(b, 'M', q) for b in MONO for q in 'IQ'] + STEREO_SLOTS
 BLOCK_BINS = np.asarray([blk[0] for blk in BLOCKS], int)
 BLOCK_SYMBOLS = np.asarray([phi + 3*np.arange(8)
                             for _, phi in BLOCKS], int)
@@ -347,7 +355,7 @@ class Model:
 # desynchronise the two ends (a different phase table decodes as garbage).
 REFERENCE_FIXTURE = ROOT/'modem_tests/fixtures/v7_reference_face.png'
 MODEL_TABLES = Path(__file__).with_name('v7_model_tables.npz')
-MODEL_TABLES_SHA256 = '74b28a2ed165b5ba8e9e6d46c8f2a99127e53d03efa5a4d19fe12fa7115b1e01'
+MODEL_TABLES_SHA256 = '0bef7da37a17f9e6f9ab6d0e0015b2e53776912da7dd2bad8fe0e2f5ce196331'
 PHASE_SEED = 70001          # provenance of the frozen phase table
 CROP_SEED = 1               # provenance of the frozen variance tables
 LEVEL_SEED = 6              # provenance of the frozen unit levels
@@ -1019,8 +1027,12 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
                                    NOISE_FLOOR)
         S[..., 1, 1] += np.maximum(noise[BLOCK_SYMBOLS, 1],
                                    NOISE_FLOOR)
-        M = safe[:, None, :, None] * Hc.conj().transpose(0, 1, 3, 2)
-        W = _solve_2x2_mat(S, M)
+        # W = P H^H S^-1 (prior on the left, inverse on the right).  S is
+        # Hermitian, so W^H = S^-1 (H P): one batched left solve, then the
+        # conjugate transpose.  Solving S^-1 (P H^H) instead is only correct
+        # when a cell's M and S priors are equal.
+        HP = Hc*safe[:, None, None, :]
+        W = _solve_2x2_mat(S, HP).conj().transpose(0, 1, 3, 2)
         xt = np.einsum('btij,btj->bti', W, Zc)
         B = W @ Hc
         cov = W @ S @ W.conj().transpose(0, 1, 3, 2)
@@ -1206,6 +1218,35 @@ def decode_stream(model, x, verbose=False, diagnostics=None):
     return results, info
 
 
+POLARITY_THRESHOLD = .3
+
+
+def leg_polarity(samples, previous=1, threshold=POLARITY_THRESHOLD):
+    """Right-leg polarity (+1 or -1) of a stereo capture, with hysteresis.
+
+    The V7 wire is M-dominated (preamble, clock, metadata and head blocks are
+    M only), so a correctly wired pair correlates strongly positive: +0.73 to
+    +0.85 wideband over one pulse frame across the whole torture matrix.  An
+    inverted leg gives the mirror image.  Between -threshold and +threshold
+    (silence, one dead leg, non-V7 audio) the previous decision is kept.
+    Mono or single-channel input is always +1.
+    """
+    x = np.asarray(samples, np.float64)
+    if x.ndim != 2 or x.shape[1] != 2 or len(x) < 2:
+        return 1
+    left = x[:, 0] - x[:, 0].mean()                  # DC/hum offset must not vote
+    right = x[:, 1] - x[:, 1].mean()
+    energy = float(np.dot(left, left)*np.dot(right, right))
+    if energy <= 1e-24:
+        return previous
+    correlation = float(np.dot(left, right))/np.sqrt(energy)
+    if correlation <= -threshold:
+        return -1
+    if correlation >= threshold:
+        return 1
+    return previous
+
+
 def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
                         input_gain=1.0, models=None, model_factory=None):
     """Decode V7 bodies located by the existing pulse-counted acquisition.
@@ -1214,12 +1255,43 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
     frame scale, the body is resampled directly to the reference grid, and the
     next pulse search starts after that frame.  There is no continuous clock
     track or buffered clock-template refinement.
+
+    ``input_gain`` is a scalar or one gain per channel; a negative right gain
+    applies a polarity correction from leg_polarity().
     """
     # Live capture is float32 and _sample_at returns float32.  Promoting the
     # complete rolling history to float64 here only doubles allocation and
     # memory traffic; the FFT/equalizer still performs its own complex work at
     # the precision NumPy requires.
-    samples = np.asarray(x, np.float32)*np.float32(input_gain)
+    samples = np.asarray(x, np.float32)
+    if samples.ndim == 1:
+        samples = samples[:, None]              # a bare mono array is one channel
+    gain = np.float32(input_gain)
+    if gain.ndim and samples.shape[1] != len(gain):
+        gain = gain[:samples.shape[1]]          # per-channel gain on mono input
+    samples = samples*gain
+    results, info = _decode_pulse_samples(model, samples, diagnostics,
+                                          latest_only, models, model_factory)
+    if results or samples.shape[1] != 2:
+        return results, info
+    # One leg polarity-inverted (miswired deck or cable, reversed head lead):
+    # the preamble, clock and metadata are M-only, so the L+R acquisition sum
+    # cancels and nothing is found.  The 2x2 pilot equalizer itself would cope,
+    # so retry once with the right leg inverted.  Normal streams never reach
+    # this; silence costs one more (cheap, empty) edge scan.
+    flipped, flipped_info = _decode_pulse_samples(
+        model, samples*np.float32([1, -1]), diagnostics, latest_only, models,
+        model_factory)
+    if not flipped:
+        return results, info
+    for result in flipped:
+        result.diag['polarity_inverted'] = True
+    flipped_info['polarity_inverted'] = True
+    return flipped, flipped_info
+
+
+def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
+                          model_factory):
     cursor = 0
     counter = 1
     results = []

@@ -305,7 +305,13 @@ x_L = (m + s)/√2        x_R = (m − s)/√2
 ```
 
 - **Mono summing or parametric-stereo codecs:** L+R = √2·m, so M survives
-  and S is lost.
+  and S is lost. The mono-aware slot order (§8.3) makes the lost S half the
+  less important ranks.
+- **One track polarity-inverted:** the 2×2 equaliser absorbs it, but the M-only
+  preamble, clock and metadata cancel in the L+R acquisition sum. The pulse
+  receiver retries once with the right leg inverted when nothing is found and
+  reports `polarity_inverted`. A *mono sum* of an inverted leg keeps only S and
+  is not recoverable.
 - **One track lost:** the survivor carries (m ± s)/√2. Where s = 0
   (mono blocks, §8.2) m survives at −3 dB.
 - **Clean stereo:** the 2×2 equaliser inverts both, so there is no cost.
@@ -386,8 +392,14 @@ important data first.
 ### 8.3 Stereo blocks
 
 - **Capacity:** the remaining 66 blocks carry 32 values each: groups M-I,
-  M-Q, S-I and S-Q of 8, filled in that order. Total 2,112.
-- **The last 3 blocks in health order** (96 values) form the tail window.
+  M-Q, S-I and S-Q of 8. Total 2,112.
+- **Slot order (mono-aware):** an S slot on carrier b is ordered as if it sat
+  on carrier b + 6 (`S_ORDER_OFFSET`, 2.25 kHz); ties go M before S, then φ,
+  then I before Q. Mono playback loses every S slot, so this pushes the lost
+  half towards lower-importance ranks, while a low-pass still removes the
+  highest carriers last. Interleaving M and S per block (the earlier draft)
+  put S-carried ranks immediately after the head.
+- **The last 12 slots** (S of carriers 31–33, 96 values) form the tail window.
 
 ### 8.4 Groups and spreading
 
@@ -415,7 +427,8 @@ head    = ranks[0:208]
 body    = ranks[208:2224]
 tail    = ranks[2224:2880][96*p : 96*(p+1)]  where p = counter mod 7
 slots   = [(b,'M','I'),(b,'M','Q') for b in mono]
-        + [(b,c,q) for b in stereo for (c,q) in (M,I),(M,Q),(S,I),(S,Q)]
+        + sorted([(b,c,q) for b in stereo for c in (M,S) for q in (I,Q)],
+                 key = (b.carrier + (6 if c == S else 0), c, b.φ, q))
 fill groups from windows over head ++ body ++ tail, in slot order
 x_group = Hadamard8 · (g ⊙ coefficient values of the group)
 ```
@@ -479,8 +492,11 @@ decision-directed estimation on analog data.
 
 ### 9.6 Reconstruction
 
-1. Run the per-cell 2×2 MMSE, or MRC where S is known zero. This gives
-   per-slot (reliability, noise) exactly as the V6 decoder does.
+1. Run the per-cell 2×2 MMSE, `W = P·Hᴴ·(H·P·Hᴴ + N)⁻¹` with P the diagonal
+   M/S prior power, or MRC where S is known zero. The prior sits on the left
+   and the inverse on the right; the two orders agree only when a cell's M
+   and S priors are equal. This gives per-slot (reliability, noise) exactly
+   as the V6 decoder does.
 2. **Per group:** the observations are `y = diag(a) · Hadamard8 · (g ⊙ x) + n`
    with prior `x ~ N(0, λ)`. Solve the 8×8 LMMSE (316 solves per frame).
 3. **Confidence gate:** use V6's `clip((c−floor)/(.85−floor), 0, 1)`
@@ -523,7 +539,7 @@ decision-directed estimation on analog data.
 | Ferric cassette, good deck | all tiers; top carriers noisier, detail gated first |
 | Isolated lifts or dropouts | clock (low band); head and body with per-symbol fade-aware gating; bursts ≤ 9 ms are diagnostic cases |
 | One track dead | clock, head tier at −3 dB, body degraded (m ± s mixed) |
-| Mono playback / HE-AAC v2 PS | clock, head, M half of body; S detail lost |
+| Mono playback / HE-AAC v2 PS | clock, head, M slots (the more important ranks, §8.3); S detail and the tail lost |
 | MP3/AAC ≥ 96 kbit/s | everything up to the codec low-pass; codec noise handled as per-symbol noise |
 | Telephone band (300–3,400 Hz) | clock, pilots on bins 4, 5 and 9, head tier (a thumbnail) |
 
@@ -586,6 +602,25 @@ recover the expected packet count after the final-header boundary, validate
 metadata, and produce displayable frames.  A lost picture may still be reported
 inside that recovered packet count; the displayability/hold-last-frame rule is
 the relevant acceptance condition.
+
+### 13.2 Mono slot order and MMSE correction
+
+Reference face, nearest filter, pulse wire, mean picture RMSE. "Before" is
+b5560c1f-era code (interleaved M/S slots, prior applied on the wrong side of the
+2×2 inverse); "after" adds the §8.3 slot order and the §9.6 correction.
+
+| Case | Before | After |
+|---|---|---|
+| Clean stereo | 0.068 | 0.068 |
+| Stereo played as mono, (L+R)/2 | 0.113 | 0.091 |
+| One leg only (other silent) | 0.113 | 0.109 |
+| One leg polarity-inverted | no frames | 0.068 |
+| Torture: crosstalk 10 % | 0.075 | 0.068 |
+| Torture: right track −4 dB | 0.084 | 0.068 |
+| Torture: all other cases | — | equal or up to 0.0015 better; soft saturation +0.0005 |
+
+The mono result equals its structural limit (every S slot lost, M perfect):
+the decoder loses nothing beyond what the layout drops.
 
 ---
 
