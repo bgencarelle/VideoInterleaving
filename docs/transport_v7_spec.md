@@ -597,11 +597,14 @@ The matrix deliberately excludes the former composite `worn-deck` case.  Its
 19 current cases cover clean playback, four low-pass ceilings, three hiss
 levels, wow/flutter, azimuth delay, crosstalk, track-level imbalance, DC plus
 hum, bias leakage, soft saturation, dropouts, unmatched NR pumping, and Type I
-and Type II combined paths.  A passing run requires every generated case to
-recover the expected packet count after the final-header boundary, validate
-metadata, and produce displayable frames.  A lost picture may still be reported
-inside that recovered packet count; the displayability/hold-last-frame rule is
-the relevant acceptance condition.
+and Type II combined paths.  Each row also reports rendered-image Y/Cb/Cr
+PSNR, global SSIM, MAE, and normalized RMSE through
+`tools/measure_plane_survival.py`; the vector RMSE alone is not the image
+quality gate.  A passing run requires every generated case to recover the
+expected packet count after the final-header boundary, validate metadata, and
+produce displayable frames.  A lost picture may still be reported inside that
+recovered packet count; the displayability/hold-last-frame rule is the relevant
+acceptance condition.
 
 ### 13.2 Mono slot order and MMSE correction
 

@@ -984,7 +984,7 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
         pos = n + np.interp(n, nom, d)
         if pos[0] < 0 or pos[-1] >= len(x)-1:
             return None
-        seg = _sample_at(x, pos, taps=16).astype(float)
+        seg = _sample_at(x, pos, taps=4).astype(float)
         # Clock cancellation (§9.2): regenerate from this frame's word, LS gain.
         if cancel:
             clk = clock_cancel_template(counter)
@@ -1115,7 +1115,7 @@ def decode_metadata(model, samples, start, scale, channel):
     indexes = start + np.arange(META_SYMBOL)*scale
     if indexes[-1] >= len(samples)-1:
         return None
-    meta = _sample_at(samples, indexes, taps=16)
+    meta = _sample_at(samples, indexes, taps=4)
     window = meta[WIN:WIN+N]
     z = (np.fft.rfft(window, axis=0)/model.scale *
          np.conj(model.phase[-1])[:, None] * EARLY[:, None])
@@ -1404,7 +1404,7 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                 selected_model = model_factory(encoding_type)
             if selected_model is None:
                 selected_model = model
-        body = _sample_at(samples, indexes, taps=16).astype(np.float32)
+        body = _sample_at(samples, indexes, taps=4).astype(np.float32)
         if revision == METADATA_OPTION_MONO_SUM:
             body = np.repeat(body.mean(axis=1, keepdims=True), 2, axis=1)
         elif body.shape[1] == 1:

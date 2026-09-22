@@ -18,6 +18,8 @@ from scipy.signal import butter, resample_poly, sosfilt
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from animation_modem import v7
+from animation_modem.imaging import values_image
+from tools.measure_plane_survival import plane_metrics_arrays
 
 RATE = 96_000
 DEFAULT_FRAMES = 12
@@ -161,6 +163,26 @@ def impair(source, case, seed=2026):
     return np.clip(x, -1, 1).astype(np.float32)
 
 
+def image_quality(rows):
+    values = np.asarray(rows, float)
+    return {
+        name: {
+            'psnr_db': float(values[:, index, 0].mean()),
+            'ssim': float(values[:, index, 1].mean()),
+            'mae': float(values[:, index, 2].mean()),
+            'normalized_rmse': float(values[:, index, 3].mean()),
+        }
+        for name, index in zip(('Y', 'Cb', 'Cr'), range(3))
+    } | {
+        'overall': {
+            'psnr_db': float(values[:, :, 0].mean()),
+            'ssim': float(values[:, :, 1].mean()),
+            'mae': float(values[:, :, 2].mean()),
+            'normalized_rmse': float(values[:, :, 3].mean()),
+        }
+    }
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', type=Path, default=DEFAULT_OUT,
@@ -184,7 +206,8 @@ def main(argv=None):
     out.mkdir(parents=True, exist_ok=True)
     model = v7.load_model(TARGET, 'nearest')
     with Image.open(FIXTURE) as image:
-        values = v7.image_values(v7.prepare_image(image, 'nearest'),
+        reference = v7.prepare_image(image, 'nearest')
+        values = v7.image_values(reference,
                                  model.coder.grids, 'nearest')
     audio48 = v7.encode_pulse_stream(model, [values] * args.frames, 1,
                                      [0] * args.frames)
@@ -196,13 +219,16 @@ def main(argv=None):
         damaged = impair(wire96, case, seed=args.seed)
         results, info = v7.decode_pulse_stream(model, damaged)
         errors = []
+        quality_rows = []
         metadata = 0
         displayable = 0
         for result in results:
             metadata += int(result.diag.get('metadata_valid', False))
             displayable += int(result.diag.get('displayable', False))
+            decoded = v7.values_from(model, result.coeffs)
+            quality_rows.append(plane_metrics_arrays(
+                reference, values_image(decoded, model.coder.grids)))
             if result.status != 'lost':
-                decoded = v7.values_from(model, result.coeffs)
                 errors.append(float(np.sqrt(np.mean((decoded - values)**2))))
         row = {
             'case': case.name,
@@ -214,6 +240,7 @@ def main(argv=None):
             'displayable': displayable,
             'mean_rmse': float(np.mean(errors)) if errors else None,
             'max_rmse': float(np.max(errors)) if errors else None,
+            'image_quality': image_quality(quality_rows) if quality_rows else None,
             'recovered': bool(info.get('recovered')),
         }
         rows.append(row)

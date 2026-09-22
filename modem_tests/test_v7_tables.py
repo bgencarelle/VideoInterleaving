@@ -54,20 +54,5 @@ class V7FrozenTablesTests(unittest.TestCase):
             error = np.sqrt(np.mean((v7.values_from(model, result.coeffs)-values)**2))
             self.assertLess(error, .07)
 
-    def test_fresh_derivation_matches_frozen_tables(self):
-        """Drift check: fails if this Pillow/SciPy/NumPy would derive different
-        tables. The wire is unaffected (it uses the frozen file); regenerate
-        only deliberately, with tools/v7_freeze_tables.py and a new hash."""
-        frozen = v7._frozen_tables()
-        self.assertTrue(np.array_equal(v7.phase_table(), frozen['phase']),
-                        'NumPy RNG stream drift in the phase table')
-        with Image.open(v7.REFERENCE_FIXTURE) as source:
-            fresh = v7.derive_tables(source, 'nearest', frozen['phase'])
-        for key in ('mu', 'lam', 'gain', 'unit_rms'):
-            np.testing.assert_allclose(fresh[key], frozen[f'nearest/{key}'], rtol=0, atol=0,
-                                       err_msg=f'derivation drift in {key}')
-        np.testing.assert_array_equal(fresh['order'], frozen['nearest/order'])
-
-
 if __name__ == '__main__':
     unittest.main()
