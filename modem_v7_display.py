@@ -14,13 +14,23 @@ import wave
 import numpy as np
 
 from animation_modem.audio_common import device, pair, pcm
-from animation_modem.v7_core import speed_resample
+from animation_modem.v7_core import speed_length, speed_resample
 from animation_modem.playback import PacketOutput, latency
 from modem_bake import ModemLibrary
 from animation_modem import v7 as _v7
 
 
 TARGET_RMS = .1521
+
+
+def _wav_packet_limit(frames, speed, ips, pingpong, packet_count=0,
+                      cycles=None):
+    """Return the finite packet count for an offline IPS-paced WAV."""
+    if packet_count:
+        return int(packet_count)
+    span = (_v7.loop_period(frames, pingpong) * int(cycles)
+            if cycles is not None else frames)
+    return max(1, math.ceil(span * _v7.PULSE_FPS * speed / float(ips)))
 
 
 def fixed_pair(value):
@@ -142,6 +152,7 @@ def run_modem(args):
     print(f'[MODEM/V7] source={source_mode} {root}: {library.frames} images, '
           f'{len(library.mains)} face / {len(library.floats)} float folders; '
           f'wire {_v7.PULSE_FPS*speed:.3f} fps at {speed:g}x, '
+          f'source {settings.IPS:g} IPS, '
           f'loop N={loop.frames} p='
           f'{"none (MIDI clock)" if not loop.clocked else loop.phase} in CRC metadata')
 
@@ -177,15 +188,28 @@ def run_modem(args):
                 f'(max {_v7.max_wire_speed(_v7.RATE):.2f}x)')
         path = Path(args.modem_wav)
         path.parent.mkdir(parents=True, exist_ok=True)
-        limit = args.modem_frames or library.frames
+        packet_samples = speed_length(_v7.PULSE_FRAME, _v7.RATE, speed)
+        # A WAV has no wall clock, so synthesize the same free-clock timeline
+        # the live sender samples.  One default pass therefore lasts
+        # library.frames / settings.IPS seconds, regardless of packet rate or
+        # playback speed.  A requested cycle uses the full folded loop period:
+        # 2N ticks for ping-pong, N for a one-way loop.
+        limit = _wav_packet_limit(
+            library.frames, speed, settings.IPS, pingpong,
+            packet_count=args.modem_frames, cycles=args.modem_cycles)
         try:
             with wave.open(str(path), 'wb') as sink:
                 sink.setparams((2, 2, _v7.RATE, 0, 'NONE', 'not compressed'))
                 folders = selected or (0, 0)
                 for n in range(limit):
-                    index = n % library.frames
+                    at_time_ns = (index_calculator.launch_time +
+                                  (n * packet_samples * 1_000_000_000) // _v7.RATE)
+                    index, _ = index_calculator.calculate_free_clock_index(
+                        library.frames, pingpong, at_time_ns=at_time_ns,
+                        publish=False)
                     prefetch(index, folders)
-                    audio, report = make_packet(n + 1, index, folders)
+                    audio, report = make_packet(n + 1, index, folders,
+                                                at_time_ns)
                     sink.writeframesraw(pcm(speed_resample(audio, _v7.RATE, speed)))
                     if args.modem_log_frames:
                         print(json.dumps(report), flush=True)

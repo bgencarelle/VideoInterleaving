@@ -100,9 +100,14 @@ python main.py --mode modem \
 python utilities/modem_v3_check.py read --wav modem_test.wav
 ```
 
-The `-f`/`--modem-numbered` flag burns the absolute modem frame and source
-index into the pixels. The WAV export loops through source indices; it does not
-invoke the project's stochastic folder selector.
+The WAV export samples the application clock at `settings.IPS` while packets
+are written, so it can skip source indices when the wire packet rate is lower
+than IPS and follows the configured ping-pong direction. With
+`--modem-frames 0`, it writes one forward source pass at that IPS rate. Use
+`--modem-cycles N` instead for complete clock cycles; with ping-pong enabled a
+cycle includes the forward and return trips, while a one-way loop cycles once
+through the source sequence. The two length options are mutually exclusive.
+The WAV path does not invoke the project's stochastic folder selector.
 
 ## Run live output
 

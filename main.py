@@ -355,7 +355,14 @@ def configure_runtime():
                         default="nearest",
                         help="V7 source resize filter (default: nearest; current "
                              "80x96 baked assets usually make this a no-op)")
-    parser.add_argument("--modem-frames", type=int, default=0, help="0 = unlimited live / one source pass for WAV")
+    modem_length = parser.add_mutually_exclusive_group()
+    modem_length.add_argument(
+        "--modem-frames", type=int, default=0,
+        help="Exact packet count; 0 = unlimited live / one source pass for WAV")
+    modem_length.add_argument(
+        "--modem-cycles", type=int, default=None,
+        help="Full application-clock cycles for WAV export; ping-pong cycles "
+             "include the return trip")
     parser.add_argument("--modem-wav", help="Export a deterministic pair to PCM16 WAV instead of live playback")
     parser.add_argument("--modem-profile", default=None,
                         help="Picture geometry to send. Defaults to the bake's "
@@ -378,6 +385,10 @@ def configure_runtime():
     if args.mode == "modem":
         if args.modem_frames < 0:
             parser.error("Modem frame count must be nonnegative")
+        if args.modem_cycles is not None and args.modem_cycles <= 0:
+            parser.error("Modem cycle count must be positive")
+        if args.modem_cycles is not None and not args.modem_wav:
+            parser.error("--modem-cycles requires --modem-wav")
         if not math.isfinite(args.modem_time_offset_ms):
             parser.error("--modem-time-offset-ms must be finite")
         if (not math.isfinite(args.modem_receive_margin_ms) or args.modem_receive_margin_ms < 0
