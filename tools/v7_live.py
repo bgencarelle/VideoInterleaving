@@ -300,7 +300,7 @@ def run_receive(args):
              # loop, both from the loop constants in the rotating CRC field;
              # '--' until learned (about a second) or if the sender has none.
              'max_index': None, 'lag_ms': None, 'loop': None,
-             'shown_index': None,
+             'shown_index': None, 'shown_direction': None,
              'pulse': None, 'aspect': 0, 'aspect_candidate': 0,
              'aspect_streak': 0, 'input_samples': 0, 'started': time.monotonic(),
              'auto_gain': 1.0, 'polarity': 1,
@@ -329,25 +329,27 @@ def run_receive(args):
             input_gap.set()
 
     def live_loop_position():
-        """(ideal index now, frames the picture on screen is behind it).
+        """(calculated index now, its direction, picture index minus it).
 
-        The ideal index is where the loop is right now on this machine's
-        clock, from the received N and p; the difference grows between
-        pictures and drops when a new one arrives.  (None, None) until the
-        loop constants are known or if the sender's index is not clocked.
+        The calculated index is where the loop is right now on this machine's
+        clock, from the received N and p.  The offset is plain index
+        arithmetic against it -- no timing state -- so it is exactly what the
+        two numbers on screen differ by, and one index step is 1/30 s.  It
+        grows between pictures and drops as each new one arrives.  Its sign
+        follows the ping-pong direction: a late picture reads negative while
+        the loop counts up and positive while it counts down.  (None,
+        None) until the loop constants are known, or if the sender's index
+        does not follow the clock.
         """
         loop = meter['loop']
         if loop is None or not loop.clocked:
-            return None, None
+            return None, 0, None
         ticks = P.loop_ticks(time.time_ns())
         ideal = P.loop_index(ticks, loop)
+        way = P.loop_direction(ticks, loop)
         if meter['shown_index'] is None:
-            return ideal, None
-        recent = list(lag_ticks)
-        diff = P.loop_lag_ticks(meter['shown_index'], ticks, loop,
-                                expected=round(float(np.median(recent)))
-                                if recent else 0)
-        return ideal, diff
+            return ideal, way, None
+        return ideal, way, meter['shown_index'] - ideal
 
     def decode_available():
         nonlocal latest, auto_gain, previous_values
@@ -459,6 +461,7 @@ def run_receive(args):
                                        meter['aspect'])
                 shown_times.append(time.monotonic())
                 meter['shown_index'] = result.diag.get('source_index')
+                meter['shown_direction'] = result.diag.get('direction')
                 # Lag: where the live loop is now (this machine's clock and
                 # the received N, p) against the index just put on screen.
                 if (loop is not None and loop.clocked and
@@ -471,7 +474,8 @@ def run_receive(args):
                         result.diag['source_index'],
                         P.loop_ticks(time.time_ns()), loop,
                         expected=round(float(np.median(lag_ticks)))
-                        if lag_ticks else 0))
+                        if lag_ticks else 0,
+                        direction=result.diag.get('direction')))
                     meter['lag_ms'] = (float(np.mean(lag_ticks)) *
                                        1000/P.LOOP_IPS)
             if result.status in ('received', 'verified'):
@@ -487,6 +491,7 @@ def run_receive(args):
                        'max_index': meter['max_index'],
                        'lag_ms': meter['lag_ms'],
                        'ideal_index': live_loop_position()[0],
+                       'direction': result.diag.get('direction'),
                        'input_gain': round(meter['auto_gain'], 3),
                        'right_polarity': meter['polarity'],
                        'incoming_fps': round(meter['input_fps'], 3),
@@ -620,13 +625,21 @@ def run_receive(args):
                 peak = 20*np.log10(np.maximum(meter['peak'], 1e-9))
                 rms = 20*np.log10(np.maximum(meter['rms'], 1e-9))
                 shown = meter['shown_index']
-                ideal, diff = live_loop_position()
+                ideal, ideal_way, diff = live_loop_position()
+                # Each index carries the loop direction it belongs to: the
+                # picture's comes off the wire, the calculated one from this
+                # machine's clock.
+                way = {1: '+', -1: '-'}
+                shown_text = ('--' if shown is None else
+                              f'{shown}{way.get(meter["shown_direction"], "")}')
+                ideal_text = ('--' if ideal is None else
+                              f'{ideal}{way.get(ideal_way, "")}')
                 diff_text = ('--' if diff is None else
                              f'{diff:+d} frames ({diff*1000/P.LOOP_IPS:+.0f} ms)')
                 sync_label.configure(text=(
-                    f'index {"--" if shown is None else shown}'
+                    f'index {shown_text}'
                     f' / {"--" if meter["max_index"] is None else meter["max_index"]}'
-                    f'   calculated {"--" if ideal is None else ideal}'
+                    f'   calculated {ideal_text}'
                     f'   diff {diff_text}'))
                 now = time.monotonic()
                 # Rates are recomputed at display time so they fall to 0 when
