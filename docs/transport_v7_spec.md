@@ -880,9 +880,13 @@ frequency: the 14 kHz emission edge times the speed must fit below it, so
 `max_wire_speed(rate) = rate / 28 kHz` -- 1.71x at 48 kHz, 3.43x at 96 kHz
 (measured: 2x from a 48 kHz output passes 4 of 15 frames; 3.5x from 96 kHz
 passes all). The application sender plays at the device's own rate and refuses
-a speed above that rate's limit; WAV output and `tools/v7_live.py send` run at
-48 kHz and are limited to 1.71x. The receiver captures at the device rate
-(capped at 96 kHz) and accepts frame scales 0.25-2, i.e. 1x-4x at 96 kHz.
+a speed above that rate's limit; the deterministic production WAV export stays
+at the 48 kHz reference rate, while `tools/v7_live.py send` follows the DAC's
+native output clock by default and accepts an explicit `--rate` override. The
+live sender and receiver currently cap the supported frame scale at 2x, so a
+96 kHz live output's practical speed limit is 2x even though its Nyquist allows
+more. The receiver captures at the device rate (capped at 96 kHz) and accepts
+frame scales 0.25-2, i.e. 1x-4x at 96 kHz.
 Above `IPS` packets per second (30 by default, about 2.45x) consecutive
 packets can repeat an image.
 

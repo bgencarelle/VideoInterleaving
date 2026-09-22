@@ -2,8 +2,9 @@
 """Bench-only live V7 camera/screen sender and receiver.
 
 This deliberately does not enter ``main.py`` or the production modem engine.
-It uses the V7 prototype's fixed 48 kHz reference stream and is intended for
-an explicit audio loopback device, normally BlackHole 2ch.
+It uses the V7 prototype's fixed 48 kHz reference geometry and follows the
+selected DAC's native output clock by default, intended for an explicit audio
+loopback device, normally BlackHole 2ch.
 
 Examples::
 
@@ -82,6 +83,11 @@ def _device_arg(value):
         return value
 
 
+def _max_send_speed(rate):
+    """Bound speed by both output bandwidth and the live receiver scale."""
+    return min(P.max_wire_speed(rate), P.PULSE_MAX_SCALE)
+
+
 def _capture(args):
     """Build one of the shared RGB capture sources."""
     from tools.v7_capture import (camera_source, mouse_follow_source,
@@ -141,6 +147,8 @@ def run_send(args):
     from tools.v7_capture import Throttled
 
     model = _model(args.fixture, args.encode_filter)
+    requested_rate = getattr(args, 'rate', None)
+    output_rate = None
     raw_grab = _capture(args)
     capture_hz = args.capture_fps or (CAMERA_CAPTURE_FPS
                                       if args.source == 'camera' else
@@ -184,7 +192,7 @@ def run_send(args):
                     peak = np.max(np.abs(audio))
                     if peak > .89:
                         audio *= .89/peak
-                audio = P.speed_pulse_stream(audio, args.speed)
+                audio = P.speed_pulse_stream(audio, args.speed, rate=output_rate)
                 batches.put((counter, audio))
                 total += len(frames)
                 counter += len(frames)
@@ -201,7 +209,7 @@ def run_send(args):
                     peak = np.max(np.abs(audio))
                     if peak > .89:
                         audio *= .89/peak
-                audio = P.speed_pulse_stream(audio, args.speed)
+                audio = P.speed_pulse_stream(audio, args.speed, rate=output_rate)
                 batches.put((counter, audio))
                 total += len(frames)
             batches.put(sentinel)
@@ -210,18 +218,37 @@ def run_send(args):
                 close()
 
     worker = threading.Thread(target=produce, daemon=True)
-    worker.start()
-    if not args.no_log:
-        print(f'V7 send ready: source={args.source} device={args.device!r} '
-              f'wire={FPS*args.speed:.3f}fps speed={args.speed:g}x camera={args.camera} '
-              f'capture={args.capture_width}px/{args.capture_filter} '
-              f'encode={args.encode_filter} mode={"mono-sum" if args.mono_sum else "M/S"}',
-              flush=True)
+    worker_started = False
     try:
-        with sd.OutputStream(samplerate=P.RATE,
-                             channels=1 if args.mono_sum else 2,
-                             dtype='float32',
-                             device=args.device, blocksize=0) as stream:
+        stream_args = {
+            'channels': 1 if args.mono_sum else 2,
+            'dtype': 'float32',
+            'device': args.device,
+            'blocksize': 0,
+        }
+        if requested_rate is not None:
+            stream_args['samplerate'] = requested_rate
+        with sd.OutputStream(**stream_args) as stream:
+            # With no --rate, sounddevice opens the DAC at its native clock.
+            # The producer must wait until that clock is known so its packet
+            # resampling preserves 1x playback speed on any supported device.
+            output_rate = float(stream.samplerate)
+            if hasattr(grab, 'retune'):
+                grab.retune(FPS * args.speed)
+            max_speed = _max_send_speed(output_rate)
+            if not 0 < args.speed <= max_speed:
+                raise ValueError(
+                    f'--speed must be above 0 and at most {max_speed:.2f} '
+                    f'for this {output_rate:g} Hz sender/receiver pair')
+            worker.start()
+            worker_started = True
+            if not args.no_log:
+                print(f'V7 send ready: source={args.source} device={args.device!r} '
+                      f'rate={output_rate:g}Hz wire={FPS*args.speed:.3f}fps '
+                      f'speed={args.speed:g}x camera={args.camera} '
+                      f'capture={args.capture_width}px/{args.capture_filter} '
+                      f'encode={args.encode_filter} mode={"mono-sum" if args.mono_sum else "M/S"}',
+                      flush=True)
             while True:
                 item = batches.get()
                 if item is sentinel:
@@ -237,7 +264,12 @@ def run_send(args):
         stop.set()
     finally:
         stop.set()
-        worker.join(timeout=2)
+        if worker_started:
+            worker.join(timeout=2)
+        else:
+            close = getattr(grab, 'close', None)
+            if close is not None:
+                close()
     if args.log and not args.no_log:
         print(f'V7 send stopped after {total} frames', flush=True)
 
@@ -747,9 +779,11 @@ def parser():
     send.add_argument('--batch-frames', type=int, default=1,
                       help='frames encoded before submission (default: 1)')
     send.add_argument('--speed', type=float, default=1.0,
-                      help='pitch-shifted playback speed; this sender outputs '
-                           f'{P.RATE} Hz, so at most {P.max_wire_speed(P.RATE):.2f}x '
-                           '(main.py --mode modem plays at the device rate)')
+                       help='pitch-shifted playback speed; the limit depends '
+                       'on the DAC rate and live receiver scale')
+    send.add_argument('--rate', type=int,
+                      help='request an output sample rate (default: the DAC '
+                           'native rate; the V7 wire remains 48 kHz reference geometry)')
     send.add_argument('--seconds', type=float, default=0,
                       help='0 means until Ctrl-C')
     send.add_argument('--no-log', dest='no_log', action='store_true',
@@ -796,9 +830,15 @@ if __name__ == '__main__':
     ap = parser()
     args = ap.parse_args()
     if args.mode == 'send':
-        if not 0 < args.speed <= P.max_wire_speed(P.RATE):
-            ap.error(f'--speed must be above 0 and at most '
-                     f'{P.max_wire_speed(P.RATE):.2f} for this {P.RATE} Hz sender')
+        if args.rate is not None and args.rate <= 0:
+            ap.error('--rate must be positive')
+        if args.speed <= 0:
+            ap.error('--speed must be positive')
+        if args.rate is not None:
+            max_speed = _max_send_speed(args.rate)
+            if args.speed > max_speed:
+                ap.error(f'--speed must be at most {max_speed:.2f} for '
+                         f'this {args.rate} Hz sender/receiver pair')
         run_send(args)
     else:
         run_receive(args)

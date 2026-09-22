@@ -58,6 +58,16 @@ def validate_ascii_port(port):
         sys.exit(1)
 
 
+def _set_process_title(mode):
+    """Give the running application a short, mode-specific process title."""
+    try:
+        import setproctitle
+    except ImportError:
+        # Keep an existing environment usable until its requirements are refreshed.
+        return
+    setproctitle.setproctitle(f"vi.{mode}")
+
+
 # -----------------------------------------------------------------------------
 # CONFIGURATION OVERRIDE LOGIC
 # -----------------------------------------------------------------------------
@@ -363,6 +373,7 @@ def configure_runtime():
     parser.add_argument("--modem-frame-duration", type=float, default=1.0,
                         help="Existing MIDI clock's frame scaling factor")
     args = parser.parse_args()
+    _set_process_title(args.mode)
 
     if args.mode == "modem":
         if args.modem_frames < 0:
