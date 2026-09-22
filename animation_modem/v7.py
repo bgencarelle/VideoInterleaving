@@ -1062,11 +1062,13 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
     conf_all = np.clip(1-post_all/lam_all, 0, 1)
     xhat = np.zeros_like(model.mu); conf = np.zeros_like(model.mu)
     got = np.zeros_like(model.mu, bool)
-    for gi in range(group_count):
-        r = ranks_all[gi, live_all[gi]]
-        xhat[r] = x_all[gi, live_all[gi]]
-        conf[r] = conf_all[gi, live_all[gi]]
-        got[r] = True
+    # Every live coefficient occurs in exactly one group.  Flattening the
+    # boolean selection turns the final group-order -> coefficient-order copy
+    # into three indexed scatters, avoiding one Python loop per frame.
+    live_ranks = ranks_all[live_all]
+    xhat[live_ranks] = x_all[live_all]
+    conf[live_ranks] = conf_all[live_all]
+    got[live_ranks] = True
     if diagnostics is not None:
         diagnostics.setdefault('stage_ms', {}).setdefault('equalize', []).append(
             (perf_counter()-stage_started)*1000)
