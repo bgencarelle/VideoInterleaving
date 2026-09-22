@@ -558,6 +558,35 @@ finish on real tape.
 | E7 | Tail rotation; F = 24 vs alternatives | fps ≥ 12 with the tail refreshed ≤ 0.5 s | fewer coefficients, no rotation |
 | E8 | Real tape: matched captures of V6, tape-ordered V6 and V7 | V7 wins or ties on every acceptance-gate item | revert the failing mechanism |
 
+### 13.1 Synthetic V7 tape torture matrix
+
+The tracked runner `tools/v7_torture_matrix.py` exercises the current V7 pulse
+wire against a deterministic, synthetic 96 kHz tape-path matrix.  It is a
+regression test for the encoder/decoder and impairment handling, not a model of
+any particular tape deck; real tape captures remain authoritative.
+
+Run it from the repository root with:
+
+```text
+.venv/bin/python tools/v7_torture_matrix.py
+```
+
+The runner generates 12 identical packets from the canonical reference face,
+encodes at the 48 kHz wire rate, resamples to 96 kHz, and feeds the damaged
+stream through the pulse-counted V7 decoder.  The seed defaults to `2026` and
+can be changed with `--seed`; `--frames`, `--only`, and `--out` support shorter
+diagnostic runs.  Results are written to the ignored `scratch/` directory.
+
+The matrix deliberately excludes the former composite `worn-deck` case.  Its
+19 current cases cover clean playback, four low-pass ceilings, three hiss
+levels, wow/flutter, azimuth delay, crosstalk, track-level imbalance, DC plus
+hum, bias leakage, soft saturation, dropouts, unmatched NR pumping, and Type I
+and Type II combined paths.  A passing run requires every generated case to
+recover the expected packet count after the final-header boundary, validate
+metadata, and produce displayable frames.  A lost picture may still be reported
+inside that recovered packet count; the displayability/hold-last-frame rule is
+the relevant acceptance condition.
+
 ---
 
 ## 14. Rejected alternatives
