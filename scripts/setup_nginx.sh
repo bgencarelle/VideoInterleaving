@@ -32,6 +32,7 @@ PROJECT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)  # repo root = pare
 DRY_RUN=false
 VERBOSE=false
 ADDITIONAL_DOMAINS=()
+REPLACEMENT_DOMAINS=()
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --dry-run)
@@ -52,6 +53,18 @@ while [ "$#" -gt 0 ]; do
             ;;
         --add-domain=*)
             ADDITIONAL_DOMAINS+=("${1#*=}")
+            shift
+            ;;
+        --replace-domain)
+            if [ "$#" -lt 2 ] || [[ "$2" == -* ]]; then
+                echo "❌ --replace-domain requires a domain name" >&2
+                exit 2
+            fi
+            REPLACEMENT_DOMAINS+=("$2")
+            shift 2
+            ;;
+        --replace-domain=*)
+            REPLACEMENT_DOMAINS+=("${1#*=}")
             shift
             ;;
         *)
@@ -415,8 +428,12 @@ if detect_existing_config; then
     fi
 fi
 
-# 3. Ask for Domain Name (skip if already configured and no override)
-if [ -n "$EXISTING_DOMAIN" ] && [ -z "${FORCE_DOMAIN_UPDATE:-}" ] && [ "$DRY_RUN" = false ]; then
+# 3. Select the domain set. --replace-domain is explicit and non-interactive;
+# repeat it to replace the full set with multiple bare domains.
+if [ "${#REPLACEMENT_DOMAINS[@]}" -gt 0 ]; then
+    DOMAIN_NAME="${REPLACEMENT_DOMAINS[0]}"
+    log_info "Replacing configured domains with: ${REPLACEMENT_DOMAINS[*]}"
+elif [ -n "$EXISTING_DOMAIN" ] && [ -z "${FORCE_DOMAIN_UPDATE:-}" ] && [ "$DRY_RUN" = false ]; then
     echo ""
     log_info "Keeping existing domains: ${EXISTING_DOMAINS[*]}"
     log_info "(Set FORCE_DOMAIN_UPDATE=1 to replace them)"
@@ -453,10 +470,6 @@ validate_domain() {
 }
 
 DOMAIN_NAMES=()
-if [ -n "$EXISTING_DOMAIN" ] && { [ -z "${FORCE_DOMAIN_UPDATE:-}" ] || [ "$DOMAIN_NAME" = "$EXISTING_DOMAIN" ]; }; then
-    DOMAIN_NAMES=("${EXISTING_DOMAINS[@]}")
-fi
-
 add_domain() {
     local domain="$1"
     domain="${domain#www.}"
@@ -472,7 +485,13 @@ add_domain() {
     DOMAIN_NAMES+=("$domain")
 }
 
-if [ "${#DOMAIN_NAMES[@]}" -eq 0 ]; then
+if [ "${#REPLACEMENT_DOMAINS[@]}" -gt 0 ]; then
+    for domain in "${REPLACEMENT_DOMAINS[@]}"; do
+        add_domain "$domain"
+    done
+elif [ -n "$EXISTING_DOMAIN" ] && { [ -z "${FORCE_DOMAIN_UPDATE:-}" ] || [ "$DOMAIN_NAME" = "$EXISTING_DOMAIN" ]; }; then
+    DOMAIN_NAMES=("${EXISTING_DOMAINS[@]}")
+else
     add_domain "$DOMAIN_NAME"
 fi
 for domain in "${ADDITIONAL_DOMAINS[@]}"; do
