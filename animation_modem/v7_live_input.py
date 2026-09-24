@@ -71,7 +71,10 @@ class LiveInput:
         self._judged_to = 0        # absolute sample up to which polarity was judged
         self._scan_from = 0        # absolute sample where the next header scan starts
         self._pending = 0          # headers arrived since the last take()
-        self._headers = deque(maxlen=256)     # absolute header positions
+        # Absolute frame start, measured scale and pulse confidence. The live
+        # decoder consumes these anchors so it need not scan this same window
+        # for headers a second time.
+        self._headers = deque(maxlen=256)
         self._header_walls = deque(maxlen=256)
 
     # ------------------------------------------------------------ buffer
@@ -119,7 +122,8 @@ class LiveInput:
         self._judge_polarity(audio)
         self._pending += self._count_headers(audio, now)
         if (self._headers and
-                self.total - self._headers[-1] > 2*self._scaled(PULSE_FRAME)):
+                self.total - self._headers[-1][0] >
+                2*self._scaled(PULSE_FRAME)):
             self.scale = None                  # lost the stream: unlock
         cap = self.cap()
         if len(audio) > cap:
@@ -138,6 +142,18 @@ class LiveInput:
         keep = int(self.span()*(self.decode_history + GUARD_FRAMES))
         audio = self._blocks[-1] if len(self._blocks) == 1 else np.concatenate(self._blocks)
         self._blocks = [audio[-keep:]] if len(audio) > keep else [audio]
+
+    def pulse_starts(self, audio):
+        """Pulse anchors in `audio`, as ``(start, scale, confidence)``.
+
+        `take()` returns a suffix of the absolute input history. Convert the
+        already measured header positions into that suffix's sample clock.
+        The decoder locally rechecks these anchors after its gain adjustment.
+        """
+        start = self.total - len(audio)
+        return tuple((position-start, scale, confidence)
+                     for position, scale, confidence in self._headers
+                     if start <= position < self.total)
 
     # ------------------------------------------------------------ polarity
     def _judge_polarity(self, audio):
@@ -165,13 +181,14 @@ class LiveInput:
         # header itself grows with scale: honour whichever is longer.
         overlap = max(self._scaled(_HEADER_OVERLAP), _HEADER_OVERLAP)
         found = 0
-        for frame_start, scale, _ in pulse_frame_starts(audio[begin:]):
+        for frame_start, scale, confidence in pulse_frame_starts(audio[begin:]):
             position = start + begin + frame_start
             if position > self.total - overlap:
                 break
-            if self._headers and position - self._headers[-1] < _SAME_HEADER:
+            if (self._headers and
+                    position - self._headers[-1][0] < _SAME_HEADER):
                 continue
-            self._headers.append(position)
+            self._headers.append((position, float(scale), float(confidence)))
             self._header_walls.append(now)
             self.scale = float(scale)
             found += 1
@@ -186,7 +203,8 @@ class LiveInput:
         speed) and drops when headers are unreadable.  Reads 0 once no header
         was seen for RATE_STALE_S of wall time.
         """
-        walls, headers = list(self._header_walls), list(self._headers)
+        walls = list(self._header_walls)
+        headers = [header[0] for header in self._headers]
         if not walls or not headers or now - walls[-1] > RATE_STALE_S:
             return 0.0
         return windowed_rate([p/self.rate for p in headers], headers[-1]/self.rate)

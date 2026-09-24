@@ -484,6 +484,7 @@ def run_receive(args):
         meter['polarity'] = live_input.polarity
         if audio is None:
             return
+        pulse_starts = live_input.pulse_starts(audio)
         peak = float(np.percentile(np.abs(audio[-P.PULSE_FRAME:]), 99.5))
         desired_gain = float(np.clip(.55/max(peak, 1e-6), .5, 32.0))
         auto_gain = (min(desired_gain, auto_gain*1.5)
@@ -497,7 +498,8 @@ def run_receive(args):
                 model, audio, diagnostics=diagnostics, latest_only=True,
                 input_gain=auto_gain, models=models,
                 model_factory=model_factory,
-                force_float32=args.force_float32, state=pulse_state)
+                force_float32=args.force_float32, state=pulse_state,
+                pulse_starts=pulse_starts)
         except Exception as exc:
             # Drop the damaged window and let the next retained clock history
             # reacquire.  A single bad frame must not stop the live receiver.

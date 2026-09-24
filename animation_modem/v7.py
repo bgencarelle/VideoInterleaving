@@ -1150,92 +1150,122 @@ _BASIS = np.stack([np.interp(np.arange(F), KNOTS, np.eye(len(KNOTS))[k])
                    for k in range(len(KNOTS))], axis=1)          # (F, knots) hat basis
 _BASIS32 = _BASIS.astype(np.float32)
 
+# The joint channel fit solves one independent two-coefficient least-squares
+# problem per pilot bin.  Pack those observations once so the per-frame path
+# can solve all pilot bins together instead of entering Python for every bin.
+_PILOT_BIN_WIDTH = max(sum(b == pilot_bin for _, b in PILOT_OBS)
+                       for pilot_bin in PILOT_BINS)
+_PILOT_BIN_FREQUENCIES = np.asarray(PILOT_BINS)
+_PILOT_BIN_SYMBOLS = np.zeros((len(PILOT_BINS), _PILOT_BIN_WIDTH), int)
+_PILOT_BIN_VALID = np.zeros_like(_PILOT_BIN_SYMBOLS, dtype=bool)
+_PILOT_BIN_VALUES = np.zeros(
+    (len(PILOT_BINS), _PILOT_BIN_WIDTH, 2), dtype=complex)
+_PILOT_BIN_LS = np.zeros(
+    (len(PILOT_BINS), 2, _PILOT_BIN_WIDTH), dtype=complex)
+for _bi, _pilot_bin in enumerate(PILOT_BINS):
+    _pilot_symbols = [s for s, b in PILOT_OBS if b == _pilot_bin]
+    _pilot_count = len(_pilot_symbols)
+    _PILOT_BIN_SYMBOLS[_bi, :_pilot_count] = _pilot_symbols
+    _PILOT_BIN_VALID[_bi, :_pilot_count] = True
+    _pilot_values = np.asarray(
+        [PATS[(s, _pilot_bin)] for s in _pilot_symbols])
+    _PILOT_BIN_VALUES[_bi, :_pilot_count] = _pilot_values
+    _gram = _pilot_values.conj().T @ _pilot_values
+    _PILOT_BIN_LS[_bi, :, :_pilot_count] = np.linalg.solve(
+        _gram, _pilot_values.conj().T)
+_PILOT_BIN_OMEGA = (2j*np.pi/N)*_PILOT_BIN_FREQUENCIES[:, None]
+_PILOT_BIN_J = (
+    (2*np.pi/N*_PILOT_BIN_FREQUENCIES[:, None, None]) *
+    _BASIS[_PILOT_BIN_SYMBOLS])
+_PILOT_BIN_VALUES32 = _PILOT_BIN_VALUES.astype(np.complex64)
+_PILOT_BIN_LS32 = _PILOT_BIN_LS.astype(np.complex64)
+_PILOT_BIN_OMEGA32 = _PILOT_BIN_OMEGA.astype(np.complex64)
+_PILOT_BIN_J32 = _PILOT_BIN_J.astype(np.float32)
+for _table in (_PILOT_BIN_FREQUENCIES, _PILOT_BIN_SYMBOLS, _PILOT_BIN_VALID,
+               _PILOT_BIN_VALUES,
+               _PILOT_BIN_LS, _PILOT_BIN_OMEGA, _PILOT_BIN_J,
+               _PILOT_BIN_VALUES32, _PILOT_BIN_LS32,
+               _PILOT_BIN_OMEGA32, _PILOT_BIN_J32):
+    _table.setflags(write=False)
+
 
 def channel_joint(Z, iters=2, force_float32=False):
     """Per rx channel: static 1x2 response per pilot bin x smooth timing track.
 
     y(s,b) = exp(j*2*pi*b*delta(s)/N) * (hM(b)*pM + hS(b)*pS), delta piecewise
     linear over the frame. Alternating LS: responses given delta, then a
-    Gauss-Newton phase step for delta. Timing error left by the clock map is
-    common to all carriers of a symbol, so the pilots pin it down (§9.3).
+    Gauss-Newton phase step for delta. Pilot-bin observations and their static
+    least-squares operators are batched, avoiding one Python solve per bin.
+    Timing error left by the clock map is common to all carriers of a symbol,
+    so the pilots pin it down (§9.3).
     """
     if force_float32:
         return _channel_joint_float32(Z, iters)
-    sv, bv, pv = PILOT_SV, PILOT_BV, PILOT_PV
-    H = np.empty((F, 65, 2, 2), complex)
+    return _channel_joint_batched(Z, iters, False)
+
+
+def _channel_joint_batched(Z, iters, force_float32):
+    if force_float32:
+        real_dtype, complex_dtype = np.float32, np.complex64
+        basis = _BASIS32
+        values, operator = _PILOT_BIN_VALUES32, _PILOT_BIN_LS32
+        omega, jacobian = _PILOT_BIN_OMEGA32, _PILOT_BIN_J32
+        eps = np.float32(1e-10)
+        threshold = np.float32(1e-9)
+        step_tolerance = np.float32(1e-4)
+    else:
+        real_dtype, complex_dtype = np.float64, np.complex128
+        basis = _BASIS
+        values, operator = _PILOT_BIN_VALUES, _PILOT_BIN_LS
+        omega, jacobian = _PILOT_BIN_OMEGA, _PILOT_BIN_J
+        eps, threshold, step_tolerance = 1e-10, 1e-9, 1e-4
+
+    H = np.empty((F, 65, 2, 2), dtype=complex_dtype)
     for c in range(2):
-        y = np.array([Z[s, b, c] for s, b in PILOT_OBS])
-        theta = np.zeros(len(KNOTS))
+        y = np.asarray(Z[_PILOT_BIN_SYMBOLS,
+                         _PILOT_BIN_FREQUENCIES[:, None], c],
+                       dtype=complex_dtype)
+        theta = np.zeros(len(KNOTS), dtype=real_dtype)
         for _ in range(iters):
-            delta = _BASIS @ theta
-            rot = np.exp(2j*np.pi*bv*delta[sv]/N)
-            h = np.empty((len(PILOT_BINS), 2), complex)
-            for b in PILOT_BINS:
-                m = PILOT_MASK_BY_BIN[b]
-                A = pv[m]*rot[m, None]
-                gram = A.conj().T @ A
-                rhs = A.conj().T @ y[m]
-                h[PILOT_BIN_INDEX[m][0]] = _solve_2x2_vec(gram, rhs)
-            pred = rot*np.einsum('ij,ij->i', h[PILOT_BIN_INDEX], pv)
-            ok = np.abs(pred) > 1e-9
-            ph = np.angle(y[ok]/pred[ok]); w = np.abs(pred[ok])
-            J = (2*np.pi*bv[ok]/N)[:, None]*_BASIS[sv[ok]]
-            JW = J*w[:, None]
-            normal = JW.T @ JW + 1e-10*np.eye(JW.shape[1])
-            step = np.linalg.solve(normal, JW.T @ (ph*w))
+            delta = basis @ theta
+            rot = np.exp(omega*delta[_PILOT_BIN_SYMBOLS]).astype(
+                complex_dtype, copy=False)
+            # The pilot phase rotation has unit magnitude, so it changes only
+            # the right-hand side; each bin's Gram matrix is static and its
+            # inverse projection can be precomputed.
+            h = np.einsum('bkn,bn->bk', operator, np.conj(rot)*y)
+            pred = rot*np.einsum('bni,bi->bn', values, h)
+            ok = _PILOT_BIN_VALID & (np.abs(pred) > threshold)
+            rho = np.divide(y, pred, out=np.zeros_like(y), where=ok)
+            ph = np.angle(rho).astype(real_dtype, copy=False)
+            w = np.where(ok, np.abs(pred), 0).astype(real_dtype, copy=False)
+
+            # This is the same weighted Gauss-Newton fit as the observation-
+            # ordered loop: both sides of the normal equation carry w**2.
+            JW = jacobian*w[..., None]
+            normal = np.einsum('bni,bnj->ij', JW, JW)
+            normal += eps*np.eye(JW.shape[-1], dtype=real_dtype)
+            step = np.linalg.solve(
+                normal, np.einsum('bni,bn->i', JW, ph*w))
             theta += step
-            if np.max(np.abs(step)) < 1e-4:
+            if np.max(np.abs(step)) < step_tolerance:
                 break
-        delta = _BASIS @ theta
-        hb = h                                                   # (pilots, 2)
+
+        delta = basis @ theta
+        phase = np.exp((2j*np.pi/N)*BINS[None, :]*delta[:, None]).astype(
+            complex_dtype, copy=False)
         for k in range(2):
-            v = hb[:, k]
-            hk = np.interp(BINS, PILOT_BINS, v.real) + 1j*np.interp(BINS, PILOT_BINS, v.imag)
-            H[:, BINS, c, k] = hk[None, :]*np.exp(2j*np.pi*BINS[None, :]*delta[:, None]/N)
+            v = h[:, k]
+            hk = (np.interp(BINS, PILOT_BINS, v.real) +
+                  1j*np.interp(BINS, PILOT_BINS, v.imag)).astype(
+                      complex_dtype, copy=False)
+            H[:, BINS, c, k] = hk[None, :]*phase
     return H
 
 
 def _channel_joint_float32(Z, iters=2):
     """Float32 channel estimate used by the opt-in ARM receiver path."""
-    sv, bv, pv = PILOT_SV, PILOT_BV, PILOT_PV32
-    H = np.empty((F, 65, 2, 2), np.complex64)
-    phase = np.complex64(2j*np.pi/N)
-    frequency = bv.astype(np.float32)
-    for c in range(2):
-        y = np.asarray([Z[s, b, c] for s, b in PILOT_OBS],
-                       dtype=np.complex64)
-        theta = np.zeros(len(KNOTS), dtype=np.float32)
-        for _ in range(iters):
-            delta = _BASIS32 @ theta
-            rot = np.exp(phase*frequency*delta[sv]).astype(np.complex64)
-            h = np.empty((len(PILOT_BINS), 2), np.complex64)
-            for b in PILOT_BINS:
-                m = PILOT_MASK_BY_BIN[b]
-                A = pv[m]*rot[m, None]
-                gram = A.conj().T @ A
-                rhs = A.conj().T @ y[m]
-                h[PILOT_BIN_INDEX[m][0]] = _solve_2x2_vec(gram, rhs)
-            pred = rot*np.einsum('ij,ij->i', h[PILOT_BIN_INDEX], pv)
-            ok = np.abs(pred) > np.float32(1e-9)
-            ph = np.angle(y[ok]/pred[ok]).astype(np.float32)
-            w = np.abs(pred[ok]).astype(np.float32)
-            J = (np.float32(2*np.pi/N)*frequency[ok])[:, None] * _BASIS32[sv[ok]]
-            JW = J*w[:, None]
-            normal = JW.T @ JW + np.float32(1e-10)*np.eye(
-                JW.shape[1], dtype=np.float32)
-            step = np.linalg.solve(normal, JW.T @ (ph*w))
-            theta += step
-            if np.max(np.abs(step)) < np.float32(1e-4):
-                break
-        delta = _BASIS32 @ theta
-        for k in range(2):
-            v = h[:, k]
-            hk = (np.interp(BINS, PILOT_BINS, v.real) +
-                  1j*np.interp(BINS, PILOT_BINS, v.imag)).astype(np.complex64)
-            H[:, BINS, c, k] = (hk[None, :]*np.exp(
-                phase*BINS[None, :].astype(np.float32)*delta[:, None]
-            )).astype(np.complex64)
-    return H
+    return _channel_joint_batched(Z, iters, True)
 
 
 # fade_and_noise() works on every symbol and channel at once. Pilot counts
@@ -1697,7 +1727,7 @@ def leg_polarity(samples, previous=1, threshold=POLARITY_THRESHOLD):
 
 def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
                         input_gain=1.0, models=None, model_factory=None,
-                        force_float32=False, state=None):
+                        force_float32=False, state=None, pulse_starts=None):
     """Decode V7 bodies located by the existing pulse-counted acquisition.
 
     This is the low-latency live path: each accepted pulse word supplies a
@@ -1711,6 +1741,10 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
     ``state`` (PulseState) carries the tail store and the learned loop
     constants between calls; a live receiver passes the same one every time.
     Without it each call starts fresh (fine for a whole recording).
+
+    ``pulse_starts`` optionally supplies ``(start, scale, confidence)`` anchors
+    from an upstream incremental scan. The anchors are rechecked locally after
+    input gain is applied; if they do not validate, normal acquisition runs.
     """
     # Live capture is float32 and _sample_at returns float32.  Promoting the
     # complete rolling history to float64 here only doubles allocation and
@@ -1727,7 +1761,7 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
         state = PulseState()
     results, info = _decode_pulse_samples(model, samples, diagnostics,
                                           latest_only, models, model_factory,
-                                          force_float32, state)
+                                          force_float32, state, pulse_starts)
     if results or samples.shape[1] != 2:
         return results, info
     # One leg polarity-inverted (miswired deck or cable, reversed head lead):
@@ -1737,7 +1771,7 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
     # this; silence costs one more (cheap, empty) edge scan.
     flipped, flipped_info = _decode_pulse_samples(
         model, samples*np.float32([1, -1]), diagnostics, latest_only, models,
-        model_factory, force_float32, state)
+        model_factory, force_float32, state, pulse_starts)
     if not flipped:
         return results, info
     for result in flipped:
@@ -1774,24 +1808,70 @@ def pulse_frame_starts(samples):
     return starts
 
 
+def _remeasure_pulse_starts(samples, anchors):
+    """Recheck upstream header anchors in short windows on decoder samples."""
+    mono = samples.mean(axis=1)
+    measured = []
+    for expected_start, expected_scale, _ in sorted(
+            anchors, key=lambda anchor: float(anchor[0])):
+        expected_start, expected_scale = (float(expected_start),
+                                          float(expected_scale))
+        if not np.isfinite(expected_start+expected_scale) or expected_scale <= 0:
+            continue
+        scan = max(0, int(np.floor(expected_start-8*expected_scale)))
+        end = min(len(mono), int(np.ceil(
+            expected_start+(PULSE.SYNC_LEN+META_SYMBOL+32)*expected_scale)))
+        if end <= scan:
+            continue
+        hit = PULSE.measure_pulses(
+            mono[scan:end], min_scale=PULSE_MIN_SCALE,
+            max_scale=PULSE_MAX_SCALE)
+        if hit is None:
+            continue
+        position, scale, confidence = hit
+        frame_start = scan+position-16*scale
+        if (abs(frame_start-expected_start) >
+                max(16*expected_scale, .03*PULSE_FRAME*expected_scale) or
+                abs(scale/expected_scale-1) > .03 or confidence < .45):
+            continue
+        if measured and frame_start-measured[-1][0] < .5*PULSE_FRAME*scale:
+            continue
+        measured.append((frame_start, scale, confidence))
+    measured.sort(key=lambda hit: hit[0])
+    return measured
+
+
 def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
-                           model_factory, force_float32, state):
+                           model_factory, force_float32, state,
+                           pulse_starts=None):
     cursor = 0
     counter = 1
     results = []
     measured = None
+    preloaded_following = None
     pending_aspect = 0
     if latest_only:
         # The live rolling buffer can contain the previous frame plus the new
-        # one.  Find all pulse starts, but run the expensive image decode only
-        # on the newest complete frame.
-        candidates = [(fs, sc, conf, 0)
-                      for fs, sc, conf in pulse_frame_starts(samples)]
+        # one. Reuse the input layer's incremental header hits when available;
+        # otherwise scan the window as before. In either case only the newest
+        # complete frame needs the expensive image decode.
+        cached = (_remeasure_pulse_starts(samples, pulse_starts)
+                  if pulse_starts is not None else [])
+        cache_valid = len(cached) >= 2
+        if cache_valid:
+            prior, current = cached[-2], cached[-1]
+            interval = (current[0]-prior[0])/prior[1]
+            cache_valid = (
+                abs(interval-PULSE_FRAME) <= max(12, .03*PULSE_FRAME) and
+                abs(current[1]/prior[1]-1) <= .03)
+        starts = cached if cache_valid else pulse_frame_starts(samples)
+        candidates = [(fs, sc, conf, 0) for fs, sc, conf in starts]
         if len(candidates) < 2:
             return [], {'frames': 0, 'pulse_frames': 0, 'recovered': False}
         # The second pulse is the first edge of the next header.  It is enough
         # to validate the current frame duration; the next body need not exist.
         fs, sc, conf, pending_aspect = candidates[-2]
+        preloaded_following = candidates[-1][:3]
         cursor = int(fs)
         measured = (16*sc, sc, conf)
     while cursor + PULSE.SYNC_LEN + META_SYMBOL + 32 < len(samples):
@@ -1810,9 +1890,16 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
         following = None
         next_start = None
         search = int(frame_start+PULSE_FRAME*scale)
-        candidate = PULSE.measure_pulses(samples[search:].mean(axis=1),
-                                      min_scale=PULSE_MIN_SCALE,
-                                      max_scale=PULSE_MAX_SCALE)
+        if preloaded_following is not None:
+            following_start, following_scale, following_confidence = \
+                preloaded_following
+            candidate = (following_start-search+16*following_scale,
+                         following_scale, following_confidence)
+            preloaded_following = None
+        else:
+            candidate = PULSE.measure_pulses(
+                samples[search:].mean(axis=1), min_scale=PULSE_MIN_SCALE,
+                max_scale=PULSE_MAX_SCALE)
         if candidate is not None:
             candidate_start = search + candidate[0] - 16*candidate[1]
             interval = (candidate_start-frame_start)/scale

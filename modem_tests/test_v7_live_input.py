@@ -34,8 +34,10 @@ class V7LiveInputTests(unittest.TestCase):
             if chunk is None:
                 continue
             taken.append(chunk.copy())
+            pulse_starts = live.pulse_starts(chunk)
             results, _ = v7.decode_pulse_stream(self.model, chunk, latest_only=True,
-                                                state=state)
+                                                state=state,
+                                                pulse_starts=pulse_starts)
             live.decoded()
             indices += [r.diag.get('source_index') for r in results]
         return live, taken, indices, len(audio)/rate
@@ -48,6 +50,45 @@ class V7LiveInputTests(unittest.TestCase):
         self.assertLessEqual(len(taken), FRAMES)
         self.assertLessEqual(max(len(t) for t in taken), live.cap())
         self.assertLessEqual(live.cap(), 2.3*v7.PULSE_FRAME)   # locked at 1x
+
+    def test_latest_only_still_scans_without_upstream_anchors(self):
+        results, _ = v7.decode_pulse_stream(
+            self.model, self.wire, latest_only=True)
+        self.assertEqual(len(results), 1)
+
+    def test_invalid_cached_anchors_fall_back_to_full_scan(self):
+        expected, _ = v7.decode_pulse_stream(
+            self.model, self.wire, latest_only=True)
+        fallback, _ = v7.decode_pulse_stream(
+            self.model, self.wire, latest_only=True,
+            pulse_starts=((100.0, 1.0, .99), (110.0, 1.0, .99)))
+        self.assertEqual(len(fallback), 1)
+        self.assertEqual(fallback[0].diag.get('source_index'),
+                         expected[0].diag.get('source_index'))
+
+    def test_cached_anchors_match_the_full_scan_after_gain(self):
+        live = LiveInput()
+        live.add(np.array(self.wire, dtype=np.float32, copy=True))
+        audio = live.take(0.0)
+        self.assertIsNotNone(audio)
+        anchors = live.pulse_starts(audio)
+        self.assertGreaterEqual(len(anchors), 2)
+
+        for force_float32 in (False, True):
+            full_scan, _ = v7.decode_pulse_stream(
+                self.model, audio, latest_only=True, input_gain=2.0,
+                force_float32=force_float32)
+            cached, _ = v7.decode_pulse_stream(
+                self.model, audio, latest_only=True, input_gain=2.0,
+                force_float32=force_float32, pulse_starts=anchors)
+            with self.subTest(force_float32=force_float32):
+                self.assertEqual(len(cached), 1)
+                self.assertEqual(cached[0].diag.get('source_index'),
+                                 full_scan[0].diag.get('source_index'))
+                np.testing.assert_allclose(
+                    cached[0].coeffs, full_scan[0].coeffs,
+                    rtol=2e-5 if force_float32 else 1e-11,
+                    atol=2e-6 if force_float32 else 1e-12)
 
     def test_incoming_rate_follows_playback_speed(self):
         for speed in (1.0, .8):
