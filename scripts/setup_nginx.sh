@@ -31,8 +31,9 @@ PROJECT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)  # repo root = pare
 # Parse command line arguments
 DRY_RUN=false
 VERBOSE=false
-for arg in "$@"; do
-    case $arg in
+ADDITIONAL_DOMAINS=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
         --dry-run)
             DRY_RUN=true
             shift
@@ -41,8 +42,21 @@ for arg in "$@"; do
             VERBOSE=true
             shift
             ;;
+        --add-domain)
+            if [ "$#" -lt 2 ] || [[ "$2" == -* ]]; then
+                echo "❌ --add-domain requires a domain name" >&2
+                exit 2
+            fi
+            ADDITIONAL_DOMAINS+=("$2")
+            shift 2
+            ;;
+        --add-domain=*)
+            ADDITIONAL_DOMAINS+=("${1#*=}")
+            shift
+            ;;
         *)
             # Unknown option
+            shift
             ;;
     esac
 done
@@ -238,10 +252,24 @@ fi
 # --------------------------------------------
 detect_existing_config() {
     if [ -f "$NGINX_AVAILABLE" ]; then
-        # Extract domain from existing config
-        local existing_domain=$(grep -E "^\s*server_name\s+" "$NGINX_AVAILABLE" 2>/dev/null | head -1 | sed 's/.*server_name\s*\([^;]*\);.*/\1/' | awk '{print $1}' | sed 's/www\.//')
-        if [ -n "$existing_domain" ] && [ "$existing_domain" != "_" ]; then
-            echo "$existing_domain"
+        # Preserve every domain/alias already configured, not only the first
+        # name in the first server_name directive.
+        local existing_domains
+        existing_domains=$(awk '
+            /^[[:space:]]*server_name[[:space:]]+/ {
+                sub(/^[[:space:]]*server_name[[:space:]]+/, "")
+                sub(/;.*/, "")
+                count = split($0, names, /[[:space:]]+/)
+                for (i = 1; i <= count; i++) {
+                    sub(/^www\./, "", names[i])
+                    if (names[i] != "" && names[i] != "_" && !seen[names[i]]++) {
+                        print names[i]
+                    }
+                }
+            }
+        ' "$NGINX_AVAILABLE" 2>/dev/null || true)
+        if [ -n "$existing_domains" ]; then
+            printf '%s\n' "$existing_domains"
             return 0
         fi
     fi
@@ -367,11 +395,16 @@ else
 fi
 
 # 2. Detect existing configuration
+EXISTING_DOMAINS=()
 EXISTING_DOMAIN=""
 if detect_existing_config; then
-    EXISTING_DOMAIN=$(detect_existing_config)
+    EXISTING_DOMAINS_TEXT=$(detect_existing_config)
+    while IFS= read -r domain; do
+        [ -n "$domain" ] && EXISTING_DOMAINS+=("$domain")
+    done <<< "$EXISTING_DOMAINS_TEXT"
+    EXISTING_DOMAIN="${EXISTING_DOMAINS[0]}"
     log_step "🔍 Existing configuration detected"
-    log_info "Domain: $EXISTING_DOMAIN"
+    log_info "Domains: ${EXISTING_DOMAINS[*]}"
     if check_ssl_configured; then
         log_success "SSL: Configured"
     fi
@@ -385,27 +418,28 @@ fi
 # 3. Ask for Domain Name (skip if already configured and no override)
 if [ -n "$EXISTING_DOMAIN" ] && [ -z "${FORCE_DOMAIN_UPDATE:-}" ] && [ "$DRY_RUN" = false ]; then
     echo ""
-    log_info "Using existing domain: $EXISTING_DOMAIN"
-    log_info "(Set FORCE_DOMAIN_UPDATE=1 to change)"
+    log_info "Keeping existing domains: ${EXISTING_DOMAINS[*]}"
+    log_info "(Set FORCE_DOMAIN_UPDATE=1 to replace them)"
     DOMAIN_NAME="$EXISTING_DOMAIN"
 else
     if [ "$DRY_RUN" = true ]; then
         DOMAIN_NAME="${EXISTING_DOMAIN:-example.com}"
         log_info "[DRY-RUN] Would prompt for domain name (using: $DOMAIN_NAME for preview)"
-else
-    echo ""
-    echo "----------------------------------------------------------------"
-    if [ -n "$EXISTING_DOMAIN" ]; then
-        read -p "Enter your domain name [current: $EXISTING_DOMAIN]: " DOMAIN_INPUT
     else
-        read -p "Enter your domain name (e.g., mysite.com): " DOMAIN_INPUT
+        echo ""
+        echo "----------------------------------------------------------------"
+        if [ -n "$EXISTING_DOMAIN" ]; then
+            read -p "Enter your domain name [current: $EXISTING_DOMAIN]: " DOMAIN_INPUT
+        else
+            read -p "Enter your domain name (e.g., mysite.com): " DOMAIN_INPUT
+        fi
+        DOMAIN_NAME=${DOMAIN_INPUT:-${EXISTING_DOMAIN:-_}}
+        echo "----------------------------------------------------------------"
     fi
-    DOMAIN_NAME=${DOMAIN_INPUT:-${EXISTING_DOMAIN:-_}}
-    echo "----------------------------------------------------------------"
-fi
 fi
 
-# Validate domain name format
+# Validate every domain strictly because names are written directly into
+# nginx's server_name directive.
 validate_domain() {
     local domain=$1
     if [ "$domain" = "_" ]; then
@@ -418,12 +452,42 @@ validate_domain() {
     return 1
 }
 
-if ! validate_domain "$DOMAIN_NAME"; then
-    log_warning "Domain name format may be invalid: $DOMAIN_NAME"
-    log_info "Continuing anyway (use '_' for default server)"
+DOMAIN_NAMES=()
+if [ -n "$EXISTING_DOMAIN" ] && { [ -z "${FORCE_DOMAIN_UPDATE:-}" ] || [ "$DOMAIN_NAME" = "$EXISTING_DOMAIN" ]; }; then
+    DOMAIN_NAMES=("${EXISTING_DOMAINS[@]}")
 fi
 
-log_info "Using Server Name: $DOMAIN_NAME and www.$DOMAIN_NAME"
+add_domain() {
+    local domain="$1"
+    domain="${domain#www.}"
+    if ! validate_domain "$domain"; then
+        log_error "Invalid domain name: $1"
+        exit 2
+    fi
+    for existing in "${DOMAIN_NAMES[@]}"; do
+        if [ "$existing" = "$domain" ]; then
+            return
+        fi
+    done
+    DOMAIN_NAMES+=("$domain")
+}
+
+if [ "${#DOMAIN_NAMES[@]}" -eq 0 ]; then
+    add_domain "$DOMAIN_NAME"
+fi
+for domain in "${ADDITIONAL_DOMAINS[@]}"; do
+    add_domain "$domain"
+done
+
+SERVER_NAMES=()
+for domain in "${DOMAIN_NAMES[@]}"; do
+    SERVER_NAMES+=("$domain")
+    if [ "$domain" != "_" ]; then
+        SERVER_NAMES+=("www.$domain")
+    fi
+done
+SERVER_NAME_DIRECTIVE="${SERVER_NAMES[*]}"
+log_info "Using Server Names: $SERVER_NAME_DIRECTIVE"
 
 # 4. Remove old site configuration and backup existing config
 SSL_BLOCK=""
@@ -502,8 +566,8 @@ fi
 render_nginx_config() {
     cat <<EOF
 server {
-    # 1. FIX WWW ERROR: Listen for both bare domain and www subdomain
-    server_name $DOMAIN_NAME www.$DOMAIN_NAME;
+    # Every configured bare domain and its www alias is served by this site.
+    server_name $SERVER_NAME_DIRECTIVE;
 $([ "$SSL_ENABLED" != "true" ] && echo "    # Listen directives (HTTP only - removed when SSL is configured)")
 $([ "$SSL_ENABLED" != "true" ] && echo "    listen 80 default_server;")
 $([ "$SSL_ENABLED" != "true" ] && echo "    listen [::]:80 default_server;")
@@ -797,13 +861,19 @@ fi
 
 echo ""
 log_info "Access URLs:"
-echo "   - Main Site:     http://$DOMAIN_NAME/  (and www.$DOMAIN_NAME)"
-echo "   - ASCII Viewer:  http://$DOMAIN_NAME/ascii/"
+for domain in "${DOMAIN_NAMES[@]}"; do
+    echo "   - Main Site:     http://$domain/  (and www.$domain)"
+    echo "   - ASCII Viewer:  http://$domain/ascii/"
+done
 
-if [ "$DOMAIN_NAME" != "_" ] && [ "$DRY_RUN" = false ]; then
-echo ""
+if [ "${DOMAIN_NAMES[0]}" != "_" ] && [ "$DRY_RUN" = false ]; then
+    CERTBOT_COMMAND="sudo certbot --nginx"
+    for domain in "${SERVER_NAMES[@]}"; do
+        CERTBOT_COMMAND+=" -d $domain"
+    done
+    echo ""
     log_warning "CRITICAL FINAL STEP FOR SSL:"
-    log_info "Since we added 'www', you MUST run this command again:"
-    echo "   sudo certbot --nginx -d $DOMAIN_NAME -d www.$DOMAIN_NAME"
+    log_info "After DNS for every name points to this server, run Certbot to issue/update the certificate:"
+    echo "   $CERTBOT_COMMAND"
 fi
     echo "================================================================"
