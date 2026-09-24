@@ -971,12 +971,17 @@ samples (288 preamble + 3,456 body + 144 metadata symbol
 runs the V7 prototype
 decoder, displays the newest usable reconstruction, and can save frames with
 `--save-dir`. A `--headless` receiver is available for loopback diagnostics.
-The window is resizable; keyboard `F` toggles fullscreen, `I` toggles the
-diagnostic panel, and `Escape` exits fullscreen. Diagnostics are shown by
-default and can be hidden with `--no-diagnostics`; `--no-log` suppresses routine
-console status output for standalone embedded use. Sender and receiver print one
-hardware/status line at startup; routine per-frame output is disabled by default
-and can be enabled with `--log`.
+The window uses a small GLFW/ModernGL viewer: it uploads only newly decoded
+images, waits for events between updates, and presents with vsync. The existing
+Sync/Index, Decode/Flow, Input/Level, and Picture/Signal diagnostics remain in a
+compact GPU-rendered panel refreshed at 5 Hz. The window is resizable; keyboard
+`F` toggles fullscreen, `I` toggles the diagnostic panel, and `Escape` exits
+fullscreen. Diagnostics are shown by default and can be hidden with
+`--no-diagnostics`; `--no-log` suppresses routine console status output for
+standalone embedded use. Use `--profile-ui` to print five-second process-CPU and
+viewer-thread CPU measurements while profiling the window. Sender and receiver
+print one hardware/status line at startup; routine per-frame output is disabled
+by default and can be enabled with `--log`.
 The sender's optional `--mono-sum` emits one audio channel containing the
 shared M signal; the receiver accepts mono input devices automatically. The sender uses an energy-preserving sum
 with a safety limiter rather than a simple average, avoiding an unnecessary
