@@ -693,16 +693,19 @@ def run_receive(args):
         root = tk.Tk()
         root.title('V7 modem receiver')
         root.resizable(True, True)
-        root.geometry('640x650')
-        root.configure(background='black')
-        image_frame = tk.Frame(root, width=620, height=480,
-                               background='black')
+        root.geometry('920x780')
+        root.configure(background='#0b1117')
+        image_frame = tk.Frame(root, width=880, height=500,
+                               background='#030609')
         image_frame.pack_propagate(False)
-        info_visible = args.show_diagnostics
-        info_frame = tk.Frame(root, background='black')
+        # Build the information widgets even when initially hidden so the I
+        # key can reveal them later without a separate widget-construction path.
+        info_visible = True
+        show_info = args.show_diagnostics
+        info_frame = tk.Frame(root, background='#0b1117')
         if args.fullscreen:
             root.attributes('-fullscreen', True)
-        image_frame.pack(padx=10, pady=8, fill='both', expand=True)
+        image_frame.pack(padx=12, pady=(12, 8), fill='both', expand=True)
 
         def toggle_fullscreen(_event=None):
             root.attributes('-fullscreen', not root.attributes('-fullscreen'))
@@ -711,7 +714,7 @@ def run_receive(args):
             nonlocal info_visible
             info_visible = not info_visible
             if info_visible:
-                info_frame.pack(fill='x', padx=6, pady=(0, 4))
+                info_frame.pack(fill='x', padx=12, pady=(0, 12))
             else:
                 info_frame.pack_forget()
 
@@ -723,39 +726,67 @@ def run_receive(args):
         root.bind_all('<KeyPress-I>', toggle_information)
         root.focus_force()
         label = tk.Label(image_frame, text='Acquiring V7 clock…',
-                         background='black')
-        label.configure(background='black')
+                         background='#030609', foreground='#dce8f2',
+                         font=('TkDefaultFont', 16))
         label.pack(expand=True, fill='both')
-        device_label = status_label = levels_label = stats_label = None
-        quality_label = sync_label = None
+        device_label = status_label = None
+        info_labels = {}
         if info_visible:
-            info_frame.pack(fill='x', padx=6, pady=(0, 4))
-            device_label = tk.Label(info_frame, text=f'V7 input: {args.device}',
-                                    background='black', foreground='white',
-                                    anchor='w', justify='left')
-            device_label.pack(fill='x')
-            status_label = tk.Label(info_frame, text='status: acquiring', anchor='w',
-                                    justify='left',
-                                    background='black', foreground='white')
-            status_label.pack(fill='x')
-            levels_label = tk.Label(info_frame, text='levels: --', anchor='w',
-                                    font='TkFixedFont', background='black',
-                                    foreground='white')
-            levels_label.pack(fill='x')
-            stats_label = tk.Label(info_frame, text='frames: --', anchor='w',
-                                   font='TkFixedFont', background='black',
-                                   foreground='white')
-            stats_label.pack(fill='x')
-            # Its own line: what is on screen, where the loop should be now,
-            # and how far apart they are.
-            sync_label = tk.Label(info_frame, text='index --', anchor='w',
-                                  font='TkFixedFont', background='black',
-                                  foreground='white')
-            sync_label.pack(fill='x')
-            quality_label = tk.Label(info_frame, text='quality: --', anchor='w',
-                                     font='TkFixedFont', background='black',
-                                     foreground='white')
-            quality_label.pack(fill='x')
+            info_frame.pack(fill='x', padx=12, pady=(0, 12))
+            info_frame.grid_columnconfigure(0, weight=1, uniform='info')
+            info_frame.grid_columnconfigure(1, weight=1, uniform='info')
+            topbar = tk.Frame(info_frame, background='#0b1117')
+            topbar.grid(row=0, column=0, columnspan=2, sticky='ew',
+                        pady=(0, 8))
+            topbar.grid_columnconfigure(1, weight=1)
+            tk.Label(topbar, text='V7 RECEIVER', background='#0b1117',
+                     foreground='#6dd6c0',
+                     font=('TkDefaultFont', 11, 'bold')).grid(
+                         row=0, column=0, sticky='w', padx=(0, 12))
+            device_label = tk.Label(
+                topbar,
+                text=(f'{args.device}  ·  {capture_rate/1000:g} kHz  ·  '
+                      f'{input_channels} ch  ·  {meter["mode"]}'),
+                background='#0b1117', foreground='#c6d4e0', anchor='w',
+                font=('TkDefaultFont', 10))
+            device_label.grid(row=0, column=1, sticky='w')
+            status_label = tk.Label(
+                topbar, text='ACQUIRING', background='#263344',
+                foreground='#f1c777', padx=10, pady=4,
+                font=('TkDefaultFont', 9, 'bold'))
+            status_label.grid(row=0, column=2, sticky='e', padx=(8, 10))
+            tk.Label(topbar, text='F fullscreen  ·  I toggle info  ·  Esc exit',
+                     background='#0b1117', foreground='#8499ad',
+                     font=('TkDefaultFont', 9)).grid(
+                         row=0, column=3, sticky='e')
+
+            card_specs = (
+                ('sync', 'SYNC  /  INDEX'),
+                ('decode', 'DECODE  /  FLOW'),
+                ('input', 'INPUT  /  LEVEL'),
+                ('signal', 'PICTURE  /  SIGNAL'),
+            )
+            for index, (key, title) in enumerate(card_specs):
+                card = tk.Frame(
+                    info_frame, background='#131e29',
+                    highlightbackground='#26384a', highlightthickness=1,
+                    padx=12, pady=8)
+                card.grid(row=1+index//2, column=index % 2, sticky='nsew',
+                          padx=(0, 6) if index % 2 == 0 else (6, 0),
+                          pady=4)
+                tk.Label(card, text=title, background='#131e29',
+                         foreground='#89a2b8',
+                         font=('TkDefaultFont', 9, 'bold')).pack(
+                             anchor='w', pady=(0, 5))
+                value = tk.Label(
+                    card, text='—', background='#131e29',
+                    foreground='#e3edf5', anchor='nw', justify='left',
+                    font=('TkFixedFont', 10), padx=0, pady=0)
+                value.pack(fill='x', anchor='w')
+                info_labels[key] = value
+        if not show_info:
+            info_visible = False
+            info_frame.pack_forget()
 
         def tick():
             nonlocal rendered
@@ -774,49 +805,63 @@ def run_receive(args):
                               f'{ideal}{way.get(ideal_way, "")}')
                 diff_text = ('--' if diff is None else
                              f'{diff:+d} frames ({diff*1000/P.LOOP_IPS:+.0f} ms)')
-                sync_label.configure(text=(
-                    f'index {shown_text}'
-                    f' / {"--" if meter["max_index"] is None else meter["max_index"]}'
-                    f'   calculated {ideal_text}'
-                    f'   diff {diff_text}'))
                 now = time.monotonic()
                 # Rates are recomputed at display time so they fall to 0 when
                 # input or decoding stops instead of freezing.
                 meter['decode_fps'] = windowed_rate(decode_times, now)
                 meter['shown_fps'] = windowed_rate(shown_times, now)
                 incoming = live_input.incoming_fps(now)
-                levels_label.configure(text=(
-                    f'peak L/R {peak[0]:6.1f}/{peak[1]:6.1f} dBFS | '
-                    f'rms {rms[0]:6.1f}/{rms[1]:6.1f} dBFS'))
-                stats_label.configure(text=(
-                    f'frames {meter["decoded"]}  '
-                    f'verified {meter["verified"]} '
-                    f'lost {meter["lost"]}  input blocks {meter["blocks"]} '
-                    f'dropped {meter["dropped"]}'))
-                quality_label.configure(text=f'quality: {meter["quality"]}')
-                status_label.configure(wraplength=max(240, root.winfo_width()-12))
                 pulse = meter['pulse']
-                pulse_text = '--' if pulse is None else f'{pulse:.4g}'
+                pulse_text = '--' if pulse is None else f'{pulse:.3f}'
                 timing = meter['timing_delta']
-                timing_text = '--' if timing is None else f'{timing:.8f}'
+                timing_text = '--' if timing is None else f'{timing:+.1f} ppm'
                 speed = meter['playback_speed']
-                speed_text = '--' if speed is None else f'{speed:.8f}x'
+                speed_text = '--' if speed is None else f'{speed:.3f}×'
                 aspect_text = P.V7_ASPECT_NAMES[int(meter['aspect']) & 7]
                 candidate_aspect = P.V7_ASPECT_NAMES[
                     int(meter['aspect_candidate']) & 7]
-                status_label.configure(text=(
-                  f'status {meter["status"]}  mode {meter["mode"]}  '
-                  f'frame {meter["counter"]}  '
-                    f'aspect {aspect_text} '
-                    f'(candidate {candidate_aspect} '
-                    f'x{meter["aspect_streak"]})  pulse {pulse_text}\n'
-                    f'gain {meter["auto_gain"]:4.1f}x'
-                    f'{" R inverted" if meter["polarity"] < 0 else ""}  '
-                    f'speed {speed_text}  timing {timing_text} ppm  '
-                    f'decode {meter["decode_ms"] if meter["decode_ms"] is not None else "--"} ms | '
-                    f'incoming {incoming:5.2f} fps  '
-                    f'decode {meter["decode_fps"]:5.2f} cycles/s  '
-                    f'shown {meter["shown_fps"]:5.2f} fps'))
+                max_index = ('--' if meter['max_index'] is None else
+                             str(meter['max_index']))
+                timing_confidence = meter['quality']
+                decode_ms = ('--' if meter['decode_ms'] is None else
+                             f'{meter["decode_ms"]:.1f} ms')
+                polarity_text = ('inverted' if meter['polarity'] < 0 else
+                                 'normal')
+                info_labels['sync'].configure(text=(
+                    f'shown      {shown_text} / {max_index}\n'
+                    f'calculated {ideal_text}\n'
+                    f'offset     {diff_text}'))
+                info_labels['decode'].configure(text=(
+                    f'frame {meter["counter"] if meter["counter"] is not None else "--"}   '
+                    f'good {meter["verified"]}   lost {meter["lost"]}\n'
+                    f'incoming {incoming:5.2f} fps   '
+                    f'decode {meter["decode_fps"]:5.2f}/s   '
+                    f'shown {meter["shown_fps"]:5.2f} fps\n'
+                    f'decode time {decode_ms}\n'
+                    f'input blocks {meter["blocks"]}   dropped {meter["dropped"]}'))
+                info_labels['input'].configure(text=(
+                    f'peak L/R  {peak[0]:6.1f} / {peak[1]:6.1f} dBFS\n'
+                    f'RMS  L/R  {rms[0]:6.1f} / {rms[1]:6.1f} dBFS\n'
+                    f'auto gain {meter["auto_gain"]:5.2f}×\n'
+                    f'right leg {polarity_text}'))
+                info_labels['signal'].configure(text=(
+                    f'aspect {aspect_text}  ·  '
+                    f'candidate {candidate_aspect} ×{meter["aspect_streak"]}\n'
+                    f'foundation {timing_confidence}\n'
+                    f'pulse {pulse_text}   speed {speed_text}\n'
+                    f'timing {timing_text}'))
+                status_colors = {
+                    'received': '#173d37', 'verified': '#173d37',
+                    'degraded': '#493a1f', 'lost': '#48292e',
+                    'acquiring': '#263344',
+                }
+                status = str(meter['status']).lower()
+                status_label.configure(
+                    text=status.upper(),
+                    background=status_colors.get(status, '#48292e'),
+                    foreground=('#8be0c4' if status in ('received', 'verified')
+                                else '#f1c777' if status in ('degraded', 'acquiring')
+                                else '#f29aa0'))
             frame = display_frames.snapshot()
             if frame is not None and frame.generation != rendered:
                 image = values_image(frame.values, frame.shapes)
