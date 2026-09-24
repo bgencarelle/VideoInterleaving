@@ -3,6 +3,7 @@
 # Tkinter and PortAudio come from the Python/OS installation, not this pip list.
 # Debian also splits the Pillow Tk bridge into python3-pil.imagetk.
 numpy>=1.24
+numba>=0.61
 scipy>=1.10
 Pillow>=9.5
 sounddevice>=0.4.6

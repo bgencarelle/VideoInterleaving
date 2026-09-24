@@ -393,6 +393,9 @@ def run_receive(args):
     # Metadata is decoded with the common bootstrap model; the body model is
     # selected from the protected encoding ID carried by each frame.
     model = _model(args.fixture, 'nearest')
+    # Numba compiles the equalizer on its first call; do that before opening the
+    # audio stream so compilation cannot stall live capture and drop a packet.
+    P.warmup_equalizer(model)
     models = {model.encoding_type: model}
 
     def model_factory(encoding_type):

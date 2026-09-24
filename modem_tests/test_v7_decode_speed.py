@@ -157,6 +157,27 @@ class V7DecodeSpeedTests(unittest.TestCase):
             expected = np.where(valid, tx_var[np.maximum(v7.BLOCK_GROUP_INDEX, 0)], 0.0)
             np.testing.assert_array_equal(model.block_prior_tables[phase], expected)
 
+    def test_numba_equalizer_matches_numpy_across_rank_phases(self):
+        model = v7.load_model(TARGET, 'nearest')
+        rng = np.random.default_rng(20260924)
+        H = (rng.standard_normal((v7.F, 65, 2, 2)) +
+             1j*rng.standard_normal((v7.F, 65, 2, 2)))*.35
+        H[:, :, 0, 0] += 1
+        H[:, :, 1, 1] += 1
+        Z = (rng.standard_normal((v7.F, 65, 2)) +
+             1j*rng.standard_normal((v7.F, 65, 2)))
+        noise = rng.uniform(.01, .2, size=(v7.F, 2))
+
+        for counter in range(v7.TAIL_PHASES):
+            expected = v7._equalize_numpy(model, Z, H, noise, counter)
+            actual = v7._equalize_numba(model, Z, H, noise, counter)
+            with self.subTest(counter=counter):
+                np.testing.assert_allclose(
+                    actual[0], expected[0], rtol=1e-9, atol=1e-11)
+                np.testing.assert_allclose(
+                    actual[1], expected[1], rtol=1e-9, atol=1e-11)
+                np.testing.assert_array_equal(actual[2], expected[2])
+
     def test_sinc_table_is_cached_and_read_only(self):
         first = v7_core._sinc_weight_table(16)
         self.assertIs(first, v7_core._sinc_weight_table(16))

@@ -18,6 +18,7 @@ from pathlib import Path
 from time import perf_counter
 
 import numpy as np
+from numba import njit
 from PIL import Image
 from scipy.linalg import hadamard
 from scipy.optimize import curve_fit
@@ -2351,6 +2352,230 @@ def _fade_and_noise_float32(Z, H, tone_reference=False,
     return H, noise
 
 
+@njit(cache=True, fastmath=False)
+def _equalize_numba_kernel(Z, H, noise, block_symbols, block_bins,
+                           block_prior, group_block, group_stream, group_q,
+                           ranks, lam, gain, h8, noise_floor, xhat, conf, got):
+    """Per-cell MMSE and group LMMSE without NumPy's small-matrix overhead."""
+    nblocks, nsym = block_symbols.shape
+    est = np.zeros((nblocks, 2, 2, nsym), np.complex128)
+    var = np.full((nblocks, 2, 2, nsym), np.inf)
+    for b in range(nblocks):
+        k_bin = block_bins[b]
+        for t in range(nsym):
+            symbol = block_symbols[b, t]
+            h00 = H[symbol, k_bin, 0, 0]
+            h01 = H[symbol, k_bin, 0, 1]
+            h10 = H[symbol, k_bin, 1, 0]
+            h11 = H[symbol, k_bin, 1, 1]
+            z0 = Z[symbol, k_bin, 0]
+            z1 = Z[symbol, k_bin, 1]
+            n0 = max(noise[symbol, 0], noise_floor)
+            n1 = max(noise[symbol, 1], noise_floor)
+            for q in range(2):
+                p0 = block_prior[b, 0, q]
+                p1 = block_prior[b, 1, q]
+                q0 = p0+1e-12
+                q1 = p1+1e-12
+                s00 = q0*(h00*np.conj(h00))+q1*(h01*np.conj(h01))+n0
+                s11 = q0*(h10*np.conj(h10))+q1*(h11*np.conj(h11))+n1
+                s01 = q0*h00*np.conj(h10)+q1*h01*np.conj(h11)
+                s10 = q0*h10*np.conj(h00)+q1*h11*np.conj(h01)
+                det = s00*s11-s01*s10
+                i00 = s11/det
+                i01 = -s01/det
+                i10 = -s10/det
+                i11 = s00/det
+                for k in range(2):
+                    pk = q0 if k == 0 else q1
+                    prior_k = p0 if k == 0 else p1
+                    hk0 = h00 if k == 0 else h01
+                    hk1 = h10 if k == 0 else h11
+                    w0 = pk*(np.conj(hk0)*i00+np.conj(hk1)*i10)
+                    w1 = pk*(np.conj(hk0)*i01+np.conj(hk1)*i11)
+                    estimate = w0*z0+w1*z1
+                    beta = (w0*hk0+w1*hk1).real
+                    variance = max(beta*pk-beta*beta*prior_k, 1e-12)
+                    if beta > 1e-6:
+                        est[b, k, q, t] = estimate/beta
+                        var[b, k, q, t] = variance/(beta*beta)
+
+    ngroups = ranks.shape[0]
+    A = np.empty((8, 8))
+    S = np.empty((8, 8))
+    L = np.zeros((8, 8))
+    R = np.empty((8, 9))
+    X = np.empty((8, 9))
+    lam_g = np.empty(8)
+    gain_g = np.empty(8)
+    y = np.empty(8)
+    sig = np.empty(8)
+    for group in range(ngroups):
+        block = group_block[group]
+        stream = group_stream[group]
+        quadrature = group_q[group]
+        for j in range(8):
+            value = est[block, stream, quadrature, j]
+            y[j] = value.real if quadrature == 0 else value.imag
+            variance = var[block, stream, quadrature, j]
+            sig[j] = variance/2 if np.isfinite(variance) else 1e9
+            rank = ranks[group, j]
+            if rank >= 0:
+                lam_g[j] = lam[rank]
+                gain_g[j] = gain[rank]
+            else:
+                lam_g[j] = 1e-12
+                gain_g[j] = 0.0
+
+        for i in range(8):
+            for j in range(8):
+                A[i, j] = h8[i, j]*gain_g[j]
+        for i in range(8):
+            for k in range(8):
+                acc = 0.0
+                for j in range(8):
+                    acc += A[i, j]*lam_g[j]*A[k, j]
+                S[i, k] = acc
+            S[i, i] += sig[i]
+
+        # Solve the group system by Cholesky with all 8 estimates as RHS.
+        for i in range(8):
+            for j in range(i+1):
+                acc = S[i, j]
+                for k in range(j):
+                    acc -= L[i, k]*L[j, k]
+                if i == j:
+                    L[i, i] = np.sqrt(acc)
+                else:
+                    L[i, j] = acc/L[j, j]
+        for i in range(8):
+            for j in range(8):
+                R[i, j] = A[i, j]*lam_g[j]
+            R[i, 8] = y[i]
+        for i in range(8):
+            for column in range(9):
+                acc = R[i, column]
+                for k in range(i):
+                    acc -= L[i, k]*X[k, column]
+                X[i, column] = acc/L[i, i]
+        for j in range(8):
+            rank = ranks[group, j]
+            if rank < 0:
+                continue
+            estimate = 0.0
+            weight = 0.0
+            for i in range(8):
+                estimate += X[i, j]*X[i, 8]
+                weight += X[i, j]*X[i, j]
+            confidence = 1.0-(lam_g[j]-weight)/lam_g[j]
+            xhat[rank] = estimate
+            conf[rank] = min(max(confidence, 0.0), 1.0)
+            got[rank] = True
+
+
+def _equalize_numba(model, Z, H, noise, counter):
+    """Run the compiled float64 equalizer; float32 retains the NumPy path."""
+    phase = counter % TAIL_PHASES
+    xhat = np.zeros_like(model.mu)
+    conf = np.zeros_like(model.mu)
+    got = np.zeros(model.mu.shape, np.bool_)
+    _equalize_numba_kernel(
+        np.ascontiguousarray(Z, dtype=np.complex128),
+        np.ascontiguousarray(H, dtype=np.complex128),
+        np.ascontiguousarray(noise, dtype=np.float64),
+        BLOCK_SYMBOLS, BLOCK_BINS, model.block_prior_tables[phase],
+        GROUP_BLOCK, GROUP_STREAM_INDEX, GROUP_Q_INDEX,
+        model.rank_tables[phase], model.lam, model.gain,
+        np.ascontiguousarray(H8), NOISE_FLOOR, xhat, conf, got)
+    return xhat, conf, got
+
+
+def warmup_equalizer(model):
+    """Compile the Numba signature before a real-time receiver opens audio."""
+    shape = (F, 65)
+    _equalize_numba(model, np.zeros(shape+(2,), np.complex128),
+                    np.zeros(shape+(2, 2), np.complex128),
+                    np.zeros((F, 2), np.float64), 1)
+
+
+def _equalize_numpy(model, Z, H, noise, counter, force_float32=False):
+    """Reference/fallback equalizer, retained for the float32 decode path."""
+    idx = model.rank_tables[counter % TAIL_PHASES]
+    if force_float32:
+        block_prior = (model.block_prior_tables32[counter % TAIL_PHASES]
+                       if model.block_prior_tables32 else
+                       block_priors(model.gain32, model.lam32, idx).astype(
+                           np.float32))
+    else:
+        block_prior = (model.block_prior_tables[counter % TAIL_PHASES]
+                       if model.block_prior_tables else
+                       block_priors(model.gain, model.lam, idx))
+    Hc = H[BLOCK_SYMBOLS, BLOCK_BINS[:, None]]
+    Zc = Z[BLOCK_SYMBOLS, BLOCK_BINS[:, None]]
+    real_dtype = np.float32 if force_float32 else float
+    complex_dtype = np.complex64 if force_float32 else complex
+    estimates = np.zeros((len(BLOCKS), 2, 2, 8), dtype=complex_dtype)
+    variances = np.full((len(BLOCKS), 2, 2, 8), np.inf, dtype=real_dtype)
+    for q in range(2):
+        prior = block_prior[:, :, q]
+        safe = prior+(np.float32(1e-12) if force_float32 else 1e-12)
+        S = ((Hc*safe[:, None, None, :]) @
+             Hc.conj().transpose(0, 1, 3, 2))
+        S[..., 0, 0] += np.maximum(noise[BLOCK_SYMBOLS, 0], NOISE_FLOOR)
+        S[..., 1, 1] += np.maximum(noise[BLOCK_SYMBOLS, 1], NOISE_FLOOR)
+        HP = Hc*safe[:, None, None, :]
+        W = _solve_2x2_mat(S, HP).conj().transpose(0, 1, 3, 2)
+        xt = np.einsum('btij,btj->bti', W, Zc)
+        B = W@Hc
+        cov = W@S@W.conj().transpose(0, 1, 3, 2)
+        beta = np.diagonal(B, axis1=-2, axis2=-1).real
+        var = np.maximum(np.diagonal(cov, axis1=-2, axis2=-1).real-
+                         beta**2*prior[:, None, :],
+                         np.float32(1e-12) if force_float32 else 1e-12)
+        beta_k = beta.transpose(0, 2, 1)
+        estimates[:, :, q] = np.divide(
+            xt.transpose(0, 2, 1), beta_k,
+            out=np.zeros_like(xt.transpose(0, 2, 1)), where=beta_k > 1e-6)
+        variances[:, :, q] = np.divide(
+            var.transpose(0, 2, 1), beta_k**2,
+            out=np.full_like(var.transpose(0, 2, 1), np.inf),
+            where=beta_k > 1e-6)
+    live_all = idx >= 0
+    group_count = len(GROUPS)
+    y_all = np.empty((group_count, 8), dtype=real_dtype)
+    sig_all = np.empty((group_count, 8), dtype=real_dtype)
+    values_all = estimates[GROUP_BLOCK, GROUP_STREAM_INDEX, GROUP_Q_INDEX]
+    vars_all = variances[GROUP_BLOCK, GROUP_STREAM_INDEX, GROUP_Q_INDEX]
+    y_all[:] = values_all.real
+    y_all[GROUP_Q_INDEX == 1] = values_all[GROUP_Q_INDEX == 1].imag
+    sig_all[:] = np.where(np.isfinite(vars_all), vars_all/2, 1e9)
+    lam_model = model.lam32 if force_float32 else model.lam
+    gain_model = model.gain32 if force_float32 else model.gain
+    lam_all = np.where(live_all, lam_model[np.maximum(idx, 0)], 1e-12)
+    gain_all = np.where(live_all, gain_model[np.maximum(idx, 0)], 0.)
+    h8 = H8.astype(np.float32 if force_float32 else float)
+    A_all = h8[None, :, :]*gain_all[:, None, :]
+    S_all = ((A_all*lam_all[:, None, :]) @
+             A_all.transpose(0, 2, 1))
+    S_all[:, np.arange(8), np.arange(8)] += sig_all
+    M_all = lam_all[:, :, None]*A_all.transpose(0, 2, 1)
+    K_all = np.linalg.solve(S_all.transpose(0, 2, 1),
+                            M_all.transpose(0, 2, 1)).transpose(0, 2, 1)
+    x_all = np.einsum('gij,gj->gi', K_all, y_all)
+    post_all = lam_all-np.einsum(
+        'gij,gji->gi', K_all, A_all*lam_all[:, None, :])
+    conf_all = np.clip(1-post_all/lam_all, 0, 1)
+    mu = model.mu32 if force_float32 else model.mu
+    xhat = np.zeros_like(mu, dtype=real_dtype)
+    conf = np.zeros_like(mu, dtype=real_dtype)
+    got = np.zeros_like(model.mu, bool)
+    live_ranks = idx[live_all]
+    xhat[live_ranks] = x_all[live_all]
+    conf[live_ranks] = conf_all[live_all]
+    got[live_ranks] = True
+    return xhat, conf, got
+
+
 def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
                  diagnostics=None, direct_body=None, force_float32=False,
                  pilot_timing='baseline', pilot_counter=None,
@@ -2419,96 +2644,13 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
             (perf_counter()-stage_started)*1000)
     stage_started = perf_counter()
     DEBUG['Z'], DEBUG['H'], DEBUG['noise'] = Z, H, noise
-    # Per-cell 2x2 MMSE (§9.6 step 1) with priors from group powers.  Keep all
-    # blocks and both quadratures in one batch: the small solve is cheap, but
-    # entering Python once per block/channel was not.
-    idx = model.rank_tables[counter % TAIL_PHASES]
-    priors = model.block_prior_tables
     if force_float32:
-        block_prior = (model.block_prior_tables32[counter % TAIL_PHASES]
-                       if model.block_prior_tables32 else
-                       block_priors(model.gain32, model.lam32, idx).astype(
-                           np.float32))
+        xhat, conf, got = _equalize_numpy(
+            model, Z, H, noise, counter, force_float32=True)
+        real_dtype, mu = np.float32, model.mu32
     else:
-        block_prior = (priors[counter % TAIL_PHASES] if priors
-                       else block_priors(model.gain, model.lam, idx))
-    Hc = H[BLOCK_SYMBOLS, BLOCK_BINS[:, None]]
-    Zc = Z[BLOCK_SYMBOLS, BLOCK_BINS[:, None]]
-    estimates = np.zeros((len(BLOCKS), 2, 2, 8),
-                         np.complex64 if force_float32 else complex)
-    variances = np.full((len(BLOCKS), 2, 2, 8), np.inf,
-                        dtype=np.float32 if force_float32 else float)
-    for q in range(2):
-        prior = block_prior[:, :, q]
-        safe = prior + (np.float32(1e-12) if force_float32 else 1e-12)
-        S = (Hc*safe[:, None, None, :]) @ Hc.conj().transpose(0, 1, 3, 2)
-        S[..., 0, 0] += np.maximum(noise[BLOCK_SYMBOLS, 0],
-                                   NOISE_FLOOR)
-        S[..., 1, 1] += np.maximum(noise[BLOCK_SYMBOLS, 1],
-                                   NOISE_FLOOR)
-        # W = P H^H S^-1 (prior on the left, inverse on the right).  S is
-        # Hermitian, so W^H = S^-1 (H P): one batched left solve, then the
-        # conjugate transpose.  Solving S^-1 (P H^H) instead is only correct
-        # when a cell's M and S priors are equal.
-        HP = Hc*safe[:, None, None, :]
-        W = _solve_2x2_mat(S, HP).conj().transpose(0, 1, 3, 2)
-        xt = np.einsum('btij,btj->bti', W, Zc)
-        B = W @ Hc
-        cov = W @ S @ W.conj().transpose(0, 1, 3, 2)
-        beta = np.diagonal(B, axis1=-2, axis2=-1).real
-        var = np.maximum(np.diagonal(cov, axis1=-2, axis2=-1).real -
-                         beta**2*prior[:, None, :], 1e-12)
-        beta_k = beta.transpose(0, 2, 1)
-        estimates[:, :, q] = np.divide(
-            xt.transpose(0, 2, 1), beta_k,
-            out=np.zeros_like(xt.transpose(0, 2, 1)),
-            where=beta_k > 1e-6)
-        variances[:, :, q] = np.divide(
-            var.transpose(0, 2, 1), beta_k**2,
-            out=np.full_like(var.transpose(0, 2, 1), np.inf),
-            where=beta_k > 1e-6)
-    # Group LMMSE (§9.6 step 2) + gate (step 3).  Assemble all groups and use
-    # one batched solve instead of 290 Python-level 8x8 SVD/solve calls.
-    group_count = len(GROUPS)
-    ranks_all = idx
-    live_all = ranks_all >= 0
-    real_dtype = np.float32 if force_float32 else float
-    y_all = np.empty((group_count, 8), dtype=real_dtype)
-    sig_all = np.empty((group_count, 8), dtype=real_dtype)
-    values_all = estimates[GROUP_BLOCK, GROUP_STREAM_INDEX, GROUP_Q_INDEX]
-    vars_all = variances[GROUP_BLOCK, GROUP_STREAM_INDEX, GROUP_Q_INDEX]
-    y_all[:] = values_all.real
-    y_all[GROUP_Q_INDEX == 1] = values_all[GROUP_Q_INDEX == 1].imag
-    sig_all[:] = np.where(np.isfinite(vars_all), vars_all/2, 1e9)
-    lam_model = model.lam32 if force_float32 else model.lam
-    gain_model = model.gain32 if force_float32 else model.gain
-    lam_all = np.where(live_all, lam_model[np.maximum(ranks_all, 0)],
-                       np.array(1e-12, dtype=real_dtype))
-    gain_all = np.where(live_all, gain_model[np.maximum(ranks_all, 0)],
-                        np.array(0, dtype=real_dtype))
-    A_all = H8.astype(np.float32 if force_float32 else float)[None, :, :] * \
-        gain_all[:, None, :]
-    S_all = (A_all*lam_all[:, None, :]) @ A_all.transpose(0, 2, 1)
-    S_all[:, np.arange(8), np.arange(8)] += sig_all
-    M_all = lam_all[:, :, None]*A_all.transpose(0, 2, 1)
-    K_all = np.linalg.solve(S_all.transpose(0, 2, 1),
-                            M_all.transpose(0, 2, 1)).transpose(0, 2, 1)
-    x_all = np.einsum('gij,gj->gi', K_all, y_all)
-    post_all = lam_all - np.einsum(
-        'gij,gji->gi', K_all,
-        A_all*lam_all[:, None, :])
-    conf_all = np.clip(1-post_all/lam_all, 0, 1)
-    mu = model.mu32 if force_float32 else model.mu
-    xhat = np.zeros_like(mu, dtype=real_dtype)
-    conf = np.zeros_like(mu, dtype=real_dtype)
-    got = np.zeros_like(model.mu, bool)
-    # Every live coefficient occurs in exactly one group.  Flattening the
-    # boolean selection turns the final group-order -> coefficient-order copy
-    # into three indexed scatters, avoiding one Python loop per frame.
-    live_ranks = ranks_all[live_all]
-    xhat[live_ranks] = x_all[live_all]
-    conf[live_ranks] = conf_all[live_all]
-    got[live_ranks] = True
+        xhat, conf, got = _equalize_numba(model, Z, H, noise, counter)
+        real_dtype, mu = float, model.mu
     if diagnostics is not None:
         diagnostics.setdefault('stage_ms', {}).setdefault('equalize', []).append(
             (perf_counter()-stage_started)*1000)
