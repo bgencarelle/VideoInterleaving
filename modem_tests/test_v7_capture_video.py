@@ -8,6 +8,9 @@ import sys
 import unittest
 from unittest import mock
 
+import numpy as np
+
+from animation_modem import v7
 from tools.v7_capture import video_source
 from tools.v7_live import _resolve_send_source, run_send
 
@@ -132,6 +135,87 @@ class SenderFailureTests(unittest.TestCase):
                            side_effect=RuntimeError('broken test source')):
             with self.assertRaisesRegex(RuntimeError, 'broken test source'):
                 run_send(args)
+
+
+class SenderSchedulingTests(unittest.TestCase):
+    class OutputStream:
+        samplerate = 96000
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def write(self, _audio):
+            pass
+
+    class Throttle:
+        instances = []
+
+        def __init__(self, grab, hz):
+            self.grab = grab
+            self.initial_hz = hz
+            self.retuned_hz = None
+            type(self).instances.append(self)
+
+        def retune(self, hz):
+            self.retuned_hz = hz
+
+        def __call__(self):
+            return self.grab()
+
+        def close(self):
+            pass
+
+    def _run_for_speed(self, speed, source='camera'):
+        grab_count = [0]
+
+        def grab():
+            grab_count[0] += 1
+            return object()
+
+        args = Namespace(
+            fixture=None, encode_filter='nearest', rate=None, source=source,
+            capture_fps=30, screen_backend='mss', speed=speed,
+            batch_frames=1, seconds=.4, mono_sum=False, device=0,
+            no_log=True, log=False, brightness=1.0, gamma=1.0, camera=0,
+            capture_width=160, capture_filter='neighbor', ffmpeg_input=None,
+            region=None, display=None,
+        )
+        fake_sounddevice = type(
+            'SoundDevice', (), {'OutputStream': self.OutputStream})
+        audio = np.zeros((v7.PULSE_FRAME, 2), np.float32)
+        self.Throttle.instances = []
+        with mock.patch.dict(sys.modules, {'sounddevice': fake_sounddevice}), \
+                mock.patch('tools.v7_live._model', return_value=object()), \
+                mock.patch('tools.v7_live._capture', return_value=grab), \
+                mock.patch('tools.v7_capture.Throttled', self.Throttle), \
+                mock.patch('tools.v7_live._values',
+                           return_value=(np.zeros(1), 0)), \
+                mock.patch('tools.v7_live.P.encode_pulse_stream',
+                           return_value=audio), \
+                mock.patch('tools.v7_live.P.speed_pulse_stream',
+                           return_value=audio):
+            run_send(args)
+        self.assertEqual(len(self.Throttle.instances), 1)
+        return grab_count[0], self.Throttle.instances[0].retuned_hz
+
+    def test_capture_producer_tracks_accelerated_wire_rate(self):
+        one_x, one_x_retune = self._run_for_speed(1.0)
+        two_x, two_x_retune = self._run_for_speed(2.0)
+        self.assertAlmostEqual(one_x_retune, v7.PULSE_FPS)
+        self.assertAlmostEqual(two_x_retune, 2*v7.PULSE_FPS)
+        self.assertGreaterEqual(two_x, 1.6*one_x)
+
+    def test_screen_capture_producer_tracks_accelerated_wire_rate(self):
+        one_x, _ = self._run_for_speed(1.0, source='screen')
+        two_x, two_x_retune = self._run_for_speed(2.0, source='screen')
+        self.assertAlmostEqual(two_x_retune, 2*v7.PULSE_FPS)
+        self.assertGreaterEqual(two_x, 1.6*one_x)
 
 
 if __name__ == '__main__':

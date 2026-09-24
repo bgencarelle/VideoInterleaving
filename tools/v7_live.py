@@ -209,6 +209,7 @@ def run_send(args):
                                       if args.source == 'camera' else
                                       (60 if args.screen_backend == 'ffmpeg' and
                                        sys.platform == 'darwin' else FPS))
+    wire_fps = FPS*args.speed
     # Drain a paced FFmpeg source continuously and expose only
     # the newest frame to the audio encoder. Reading the pipe once per encoded
     # frame creates seconds of stale-camera latency.
@@ -248,7 +249,9 @@ def run_send(args):
                 value, aspect = _values(model, grab(), args.encode_filter,
                                         args.brightness, args.gamma)
                 frames.append(value); aspects.append(aspect)
-                next_capture += 1/FPS
+                # A compressed packet still needs a new source frame at the
+                # faster wire cadence; otherwise the audio stream has gaps.
+                next_capture += 1/wire_fps
                 if len(frames) < batch_size:
                     continue
                 audio = encode_batch(frames, aspects, counter)
@@ -296,7 +299,7 @@ def run_send(args):
             # resampling preserves 1x playback speed on any supported device.
             output_rate = float(stream.samplerate)
             if hasattr(grab, 'retune'):
-                grab.retune(FPS * args.speed)
+                grab.retune(wire_fps)
             max_speed = _max_send_speed(output_rate)
             if not 0 < args.speed <= max_speed:
                 raise ValueError(
@@ -308,7 +311,7 @@ def run_send(args):
                 camera_text = (f'camera={args.camera} '
                                if args.source == 'camera' else '')
                 print(f'V7 send ready: source={args.source} device={args.device!r} '
-                      f'rate={output_rate:g}Hz wire={FPS*args.speed:.3f}fps '
+                      f'rate={output_rate:g}Hz wire={wire_fps:.3f}fps '
                       f'speed={args.speed:g}x {camera_text}'
                       f'capture={args.capture_width}px/{args.capture_filter} '
                       f'encode={args.encode_filter} mode={"mono-sum" if args.mono_sum else "M/S"}',

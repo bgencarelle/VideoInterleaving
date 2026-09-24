@@ -38,6 +38,23 @@ class V7SpeedTests(unittest.TestCase):
         self.assertAlmostEqual(results[0].diag['playback_speed'], 1.5,
                                delta=.02)
 
+    def test_two_x_96khz_stream_preserves_aspect_metadata(self):
+        model = v7.build_model(
+            FIXTURE, .1521/np.sqrt(1+10**(v7.CLOCK_REL_DB/10)),
+            encode_filter='nearest')
+        with Image.open(FIXTURE) as image:
+            values = v7.image_values(v7.prepare_image(image, 'nearest'),
+                                     model.coder.grids, 'nearest')
+        aspects = [3, 1, 5, 2]
+        wire = v7.encode_pulse_stream(
+            model, [values]*len(aspects), aspect_codes=aspects,
+            source_indices=list(range(len(aspects))))
+        fast = v7.speed_pulse_stream(wire, 2, rate=96000)
+        results, info = v7.decode_pulse_stream(model, fast)
+        self.assertGreaterEqual(len(results), len(aspects)-1, info)
+        self.assertEqual([result.diag['aspect_code'] for result in results],
+                         aspects[:len(results)])
+
 
 if __name__ == '__main__':
     unittest.main()

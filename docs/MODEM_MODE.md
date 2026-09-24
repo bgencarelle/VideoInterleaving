@@ -80,6 +80,12 @@ rgb` when JPEGs are ordinary RGB images. The default `sbs` follows the project
 convention used by `utilities/convert_to_xy.py`: the left half is colour and
 the right half is a matte. PNG/WebP alpha is read directly.
 
+Each folder entry also records every source frame's dimensions. The slab stays
+80x96 for encoding, while the original dimensions supply the aspect metadata
+sent to the receiver (including quarter-turn rotation). Older bake manifests
+without these dimensions remain readable, but they can only report the baked
+80x96 aspect; rebake the source tree to recover its original aspect ratio.
+
 The bake refuses to overwrite an existing output directory. Bake to a new
 directory after source changes. It writes temporary slabs beside the final
 tree and publishes the tree only after each file and the manifest complete.

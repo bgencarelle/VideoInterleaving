@@ -29,6 +29,7 @@ class ModemLibrary:
         self.size=source_size(self.profile)
         groups={'main':{},'float':{}}
         self.slabs={}
+        self.source_sizes={}
         seen=set()
         for entry in manifest['folders']:
             layer=entry['layer'];relative=Path(entry['path'])
@@ -43,8 +44,18 @@ class ModemLibrary:
             if (not isinstance(count,int) or count<=0 or data.dtype!=np.uint8
                     or data.shape!=(count,h,w,4) or len(entry['names'])!=count):
                 raise ValueError(f'Invalid slab or frame manifest: {relative}')
+            source_sizes=entry.get('source_sizes')
+            if source_sizes is None:  # pre-aspect-metadata bake compatibility
+                source_sizes=[list(self.size) for _ in range(count)]
+            if (not isinstance(source_sizes,list) or len(source_sizes)!=count
+                    or any(not isinstance(size,list) or len(size)!=2
+                           or any(type(value) is not int or value<=0
+                                  for value in size)
+                           for size in source_sizes)):
+                raise ValueError(f'Invalid source dimensions: {relative}')
             groups[layer].setdefault(count,[]).append(folder)
             self.slabs[folder]=data
+            self.source_sizes[folder]=[tuple(size) for size in source_sizes]
         common=set(groups['main']) & set(groups['float'])
         if not common:
             raise ValueError('No shared face/float frame count in modem bake')
@@ -63,6 +74,7 @@ class ModemLibrary:
             raise ValueError('Selected face/float folder is outside the manifest')
         main=self.slabs[self.mains[main_folder]][index].astype(np.float32)/255
         front=self.slabs[self.floats[float_folder]][index].astype(np.float32)/255
+        source_dimensions=self.source_sizes[self.mains[main_folder]][index]
         # Same straight-alpha over order as renderer.py: background, main, float.
         rgb=np.asarray(background,dtype=np.float32)/255
         rgb=main[:,:,:3]*main[:,:,3:4]+rgb*(1-main[:,:,3:4])
@@ -70,6 +82,9 @@ class ModemLibrary:
         im=Image.fromarray(np.uint8(np.clip(np.rint(rgb*255),0,255)))
         if rotation%360:
             im=im.rotate(rotation%360,expand=True)
+            if rotation%180==90:
+                source_dimensions=source_dimensions[::-1]
         if mirror:
             im=im.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+        im.info['source_dimensions']=source_dimensions
         return im

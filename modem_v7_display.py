@@ -58,15 +58,18 @@ def packet(library, model, absolute, source_index, selection, *,
     image = library.composite(index, main_folder, float_folder,
                               background, rotation, mirror)
     values = _source_values(model, image, encode_filter)
+    aspect_code = _v7.aspect_wire_code(
+        image.info.get('source_dimensions', image.size))
     audio = _v7.encode_pulse_frame(
         model, values, absolute,
-        aspect_code=_v7.aspect_wire_code(image.size),
+        aspect_code=aspect_code,
         source_index=source_index, loop=loop, direction=direction)
     return audio, {
         'frame': absolute,
         'source_index': source_index,
         'face_folder': main_folder,
         'float_folder': float_folder,
+        'aspect_code': aspect_code,
         'packet_samples': len(audio),
     }
 

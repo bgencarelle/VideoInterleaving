@@ -28,7 +28,7 @@ def source_tree(root, count=3):
         folder = root / name
         folder.mkdir(parents=True)
         for i in range(count):
-            Image.new('RGBA', (40, 48), color).save(folder / f'frame_{i}.png')
+            Image.new('RGBA', (80, 45), color).save(folder / f'frame_{i}.png')
 
 
 class ModemV7IntegrationTests(unittest.TestCase):
@@ -45,10 +45,26 @@ class ModemV7IntegrationTests(unittest.TestCase):
             self.assertEqual(library.profile, 'color-dct')
             self.assertEqual(library.size, (80, 96))
             self.assertEqual(library.frames, 3)
-            self.assertEqual(library.composite(0, 0, 0).size, (80, 96))
+            composite = library.composite(0, 0, 0)
+            self.assertEqual(composite.size, (80, 96))
+            self.assertEqual(composite.info['source_dimensions'], (80, 45))
+            self.assertEqual(
+                v7.aspect_wire_code(composite.info['source_dimensions']), 3)
+            rotated = library.composite(0, 0, 0, rotation=90)
+            self.assertEqual(rotated.info['source_dimensions'], (45, 80))
+            self.assertEqual(
+                v7.aspect_wire_code(rotated.info['source_dimensions']), 7)
 
             manifest_path = bake / 'modem.json'
             manifest = json.loads(manifest_path.read_text())
+            for entry in manifest['folders']:
+                entry.pop('source_sizes')
+            manifest_path.write_text(json.dumps(manifest))
+            legacy_library = ModemLibrary(bake)
+            self.assertEqual(
+                legacy_library.composite(0, 0, 0).info['source_dimensions'],
+                (80, 96))
+
             manifest['profile'] = 'lean-dct'
             manifest_path.write_text(json.dumps(manifest))
             with self.assertRaises(ValueError):
@@ -98,6 +114,8 @@ runpy.run_path(target, run_name='__main__')
             self.assertEqual(
                 [item.diag['source_index'] for item in decoded[:4]],
                 [0, 1, 2, 1])
+            self.assertTrue(all(item.diag['aspect_code'] == 3
+                                for item in decoded[:4]))
 
     def test_main_runtime_images_use_fifo_and_v7(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -138,6 +156,8 @@ runpy.run_path(target, run_name='__main__')
             self.assertEqual(
                 [item.diag['source_index'] for item in decoded[:4]],
                 [0, 2, 1, 1])
+            self.assertTrue(all(item.diag['aspect_code'] == 3
+                                for item in decoded[:4]))
 
     def test_wav_rejects_live_midi_clock_without_prompting(self):
         with tempfile.TemporaryDirectory() as temp:

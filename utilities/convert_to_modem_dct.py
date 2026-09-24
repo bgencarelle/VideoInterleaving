@@ -70,12 +70,23 @@ def bake_tree_dct(source, output, jpeg_layout='sbs'):
         for kind, folder, files in tasks:
             relative = folder.relative_to(source)
             # Write 80x96 RGBA slabs with Lanczos resampling
-            write_slab(files, stage / relative / 'frames.npy', DCT_SIZE, dct_loader, Image.Resampling.LANCZOS)
+            source_sizes = []
+
+            def tracked_loader(path):
+                rgba = dct_loader(path)
+                source_sizes.append(list(rgba.size))
+                return rgba
+
+            write_slab(files, stage / relative / 'frames.npy', DCT_SIZE,
+                       tracked_loader, Image.Resampling.LANCZOS)
             entries.append({
                 'layer': kind,
                 'path': relative.as_posix(),
                 'count': len(files),
-                'names': [p.name for p in files]
+                'names': [p.name for p in files],
+                # The slab geometry is fixed, but display aspect belongs to
+                # the source frames and cannot be recovered from 80x96 later.
+                'source_sizes': source_sizes,
             })
             print(f'[DCT BAKE] {relative}: {len(files)} frames, {DCT_SIZE[0]}x{DCT_SIZE[1]} RGBA')
 
