@@ -50,9 +50,7 @@ def _region(text):
 def _read_ppm(stream):
     """Read one self-describing RGB frame from FFmpeg's image2pipe output."""
     if stream.readline() != b'P6\n':
-        raise RuntimeError('FFmpeg capture ended without a complete frame. '
-                           'See FFmpeg errors above; check the capture '
-                           'device, supported frame rate, and permissions.')
+        raise RuntimeError('FFmpeg output ended before a complete PPM frame')
     dimensions = stream.readline()
     while dimensions.startswith(b'#'):
         dimensions = stream.readline()
@@ -282,24 +280,25 @@ def screen_capture_source(fps, region=None, display=None, width=320,
                          width=width, scale_flags=scale_flags)
 
 
-_LIVE_SCHEMES = frozenset({
+_NETWORK_SCHEMES = frozenset({
     'http', 'https', 'rtsp', 'rtsps', 'rtmp', 'rtmps', 'udp', 'tcp', 'srt',
     'rist', 'rtp', 'rtmpe', 'rtmpt',
 })
+_LIVE_SCHEMES = _NETWORK_SCHEMES - {'http', 'https'}
 
 
 def _is_stream_url(source):
-    return urlsplit(str(source)).scheme.lower() in _LIVE_SCHEMES
+    return urlsplit(str(source)).scheme.lower() in _NETWORK_SCHEMES
 
 
 def video_source(source, loop=None, realtime=None, width=320,
-                 scale_flags='bicubic'):
+                 scale_flags='bicubic', live=None):
     """Read a local video file in a real-time loop or a live stream URL.
 
-    Local files loop and are paced with ``-re``. Network URLs are treated as
-    live inputs: they are read as delivered, without file-loop or input pacing.
-    PPM carries each output frame's dimensions, so this path needs no separate
-    ffprobe pass and can handle sources with different aspect ratios.
+    Local files and HTTP(S) media URLs loop and are paced with ``-re``. Native
+    live protocols are read as delivered. Set ``live=True`` for live HLS/HTTP
+    URLs; those protocols can also serve finite VOD playlists. PPM carries each
+    output frame's dimensions, so no ffprobe pass is needed.
     """
     if shutil.which('ffmpeg') is None:
         raise SystemExit('ffmpeg not found. brew install ffmpeg / apt install ffmpeg')
@@ -312,10 +311,14 @@ def video_source(source, loop=None, realtime=None, width=320,
     if scale_flags not in ('neighbor', 'area', 'bilinear', 'bicubic', 'lanczos'):
         raise ValueError(f'Unsupported FFmpeg scale flags: {scale_flags}')
 
+    is_live = (urlsplit(source).scheme.lower() in _LIVE_SCHEMES
+               if live is None else bool(live))
+    if is_live and not is_stream:
+        raise ValueError('--video-live requires a stream URL')
     if loop is None:
-        loop = not is_stream
+        loop = not is_live
     if realtime is None:
-        realtime = not is_stream
+        realtime = not is_live
 
     cmd = ['ffmpeg', '-nostdin', '-loglevel', 'error']
     if loop:

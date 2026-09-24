@@ -4,11 +4,12 @@ from argparse import Namespace
 from contextlib import redirect_stdout
 from pathlib import Path
 import tempfile
+import sys
 import unittest
 from unittest import mock
 
 from tools.v7_capture import video_source
-from tools.v7_live import _resolve_send_source
+from tools.v7_live import _resolve_send_source, run_send
 
 
 class VideoSourceSelectionTests(unittest.TestCase):
@@ -75,6 +76,62 @@ class VideoSourceCommandTests(unittest.TestCase):
             self.assertIn('-rw_timeout', cmd)
             self.assertIn('rtsp://camera.example/live', cmd)
             grab.close()
+
+    def test_https_vod_loops_unless_explicitly_marked_live(self):
+        for live in (False, True):
+            process = self.Process()
+            with self.subTest(live=live), \
+                    mock.patch('tools.v7_capture.shutil.which', return_value='ffmpeg'), \
+                    mock.patch('tools.v7_capture.subprocess.Popen',
+                               return_value=process) as popen:
+                grab = video_source('https://media.example/master.m3u8',
+                                    live=live)
+                cmd = popen.call_args.args[0]
+                self.assertEqual('-stream_loop' in cmd, not live)
+                self.assertEqual('-re' in cmd, not live)
+                self.assertIn('-rw_timeout', cmd)
+                grab.close()
+
+
+class SenderFailureTests(unittest.TestCase):
+    def test_producer_errors_return_to_the_sender_thread(self):
+        class OutputStream:
+            samplerate = 48000
+
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+        class LatestGrab:
+            def __init__(self, *_args):
+                pass
+
+            def __call__(self):
+                return None
+
+            def close(self):
+                pass
+
+        args = Namespace(
+            fixture=None, encode_filter='nearest', rate=None, source='video',
+            capture_fps=None, screen_backend='mss', speed=1.0,
+            batch_frames=1, seconds=0, mono_sum=False, device=0,
+            no_log=True, log=False, brightness=1.0, gamma=1.0,
+        )
+        fake_sounddevice = type('SoundDevice', (), {'OutputStream': OutputStream})
+        with mock.patch.dict(sys.modules, {'sounddevice': fake_sounddevice}), \
+                mock.patch('tools.v7_live._model', return_value=object()), \
+                mock.patch('tools.v7_live._capture', return_value=lambda: None), \
+                mock.patch('tools.v7_capture.Throttled', LatestGrab), \
+                mock.patch('tools.v7_live._values',
+                           side_effect=RuntimeError('broken test source')):
+            with self.assertRaisesRegex(RuntimeError, 'broken test source'):
+                run_send(args)
 
 
 if __name__ == '__main__':

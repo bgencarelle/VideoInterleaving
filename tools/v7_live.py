@@ -150,7 +150,8 @@ def _capture(args):
         return test_source()
     if args.source == 'video':
         return video_source(args.video_source, width=args.capture_width,
-                            scale_flags=args.capture_filter)
+                            scale_flags=args.capture_filter,
+                            live=True if args.video_live else None)
     if args.source == 'mouse-follow':
         return mouse_follow_source(initial_width=args.capture_width)
     if args.source == 'camera':
@@ -215,9 +216,21 @@ def run_send(args):
     batches = queue.Queue(maxsize=2)
     stop = threading.Event()
     sentinel = object()
+    producer_errors = []
     batch_size = max(1, args.batch_frames)
     total = 0
     started = time.monotonic()
+
+    def encode_batch(frames, aspects, counter):
+        values = np.asarray(frames)
+        audio = P.encode_pulse_stream(model, values, start_counter=counter,
+                                      aspect_codes=aspects)
+        if args.mono_sum:
+            audio = audio.sum(axis=1, keepdims=True)/np.sqrt(2)
+            peak = np.max(np.abs(audio))
+            if peak > .89:
+                audio *= .89/peak
+        return P.speed_pulse_stream(audio, args.speed, rate=output_rate)
 
     def produce():
         nonlocal total
@@ -225,6 +238,7 @@ def run_send(args):
         aspects = []
         counter = 1
         next_capture = time.monotonic()
+        failure = None
         try:
             while not stop.is_set() and (args.seconds <= 0 or
                                          time.monotonic()-started < args.seconds):
@@ -237,39 +251,33 @@ def run_send(args):
                 next_capture += 1/FPS
                 if len(frames) < batch_size:
                     continue
-                values = np.asarray(frames)
-                audio = P.encode_pulse_stream(model, values,
-                                              start_counter=counter,
-                                              aspect_codes=aspects)
-                if args.mono_sum:
-                    audio = audio.sum(axis=1, keepdims=True)/np.sqrt(2)
-                    peak = np.max(np.abs(audio))
-                    if peak > .89:
-                        audio *= .89/peak
-                audio = P.speed_pulse_stream(audio, args.speed, rate=output_rate)
+                audio = encode_batch(frames, aspects, counter)
                 batches.put((counter, audio))
                 total += len(frames)
                 counter += len(frames)
                 frames = []
                 aspects = []
-        finally:
-            if frames and not stop.is_set():
-                values = np.asarray(frames)
-                audio = P.encode_pulse_stream(
-                    model, values, start_counter=counter,
-                    aspect_codes=aspects)
-                if args.mono_sum:
-                    audio = audio.sum(axis=1, keepdims=True)/np.sqrt(2)
-                    peak = np.max(np.abs(audio))
-                    if peak > .89:
-                        audio *= .89/peak
-                audio = P.speed_pulse_stream(audio, args.speed, rate=output_rate)
+        except Exception as exc:
+            failure = exc
+
+        if failure is None and frames and not stop.is_set():
+            try:
+                audio = encode_batch(frames, aspects, counter)
                 batches.put((counter, audio))
                 total += len(frames)
-            batches.put(sentinel)
-            close = getattr(grab, 'close', None)
+            except Exception as exc:
+                failure = exc
+
+        close = getattr(grab, 'close', None)
+        try:
             if close is not None:
                 close()
+        except Exception as exc:
+            if failure is None:
+                failure = exc
+        if failure is not None:
+            producer_errors.append(failure)
+        batches.put(sentinel)
 
     worker = threading.Thread(target=produce, daemon=True)
     worker_started = False
@@ -326,6 +334,9 @@ def run_send(args):
             close = getattr(grab, 'close', None)
             if close is not None:
                 close()
+    if producer_errors:
+        failure = producer_errors[0]
+        raise RuntimeError(f'V7 live producer failed: {failure}') from failure
     if args.log and not args.no_log:
         print(f'V7 send stopped after {total} frames', flush=True)
 
@@ -823,6 +834,8 @@ def parser():
     send.add_argument('--camera', type=int, default=0)
     send.add_argument('--video-source', '--video', dest='video_source',
                       help='local video file or FFmpeg-supported live stream URL')
+    send.add_argument('--video-live', action='store_true',
+                      help='treat an HTTP(S) source as live instead of looping it')
     send.add_argument('--display', type=int)
     send.add_argument('--ffmpeg-input')
     send.add_argument('--screen-backend', choices=('mss', 'ffmpeg'), default='mss',
@@ -902,6 +915,9 @@ if __name__ == '__main__':
             if args.speed > max_speed:
                 ap.error(f'--speed must be at most {max_speed:.2f} for '
                          f'this {args.rate} Hz sender/receiver pair')
-        run_send(args)
+        try:
+            run_send(args)
+        except Exception as exc:
+            ap.exit(1, f'V7 send failed: {exc}\n')
     else:
         run_receive(args)

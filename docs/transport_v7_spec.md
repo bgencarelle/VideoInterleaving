@@ -943,10 +943,12 @@ real-media validation and long-run CPU/reacquisition testing are complete.
 ```
 
 The video source accepts a local file or an FFmpeg-supported stream URL. Local
-files play in real time and loop; stream URLs are consumed as live inputs. With
-`--source video` but no `--video-source`, the sender prompts for a path or URL.
-If `--source` is omitted in an interactive terminal, it first prompts for the
-capture type. Non-interactive runs must specify the source explicitly.
+files and HTTP(S) media URLs play in real time and loop; live protocols such as
+RTSP are consumed as they arrive. Add `--video-live` for a live HTTP(S)/HLS
+source, since HLS URLs can refer either to live feeds or finite VOD playlists.
+With `--source video` but no `--video-source`, the sender prompts for a path or
+URL. If `--source` is omitted in an interactive terminal, it first prompts for
+the capture type. Non-interactive runs must specify the source explicitly.
 
 The sender prepares frames with the V7 source grids. Camera capture uses the
 selected FFmpeg device and its negotiated input mode; `--capture-width` scales
