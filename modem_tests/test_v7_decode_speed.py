@@ -269,6 +269,66 @@ class V7DecodeSpeedTests(unittest.TestCase):
         np.testing.assert_allclose(v7._phase_or_zero(np.array([1j, -1+0j])),
                                    [np.pi/2, np.pi])
 
+    def test_compiled_sample_reads_match_numpy(self):
+        rng = np.random.default_rng(3)
+        for dtype in (np.float32, np.float64):
+            for taps in (4, 16):
+                samples = rng.standard_normal((4000, 2)).astype(dtype)
+                # interior, fractional and both clamped edges
+                positions = np.concatenate([
+                    rng.uniform(-10, 4010, 500), [0., 3999., 1.5, 2000.25]])
+                with self.subTest(dtype=dtype.__name__, taps=taps):
+                    np.testing.assert_array_equal(
+                        v7_core._sample_at(samples, positions, taps),
+                        v7_core._sample_at_numpy(samples, positions, taps))
+
+    def test_compiled_pulse_search_matches_numpy(self):
+        from animation_modem import transport3
+        model = v7.load_model(TARGET, 'nearest')
+        values = np.zeros(model.coder.source_count)
+        wire = v7.encode_pulse_stream(model, [values]*3, pilot_tones=True,
+                                      eof_marker=True)
+        rng = np.random.default_rng(4)
+        signals = {
+            'wire': v7._mono(wire),
+            'slow': v7._mono(v7.speed_pulse_stream(wire, .8)),   # refinement
+            'noise': rng.normal(0, .2, 12000),
+            'silence': np.zeros(4000),
+        }
+        for name, signal in signals.items():
+            for dtype in (np.float32, np.float64):
+                for start in (0, 1111, 4100):
+                    segment = signal[start:].astype(dtype)
+                    expected = transport3.measure_pulses_numpy(segment, .25, 8)
+                    actual = transport3.measure_pulses(segment, .25, 8)
+                    with self.subTest(signal=name, dtype=dtype.__name__,
+                                      start=start):
+                        self.assertEqual(expected is None, actual is None)
+                        if expected is not None:
+                            np.testing.assert_allclose(actual, expected,
+                                                       rtol=0, atol=1e-12)
+
+    def test_mono_mix_is_the_channel_mean(self):
+        rng = np.random.default_rng(5)
+        for dtype in (np.float32, np.float64):
+            stereo = rng.standard_normal((999, 2)).astype(dtype)
+            np.testing.assert_array_equal(v7._mono(stereo), stereo.mean(axis=1))
+            np.testing.assert_array_equal(v7._mono(stereo[:, :1]), stereo[:, 0])
+
+    def test_compiled_leg_polarity_matches_numpy_correlation(self):
+        rng = np.random.default_rng(6)
+        for sign in (1, -1):
+            common = rng.standard_normal(3920)
+            stereo = np.column_stack((common+.3*rng.standard_normal(3920)+.2,
+                                      sign*common+.3*rng.standard_normal(3920)))
+            left = stereo[:, 0]-stereo[:, 0].mean()
+            right = stereo[:, 1]-stereo[:, 1].mean()
+            expected = np.dot(left, right)/np.sqrt(np.dot(left, left)*np.dot(right, right))
+            powers = v7._leg_correlation_sums(stereo.astype(np.float32))
+            self.assertAlmostEqual(
+                powers[2]/np.sqrt(powers[0]*powers[1]), expected, places=5)
+            self.assertEqual(v7.leg_polarity(stereo.astype(np.float32)), sign)
+
     def test_sinc_table_is_cached_and_read_only(self):
         first = v7_core._sinc_weight_table(16)
         self.assertIs(first, v7_core._sinc_weight_table(16))

@@ -2,10 +2,12 @@
 
 This module intentionally contains no legacy wire encoder or decoder.
 """
+import math
 from fractions import Fraction
 from functools import lru_cache
 
 import numpy as np
+from numba import njit
 from scipy.fft import dctn, idctn
 from scipy.signal import resample_poly, firwin, filtfilt
 
@@ -190,8 +192,36 @@ def _sinc_weight_table(taps=8, phases=4096):
 def _sample_walk(length, taps):
     return np.arange(length, dtype=np.float64), np.arange(-taps+1, taps+1)
 
+@njit(cache=True, fastmath=False)
+def _sample_at_kernel(samples, position, table, taps, out):
+    """Compiled fractional-delay read; same arithmetic as _sample_at_numpy."""
+    count, channels = samples.shape
+    phases = table.shape[0]
+    for i in range(position.shape[0]):
+        base = math.floor(position[i])
+        phase = min(int((position[i]-base)*phases), phases-1)
+        first = int(base)-taps+1
+        for c in range(channels):
+            acc = 0.0
+            for k in range(2*taps):
+                index = min(max(first+k, 0), count-1)
+                acc += table[phase, k]*samples[index, c]
+            out[i, c] = acc
+
+
 def _sample_at(samples, position, taps=8):
     """Read a recovered-clock sample walk using fixed fractional-delay weights."""
+    samples = np.asarray(samples)
+    position = np.ascontiguousarray(position, dtype=np.float64)
+    if samples.ndim != 2 or samples.dtype not in (np.float32, np.float64):
+        return _sample_at_numpy(samples, position, taps)
+    out = np.empty((len(position), samples.shape[1]), np.float32)
+    _sample_at_kernel(samples, position, _sinc_weight_table(taps), taps, out)
+    return out
+
+
+def _sample_at_numpy(samples, position, taps=8):
+    """Reference/fallback for the compiled fractional-delay read."""
     _, offsets = _sample_walk(0, taps)
     base = np.floor(position).astype(np.intp)
     table = _sinc_weight_table(taps)

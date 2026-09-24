@@ -51,6 +51,7 @@ EOF_MARKER_EDGES = np.cumsum(EOF_MARKER_RUNS[:-1], dtype=float)-.5
 EOF_MARKER_CENTERS = (np.cumsum((0,)+EOF_MARKER_RUNS[:-1], dtype=float)+
                       np.asarray(EOF_MARKER_RUNS, dtype=float)/2)
 EOF_MARKER_MIN_LEVEL = .08
+EOF_MARKER_RUNS_ARRAY = np.asarray(EOF_MARKER_RUNS, dtype=np.float64)
 EOF_SEARCH_FRACTION = .012
 # measure_pulses() fits one scale over the preamble edge word, centered near
 # this reference-sample coordinate within each packet.
@@ -2238,6 +2239,48 @@ def _channel_timing_residual_numpy(Z, H):
 
 
 @njit(cache=True, fastmath=False)
+def _solve_spd(matrix, rhs):
+    """Cholesky solve of a small symmetric positive-definite system (the
+    Gauss-Newton normal equations: J^T W J + eps*I)."""
+    size = rhs.shape[0]
+    lower = np.zeros((size, size))
+    for i in range(size):
+        for j in range(i+1):
+            acc = matrix[i, j]
+            for k in range(j):
+                acc -= lower[i, k]*lower[j, k]
+            lower[i, j] = math.sqrt(acc) if i == j else acc/lower[j, j]
+    forward = np.empty(size)
+    for i in range(size):
+        acc = rhs[i]
+        for k in range(i):
+            acc -= lower[i, k]*forward[k]
+        forward[i] = acc/lower[i, i]
+    out = np.empty(size)
+    for i in range(size-1, -1, -1):
+        acc = forward[i]
+        for k in range(i+1, size):
+            acc -= lower[k, i]*out[k]
+        out[i] = acc/lower[i, i]
+    return out
+
+
+@njit(cache=True, fastmath=False)
+def _phasor_powers(delta, n, powers):
+    """powers[s, m] = exp(2j*pi*m*delta[s]/n) by repeated multiplication.
+
+    One exp per symbol instead of one per (bin, symbol); the product chain
+    over at most ~35 bins stays within a few 1e-15 of the direct exp.
+    """
+    for s in range(delta.shape[0]):
+        step = np.exp((2j*np.pi/n)*delta[s])
+        value = 1.0+0j
+        for m in range(powers.shape[1]):
+            powers[s, m] = value
+            value *= step
+
+
+@njit(cache=True, fastmath=False)
 def _channel_joint_kernel(Z, iters, theta0, tone_replaced, tone_delta,
                           bin_symbols, bin_frequencies, bin_valid, values,
                           operator, omega, jacobian, basis, bins, pilot_bins,
@@ -2257,6 +2300,8 @@ def _channel_joint_kernel(Z, iters, theta0, tone_replaced, tone_delta,
     h = np.empty((nbins, 2), np.complex128)
     delta = np.empty(nsym)
     phase_table = np.empty((nsym, bins.shape[0]), np.complex128)
+    top = max(bins.max(), bin_frequencies.max())
+    powers = np.empty((nsym, top+1), np.complex128)
     target = bins.astype(np.float64)
     known = pilot_bins.astype(np.float64)
     for channel in range(2):
@@ -2275,9 +2320,11 @@ def _channel_joint_kernel(Z, iters, theta0, tone_replaced, tone_delta,
                     for knot in range(nknots):
                         acc += basis[s, knot]*theta[knot]
                     delta[s] = acc
+            # exp(2j*pi*bin*delta/n) as integer powers of one phasor per symbol
+            _phasor_powers(delta, n, powers)
             for b in range(nbins):
                 for k in range(width):
-                    rot[b, k] = np.exp(omega[b, 0]*delta[bin_symbols[b, k]])
+                    rot[b, k] = powers[bin_symbols[b, k], bin_frequencies[b]]
                 for column in range(2):
                     acc = 0j
                     for k in range(width):
@@ -2305,7 +2352,7 @@ def _channel_joint_kernel(Z, iters, theta0, tone_replaced, tone_delta,
                             normal[i, j] += jw*jacobian[b, k, j]*weight
             for i in range(nknots):
                 normal[i, i] += eps
-            step = np.linalg.solve(normal, rhs)
+            step = _solve_spd(normal, rhs)
             largest = 0.0
             for i in range(nknots):
                 theta[i] += step[i]
@@ -2322,9 +2369,10 @@ def _channel_joint_kernel(Z, iters, theta0, tone_replaced, tone_delta,
                     acc += basis[s, knot]*theta[knot]
                 delta[s] = acc
         # One timing rotation per (symbol, bin), shared by both columns.
+        _phasor_powers(delta, n, powers)
         for s in range(nsym):
             for j in range(bins.shape[0]):
-                phase_table[s, j] = np.exp((2j*np.pi/n)*bins[j]*delta[s])
+                phase_table[s, j] = powers[s, bins[j]]
         for column in range(2):
             real = np.interp(target, known, h[:, column].real.copy())
             imag = np.interp(target, known, h[:, column].imag.copy())
@@ -2447,6 +2495,9 @@ PILOT_PAD_VALUES32 = PILOT_PAD_VALUES.astype(np.complex64)
 PILOT_PAD_KHZ32 = PILOT_PAD_KHZ.astype(np.float32)
 PILOT_DOF = np.maximum(PILOT_PAD_VALID.sum(axis=1)-3, 1)
 _BINS_KHZ = BINS*RATE/N/1000
+# The compiled fade refit steps the correction geometrically across the
+# occupied bins, which needs them evenly spaced.
+assert np.allclose(np.diff(_BINS_KHZ), _BINS_KHZ[1]-_BINS_KHZ[0])
 _SYMBOL_INDEX = np.arange(F)[:, None]
 
 
@@ -2654,10 +2705,14 @@ def _fade_and_noise_kernel(Z, H, pad_bins, pad_values, pad_valid, pad_khz,
             if count >= 2:
                 apply[s, channel] = True
                 angle = math.atan2(phasor.imag, phasor.real)
+                # exp(u - v*f + j*angle) over evenly spaced bins: one exp for
+                # the first bin, then a real geometric step per bin.
+                correction = np.exp(u-v*frequency[0]+1j*angle)
+                step = math.exp(-v*(frequency[1]-frequency[0]))
                 for j in range(bins.shape[0]):
-                    correction = np.exp(u-v*frequency[j]+1j*angle)
                     H[s, bins[j], channel, 0] *= correction
                     H[s, bins[j], channel, 1] *= correction
+                    correction *= step
     raw = np.zeros((nsym, 2))
     for s in range(nsym):
         for channel in range(2):
@@ -2853,7 +2908,8 @@ def _fade_and_noise_float32(Z, H, tone_reference=False,
 @njit(cache=True, fastmath=False)
 def _equalize_numba_kernel(Z, H, noise, block_symbols, block_bins,
                            block_prior, group_block, group_stream, group_q,
-                           ranks, lam, gain, h8, noise_floor, xhat, conf, got):
+                           ranks, lam, system, weighted, noise_floor, xhat,
+                           conf, got):
     """Per-cell MMSE and group LMMSE without NumPy's small-matrix overhead."""
     nblocks, nsym = block_symbols.shape
     est = np.zeros((nblocks, 2, 2, nsym), np.complex128)
@@ -2879,11 +2935,13 @@ def _equalize_numba_kernel(Z, H, noise, block_symbols, block_bins,
                 s11 = q0*(h10*np.conj(h10))+q1*(h11*np.conj(h11))+n1
                 s01 = q0*h00*np.conj(h10)+q1*h01*np.conj(h11)
                 s10 = q0*h10*np.conj(h00)+q1*h11*np.conj(h01)
-                det = s00*s11-s01*s10
-                i00 = s11/det
-                i01 = -s01/det
-                i10 = -s10/det
-                i11 = s00/det
+                # S is Hermitian: s00, s11 and s01*s10 = |s01|^2 are real,
+                # so one real reciprocal replaces four complex divisions.
+                inverse = 1.0/(s00.real*s11.real-(s01*s10).real)
+                i00 = s11*inverse
+                i01 = -s01*inverse
+                i10 = -s10*inverse
+                i11 = s00*inverse
                 for k in range(2):
                     pk = q0 if k == 0 else q1
                     prior_k = p0 if k == 0 else p1
@@ -2899,13 +2957,11 @@ def _equalize_numba_kernel(Z, H, noise, block_symbols, block_bins,
                         var[b, k, q, t] = variance/(beta*beta)
 
     ngroups = ranks.shape[0]
-    A = np.empty((8, 8))
     S = np.empty((8, 8))
     L = np.zeros((8, 8))
     R = np.empty((8, 9))
     X = np.empty((8, 9))
     lam_g = np.empty(8)
-    gain_g = np.empty(8)
     y = np.empty(8)
     sig = np.empty(8)
     for group in range(ngroups):
@@ -2918,22 +2974,13 @@ def _equalize_numba_kernel(Z, H, noise, block_symbols, block_bins,
             variance = var[block, stream, quadrature, j]
             sig[j] = variance/2 if np.isfinite(variance) else 1e9
             rank = ranks[group, j]
-            if rank >= 0:
-                lam_g[j] = lam[rank]
-                gain_g[j] = gain[rank]
-            else:
-                lam_g[j] = 1e-12
-                gain_g[j] = 0.0
+            lam_g[j] = lam[rank] if rank >= 0 else 1e-12
 
-        for i in range(8):
-            for j in range(8):
-                A[i, j] = h8[i, j]*gain_g[j]
+        # A Lam A^T depends only on the rank table (_group_systems); a frame
+        # adds only its per-member noise on the diagonal.
         for i in range(8):
             for k in range(8):
-                acc = 0.0
-                for j in range(8):
-                    acc += A[i, j]*lam_g[j]*A[k, j]
-                S[i, k] = acc
+                S[i, k] = system[group, i, k]
             S[i, i] += sig[i]
 
         # Solve the group system by Cholesky with all 8 estimates as RHS.
@@ -2948,7 +2995,7 @@ def _equalize_numba_kernel(Z, H, noise, block_symbols, block_bins,
                     L[i, j] = acc/L[j, j]
         for i in range(8):
             for j in range(8):
-                R[i, j] = A[i, j]*lam_g[j]
+                R[i, j] = weighted[group, i, j]
             R[i, 8] = y[i]
         for i in range(8):
             for column in range(9):
@@ -2983,9 +3030,31 @@ def _equalize_numba(model, Z, H, noise, counter):
         np.ascontiguousarray(noise, dtype=np.float64),
         BLOCK_SYMBOLS, BLOCK_BINS, model.block_prior_tables[phase],
         GROUP_BLOCK, GROUP_STREAM_INDEX, GROUP_Q_INDEX,
-        model.rank_tables[phase], model.lam, model.gain,
-        np.ascontiguousarray(H8), NOISE_FLOOR, xhat, conf, got)
+        model.rank_tables[phase], model.lam, *_group_systems(model, phase),
+        NOISE_FLOOR, xhat, conf, got)
     return xhat, conf, got
+
+
+def _group_systems(model, phase):
+    """Per tail phase: A Lam A^T and A Lam for every Hadamard group.
+
+    A = H8 diag(gain) over the group's ranks (zero where a slot is empty);
+    both are fixed by the model and rank table, so they are built once per
+    model and phase and cached on the model.
+    """
+    cache = model.__dict__.setdefault('_group_system_cache', {})
+    if phase not in cache:
+        ranks = model.rank_tables[phase]
+        live = ranks >= 0
+        lam = np.where(live, model.lam[np.maximum(ranks, 0)], 1e-12)
+        gain = np.where(live, model.gain[np.maximum(ranks, 0)], 0.)
+        A = H8[None, :, :]*gain[:, None, :]
+        weighted = np.ascontiguousarray(A*lam[:, None, :])
+        system = np.ascontiguousarray(weighted @ A.transpose(0, 2, 1))
+        for table in (weighted, system):
+            table.setflags(write=False)
+        cache[phase] = (system, weighted)
+    return cache[phase]
 
 
 def warmup_equalizer(model):
@@ -3003,6 +3072,17 @@ def warmup_equalizer(model):
     pilot_tone_timing(Z, model, 1)
     H, noise = fade_and_noise(Z, H)
     _equalize_numba(model, Z, H, noise, 1)
+    # Acquisition kernels (pulse edges, EOF counter, sample reads) compile per
+    # dtype; decode a short float32 stream -- the live receiver's type -- at
+    # 1x and slowed (the slow path refines pulse edges with 16-tap reads).
+    values = np.zeros(model.coder.source_count)
+    wire = encode_pulse_stream(model, [values]*3, pilot_tones=True,
+                               eof_marker=True).astype(np.float32)
+    for stream in (wire, speed_pulse_stream(wire, .8).astype(np.float32)):
+        decode_pulse_stream(model, stream, frame_boundary='eof',
+                            pilot_timing='tone-seeded')
+        decode_pulse_stream(model, stream, latest_only=True,
+                            frame_boundary='eof', pilot_timing='tone-seeded')
 
 
 warmup_decoder = warmup_equalizer
@@ -3086,6 +3166,32 @@ def _equalize_numpy(model, Z, H, noise, counter, force_float32=False):
     return xhat, conf, got
 
 
+def _receive_rotation(model):
+    """conj(cell phase) * EARLY / scale, the fixed per-cell FFT correction,
+    built once per model (was three full-frame multiplies per packet)."""
+    cache = model.__dict__.setdefault('_receive_cache', {})
+    if 'rotation' not in cache:
+        rotation = (np.conj(model.phase)*EARLY[None, :] /
+                    model.scale)[:, :, None]
+        rotation.setflags(write=False)
+        cache['rotation'] = rotation
+    return cache['rotation']
+
+
+def _gate_floor(model, force_float32=False):
+    """Per-coefficient confidence floor of the §9.6 gate, built once."""
+    cache = model.__dict__.setdefault('_receive_cache', {})
+    key = 'floor32' if force_float32 else 'floor'
+    if key not in cache:
+        floor = np.where(model.head, np.where(model.plane == 0, .05, .15),
+                         np.where(model.plane == 0, .45, .60))
+        if force_float32:
+            floor = floor.astype(np.float32)
+        floor.setflags(write=False)
+        cache[key] = floor
+    return cache[key]
+
+
 def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
                  diagnostics=None, direct_body=None, force_float32=False,
                  pilot_timing='baseline', pilot_counter=None,
@@ -3120,8 +3226,7 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
              np.conj(model.phase32)[:, :, None] *
              EARLY.astype(np.complex64)[None, :, None]).astype(np.complex64)
     else:
-        Z = (np.fft.rfft(windows, axis=1)/model.scale *
-             np.conj(model.phase)[:, :, None] * EARLY[None, :, None])
+        Z = np.fft.rfft(windows, axis=1)*_receive_rotation(model)
     if diagnostics is not None:
         diagnostics.setdefault('stage_ms', {}).setdefault('sample_fft', []).append(
             (perf_counter()-stage_started)*1000)
@@ -3164,10 +3269,7 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
     if diagnostics is not None:
         diagnostics.setdefault('stage_ms', {}).setdefault('equalize', []).append(
             (perf_counter()-stage_started)*1000)
-    floor = np.where(model.head, np.where(model.plane == 0, .05, .15),
-                     np.where(model.plane == 0, .45, .60))
-    if force_float32:
-        floor = floor.astype(np.float32)
+    floor = _gate_floor(model, force_float32)
     gate = np.clip((conf-floor)/(.85-floor), 0, 1)
     current = mu + xhat*gate
     coeffs = np.asarray(prev_tail, dtype=real_dtype).copy()
@@ -3324,6 +3426,29 @@ def decode_stream(model, x, verbose=False, diagnostics=None,
 POLARITY_THRESHOLD = .3
 
 
+@njit(cache=True, fastmath=False)
+def _leg_correlation_sums(x):
+    """Mean-removed left/right powers and cross product of a stereo block."""
+    count = x.shape[0]
+    left_mean = 0.0
+    right_mean = 0.0
+    for i in range(count):
+        left_mean += x[i, 0]
+        right_mean += x[i, 1]
+    left_mean /= count
+    right_mean /= count
+    left_power = 0.0
+    right_power = 0.0
+    cross = 0.0
+    for i in range(count):
+        left = x[i, 0]-left_mean
+        right = x[i, 1]-right_mean
+        left_power += left*left
+        right_power += right*right
+        cross += left*right
+    return left_power, right_power, cross
+
+
 def leg_polarity(samples, previous=1, threshold=POLARITY_THRESHOLD):
     """Right-leg polarity (+1 or -1) of a stereo capture, with hysteresis.
 
@@ -3334,15 +3459,17 @@ def leg_polarity(samples, previous=1, threshold=POLARITY_THRESHOLD):
     (silence, one dead leg, non-V7 audio) the previous decision is kept.
     Mono or single-channel input is always +1.
     """
-    x = np.asarray(samples, np.float64)
+    x = np.asarray(samples)
     if x.ndim != 2 or x.shape[1] != 2 or len(x) < 2:
         return 1
-    left = x[:, 0] - x[:, 0].mean()                  # DC/hum offset must not vote
-    right = x[:, 1] - x[:, 1].mean()
-    energy = float(np.dot(left, left)*np.dot(right, right))
+    if x.dtype not in (np.float32, np.float64):
+        x = x.astype(np.float64)
+    # DC/hum offset must not vote: correlate the mean-removed legs.
+    left_power, right_power, cross = _leg_correlation_sums(x)
+    energy = left_power*right_power
     if energy <= 1e-24:
         return previous
-    correlation = float(np.dot(left, right))/np.sqrt(energy)
+    correlation = cross/np.sqrt(energy)
     if correlation <= -threshold:
         return -1
     if correlation >= threshold:
@@ -3438,6 +3565,20 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
     return flipped, flipped_info
 
 
+def _mono(samples):
+    """Mean of the capture's channels, bit-identical to samples.mean(axis=1)
+    for one or two channels (the average of two floats is (a+b)*0.5 in their
+    own precision) but without NumPy's slow short-axis reduction, which cost
+    ~0.15 ms on every live window."""
+    samples = np.asarray(samples)
+    if samples.ndim == 2 and samples.shape[1] == 2 and samples.dtype in (
+            np.float32, np.float64):
+        return (samples[:, 0]+samples[:, 1])*samples.dtype.type(.5)
+    if samples.ndim == 2 and samples.shape[1] == 1:
+        return samples[:, 0].copy()
+    return samples.mean(axis=1)
+
+
 def pulse_frame_starts(samples, sample_rate=RATE):
     """Every accepted pulse header in a stereo (or (n, 1)) capture.
 
@@ -3451,8 +3592,9 @@ def pulse_frame_starts(samples, sample_rate=RATE):
     min_scale, max_scale = pulse_sample_scale_bounds(sample_rate)
     starts = []
     scan = 0
+    mono = _mono(samples)      # once, not once per header found
     while scan + PULSE.SYNC_LEN + META_SYMBOL + 32 < len(samples):
-        hit = PULSE.measure_pulses(samples[scan:].mean(axis=1),
+        hit = PULSE.measure_pulses(mono[scan:],
                                    min_scale=min_scale,
                                    max_scale=max_scale)
         if hit is None:
@@ -3467,10 +3609,11 @@ def pulse_frame_starts(samples, sample_rate=RATE):
     return starts
 
 
-def _remeasure_pulse_starts(samples, anchors, sample_rate=RATE):
+def _remeasure_pulse_starts(samples, anchors, sample_rate=RATE, mono=None):
     """Recheck upstream header anchors in short windows on decoder samples."""
     min_scale, max_scale = pulse_sample_scale_bounds(sample_rate)
-    mono = samples.mean(axis=1)
+    if mono is None:
+        mono = _mono(samples)
     measured = []
     for expected_start, expected_scale, _ in sorted(
             anchors, key=lambda anchor: float(anchor[0])):
@@ -3500,7 +3643,158 @@ def _remeasure_pulse_starts(samples, anchors, sample_rate=RATE):
     return measured
 
 
+EOF_EDGE_HYSTERESIS = .04    # Schmitt band around zero for marker edges
+
+
+@njit(cache=True, fastmath=False)
+def _eof_marker_kernel(mono, lo, hi, expected_start, radius, start_scale,
+                       hysteresis, min_level, edges_nominal, runs, out):
+    """Schmitt trigger + run counter for the EOF mark (+, -, +, -).
+
+    Walks [lo, hi) once. Each Schmitt state change is an edge, timed at the
+    last zero crossing before it (as the preamble edges are). Three
+    consecutive edges -, +, - (or the inverted pattern) whose spacing counts
+    8 and 6 samples at one scale, whose runs each peak past min_level, and
+    whose fitted start lies inside the search window make a marker. The
+    best is the one closest to the packet-clock prediction.
+
+    out receives [found, start, scale, confidence, residual, gap_error,
+    min_level, polarity, prediction_error].
+    """
+    out[0] = 0.0
+    times = np.empty(hi-lo)
+    signs = np.empty(hi-lo, np.int64)
+    peaks = np.empty(hi-lo)          # peak of the run that ends at this edge
+    edges = 0
+    state = 0
+    run_peak = 0.0
+    last_crossing = -1
+    previous_negative = math.copysign(1.0, mono[lo]) < 0
+    for i in range(lo, hi):
+        value = mono[i]
+        negative = math.copysign(1.0, value) < 0
+        if i > lo and negative != previous_negative:
+            last_crossing = i-1
+        previous_negative = negative
+        now = 1 if value > hysteresis else (-1 if value < -hysteresis else 0)
+        if now != 0 and state != 0 and now != state and last_crossing >= lo:
+            left = last_crossing
+            times[edges] = left + mono[left]/(mono[left]-mono[left+1])
+            signs[edges] = now
+            peaks[edges] = run_peak
+            edges += 1
+            run_peak = 0.0
+        if now != 0:
+            state = now
+        if state != 0:
+            run_peak = max(run_peak, state*value)
+    # Peak of the last run after each edge's successor is the next edge's peak;
+    # the final run (after the third marker edge) only has to cross the band,
+    # which its Schmitt state change already proves.
+    nominal_mean = (edges_nominal[0]+edges_nominal[1]+edges_nominal[2])/3
+    spread = 0.0
+    for k in range(3):
+        spread += (edges_nominal[k]-nominal_mean)**2
+    best_error = np.inf
+    best_quality = np.inf
+    for k in range(edges-2):
+        first = signs[k]
+        if signs[k+1] != -first or signs[k+2] != first:
+            continue
+        polarity = -first            # (+,-,+,-) marker: first edge enters -
+        level = min(peaks[k], peaks[k+1], peaks[k+2])
+        if level < min_level:
+            continue
+        g1 = times[k+1]-times[k]
+        g2 = times[k+2]-times[k+1]
+        n1 = edges_nominal[1]-edges_nominal[0]
+        n2 = edges_nominal[2]-edges_nominal[1]
+        marker_scale = .5*(g1/n1+g2/n2)
+        if not (.7*start_scale <= marker_scale <= 1.3*start_scale):
+            continue
+        gap_error = max(abs(g1-n1*marker_scale), abs(g2-n2*marker_scale))
+        if gap_error > max(1.5, .40*min(n1, n2)*marker_scale):
+            continue
+        t_mean = (times[k]+times[k+1]+times[k+2])/3
+        cov = 0.0
+        for m in range(3):
+            cov += (edges_nominal[m]-nominal_mean)*(times[k+m]-t_mean)
+        fitted = cov/spread
+        if fitted <= 0 or abs(fitted/marker_scale-1) > .08:
+            continue
+        offset = t_mean-fitted*nominal_mean
+        sq = 0.0
+        for m in range(3):
+            sq += (times[k+m]-offset-fitted*edges_nominal[m])**2
+        residual = math.sqrt(sq/3)
+        confidence = min(max(1-residual/max(1.5, .45*fitted), 0.0), 1.0)
+        if confidence < .45:
+            continue
+        error = offset-expected_start
+        if abs(error) > radius:
+            continue
+        quality = residual+gap_error*.25
+        if (abs(error) < best_error or
+                (abs(error) == best_error and quality < best_quality)):
+            best_error, best_quality = abs(error), quality
+            out[0] = 1.0
+            out[1] = offset
+            out[2] = fitted
+            out[3] = confidence
+            out[4] = residual
+            out[5] = gap_error
+            out[6] = level
+            out[7] = polarity
+            out[8] = error
+
+
 def _measure_eof_marker(samples, frame_start, start_scale):
+    """Find a packet's EOF mark with a Schmitt trigger and a run counter.
+
+    The mark is a known four-run pattern at preamble level, so like the
+    header it is counted, not fitted: see _eof_marker_kernel. The search is
+    gated around the packet-clock prediction. Returns the marker's measured
+    start, end and scale and the packet scale they imply, or None.
+    _measure_eof_marker_fit is the earlier fitted implementation, kept as the
+    reference in tests.
+    """
+    mono = np.asarray(samples)
+    if mono.ndim == 2:
+        mono = mono.mean(axis=1)
+    if mono.ndim != 1 or start_scale <= 0 or mono.dtype not in (
+            np.float32, np.float64):
+        return None
+    start_scale = float(start_scale)
+    expected_start = float(frame_start)+EOF_MARKER_OFFSET*start_scale
+    radius = max(12*start_scale, EOF_SEARCH_FRACTION*PULSE_FRAME*start_scale)
+    lo = max(0, int(np.floor(expected_start-radius)))
+    hi = min(len(mono), int(np.ceil(expected_start+
+                                    EOF_MARKER_LENGTH*start_scale+radius)))
+    if hi-lo < EOF_MARKER_LENGTH*start_scale:
+        return None
+    out = np.zeros(9)
+    _eof_marker_kernel(mono, lo, hi, expected_start, radius, start_scale,
+                       EOF_EDGE_HYSTERESIS, EOF_MARKER_MIN_LEVEL,
+                       EOF_MARKER_EDGES, EOF_MARKER_RUNS_ARRAY, out)
+    if not out[0]:
+        return None
+    marker_start, fitted_scale = float(out[1]), float(out[2])
+    marker_end = marker_start+EOF_MARKER_LENGTH*fitted_scale
+    return {
+        'start': marker_start,
+        'end': marker_end,
+        'scale': fitted_scale,
+        'packet_scale': (marker_end-float(frame_start))/PULSE_FRAME,
+        'confidence': float(out[3]),
+        'edge_residual': float(out[4]),
+        'gap_error': float(out[5]),
+        'min_level': float(out[6]),
+        'polarity': int(out[7]),
+        'prediction_error': float(out[8]),
+    }
+
+
+def _measure_eof_marker_fit(samples, frame_start, start_scale):
     """Validate the three known transitions in a packet's 32-sample EOF mark.
 
     The marker is a distinct four-run (+, -, +, -) sequence at the same level
@@ -3739,17 +4033,19 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
     preloaded_following = None
     pending_aspect = 0
     eof_markers_validated = 0
+    selected_marker = None
     min_scale, max_scale = pulse_sample_scale_bounds(sample_rate)
     # EOF-mode acquisition revisits one packet at a time. Cache this mono
     # view so marker checks and local pulse reacquisition do not repeatedly
     # average the entire capture for every frame.
-    mono_samples = samples.mean(axis=1) if frame_boundary == 'eof' else None
+    mono_samples = _mono(samples) if frame_boundary == 'eof' else None
     if latest_only:
         # The live rolling buffer can contain the previous frame plus the new
         # one. Reuse the input layer's incremental header hits when available;
         # otherwise scan the window as before. In either case only the newest
         # complete frame needs the expensive image decode.
-        cached = (_remeasure_pulse_starts(samples, pulse_starts, sample_rate)
+        cached = (_remeasure_pulse_starts(samples, pulse_starts, sample_rate,
+                                          mono=mono_samples)
                   if pulse_starts is not None else [])
         required_starts = 1 if frame_boundary == 'eof' else 2
         cache_valid = len(cached) >= required_starts
@@ -3778,6 +4074,9 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                 if (marker is not None and
                         frame_min*.98 <= marker['packet_scale'] <= frame_max*1.02):
                     selected = candidate
+                    # Keep the validated marker: the walk below commits this
+                    # same packet and must not count its EOF a second time.
+                    selected_marker = marker
                     break
             if selected is None:
                 return [], {'frames': 0, 'pulse_frames': 0, 'recovered': False}
@@ -3792,7 +4091,7 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
     while cursor + PULSE.SYNC_LEN + META_SYMBOL + 32 < len(samples):
         if measured is None:
             pulse_samples = (mono_samples[cursor:] if mono_samples is not None
-                             else samples[cursor:].mean(axis=1))
+                             else _mono(samples[cursor:]))
             measured = PULSE.measure_pulses(pulse_samples,
                                           min_scale=min_scale,
                                           max_scale=max_scale)
@@ -3814,8 +4113,14 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
         following_confidence = None
         boundary_diag = None
         if frame_boundary == 'eof':
-            marker = _measure_eof_marker(
-                mono_samples, frame_start, scale)
+            if selected_marker is not None:
+                marker = dict(selected_marker)
+                marker['packet_scale'] = ((marker['end']-frame_start) /
+                                          PULSE_FRAME)
+                selected_marker = None
+            else:
+                marker = _measure_eof_marker(
+                    mono_samples, frame_start, scale)
             if marker is not None:
                 frame_min, frame_max = pulse_sample_scale_bounds(sample_rate)
                 candidate_scale = marker['packet_scale']
@@ -3837,7 +4142,7 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                 preloaded_following = None
             else:
                 candidate = PULSE.measure_pulses(
-                    samples[search:].mean(axis=1), min_scale=min_scale,
+                    _mono(samples[search:]), min_scale=min_scale,
                     max_scale=max_scale)
             if candidate is not None:
                 candidate_start = search + candidate[0] - 16*candidate[1]
