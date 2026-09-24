@@ -220,13 +220,40 @@ def run_send(args):
     def encode_batch(frames, aspects, counter):
         values = np.asarray(frames)
         audio = P.encode_pulse_stream(model, values, start_counter=counter,
-                                      aspect_codes=aspects)
+                                      aspect_codes=aspects,
+                                      pilot_tones=getattr(args, 'pilot_tones', False))
+        encoded_peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+        encoded_rms = float(np.sqrt(np.mean(audio*audio))) if audio.size else 0.0
+        limiter_gain = 1.0
+        limiter_samples = 0
         if args.mono_sum:
             audio = audio.sum(axis=1, keepdims=True)/np.sqrt(2)
-            peak = np.max(np.abs(audio))
+        before_peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+        before_rms = float(np.sqrt(np.mean(audio*audio))) if audio.size else 0.0
+        if args.mono_sum:
+            peak = before_peak
             if peak > .89:
-                audio *= .89/peak
-        return P.speed_pulse_stream(audio, args.speed, rate=output_rate)
+                limiter_gain = .89/float(peak)
+                limiter_samples = int(np.count_nonzero(np.abs(audio) > .89))
+                audio *= limiter_gain
+        stats = {
+            'frames_encoded': len(frames),
+            'encoded_peak': encoded_peak,
+            'encoded_rms': encoded_rms,
+            'peak_before_limit': before_peak,
+            'peak_after_limit': float(np.max(np.abs(audio))) if audio.size else 0.0,
+            'rms_before_limit': before_rms,
+            'limiter_active': limiter_gain < 1.0,
+            'limiter_gain': limiter_gain,
+            'samples_limited': limiter_samples,
+        }
+        output = P.speed_pulse_stream(audio, args.speed, rate=output_rate)
+        stats.update({
+            'emitted_peak': float(np.max(np.abs(output))) if output.size else 0.0,
+            'emitted_rms': float(np.sqrt(np.mean(output*output)))
+            if output.size else 0.0,
+        })
+        return output, stats
 
     def produce():
         nonlocal total
@@ -249,8 +276,8 @@ def run_send(args):
                 next_capture += 1/wire_fps
                 if len(frames) < batch_size:
                     continue
-                audio = encode_batch(frames, aspects, counter)
-                batches.put((counter, audio))
+                audio, stats = encode_batch(frames, aspects, counter)
+                batches.put((counter, audio, stats))
                 total += len(frames)
                 counter += len(frames)
                 frames = []
@@ -260,8 +287,8 @@ def run_send(args):
 
         if failure is None and frames and not stop.is_set():
             try:
-                audio = encode_batch(frames, aspects, counter)
-                batches.put((counter, audio))
+                audio, stats = encode_batch(frames, aspects, counter)
+                batches.put((counter, audio, stats))
                 total += len(frames)
             except Exception as exc:
                 failure = exc
@@ -306,22 +333,27 @@ def run_send(args):
                 camera_text = (f'camera={args.camera} '
                                if args.source == 'camera' else '')
                 print(f'V7 send ready: source={args.source} device={args.device!r} '
-                      f'rate={output_rate:g}Hz wire={wire_fps:.3f}fps '
-                      f'speed={args.speed:g}x {camera_text}'
-                      f'capture={args.capture_width}px/{args.capture_filter} '
+                       f'rate={output_rate:g}Hz wire={wire_fps:.3f}fps '
+                       f'speed={args.speed:g}x {camera_text}'
+                       f'pilot-tones={"on" if getattr(args, "pilot_tones", False) else "off"} '
+                       f'capture={args.capture_width}px/{args.capture_filter} '
                       f'encode={args.encode_filter} mode={"mono-sum" if args.mono_sum else "M/S"}',
                       flush=True)
             while True:
                 item = batches.get()
                 if item is sentinel:
                     break
-                counter, audio = item
+                counter, audio, stats = item
                 # sounddevice requires a C-contiguous interleaved buffer;
                 # filtering/resampling can return a strided view here.
                 stream.write(np.ascontiguousarray(audio, dtype=np.float32))
                 if args.log and not args.no_log:
-                    print(f'  sent through frame {counter+len(audio)//P.PULSE_FRAME-1}',
-                          flush=True)
+                    print({
+                        'sent_through_frame': (
+                            counter+stats['frames_encoded']-1),
+                        **{key: value for key, value in stats.items()
+                           if key != 'frames_encoded'},
+                    }, flush=True)
     except KeyboardInterrupt:
         stop.set()
     finally:
@@ -496,7 +528,11 @@ def run_receive(args):
                 input_gain=auto_gain, models=models,
                 model_factory=model_factory,
                 force_float32=args.force_float32, state=pulse_state,
-                pulse_starts=pulse_starts, sample_rate=capture_rate)
+                pulse_starts=pulse_starts, sample_rate=capture_rate,
+                pilot_timing=args.pilot_timing,
+                pilot_speed_diagnostics=args.pilot_speed_diagnostics,
+                pulse_timing=args.pulse_timing,
+                tone_equalization=args.tone_equalization)
         except Exception as exc:
             # Drop the damaged window and let the next retained clock history
             # reacquire.  A single bad frame must not stop the live receiver.
@@ -598,7 +634,8 @@ def run_receive(args):
                        'timing_delta_ppm': result.diag.get('timing_delta_ppm'),
                        'playback_speed': meter['playback_speed'],
                        'capture_rate_hz': capture_rate,
-                      'noise': result.diag.get('noise'),
+                       'pilot_tone_speed': result.diag.get('pilot_tone_speed'),
+                       'noise': result.diag.get('noise'),
                       'metadata_valid': result.diag.get('metadata_valid'),
                       'skipped_frames': len(info.get('skipped_frames', [])),
                       'recovered': info.get('recovered', False)}
@@ -828,7 +865,9 @@ def parser():
     send.add_argument('--gamma', type=float, default=1.0,
                       help='source gamma; >1 lifts midtones (default: 1.0)')
     send.add_argument('--mono-sum', action='store_true',
-                      help='emit mono-summed M content on one channel')
+                       help='emit mono-summed M content on one channel')
+    send.add_argument('--pilot-tones', action='store_true',
+                      help='add experimental V7 bin-1/bin-3 reference tones')
     send.add_argument('--camera', type=int, default=0)
     send.add_argument('--video-source', '--video', dest='video_source',
                       help='local video file or FFmpeg-supported live stream URL')
@@ -892,7 +931,20 @@ def parser():
     recv.add_argument('--no-tail-memory', action='store_true',
                       help='do not reuse tail coefficients from earlier packets')
     recv.add_argument('--force-float32', action='store_true',
-                      help='use the experimental float32/complex64 decode path')
+                       help='use the experimental float32/complex64 decode path')
+    recv.add_argument('--pilot-timing',
+                      choices=('baseline', 'tone-seeded', 'tone-joint',
+                               'tone-replaced'),
+                      default='baseline',
+                      help='experimental timing fit; defaults to existing pilot fit')
+    recv.add_argument('--pilot-speed-diagnostics', action='store_true',
+                      help='compare raw pilot-tone speed with pulse-measured speed')
+    recv.add_argument('--pulse-timing', choices=('baseline', 'pulse-warp'),
+                      default='baseline',
+                      help='experimental within-packet map from neighboring pulse scales')
+    recv.add_argument('--tone-equalization',
+                      choices=('off', 'm-reference'), default='off',
+                      help='use pilot tones as an opt-in M-path gain reference')
     return ap
 
 

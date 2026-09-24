@@ -343,6 +343,8 @@ def configure_runtime():
                         type=float, default=1.0,
                         help="V7 playback speed 0.25..4x (default 1; 1x is tape-safe). "
                              "Above the output Nyquist limit, high-frequency detail is lost")
+    parser.add_argument("--modem-pilot-tones", action="store_true",
+                        help="Experimental V7 bin-1/bin-3 references (default off)")
     parser.add_argument("--modem-encode-filter",
                         choices=("nearest", "box", "lanczos", "bicubic"),
                         default="nearest",

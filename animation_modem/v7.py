@@ -39,12 +39,43 @@ META_SYMBOL = SYM
 PULSE_FRAME = PULSE.SYNC_LEN + FRAME + META_SYMBOL + 32  # 3920, 12.245 fps
 PULSE_FPS = RATE/PULSE_FRAME
 PULSE_GUARD_BASE = 32
+EOF_MARKER_RUNS = (4, 8, 6, 6)
+EOF_MARKER_LENGTH = sum(EOF_MARKER_RUNS)
+EOF_MARKER_PREFIX = 32-EOF_MARKER_LENGTH
+EOF_MARKER_OFFSET = PULSE_FRAME-32+EOF_MARKER_PREFIX
+EOF_MARKER_LEVEL = PULSE.PREAMBLE_AMPLITUDE
+EOF_MARKER_LEVELS = (1, -1, 1, -1)
+EOF_MARKER_EDGES = np.cumsum(EOF_MARKER_RUNS[:-1], dtype=float)-.5
+EOF_MARKER_CENTERS = (np.cumsum((0,)+EOF_MARKER_RUNS[:-1], dtype=float)+
+                      np.asarray(EOF_MARKER_RUNS, dtype=float)/2)
+EOF_MARKER_MIN_LEVEL = .08
+EOF_SEARCH_FRACTION = .012
+# measure_pulses() fits one scale over the preamble edge word, centered near
+# this reference-sample coordinate within each packet.
+PULSE_PREAMBLE_CENTER = (
+    16.0 + float(np.mean(PULSE.NOMINAL_EDGES.astype(float)+.5)))
+PULSE_WARP_STATIC_BIAS_DELTA = 100e-6
+PULSE_WARP_STATIC_BIAS_GATE = 1000e-6
+PULSE_WARP_MIN_SLOPE_DELTA = 500e-6
 # Pulse scale bounds are relative to the 48 kHz reference geometry. A capture
 # at another sample rate observes raw sample scales multiplied by rate/RATE.
 PULSE_MIN_SCALE = .25
 PULSE_MAX_SCALE = 4.0
 MIN_PLAYBACK_SPEED = .25
 MAX_PLAYBACK_SPEED = 4.0
+PILOT_TONE_BINS = (1, 3)
+PILOT_TONE_REL_DB = -20.0
+# Fixed phase origins are 0 rad (bin 1) and 1 rad (bin 3); bin 2 stays clear.
+PILOT_TONE_PHASES = {1: 0.0, 3: 1.0}
+PILOT_TONE_DURATION = PULSE_FRAME
+PILOT_TONE_NARROW_SNR_DB = 16.0
+PILOT_TONE_NARROW_WINDOW = 9
+PILOT_TONE_JOINT_MIN_COHERENCE = .35
+PILOT_TONE_JOINT_MAX_DISAGREEMENT = 1.5
+PILOT_TONE_JOINT_RELATIVE_TOLERANCE = .005
+PILOT_TONE_JOINT_BASELINE_TIMING_TRIGGER = .02
+PILOT_TONE_MAX_PILOT_RESIDUAL = .01
+PILOT_TONE_MAX_CHANNEL_TIMING_RESIDUAL = .5
 ENCODING_FILTERS = ('nearest', 'box', 'lanczos', 'bicubic')
 ENCODING_FILTER_CODES = {name: code for code, name in
                          enumerate(ENCODING_FILTERS)}
@@ -90,6 +121,34 @@ def speed_pulse_stream(audio, speed=1.0, rate=RATE):
         speed_resample(audio[start:start+PULSE_FRAME], rate, speed)
         for start in range(0, len(audio), PULSE_FRAME)
     ])
+
+
+def _add_pilot_tones(packet, counter, gate_preamble=False):
+    """Add packet-long, body-RMS-normalized M references to one pulse packet.
+
+    Each tone's RMS level is -20 dB relative to the OFDM body RMS. The known
+    phase origin advances by one PULSE_FRAME per counter, including across
+    separately encoded packets.
+    """
+    packet = np.asarray(packet, np.float64).copy()
+    body = packet[PULSE.SYNC_LEN:PULSE.SYNC_LEN+FRAME]
+    body_rms = float(np.sqrt(np.mean(body*body)))
+    amplitude = np.sqrt(2)*body_rms*10**(PILOT_TONE_REL_DB/20)
+    absolute = ((int(counter)-1)*PILOT_TONE_DURATION +
+                np.arange(len(packet)))
+    tone = sum(amplitude*np.cos(2*np.pi*bin_index*absolute/N +
+                                PILOT_TONE_PHASES[bin_index])
+               for bin_index in PILOT_TONE_BINS)
+    if gate_preamble:
+        # Test-only fallback for an edge-biased pulse detector. The phase keeps
+        # running while the preamble amplitude is faded out and back in.
+        envelope = np.ones(len(packet), dtype=float)
+        envelope[:16] = np.cos(np.linspace(0, np.pi/2, 16))**2
+        envelope[16:272] = 0
+        envelope[272:300] = np.sin(np.linspace(0, np.pi/2, 28))**2
+        tone *= envelope
+    packet += tone[:, None]
+    return packet.astype(np.float32)
 
 
 # The high bit of each pair is orientation; square ignores it.
@@ -859,7 +918,8 @@ def encode_stream(model, values, frames, lead=0.25, tail=0.25,
 
 
 def encode_pulse_frame(model, values, counter, aspect_code=0, source_index=None,
-                       loop=None, direction=1):
+                       loop=None, direction=1, pilot_tones=False,
+                       pilot_tone_gate_preamble=False, eof_marker=False):
     """One edge-counted pulse-framed V7 body for low-latency live transport.
 
     ``counter`` is the packet count: counter mod 7 picks the tail slice, which
@@ -887,11 +947,25 @@ def encode_pulse_frame(model, values, counter, aspect_code=0, source_index=None,
     # cannot smear the preceding image symbol across its pilots/data.
     shaped = bound_emission(out, EMISSION_EDGE_HZ, RATE)
     shaped[meta_start:meta_start+META_SYMBOL, :] += meta_pcm[:, None]
+    if pilot_tones:
+        # Add after the per-packet shaper so phase is exact across packets.
+        # Time compression remains downstream and shifts the tone frequencies
+        # together with the pulse wire.
+        shaped = _add_pilot_tones(shaped, counter,
+                                  gate_preamble=pilot_tone_gate_preamble)
+    if eof_marker:
+        marker = np.concatenate([
+            np.full(run, level, np.float32)
+            for run, level in zip(EOF_MARKER_RUNS, EOF_MARKER_LEVELS)
+        ])*EOF_MARKER_LEVEL
+        shaped[EOF_MARKER_OFFSET:PULSE_FRAME, :] += marker[:, None]
     return shaped
 
 
 def encode_pulse_stream(model, values, start_counter=1, aspect_codes=None,
-                        source_indices=None, loop=None, directions=None):
+                        source_indices=None, loop=None, directions=None,
+                        pilot_tones=False, pilot_tone_gate_preamble=False,
+                        eof_marker=False):
     values = list(values) if np.asarray(values).ndim != 1 else [values]
     codes = aspect_codes or [0]*len(values)
     indexes = (list(source_indices) if source_indices is not None else
@@ -901,7 +975,8 @@ def encode_pulse_stream(model, values, start_counter=1, aspect_codes=None,
         raise ValueError('aspect_codes, source_indices and directions must match values')
     return np.concatenate([
         encode_pulse_frame(model, value, start_counter+i, code, source_index,
-                           loop, way)
+                           loop, way, pilot_tones,
+                           pilot_tone_gate_preamble, eof_marker)
         for i, (value, code, source_index, way) in
         enumerate(zip(values, codes, indexes, ways))])
 
@@ -1166,6 +1241,8 @@ KNOTS = np.array([0, 4, 8, 12, 16, 20, F-1], float)
 _BASIS = np.stack([np.interp(np.arange(F), KNOTS, np.eye(len(KNOTS))[k])
                    for k in range(len(KNOTS))], axis=1)          # (F, knots) hat basis
 _BASIS32 = _BASIS.astype(np.float32)
+_BASIS_LS = np.linalg.pinv(_BASIS)
+_BASIS_LS32 = _BASIS_LS.astype(np.float32)
 
 # The joint channel fit solves one independent two-coefficient least-squares
 # problem per pilot bin.  Pack those observations once so the per-frame path
@@ -1198,7 +1275,8 @@ _PILOT_BIN_VALUES32 = _PILOT_BIN_VALUES.astype(np.complex64)
 _PILOT_BIN_LS32 = _PILOT_BIN_LS.astype(np.complex64)
 _PILOT_BIN_OMEGA32 = _PILOT_BIN_OMEGA.astype(np.complex64)
 _PILOT_BIN_J32 = _PILOT_BIN_J.astype(np.float32)
-for _table in (_PILOT_BIN_FREQUENCIES, _PILOT_BIN_SYMBOLS, _PILOT_BIN_VALID,
+for _table in (_BASIS_LS, _BASIS_LS32, _PILOT_BIN_FREQUENCIES,
+               _PILOT_BIN_SYMBOLS, _PILOT_BIN_VALID,
                _PILOT_BIN_VALUES,
                _PILOT_BIN_LS, _PILOT_BIN_OMEGA, _PILOT_BIN_J,
                _PILOT_BIN_VALUES32, _PILOT_BIN_LS32,
@@ -1206,22 +1284,704 @@ for _table in (_PILOT_BIN_FREQUENCIES, _PILOT_BIN_SYMBOLS, _PILOT_BIN_VALID,
     _table.setflags(write=False)
 
 
-def channel_joint(Z, iters=2, force_float32=False):
-    """Per rx channel: static 1x2 response per pilot bin x smooth timing track.
+def _median_fast(values, axis=None):
+    """Finite-array median without NumPy's general masked/NaN dispatch."""
+    array = np.asarray(values)
+    if axis is None:
+        array = array.ravel()
+        axis = 0
+    length = array.shape[axis]
+    middle = length//2
+    kth = (middle,) if length % 2 else (middle-1, middle)
+    partitioned = np.partition(array, kth, axis=axis)
+    upper = np.take(partitioned, middle, axis=axis)
+    if length % 2:
+        return upper
+    lower = np.take(partitioned, middle-1, axis=axis)
+    return (lower+upper)*.5
 
-    y(s,b) = exp(j*2*pi*b*delta(s)/N) * (hM(b)*pM + hS(b)*pS), delta piecewise
-    linear over the frame. Alternating LS: responses given delta, then a
-    Gauss-Newton phase step for delta. Pilot-bin observations and their static
-    least-squares operators are batched, avoiding one Python solve per bin.
-    Timing error left by the clock map is common to all carriers of a symbol,
-    so the pilots pin it down (§9.3).
+
+def _unwrap_phase_fast(phase, axis=0):
+    """Unwrap short phase tracks using their adjacent principal differences."""
+    values = np.asarray(phase)
+    values = np.moveaxis(values, axis, 0)
+    differences = np.diff(values, axis=0)
+    differences = (differences+np.pi) % (2*np.pi)-np.pi
+    unwrapped = np.empty(values.shape, dtype=float)
+    unwrapped[0] = values[0]
+    unwrapped[1:] = values[0]+np.cumsum(differences, axis=0)
+    return np.moveaxis(unwrapped, 0, axis)
+
+
+def pilot_tone_timing(Z, model, counter, include_metadata=False,
+                      estimator='single'):
+    """Estimate the smooth within-frame timing residual from bins 1 and 3.
+
+    Adjacent bin-3 phasors cancel the unknown absolute phase and yield timing
+    increments; the lower-slope bin 1 remains an independent lock check. The
+    constant delay is unobservable from the tones and is centered out. A weak
+    or incoherent reference falls back to the established data-pilot fit.
     """
+    if estimator not in ('single', 'joint'):
+        raise ValueError(f'unknown pilot-tone estimator {estimator!r}')
+    if estimator == 'joint':
+        return _pilot_tone_timing_joint(
+            Z, model, counter, include_metadata=include_metadata)
+    bins = np.asarray(PILOT_TONE_BINS, dtype=int)
+    phase0 = np.asarray([PILOT_TONE_PHASES[int(k)] for k in bins])
+    phase_step = 2*np.pi/N
+    physical = (np.asarray(Z)[:, bins, :]*model.scale *
+                model.phase[:, bins, None] *
+                np.conj(EARLY[bins])[None, :, None])
+    # Encoder tones are identical in L/R, hence M-only; averaging rejects
+    # channel-specific noise while keeping the common reference.
+    tone = np.sum(physical, axis=2)*.5
+    amplitudes = np.sum(np.abs(tone), axis=0)/F
+    # Bin 2 is deliberately left empty as a mains-hum guard; bin 0 is also
+    # unoccupied. Compare each tone against those local empty-bin levels so a
+    # coincidental carrier/noise phasor cannot be mistaken for a reference.
+    empty_bins = np.asarray((0, 2), dtype=int)
+    empty = (np.asarray(Z)[:, empty_bins, :]*model.scale *
+             model.phase[:, empty_bins, None] *
+             np.conj(EARLY[empty_bins])[None, :, None])
+    empty_tone = np.sum(empty, axis=2)*.5
+    empty_level = max(float(np.sum(np.abs(empty_tone))/(F*len(empty_bins))),
+                      1e-12)
+    tone_snr_db = 20*np.log10(np.maximum(amplitudes, 1e-12)/empty_level)
+    active = np.flatnonzero(
+        (amplitudes >= 1e-5) &
+        (tone_snr_db >= 6.0))
+    if not len(active):
+        return None, {
+            'detected': False, 'reason': 'tone_level',
+            'tone_snr_db': tone_snr_db.tolist(),
+            'empty_bin_level': empty_level,
+        }
+
+    # Bin 3 supplies fine timing over its ±N/6-sample unambiguous interval;
+    # bin 1 remains an independent lock/coherence check. If bin 3 is removed
+    # by the medium, fall back to the lower-slope bin 1 track.
+    index = (1 if 3 in bins[active] else
+             int(active[np.argmax(amplitudes[active])]))
+    bin_index = int(bins[index])
+    # Adjacent symbol phasors cancel unknown start time and fixed tone phase.
+    # The remaining phase is only the within-packet timing increment, so a
+    # single short cumulative sum replaces full-packet phase unwrapping.
+    advance = np.exp(-2j*np.pi*bin_index*SYM/N)
+    phase_steps = np.angle(
+        tone[1:, index]*np.conj(tone[:-1, index])*advance)
+    delta = np.r_[0.0, np.cumsum(phase_steps)]*N/(2*np.pi*bin_index)
+    delta -= np.sum(delta)/len(delta)
+    narrow_track = bool(np.min(tone_snr_db[active]) <
+                        PILOT_TONE_NARROW_SNR_DB)
+    if narrow_track:
+        # Hum harmonics produce low-frequency beat phasors in the low bins.
+        # Reduce the tracking bandwidth when the tone is still phase-coherent
+        # but has weak SNR; high-SNR/flutter cases keep the wider 3-tap track.
+        per_symbol = savgol_filter(
+            delta, PILOT_TONE_NARROW_WINDOW, 2, mode='interp')
+    else:
+        padded = np.pad(delta, (1, 1), mode='edge')
+        per_symbol = (.25*padded[:-2] + .5*padded[1:-1] +
+                      .25*padded[2:])
+    theta = _BASIS_LS@per_symbol
+    knot_track = _BASIS@theta
+    knot_residual = per_symbol-knot_track
+    symbol_residual = delta-per_symbol
+    symbol_phase = (phase_step*SYM*np.arange(F)[:, None]*bins[None, :])
+    nominal_removed = tone*np.exp(-1j*symbol_phase)
+    corrected = nominal_removed*np.exp(
+        -1j*phase_step*per_symbol[:, None]*bins[None, :])
+    coherence = (np.abs(np.sum(corrected, axis=0)) /
+                 np.maximum(np.sum(np.abs(corrected), axis=0), 1e-12))
+    knot_residual_rms = float(np.sqrt(np.sum(knot_residual*knot_residual)/F))
+    symbol_residual_rms = float(np.sqrt(np.sum(symbol_residual*symbol_residual)/F))
+    if np.min(coherence[active]) < .2 or knot_residual_rms > 1.0:
+        return None, {
+            'detected': False, 'reason': 'tone_coherence',
+            'coherence': coherence.tolist(),
+            'tone_bins_used': bins[active].tolist(),
+            'tone_snr_db': tone_snr_db.tolist(),
+            'empty_bin_level': empty_level,
+            'narrow_track': narrow_track,
+            'timing_residual_rms': knot_residual_rms,
+            'timing_sample_residual_rms': symbol_residual_rms,
+        }
+    track = {'per_symbol': per_symbol, 'knot_fit': knot_track,
+             'active': active}
+    if include_metadata:
+        nominal = ((int(counter)-1)*PULSE_FRAME + PULSE.SYNC_LEN +
+                   np.arange(F)*SYM + WIN)
+        expected = (phase_step*nominal[:, None]*bins[None, :] +
+                    phase0[None, :])
+        despread = tone*np.exp(-1j*expected)
+        individual_phase = _unwrap_phase_fast(np.angle(despread), axis=0)
+        tone_omegas = 2*np.pi*bins/N
+        phase_intercepts = _median_fast(
+            individual_phase-tone_omegas[None, :]*per_symbol[:, None], axis=0)
+        body_centers = (PULSE.SYNC_LEN + np.arange(F)*SYM + WIN +
+                        (N-1)/2)
+        meta_center = PULSE.SYNC_LEN+FRAME+WIN+(N-1)/2
+        fit_x = body_centers[-5:]
+        fit_y = per_symbol[-5:]
+        fit_x_center = float(np.mean(fit_x))
+        fit_y_center = float(np.mean(fit_y))
+        fit_slope = float(np.dot(fit_x-fit_x_center, fit_y-fit_y_center) /
+                          np.dot(fit_x-fit_x_center, fit_x-fit_x_center))
+        track.update({
+            'phase_intercept': float(phase_intercepts[1]-phase_intercepts[0]),
+            'phase_intercepts': phase_intercepts,
+            'meta_delta': fit_y_center+fit_slope*(meta_center-fit_x_center),
+        })
+    return track, {
+        'detected': True,
+        'coherence': coherence.tolist(),
+        'tone_bins_used': bins[active].tolist(),
+        'tone_snr_db': tone_snr_db.tolist(),
+        'empty_bin_level': empty_level,
+        'narrow_track': narrow_track,
+        'timing_rms': float(np.sqrt(np.sum(per_symbol*per_symbol)/F)),
+        'timing_peak': float(np.max(np.abs(per_symbol))),
+        'timing_residual_rms': knot_residual_rms,
+        'timing_sample_residual_rms': symbol_residual_rms,
+    }
+
+
+def _pilot_tone_timing_joint(Z, model, counter, include_metadata=False):
+    """Estimate timing increments jointly from both known tone frequencies.
+
+    Differential phase removes each tone's unknown static channel phase. Bin 1
+    supplies the wider-range branch decision, while bin 3 supplies finer
+    timing resolution. A contaminated empty-bin guard is treated as a
+    diagnostic outlier; phase coherence and agreement between the two timing
+    estimates decide whether the joint track is usable.
+    """
+    bins = np.asarray(PILOT_TONE_BINS, dtype=int)
+    phase0 = np.asarray([PILOT_TONE_PHASES[int(k)] for k in bins])
+    phase_step = 2*np.pi/N
+    spectrum = np.asarray(Z)
+    physical = (spectrum[:, bins, :]*model.scale *
+                model.phase[:, bins, None] *
+                np.conj(EARLY[bins])[None, :, None])
+    tone = np.sum(physical, axis=2)*.5
+    amplitudes = np.mean(np.abs(tone), axis=0)
+
+    # Bin 0 can contain DC; bin 2 is 750 Hz at the 48 kHz reference rate.
+    # In particular, the 15th harmonic of 50 Hz can raise bin 2; 750 Hz is
+    # not a harmonic of 60 Hz. Use the cleaner of these guards for a
+    # conservative signal-presence ratio and retain both levels in diagnostics.
+    empty_bins = np.asarray((0, 2), dtype=int)
+    empty = (spectrum[:, empty_bins, :]*model.scale *
+             model.phase[:, empty_bins, None] *
+             np.conj(EARLY[empty_bins])[None, :, None])
+    empty_tone = np.sum(empty, axis=2)*.5
+    empty_levels = np.maximum(np.mean(np.abs(empty_tone), axis=0), 1e-12)
+    empty_level = float(np.min(empty_levels))
+    tone_snr_db = 20*np.log10(np.maximum(amplitudes, 1e-12)/empty_level)
+
+    # Remove the known 144-sample symbol-to-symbol tone rotation. A true tone
+    # remains coherent even with a varying timing offset; mains/DC leakage does
+    # not generally follow both exact V7 phase advances.
+    symbols = np.arange(F)
+    nominal_phase = phase_step*SYM*symbols[:, None]*bins[None, :]
+    nominal_removed = tone*np.exp(-1j*nominal_phase)
+    nominal_coherence = (
+        np.abs(np.sum(nominal_removed, axis=0)) /
+        np.maximum(np.sum(np.abs(tone), axis=0), 1e-12))
+    active = np.flatnonzero(
+        (amplitudes >= 1e-5) & (tone_snr_db >= 6.0) &
+        (nominal_coherence >= PILOT_TONE_JOINT_MIN_COHERENCE))
+    base_metrics = {
+        'tone_snr_db': tone_snr_db.tolist(),
+        'nominal_coherence': nominal_coherence.tolist(),
+        'empty_bin_level': empty_level,
+        'empty_bin_levels': empty_levels.tolist(),
+    }
+    if not len(active):
+        return None, {
+            'detected': False, 'reason': 'tone_level_or_coherence',
+            **base_metrics,
+        }
+
+    # The residual phase advance from one symbol to the next is
+    # 2*pi*k*delta/N. Bin 3's estimate aliases every N/3 samples; the bin-1
+    # estimate selects the matching branch before the precision-weighted fit.
+    expected_advance = phase_step*SYM*bins
+    phase_steps = np.angle(
+        tone[1:, :]*np.conj(tone[:-1, :]) *
+        np.exp(-1j*expected_advance)[None, :])
+    step_samples = phase_steps*N/(2*np.pi*bins[None, :])
+    dual_tone_disagreement = None
+    if len(active) == 2 and np.array_equal(bins[active], (1, 3)):
+        index1, index3 = int(active[0]), int(active[1])
+        delta1 = step_samples[:, index1]
+        delta3 = step_samples[:, index3]
+        delta3 += np.rint((delta1-delta3)/(N/3))*(N/3)
+
+        # Phase variance scales approximately as 1/SNR and timing variance as
+        # 1/k^2, so weight the sample estimates by SNR*k^2 and phase coherence.
+        snr_linear = np.clip(10**(tone_snr_db/10), .1, 1e3)
+        weights = (snr_linear*bins.astype(float)**2 *
+                   np.maximum(nominal_coherence, .05)**2)
+        w1, w3 = weights[index1], weights[index3]
+        per_step = (w1*delta1+w3*delta3)/(w1+w3)
+        dual_tone_disagreement = float(np.sqrt(
+            np.mean((delta1-delta3)**2)))
+        if dual_tone_disagreement > PILOT_TONE_JOINT_MAX_DISAGREEMENT:
+            return None, {
+                'detected': False,
+                'reason': 'dual_tone_timing_disagreement',
+                'tone_bins_used': bins[active].tolist(),
+                'dual_tone_timing_disagreement_samples': (
+                    dual_tone_disagreement),
+                **base_metrics,
+            }
+    else:
+        # If one reference is rejected by the medium, retain a single-tone
+        # fallback. Prefer bin 3 for precision; bin 1 remains the broad-range
+        # fallback when bin 3 is lost.
+        bin3 = np.flatnonzero(bins[active] == 3)
+        index = int(active[bin3[0]]) if len(bin3) else int(active[0])
+        per_step = step_samples[:, index]
+
+    delta = np.r_[0.0, np.cumsum(per_step)]
+    delta -= np.mean(delta)
+    narrow_track = bool(np.min(tone_snr_db[active]) <
+                        PILOT_TONE_NARROW_SNR_DB)
+    if narrow_track:
+        per_symbol = savgol_filter(
+            delta, PILOT_TONE_NARROW_WINDOW, 2, mode='interp')
+    else:
+        padded = np.pad(delta, (1, 1), mode='edge')
+        per_symbol = (.25*padded[:-2] + .5*padded[1:-1] +
+                      .25*padded[2:])
+    theta = _BASIS_LS@per_symbol
+    knot_track = _BASIS@theta
+    knot_residual = per_symbol-knot_track
+    symbol_residual = delta-per_symbol
+    corrected = nominal_removed*np.exp(
+        -1j*phase_step*per_symbol[:, None]*bins[None, :])
+    coherence = (np.abs(np.sum(corrected, axis=0)) /
+                 np.maximum(np.sum(np.abs(corrected), axis=0), 1e-12))
+    knot_residual_rms = float(np.sqrt(np.mean(knot_residual*knot_residual)))
+    symbol_residual_rms = float(np.sqrt(np.mean(symbol_residual*symbol_residual)))
+    metrics = {
+        'coherence': coherence.tolist(),
+        'tone_bins_used': bins[active].tolist(),
+        'narrow_track': narrow_track,
+        'timing_rms': float(np.sqrt(np.mean(per_symbol*per_symbol))),
+        'timing_peak': float(np.max(np.abs(per_symbol))),
+        'timing_residual_rms': knot_residual_rms,
+        'timing_sample_residual_rms': symbol_residual_rms,
+        'dual_tone_timing_disagreement_samples': dual_tone_disagreement,
+        **base_metrics,
+    }
+    if np.min(coherence[active]) < .2 or knot_residual_rms > 1.0:
+        return None, {
+            'detected': False, 'reason': 'tone_coherence', **metrics,
+        }
+
+    track = {'per_symbol': per_symbol, 'knot_fit': knot_track,
+             'active': active}
+    if include_metadata:
+        nominal = ((int(counter)-1)*PULSE_FRAME + PULSE.SYNC_LEN +
+                   np.arange(F)*SYM + WIN)
+        expected = phase_step*nominal[:, None]*bins[None, :] + phase0[None, :]
+        despread = tone*np.exp(-1j*expected)
+        individual_phase = _unwrap_phase_fast(np.angle(despread), axis=0)
+        tone_omegas = 2*np.pi*bins/N
+        phase_intercepts = _median_fast(
+            individual_phase-tone_omegas[None, :]*per_symbol[:, None], axis=0)
+        body_centers = (PULSE.SYNC_LEN + np.arange(F)*SYM + WIN +
+                        (N-1)/2)
+        meta_center = PULSE.SYNC_LEN+FRAME+WIN+(N-1)/2
+        fit_x = body_centers[-5:]
+        fit_y = per_symbol[-5:]
+        fit_x_center = float(np.mean(fit_x))
+        fit_y_center = float(np.mean(fit_y))
+        fit_slope = float(np.dot(fit_x-fit_x_center, fit_y-fit_y_center) /
+                          np.dot(fit_x-fit_x_center, fit_x-fit_x_center))
+        track.update({
+            'phase_intercept': float(phase_intercepts[1]-phase_intercepts[0]),
+            'phase_intercepts': phase_intercepts,
+            'meta_delta': fit_y_center+fit_slope*(meta_center-fit_x_center),
+        })
+    return track, {'detected': True, **metrics}
+
+
+def pilot_tone_speed(samples, sample_rate, frame_start, frame_scale,
+                     segments=6):
+    """Measure raw-recording tone speed relative to the pulse header.
+
+    The pulse count supplies the expected frequencies and removes each packet's
+    large nominal phase slope. A short set of windowed in-phase projections
+    then measures the residual phase slope for bins 1 and 3. This operates on
+    the capture-rate samples, before pulse resampling can normalize the speed.
+    """
+    sample_rate = float(sample_rate)
+    frame_scale = float(frame_scale)
+    if (not np.isfinite(sample_rate) or sample_rate <= 0 or
+            not np.isfinite(frame_scale) or frame_scale <= 0 or segments < 3):
+        raise ValueError('invalid pilot speed measurement parameters')
+    audio = np.asarray(samples, dtype=float)
+    if audio.ndim == 1:
+        mono = audio
+    elif audio.ndim == 2 and audio.shape[1]:
+        mono = audio.mean(axis=1)
+    else:
+        raise ValueError('pilot speed samples must be mono or multichannel')
+    start = int(round(frame_start + PULSE.SYNC_LEN*frame_scale))
+    stop = int(round(frame_start + (PULSE.SYNC_LEN+FRAME)*frame_scale))
+    if start < 0 or stop > len(mono) or stop-start < segments*16:
+        return {'detected': False, 'reason': 'body_out_of_window'}
+    body = mono[start:stop]
+    edges = np.linspace(0, len(body), segments+1, dtype=int)
+    pulse_speed = sample_rate/(RATE*frame_scale)
+    rms = float(np.sqrt(np.mean(body*body)))
+    by_bin = []
+    for bin_index in PILOT_TONE_BINS:
+        expected_hz = bin_index*RATE/N*pulse_speed
+        empty_hz = 2*RATE/N*pulse_speed
+        phases, amplitudes, empty_amplitudes, centers = [], [], [], []
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            if hi-lo < 16:
+                continue
+            window = np.hanning(hi-lo)
+            chunk = body[lo:hi]
+            chunk = chunk-float(np.mean(chunk))
+            indexes = start+np.arange(lo, hi, dtype=float)
+            phasor = np.sum(
+                chunk*window*np.exp(-2j*np.pi*expected_hz*indexes/sample_rate))
+            empty_phasor = np.sum(
+                chunk*window*np.exp(-2j*np.pi*empty_hz*indexes/sample_rate))
+            phases.append(float(np.angle(phasor)))
+            amplitudes.append(float(2*np.abs(phasor)/max(np.sum(window), 1e-12)))
+            empty_amplitudes.append(float(
+                2*np.abs(empty_phasor)/max(np.sum(window), 1e-12)))
+            centers.append((lo+hi-1)/(2*sample_rate))
+        if len(phases) < 3:
+            continue
+        phase = np.unwrap(phases)
+        slope = float(np.polyfit(centers, phase, 1)[0])
+        speed = pulse_speed + slope/(2*np.pi*bin_index*RATE/N)
+        amplitude = float(np.median(amplitudes))
+        empty_level = float(np.median(empty_amplitudes))
+        ratio = amplitude/max(np.sqrt(2)*rms, 1e-12)
+        snr_db = float(20*np.log10(amplitude/max(empty_level, 1e-12)))
+        by_bin.append({'bin': int(bin_index), 'speed': float(speed),
+                       'amplitude_ratio': ratio,
+                       'empty_bin_amplitude': empty_level,
+                       'tone_snr_db': snr_db})
+    valid = [entry for entry in by_bin
+             if entry['amplitude_ratio'] >= .03 and
+             entry['tone_snr_db'] >= 6.0]
+    if not valid:
+        return {'detected': False, 'reason': 'tone_level',
+                'pulse_speed': pulse_speed, 'per_bin': by_bin,
+                'tone_snr_db': [entry['tone_snr_db'] for entry in by_bin]}
+    # Bin 3 has the larger timing slope and is the refinement reference. Bin 1
+    # remains a coarse lock/consistency check; if bin 3 is absent, retain the
+    # single-tone fallback.
+    refine = next((entry for entry in valid if entry['bin'] == 3), None)
+    tone_speed = float((refine or valid[0])['speed'])
+    return {
+        'detected': True,
+        'pulse_speed': float(pulse_speed),
+        'tone_speed': tone_speed,
+        'difference_pct': float(100*(tone_speed/pulse_speed-1)),
+        'tone_snr_db': [entry['tone_snr_db'] for entry in by_bin],
+        'per_bin': by_bin,
+    }
+
+
+def _pilot_metadata_offset(body, samples, meta_start, scale, model, counter,
+                           force_float32=False, estimator='single',
+                           metadata_indexes=None):
+    """Estimate metadata-symbol timing from the continuing dual-tone phase."""
+    windows = np.asarray(body).reshape(F, SYM, 2)[:, WIN:WIN+N, :]
     if force_float32:
-        return _channel_joint_float32(Z, iters)
-    return _channel_joint_batched(Z, iters, False)
+        Z = (np.fft.rfft(windows, axis=1)/np.float32(model.scale) *
+             np.conj(model.phase32)[:, :, None] *
+             EARLY.astype(np.complex64)[None, :, None]).astype(np.complex64)
+    else:
+        Z = (np.fft.rfft(windows, axis=1)/model.scale *
+             np.conj(model.phase)[:, :, None]*EARLY[None, :, None])
+    track, metrics = pilot_tone_timing(
+        Z, model, counter, include_metadata=True, estimator=estimator)
+    if track is None:
+        return None, {'used': False, 'reason': 'body_tones_unavailable',
+                      'tone_metrics': metrics}
+
+    meta_indexes = (meta_start+np.arange(META_SYMBOL)*scale
+                    if metadata_indexes is None else
+                    np.asarray(metadata_indexes, dtype=float))
+    if meta_indexes[-1] >= len(samples)-1:
+        return None, {'used': False, 'reason': 'metadata_out_of_window',
+                      'tone_metrics': metrics}
+    meta = _sample_at(samples, meta_indexes, taps=4)
+    window = meta[WIN:WIN+N]
+    if force_float32:
+        z = (np.fft.rfft(window.astype(np.float32), axis=0) /
+             np.float32(model.scale) *
+             np.conj(model.phase32[-1])[:, None] *
+             EARLY.astype(np.complex64)[:, None]).astype(np.complex64)
+    else:
+        z = (np.fft.rfft(window, axis=0)/model.scale *
+             np.conj(model.phase[-1])[:, None]*EARLY[:, None])
+    bins = np.asarray(PILOT_TONE_BINS, dtype=int)
+    phase0 = np.asarray([PILOT_TONE_PHASES[int(k)] for k in bins])
+    tone = (z[bins]*model.scale*model.phase[-1, bins, None]*
+            np.conj(EARLY[bins])[:, None]).mean(axis=1)
+    reference = float(np.median(np.abs(z[BINS]*model.scale)))
+    active = track['active']
+    if np.any(np.abs(tone[active]) < max(reference*.08, 1e-5)):
+        return None, {'used': False, 'reason': 'metadata_tone_level',
+                      'tone_metrics': metrics}
+
+    nominal = ((int(counter)-1)*PULSE_FRAME + PULSE.SYNC_LEN + FRAME + WIN)
+    expected = 2*np.pi*nominal*bins/N+phase0
+    despread = tone*np.exp(-1j*expected)
+    if len(active) == 2:
+        measured_phase = float(np.angle(despread[1]*np.conj(despread[0])))
+        omega = 2*np.pi*(bins[1]-bins[0])/N
+        predicted_phase = (track['phase_intercept']+
+                           omega*track['meta_delta'])
+    else:
+        index = int(active[np.argmax(np.abs(tone[active]))])
+        measured_phase = float(np.angle(despread[index]))
+        omega = 2*np.pi*bins[index]/N
+        predicted_phase = (track['phase_intercepts'][index] +
+                           omega*track['meta_delta'])
+    measured_phase += 2*np.pi*round(
+        (predicted_phase-measured_phase)/(2*np.pi))
+    offset = (measured_phase-predicted_phase)/omega
+    if not np.isfinite(offset) or abs(offset) > 16:
+        return None, {'used': False, 'reason': 'metadata_tone_offset_range',
+                      'offset_samples': float(offset),
+                      'tone_metrics': metrics}
+    return float(offset), {
+        'used': True, 'offset_samples': float(offset),
+        'tone_metrics': metrics,
+    }
 
 
-def _channel_joint_batched(Z, iters, force_float32):
+def channel_joint(Z, iters=2, force_float32=False, pilot_timing='baseline',
+                  model=None, counter=None, return_timing_diag=False):
+    """Fit channel and timing, optionally using the experimental low-bin tones.
+
+    ``tone-seeded`` initializes the established Gauss-Newton pilot fit from
+    the original bin-3 tone track. ``tone-joint`` seeds it from a joint bin-1/
+    bin-3 estimate. ``tone-replaced`` holds timing to the selected single-tone
+    track while ordinary data pilots continue to estimate the channel.
+    """
+    modes = ('baseline', 'tone-seeded', 'tone-joint', 'tone-replaced')
+    if pilot_timing not in modes:
+        raise ValueError(f'unknown pilot timing mode {pilot_timing!r}')
+    if pilot_timing == 'tone-joint':
+        return _channel_joint_tone_joint(
+            Z, iters, force_float32, model, counter, return_timing_diag)
+    tone_delta = None
+    timing_diag = {'mode_requested': pilot_timing,
+                   'mode_applied': 'baseline'}
+    if pilot_timing != 'baseline':
+        if model is None or counter is None:
+            raise ValueError('tone timing requires model and counter')
+        tone_delta, metrics = pilot_tone_timing(Z, model, counter)
+        timing_diag.update(metrics)
+        weak_tone = min(metrics.get('tone_snr_db', [np.inf])) < \
+            PILOT_TONE_NARROW_SNR_DB
+        max_residual = (.8 if weak_tone else .5)
+        residual_key = ('timing_sample_residual_rms'
+                        if pilot_timing == 'tone-replaced'
+                        else 'timing_residual_rms')
+        if pilot_timing == 'tone-seeded' and not weak_tone:
+            max_residual = .35
+        if (tone_delta is not None and
+                timing_diag.get(residual_key, np.inf) > max_residual):
+            tone_delta = None
+            timing_diag.update({
+                'reason': 'timing_quality_gate',
+                'timing_accepted': False,
+            })
+        if tone_delta is not None:
+            timing_diag['timing_accepted'] = True
+            candidate = _channel_joint_batched(
+                Z, iters, force_float32,
+                tone_delta=tone_delta['knot_fit']
+                if pilot_timing == 'tone-seeded'
+                else tone_delta['per_symbol'],
+                tone_replaced=(pilot_timing == 'tone-replaced'))
+            candidate_score = _channel_pilot_residual(Z, candidate)
+            candidate_timing_residual = _channel_timing_residual(Z, candidate)
+            timing_diag.update({
+                'tone_pilot_residual': candidate_score,
+                'tone_timing_residual_samples': candidate_timing_residual,
+                'comparison_fit_performed': False,
+            })
+            # A clean pilot fit and small phase-derived residual can qualify
+            # without a second full channel fit. Ambiguous candidates trigger
+            # the baseline fit below, preserving the old relative quality gate
+            # while keeping the common accepted path within the CPU budget.
+            if (pilot_timing != 'tone-replaced' and
+                    candidate_score <= PILOT_TONE_MAX_PILOT_RESIDUAL and
+                    candidate_timing_residual <=
+                    PILOT_TONE_MAX_CHANNEL_TIMING_RESIDUAL):
+                result = candidate
+                timing_diag['mode_applied'] = pilot_timing
+                timing_diag['timing_quality_gate'] = 'absolute'
+            else:
+                baseline = _channel_joint_batched(Z, iters, force_float32)
+                base_score = _channel_pilot_residual(Z, baseline)
+                baseline_timing_residual = _channel_timing_residual(Z, baseline)
+                timing_diag.update({
+                    'baseline_pilot_residual': base_score,
+                    'baseline_timing_residual_samples': baseline_timing_residual,
+                    'comparison_fit_performed': True,
+                })
+                if (candidate_score <= base_score*1.05 and
+                        candidate_timing_residual <=
+                        baseline_timing_residual*1.05+1e-8):
+                    result = candidate
+                    timing_diag['mode_applied'] = pilot_timing
+                    timing_diag['timing_quality_gate'] = 'relative'
+                else:
+                    result = baseline
+                    timing_diag['mode_applied'] = 'baseline'
+                    timing_diag['timing_accepted'] = False
+                    timing_diag['reason'] = (
+                        'pilot_residual_gate'
+                        if candidate_score > base_score*1.05
+                        else 'timing_residual_gate')
+        else:
+            result = _channel_joint_batched(Z, iters, force_float32)
+            timing_diag['baseline_pilot_residual'] = _channel_pilot_residual(
+                Z, result)
+            timing_diag['baseline_timing_residual_samples'] = (
+                _channel_timing_residual(Z, result))
+    else:
+        result = _channel_joint_batched(Z, iters, force_float32)
+    if return_timing_diag:
+        if pilot_timing == 'baseline':
+            timing_diag['baseline_pilot_residual'] = _channel_pilot_residual(
+                Z, result)
+            timing_diag['baseline_timing_residual_samples'] = (
+                _channel_timing_residual(Z, result))
+        use_tone = (pilot_timing != 'baseline' and
+                    timing_diag.get('mode_applied') == pilot_timing)
+        timing_diag['pilot_residual'] = (
+            timing_diag.get('tone_pilot_residual') if use_tone else
+            timing_diag.get('baseline_pilot_residual'))
+        timing_diag['timing_residual_samples'] = (
+            timing_diag.get('tone_timing_residual_samples') if use_tone else
+            timing_diag.get('baseline_timing_residual_samples'))
+        return result, timing_diag
+    return result
+
+
+def _channel_joint_tone_joint(Z, iters, force_float32, model, counter,
+                              return_timing_diag):
+    """Use the joint tone track only when the ordinary pilot fit needs help."""
+    if model is None or counter is None:
+        raise ValueError('tone timing requires model and counter')
+    result = _channel_joint_batched(Z, iters, force_float32)
+    base_score = _channel_pilot_residual(Z, result)
+    base_timing = _channel_timing_residual(Z, result)
+    timing_diag = {
+        'mode_requested': 'tone-joint',
+        'mode_applied': 'baseline',
+        'baseline_pilot_residual': base_score,
+        'baseline_timing_residual_samples': base_timing,
+        'comparison_fit_performed': True,
+    }
+
+    # Avoid paying for tone extraction when the data pilots already show a
+    # stable timing fit, or when their broad residual says the problem is not a
+    # cleanly separable timing error. Metadata CRC retry remains independent.
+    if base_score > PILOT_TONE_MAX_PILOT_RESIDUAL:
+        timing_diag.update({
+            'detected': False, 'tone_evaluation_skipped': True,
+            'reason': 'baseline_pilot_residual_high',
+        })
+    elif base_timing <= PILOT_TONE_JOINT_BASELINE_TIMING_TRIGGER:
+        timing_diag.update({
+            'detected': False, 'tone_evaluation_skipped': True,
+            'reason': 'baseline_timing_fit_sufficient',
+        })
+    else:
+        tone_delta, metrics = pilot_tone_timing(
+            Z, model, counter, estimator='joint')
+        timing_diag.update(metrics)
+        if tone_delta is not None:
+            weak_tone = min(metrics.get('tone_snr_db', [np.inf])) < \
+                PILOT_TONE_NARROW_SNR_DB
+            max_residual = .8 if weak_tone else .5
+            if metrics.get('timing_residual_rms', np.inf) > max_residual:
+                tone_delta = None
+                timing_diag.update({
+                    'reason': 'timing_quality_gate',
+                    'timing_accepted': False,
+                })
+        if tone_delta is not None:
+            candidate = _channel_joint_batched(
+                Z, 1, force_float32, tone_delta=tone_delta['knot_fit'])
+            candidate_score = _channel_pilot_residual(Z, candidate)
+            candidate_timing = _channel_timing_residual(Z, candidate)
+            timing_diag.update({
+                'tone_pilot_residual': candidate_score,
+                'tone_timing_residual_samples': candidate_timing,
+                'timing_accepted': True,
+            })
+            tolerance = PILOT_TONE_JOINT_RELATIVE_TOLERANCE
+            if (candidate_score <= base_score*(1+tolerance) and
+                    candidate_timing <= base_timing*(1+tolerance)+1e-8):
+                result = candidate
+                timing_diag.update({
+                    'mode_applied': 'tone-joint',
+                    'timing_quality_gate': 'baseline_relative',
+                    'timing_fit_iterations': 1,
+                })
+            else:
+                timing_diag.update({
+                    'timing_accepted': False,
+                    'reason': ('pilot_residual_gate'
+                               if candidate_score > base_score*(1+tolerance)
+                               else 'timing_residual_gate'),
+                })
+
+    use_tone = timing_diag['mode_applied'] == 'tone-joint'
+    timing_diag['pilot_residual'] = (
+        timing_diag.get('tone_pilot_residual') if use_tone else base_score)
+    timing_diag['timing_residual_samples'] = (
+        timing_diag.get('tone_timing_residual_samples')
+        if use_tone else base_timing)
+    if return_timing_diag:
+        return result, timing_diag
+    return result
+
+
+def _channel_pilot_residual(Z, H):
+    predicted = np.einsum(
+        'nci,ni->nc', H[PILOT_SV, PILOT_BV], PILOT_PV)
+    observed = Z[PILOT_SV, PILOT_BV]
+    numerator = float(np.sum(np.abs(observed-predicted)**2))
+    denominator = float(np.sum(np.abs(observed)**2))
+    return numerator/max(denominator, 1e-12)
+
+
+def _channel_timing_residual(Z, H):
+    """Weighted data-pilot phase residual expressed in reference samples."""
+    predicted = np.einsum(
+        'nci,ni->nc', H[PILOT_SV, PILOT_BV], PILOT_PV)
+    observed = Z[PILOT_SV, PILOT_BV]
+    weights = np.abs(predicted)*np.abs(observed)
+    timing_error = (np.angle(observed*np.conj(predicted))*N /
+                    (2*np.pi*PILOT_BV[:, None]))
+    return float(np.sqrt(np.sum(weights*timing_error**2) /
+                         max(float(np.sum(weights)), 1e-12)))
+
+
+def _channel_joint_batched(Z, iters, force_float32, tone_delta=None,
+                           tone_replaced=False):
     if force_float32:
         real_dtype, complex_dtype = np.float32, np.complex64
         basis = _BASIS32
@@ -1242,33 +2002,43 @@ def _channel_joint_batched(Z, iters, force_float32):
         y = np.asarray(Z[_PILOT_BIN_SYMBOLS,
                          _PILOT_BIN_FREQUENCIES[:, None], c],
                        dtype=complex_dtype)
-        theta = np.zeros(len(KNOTS), dtype=real_dtype)
-        for _ in range(iters):
-            delta = basis @ theta
+        if tone_delta is None or tone_replaced:
+            theta = np.zeros(len(KNOTS), dtype=real_dtype)
+        else:
+            basis_operator = (_BASIS_LS32 if force_float32 else _BASIS_LS)
+            theta = basis_operator@np.asarray(tone_delta, dtype=real_dtype)
+        if tone_replaced:
+            delta = np.asarray(tone_delta, dtype=real_dtype)
             rot = np.exp(omega*delta[_PILOT_BIN_SYMBOLS]).astype(
                 complex_dtype, copy=False)
-            # The pilot phase rotation has unit magnitude, so it changes only
-            # the right-hand side; each bin's Gram matrix is static and its
-            # inverse projection can be precomputed.
             h = np.einsum('bkn,bn->bk', operator, np.conj(rot)*y)
-            pred = rot*np.einsum('bni,bi->bn', values, h)
-            ok = _PILOT_BIN_VALID & (np.abs(pred) > threshold)
-            rho = np.divide(y, pred, out=np.zeros_like(y), where=ok)
-            ph = np.angle(rho).astype(real_dtype, copy=False)
-            w = np.where(ok, np.abs(pred), 0).astype(real_dtype, copy=False)
+        else:
+            for _ in range(iters):
+                delta = basis @ theta
+                rot = np.exp(omega*delta[_PILOT_BIN_SYMBOLS]).astype(
+                    complex_dtype, copy=False)
+                # The pilot phase rotation has unit magnitude, so it changes
+                # only the right-hand side; each bin's Gram matrix is static.
+                h = np.einsum('bkn,bn->bk', operator, np.conj(rot)*y)
+                pred = rot*np.einsum('bni,bi->bn', values, h)
+                ok = _PILOT_BIN_VALID & (np.abs(pred) > threshold)
+                rho = np.divide(y, pred, out=np.zeros_like(y), where=ok)
+                ph = np.angle(rho).astype(real_dtype, copy=False)
+                w = np.where(ok, np.abs(pred), 0).astype(real_dtype, copy=False)
 
-            # This is the same weighted Gauss-Newton fit as the observation-
-            # ordered loop: both sides of the normal equation carry w**2.
-            JW = jacobian*w[..., None]
-            normal = np.einsum('bni,bnj->ij', JW, JW)
-            normal += eps*np.eye(JW.shape[-1], dtype=real_dtype)
-            step = np.linalg.solve(
-                normal, np.einsum('bni,bn->i', JW, ph*w))
-            theta += step
-            if np.max(np.abs(step)) < step_tolerance:
-                break
+                # This is the same weighted Gauss-Newton fit as the
+                # observation-ordered loop: both sides are weighted by w².
+                JW = jacobian*w[..., None]
+                normal = np.einsum('bni,bnj->ij', JW, JW)
+                normal += eps*np.eye(JW.shape[-1], dtype=real_dtype)
+                step = np.linalg.solve(
+                    normal, np.einsum('bni,bn->i', JW, ph*w))
+                theta += step
+                if np.max(np.abs(step)) < step_tolerance:
+                    break
 
-        delta = basis @ theta
+        delta = (np.asarray(tone_delta, dtype=real_dtype) if tone_replaced
+                 else basis @ theta)
         phase = np.exp((2j*np.pi/N)*BINS[None, :]*delta[:, None]).astype(
             complex_dtype, copy=False)
         for k in range(2):
@@ -1303,14 +2073,155 @@ PILOT_DOF = np.maximum(PILOT_PAD_VALID.sum(axis=1)-3, 1)
 _SYMBOL_INDEX = np.arange(F)[:, None]
 
 
-def fade_and_noise(Z, H, force_float32=False):
+def _tone_reference_gain(Z, u, v):
+    """Estimate a packet-relative broadband gain track from the M-only tones.
+
+    Tone amplitude is normalized to the current packet's body RMS, which the
+    receiver does not know. Centering each tone across symbols removes that
+    unknown constant and its static channel response, leaving the per-symbol
+    M-path gain change. The data pilots still estimate the static response,
+    S path, and frequency-dependent loss.
+    """
+    bins = np.asarray(PILOT_TONE_BINS, dtype=int)
+    tone_frequency = bins*RATE/N/1000
+    magnitude = np.abs(np.asarray(Z)[:, bins, :])
+    empty = np.abs(np.asarray(Z)[:, (0, 2), :])
+    empty_level = np.median(empty, axis=(0, 1))
+    snr_db = 20*np.log10(
+        np.maximum(magnitude, 1e-12)/np.maximum(empty_level[None, None, :],
+                                                1e-12))
+    valid = (snr_db >= 6.0) & (magnitude >= 1e-5)
+    correction = np.zeros((F, 2), dtype=float)
+    channel_diag = []
+
+    for channel in range(2):
+        observations = np.log(np.maximum(magnitude[:, :, channel], 1e-12))
+        predicted = (np.asarray(u)[:, channel, None] -
+                     np.asarray(v)[:, channel, None]*tone_frequency[None, :])
+        residual = np.zeros((F, len(bins)), dtype=float)
+        for tone in range(len(bins)):
+            active = valid[:, tone, channel]
+            if not np.any(active):
+                continue
+            residual[:, tone] = (
+                observations[:, tone]-np.median(observations[active, tone]) -
+                predicted[:, tone]+np.median(predicted[active, tone]))
+
+        active = valid[:, :, channel]
+        active_symbols = np.any(active, axis=1)
+        count = int(np.sum(active_symbols))
+        tone_counts = [int(np.sum(active[:, tone]))
+                       for tone in range(len(bins))]
+        disagreement = None
+        both = active[:, 0] & active[:, 1]
+        if np.any(both):
+            disagreement = float(np.sqrt(np.mean(
+                np.square(residual[both, 0]-residual[both, 1]))))
+
+        diag = {
+            'used': False,
+            'valid_symbols': count,
+            'valid_symbols_by_tone': tone_counts,
+            'mean_snr_db': [
+                (float(np.mean(snr_db[active[:, tone], tone, channel]))
+                 if tone_counts[tone] else None)
+                for tone in range(len(bins))],
+            'two_tone_disagreement_rms': disagreement,
+        }
+        if count < F//2:
+            diag['reason'] = 'insufficient_tone_reference'
+            channel_diag.append(diag)
+            continue
+        if disagreement is not None and disagreement > .20:
+            diag['reason'] = 'tone_gain_tracks_disagree'
+            channel_diag.append(diag)
+            continue
+
+        weights = np.where(active, 1/(1+10**(-snr_db[:, :, channel]/10)), 0)
+        weight_sum = weights.sum(axis=1)
+        track = np.divide(
+            np.sum(weights*residual, axis=1), weight_sum,
+            out=np.zeros(F, dtype=float), where=weight_sum > 0)
+        valid_at = np.flatnonzero(active_symbols)
+        if len(valid_at) < F:
+            track = np.interp(np.arange(F), valid_at, track[valid_at])
+        track -= float(np.median(track[active_symbols]))
+        if F >= 5:
+            track = savgol_filter(track, 5, 2, mode='interp')
+            track -= float(np.median(track[active_symbols]))
+        rms = float(np.sqrt(np.mean(np.square(track[active_symbols]))))
+        if rms < .01:
+            diag['reason'] = 'tone_gain_track_negligible'
+            diag['rms_log_gain'] = rms
+            channel_diag.append(diag)
+            continue
+
+        # The reference only constrains the common M-path gain. Keep a poor
+        # low-band estimate from extrapolating into an excessive wideband EQ.
+        track = np.clip(track, -.22, .22)
+        correction[:, channel] = track
+        diag.update({
+            'used': True,
+            'rms_log_gain': rms,
+            'max_gain_correction_db': float(
+                np.max(np.abs(track))*20/np.log(10)),
+        })
+        channel_diag.append(diag)
+
+    return correction, {
+        'mode': 'm-reference',
+        'used': any(item['used'] for item in channel_diag),
+        'channels': channel_diag,
+    }
+
+
+def _apply_tone_reference_gain(Z, H, gain_track, diagnostic):
+    """Apply tone gain only where the known OFDM pilots agree with it."""
+    if not diagnostic.get('used'):
+        return H
+    valid = PILOT_PAD_VALID
+    obs = Z[_SYMBOL_INDEX, PILOT_PAD_BINS]
+    accepted_any = False
+    for ch, channel_diag in enumerate(diagnostic['channels']):
+        if not channel_diag.get('used'):
+            channel_diag['accepted_symbols'] = 0
+            continue
+        pilot_h = H[_SYMBOL_INDEX, PILOT_PAD_BINS, ch]
+        predicted = np.einsum('spi,spi->sp', pilot_h, PILOT_PAD_VALUES)
+        m_component = pilot_h[:, :, 0]*PILOT_PAD_VALUES[:, :, 0]
+        factor = np.exp(gain_track[:, ch])
+        candidate = predicted+(factor[:, None]-1)*m_component
+        baseline_loss = np.where(valid, np.abs(obs[:, :, ch]-predicted)**2,
+                                 0).sum(axis=1)
+        candidate_loss = np.where(valid,
+                                  np.abs(obs[:, :, ch]-candidate)**2,
+                                  0).sum(axis=1)
+        # A tone reference is additional training, not permission to worsen
+        # the existing known OFDM training fit. This per-symbol check also
+        # rejects low-band gain tracks that do not predict the occupied band.
+        accepted = candidate_loss <= baseline_loss*1.02+1e-10
+        accepted_factor = np.where(accepted, factor, 1.0)
+        H[:, BINS, ch, 0] *= accepted_factor[:, None]
+        channel_diag.update({
+            'accepted_symbols': int(np.sum(accepted)),
+            'rejected_symbols': int(F-np.sum(accepted)),
+        })
+        accepted_any |= bool(np.any(accepted & (np.abs(gain_track[:, ch]) > .01)))
+    diagnostic['used'] = accepted_any
+    return H
+
+
+def fade_and_noise(Z, H, force_float32=False, tone_reference=False,
+                   return_tone_diag=False):
     """Per-symbol magnitude/phase refit (§9.4) and pilot-residual noise (§9.5).
 
     Batched over all symbols and both channels; same rules as the original
     per-symbol loop (equivalence is covered by modem_tests/test_v7_decode_speed).
     """
     if force_float32:
-        return _fade_and_noise_float32(Z, H)
+        return _fade_and_noise_float32(
+            Z, H, tone_reference=tone_reference,
+            return_tone_diag=return_tone_diag)
     freq = BINS*RATE/N/1000
     valid = PILOT_PAD_VALID[:, :, None]                                # (F, P, 1)
     Hp = H[_SYMBOL_INDEX, PILOT_PAD_BINS]                              # (F, P, 2ch, 2)
@@ -1347,6 +2258,10 @@ def fade_and_noise(Z, H, force_float32=False):
     corr = np.exp(u[:, None, :] - v[:, None, :]*freq[None, :, None] + 1j*a[:, None, :])
     corr = np.where(apply[:, None, :], corr, 1.0)                      # (F, bins, 2ch)
     H[:, BINS] *= corr[..., None]
+    tone_diag = {'mode': 'off', 'used': False}
+    if tone_reference:
+        tone_gain, tone_diag = _tone_reference_gain(Z, u, v)
+        _apply_tone_reference_gain(Z, H, tone_gain, tone_diag)
     Hp2 = H[_SYMBOL_INDEX, PILOT_PAD_BINS]
     pred2 = np.einsum('spci,spi->spc', Hp2, PILOT_PAD_VALUES)
     resid = np.where(valid, np.abs(obs-pred2)**2, 0.0).sum(axis=1)
@@ -1366,10 +2281,13 @@ def fade_and_noise(Z, H, force_float32=False):
         noise[:, ch] = np.maximum(
             np.maximum(sm[:, ch], np.median(sm[:, ch])),
             1e-5*PILOT_AMP**2*np.mean(np.abs(H[:, BINS, ch])**2))
+    if return_tone_diag:
+        return H, noise, tone_diag
     return H, noise
 
 
-def _fade_and_noise_float32(Z, H):
+def _fade_and_noise_float32(Z, H, tone_reference=False,
+                            return_tone_diag=False):
     """Float32 version of fade/noise refit for the opt-in receiver path."""
     freq = (BINS*RATE/N/1000).astype(np.float32)
     valid = PILOT_PAD_VALID[:, :, None]
@@ -1407,6 +2325,10 @@ def _fade_and_noise_float32(Z, H):
                   np.complex64(1j)*a[:, None, :]).astype(np.complex64)
     corr = np.where(apply[:, None, :], corr, np.complex64(1))
     H[:, BINS] *= corr[..., None]
+    tone_diag = {'mode': 'off', 'used': False}
+    if tone_reference:
+        tone_gain, tone_diag = _tone_reference_gain(Z, u, v)
+        _apply_tone_reference_gain(Z, H, tone_gain, tone_diag)
     Hp2 = H[_SYMBOL_INDEX, PILOT_PAD_BINS]
     pred2 = np.einsum('spci,spi->spc', Hp2, PILOT_PAD_VALUES32)
     resid = np.where(valid, np.abs(obs-pred2)**2, np.float32(0)).sum(axis=1)
@@ -1424,11 +2346,17 @@ def _fade_and_noise_float32(Z, H):
             np.maximum(sm[:, ch], np.median(sm[:, ch])),
             np.float32(1e-5)*np.float32(PILOT_AMP)**2*np.mean(
                 np.abs(H[:, BINS, ch])**2).astype(np.float32))
+    if return_tone_diag:
+        return H, noise, tone_diag
     return H, noise
 
 
 def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
-                 diagnostics=None, direct_body=None, force_float32=False):
+                 diagnostics=None, direct_body=None, force_float32=False,
+                 pilot_timing='baseline', pilot_counter=None,
+                 tone_equalization='off'):
+    if tone_equalization not in ('off', 'm-reference'):
+        raise ValueError(f'unknown tone equalization mode {tone_equalization!r}')
     started = perf_counter()
     stage_started = started
     if direct_body is None:
@@ -1463,8 +2391,29 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
         diagnostics.setdefault('stage_ms', {}).setdefault('sample_fft', []).append(
             (perf_counter()-stage_started)*1000)
     stage_started = perf_counter()
-    H = channel_joint(Z, force_float32=force_float32)
-    H, noise = fade_and_noise(Z, H, force_float32=force_float32)
+    timing_metrics = {}
+    if pilot_timing == 'baseline':
+        H, timing_diag = channel_joint(
+            Z, force_float32=force_float32, return_timing_diag=True)
+        timing_metrics['pilot_residual'] = timing_diag['pilot_residual']
+        timing_metrics['timing_residual_samples'] = (
+            timing_diag['timing_residual_samples'])
+    else:
+        H, timing_diag = channel_joint(
+            Z, force_float32=force_float32, pilot_timing=pilot_timing,
+            model=model, counter=(counter if pilot_counter is None
+                                  else pilot_counter),
+            return_timing_diag=True)
+        timing_metrics['pilot_timing'] = timing_diag
+        timing_metrics['pilot_residual'] = timing_diag['pilot_residual']
+        timing_metrics['timing_residual_samples'] = (
+            timing_diag['timing_residual_samples'])
+    H, noise, tone_eq_diag = fade_and_noise(
+        Z, H, force_float32=force_float32,
+        tone_reference=(tone_equalization == 'm-reference'),
+        return_tone_diag=True)
+    if tone_equalization != 'off':
+        timing_metrics['tone_equalization'] = tone_eq_diag
     if diagnostics is not None:
         diagnostics.setdefault('stage_ms', {}).setdefault('channel', []).append(
             (perf_counter()-stage_started)*1000)
@@ -1578,24 +2527,31 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
         display_coeffs = np.asarray(prev_tail, dtype=real_dtype).copy()
         if displayable:
             display_coeffs[got] = current[got]
-        return Result(counter, 'lost', display_coeffs if displayable else
-                      np.asarray(prev_tail, dtype=real_dtype).copy(), {
+        result_diag = {
             'noise': noise.mean(0).tolist(), 'got': int(got.sum()),
             'head_confidence': head_confidence,
             'head_coverage': head_coverage, 'held': not displayable,
             'displayable': displayable,
-            'display_coeffs': display_coeffs})
+            'display_coeffs': display_coeffs}
+        result_diag.update(timing_metrics)
+        return Result(counter, 'lost', display_coeffs if displayable else
+                      np.asarray(prev_tail, dtype=real_dtype).copy(), result_diag)
     coeffs[got] = current[got]
-    return Result(counter, 'verified', coeffs,
-                  {'noise': noise.mean(0).tolist(), 'got': int(got.sum()),
+    result_diag = {'noise': noise.mean(0).tolist(), 'got': int(got.sum()),
                    'head_confidence': head_confidence,
                    'head_coverage': head_coverage, '_H': H,
-                   'displayable': True})
+                   'displayable': True}
+    result_diag.update(timing_metrics)
+    return Result(counter, 'verified', coeffs, result_diag)
 
 
 def decode_metadata(model, samples, start, scale, channel,
-                    force_float32=False):
-    indexes = start + np.arange(META_SYMBOL)*scale
+                    force_float32=False, sample_indexes=None):
+    indexes = (start + np.arange(META_SYMBOL)*scale
+               if sample_indexes is None else
+               np.asarray(sample_indexes, dtype=float))
+    if indexes.shape != (META_SYMBOL,):
+        raise ValueError('metadata sample indexes must match META_SYMBOL')
     if indexes[-1] >= len(samples)-1:
         return None
     meta = _sample_at(samples, indexes, taps=4)
@@ -1745,7 +2701,10 @@ def leg_polarity(samples, previous=1, threshold=POLARITY_THRESHOLD):
 def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
                         input_gain=1.0, models=None, model_factory=None,
                         force_float32=False, state=None, pulse_starts=None,
-                        sample_rate=RATE):
+                        sample_rate=RATE, pilot_timing='baseline',
+                        pilot_speed_diagnostics=False,
+                        pulse_timing='baseline', frame_boundary='baseline',
+                        tone_equalization='off'):
     """Decode V7 bodies located by the existing pulse-counted acquisition.
 
     This is the low-latency live path: each accepted pulse word supplies a
@@ -1765,7 +2724,27 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
     input gain is applied; if they do not validate, normal acquisition runs.
     ``sample_rate`` is the rate of ``x``; pulse-scale limits are normalized
     against it while sample positions remain in the input's native coordinates.
+    ``pilot_timing`` selects the experimental low-bin timing reference:
+    ``baseline`` (default), ``tone-seeded``, ``tone-joint``, or
+    ``tone-replaced``.
+    ``pulse_timing='pulse-warp'`` optionally uses the neighboring pulse fits
+    as local-slope anchors for a monotone, within-packet Hermite sample map.
+    ``frame_boundary='eof'`` requires and uses the packet's final 32-sample
+    marker instead of waiting for the next header.
+    ``tone_equalization='m-reference'`` uses the known low-bin tone magnitudes
+    as a packet-relative M-path gain reference in addition to the ordinary
+    data-pilot channel fit. Static response, S-path response, and spectral
+    slope remain data-pilot estimates.
     """
+    if pilot_timing not in (
+            'baseline', 'tone-seeded', 'tone-joint', 'tone-replaced'):
+        raise ValueError(f'unknown pilot timing mode {pilot_timing!r}')
+    if pulse_timing not in ('baseline', 'pulse-warp'):
+        raise ValueError(f'unknown pulse timing mode {pulse_timing!r}')
+    if frame_boundary not in ('baseline', 'eof'):
+        raise ValueError(f'unknown frame boundary mode {frame_boundary!r}')
+    if tone_equalization not in ('off', 'm-reference'):
+        raise ValueError(f'unknown tone equalization mode {tone_equalization!r}')
     # Live capture is float32 and _sample_at returns float32.  Promoting the
     # complete rolling history to float64 here only doubles allocation and
     # memory traffic; the FFT/equalizer still performs its own complex work at
@@ -1782,7 +2761,10 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
     results, info = _decode_pulse_samples(model, samples, diagnostics,
                                           latest_only, models, model_factory,
                                           force_float32, state, pulse_starts,
-                                          sample_rate)
+                                          sample_rate, pilot_timing,
+                                          pilot_speed_diagnostics,
+                                          pulse_timing, frame_boundary,
+                                          tone_equalization)
     if results or samples.shape[1] != 2:
         return results, info
     # One leg polarity-inverted (miswired deck or cable, reversed head lead):
@@ -1792,7 +2774,9 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
     # this; silence costs one more (cheap, empty) edge scan.
     flipped, flipped_info = _decode_pulse_samples(
         model, samples*np.float32([1, -1]), diagnostics, latest_only, models,
-        model_factory, force_float32, state, pulse_starts, sample_rate)
+        model_factory, force_float32, state, pulse_starts, sample_rate,
+        pilot_timing, pilot_speed_diagnostics, pulse_timing, frame_boundary,
+        tone_equalization)
     if not flipped:
         return results, info
     for result in flipped:
@@ -1863,9 +2847,237 @@ def _remeasure_pulse_starts(samples, anchors, sample_rate=RATE):
     return measured
 
 
+def _measure_eof_marker(samples, frame_start, start_scale):
+    """Validate the three known transitions in a packet's 32-sample EOF mark.
+
+    The marker is a distinct four-run (+, -, +, -) sequence at the same level
+    as the acquisition preamble. Search is gated around the packet-clock
+    prediction; acceptance then comes from the transition spacing, polarity,
+    plateau levels, and a linear fit to the three zero crossings.
+    """
+    mono = np.asarray(samples, dtype=float)
+    if mono.ndim == 2:
+        mono = mono.mean(axis=1)
+    if mono.ndim != 1 or start_scale <= 0:
+        return None
+
+    expected_start = float(frame_start)+EOF_MARKER_OFFSET*float(start_scale)
+    radius = max(12*float(start_scale),
+                EOF_SEARCH_FRACTION*PULSE_FRAME*float(start_scale))
+    lo = max(0, int(np.floor(expected_start-radius)))
+    hi = min(len(mono), int(np.ceil(expected_start+
+                                    EOF_MARKER_LENGTH*start_scale+radius)))
+    if hi-lo < EOF_MARKER_LENGTH*start_scale:
+        return None
+    window = mono[lo:hi]
+
+    def interpolate(positions):
+        positions = np.asarray(positions, dtype=float)
+        clipped = np.clip(positions, 0, len(mono)-1)
+        left = np.clip(np.floor(clipped).astype(np.intp), 0, len(mono)-2)
+        fraction = clipped-left
+        return mono[left]+fraction*(mono[left+1]-mono[left])
+
+    crossings = np.flatnonzero(np.diff(np.signbit(window)))
+    if len(crossings) < 3:
+        return None
+    left = crossings
+    crossing_values = window[left]
+    edge_positions = (lo+left+crossing_values /
+                      (crossing_values-window[left+1]))
+
+    edge_coordinates = EOF_MARKER_EDGES
+    center_coordinates = EOF_MARKER_CENTERS
+    level_signs = np.asarray(EOF_MARKER_LEVELS, dtype=float)
+    fit_matrix = np.column_stack((np.ones(3), edge_coordinates))
+    nominal_gaps = np.diff(edge_coordinates)
+    candidates = []
+    for index in range(len(edge_positions)-2):
+        observed = edge_positions[index:index+3]
+        gaps = np.diff(observed)
+        marker_scale = float(np.mean(gaps/nominal_gaps))
+        if (not np.isfinite(marker_scale) or marker_scale <= 0 or
+                not .7*start_scale <= marker_scale <= 1.3*start_scale):
+            continue
+        gap_error = float(np.max(np.abs(gaps-nominal_gaps*marker_scale)))
+        if gap_error > max(1.5, .40*np.min(nominal_gaps)*marker_scale):
+            continue
+        offset, fitted_scale = np.linalg.lstsq(
+            fit_matrix, observed, rcond=None)[0]
+        fitted_scale = float(fitted_scale)
+        if (not np.isfinite(offset+fitted_scale) or fitted_scale <= 0 or
+                abs(fitted_scale/marker_scale-1) > .08):
+            continue
+        fit = offset+edge_coordinates*fitted_scale
+        residual = float(np.sqrt(np.mean(np.square(observed-fit))))
+        residual_limit = max(1.5, .45*fitted_scale)
+        confidence = float(np.clip(1-residual/residual_limit, 0, 1))
+        marker_start = float(offset)
+        if abs(marker_start-expected_start) > radius:
+            continue
+        centers = marker_start+center_coordinates[:3]*fitted_scale
+        levels = interpolate(centers)
+        edge_step = max(.75, .75*fitted_scale)
+        before_edges = interpolate(observed-edge_step)
+        after_edges = interpolate(observed+edge_step)
+        marker_polarity = None
+        signed_levels = None
+        for polarity in (1, -1):
+            trial_centers = polarity*level_signs[:3]*levels
+            trial_before = polarity*level_signs[:3]*before_edges
+            trial_after = polarity*level_signs[1:]*after_edges
+            if (float(np.min(trial_centers)) >= EOF_MARKER_MIN_LEVEL and
+                    float(np.min(trial_before)) >= .04 and
+                    float(np.min(trial_after[:2])) >= .04 and
+                    float(trial_after[2]) >= .01):
+                marker_polarity = polarity
+                signed_levels = np.concatenate((trial_centers,
+                                                trial_before, trial_after))
+                break
+        if marker_polarity is None:
+            continue
+        if confidence < .45:
+            continue
+        marker_end = marker_start+EOF_MARKER_LENGTH*fitted_scale
+        packet_scale = (marker_end-float(frame_start))/PULSE_FRAME
+        candidates.append({
+            'start': marker_start,
+            'end': marker_end,
+            'scale': fitted_scale,
+            'packet_scale': packet_scale,
+            'confidence': confidence,
+            'edge_residual': residual,
+            'gap_error': gap_error,
+            'min_level': float(np.min(signed_levels)),
+            'polarity': marker_polarity,
+            'prediction_error': float(marker_start-expected_start),
+        })
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: (
+        abs(item['prediction_error']),
+        item['edge_residual']+item['gap_error']*.25))
+
+
+def _measure_pulse_after_eof_marker(samples, cursor, scale,
+                                    min_scale, max_scale):
+    """Acquire the next packet locally, without rescanning the remaining tape."""
+    margin = 32*float(scale)
+    search_start = max(0, int(cursor-margin))
+    search_end = min(len(samples), int(cursor+
+                                        (PULSE.SYNC_LEN+32)*scale))
+    hit = PULSE.measure_pulses(samples[search_start:search_end],
+                               min_scale=min_scale, max_scale=max_scale)
+    if hit is None:
+        return None
+    return (hit[0]+search_start-int(cursor), hit[1], hit[2])
+
+
+def _pulse_warp_trusted_scale(local, confidence, average):
+    weight = float(np.clip((confidence-.45)/.55, 0.0, 1.0))
+    return average + weight*(float(local)-average)
+
+
+def _pulse_warp_anchor_conflict(average, scale_start, scale_end,
+                                confidence_start, confidence_end):
+    left = _pulse_warp_trusted_scale(
+        scale_start, confidence_start, average)
+    right = _pulse_warp_trusted_scale(
+        scale_end, confidence_end, average)
+    nearly_equal = abs(left-right) <= PULSE_WARP_STATIC_BIAS_DELTA*average
+    common_bias = abs((left+right)*.5-average) >= \
+        PULSE_WARP_STATIC_BIAS_GATE*average
+    return bool(nearly_equal and common_bias)
+
+
+def _pulse_warp_is_near_linear(average, scale_start, scale_end,
+                               confidence_start, confidence_end):
+    left = _pulse_warp_trusted_scale(
+        scale_start, confidence_start, average)
+    right = _pulse_warp_trusted_scale(
+        scale_end, confidence_end, average)
+    return max(abs(left/average-1), abs(right/average-1)) <= \
+        PULSE_WARP_MIN_SLOPE_DELTA
+
+
+def _pulse_warp_map(frame_start, next_start, scale_start, scale_end,
+                    confidence_start, confidence_end, positions,
+                    endpoint_position=None, endpoint_coordinate=None):
+    """Map reference packet coordinates through a pulse-anchored Hermite warp.
+
+    Each pulse fit estimates local scale around the center of its edge word;
+    the measured packet interval fixes the integrated scale between them.
+    Confidence blends each local slope toward that interval average before the
+    monotone-curve check. The returned pair is (capture positions, derivative
+    values at the curve's extrema).
+    """
+    span = float(PULSE_FRAME)
+    average = (float(endpoint_position if endpoint_position is not None
+                      else next_start)-float(frame_start))/span
+    if (not np.isfinite(average) or average <= 0 or
+            not np.isfinite(scale_start+scale_end) or
+            scale_start <= 0 or scale_end <= 0):
+        return None
+
+    left_scale = _pulse_warp_trusted_scale(
+        scale_start, confidence_start, average)
+    right_scale = _pulse_warp_trusted_scale(
+        scale_end, confidence_end, average)
+    if _pulse_warp_anchor_conflict(
+            average, scale_start, scale_end,
+            confidence_start, confidence_end):
+        return None
+    center = PULSE_PREAMBLE_CENTER
+    t0 = center
+    t1 = (float(endpoint_coordinate) if endpoint_coordinate is not None
+          else span+center)
+    reference_span = t1-t0
+    if reference_span <= 0:
+        return None
+    x0 = float(frame_start)+center*left_scale
+    x1 = (float(endpoint_position) if endpoint_position is not None else
+          float(next_start)+center*right_scale)
+    cubic_a = 2*x0-2*x1+reference_span*(left_scale+right_scale)
+    cubic_b = (-3*x0+3*x1-reference_span*(2*left_scale+right_scale))
+    cubic_c = reference_span*left_scale
+
+    def evaluate(at):
+        z = (at-t0)/reference_span
+        return ((cubic_a*z+cubic_b)*z+cubic_c)*z+x0
+
+    requested = np.asarray(positions, dtype=float)
+    if not np.all(np.isfinite(requested)):
+        return None
+    if (np.min(requested) < t0 or np.max(requested) > t1):
+        return None
+    # The derivative is quadratic in normalized interval position. Checking
+    # both endpoints and its interior extremum is cheaper and more reliable
+    # than allocating a derivative value for every audio sample to be mapped.
+    derivative_a = (6*(x0-x1)/reference_span+
+                    3*(left_scale+right_scale))
+    derivative_b = (6*(x1-x0)/reference_span-
+                    4*left_scale-2*right_scale)
+    extrema = [0.0, 1.0]
+    if abs(derivative_a) > 1e-12:
+        vertex = -derivative_b/(2*derivative_a)
+        if 0 < vertex < 1:
+            extrema.append(float(vertex))
+    local_scales = (derivative_a*np.square(extrema) +
+                    derivative_b*np.asarray(extrema) + left_scale)
+    if (not np.all(np.isfinite(local_scales)) or
+            np.min(local_scales) <= .5*average or
+            np.max(local_scales) >= 1.5*average):
+        return None
+    return evaluate(requested), local_scales
+
+
 def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                            model_factory, force_float32, state,
-                           pulse_starts=None, sample_rate=RATE):
+                           pulse_starts=None, sample_rate=RATE,
+                           pilot_timing='baseline',
+                           pilot_speed_diagnostics=False,
+                           pulse_timing='baseline', frame_boundary='baseline',
+                           tone_equalization='off'):
     sample_rate = float(sample_rate)
     cursor = 0
     counter = 1
@@ -1873,7 +3085,12 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
     measured = None
     preloaded_following = None
     pending_aspect = 0
+    eof_markers_validated = 0
     min_scale, max_scale = pulse_sample_scale_bounds(sample_rate)
+    # EOF-mode acquisition revisits one packet at a time. Cache this mono
+    # view so marker checks and local pulse reacquisition do not repeatedly
+    # average the entire capture for every frame.
+    mono_samples = samples.mean(axis=1) if frame_boundary == 'eof' else None
     if latest_only:
         # The live rolling buffer can contain the previous frame plus the new
         # one. Reuse the input layer's incremental header hits when available;
@@ -1881,8 +3098,9 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
         # complete frame needs the expensive image decode.
         cached = (_remeasure_pulse_starts(samples, pulse_starts, sample_rate)
                   if pulse_starts is not None else [])
-        cache_valid = len(cached) >= 2
-        if cache_valid:
+        required_starts = 1 if frame_boundary == 'eof' else 2
+        cache_valid = len(cached) >= required_starts
+        if cache_valid and frame_boundary == 'baseline':
             prior, current = cached[-2], cached[-1]
             interval = (current[0]-prior[0])/prior[1]
             cache_valid = (
@@ -1891,19 +3109,24 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
         starts = (cached if cache_valid else
                   pulse_frame_starts(samples, sample_rate))
         candidates = [(fs, sc, conf, 0) for fs, sc, conf in starts]
-        if len(candidates) < 2:
+        if len(candidates) < required_starts:
             return [], {'frames': 0, 'pulse_frames': 0, 'recovered': False}
-        # The second pulse is the first edge of the next header.  It is enough
-        # to validate the current frame duration; the next body need not exist.
-        fs, sc, conf, pending_aspect = candidates[-2]
-        preloaded_following = candidates[-1][:3]
+        if frame_boundary == 'eof':
+            fs, sc, conf, pending_aspect = candidates[-1]
+        else:
+            # The second pulse is the first edge of the next header. It is
+            # enough to validate duration; the next body need not exist.
+            fs, sc, conf, pending_aspect = candidates[-2]
+            preloaded_following = candidates[-1][:3]
         cursor = int(fs)
         measured = (16*sc, sc, conf)
     while cursor + PULSE.SYNC_LEN + META_SYMBOL + 32 < len(samples):
         if measured is None:
-            measured = PULSE.measure_pulses(samples[cursor:].mean(axis=1),
-                                         min_scale=min_scale,
-                                         max_scale=max_scale)
+            pulse_samples = (mono_samples[cursor:] if mono_samples is not None
+                             else samples[cursor:].mean(axis=1))
+            measured = PULSE.measure_pulses(pulse_samples,
+                                          min_scale=min_scale,
+                                          max_scale=max_scale)
         if measured is None:
             break
         position, scale, confidence = measured
@@ -1914,65 +3137,206 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
         frame_start = position - 16*scale
         following = None
         next_start = None
-        search = int(frame_start+PULSE_FRAME*scale)
-        if preloaded_following is not None:
-            following_start, following_scale, following_confidence = \
-                preloaded_following
-            candidate = (following_start-search+16*following_scale,
-                         following_scale, following_confidence)
-            preloaded_following = None
-        else:
-            candidate = PULSE.measure_pulses(
-                samples[search:].mean(axis=1), min_scale=min_scale,
-                max_scale=max_scale)
-        if candidate is not None:
-            candidate_start = search + candidate[0] - 16*candidate[1]
-            interval = (candidate_start-frame_start)/scale
-            current_match = abs(interval-PULSE_FRAME) <= max(12, .03*PULSE_FRAME)
-            if (candidate[2] >= .45 and abs(candidate[1]/scale-1) <= .03 and
-                    current_match):
-                following = candidate
-                next_start = candidate_start
         aspect_code = pending_aspect
         following_valid = False
         frame_scale = scale
         frame_length = PULSE_FRAME
-        if following is not None:
-            following_valid = True
-            frame_scale = (next_start-frame_start)/frame_length
+        following_scale = None
+        following_confidence = None
+        boundary_diag = None
+        if frame_boundary == 'eof':
+            marker = _measure_eof_marker(
+                mono_samples, frame_start, scale)
+            if marker is not None:
+                frame_min, frame_max = pulse_sample_scale_bounds(sample_rate)
+                candidate_scale = marker['packet_scale']
+                if (frame_min*.98 <= candidate_scale <= frame_max*1.02):
+                    following_valid = True
+                    next_start = marker['end']
+                    frame_scale = candidate_scale
+                    following_scale = marker['scale']
+                    following_confidence = marker['confidence']
+                    eof_markers_validated += 1
+                    boundary_diag = marker
+        else:
+            search = int(frame_start+PULSE_FRAME*scale)
+            if preloaded_following is not None:
+                following_start, following_scale, following_confidence = \
+                    preloaded_following
+                candidate = (following_start-search+16*following_scale,
+                             following_scale, following_confidence)
+                preloaded_following = None
+            else:
+                candidate = PULSE.measure_pulses(
+                    samples[search:].mean(axis=1), min_scale=min_scale,
+                    max_scale=max_scale)
+            if candidate is not None:
+                candidate_start = search + candidate[0] - 16*candidate[1]
+                interval = (candidate_start-frame_start)/scale
+                current_match = (abs(interval-PULSE_FRAME) <=
+                                 max(12, .03*PULSE_FRAME))
+                if (candidate[2] >= .45 and
+                        abs(candidate[1]/scale-1) <= .03 and current_match):
+                    following = candidate
+                    next_start = candidate_start
+                    following_scale = candidate[1]
+                    following_confidence = candidate[2]
+            if following is not None:
+                following_valid = True
+                frame_scale = (next_start-frame_start)/frame_length
         if not following_valid:
-            # The next header is the commit boundary.  Do not decode on a
-            # coincidental edge inside the current body/metadata.
+            # A frame is committed only after its selected endpoint witness.
             break
         start = frame_start + PULSE.SYNC_LEN*scale
-        # The first pulse measures the local playback scale at frame start;
-        # consecutive pulse positions measure the actual frame duration. Use
-        # the latter for the body walk so smooth wow/flutter is corrected
-        # across the payload instead of only at its first sample.
-        indexes = start + np.arange(FRAME)*frame_scale
+        # Consecutive pulse positions provide the packet-average scale. The
+        # optional warp bends that straight-line sample map using the local
+        # scales fitted at both neighboring pulse words.
+        pulse_map = None
+        pulse_timing_diag = None
+        metadata_indexes = None
+        if pulse_timing == 'pulse-warp':
+            scale_conflict = _pulse_warp_anchor_conflict(
+                frame_scale, scale, following_scale, confidence,
+                following_confidence)
+            near_linear = _pulse_warp_is_near_linear(
+                frame_scale, scale, following_scale, confidence,
+                following_confidence)
+            if not scale_conflict and not near_linear:
+                body_reference = PULSE.SYNC_LEN + np.arange(FRAME)
+                metadata_reference = (PULSE.SYNC_LEN+FRAME+
+                                     np.arange(META_SYMBOL))
+                reference_positions = np.concatenate((body_reference,
+                                                      metadata_reference))
+                pulse_map = _pulse_warp_map(
+                    frame_start, next_start, scale, following_scale,
+                    confidence, following_confidence, reference_positions,
+                    endpoint_position=(next_start if frame_boundary == 'eof'
+                                       else None),
+                    endpoint_coordinate=(PULSE_FRAME
+                                         if frame_boundary == 'eof' else None))
+            pulse_timing_diag = {
+                'mode_requested': 'pulse-warp',
+                'mode_applied': 'baseline',
+                'average_scale': float(frame_scale),
+                'start_pulse_scale': float(scale),
+                'end_pulse_scale': float(following_scale),
+            }
+            if pulse_map is None:
+                pulse_timing_diag['reason'] = (
+                    'local_scale_interval_mismatch' if scale_conflict else
+                    'pulse_scales_near_average' if near_linear else
+                    'invalid_or_non_monotone_map')
+            else:
+                mapped_indexes, local_scales = pulse_map
+                indexes = mapped_indexes[:FRAME]
+                metadata_indexes = mapped_indexes[FRAME:]
+                pulse_timing_diag.update({
+                    'mode_applied': 'pulse-warp',
+                    'local_scale_min': float(np.min(local_scales)),
+                    'local_scale_max': float(np.max(local_scales)),
+                })
+        if pulse_map is None:
+            if frame_boundary == 'eof':
+                # The header origin and measured EOF endpoint define one
+                # packet-wide affine time map. Use its scale for both the
+                # body origin and every metadata sample; mixing the local
+                # preamble scale into either offset breaks that shared clock.
+                indexes = (frame_start +
+                           (PULSE.SYNC_LEN+np.arange(FRAME))*frame_scale)
+                metadata_indexes = (
+                    frame_start+(PULSE.SYNC_LEN+FRAME+
+                                 np.arange(META_SYMBOL))*frame_scale)
+            else:
+                indexes = start + np.arange(FRAME)*frame_scale
+                metadata_indexes = None
         if indexes[-1] >= len(samples)-1:
             break
         if confidence < .45:
-            results.append(Result(counter, 'lost', state.tail.prior(model), {
-                'pulse_confidence': float(confidence), 'held': True}))
+            lost_diag = {'pulse_confidence': float(confidence), 'held': True}
+            if boundary_diag is not None:
+                lost_diag['eof_marker'] = boundary_diag
+            results.append(Result(counter, 'lost', state.tail.prior(model),
+                                  lost_diag))
             pending_aspect = aspect_code
             frame_length = PULSE_FRAME
             cursor = int(next_start if following_valid
                          else frame_start + frame_length*scale)
-            measured = ((16*following[1], following[1], following[2])
-                        if following_valid else None)
+            if following_valid and frame_boundary == 'baseline':
+                measured = (16*following_scale, following_scale,
+                            following_confidence)
+            elif following_valid and frame_boundary == 'eof':
+                measured = _measure_pulse_after_eof_marker(
+                    mono_samples, cursor, following_scale,
+                    min_scale, max_scale)
+            else:
+                measured = None
             counter += 1
             continue
+        body = _sample_at(samples, indexes, taps=4).astype(np.float32)
+        if body.shape[1] == 1:
+            # The demodulator is M/S two-channel internally.  A mono capture
+            # is the shared M observation, so duplicate it without inventing S.
+            body = np.repeat(body, 2, axis=1)
         # Metadata is deliberately decoded before the image body.  Its pilots
         # are self-referencing, so the bootstrap model's absolute scale cancels
         # out; the protected encoding ID can therefore select the source model.
-        meta_start = frame_start + (PULSE.SYNC_LEN+FRAME)*scale
-        meta = decode_metadata(model, samples, meta_start, scale, None,
-                               force_float32)
+        metadata_scale = (frame_scale if frame_boundary == 'eof' else scale)
+        meta_start = (frame_start + (PULSE.SYNC_LEN+FRAME)*metadata_scale)
+        meta = decode_metadata(model, samples, meta_start, metadata_scale, None,
+                               force_float32,
+                               sample_indexes=metadata_indexes)
         # Slices 0-4 carry a plain CRC; 5 and 6 carry it XOR p / N, which
         # the lock learns and then checks; until then they are accepted only
         # provisionally (see PulseState.accept).
         metadata_valid, provisional = state.accept(meta)
+        metadata_retry = None
+        if not metadata_valid and pilot_timing != 'baseline':
+            # A failed CRC may be a timing miss rather than lost metadata bits.
+            # The reference tones continue through the metadata symbol, so use
+            # their body-to-metadata phase advance for one corrected retry.
+            retry_scale = frame_scale
+            retry_start = frame_start + (PULSE.SYNC_LEN+FRAME)*retry_scale
+            retry_metadata_indexes = metadata_indexes
+            shift, metadata_retry = _pilot_metadata_offset(
+                body, samples, retry_start, retry_scale, model, counter,
+                force_float32,
+                estimator=('joint' if pilot_timing == 'tone-joint'
+                           else 'single'),
+                metadata_indexes=retry_metadata_indexes)
+            if shift is not None:
+                if pulse_map is None:
+                    corrected_start = retry_start-shift*retry_scale
+                    retry_meta = decode_metadata(
+                        model, samples, corrected_start, retry_scale, None,
+                        force_float32)
+                else:
+                    corrected_map = _pulse_warp_map(
+                        frame_start, next_start, scale, following_scale,
+                        confidence, following_confidence,
+                        PULSE.SYNC_LEN+FRAME+
+                        np.arange(META_SYMBOL)-shift,
+                        endpoint_position=(next_start
+                                           if frame_boundary == 'eof' else None),
+                        endpoint_coordinate=(PULSE_FRAME
+                                             if frame_boundary == 'eof'
+                                             else None))
+                    corrected_indexes = (None if corrected_map is None else
+                                         corrected_map[0])
+                    retry_meta = (decode_metadata(
+                        model, samples, retry_start, retry_scale, None,
+                        force_float32, sample_indexes=corrected_indexes)
+                        if corrected_indexes is not None else None)
+                retry_valid, retry_provisional = state.accept(retry_meta)
+                metadata_retry.update({
+                    'retried': True, 'valid': bool(retry_valid),
+                    'provisional': bool(retry_provisional),
+                })
+                if retry_valid:
+                    meta = retry_meta
+                    metadata_valid = retry_valid
+                    provisional = retry_provisional
+            else:
+                metadata_retry['retried'] = False
         encoding_type = model.encoding_type
         source_index = None
         tail_slice = None
@@ -1990,11 +3354,6 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                 selected_model = model_factory(encoding_type)
             if selected_model is None:
                 selected_model = model
-        body = _sample_at(samples, indexes, taps=4).astype(np.float32)
-        if body.shape[1] == 1:
-            # The demodulator is M/S two-channel internally.  A mono capture
-            # is the shared M observation, so duplicate it without inventing S.
-            body = np.repeat(body, 2, axis=1)
         nominal = np.array([0., FRAME])
         offset = np.array([64., 64.])
         # The rank table follows the tail slice the packet names; without
@@ -2007,7 +3366,10 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                                   ranks_counter, state.tail.prior(selected_model),
                                   cancel=False, direct_body=body,
                                   diagnostics=diagnostics,
-                                  force_float32=force_float32)
+                                  force_float32=force_float32,
+                                  pilot_timing=pilot_timing,
+                                  pilot_counter=counter,
+                                  tone_equalization=tone_equalization)
         except (FloatingPointError, np.linalg.LinAlgError, ValueError,
                 IndexError):
             result = None
@@ -2040,13 +3402,23 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
             result.diag['tail_slice'] = tail_slice
             result.diag['direction'] = direction
             result.diag['metadata_provisional'] = provisional
+            if metadata_retry is not None:
+                result.diag['metadata_pilot_retry'] = metadata_retry
+            if pulse_timing_diag is not None:
+                result.diag['pulse_timing'] = pulse_timing_diag
+            if boundary_diag is not None:
+                result.diag['eof_marker'] = boundary_diag
             result.diag['loop'] = state.lock.loop
             result.diag['pulse_scale'] = float(scale)
             result.diag['frame_scale'] = float(frame_scale)
+            result.diag['frame_start'] = float(frame_start)
             result.diag['playback_speed'] = float(
                 sample_rate/(RATE*max(frame_scale, 1e-9)))
             result.diag['timing_delta_ppm'] = float(
                 (frame_scale/scale-1)*1e6)
+            if pilot_speed_diagnostics:
+                result.diag['pilot_tone_speed'] = pilot_tone_speed(
+                    samples, sample_rate, frame_start, frame_scale)
             results.append(result)
             if result.status != 'lost' and tail_slice is not None:
                 state.tail.update(selected_model, result.coeffs, tail_slice)
@@ -2056,11 +3428,18 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
         frame_length = PULSE_FRAME
         cursor = int(next_start if following_valid
                      else frame_start + frame_length*scale)
-        measured = ((16*following[1], following[1], following[2])
-                    if following_valid else None)
+        if following_valid and frame_boundary == 'baseline':
+            measured = (16*following_scale, following_scale,
+                        following_confidence)
+        elif following_valid and frame_boundary == 'eof':
+            measured = _measure_pulse_after_eof_marker(
+                mono_samples, cursor, following_scale, min_scale, max_scale)
+        else:
+            measured = None
         counter += 1
     info = {'frames': len(results), 'pulse_frames': len(results),
-            'recovered': bool(results)}
+            'recovered': bool(results), 'frame_boundary': frame_boundary,
+            'eof_markers_validated': eof_markers_validated}
     if diagnostics is not None:
         info['diagnostics'] = _diagnostic_summary(diagnostics, 0.0)
     return results, info

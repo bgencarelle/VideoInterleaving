@@ -53,7 +53,8 @@ def _source_values(model, image, encode_filter='nearest'):
 
 def packet(library, model, absolute, source_index, selection, *,
            background=(4, 4, 4), rotation=0, mirror=False,
-           encode_filter='nearest', loop=None, direction=1):
+           encode_filter='nearest', loop=None, direction=1,
+           pilot_tones=False):
     index, main_folder, float_folder = selection
     image = library.composite(index, main_folder, float_folder,
                               background, rotation, mirror)
@@ -63,7 +64,8 @@ def packet(library, model, absolute, source_index, selection, *,
     audio = _v7.encode_pulse_frame(
         model, values, absolute,
         aspect_code=aspect_code,
-        source_index=source_index, loop=loop, direction=direction)
+        source_index=source_index, loop=loop, direction=direction,
+        pilot_tones=pilot_tones)
     return audio, {
         'frame': absolute,
         'source_index': source_index,
@@ -71,6 +73,9 @@ def packet(library, model, absolute, source_index, selection, *,
         'float_folder': float_folder,
         'aspect_code': aspect_code,
         'packet_samples': len(audio),
+        'peak': float(np.max(np.abs(audio))) if audio.size else 0.0,
+        'pcm_clip_samples': int(np.count_nonzero(np.abs(audio) >= 1.0)),
+        'limiter_active': False,
     }
 
 
@@ -135,6 +140,7 @@ def run_modem(args):
     mirror = getattr(args, 'mirror', None)
     mirror = mirror if mirror is not None else bool(getattr(settings, 'INITIAL_MIRROR', 0))
     encode_filter = getattr(args, 'modem_encode_filter', None) or 'nearest'
+    pilot_tones = bool(getattr(args, 'modem_pilot_tones', False))
 
     # The V7 statistics are a wire profile, not a property of whichever frame
     # happens to be sent first.  The canonical profile ships as frozen,
@@ -178,7 +184,8 @@ def run_modem(args):
           f'wire {_v7.PULSE_FPS*speed:.3f} fps at {speed:g}x, '
           f'source {settings.IPS:g} IPS, '
           f'loop N={loop.frames} p='
-          f'{"none (MIDI clock)" if not loop.clocked else loop.phase} in CRC metadata')
+          f'{"none (MIDI clock)" if not loop.clocked else loop.phase} in CRC metadata; '
+          f'pilot tones={"on" if pilot_tones else "off"}')
 
     def make_packet(absolute, index, folders, at_time_ns=None):
         started = time.perf_counter()
@@ -190,7 +197,8 @@ def run_modem(args):
         audio, report = packet(
             library, model, absolute, index, (index, *folders),
             background=background, rotation=rotation, mirror=mirror,
-            encode_filter=encode_filter, loop=loop, direction=direction)
+            encode_filter=encode_filter, loop=loop, direction=direction,
+            pilot_tones=pilot_tones)
         report['direction'] = direction
         report['encode_ms'] = (time.perf_counter() - started) * 1000
         if runtime_library is not None:
