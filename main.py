@@ -341,9 +341,8 @@ def configure_runtime():
                         help="Minimum encoding lead before a send deadline (default 10)")
     parser.add_argument("--modem-speed", "--speed", dest="modem_speed",
                         type=float, default=1.0,
-                        help="V7 playback speed (default 1; 1x is tape-safe). "
-                             "Any value up to the output device's limit: "
-                             "rate/28 kHz, i.e. 1.71x at 48 kHz, 3.43x at 96 kHz")
+                        help="V7 playback speed 0.25..4x (default 1; 1x is tape-safe). "
+                             "Above the output Nyquist limit, high-frequency detail is lost")
     parser.add_argument("--modem-encode-filter",
                         choices=("nearest", "box", "lanczos", "bicubic"),
                         default="nearest",
@@ -386,8 +385,9 @@ def configure_runtime():
             parser.error("--modem-index-offset-ms must be finite and within +/-10000")
         if not math.isfinite(args.modem_frame_duration) or args.modem_frame_duration <= 0:
             parser.error("--modem-frame-duration must be finite and positive")
-        if not math.isfinite(args.modem_speed) or args.modem_speed <= 0:
-            parser.error("--modem-speed must be finite and positive")
+        if (not math.isfinite(args.modem_speed) or
+                not 0.25 <= args.modem_speed <= 4.0):
+            parser.error("--modem-speed must be finite and between 0.25 and 4")
         if args.modem_clock == settings.CLIENT_MODE:
             parser.error("--modem-clock 3 (CLIENT_MODE) is not supported by the V7 modem")
         if args.modem_wav and args.modem_clock != settings.FREE_CLOCK:

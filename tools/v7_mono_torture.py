@@ -47,7 +47,7 @@ def mono_wav(path, stereo):
 
 def decode_trial(model, audio, reference, values, force_float32=False):
     results, info = v7.decode_pulse_stream(
-        model, audio, force_float32=force_float32)
+        model, audio, force_float32=force_float32, sample_rate=RATE)
     usable = []
     quality_rows = []
     errors = []

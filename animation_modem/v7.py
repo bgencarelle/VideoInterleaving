@@ -39,11 +39,29 @@ META_SYMBOL = SYM
 PULSE_FRAME = PULSE.SYNC_LEN + FRAME + META_SYMBOL + 32  # 3920, 12.245 fps
 PULSE_FPS = RATE/PULSE_FRAME
 PULSE_GUARD_BASE = 32
+# Pulse scale bounds are relative to the 48 kHz reference geometry. A capture
+# at another sample rate observes raw sample scales multiplied by rate/RATE.
 PULSE_MIN_SCALE = .25
-PULSE_MAX_SCALE = 2.0
+PULSE_MAX_SCALE = 4.0
+MIN_PLAYBACK_SPEED = .25
+MAX_PLAYBACK_SPEED = 4.0
 ENCODING_FILTERS = ('nearest', 'box', 'lanczos', 'bicubic')
 ENCODING_FILTER_CODES = {name: code for code, name in
                          enumerate(ENCODING_FILTERS)}
+
+
+def pulse_sample_scale_bounds(sample_rate=RATE):
+    """Bounds for pulse scales measured in the capture's sample coordinates.
+
+    The scale limits describe playback relative to the 48 kHz wire geometry.
+    A different capture rate changes the number of input samples per packet,
+    not the admissible playback-speed range.
+    """
+    sample_rate = float(sample_rate)
+    if not np.isfinite(sample_rate) or sample_rate <= 0:
+        raise ValueError('sample_rate must be finite and positive')
+    factor = sample_rate/RATE
+    return PULSE_MIN_SCALE*factor, PULSE_MAX_SCALE*factor
 
 
 def prepare_image(image, encode_filter='lanczos'):
@@ -802,13 +820,12 @@ EMISSION_EDGE_HZ = 14000
 
 
 def max_wire_speed(rate):
-    """Fastest playback speed a `rate` Hz output can carry.
+    """Playback speed below which a `rate` Hz output retains the full band.
 
     Speeding the wire up multiplies every frequency, so the emission edge
-    (14 kHz at 1x) must stay below the output's Nyquist frequency: 1.71x at
-    48 kHz, 3.43x at 96 kHz.  Faster than this the speed conversion filters
-    the top carriers away (measured: 2x from a 48 kHz output passes 4 of 15
-    frames; 3.5x from 96 kHz still passes all).
+    (14 kHz at 1x) stays below the output's Nyquist frequency up to this
+    speed. Faster playback is permitted, but the speed conversion filters or
+    aliases high carriers and can reduce decode quality.
     """
     return float(rate)/(2*EMISSION_EDGE_HZ)
 
@@ -1727,7 +1744,8 @@ def leg_polarity(samples, previous=1, threshold=POLARITY_THRESHOLD):
 
 def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
                         input_gain=1.0, models=None, model_factory=None,
-                        force_float32=False, state=None, pulse_starts=None):
+                        force_float32=False, state=None, pulse_starts=None,
+                        sample_rate=RATE):
     """Decode V7 bodies located by the existing pulse-counted acquisition.
 
     This is the low-latency live path: each accepted pulse word supplies a
@@ -1745,6 +1763,8 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
     ``pulse_starts`` optionally supplies ``(start, scale, confidence)`` anchors
     from an upstream incremental scan. The anchors are rechecked locally after
     input gain is applied; if they do not validate, normal acquisition runs.
+    ``sample_rate`` is the rate of ``x``; pulse-scale limits are normalized
+    against it while sample positions remain in the input's native coordinates.
     """
     # Live capture is float32 and _sample_at returns float32.  Promoting the
     # complete rolling history to float64 here only doubles allocation and
@@ -1761,7 +1781,8 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
         state = PulseState()
     results, info = _decode_pulse_samples(model, samples, diagnostics,
                                           latest_only, models, model_factory,
-                                          force_float32, state, pulse_starts)
+                                          force_float32, state, pulse_starts,
+                                          sample_rate)
     if results or samples.shape[1] != 2:
         return results, info
     # One leg polarity-inverted (miswired deck or cable, reversed head lead):
@@ -1771,7 +1792,7 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
     # this; silence costs one more (cheap, empty) edge scan.
     flipped, flipped_info = _decode_pulse_samples(
         model, samples*np.float32([1, -1]), diagnostics, latest_only, models,
-        model_factory, force_float32, state, pulse_starts)
+        model_factory, force_float32, state, pulse_starts, sample_rate)
     if not flipped:
         return results, info
     for result in flipped:
@@ -1780,7 +1801,7 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
     return flipped, flipped_info
 
 
-def pulse_frame_starts(samples):
+def pulse_frame_starts(samples, sample_rate=RATE):
     """Every accepted pulse header in a stereo (or (n, 1)) capture.
 
     Returns ``(frame_start, scale, confidence)`` per header, in order, using
@@ -1790,12 +1811,13 @@ def pulse_frame_starts(samples):
     scan point to be found, so callers scanning a live stream should overlap
     successive scans by that much.
     """
+    min_scale, max_scale = pulse_sample_scale_bounds(sample_rate)
     starts = []
     scan = 0
     while scan + PULSE.SYNC_LEN + META_SYMBOL + 32 < len(samples):
         hit = PULSE.measure_pulses(samples[scan:].mean(axis=1),
-                                   min_scale=PULSE_MIN_SCALE,
-                                   max_scale=PULSE_MAX_SCALE)
+                                   min_scale=min_scale,
+                                   max_scale=max_scale)
         if hit is None:
             break
         pos, sc, conf = hit
@@ -1808,8 +1830,9 @@ def pulse_frame_starts(samples):
     return starts
 
 
-def _remeasure_pulse_starts(samples, anchors):
+def _remeasure_pulse_starts(samples, anchors, sample_rate=RATE):
     """Recheck upstream header anchors in short windows on decoder samples."""
+    min_scale, max_scale = pulse_sample_scale_bounds(sample_rate)
     mono = samples.mean(axis=1)
     measured = []
     for expected_start, expected_scale, _ in sorted(
@@ -1824,8 +1847,7 @@ def _remeasure_pulse_starts(samples, anchors):
         if end <= scan:
             continue
         hit = PULSE.measure_pulses(
-            mono[scan:end], min_scale=PULSE_MIN_SCALE,
-            max_scale=PULSE_MAX_SCALE)
+            mono[scan:end], min_scale=min_scale, max_scale=max_scale)
         if hit is None:
             continue
         position, scale, confidence = hit
@@ -1843,19 +1865,21 @@ def _remeasure_pulse_starts(samples, anchors):
 
 def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                            model_factory, force_float32, state,
-                           pulse_starts=None):
+                           pulse_starts=None, sample_rate=RATE):
+    sample_rate = float(sample_rate)
     cursor = 0
     counter = 1
     results = []
     measured = None
     preloaded_following = None
     pending_aspect = 0
+    min_scale, max_scale = pulse_sample_scale_bounds(sample_rate)
     if latest_only:
         # The live rolling buffer can contain the previous frame plus the new
         # one. Reuse the input layer's incremental header hits when available;
         # otherwise scan the window as before. In either case only the newest
         # complete frame needs the expensive image decode.
-        cached = (_remeasure_pulse_starts(samples, pulse_starts)
+        cached = (_remeasure_pulse_starts(samples, pulse_starts, sample_rate)
                   if pulse_starts is not None else [])
         cache_valid = len(cached) >= 2
         if cache_valid:
@@ -1864,7 +1888,8 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
             cache_valid = (
                 abs(interval-PULSE_FRAME) <= max(12, .03*PULSE_FRAME) and
                 abs(current[1]/prior[1]-1) <= .03)
-        starts = cached if cache_valid else pulse_frame_starts(samples)
+        starts = (cached if cache_valid else
+                  pulse_frame_starts(samples, sample_rate))
         candidates = [(fs, sc, conf, 0) for fs, sc, conf in starts]
         if len(candidates) < 2:
             return [], {'frames': 0, 'pulse_frames': 0, 'recovered': False}
@@ -1877,8 +1902,8 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
     while cursor + PULSE.SYNC_LEN + META_SYMBOL + 32 < len(samples):
         if measured is None:
             measured = PULSE.measure_pulses(samples[cursor:].mean(axis=1),
-                                         min_scale=PULSE_MIN_SCALE,
-                                         max_scale=PULSE_MAX_SCALE)
+                                         min_scale=min_scale,
+                                         max_scale=max_scale)
         if measured is None:
             break
         position, scale, confidence = measured
@@ -1898,8 +1923,8 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
             preloaded_following = None
         else:
             candidate = PULSE.measure_pulses(
-                samples[search:].mean(axis=1), min_scale=PULSE_MIN_SCALE,
-                max_scale=PULSE_MAX_SCALE)
+                samples[search:].mean(axis=1), min_scale=min_scale,
+                max_scale=max_scale)
         if candidate is not None:
             candidate_start = search + candidate[0] - 16*candidate[1]
             interval = (candidate_start-frame_start)/scale
@@ -2018,7 +2043,8 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
             result.diag['loop'] = state.lock.loop
             result.diag['pulse_scale'] = float(scale)
             result.diag['frame_scale'] = float(frame_scale)
-            result.diag['playback_speed'] = float(1/max(scale, 1e-9))
+            result.diag['playback_speed'] = float(
+                sample_rate/(RATE*max(frame_scale, 1e-9)))
             result.diag['timing_delta_ppm'] = float(
                 (frame_scale/scale-1)*1e6)
             results.append(result)

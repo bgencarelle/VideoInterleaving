@@ -5,11 +5,11 @@ No audio device, threads or UI live here; tools/v7_live.py feeds captured
 blocks in and decodes what take() hands back.  Keeping the policy here makes
 it testable without sounddevice.
 
-Sample rate.  Everything here is measured in captured samples.  The capture
-rate need not be 48 kHz: a frame is PULSE_FRAME x scale samples, where the
-scale (capture rate / (48 kHz x playback speed)) is read off each header, so
-frame-sized lengths below all scale with it.  Only incoming_fps() needs the
-real rate, to convert samples to seconds.
+Sample rate. Everything here is measured in captured samples. The scale read
+from a header is capture_rate / (48 kHz x playback_speed); its accepted bounds
+are multiplied by capture_rate / 48 kHz, preserving the same playback-speed
+range on every device. Frame-sized lengths below use the raw captured-sample
+scale. Only incoming_fps() needs the real rate to convert samples to seconds.
 
 Buffer policy.  A latest-only pulse decode needs one complete frame plus the
 next frame's header (the commit boundary), so two frames of audio at the
@@ -23,9 +23,9 @@ from collections import deque
 import numpy as np
 
 from animation_modem import transport3 as PULSE
-from animation_modem.v7 import (META_SYMBOL, PULSE_FRAME, PULSE_MAX_SCALE,
-                                PULSE_MIN_SCALE, RATE, leg_polarity,
-                                pulse_frame_starts)
+from animation_modem.v7 import (META_SYMBOL, PULSE_FRAME, RATE, leg_polarity,
+                                pulse_frame_starts,
+                                pulse_sample_scale_bounds)
 
 GUARD_FRAMES = .25          # header, timing tolerance and block granularity
 UNLOCK_AFTER = 3            # failed decodes before the frame length is forgotten
@@ -34,8 +34,6 @@ RATE_STALE_S = 1.0          # a rate with no event this long reads 0
 # A header is found only if SYNC_LEN + META_SYMBOL + 32 samples follow its
 # scan point; successive incoming scans overlap by a little more than that.
 _HEADER_OVERLAP = PULSE.SYNC_LEN + META_SYMBOL + 64
-# Two hits closer than half the shortest accepted frame are the same header.
-_SAME_HEADER = PULSE_FRAME*PULSE_MIN_SCALE/2
 
 
 def windowed_rate(times, now, window=RATE_WINDOW_S, stale=RATE_STALE_S):
@@ -63,9 +61,13 @@ class LiveInput:
     def __init__(self, decode_history=1, decode_batch=1, rate=RATE):
         self.decode_history = max(1, int(decode_history))
         self.decode_batch = max(1, int(decode_batch))
-        self.rate = rate
+        self.rate = float(rate)
+        self.min_scale, self.max_scale = pulse_sample_scale_bounds(self.rate)
+        # Two hits closer than half the shortest accepted frame are the same.
+        self._same_header = PULSE_FRAME*self.min_scale/2
         self.polarity = 1          # right-leg sign applied to stored input
-        self.scale = None          # scale of the latest header (1/playback speed)
+        # Raw captured-sample scale: capture_rate/(48 kHz x playback speed).
+        self.scale = None
         self.total = 0             # samples ever stored (absolute clock)
         self._blocks = []
         self._judged_to = 0        # absolute sample up to which polarity was judged
@@ -80,11 +82,11 @@ class LiveInput:
     # ------------------------------------------------------------ buffer
     def span(self):
         """Samples in one frame at the current speed (slowest speed if unknown)."""
-        return PULSE_FRAME*(self.scale if self.scale else PULSE_MAX_SCALE)
+        return PULSE_FRAME*(self.scale if self.scale else self.max_scale)
 
     def _scaled(self, samples):
         """A nominal (48 kHz, 1x) length at the current frame scale."""
-        return samples*(self.scale if self.scale else PULSE_MAX_SCALE)
+        return samples*(self.scale if self.scale else self.max_scale)
 
     def cap(self):
         return int(self.span()*(1 + self.decode_history + GUARD_FRAMES))
@@ -181,12 +183,13 @@ class LiveInput:
         # header itself grows with scale: honour whichever is longer.
         overlap = max(self._scaled(_HEADER_OVERLAP), _HEADER_OVERLAP)
         found = 0
-        for frame_start, scale, confidence in pulse_frame_starts(audio[begin:]):
+        for frame_start, scale, confidence in pulse_frame_starts(
+                audio[begin:], sample_rate=self.rate):
             position = start + begin + frame_start
             if position > self.total - overlap:
                 break
             if (self._headers and
-                    position - self._headers[-1][0] < _SAME_HEADER):
+                    position - self._headers[-1][0] < self._same_header):
                 continue
             self._headers.append((position, float(scale), float(confidence)))
             self._header_walls.append(now)

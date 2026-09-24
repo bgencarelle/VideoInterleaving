@@ -769,9 +769,13 @@ keeps the rate above the 12 fps requirement. This 3,920-sample format is the
 only supported live V7 pulse format.
 
 The pulse preamble is measured with `transport3.measure_pulses()`, not FFT
-correlation. The receiver accepts a bounded playback scale of approximately
-0.25×–2×, resamples the body to the reference grid, and uses consecutive pulse
-positions to estimate frame-to-frame timing drift. The body walk uses the
+correlation. Its accepted scale bounds are relative to the 48 kHz reference
+geometry. At capture rate `R`, the raw scale measured in input samples is
+`R / (48 kHz × playback_speed)`, so acquisition scales those bounds by the
+capture-rate ratio `R/48 kHz`. High-rate capture contributes more timing
+samples rather than changing the allowed playback speeds. The decoder uses raw
+sample positions to resample the body to the reference grid and consecutive
+pulse positions to estimate frame-to-frame timing drift. The body walk uses the
 measured frame duration, so smooth wow/flutter is corrected across the payload.
 
 ### 19.2 CRC-protected live metadata
@@ -862,31 +866,33 @@ An accelerated sender time-compresses each complete pulse packet before output;
 it does not use pitch-preserving time stretch:
 
 ```text
+speed 0.25x: 15680 samples at 48 kHz,  3.061 fps, body top  3.1875 kHz
 speed 1.0x: 3920 samples, 12.245 fps, body top 12.75 kHz
 speed 1.5x: 2613 samples at 48 kHz, 18.367 fps, body top 19.125 kHz
 speed 2.0x: 1960 samples at 48 kHz, 24.490 fps, body top 25.5 kHz
+speed 3.0x: 1307 samples at 48 kHz, 36.735 fps, body top 38.25 kHz
+speed 4.0x:  980 samples at 48 kHz, 48.980 fps, body top 51 kHz
 ```
 
 The receiver measures the resulting pulse scale and resamples the body back to
-the reference grid. `1.0x` is the tape-compatible baseline. `1.5x` is a
-digital/wideband candidate; `2.0x` requires a path whose capture Nyquist and
-analog bandwidth retain the expanded carriers, normally a 96 kHz path. At a
-fixed 48 kHz output, downsampling before 2.0x playback necessarily loses some
-highest carriers, so acquisition success alone does not prove full-band
-fidelity.
+the reference grid. The sender supports `0.25x` through `4.0x`; `1.0x` is the
+tape-compatible baseline. Faster playback raises the wire frequencies as well
+as the frame rate. The full-band Nyquist threshold is
+`max_wire_speed(rate) = rate / 28 kHz` (1.71x at 48 kHz, 3.43x at 96 kHz),
+but it is a fidelity guide, not a send limit. Above it the time-compression
+filter removes top carriers and the output path may alias what remains. At
+3–4x, expect reduced image quality and potentially lost frames, especially on
+48 kHz paths; successful pulse acquisition does not guarantee successful
+metadata or image decoding.
 
-Speed is continuous, not a fixed set. The limit is the output's Nyquist
-frequency: the 14 kHz emission edge times the speed must fit below it, so
-`max_wire_speed(rate) = rate / 28 kHz` -- 1.71x at 48 kHz, 3.43x at 96 kHz
-(measured: 2x from a 48 kHz output passes 4 of 15 frames; 3.5x from 96 kHz
-passes all). The application sender plays at the device's own rate and refuses
-a speed above that rate's limit; the deterministic production WAV export stays
-at the 48 kHz reference rate, while `tools/v7_live.py send` follows the DAC's
-native output clock by default and accepts an explicit `--rate` override. The
-live sender and receiver currently cap the supported frame scale at 2x, so a
-96 kHz live output's practical speed limit is 2x even though its Nyquist allows
-more. The receiver captures at the device rate (capped at 96 kHz) and accepts
-frame scales 0.25-2, i.e. 1x-4x at 96 kHz.
+Speed is continuous within that supported range. The application sender plays
+at the device's own rate; deterministic WAV export stays at the 48 kHz reference
+rate, while `tools/v7_live.py send` follows the DAC's native output clock by
+default and accepts an explicit `--rate` override. Receiver pulse-scale limits
+are independently normalized to the 48 kHz geometry using the actual capture
+rate (capped at 96 kHz). Its normalized scales 0.25–4 correspond to playback
+speeds 4–0.25x, so changing capture rate changes the samples available for
+timing without changing the supported playback range.
 Above `IPS` packets per second (30 by default, about 2.45x) consecutive
 packets can repeat an image.
 

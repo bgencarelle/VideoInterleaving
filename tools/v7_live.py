@@ -134,11 +134,6 @@ def _resolve_send_source(args, interactive=None, input_fn=None):
     return args
 
 
-def _max_send_speed(rate):
-    """Bound speed by both output bandwidth and the live receiver scale."""
-    return min(P.max_wire_speed(rate), P.PULSE_MAX_SCALE)
-
-
 def _capture(args):
     """Build one of the shared RGB capture sources."""
     from tools.v7_capture import (camera_source, mouse_follow_source,
@@ -300,11 +295,11 @@ def run_send(args):
             output_rate = float(stream.samplerate)
             if hasattr(grab, 'retune'):
                 grab.retune(wire_fps)
-            max_speed = _max_send_speed(output_rate)
-            if not 0 < args.speed <= max_speed:
+            if (not np.isfinite(args.speed) or
+                    not P.MIN_PLAYBACK_SPEED <= args.speed <= P.MAX_PLAYBACK_SPEED):
                 raise ValueError(
-                    f'--speed must be above 0 and at most {max_speed:.2f} '
-                    f'for this {output_rate:g} Hz sender/receiver pair')
+                    f'--speed must be between {P.MIN_PLAYBACK_SPEED:g} and '
+                    f'{P.MAX_PLAYBACK_SPEED:g} (higher speeds may lose high-frequency detail)')
             worker.start()
             worker_started = True
             if not args.no_log:
@@ -347,11 +342,10 @@ def run_send(args):
 # Capture at the device's own rate, like the sender's PacketOutput: forcing
 # 48 kHz made PortAudio resample behind our back, and on a 96 kHz device a 2x
 # wire (carriers up to 25.5 kHz) lost its top carriers to that converter.  The
-# decoder needs no fixed rate -- it measures each frame's length from its
-# preamble -- as long as the frame scale stays within PULSE_MIN/MAX_SCALE:
-# capture rate / (48 kHz x speed) in [0.25, 2].  Above 96 kHz the capture is
-# capped at 96 kHz (a benign conversion that keeps the whole band up to 3x),
-# so 1x on a 192 kHz device still lands inside that range.
+# decoder uses the actual capture rate to normalize the frame scale measured
+# from each preamble. The raw sample scale is capture rate/(48 kHz x speed),
+# so a higher-rate capture provides more timing samples without changing the
+# accepted playback-speed range. Above 96 kHz capture is capped at 96 kHz.
 MAX_CAPTURE_RATE = 96_000
 
 
@@ -502,7 +496,7 @@ def run_receive(args):
                 input_gain=auto_gain, models=models,
                 model_factory=model_factory,
                 force_float32=args.force_float32, state=pulse_state,
-                pulse_starts=pulse_starts)
+                pulse_starts=pulse_starts, sample_rate=capture_rate)
         except Exception as exc:
             # Drop the damaged window and let the next retained clock history
             # reacquire.  A single bad frame must not stop the live receiver.
@@ -523,11 +517,10 @@ def run_receive(args):
                 meter['source_index'] = int(result.diag['source_index'])
             meter['pulse'] = result.diag.get('pulse_confidence')
             meter['timing_delta'] = result.diag.get('timing_delta_ppm')
-            # The decoder's speed is relative to 48 kHz samples; at another
-            # capture rate the same frame length means a different real speed.
             speed = result.diag.get('playback_speed')
-            meter['playback_speed'] = (None if speed is None
-                                       else speed*capture_rate/P.RATE)
+            incoming_fps = live_input.incoming_fps(time.monotonic())
+            meter['playback_speed'] = (
+                incoming_fps/P.PULSE_FPS if incoming_fps > 0 else speed)
             meter['quality'] = (
                 f'head {result.diag.get("head_confidence", 0):.2f}/'
                 f'{result.diag.get("head_coverage", 0):.2f}')
@@ -856,8 +849,8 @@ def parser():
     send.add_argument('--batch-frames', type=int, default=1,
                       help='frames encoded before submission (default: 1)')
     send.add_argument('--speed', type=float, default=1.0,
-                       help='pitch-shifted playback speed; the limit depends '
-                       'on the DAC rate and live receiver scale')
+                       help='pitch-shifted playback speed, 0.25..4.0; speeds '
+                       'above the DAC Nyquist limit lose high-frequency detail')
     send.add_argument('--rate', type=int,
                       help='request an output sample rate (default: the DAC '
                            'native rate; the V7 wire remains 48 kHz reference geometry)')
@@ -913,13 +906,10 @@ if __name__ == '__main__':
             ap.error(str(exc))
         if args.rate is not None and args.rate <= 0:
             ap.error('--rate must be positive')
-        if args.speed <= 0:
-            ap.error('--speed must be positive')
-        if args.rate is not None:
-            max_speed = _max_send_speed(args.rate)
-            if args.speed > max_speed:
-                ap.error(f'--speed must be at most {max_speed:.2f} for '
-                         f'this {args.rate} Hz sender/receiver pair')
+        if (not np.isfinite(args.speed) or
+                not P.MIN_PLAYBACK_SPEED <= args.speed <= P.MAX_PLAYBACK_SPEED):
+            ap.error(f'--speed must be between {P.MIN_PLAYBACK_SPEED:g} and '
+                     f'{P.MAX_PLAYBACK_SPEED:g}')
         try:
             run_send(args)
         except Exception as exc:

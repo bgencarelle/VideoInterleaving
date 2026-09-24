@@ -37,7 +37,8 @@ class V7LiveInputTests(unittest.TestCase):
             pulse_starts = live.pulse_starts(chunk)
             results, _ = v7.decode_pulse_stream(self.model, chunk, latest_only=True,
                                                 state=state,
-                                                pulse_starts=pulse_starts)
+                                                pulse_starts=pulse_starts,
+                                                sample_rate=rate)
             live.decoded()
             indices += [r.diag.get('source_index') for r in results]
         return live, taken, indices, len(audio)/rate
@@ -100,7 +101,7 @@ class V7LiveInputTests(unittest.TestCase):
     def test_device_rate_capture(self):
         """A 96 kHz device carries a 2x wire whole (carriers to 25.5 kHz);
         captured at 96 kHz the frames decode like 1x at 48 kHz, and 1x at
-        96 kHz sits at the top of the accepted scale range."""
+        96 kHz has twice as many samples per frame as at 48 kHz."""
         for speed in (2.0, 1.0):
             device = np.concatenate([
                 speed_resample(self.wire[i:i+v7.PULSE_FRAME], 96000, speed)
@@ -112,16 +113,36 @@ class V7LiveInputTests(unittest.TestCase):
                 self.assertAlmostEqual(live.incoming_fps(seconds), v7.PULSE_FPS*speed,
                                        delta=.03)
 
-    def test_speed_limit_follows_output_rate(self):
+    def test_slow_playback_uses_capture_rate_as_oversampling(self):
+        wire = self.wire[:5*v7.PULSE_FRAME]
+        for rate in (32000, 44100, 48000, 88200, 96000):
+            for speed in (.25, .8, .9):
+                audio = v7.speed_pulse_stream(wire, speed, rate=rate)
+                live, _, indices, seconds = self._run(audio, rate=rate)
+                results, info = v7.decode_pulse_stream(
+                    self.model, audio, latest_only=True, sample_rate=rate)
+                with self.subTest(rate=rate, speed=speed):
+                    self.assertEqual(
+                        sorted(i for i in indices if i is not None),
+                        list(range(4)))
+                    self.assertAlmostEqual(
+                        live.incoming_fps(seconds), v7.PULSE_FPS*speed,
+                        delta=.03)
+                    self.assertTrue(results, info)
+                    self.assertAlmostEqual(
+                        results[-1].diag['playback_speed'], speed, delta=.02)
+
+    def test_high_speed_receiver_uses_capture_headroom(self):
         self.assertAlmostEqual(v7.max_wire_speed(48000), 48000/28000)
         self.assertAlmostEqual(v7.max_wire_speed(96000), 96000/28000)
-        speed = 3.4                                    # just under the 96 kHz limit
-        device = np.concatenate([
-            speed_resample(self.wire[i:i+v7.PULSE_FRAME], 96000, speed)
-            for i in range(0, len(self.wire), v7.PULSE_FRAME)])
-        _, _, indices, _ = self._run(device, rate=96000)
-        self.assertEqual(sorted(i for i in indices if i is not None),
-                         list(range(FRAMES-1)))
+        for speed in (3.0, 3.4):
+            device = np.concatenate([
+                speed_resample(self.wire[i:i+v7.PULSE_FRAME], 96000, speed)
+                for i in range(0, len(self.wire), v7.PULSE_FRAME)])
+            _, _, indices, _ = self._run(device, rate=96000)
+            with self.subTest(speed=speed):
+                self.assertEqual(sorted(i for i in indices if i is not None),
+                                 list(range(FRAMES-1)))
 
     def test_inverted_leg_is_corrected_in_the_stored_audio(self):
         live, taken, indices, _ = self._run(self.wire*np.float32([1, -1]))

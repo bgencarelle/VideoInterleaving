@@ -220,7 +220,8 @@ def main(argv=None):
     for case in cases:
         damaged = impair(wire96, case, seed=args.seed)
         results, info = v7.decode_pulse_stream(
-            model, damaged, force_float32=args.force_float32)
+            model, damaged, force_float32=args.force_float32,
+            sample_rate=RATE)
         errors = []
         quality_rows = []
         metadata = 0

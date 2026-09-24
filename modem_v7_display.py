@@ -168,6 +168,11 @@ def run_modem(args):
     previous = None
     sent = 0
     speed = float(getattr(args, 'modem_speed', 1.0))
+    if (not math.isfinite(speed) or
+            not _v7.MIN_PLAYBACK_SPEED <= speed <= _v7.MAX_PLAYBACK_SPEED):
+        raise SystemExit(
+            f'[MODEM/V7] --modem-speed must be between '
+            f'{_v7.MIN_PLAYBACK_SPEED:g} and {_v7.MAX_PLAYBACK_SPEED:g}')
     print(f'[MODEM/V7] source={source_mode} {root}: {library.frames} images, '
           f'{len(library.mains)} face / {len(library.floats)} float folders; '
           f'wire {_v7.PULSE_FPS*speed:.3f} fps at {speed:g}x, '
@@ -201,10 +206,6 @@ def run_modem(args):
             runtime_library.prefetch((index + 1) % library.frames, *folders)
 
     if getattr(args, 'modem_wav', None):
-        if speed > _v7.max_wire_speed(_v7.RATE):
-            raise SystemExit(
-                f'[MODEM/V7] --modem-speed {speed:g} does not fit a {_v7.RATE} Hz WAV '
-                f'(max {_v7.max_wire_speed(_v7.RATE):.2f}x)')
         path = Path(args.modem_wav)
         path.parent.mkdir(parents=True, exist_ok=True)
         packet_samples = speed_length(_v7.PULSE_FRAME, _v7.RATE, speed)
@@ -246,11 +247,6 @@ def run_modem(args):
                           frame=_v7.PULSE_FRAME, packet=_v7.PULSE_FRAME,
                           speed=speed) as output:
             print(f'[MODEM/V7] output {output.rate:g} Hz, {output.fps:.2f} fps')
-            if speed > _v7.max_wire_speed(output.rate):
-                raise SystemExit(
-                    f'[MODEM/V7] --modem-speed {speed:g} needs more bandwidth than a '
-                    f'{output.rate:g} Hz output has (max {_v7.max_wire_speed(output.rate):.2f}x); '
-                    'lower the speed or raise the device sample rate')
             while not args.modem_frames or sent < args.modem_frames:
                 started = time.perf_counter()
                 index, _ = index_calculator.update_index(library.frames, settings.PINGPONG)
