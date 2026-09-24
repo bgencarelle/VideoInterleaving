@@ -27,12 +27,14 @@ class V7PilotToneTests(unittest.TestCase):
     def test_encoder_is_off_by_default_and_tones_are_m_only(self):
         plain = v7.encode_pulse_stream(self.model, [self.values]*4)
         explicit_off = v7.encode_pulse_stream(
-            self.model, [self.values]*4, pilot_tones=False)
+            self.model, [self.values]*4, pilot_tones=False, eof_marker=False)
         np.testing.assert_array_equal(plain, explicit_off)
 
-        toned = v7.encode_pulse_stream(
-            self.model, [self.values]*4, pilot_tones=True)
-        delta = toned-plain
+        default_tones_without_marker = v7.encode_pulse_stream(
+            self.model, [self.values]*4, pilot_tones=True, eof_marker=False)
+        plain = v7.encode_pulse_stream(
+            self.model, [self.values]*4, pilot_tones=False, eof_marker=False)
+        delta = default_tones_without_marker-plain
         np.testing.assert_allclose(delta[:, 0], delta[:, 1], atol=1e-7)
         self.assertGreater(float(np.sqrt(np.mean(delta**2))), 0)
 
@@ -51,12 +53,14 @@ class V7PilotToneTests(unittest.TestCase):
     def test_phase_offsets_and_packet_continuity_follow_known_template(self):
         plain = v7.encode_pulse_stream(self.model, [self.values]*4)
         with_tones = v7.encode_pulse_stream(
-            self.model, [self.values]*4, pilot_tones=True)
+            self.model, [self.values]*4, pilot_tones=True, eof_marker=False)
         split_batches = np.concatenate((
             v7.encode_pulse_stream(self.model, [self.values]*2,
-                                   start_counter=1, pilot_tones=True),
+                                   start_counter=1, pilot_tones=True,
+                                   eof_marker=False),
             v7.encode_pulse_stream(self.model, [self.values]*2,
-                                   start_counter=3, pilot_tones=True)))
+                                   start_counter=3, pilot_tones=True,
+                                   eof_marker=False)))
         np.testing.assert_array_equal(split_batches, with_tones)
         for counter in range(1, 5):
             start = (counter-1)*v7.PULSE_FRAME
@@ -313,17 +317,29 @@ class V7PilotToneTests(unittest.TestCase):
                     self.assertTrue(speed_diag['detected'], speed_diag)
                     self.assertLess(abs(speed_diag['difference_pct']), .1)
 
-    def test_live_sender_pilot_flag_is_opt_in(self):
-        off = v7_live.parser().parse_args([
+    def test_live_sender_and_receiver_default_to_eof_tone_seeded(self):
+        default_send = v7_live.parser().parse_args([
             'send', '--source', 'test', '--device', 'null'])
-        on = v7_live.parser().parse_args([
-            'send', '--source', 'test', '--device', 'null', '--pilot-tones'])
-        self.assertFalse(off.pilot_tones)
-        self.assertTrue(on.pilot_tones)
+        legacy_send = v7_live.parser().parse_args([
+            'send', '--source', 'test', '--device', 'null',
+            '--no-pilot-tones', '--no-eof-marker'])
+        self.assertTrue(default_send.pilot_tones)
+        self.assertTrue(default_send.eof_marker)
+        self.assertFalse(legacy_send.pilot_tones)
+        self.assertFalse(legacy_send.eof_marker)
         receive = v7_live.parser().parse_args([
-            'receive', '--device', 'null', '--pilot-timing', 'tone-joint'])
-        self.assertEqual(receive.pilot_timing, 'tone-joint')
+            'receive', '--device', 'null'])
+        self.assertEqual(receive.pilot_timing, 'tone-seeded')
+        self.assertEqual(receive.frame_boundary, 'eof')
         self.assertEqual(receive.tone_equalization, 'off')
+        legacy_receive = v7_live.parser().parse_args([
+            'receive', '--device', 'null', '--pilot-timing', 'baseline',
+            '--frame-boundary', 'baseline'])
+        self.assertEqual(legacy_receive.pilot_timing, 'baseline')
+        self.assertEqual(legacy_receive.frame_boundary, 'baseline')
+        joint_receive = v7_live.parser().parse_args([
+            'receive', '--device', 'null', '--pilot-timing', 'tone-joint'])
+        self.assertEqual(joint_receive.pilot_timing, 'tone-joint')
         tone_eq_receive = v7_live.parser().parse_args([
             'receive', '--device', 'null', '--tone-equalization', 'm-reference'])
         self.assertEqual(tone_eq_receive.tone_equalization, 'm-reference')
@@ -331,7 +347,7 @@ class V7PilotToneTests(unittest.TestCase):
             'receive', '--device', 'null', '--pulse-timing', 'pulse-warp'])
         self.assertEqual(pulse_receive.pulse_timing, 'pulse-warp')
 
-    def test_application_packet_forwards_pilot_flag(self):
+    def test_application_packet_defaults_to_eof_and_pilot_tones(self):
         import modem_v7_display
 
         class Library:
@@ -346,8 +362,9 @@ class V7PilotToneTests(unittest.TestCase):
                 mock.patch('modem_v7_display._v7.encode_pulse_frame',
                            return_value=output) as encode:
             modem_v7_display.packet(
-                Library(), self.model, 1, 0, (0, 0, 0), pilot_tones=True)
+                Library(), self.model, 1, 0, (0, 0, 0))
         self.assertTrue(encode.call_args.kwargs['pilot_tones'])
+        self.assertTrue(encode.call_args.kwargs['eof_marker'])
 
     def test_tone_replacement_wins_for_known_per_symbol_timing_track(self):
         symbols = np.arange(v7.F)

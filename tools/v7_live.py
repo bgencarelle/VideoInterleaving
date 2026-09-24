@@ -221,7 +221,8 @@ def run_send(args):
         values = np.asarray(frames)
         audio = P.encode_pulse_stream(model, values, start_counter=counter,
                                       aspect_codes=aspects,
-                                      pilot_tones=getattr(args, 'pilot_tones', False))
+                                      pilot_tones=getattr(args, 'pilot_tones', True),
+                                      eof_marker=getattr(args, 'eof_marker', True))
         encoded_peak = float(np.max(np.abs(audio))) if audio.size else 0.0
         encoded_rms = float(np.sqrt(np.mean(audio*audio))) if audio.size else 0.0
         limiter_gain = 1.0
@@ -532,6 +533,7 @@ def run_receive(args):
                 pilot_timing=args.pilot_timing,
                 pilot_speed_diagnostics=args.pilot_speed_diagnostics,
                 pulse_timing=args.pulse_timing,
+                frame_boundary=args.frame_boundary,
                 tone_equalization=args.tone_equalization)
         except Exception as exc:
             # Drop the damaged window and let the next retained clock history
@@ -866,8 +868,12 @@ def parser():
                       help='source gamma; >1 lifts midtones (default: 1.0)')
     send.add_argument('--mono-sum', action='store_true',
                        help='emit mono-summed M content on one channel')
-    send.add_argument('--pilot-tones', action='store_true',
-                      help='add experimental V7 bin-1/bin-3 reference tones')
+    send.add_argument('--pilot-tones', action=argparse.BooleanOptionalAction,
+                      default=True,
+                      help='add V7 bin-1/bin-3 timing references (default on)')
+    send.add_argument('--eof-marker', action=argparse.BooleanOptionalAction,
+                      default=True,
+                      help='add the V7 packet EOF marker (default on)')
     send.add_argument('--camera', type=int, default=0)
     send.add_argument('--video-source', '--video', dest='video_source',
                       help='local video file or FFmpeg-supported live stream URL')
@@ -933,10 +939,13 @@ def parser():
     recv.add_argument('--force-float32', action='store_true',
                        help='use the experimental float32/complex64 decode path')
     recv.add_argument('--pilot-timing',
-                      choices=('baseline', 'tone-seeded', 'tone-joint',
-                               'tone-replaced'),
-                      default='baseline',
-                      help='experimental timing fit; defaults to existing pilot fit')
+                       choices=('baseline', 'tone-seeded', 'tone-joint',
+                                'tone-replaced'),
+                       default='tone-seeded',
+                       help='pilot timing fit (default: tone-seeded)')
+    recv.add_argument('--frame-boundary', choices=('baseline', 'eof'),
+                      default='eof',
+                      help='packet boundary mode (default: EOF marker)')
     recv.add_argument('--pilot-speed-diagnostics', action='store_true',
                       help='compare raw pilot-tone speed with pulse-measured speed')
     recv.add_argument('--pulse-timing', choices=('baseline', 'pulse-warp'),

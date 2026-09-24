@@ -109,8 +109,14 @@ runpy.run_path(target, run_name='__main__')
                 REPO / 'modem_tests/fixtures/v7_reference_face.png',
                 .1521 / np.sqrt(1 + 10**(v7.CLOCK_REL_DB / 10)),
                 encode_filter='nearest')
-            decoded, info = v7.decode_pulse_stream(model, samples)
-            self.assertGreaterEqual(len(decoded), 4, info)
+            decoded, info = v7.decode_pulse_stream(
+                model, samples, pilot_timing='tone-seeded',
+                frame_boundary='eof')
+            self.assertEqual(len(decoded), 5, info)
+            self.assertEqual(info['eof_markers_validated'], 5)
+            self.assertTrue(all(
+                item.diag['pilot_timing']['mode_applied'] == 'tone-seeded'
+                for item in decoded))
             self.assertEqual(
                 [item.diag['source_index'] for item in decoded[:4]],
                 [0, 1, 2, 1])
@@ -151,8 +157,14 @@ runpy.run_path(target, run_name='__main__')
                 REPO / 'modem_tests/fixtures/v7_reference_face.png',
                 .1521 / np.sqrt(1 + 10**(v7.CLOCK_REL_DB / 10)),
                 encode_filter='nearest')
-            decoded, info = v7.decode_pulse_stream(model, samples)
-            self.assertGreaterEqual(len(decoded), 4, info)
+            decoded, info = v7.decode_pulse_stream(
+                model, samples, pilot_timing='tone-seeded',
+                frame_boundary='eof')
+            self.assertEqual(len(decoded), 5, info)
+            self.assertEqual(info['eof_markers_validated'], 5)
+            self.assertTrue(all(
+                item.diag['pilot_timing']['mode_applied'] == 'tone-seeded'
+                for item in decoded))
             self.assertEqual(
                 [item.diag['source_index'] for item in decoded[:4]],
                 [0, 2, 1, 1])

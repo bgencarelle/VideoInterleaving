@@ -54,7 +54,7 @@ def _source_values(model, image, encode_filter='nearest'):
 def packet(library, model, absolute, source_index, selection, *,
            background=(4, 4, 4), rotation=0, mirror=False,
            encode_filter='nearest', loop=None, direction=1,
-           pilot_tones=False):
+           pilot_tones=True, eof_marker=True):
     index, main_folder, float_folder = selection
     image = library.composite(index, main_folder, float_folder,
                               background, rotation, mirror)
@@ -65,7 +65,7 @@ def packet(library, model, absolute, source_index, selection, *,
         model, values, absolute,
         aspect_code=aspect_code,
         source_index=source_index, loop=loop, direction=direction,
-        pilot_tones=pilot_tones)
+        pilot_tones=pilot_tones, eof_marker=eof_marker)
     return audio, {
         'frame': absolute,
         'source_index': source_index,
@@ -140,7 +140,8 @@ def run_modem(args):
     mirror = getattr(args, 'mirror', None)
     mirror = mirror if mirror is not None else bool(getattr(settings, 'INITIAL_MIRROR', 0))
     encode_filter = getattr(args, 'modem_encode_filter', None) or 'nearest'
-    pilot_tones = bool(getattr(args, 'modem_pilot_tones', False))
+    pilot_tones = bool(getattr(args, 'modem_pilot_tones', True))
+    eof_marker = bool(getattr(args, 'modem_eof_marker', True))
 
     # The V7 statistics are a wire profile, not a property of whichever frame
     # happens to be sent first.  The canonical profile ships as frozen,
@@ -185,6 +186,7 @@ def run_modem(args):
           f'source {settings.IPS:g} IPS, '
           f'loop N={loop.frames} p='
           f'{"none (MIDI clock)" if not loop.clocked else loop.phase} in CRC metadata; '
+          f'EOF marker={"on" if eof_marker else "off"}; '
           f'pilot tones={"on" if pilot_tones else "off"}')
 
     def make_packet(absolute, index, folders, at_time_ns=None):
@@ -198,7 +200,7 @@ def run_modem(args):
             library, model, absolute, index, (index, *folders),
             background=background, rotation=rotation, mirror=mirror,
             encode_filter=encode_filter, loop=loop, direction=direction,
-            pilot_tones=pilot_tones)
+            pilot_tones=pilot_tones, eof_marker=eof_marker)
         report['direction'] = direction
         report['encode_ms'] = (time.perf_counter() - started) * 1000
         if runtime_library is not None:

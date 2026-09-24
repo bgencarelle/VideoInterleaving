@@ -1119,21 +1119,24 @@ would change multiple variables and make the current stable emulation harder to
 audit. Every future change requires a reversible flag, clean vectors, matched
 impairment results, and a real-media acceptance plan.
 
-## Appendix A: EOF acquisition proposal
+## Appendix A: EOF acquisition and production defaults
 
-This appendix records a positive acquisition proposal for later implementation;
-it does not change the V7 baseline wire.
+The application V7 sender now emits the EOF marker and pilot tones by default.
+The live receiver defaults to EOF packet boundaries and tone-seeded timing.
+Legacy framing/timing and marker/tone transmission remain selectable for
+compatibility comparisons. Tone-referenced equalization and pulse-warp timing
+remain opt-in.
 
-The proposal is to retain the existing body decoder and timing calculations,
-and add an explicit loud end-of-frame pulse in the existing guard budget. The
-receiver would use classical packet-clock logic:
+The implementation retains the existing body decoder and timing calculations,
+and adds an explicit loud end-of-frame pulse in the existing guard budget. The
+receiver uses classical packet-clock logic:
 
 ```text
 header lock → count known packet geometry → validate EOF pulse → commit frame
 ```
 
-The header remains the start/timing reference and the EOF pulse becomes the
-observed packet-end reference. This has useful properties:
+The header remains the start/timing reference and the EOF pulse is the observed
+packet-end reference. This has useful properties:
 
 - no packet-length or FPS increase is required;
 - acquisition no longer needs to search payload crossings;
@@ -1143,10 +1146,9 @@ observed packet-end reference. This has useful properties:
 - the approach is deterministic, inexpensive, and appropriate for noisy tape;
 - loss recovery can be an explicit timeout/reacquisition transition.
 
-An EOF-only prototype must change its encoder and decoder together. It must
-validate clean generated WAVs, playback-scale PPM, timing residuals, CPU, and
-the existing tape matrix against the baseline before any wire change is made
-default.
+The encoder and decoder must change together: an EOF-default receiver cannot
+commit a packet from a legacy stream that has no EOF marker. Keep legacy options
+available for captures made before this wire change.
 
 ### A.1 Bench implementation findings
 
@@ -1195,6 +1197,6 @@ Type-I                    -2781           -2723
 Type-II                   -1748           -1693
 ```
 
-These are bench results only. The existing V7 pulse wire and its
-`measure_pulses()` receiver remain the protected live baseline until the EOF
-state machine is migrated and revalidated on real media.
+These are synthetic bench results, not real-media validation. EOF acquisition
+is now the production V7 baseline; same-deck tape A/B remains necessary to
+measure its recovery and reconstructed-image quality on actual media.

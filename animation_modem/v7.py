@@ -2724,9 +2724,10 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
     input gain is applied; if they do not validate, normal acquisition runs.
     ``sample_rate`` is the rate of ``x``; pulse-scale limits are normalized
     against it while sample positions remain in the input's native coordinates.
-    ``pilot_timing`` selects the experimental low-bin timing reference:
+    ``pilot_timing`` selects the optional low-bin timing reference:
     ``baseline`` (default), ``tone-seeded``, ``tone-joint``, or
-    ``tone-replaced``.
+    ``tone-replaced``. ``frame_boundary='eof'`` selects EOF packet boundaries;
+    the default waits for the next header for legacy streams.
     ``pulse_timing='pulse-warp'`` optionally uses the neighboring pulse fits
     as local-slope anchors for a monotone, within-packet Hermite sample map.
     ``frame_boundary='eof'`` requires and uses the packet's final 32-sample
@@ -3112,7 +3113,23 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
         if len(candidates) < required_starts:
             return [], {'frames': 0, 'pulse_frames': 0, 'recovered': False}
         if frame_boundary == 'eof':
-            fs, sc, conf, pending_aspect = candidates[-1]
+            # LiveInput wakes on a newly arrived header. At that point the
+            # newest packet may not have reached its EOF yet, while the prior
+            # packet's marker is complete. Choose the newest candidate whose
+            # marker validates; a finite one-packet capture still works.
+            selected = None
+            frame_min, frame_max = pulse_sample_scale_bounds(sample_rate)
+            for candidate in reversed(candidates):
+                candidate_start, candidate_scale, _, _ = candidate
+                marker = _measure_eof_marker(
+                    mono_samples, candidate_start, candidate_scale)
+                if (marker is not None and
+                        frame_min*.98 <= marker['packet_scale'] <= frame_max*1.02):
+                    selected = candidate
+                    break
+            if selected is None:
+                return [], {'frames': 0, 'pulse_frames': 0, 'recovered': False}
+            fs, sc, conf, pending_aspect = selected
         else:
             # The second pulse is the first edge of the next header. It is
             # enough to validate duration; the next body need not exist.

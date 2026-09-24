@@ -21,9 +21,11 @@ class V7EOFTests(unittest.TestCase):
                 v7.prepare_image(source, 'nearest'), cls.model.coder.grids,
                 'nearest')
         cls.baseline_wire = v7.encode_pulse_stream(
-            cls.model, [cls.values]*FRAME_COUNT)
+            cls.model, [cls.values]*FRAME_COUNT,
+            pilot_tones=False, eof_marker=False)
         cls.eof_wire = v7.encode_pulse_stream(
-            cls.model, [cls.values]*FRAME_COUNT, eof_marker=True)
+            cls.model, [cls.values]*FRAME_COUNT,
+            pilot_tones=False, eof_marker=True)
 
     def test_marker_reuses_the_guard_and_is_opt_in(self):
         self.assertEqual(len(self.eof_wire), len(self.baseline_wire))
@@ -41,7 +43,9 @@ class V7EOFTests(unittest.TestCase):
             self.eof_wire[-32:-v7.EOF_MARKER_LENGTH]))), 0.0)
 
     def test_eof_receiver_commits_final_packet_without_next_header(self):
-        baseline, _ = v7.decode_pulse_stream(self.model, self.baseline_wire)
+        baseline, _ = v7.decode_pulse_stream(
+            self.model, self.baseline_wire, pilot_timing='baseline',
+            frame_boundary='baseline')
         eof, info = v7.decode_pulse_stream(
             self.model, self.eof_wire, frame_boundary='eof')
 

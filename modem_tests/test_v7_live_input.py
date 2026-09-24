@@ -21,10 +21,16 @@ class V7LiveInputTests(unittest.TestCase):
         with Image.open(v7.REFERENCE_FIXTURE) as source:
             values = v7.image_values(v7.prepare_image(source, encode_filter='nearest'),
                                      cls.model.coder.grids, encode_filter='nearest')
+        cls.values = values
         cls.wire = v7.encode_pulse_stream(cls.model, [values]*FRAMES, 1, [6]*FRAMES,
                                           source_indices=list(range(FRAMES)))
+        cls.eof_wire = v7.encode_pulse_stream(
+            cls.model, [values]*FRAMES, 1, [6]*FRAMES,
+            source_indices=list(range(FRAMES)), pilot_tones=True,
+            eof_marker=True)
 
-    def _run(self, audio, rate=v7.RATE):
+    def _run(self, audio, rate=v7.RATE, *, frame_boundary='baseline',
+             pilot_timing='baseline'):
         live = LiveInput(rate=rate)
         state = v7.PulseState()          # as the live receiver keeps it
         taken, indices = [], []
@@ -38,7 +44,9 @@ class V7LiveInputTests(unittest.TestCase):
             results, _ = v7.decode_pulse_stream(self.model, chunk, latest_only=True,
                                                 state=state,
                                                 pulse_starts=pulse_starts,
-                                                sample_rate=rate)
+                                                sample_rate=rate,
+                                                frame_boundary=frame_boundary,
+                                                pilot_timing=pilot_timing)
             live.decoded()
             indices += [r.diag.get('source_index') for r in results]
         return live, taken, indices, len(audio)/rate
@@ -51,6 +59,12 @@ class V7LiveInputTests(unittest.TestCase):
         self.assertLessEqual(len(taken), FRAMES)
         self.assertLessEqual(max(len(t) for t in taken), live.cap())
         self.assertLessEqual(live.cap(), 2.3*v7.PULSE_FRAME)   # locked at 1x
+
+    def test_live_latest_only_commits_completed_eof_packets_at_normal_speed(self):
+        _, _, indices, _ = self._run(
+            self.eof_wire, frame_boundary='eof', pilot_timing='tone-seeded')
+        self.assertEqual(sorted(i for i in indices if i is not None),
+                         list(range(FRAMES-1)))
 
     def test_latest_only_still_scans_without_upstream_anchors(self):
         results, _ = v7.decode_pulse_stream(
