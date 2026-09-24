@@ -41,7 +41,9 @@ class V7LiveInputTests(unittest.TestCase):
                 continue
             taken.append(chunk.copy())
             pulse_starts = live.pulse_starts(chunk)
+            # Decode with LiveInput's leveler gain, as tools/v7_live.py does.
             results, _ = v7.decode_pulse_stream(self.model, chunk, latest_only=True,
+                                                input_gain=live.gain,
                                                 state=state,
                                                 pulse_starts=pulse_starts,
                                                 sample_rate=rate,
@@ -59,6 +61,34 @@ class V7LiveInputTests(unittest.TestCase):
         self.assertLessEqual(len(taken), FRAMES)
         self.assertLessEqual(max(len(t) for t in taken), live.cap())
         self.assertLessEqual(live.cap(), 2.3*v7.PULSE_FRAME)   # locked at 1x
+
+    def test_quiet_input_is_levelled_before_headers_are_searched(self):
+        # The pulse and EOF thresholds are absolute, so a capture 30 dB below
+        # line level is only found once the leveler has raised it. Scanning
+        # the raw capture found nothing here at all.
+        quiet = (self.eof_wire*10**(-30/20)).astype(np.float32)
+        live, _, indices, _ = self._run(
+            quiet, frame_boundary='eof', pilot_timing='tone-seeded')
+        decoded = sorted(i for i in indices if i is not None)
+        self.assertGreater(live.gain, 10)
+        # A few frames go to the slow-rise ramp; every later one decodes.
+        self.assertGreaterEqual(len(decoded), FRAMES-6)
+        self.assertEqual(decoded, list(range(decoded[0], FRAMES-1)))
+
+    def test_leveler_rises_slowly_and_falls_at_once(self):
+        live = LiveInput()
+        quiet = (self.wire*.01).astype(np.float32)
+        loud = (self.wire*2.0).astype(np.float32)
+        frame = v7.PULSE_FRAME
+        live.add(quiet[:frame].copy()); live.take(0.0)
+        self.assertAlmostEqual(live.gain, 1.5)          # one step of the ramp
+        for start in range(frame, 6*frame, frame):
+            live.add(quiet[start:start+frame].copy()); live.take(0.0)
+        self.assertAlmostEqual(live.gain, 1.5**6)
+        live.add(loud[6*frame:7*frame].copy()); live.take(0.0)
+        self.assertLess(live.gain, 1.0)                  # hot input: cut at once
+        live.reset()
+        self.assertLess(live.gain, 1.0)                  # a gap keeps the level
 
     def test_live_latest_only_commits_completed_eof_packets_at_normal_speed(self):
         _, _, indices, _ = self._run(

@@ -518,10 +518,9 @@ def run_receive(args):
         if audio is None:
             return
         pulse_starts = live_input.pulse_starts(audio)
-        peak = float(np.percentile(np.abs(audio[-P.PULSE_FRAME:]), 99.5))
-        desired_gain = float(np.clip(.55/max(peak, 1e-6), .5, 32.0))
-        auto_gain = (min(desired_gain, auto_gain*1.5)
-                     if desired_gain > auto_gain else desired_gain)
+        # LiveInput levels the input before it searches for headers (a quiet
+        # capture is otherwise never found); decode with that same gain.
+        auto_gain = live_input.gain
         meter['auto_gain'] = auto_gain
         if not args.refine:
             P.REFINE = False

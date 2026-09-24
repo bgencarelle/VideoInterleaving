@@ -34,6 +34,14 @@ RATE_STALE_S = 1.0          # a rate with no event this long reads 0
 # A header is found only if SYNC_LEN + META_SYMBOL + 32 samples follow its
 # scan point; successive incoming scans overlap by a little more than that.
 _HEADER_OVERLAP = PULSE.SYNC_LEN + META_SYMBOL + 64
+# Input leveler. The pulse detector's edge hysteresis and the EOF marker floor
+# are absolute levels that assume a preamble near PREAMBLE_AMPLITUDE, so the
+# input must be levelled *before* headers are searched: scanning the raw
+# capture made every input more than ~20 dB below line level undetectable.
+LEVEL_TARGET = PULSE.PREAMBLE_AMPLITUDE   # loudest 0.5% of a frame is set here
+LEVEL_PERCENTILE = 99.5
+GAIN_MIN, GAIN_MAX = .5, 32.0
+GAIN_RISE = 1.5                           # per frame; reductions are immediate
 
 
 def windowed_rate(times, now, window=RATE_WINDOW_S, stale=RATE_STALE_S):
@@ -78,6 +86,10 @@ class LiveInput:
         # for headers a second time.
         self._headers = deque(maxlen=256)
         self._header_walls = deque(maxlen=256)
+        # Leveler gain applied to header scans; the receiver decodes with the
+        # same gain so its own anchor re-check sees the same levels.
+        self.gain = 1.0
+        self._leveled_to = 0       # absolute sample of the last level update
 
     # ------------------------------------------------------------ buffer
     def span(self):
@@ -122,6 +134,7 @@ class LiveInput:
         audio = (self._blocks[0] if len(self._blocks) == 1
                  else np.concatenate(self._blocks))
         self._judge_polarity(audio)
+        self._update_level(audio)
         self._pending += self._count_headers(audio, now)
         if (self._headers and
                 self.total - self._headers[-1][0] >
@@ -171,6 +184,25 @@ class LiveInput:
             audio[max(min(judged, len(audio) - frame), 0):, 1] *= -1
         self._judged_to = self.total
 
+    # ------------------------------------------------------------ level
+    def _update_level(self, audio):
+        """Once per frame of new audio, move the gain toward setting the
+        loudest 0.5% of the newest frame at LEVEL_TARGET: slow rise, immediate
+        reduction. It runs whether or not a header has been found yet -- that
+        is what lets a quiet input be raised far enough for its headers to
+        become detectable. A reset keeps the gain: an input gap does not
+        change the input level."""
+        frame = int(self._scaled(PULSE_FRAME) if self.scale
+                    else PULSE_FRAME*self.rate/RATE)
+        if self.total-self._leveled_to < frame or len(audio) < frame:
+            return
+        self._leveled_to = self.total
+        peak = float(np.percentile(np.abs(audio[-frame:]), LEVEL_PERCENTILE))
+        desired = float(np.clip(LEVEL_TARGET/max(peak, 1e-6),
+                                GAIN_MIN, GAIN_MAX))
+        self.gain = (min(desired, self.gain*GAIN_RISE)
+                     if desired > self.gain else desired)
+
     # ------------------------------------------------------------ incoming
     def _count_headers(self, audio, now):
         """New headers in the audio not scanned yet.  A header is accepted
@@ -184,7 +216,7 @@ class LiveInput:
         overlap = max(self._scaled(_HEADER_OVERLAP), _HEADER_OVERLAP)
         found = 0
         for frame_start, scale, confidence in pulse_frame_starts(
-                audio[begin:], sample_rate=self.rate):
+                audio[begin:]*np.float32(self.gain), sample_rate=self.rate):
             position = start + begin + frame_start
             if position > self.total - overlap:
                 break
