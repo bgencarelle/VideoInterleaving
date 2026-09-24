@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bench-only live V7 camera/screen sender and receiver.
+"""Bench-only live V7 camera/screen/video sender and receiver.
 
 This deliberately does not enter ``main.py`` or the production modem engine.
 It uses the V7 prototype's fixed 48 kHz reference geometry and follows the
@@ -10,6 +10,10 @@ Examples::
 
     .venv/bin/python tools/v7_live.py send --source camera --device 'BlackHole 2ch'
     .venv/bin/python tools/v7_live.py send --source screen --device 'BlackHole 2ch'
+    .venv/bin/python tools/v7_live.py send --source video \\
+        --video-source clip.mp4 --device 'BlackHole 2ch'
+    .venv/bin/python tools/v7_live.py send --source video \\
+        --video-source 'rtsp://camera.example/live' --device 'BlackHole 2ch'
     .venv/bin/python tools/v7_live.py receive --device 'BlackHole 2ch'
     .venv/bin/python tools/v7_live.py receive --device 'BlackHole 2ch' --force-float32
 
@@ -83,6 +87,53 @@ def _device_arg(value):
         return value
 
 
+def _resolve_send_source(args, interactive=None, input_fn=None):
+    """Resolve optional interactive source and video-file/stream prompts."""
+    if interactive is None:
+        interactive = sys.stdin.isatty()
+    if input_fn is None:
+        input_fn = input
+
+    def ask(prompt):
+        try:
+            return input_fn(prompt)
+        except EOFError as exc:
+            raise ValueError(
+                'interactive source selection ended before a choice') from exc
+
+    if args.source is None and args.video_source:
+        args.source = 'video'
+    if args.source is None:
+        if not interactive:
+            raise ValueError(
+                'specify --source, or run interactively to choose one')
+        print('Capture source: camera, screen, video, test, or mouse-follow')
+        while True:
+            selected = ask('Source: ').strip().lower()
+            if selected in ('camera', 'screen', 'video', 'test', 'mouse-follow'):
+                args.source = selected
+                break
+            print('Choose camera, screen, video, test, or mouse-follow.')
+
+    if args.source == 'video':
+        if not args.video_source:
+            if not interactive:
+                raise ValueError(
+                    'video source missing; pass --video-source PATH_OR_URL')
+            args.video_source = ask(
+                'Video file path or live stream URL: ').strip()
+        args.video_source = args.video_source.strip()
+        if (len(args.video_source) >= 2 and
+                args.video_source[0] == args.video_source[-1] and
+                args.video_source[0] in ('"', "'")):
+            args.video_source = args.video_source[1:-1]
+        if not args.video_source:
+            raise ValueError('video file path or stream URL cannot be empty')
+    elif args.video_source:
+        raise ValueError('--video-source can only be used with --source video')
+    return args
+
+
 def _max_send_speed(rate):
     """Bound speed by both output bandwidth and the live receiver scale."""
     return min(P.max_wire_speed(rate), P.PULSE_MAX_SCALE)
@@ -92,11 +143,14 @@ def _capture(args):
     """Build one of the shared RGB capture sources."""
     from tools.v7_capture import (camera_source, mouse_follow_source,
                                   screen_capture_source, screen_source,
-                                  test_source, Throttled, _region)
+                                  test_source, video_source, Throttled, _region)
 
     region = _region(args.region)
     if args.source == 'test':
         return test_source()
+    if args.source == 'video':
+        return video_source(args.video_source, width=args.capture_width,
+                            scale_flags=args.capture_filter)
     if args.source == 'mouse-follow':
         return mouse_follow_source(initial_width=args.capture_width)
     if args.source == 'camera':
@@ -243,9 +297,11 @@ def run_send(args):
             worker.start()
             worker_started = True
             if not args.no_log:
+                camera_text = (f'camera={args.camera} '
+                               if args.source == 'camera' else '')
                 print(f'V7 send ready: source={args.source} device={args.device!r} '
                       f'rate={output_rate:g}Hz wire={FPS*args.speed:.3f}fps '
-                      f'speed={args.speed:g}x camera={args.camera} '
+                      f'speed={args.speed:g}x {camera_text}'
                       f'capture={args.capture_width}px/{args.capture_filter} '
                       f'encode={args.encode_filter} mode={"mono-sum" if args.mono_sum else "M/S"}',
                       flush=True)
@@ -750,8 +806,9 @@ def parser():
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest='mode', required=True)
     send = sub.add_parser('send', help='capture camera/screen and transmit V7')
-    send.add_argument('--source', choices=('camera', 'screen', 'test',
-                                           'mouse-follow'), required=True)
+    send.add_argument('--source', choices=('camera', 'screen', 'video', 'test',
+                                           'mouse-follow'),
+                      help='capture source; omitted interactively prompts for one')
     send.add_argument('--device', type=_device_arg, required=True,
                       help='explicit sounddevice output, e.g. BlackHole 2ch')
     send.add_argument('--fixture', type=Path, default=DEFAULT_FIXTURE)
@@ -764,6 +821,8 @@ def parser():
     send.add_argument('--mono-sum', action='store_true',
                       help='emit mono-summed M content on one channel')
     send.add_argument('--camera', type=int, default=0)
+    send.add_argument('--video-source', '--video', dest='video_source',
+                      help='local video file or FFmpeg-supported live stream URL')
     send.add_argument('--display', type=int)
     send.add_argument('--ffmpeg-input')
     send.add_argument('--screen-backend', choices=('mss', 'ffmpeg'), default='mss',
@@ -774,7 +833,7 @@ def parser():
                       choices=('neighbor', 'area', 'bilinear', 'bicubic',
                                'lanczos'),
                       default='neighbor',
-                      help='FFmpeg camera scaler (default: neighbor)')
+                      help='FFmpeg capture scaler (default: neighbor)')
     send.add_argument('--capture-fps', '--fps', dest='capture_fps', type=float)
     send.add_argument('--batch-frames', type=int, default=1,
                       help='frames encoded before submission (default: 1)')
@@ -830,6 +889,10 @@ if __name__ == '__main__':
     ap = parser()
     args = ap.parse_args()
     if args.mode == 'send':
+        try:
+            _resolve_send_source(args)
+        except ValueError as exc:
+            ap.error(str(exc))
         if args.rate is not None and args.rate <= 0:
             ap.error('--rate must be positive')
         if args.speed <= 0:

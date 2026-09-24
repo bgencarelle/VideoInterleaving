@@ -10,6 +10,7 @@ import sys
 import tempfile
 import threading
 import time
+from urllib.parse import urlsplit
 
 import numpy as np
 
@@ -281,55 +282,103 @@ def screen_capture_source(fps, region=None, display=None, width=320,
                          width=width, scale_flags=scale_flags)
 
 
-def video_source(path, loop=True, realtime=True):
-    """Decode a file through ffmpeg, optionally looping.
+_LIVE_SCHEMES = frozenset({
+    'http', 'https', 'rtsp', 'rtsps', 'rtmp', 'rtmps', 'udp', 'tcp', 'srt',
+    'rist', 'rtp', 'rtmpe', 'rtmpt',
+})
 
-    `realtime` paces ffmpeg to the wall clock with -re, which is right when the
-    packets are going to a device. It is wrong when rendering to a WAV as fast
-    as the CPU allows: the renderer outruns the decoder and every grab returns
-    the same frame. Rendering therefore reads the pipe sequentially instead,
-    one decoded frame per packet, so the clip plays at the wire rate.
+
+def _is_stream_url(source):
+    return urlsplit(str(source)).scheme.lower() in _LIVE_SCHEMES
+
+
+def video_source(source, loop=None, realtime=None, width=320,
+                 scale_flags='bicubic'):
+    """Read a local video file in a real-time loop or a live stream URL.
+
+    Local files loop and are paced with ``-re``. Network URLs are treated as
+    live inputs: they are read as delivered, without file-loop or input pacing.
+    PPM carries each output frame's dimensions, so this path needs no separate
+    ffprobe pass and can handle sources with different aspect ratios.
     """
     if shutil.which('ffmpeg') is None:
         raise SystemExit('ffmpeg not found. brew install ffmpeg / apt install ffmpeg')
-    if not os.path.exists(path):
-        raise SystemExit(f'No such file: {path}')
-    w = 320
-    probe = subprocess.run(
-        ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries',
-         'stream=width,height', '-of', 'csv=p=0', path],
-        capture_output=True, text=True)
-    try:
-        sw, sh = [int(x) for x in probe.stdout.strip().split(',')[:2]]
-    except Exception:
-        sw, sh = 16, 9
-    h = max(2, int(round(w*sh/float(sw)))//2*2)
-    state = {'proc': None}
+    source = os.path.expanduser(str(source))
+    is_stream = _is_stream_url(source)
+    if not is_stream and not os.path.isfile(source):
+        raise SystemExit(f'No such video file: {source}')
+    if width < 1:
+        raise ValueError('Capture width must be positive')
+    if scale_flags not in ('neighbor', 'area', 'bilinear', 'bicubic', 'lanczos'):
+        raise ValueError(f'Unsupported FFmpeg scale flags: {scale_flags}')
 
-    def start():
-        cmd = ['ffmpeg', '-loglevel', 'error']
-        if loop:
-            cmd += ['-stream_loop', '-1']
-        if realtime:
-            cmd += ['-re']
-        cmd += ['-i', path, '-vf', f'scale={w}:{h}', '-pix_fmt', 'rgb24',
-                '-f', 'rawvideo', '-an', '-sn', '-']
-        state['proc'] = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                         stderr=subprocess.DEVNULL, bufsize=0)
-    start()
-    nbytes = w*h*3
-    last = [None]
+    if loop is None:
+        loop = not is_stream
+    if realtime is None:
+        realtime = not is_stream
+
+    cmd = ['ffmpeg', '-nostdin', '-loglevel', 'error']
+    if loop:
+        cmd += ['-stream_loop', '-1']
+    if realtime:
+        cmd += ['-re']
+    if is_stream:
+        # Fail a stalled network read instead of leaving the capture worker
+        # blocked forever during shutdown or source loss.
+        cmd += ['-rw_timeout', '10000000']
+    cmd += ['-i', source, '-vf',
+            f'scale={int(width)}:-2:flags={scale_flags}',
+            '-fps_mode', 'passthrough', '-pix_fmt', 'rgb24',
+            '-c:v', 'ppm', '-f', 'image2pipe', '-an', '-sn', '-']
+
+    errors = tempfile.TemporaryFile()
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                stderr=errors, bufsize=0)
+    except BaseException:
+        errors.close()
+        raise
+    state = {'closed': False}
+    close_lock = threading.Lock()
 
     def grab():
-        buf = _read_exact(state['proc'].stdout, nbytes)
-        if buf is None:
-            if last[0] is None:
-                raise SystemExit(f'ffmpeg produced no frames from {path}')
-            return last[0]
-        last[0] = np.frombuffer(buf, np.uint8).reshape(h, w, 3)
-        return last[0]
-    grab.proc = state['proc']
-    grab.sequential = True          # one decoded frame per call; do not throttle
+        try:
+            return _read_ppm(proc.stdout)
+        except RuntimeError as exc:
+            with close_lock:
+                if state['closed']:
+                    raise
+                errors.flush()
+                errors.seek(0)
+                detail = errors.read().decode('utf-8', errors='replace').strip()
+            if source in detail:
+                detail = detail.replace(source, '<video source>')
+            message = f'FFmpeg video source failed: {exc}'
+            if detail:
+                message += f'\n{detail}'
+            raise RuntimeError(message) from exc
+
+    def close():
+        with close_lock:
+            if state['closed']:
+                return
+            state['closed'] = True
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=2)
+            finally:
+                errors.close()
+
+    grab.proc = proc
+    grab.close = close
+    # File input is paced by -re; a live URL is paced by its own arrival rate.
+    # Drain either continuously so the newest-frame mailbox stays current.
+    grab.paced = True
     return grab
 
 

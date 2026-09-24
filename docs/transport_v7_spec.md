@@ -911,9 +911,10 @@ from a held frame.
 ### 19.5 Capture, CPU, and live diagnostics
 
 `tools/v7_live.py` is an explicit-device experimental tool. Camera capture
-probes the lowest supported FPS and smallest resolution, and reuses the
-V3–V6 `Throttled` newest-frame capture path. Screen capture defaults to `mss`;
-FFmpeg is explicit for screen and remains the camera device/mode backend.
+uses FFmpeg's negotiated device mode and the V3–V6 `Throttled` newest-frame
+path; `--capture-width` scales the frames after capture. Screen capture defaults
+to `mss`, with FFmpeg available as an explicit backend. The sender also accepts
+local video files (real-time looping) and live stream URLs.
 
 The current prototype precomputes rank/placement tables, vectorizes group
 mixing and IFFT, batches receiver solves, caches clock templates, and reports
@@ -934,20 +935,30 @@ real-media validation and long-run CPU/reacquisition testing are complete.
   --device 'BlackHole 2ch'
 .venv/bin/python tools/v7_live.py send --source screen \
   --device 'BlackHole 2ch'
+.venv/bin/python tools/v7_live.py send --source video \
+  --video-source clip.mp4 --device 'BlackHole 2ch'
+.venv/bin/python tools/v7_live.py send --source video \
+  --video-source 'rtsp://camera.example/live' --device 'BlackHole 2ch'
 .venv/bin/python tools/v7_live.py receive --device 'BlackHole 2ch'
 ```
 
-The sender reuses `modem_screen.py`'s camera and screen capture sources,
-selects the smallest camera mode supporting the requested capture rate, and
-prepares frames with the V7 source grids. Live V7 uses the V3-style
-pulse-counted frame preamble and runs at approximately 12.245 fps. Live V7
-defaults to nearest-neighbor
-sampling at both the 80x96 preparation step and the coder-grid sampling step;
+The video source accepts a local file or an FFmpeg-supported stream URL. Local
+files play in real time and loop; stream URLs are consumed as live inputs. With
+`--source video` but no `--video-source`, the sender prompts for a path or URL.
+If `--source` is omitted in an interactive terminal, it first prompts for the
+capture type. Non-interactive runs must specify the source explicitly.
+
+The sender prepares frames with the V7 source grids. Camera capture uses the
+selected FFmpeg device and its negotiated input mode; `--capture-width` scales
+the frames FFmpeg sends to Python, not the camera's sensor mode. Live V7 uses
+the V3-style pulse-counted frame preamble and runs at approximately 12.245 fps.
+It defaults to nearest-neighbor sampling at both the 80x96 preparation step and
+the coder-grid sampling step;
 `--encode-filter` can select another explicit filter. Screen capture defaults to
 the existing `mss` path; `--screen-backend ffmpeg` selects the FFmpeg pipe
-explicitly. Camera capture continues to use FFmpeg because it probes the
-smallest supported device mode and performs the RGB pipe conversion. The live
-pulse frame is 3,920 samples (288 preamble + 3,456 body + 144 metadata symbol
+explicitly. Camera and video-file/stream capture use FFmpeg to scale and convert
+frames to RGB before piping them to Python. The live pulse frame is 3,920
+samples (288 preamble + 3,456 body + 144 metadata symbol
 + 32 guard), or 12.245 fps. The receiver accumulates the explicit 48 kHz input,
 runs the V7 prototype
 decoder, displays the newest usable reconstruction, and can save frames with
