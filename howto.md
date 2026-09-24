@@ -12,8 +12,8 @@ cd /Users/ben/PycharmProjects/VideoInterleaving   # CWD must be the repo root
 
 - Run everything from the repo root (systemd units, scripts, and tests assume it).
 - CLI args that belong to another mode are reported as ignored (`⚠️`), not dropped.
-- `logs/` holds per-run logs (stdout/stderr teed there). Image scan caches in
-  `_cache/` are wiped at startup; `--rebuild` forces regeneration.
+- `logs/` holds per-run logs (stdout/stderr teed there). Generated image lists
+  are refreshed at startup; scope can use the manifest in its XY bake instead.
 - **Audio:** pass a device by name or index (`--device BlackHole`), never assume
   the default. `--device null` runs headless. Anything opening a REAL device
   must use **BlackHole 2ch**; if it's missing on macOS, `brew install blackhole-2ch`
@@ -112,12 +112,12 @@ One wire, one format (`WIRE`: 375–20250 Hz, 15.00 fps, full 2880-slot
 .venv/bin/python tools/bench_modem.py
 # fixed-pair WAV round trip:
 .venv/bin/python main.py --mode modem --modem-dir images_modem \
-  --modem-pair 1,0 --modem-wav modem_test.wav --modem-frames 100 -f
+  --modem-pair 1,0 --modem-wav modem_test.wav --modem-frames 100
 .venv/bin/python utilities/modem_v3_check.py read --wav modem_test.wav
 # live loop over BlackHole:
 .venv/bin/python utilities/modem_v3_check.py live-receive --device BlackHole --channels 1,2 --emulate clean
 .venv/bin/python main.py --mode modem --modem-dir images_modem \
-  --device BlackHole --modem-channels 1,2 -f
+  --device BlackHole --modem-channels 1,2
 # sender without a bake:
 .venv/bin/python modem_screen.py --source test --frames 5 --write out.wav
 ```

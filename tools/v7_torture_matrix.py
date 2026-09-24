@@ -3,7 +3,7 @@
 
 This reconstructs the historical 19-case matrix, excluding worn-deck. It is
 deliberately a synthetic regression matrix, not a claim to model a particular
-deck; real tape captures remain authoritative. Outputs go under scratch/.
+deck; real tape captures remain authoritative. Outputs go under tmp/.
 """
 import argparse
 import json
@@ -23,7 +23,7 @@ from tools.measure_plane_survival import plane_metrics_arrays
 
 RATE = 96_000
 DEFAULT_FRAMES = 12
-DEFAULT_OUT = Path('scratch/v7-torture-current')
+DEFAULT_OUT = Path('tmp/v7-torture-current')
 FIXTURE = v7.REFERENCE_FIXTURE
 TARGET = .1521 / np.sqrt(1 + 10**(v7.CLOCK_REL_DB / 10))
 
@@ -186,7 +186,7 @@ def image_quality(rows):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', type=Path, default=DEFAULT_OUT,
-                        help='output directory (default: scratch/v7-torture-current)')
+                        help='output directory (default: tmp/v7-torture-current)')
     parser.add_argument('--frames', type=int, default=DEFAULT_FRAMES,
                         help='identical V7 frames to generate (default: 12)')
     parser.add_argument('--seed', type=int, default=2026,

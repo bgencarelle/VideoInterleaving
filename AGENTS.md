@@ -18,8 +18,13 @@ subsystems.
 - `tools/` — standalone diagnostic/inspection tools. Nothing imports them; the
   ones that need app modules insert the repo root into `sys.path` themselves.
 - `tests/` — root-level test suites; `modem_tests/` is the modem package suite.
-- `scratch/` — temp directory for measurement scripts, review PNGs, and other
-  working artifacts. Excluded from git; never commit it, never import from it.
+- `tmp/` — repo-local temporary directory for measurement scripts, review PNGs,
+  test outputs, and other working artifacts. Excluded from git; never commit
+  it or import from it.
+- Never create or use working files, scripts, outputs, or Git worktrees under
+  `/tmp` or another external temporary directory. Keep temporary artifacts in
+  the repo-local `tmp/`, and do work in the active checkout unless a repo-local
+  worktree is explicitly needed.
 
 ## Modes
 
@@ -93,8 +98,9 @@ inside the modem subsystem (`animation_modem/`, `modem_*.py`,
   exits on a busy port, but scope mode deliberately skips it (it binds nothing).
   Ports 2423/2424 are reserved for asciiweb.
 - Image scan caches live in `_cache/generated_lists_<src>_<mode>_<port>/` and
-are wiped at startup; `--rebuild` forces regeneration. `logs/` holds per-run
-logs (stdout and stderr are teed there).
+  are refreshed at startup to avoid reusing stale folder lists. Scope reads the
+  folder manifest from its XY bake when available. `logs/` holds per-run logs
+  (stdout and stderr are teed there).
 
 ## Bakes (all gitignored, never commit)
 

@@ -80,7 +80,7 @@ runpy.run_path(target, run_name='__main__')
                 [sys.executable, '-c', script, str(REPO / 'main.py'),
                  '--mode', 'modem', '--modem-dir', str(bake),
                  '--modem-pair', '1,0', '--modem-wav', str(wav),
-                 '--modem-frames', '5', '--modem-speed', '1.5', '-f'],
+                 '--modem-frames', '5', '--modem-speed', '1.5'],
                 cwd=root, text=True, capture_output=True, timeout=30)
             self.assertEqual(result.returncode, 0,
                              result.stdout + result.stderr)
@@ -110,7 +110,7 @@ runpy.run_path(target, run_name='__main__')
                  '--mode', 'modem', '--modem-source', 'images',
                  '--dir', str(source), '--modem-pair', '1,0',
                  '--modem-wav', str(wav), '--modem-frames', '5',
-                 '--modem-log-frames', '--rebuild'],
+                 '--modem-log-frames'],
                 cwd=REPO, text=True, capture_output=True, timeout=30)
             self.assertEqual(result.returncode, 0,
                              result.stdout + result.stderr)
@@ -138,6 +138,23 @@ runpy.run_path(target, run_name='__main__')
             self.assertEqual(
                 [item.diag['source_index'] for item in decoded[:4]],
                 [0, 2, 1, 1])
+
+    def test_wav_rejects_live_midi_clock_without_prompting(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / 'images'
+            source_tree(source)
+            bake = root / 'images_modem'
+            with contextlib.redirect_stdout(io.StringIO()):
+                bake_tree(source, bake)
+            result = subprocess.run(
+                [sys.executable, str(REPO / 'main.py'),
+                 '--mode', 'modem', '--modem-dir', str(bake),
+                 '--modem-pair', '1,0', '--modem-wav', str(root / 'midi.wav'),
+                 '--modem-clock', '0', '--modem-frames', '5'],
+                cwd=root, text=True, capture_output=True, timeout=30)
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn('--modem-wav requires the free clock', result.stderr)
 
 
 if __name__ == '__main__':

@@ -80,6 +80,19 @@ def _folders(args, library, index, selected, previous):
     return folder_dictionary['Main_and_Float_Folders'], index
 
 
+def _open_midi_input(index_calculator):
+    """Open the selected legacy MIDI clock before the live send loop polls it."""
+    if not index_calculator.midi_mode:
+        return None
+    midi = index_calculator.midi_control
+    if midi is None or not midi.mido.get_input_names():
+        raise RuntimeError('A MIDI clock was selected, but no MIDI input is available')
+    midi.midi_control_stuff_main()
+    if midi.input_port is None:
+        raise RuntimeError('The MIDI clock input could not be opened')
+    return midi.input_port
+
+
 def run_modem(args):
     import settings
     import index_calculator
@@ -89,7 +102,10 @@ def run_modem(args):
     if source_mode == 'images':
         from modem_image_source import RuntimeImageLibrary
         library = RuntimeImageLibrary(
-            rebuild=bool(getattr(args, 'rebuild', False)),
+            # Modem mode returns before main.py's shared list-refresh path.
+            # Always rebuild so lists from a previous source directory cannot
+            # leak into this run.
+            rebuild=True,
             capacity=getattr(settings, 'FIFO_LENGTH', 5))
         runtime_library = library
         root = str(library.root)
@@ -220,7 +236,9 @@ def run_modem(args):
         return
 
     poll_seconds = 1 / (settings.FPS or 60)
+    midi_input = None
     try:
+        midi_input = _open_midi_input(index_calculator)
         with PacketOutput(device(args.scope_device), channels, output_latency,
                           frame=_v7.PULSE_FRAME, packet=_v7.PULSE_FRAME,
                           speed=speed) as output:
@@ -261,5 +279,9 @@ def run_modem(args):
                     time.sleep(delay)
             output.finish()
     finally:
-        if runtime_library is not None:
-            runtime_library.close()
+        try:
+            if midi_input is not None:
+                midi_input.close()
+        finally:
+            if runtime_library is not None:
+                runtime_library.close()

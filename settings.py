@@ -59,7 +59,6 @@ PINGPONG = True
 FROM_BIRTH = True
 
 # web stuff
-HTTP_MONITOR = True  # or True
 # WEB_PORT is now managed by server_config.py - do not set here
 FRAME_COUNTER_DISPLAY = True  # If the monitor is on, skip printing
 
@@ -93,7 +92,6 @@ HEADLESS_RES = (320, 400)   # Resolution for the virtual screen (web frame size)
 # Scope refresh defaults to IPS. For completed vector/raster passes, one trace
 # per index maximises their finite sample budget (samples = rate / fps).
 # Stochastic is continuous: a trace is only an audio buffer, not an image.
-SCOPE_MODE = False
 SCOPE_ROW_BIAS = 1.0      # >1 trades columns for rows at constant cell count.
                           # Faces want ~1.3: their features are horizontal
                           # edges, and rows resolve those. Past ~1.6 the mouth

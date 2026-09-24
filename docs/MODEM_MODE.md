@@ -95,8 +95,7 @@ python main.py --mode modem \
   --modem-dir images_modem \
   --modem-pair 1,0 \
   --modem-wav modem_test.wav \
-  --modem-frames 100 \
-  -f
+  --modem-frames 100
 python utilities/modem_v3_check.py read --wav modem_test.wav
 ```
 
@@ -123,7 +122,7 @@ BlackHole or a stereo cable can connect the two:
 ```bash
 python utilities/modem_v3_check.py live-receive --device BlackHole --channels 1,2 --emulate clean
 python main.py --mode modem --modem-dir images_modem \
-  --device BlackHole --modem-channels 1,2 -f
+  --device BlackHole --modem-channels 1,2
 ```
 
 `--modem-channels` is a one-based pair of physical output channels. The
@@ -187,8 +186,11 @@ index formula. `--modem-prepare-ms` defaults to 10 and grows when measured image
 composition/encoding needs more time. Neither setting guarantees a hardware deadline.
 
 MIDI clocks retain immediate, untimed packets since future input is unknown.
-The deterministic WAV inspection export also remains untimed. The new receiver
-still accepts old SI01/SI02 headers and displays those frames immediately.
+For a live MIDI-clock run, the sender opens the first available MIDI input port;
+there must be at least one input. `CLIENT_MODE` is not supported by the V7
+sender. Deterministic WAV export requires the free clock because it cannot be
+driven by future live MIDI input. The new receiver still accepts old SI01/SI02
+headers and displays those frames immediately.
 
 ### Timing reports
 

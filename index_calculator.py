@@ -43,7 +43,7 @@ set_launch_time(from_birth=FROM_BIRTH)
 
 def set_clock_mode(mode=None):
     global clock_mode, midi_mode
-    if mode and mode in VALID_MODES.values():
+    if mode is not None and mode in VALID_MODES.values():
         clock_mode = mode
     else:
         while True:

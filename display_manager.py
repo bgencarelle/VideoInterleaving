@@ -74,6 +74,18 @@ def _session_label() -> str:
 def _is_macos() -> bool:
     return sys.platform == 'darwin'
 
+
+def _position_macos_fullscreen(window, monitor) -> None:
+    """Align a borderless macOS window with its monitor after resizing it."""
+    if not _is_macos() or glfw is None or monitor is None:
+        return
+    try:
+        x, y = glfw.get_monitor_pos(monitor)
+        glfw.set_window_pos(window, x, y)
+    except Exception:
+        pass
+
+
 class DisplayState:
     def __init__(self, image_size: tuple[int, int] = (640, 480)) -> None:
         self.image_size = image_size
@@ -1181,12 +1193,8 @@ def display_init(state: DisplayState):
                 if is_wayland or _is_macos():
                     glfw.window_hint(glfw.DECORATED, glfw.FALSE)
                     win = glfw.create_window(fs_w, fs_h, "Fullscreen", None, None)
-                    if win and _is_macos() and mon is not None:
-                        try:
-                            mx, my = glfw.get_monitor_pos(mon)
-                            glfw.set_window_pos(win, mx, my)
-                        except Exception:
-                            pass
+                    if win:
+                        _position_macos_fullscreen(win, mon)
                     return win
                 return glfw.create_window(fs_w, fs_h, "Fullscreen", mon, None)
 
@@ -1374,6 +1382,7 @@ def display_init(state: DisplayState):
                     _hide_cursor_reliable(window)
                 # Ensure borderless
                 glfw.set_window_attrib(window, glfw.DECORATED, glfw.FALSE)
+                _position_macos_fullscreen(window, mon)
                 _hide_cursor_reliable(window)
             else:
                 # Windowed mode: restore decoration and use a stable 4:3

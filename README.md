@@ -1,6 +1,6 @@
 # VideoInterleaving
 
-**VideoInterleaving** is a timecode-synced image-sequence renderer designed for high-performance animation installations. It supports dual-layer blending, MIDI/MTC synchronization, real-time OpenGL rendering, and multi-format streaming (MJPEG & ASCII).
+**VideoInterleaving** is an image-sequence renderer designed for high-performance animation installations. It supports dual-layer blending, real-time OpenGL rendering, oscilloscope XY output, and multi-format streaming (MJPEG & ASCII).
 
 It is designed to run on everything from high-end workstations to headless Raspberry Pis and remote VPS instances.
 
@@ -16,7 +16,9 @@ It is designed to run on everything from high-end workstations to headless Raspb
     * **Oscilloscope XY**: Vector, scanline raster, or no-Z stochastic bitmap
       rendering through a stereo audio interface.
 * **Performance First**: Uses Side-by-Side (SBS) JPEGs and TurboJPEG for maximum throughput on low-power CPUs.
-* **Sync**: Supports free-running, MIDI, MTC, and Client/Server index synchronization.
+* **Sync**: Normal startup uses the free-running image clock. Live MTC/LTC sync
+  and MIDI note/pitch-bend performance controls are intended future behavior;
+  see `docs/UPGRADE_NOTES.md` for the current state and restoration target.
 
 ---
 

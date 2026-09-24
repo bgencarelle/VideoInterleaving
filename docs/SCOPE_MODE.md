@@ -4,9 +4,10 @@ Draws the interleaved composition on an oscilloscope in XY mode, using the
 sound card as a two-channel DAC. Left channel drives X, right drives Y, and
 the beam traces whatever path those two voltages walk.
 
-It runs off the same clock and the same folder selector as every other output
-mode, so it stays in sync with MIDI/MTC without any new sync code. It never
-decodes a JPEG, opens a GL context, or touches the image loader.
+It uses the same image-index clock and folder selector as the other output
+modes. Normal startup currently uses the free-running clock; MIDI/MTC is not
+initialized, and LTC input is not implemented. It never decodes a JPEG, opens a
+GL context, or touches the image loader.
 
 ---
 

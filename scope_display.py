@@ -4,10 +4,10 @@ scope_display.py -- the scope-mode engine.
 A standalone mode, like ascii / asciiweb / local / web: selected once and it
 owns the run. Renders the interleaved composition as XY vectors, dwell raster,
 an Osci-style stochastic luminance walk, a stable weighted stipple route, or a
-per-index multiplexer across complete XY position arrays on the audio output,
-driven by the same clock
-(update_index, MIDI included) and the same
-folder selector as every other mode.
+    per-index multiplexer across complete XY position arrays on the audio output,
+    driven by the same image-index path and folder selector as every other mode.
+    Normal startup currently uses the free-running clock; it does not initialize
+    the retained legacy MIDI clock path.
 
 Needs none of the image machinery: no ImageLoader, no FIFO, no TurboJPEG, no
 GL context.  Geometry comes from libraries baked offline by
@@ -17,7 +17,7 @@ utilities/convert_to_xy.py into settings.XY_DIR.
 
 or directly, using the settings.py defaults:
 
-    python scope_display.py [--dir images] [--xy-dir images_xy] [--rebuild]
+    python scope_display.py [--dir images] [--xy-dir images_xy]
 
 All tuning is read from settings.SCOPE_*; main.py publishes CLI overrides
 there, exactly as the other modes read ASCII_MODE / SERVER_MODE.
@@ -128,8 +128,6 @@ def _bootstrap():
     ap.add_argument("--dir", help="image source folder. Optional: scope mode "
                     "reads its manifest from the bake and never opens an image.")
     ap.add_argument("--xy-dir", help="baked XY libraries")
-    ap.add_argument("--rebuild", action="store_true",
-                    help="force rebuild of image lists")
     render = ap.add_mutually_exclusive_group()
     render.add_argument("--scope-mode",
                         choices=("vector", "raster", "stochastic", "stipple",
@@ -251,15 +249,25 @@ def _bootstrap():
     import make_file_lists
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    gen_full = os.path.join(script_dir, settings.GENERATED_LISTS_DIR)
-    if args.rebuild:
-        for d in (settings.PROCESSED_DIR, settings.GENERATED_LISTS_DIR):
-            shutil.rmtree(os.path.join(script_dir, d), ignore_errors=True)
-    if not (os.path.isdir(gen_full) and os.listdir(gen_full)):
+    for d in (settings.PROCESSED_DIR, settings.GENERATED_LISTS_DIR):
+        shutil.rmtree(os.path.join(script_dir, d), ignore_errors=True)
+
+    # Match main.py: when a bake contains its folder manifest, scope can start
+    # without scanning source images. Otherwise build fresh lists now.
+    _scope_has_manifest = False
+    if not getattr(settings, "SCOPE_LIST_FROM_IMAGES", False):
+        _xy = getattr(settings, "XY_DIR", None)
+        if _xy and os.path.isdir(_xy):
+            for _root, _dirs, _files in os.walk(_xy):
+                if "frame_starts.npy" in _files:
+                    _scope_has_manifest = True
+                    break
+
+    if _scope_has_manifest:
+        print(">> Skipping image scan: scope mode takes its manifest from the bake")
+    else:
         print(">> Building file lists...")
         make_file_lists.process_files()
-    else:
-        print(f">> Reusing lists in {settings.GENERATED_LISTS_DIR}")
 
 
 # ---------------------------------------------------------------- resolution

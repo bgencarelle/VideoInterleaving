@@ -320,12 +320,6 @@ def configure_runtime():
                              "a kiosk launch script.")
 
     parser.add_argument(
-        "--rebuild",
-        action="store_true",
-        help="Force a rebuild of image lists (Default: Reuse existing lists if found)"
-    )
-
-    parser.add_argument(
         "--test",
         action="store_true",
         help="Override hosts to '0.0.0.0' for network testing (default: '127.0.0.1')"
@@ -364,14 +358,7 @@ def configure_runtime():
         help="Full application-clock cycles for WAV export; ping-pong cycles "
              "include the return trip")
     parser.add_argument("--modem-wav", help="Export a deterministic pair to PCM16 WAV instead of live playback")
-    parser.add_argument("--modem-profile", default=None,
-                        help="Picture geometry to send. Defaults to the bake's "
-                             "own profile, which is the right answer unless "
-                             "you are comparing. 'color-dct' needs a bake at "
-                             "80x96 and the wire holding 2880 values; the "
-                             "receiver reads it from the header.")
     parser.add_argument("--modem-pair", help="Fixed zero-based face,float pair for inspection, e.g. 1,0")
-    parser.add_argument("-f", "--modem-numbered", action="store_true", help="Burn absolute and source-index counters into modem pixels")
     parser.add_argument("--modem-index-offset-ms", type=float, default=0.0,
         help="Shift only which image the clock returns, not when it is shown; "
              "use to align modem output with local/scope/ascii. One image is 1000/IPS ms.")
@@ -401,6 +388,11 @@ def configure_runtime():
             parser.error("--modem-frame-duration must be finite and positive")
         if not math.isfinite(args.modem_speed) or args.modem_speed <= 0:
             parser.error("--modem-speed must be finite and positive")
+        if args.modem_clock == settings.CLIENT_MODE:
+            parser.error("--modem-clock 3 (CLIENT_MODE) is not supported by the V7 modem")
+        if args.modem_wav and args.modem_clock != settings.FREE_CLOCK:
+            parser.error("--modem-wav requires the free clock (--modem-clock 255); "
+                         "a live MIDI clock cannot drive a deterministic WAV")
         if args.scope_ask:
             parser.error("V7 modem mode takes --device explicitly; use "
                          "--scope-device with the selected audio device")
@@ -629,7 +621,6 @@ def configure_runtime():
         print(f">> MODE: SCOPE (XY audio) [{source_name}]")
         settings.ASCII_MODE = False
         settings.SERVER_MODE = False
-        settings.SCOPE_MODE = True
         config.set_mode(MODE_SCOPE)
         ports = config.get_ports()
         # Deliberately NOT require_ports() here.  Scope binds nothing -- the
@@ -949,22 +940,18 @@ def main(clock=CLOCK_MODE):
             if _log_file is not None:
                 _log_file.close()
         return
-    # Register cleanup handler for display resolution restoration
-    try:
-        from display_manager import _restore_display_resolution
-        atexit.register(_restore_display_resolution)
-    except ImportError:
-        pass  # display_manager may not be imported yet
+    # display_manager imports ModernGL and renderer; scope is audio-only and
+    # must not import the graphics stack on its way into the scope engine.
+    if cli_args.mode != "scope":
+        try:
+            from display_manager import _restore_display_resolution
+            atexit.register(_restore_display_resolution)
+        except ImportError:
+            pass  # display_manager may not be imported yet
 
-    # 1. Process Files (Reuse Logic)
-    lists_exist = False
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    gen_dir_full = os.path.join(script_dir, settings.GENERATED_LISTS_DIR)
+    # 1. Process Files (fresh on each startup)
 
     print(f"[MAIN] Mode={cli_args.mode} | Images={settings.IMAGES_DIR} | Cache={settings.GENERATED_LISTS_DIR}")
-
-    if os.path.exists(gen_dir_full) and os.listdir(gen_dir_full):
-        lists_exist = True
 
     # Scope mode reads its folder manifest from the bake and never opens an
     # image, so the image scan is pure startup cost for it.  Skipped only when
@@ -981,12 +968,10 @@ def main(clock=CLOCK_MODE):
     if _scope_has_manifest:
         print(">> Skipping image scan: scope mode takes its manifest from the "
               "bake (--scope-list-from-images to override)")
-    elif cli_args.rebuild or not lists_exist:
+    else:
         print(">> Building file lists...")
         import make_file_lists          # PIL + numpy; not needed off this path
         make_file_lists.process_files()
-    else:
-        print(f">> Skipping build. Reusing existing lists in: {settings.GENERATED_LISTS_DIR}")
 
     # 2. Launch Servers
     mode = cli_args.mode
@@ -1026,6 +1011,7 @@ def main(clock=CLOCK_MODE):
         web_service.start_server(monitor=True, stream=False)
 
         # 3. Start Display Engine
+    failed = False
     try:
         if mode == "scope":
             # Standalone, like every other mode: audio only. No GL context, no
@@ -1048,17 +1034,19 @@ def main(clock=CLOCK_MODE):
     except KeyboardInterrupt:
         print("\n[MAIN] Shutdown requested via Ctrl+C")
     except Exception as e:
+        failed = True
         print(f"\n[MAIN] CRASH DETAILS: {e}")
         traceback.print_exc()
     finally:
         print("[MAIN] Exiting...")
-        # Restore display resolution if it was changed
-        try:
-            from display_manager import _restore_display_resolution
-            _restore_display_resolution()
-        except Exception as e:
-            # Don't fail if restoration fails
-            pass
+        # Restore display resolution only for modes that can use the window
+        # manager. Scope must stay independent of graphics libraries.
+        if mode != "scope":
+            try:
+                from display_manager import _restore_display_resolution
+                _restore_display_resolution()
+            except Exception:
+                pass  # Don't fail if restoration fails
         # Ensure all output is flushed before closing
         sys.stdout.flush()
         sys.stderr.flush()
@@ -1072,6 +1060,8 @@ def main(clock=CLOCK_MODE):
                 _log_file.close()
             except Exception as e:
                 _original_stderr.write(f"⚠️  Error closing log file: {e}\n")
+    if failed:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

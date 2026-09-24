@@ -22,7 +22,6 @@ wire compatibility, source-clock semantics, or scope DAC timing.
 
 ## Phase 1 — Shared/local playback
 
-- [ ] Preserve valid generated-list and folder caches; rebuild only for `--rebuild` or a changed source manifest.
 - [ ] Remove the duplicate first-image decode during local startup.
 - [ ] Bound image-loader work to one or two latest-needed tasks; cancel or ignore obsolete futures.
 - [ ] Replace render-time-plus-sleep pacing with monotonic absolute frame deadlines.

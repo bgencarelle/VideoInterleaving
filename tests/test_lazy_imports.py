@@ -17,6 +17,7 @@ import ast
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import textwrap
 import unittest
 
@@ -101,6 +102,97 @@ class MidiIsNotARequirementOfEveryClock(unittest.TestCase):
                            capture_output=True, text=True, timeout=120)
         self.assertEqual(r.returncode, 0, r.stderr[-2000:])
         self.assertIn("OK", r.stdout)
+
+
+class ScopeDoesNotLoadGraphicsStack(unittest.TestCase):
+    def test_scope_startup_skips_display_manager_and_gl_imports(self):
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temp:
+            images = Path(temp) / "scope_images"
+            images.mkdir()
+            script = textwrap.dedent("""
+                import runpy, sys, types
+                from pathlib import Path
+
+                target, images = sys.argv[1:3]
+                sys.path.insert(0, str(Path(target).parent))
+                sys.argv = [target, "--mode", "scope", "--dir", images,
+                            "--device", "null"]
+                blocked = []
+
+                class BlockGraphics:
+                    def find_spec(self, name, path=None, target=None):
+                        if name.split(".")[0] in (
+                                "display_manager", "moderngl", "glfw",
+                                "OpenGL", "turbojpeg"):
+                            blocked.append(name)
+                            raise ImportError("blocked scope-irrelevant " + name)
+                        return None
+
+                sys.meta_path.insert(0, BlockGraphics())
+                out = types.ModuleType("scope_out")
+                out.choose_device = lambda ask, device: device
+                out.scrub = lambda value: value
+                sys.modules["scope_out"] = out
+                service = types.ModuleType("web_service")
+                service.start_server = lambda **kwargs: None
+                sys.modules["web_service"] = service
+                scope = types.ModuleType("scope_display")
+                scope.run_scope = lambda clock: None
+                sys.modules["scope_display"] = scope
+                lists = types.ModuleType("make_file_lists")
+                lists.process_files = lambda: None
+                sys.modules["make_file_lists"] = lists
+
+                runpy.run_path(target, run_name="__main__")
+                assert not blocked, blocked
+                assert "display_manager" not in sys.modules
+                print("OK")
+            """)
+            result = subprocess.run(
+                [sys.executable, "-c", script, str(repo / "main.py"),
+                 str(images)],
+                cwd=temp, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("OK", result.stdout)
+
+    def test_scope_engine_failure_returns_nonzero(self):
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temp:
+            images = Path(temp) / "scope_images"
+            images.mkdir()
+            script = textwrap.dedent("""
+                import runpy, sys, types
+                from pathlib import Path
+
+                target, images = sys.argv[1:3]
+                sys.path.insert(0, str(Path(target).parent))
+                sys.argv = [target, "--mode", "scope", "--dir", images,
+                            "--device", "null"]
+                out = types.ModuleType("scope_out")
+                out.choose_device = lambda ask, device: device
+                out.scrub = lambda value: value
+                sys.modules["scope_out"] = out
+                service = types.ModuleType("web_service")
+                service.start_server = lambda **kwargs: None
+                sys.modules["web_service"] = service
+                scope = types.ModuleType("scope_display")
+                def fail(_clock):
+                    raise RuntimeError("scope failure sentinel")
+                scope.run_scope = fail
+                sys.modules["scope_display"] = scope
+                lists = types.ModuleType("make_file_lists")
+                lists.process_files = lambda: None
+                sys.modules["make_file_lists"] = lists
+
+                runpy.run_path(target, run_name="__main__")
+            """)
+            result = subprocess.run(
+                [sys.executable, "-c", script, str(repo / "main.py"),
+                 str(images)], cwd=temp, capture_output=True, text=True,
+                timeout=30)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("scope failure sentinel", result.stdout + result.stderr)
 
 
 if __name__ == "__main__":
