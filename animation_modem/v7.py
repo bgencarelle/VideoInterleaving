@@ -11,6 +11,7 @@ time groups (§7-§8), and the receiver chain of §9 (edge-counted clock,
 time-map resampling, clock cancellation, pilot channel + per-symbol fade
 model, per-cell 2x2 MMSE, group LMMSE, confidence gate, tail store).
 """
+import math
 import sys
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -1314,6 +1315,137 @@ def _unwrap_phase_fast(phase, axis=0):
     return np.moveaxis(unwrapped, 0, axis)
 
 
+# savgol_filter(x, PILOT_TONE_NARROW_WINDOW, 2, mode='interp') is linear in x;
+# as a fixed (F, F) matrix it can run inside the compiled tone tracker.
+_TONE_NARROW_SMOOTHER = np.ascontiguousarray(savgol_filter(
+    np.eye(F), PILOT_TONE_NARROW_WINDOW, 2, mode='interp', axis=0))
+_TONE_BINS_ARRAY = np.asarray(PILOT_TONE_BINS, dtype=np.int64)
+_TONE_EMPTY_BINS = np.asarray((0, 2), dtype=np.int64)
+for _table in (_TONE_NARROW_SMOOTHER, _TONE_BINS_ARRAY, _TONE_EMPTY_BINS):
+    _table.setflags(write=False)
+
+
+@njit(cache=True, fastmath=False)
+def _pilot_tone_track_kernel(Z, scale, phase, early, tone_bins, empty_bins,
+                             sym, n, narrow_snr_db, smoother, basis,
+                             basis_ls, tone, stats, per_symbol, knot_track,
+                             coherence):
+    """Numeric core of the single-tone timing estimator.
+
+    stats receives: [stage, index, narrow, empty_level, knot_rms,
+    symbol_rms, amp0, amp1, snr0, snr1]; stage 0 = no tone above the empty
+    bins, 1 = incoherent, 2 = usable track.
+    """
+    nsym = Z.shape[0]
+    ntones = tone_bins.shape[0]
+    for s in range(nsym):
+        for t in range(ntones):
+            b = tone_bins[t]
+            rotation = scale*phase[s, b]*np.conj(early[b])
+            tone[s, t] = (Z[s, b, 0]*rotation + Z[s, b, 1]*rotation)*.5
+    empty_sum = 0.0
+    for s in range(nsym):
+        for e in range(empty_bins.shape[0]):
+            b = empty_bins[e]
+            rotation = scale*phase[s, b]*np.conj(early[b])
+            empty_sum += abs((Z[s, b, 0]*rotation + Z[s, b, 1]*rotation)*.5)
+    empty_level = max(empty_sum/(nsym*empty_bins.shape[0]), 1e-12)
+    stats[3] = empty_level
+    active = np.zeros(ntones, np.bool_)
+    any_active = False
+    min_snr = np.inf
+    for t in range(ntones):
+        total = 0.0
+        for s in range(nsym):
+            total += abs(tone[s, t])
+        amplitude = total/nsym
+        snr = 20*math.log10(max(amplitude, 1e-12)/empty_level)
+        stats[6+t] = amplitude
+        stats[8+t] = snr
+        if amplitude >= 1e-5 and snr >= 6.0:
+            active[t] = True
+            any_active = True
+            min_snr = min(min_snr, snr)
+    if not any_active:
+        stats[0] = 0
+        return
+    index = -1
+    for t in range(ntones):
+        if active[t] and tone_bins[t] == 3:
+            index = t
+    if index < 0:
+        best = -1.0
+        for t in range(ntones):
+            if active[t] and stats[6+t] > best:
+                best = stats[6+t]
+                index = t
+    stats[1] = index
+    bin_index = tone_bins[index]
+    advance = np.exp(-2j*np.pi*bin_index*sym/n)
+    delta = np.empty(nsym)
+    delta[0] = 0.0
+    for s in range(1, nsym):
+        step = tone[s, index]*np.conj(tone[s-1, index])*advance
+        # An exactly-zero phasor (digitally muted symbol) has no phase.
+        if step.real != 0.0 or step.imag != 0.0:
+            delta[s] = delta[s-1]+math.atan2(step.imag, step.real)
+        else:
+            delta[s] = delta[s-1]
+    for s in range(nsym):
+        delta[s] = delta[s]*n/(2*np.pi*bin_index)
+    mean = 0.0
+    for s in range(nsym):
+        mean += delta[s]
+    mean /= nsym
+    for s in range(nsym):
+        delta[s] -= mean
+    narrow = min_snr < narrow_snr_db
+    stats[2] = 1.0 if narrow else 0.0
+    for s in range(nsym):
+        if narrow:
+            acc = 0.0
+            for k in range(nsym):
+                acc += smoother[s, k]*delta[k]
+            per_symbol[s] = acc
+        else:
+            left = delta[max(s-1, 0)]
+            right = delta[min(s+1, nsym-1)]
+            per_symbol[s] = .25*left + .5*delta[s] + .25*right
+    nknots = basis.shape[1]
+    theta = np.zeros(nknots)
+    for k in range(nknots):
+        acc = 0.0
+        for s in range(nsym):
+            acc += basis_ls[k, s]*per_symbol[s]
+        theta[k] = acc
+    knot_sq = 0.0
+    symbol_sq = 0.0
+    for s in range(nsym):
+        acc = 0.0
+        for k in range(nknots):
+            acc += basis[s, k]*theta[k]
+        knot_track[s] = acc
+        knot_sq += (per_symbol[s]-acc)**2
+        symbol_sq += (delta[s]-per_symbol[s])**2
+    stats[4] = math.sqrt(knot_sq/nsym)
+    stats[5] = math.sqrt(symbol_sq/nsym)
+    step_phase = 2*np.pi/n
+    worst = np.inf
+    for t in range(ntones):
+        total = 0j
+        magnitude = 0.0
+        for s in range(nsym):
+            corrected = (tone[s, t] *
+                         np.exp(-1j*(step_phase*sym*s*tone_bins[t])) *
+                         np.exp(-1j*step_phase*per_symbol[s]*tone_bins[t]))
+            total += corrected
+            magnitude += abs(corrected)
+        coherence[t] = abs(total)/max(magnitude, 1e-12)
+        if active[t]:
+            worst = min(worst, coherence[t])
+    stats[0] = 1 if (worst < .2 or stats[4] > 1.0) else 2
+
+
 def pilot_tone_timing(Z, model, counter, include_metadata=False,
                       estimator='single'):
     """Estimate the smooth within-frame timing residual from bins 1 and 3.
@@ -1322,12 +1454,69 @@ def pilot_tone_timing(Z, model, counter, include_metadata=False,
     increments; the lower-slope bin 1 remains an independent lock check. The
     constant delay is unobservable from the tones and is centered out. A weak
     or incoherent reference falls back to the established data-pilot fit.
+    The float64 path runs the compiled core; _pilot_tone_timing_numpy is the
+    reference and the float32 fallback.
     """
     if estimator not in ('single', 'joint'):
         raise ValueError(f'unknown pilot-tone estimator {estimator!r}')
     if estimator == 'joint':
         return _pilot_tone_timing_joint(
             Z, model, counter, include_metadata=include_metadata)
+    if (include_metadata or not _is_float64_frame(Z) or
+            tuple(PILOT_TONE_BINS) != (1, 3)):
+        return _pilot_tone_timing_numpy(Z, model, counter,
+                                        include_metadata=include_metadata)
+    tone = np.empty((F, 2), np.complex128)
+    stats = np.zeros(10)
+    per_symbol = np.empty(F)
+    knot_track = np.empty(F)
+    coherence = np.zeros(2)
+    _pilot_tone_track_kernel(
+        Z, float(model.scale), model.phase, EARLY, _TONE_BINS_ARRAY,
+        _TONE_EMPTY_BINS, SYM, N, PILOT_TONE_NARROW_SNR_DB,
+        _TONE_NARROW_SMOOTHER, _BASIS, _BASIS_LS, tone, stats, per_symbol,
+        knot_track, coherence)
+    bins = _TONE_BINS_ARRAY
+    tone_snr_db = stats[8:10]
+    empty_level = float(stats[3])
+    active = np.flatnonzero((stats[6:8] >= 1e-5) & (tone_snr_db >= 6.0))
+    if stats[0] == 0:
+        return None, {
+            'detected': False, 'reason': 'tone_level',
+            'tone_snr_db': tone_snr_db.tolist(),
+            'empty_bin_level': empty_level,
+        }
+    narrow_track = bool(stats[2])
+    knot_residual_rms = float(stats[4])
+    symbol_residual_rms = float(stats[5])
+    if stats[0] == 1:
+        return None, {
+            'detected': False, 'reason': 'tone_coherence',
+            'coherence': coherence.tolist(),
+            'tone_bins_used': bins[active].tolist(),
+            'tone_snr_db': tone_snr_db.tolist(),
+            'empty_bin_level': empty_level,
+            'narrow_track': narrow_track,
+            'timing_residual_rms': knot_residual_rms,
+            'timing_sample_residual_rms': symbol_residual_rms,
+        }
+    return {'per_symbol': per_symbol, 'knot_fit': knot_track,
+            'active': active}, {
+        'detected': True,
+        'coherence': coherence.tolist(),
+        'tone_bins_used': bins[active].tolist(),
+        'tone_snr_db': tone_snr_db.tolist(),
+        'empty_bin_level': empty_level,
+        'narrow_track': narrow_track,
+        'timing_rms': float(np.sqrt(np.sum(per_symbol*per_symbol)/F)),
+        'timing_peak': float(np.max(np.abs(per_symbol))),
+        'timing_residual_rms': knot_residual_rms,
+        'timing_sample_residual_rms': symbol_residual_rms,
+    }
+
+
+def _pilot_tone_timing_numpy(Z, model, counter, include_metadata=False):
+    """Reference/fallback single-tone estimator (also the metadata variant)."""
     bins = np.asarray(PILOT_TONE_BINS, dtype=int)
     phase0 = np.asarray([PILOT_TONE_PHASES[int(k)] for k in bins])
     phase_step = 2*np.pi/N
@@ -1369,7 +1558,7 @@ def pilot_tone_timing(Z, model, counter, include_metadata=False,
     # The remaining phase is only the within-packet timing increment, so a
     # single short cumulative sum replaces full-packet phase unwrapping.
     advance = np.exp(-2j*np.pi*bin_index*SYM/N)
-    phase_steps = np.angle(
+    phase_steps = _phase_or_zero(
         tone[1:, index]*np.conj(tone[:-1, index])*advance)
     delta = np.r_[0.0, np.cumsum(phase_steps)]*N/(2*np.pi*bin_index)
     delta -= np.sum(delta)/len(delta)
@@ -1508,7 +1697,7 @@ def _pilot_tone_timing_joint(Z, model, counter, include_metadata=False):
     # 2*pi*k*delta/N. Bin 3's estimate aliases every N/3 samples; the bin-1
     # estimate selects the matching branch before the precision-weighted fit.
     expected_advance = phase_step*SYM*bins
-    phase_steps = np.angle(
+    phase_steps = _phase_or_zero(
         tone[1:, :]*np.conj(tone[:-1, :]) *
         np.exp(-1j*expected_advance)[None, :])
     step_samples = phase_steps*N/(2*np.pi*bins[None, :])
@@ -1960,7 +2149,74 @@ def _channel_joint_tone_joint(Z, iters, force_float32, model, counter,
     return result
 
 
+def _phase_or_zero(values):
+    """np.angle, but an exactly-zero phasor has phase 0.
+
+    A digitally muted symbol (a dropout to exact zero) yields 0+0j products
+    whose np.angle is 0 or +-pi depending on the signs of the zeros, i.e. on
+    arithmetic order. Treating them as carrying no phase keeps the timing
+    track and the Gauss-Newton step independent of that accident.
+    """
+    values = np.asarray(values)
+    return np.where(values == 0, 0.0, np.angle(values))
+
+
+_PILOT_BINS_ARRAY = np.asarray(PILOT_BINS)
+_PILOT_BINS_ARRAY.setflags(write=False)
+
+
+def _is_float64_frame(Z, H=None):
+    """The compiled kernels cover the default float64 path only."""
+    return (np.asarray(Z).dtype == np.complex128 and
+            (H is None or np.asarray(H).dtype == np.complex128))
+
+
+@njit(cache=True, fastmath=False)
+def _channel_residuals_kernel(Z, H, symbols, bins, values, n):
+    """Pilot misfit and phase-derived timing residual in one pass."""
+    numerator = 0.0
+    denominator = 0.0
+    weight_sum = 0.0
+    weighted = 0.0
+    for index in range(symbols.shape[0]):
+        symbol = symbols[index]
+        pilot_bin = bins[index]
+        for channel in range(2):
+            predicted = (H[symbol, pilot_bin, channel, 0]*values[index, 0] +
+                         H[symbol, pilot_bin, channel, 1]*values[index, 1])
+            observed = Z[symbol, pilot_bin, channel]
+            error = abs(observed-predicted)
+            numerator += error*error
+            magnitude = abs(observed)
+            denominator += magnitude*magnitude
+            weight = abs(predicted)*magnitude
+            product = observed*np.conj(predicted)
+            timing = (math.atan2(product.imag, product.real)*n /
+                      (2*np.pi*pilot_bin))
+            weight_sum += weight
+            weighted += weight*timing*timing
+    return (numerator/max(denominator, 1e-12),
+            math.sqrt(weighted/max(weight_sum, 1e-12)))
+
+
+def _channel_residuals(Z, H):
+    return _channel_residuals_kernel(Z, H, PILOT_SV, PILOT_BV, PILOT_PV, N)
+
+
 def _channel_pilot_residual(Z, H):
+    if _is_float64_frame(Z, H):
+        return float(_channel_residuals(Z, H)[0])
+    return _channel_pilot_residual_numpy(Z, H)
+
+
+def _channel_timing_residual(Z, H):
+    """Weighted data-pilot phase residual expressed in reference samples."""
+    if _is_float64_frame(Z, H):
+        return float(_channel_residuals(Z, H)[1])
+    return _channel_timing_residual_numpy(Z, H)
+
+
+def _channel_pilot_residual_numpy(Z, H):
     predicted = np.einsum(
         'nci,ni->nc', H[PILOT_SV, PILOT_BV], PILOT_PV)
     observed = Z[PILOT_SV, PILOT_BV]
@@ -1969,8 +2225,8 @@ def _channel_pilot_residual(Z, H):
     return numerator/max(denominator, 1e-12)
 
 
-def _channel_timing_residual(Z, H):
-    """Weighted data-pilot phase residual expressed in reference samples."""
+def _channel_timing_residual_numpy(Z, H):
+    """Reference/fallback for the compiled residual kernel."""
     predicted = np.einsum(
         'nci,ni->nc', H[PILOT_SV, PILOT_BV], PILOT_PV)
     observed = Z[PILOT_SV, PILOT_BV]
@@ -1981,8 +2237,127 @@ def _channel_timing_residual(Z, H):
                          max(float(np.sum(weights)), 1e-12)))
 
 
+@njit(cache=True, fastmath=False)
+def _channel_joint_kernel(Z, iters, theta0, tone_replaced, tone_delta,
+                          bin_symbols, bin_frequencies, bin_valid, values,
+                          operator, omega, jacobian, basis, bins, pilot_bins,
+                          n, eps, threshold, step_tolerance, H):
+    """Joint pilot channel + timing fit (§9.3) for both receive tracks.
+
+    Same weighted Gauss-Newton as _channel_joint_batched_numpy: each pilot
+    bin's two-coefficient response is a fixed linear operator of the
+    de-rotated observations, and the timing knots take Gauss-Newton steps on
+    the |pred|-weighted pilot phase errors.
+    """
+    nbins, width = bin_symbols.shape
+    nknots = basis.shape[1]
+    nsym = basis.shape[0]
+    y = np.empty((nbins, width), np.complex128)
+    rot = np.empty((nbins, width), np.complex128)
+    h = np.empty((nbins, 2), np.complex128)
+    delta = np.empty(nsym)
+    phase_table = np.empty((nsym, bins.shape[0]), np.complex128)
+    target = bins.astype(np.float64)
+    known = pilot_bins.astype(np.float64)
+    for channel in range(2):
+        for b in range(nbins):
+            for k in range(width):
+                y[b, k] = Z[bin_symbols[b, k], bin_frequencies[b], channel]
+        theta = theta0.copy()
+        rounds = 1 if tone_replaced else iters
+        for _ in range(rounds):
+            if tone_replaced:
+                for s in range(nsym):
+                    delta[s] = tone_delta[s]
+            else:
+                for s in range(nsym):
+                    acc = 0.0
+                    for knot in range(nknots):
+                        acc += basis[s, knot]*theta[knot]
+                    delta[s] = acc
+            for b in range(nbins):
+                for k in range(width):
+                    rot[b, k] = np.exp(omega[b, 0]*delta[bin_symbols[b, k]])
+                for column in range(2):
+                    acc = 0j
+                    for k in range(width):
+                        acc += operator[b, column, k]*np.conj(rot[b, k])*y[b, k]
+                    h[b, column] = acc
+            if tone_replaced:
+                break
+            normal = np.zeros((nknots, nknots))
+            rhs = np.zeros(nknots)
+            for b in range(nbins):
+                for k in range(width):
+                    predicted = rot[b, k]*(values[b, k, 0]*h[b, 0] +
+                                           values[b, k, 1]*h[b, 1])
+                    weight = abs(predicted)
+                    if not bin_valid[b, k] or weight <= threshold:
+                        continue
+                    ratio = y[b, k]/predicted
+                    phase = (math.atan2(ratio.imag, ratio.real)
+                             if ratio.real != 0.0 or ratio.imag != 0.0
+                             else 0.0)
+                    for i in range(nknots):
+                        jw = jacobian[b, k, i]*weight
+                        rhs[i] += jw*phase*weight
+                        for j in range(nknots):
+                            normal[i, j] += jw*jacobian[b, k, j]*weight
+            for i in range(nknots):
+                normal[i, i] += eps
+            step = np.linalg.solve(normal, rhs)
+            largest = 0.0
+            for i in range(nknots):
+                theta[i] += step[i]
+                largest = max(largest, abs(step[i]))
+            if largest < step_tolerance:
+                break
+        if tone_replaced:
+            for s in range(nsym):
+                delta[s] = tone_delta[s]
+        else:
+            for s in range(nsym):
+                acc = 0.0
+                for knot in range(nknots):
+                    acc += basis[s, knot]*theta[knot]
+                delta[s] = acc
+        # One timing rotation per (symbol, bin), shared by both columns.
+        for s in range(nsym):
+            for j in range(bins.shape[0]):
+                phase_table[s, j] = np.exp((2j*np.pi/n)*bins[j]*delta[s])
+        for column in range(2):
+            real = np.interp(target, known, h[:, column].real.copy())
+            imag = np.interp(target, known, h[:, column].imag.copy())
+            for s in range(nsym):
+                for j in range(bins.shape[0]):
+                    H[s, bins[j], channel, column] = (
+                        (real[j]+1j*imag[j])*phase_table[s, j])
+
+
 def _channel_joint_batched(Z, iters, force_float32, tone_delta=None,
                            tone_replaced=False):
+    if force_float32 or not _is_float64_frame(Z):
+        return _channel_joint_batched_numpy(
+            Z, iters, force_float32, tone_delta=tone_delta,
+            tone_replaced=tone_replaced)
+    if tone_delta is None or tone_replaced:
+        theta0 = np.zeros(len(KNOTS))
+    else:
+        theta0 = _BASIS_LS@np.asarray(tone_delta, dtype=np.float64)
+    delta = (np.asarray(tone_delta, dtype=np.float64) if tone_replaced
+             else np.zeros(F))
+    # Bins outside BINS are never read; zeros keep them deterministic.
+    H = np.zeros((F, 65, 2, 2), dtype=np.complex128)
+    _channel_joint_kernel(
+        Z, int(iters), theta0, bool(tone_replaced), delta,
+        _PILOT_BIN_SYMBOLS, _PILOT_BIN_FREQUENCIES, _PILOT_BIN_VALID,
+        _PILOT_BIN_VALUES, _PILOT_BIN_LS, _PILOT_BIN_OMEGA, _PILOT_BIN_J,
+        _BASIS, BINS, _PILOT_BINS_ARRAY, N, 1e-10, 1e-9, 1e-4, H)
+    return H
+
+
+def _channel_joint_batched_numpy(Z, iters, force_float32, tone_delta=None,
+                                 tone_replaced=False):
     if force_float32:
         real_dtype, complex_dtype = np.float32, np.complex64
         basis = _BASIS32
@@ -2024,7 +2399,7 @@ def _channel_joint_batched(Z, iters, force_float32, tone_delta=None,
                 pred = rot*np.einsum('bni,bi->bn', values, h)
                 ok = _PILOT_BIN_VALID & (np.abs(pred) > threshold)
                 rho = np.divide(y, pred, out=np.zeros_like(y), where=ok)
-                ph = np.angle(rho).astype(real_dtype, copy=False)
+                ph = _phase_or_zero(rho).astype(real_dtype, copy=False)
                 w = np.where(ok, np.abs(pred), 0).astype(real_dtype, copy=False)
 
                 # This is the same weighted Gauss-Newton fit as the
@@ -2071,6 +2446,7 @@ PILOT_PAD_KHZ = PILOT_PAD_BINS*RATE/N/1000
 PILOT_PAD_VALUES32 = PILOT_PAD_VALUES.astype(np.complex64)
 PILOT_PAD_KHZ32 = PILOT_PAD_KHZ.astype(np.float32)
 PILOT_DOF = np.maximum(PILOT_PAD_VALID.sum(axis=1)-3, 1)
+_BINS_KHZ = BINS*RATE/N/1000
 _SYMBOL_INDEX = np.arange(F)[:, None]
 
 
@@ -2212,17 +2588,139 @@ def _apply_tone_reference_gain(Z, H, gain_track, diagnostic):
     return H
 
 
+@njit(cache=True, fastmath=False)
+def _fade_and_noise_kernel(Z, H, pad_bins, pad_values, pad_valid, pad_khz,
+                           dof, bins, frequency, pilot_amp, noise):
+    """Compiled §9.4 fade refit and §9.5 noise, same rules as the NumPy path.
+
+    Updates H in place (occupied bins) and fills noise (F, 2).
+    """
+    nsym, width = pad_bins.shape
+    apply = np.zeros((nsym, 2), np.bool_)
+    predicted = np.empty(width, np.complex128)
+    magnitude = np.empty(width)
+    for s in range(nsym):
+        for channel in range(2):
+            largest = 0.0
+            for p in range(width):
+                if pad_valid[s, p]:
+                    predicted[p] = (
+                        H[s, pad_bins[s, p], channel, 0]*pad_values[s, p, 0] +
+                        H[s, pad_bins[s, p], channel, 1]*pad_values[s, p, 1])
+                    magnitude[p] = abs(predicted[p])
+                else:
+                    predicted[p] = 0j
+                    magnitude[p] = 0.0
+                largest = max(largest, magnitude[p])
+            count = 0
+            fmax = -np.inf
+            fmin = np.inf
+            s00 = 0.0
+            s01 = 0.0
+            s11 = 0.0
+            r0 = 0.0
+            r1 = 0.0
+            weight_sum = 0.0
+            weighted_log = 0.0
+            phasor = 0j
+            for p in range(width):
+                if not pad_valid[s, p] or magnitude[p] <= .3*largest:
+                    continue
+                count += 1
+                ratio = Z[s, pad_bins[s, p], channel]/predicted[p]
+                weight = magnitude[p]
+                log_ratio = math.log(abs(ratio)+1e-12)
+                khz = pad_khz[s, p]
+                fmax = max(fmax, khz)
+                fmin = min(fmin, khz)
+                w2 = weight*weight
+                s00 += w2
+                s01 -= w2*khz
+                s11 += w2*khz*khz
+                r0 += w2*log_ratio
+                r1 -= w2*khz*log_ratio
+                weight_sum += weight
+                weighted_log += weight*log_ratio
+                phasor += ratio*weight
+            s00 += 1e-10
+            s11 += 1e-10
+            if count >= 3 and fmax-fmin > 3:
+                det = s00*s11-s01*s01
+                u = (s11*r0-s01*r1)/det
+                v = max((s00*r1-s01*r0)/det, 0.0)
+            else:
+                u = weighted_log/weight_sum if weight_sum > 0 else 0.0
+                v = 0.0
+            if count >= 2:
+                apply[s, channel] = True
+                angle = math.atan2(phasor.imag, phasor.real)
+                for j in range(bins.shape[0]):
+                    correction = np.exp(u-v*frequency[j]+1j*angle)
+                    H[s, bins[j], channel, 0] *= correction
+                    H[s, bins[j], channel, 1] *= correction
+    raw = np.zeros((nsym, 2))
+    for s in range(nsym):
+        for channel in range(2):
+            if not apply[s, channel]:
+                continue
+            residual = 0.0
+            for p in range(width):
+                if pad_valid[s, p]:
+                    fitted = (
+                        H[s, pad_bins[s, p], channel, 0]*pad_values[s, p, 0] +
+                        H[s, pad_bins[s, p], channel, 1]*pad_values[s, p, 1])
+                    error = abs(Z[s, pad_bins[s, p], channel]-fitted)
+                    residual += error*error
+            raw[s, channel] = residual/dof[s]
+    smooth = np.empty((nsym, 2))
+    for channel in range(2):
+        if nsym == 1:
+            smooth[0, channel] = raw[0, channel]
+        else:
+            smooth[0, channel] = (raw[0, channel]+raw[1, channel])/3
+            smooth[nsym-1, channel] = (raw[nsym-2, channel] +
+                                       raw[nsym-1, channel])/3
+            for s in range(1, nsym-1):
+                smooth[s, channel] = (raw[s-1, channel]+raw[s, channel] +
+                                      raw[s+1, channel])/3
+        median = np.median(smooth[:, channel].copy())
+        power = 0.0
+        for s in range(nsym):
+            for j in range(bins.shape[0]):
+                for column in range(2):
+                    value = abs(H[s, bins[j], channel, column])
+                    power += value*value
+        floor = 1e-5*pilot_amp*pilot_amp*power/(nsym*bins.shape[0]*2)
+        for s in range(nsym):
+            noise[s, channel] = max(max(smooth[s, channel], median), floor)
+
+
 def fade_and_noise(Z, H, force_float32=False, tone_reference=False,
                    return_tone_diag=False):
     """Per-symbol magnitude/phase refit (§9.4) and pilot-residual noise (§9.5).
 
-    Batched over all symbols and both channels; same rules as the original
-    per-symbol loop (equivalence is covered by modem_tests/test_v7_decode_speed).
+    The float64 path runs the compiled kernel; the float32 path and the opt-in
+    tone reference keep the NumPy implementation, which is also the reference
+    the kernel is tested against (modem_tests/test_v7_decode_speed).
     """
     if force_float32:
         return _fade_and_noise_float32(
             Z, H, tone_reference=tone_reference,
             return_tone_diag=return_tone_diag)
+    if tone_reference or not _is_float64_frame(Z, H):
+        return _fade_and_noise_numpy(Z, H, tone_reference=tone_reference,
+                                     return_tone_diag=return_tone_diag)
+    noise = np.empty((F, 2))
+    _fade_and_noise_kernel(Z, H, PILOT_PAD_BINS, PILOT_PAD_VALUES,
+                           PILOT_PAD_VALID, PILOT_PAD_KHZ, PILOT_DOF, BINS,
+                           _BINS_KHZ, PILOT_AMP, noise)
+    if return_tone_diag:
+        return H, noise, {'mode': 'off', 'used': False}
+    return H, noise
+
+
+def _fade_and_noise_numpy(Z, H, tone_reference=False, return_tone_diag=False):
+    """Reference/fallback float64 fade/noise refit (batched NumPy)."""
     freq = BINS*RATE/N/1000
     valid = PILOT_PAD_VALID[:, :, None]                                # (F, P, 1)
     Hp = H[_SYMBOL_INDEX, PILOT_PAD_BINS]                              # (F, P, 2ch, 2)
@@ -2491,11 +2989,23 @@ def _equalize_numba(model, Z, H, noise, counter):
 
 
 def warmup_equalizer(model):
-    """Compile the Numba signature before a real-time receiver opens audio."""
+    """Compile every Numba decoder kernel before a real-time receiver opens
+    audio: channel fit, residuals, fade/noise and the equalizer."""
     shape = (F, 65)
-    _equalize_numba(model, np.zeros(shape+(2,), np.complex128),
-                    np.zeros(shape+(2, 2), np.complex128),
-                    np.zeros((F, 2), np.float64), 1)
+    Z = np.zeros(shape+(2,), np.complex128)
+    Z[:, BINS] = 1
+    H = _channel_joint_batched(Z, 2, False)
+    _channel_joint_batched(Z, 2, False, tone_delta=np.zeros(F))
+    _channel_joint_batched(Z, 2, False, tone_delta=np.zeros(F),
+                           tone_replaced=True)
+    _channel_residuals(Z, H)
+    Z[:, _TONE_BINS_ARRAY] = 1
+    pilot_tone_timing(Z, model, 1)
+    H, noise = fade_and_noise(Z, H)
+    _equalize_numba(model, Z, H, noise, 1)
+
+
+warmup_decoder = warmup_equalizer
 
 
 def _equalize_numpy(model, Z, H, noise, counter, force_float32=False):

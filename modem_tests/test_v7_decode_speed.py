@@ -178,6 +178,97 @@ class V7DecodeSpeedTests(unittest.TestCase):
                     actual[1], expected[1], rtol=1e-9, atol=1e-11)
                 np.testing.assert_array_equal(actual[2], expected[2])
 
+    def _tone_frame(self, model, seed, tone_amp=1.0, empty_amp=.01,
+                    coherent=True, muted=()):
+        """Z with bins 1/3 carrying tones as the receiver sees them."""
+        rng = np.random.default_rng(seed)
+        Z = (rng.standard_normal((v7.F, 65, 2)) +
+             1j*rng.standard_normal((v7.F, 65, 2)))
+        Z[:, (0, 2), :] *= empty_amp
+        wobble = np.cumsum(rng.normal(0, .15, v7.F))
+        for b in v7.PILOT_TONE_BINS:
+            nominal = 2*np.pi*b*(v7.SYM*np.arange(v7.F)+wobble)/v7.N
+            angle = nominal if coherent else rng.uniform(-np.pi, np.pi, v7.F)
+            receive = model.scale*model.phase[:, b]*np.conj(v7.EARLY[b])
+            for ch in range(2):
+                Z[:, b, ch] = tone_amp*np.exp(1j*angle)/receive
+        Z[list(muted)] = 0
+        return Z
+
+    def test_numba_tone_timing_matches_numpy_in_every_outcome(self):
+        model = v7.load_model(TARGET, 'nearest')
+        cases = {
+            'detected': dict(),
+            'narrow_track': dict(empty_amp=.25),
+            'incoherent': dict(coherent=False),
+            'no_tone': dict(tone_amp=1e-7),
+            'muted_symbols': dict(muted=(5, 6, 7, 8)),
+        }
+        seen = set()
+        for name, options in cases.items():
+            for seed in range(3):
+                Z = self._tone_frame(model, seed, **options)
+                expected_track, expected = v7._pilot_tone_timing_numpy(
+                    Z, model, 3)
+                actual_track, actual = v7.pilot_tone_timing(Z, model, 3)
+                seen.add(expected.get('reason', 'detected') +
+                         ('/narrow' if expected.get('narrow_track') else ''))
+                with self.subTest(case=name, seed=seed):
+                    self.assertEqual(expected.keys(), actual.keys())
+                    for key, value in expected.items():
+                        if isinstance(value, (str, bool)) or value is None:
+                            self.assertEqual(actual[key], value)
+                        else:
+                            np.testing.assert_allclose(
+                                actual[key], value, rtol=1e-9, atol=1e-11)
+                    self.assertEqual(expected_track is None,
+                                     actual_track is None)
+                    if expected_track is not None:
+                        for key in ('per_symbol', 'knot_fit'):
+                            np.testing.assert_allclose(
+                                actual_track[key], expected_track[key],
+                                rtol=1e-9, atol=1e-11)
+        # Every branch of the estimator must have been exercised.
+        self.assertTrue({'detected', 'detected/narrow', 'tone_coherence',
+                         'tone_level'} <= seen, seen)
+
+    def test_numba_channel_fit_matches_numpy_seeded_and_replaced(self):
+        rng = np.random.default_rng(11)
+        for seed in range(3):
+            Z, _ = self._channels(seed)
+            if seed == 2:
+                Z[5:9] = 0                  # a digital mute inside the frame
+            delta = rng.normal(0, .3, v7.F)
+            for options in (dict(), dict(tone_delta=delta),
+                            dict(tone_delta=delta, tone_replaced=True)):
+                expected = v7._channel_joint_batched_numpy(
+                    Z, 2, False, **options)
+                actual = v7._channel_joint_batched(Z, 2, False, **options)
+                with self.subTest(seed=seed, options=sorted(options)):
+                    np.testing.assert_allclose(
+                        actual[:, v7.BINS], expected[:, v7.BINS],
+                        rtol=1e-11, atol=1e-12)
+
+    def test_numba_channel_residuals_match_numpy(self):
+        for seed in range(4):
+            Z, H = self._channels(seed)
+            if seed == 3:
+                Z[2:4] = 0
+            with self.subTest(seed=seed):
+                self.assertAlmostEqual(
+                    v7._channel_pilot_residual(Z, H),
+                    v7._channel_pilot_residual_numpy(Z, H), places=12)
+                self.assertAlmostEqual(
+                    v7._channel_timing_residual(Z, H),
+                    v7._channel_timing_residual_numpy(Z, H), places=10)
+
+    def test_zero_phasor_carries_no_phase(self):
+        zeros = np.array([complex(0., 0.), complex(0., -0.),
+                          complex(-0., 0.), complex(-0., -0.)])
+        np.testing.assert_array_equal(v7._phase_or_zero(zeros), 0.0)
+        np.testing.assert_allclose(v7._phase_or_zero(np.array([1j, -1+0j])),
+                                   [np.pi/2, np.pi])
+
     def test_sinc_table_is_cached_and_read_only(self):
         first = v7_core._sinc_weight_table(16)
         self.assertIs(first, v7_core._sinc_weight_table(16))
