@@ -1,6 +1,6 @@
 # How to test the modes
 
-Practical run + test notes for every `main.py --mode` in VideoInterleaving.
+Practical run + test notes for every  `main.py --mode` in VideoInterleaving.
 Each mode is **standalone and owns the run** — modes never attach to each other.
 
 ## Ground rules (all modes)
