@@ -28,22 +28,40 @@ class V7MonoTests(unittest.TestCase):
                   for r in results]
         return results, info, float(np.median(errors))
 
-    def test_slot_order_puts_s_after_m_by_offset(self):
+    def test_slot_order_puts_every_s_slot_after_every_m_slot(self):
         head = v7.GROUPS[:v7.N_HEAD_G]
         self.assertTrue(all(stream == 'M' for _, stream, _ in head))
-        keys = [blk[0] + (v7.S_ORDER_OFFSET if stream == 'S' else 0)
-                for blk, stream, _ in v7.GROUPS[v7.N_HEAD_G:]]
-        self.assertEqual(keys, sorted(keys))
+        streams = [stream for _, stream, _ in v7.GROUPS]
+        first_s = streams.index('S')
+        self.assertTrue(all(stream == 'S' for stream in streams[first_s:]))
+        for stream in 'MS':
+            carriers = [blk for blk, s, _ in v7.GROUPS[v7.N_HEAD_G:] if s == stream]
+            self.assertEqual(carriers, sorted(carriers))
         self.assertTrue(all(stream == 'S' for _, stream, _ in v7.GROUPS[-v7.N_TAIL_G:]))
         self.assertEqual(sorted(v7.GROUPS), sorted(
             [(b, 'M', q) for b in v7.MONO for q in 'IQ'] +
             [(b, c, q) for b in v7.STEREO for c in 'MS' for q in 'IQ']))
 
+    def test_mono_keeps_a_prefix_of_the_rank_order(self):
+        """M carries ranks 0-1231 and half of the 64-rank window that straddles
+        the M/S boundary, in every tail phase; nothing above it."""
+        on_m = np.zeros(len(self.model.mu), bool)
+        for table in self.model.rank_tables:
+            for group, (_, stream, _) in enumerate(v7.GROUPS):
+                if stream == 'M':
+                    on_m[table[group][table[group] >= 0]] = True
+        order = self.model.order
+        self.assertTrue(on_m[order[:1232]].all())
+        self.assertEqual(int(on_m[order[1232:1296]].sum()), 32)
+        self.assertFalse(on_m[order[1296:]].any())
+
     def test_mono_downmix_keeps_the_important_half(self):
         mono = self.stereo.mean(axis=1, keepdims=True)
         results, _, error = self._decode(np.repeat(mono, 2, axis=1))
         self.assertTrue(all(r.status != 'lost' for r in results))
-        self.assertLess(error, .095)            # interleaved slots gave 0.113
+        # 0.113 with M/S interleaved, 0.091 with S ordered as if on b+6,
+        # 0.082 with every S slot last.
+        self.assertLess(error, .085)
 
     def test_unequal_tracks_decode_like_clean(self):
         """The prior belongs left of the inverse; the reversed order failed

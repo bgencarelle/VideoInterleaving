@@ -586,15 +586,17 @@ def data_blocks():
 BLOCKS = data_blocks()
 MONO = [blk for blk in BLOCKS if blk[0] <= 9]
 STEREO = [blk for blk in BLOCKS if blk[0] > 9]
-# Stereo slot order (§8.3).  An S slot on carrier b is ordered as if it sat on
-# carrier b+S_ORDER_OFFSET, so mono playback (which loses every S slot) drops
-# less important ranks while a low-pass still removes high carriers last.
-# Offset 6 (2.25 kHz) keeps most of the mono gain at almost no low-pass cost.
-S_ORDER_OFFSET = 6
+# Stereo slot order (§8.3): every M slot, by carrier, then every S slot, by
+# carrier.  Mono playback loses every S slot, so it now loses a suffix of the
+# rank order -- the least important ranks -- and keeps a whole lower-detail
+# picture instead of one with ranks missing all through it.  Measured at 1x
+# (4 images, SSIMULACRA2 against the clean decode): mono -56 with S ordered
+# as if on carrier b+6, -33 here, which equals the ideal for this capacity
+# (M exact, S at the prior mean).  Stereo cases are unchanged except soft
+# saturation, which follows each picture's emitted level (see §8.3).
 STEREO_SLOTS = sorted(
     [(b, c, q) for b in STEREO for c in 'MS' for q in 'IQ'],
-    key=lambda slot: (slot[0][0] + (S_ORDER_OFFSET if slot[1] == 'S' else 0),
-                      slot[1], slot[0][1], slot[2]))
+    key=lambda slot: (slot[1] == 'S', slot[0][0], slot[0][1], slot[2]))
 GROUPS = [(b, 'M', q) for b in MONO for q in 'IQ'] + STEREO_SLOTS
 BLOCK_BINS = np.asarray([blk[0] for blk in BLOCKS], int)
 BLOCK_SYMBOLS = np.asarray([phi + 3*np.arange(8)
@@ -705,7 +707,7 @@ class Model:
 # desynchronise the two ends (a different phase table decodes as garbage).
 REFERENCE_FIXTURE = ROOT/'modem_tests/fixtures/v7_reference_face.png'
 MODEL_TABLES = Path(__file__).with_name('v7_model_tables.npz')
-MODEL_TABLES_SHA256 = '0bef7da37a17f9e6f9ab6d0e0015b2e53776912da7dd2bad8fe0e2f5ce196331'
+MODEL_TABLES_SHA256 = '2392943a287fdf1cd2ac773c2fc065179006bfab4646726e72e023f3921ffb1c'
 PHASE_SEED = 70001          # provenance of the frozen phase table
 CROP_SEED = 1               # provenance of the frozen variance tables
 LEVEL_SEED = 6              # provenance of the frozen unit levels

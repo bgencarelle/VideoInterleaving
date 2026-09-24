@@ -27,5 +27,13 @@ class ClockTests(unittest.TestCase):
                                 actual=clock.update_index(4,pingpong,time_offset_ns=offset)
                             self.assertEqual(actual,expected)
 
+    def test_settings_offset_is_applied_to_the_shared_clock(self):
+        with patch.object(clock, 'launch_time', 0), \
+             patch.object(clock, 'IPS', 30), \
+             patch.object(clock, 'INDEX_TIME_OFFSET_MS', 50.0), \
+             patch.object(clock.time, 'time_ns', return_value=100_000_000), \
+             patch.object(clock, 'midi_mode', False):
+            self.assertEqual(clock.update_index(10, pingpong=False), (1, None))
+
 
 if __name__=='__main__':unittest.main()

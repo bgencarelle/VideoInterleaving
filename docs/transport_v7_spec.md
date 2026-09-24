@@ -306,7 +306,7 @@ x_L = (m + s)/√2        x_R = (m − s)/√2
 
 - **Mono summing or parametric-stereo codecs:** L+R = √2·m, so M survives
   and S is lost. The mono-aware slot order (§8.3) makes the lost S half the
-  less important ranks.
+  least important ranks.
 - **One track polarity-inverted:** the 2×2 equaliser absorbs it, but the M-only
   preamble, clock and metadata cancel in the L+R acquisition sum. The pulse
   receiver retries once with the right leg inverted when nothing is found and
@@ -393,12 +393,24 @@ important data first.
 
 - **Capacity:** the remaining 66 blocks carry 32 values each: groups M-I,
   M-Q, S-I and S-Q of 8. Total 2,112.
-- **Slot order (mono-aware):** an S slot on carrier b is ordered as if it sat
-  on carrier b + 6 (`S_ORDER_OFFSET`, 2.25 kHz); ties go M before S, then φ,
-  then I before Q. Mono playback loses every S slot, so this pushes the lost
-  half towards lower-importance ranks, while a low-pass still removes the
-  highest carriers last. Interleaving M and S per block (the earlier draft)
-  put S-carried ranks immediately after the head.
+- **Slot order (mono-aware):** every M slot, then every S slot; each by
+  carrier, then φ, then I before Q. Mono playback loses every S slot, so it
+  loses a suffix of the rank order and keeps a whole lower-detail picture
+  (ranks 0–1231 and half of 1232–1295). Earlier orders put S-carried ranks
+  among the M ones: interleaved per block (the first draft) straight after
+  the head, and ordered as if on b + 6 (the second) from rank 528.
+  Both left ranks missing all through the mono picture. [MEASURED] at 1×,
+  4 images, SSIMULACRA2 against the clean decode: mono −64 with S beside M
+  on its own carrier, −56 as if on b + 6, −33 with S last. −33 is also the
+  ideal for this capacity (M exact, S at the prior mean). Stereo torture
+  cases are unchanged within noise; a 10 kHz low-pass costs about 1 dB of
+  luma-detail SNR at 38 dB. Soft saturation moves with each picture, because
+  the order changes how much of a picture's power sits on the top carriers
+  that the emission filter trims: emitted RMS face 0.171 → 0.161,
+  coffee 0.190 → 0.204. Under the drive-2 case, pilot noise went from 0.30
+  to 0.19 for astronaut and from 0.03 to 0.025 for face. For coffee it went
+  from 0.064 to 0.086, which crosses the 0.08 live-valid limit, so coffee is
+  still displayed but flagged.
 - **The last 12 slots** (S of carriers 31–33, 96 values) form the tail window.
 
 ### 8.4 Groups and spreading
@@ -428,7 +440,7 @@ body    = ranks[208:2224]
 tail    = ranks[2224:2880][96*p : 96*(p+1)]  where p = counter mod 7
 slots   = [(b,'M','I'),(b,'M','Q') for b in mono]
         + sorted([(b,c,q) for b in stereo for c in (M,S) for q in (I,Q)],
-                 key = (b.carrier + (6 if c == S else 0), c, b.φ, q))
+                 key = (c == S, b.carrier, b.φ, q))
 fill groups from windows over head ++ body ++ tail, in slot order
 x_group = Hadamard8 · (g ⊙ coefficient values of the group)
 ```
@@ -624,8 +636,11 @@ b5560c1f-era code (interleaved M/S slots, prior applied on the wrong side of the
 | Torture: right track −4 dB | 0.084 | 0.068 |
 | Torture: all other cases | — | equal or up to 0.0015 better; soft saturation +0.0005 |
 
-The mono result equals its structural limit (every S slot lost, M perfect):
-the decoder loses nothing beyond what the layout drops.
+The mono decode equals its structural limit (every S slot lost, M perfect):
+the decoder loses nothing beyond what the layout drops. That limit is set by
+the slot order, though. Ordering every S slot after every M slot (§8.3) makes
+it a prefix of the rank order and lowers it: stereo played as mono 0.091 →
+0.082, one leg only 0.109 → 0.104. Clean stereo stays at 0.068.
 
 ---
 

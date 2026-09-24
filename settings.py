@@ -49,6 +49,9 @@ VSYNC = True  # or False, depending on your preference
 # Frames per Second and Images Per Second (IPS)
 IPS = 30
 FPS = 60
+# Milliseconds to subtract from the shared free-running index clock in every
+# mode. Positive values backdate the sampled time; negative values advance it.
+INDEX_TIME_OFFSET_MS = 0.0
 
 # Buffer settings: The BUFFER_SIZE is derived from IPS (e.g., 15 if IPS == 60)
 TOLERANCE = 10
