@@ -310,7 +310,7 @@ get_packages_for_platform() {
         rhel)
             # From README.md (Fedora/CentOS)
             pkg_list="python3 python3-pip python3-devel gcc gcc-c++ make cmake pkgconfig \
-libwebp-devel libjpeg-turbo-devel SDL2-devel alsa-lib-devel portaudio python3-tkinter python3-opencv \
+libwebp-devel libjpeg-turbo-devel SDL2-devel alsa-lib-devel portaudio python3-opencv \
 mesa-libGL-devel mesa-libGLU-devel mesa-libEGL-devel mesa-libGLES-devel \
 libglvnd-devel glfw-devel mesa-utils \
 chrony ninja-build bind-utils certbot python3-certbot-nginx"
@@ -318,15 +318,15 @@ chrony ninja-build bind-utils certbot python3-certbot-nginx"
         arch)
             # Arch Linux equivalents
             pkg_list="python python-pip base-devel cmake pkg-config ninja \
-libwebp libjpeg-turbo sdl2 alsa-lib mesa glu glfw portaudio tk python-opencv ffmpeg \
+libwebp libjpeg-turbo sdl2 alsa-lib mesa glu glfw portaudio python-opencv ffmpeg \
 chrony bind-tools certbot certbot-nginx"
             ;;
         macos)
             # Package names differ by manager (MacPorts uses webp, not libwebp).
             if [ "$manager" = port ]; then
-                pkg_list="python312 py312-pip py312-numpy py312-scipy py312-Pillow py312-tkinter py312-opencv4 portaudio webp pkgconfig libsdl2 chrony libjpeg-turbo glfw ffmpeg"
+                pkg_list="python312 py312-pip py312-numpy py312-scipy py312-Pillow py312-opencv4 portaudio webp pkgconfig libsdl2 chrony libjpeg-turbo glfw ffmpeg"
             else
-                pkg_list="python@3.12 python-tk@3.12 portaudio webp pkg-config sdl2 chrony jpeg-turbo glfw ffmpeg"
+                pkg_list="python@3.12 portaudio webp pkg-config sdl2 chrony jpeg-turbo glfw ffmpeg"
             fi
             # Note: certbot on macOS is typically installed via pip or brew separately
             ;;
@@ -463,7 +463,7 @@ NEEDS_SUDO=$(echo "$OS_INFO" | cut -d'|' -f5)
 
 echo "    OS: $OS | Package Manager: $PKG_MANAGER"
 
-# Use the interpreter belonging to the native Tk/scientific packages.
+# Use the interpreter belonging to the native scientific/image packages.
 if [ "$PKG_MANAGER" = port ]; then
     manager_executable=${PKG_INSTALL% install}
     PYTHON_BIN="$(dirname "$manager_executable")/python3.12"

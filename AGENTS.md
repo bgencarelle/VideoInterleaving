@@ -70,9 +70,9 @@ inside the modem subsystem (`animation_modem/`, `modem_*.py`,
 
 ## Environment
 
-- `.venv` is created with `--system-site-packages` (needed for Tk). Always use
-  `.venv/bin/python`; on macOS the Homebrew `python-tk` must match the Python
-  version used to create the venv. `scripts/setup_app.sh` (sudo) does setup + systemd.
+- `.venv` is created with `--system-site-packages` to reuse compatible
+  OS-provided Python packages. Always use `.venv/bin/python`;
+  `scripts/setup_app.sh` (sudo) does setup + systemd.
 - `utilities/check_modem_setup.py` verifies modem imports/bindings without
   opening audio devices.
 - No linter, typechecker, or formatter is configured. Inline prose comments

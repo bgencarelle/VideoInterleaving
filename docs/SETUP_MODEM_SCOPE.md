@@ -6,10 +6,10 @@ its full application/service setup is retained. The former `--modem` delegation
 is removed. Runtime decoder selection and clock/scheduler code are unchanged.
 
 On macOS setup detects MacPorts first, then Homebrew, including their standard
-installation paths when absent from PATH. MacPorts uses Python 3.12 and matching
-Tk, NumPy, SciPy, Pillow and OpenCV ports. Homebrew uses Python 3.12 and matching
-Tk, with pip packages for scientific/image dependencies as needed. Both install
-PortAudio, GLFW and FFmpeg alongside the existing application libraries.
+installation paths when absent from PATH. MacPorts uses Python 3.12 with NumPy,
+SciPy, Pillow and OpenCV ports. Homebrew uses Python 3.12, with pip packages for
+scientific/image dependencies as needed. Both install PortAudio, GLFW and FFmpeg
+alongside the existing application libraries.
 The main `.venv` uses that manager's interpreter and system site packages.
 As in the main installer, an invalid environment is recreated; Python provider
 mismatches now count as invalid even when version numbers match.

@@ -32,8 +32,8 @@ hardware, outside the simulations. See AGENTS.md "Long-term direction".
 Normal `scripts/setup_app.sh` setup now includes modem dependencies through
 `requirements.txt` -> `requirements-modem.txt`, and verifies them in `.venv`.
 An existing environment is updated when either requirements file changes or a
-modem import is missing. System packages include SciPy and Pillow's Tk bridge
-on Debian, Tk bindings on every supported platform, and PortAudio.
+modem import is missing. PortAudio is a native system dependency; Python
+dependencies are listed in `requirements-modem.txt`.
 
 For an existing checkout, rerun your usual `scripts/setup_app.sh` command. To verify
 without changing the environment or touching audio devices:
@@ -42,7 +42,7 @@ without changing the environment or touching audio devices:
 .venv/bin/python utilities/check_modem_setup.py
 ```
 
-For standalone baking/receiving tools, install the OS Tk/PortAudio dependencies
+For standalone baking/receiving tools, install the native PortAudio dependency
 first, then use a virtual environment:
 
 ```bash
@@ -50,9 +50,8 @@ python -m pip install -r requirements-modem.txt
 python utilities/check_modem_setup.py
 ```
 
-Debian/Ubuntu packages: `python3-scipy python3-tk python3-pil.imagetk libportaudio2`.
-Fedora uses `python3-tkinter portaudio`; Arch uses `tk portaudio`. Homebrew uses
-`python-tk portaudio`; Tk must match the Python version used for the venv.
+Debian/Ubuntu: `libportaudio2`. Fedora, Arch, Homebrew, and MacPorts provide
+PortAudio as `portaudio`.
 Full `main.py --mode modem` transmission still uses the normal application
 requirements, which are installed by setup.
 

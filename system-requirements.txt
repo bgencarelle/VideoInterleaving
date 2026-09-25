@@ -13,8 +13,6 @@ python-is-python3
 
 # Python packages (system-installed)
 python3-pil
-python3-pil.imagetk
-python3-tk
 python3-numpy
 python3-scipy
 python3-opencv

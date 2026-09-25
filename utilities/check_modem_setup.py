@@ -4,17 +4,12 @@ import importlib
 import sys
 
 
-# Import the actual FFT/filter and Tk bridge modules, not just parent packages.
-# Importing tkinter does not create a window or require DISPLAY.
+# Import the actual FFT/filter modules, not just their parent packages.
 CHECKS = (
     ('numpy', 'numpy from requirements-modem.txt'),
     ('scipy.fft', 'scipy from requirements-modem.txt / python3-scipy'),
     ('scipy.signal', 'scipy from requirements-modem.txt / python3-scipy'),
     ('PIL.Image', 'Pillow from requirements-modem.txt'),
-    ('tkinter', 'Python Tk bindings: python3-tk (Debian), python3-tkinter (Fedora), '
-                 'tk (Arch), or matching Homebrew python-tk / MacPorts py312-tkinter'),
-    ('PIL.ImageTk', 'Pillow Tk support'),
-    ('PIL._imagingtk', 'Pillow Tk bridge: python3-pil.imagetk (Debian) or pip Pillow'),
     ('sounddevice', 'sounddevice from requirements-modem.txt and PortAudio '
                     '(libportaudio2 on Debian; portaudio on Fedora/Arch/Homebrew/MacPorts)'),
 )
@@ -32,7 +27,7 @@ def check(quiet=False):
     if failures:
         return 1
     if not quiet:
-        print('Modem dependencies available (NumPy, SciPy, Pillow/Tk and sounddevice/PortAudio).')
+        print('Modem dependencies available (NumPy, SciPy, Pillow and sounddevice/PortAudio).')
     return 0
 
 
