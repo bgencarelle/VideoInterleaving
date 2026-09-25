@@ -26,11 +26,8 @@ from animation_modem import v7                                         # noqa: E
 from animation_modem.imaging import values_image                        # noqa: E402
 from tools.v7_torture_matrix import CASES, RATE, TARGET, impair         # noqa: E402,F401
 
-try:
-    from ssimulacra2 import compute_ssimulacra2
-except ImportError:                                                     # pragma: no cover
-    sys.exit('test_modem_v7 needs the ssimulacra2 package: pip install ssimulacra2')
-from skimage.color import deltaE_ciede2000, rgb2lab                     # noqa: E402
+# The scoring packages are imported where they are used, so the fold codec
+# (and the live prototype built on it) runs without them.
 
 DISPLAY = (405, 540)
 STEADY_FROM = v7.TAIL_PHASES + 1        # first packet with every tail slice received
@@ -56,11 +53,16 @@ def _png(image):
 
 
 def ssimulacra2(ref, got):
+    try:
+        from ssimulacra2 import compute_ssimulacra2
+    except ImportError:                                                 # pragma: no cover
+        sys.exit('scoring needs the ssimulacra2 package: pip install ssimulacra2')
     return float(compute_ssimulacra2(_png(ref), _png(got)))
 
 
 def score(ref, got):
     """SSIMULACRA2 (higher is better), luma PSNR and mean CIEDE2000."""
+    from skimage.color import deltaE_ciede2000, rgb2lab
     ry = np.asarray(ref.convert('YCbCr'))[..., 0].astype(float)
     gy = np.asarray(got.convert('YCbCr'))[..., 0].astype(float)
     return {'ssimulacra2': ssimulacra2(ref, got),

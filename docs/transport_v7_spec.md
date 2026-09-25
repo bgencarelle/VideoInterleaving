@@ -341,3 +341,397 @@ The ATRAC encoder CTests were run from the repository root with
 Real-media validation remains pending: actual tape/deck captures and later
 analysis notes are required before synthetic results can be treated as
 evidence of real-media performance.
+
+## 10. Fold proposal
+
+**Status: proposal, not implemented on the wire.** A live prototype exists:
+`tools/v7_live.py --experimental-fold M` on both ends (see 10.7). The
+measurements below are synthetic. They come from `test_modem_v7/`, run on 11 frames of an 810×1080
+portrait face video: frames 1, 3, 5, … fit the statistics and frames 2, 4,
+6, … are scored. Each reconstruction is scored with SSIMULACRA2 at 405×540
+against the source at 405×540 (higher is better; about 90 is visually
+lossless). No real tape or deck has been tested.
+
+### 10.1 Idea
+
+V7 sends 2,880 coefficients as analog values. On a clean path each slot
+arrives with far more precision than the picture needs, while detail beyond
+the 48×40 Y corner is not sent at all. Linear rearrangements cannot move that
+spare precision into resolution: for a linear analog code, sending the
+highest-variance coefficients is already mean-square optimal. A nonlinear 2:1 mapping
+can. It trades SNR for resolution the way FM trades bandwidth for SNR, and it
+has the same kind of threshold.
+
+The **M weakest Y slots of the body tier** each carry two Y coefficients.
+With `h` the slot's own coefficient (the host) and `u` the most important Y
+coefficient that V7 does not send today (the guest), both normalised to unit
+variance:
+
+```text
+s = D·round(h / D) + β·clip(u, −2.5, 2.5)        β = 0.8·D / 5
+```
+
+- **Host:** sent coarsely, as a multiple of the step D.
+- **Guest:** rides inside the step as a small analog residual.
+- **Scaling:** `s` is scaled by `1/sqrt(1 + D²/12 + β²)` and replaces the
+  host coefficient at the host's own variance. Slot power, slot layout,
+  Hadamard spreading and the equaliser are therefore unchanged: a normal V7
+  encode of the modified coefficients is a folded packet.
+- **Host slots:** Y only, ranks 208–2,223 (the body tier), taken from the
+  weakest end. Never the head, never the rotating tail, never Cb/Cr.
+- **Guests:** Y coefficients of the 96×80 grid outside the 48×40 corner,
+  in fitted-variance order.
+- **Step D:** chosen for a 30 dB design SNR from training frames.
+  - Offline harness (`fold_modem.py`): D is re-chosen from each run's
+    training frames. On the reference run that gave 0.97 for both M; the
+    10.2 results use it.
+  - Live prototype: the frozen tables are the authority, fitted on the
+    reference fixture. D = 0.970 in `fold_table_500.json` and 0.8247 in
+    `fold_table_1000.json`; the 10.7 results use these.
+
+The receiver:
+1. takes the equaliser's per-coefficient estimate and confidence for the host
+   slots;
+2. removes the MMSE shrink by dividing by the confidence;
+3. rounds to the step, giving the host;
+4. reads the remainder as the guest;
+5. rebuilds Y on the full 96×80 grid.
+
+**Fallback:** a host whose equaliser confidence is below 0.9 is read as a
+plain (noisy) host, and its guest is dropped.
+
+### 10.2 Measured results
+
+Real V7 modem, 1×, box encode filter, current slot layout, still pictures,
+mean over every decoded steady packet:
+
+| Condition | No fold | Fold 500 (+fallback) | Fold 1,000 (+fallback) |
+|---|---:|---:|---:|
+| Clean | −16.9 | −7.0 | **−4.1** |
+| Low-pass 12 kHz | −17.0 | −7.0 | **−4.3** |
+| Low-pass 10 kHz | −17.0 | −7.1 | **−4.3** |
+| Dropouts (12 ms every 0.7 s) | −17.3 | −7.6 | **−4.7** |
+| Wow/flutter (0.45 % at 0.55 Hz, 0.12 % at 7.3 Hz) | −17.7 | **−10.3** | −10.4 |
+| Random speed jitter 0.1 % RMS, 20–300 Hz | −19.5 | **−16.3** | −18.3 |
+| Fast flutter (adds 0.1 % at 25 Hz, 0.05 % at 60 Hz) | −19.4 | −19.8 | −21.5 |
+| Fast flutter + 12 kHz low-pass + dropouts | −24.0 | −24.5 | −26.8 |
+| Random speed jitter 0.3 % RMS | −33.0 | −43.1 (**−34.3**) | −49.8 (−43.4) |
+
+- **Low-pass and dropouts** do not affect folding. The Hadamard spreading and
+  the equaliser absorb them before the folded symbols are read.
+- **Fast flutter and jitter** hurt. Timing smear moves symbols across a step.
+  The fallback has a measurable effect only in the 0.3 % jitter case, where
+  it brings fold 500 back to within 1.3 points of no folding.
+- **Contact sheets:** where folding scores even, it looks different: fine
+  grain instead of blur.
+
+On the simulated channel (per-slot noise, below the 30 dB design point), Y
+folding costs about 3.5 points (M = 500) to 6 points (M = 1,000) at 20 dB,
+and 5–10 points at 15 dB.
+
+Folding into Cb/Cr slots raised the mean colour error (CIEDE2000) from about
+3.4 to 7–11 and is excluded. With Y-only hosts, colour error is unchanged.
+
+### 10.3 Recommendation
+
+**M = 500 with the fallback, as an opt-in mode.** Measured: +10 on clean,
+low-pass and dropouts, +7 with slow wow, and −0.4 to −1.3 at worst (fast
+flutter, combined impairments, 0.3 % jitter). M = 1,000 gains more on clean
+paths but loses 2–3 points under flutter.
+
+This matches the recovery priority in `AGENTS.md`: colour is unchanged, and
+on bad paths only detail degrades.
+
+### 10.4 Proposed implementation
+
+1. **Frozen fold table.** Freeze M, D, the host list, the guest positions and
+   the guest variances into the model tables, under the same hash check as
+   the canonical tables. Sender and receiver must not depend on local frames
+   for these statistics.
+2. **Sender.** Apply the fold to the coefficient vector inside
+   `encode_frame_coeffs()`, before gains and slot placement. It applies to
+   `modem_v7_display.py` and `tools/v7_live.py send`.
+3. **Receiver.** Unfold inside `decode_frame()` from the equaliser's `xhat`
+   and `conf` for the host slots, apply the fallback, then reconstruct Y on
+   the 96×80 grid. Hosts are in the body tier, so tail memory is unaffected.
+4. **Signalling.** The 2-bit source-encoding field is fully used by the four
+   encode filters. Options:
+   - reassign one filter code (for example `bicubic`) to "box + fold";
+   - extend the metadata word;
+   - for a first live experiment only, set the same `--experimental-fold`
+     flag on both ends.
+
+   The live prototype instead marks folded packets with an in-band signature
+   (10.7), so a folding receiver also shows normal packets correctly.
+5. **Tests.** `modem_tests/test_v7_experimental_fold.py` covers the
+   prototype:
+   - noiseless round trip (hosts within half a step, guests exact);
+   - signature detection;
+   - pass-through of normal packets and of packets folded with another
+     table;
+   - the confidence fallback, the noise gate and guest weighting;
+   - fail-closed table loading;
+   - receiver hooks restored after a failed run.
+
+   A production implementation would add a regression that an unfolded wire
+   decodes identically.
+
+### 10.5 Related measurements that need no folding
+
+Same harness, same frames:
+
+- **Encode filter.** `box` beats today's default `nearest` by 4.8–7 points
+  on every tested case through the real modem (clean −23.9 → −16.9; Type II
+  −27.5 → −20.9; dropouts −24.6 → −17.8), with no wire change. The receiver
+  already selects the model from the metadata.
+- **Y-first coefficient selection.** Choosing the 2,880 coefficients by
+  variance across all three planes keeps about 2,620 Y and 260 Cb/Cr
+  coefficients, instead of 1,920 and 960.
+  - With box sampling, it scores −16.8 → −5.8 at 50 dB and −18.6 → −8.1 at
+    25 dB (simulated channel).
+  - Mean colour error (CIEDE2000) rises from 2.6 to 3.3.
+  - It is a wire change, and it trades against the colour priority, so it
+    needs a decision before adoption.
+- **Prefiltering.** A smooth taper before the coefficient cutoff reduces
+  ringing. At best it only matches today's box sampling, and on the Y-first
+  selection it scores 3–7 points worse. Reconstructing on a finer grid
+  without more coefficients does not help.
+
+### 10.6 Reproducing
+
+```text
+.venv/bin/python -m pip install ssimulacra2 scikit-image
+export NUMBA_CACHE_DIR=tmp/numba_cache
+.venv/bin/python test_modem_v7/fold_modem.py      FRAME... [--quick]
+.venv/bin/python test_modem_v7/compare_filters.py FRAME... [--quick]
+.venv/bin/python test_modem_v7/layout_oracle.py   FRAME... [--quick]
+```
+
+Full instructions and the reference numbers are in `test_modem_v7/HOWTO.md`.
+Results are written to `tmp/test_modem_v7/`.
+
+### 10.7 Live prototype
+
+`tools/v7_live.py send|receive --experimental-fold M` loads a frozen table,
+`test_modem_v7/fold_table_<M>.json`, built from the reference fixture. It
+holds the hosts, guests, guest scales and the step. The sender folds each
+frame's values before the normal encode. The receiver wraps
+`v7.decode_frame` and the equaliser entry points while it runs; they are
+restored in a `finally`. It keeps each packet's equaliser output and unfolds
+before display. `animation_modem` is unchanged.
+
+Table loading fails closed:
+- **Pinned files.** Each table file must match a SHA-256 pinned in
+  `live_fold.py` and be in canonical form. A rebuilt table must be pinned
+  deliberately.
+- **One model per table.** A table records the digest of the model it was
+  built for: the canonical `box` profile under the current model-table
+  hash. The sender refuses to start with any other encode filter or
+  fixture. The receiver shows packets from any other model without
+  unfolding.
+
+The prototype adds a signature. The 16 weakest host slots carry a ±3D
+pattern instead of data. The pattern is drawn from the table's identity, and
+it serves three purposes:
+- **Detection.** The receiver unfolds only packets that carry its own
+  table's pattern (score ≥ 0.5). Normal packets, and packets folded with a
+  different table, are shown as they are.
+- **Noise measurement.** The pattern's residual measures the packet's symbol
+  noise on exactly the folded slots. Timing smear from fast flutter and
+  jitter shows up there, not in the equaliser confidence.
+- **Weighting.** Guests are weighted by β²/(β² + noise²), and above 0.3 steps
+  of noise the packet is not unfolded.
+
+Measured on the live receive path (`live_fold.py selftest`: a moving
+sequence, pilot tones, EOF, LiveInput blocks, live receiver arguments; the
+same 11 frames). The table shows the change against no folding for M = 500
+and M = 1,000:
+
+| Condition | No fold | Change, M = 500 | Change, M = 1,000 |
+|---|---:|---:|---:|
+| Clean | −18.3 | +9.6 | +14.5 |
+| Low-pass 10 kHz | −18.3 | +9.6 | +14.2 |
+| Dropouts | −23.9 | +8.4 | +12.7 |
+| Wow/flutter | −19.0 | +7.7 | +8.3 |
+| Random jitter 0.1 % | −20.6 | +4.6 | +4.2 |
+| Fast flutter | −20.8 | +2.2 | +0.6 |
+| Fast flutter + 12 kHz low-pass + dropouts | −26.2 | +1.8 | +0.4 |
+| Random jitter 0.3 % | −38.5 | −0.8 | −2.3 |
+
+With the noise-weighted guests, folding no longer loses under fast flutter.
+Without the weighting, M = 500 lost 2.4 points there.
+
+Additive noise is the weak case, with the same change against no folding:
+
+| Condition | No fold | Change, M = 500 | Change, M = 1,000 |
+|---|---:|---:|---:|
+| Hiss −45 dBFS | −19.7 | +5.0 | +4.6 |
+| Type II tape model | −21.3 | +1.8 | 0.0 |
+| Hiss −40 dBFS | −22.9 | −0.1 | −2.5 |
+| Type I tape model | −29.5 | −1.6 | −4.1 |
+| Hiss −35 dBFS | −31.9 | −1.8 | −4.1 |
+
+Hosts are sent coarsely whatever the channel. The receiver can drop guests
+on a noisy packet, but it cannot restore host precision. M = 500 therefore
+costs up to about 2 points on noisy tape. Real tape remains untested.
+
+Loopback through the real `tools/v7_live.py` sender and receiver
+(`test_modem_v7/live_loopback.py`, one frame, clean): −18.7 unfolded,
+−7.6 at M = 500, −2.5 at M = 1,000. Mismatches:
+- A folded sender with a normal receiver scores −22.1.
+- A folding receiver with a normal sender scores −18.7, unchanged.
+- An M = 1,000 sender with an M = 500 receiver scores −25.2: the packets are
+  shown unfolded, not unfolded with the wrong table.
+- `--experimental-fold` with `--encode-filter nearest` refuses to start.
+
+## 10. Fold proposal
+
+**Status: proposal, not implemented on the wire.** The measurements below are
+synthetic. They come from `test_modem_v7/`, run on 11 frames of an 810×1080
+portrait face video: frames 1, 3, 5, … fit the statistics and frames 2, 4,
+6, … are scored. Each reconstruction is scored with SSIMULACRA2 at 405×540
+against the source at 405×540 (higher is better; about 90 is visually
+lossless). No real tape or deck has been tested.
+
+### 10.1 Idea
+
+V7 sends 2,880 coefficients as analog values. On a clean path each slot
+arrives with far more precision than the picture needs, while detail beyond
+the 48×40 Y corner is not sent at all. Linear rearrangements cannot move that
+spare precision into resolution: for a linear analog code, sending the
+highest-variance coefficients is already mean-square optimal. A nonlinear 2:1 mapping
+can. It trades SNR for resolution the way FM trades bandwidth for SNR, and it
+has the same kind of threshold.
+
+The **M weakest Y slots of the body tier** each carry two Y coefficients.
+With `h` the slot's own coefficient (the host) and `u` the most important Y
+coefficient that V7 does not send today (the guest), both normalised to unit
+variance:
+
+```text
+s = D·round(h / D) + β·clip(u, −2.5, 2.5)        β = 0.8·D / 5
+```
+
+- **Host:** sent coarsely, as a multiple of the step D.
+- **Guest:** rides inside the step as a small analog residual.
+- **Scaling:** `s` is scaled by `1/sqrt(1 + D²/12 + β²)` and replaces the
+  host coefficient at the host's own variance. Slot power, slot layout,
+  Hadamard spreading and the equaliser are therefore unchanged: a normal V7
+  encode of the modified coefficients is a folded packet.
+- **Host slots:** Y only, ranks 208–2,223 (the body tier), taken from the
+  weakest end. Never the head, never the rotating tail, never Cb/Cr.
+- **Guests:** Y coefficients of the 96×80 grid outside the 48×40 corner,
+  in fitted-variance order.
+- **Step D:** chosen for a 30 dB design SNR (D ≈ 0.97 for both M = 500 and
+  M = 1,000).
+
+The receiver:
+1. takes the equaliser's per-coefficient estimate and confidence for the host
+   slots;
+2. removes the MMSE shrink by dividing by the confidence;
+3. rounds to the step, giving the host;
+4. reads the remainder as the guest;
+5. rebuilds Y on the full 96×80 grid.
+
+**Fallback:** a host whose equaliser confidence is below 0.9 is read as a
+plain (noisy) host, and its guest is dropped.
+
+### 10.2 Measured results
+
+Real V7 modem, 1×, box encode filter, current slot layout, still pictures,
+mean over every decoded steady packet:
+
+| Condition | No fold | Fold 500 (+fallback) | Fold 1,000 (+fallback) |
+|---|---:|---:|---:|
+| Clean | −16.9 | −7.0 | **−4.1** |
+| Low-pass 12 kHz | −17.0 | −7.0 | **−4.3** |
+| Low-pass 10 kHz | −17.0 | −7.1 | **−4.3** |
+| Dropouts (12 ms every 0.7 s) | −17.3 | −7.6 | **−4.7** |
+| Wow/flutter (0.45 % at 0.55 Hz, 0.12 % at 7.3 Hz) | −17.7 | **−10.3** | −10.4 |
+| Random speed jitter 0.1 % RMS, 20–300 Hz | −19.5 | **−16.3** | −18.3 |
+| Fast flutter (adds 0.1 % at 25 Hz, 0.05 % at 60 Hz) | −19.4 | −19.8 | −21.5 |
+| Fast flutter + 12 kHz low-pass + dropouts | −24.0 | −24.5 | −26.8 |
+| Random speed jitter 0.3 % RMS | −33.0 | −43.1 (**−34.3**) | −49.8 (−43.4) |
+
+- **Low-pass and dropouts** do not affect folding. The Hadamard spreading and
+  the equaliser absorb them before the folded symbols are read.
+- **Fast flutter and jitter** hurt. Timing smear moves symbols across a step.
+  The fallback has a measurable effect only in the 0.3 % jitter case, where
+  it brings fold 500 back to within 1.3 points of no folding.
+- **Contact sheets:** where folding scores even, it looks different: fine
+  grain instead of blur.
+
+On the simulated channel (per-slot noise, below the 30 dB design point), Y
+folding costs about 3.5 points (M = 500) to 6 points (M = 1,000) at 20 dB,
+and 5–10 points at 15 dB.
+
+Folding into Cb/Cr slots raised the mean colour error (CIEDE2000) from about
+3.4 to 7–11 and is excluded. With Y-only hosts, colour error is unchanged.
+
+### 10.3 Recommendation
+
+**M = 500 with the fallback, as an opt-in mode.** Measured: +10 on clean,
+low-pass and dropouts, +7 with slow wow, and −0.4 to −1.3 at worst (fast
+flutter, combined impairments, 0.3 % jitter). M = 1,000 gains more on clean
+paths but loses 2–3 points under flutter.
+
+This matches the recovery priority in `AGENTS.md`: colour is unchanged, and
+on bad paths only detail degrades.
+
+### 10.4 Proposed implementation
+
+1. **Frozen fold table.** Freeze M, D, the host list, the guest positions and
+   the guest variances into the model tables, under the same hash check as
+   the canonical tables. Sender and receiver must not depend on local frames
+   for these statistics.
+2. **Sender.** Apply the fold to the coefficient vector inside
+   `encode_frame_coeffs()`, before gains and slot placement. It applies to
+   `modem_v7_display.py` and `tools/v7_live.py send`.
+3. **Receiver.** Unfold inside `decode_frame()` from the equaliser's `xhat`
+   and `conf` for the host slots, apply the fallback, then reconstruct Y on
+   the 96×80 grid. Hosts are in the body tier, so tail memory is unaffected.
+4. **Signalling.** The 2-bit source-encoding field is fully used by the four
+   encode filters. Options:
+   - reassign one filter code (for example `bicubic`) to "box + fold";
+   - extend the metadata word;
+   - for a first live experiment only, set the same `--experimental-fold`
+     flag on both ends.
+
+   A sender/receiver mismatch affects only the folded slots.
+5. **Tests.** Add fold/unfold round-trip tests (noiseless unfold within the
+   step quantisation; the fallback path) to `modem_tests/`, plus a regression
+   that an unfolded wire decodes identically.
+
+### 10.5 Related measurements that need no folding
+
+Same harness, same frames:
+
+- **Encode filter.** `box` beats today's default `nearest` by 4.8–7 points
+  on every tested case through the real modem (clean −23.9 → −16.9; Type II
+  −27.5 → −20.9; dropouts −24.6 → −17.8), with no wire change. The receiver
+  already selects the model from the metadata.
+- **Y-first coefficient selection.** Choosing the 2,880 coefficients by
+  variance across all three planes keeps about 2,620 Y and 260 Cb/Cr
+  coefficients, instead of 1,920 and 960.
+  - With box sampling, it scores −16.8 → −5.8 at 50 dB and −18.6 → −8.1 at
+    25 dB (simulated channel).
+  - Mean colour error (CIEDE2000) rises from 2.6 to 3.3.
+  - It is a wire change, and it trades against the colour priority, so it
+    needs a decision before adoption.
+- **Prefiltering.** A smooth taper before the coefficient cutoff reduces
+  ringing. At best it only matches today's box sampling, and on the Y-first
+  selection it scores 3–7 points worse. Reconstructing on a finer grid
+  without more coefficients does not help.
+
+### 10.6 Reproducing
+
+```text
+.venv/bin/python -m pip install ssimulacra2 scikit-image
+export NUMBA_CACHE_DIR=tmp/numba_cache
+.venv/bin/python test_modem_v7/fold_modem.py      FRAME... [--quick]
+.venv/bin/python test_modem_v7/compare_filters.py FRAME... [--quick]
+.venv/bin/python test_modem_v7/layout_oracle.py   FRAME... [--quick]
+```
+
+Full instructions and the reference numbers are in `test_modem_v7/HOWTO.md`.
+Results are written to `tmp/test_modem_v7/`.

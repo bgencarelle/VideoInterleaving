@@ -191,11 +191,33 @@ def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0):
             P.aspect_wire_code(image.size))
 
 
+def _experimental_fold(slots):
+    """PROTOTYPE: the test_modem_v7 luma fold (see docs/transport_v7_spec.md
+    section 10). Both ends must load the same table; nothing on the wire says
+    a packet is folded."""
+    if not slots:
+        return None
+    sys.path.insert(0, str(ROOT/'test_modem_v7'))
+    from live_fold import LiveFold
+    try:
+        fold = LiveFold(slots)
+    except ValueError as exc:
+        raise SystemExit(f'--experimental-fold {slots}: {exc}')
+    print(f'[experimental fold] {slots} luma slots, table {fold.digest} '
+          f'(the other end must show the same)', flush=True)
+    return fold
+
+
 def run_send(args):
     import sounddevice as sd
     from tools.v7_capture import Throttled
 
     model = _model(args.fixture, args.encode_filter)
+    fold = _experimental_fold(getattr(args, 'experimental_fold', 0))
+    if fold is not None:
+        # Fail before any audio: the table folds only the model it was built
+        # for (the canonical box profile).
+        fold.check(model)
     requested_rate = getattr(args, 'rate', None)
     output_rate = None
     raw_grab = _capture(args)
@@ -270,6 +292,8 @@ def run_send(args):
                     time.sleep(delay)
                 value, aspect = _values(model, grab(), args.encode_filter,
                                         args.brightness, args.gamma)
+                if fold is not None:
+                    value = fold.encode(model, value)
                 frames.append(value); aspects.append(aspect)
                 # A compressed packet still needs a new source frame at the
                 # faster wire cadence; otherwise the audio stream has gaps.
@@ -387,6 +411,19 @@ def capture_rate_for(device_info):
 
 
 def run_receive(args):
+    fold = _experimental_fold(getattr(args, 'experimental_fold', 0))
+    if fold is None:
+        return _run_receive(args, None)
+    # The prototype wraps v7.decode_frame and the equalisers to keep each
+    # packet's equaliser output; always restore them, however the run ends.
+    fold.install()
+    try:
+        return _run_receive(args, fold)
+    finally:
+        fold.uninstall()
+
+
+def _run_receive(args, fold):
     import sounddevice as sd
 
     # Metadata is decoded with the common bootstrap model; the body model is
@@ -643,7 +680,11 @@ def run_receive(args):
             meter['decode_ms'] = (info.get('diagnostics') or {}).get(
                 'last_elapsed_ms')
             if result.status in ('received', 'verified') or displayable:
-                values = P.values_from(model, result.coeffs)
+                if fold is not None:
+                    values = fold.values(
+                        models.get(result.diag.get('encoding_type'), model), result)
+                else:
+                    values = P.values_from(model, result.coeffs)
                 if args.mono_compatible:
                     noise = result.diag.get('noise') or [0.0]
                     values = stabilize_chroma(
@@ -790,6 +831,11 @@ def parser():
     send.add_argument('--eof-marker', action=argparse.BooleanOptionalAction,
                       default=True,
                       help='add the V7 packet EOF marker (default on)')
+    send.add_argument('--experimental-fold', type=int, default=0, metavar='M',
+                      help='PROTOTYPE: fold M luma slots 2:1 for extra detail '
+                           '(test_modem_v7/fold_table_M.json, M = 500 or 1000). '
+                           'Requires --encode-filter box and the default '
+                           'fixture. The receiver needs the same flag.')
     send.add_argument('--camera', type=int, default=0)
     send.add_argument('--video-source', '--video', dest='video_source',
                       help='local video file or FFmpeg-supported live stream URL')
@@ -872,6 +918,10 @@ def parser():
     recv.add_argument('--tone-equalization',
                       choices=('off', 'm-reference'), default='off',
                       help='use pilot tones as an opt-in M-path gain reference')
+    recv.add_argument('--experimental-fold', type=int, default=0, metavar='M',
+                      help='PROTOTYPE: unfold M luma slots (use the sender\'s '
+                           'M; packets without the fold signature are shown '
+                           'unchanged)')
     return ap
 
 

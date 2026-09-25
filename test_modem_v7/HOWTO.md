@@ -10,6 +10,8 @@ build, not features.
 | `compare_filters.py` | real modem | Does the `box` or `lanczos` encode filter beat today's `nearest`? |
 | `layout_oracle.py` | simulated (per-slot noise) | Ringing and prefilters; luma-first coefficient choice; where to fold |
 | `fold_modem.py` | real modem | Does luma folding survive warble, jitter, low-pass and dropouts? |
+| `live_fold.py` | live receive path | Fold tables (`build`) and an offline live-path check (`selftest`) |
+| `live_loopback.py` | real live tools | `tools/v7_live.py` send and receive back to back, no sound card |
 
 `common.py` holds shared helpers: loading, scoring, DCT grids and variance
 fitting. `folding.py` holds the fold codec and the equaliser hook used by
@@ -129,6 +131,117 @@ Reading:
 - **Look at the contact sheets, not only the numbers.** Where folding scores
   even (fast flutter), it looks different: a fine grain replaces blur.
 
+## Live prototype: send/receive with folding
+
+`tools/v7_live.py` (`vi.modem-send` / `vi.modem-receive`) takes
+`--experimental-fold M`, with `M` = 500 (recommended) or 1000. Both ends load
+the same frozen table, `test_modem_v7/fold_table_<M>.json`. It is built from
+the repository's reference fixture, so neither machine's own frames are
+involved.
+
+The prototype fails closed:
+- **Pinned tables.** The file must match the SHA-256 pinned in
+  `live_fold.py`. Both ends print the hash at startup.
+- **Box only.** A table only folds the canonical `box` profile. The sender
+  refuses `--encode-filter nearest` and custom fixtures. The receiver shows
+  packets from other models unfolded.
+- **Own signature only.** The receiver unfolds only packets that carry its
+  own table's signature. Packets folded with another table are shown
+  unfolded, never mis-unfolded.
+- **Hooks restored.** The receiver's hooks on `v7` are restored when it
+  exits, including on errors.
+
+```bash
+# receiver first (any machine), then the sender
+./vi.modem-receive --device "BlackHole 2ch" --experimental-fold 500
+./vi.modem-send    --device "BlackHole 2ch" --source video --video-source clip.mp4 \
+                   --encode-filter box --experimental-fold 500
+```
+
+Replace BlackHole with your real input and output (deck, interface) for tape.
+
+No packet flag exists yet. Instead the 16 weakest folded slots carry a fixed
+signature, and it does two jobs:
+- **Packet detection.** A receiver with the flag unfolds only packets that
+  carry the signature, so it shows normal packets unchanged. It is safe to
+  leave on.
+- **Noise measurement.** The signature measures each packet's noise on
+  exactly the folded slots. The receiver uses it to weight the extra detail,
+  and it drops the detail when the packet is too noisy (above 0.3 steps).
+
+### Try it without a sound card
+
+`live_loopback.py` runs the real `tools/v7_live.py` sender and headless
+receiver in one process. A stand-in audio device joins them in real time.
+It saves every picture shown and scores it against the frame:
+
+```bash
+.venv/bin/python test_modem_v7/live_loopback.py --frame FRAME --fold 0
+.venv/bin/python test_modem_v7/live_loopback.py --frame FRAME --fold 500
+.venv/bin/python test_modem_v7/live_loopback.py --frame FRAME --fold 500 --receiver-fold 0   # mismatch
+```
+
+Reference run: one 810x1080 frame, 6 s, about 70 pictures, SSIMULACRA2.
+
+| Sender fold | Receiver fold | Score |
+|---:|---:|---:|
+| 0 | 0 | -18.7 |
+| 500 | 500 | **-7.6** |
+| 1000 | 1000 | **-2.5** |
+| 500 | 0 | -22.1 (folded, shown unfolded) |
+| 0 | 500 | -18.7 (normal packets pass through) |
+| 1000 | 500 | -25.2 (other table: shown unfolded, not mis-unfolded) |
+
+`live_fold.py selftest FRAME...` runs the same receive path offline:
+- the live sender's value path;
+- a moving sequence, with a different frame every packet, pilot tones and
+  EOF;
+- LiveInput in 1,024-sample blocks, decoding with the live receiver's
+  arguments.
+
+It then damages the audio. Reference run (the 11 frames):
+
+| Case | No fold | Fold 500 | Fold 1000 |
+|---|---:|---:|---:|
+| clean | -18.3 | -8.7 | **-3.8** |
+| low-pass 10k | -18.3 | -8.7 | **-4.1** |
+| dropouts | -23.9 | -15.5 | **-11.2** |
+| wow/flutter | -19.0 | -11.3 | **-10.7** |
+| random jitter 0.1% | -20.6 | **-16.0** | -16.4 |
+| fast flutter 25/60 Hz | -20.8 | **-18.6** | -20.2 |
+| warble + low-pass + dropouts | -26.2 | **-24.4** | -25.8 |
+| heavy jitter 0.3% | -38.5 | -39.3 | -40.8 |
+
+Most of the gain under flutter comes from the noise-measured weighting of
+the extra detail. Without it, fast flutter scored -23.2 with fold 500.
+
+Hiss is folding's weak spot (`--cases hiss-45 hiss-40 hiss-35 type-ii type-i`,
+or any other torture-matrix case name):
+
+| Case | No fold | Fold 500 | Fold 1000 |
+|---|---:|---:|---:|
+| hiss -45 dBFS | -19.7 | **-14.7** | -15.1 |
+| type II | -21.3 | **-19.5** | -21.3 |
+| hiss -40 dBFS | -22.9 | -23.0 | -25.4 |
+| type I | -29.5 | -31.1 | -33.6 |
+| hiss -35 dBFS | -31.9 | -33.7 | -36.0 |
+
+The folded host is sent coarsely. The receiver can drop the extra detail on a
+noisy packet, but it cannot restore the host's precision, and the sender
+cannot know the tape's noise in advance.
+
+Rebuilding with `live_fold.py build --folds 500 1000` prints new pins. Paste
+them into `TABLE_SHA256` in `live_fold.py`; until you do, the prototype
+refuses the new tables. The step D belongs to each table: 0.970 for M=500 and
+0.8247 for M=1000. These can differ from what `fold_modem.py` picks, because
+that script refits D on its own training frames.
+
+Regression tests for the prototype are in the modem suite:
+
+```bash
+.venv/bin/python -m unittest modem_tests.test_v7_experimental_fold -v
+```
+
 ## How folding works (folding.py)
 
 The weakest M luma body slots each carry two luma coefficients:
@@ -150,6 +263,8 @@ The receiver:
 2. removes the MMSE shrink;
 3. splits the symbol back into host and guest.
 
-This is an experimental harness. A real implementation would need a packet
-flag (the 2-bit `encoding_type` is full) and an unfolding step inside
-`decode_frame`, not a monkeypatch.
+The offline harness (`fold_modem.py`) uses the plain codec: no signature,
+confidence fallback only. The live prototype adds the signature, which
+detects folded packets, measures their noise and weights the guests. A real
+implementation would put the unfolding step inside `decode_frame`, not in a
+wrapper.
