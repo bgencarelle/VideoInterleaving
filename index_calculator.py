@@ -7,7 +7,7 @@ import math
 from zoneinfo import ZoneInfo
 
 from globals import control_data_dictionary
-from settings import IPS, FPS, INDEX_TIME_OFFSET_MS, CLIENT_MODE, VALID_MODES, FROM_BIRTH, CLOCK_MODE, BIRTH_TZ, BIRTH_TIME, TIMEZONE_OFFSETS
+from settings import IPS, INDEX_TIME_OFFSET_MS, CLIENT_MODE, VALID_MODES, FROM_BIRTH, CLOCK_MODE, BIRTH_TZ, BIRTH_TIME, TIMEZONE_OFFSETS
 
 clock_mode = CLOCK_MODE
 midi_mode = False
@@ -69,16 +69,16 @@ def set_clock_mode(mode=None):
     print("Clock mode set to", list(VALID_MODES.keys())[list(VALID_MODES.values()).index(clock_mode)])
 
 def output_rate_offset_ns(display_fps=None, ips=None):
-    """Backdate by the excess frame period when output cadence is below IPS."""
-    fps = FPS if display_fps is None else display_fps
+    """Return output period minus index period, signed, in nanoseconds."""
+    if display_fps is None:
+        return 0
+    fps = display_fps
     ips = IPS if ips is None else ips
     try:
         fps, ips = float(fps), float(ips)
     except (TypeError, ValueError):
         return 0
     if not (math.isfinite(fps) and math.isfinite(ips)) or fps <= 0 or ips <= 0:
-        return 0
-    if fps >= ips:
         return 0
     return int(round(1_000_000_000/fps - 1_000_000_000/ips))
 
@@ -93,7 +93,8 @@ def calculate_free_clock_index(total_images, pingpong=True, *, time_offset_ns=0,
     for multi-machine setups with chrony-synchronized clocks.
     """
     # Use nanosecond precision with integer arithmetic to avoid floating point errors
-    # Align slower output with the index clock; the setting is a manual trim.
+    # Subtract the signed output/index period difference; the setting is a
+    # manual trim. Slow output backdates, while fast output advances the index.
     configured_offset_ns = int(round(float(INDEX_TIME_OFFSET_MS)*1_000_000))
     rate_offset_ns = output_rate_offset_ns(display_fps)
     current_time_ns = ((time.time_ns() if at_time_ns is None else int(at_time_ns))

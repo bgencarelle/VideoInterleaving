@@ -35,15 +35,14 @@ class ClockTests(unittest.TestCase):
              patch.object(clock, 'midi_mode', False):
             self.assertEqual(clock.update_index(10, pingpong=False), (1, None))
 
-    def test_output_rate_compensates_only_below_ips(self):
-        with patch.object(clock, 'IPS', 30), patch.object(clock, 'FPS', 60):
+    def test_output_rate_offset_is_signed_relative_to_ips(self):
+        with patch.object(clock, 'IPS', 30):
             self.assertEqual(clock.output_rate_offset_ns(15), 33_333_333)
             self.assertEqual(clock.output_rate_offset_ns(30), 0)
-            self.assertEqual(clock.output_rate_offset_ns(60), 0)
+            self.assertEqual(clock.output_rate_offset_ns(60), -16_666_667)
             self.assertEqual(clock.output_rate_offset_ns(0), 0)
             self.assertEqual(clock.output_rate_offset_ns(float('nan')), 0)
-        with patch.object(clock, 'IPS', 30), patch.object(clock, 'FPS', 15):
-            self.assertEqual(clock.output_rate_offset_ns(), 33_333_333)
+            self.assertEqual(clock.output_rate_offset_ns(), 0)
 
     def test_output_rate_offset_is_used_for_index_selection(self):
         with patch.object(clock, 'launch_time', 0), \
@@ -53,6 +52,15 @@ class ClockTests(unittest.TestCase):
              patch.object(clock, 'midi_mode', False):
             self.assertEqual(clock.update_index(
                 10, pingpong=False, display_fps=15), (2, None))
+
+    def test_faster_output_advances_index_phase(self):
+        with patch.object(clock, 'launch_time', 0), \
+             patch.object(clock, 'IPS', 30), \
+             patch.object(clock, 'INDEX_TIME_OFFSET_MS', 0.0), \
+             patch.object(clock.time, 'time_ns', return_value=100_000_000), \
+             patch.object(clock, 'midi_mode', False):
+            self.assertEqual(clock.update_index(
+                10, pingpong=False, display_fps=60), (3, None))
 
 
 if __name__=='__main__':unittest.main()
