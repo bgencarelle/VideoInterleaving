@@ -168,6 +168,40 @@ failed metadata decode using the measured tone phase. Tone-assisted channel
 equalization (`m-reference`) and pulse-warp timing are opt-in; their defaults
 are off/baseline.
 
+### Exploratory extension: time-coded pilot tones (not implemented)
+
+The two packet-long reference tones could be switched in fixed intervals to
+form a low-rate control channel as well as a timing pattern. At each interval,
+the tone state could be neither tone, bin 1, bin 3, or both: four states, or at
+most two uncoded bits per interval. Keeping one tone continuously present would
+leave one bit per interval while preserving a steady reference. A known start
+pattern followed by coded states could carry small metadata (for example, a
+fold mode or packet-format identifier) and provide known transitions for a
+secondary timing or playback-speed check.
+
+This would use the existing low-frequency tone bins, not create more luma
+coefficient slots. It could potentially carry a fold/table identifier instead
+of using the fold's luma signature for detection, but the signature also
+measures noise on the folded luma slots. Tone decoding alone would not replace
+that per-slot noise estimate.
+
+The pulse preamble remains the primary packet-acquisition path. The current
+tone estimator expects packet-long steady tones, so time coding needs a new
+detector, a fixed chip schedule, transition shaping, and error protection. It
+must distinguish an intentionally absent tone from a tone erased by a notch,
+dropout, or noise; faster switching increases gross bit rate but leaves less
+time to detect each state. The existing metadata word is fully allocated, so a
+separate side channel could be useful, but its practical rate and robustness
+need measurement.
+
+An initial no-tone ablation only tested compatibility, not coded metadata:
+with the optional tones disabled, the synthetic live loopback still displayed
+71 pictures in 6 seconds at both M = 500 and M = 1,000, with picture scores
+within 0.2 points of the tone-on runs. In the offline 17-case stress run, most
+conditions scored 20 frames; the 0.3% jitter case scored 19. This suggests the
+current receiver can fall back when the tones are absent; it does not establish
+that an on/off code can be decoded over tape or real audio hardware.
+
 Packets may be pitch-shifted in the range 0.25×–4×. The receiver measures the
 resulting pulse scale and resamples the packet onto the reference grid. Faster
 playback increases both packet rate and carrier frequencies. With a 14 kHz
