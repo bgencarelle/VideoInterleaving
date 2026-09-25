@@ -84,7 +84,8 @@ def output_rate_offset_ns(display_fps=None, ips=None):
 
 
 def calculate_free_clock_index(total_images, pingpong=True, *, time_offset_ns=0,
-                               at_time_ns=None, publish=True, display_fps=None):
+                               at_time_ns=None, publish=True, display_fps=None,
+                               advance_for_fast_output=False):
     """
     Fast, mirrored ping‑pong index:
       0,1,2,...,N-1, N-1,N-2,...,1,0, 0,1,2...
@@ -94,9 +95,12 @@ def calculate_free_clock_index(total_images, pingpong=True, *, time_offset_ns=0,
     """
     # Use nanosecond precision with integer arithmetic to avoid floating point errors
     # Subtract the signed output/index period difference; the setting is a
-    # manual trim. Slow output backdates, while fast output advances the index.
+    # manual trim. Slow output backdates. Fast output only advances when the
+    # caller opts in, which is used for modem packet speeds.
     configured_offset_ns = int(round(float(INDEX_TIME_OFFSET_MS)*1_000_000))
     rate_offset_ns = output_rate_offset_ns(display_fps)
+    if rate_offset_ns < 0 and not advance_for_fast_output:
+        rate_offset_ns = 0
     current_time_ns = ((time.time_ns() if at_time_ns is None else int(at_time_ns))
                        + int(time_offset_ns) - configured_offset_ns - rate_offset_ns)
     elapsed_ns = current_time_ns - launch_time
@@ -142,7 +146,7 @@ def calculate_midi_clock_index(frame_counter, png_paths_len_param=None, frame_du
     return index, direction
 
 def update_index(total_images, pingpong=True, *, time_offset_ns=0, at_time_ns=None,
-                 display_fps=None):
+                 display_fps=None, advance_for_fast_output=False):
     """
     Update the index using MIDI data if in MIDI mode; otherwise use the free-clock calculation.
     """
@@ -163,4 +167,5 @@ def update_index(total_images, pingpong=True, *, time_offset_ns=0, at_time_ns=No
         return calculate_free_clock_index(total_images, pingpong,
                                           time_offset_ns=time_offset_ns,
                                           at_time_ns=at_time_ns,
-                                          display_fps=display_fps)
+                                          display_fps=display_fps,
+                                          advance_for_fast_output=advance_for_fast_output)

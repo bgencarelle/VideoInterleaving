@@ -53,14 +53,24 @@ class ClockTests(unittest.TestCase):
             self.assertEqual(clock.update_index(
                 10, pingpong=False, display_fps=15), (2, None))
 
-    def test_faster_output_advances_index_phase(self):
+    def test_fast_display_does_not_advance_index_phase(self):
         with patch.object(clock, 'launch_time', 0), \
              patch.object(clock, 'IPS', 30), \
              patch.object(clock, 'INDEX_TIME_OFFSET_MS', 0.0), \
-             patch.object(clock.time, 'time_ns', return_value=100_000_000), \
+             patch.object(clock.time, 'time_ns', return_value=90_000_000), \
              patch.object(clock, 'midi_mode', False):
             self.assertEqual(clock.update_index(
-                10, pingpong=False, display_fps=60), (3, None))
+                10, pingpong=False, display_fps=60), (2, None))
+
+    def test_fast_modem_output_can_advance_index_phase(self):
+        with patch.object(clock, 'launch_time', 0), \
+             patch.object(clock, 'IPS', 30), \
+             patch.object(clock, 'INDEX_TIME_OFFSET_MS', 0.0), \
+             patch.object(clock.time, 'time_ns', return_value=90_000_000), \
+             patch.object(clock, 'midi_mode', False):
+            self.assertEqual(clock.update_index(
+                10, pingpong=False, display_fps=60,
+                advance_for_fast_output=True), (3, None))
 
 
 if __name__=='__main__':unittest.main()
