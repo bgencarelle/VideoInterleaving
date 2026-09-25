@@ -171,6 +171,45 @@ an audio device. The transport is described in
 [`docs/transport_v7_spec.md`](docs/transport_v7_spec.md). Synthetic tests do not
 establish real tape/deck or telephone-band reliability.
 
+### Run the standalone V7 live sender and receiver
+
+For a direct camera, screen, or video-file link, use the standalone V7 tools
+instead of `main.py --mode modem` (which sends the baked image library above).
+Open two terminals from the repository root and start the receiver first:
+
+```bash
+# Terminal 1: audio input and display
+./vi.modem-receive --device "BlackHole 2ch"
+
+# Terminal 2: audio output; prompts for a capture source in an interactive shell
+./vi.modem-send --device "BlackHole 2ch"
+```
+
+For a non-interactive send, specify the source. `screen` is a simple live
+capture; for a clip, use `--source video --video-source PATH`:
+
+```bash
+./vi.modem-send --device "BlackHole 2ch" --source screen --encode-filter box
+# or
+./vi.modem-send --device "BlackHole 2ch" --source video \
+  --video-source clip.mp4 --encode-filter box
+```
+
+`--device` is required on both commands. Route the sender's output into the
+receiver's input; device names can differ on separate machines. List PortAudio
+devices with `.venv/bin/python -m sounddevice`. Press Ctrl-C in each terminal to
+stop it. `box` is the recommended encode filter. For the experimental fold,
+start both ends with the same setting:
+
+```bash
+./vi.modem-receive --device "BlackHole 2ch" --experimental-fold 500
+./vi.modem-send --device "BlackHole 2ch" --source screen \
+  --encode-filter box --experimental-fold 500
+```
+
+Use `1000` instead on both ends to select the larger fold. See
+[`test_modem_v7/HOWTO.md`](test_modem_v7/HOWTO.md) for prototype details.
+
 ## Runtime and development notes
 
 - The normal image clock is free-running. MTC/MIDI/LTC synchronization is not

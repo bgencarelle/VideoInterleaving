@@ -113,9 +113,46 @@ cycle includes the forward and return trips, while a one-way loop cycles once
 through the source sequence. The two length options are mutually exclusive.
 The WAV path does not invoke the project's stochastic folder selector.
 
-## Run live output
+## Standalone V7 live sender and receiver (experimental)
 
-List PortAudio devices using the receiver wrapper:
+For direct camera, screen, or video-file transmission, use the standalone
+`vi.modem-send` and `vi.modem-receive` wrappers. This path is separate from
+`main.py --mode modem`, which sends the baked image library described above.
+From the repository root, start the receiver first:
+
+```bash
+# Terminal 1
+./vi.modem-receive --device "BlackHole 2ch"
+
+# Terminal 2; interactively asks which capture source to use
+./vi.modem-send --device "BlackHole 2ch"
+```
+
+For non-interactive runs, pass a source explicitly:
+
+```bash
+./vi.modem-send --device "BlackHole 2ch" --source screen --encode-filter box
+./vi.modem-send --device "BlackHole 2ch" --source video \
+  --video-source clip.mp4 --encode-filter box
+```
+
+The device argument is required on both sides. Route the sender's output to the
+receiver's input; on a same-machine loopback, select the loopback device for
+both. The sender runs until Ctrl-C (or `--seconds N`); stop the receiver with
+Ctrl-C. Use `--experimental-fold 500` or `1000` on both commands to try the
+opt-in fold prototype. Folding requires the sender's `--encode-filter box` and
+the default fixture. See `test_modem_v7/HOWTO.md` for fold tables, loopback
+instructions, and regression tests.
+
+List available device names with `.venv/bin/python -m sounddevice`. On separate
+machines, use the actual output-device name for sending and input-device name
+for receiving; they do not need to match.
+
+## Live output from the baked-image application
+
+The remaining instructions here are for the baked-library path through
+`main.py --mode modem`, not the standalone `vi.modem-*` V7 capture tools above.
+List PortAudio devices using the legacy link checker:
 
 ```bash
 python utilities/modem_v3_check.py live-receive --list-devices
