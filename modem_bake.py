@@ -2,8 +2,50 @@
 import json
 from pathlib import Path
 import numpy as np
+from numba import njit
 from PIL import Image
 from animation_modem.imaging import PROFILES, source_size
+
+
+def _alpha_over_numpy(main, front, background):
+    """Reference for _alpha_over: straight-alpha over, as renderer.py does."""
+    main=main.astype(np.float32)/255
+    front=front.astype(np.float32)/255
+    rgb=np.asarray(background,dtype=np.float32)/255
+    rgb=main[:,:,:3]*main[:,:,3:4]+rgb*(1-main[:,:,3:4])
+    rgb=front[:,:,:3]*front[:,:,3:4]+rgb*(1-front[:,:,3:4])
+    return np.uint8(np.clip(np.rint(rgb*255),0,255))
+
+
+@njit(cache=True, fastmath=False)
+def _alpha_over_kernel(main, front, background, out):
+    scale=np.float32(255)
+    one=np.float32(1)
+    for y in range(main.shape[0]):
+        for x in range(main.shape[1]):
+            main_alpha=np.float32(main[y,x,3])/scale
+            front_alpha=np.float32(front[y,x,3])/scale
+            for c in range(3):
+                value=(np.float32(main[y,x,c])/scale*main_alpha+
+                       background[c]*(one-main_alpha))
+                value=(np.float32(front[y,x,c])/scale*front_alpha+
+                       value*(one-front_alpha))
+                value=np.rint(value*scale)
+                out[y,x,c]=np.uint8(min(max(value,np.float32(0)),scale))
+
+
+def _alpha_over(main, front, background):
+    """Background, main, float composited in float32 (bit-identical to
+    _alpha_over_numpy, one pass instead of a dozen full-array temporaries)."""
+    main,front=np.asarray(main),np.asarray(front)
+    if (main.dtype!=np.uint8 or front.dtype!=np.uint8 or main.shape!=front.shape
+            or main.ndim!=3 or main.shape[2]!=4):
+        return _alpha_over_numpy(main,front,background)
+    main,front=np.ascontiguousarray(main),np.ascontiguousarray(front)
+    out=np.empty(main.shape[:2]+(3,),np.uint8)
+    _alpha_over_kernel(main,front,
+                       np.asarray(background,dtype=np.float32)/np.float32(255),out)
+    return out
 
 
 class ModemLibrary:
@@ -72,14 +114,11 @@ class ModemLibrary:
             raise ValueError('Image index is outside the baked sequence')
         if not 0<=main_folder<len(self.mains) or not 0<=float_folder<len(self.floats):
             raise ValueError('Selected face/float folder is outside the manifest')
-        main=self.slabs[self.mains[main_folder]][index].astype(np.float32)/255
-        front=self.slabs[self.floats[float_folder]][index].astype(np.float32)/255
+        main=self.slabs[self.mains[main_folder]][index]
+        front=self.slabs[self.floats[float_folder]][index]
         source_dimensions=self.source_sizes[self.mains[main_folder]][index]
         # Same straight-alpha over order as renderer.py: background, main, float.
-        rgb=np.asarray(background,dtype=np.float32)/255
-        rgb=main[:,:,:3]*main[:,:,3:4]+rgb*(1-main[:,:,3:4])
-        rgb=front[:,:,:3]*front[:,:,3:4]+rgb*(1-front[:,:,3:4])
-        im=Image.fromarray(np.uint8(np.clip(np.rint(rgb*255),0,255)))
+        im=Image.fromarray(_alpha_over(main,front,background))
         if rotation%360:
             im=im.rotate(rotation%360,expand=True)
             if rotation%180==90:

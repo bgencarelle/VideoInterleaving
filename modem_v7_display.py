@@ -56,8 +56,15 @@ def packet(library, model, absolute, source_index, selection, *,
            encode_filter='nearest', loop=None, direction=1,
            pilot_tones=True, eof_marker=True):
     index, main_folder, float_folder = selection
-    image = library.composite(index, main_folder, float_folder,
-                              background, rotation, mirror)
+    if encode_filter == 'nearest' and hasattr(library, 'composite_nearest'):
+        # Nearest sampling reads 80x96 source pixels: composite only those
+        # (bit-identical; full-size compositing was most of the encode time).
+        image = library.composite_nearest(index, main_folder, float_folder,
+                                          _v7.PREPARED_SIZE, background,
+                                          rotation, mirror)
+    else:
+        image = library.composite(index, main_folder, float_folder,
+                                  background, rotation, mirror)
     values = _source_values(model, image, encode_filter)
     aspect_code = _v7.aspect_wire_code(
         image.info.get('source_dimensions', image.size))

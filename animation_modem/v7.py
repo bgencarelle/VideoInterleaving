@@ -98,10 +98,13 @@ def pulse_sample_scale_bounds(sample_rate=RATE):
     return PULSE_MIN_SCALE*factor, PULSE_MAX_SCALE*factor
 
 
+PREPARED_SIZE = (80, 96)        # (width, height) every source is resized to
+
+
 def prepare_image(image, encode_filter='lanczos'):
     """Prepare an RGB source without depending on the application imaging API."""
     resampling = getattr(Image.Resampling, encode_filter.upper())
-    return image.convert('RGB').resize((80, 96), resampling)
+    return image.convert('RGB').resize(PREPARED_SIZE, resampling)
 
 
 def image_values(image, shapes=V7_SHAPES, encode_filter='lanczos'):
@@ -126,6 +129,17 @@ def speed_pulse_stream(audio, speed=1.0, rate=RATE):
     ])
 
 
+@lru_cache(maxsize=4)
+def _pilot_tone_wave(length):
+    """Unit-amplitude pilot tone sum, N-periodic, long enough for any origin."""
+    period = np.arange(N)
+    one = sum(np.cos(2*np.pi*bin_index*period/N + PILOT_TONE_PHASES[bin_index])
+              for bin_index in PILOT_TONE_BINS)
+    wave = np.tile(one, int(length)//N + 2)
+    wave.setflags(write=False)
+    return wave
+
+
 def _add_pilot_tones(packet, counter, gate_preamble=False):
     """Add packet-long, body-RMS-normalized M references to one pulse packet.
 
@@ -137,11 +151,11 @@ def _add_pilot_tones(packet, counter, gate_preamble=False):
     body = packet[PULSE.SYNC_LEN:PULSE.SYNC_LEN+FRAME]
     body_rms = float(np.sqrt(np.mean(body*body)))
     amplitude = np.sqrt(2)*body_rms*10**(PILOT_TONE_REL_DB/20)
-    absolute = ((int(counter)-1)*PILOT_TONE_DURATION +
-                np.arange(len(packet)))
-    tone = sum(amplitude*np.cos(2*np.pi*bin_index*absolute/N +
-                                PILOT_TONE_PHASES[bin_index])
-               for bin_index in PILOT_TONE_BINS)
+    # Every tone bin divides N, so the sum repeats every N samples: read one
+    # precomputed period from the packet's phase origin instead of evaluating
+    # the cosines at ever larger absolute sample numbers.
+    origin = ((int(counter)-1)*PILOT_TONE_DURATION) % N
+    tone = amplitude*_pilot_tone_wave(len(packet))[origin:origin+len(packet)]
     if gate_preamble:
         # Test-only fallback for an edge-biased pulse detector. The phase keeps
         # running while the preamble amplitude is faded out and back in.
@@ -632,6 +646,16 @@ GROUP_STREAMS = np.asarray([0 if stream == 'M' else 1
 GROUP_QMULT = np.asarray([1 if q == 'I' else 1j for (_, _, q) in GROUPS])
 GROUP_SYMBOLS = np.asarray([
     phi + 3*np.arange(8) for ((b, phi), _, _) in GROUPS], int)
+# Flat (symbol, bin, stream) cell of every (group, member): I groups write the
+# real part of a cell and Q groups the imaginary part, and no two groups of
+# the same kind share a cell, so the scatter is a plain assignment.
+GROUP_CELLS = ((GROUP_SYMBOLS*65 + GROUP_BINS[:, None])*2 +
+               GROUP_STREAMS[:, None])
+GROUP_IS_I = GROUP_QMULT == 1
+CELLS_I = GROUP_CELLS[GROUP_IS_I].ravel()
+CELLS_Q = GROUP_CELLS[~GROUP_IS_I].ravel()
+assert len(np.unique(CELLS_I)) == CELLS_I.size
+assert len(np.unique(CELLS_Q)) == CELLS_Q.size
 SCATTERED_PILOTS = np.zeros((F, 65, 2), complex)
 for _s in range(F):
     for _b in CONTINUAL:
@@ -862,11 +886,9 @@ def encode_frame_coeffs(model, coeffs, counter, return_X=False):
     vals = model.gain[ranks]*c[ranks]
     vals[idx < 0] = 0
     tx = vals @ H8.T
-    np.add.at(X,
-              (GROUP_SYMBOLS.ravel(),
-               np.repeat(GROUP_BINS, 8),
-               np.repeat(GROUP_STREAMS, 8)),
-              (tx*GROUP_QMULT[:, None]).ravel())
+    cells = X.reshape(-1)
+    cells.real[CELLS_I] = tx[GROUP_IS_I].ravel()
+    cells.imag[CELLS_Q] = tx[~GROUP_IS_I].ravel()
     X += SCATTERED_PILOTS
     if return_X:
         return X

@@ -9,7 +9,8 @@ from functools import lru_cache
 import numpy as np
 from numba import njit
 from scipy.fft import dctn, idctn
-from scipy.signal import resample_poly, firwin, filtfilt
+from scipy.signal import resample_poly, firwin, filtfilt, lfilter_zi
+from scipy.signal._arraytools import odd_ext
 
 REFERENCE_RATE = 48000
 
@@ -313,6 +314,45 @@ def band_limited(packet, rate, reference=REFERENCE_RATE, top_bin=54, pad=64):
 
 EMIT_TAPS = 63
 
+
+@lru_cache(maxsize=8)
+def _emission_design(taps, ceiling_hz, rate):
+    """The emission FIR and its step-response steady state (filtfilt's zi).
+
+    Both are fixed per (taps, ceiling, rate); designing them for every packet
+    was about a third of the whole encode.
+    """
+    window = firwin(int(taps) | 1, ceiling_hz, fs=rate, window=('kaiser', 8.6))
+    zi = lfilter_zi(window, [1.0])
+    window.setflags(write=False)
+    zi.setflags(write=False)
+    return window, zi
+
+
+def _fir_filtfilt(b, zi, x):
+    """scipy.signal.filtfilt(b, [1], x, axis=0) for an FIR with a cached zi.
+
+    The same steps in the same arithmetic -- odd extension by 3*len(b), then a
+    forward and a backward np.convolve seeded with zi times the first sample --
+    so the result is bit-identical, without redesigning zi or going through
+    apply_along_axis on every call.
+    """
+    edge = 3*len(b)
+    ext = odd_ext(x, edge, axis=0)
+    n, keep = ext.shape[0], len(b)-1
+    dtype = np.result_type(b, ext, zi)
+    out = np.empty(ext.shape, dtype)
+    for channel in range(ext.shape[1]):
+        column = ext[:, channel].astype(dtype)
+        forward = np.convolve(b, column)
+        forward[:keep] += zi*column[0]
+        reverse = forward[n-1::-1]
+        backward = np.convolve(b, reverse)
+        backward[:keep] += zi*reverse[0]
+        out[:, channel] = backward[n-1::-1]
+    return out[edge:-edge]
+
+
 def bound_emission(packet, ceiling_hz, rate=REFERENCE_RATE, taps=EMIT_TAPS):
     """Hold the EMITTED spectrum under `ceiling_hz`, not just the carriers.
 
@@ -346,8 +386,11 @@ def bound_emission(packet, ceiling_hz, rate=REFERENCE_RATE, taps=EMIT_TAPS):
     if not ceiling_hz or ceiling_hz >= rate/2:
         return packet
     peak = float(np.max(np.abs(packet)))
-    window = firwin(int(taps) | 1, ceiling_hz, fs=rate, window=('kaiser', 8.6))
-    out = filtfilt(window, [1.0], packet, axis=0)
+    window, zi = _emission_design(int(taps), float(ceiling_hz), float(rate))
+    if packet.ndim == 2 and len(packet) > 3*len(window):
+        out = _fir_filtfilt(window, zi, packet)
+    else:
+        out = filtfilt(window, [1.0], packet, axis=0)
     got = float(np.max(np.abs(out)))
     if peak > 0 and got > 0:
         # Same argument as band_limited: the training symbols carry the scale,
@@ -367,6 +410,21 @@ def speed_length(samples, rate, speed=1.0, reference=REFERENCE_RATE):
         raise ValueError('speed must be finite and positive')
     return max(1, int(round(float(samples)*float(rate)/(reference*speed))))
 
+@lru_cache(maxsize=32)
+def _speed_filter(up, down, dtype):
+    """resample_poly's own default filter for (up, down), designed once.
+
+    Passing it back as `window` gives bit-identical output: resample_poly
+    copies it, scales it by `up` and pads it exactly as it does the filter it
+    would otherwise design -- a 20*max(up, down)+1-tap firwin on every packet.
+    """
+    max_rate = max(up, down)
+    window = np.asarray(firwin(20*max_rate + 1, 1./max_rate,
+                               window=('kaiser', 5.0)), dtype=np.dtype(dtype))
+    window.setflags(write=False)
+    return window
+
+
 def speed_resample(samples, rate, speed=1.0, reference=REFERENCE_RATE):
     """Time-compress a reference packet for a real output sample clock.
 
@@ -380,7 +438,9 @@ def speed_resample(samples, rate, speed=1.0, reference=REFERENCE_RATE):
     if target == len(samples):
         return np.ascontiguousarray(samples)
     ratio = Fraction(target, len(samples)).limit_denominator(256)
-    out = resample_poly(samples, ratio.numerator, ratio.denominator, axis=0)
+    out = resample_poly(samples, ratio.numerator, ratio.denominator, axis=0,
+                        window=_speed_filter(ratio.numerator, ratio.denominator,
+                                             samples.dtype.str))
     if len(out) < target:
         out = np.concatenate((out, np.zeros((target-len(out), *out.shape[1:]),
                                              dtype=out.dtype)))

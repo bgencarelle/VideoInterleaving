@@ -5,6 +5,7 @@ folder lists, image loader, and sliding FIFO, while the modem keeps its own
 V7 timing and audio output path.
 """
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from pathlib import Path
 import threading
 
@@ -189,5 +190,92 @@ class RuntimeImageLibrary:
             image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
         return image
 
+    def composite_nearest(self, index, main_folder, float_folder, size,
+                          background=(4, 4, 4), rotation=0, mirror=False):
+        """``composite(...).resize(size, NEAREST)``, compositing only the
+        pixels that nearest-neighbour sampling reads.
+
+        Compositing is per pixel and nearest sampling picks whole source
+        pixels, so the result is bit-identical to the full-size path, but a
+        1080x1920 source composites 7,680 pixels instead of about two million
+        (28 ms -> well under 1 ms). ``info['source_dimensions']`` carries the
+        full composite size, which the full path reports as ``image.size``.
+        """
+        layers = self._layers_for(int(index) % self.frames,
+                                  (int(main_folder), int(float_folder)))
+        main, front, main_sbs, front_sbs = layers
+        main, front = self._layer_array(main), self._layer_array(front)
+        height, width = main.shape[0], self._layer_width(main, main_sbs)
+        picked, full_size = _nearest_samples(width, height, int(rotation) % 360,
+                                             bool(mirror), tuple(size))
+        filled = picked < 0
+        rows, cols = np.divmod(np.where(filled, 0, picked), width)
+        main_pixels = self._sampled_rgba(main, main_sbs, rows, cols)
+        front_height, front_width = (front.shape[0],
+                                     self._layer_width(front, front_sbs))
+        inside = (rows < front_height) & (cols < front_width)
+        front_pixels = self._sampled_rgba(
+            front, front_sbs, np.where(inside, rows, 0), np.where(inside, cols, 0))
+        front_pixels[~inside] = 0                  # outside the cropped float
+        image = Image.new('RGBA', tuple(size), tuple(background) + (255,))
+        image.alpha_composite(Image.fromarray(main_pixels, 'RGBA'))
+        image.alpha_composite(Image.fromarray(front_pixels, 'RGBA'))
+        rgb = np.array(image.convert('RGB'))
+        rgb[filled] = 0                            # rotate()'s black fill
+        image = Image.fromarray(rgb, 'RGB')
+        image.info['source_dimensions'] = full_size
+        return image
+
+    @staticmethod
+    def _layer_array(image):
+        if isinstance(image, dict):
+            raise ValueError('ASCII pre-baked data cannot be a modem source')
+        array = np.asarray(image)
+        if array.ndim != 3 or array.shape[2] not in (3, 4):
+            raise ValueError(f'Unsupported modem source image shape: {array.shape}')
+        return array
+
+    @staticmethod
+    def _layer_width(array, sbs):
+        if not sbs:
+            return array.shape[1]
+        if array.shape[1] % 2:
+            raise ValueError('SBS image width must be even')
+        return array.shape[1] // 2
+
+    @staticmethod
+    def _sampled_rgba(array, sbs, rows, cols):
+        """The pixels ``_rgba`` would hold at (rows, cols), as uint8 RGBA."""
+        out = np.empty(rows.shape + (4,), np.uint8)
+        if sbs:
+            half = array.shape[1] // 2
+            out[..., :3] = array[rows, cols, :3].astype(np.uint8)
+            out[..., 3] = array[rows, cols + half, 0].astype(np.uint8)
+        elif array.shape[2] == 4:
+            out[...] = array[rows, cols].astype(np.uint8)
+        else:
+            out[..., :3] = array[rows, cols, :3].astype(np.uint8)
+            out[..., 3] = 255
+        return out
+
     def close(self):
         self._pool.shutdown(wait=True, cancel_futures=True)
+
+
+@lru_cache(maxsize=16)
+def _nearest_samples(width, height, rotation, mirror, size):
+    """Source pixel (flat index, -1 for rotate's fill) behind every pixel of
+    ``composite(...).resize(size, NEAREST)``, found by sending an index image
+    through the same rotate, mirror and resize, and the full composite size.
+    """
+    index = np.arange(1, width*height + 1, dtype=np.int32).reshape(height, width)
+    image = Image.fromarray(index)                         # mode 'I'
+    if rotation:
+        image = image.rotate(rotation, expand=True)
+    if mirror:
+        image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+    full_size = image.size
+    picked = np.asarray(image.resize(size, Image.Resampling.NEAREST),
+                        np.int64) - 1
+    picked.setflags(write=False)
+    return picked, full_size
