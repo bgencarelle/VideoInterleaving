@@ -49,8 +49,8 @@ VSYNC = True  # or False, depending on your preference
 # Frames per Second and Images Per Second (IPS)
 IPS = 30
 FPS = 60
-# Extra milliseconds to subtract after output-rate compensation. Positive values
-# backdate the sampled time; negative values advance it.
+# Common milliseconds subtracted from the free-running index clock. Keep this
+# equal on synchronized units; positive values backdate all of them together.
 INDEX_TIME_OFFSET_MS = 0.0
 
 # Buffer settings: The BUFFER_SIZE is derived from IPS (e.g., 15 if IPS == 60)

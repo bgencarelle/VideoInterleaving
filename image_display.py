@@ -220,13 +220,6 @@ def run_display(clock_source=CLOCK_MODE):
     
     is_web = server_mode and not is_ascii
     is_headless = is_web or is_ascii
-    # ASCII and ASCIIWeb share this path and the same client presentation cap.
-    if is_ascii:
-        display_fps = getattr(settings, 'ASCII_FPS', FPS)
-    elif is_web:
-        display_fps = capture_rate
-    else:
-        display_fps = FPS
 
     # --- LOGGING ---
     if is_web:
@@ -336,8 +329,7 @@ def run_display(clock_source=CLOCK_MODE):
             print(f"[DISPLAY] Source image: {src_w}x{src_h} | Screen: unknown")
 
     # 4. Loader & Buffer Init
-    index, _ = update_index(png_paths_len, PINGPONG,
-                            display_fps=display_fps)
+    index, _ = update_index(png_paths_len, PINGPONG)
     
     update_folder_selection(index, float_folder_count, main_folder_count)
 
@@ -409,8 +401,7 @@ def run_display(clock_source=CLOCK_MODE):
                     _hide_cursor_reliable(window)
 
             prev = index
-            index, _ = update_index(png_paths_len, PINGPONG,
-                                    display_fps=display_fps)
+            index, _ = update_index(png_paths_len, PINGPONG)
 
             if index != prev:
                 update_folder_selection(index, float_folder_count, main_folder_count)

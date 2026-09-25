@@ -3,7 +3,6 @@
 import time
 import datetime
 import decimal
-import math
 from zoneinfo import ZoneInfo
 
 from globals import control_data_dictionary
@@ -68,27 +67,8 @@ def set_clock_mode(mode=None):
         import midi_control
     print("Clock mode set to", list(VALID_MODES.keys())[list(VALID_MODES.values()).index(clock_mode)])
 
-def output_rate_offset_ns(display_fps=None, ips=None):
-    """Return the excess output period when output is slower than the index clock."""
-    if display_fps is None:
-        return 0
-    fps = display_fps
-    ips = IPS if ips is None else ips
-    try:
-        fps, ips = float(fps), float(ips)
-    except (TypeError, ValueError):
-        return 0
-    if not (math.isfinite(fps) and math.isfinite(ips)) or fps <= 0 or ips <= 0:
-        return 0
-    output_period_ns = 1_000_000_000/fps
-    index_period_ns = 1_000_000_000/ips
-    if output_period_ns <= index_period_ns:
-        return 0
-    return int(round(output_period_ns - index_period_ns))
-
-
 def calculate_free_clock_index(total_images, pingpong=True, *, time_offset_ns=0,
-                               at_time_ns=None, publish=True, display_fps=None):
+                               at_time_ns=None, publish=True):
     """
     Fast, mirrored ping‑pong index:
       0,1,2,...,N-1, N-1,N-2,...,1,0, 0,1,2...
@@ -97,12 +77,11 @@ def calculate_free_clock_index(total_images, pingpong=True, *, time_offset_ns=0,
     for multi-machine setups with chrony-synchronized clocks.
     """
     # Use nanosecond precision with integer arithmetic to avoid floating point errors
-    # Backdate only when the output period exceeds an IPS interval; the setting
-    # is an additional manual trim.
+    # Keep this phase common across modes. A configured offset is safe for
+    # synchronized displays only when every unit uses the same value.
     configured_offset_ns = int(round(float(INDEX_TIME_OFFSET_MS)*1_000_000))
-    rate_offset_ns = output_rate_offset_ns(display_fps)
     current_time_ns = ((time.time_ns() if at_time_ns is None else int(at_time_ns))
-                       + int(time_offset_ns) - configured_offset_ns - rate_offset_ns)
+                       + int(time_offset_ns) - configured_offset_ns)
     elapsed_ns = current_time_ns - launch_time
     # Calculate index using integer math: (elapsed_ns * IPS) // 1_000_000_000
     raw_index = (elapsed_ns * IPS) // 1_000_000_000
@@ -145,8 +124,7 @@ def calculate_midi_clock_index(frame_counter, png_paths_len_param=None, frame_du
     index = max(0, min(index, png_len))
     return index, direction
 
-def update_index(total_images, pingpong=True, *, time_offset_ns=0, at_time_ns=None,
-                 display_fps=None):
+def update_index(total_images, pingpong=True, *, time_offset_ns=0, at_time_ns=None):
     """
     Update the index using MIDI data if in MIDI mode; otherwise use the free-clock calculation.
     """
@@ -166,5 +144,4 @@ def update_index(total_images, pingpong=True, *, time_offset_ns=0, at_time_ns=No
     else:
         return calculate_free_clock_index(total_images, pingpong,
                                           time_offset_ns=time_offset_ns,
-                                          at_time_ns=at_time_ns,
-                                          display_fps=display_fps)
+                                          at_time_ns=at_time_ns)

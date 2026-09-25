@@ -1555,10 +1555,7 @@ def run_scope(clock_source=None):
                 stipple_emitter.gamma = walk_gamma
                 stipple_emitter.trim = trim
 
-            # Use the actual audio trace rate. ScopeWeb samples that output
-            # downstream, so its preview cap must not shift the source index.
-            index, _ = update_index(png_paths_len, PINGPONG,
-                                    display_fps=fps)
+            index, _ = update_index(png_paths_len, PINGPONG)
             if index != prev_index:
                 # sole caller of the stateful selector in this mode
                 update_folder_selection(index, float_folder_count,

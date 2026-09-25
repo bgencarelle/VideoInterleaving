@@ -119,7 +119,7 @@ runpy.run_path(target, run_name='__main__')
                 for item in decoded))
             self.assertEqual(
                 [item.diag['source_index'] for item in decoded[:4]],
-                [0, 0, 2, 1])
+                [0, 1, 2, 1])
             self.assertTrue(all(item.diag['aspect_code'] == 3
                                 for item in decoded[:4]))
 
@@ -167,7 +167,7 @@ runpy.run_path(target, run_name='__main__')
                 for item in decoded))
             self.assertEqual(
                 [item.diag['source_index'] for item in decoded[:4]],
-                [1, 0, 2, 0])
+                [0, 2, 1, 1])
             self.assertTrue(all(item.diag['aspect_code'] == 3
                                 for item in decoded[:4]))
 
