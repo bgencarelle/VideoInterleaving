@@ -237,8 +237,7 @@ def run_modem(args):
                     index, _ = index_calculator.calculate_free_clock_index(
                         library.frames, pingpong, at_time_ns=at_time_ns,
                         publish=False,
-                        display_fps=_v7.RATE/packet_samples,
-                        advance_for_fast_output=True)
+                        display_fps=_v7.RATE/packet_samples)
                     prefetch(index, folders)
                     audio, report = make_packet(n + 1, index, folders,
                                                 at_time_ns)
@@ -263,8 +262,7 @@ def run_modem(args):
                 started = time.perf_counter()
                 index, _ = index_calculator.update_index(
                     library.frames, settings.PINGPONG,
-                    display_fps=output.fps,
-                    advance_for_fast_output=True)
+                    display_fps=output.fps)
                 index = max(0, min(int(index), library.frames - 1))
                 if output.ready():
                     slot = None
@@ -277,8 +275,7 @@ def run_modem(args):
                                 library.frames, settings.PINGPONG,
                                 at_time_ns=target_time_ns,
                                 time_offset_ns=index_offset_ns, publish=False,
-                                display_fps=output.fps,
-                                advance_for_fast_output=True)
+                                display_fps=output.fps)
                             index = max(0, min(int(index), library.frames - 1))
                     folders, previous = _folders(args, library, index, selected, previous)
                     prefetch(index, folders)
