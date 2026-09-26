@@ -1,6 +1,5 @@
 import threading
 import socket
-import time
 import settings
 from shared_state import exchange_ascii
 from SimpleWebSocketServer import SimpleWebSocketServer, WebSocket
@@ -78,22 +77,11 @@ class AsciiWebSocket(WebSocket):
 
 
 def broadcast_loop():
-    """Pushes frames to all connected WS clients."""
-    # Same rate limit the telnet server applies (ascii_server.py). Without
-    # this the WS clients got every published frame -- roughly double the
-    # intended rate -- and xterm.js re-renders the whole grid per frame, so
-    # the extra work was pure lag on a slow client.
-    min_interval = 1.0 / getattr(settings, 'ASCII_FPS', 15)
-    last_send_time = 0.0
+    """Push each frame published by the ASCII_FPS-paced image producer."""
     while True:
-        # Blocking Wait
         frame_data = exchange_ascii.get_frame()
 
         if not frame_data:
-            continue
-
-        now = time.monotonic()
-        if now - last_send_time < min_interval:
             continue
 
         try:

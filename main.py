@@ -337,8 +337,8 @@ def configure_runtime():
                         help="Additional receiver allowance; scheduled transmission is already compensated")
     parser.add_argument("--modem-receive-margin-ms", type=float, default=15.0,
                         help="Time after packet completion reserved for input/decode/GUI (default 15)")
-    parser.add_argument("--modem-prepare-ms", type=float, default=10.0,
-                        help="Minimum encoding lead before a send deadline (default 10)")
+    parser.add_argument("--modem-prepare-ms", type=float, default=25.0,
+                        help="Minimum encoding lead before a send deadline (default 25)")
     parser.add_argument("--modem-speed", "--speed", dest="modem_speed",
                         type=float, default=1.0,
                         help="V7 playback speed 0.25..4x (default 1; 1x is tape-safe). "

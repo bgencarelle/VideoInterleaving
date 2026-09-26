@@ -203,11 +203,6 @@ def run_display(clock_source=CLOCK_MODE):
     state.fullscreen = FULLSCREEN_MODE
     last_actual_fps = 0.0  # Initialize to 0, will be calculated from actual frame times
 
-    capture_rate = SERVER_CAPTURE_RATE
-    capture_interval = 1.0 / capture_rate
-    last_server_capture = time.time()
-    last_captured_index = None
-
     # Monitor Counters
     fifo_miss_count = 0
     last_fifo_miss = -1
@@ -225,10 +220,18 @@ def run_display(clock_source=CLOCK_MODE):
     
     is_web = server_mode and not is_ascii
     is_headless = is_web or is_ascii
-    # The web loop has no visible output between captures. Run it at the
-    # capture cadence instead of drawing at 60 Hz while publishing 15 frames/s.
+    # ASCII has its own rate knob: unlike MJPEG, its small text frames are not
+    # constrained by the web capture bandwidth setting.
+    capture_rate = (getattr(settings, "ASCII_FPS", 15)
+                    if is_ascii else SERVER_CAPTURE_RATE)
+    capture_interval = 1.0 / capture_rate
+    last_server_capture = time.time()
+    last_captured_index = None
+    # Headless web/ASCII loops have no local window between captures. Run them
+    # at their output cadence instead of rendering extra frames that are never
+    # published.
     loop_fps = FPS
-    if is_web and capture_rate and capture_rate > 0:
+    if (is_web or is_ascii) and capture_rate and capture_rate > 0:
         loop_fps = min(FPS, capture_rate) if FPS and FPS > 0 else capture_rate
 
     # --- LOGGING ---
@@ -409,7 +412,25 @@ def run_display(clock_source=CLOCK_MODE):
         future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
 
         frame_times = deque(maxlen=60)
-        frame_start = time.perf_counter()
+        ticker_period = (1.0 / loop_fps
+                         if loop_fps and loop_fps > 0 else None)
+        capture_period = ticker_period if is_headless else None
+        next_tick = time.perf_counter()
+
+        def pace_iteration(iteration_start):
+            """Wait for the next monotonic frame deadline; skip missed ticks."""
+            nonlocal next_tick
+            if ticker_period is not None:
+                next_tick += ticker_period
+                now = time.perf_counter()
+                remaining = next_tick - now
+                if remaining < 0:
+                    # Do not run catch-up frames after a slow decode/render.
+                    next_tick += (int((-remaining) // ticker_period) + 1) * ticker_period
+                    remaining = next_tick - now
+                if remaining > 0:
+                    time.sleep(remaining)
+            return time.perf_counter() - iteration_start
         
         # Counter for periodic mouse hiding (every 60 frames ~= 2 seconds at 30fps)
         cursor_hide_counter = 0
@@ -418,6 +439,7 @@ def run_display(clock_source=CLOCK_MODE):
         mouse_jiggled = False
 
         while (state.run_mode and not is_headless) or is_headless:
+            iteration_start = time.perf_counter()
             successful_display = False
 
             if not is_headless and has_gl and glfw:
@@ -477,13 +499,8 @@ def run_display(clock_source=CLOCK_MODE):
                         future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
 
                         # Timing
-                        now = time.perf_counter()
-                        dt = now - frame_start
+                        dt = pace_iteration(iteration_start)
                         frame_times.append(dt)
-                        frame_start = now
-                        if FPS:
-                            s = (1.0 / loop_fps) - dt
-                            if s > 0: time.sleep(s)
 
                         # Calculate FPS from frame times (handle both single and multiple frames)
                         if len(frame_times) >= 1:
@@ -549,7 +566,12 @@ def run_display(clock_source=CLOCK_MODE):
             should_capture = False
             if is_headless or not has_gl:
                 now = time.time()
-                if (index != last_captured_index) and (now - last_server_capture > capture_interval):
+                # Headless output is already paced by the monotonic ticker
+                # below. Applying the same interval again against wall-clock
+                # time can reject every other tick at a matched output rate.
+                interval_elapsed = (capture_period is not None or
+                                    now - last_server_capture > capture_interval)
+                if index != last_captured_index and interval_elapsed:
                     should_capture = True
                     last_server_capture = now
                     last_captured_index = index
@@ -631,13 +653,8 @@ def run_display(clock_source=CLOCK_MODE):
                     _hide_cursor_reliable(window)
                     cursor_hide_counter = 0
 
-            now = time.perf_counter()
-            dt = now - frame_start
+            dt = pace_iteration(iteration_start)
             frame_times.append(dt)
-            frame_start = now
-            if FPS:
-                s = (1.0 / loop_fps) - dt
-                if s > 0: time.sleep(s)
 
             # Calculate FPS from frame times (handle both single and multiple frames)
             if len(frame_times) >= 1:

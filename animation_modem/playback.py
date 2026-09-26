@@ -61,6 +61,9 @@ class PacketOutput:
         self.error = None
         self.lock = threading.Lock()
         self.done = threading.Event()
+        self.ready_event = threading.Event()
+        self.ready_event.set()
+        self.callback_progress = threading.Event()
         self.sd = sounddevice()
         # No samplerate= here on purpose. The packet is a sample array, not a
         # duration, so it plays correctly out of a device running at whatever
@@ -71,7 +74,7 @@ class PacketOutput:
         self.stream = self.sd.OutputStream(
             channels=max(channels)+1, dtype='float32',
             device=device, blocksize=256, latency=requested_latency,
-            callback=self._callback, finished_callback=self.done.set)
+            callback=self._callback, finished_callback=self._on_finished)
         # Whatever the device reported once it was open. Everything below that
         # converts samples to seconds uses this, never a constant.
         self.rate = float(self.stream.samplerate)
@@ -109,6 +112,21 @@ class PacketOutput:
         with self.lock:
             return self.pending is None
 
+    def wait_ready(self):
+        """Block until the audio callback has taken the pending packet."""
+        while True:
+            self.check()
+            with self.lock:
+                if self.pending is None:
+                    return True
+                self.ready_event.clear()
+            self.ready_event.wait()
+
+    def _on_finished(self):
+        self.done.set()
+        self.ready_event.set()
+        self.callback_progress.set()
+
     def reserve(self, prepare_ms=10, receive_margin_ms=15):
         """Reserve a send boundary; map its completion to the shared wall clock.
 
@@ -119,8 +137,21 @@ class PacketOutput:
         if not self.ready():return None
         self.scheduled = True
         if not self.started:
+            initial_clock = float(self.stream.time)
             self.stream.start()
             self.started = True
+            # Some audio servers deliver a few callbacks while their stream
+            # clock is still settling. Wait for it to advance by two blocks so
+            # the first DAC reservation uses the running device clock.
+            clock_ready = initial_clock + 2*256/self.rate
+            deadline = time.monotonic() + 5.0
+            while self.stream.time < clock_ready:
+                remaining = deadline-time.monotonic()
+                if remaining <= 0 or not self.callback_progress.wait(remaining):
+                    self.check()
+                    raise RuntimeError('Modem audio clock did not start advancing')
+                self.callback_progress.clear()
+                self.check()
         before = time.time_ns()
         now = self.stream.time
         after = time.time_ns()
@@ -149,6 +180,7 @@ class PacketOutput:
                 raise RuntimeError('Wait for ready() before submitting another packet')
             self.pending = prepared
             self.pending_start = slot.start_time if slot else None
+            self.ready_event.clear()
             if slot:self.next_start = slot.start_time + self.emit_frame/self.rate
         if not self.started:
             self.stream.start()
@@ -156,6 +188,7 @@ class PacketOutput:
         return True
 
     def _callback(self, outdata, frames, timing, status):
+        self.callback_progress.set()
         outdata.fill(0)
         if status.output_underflow:
             self.underflows += 1
@@ -178,6 +211,7 @@ class PacketOutput:
                                 continue  # Device missed the deadline; never present stale metadata.
                         self.current, self.pending = self.pending, None
                         self.pending_start = None
+                        self.ready_event.set()
                         if self.current is None:
                             eof = self.finishing
                             if not eof and not self.scheduled:self.starvations += 1

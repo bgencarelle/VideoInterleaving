@@ -229,7 +229,7 @@ target; it is no longer a manually guessed total transmission offset. Prefer
 `--modem-receive-margin-ms` to set the allowance directly, e.g. 30 on a slower
 receiver. Total allowance must be 0..2000 ms. Increasing it gives the receiver
 more time to finish before the chosen shared timestamp; it does not change the
-index formula. `--modem-prepare-ms` defaults to 10 and grows when measured image
+index formula. `--modem-prepare-ms` defaults to 25 and grows when measured image
 composition/encoding needs more time. Neither setting guarantees a hardware deadline.
 
 MIDI clocks retain immediate, untimed packets since future input is unknown.

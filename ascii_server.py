@@ -2,7 +2,6 @@ import socketserver
 import socket
 import sys
 import threading
-import time
 import settings
 from shared_state import exchange_ascii, ascii_client_count
 from server_config import get_config
@@ -62,26 +61,15 @@ class AsciiHandler(socketserver.BaseRequestHandler):
             # 3. Setup Terminal
             self.request.sendall(ANSI_CLEAR)
 
-            # Timing setup
-            target_fps = getattr(settings, 'ASCII_FPS', 15)
-            min_interval = 1.0 / target_fps
-            last_send_time = 0
-
             while True:
-                # 4. Blocking Wait (0% CPU usage)
-                # Waits for the main display loop to signal a new frame
+                # The producer publishes on the ASCII_FPS ticker. Wait for
+                # each new frame instead of adding a second, drifting rate cap.
                 frame_data = exchange_ascii.get_frame()
 
                 if not frame_data:
                     break
 
-                # 5. Rate Limiting (Frame Skip)
-                # If frames are coming too fast, skip sending to save bandwidth
-                now = time.monotonic()
-                if now - last_send_time < min_interval:
-                    continue
-
-                # 6. Payload Construction
+                # Payload Construction
                 try:
                     if isinstance(frame_data, bytes):
                         # Optimization: If it's already bytes, don't decode/encode
@@ -92,7 +80,6 @@ class AsciiHandler(socketserver.BaseRequestHandler):
                         payload = (f"\033[H{frame_data}").encode('utf-8', errors='ignore')
 
                     self.request.sendall(payload)
-                    last_send_time = now
 
                 except (BrokenPipeError, ConnectionResetError):
                     break

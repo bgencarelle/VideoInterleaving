@@ -264,7 +264,7 @@ def run_modem(args):
                 runtime_library.close()
         return
 
-    poll_seconds = 1 / (settings.FPS or 60)
+    retry_seconds = 1 / (settings.FPS or 60)
     midi_input = None
     try:
         midi_input = _open_midi_input(index_calculator)
@@ -274,43 +274,46 @@ def run_modem(args):
             print(f'[MODEM/V7] output {output.rate:g} Hz, {output.fps:.2f} fps')
             while not args.modem_frames or sent < args.modem_frames:
                 started = time.perf_counter()
+                output.wait_ready()
                 index, _ = index_calculator.update_index(library.frames, settings.PINGPONG)
                 index = max(0, min(int(index), library.frames - 1))
-                if output.ready():
-                    slot = None
-                    target_time_ns = None
-                    next_index = None
-                    if not index_calculator.midi_mode:
-                        slot = output.reserve(prepare_ms, receive_margin_ms)
-                        if slot is not None:
-                            target_time_ns = slot.target_time_ns
-                            index, _ = index_calculator.calculate_free_clock_index(
-                                library.frames, settings.PINGPONG,
-                                at_time_ns=target_time_ns,
-                                time_offset_ns=index_offset_ns, publish=False)
-                            index = max(0, min(int(index), library.frames - 1))
-                            next_at_time_ns = (
-                                target_time_ns +
-                                round(output.emit_frame/output.rate * 1_000_000_000))
-                            next_index, _ = index_calculator.calculate_free_clock_index(
-                                library.frames, settings.PINGPONG,
-                                at_time_ns=next_at_time_ns,
-                                time_offset_ns=index_offset_ns, publish=False)
-                            next_index = max(0, min(int(next_index),
-                                                    library.frames - 1))
-                    folders, previous = _folders(args, library, index, selected, previous)
-                    prefetch(index, folders, next_index)
-                    audio, report = make_packet(sent + 1, index, folders,
-                                                target_time_ns)
-                    prepare_ms = max(args.modem_prepare_ms, report['encode_ms'] * 1.5)
-                    if output.submit(audio, slot):
-                        sent += 1
-                        if args.modem_log_frames:
-                            report['target_time_ns'] = target_time_ns
-                            print(json.dumps(report), flush=True)
-                delay = poll_seconds - (time.perf_counter() - started)
-                if delay > 0:
-                    time.sleep(delay)
+                slot = None
+                target_time_ns = None
+                next_index = None
+                if not index_calculator.midi_mode:
+                    slot = output.reserve(prepare_ms, receive_margin_ms)
+                    if slot is not None:
+                        target_time_ns = slot.target_time_ns
+                        index, _ = index_calculator.calculate_free_clock_index(
+                            library.frames, settings.PINGPONG,
+                            at_time_ns=target_time_ns,
+                            time_offset_ns=index_offset_ns, publish=False)
+                        index = max(0, min(int(index), library.frames - 1))
+                        next_at_time_ns = (
+                            target_time_ns +
+                            round(output.emit_frame/output.rate * 1_000_000_000))
+                        next_index, _ = index_calculator.calculate_free_clock_index(
+                            library.frames, settings.PINGPONG,
+                            at_time_ns=next_at_time_ns,
+                            time_offset_ns=index_offset_ns, publish=False)
+                        next_index = max(0, min(int(next_index),
+                                                library.frames - 1))
+                folders, previous = _folders(args, library, index, selected, previous)
+                prefetch(index, folders, next_index)
+                audio, report = make_packet(sent + 1, index, folders,
+                                            target_time_ns)
+                prepare_ms = max(args.modem_prepare_ms, report['encode_ms'] * 1.5)
+                if output.submit(audio, slot):
+                    sent += 1
+                    if args.modem_log_frames:
+                        report['target_time_ns'] = target_time_ns
+                        print(json.dumps(report), flush=True)
+                else:
+                    # A missed reservation leaves the output ready. Yield before
+                    # recomputing/re-encoding rather than retrying in a tight loop.
+                    delay = retry_seconds - (time.perf_counter() - started)
+                    if delay > 0:
+                        time.sleep(delay)
             output.finish()
     finally:
         try:
