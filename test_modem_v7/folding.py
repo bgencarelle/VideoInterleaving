@@ -151,14 +151,18 @@ class FoldCodec:
         u = np.clip(full[self.guests]/self.sd_guest, -U_CLIP, U_CLIP)
         return full, coeffs, h, u
 
-    def encode(self, values):
-        """V7 values whose coefficients carry the folded symbols."""
+    def encode_coefficients(self, values):
+        """Return folded source coefficients, before the inverse DCT to pixels."""
         _, coeffs, h, u = self._split(values)
         symbol = self.D*np.round(h/self.D) + self.beta*u
         if self.signature:
             symbol[-self.signature:] = SIGNATURE_STEPS*self.D*self.pattern
         coeffs[self.hosts] = self.model.mu[self.hosts] + self.sd_host*symbol/np.sqrt(self.power)
-        return v7.values_from(self.model, coeffs)
+        return coeffs
+
+    def encode(self, values):
+        """V7 values whose coefficients carry the folded symbols."""
+        return v7.values_from(self.model, self.encode_coefficients(values))
 
     # -------------------------------------------------------------- receiver
     def _unfold(self, symbol):

@@ -145,6 +145,27 @@ class ExperimentalFoldTests(unittest.TestCase):
             self.assertTrue(decoded['valid'], decoded['reason'])
             self.assertEqual(decoded['status']['fold_slots'], 500)
 
+    def test_live_folded_coeff_encoder_is_wire_identical(self):
+        coeffs = self.fold.encode_coefficients(self.model, self.values)
+        folded_values = self.fold.encode(self.model, self.values)
+        for counter in (1, 2, 6, 7, 8):
+            with self.subTest(counter=counter):
+                direct = v7_live._encode_pulse_frame_coeffs(
+                    self.model, coeffs, counter, aspect_code=6,
+                    source_index=counter+10, eof_marker=True)
+                reference = v7.encode_pulse_frame(
+                    self.model, folded_values, counter, aspect_code=6,
+                    source_index=counter+10, pilot_tones=False,
+                    eof_marker=True)
+                np.testing.assert_array_equal(direct, reference)
+                if counter == 1:
+                    coded_direct = v7_live._add_coded_pilots(
+                        direct, counter, self.fold.slots)
+                    coded_reference = v7_live._add_coded_pilots(
+                        reference, counter, self.fold.slots)
+                    np.testing.assert_array_equal(coded_direct,
+                                                  coded_reference)
+
     def test_coded_status_authorizes_only_its_matching_fold_table(self):
         class Result:
             diag = {'pilot_timing': {'coded_status_mode': 1}}

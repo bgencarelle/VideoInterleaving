@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+from functools import lru_cache
 import json
 import math
 
@@ -38,6 +39,10 @@ ALIGNMENT_MIN_SCORE = 0.60
 TONE_MIN_BODY_RATIO = 0.03
 STATUS_MIN_DISTANCE = 6
 CHIP_SHAPE_SAMPLES = 8
+_CHIP_RAMP = .5-.5*np.cos(
+    np.pi*np.arange(CHIP_SHAPE_SAMPLES, dtype=float)/
+    (CHIP_SHAPE_SAMPLES-1))
+_CHIP_RAMP.setflags(write=False)
 
 
 def _repeat_four_chip_pattern(pattern):
@@ -59,6 +64,20 @@ def encode_status(mode):
     if mode not in FOLD_MODE_TO_SLOTS:
         raise ValueError('fold mode must be 0 (off), 1 (500), or 2 (1000)')
     return STATUS_WORD_BY_MODE[mode]
+
+
+def warmup_tone_templates(fold_slots):
+    """Prepare every packet-phase template before the live sender starts."""
+    mode_by_slots = {slots: mode for mode, slots in FOLD_MODE_TO_SLOTS.items()}
+    if fold_slots not in mode_by_slots or not fold_slots:
+        return
+    mode = mode_by_slots[fold_slots]
+    bits = encode_status(mode)
+    pilot_code = tuple(int(sign) for sign in PILOT_CODE)
+    phase_count = v7.N//math.gcd(v7.N, v7.PILOT_TONE_DURATION)
+    for index in range(phase_count):
+        offset = (index*v7.PILOT_TONE_DURATION) % v7.N
+        _coded_tone_template(bits, pilot_code, offset)
 
 
 def decode_status(chips):
@@ -107,6 +126,35 @@ def _packet_tone_amplitude(packet):
     return math.sqrt(2.0)*body_rms*10**(v7.PILOT_TONE_REL_DB/20)
 
 
+@lru_cache(maxsize=64)
+def _coded_tone_template(status_bits, pilot_code, phase_offset):
+    """Static carrier/chip waveform keyed by the packet's eight-phase cycle."""
+    n = np.arange(v7.PULSE_FRAME, dtype=float)
+    absolute = (int(phase_offset)+n) % v7.N
+    phase1 = 2*np.pi*v7.PILOT_TONE_BINS[0]*absolute/v7.N
+    phase3 = (2*np.pi*v7.PILOT_TONE_BINS[1]*absolute/v7.N +
+              v7.PILOT_TONE_PHASES[v7.PILOT_TONE_BINS[1]])
+    chips3 = np.ones(v7.PULSE_FRAME, dtype=float)
+    body_start = v7.PULSE.SYNC_LEN
+    symbol_chips = tuple(
+        pilot_code[symbol//2] if symbol % 2 == 0 else
+        (1 if status_bits[symbol//2] == 0 else -1)
+        for symbol in range(v7.F))
+    shape = min(CHIP_SHAPE_SAMPLES, v7.CP)
+    for symbol, sign in enumerate(symbol_chips):
+        start = body_start+symbol*v7.SYM
+        chips3[start:start+v7.SYM] = sign
+        # Keep the transition within the cyclic prefix so the FFT window sees
+        # one constant chip while the emitted waveform remains smooth.
+        if shape > 1:
+            previous = 1 if symbol == 0 else symbol_chips[symbol-1]
+            chips3[start:start+shape] = (
+                previous+(sign-previous)*_CHIP_RAMP[:shape])
+    template = np.cos(phase1)+chips3*np.cos(phase3)
+    template.setflags(write=False)
+    return template
+
+
 def add_tone_code(packet, counter, status_bits, pilot_code=PILOT_CODE):
     """Overlay the coded pilot/status tones on one tone-free V7 packet.
 
@@ -115,47 +163,28 @@ def add_tone_code(packet, counter, status_bits, pilot_code=PILOT_CODE):
     the 24-symbol image body bin 3 is steady as well. The tone phase advances
     continuously across packet counters just like V7's current tone helper.
     """
-    packet = np.asarray(packet, dtype=np.float64)
+    packet = np.asarray(packet)
     if packet.shape != (v7.PULSE_FRAME, 2):
         raise ValueError(f'packet must have shape ({v7.PULSE_FRAME}, 2)')
     status_bits = tuple(status_bits)
     if len(status_bits) != STATUS_BITS or any(bit not in (0, 1) for bit in status_bits):
         raise ValueError('status must contain exactly 12 binary chips')
     status_bits = tuple(int(bit) for bit in status_bits)
-    pilot_code = np.asarray(pilot_code)
-    if pilot_code.shape != (len(PILOT_SYMBOLS),) or not np.all(
-            np.isin(pilot_code, (-1, 1))):
+    pilot_code = tuple(pilot_code)
+    if len(pilot_code) != len(PILOT_SYMBOLS) or any(
+            sign not in (-1, 1) for sign in pilot_code):
         raise ValueError('pilot code must contain 12 signs')
     packet_counter = int(counter)
     if packet_counter < 1 or packet_counter != counter:
         raise ValueError('packet counter must be one-based')
-    pilot_code = pilot_code.astype(np.int8, copy=False)
-
-    n = np.arange(v7.PULSE_FRAME, dtype=float)
-    absolute = ((packet_counter-1)*v7.PILOT_TONE_DURATION+n) % v7.N
-    phase1 = 2*np.pi*v7.PILOT_TONE_BINS[0]*absolute/v7.N
-    phase3 = (2*np.pi*v7.PILOT_TONE_BINS[1]*absolute/v7.N +
-              v7.PILOT_TONE_PHASES[v7.PILOT_TONE_BINS[1]])
-    chips3 = np.ones(v7.PULSE_FRAME, dtype=float)
-    body_start = v7.PULSE.SYNC_LEN
-    symbol_chips = np.empty(v7.F, dtype=np.int8)
-    for symbol in range(v7.F):
-        symbol_chips[symbol] = (pilot_code[symbol//2] if symbol % 2 == 0 else
-                                (1 if status_bits[symbol//2] == 0 else -1))
-        start = body_start+symbol*v7.SYM
-        chips3[start:start+v7.SYM] = symbol_chips[symbol]
-        # Keep the coded phase transition inside the cyclic prefix. A raised
-        # cosine from the preceding chip to this one avoids a hard discontinuity
-        # in the added tone while leaving the useful FFT window unmodulated.
-        shape = min(CHIP_SHAPE_SAMPLES, v7.CP)
-        if shape > 1:
-            previous = 1 if symbol == 0 else symbol_chips[symbol-1]
-            x = np.arange(shape, dtype=float)/(shape-1)
-            ramp = .5-.5*np.cos(np.pi*x)
-            chips3[start:start+shape] = previous+(symbol_chips[symbol]-previous)*ramp
+    pilot_code = tuple(int(sign) for sign in pilot_code)
     amplitude = _packet_tone_amplitude(packet)
-    tone = amplitude*(np.cos(phase1)+chips3*np.cos(phase3))
-    return (packet+tone[:, None]).astype(np.float32)
+    phase_offset = ((packet_counter-1)*v7.PILOT_TONE_DURATION) % v7.N
+    template = _coded_tone_template(status_bits, pilot_code, phase_offset)
+    output = np.empty(packet.shape, dtype=np.float32)
+    np.add(packet, (amplitude*template)[:, None], out=output,
+           casting='unsafe')
+    return output
 
 
 def encode_packet(model, values, counter, mode=FOLD_OFF,

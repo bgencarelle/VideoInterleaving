@@ -94,6 +94,10 @@ class LiveFold:
         """Values whose V7 encode is a folded packet."""
         return self.codec(model).encode(values)
 
+    def encode_coefficients(self, model, values):
+        """Fold directly to DCT coefficients for the live pulse encoder."""
+        return self.codec(model).encode_coefficients(values)
+
     # -------------------------------------------------------------- receiver
     def install(self):
         """Keep each decoded packet's equaliser output on its Result."""

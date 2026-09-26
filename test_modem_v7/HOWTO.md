@@ -279,6 +279,15 @@ at 0.96 ms/packet for the prior baseline and 1.01 ms/packet for coded M=500
 reconstruction/display work and is a local CPU measurement, not a guarantee for
 other hardware.
 
+The live sender also keeps the fold in coefficient space through pulse-frame
+encoding, avoiding the old folded-values inverse/forward DCT round trip. Coded
+pilot waveforms are cached over the packet phase cycle instead of rebuilding
+their carrier/chip trigonometric arrays for every frame. A matched synthetic
+sender timing run measured 1.44 ms/frame for nearest/1.05 baseline and 1.63
+ms/frame for coded M=500 with box/1.0 (+0.19 ms, about 13%). The earlier coded
+sender measured 2.42 ms/frame; these are local CPU timings, with capture and
+audio-device work excluded.
+
 Run the coded channel against steady-tone and no-tone controls:
 
 ```bash

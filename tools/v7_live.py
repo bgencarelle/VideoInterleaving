@@ -243,6 +243,38 @@ def _send_profile(args, slots):
     return encode_filter, float(brightness)
 
 
+def _encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
+                               source_index=None, eof_marker=True):
+    """Build one folded pulse packet without an inverse/forward DCT round trip."""
+    if source_index is None:
+        source_index = int(counter)-1
+    body = P.encode_frame_coeffs(model, np.asarray(coeffs), counter)
+    packet = np.zeros((P.PULSE_FRAME, 2), np.float32)
+    packet[P.PULSE.SYNC_LEN:P.PULSE.SYNC_LEN+P.FRAME] = body
+    packet[16:16+len(P.PULSE.PREAMBLE), :] = P.PULSE.PREAMBLE[:, None]
+
+    meta = np.zeros((P.N//2+1, 2), complex)
+    symbols = P.metadata_symbols(
+        aspect_code, model.encoding_type, counter % P.TAIL_PHASES,
+        source_index, None, 1)
+    meta[P.META_PILOTS, 0] = 1
+    meta[P.META_DATA_BINS[:len(symbols)], 0] = symbols
+    mx = meta[:, 0]/np.sqrt(2)*model.phase[-1]
+    meta_wave = np.fft.irfft(mx, n=P.N)
+    meta_pcm = np.concatenate([meta_wave[-P.CP:], meta_wave])*model.scale
+
+    shaped = P.bound_emission(packet, P.EMISSION_EDGE_HZ, P.RATE)
+    meta_start = P.PULSE.SYNC_LEN+P.FRAME
+    shaped[meta_start:meta_start+P.META_SYMBOL, :] += meta_pcm[:, None]
+    if eof_marker:
+        marker = np.concatenate([
+            np.full(run, level, np.float32)
+            for run, level in zip(P.EOF_MARKER_RUNS, P.EOF_MARKER_LEVELS)
+        ])*P.EOF_MARKER_LEVEL
+        shaped[P.EOF_MARKER_OFFSET:P.PULSE_FRAME, :] += marker[:, None]
+    return shaped
+
+
 def _add_coded_pilots(audio, start_counter, fold_slots):
     """Overlay each packet's fold-mode status and coded reference tones."""
     _ensure_test_modem_path()
@@ -257,6 +289,8 @@ def _add_coded_pilots(audio, start_counter, fold_slots):
         raise ValueError('coded-pilot audio must contain complete stereo V7 packets')
     packets = audio.reshape((-1, P.PULSE_FRAME, 2))
     status = encode_status(modes[fold_slots])
+    if len(packets) == 1:
+        return add_tone_code(packets[0], int(start_counter), status)
     return np.concatenate([
         add_tone_code(packet, int(start_counter)+index, status)
         for index, packet in enumerate(packets)])
@@ -283,6 +317,9 @@ def run_send(args):
         # Fail before any audio: the table folds only the model it was built
         # for (the canonical box profile).
         fold.check(model)
+        _ensure_test_modem_path()
+        from tone_code import warmup_tone_templates
+        warmup_tone_templates(fold.slots)
     requested_rate = getattr(args, 'rate', None)
     output_rate = None
     raw_grab = _capture(args)
@@ -305,13 +342,20 @@ def run_send(args):
 
     def encode_batch(frames, aspects, counter):
         values = np.asarray(frames)
-        audio = P.encode_pulse_stream(model, values, start_counter=counter,
-                                      aspect_codes=aspects,
-                                      pilot_tones=(False if fold is not None else
-                                                   getattr(args, 'pilot_tones', True)),
-                                      eof_marker=getattr(args, 'eof_marker', True))
         if fold is not None:
+            audio = np.concatenate([
+                _encode_pulse_frame_coeffs(
+                    model, fold.encode_coefficients(model, value),
+                    counter+index, aspect_code=aspects[index],
+                    source_index=counter+index-1,
+                    eof_marker=getattr(args, 'eof_marker', True))
+                for index, value in enumerate(values)])
             audio = _add_coded_pilots(audio, counter, fold.slots)
+        else:
+            audio = P.encode_pulse_stream(
+                model, values, start_counter=counter, aspect_codes=aspects,
+                pilot_tones=getattr(args, 'pilot_tones', True),
+                eof_marker=getattr(args, 'eof_marker', True))
         encoded_peak = float(np.max(np.abs(audio))) if audio.size else 0.0
         encoded_rms = float(np.sqrt(np.mean(audio*audio))) if audio.size else 0.0
         limiter_gain = 1.0
