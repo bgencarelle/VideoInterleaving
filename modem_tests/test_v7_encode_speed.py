@@ -71,7 +71,16 @@ class V7EncodeSpeedTests(unittest.TestCase):
                              np.repeat(v7.GROUP_STREAMS, 8)),
                       (tx*v7.GROUP_QMULT[:, None]).ravel())
             want += v7.SCATTERED_PILOTS
-            np.testing.assert_array_equal(got, want)
+            np.testing.assert_allclose(got, want, rtol=0, atol=2e-14)
+            fixed_tx = v7._hadamard8(vals)
+            np.testing.assert_array_equal(fixed_tx.astype(np.float32),
+                                          tx.astype(np.float32))
+
+    def test_hadamard_rejects_nonfinite_source_coefficients(self):
+        values = np.zeros((1, 8), dtype=float)
+        values[0, 3] = np.nan
+        with self.assertRaisesRegex(FloatingPointError, 'non-finite'):
+            v7._hadamard8(values)
 
     def test_pilot_tone_table_is_the_cosines_reduced_exactly(self):
         packet = v7.encode_pulse_frame(self.model, self.values, 4)

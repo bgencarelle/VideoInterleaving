@@ -188,6 +188,22 @@ H8 = hadamard(8)/np.sqrt(8)
 NOISE_FLOOR = 1e-6
 REFINE = True
 DEBUG = {}
+
+
+def _hadamard8(values):
+    """Apply the fixed 8-point Hadamard transform without a BLAS dispatch.
+
+    This tiny transform does not need vendor matrix-multiply dispatch, and the
+    fixed contraction keeps behavior consistent across BLAS backends. Reject
+    invalid coefficients rather than encoding a damaged packet if a source or
+    model calculation ever goes non-finite.
+    """
+    if not np.isfinite(values).all():
+        raise FloatingPointError('V7 Hadamard input contains non-finite values')
+    with np.errstate(over='raise', invalid='raise'):
+        return np.einsum('fg,gk->fk', values, H8.T, optimize=False)
+
+
 # The FFT window opens CP-WIN samples early: undo that known linear phase so
 # channel interpolation between pilots sees a smooth response.
 EARLY = np.exp(2j*np.pi*np.arange(65)*(CP-WIN)/N)
@@ -885,7 +901,7 @@ def encode_frame_coeffs(model, coeffs, counter, return_X=False):
     ranks = np.maximum(idx, 0)
     vals = model.gain[ranks]*c[ranks]
     vals[idx < 0] = 0
-    tx = vals @ H8.T
+    tx = _hadamard8(vals)
     cells = X.reshape(-1)
     cells.real[CELLS_I] = tx[GROUP_IS_I].ravel()
     cells.imag[CELLS_Q] = tx[~GROUP_IS_I].ravel()
