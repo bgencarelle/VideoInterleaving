@@ -1354,6 +1354,33 @@ def _stipple_importance(lum, gamma=2.0, trim=0.02, edge_gain=0.0):
     return importance if total > 1e-12 else None
 
 
+def _greedy_nearest_order(points, start):
+    """Exact greedy Euclidean ordering with reusable distance work arrays."""
+    points = np.asarray(points, dtype=np.float64)
+    if not len(points):
+        return np.empty(0, dtype=np.int64)
+
+    remaining = np.ones(len(points), dtype=bool)
+    dx = np.empty(len(points), dtype=np.float64)
+    dy = np.empty(len(points), dtype=np.float64)
+    distance = np.empty(len(points), dtype=np.float64)
+    squared_y = np.empty(len(points), dtype=np.float64)
+    order = np.empty(len(points), dtype=np.int64)
+    pos = np.asarray(start, dtype=np.float64)
+    for i in range(len(points)):
+        np.subtract(points[:, 0], pos[0], out=dx)
+        np.square(dx, out=distance)
+        np.subtract(points[:, 1], pos[1], out=dy)
+        np.square(dy, out=squared_y)
+        np.add(distance, squared_y, out=distance)
+        distance[~remaining] = np.inf
+        chosen = int(np.argmin(distance))
+        order[i] = chosen
+        remaining[chosen] = False
+        pos = points[chosen]
+    return order
+
+
 class StippleEmitter(StochasticEmitter):
     """Stable luminance-weighted points joined by an unrestricted local tour.
 
@@ -1389,22 +1416,11 @@ class StippleEmitter(StochasticEmitter):
 
         # Greedy Euclidean tour. This is intentionally not the old cardinal-
         # direction spiral; diagonal neighbours are neighbours too.
-        remaining = np.ones(len(pixels), dtype=bool)
         if self._end is not None:
             start = np.asarray(self._xy_to_pixel(self._end, (h, w)), np.float64)
         else:
             start = pixels[np.argmax(dwell)]
-        order = []
-        pos = start
-        for _ in range(len(pixels)):
-            delta = pixels - pos
-            distance = np.einsum("ij,ij->i", delta, delta)
-            distance[~remaining] = np.inf
-            chosen = int(np.argmin(distance))
-            order.append(chosen)
-            remaining[chosen] = False
-            pos = pixels[chosen]
-        order = np.asarray(order, dtype=np.int64)
+        order = _greedy_nearest_order(pixels, start)
         return np.repeat(pixels[order], dwell[order], axis=0)
 
     def emit(self, lum):
@@ -1481,19 +1497,8 @@ class StippleEmitter(StochasticEmitter):
             (1.0 - 2.0 * points[:, 1]) * sy,
         ]) * self.level
 
-        remaining = np.ones(len(display), dtype=bool)
         start = self._end if self._end is not None else display[np.argmax(dwell)]
-        order = []
-        pos = np.asarray(start, dtype=np.float64)
-        for _ in range(len(display)):
-            delta = display - pos
-            distance = np.einsum("ij,ij->i", delta, delta)
-            distance[~remaining] = np.inf
-            j = int(np.argmin(distance))
-            order.append(j)
-            remaining[j] = False
-            pos = display[j]
-        order = np.asarray(order, dtype=np.int64)
+        order = _greedy_nearest_order(display, start)
         route = np.repeat(display[order], dwell[order], axis=0)
         if self._end is not None:
             route = np.vstack([self._end, route])
@@ -1626,15 +1631,18 @@ def composite_luma(main_lib, main_idx, float_lib, float_idx, bbox=None,
         lf, af = split(tf)
         lm, am = split(tm)
         lum = lf * af + lm * am * (1.0 - af)
-        coverage = af + am * (1.0 - af)
+        if invert:
+            coverage = af + am * (1.0 - af)
     elif tf is not None:
         lf, af = split(tf)
         lum = lf * af
-        coverage = af
+        if invert:
+            coverage = af
     else:
         lm, am = split(tm)
         lum = lm * am
-        coverage = am
+        if invert:
+            coverage = am
 
     if invert:
         # Invert only covered image content. Transparent padding remains dark

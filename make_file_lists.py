@@ -16,6 +16,10 @@ import re
 import csv
 import sys
 import shutil
+import base64
+import gzip
+import hashlib
+import json
 from itertools import zip_longest
 from collections import defaultdict
 import numpy as np  # [ADDED]
@@ -31,6 +35,9 @@ import settings
 # Defaults. main.py overrides these in settings if needed.
 PROCESSED_DIR_NAME = getattr(settings, 'PROCESSED_DIR', "folders_processed")
 GENERATED_DIR_NAME = getattr(settings, 'GENERATED_LISTS_DIR', "generated_img_lists")
+VALID_IMAGE_EXTENSIONS = ('.png', '.webp', '.jpg', '.jpeg',
+                          '.npy', '.npz', '.spz', '.spy')
+_LIST_CACHE_VERSION = 3
 
 
 # ------------------------------
@@ -47,18 +54,16 @@ def get_subdirectories(path):
 
 def contains_image_files(path):
     try:
-        # [MODIFIED] Added new extensions
-        valid = ('.png', '.webp', '.jpg', '.jpeg', '.npy', '.npz', '.spz', '.spy')
-        return any(f.lower().endswith(valid) for f in os.listdir(path))
+        return any(f.lower().endswith(VALID_IMAGE_EXTENSIONS)
+                   for f in os.listdir(path))
     except FileNotFoundError:
         return False
 
 
 def count_image_files(path):
     try:
-        # [MODIFIED] Added new extensions
-        valid = ('.png', '.webp', '.jpg', '.jpeg', '.npy', '.npz', '.spz', '.spy')
-        return len([f for f in os.listdir(path) if f.lower().endswith(valid)])
+        return sum(f.lower().endswith(VALID_IMAGE_EXTENSIONS)
+                   for f in os.listdir(path))
     except FileNotFoundError:
         return 0
 
@@ -108,7 +113,8 @@ def check_folder_prefix(folder_path, allowed_type):
 # Scanning Logic
 # ------------------------------
 
-def scan_directory_recursive(base_path, script_dir, folder_type):
+def scan_directory_recursive(base_path, script_dir, folder_type,
+                             files_by_folder=None):
     """
     Recursively scans a directory for image folders matching the strict prefix rules.
     folder_type: 'main' or 'float'
@@ -131,18 +137,21 @@ def scan_directory_recursive(base_path, script_dir, folder_type):
                 continue
 
         # 2. Check for images
-        if not contains_image_files(subdir):
+        try:
+            image_files = [f for f in os.listdir(subdir)
+                           if f.lower().endswith(VALID_IMAGE_EXTENSIONS)]
+        except FileNotFoundError:
             continue
-
-        # [MODIFIED] Added extensions to list comprehension
-        valid = ('.png', '.webp', '.jpg', '.jpeg', '.npy', '.npz', '.spz', '.spy')
-        image_files = [f for f in os.listdir(subdir) if f.lower().endswith(valid)]
 
         if not image_files:
             continue
 
         # Sort to ensure consistent "First Image" logic
         image_files.sort(key=natural_sort_key)
+        if files_by_folder is not None:
+            folder_key = os.path.normcase(os.path.abspath(subdir))
+            files_by_folder[folder_key] = [
+                os.path.join(subdir, name) for name in image_files]
         first_image = image_files[0]
 
         width, height, has_alpha = 0, 0, False
@@ -243,7 +252,7 @@ def create_folder_csv_files(counts_main, counts_float, processed_dir, script_dir
     write_group_csv(groups_float, 'float_folder_{}.csv')
 
 
-def write_folder_list():
+def write_folder_list(files_by_folder=None):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     processed_dir = os.path.join(script_dir, PROCESSED_DIR_NAME)
 
@@ -256,10 +265,12 @@ def write_folder_list():
 
     # 1. Scan with STRICT MODE
     print(f"Scanning Main: {main_path} (Allow: 0_-254_)")
-    counts_main = scan_directory_recursive(main_path, script_dir, 'main')
+    counts_main = scan_directory_recursive(
+        main_path, script_dir, 'main', files_by_folder)
 
     print(f"Scanning Float: {float_path} (Allow: 255_)")
-    counts_float = scan_directory_recursive(float_path, script_dir, 'float')
+    counts_float = scan_directory_recursive(
+        float_path, script_dir, 'float', files_by_folder)
 
     all_counts = counts_main + counts_float
     total_images = sum(x[5] for x in all_counts)
@@ -325,16 +336,17 @@ def check_unequal_img_counts(csv_path):
                 sys.exit(0)
 
 
-def sort_image_files(folder_dict):
+def sort_image_files(folder_dict, files_by_folder=None):
     sorted_files = []
     for num in sorted(folder_dict.keys()):
         folder = folder_dict[num]
-
-        # [MODIFIED] Added extensions
-        valid = ('.png', '.webp', '.jpg', '.jpeg', '.npy', '.npz', '.spz', '.spy')
-        imgs = [os.path.join(folder, x) for x in os.listdir(folder) if x.lower().endswith(valid)]
-
-        imgs.sort(key=natural_sort_key)
+        if files_by_folder is not None:
+            folder_key = os.path.normcase(os.path.abspath(folder))
+            imgs = files_by_folder.get(folder_key, [])
+        else:
+            imgs = [os.path.join(folder, x) for x in os.listdir(folder)
+                    if x.lower().endswith(VALID_IMAGE_EXTENSIONS)]
+            imgs.sort(key=natural_sort_key)
         sorted_files.append(imgs)
     return sorted_files
 
@@ -348,13 +360,137 @@ def parse_folder_locations(csv_path):
     return d
 
 
+def _filesystem_signature(script_dir):
+    """Fingerprint source paths and metadata without opening image contents."""
+    roots = (
+        ("main", os.path.abspath(os.path.join(
+            script_dir, settings.MAIN_FOLDER_PATH))),
+        ("float", os.path.abspath(os.path.join(
+            script_dir, settings.FLOAT_FOLDER_PATH))),
+    )
+    digest = hashlib.sha256()
+    digest.update(json.dumps(
+        [_LIST_CACHE_VERSION, VALID_IMAGE_EXTENSIONS, roots],
+        separators=(",", ":")).encode("utf-8"))
+
+    for label, root in roots:
+        digest.update(label.encode("ascii"))
+        if not os.path.isdir(root):
+            digest.update(b"\0missing\0")
+            continue
+
+        records = []
+        for current, dirs, files in os.walk(root):
+            dirs.sort()
+            rel_dir = os.path.relpath(current, root)
+            try:
+                st = os.stat(current)
+                records.append(("d", rel_dir, st.st_dev, st.st_ino,
+                                st.st_mtime_ns, st.st_ctime_ns))
+            except OSError as exc:
+                records.append(("d!", rel_dir, exc.errno))
+            if (current == root or
+                    check_folder_prefix(current, label)):
+                for name in files:
+                    if not name.lower().endswith(VALID_IMAGE_EXTENSIONS):
+                        continue
+                    path = os.path.join(current, name)
+                    rel_path = os.path.relpath(path, root)
+                    try:
+                        st = os.stat(path)
+                        records.append(("f", rel_path, st.st_dev,
+                                        st.st_ino, st.st_size,
+                                        st.st_mtime_ns, st.st_ctime_ns))
+                    except OSError as exc:
+                        records.append(("f!", rel_path, exc.errno))
+
+        for record in sorted(records):
+            digest.update(json.dumps(record, separators=(",", ":"),
+                                      ensure_ascii=True).encode("utf-8"))
+            digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _list_cache_path(generated_dir):
+    # main.py clears the generated-list directories on startup. Keep this
+    # compact source signature and output snapshot adjacent, outside the dirs.
+    return os.path.abspath(generated_dir) + ".source-manifest.json.gz"
+
+
+def _restore_list_cache(cache_path, fingerprint, processed_dir, generated_dir):
+    try:
+        with gzip.open(cache_path, "rt", encoding="utf-8") as f:
+            state = json.load(f)
+        if (state.get("version") != _LIST_CACHE_VERSION or
+                state.get("fingerprint") != fingerprint):
+            return False
+        bases = {"processed": processed_dir, "generated": generated_dir}
+        restored = []
+        for entry in state.get("outputs", ()):
+            tag, rel_path, encoded = entry
+            base = bases.get(tag)
+            if (base is None or os.path.isabs(rel_path) or
+                    os.path.normpath(rel_path).startswith("..")):
+                return False
+            restored.append((os.path.join(base, rel_path),
+                             base64.b64decode(encoded, validate=True)))
+    except (OSError, ValueError, TypeError, KeyError, AttributeError,
+            json.JSONDecodeError):
+        return False
+
+    for directory in bases.values():
+        shutil.rmtree(directory, ignore_errors=True)
+        os.makedirs(directory, exist_ok=True)
+    for path, contents in restored:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(contents)
+    return bool(restored)
+
+
+def _save_list_cache(cache_path, fingerprint, processed_dir, generated_dir):
+    outputs = []
+    for tag, base in (("processed", processed_dir),
+                      ("generated", generated_dir)):
+        if not os.path.isdir(base):
+            continue
+        for current, dirs, files in os.walk(base):
+            dirs.sort()
+            for name in sorted(files):
+                path = os.path.join(current, name)
+                if not os.path.isfile(path):
+                    continue
+                rel_path = os.path.relpath(path, base)
+                with open(path, "rb") as f:
+                    encoded = base64.b64encode(f.read()).decode("ascii")
+                outputs.append((tag, rel_path, encoded))
+    if not outputs:
+        return
+
+    state = {"version": _LIST_CACHE_VERSION,
+             "fingerprint": fingerprint, "outputs": outputs}
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    tmp_path = cache_path + ".tmp"
+    with gzip.open(tmp_path, "wt", encoding="utf-8", compresslevel=6) as f:
+        json.dump(state, f, separators=(",", ":"))
+    os.replace(tmp_path, cache_path)
+
+
 def process_files():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     processed_dir = os.path.join(script_dir, PROCESSED_DIR_NAME)
     generated_dir = os.path.join(script_dir, GENERATED_DIR_NAME)
 
+    fingerprint = _filesystem_signature(script_dir)
+    cache_path = _list_cache_path(generated_dir)
+    if _restore_list_cache(cache_path, fingerprint,
+                           processed_dir, generated_dir):
+        print("[FILE LISTS] Source files unchanged; restored cached lists.")
+        return
+
     # 1. Generate Metadata
-    write_folder_list()
+    files_by_folder = {}
+    write_folder_list(files_by_folder)
 
     # 2. Find Matches
     csv_paths = find_default_csvs(processed_dir)
@@ -375,7 +511,7 @@ def process_files():
         folder_dict = parse_folder_locations(csv_path)
         if not folder_dict: continue
 
-        sorted_groups = sort_image_files(folder_dict)
+        sorted_groups = sort_image_files(folder_dict, files_by_folder)
         interleaved = interleave_lists(sorted_groups)
 
         out_name = f'{os.path.splitext(os.path.basename(csv_path))[0]}_list.csv'
@@ -385,6 +521,8 @@ def process_files():
             for idx, grp in enumerate(interleaved):
                 writer.writerow([idx] + grp)
         print(f"CSV written to {out_path}")
+
+    _save_list_cache(cache_path, fingerprint, processed_dir, generated_dir)
 
 
 # ------------------------------

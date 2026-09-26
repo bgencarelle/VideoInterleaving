@@ -40,7 +40,8 @@ class ImageLoader:
             raise RuntimeError(f"Decode failed: {image_path}")
         return img, False
 
-    def read_image(self, image_path):
+    def read_image(self, image_path, jpeg_scaling_factor=None,
+                   jpeg_min_size=None):
         ext = image_path.split('.')[-1].lower()
 
         # --- [INSERTED] Hybrid Asset Support ---
@@ -88,7 +89,14 @@ class ImageLoader:
             # This is optimal - no unnecessary copies, uses native library
             with open(image_path, "rb") as f: data = f.read()
             try:
-                return jpeg.decode(data, pixel_format=TJPF_RGB), True
+                decode_scale = jpeg_scaling_factor
+                if decode_scale is not None and jpeg_min_size is not None:
+                    width, height, _, _ = jpeg.decode_header(data)
+                    if width < jpeg_min_size[0] or height < jpeg_min_size[1]:
+                        decode_scale = None
+                return jpeg.decode(
+                    data, pixel_format=TJPF_RGB,
+                    scaling_factor=decode_scale), True
             except Exception as e:
                 print(f"[JPEG ERROR] Failed to decode: {image_path}")
                 print(f"  Error: {e}")
@@ -96,11 +104,16 @@ class ImageLoader:
 
         raise ValueError(f"Unsupported: {image_path}")
 
-    def load_images(self, index, main_folder, float_folder):
+    def load_images(self, index, main_folder, float_folder,
+                    jpeg_scaling_factor=None, jpeg_min_size=None):
         mpath = self.main_folder_path[index][main_folder]
         fpath = self.float_folder_path[index][float_folder]
-        main_img, main_sbs = self.read_image(mpath)
-        float_img, float_sbs = self.read_image(fpath)
+        main_img, main_sbs = self.read_image(
+            mpath, jpeg_scaling_factor=jpeg_scaling_factor,
+            jpeg_min_size=jpeg_min_size)
+        float_img, float_sbs = self.read_image(
+            fpath, jpeg_scaling_factor=jpeg_scaling_factor,
+            jpeg_min_size=jpeg_min_size)
         return main_img, float_img, main_sbs, float_sbs
 
 

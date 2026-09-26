@@ -89,7 +89,9 @@ class FIFOImageBufferPatched(FIFOImageBuffer):
 # WORKER FUNCTION (Runs in Background Threads)
 # -----------------------------------------------------------------------------
 
-def load_and_render_frame(loader, index, main_folder, float_folder, source_aspect_ratio=None):
+def load_and_render_frame(loader, index, main_folder, float_folder,
+                          source_aspect_ratio=None, jpeg_scaling_factor=None,
+                          jpeg_min_size=None):
     """
     Loads images AND performs the heavy ASCII merging/string-generation
     in the background thread. Returns the final string if ASCII.
@@ -102,7 +104,10 @@ def load_and_render_frame(loader, index, main_folder, float_folder, source_aspec
         source_aspect_ratio: Source image aspect ratio (w/h) for consistent scaling
     """
     # 1. Load Data
-    m_img, f_img, m_sbs, f_sbs = loader.load_images(index, main_folder, float_folder)
+    m_img, f_img, m_sbs, f_sbs = loader.load_images(
+        index, main_folder, float_folder,
+        jpeg_scaling_factor=jpeg_scaling_factor,
+        jpeg_min_size=jpeg_min_size)
 
     # 2. Check for ASCII Data
     if isinstance(m_img, dict):
@@ -220,6 +225,11 @@ def run_display(clock_source=CLOCK_MODE):
     
     is_web = server_mode and not is_ascii
     is_headless = is_web or is_ascii
+    # The web loop has no visible output between captures. Run it at the
+    # capture cadence instead of drawing at 60 Hz while publishing 15 frames/s.
+    loop_fps = FPS
+    if is_web and capture_rate and capture_rate > 0:
+        loop_fps = min(FPS, capture_rate) if FPS and FPS > 0 else capture_rate
 
     # --- LOGGING ---
     if is_web:
@@ -267,6 +277,20 @@ def run_display(clock_source=CLOCK_MODE):
     if source_image_size is not None:
         src_w, src_h = source_image_size
         source_aspect_ratio = src_w / src_h if src_h > 0 else 1.0
+
+    # Half-size TurboJPEG decode emits one-quarter of the pixels. Use it only
+    # when the source still covers the web target after scaling. Other modes
+    # retain full-resolution decoding.
+    web_jpeg_scale = None
+    web_jpeg_min_size = None
+    if is_web and source_image_size is not None:
+        target_w, target_h = HEADLESS_RES
+        if (source_image_size[0] >= 2 * target_w and
+                source_image_size[1] >= 2 * target_h):
+            web_jpeg_scale = (1, 2)
+            # JPEG files are SBS: require each decoded half to remain at least
+            # as large as the web target, checking every file's header.
+            web_jpeg_min_size = (4 * target_w, 2 * target_h)
 
     # 3. Initialize Window
     if isinstance(img0, dict):
@@ -341,7 +365,11 @@ def run_display(clock_source=CLOCK_MODE):
 
     # Pre-load using the NEW helper directly for the first frame
     initial_folders = folder_dictionary["Main_and_Float_Folders"]
-    res0 = load_and_render_frame(loader, index, *initial_folders, source_aspect_ratio=source_aspect_ratio)
+    res0 = load_and_render_frame(
+        loader, index, *initial_folders,
+        source_aspect_ratio=source_aspect_ratio,
+        jpeg_scaling_factor=web_jpeg_scale,
+        jpeg_min_size=web_jpeg_min_size)
     fifo.update(index, res0)
 
     cur_main, cur_float, cur_m_sbs, cur_f_sbs = None, None, False, False
@@ -373,7 +401,11 @@ def run_display(clock_source=CLOCK_MODE):
         next_idx = 1 if index == 0 else (index - 1 if index == png_paths_len - 1 else index + 1)
         # Use the NEW worker function
         folders = folder_dictionary["Main_and_Float_Folders"]
-        future = pool.submit(load_and_render_frame, loader, next_idx, *folders, source_aspect_ratio=source_aspect_ratio)
+        future = pool.submit(
+            load_and_render_frame, loader, next_idx, *folders,
+            source_aspect_ratio=source_aspect_ratio,
+            jpeg_scaling_factor=web_jpeg_scale,
+            jpeg_min_size=web_jpeg_min_size)
         future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
 
         frame_times = deque(maxlen=60)
@@ -437,7 +469,11 @@ def run_display(clock_source=CLOCK_MODE):
                         next_idx = 1 if index == 0 else (
                             index - 1 if index == png_paths_len - 1 else (index + 1 if index > prev else index - 1))
                         folders = folder_dictionary["Main_and_Float_Folders"]
-                        future = pool.submit(load_and_render_frame, loader, next_idx, *folders, source_aspect_ratio=source_aspect_ratio)
+                        future = pool.submit(
+                            load_and_render_frame, loader, next_idx, *folders,
+                            source_aspect_ratio=source_aspect_ratio,
+                            jpeg_scaling_factor=web_jpeg_scale,
+                            jpeg_min_size=web_jpeg_min_size)
                         future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
 
                         # Timing
@@ -446,7 +482,7 @@ def run_display(clock_source=CLOCK_MODE):
                         frame_times.append(dt)
                         frame_start = now
                         if FPS:
-                            s = (1.0 / FPS) - dt
+                            s = (1.0 / loop_fps) - dt
                             if s > 0: time.sleep(s)
 
                         # Calculate FPS from frame times (handle both single and multiple frames)
@@ -494,7 +530,11 @@ def run_display(clock_source=CLOCK_MODE):
                 next_idx = 1 if index == 0 else (
                     index - 1 if index == png_paths_len - 1 else (index + 1 if index > prev else index - 1))
                 folders = folder_dictionary["Main_and_Float_Folders"]
-                future = pool.submit(load_and_render_frame, loader, next_idx, *folders, source_aspect_ratio=source_aspect_ratio)
+                future = pool.submit(
+                    load_and_render_frame, loader, next_idx, *folders,
+                    source_aspect_ratio=source_aspect_ratio,
+                    jpeg_scaling_factor=web_jpeg_scale,
+                    jpeg_min_size=web_jpeg_min_size)
                 future.add_done_callback(lambda f, i=next_idx: async_cb(f, i))
 
             # Render (GL)
@@ -534,7 +574,10 @@ def run_display(clock_source=CLOCK_MODE):
                                 # In web mode, resize to HEADLESS_RES
                                 if is_web and frame is not None:
                                     import cv2
-                                    frame = cv2.resize(frame, HEADLESS_RES, interpolation=cv2.INTER_LINEAR)
+                                    if (frame.shape[1], frame.shape[0]) != HEADLESS_RES:
+                                        frame = cv2.resize(
+                                            frame, HEADLESS_RES,
+                                            interpolation=cv2.INTER_LINEAR)
                             else:
                                 # Windowed mode - shouldn't reach here due to should_capture logic
                                 # But add safety check to prevent AttributeError
@@ -593,7 +636,7 @@ def run_display(clock_source=CLOCK_MODE):
             frame_times.append(dt)
             frame_start = now
             if FPS:
-                s = (1.0 / FPS) - dt
+                s = (1.0 / loop_fps) - dt
                 if s > 0: time.sleep(s)
 
             # Calculate FPS from frame times (handle both single and multiple frames)
@@ -634,4 +677,3 @@ def run_display(clock_source=CLOCK_MODE):
                 window.close()
             except Exception as e:
                 print(f"[DISPLAY] Headless window cleanup failed: {e}")
-

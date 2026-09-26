@@ -1817,10 +1817,9 @@ def _emit(scope, ml, fl, index, render_mode, sweep, sweep_mode,
                     # start_at preserves the walk clock and only aligns the
                     # first physical sample with the fused beam endpoint.
                     stochastic_emitter.start_at(beam_start)
-                stochastic_frame = stochastic_emitter.emit(_rotate_luma(
-                    composite_luma(
-                        ml, index, fl, index, raw=True, invert=invert),
-                    rotation))
+                # Reuse the identical raw composite, rotation, and inversion
+                # already prepared for fusion_luma above.
+                stochastic_frame = stochastic_emitter.emit(fusion_luma)
             mux = fusion_multiplexer or PositionMultiplexer()
             fusion_weights = {
                 "v": trace_luminance_weights(
