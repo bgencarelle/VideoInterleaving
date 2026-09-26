@@ -10,7 +10,56 @@ from pathlib import Path
 import threading
 
 import numpy as np
+from numba import njit
 from PIL import Image
+
+
+@njit(cache=True, fastmath=False)
+def _sample_pair_uint8(main, front, rows, cols, main_sbs, front_sbs):
+    """Gather both SBS/RGBA layers in one compiled pass over output pixels."""
+    height, width = rows.shape
+    main_pixels = np.empty((height, width, 4), np.uint8)
+    front_pixels = np.empty((height, width, 4), np.uint8)
+    main_half = main.shape[1] // 2 if main_sbs else 0
+    front_half = front.shape[1] // 2 if front_sbs else 0
+    front_width = front_half if front_sbs else front.shape[1]
+
+    for y in range(height):
+        for x in range(width):
+            sy = rows[y, x]
+            sx = cols[y, x]
+            for channel in range(3):
+                main_pixels[y, x, channel] = main[sy, sx, channel]
+            if main_sbs:
+                main_pixels[y, x, 3] = main[sy, sx+main_half, 0]
+            elif main.shape[2] == 4:
+                main_pixels[y, x, 3] = main[sy, sx, 3]
+            else:
+                main_pixels[y, x, 3] = 255
+
+            if sy < front.shape[0] and sx < front_width:
+                for channel in range(3):
+                    front_pixels[y, x, channel] = front[sy, sx, channel]
+                if front_sbs:
+                    front_pixels[y, x, 3] = front[sy, sx+front_half, 0]
+                elif front.shape[2] == 4:
+                    front_pixels[y, x, 3] = front[sy, sx, 3]
+                else:
+                    front_pixels[y, x, 3] = 255
+            else:
+                for channel in range(4):
+                    front_pixels[y, x, channel] = 0
+    return main_pixels, front_pixels
+
+
+def warmup_compositor():
+    """Compile the uint8 gather before live audio scheduling begins."""
+    image = np.zeros((2, 4, 3), np.uint8)
+    row = np.zeros((1, 1), np.int64)
+    col = np.zeros((1, 1), np.int64)
+    row.setflags(write=False)
+    col.setflags(write=False)
+    _sample_pair_uint8(image, image, row, col, True, True)
 
 
 class RuntimeImageLibrary:
@@ -55,6 +104,8 @@ class RuntimeImageLibrary:
         self.prefetches = 0
         self.fifo_hits = 0
         self.index_misses = 0
+        # Do JIT work before PacketOutput opens, never on the first live frame.
+        warmup_compositor()
 
     @staticmethod
     def _has_lists(path):
@@ -206,22 +257,30 @@ class RuntimeImageLibrary:
         main, front, main_sbs, front_sbs = layers
         main, front = self._layer_array(main), self._layer_array(front)
         height, width = main.shape[0], self._layer_width(main, main_sbs)
-        picked, full_size = _nearest_samples(width, height, int(rotation) % 360,
-                                             bool(mirror), tuple(size))
-        filled = picked < 0
-        rows, cols = np.divmod(np.where(filled, 0, picked), width)
-        main_pixels = self._sampled_rgba(main, main_sbs, rows, cols)
-        front_height, front_width = (front.shape[0],
-                                     self._layer_width(front, front_sbs))
-        inside = (rows < front_height) & (cols < front_width)
-        front_pixels = self._sampled_rgba(
-            front, front_sbs, np.where(inside, rows, 0), np.where(inside, cols, 0))
-        front_pixels[~inside] = 0                  # outside the cropped float
+        rows, cols, filled, full_size = _nearest_coordinates(
+            width, height, int(rotation) % 360, bool(mirror), tuple(size))
+        if (main.dtype == np.uint8 and front.dtype == np.uint8 and
+                main.flags.c_contiguous and front.flags.c_contiguous and
+                rows.flags.c_contiguous and cols.flags.c_contiguous):
+            main_pixels, front_pixels = _sample_pair_uint8(
+                main, front, rows, cols, main_sbs, front_sbs)
+        else:
+            # Keep unusual source dtypes on the well-tested NumPy conversion
+            # path; the common JPEG/TurboJPEG path is fused above.
+            main_pixels = self._sampled_rgba(main, main_sbs, rows, cols)
+            front_height, front_width = (front.shape[0],
+                                         self._layer_width(front, front_sbs))
+            inside = (rows < front_height) & (cols < front_width)
+            front_pixels = self._sampled_rgba(
+                front, front_sbs, np.where(inside, rows, 0),
+                np.where(inside, cols, 0))
+            front_pixels[~inside] = 0              # outside the cropped float
         image = Image.new('RGBA', tuple(size), tuple(background) + (255,))
         image.alpha_composite(Image.fromarray(main_pixels, 'RGBA'))
         image.alpha_composite(Image.fromarray(front_pixels, 'RGBA'))
         rgb = np.array(image.convert('RGB'))
-        rgb[filled] = 0                            # rotate()'s black fill
+        if filled is not None:
+            rgb[filled] = 0                        # rotate()'s black fill
         image = Image.fromarray(rgb, 'RGB')
         image.info['source_dimensions'] = full_size
         return image
@@ -249,12 +308,17 @@ class RuntimeImageLibrary:
         out = np.empty(rows.shape + (4,), np.uint8)
         if sbs:
             half = array.shape[1] // 2
-            out[..., :3] = array[rows, cols, :3].astype(np.uint8)
-            out[..., 3] = array[rows, cols + half, 0].astype(np.uint8)
+            rgb = array[rows, cols, :3]
+            alpha = array[rows, cols + half, 0]
+            out[..., :3] = rgb if rgb.dtype == np.uint8 else rgb.astype(np.uint8)
+            out[..., 3] = (alpha if alpha.dtype == np.uint8
+                           else alpha.astype(np.uint8))
         elif array.shape[2] == 4:
-            out[...] = array[rows, cols].astype(np.uint8)
+            rgba = array[rows, cols]
+            out[...] = rgba if rgba.dtype == np.uint8 else rgba.astype(np.uint8)
         else:
-            out[..., :3] = array[rows, cols, :3].astype(np.uint8)
+            rgb = array[rows, cols, :3]
+            out[..., :3] = rgb if rgb.dtype == np.uint8 else rgb.astype(np.uint8)
             out[..., 3] = 255
         return out
 
@@ -263,10 +327,12 @@ class RuntimeImageLibrary:
 
 
 @lru_cache(maxsize=16)
-def _nearest_samples(width, height, rotation, mirror, size):
-    """Source pixel (flat index, -1 for rotate's fill) behind every pixel of
-    ``composite(...).resize(size, NEAREST)``, found by sending an index image
-    through the same rotate, mirror and resize, and the full composite size.
+def _nearest_coordinates(width, height, rotation, mirror, size):
+    """Cached source coordinates behind every output pixel, plus rotate fill.
+
+    Build the coordinate arrays from an index image sent through the same
+    transform and nearest resize as the full composite path. They are reused
+    across frames of a fixed source geometry, avoiding per-frame divmod/masks.
     """
     index = np.arange(1, width*height + 1, dtype=np.int32).reshape(height, width)
     image = Image.fromarray(index)                         # mode 'I'
@@ -277,5 +343,15 @@ def _nearest_samples(width, height, rotation, mirror, size):
     full_size = image.size
     picked = np.asarray(image.resize(size, Image.Resampling.NEAREST),
                         np.int64) - 1
-    picked.setflags(write=False)
-    return picked, full_size
+    if rotation:
+        filled = picked < 0
+        picked = np.where(filled, 0, picked)
+        filled.setflags(write=False)
+    else:
+        # Mirror alone has no uncovered pixels, so the hot path needs no fill
+        # mask or output rewrite.
+        filled = None
+    rows, cols = np.divmod(picked, width)
+    rows.setflags(write=False)
+    cols.setflags(write=False)
+    return rows, cols, filled, full_size
