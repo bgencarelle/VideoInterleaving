@@ -166,6 +166,72 @@ class ExperimentalFoldTests(unittest.TestCase):
                     np.testing.assert_array_equal(coded_direct,
                                                   coded_reference)
 
+    def test_live_sender_folds_each_frame_exactly_once(self):
+        """Exercise run_send so capture and batch encoding cannot both fold."""
+        import types
+
+        written = []
+
+        class OutputStream:
+            samplerate = float(v7.RATE)
+
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def write(self, audio):
+                written.append(np.array(audio, dtype=np.float32, copy=True))
+
+        fake_sounddevice = types.ModuleType('sounddevice')
+        fake_sounddevice.OutputStream = OutputStream
+        with Image.open(v7.REFERENCE_FIXTURE) as image:
+            still = np.asarray(image.convert('RGB'))
+
+        previous_sounddevice = sys.modules.get('sounddevice')
+        previous_capture = v7_live._capture
+        sys.modules['sounddevice'] = fake_sounddevice
+        v7_live._capture = lambda _args: (lambda: still)
+        try:
+            args = v7_live.parser().parse_args([
+                'send', '--device', 'memory', '--source', 'test',
+                '--seconds', '0.25', '--no-log'])
+            v7_live.run_send(args)
+        finally:
+            v7_live._capture = previous_capture
+            if previous_sounddevice is None:
+                sys.modules.pop('sounddevice', None)
+            else:
+                sys.modules['sounddevice'] = previous_sounddevice
+
+        self.assertTrue(written)
+        audio = np.concatenate(written)
+        self.fold.install()
+        try:
+            with coded_pilot_timing():
+                results, _ = v7.decode_pulse_stream(
+                    self.model, audio, sample_rate=v7.RATE,
+                    pilot_timing='tone-seeded', frame_boundary='eof')
+        finally:
+            self.fold.uninstall()
+
+        self.assertTrue(results)
+        reconstructed = self.fold.values(
+            self.model, results[-1],
+            metadata_confirmed=v7_live._coded_mode_matches_fold(
+                results[-1], self.fold))
+        full = self.codec.grid.forward(reconstructed)
+        truth = self.codec.grid.forward(v7_live._values(
+            self.model, still, 'box', 1.0)[0])
+        guest_data = self.codec.guests[:-self.codec.signature]
+        self.assertGreater(self.codec.last_score, .9)
+        self.assertGreater(np.corrcoef(full[guest_data],
+                                       truth[guest_data])[0, 1], .9)
+
     def test_coded_status_authorizes_only_its_matching_fold_table(self):
         class Result:
             diag = {'pilot_timing': {'coded_status_mode': 1}}

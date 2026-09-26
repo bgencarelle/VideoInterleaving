@@ -356,39 +356,59 @@ def run_send(args):
                 model, values, start_counter=counter, aspect_codes=aspects,
                 pilot_tones=getattr(args, 'pilot_tones', True),
                 eof_marker=getattr(args, 'eof_marker', True))
-        encoded_peak = float(np.max(np.abs(audio))) if audio.size else 0.0
-        encoded_rms = float(np.sqrt(np.mean(audio*audio))) if audio.size else 0.0
+        report_stats = args.log and not args.no_log
+        if report_stats:
+            encoded_peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+            encoded_rms = float(np.sqrt(np.mean(audio*audio))) if audio.size else 0.0
         limiter_gain = 1.0
         limiter_samples = 0
         if args.mono_sum:
             audio = audio.sum(axis=1, keepdims=True)/np.sqrt(2)
-        before_peak = float(np.max(np.abs(audio))) if audio.size else 0.0
-        before_rms = float(np.sqrt(np.mean(audio*audio))) if audio.size else 0.0
+            before_peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+            if report_stats:
+                before_rms = float(np.sqrt(np.mean(audio*audio))) if audio.size else 0.0
+        else:
+            if report_stats:
+                # The signal is unchanged, so reuse encoded measurements rather
+                # than scanning the full packet again.
+                before_peak, before_rms = encoded_peak, encoded_rms
         if args.mono_sum:
             peak = before_peak
             if peak > .89:
                 limiter_gain = .89/float(peak)
-                limiter_samples = int(np.count_nonzero(np.abs(audio) > .89))
+                if report_stats:
+                    limiter_samples = int(np.count_nonzero(np.abs(audio) > .89))
                 audio *= limiter_gain
-        stats = {
-            'frames_encoded': len(frames),
-            'encoded_peak': encoded_peak,
-            'encoded_rms': encoded_rms,
-            'peak_before_limit': before_peak,
-            'peak_after_limit': float(np.max(np.abs(audio))) if audio.size else 0.0,
-            'rms_before_limit': before_rms,
-            'limiter_active': limiter_gain < 1.0,
-            'limiter_gain': limiter_gain,
-            'samples_limited': limiter_samples,
-            'fold_slots': 0 if fold is None else fold.slots,
-            'coded_pilot': fold is not None,
-        }
+                if report_stats:
+                    peak_after_limit = float(np.max(np.abs(audio)))
+            elif report_stats:
+                peak_after_limit = before_peak
+        if not args.mono_sum and report_stats:
+            peak_after_limit = before_peak
+        if report_stats:
+            stats = {
+                'frames_encoded': len(frames),
+                'encoded_peak': encoded_peak,
+                'encoded_rms': encoded_rms,
+                'peak_before_limit': before_peak,
+                'peak_after_limit': peak_after_limit,
+                'rms_before_limit': before_rms,
+                'limiter_active': limiter_gain < 1.0,
+                'limiter_gain': limiter_gain,
+                'samples_limited': limiter_samples,
+                'fold_slots': 0 if fold is None else fold.slots,
+                'coded_pilot': fold is not None,
+            }
+        else:
+            stats = {'frames_encoded': len(frames)}
         output = P.speed_pulse_stream(audio, args.speed, rate=output_rate)
-        stats.update({
-            'emitted_peak': float(np.max(np.abs(output))) if output.size else 0.0,
-            'emitted_rms': float(np.sqrt(np.mean(output*output)))
-            if output.size else 0.0,
-        })
+        if report_stats:
+            stats.update({
+                'emitted_peak': float(np.max(np.abs(output)))
+                if output.size else 0.0,
+                'emitted_rms': float(np.sqrt(np.mean(output*output)))
+                if output.size else 0.0,
+            })
         return output, stats
 
     def produce():
@@ -406,8 +426,9 @@ def run_send(args):
                     time.sleep(delay)
                 value, aspect = _values(model, grab(), args.encode_filter,
                                         args.brightness, args.gamma)
-                if fold is not None:
-                    value = fold.encode(model, value)
+                # Keep captured source values unfolded. encode_batch folds
+                # exactly once, directly in coefficient space; a second fold
+                # would quantize the hosts again and erase the guest residuals.
                 frames.append(value); aspects.append(aspect)
                 # A compressed packet still needs a new source frame at the
                 # faster wire cadence; otherwise the audio stream has gaps.

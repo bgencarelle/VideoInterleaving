@@ -262,24 +262,26 @@ Numba installation mode.
 
 ## 9. Verification evidence and limits
 
-The V7 test suite was run with:
+### Test inventory and routine checks
+
+Run the modem regression suite from the repository root with:
 
 ```text
-.venv/bin/python -m unittest discover -s modem_tests -p 'test_v7_*.py' -v
+.venv/bin/python -m unittest discover -s modem_tests -v
 ```
 
-Result: **117 tests passed**. This covers the V7 unit tests, including frozen
-table integrity, packet metadata, pulse/EOF framing, live-input behavior,
-loop handling, and decode paths. It is synthetic/unit evidence, not a real
-device or tape test.
-
-The matching test modules, all relative to the repository root, are:
+The `modem_tests/` suite covers V7 transport, sender/receiver behavior, timing,
+quality, impairments, tables, and shared modem support:
 
 ```text
+modem_tests/test_clock.py
+modem_tests/test_impairments.py
+modem_tests/test_modem_clock.py
 modem_tests/test_v7_capture_video.py
 modem_tests/test_v7_decode_speed.py
-modem_tests/test_v7_encode_speed.py
 modem_tests/test_v7_eof.py
+modem_tests/test_v7_encode_speed.py
+modem_tests/test_v7_experimental_fold.py
 modem_tests/test_v7_gl_viewer.py
 modem_tests/test_v7_image_quality.py
 modem_tests/test_v7_live_input.py
@@ -293,6 +295,28 @@ modem_tests/test_v7_speed.py
 modem_tests/test_v7_tables.py
 modem_tests/test_v7_tone_equalization.py
 ```
+
+The standalone coded-pilot prototype has a separate suite:
+
+```text
+.venv/bin/python -m unittest discover -s test_modem_v7 -p 'test_*.py' -v
+```
+
+Its current regression module is `test_modem_v7/test_tone_code.py`. On
+2026-09-26, the modem suite passed **144 tests** and the prototype suite passed
+**12 tests**. Rerun the relevant suite and report fresh results after changes;
+these counts are a dated snapshot, not permanent expectations. Both suites are
+synthetic/unit evidence, not a real device or tape test.
+
+For CPU measurements, run `test_modem_v7/cpu_smoke.py`. Always report the new
+feature beside its matched baseline, with absolute time and delta/percentage
+from the same machine and workload; do not present a feature-only timing.
+Measurements are informational, not pass/fail thresholds. See
+`test_modem_v7/HOWTO.md` for invocation and scope.
+
+For repository test-selection cautions, follow `AGENTS.md`; in particular, do
+not blanket-discover `tests/`, which includes interactive and audio-device scope
+tests.
 
 The shared image fixture is `modem_tests/fixtures/v7_reference_face.png`.
 The synthetic impairment matrix runner is `tools/v7_torture_matrix.py`.
@@ -542,7 +566,8 @@ ends restores the previous unfolded profile; `--experimental-fold M` selects
 M=500 or M=1000 explicitly (M=0 is also accepted as the legacy baseline
 spelling). Each folded profile loads the frozen
 `test_modem_v7/fold_table_<M>.json` built from the reference fixture. The
-sender folds each frame before encoding and overlays the coded status. The
+sender folds each captured source frame exactly once in coefficient space
+before pulse encoding and overlays the coded status. The
 receiver despreads status chips before tone timing, retains each packet's
 equaliser output, and unfolds before display. Its prototype hooks are restored
 in `finally`. `animation_modem` is unchanged.

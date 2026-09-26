@@ -288,6 +288,22 @@ ms/frame for coded M=500 with box/1.0 (+0.19 ms, about 13%). The earlier coded
 sender measured 2.42 ms/frame; these are local CPU timings, with capture and
 audio-device work excluded.
 
+### Paired CPU smoke comparison
+
+Run the lightweight encode/decode timing smoke check with:
+
+```bash
+NUMBA_CACHE_DIR=tmp/numba_cache \
+  .venv/bin/python test_modem_v7/cpu_smoke.py --packets 8 --repeats 12
+```
+
+It emits baseline and feature rows together for send, decode, and decode plus
+reconstruction, with process CPU time and wall time. It uses a synthetic
+fixture and opens no audio device. **Always present new-feature CPU results as
+a paired comparison against the matching baseline**, with absolute time and
+delta/percent on the same machine and workload; do not report a feature-only
+timing. Timings are informational, not pass/fail thresholds.
+
 Run the coded channel against steady-tone and no-tone controls:
 
 ```bash
