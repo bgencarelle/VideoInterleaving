@@ -28,6 +28,8 @@ import folding                                                          # noqa: 
 from folding import SIGNATURE_STEPS, table_text                          # noqa: E402
 import live_fold                                                        # noqa: E402
 from live_fold import LiveFold                                          # noqa: E402
+from tools import v7_live                                                # noqa: E402
+from tone_code import (coded_pilot_timing, decode_tone_code)              # noqa: E402
 
 TARGET = .1521/np.sqrt(1 + 10**(v7.CLOCK_REL_DB/10))
 
@@ -129,6 +131,56 @@ class ExperimentalFoldTests(unittest.TestCase):
         np.testing.assert_allclose(symbol[-c.signature:], SIGNATURE_STEPS*c.D*c.pattern,
                                    atol=1e-9)
 
+    def test_default_sender_overlay_codes_fold_mode_per_packet(self):
+        packets = [v7.encode_pulse_frame(
+            self.model, self.folded, counter, source_index=counter-1,
+            pilot_tones=False, eof_marker=True)
+            for counter in (17, 18)]
+        wire = v7_live._add_coded_pilots(
+            np.concatenate(packets), start_counter=17, fold_slots=500)
+        for index, start in enumerate((0, len(packets[0]))):
+            decoded = decode_tone_code(
+                wire, frame_start=start, frame_scale=1.0,
+                sample_rate=v7.RATE)
+            self.assertTrue(decoded['valid'], decoded['reason'])
+            self.assertEqual(decoded['status']['fold_slots'], 500)
+
+    def test_coded_status_authorizes_only_its_matching_fold_table(self):
+        class Result:
+            diag = {'pilot_timing': {'coded_status_mode': 1}}
+        self.assertTrue(v7_live._coded_mode_matches_fold(Result, self.fold))
+        self.assertFalse(v7_live._coded_mode_matches_fold(
+            Result, LiveFold(1000)))
+
+    def test_default_live_profile_decodes_status_and_unfolds(self):
+        packets = [v7.encode_pulse_frame(
+            self.model, self.folded, counter, source_index=counter-1,
+            pilot_tones=False, eof_marker=True)
+            for counter in range(1, 6)]
+        wire = v7_live._add_coded_pilots(
+            np.concatenate(packets), start_counter=1, fold_slots=500)
+        self.fold.install()
+        try:
+            with coded_pilot_timing():
+                results, _ = v7.decode_pulse_stream(
+                    self.model, wire, sample_rate=v7.RATE,
+                    pilot_timing='tone-seeded', frame_boundary='eof')
+        finally:
+            self.fold.uninstall()
+        self.assertTrue(results)
+        self.assertTrue(any(
+            result.diag.get('pilot_timing', {}).get('coded_status_mode') == 1
+            for result in results))
+        decoded = next(result for result in reversed(results)
+                       if v7_live._coded_mode_matches_fold(result, self.fold))
+        values = self.fold.values(
+            self.model, decoded,
+            metadata_confirmed=v7_live._coded_mode_matches_fold(
+                decoded, self.fold))
+        self.assertEqual(self.fold.codec(self.model).last_unfolded_slots,
+                         self.fold.codec(self.model).M)
+        self.assertEqual(values.shape, self.values.shape)
+
     # ------------------------------------------------------------ fail closed
     def test_shipped_tables_are_pinned_and_describe_themselves(self):
         for slots in (500, 1000):
@@ -169,7 +221,8 @@ class ExperimentalFoldTests(unittest.TestCase):
 
     # --------------------------------------------------------------- hooks
     def test_receiver_hooks_unfold_a_real_packet_and_are_restored(self):
-        originals = (v7._equalize_numba, v7._equalize_numpy, v7.decode_frame)
+        originals = (v7._equalize_numba, v7._equalize_numpy, v7.decode_frame,
+                     v7.pilot_tone_timing)
         audio = v7.encode_pulse_stream(self.model, [self.folded]*4, 1, [0]*4)
         self.fold.install()
         try:
@@ -177,7 +230,8 @@ class ExperimentalFoldTests(unittest.TestCase):
             results, _ = v7.decode_pulse_stream(self.model, audio)
         finally:
             self.fold.uninstall()
-        self.assertEqual((v7._equalize_numba, v7._equalize_numpy, v7.decode_frame), originals)
+        self.assertEqual((v7._equalize_numba, v7._equalize_numpy, v7.decode_frame,
+                          v7.pilot_tone_timing), originals)
         self.assertTrue(results)
         c = self.codec
         full = c.grid.forward(self.fold.values(self.model, results[-1]))
@@ -188,7 +242,8 @@ class ExperimentalFoldTests(unittest.TestCase):
 
     def test_live_receiver_restores_hooks_when_the_run_fails(self):
         import v7_live
-        originals = (v7._equalize_numba, v7._equalize_numpy, v7.decode_frame)
+        originals = (v7._equalize_numba, v7._equalize_numpy, v7.decode_frame,
+                     v7.pilot_tone_timing)
         seen = []
 
         def failing_run(args, fold):
@@ -203,7 +258,8 @@ class ExperimentalFoldTests(unittest.TestCase):
         finally:
             v7_live._run_receive = real
         self.assertEqual(seen, [True])
-        self.assertEqual((v7._equalize_numba, v7._equalize_numpy, v7.decode_frame), originals)
+        self.assertEqual((v7._equalize_numba, v7._equalize_numpy, v7.decode_frame,
+                          v7.pilot_tone_timing), originals)
 
 
 if __name__ == '__main__':

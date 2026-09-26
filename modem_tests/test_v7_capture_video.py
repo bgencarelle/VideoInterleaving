@@ -125,6 +125,7 @@ class SenderFailureTests(unittest.TestCase):
             capture_fps=None, screen_backend='mss', speed=1.0,
             batch_frames=1, seconds=0, mono_sum=False, device=0,
             no_log=True, log=False, brightness=1.0, gamma=1.0,
+            baseline=True,
         )
         fake_sounddevice = type('SoundDevice', (), {'OutputStream': OutputStream})
         with mock.patch.dict(sys.modules, {'sounddevice': fake_sounddevice}), \
@@ -184,7 +185,7 @@ class SenderSchedulingTests(unittest.TestCase):
             batch_frames=1, seconds=.4, mono_sum=False, device=0,
             no_log=True, log=False, brightness=1.0, gamma=1.0, camera=0,
             capture_width=160, capture_filter='neighbor', ffmpeg_input=None,
-            region=None, display=None,
+            region=None, display=None, baseline=True,
         )
         fake_sounddevice = type(
             'SoundDevice', (), {'OutputStream': self.OutputStream})

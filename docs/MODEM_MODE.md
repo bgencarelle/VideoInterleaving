@@ -118,7 +118,9 @@ The WAV path does not invoke the project's stochastic folder selector.
 For direct camera, screen, or video-file transmission, use the standalone
 `vi.modem-send` and `vi.modem-receive` wrappers. This path is separate from
 `main.py --mode modem`, which sends the baked image library described above.
-From the repository root, start the receiver first:
+From the repository root, start the receiver first. Both live tools default to
+the pinned M=500 fold with coded pilot status; the sender selects the matching
+box profile and the receiver despreads the chips before tone-assisted timing.
 
 ```bash
 # Terminal 1
@@ -128,21 +130,24 @@ From the repository root, start the receiver first:
 ./vi.modem-send --device "BlackHole 2ch"
 ```
 
-For non-interactive runs, pass a source explicitly:
+For non-interactive runs, pass a source explicitly. No additional fold option is
+needed for the default M=500 coded profile:
 
 ```bash
-./vi.modem-send --device "BlackHole 2ch" --source screen --encode-filter box
+./vi.modem-send --device "BlackHole 2ch" --source screen
 ./vi.modem-send --device "BlackHole 2ch" --source video \
-  --video-source clip.mp4 --encode-filter box
+  --video-source clip.mp4
 ```
 
 The device argument is required on both sides. Route the sender's output to the
 receiver's input; on a same-machine loopback, select the loopback device for
 both. The sender runs until Ctrl-C (or `--seconds N`); stop the receiver with
-Ctrl-C. Use `--experimental-fold 500` or `1000` on both commands to try the
-opt-in fold prototype. Folding requires the sender's `--encode-filter box` and
-the default fixture. See `test_modem_v7/HOWTO.md` for fold tables, loopback
-instructions, and regression tests.
+Ctrl-C. Use `--baseline` on **both** commands to restore the previous live
+profile (nearest resize, brightness 1.05, and steady pilot tones). To select
+another experimental table, pass `--experimental-fold 1000` on both commands;
+the sender uses box/brightness 1.0 by default. Folded profiles require the
+default fixture and the canonical box model. See `test_modem_v7/HOWTO.md` for
+fold tables, coded-pilot behavior, loopback instructions, and regression tests.
 
 List available device names with `.venv/bin/python -m sounddevice`. On separate
 machines, use the actual output-device name for sending and input-device name

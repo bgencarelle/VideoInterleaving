@@ -246,15 +246,29 @@ Regression tests for the prototype are in the modem suite:
 
 ## Experimental coded pilot (tone_code.py)
 
-This separate experiment leaves `animation_modem/` unchanged. On the 24 image
-symbols, bin 1 remains a steady reference and bin 3 carries 12 known balanced
-BPSK chips on even symbols and 12 status chips on odd symbols. The 12-bit
-status is fold mode (2), pinned table ID (4), CRC-4 (4), and spare (2). The
-receiver acquires packet starts with the normal edge-counted pulse detector,
-uses bin 1 to propose smoothed symbol-window timing corrections, and selects
-a correction only if the known bin-3 code correlates better. The status
-codebook/CRC can resolve up to two low-confidence chips (or one nearby weak
-hard decision), but it never guesses a missing-tone chip.
+The standalone V7 live tools now default to this profile with the pinned M=500
+fold; `--baseline` on both sender and receiver restores the previous nearest /
+1.05-brightness path with steady pilot tones. M=1000 remains available as an
+explicit experimental profile. The coded pilot implementation stays outside
+`animation_modem/`.
+
+On the 24 image symbols, bin 1 remains a steady reference and bin 3 carries 12
+known balanced BPSK chips on even symbols and 12 status chips on odd symbols.
+Status is one of
+three balanced 12-chip codewords for fold-off, M=500, and M=1000. Their minimum
+Hamming distance is six, so nearest-correlation decoding corrects up to two
+chip errors or five erased chips (with the bound `2*errors + erasures < 6`).
+Each chip transition is raised-cosine shaped over the first eight samples of
+the cyclic prefix. The status identifies fold size, not a table revision; the
+signature-missing metadata path assumes one pinned receiver table per fold size.
+
+The prototype receiver acquires packet starts with the normal edge-counted
+pulse detector. Before V7's pilot timing estimator runs, a temporary wrapper
+decodes the current packet's signs from its body and removes those signs from
+bin 3's symbol phasors. This connects coded pilot recovery to V7 tone-seeded
+timing; it does not modify the picture equalizer input. Separate packet scans
+are paired to decoded pictures by measured frame-start position, not list
+order.
 
 Run the coded channel against steady-tone and no-tone controls:
 
@@ -263,95 +277,48 @@ Run the coded channel against steady-tone and no-tone controls:
 .venv/bin/python -m unittest discover -s test_modem_v7 -p 'test_*.py' -v
 ```
 
-In the 12-packet synthetic run, all coded status words decoded in clean,
-10 kHz low-pass, hiss (-45 to -35 dBFS), wow/flutter, fast flutter, mains buzz,
-and random jitter (0.1% and 0.3%). The dropout case decoded 11/12. Neither
-steady-tone nor no-tone controls produced an accepted status in these runs;
-their raw code-correlation scores can nevertheless spike under some
-impairments, so acceptance also depends on tone presence and a valid status
-CRC. These are short synthetic checks, not tape validation.
+The comparison includes a genuine no-metadata baseline: `signature_probe`
+tries both pinned fold-table signatures and accepts a table only when its
+signature noise and coefficient confidence permit unfolding. The image paths
+are `blind` (no table), `signature_probe` (test both signatures),
+`status_selected` (select the current table from this packet's valid status),
+`latched_status` (carry the last valid mode forward), and `oracle` (sender's
+table known in advance). A valid coded mode can authorize the table when the
+signature is missing; the ordinary per-host confidence fallback still applies.
 
-Compare directly against the pinned folded-500 and folded-1000 baselines:
-
-```bash
-.venv/bin/python test_modem_v7/compare_tone_fold.py --packets 12
-```
-
-For each fold and impairment, it sends the same folded frame as no-tone,
-steady-tone, and coded-tone packets. The original 16-slot fold signature and
-noise measurement are active in every run. Each row contains four image paths:
-`blind` (no fold table), `status_selected` (use that packet's decoded mode/table),
-`latched_status` (retain the last valid status through a rejected packet), and
-`oracle` (the sender's table supplied in advance). The coded-status decoder
-also probes every tone variant; accepted statuses on steady/no-tone controls
-count as false accepts. Results go to
-`tmp/test_modem_v7/tone_fold_compare/results.json` (or `--out DIR`).
-
-Earlier fixed-table picture comparisons measured coded-tone impact on the
-folded image, but did not let the decoded status choose the fold table. The
-metadata-assisted receiver comparison below addresses that question directly.
-
-Compare against the current live V7 defaults as well as a no-fold box control:
-
-```bash
-.venv/bin/python test_modem_v7/compare_tone_fold.py \
-  --include-current-v7 --include-box-v7 --pilot-timing tone-seeded \
-  --tones steady coded --packets 12 \
-  --out tmp/test_modem_v7/tone_v7_status
-```
-
-The current baseline uses `nearest`, brightness 1.05, steady tones, and
-`tone-seeded` receive timing. Folded sends use the pinned `box` profile; the
-no-fold box control separates the filter change from the folding gain. The
-same tone-seeded receiver is used for every row. Picture demodulation still
-does not consume the prototype's timing-offset estimate; this comparison tests
-the metadata-driven fold-table choice.
-
-On this reference-fixture run, coded fold-500 improved SSIMULACRA2 over the
-current V7 baseline by 1.17–14.85 points across the eight cases; fold-1000
-improved it by 0.14–18.96 points. Against the matched no-fold box control, the
-ranges were -0.41–10.92 (M=500) and -1.44–15.03 (M=1000); the losses occur at
-0.3% jitter. Coded-tone picture scores stayed within -0.52 to +0.29 points of
-steady-tone folds. The fold-signature noise measurement changed by at most
-0.004 steps for M=500 and 0.0048 for M=1000.
-
-The current-V7 baseline, un-folded box control, and folded steady-tone controls
-each had **0/96 valid coded-status accepts** when probed by the coded-status
-decoder (0 false accepts). Their `correct` count is not applicable because
-those packets do not transmit the coded status. Coded fold-500 decoded 94/96
-statuses correctly (2 rejected, 0 wrong accepts); fold-1000 decoded 93/96
-(3 rejected, 0 wrong accepts). Those are metadata-channel results, not image
-recovery results.
-
-### Does the status help recover the folded image?
-
-Run the receiver-choice comparison (the current-V7 picture baseline above is
-available separately):
+Run the focused metadata/image comparison, including mono sum and two hiss
+levels:
 
 ```bash
 .venv/bin/python test_modem_v7/compare_tone_fold.py \
   --pilot-timing tone-seeded --tones steady coded --packets 12 \
-  --out tmp/test_modem_v7/tone_v7_metadata_image
+  --cases clean dropouts mono-sum hiss-35 hiss-30 \
+  --out tmp/test_modem_v7/tone_metadata_review_matrix
 ```
 
-`blind` decodes a folded packet as ordinary V7 data. `status_selected` uses a
-valid status from that packet to choose M=500 or M=1000; if that status is
-rejected, it shows the packet without unfolding. `latched_status` carries
-forward the last valid mode/table. `oracle` supplies the sender's table in
-advance and is the upper-bound check. All paths use the same decoded V7
-coefficients, and the fold's embedded signature still has to match before
-unfolding is applied.
+On the reference fixture, the coded metadata decoded **60/60 packets** for both
+fold sizes across those five cases; steady-tone controls had no valid statuses.
+The timing wrapper removed coded chip signs on 60/60 coded packets, and V7
+accepted the resulting tone-seeded timing on 53/60 (M=500) and 55/60 (M=1000).
+This verifies connection and timing-fit acceptance, not an independent image
+quality gain from the timing path.
 
-On the reference fixture across eight synthetic cases, the 5 scored frames per
-case recovered the oracle image score exactly with latched metadata for both
-folds. Compared with blind decoding, latched status selection improved
-SSIMULACRA2 by an average of **8.93 points for M=500** (range +0.24 to +13.69)
-and **11.27 points for M=1000** (range +0.27 to +20.26). Immediate per-packet
-selection applied the fold to 38/40 scored frames for M=500 and 37/40 for
-M=1000; latching recovered all 40/40 for both. The exceptions match rejected
-status packets. Steady-tone controls supplied no usable status and applied no
-fold, as expected. Detailed per-case metadata and image scores are in
-`tmp/test_modem_v7/tone_v7_metadata_image/results.json`.
+The signature-probe baseline already matches the oracle on clean and dropout
+runs: it applies the fold on 5/5 and 4/5 scored frames, respectively. Thus
+metadata adds no image gain in those cases. The main positive case is mono-sum
+with M=1000: trying both signatures applies no folds, while the coded status
+selects M=1000 and permits it on 3/5 scored frames. SSIMULACRA2 rises from
+-53.70 to -52.78 (+0.92 points) and reaches the oracle score. M=500 applies no
+folds or gain in mono-sum. This is a conditional synthetic result on one frame,
+not a general-use validation of M=1000.
+
+At hiss -35 dBFS, coded M=500 gains +0.36 points over signature probing, while
+M=1000 gains +0.41; at hiss -30 dBFS the gains are only +0.05/+0.10. In these
+hiss cases no confident guest slots were restored for M=1000 (and only 1/5 for
+M=500), so the small score changes should not be presented as detail recovery.
+The status can identify the fold mode, but it cannot restore coefficients the
+channel did not deliver with adequate confidence. Results and per-packet
+diagnostics are in `tmp/test_modem_v7/tone_metadata_review_matrix/results.json`.
 
 ## How folding works (folding.py)
 

@@ -2,16 +2,17 @@
 """Compare coded-pilot metadata selection with blind and oracle fold decoding.
 
 For each pinned fold table, send identical folded values with no tones, the
-current steady pilot tones, or the experimental coded pilot. Each packet is
-decoded three ways: without a fold table, with the table selected by its coded
-status (or the last valid status), and with the sender's table as an oracle.
-The live 16-slot signature still guards each actual unfold. The same V7 pulse
-receiver/timing mode is used on all paths. ``--include-current-v7`` and
-``--include-box-v7`` add un-folded baselines.
+current steady pilot tones, or the experimental coded pilot. Compare blind
+decoding, probing both pinned fold signatures, coded-status selection/latching,
+and an oracle supplied the sender's table. The signature gates ordinary table
+probes; a valid coded mode may authorize signature-missing reconstruction.
+The same V7 pulse receiver/timing mode is used on all paths.
+``--include-current-v7`` and ``--include-box-v7`` add un-folded baselines.
 
     python test_modem_v7/compare_tone_fold.py [--packets 12]
 """
 import argparse
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -19,27 +20,37 @@ import numpy as np
 from PIL import Image, ImageEnhance
 from scipy.signal import resample_poly
 
-from common import (DISPLAY, RATE, REPO, STEADY_FROM, TARGET,
-                    reference, ssimulacra2, v7, v7_values)
+from common import (CASES as CHANNEL_CASES, DISPLAY, RATE, REPO, STEADY_FROM,
+                    TARGET, impair, reference, ssimulacra2, v7, v7_values)
 from animation_modem.imaging import values_image
 from fold_modem import IMPAIRMENTS
 from live_fold import LiveFold
 from tone_code import (FOLD_500, FOLD_1000, acquire_packet_starts,
-                       add_tone_code, decode_status, decode_tone_code,
-                       encode_status)
+                       add_tone_code, coded_pilot_timing, decode_status,
+                       decode_tone_code, encode_status,
+                       match_tone_results_to_frames)
 
 TONE_VARIANTS = ('no-tone', 'steady', 'coded')
 MODE_FOR_SLOTS = {500: FOLD_500, 1000: FOLD_1000}
 STEADY_VARIANTS = ('steady', 'current-v7', 'box-v7')
 DEFAULT_CASES = ('clean', 'dropouts', 'wow-flutter', 'fast-flutter',
                  'jitter 0.1%', 'jitter 0.3%', 'lowpass-10k',
-                 'warble+lpf12k+dropouts')
+                 'warble+lpf12k+dropouts', 'mono-sum', 'hiss-35',
+                 'hiss-30')
+_CHANNEL_CASE_BY_NAME = {case.name: case for case in CHANNEL_CASES}
+IMPAIRMENTS = dict(IMPAIRMENTS)
+for _extra_case in ('mono-sum', 'hiss-35'):
+    _case = _CHANNEL_CASE_BY_NAME[_extra_case]
+    IMPAIRMENTS[_extra_case] = (
+        lambda wire, case=_case: impair(wire, case, seed=2026))
+_hiss_30 = replace(_CHANNEL_CASE_BY_NAME['hiss-35'],
+                   name='hiss-30', noise_dbfs=-30)
+IMPAIRMENTS['hiss-30'] = lambda wire: impair(wire, _hiss_30, seed=2026)
 
 
 def _encode(model, values, fold, slots, variant, packets, aspect_code):
     transmit_values = fold.encode(model, values) if fold is not None else values
-    mode = MODE_FOR_SLOTS.get(slots)
-    table_id = {500: 1, 1000: 9}.get(slots)
+    mode = FOLD_500 if slots == 500 else FOLD_1000 if slots == 1000 else None
     wire = []
     for index in range(packets):
         counter = index+1
@@ -48,25 +59,25 @@ def _encode(model, values, fold, slots, variant, packets, aspect_code):
             source_index=index,
             pilot_tones=(variant in STEADY_VARIANTS), eof_marker=True)
         if variant == 'coded':
-            packet = add_tone_code(
-                packet, counter, encode_status(mode, table_id, spare=0))
+            packet = add_tone_code(packet, counter, encode_status(mode))
         wire.append(packet)
     return np.concatenate(wire)
 
 
 def _receive(capture_fold, model, capture, pilot_timing):
-    if capture_fold is None:
-        results, info = v7.decode_pulse_stream(
-            model, capture, sample_rate=RATE, pilot_timing=pilot_timing,
-            frame_boundary='eof')
-    else:
-        capture_fold.install()
-        try:
+    with coded_pilot_timing():
+        if capture_fold is None:
             results, info = v7.decode_pulse_stream(
                 model, capture, sample_rate=RATE, pilot_timing=pilot_timing,
                 frame_boundary='eof')
-        finally:
-            capture_fold.uninstall()
+        else:
+            capture_fold.install()
+            try:
+                results, info = v7.decode_pulse_stream(
+                    model, capture, sample_rate=RATE, pilot_timing=pilot_timing,
+                    frame_boundary='eof')
+            finally:
+                capture_fold.uninstall()
     return results, info
 
 
@@ -80,6 +91,26 @@ def _fold_for_status(folds, status_result):
     return folds.get(fold_slots) if fold_slots else None
 
 
+def _probe_fold_signatures(folds, model, result):
+    """Try each compatible pinned signature and require one unambiguous hit."""
+    hits = []
+    for fold in folds.values():
+        try:
+            codec = fold.codec(model)
+            codec.last_score = codec.last_noise = None
+            values = fold.values(model, result)
+        except ValueError:
+            continue
+        if (codec.last_score is not None and codec.last_score >= .5 and
+                codec.last_noise is not None and
+                codec.last_noise <= codec.noise_max and
+                codec.last_unfolded_slots > 0):
+            hits.append((fold, values, codec.last_score, codec.last_noise))
+    if len(hits) == 1:
+        return hits[0]
+    return None, None, None, None
+
+
 def _score_run(ref, values, model, fold, slots, folds, variant, case,
                packets, pilot_timing, aspect_code):
     wire = resample_poly(
@@ -88,29 +119,30 @@ def _score_run(ref, values, model, fold, slots, folds, variant, case,
     capture = IMPAIRMENTS[case](wire)
     # install() only records equaliser outputs for later fold reconstruction;
     # the capture hook's table is deliberately independent of the sent table.
-    capture_fold = next(iter(folds.values())) if fold is not None else None
+    capture_fold = next(iter(folds.values())) if folds else None
     results, info = _receive(capture_fold, model, capture, pilot_timing)
     starts = acquire_packet_starts(capture, limit=packets)
     tone_results = [decode_tone_code(
         capture, start, scale, RATE) for start, scale, _ in starts]
-    # Packets in this experiment carry sequential source indices and the pulse
-    # detector returns them in wire order. A valid status selects its pinned
-    # fold table; invalid status uses the plain fallback until one is acquired.
-    status_by_source = {index: result for index, result in enumerate(tone_results)}
-    latched_status_by_source = {}
+    status_by_result, matched_status_frames = match_tone_results_to_frames(
+        results, starts, tone_results)
+    latched_status_by_result = {}
     latched_status = None
     have_latched_status = False
-    for source_index in range(packets):
-        status_result = status_by_source.get(source_index)
+    for decoded_frame in results:
+        status_result = status_by_result.get(id(decoded_frame))
         if status_result is not None and status_result.get('valid'):
             latched_status = status_result
             have_latched_status = True
-        latched_status_by_source[source_index] = (
+        latched_status_by_result[id(decoded_frame)] = (
             latched_status if have_latched_status else None)
 
     image_paths = {
         'blind': {'scores': [], 'fold_packets': 0, 'fold_applied_frames': 0,
                   'metadata_packets': 0},
+        'signature_probe': {'scores': [], 'fold_packets': 0,
+                            'fold_applied_frames': 0, 'metadata_packets': 0,
+                            'signature_scores': [], 'signature_noises': []},
         'status_selected': {'scores': [], 'fold_packets': 0,
                             'fold_applied_frames': 0, 'metadata_packets': 0},
         'latched_status': {'scores': [], 'fold_packets': 0,
@@ -130,51 +162,66 @@ def _score_run(ref, values, model, fold, slots, folds, variant, case,
         if source_index is None or result.counter < STEADY_FROM:
             continue
 
-        packet_status = status_by_source.get(source_index)
-        packet_latched_status = latched_status_by_source.get(source_index)
+        packet_status = status_by_result.get(id(result))
+        packet_latched_status = latched_status_by_result.get(id(result))
         selected_fold = _fold_for_status(folds, packet_status)
         latched_fold = _fold_for_status(folds, packet_latched_status)
+        signature_fold, signature_values, signature_score, signature_noise = (
+            _probe_fold_signatures(folds, model, result))
         paths = {
-            'blind': None,
-            'status_selected': selected_fold,
-            'latched_status': latched_fold,
-            'oracle': fold,
+            'blind': (None, False, None),
+            'signature_probe': (signature_fold, False, signature_values),
+            'status_selected': (selected_fold,
+                                selected_fold is not None and packet_status is not None,
+                                None),
+            'latched_status': (latched_fold,
+                               latched_fold is not None and
+                               packet_latched_status is not None,
+                               None),
+            'oracle': (fold, fold is not None, None),
         }
         score_cache = {}
-        for name, selected in paths.items():
+        for name, (selected, metadata_confirmed, precomputed) in paths.items():
             summary = image_paths[name]
             if (name == 'status_selected' and packet_status is not None and
                     packet_status.get('valid')):
                 summary['metadata_packets'] += 1
             if name == 'latched_status' and packet_latched_status is not None:
                 summary['metadata_packets'] += 1
+            if name == 'signature_probe' and signature_fold is not None:
+                summary['signature_scores'].append(signature_score)
+                if signature_noise is not None:
+                    summary['signature_noises'].append(signature_noise)
             if selected is not None:
                 summary['fold_packets'] += 1
-                cache_key = ('fold', selected.slots)
+                cache_key = ('fold', selected.slots, metadata_confirmed)
             else:
-                cache_key = ('plain',)
+                cache_key = ('plain', False)
             if cache_key not in score_cache:
-                signature_detected = False
                 if selected is not None:
                     codec = selected.codec(model)
-                    if selected is fold:
+                    if precomputed is None:
                         codec.last_score = codec.last_noise = None
-                    decoded_values = selected.values(model, result)
-                    signature_detected = (codec.last_score is not None and
-                                          codec.last_score >= .5)
-                    if selected is fold:
+                        decoded_values = selected.values(
+                            model, result,
+                            metadata_confirmed=metadata_confirmed)
+                    else:
+                        decoded_values = precomputed
+                    if name == 'oracle':
                         if codec.last_score is not None:
                             signature_scores.append(codec.last_score)
                         if codec.last_noise is not None:
                             signature_noises.append(codec.last_noise)
+                    unfolded_slots = codec.last_unfolded_slots
                 else:
                     decoded_values = v7.values_from(model, result.coeffs)
+                    unfolded_slots = 0
                 picture = values_image(decoded_values, v7.V7_GRIDS).resize(
                     DISPLAY, Image.Resampling.BICUBIC)
                 score_cache[cache_key] = (ssimulacra2(ref, picture),
-                                          signature_detected)
-            score, signature_detected = score_cache[cache_key]
-            if selected is not None and signature_detected:
+                                          unfolded_slots)
+            score, unfolded_slots = score_cache[cache_key]
+            if selected is not None and unfolded_slots > 0:
                 summary['fold_applied_frames'] += 1
             summary['scores'].append(score)
 
@@ -188,9 +235,17 @@ def _score_run(ref, values, model, fold, slots, folds, variant, case,
             'fold_applied_frames': summary['fold_applied_frames'],
             'metadata_available_frames': summary['metadata_packets'],
         }
+        if name == 'signature_probe':
+            image_recovery[name]['mean_signature_score'] = (
+                round(float(np.mean(summary['signature_scores'])), 3)
+                if summary['signature_scores'] else None)
+            image_recovery[name]['mean_signature_noise'] = (
+                round(float(np.mean(summary['signature_noises'])), 4)
+                if summary['signature_noises'] else None)
     oracle_score = image_recovery['oracle']['ssimulacra2']
     blind_score = image_recovery['blind']['ssimulacra2']
-    for name in ('status_selected', 'latched_status'):
+    signature_score = image_recovery['signature_probe']['ssimulacra2']
+    for name in ('signature_probe', 'status_selected', 'latched_status'):
         score = image_recovery[name]['ssimulacra2']
         image_recovery[name]['delta_vs_blind'] = (
             round(score-blind_score, 2)
@@ -198,13 +253,16 @@ def _score_run(ref, values, model, fold, slots, folds, variant, case,
         image_recovery[name]['delta_vs_oracle'] = (
             round(score-oracle_score, 2)
             if score is not None and oracle_score is not None else None)
+        image_recovery[name]['delta_vs_signature_probe'] = (
+            round(score-signature_score, 2)
+            if score is not None and signature_score is not None else None)
 
     expected = None
     if variant == 'coded':
-        expected = decode_status(encode_status(MODE_FOR_SLOTS[slots],
-                                               {500: 1, 1000: 9}[slots]))
+        expected = decode_status(encode_status(MODE_FOR_SLOTS[slots]))
     valid_statuses = [result for result in tone_results if result['valid']]
-    correct_statuses = (sum(result['status'] == expected for result in valid_statuses)
+    correct_statuses = (sum(result['status']['mode'] == expected['mode']
+                             for result in valid_statuses)
                          if expected is not None else None)
     status = {
         'acquired': len(tone_results),
@@ -216,6 +274,10 @@ def _score_run(ref, values, model, fold, slots, folds, variant, case,
             [result['pilot_score'] for result in tone_results])), 3)
             if tone_results else None,
     }
+    timing_diagnostics = [result.diag.get('pilot_timing', {})
+                          for result in results]
+    coded_timing = [item for item in timing_diagnostics
+                    if item.get('coded_chips_removed')]
 
     return {
         'case': case,
@@ -233,6 +295,10 @@ def _score_run(ref, values, model, fold, slots, folds, variant, case,
         'mean_fold_signature_noise': round(float(np.mean(signature_noises)), 4)
             if signature_noises else None,
         'metadata': status,
+        'tone_frame_matches': matched_status_frames,
+        'coded_timing_despread_frames': len(coded_timing),
+        'coded_timing_applied_frames': sum(
+            item.get('mode_applied') == pilot_timing for item in coded_timing),
         'receiver_info': info,
     }
 

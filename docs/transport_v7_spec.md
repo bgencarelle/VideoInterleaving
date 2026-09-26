@@ -168,31 +168,17 @@ failed metadata decode using the measured tone phase. Tone-assisted channel
 equalization (`m-reference`) and pulse-warp timing are opt-in; their defaults
 are off/baseline.
 
-### Exploratory extension: time-coded pilot tones (not implemented)
+### Coded pilot prototype
 
-The two packet-long reference tones could be switched in fixed intervals to
-form a low-rate control channel as well as a timing pattern. At each interval,
-the tone state could be neither tone, bin 1, bin 3, or both: four states, or at
-most two uncoded bits per interval. Keeping one tone continuously present would
-leave one bit per interval while preserving a steady reference. A known start
-pattern followed by coded states could carry small metadata (for example, a
-fold mode or packet-format identifier) and provide known transitions for a
-secondary timing or playback-speed check.
-
-This would use the existing low-frequency tone bins, not create more luma
-coefficient slots. It could potentially carry a fold/table identifier instead
-of using the fold's luma signature for detection, but the signature also
-measures noise on the folded luma slots. Tone decoding alone would not replace
-that per-slot noise estimate.
-
-The pulse preamble remains the primary packet-acquisition path. The current
-tone estimator expects packet-long steady tones, so time coding needs a new
-detector, a fixed chip schedule, transition shaping, and error protection. It
-must distinguish an intentionally absent tone from a tone erased by a notch,
-dropout, or noise; faster switching increases gross bit rate but leaves less
-time to detect each state. The existing metadata word is fully allocated, so a
-separate side channel could be useful, but its practical rate and robustness
-need measurement.
+The standalone V7 live tools now transmit an experimental 12-chip status with
+their default M=500 fold. Bin 1 stays steady; bin 3 alternates 12 known BPSK
+chips and 12 status chips. Three balanced status codewords identify fold-off,
+M=500, and M=1000 at minimum Hamming distance six. Chip transitions are shaped
+inside the cyclic prefix. The live receiver decodes the chip signs and removes
+them before its tone-assisted timing fit. The normal edge-counted pulse path
+remains primary acquisition, and the fold signature still measures per-slot
+noise. This prototype remains outside `animation_modem/`; `--baseline` on both
+standalone endpoints selects the previous steady-tone, unfolded profile.
 
 An initial no-tone ablation only tested compatibility, not coded metadata:
 with the optional tones disabled, the synthetic live loopback still displayed
@@ -378,8 +364,10 @@ evidence of real-media performance.
 
 ## 10. Fold proposal
 
-**Status: proposal, not implemented on the wire.** A live prototype exists:
-`tools/v7_live.py --experimental-fold M` on both ends (see 10.7). The
+**Status: experimental live profile, not integrated into the production
+transport.** `tools/v7_live.py` defaults to coded M=500; `--baseline` on both
+ends restores the prior profile, and `--experimental-fold M` selects another
+pinned size (see 10.7). The
 measurements below are synthetic. They come from `test_modem_v7/`, run on 11 frames of an 810×1080
 portrait face video: frames 1, 3, 5, … fit the statistics and frames 2, 4,
 6, … are scored. Each reconstruction is scored with SSIMULACRA2 at 405×540
@@ -468,10 +456,12 @@ Folding into Cb/Cr slots raised the mean colour error (CIEDE2000) from about
 
 ### 10.3 Recommendation
 
-**M = 500 with the fallback, as an opt-in mode.** Measured: +10 on clean,
-low-pass and dropouts, +7 with slow wow, and −0.4 to −1.3 at worst (fast
-flutter, combined impairments, 0.3 % jitter). M = 1,000 gains more on clean
-paths but loses 2–3 points under flutter.
+**M = 500 with the fallback.** It is now the default profile in the standalone
+V7 live prototype, with `--baseline` to restore the prior profile. The earlier
+measurements show about +10 on clean, low-pass and dropouts, +7 with slow wow,
+and −0.4 to −1.3 at worst (fast flutter, combined impairments, 0.3 % jitter).
+M = 1,000 gains more on clean paths but loses 2–3 points under flutter; it
+remains an explicit experiment rather than the default.
 
 This matches the recovery priority in `AGENTS.md`: colour is unchanged, and
 on bad paths only detail degrades.
@@ -490,13 +480,14 @@ on bad paths only detail degrades.
    the 96×80 grid. Hosts are in the body tier, so tail memory is unaffected.
 4. **Signalling.** The 2-bit source-encoding field is fully used by the four
    encode filters. Options:
-   - reassign one filter code (for example `bicubic`) to "box + fold";
-   - extend the metadata word;
-   - for a first live experiment only, set the same `--experimental-fold`
-     flag on both ends.
+    - reassign one filter code (for example `bicubic`) to "box + fold";
+    - extend the metadata word;
+    - for the standalone live prototype, set the same fold profile on both
+      ends; it defaults to coded M=500 and `--baseline` restores the prior mode.
 
-   The live prototype instead marks folded packets with an in-band signature
-   (10.7), so a folding receiver also shows normal packets correctly.
+    The live prototype uses an in-band signature and coded fold-size status
+    (10.7), so normal packets can pass through and a signature-missing packet
+    can be routed to its pinned table.
 5. **Tests.** `modem_tests/test_v7_experimental_fold.py` covers the
    prototype:
    - noiseless round trip (hosts within half a step, guests exact);
@@ -546,13 +537,15 @@ Results are written to `tmp/test_modem_v7/`.
 
 ### 10.7 Live prototype
 
-`tools/v7_live.py send|receive --experimental-fold M` loads a frozen table,
-`test_modem_v7/fold_table_<M>.json`, built from the reference fixture. It
-holds the hosts, guests, guest scales and the step. The sender folds each
-frame's values before the normal encode. The receiver wraps
-`v7.decode_frame` and the equaliser entry points while it runs; they are
-restored in a `finally`. It keeps each packet's equaliser output and unfolds
-before display. `animation_modem` is unchanged.
+`tools/v7_live.py send|receive` defaults to coded M=500. `--baseline` on both
+ends restores the previous unfolded profile; `--experimental-fold M` selects
+M=500 or M=1000 explicitly (M=0 is also accepted as the legacy baseline
+spelling). Each folded profile loads the frozen
+`test_modem_v7/fold_table_<M>.json` built from the reference fixture. The
+sender folds each frame before encoding and overlays the coded status. The
+receiver despreads status chips before tone timing, retains each packet's
+equaliser output, and unfolds before display. Its prototype hooks are restored
+in `finally`. `animation_modem` is unchanged.
 
 Table loading fails closed:
 - **Pinned files.** Each table file must match a SHA-256 pinned in
@@ -564,17 +557,21 @@ Table loading fails closed:
   fixture. The receiver shows packets from any other model without
   unfolding.
 
-The prototype adds a signature. The 16 weakest host slots carry a ±3D
+The prototype retains a signature. The 16 weakest host slots carry a ±3D
 pattern instead of data. The pattern is drawn from the table's identity, and
 it serves three purposes:
-- **Detection.** The receiver unfolds only packets that carry its own
-  table's pattern (score ≥ 0.5). Normal packets, and packets folded with a
-  different table, are shown as they are.
+- **Detection.** Ordinary signature-based decoding unfolds packets that carry
+  the selected table's pattern (score ≥ 0.5). A valid coded mode can authorize
+  the matching pinned table when its signature is hidden; a normal packet
+  without matching coded status is shown unchanged.
 - **Noise measurement.** The pattern's residual measures the packet's symbol
   noise on exactly the folded slots. Timing smear from fast flutter and
   jitter shows up there, not in the equaliser confidence.
 - **Weighting.** Guests are weighted by β²/(β² + noise²), and above 0.3 steps
   of noise the packet is not unfolded.
+
+The coded status identifies fold size, not a revision hash; signature-missing
+authorization assumes one pinned receiver table per fold size.
 
 Measured on the live receive path (`live_fold.py selftest`: a moving
 sequence, pilot tones, EOF, LiveInput blocks, live receiver arguments; the
@@ -620,7 +617,8 @@ Loopback through the real `tools/v7_live.py` sender and receiver
 
 ## 10. Fold proposal
 
-**Status: proposal, not implemented on the wire.** The measurements below are
+**Status: experimental live profile, not integrated into the production
+transport.** The standalone tools default to coded M=500; the measurements below are
 synthetic. They come from `test_modem_v7/`, run on 11 frames of an 810×1080
 portrait face video: frames 1, 3, 5, … fit the statistics and frames 2, 4,
 6, … are scored. Each reconstruction is scored with SSIMULACRA2 at 405×540
@@ -704,10 +702,12 @@ Folding into Cb/Cr slots raised the mean colour error (CIEDE2000) from about
 
 ### 10.3 Recommendation
 
-**M = 500 with the fallback, as an opt-in mode.** Measured: +10 on clean,
-low-pass and dropouts, +7 with slow wow, and −0.4 to −1.3 at worst (fast
-flutter, combined impairments, 0.3 % jitter). M = 1,000 gains more on clean
-paths but loses 2–3 points under flutter.
+**M = 500 with the fallback.** It is now the default profile in the standalone
+V7 live prototype, with `--baseline` to restore the prior profile. The earlier
+measurements show about +10 on clean, low-pass and dropouts, +7 with slow wow,
+and −0.4 to −1.3 at worst (fast flutter, combined impairments, 0.3 % jitter).
+M = 1,000 gains more on clean paths but loses 2–3 points under flutter; it
+remains an explicit experiment rather than the default.
 
 This matches the recovery priority in `AGENTS.md`: colour is unchanged, and
 on bad paths only detail degrades.
@@ -726,10 +726,10 @@ on bad paths only detail degrades.
    the 96×80 grid. Hosts are in the body tier, so tail memory is unaffected.
 4. **Signalling.** The 2-bit source-encoding field is fully used by the four
    encode filters. Options:
-   - reassign one filter code (for example `bicubic`) to "box + fold";
-   - extend the metadata word;
-   - for a first live experiment only, set the same `--experimental-fold`
-     flag on both ends.
+    - reassign one filter code (for example `bicubic`) to "box + fold";
+    - extend the metadata word;
+    - the standalone live prototype uses one matched profile on both ends;
+      it defaults to coded M=500 and `--baseline` restores the prior profile.
 
    A sender/receiver mismatch affects only the folded slots.
 5. **Tests.** Add fold/unfold round-trip tests (noiseless unfold within the

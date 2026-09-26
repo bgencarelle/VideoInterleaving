@@ -193,27 +193,92 @@ def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0):
 
 def _experimental_fold(slots):
     """PROTOTYPE: the test_modem_v7 luma fold (see docs/transport_v7_spec.md
-    section 10). Both ends must load the same table; nothing on the wire says
-    a packet is folded."""
+    section 10). Both ends load the same pinned table; coded pilot status
+    identifies the fold size and supplies the timing estimator's chip signs."""
     if not slots:
         return None
-    sys.path.insert(0, str(ROOT/'test_modem_v7'))
+    _ensure_test_modem_path()
     from live_fold import LiveFold
     try:
         fold = LiveFold(slots)
     except ValueError as exc:
         raise SystemExit(f'--experimental-fold {slots}: {exc}')
-    print(f'[experimental fold] {slots} luma slots, table {fold.digest} '
-          f'(the other end must show the same)', flush=True)
+    print(f'[fold + coded pilot] {slots} luma slots, table {fold.digest} '
+          f'(the other end must use the same profile)', flush=True)
     return fold
+
+
+def _ensure_test_modem_path():
+    path = str(ROOT/'test_modem_v7')
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+
+def _fold_slots(args):
+    """Resolve the shared live profile; the historical profile is explicit opt-out."""
+    requested = getattr(args, 'experimental_fold', None)
+    if getattr(args, 'baseline', False):
+        if requested is not None:
+            raise ValueError('--baseline cannot be combined with --experimental-fold')
+        return 0
+    return 500 if requested is None else int(requested)
+
+
+def _send_profile(args, slots):
+    """Apply profile defaults while preserving explicit user overrides."""
+    encode_filter = getattr(args, 'encode_filter', None)
+    brightness = getattr(args, 'brightness', None)
+    if slots:
+        encode_filter = encode_filter or 'box'
+        brightness = 1.0 if brightness is None else brightness
+        if encode_filter != 'box':
+            raise ValueError('folded coded-pilot mode requires --encode-filter box')
+        if not P._is_reference(getattr(args, 'fixture', None)):
+            raise ValueError('folded coded-pilot mode requires the default V7 fixture')
+        if not getattr(args, 'pilot_tones', True):
+            raise ValueError('coded-pilot folding cannot be combined with --no-pilot-tones')
+    else:
+        encode_filter = encode_filter or 'nearest'
+        brightness = 1.05 if brightness is None else brightness
+    return encode_filter, float(brightness)
+
+
+def _add_coded_pilots(audio, start_counter, fold_slots):
+    """Overlay each packet's fold-mode status and coded reference tones."""
+    _ensure_test_modem_path()
+    from tone_code import (FOLD_500, FOLD_1000, add_tone_code,
+                           encode_status)
+
+    modes = {500: FOLD_500, 1000: FOLD_1000}
+    if fold_slots not in modes:
+        raise ValueError(f'coded pilots support fold sizes {sorted(modes)}')
+    audio = np.asarray(audio)
+    if audio.ndim != 2 or audio.shape[1] != 2 or len(audio) % P.PULSE_FRAME:
+        raise ValueError('coded-pilot audio must contain complete stereo V7 packets')
+    packets = audio.reshape((-1, P.PULSE_FRAME, 2))
+    status = encode_status(modes[fold_slots])
+    return np.concatenate([
+        add_tone_code(packet, int(start_counter)+index, status)
+        for index, packet in enumerate(packets)])
+
+
+def _coded_mode_matches_fold(result, fold):
+    """A valid per-packet status may authorize only its matching pinned table."""
+    _ensure_test_modem_path()
+    from tone_code import FOLD_MODE_TO_SLOTS
+    timing = result.diag.get('pilot_timing') or {}
+    mode = timing.get('coded_status_mode')
+    return mode is not None and FOLD_MODE_TO_SLOTS.get(mode) == fold.slots
 
 
 def run_send(args):
     import sounddevice as sd
     from tools.v7_capture import Throttled
 
+    slots = _fold_slots(args)
+    fold = _experimental_fold(slots)
+    args.encode_filter, args.brightness = _send_profile(args, slots)
     model = _model(args.fixture, args.encode_filter)
-    fold = _experimental_fold(getattr(args, 'experimental_fold', 0))
     if fold is not None:
         # Fail before any audio: the table folds only the model it was built
         # for (the canonical box profile).
@@ -242,8 +307,11 @@ def run_send(args):
         values = np.asarray(frames)
         audio = P.encode_pulse_stream(model, values, start_counter=counter,
                                       aspect_codes=aspects,
-                                      pilot_tones=getattr(args, 'pilot_tones', True),
+                                      pilot_tones=(False if fold is not None else
+                                                   getattr(args, 'pilot_tones', True)),
                                       eof_marker=getattr(args, 'eof_marker', True))
+        if fold is not None:
+            audio = _add_coded_pilots(audio, counter, fold.slots)
         encoded_peak = float(np.max(np.abs(audio))) if audio.size else 0.0
         encoded_rms = float(np.sqrt(np.mean(audio*audio))) if audio.size else 0.0
         limiter_gain = 1.0
@@ -268,6 +336,8 @@ def run_send(args):
             'limiter_active': limiter_gain < 1.0,
             'limiter_gain': limiter_gain,
             'samples_limited': limiter_samples,
+            'fold_slots': 0 if fold is None else fold.slots,
+            'coded_pilot': fold is not None,
         }
         output = P.speed_pulse_stream(audio, args.speed, rate=output_rate)
         stats.update({
@@ -411,14 +481,22 @@ def capture_rate_for(device_info):
 
 
 def run_receive(args):
-    fold = _experimental_fold(getattr(args, 'experimental_fold', 0))
+    slots = _fold_slots(args)
+    fold = _experimental_fold(slots)
     if fold is None:
         return _run_receive(args, None)
+    if getattr(args, 'pilot_timing', 'tone-seeded') == 'baseline':
+        raise ValueError('coded-pilot folding requires tone-assisted timing; '
+                         'use --baseline for the original steady-pilot profile')
     # The prototype wraps v7.decode_frame and the equalisers to keep each
-    # packet's equaliser output; always restore them, however the run ends.
+    # packet's equaliser output. The coded-pilot context despreads valid chips
+    # before V7 estimates tone timing. Both wrappers are always restored.
     fold.install()
     try:
-        return _run_receive(args, fold)
+        _ensure_test_modem_path()
+        from tone_code import coded_pilot_timing
+        with coded_pilot_timing():
+            return _run_receive(args, fold)
     finally:
         fold.uninstall()
 
@@ -428,7 +506,9 @@ def _run_receive(args, fold):
 
     # Metadata is decoded with the common bootstrap model; the body model is
     # selected from the protected encoding ID carried by each frame.
-    model = _model(args.fixture, 'nearest')
+    model = _model(args.fixture, 'box' if fold is not None else 'nearest')
+    if fold is not None:
+        fold.check(model)
     # Numba compiles the equalizer on its first call; do that before opening the
     # audio stream so compilation cannot stall live capture and drop a packet.
     P.warmup_equalizer(model)
@@ -682,7 +762,8 @@ def _run_receive(args, fold):
             if result.status in ('received', 'verified') or displayable:
                 if fold is not None:
                     values = fold.values(
-                        models.get(result.diag.get('encoding_type'), model), result)
+                        models.get(result.diag.get('encoding_type'), model), result,
+                        metadata_confirmed=_coded_mode_matches_fold(result, fold))
                 else:
                     values = P.values_from(model, result.coeffs)
                 if args.mono_compatible:
@@ -818,24 +899,28 @@ def parser():
                       help='explicit sounddevice output, e.g. BlackHole 2ch')
     send.add_argument('--fixture', type=Path, default=DEFAULT_FIXTURE)
     send.add_argument('--encode-filter', choices=('nearest', 'box', 'lanczos', 'bicubic'),
-                      default='nearest')
-    send.add_argument('--brightness', type=float, default=1.05,
-                      help='source brightness multiplier (default: 1.05)')
+                      default=None,
+                      help='source resize filter (default: box with fold, nearest in baseline mode)')
+    send.add_argument('--brightness', type=float, default=None,
+                      help='source brightness multiplier (default: 1.0 with fold, 1.05 in baseline mode)')
     send.add_argument('--gamma', type=float, default=1.0,
                       help='source gamma; >1 lifts midtones (default: 1.0)')
     send.add_argument('--mono-sum', action='store_true',
                        help='emit mono-summed M content on one channel')
     send.add_argument('--pilot-tones', action=argparse.BooleanOptionalAction,
                       default=True,
-                      help='add V7 bin-1/bin-3 timing references (default on)')
+                       help='baseline: add steady bin-1/bin-3 references (default on); '
+                            'folded profiles always send their coded references')
     send.add_argument('--eof-marker', action=argparse.BooleanOptionalAction,
                       default=True,
                       help='add the V7 packet EOF marker (default on)')
-    send.add_argument('--experimental-fold', type=int, default=0, metavar='M',
-                      help='PROTOTYPE: fold M luma slots 2:1 for extra detail '
-                           '(test_modem_v7/fold_table_M.json, M = 500 or 1000). '
-                           'Requires --encode-filter box and the default '
-                           'fixture. The receiver needs the same flag.')
+    send_profile = send.add_mutually_exclusive_group()
+    send_profile.add_argument('--baseline', action='store_true',
+                              help='restore the pre-fold profile (nearest, brightness 1.05, steady pilots)')
+    send_profile.add_argument('--experimental-fold', type=int, default=None,
+                              choices=(0, 500, 1000), metavar='M',
+                              help='fold M luma slots and send coded pilots (default: 500); '
+                                   '0 selects the baseline. Use the same profile on receiver.')
     send.add_argument('--camera', type=int, default=0)
     send.add_argument('--video-source', '--video', dest='video_source',
                       help='local video file or FFmpeg-supported live stream URL')
@@ -918,10 +1003,13 @@ def parser():
     recv.add_argument('--tone-equalization',
                       choices=('off', 'm-reference'), default='off',
                       help='use pilot tones as an opt-in M-path gain reference')
-    recv.add_argument('--experimental-fold', type=int, default=0, metavar='M',
-                      help='PROTOTYPE: unfold M luma slots (use the sender\'s '
-                           'M; packets without the fold signature are shown '
-                           'unchanged)')
+    recv_profile = recv.add_mutually_exclusive_group()
+    recv_profile.add_argument('--baseline', action='store_true',
+                              help='restore the pre-fold receiver profile; use with sender --baseline')
+    recv_profile.add_argument('--experimental-fold', type=int, default=None,
+                              choices=(0, 500, 1000), metavar='M',
+                              help='unfold M luma slots using coded-pilot status (default: 500); '
+                                   '0 selects baseline. Use the sender\'s profile.')
     return ap
 
 

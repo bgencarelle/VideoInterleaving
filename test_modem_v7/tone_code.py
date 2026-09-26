@@ -7,19 +7,17 @@ status chips. The known pilot code and the steady bin-1 reference let the
 receiver validate chip alignment and decode status before restoring the bin-3
 phase track.
 
-Status layout (12 chips, MSB first)::
-
-    fold mode (2) | table ID (4) | CRC-4 (4) | spare (2)
-
-The four-bit table IDs are local registry IDs derived from the first hex digit
-of the currently pinned table hashes: M=500 -> 1, M=1000 -> 9. They are not
-standalone hashes; unknown IDs fail closed.
+The 12-chip status is one of three length-12 codewords. Their pairwise Hamming
+distance is six, so nearest-correlation decoding corrects two chip errors or
+any five erased chips without a table ID, CRC, or soft-bit heuristic.
 """
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import math
+import threading
 
 import numpy as np
 from scipy.signal import savgol_filter
@@ -30,8 +28,6 @@ FOLD_OFF = 0
 FOLD_500 = 1
 FOLD_1000 = 2
 FOLD_MODE_TO_SLOTS = {FOLD_OFF: 0, FOLD_500: 500, FOLD_1000: 1000}
-TABLE_ID_BY_SLOTS = {0: 0, 500: 0x1, 1000: 0x9}
-SLOTS_BY_TABLE_ID = {value: key for key, value in TABLE_ID_BY_SLOTS.items()}
 
 DATA_SYMBOLS = np.arange(1, v7.F, 2, dtype=int)
 PILOT_SYMBOLS = np.arange(0, v7.F, 2, dtype=int)
@@ -39,82 +35,70 @@ PILOT_SYMBOLS = np.arange(0, v7.F, 2, dtype=int)
 PILOT_CODE = np.asarray((1, -1, -1, -1, -1, -1, 1, 1, -1, 1, 1, 1),
                         dtype=np.int8)
 STATUS_BITS = 12
-STATUS_CRC_POLY = 0x3             # x^4 + x + 1
 ALIGNMENT_MIN_SCORE = 0.60
 TONE_MIN_BODY_RATIO = 0.03
+STATUS_MIN_DISTANCE = 6
+CHIP_SHAPE_SAMPLES = 8
 
 
-def _bits(value, width):
-    return [(int(value) >> bit) & 1 for bit in range(width-1, -1, -1)]
+def _repeat_four_chip_pattern(pattern):
+    return tuple(int(bit) for _ in range(3) for bit in pattern)
 
 
-def _integer(bits):
-    value = 0
-    for bit in bits:
-        value = (value << 1) | int(bit)
-    return value
+# Three balanced codewords derived from distinct weight-two four-chip masks.
+# Repeating the masks three times gives pairwise distance six in 12 chips.
+STATUS_WORD_BY_MODE = {
+    FOLD_OFF: _repeat_four_chip_pattern((0, 0, 1, 1)),
+    FOLD_500: _repeat_four_chip_pattern((0, 1, 0, 1)),
+    FOLD_1000: _repeat_four_chip_pattern((0, 1, 1, 0)),
+}
 
 
-def crc4(bits):
-    """MSB-first CRC remainder (x^4 + x + 1, init/xorout zero)."""
-    crc = 0
-    for bit in bits:
-        feedback = ((crc >> 3) & 1) ^ int(bit)
-        crc = (crc << 1) & 0xF
-        if feedback:
-            crc ^= STATUS_CRC_POLY
-    return crc
-
-
-def encode_status(mode, table_id=None, spare=0):
-    """Encode a fail-closed 12-chip status word.
-
-    ``mode`` is 0=off, 1=M500, 2=M1000. The table ID is a pinned local
-    registry entry, not a cryptographic digest. The CRC covers mode, table ID,
-    and spare bits.
-    """
+def encode_status(mode):
+    """Return the registered distance-six codeword for fold mode."""
     mode = int(mode)
     if mode not in FOLD_MODE_TO_SLOTS:
         raise ValueError('fold mode must be 0 (off), 1 (500), or 2 (1000)')
-    slots = FOLD_MODE_TO_SLOTS[mode]
-    expected_id = TABLE_ID_BY_SLOTS[slots]
-    if table_id is None:
-        table_id = expected_id
-    table_id, spare = int(table_id), int(spare)
-    if not 0 <= table_id <= 0xF or not 0 <= spare <= 0x3:
-        raise ValueError('table ID must be 4-bit and spare must be 2-bit')
-    if table_id != expected_id:
-        raise ValueError('fold mode and table ID do not match the pinned registry')
-    payload = _bits(mode, 2) + _bits(table_id, 4) + _bits(spare, 2)
-    check = _bits(crc4(payload), 4)
-    return tuple(payload[:6] + check + payload[6:])
+    return STATUS_WORD_BY_MODE[mode]
 
 
-def decode_status(bits):
-    """Return status fields, or ``None`` on CRC/reserved-table failure."""
-    bits = tuple(bits)
-    if len(bits) != STATUS_BITS or any(bit not in (0, 1) for bit in bits):
+def decode_status(chips):
+    """Nearest-correlation decode, bounded to two errors/five erasures.
+
+    Erased chips are ``None``. The distance bound rejects any observation that
+    is not uniquely inside one codeword's guaranteed decoding radius.
+    """
+    chips = tuple(chips)
+    if len(chips) != STATUS_BITS or any(
+            chip is not None and chip not in (0, 1) for chip in chips):
         return None
-    bits = tuple(int(bit) for bit in bits)
-    payload = bits[:6] + bits[10:12]
-    if _integer(bits[6:10]) != crc4(payload):
+    erasures = sum(chip is None for chip in chips)
+    candidates = []
+    for word, candidate in STATUS_CODEBOOK:
+        mode = candidate['mode']
+        mismatches = tuple(index for index, (observed, expected) in
+                           enumerate(zip(chips, word))
+                           if observed is not None and int(observed) != expected)
+        correlation = sum(1 if int(observed) == expected else -1
+                          for observed, expected in zip(chips, word)
+                          if observed is not None)
+        candidates.append((correlation, len(mismatches), mode, mismatches))
+    best_correlation = max(candidate[0] for candidate in candidates)
+    best = [candidate for candidate in candidates
+            if candidate[0] == best_correlation]
+    if len(best) != 1:
         return None
-    mode, table_id, spare = (_integer(payload[:2]), _integer(payload[2:6]),
-                             _integer(payload[6:8]))
-    if mode not in FOLD_MODE_TO_SLOTS:
+    _, errors, mode, mismatches = best[0]
+    if 2*errors+erasures >= STATUS_MIN_DISTANCE:
         return None
-    slots = FOLD_MODE_TO_SLOTS[mode]
-    if table_id != TABLE_ID_BY_SLOTS[slots] or table_id not in SLOTS_BY_TABLE_ID:
-        return None
-    return {'mode': mode, 'fold_slots': slots, 'table_id': table_id,
-            'spare': spare}
+    return {'mode': mode, 'fold_slots': FOLD_MODE_TO_SLOTS[mode],
+            'errors_corrected': errors, 'erasures_filled': erasures,
+            'corrected_chips': list(mismatches)}
 
 
 STATUS_CODEBOOK = tuple(
-    (word, decode_status(word))
-    for mode in (FOLD_OFF, FOLD_500, FOLD_1000)
-    for spare in range(4)
-    for word in (encode_status(mode, spare=spare),))
+    (word, {'mode': mode, 'fold_slots': FOLD_MODE_TO_SLOTS[mode]})
+    for mode, word in STATUS_WORD_BY_MODE.items())
 
 
 def _packet_tone_amplitude(packet):
@@ -153,24 +137,33 @@ def add_tone_code(packet, counter, status_bits, pilot_code=PILOT_CODE):
     phase1 = 2*np.pi*v7.PILOT_TONE_BINS[0]*absolute/v7.N
     phase3 = (2*np.pi*v7.PILOT_TONE_BINS[1]*absolute/v7.N +
               v7.PILOT_TONE_PHASES[v7.PILOT_TONE_BINS[1]])
-    chips3 = np.ones(v7.PULSE_FRAME, dtype=np.int8)
+    chips3 = np.ones(v7.PULSE_FRAME, dtype=float)
     body_start = v7.PULSE.SYNC_LEN
+    symbol_chips = np.empty(v7.F, dtype=np.int8)
     for symbol in range(v7.F):
+        symbol_chips[symbol] = (pilot_code[symbol//2] if symbol % 2 == 0 else
+                                (1 if status_bits[symbol//2] == 0 else -1))
         start = body_start+symbol*v7.SYM
-        stop = start+v7.SYM
-        chip = (pilot_code[symbol//2] if symbol % 2 == 0 else
-                (1 if status_bits[symbol//2] == 0 else -1))
-        chips3[start:stop] = chip
+        chips3[start:start+v7.SYM] = symbol_chips[symbol]
+        # Keep the coded phase transition inside the cyclic prefix. A raised
+        # cosine from the preceding chip to this one avoids a hard discontinuity
+        # in the added tone while leaving the useful FFT window unmodulated.
+        shape = min(CHIP_SHAPE_SAMPLES, v7.CP)
+        if shape > 1:
+            previous = 1 if symbol == 0 else symbol_chips[symbol-1]
+            x = np.arange(shape, dtype=float)/(shape-1)
+            ramp = .5-.5*np.cos(np.pi*x)
+            chips3[start:start+shape] = previous+(symbol_chips[symbol]-previous)*ramp
     amplitude = _packet_tone_amplitude(packet)
     tone = amplitude*(np.cos(phase1)+chips3*np.cos(phase3))
     return (packet+tone[:, None]).astype(np.float32)
 
 
-def encode_packet(model, values, counter, mode=FOLD_OFF, table_id=None,
-                  spare=0, source_index=None, aspect_code=0,
+def encode_packet(model, values, counter, mode=FOLD_OFF,
+                  source_index=None, aspect_code=0,
                   pilot_code=PILOT_CODE, eof_marker=False):
     """Encode a normal V7 pulse packet and overlay time-coded pilots."""
-    bits = encode_status(mode, table_id, spare)
+    bits = encode_status(mode)
     packet = v7.encode_pulse_frame(
         model, values, counter, aspect_code=aspect_code,
         source_index=source_index, pilot_tones=False, eof_marker=eof_marker)
@@ -231,7 +224,7 @@ def decode_tone_code(samples, frame_start=0, frame_scale=None,
     The steady bin-1 phasors supply an absolute per-symbol reference. Even
     bin-3 chips are de-spread with the known code; odd chips are decoded against
     the interpolated pilot phase. ``pilot_score`` is the code-alignment check.
-    Invalid/erased chips, weak alignment, or a bad CRC fail closed.
+    A missing tone, weak alignment, or an ambiguous codeword fails closed.
     """
     rate = float(sample_rate)
     scale = rate/v7.RATE if frame_scale is None else float(frame_scale)
@@ -331,26 +324,18 @@ def decode_tone_code(samples, frame_start=0, frame_scale=None,
     data_metric = np.real(d3[odd]*np.exp(-1j*phase_at[odd]))
     data_confidence = np.abs(data_metric)/np.maximum(np.abs(d3[odd]), 1e-12)
     raw_bits = tuple(int(metric < 0) for metric in data_metric)
-    bits = raw_bits
-    status = None
-    corrected_bits = []
-    if len(pilot_positions) >= 2 and np.all(tone_present[odd]):
-        choices = []
-        for word, candidate in STATUS_CODEBOOK:
-            mismatches = [index for index, (actual, expected) in
-                          enumerate(zip(raw_bits, word)) if actual != expected]
-            weak_match = (len(mismatches) <= 2 and
-                          all(data_confidence[index] < .20
-                              for index in mismatches))
-            single_soft_error = (len(mismatches) == 1 and
-                                 data_confidence[mismatches[0]] < .40 and
-                                 pilot_score >= .80)
-            if (not mismatches or weak_match or single_soft_error):
-                choices.append((word, candidate, mismatches))
-        # The registered codebook has distance at least three, so a bounded
-        # one-bit error or two-chip erasure completion must be unique.
-        if len(choices) == 1:
-            bits, status, corrected_bits = choices[0]
+    data_erasures = tuple(index for index, symbol in enumerate(odd)
+                          if not tone_present[symbol])
+    observed_bits = tuple(None if index in data_erasures else bit
+                          for index, bit in enumerate(raw_bits))
+    status_candidate = decode_status(observed_bits)
+    alignment_ok = (len(pilot_positions) >= 6 and
+                    pilot_score >= float(alignment_min_score))
+    status = status_candidate if alignment_ok else None
+    bits = (encode_status(status['mode']) if status is not None else raw_bits)
+    corrected_bits = [index for index, (actual, expected) in enumerate(
+        zip(raw_bits, bits)) if index not in data_erasures and actual != expected]
+    corrected_erasures = list(data_erasures) if status is not None else []
 
     recovered_signs = np.ones(v7.F, dtype=np.int8)
     recovered_signs[PILOT_SYMBOLS] = code
@@ -358,8 +343,6 @@ def decode_tone_code(samples, frame_start=0, frame_scale=None,
                                       dtype=np.int8)
     bin3_track = np.unwrap(np.angle(d3*recovered_signs))
     bin1_track = np.unwrap(np.angle(d1))
-    alignment_ok = (len(pilot_positions) >= 6 and
-                    pilot_score >= float(alignment_min_score))
     erasures = np.flatnonzero(~tone_present).tolist()
     if len(pilot_positions) < 6 or not alignment_ok:
         reason = 'pilot_code_misaligned'
@@ -378,11 +361,83 @@ def decode_tone_code(samples, frame_start=0, frame_scale=None,
         'timing_offsets': np.asarray(timing_offsets).tolist(),
         'data_confidence': data_confidence.tolist(),
         'raw_bits': raw_bits, 'corrected_bits': corrected_bits,
-        'corrected_erasures': [index for index in corrected_bits
-                               if data_confidence[index] < .20],
+        'corrected_erasures': corrected_erasures,
+        'status_errors_corrected': (status['errors_corrected']
+                                    if status is not None else None),
+        'status_erasures_filled': (status['erasures_filled']
+                                   if status is not None else None),
+        'recovered_signs': recovered_signs,
         'bin1_phase_track': bin1_track, 'bin3_phase_track': bin3_track,
         'bin1_phasors': d1, 'bin3_phasors': d3,
     }
+
+
+def decode_tone_body(body, sample_rate=v7.RATE):
+    """Decode coded pilots from V7's body-only, reference-rate sample block."""
+    return decode_tone_code(
+        body, frame_start=-v7.PULSE.SYNC_LEN, frame_scale=1.0,
+        sample_rate=sample_rate)
+
+
+@contextmanager
+def coded_pilot_timing():
+    """Temporarily despread valid coded chips before V7 estimates tone timing.
+
+    ``decode_frame`` receives the exact sampled packet body. Decode its status
+    there, then correct bin 3's known pilot and status signs in the input to
+    V7's existing tone timing estimator. Image equalization still sees the
+    original channel coefficients. This is prototype-only monkeypatching.
+    """
+    real_decode_frame = v7.decode_frame
+    real_pilot_timing = v7.pilot_tone_timing
+    local = threading.local()
+
+    def pilot_tone_timing(Z, model, counter, include_metadata=False,
+                          estimator='single'):
+        signs = getattr(local, 'signs', None)
+        expected_counter = getattr(local, 'counter', None)
+        if signs is None or expected_counter != int(counter):
+            return real_pilot_timing(
+                Z, model, counter, include_metadata=include_metadata,
+                estimator=estimator)
+        adjusted = np.array(Z, copy=True)
+        adjusted[:, 3, :] *= signs[:, None]
+        track, metrics = real_pilot_timing(
+            adjusted, model, counter, include_metadata=include_metadata,
+            estimator=estimator)
+        metrics = dict(metrics)
+        metrics['coded_chips_removed'] = True
+        metrics['coded_status_mode'] = getattr(local, 'mode', None)
+        return track, metrics
+
+    def decode_frame(*args, **kwargs):
+        body = kwargs.get('direct_body')
+        timing_mode = kwargs.get('pilot_timing', 'baseline')
+        packet_counter = kwargs.get('pilot_counter')
+        if packet_counter is None and len(args) > 3:
+            packet_counter = args[3]
+        old = (getattr(local, 'signs', None),
+               getattr(local, 'counter', None),
+               getattr(local, 'mode', None))
+        local.signs = local.counter = local.mode = None
+        if body is not None and timing_mode != 'baseline' and packet_counter is not None:
+            decoded = decode_tone_body(body)
+            if decoded['valid']:
+                local.signs = np.asarray(decoded['recovered_signs'], dtype=float)
+                local.counter = int(packet_counter)
+                local.mode = decoded['status']['mode']
+        try:
+            return real_decode_frame(*args, **kwargs)
+        finally:
+            local.signs, local.counter, local.mode = old
+
+    v7.decode_frame = decode_frame
+    v7.pilot_tone_timing = pilot_tone_timing
+    try:
+        yield
+    finally:
+        v7.decode_frame = real_decode_frame
+        v7.pilot_tone_timing = real_pilot_timing
 
 
 def make_packet_stream(model, values, statuses, start_counter=1):
@@ -393,15 +448,9 @@ def make_packet_stream(model, values, statuses, start_counter=1):
     packets = []
     for offset, (value, status) in enumerate(zip(values, statuses)):
         counter = start_counter+offset
-        if len(status) == 2:
-            mode, table_id = status
-            spare = 0
-        elif len(status) == 3:
-            mode, table_id, spare = status
-        else:
-            raise ValueError('status tuple must be (mode, table ID[, spare])')
-        packets.append(encode_packet(model, value, counter, mode, table_id,
-                                     spare=spare, source_index=offset))
+        mode = status[0] if isinstance(status, (tuple, list)) else status
+        packets.append(encode_packet(model, value, counter, mode,
+                                     source_index=offset))
     return np.concatenate(packets)
 
 
@@ -429,6 +478,27 @@ def acquire_packet_starts(samples, limit=None):
     return found
 
 
+def match_tone_results_to_frames(results, starts, tone_results):
+    """Pair separate tone scans to decoded packets by their frame-start time."""
+    matched = {}
+    used = set()
+    for result in results:
+        frame_start = result.diag.get('frame_start')
+        if frame_start is None or not starts:
+            continue
+        choices = [(abs(float(frame_start)-float(start[0])), index)
+                   for index, start in enumerate(starts) if index not in used]
+        if not choices:
+            continue
+        distance, index = min(choices)
+        scale = float(starts[index][1])
+        tolerance = max(24*scale, .015*v7.PULSE_FRAME*scale)
+        if distance <= tolerance:
+            matched[id(result)] = tone_results[index]
+            used.add(index)
+    return matched, len(used)
+
+
 def _selftest(args):
     from scipy.signal import resample_poly
     from common import CASES, impair, jitter_warp
@@ -443,7 +513,7 @@ def _selftest(args):
         model, values, index+1, source_index=index, eof_marker=True)
         for index in range(args.packets)]
     coded_packets = [add_tone_code(packet, index+1,
-                                   encode_status(FOLD_500, spare=0))
+                                   encode_status(FOLD_500))
                      for index, packet in enumerate(plain_packets)]
     steady_packets = [v7.encode_pulse_frame(
         model, values, index+1, source_index=index, pilot_tones=True,
@@ -471,14 +541,16 @@ def _selftest(args):
         coded = outputs['coded']
         steady, no_tone = outputs['steady'], outputs['no_tone']
         valid = sum(result['valid'] for result in coded)
-        correct = sum(result['valid'] and result['status'] ==
-                      decode_status(encode_status(FOLD_500)) for result in coded)
+        correct = sum(result['valid'] and result['status']['mode'] == FOLD_500
+                      for result in coded)
         scores = [result['pilot_score'] for result in coded]
         print(json.dumps({
             'case': name, 'acquired': len(coded), 'valid': valid,
             'correct_status': correct,
             'timing_corrections': sum(r['timing_window'] != 0 for r in coded),
             'soft_corrected_packets': sum(bool(r['corrected_bits']) for r in coded),
+            'erasure_recovered_packets': sum(bool(r['corrected_erasures'])
+                                             for r in coded),
             'steady_false_accepts': sum(r['valid'] for r in steady),
             'no_tone_false_accepts': sum(r['valid'] for r in no_tone),
             'mean_pilot_score': round(float(np.mean(scores)), 3) if scores else 0,

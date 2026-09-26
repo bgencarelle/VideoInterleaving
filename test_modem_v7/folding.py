@@ -89,6 +89,7 @@ class FoldCodec:
         rng = np.random.default_rng(int(self.identity[:16], 16))
         self.pattern = rng.choice([-1.0, 1.0], self.signature)
         self.last_score = self.last_noise = None
+        self.last_unfolded_slots = 0
 
     # ----------------------------------------------------------- fold table
     # Sender and receiver must fold the same slots with the same scales, so a
@@ -164,23 +165,28 @@ class FoldCodec:
         k = np.round(symbol/self.D)
         return self.D*k, np.clip((symbol - self.D*k)/self.beta, -U_CLIP, U_CLIP)
 
-    def decode(self, coeffs, xhat, conf, fallback=True):
+    def decode(self, coeffs, xhat, conf, fallback=True,
+               metadata_confirmed=False):
         """Full 96x80/48x40 DCT vector from a decoded packet: `coeffs` is the
         decoder's result, `xhat`/`conf` the equaliser output for that packet."""
         full = np.zeros(self.grid.off[-1])
         full[self.kept] = coeffs
+        self.last_noise = None
+        self.last_unfolded_slots = 0
         c = conf[self.hosts]
         symbol = xhat[self.hosts]/np.maximum(c, 1e-3)/self.sd_host*np.sqrt(self.power)
+        signature_detected = not self.signature
         if self.signature:
             # ~1 on a folded packet; ~0 +- .09 on a normal one (16 unit-variance
             # hosts against a +-3D pattern).
             self.last_score = float(np.mean(symbol[-self.signature:]*self.pattern) /
                                     (SIGNATURE_STEPS*self.D))
-            if self.last_score < .5:
+            signature_detected = self.last_score >= .5
+            if not signature_detected and not metadata_confirmed:
                 return full                          # a normal packet: show it as is
         h, u = self._unfold(symbol)
         ok = c >= self.conf_min if fallback else np.ones(self.M, bool)
-        if self.signature and fallback:
+        if self.signature and fallback and signature_detected:
             # The known signature symbols measure this packet's symbol noise on
             # exactly the folded slots. Timing smear (fast flutter, jitter) is
             # not visible in the equaliser confidence, but it is visible here:
@@ -196,9 +202,13 @@ class FoldCodec:
         plain = mu + (np.asarray(coeffs)[self.hosts] - mu)*np.sqrt(self.power)
         full[self.kept[self.hosts]] = np.where(ok, mu + self.sd_host*h, plain)
         full[self.guests] = np.where(ok, u*self.sd_guest, 0.0)
-        if self.signature:                           # signature slots carry no picture
+        if self.signature and (signature_detected or metadata_confirmed):
+            # Signature slots are reserved in every folded packet even when
+            # mono/noise hides their identity. A valid coded mode can authorize
+            # the table while the normal host-confidence fallback remains on.
             full[self.kept[self.hosts[-self.signature:]]] = mu[-self.signature:]
             full[self.guests[-self.signature:]] = 0.0
+        self.last_unfolded_slots = int(np.count_nonzero(ok))
         return full
 
     def plain(self, coeffs):

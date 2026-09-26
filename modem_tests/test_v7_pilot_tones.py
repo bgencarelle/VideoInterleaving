@@ -320,15 +320,26 @@ class V7PilotToneTests(unittest.TestCase):
     def test_live_sender_and_receiver_default_to_eof_tone_seeded(self):
         default_send = v7_live.parser().parse_args([
             'send', '--source', 'test', '--device', 'null'])
+        baseline_send = v7_live.parser().parse_args([
+            'send', '--source', 'test', '--device', 'null', '--baseline'])
         legacy_send = v7_live.parser().parse_args([
             'send', '--source', 'test', '--device', 'null',
             '--no-pilot-tones', '--no-eof-marker'])
+        self.assertEqual(v7_live._fold_slots(default_send), 500)
+        self.assertEqual(v7_live._send_profile(default_send, 500), ('box', 1.0))
+        self.assertEqual(v7_live._fold_slots(baseline_send), 0)
+        self.assertEqual(v7_live._send_profile(baseline_send, 0),
+                         ('nearest', 1.05))
         self.assertTrue(default_send.pilot_tones)
         self.assertTrue(default_send.eof_marker)
         self.assertFalse(legacy_send.pilot_tones)
         self.assertFalse(legacy_send.eof_marker)
         receive = v7_live.parser().parse_args([
             'receive', '--device', 'null'])
+        baseline_receive = v7_live.parser().parse_args([
+            'receive', '--device', 'null', '--baseline'])
+        self.assertEqual(v7_live._fold_slots(receive), 500)
+        self.assertEqual(v7_live._fold_slots(baseline_receive), 0)
         self.assertEqual(receive.pilot_timing, 'tone-seeded')
         self.assertEqual(receive.frame_boundary, 'eof')
         self.assertEqual(receive.tone_equalization, 'off')

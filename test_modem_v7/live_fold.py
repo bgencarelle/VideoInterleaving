@@ -16,9 +16,9 @@ Fail closed:
   canonical `box` profile). The sender refuses any other encode filter or
   fixture. The receiver shows packets from any other model unfolded.
 - The 16 weakest host slots carry a signature drawn from the table's
-  identity. The receiver unfolds only packets that carry its own table's
-  signature. Normal packets, and packets folded with a different table, are
-  shown as they are.
+  identity. The ordinary signature path unfolds only packets that carry its
+  own signature. A valid coded mode can select a table and authorize a
+  signature-missing fallback; normal V7 packets still require the signature.
 
 A normal receiver shows folded packets slightly degraded (loopback, one
 frame: -18.7 normal, -22.1 folded but not unfolded, -7.6 folded and
@@ -127,10 +127,9 @@ class LiveFold:
             v7._equalize_numba, v7._equalize_numpy, v7.decode_frame = self._installed
             self._installed = None
 
-    def values(self, model, result):
-        """Display values for a decoded packet: unfolded when the equaliser
-        output is available, the packet carries this table's signature and the
-        table is for this packet's model; the normal reconstruction otherwise."""
+    def values(self, model, result, metadata_confirmed=False):
+        """Display values using this table, after either signature or metadata
+        authorization. A mismatched model always falls back to normal values."""
         eq = result.diag.get('fold_eq')
         key = model.encoding_type
         if eq is None or key in self._refused:
@@ -140,7 +139,9 @@ class LiveFold:
         except ValueError as exc:                     # another filter or profile
             self._refused[key] = str(exc)
             return v7.values_from(model, result.coeffs)
-        return codec.grid.inverse(codec.decode(result.coeffs, eq[0], eq[1], fallback=True))
+        return codec.grid.inverse(codec.decode(
+            result.coeffs, eq[0], eq[1], fallback=True,
+            metadata_confirmed=metadata_confirmed))
 
 
 # --------------------------------------------------------------------- build
