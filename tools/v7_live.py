@@ -509,9 +509,12 @@ def _run_receive(args, fold):
     model = _model(args.fixture, 'box' if fold is not None else 'nearest')
     if fold is not None:
         fold.check(model)
-    # Numba compiles the equalizer on its first call; do that before opening the
-    # audio stream so compilation cannot stall live capture and drop a packet.
+    # Compile the equalizer and coded status kernel before opening the audio
+    # stream so first-call compilation cannot stall live capture and drop data.
     P.warmup_equalizer(model)
+    if fold is not None:
+        from tone_code import warmup_coded_decoder
+        warmup_coded_decoder(model)
     models = {model.encoding_type: model}
 
     def model_factory(encoding_type):

@@ -17,7 +17,6 @@ import argparse
 from contextlib import contextmanager
 import json
 import math
-import threading
 
 import numpy as np
 from scipy.signal import savgol_filter
@@ -379,64 +378,213 @@ def decode_tone_body(body, sample_rate=v7.RATE):
         sample_rate=sample_rate)
 
 
+_STATUS_WORDS = np.asarray(
+    [STATUS_WORD_BY_MODE[mode] for mode in (FOLD_OFF, FOLD_500, FOLD_1000)],
+    dtype=np.int8)
+_STATUS_WORDS.setflags(write=False)
+_LOW_EARLY = np.asarray(v7.EARLY[:4])
+_LOW_EARLY.setflags(write=False)
+
+
+@v7.njit(cache=True, fastmath=False)
+def _decode_tone_spectrum_kernel(Z, scale, phase, early, pilot_code,
+                                 status_words):
+    """Small compiled status decoder for the low bins in V7's existing FFTs."""
+    tone3r = np.empty(v7.F)
+    tone3i = np.empty(v7.F)
+    amplitude = np.empty(v7.F)
+    d3r = np.empty(v7.F)
+    d3i = np.empty(v7.F)
+    signs = np.ones(v7.F, dtype=np.int8)
+    signs[0::2] = pilot_code
+
+    bin1_total = 0.0
+    for symbol in range(v7.F):
+        p1 = scale*phase[symbol, 1]*np.conj(early[1])*(2.0/v7.N)
+        p3 = scale*phase[symbol, 3]*np.conj(early[3])*(2.0/v7.N)
+        sum1 = 0.0j
+        sum3 = 0.0j
+        for channel in range(2):
+            sum1 += Z[symbol, 1, channel]*p1
+            sum3 += Z[symbol, 3, channel]*p3
+        t1 = sum1*.5
+        t3 = sum3*.5
+        bin1_total += abs(t1)
+        tone3r[symbol], tone3i[symbol] = t3.real, t3.imag
+        amplitude[symbol] = abs(t3)
+
+        # Remove the known 135-degree bin-3 carrier advance per symbol.
+        angle = -2.0*math.pi*v7.PILOT_TONE_BINS[1]*v7.SYM*symbol/v7.N
+        co, si = math.cos(angle), math.sin(angle)
+        d3r[symbol] = t3.real*co-t3.imag*si
+        d3i[symbol] = t3.real*si+t3.imag*co
+
+    bin1_mean = bin1_total/v7.F
+    # Both reference tones are transmitted at the same level. A fraction of
+    # the steady bin-1 reference is a conservative chip-presence floor. Avoid
+    # gating status on the empty bins: mains hum can dominate them while the
+    # coded pilot remains correctly aligned.
+    amplitude_floor = max(1e-8, bin1_mean*.20)
+    ordered = np.sort(amplitude.copy())
+    median = (ordered[v7.F//2-1]+ordered[v7.F//2])*.5
+    tone_present = np.zeros(v7.F, dtype=np.bool_)
+    for symbol in range(v7.F):
+        tone_present[symbol] = (amplitude[symbol] >= amplitude_floor and
+                                amplitude[symbol] >= median*.20)
+
+    pilot_positions = np.empty(len(PILOT_SYMBOLS), dtype=np.int64)
+    pilot_phase = np.empty(len(PILOT_SYMBOLS))
+    pilot_count = 0
+    score_r = 0.0
+    score_i = 0.0
+    score_weight = 0.0
+    for chip in range(len(PILOT_SYMBOLS)):
+        symbol = 2*chip
+        if not tone_present[symbol]:
+            continue
+        pilot_positions[pilot_count] = symbol
+        sign = pilot_code[chip]
+        raw_phase = math.atan2(d3i[symbol]*sign, d3r[symbol]*sign)
+        if pilot_count:
+            delta = raw_phase-pilot_phase[pilot_count-1]
+            while delta > math.pi:
+                delta -= 2.0*math.pi
+            while delta < -math.pi:
+                delta += 2.0*math.pi
+            raw_phase = pilot_phase[pilot_count-1]+delta
+        pilot_phase[pilot_count] = raw_phase
+        score_r += d3r[symbol]*sign
+        score_i += d3i[symbol]*sign
+        score_weight += amplitude[symbol]
+        pilot_count += 1
+    pilot_score = math.sqrt(score_r*score_r+score_i*score_i) / max(
+        score_weight, 1e-12)
+
+    raw_bits = np.zeros(len(DATA_SYMBOLS), dtype=np.int8)
+    erasures = 0
+    if pilot_count >= 2:
+        for chip in range(len(DATA_SYMBOLS)):
+            symbol = 2*chip+1
+            if not tone_present[symbol]:
+                erasures += 1
+            phase_at = 0.0
+            if symbol <= pilot_positions[0]:
+                slope = ((pilot_phase[1]-pilot_phase[0]) /
+                         (pilot_positions[1]-pilot_positions[0]))
+                phase_at = pilot_phase[0]+slope*(symbol-pilot_positions[0])
+            elif symbol >= pilot_positions[pilot_count-1]:
+                last = pilot_count-1
+                slope = ((pilot_phase[last]-pilot_phase[last-1]) /
+                         (pilot_positions[last]-pilot_positions[last-1]))
+                phase_at = pilot_phase[last]+slope*(
+                    symbol-pilot_positions[last])
+            else:
+                for index in range(pilot_count-1):
+                    left, right = pilot_positions[index], pilot_positions[index+1]
+                    if left <= symbol <= right:
+                        fraction = (symbol-left)/(right-left)
+                        phase_at = (pilot_phase[index]+fraction*(
+                            pilot_phase[index+1]-pilot_phase[index]))
+                        break
+            real_metric = (d3r[symbol]*math.cos(phase_at)+
+                           d3i[symbol]*math.sin(phase_at))
+            raw_bits[chip] = 1 if real_metric < 0.0 else 0
+    else:
+        erasures = len(DATA_SYMBOLS)
+
+    mode = -1
+    if (bin1_mean >= 1e-7 and pilot_count >= 6 and
+            pilot_score >= ALIGNMENT_MIN_SCORE):
+        best_errors = len(DATA_SYMBOLS)+1
+        best_mode = -1
+        tied = False
+        for candidate in range(status_words.shape[0]):
+            errors = 0
+            for chip in range(len(DATA_SYMBOLS)):
+                symbol = 2*chip+1
+                if (tone_present[symbol] and
+                        raw_bits[chip] != status_words[candidate, chip]):
+                    errors += 1
+            if errors < best_errors:
+                best_errors, best_mode, tied = errors, candidate, False
+            elif errors == best_errors:
+                tied = True
+        if not tied and 2*best_errors+erasures < STATUS_MIN_DISTANCE:
+            mode = best_mode
+
+    for chip in range(len(DATA_SYMBOLS)):
+        if mode >= 0:
+            bit = status_words[mode, chip]
+        else:
+            bit = raw_bits[chip]
+        signs[2*chip+1] = 1 if bit == 0 else -1
+    return mode, signs, pilot_score
+
+
+def decode_tone_spectrum(Z, model):
+    """Decode fold status from V7's already-computed per-symbol FFT array."""
+    spectrum = np.asarray(Z)
+    if spectrum.ndim != 3 or spectrum.shape != (v7.F, v7.N//2+1, 2):
+        raise ValueError('Z must have shape (F, N//2+1, 2)')
+    mode, signs, pilot_score = _decode_tone_spectrum_kernel(
+        spectrum, float(model.scale), model.phase, _LOW_EARLY,
+        PILOT_CODE, _STATUS_WORDS)
+    status = (None if mode < 0 else {
+        'mode': int(mode), 'fold_slots': FOLD_MODE_TO_SLOTS[int(mode)],
+        'errors_corrected': None, 'erasures_filled': None,
+        'corrected_chips': []})
+    return {'valid': mode >= 0,
+            'reason': None if mode >= 0 else 'pilot_code_or_status_invalid',
+            'status': status, 'pilot_score': float(pilot_score),
+            'recovered_signs': signs}
+
+
+def warmup_coded_decoder(model):
+    """Compile the tiny status kernel before a live input stream is opened."""
+    probe = np.zeros((v7.F, v7.N//2+1, 2), dtype=np.complex128)
+    _decode_tone_spectrum_kernel(probe, float(model.scale), model.phase,
+                                 _LOW_EARLY, PILOT_CODE, _STATUS_WORDS)
+
+
 @contextmanager
 def coded_pilot_timing():
     """Temporarily despread valid coded chips before V7 estimates tone timing.
 
-    ``decode_frame`` receives the exact sampled packet body. Decode its status
-    there, then correct bin 3's known pilot and status signs in the input to
-    V7's existing tone timing estimator. Image equalization still sees the
-    original channel coefficients. This is prototype-only monkeypatching.
+    Reuse the packet FFTs passed to V7's timing estimator, then correct bin 3's
+    known pilot/status signs before the existing tone fit. Image equalization
+    still sees the original channel coefficients. Prototype-only hook.
     """
-    real_decode_frame = v7.decode_frame
     real_pilot_timing = v7.pilot_tone_timing
-    local = threading.local()
 
     def pilot_tone_timing(Z, model, counter, include_metadata=False,
                           estimator='single'):
-        signs = getattr(local, 'signs', None)
-        expected_counter = getattr(local, 'counter', None)
-        if signs is None or expected_counter != int(counter):
+        decoded = decode_tone_spectrum(Z, model)
+        if not decoded['valid']:
             return real_pilot_timing(
                 Z, model, counter, include_metadata=include_metadata,
                 estimator=estimator)
-        adjusted = np.array(Z, copy=True)
-        adjusted[:, 3, :] *= signs[:, None]
-        track, metrics = real_pilot_timing(
-            adjusted, model, counter, include_metadata=include_metadata,
-            estimator=estimator)
+        # Signs are ±1, so temporarily despread and restore bin 3 in place.
+        # This avoids allocating/copying the complete (24, 65, 2) FFT block
+        # just to adapt the tone fit; image equalization receives original Z.
+        bin3 = Z[:, 3, :]
+        signs = decoded['recovered_signs'][:, None]
+        bin3 *= signs
+        try:
+            track, metrics = real_pilot_timing(
+                Z, model, counter, include_metadata=include_metadata,
+                estimator=estimator)
+        finally:
+            bin3 *= signs
         metrics = dict(metrics)
         metrics['coded_chips_removed'] = True
-        metrics['coded_status_mode'] = getattr(local, 'mode', None)
+        metrics['coded_status_mode'] = decoded['status']['mode']
+        metrics['coded_pilot_score'] = decoded['pilot_score']
         return track, metrics
 
-    def decode_frame(*args, **kwargs):
-        body = kwargs.get('direct_body')
-        timing_mode = kwargs.get('pilot_timing', 'baseline')
-        packet_counter = kwargs.get('pilot_counter')
-        if packet_counter is None and len(args) > 3:
-            packet_counter = args[3]
-        old = (getattr(local, 'signs', None),
-               getattr(local, 'counter', None),
-               getattr(local, 'mode', None))
-        local.signs = local.counter = local.mode = None
-        if body is not None and timing_mode != 'baseline' and packet_counter is not None:
-            decoded = decode_tone_body(body)
-            if decoded['valid']:
-                local.signs = np.asarray(decoded['recovered_signs'], dtype=float)
-                local.counter = int(packet_counter)
-                local.mode = decoded['status']['mode']
-        try:
-            return real_decode_frame(*args, **kwargs)
-        finally:
-            local.signs, local.counter, local.mode = old
-
-    v7.decode_frame = decode_frame
     v7.pilot_tone_timing = pilot_tone_timing
     try:
         yield
     finally:
-        v7.decode_frame = real_decode_frame
         v7.pilot_tone_timing = real_pilot_timing
 
 

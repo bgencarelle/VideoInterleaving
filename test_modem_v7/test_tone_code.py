@@ -18,7 +18,8 @@ from common import CASES, RATE, STEADY_FROM, impair                      # noqa:
 from live_fold import LiveFold                                            # noqa: E402
 from tone_code import (FOLD_500, FOLD_1000, FOLD_OFF, acquire_packet_starts,
                        add_tone_code, coded_pilot_timing, decode_status,
-                       decode_tone_code, encode_packet, encode_status,
+                       decode_tone_code, decode_tone_spectrum, encode_packet,
+                       encode_status,
                        make_packet_stream,
                        match_tone_results_to_frames)                         # noqa: E402
 
@@ -126,6 +127,55 @@ class ToneCodeTests(unittest.TestCase):
             metrics.get('coded_chips_removed') and
             metrics.get('mode_applied') == 'tone-seeded'
             for metrics in timing))
+        self.assertTrue(any(
+            metrics.get('coded_status_mode') == FOLD_500
+            for metrics in timing))
+
+    def test_runtime_status_decoder_reuses_v7_fft_bins(self):
+        coded = encode_packet(self.model, self.values, 1, FOLD_500)
+        steady = v7.encode_pulse_frame(
+            self.model, self.values, 1, pilot_tones=True, eof_marker=True)
+        absent = v7.encode_pulse_frame(
+            self.model, self.values, 1, pilot_tones=False, eof_marker=True)
+
+        def body_spectrum(packet):
+            body = packet[v7.PULSE.SYNC_LEN:
+                          v7.PULSE.SYNC_LEN+v7.FRAME]
+            windows = body.reshape(v7.F, v7.SYM, 2)[:, v7.WIN:v7.WIN+v7.N]
+            return np.fft.rfft(windows, axis=1)*v7._receive_rotation(self.model)
+
+        decoded = decode_tone_spectrum(body_spectrum(coded), self.model)
+        self.assertTrue(decoded['valid'], decoded['reason'])
+        self.assertEqual(decoded['status']['fold_slots'], 500)
+        self.assertEqual(decoded['recovered_signs'].shape, (v7.F,))
+        spectrum = body_spectrum(coded)
+        original = spectrum.copy()
+        with coded_pilot_timing():
+            _, metrics = v7.pilot_tone_timing(spectrum, self.model, 1)
+        self.assertTrue(metrics['coded_chips_removed'])
+        np.testing.assert_array_equal(spectrum, original)
+        self.assertFalse(decode_tone_spectrum(
+            body_spectrum(steady), self.model)['valid'])
+        self.assertFalse(decode_tone_spectrum(
+            body_spectrum(absent), self.model)['valid'])
+
+    def test_runtime_status_survives_mains_buzz_in_existing_fft_path(self):
+        packets = [encode_packet(
+            self.model, self.values, index+1, FOLD_500,
+            source_index=index, eof_marker=True)
+            for index in range(12)]
+        capture = resample_poly(np.concatenate(packets), 2, 1,
+                                axis=0).astype(np.float32)
+        mains = next(case for case in CASES if case.name == 'mains-buzz')
+        capture = impair(capture, mains)
+        with coded_pilot_timing():
+            received, _ = v7.decode_pulse_stream(
+                self.model, capture, sample_rate=RATE,
+                pilot_timing='tone-seeded', frame_boundary='eof')
+        modes = [result.diag.get('pilot_timing', {}).get('coded_status_mode')
+                 for result in received]
+        self.assertEqual(len(received), len(packets))
+        self.assertEqual(modes, [FOLD_500]*len(packets))
 
     def test_steady_and_absent_tones_do_not_decode_as_the_coded_channel(self):
         for pilot_tones in (False, True):

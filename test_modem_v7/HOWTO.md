@@ -263,12 +263,21 @@ the cyclic prefix. The status identifies fold size, not a table revision; the
 signature-missing metadata path assumes one pinned receiver table per fold size.
 
 The prototype receiver acquires packet starts with the normal edge-counted
-pulse detector. Before V7's pilot timing estimator runs, a temporary wrapper
-decodes the current packet's signs from its body and removes those signs from
-bin 3's symbol phasors. This connects coded pilot recovery to V7 tone-seeded
-timing; it does not modify the picture equalizer input. Separate packet scans
-are paired to decoded pictures by measured frame-start position, not list
-order.
+pulse detector. Its live timing hook reuses V7's existing per-symbol `rfft`
+array: a small compiled kernel reads the low tone bins, decodes status, and
+temporarily despreads bin 3 in place for the tone fit. It restores the original
+FFT data before picture equalization. The live path therefore adds no repeated
+sample-window projections, and the kernel is warmed before opening the audio
+stream. The standalone capture-analysis decoder retains its direct projections
+and timing-correction trials for independent waveform comparisons. Separate
+packet scans are paired to decoded pictures by measured frame-start position,
+not list order.
+
+A matched synthetic 8-packet receiver timing run measured `decode_pulse_stream`
+at 0.96 ms/packet for the prior baseline and 1.01 ms/packet for coded M=500
+(+0.05 ms, about 5.2%). Run-to-run ranges overlapped. This excludes picture
+reconstruction/display work and is a local CPU measurement, not a guarantee for
+other hardware.
 
 Run the coded channel against steady-tone and no-tone controls:
 
