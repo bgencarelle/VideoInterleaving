@@ -318,6 +318,11 @@ For repository test-selection cautions, follow `AGENTS.md`; in particular, do
 not blanket-discover `tests/`, which includes interactive and audio-device scope
 tests.
 
+**Concurrent-work note (2026-09-26):** another thread is optimizing calls to
+`main.py`. Treat that work as separate from V7 transport changes; inspect its
+existing diff before touching `main.py` and do not overwrite or fold those
+changes into a modem commit without coordination.
+
 The shared image fixture is `modem_tests/fixtures/v7_reference_face.png`.
 The synthetic impairment matrix runner is `tools/v7_torture_matrix.py`.
 
