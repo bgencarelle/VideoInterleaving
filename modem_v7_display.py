@@ -215,12 +215,14 @@ def run_modem(args):
             report['source_index_misses'] = runtime_library.index_misses
         return audio, report
 
-    def prefetch(index, folders):
+    def prefetch(index, folders, next_index=None):
         if runtime_library is None:
             return
         runtime_library.prefetch(index, *folders)
-        if library.frames > 1:
-            runtime_library.prefetch((index + 1) % library.frames, *folders)
+        if next_index is None:
+            next_index = (index + 1) % library.frames
+        if library.frames > 1 and next_index != index:
+            runtime_library.prefetch(next_index, *folders)
 
     if getattr(args, 'modem_wav', None):
         path = Path(args.modem_wav)
@@ -244,7 +246,13 @@ def run_modem(args):
                     index, _ = index_calculator.calculate_free_clock_index(
                         library.frames, pingpong, at_time_ns=at_time_ns,
                         publish=False)
-                    prefetch(index, folders)
+                    next_at_time_ns = (index_calculator.launch_time +
+                                       ((n + 1) * packet_samples * 1_000_000_000)
+                                       // _v7.RATE)
+                    next_index, _ = index_calculator.calculate_free_clock_index(
+                        library.frames, pingpong,
+                        at_time_ns=next_at_time_ns, publish=False)
+                    prefetch(index, folders, next_index)
                     audio, report = make_packet(n + 1, index, folders,
                                                 at_time_ns)
                     sink.writeframesraw(pcm(speed_resample(audio, _v7.RATE, speed)))
@@ -271,6 +279,7 @@ def run_modem(args):
                 if output.ready():
                     slot = None
                     target_time_ns = None
+                    next_index = None
                     if not index_calculator.midi_mode:
                         slot = output.reserve(prepare_ms, receive_margin_ms)
                         if slot is not None:
@@ -280,8 +289,17 @@ def run_modem(args):
                                 at_time_ns=target_time_ns,
                                 time_offset_ns=index_offset_ns, publish=False)
                             index = max(0, min(int(index), library.frames - 1))
+                            next_at_time_ns = (
+                                target_time_ns +
+                                round(output.emit_frame/output.rate * 1_000_000_000))
+                            next_index, _ = index_calculator.calculate_free_clock_index(
+                                library.frames, settings.PINGPONG,
+                                at_time_ns=next_at_time_ns,
+                                time_offset_ns=index_offset_ns, publish=False)
+                            next_index = max(0, min(int(next_index),
+                                                    library.frames - 1))
                     folders, previous = _folders(args, library, index, selected, previous)
-                    prefetch(index, folders)
+                    prefetch(index, folders, next_index)
                     audio, report = make_packet(sent + 1, index, folders,
                                                 target_time_ns)
                     prepare_ms = max(args.modem_prepare_ms, report['encode_ms'] * 1.5)
