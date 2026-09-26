@@ -131,7 +131,7 @@ class ScopeDoesNotLoadGraphicsStack(unittest.TestCase):
 
                 sys.meta_path.insert(0, BlockGraphics())
                 out = types.ModuleType("scope_out")
-                out.choose_device = lambda ask, device: device
+                out.choose_device = lambda ask, device, **kwargs: device
                 out.scrub = lambda value: value
                 sys.modules["scope_out"] = out
                 service = types.ModuleType("web_service")
@@ -170,7 +170,7 @@ class ScopeDoesNotLoadGraphicsStack(unittest.TestCase):
                 sys.argv = [target, "--mode", "scope", "--dir", images,
                             "--device", "null"]
                 out = types.ModuleType("scope_out")
-                out.choose_device = lambda ask, device: device
+                out.choose_device = lambda ask, device, **kwargs: device
                 out.scrub = lambda value: value
                 sys.modules["scope_out"] = out
                 service = types.ModuleType("web_service")

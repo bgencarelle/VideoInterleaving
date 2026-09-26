@@ -36,18 +36,19 @@ import numpy as np
 import settings
 import scope_out as _scope_out
 
-_REQUIRED_SCOPE_OUT_API = 5
+_REQUIRED_SCOPE_OUT_API = 6
 _scope_out_api = getattr(_scope_out, "SCOPE_OUT_API_VERSION", 0)
 _scope_signature = inspect.signature(_scope_out.Scope.__init__)
 if (_scope_out_api != _REQUIRED_SCOPE_OUT_API or
         "rotation" not in _scope_signature.parameters or
         "mirror" not in _scope_signature.parameters or
-        "trigger_shape" not in _scope_signature.parameters):
+        "trigger_shape" not in _scope_signature.parameters or
+        "x_only" not in _scope_signature.parameters):
     raise RuntimeError(
         "scope_display.py and scope_out.py are from different revisions. "
         f"Loaded scope_out from {_scope_out.__file__!r}; "
         f"API={_scope_out_api}, constructor={_scope_signature}. "
-        "Replace scope_out.py with the rotation/mirror/trigger-aware file "
+        "Replace scope_out.py with the rotation/mirror/trigger/X-only file "
         "from the same runtime bundle as scope_display.py."
     )
 
@@ -140,6 +141,9 @@ def _bootstrap():
                         dest="scope_stipple", action="store_true")
     ap.add_argument("--scope-invert", action=argparse.BooleanOptionalAction,
                     default=None)
+    ap.add_argument("--scope-x-only", action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="send only X through a one-channel output")
     ap.add_argument("--scope-trigger", action=argparse.BooleanOptionalAction,
                     default=None,
                     help="one rising X edge per trace (on by default)")
@@ -198,6 +202,8 @@ def _bootstrap():
         settings.SCOPE_RASTER = settings.SCOPE_RENDER_MODE == "raster"
     if args.scope_invert is not None:
         settings.SCOPE_INVERT = args.scope_invert
+    if args.scope_x_only is not None:
+        settings.SCOPE_X_ONLY = args.scope_x_only
     if args.rotation is not None:
         settings.INITIAL_ROTATION = int(args.rotation) % 360
     if args.mirror is not None:
@@ -462,7 +468,8 @@ def _dev_name_of(scope):
 
 
 def _swap_device(old_scope, spec, source, fps, samples, main_libs, float_libs,
-                 density, trim, rows, fields, row_bias, autofit, invert=False):
+                 density, trim, rows, fields, row_bias, autofit, invert=False,
+                 x_only=False):
     """Move the running scope to another output device.
 
     Returns (new_scope, new_cal, fresh_sweep_state).
@@ -485,7 +492,8 @@ def _swap_device(old_scope, spec, source, fps, samples, main_libs, float_libs,
     holding both would fail on exactly the devices worth using.
     """
     from scope_out import Scope, resolve_device
-    dev = resolve_device(spec)
+    dev = (resolve_device(spec, min_channels=1) if x_only
+           else resolve_device(spec))
     try:
         old_scope.stream.stop()
         old_scope.stream.close()
@@ -502,6 +510,7 @@ def _swap_device(old_scope, spec, source, fps, samples, main_libs, float_libs,
         mirror=getattr(old_scope, "mirror", False),
         trigger=getattr(old_scope, "trigger", True),
         trigger_shape=getattr(old_scope, "trigger_shape", "ramp"),
+        x_only=x_only,
         yt_trigger_us=getattr(old_scope, "yt_trigger_us", 250.0),
         yt_trigger_level=getattr(old_scope, "yt_trigger_level", 0.99))
     new_cal = {}
@@ -530,6 +539,7 @@ def run_scope(clock_source=None):
     fps = getattr(settings, "SCOPE_FPS", None) or IPS
     samples = getattr(settings, "SCOPE_SAMPLES", None)
     render_mode = getattr(settings, "SCOPE_RENDER_MODE", None)
+    x_only = bool(getattr(settings, "SCOPE_X_ONLY", False))
     trigger_on = bool(getattr(settings, "SCOPE_TRIGGER", True))
     trigger_shape = getattr(settings, "SCOPE_TRIGGER_SHAPE", "ramp")
     if trigger_shape not in ("ramp", "step"):
@@ -872,10 +882,12 @@ def run_scope(clock_source=None):
         # SCOPE_DEVICE so settings.py can name one.
         if device_spec is None:
             device_spec = getattr(settings, "SCOPE_DEVICE", None)
-        dev = choose_device(ask=ask, device=device_spec)
+        dev = choose_device(ask=ask, device=device_spec,
+                            min_channels=(1 if x_only else 2))
     source = None
     if realtime:
-        probe = Scope(fps=fps, samples=samples, device=dev, invert_y=False)
+        probe = Scope(fps=fps, samples=samples, device=dev, invert_y=False,
+                      x_only=x_only)
         n_pass = probe.samples_per_frame
         probe.stream.close()
         # Calibrate HERE, before the generator is built: it needs the same
@@ -924,6 +936,7 @@ def run_scope(clock_source=None):
     scope = Scope(fps=fps, samples=samples, device=dev, source=source,
                   invert_y=False, rotation=0, mirror=mirror,
                   trigger=trigger_on, trigger_shape=trigger_shape,
+                  x_only=x_only,
                   yt_trigger_us=trigger_us)
 
     if trigger_on:
@@ -938,8 +951,15 @@ def run_scope(clock_source=None):
         else:
             print("[SCOPE] step marker dwells at both rails: two bright dots "
                   "on an XY display. Y-T only.")
-        print("[SCOPE] One channel, Y-T: take X, set the timebase to one "
-              f"complete trace ({1e6 / max(trigger_hz, 1e-9):g} us).")
+        if x_only:
+            print("[SCOPE] X-only mono: connect the output to the Y-T input; "
+                  f"set the timebase to one trace ({1e6 / max(trigger_hz, 1e-9):g} us).")
+        else:
+            print("[SCOPE] One channel, Y-T: take X, set the timebase to one "
+                  f"complete trace ({1e6 / max(trigger_hz, 1e-9):g} us).")
+    elif x_only:
+        print("[SCOPE] X-only mono output: connect the output to the Y-T input; "
+              "the trigger marker is disabled.")
     if yt_timing == "fixed":
         print("[SCOPE] fixed row slots: image width stays registered; "
               "brightness controls dwell within each row")
@@ -997,7 +1017,8 @@ def run_scope(clock_source=None):
     # trace_samples, not samples_per_frame: the marker has its own samples,
     # so the picture budget and the emitted trace length are no longer equal.
     _trace_hz = scope.samplerate / scope.trace_samples
-    print(f"[SCOPE] {mode_name}{' REALTIME' if realtime else ''}"
+    print(f"[SCOPE] {'X-ONLY ' if x_only else ''}"
+          f"{mode_name}{' REALTIME' if realtime else ''}"
           f"{f' INTERLACE x{fields}' if fields > 1 else ''} | "
           f"{scope.samples_per_frame} samples/trace @ {scope.samplerate} Hz "
           f"({_trace_hz:.0f} passes/sec) | "
@@ -1211,6 +1232,7 @@ def run_scope(clock_source=None):
                       lowpass=lowpass, mode=render_mode, raster=use_raster,
                       sweep=sweep_mode, autofit=autofit,
                       invert=invert, rotation=rotation, mirror=mirror,
+                      x_only=x_only,
                       yt=trigger_on,
                       yt_trigger_us=scope.yt_trigger_us,
                       trigger_shape=trigger_shape,
@@ -1238,6 +1260,7 @@ def run_scope(clock_source=None):
         from lightweight_monitor import start_monitor, monitor_data
         monitor = start_monitor()
         monitor_data["scope_device"] = _dev_name
+        monitor_data["scope_x_only"] = x_only
         # Static: enumerated once. The page needs it to build the selector, and
         # putting it in /data avoids a second endpoint.
         try:
@@ -1246,7 +1269,8 @@ def run_scope(clock_source=None):
             monitor_data["scope_devices"] = [
                 {"index": i, "name": nm, "api": api, "rate": rate,
                  "default": (i == _dflt)}
-                for (i, nm, api, rate) in list_output_devices()]
+                for (i, nm, api, rate) in list_output_devices(
+                    min_channels=(1 if x_only else 2))]
         except Exception:
             monitor_data["scope_devices"] = []
         monitor_data["scope_mode"] = mode_name + (" REALTIME" if realtime else "")
@@ -1367,7 +1391,7 @@ def run_scope(clock_source=None):
                     scope, cal, sweep = _swap_device(
                         scope, _want, source, fps, samples,
                         main_libs, float_libs, density, trim, rows, fields,
-                        row_bias, autofit, invert)
+                        row_bias, autofit, invert, x_only=x_only)
                     # The emitter owns the chain and the geometry, so it has to
                     # be rebuilt, not just reset: a new device can mean a new
                     # sample rate, which changes samples_per_frame and with it

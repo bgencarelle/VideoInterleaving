@@ -8,6 +8,8 @@
       audioBusy = busy;
       for (const id of ["local-btn", "sink-btn", "sink-select"])
         document.getElementById(id).disabled = busy;
+      if (localOutputSel)
+        localOutputSel.disabled = busy || localRunning;
       if (!busy && outputCheckPending) void checkSelectedOutput();
     }
 
@@ -104,7 +106,10 @@
         const url = URL.createObjectURL(new Blob([WORKLET_SRC], {type: "text/javascript"}));
         try { await actx.audioWorklet.addModule(url); }
         finally { URL.revokeObjectURL(url); }
-        worklet = new AudioWorkletNode(actx, "scope-out", {outputChannelCount: [2]});
+        const xOnly = localOutputSel && localOutputSel.value === "x";
+        worklet = new AudioWorkletNode(actx, "scope-out", {
+          outputChannelCount: [xOnly ? 1 : 2]
+        });
         worklet.connect(actx.destination);
         lumCanvas = document.createElement("canvas");
         lumCtx = lumCanvas.getContext("2d", {willReadFrequently: true});

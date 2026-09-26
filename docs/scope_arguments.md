@@ -208,6 +208,16 @@ stochastic contribution from raster's grid-compensated contribution.
 
 ## Group D — the output path
 
+### `--scope-x-only` / `--no-scope-x-only`
+
+By default scope output is stereo XY: left carries X and right carries Y.
+`--scope-x-only` opens a one-channel audio stream and sends only the X waveform,
+for an interface with one output channel and a single-input Y-T scope. The X
+trigger marker remains on that signal, so the scope can trigger on its rising
+edge. Device selection and `--ask` include mono-capable outputs in this mode.
+The default remains stereo; use `--no-scope-x-only` to override a setting that
+enables it.
+
 ### `--rotation {0,90,180,270}` and `--mirror` / `--no-mirror`
 
 Orientation of the picture. These are not scope-only flags: the local window

@@ -141,7 +141,7 @@ def configure_runtime():
         help="Path to image source folder (overrides settings.py)"
     )
 
-    # --- Options for --mode scope (XY output on the sound card) ---
+    # --- Options for --mode scope (scope signal output on the sound card) ---
     parser.add_argument("--xy-dir", help="Baked XY libraries (default: settings.XY_DIR)")
     scope_render = parser.add_mutually_exclusive_group()
     scope_render.add_argument("--scope-mode",
@@ -163,6 +163,10 @@ def configure_runtime():
                              "keeps its geometry but shifts beam dwell toward "
                              "originally dark regions. Transparent padding "
                              "stays dark. Press i to toggle live")
+    parser.add_argument("--scope-x-only",
+                        action=argparse.BooleanOptionalAction, default=None,
+                        help="Scope: send only the X signal through a one-channel "
+                             "output for a single-input Y-T scope")
     parser.add_argument("--scope-realtime", action="store_true",
                         help="Scope: stream continuously so index changes land "
                              "within a row instead of at a trace boundary "
@@ -624,7 +628,10 @@ def configure_runtime():
                              "alternative combiners; choose one")
         if args.port:
             print("⚠️  WARNING: --port ignored in SCOPE mode.")
-        print(f">> MODE: SCOPE (XY audio) [{source_name}]")
+        if args.scope_x_only is not None:
+            settings.SCOPE_X_ONLY = args.scope_x_only
+        _scope_signal = "X-only mono" if settings.SCOPE_X_ONLY else "XY stereo"
+        print(f">> MODE: SCOPE ({_scope_signal}) [{source_name}]")
         settings.ASCII_MODE = False
         settings.SERVER_MODE = False
         config.set_mode(MODE_SCOPE)
@@ -764,8 +771,9 @@ def configure_runtime():
             # argv is decoded with surrogateescape, so a stray byte in shell
             # history arrives as a lone surrogate and breaks any later encode
             _configured_device = _scrub(_configured_device)
-            settings.SCOPE_DEVICE = _choose(ask=_configured_ask,
-                                            device=_configured_device)
+            settings.SCOPE_DEVICE = _choose(
+                ask=_configured_ask, device=_configured_device,
+                min_channels=(1 if settings.SCOPE_X_ONLY else 2))
             if settings.SCOPE_DEVICE == "null":
                 _name = "none (browser renders)"
             else:

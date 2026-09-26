@@ -11,6 +11,31 @@
     const lumImg = document.getElementById("luma-src");
     let actx = null, worklet = null, lumCanvas = null, lumCtx = null;
     let localRunning = false, tracesBuilt = 0;
+    const localOutputSel = document.getElementById("local-output-mode");
+    let localOutputTouched = false;
+
+    if (localOutputSel) {
+      localOutputSel.addEventListener("change", () => {
+        localOutputTouched = true;
+        if (!localRunning) {
+          document.getElementById("local-status").textContent =
+            localOutputSel.value === "x"
+              ? "Ready: X-only mono signal for a single-input Y-T scope."
+              : "Ready: stereo XY signal (left=X, right=Y).";
+        }
+      });
+    }
+
+    function syncLocalOutputMode(data) {
+      if (!localOutputTouched && localOutputSel && data.scope_x_only !== undefined)
+        localOutputSel.value = data.scope_x_only ? "x" : "xy";
+    }
+
+    function xOnlyTrace(xy) {
+      const n = Math.floor(xy.length / 2), x = new Float32Array(n);
+      for (let i = 0; i < n; i++) x[i] = xy[2 * i];
+      return x;
+    }
 
     function boxGrid(data, w, h, rows, cols) {
       // area-average each cell, matching _box()
@@ -232,11 +257,11 @@
         constructor(){ super(); this.buf=null; this.pos=0;
           this.port.onmessage = e => { this.buf = e.data; this.pos = 0; }; }
         process(_i, outputs){
-          const L=outputs[0][0], R=outputs[0][1];
-          if(!this.buf){ L.fill(0); R.fill(0); return true; }
-          const b=this.buf, n=b.length>>1;
-          for(let k=0;k<L.length;k++){
-            L[k]=b[this.pos*2]; R[k]=b[this.pos*2+1];
+          const out=outputs[0], channels=out.length;
+          if(!this.buf){ for(const channel of out) channel.fill(0); return true; }
+          const b=this.buf, n=Math.max(1,Math.floor(b.length/channels));
+          for(let k=0;k<out[0].length;k++){
+            for(let c=0;c<channels;c++) out[c][k]=b[this.pos*channels+c]||0;
             this.pos++; if(this.pos>=n) this.pos=0;   // loop, never silence
           }
           return true;
@@ -255,7 +280,8 @@
         ? serverRate / pictureSamples : 30;
       const n = Math.max(64, Math.round(actx.sampleRate / rate));
       document.getElementById("local-status").textContent =
-        `Running at ${actx.sampleRate} Hz \u2014 ${n} samples per trace, `
+        `${localOutputSel && localOutputSel.value === "x" ? "X-only mono" : "Stereo XY"} `
+        + `at ${actx.sampleRate} Hz \u2014 ${n} samples per trace, `
         + `${tracesBuilt} built. Your rate, your sound card.`;
     }
 
@@ -329,6 +355,9 @@
                               lastData.scope_yt_trigger_us,
                               lastData.scope_trigger_shape);
       }
+      if (typeof localOutputSel !== "undefined" && localOutputSel
+          && localOutputSel.value === "x")
+        trace = xOnlyTrace(trace);
       worklet.port.postMessage(trace);
       if ((++tracesBuilt % 15) === 0) setStatus();
     }

@@ -91,7 +91,7 @@ ASCII_SOURCE_IMAGE_ASPECT_RATIO = 1.333333333
 JPEG_QUALITY = 60# Image quality (lower = fewer bytes per frame on slow links)
 HEADLESS_RES = (320, 400)   # Resolution for the virtual screen (web frame size)
 
-# --- SCOPE MODE (XY output via the sound card) ---
+# --- SCOPE MODE (scope waveform output via the sound card) ---
 # Scope refresh defaults to IPS. For completed vector/raster passes, one trace
 # per index maximises their finite sample budget (samples = rate / fps).
 # Stochastic is continuous: a trace is only an audio buffer, not an image.
@@ -132,9 +132,10 @@ SCOPE_INVERT = False      # inverse tone; vector approximates it through dwell v
 SCOPE_REALTIME = False    # raster-only low-latency streaming path
 # The X trigger marker is a property of the output, not a mode: shaped as a
 # ramp and parked outside the picture box it costs an XY display nothing, and
-# it is the whole requirement for single-channel Y-T viewing. On by default so
-# one signal drives both; turn it off with --no-scope-trigger.
+# it supplies the trigger for single-input Y-T viewing. On by default; turn it
+# off with --no-scope-trigger.
 SCOPE_TRIGGER = True
+SCOPE_X_ONLY = False     # open one output channel and send the X waveform only
 SCOPE_TRIGGER_US = 250.0   # marker duration; CLI override is in microseconds
 SCOPE_TRIGGER_SHAPE = "ramp"  # "ramp": moving, parked off-picture, invisible on
                           # XY. "step": the original two-dwell marker, for a

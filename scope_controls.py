@@ -236,6 +236,8 @@ def as_flags(s):
         out.append(f"--rotation {int(s['rotation']) % 360}")
     if s.get("mirror", False):
         out.append("--mirror")
+    if s.get("x_only", False):
+        out.append("--scope-x-only")
     if not s.get("yt", True):
         out.append("--no-scope-trigger")
     else:

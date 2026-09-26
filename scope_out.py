@@ -1,11 +1,11 @@
 """
-scope_out.py -- send 2D vector graphics to an oscilloscope in XY mode
-via the sound card.  Left channel = X, right channel = Y.
+scope_out.py -- send scope waveforms to an oscilloscope via the sound card.
+Stereo mode uses left=X and right=Y; X-only mode opens a mono output.
 
     pip install numpy sounddevice
 
-Scope setup: XY / "Format XY" mode, both inputs DC-coupled if available,
-~200-500 mV/div, start with the system volume low and bring it up.
+Scope setup: XY / "Format XY" for stereo, Y-T for X-only. Use DC coupling if
+available, ~200-500 mV/div, and start with the system volume low.
 """
 
 import re
@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 
-SCOPE_OUT_API_VERSION = 5  # rotation + mirror output, always-on shaped X trigger
+SCOPE_OUT_API_VERSION = 6  # adds native one-channel X-only output
 
 try:
     import settings as settings_mod
@@ -54,14 +54,15 @@ JUMP_GAIN = 0.12   # <1 -> fewer samples spent on travel moves -> dimmer
 SMOOTH = 5         # circular box filter width; tames DAC ringing at corners
 LEVEL = 0.9        # peak output amplitude, keep below 1.0
 
-# A frame whose peak-to-peak is below this on BOTH channels is not a picture,
+# A frame whose peak-to-peak is below this on every active output axis is not
+# a picture,
 # it is a stationary beam.  Full scale is 1.8 peak-to-peak, so this is ~5e-5 of
 # the range: far below anything a real image produces, and far above the
 # round-off left by the filters a frame has already been through.
 PARK_PTP = 1e-4
 
 
-def beam_is_parked(frame, eps=PARK_PTP):
+def beam_is_parked(frame, eps=PARK_PTP, x_only=False):
     """True when every sample in the frame is effectively the same position.
 
     "Never park the beam" is stated in four places in this codebase and was
@@ -73,16 +74,21 @@ def beam_is_parked(frame, eps=PARK_PTP):
     producer that might create one.
 
     ptp per channel rather than diff(): no allocation of an (n, 2) temporary in
-    a path that runs once per trace.
+    a path that runs once per trace. In X-only mode only the emitted axis matters.
     """
     f = np.asarray(frame)
     if len(f) < 2:
         return True
-    # ptp propagates NaN and inf, so both are caught from the two reductions we
+    # ptp propagates NaN and inf, so either is caught from the reductions we
     # already need -- `not (v >= 0)` is True for NaN and `v == inf` for inf.
     # An isfinite().all() here would be correct too, but it allocates a full
     # boolean array, and this runs on the audio thread once per callback.
-    px, py = np.ptp(f[:, 0]), np.ptp(f[:, 1])
+    px = np.ptp(f[:, 0])
+    if x_only:
+        if not (px >= 0.0) or px == np.inf:
+            return True
+        return bool(px < eps)
+    py = np.ptp(f[:, 1])
     if not (px >= 0.0) or not (py >= 0.0) or px == np.inf or py == np.inf:
         # Not a picture. Treat it as parked so the caller replaces it with
         # something the deflection amplifiers can actually follow.
@@ -346,7 +352,7 @@ def _clean_input(raw):
 
 
 def list_output_devices(min_channels=2):
-    """[(index, name, host_api, default_rate)] for devices that can do stereo."""
+    """[(index, name, host_api, default_rate)] with enough output channels."""
     try:
         apis = sd.query_hostapis()
     except Exception:
@@ -371,7 +377,7 @@ def default_output_index():
         return None
 
 
-def resolve_device(spec):
+def resolve_device(spec, min_channels=2):
     """
     Accept a name fragment, an index, or None (= system default).
 
@@ -389,7 +395,7 @@ def resolve_device(spec):
         spec = _ANSI_OR_CTRL.sub("", spec).strip()
         if not spec:
             return None
-    devs = list_output_devices()
+    devs = list_output_devices(min_channels=min_channels)
 
     def listing():
         return "\n".join(f"  [{i}] {n}  ({a}, {r} Hz)"
@@ -414,7 +420,7 @@ def resolve_device(spec):
     return devs[k][0]
 
 
-def choose_device(ask=False, device=None, stream=None):
+def choose_device(ask=False, device=None, stream=None, min_channels=2):
     """
     Pick an output device.  Returns a PortAudio index, or None for the system
     default.
@@ -422,15 +428,15 @@ def choose_device(ask=False, device=None, stream=None):
     The prompt numbers outputs sequentially from 0, and --device uses the same
     numbering, so what you read off the list is what you can pass next time.
 
-    Prompts only when asked AND more than one stereo-capable output exists AND
+    Prompts only when asked AND more than one suitable output exists AND
     there is a terminal to prompt on -- so --ask is safe to leave in a kiosk
     launch script, where it takes the default instead of hanging.
     """
     if device is not None:
-        return resolve_device(device)
-    devs = list_output_devices()
+        return resolve_device(device, min_channels=min_channels)
+    devs = list_output_devices(min_channels=min_channels)
     if not devs:
-        raise RuntimeError("No stereo-capable audio output found. "
+        raise RuntimeError(f"No output with at least {min_channels} channel(s) found. "
                            "On Linux check that libportaudio2 is installed.")
     if not ask or len(devs) == 1:
         return None
@@ -736,13 +742,13 @@ class NullStream:
     is published separately by the tap.
     """
 
-    def __init__(self, samplerate, blocksize, callback):
+    def __init__(self, samplerate, blocksize, callback, channels=2):
         self.samplerate = float(samplerate)
         self.blocksize = int(blocksize or 512)
         self._cb = callback
         self.latency = 0.0
         self._stop = threading.Event()
-        self._buf = np.zeros((self.blocksize, 2), dtype=np.float32)
+        self._buf = np.zeros((self.blocksize, int(channels)), dtype=np.float32)
         self._t = None
 
     def start(self):
@@ -779,6 +785,9 @@ class NullStream:
 class Scope:
     """Continuously loops the current frame out of an audio device.
 
+    The normal stream is stereo XY. ``x_only=True`` emits just the first
+    coordinate through a one-channel stream for a single-input Y-T scope.
+
     device=None targets the system default output.  The sample rate is taken
     from that device's own default: on desktops the default output is a shared
     mixer, and requesting any other rate just makes it resample behind your
@@ -792,7 +801,7 @@ class Scope:
                  lowpass_hz=None, lowpass_taper=0.0, blocksize=512,
                  yt_mode=None, yt_trigger_us=250.0,
                  yt_trigger_level=0.99, mirror=False,
-                 trigger=True, trigger_shape="ramp"):
+                 trigger=True, trigger_shape="ramp", x_only=False):
         """
         samples : path length per trace -- the REAL parameter.  Refresh is not
                   set independently; it falls out as rate/samples, because the
@@ -803,6 +812,8 @@ class Scope:
         """
         self.invert_y = invert_y
         self.swap_xy = swap_xy
+        self.x_only = bool(x_only)
+        self.output_channels = 1 if self.x_only else 2
         self.set_rotation(rotation)
         self.set_mirror(mirror)
         _null = (isinstance(device, str) and device.strip().lower()
@@ -893,12 +904,19 @@ class Scope:
             print(f"[SCOPE] no audio device (--device null): generating at "
                   f"{samplerate:.0f} Hz for the browser to render")
             self.stream = NullStream(samplerate, self.blocksize or 512,
-                                     self._callback)
+                                     self._callback, channels=self.output_channels)
             return
         self.stream = sd.OutputStream(
-            samplerate=samplerate, channels=2, dtype="float32",
+            samplerate=samplerate, channels=self.output_channels, dtype="float32",
             device=device, blocksize=self.blocksize,
             latency="low", callback=self._callback)
+
+    def _write_output(self, outdata, frame):
+        """Map XY geometry to the selected physical output layout."""
+        if self.x_only:
+            outdata[:, 0] = frame[:, 0]
+        else:
+            outdata[:, :2] = frame[:, :2]
 
     @property
     def trace_samples(self):
@@ -926,16 +944,22 @@ class Scope:
         # A window that began in the previous block and runs into this one.
         if pos < marker:
             k = min(marker - pos, n)
-            block[:k] = self._marker[pos:pos + k]
+            if block.shape[1] == 1:
+                block[:k, 0] = self._marker[pos:pos + k, 0]
+            else:
+                block[:k] = self._marker[pos:pos + k]
         start = (-pos) % period                  # next window boundary
         while start < n:
             k = min(marker, n - start)
-            block[start:start + k] = self._marker[:k]
+            if block.shape[1] == 1:
+                block[start:start + k, 0] = self._marker[:k, 0]
+            else:
+                block[start:start + k] = self._marker[:k]
             start += period
 
     def _callback(self, outdata, frames, time_info, status):
-        # PortAudio fills a missed block with SILENCE, and silence on both
-        # channels is a stationary full-brightness dot at screen centre.  We
+        # PortAudio fills a missed block with SILENCE, and silence is a
+        # stationary full-brightness beam at screen centre. We
         # cannot retrieve those samples, but an underrun that is never counted
         # is a bright spot with no explanation; counted, it is a number on the
         # dashboard.  No formatting here -- this is the audio thread.
@@ -960,7 +984,7 @@ class Scope:
                 # the marker is motion of its own, so a stream that collapsed
                 # upstream -- a starved BufferedSource holding its last sample,
                 # most likely -- would look alive by the time it was checked.
-                if beam_is_parked(rendered):
+                if beam_is_parked(rendered, x_only=self.x_only):
                     rendered = unpark_frame(
                         rendered, phase=self.beams_unparked * 7)
                     self.beams_unparked += 1
@@ -975,7 +999,7 @@ class Scope:
                     self._stamp_marker(rendered, self._yt_pos)
                     self._yt_pos = ((self._yt_pos + frames)
                                     % self.samples_per_frame)
-                outdata[:] = rendered
+                self._write_output(outdata, rendered)
                 self._last_out = rendered[-1].copy()
                 self.frames_drawn += 1
             except Exception:
@@ -984,24 +1008,27 @@ class Scope:
                 if frames:
                     fallback = np.repeat(self._last_out[None, :], frames, axis=0)
                     rendered = unpark_frame(fallback, phase=self.beams_unparked * 7)
-                    outdata[:] = rendered[:frames]
+                    self._write_output(outdata, rendered[:frames])
                     self.beams_unparked += 1
                     if self.trigger:
                         self._stamp_marker(outdata, self._yt_pos)
                         self._yt_pos = ((self._yt_pos + frames)
                                         % self.samples_per_frame)
-                    self._last_out = outdata[-1].copy()
+                    self._last_out = rendered[-1].copy()
                 self.dac_dropouts += 1
             return
         # Swap ONLY at a frame boundary.  Replacing the buffer mid-trace makes
         # the beam jump from its position in one image to the same offset in a
         # different one -- a bright tear on every index change.
         filled = 0
+        last_point = None
         while filled < frames:
             f = self._frame
             n = len(f)
             take = min(frames - filled, n - self._pos)
-            outdata[filled:filled + take] = f[self._pos:self._pos + take]
+            self._write_output(outdata[filled:filled + take],
+                               f[self._pos:self._pos + take])
+            last_point = f[self._pos + take - 1]
             self._pos += take
             filled += take
             if self._pos >= n:
@@ -1011,8 +1038,8 @@ class Scope:
                 self._pending = None
                 if p is not None:
                     self._frame = p
-        if frames:
-            self._last_out = outdata[-1].copy()
+        if last_point is not None:
+            self._last_out = last_point.copy()
 
     def ready(self):
         """True when the last queued frame has been taken by the callback.
@@ -1155,7 +1182,7 @@ class Scope:
         # Before the filters, not after: lowpass ringing and the Y-T marker
         # both add motion of their own, so a picture that collapsed upstream
         # would still look alive by the time it reached the DAC.
-        if beam_is_parked(f):
+        if beam_is_parked(f, x_only=self.x_only):
             f = unpark_frame(f, phase=self.beams_unparked * 7)
             self.beams_unparked += 1
         if self.lowpass_hz:

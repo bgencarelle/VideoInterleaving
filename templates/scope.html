@@ -146,6 +146,12 @@
           <option value="2.6">2.6</option>
         </select>
       </label>
+      <label>signal
+        <select id="local-output-mode">
+          <option value="xy" selected>XY stereo</option>
+          <option value="x">X only &mdash; mono Y-T</option>
+        </select>
+      </label>
     </div>
     <div class="dim-controls">
       <button class="preset-btn" id="sink-btn" onclick="chooseOutput()">
@@ -155,10 +161,10 @@
       <span id="sink-status"></span>
     </div>
     <div class="warn">
-      Connect your scope to this machine's audio output and set it to XY.
-      Left is X, right is Y. Turn the volume up full &mdash; the level is the
-      picture size, and anything the operating system does to the signal
-      (EQ, "enhancements", spatial audio) will distort it.
+      For XY, connect left to X and right to Y. For a single-input Y-T scope,
+      select X only and connect the mono output to its input. Turn the volume up
+      full &mdash; the level is the picture size, and anything the operating
+      system does to the signal (EQ, "enhancements", spatial audio) will distort it.
       <br><br>
       Audio goes to your system's default output unless you pick another.
       Where supported, the device picker requests output access only.
@@ -189,6 +195,7 @@
     // meant to be read at a glance from across a room.
     const SCOPE_FIELDS = [
       ["scope_mode",              "mode"],
+      ["scope_x_only",            "X-only output"],
       ["scope_trigger",           "X trigger"],
       ["scope_trigger_shape",     "trigger shape"],
       ["scope_device",            "output device"],
@@ -235,6 +242,7 @@
     }
 
     function render(d) {
+      syncLocalOutputMode(d);
       const top = document.getElementById("scope_data");
       top.textContent = "";
       let any = false;

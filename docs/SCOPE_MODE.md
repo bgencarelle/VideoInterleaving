@@ -1,8 +1,9 @@
 # Scope Mode
 
-Draws the interleaved composition on an oscilloscope in XY mode, using the
-sound card as a two-channel DAC. Left channel drives X, right drives Y, and
-the beam traces whatever path those two voltages walk.
+Draws the interleaved composition on an oscilloscope using the sound card as a
+DAC. Stereo XY is the default: left drives X and right drives Y. Optional
+`--scope-x-only` opens one output channel and sends X alone to a single-input
+scope using its own Y-T timebase.
 
 It uses the same image-index clock and folder selector as the other output
 modes. Normal startup currently uses the free-running clock; MIDI/MTC is not
@@ -64,6 +65,16 @@ mode's code path is altered.
 ```
 python main.py --mode scope --dir images --xy-dir images_xy --scope-raster
 ```
+
+For a one-channel output and a single-input Y-T scope:
+
+```
+python main.py --mode scope --dir images --xy-dir images_xy --scope-x-only
+```
+
+The X trigger marker is already part of each trace. Connect the mono output to
+the scope input and use a rising-edge trigger near +0.95. Without
+`--scope-x-only`, scope mode keeps its normal two-channel XY output.
 
 With `--device null`, the server-side virtual trace uses a 96 kHz reference
 budget. At 30 traces/s this gives the browser scope display 3200 XY samples per
@@ -612,6 +623,7 @@ python main.py --mode scope --xy-dir images_xy [options]
 | `--scope-mix [HZ]` | Vector/raster/stochastic/raster/stipple/raster whole-trace mix (default 120 Hz). |
 | `--scope-mix-duty F` | Raster fraction; remainder splits equally between vector/stochastic/stipple (default 0.5). |
 | `--scope-sweep MODE` | `alternate` (default), `palindrome`, or `retrace`. |
+| `--scope-x-only` / `--no-scope-x-only` | Open a one-channel audio stream and emit X only, for a single-input Y-T scope. Default: stereo XY. |
 | `--scope-trigger` / `--no-scope-trigger` | One unique rising edge on X per trace, so a single-input scope in Y-T locks onto the picture. On by default in every renderer; the `ramp` shape is invisible on an XY display. |
 | `--scope-trigger-shape ramp\|step` | `ramp` (default): the marker sweeps and parks outside +/-0.9, so an XY display never shows it. `step`: the original two-dwell marker, for a scope whose trigger will not hold on a ramp. |
 | `--scope-trigger-us US` | Trigger marker duration in microseconds (default 250). Aliases: `--scope-trigger-duration`, `--scope-yt-trigger`, `--scope-yt-trigger-us`. |
@@ -652,8 +664,9 @@ Adds `--play`, `--ips`, `--loop`, `--exposure`, `--size`, `--ask` and
 
 ### Choosing the audio output
 
-By default the system default output is used. `--ask` lists every
-stereo-capable output with its host API and native sample rate, and prompts —
+By default the system default output is used. `--ask` lists every output with
+enough channels for the selected output mode, along with its host API and
+native sample rate, and prompts —
 but only when more than one exists, and only when there's a terminal to prompt
 on, so it can live in a kiosk launch script without ever hanging. Blank input
 or an out-of-range number falls back to the default.
