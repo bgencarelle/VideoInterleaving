@@ -39,6 +39,7 @@ sys.path.insert(0, str(ROOT))
 from animation_modem.imaging import values_image                         # noqa: E402
 from animation_modem import v7 as P                                       # noqa: E402
 from animation_modem.v7_live_input import (DirectionStreak, LiveInput,
+                                           select_packet_hit,
                                            windowed_rate)                 # noqa: E402
 image_values = P.image_values
 prepare_image = P.prepare_image
@@ -649,6 +650,9 @@ def _run_receive(args, fold):
         args.decode_history, args.decode_batch, rate=capture_rate,
         direction=getattr(args, 'direction', 'auto'))
     direction_streak = DirectionStreak()
+    # Absolute capture arrival of the last pulse hit handed to a decoder.
+    # The sample clock never rewinds, so an input gap needs no reset here.
+    decoded_through = None
     # Tail store and learned loop constants (N, p) persist across decodes.
     pulse_state = P.PulseState(tail_memory=not args.no_tail_memory)
     lag_ticks = deque(maxlen=32)        # recent picture lags, loop ticks
@@ -798,6 +802,7 @@ def _run_receive(args, fold):
 
     def decode_available():
         nonlocal latest, auto_gain, previous_values, direction_streak
+        nonlocal decoded_through
         if input_gap.is_set():
             # Never stitch samples across a callback drop.  Keep displaying
             # the last good image while pulse acquisition starts over.
@@ -848,11 +853,14 @@ def _run_receive(args, fold):
         if not pulse_hits:
             live_input.decoded()
             return
-        packet_start, packet_scale, _, packet_direction = max(
-            pulse_hits, key=lambda hit: hit[0])
-        pulse_starts = live_input.pulse_starts(audio)
         audio_start = live_input.total-len(audio)
+        # Normally the newest hit; at a reverse-to-forward turn-around, the
+        # last reversed packet (see select_packet_hit).
+        packet_start, packet_scale, _, packet_direction = select_packet_hit(
+            pulse_hits, audio_start, decoded_through)
+        pulse_starts = live_input.pulse_starts(audio)
         absolute_arrival = int(round(audio_start+packet_start))
+        decoded_through = absolute_arrival
         # LiveInput levels the input before it searches for headers (a quiet
         # capture is otherwise never found); decode with that same gain.
         auto_gain = live_input.gain

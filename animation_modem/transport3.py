@@ -170,6 +170,26 @@ def measure_pulses(samples, min_scale=0.5, max_scale=4.0):
     return _fit_pulse_words(samples, words, _FIT_NOMINAL)
 
 
+# Opposite-direction words closer than one preamble length overlap: they read
+# the same stretch of signal both ways, so neither orientation is trusted. Two
+# genuine opposite words can sit closer than a whole packet in one case only: a
+# reversed packet followed by a forward one (a reverse-to-forward turn on a
+# packet boundary, as in a sampler's ping-pong loop). The reversed preamble
+# then ends 16 samples before the boundary and the forward one starts 16 after
+# it, so their template starts are exactly SYNC_LEN apart. Testing against
+# SYNC_LEN itself made that pair a coin toss on scale-fit noise of a few
+# hundredths of a sample. One preamble length leaves half a lead-in (32
+# samples at 1x) of margin on each side.
+OPPOSITE_WORD_SPACING = len(PREAMBLE)
+
+
+def _opposite_words_overlap(first, second):
+    """True if two ``(position, scale, ...)`` hits of opposite direction are
+    closer than one preamble at the smaller of their scales."""
+    return abs(first[0]-second[0]) < OPPOSITE_WORD_SPACING*min(first[1],
+                                                               second[1])
+
+
 def measure_pulses_both(samples, min_scale=0.5, max_scale=4.0,
                         direction='auto'):
     """Acquire the earliest unambiguous pulse word in either direction.
@@ -219,9 +239,9 @@ def measure_pulses_both(samples, min_scale=0.5, max_scale=4.0,
     if requested_direction == 'reverse':
         return reverse
     if forward is not None and reverse is not None:
-        # Opposite hypotheses in one sync-sized neighborhood are not enough
-        # evidence to choose an orientation.
-        if abs(forward[0]-reverse[0]) <= SYNC_LEN*min(forward[1], reverse[1]):
+        # Opposite hypotheses whose preambles overlap are not enough evidence
+        # to choose an orientation (see OPPOSITE_WORD_SPACING).
+        if _opposite_words_overlap(forward, reverse):
             return None
     candidates = [hit for hit in (forward, reverse) if hit is not None]
     return min(candidates, key=lambda hit: hit[0]) if candidates else None
@@ -292,8 +312,7 @@ def measure_pulses_both_numpy(samples, min_scale=0.5, max_scale=4.0,
         hit = _fit_pulse_words(samples, words[mask], nominal)
         if hit is not None:
             candidates.append((*hit, way))
-    if len(candidates) == 2 and abs(candidates[0][0]-candidates[1][0]) <= (
-            SYNC_LEN*min(candidates[0][1], candidates[1][1])):
+    if len(candidates) == 2 and _opposite_words_overlap(*candidates):
         return None
     return min(candidates, key=lambda hit: hit[0]) if candidates else None
 

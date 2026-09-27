@@ -1,12 +1,20 @@
 """V7 reverse pulse acquisition and EOF-validated packet normalization."""
+import sys
 import unittest
+from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageOps
 from scipy.signal import resample_poly
 
-from animation_modem import transport3, v7
-from animation_modem.v7_live_input import DirectionStreak, LiveInput
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from animation_modem import transport3, v7                             # noqa: E402
+from animation_modem.v7_live_input import (DirectionStreak, LiveInput,  # noqa: E402
+                                           select_packet_hit)
+from tools.v7_wire_profile import WireProfile                          # noqa: E402
 
 
 TARGET = .1521/np.sqrt(1 + 10**(v7.CLOCK_REL_DB/10))
@@ -326,6 +334,112 @@ class V7ReverseTests(unittest.TestCase):
         self.assertEqual(streak.observe(400, 1, False), (-1, False))
         self.assertEqual(streak.observe(500, 1, True), (-1, False))
         self.assertEqual(streak.observe(600, 1, True), (1, True))
+
+    def test_mirrored_turnaround_keeps_both_words(self):
+        # A reverse-to-forward turn on a packet boundary (a ping-pong loop, or
+        # a tape reversing exactly there) puts the reversed preamble and the
+        # forward one SYNC_LEN apart. Both are genuine packets.
+        packet = self.stream(1)
+        for speed in (.96, .98, 1.0, 1.02, 1.04):
+            sped = v7.speed_pulse_stream(packet, speed, rate=v7.RATE)
+            capture = np.concatenate((sped[::-1], sped)).astype(np.float32)
+            with self.subTest(speed=speed):
+                hits = v7.pulse_frame_hits(capture, sample_rate=v7.RATE)
+                self.assertEqual([hit[3] for hit in hits], [-1, 1])
+                self.assertAlmostEqual(hits[0][0], 0.0, delta=1.0)
+                self.assertAlmostEqual(hits[1][0], len(sped), delta=1.0)
+                mono = v7._mono(capture)
+                window = mono[len(sped)-1000:len(sped)+1000]
+                compiled = transport3.measure_pulses_both(window)
+                reference = transport3.measure_pulses_both_numpy(window)
+                self.assertEqual(compiled[3], -1)
+                self.assertEqual(reference[3], -1)
+        # Words that share their edges stay ambiguous.
+        forward = (100.0, 1.0, 1.0, 1)
+        self.assertTrue(transport3._opposite_words_overlap(
+            forward, (100.0+len(transport3.PREAMBLE)-1, 1.0, 1.0, -1)))
+        self.assertFalse(transport3._opposite_words_overlap(
+            forward, (100.0-transport3.SYNC_LEN, 1.0, 1.0, -1)))
+
+    def test_turnaround_hit_choice(self):
+        forward_header = (5000.0, 1.0, 1.0, 1)
+        reversed_packet = (1080.0, 1.0, 1.0, -1)
+        # The forward hit only starts a packet; the reversed one is complete.
+        self.assertEqual(select_packet_hit(
+            (forward_header, reversed_packet), audio_start=0),
+            reversed_packet)
+        # ... unless that reversed packet was already decoded.
+        self.assertEqual(select_packet_hit(
+            (reversed_packet, forward_header), audio_start=10,
+            decoded_through=1090), forward_header)
+        # Steady forward and reverse streams take the newest hit.
+        older_forward = (1080.0, 1.0, 1.0, 1)
+        self.assertEqual(select_packet_hit((older_forward, forward_header)),
+                         forward_header)
+        newer_reverse = (5000.0, 1.0, 1.0, -1)
+        self.assertEqual(select_packet_hit((reversed_packet, newer_reverse)),
+                         newer_reverse)
+        self.assertEqual(select_packet_hit((older_forward, newer_reverse)),
+                         newer_reverse)
+        self.assertIsNone(select_packet_hit(()))
+
+    def test_tape_rocking_on_the_default_wire(self):
+        # Forward 0-6, the tape reverses over 6-3, then plays forward 3-8,
+        # through LiveInput with the receiver's wake-and-pick policy.
+        profile = WireProfile('default')
+        model = v7.load_model(TARGET, profile.encode_filter)
+        with Image.open(v7.REFERENCE_FIXTURE) as image:
+            values = v7.image_values(
+                v7.prepare_image(image.convert('RGB'), profile.encode_filter),
+                model.coder.grids, profile.encode_filter)
+        packets = profile.encode(
+            model, [values]*9, source_indices=range(9)).reshape(
+                9, v7.PULSE_FRAME, 2)
+        order = ([(index, 1) for index in range(7)] +
+                 [(index, -1) for index in (6, 5, 4, 3)] +
+                 [(index, 1) for index in range(3, 9)])
+        capture = np.concatenate([
+            packets[index] if way > 0 else packets[index][::-1]
+            for index, way in order]).astype(np.float32)
+        live = LiveInput(rate=v7.RATE)
+        state = v7.PulseState()
+        decoded_through = None
+        shown = []
+        with profile.receiving():
+            for offset in range(0, len(capture), 1024):
+                live.add(capture[offset:offset+1024].copy())
+                audio = live.take(offset/v7.RATE)
+                if audio is None:
+                    continue
+                hits = live.pulse_hits(audio)
+                if not hits:
+                    live.decoded()
+                    continue
+                audio_start = live.total-len(audio)
+                start, scale, _, way = select_packet_hit(
+                    hits, audio_start, decoded_through)
+                decoded_through = int(round(audio_start+start))
+                state.set_playback_direction(way)
+                if way < 0:
+                    results, _ = v7.decode_reverse_packet(
+                        model, audio, start, scale, state=state,
+                        sample_rate=v7.RATE, **profile.decode_options)
+                else:
+                    results, _ = v7.decode_pulse_stream(
+                        model, audio, latest_only=True,
+                        pulse_starts=live.pulse_starts(audio), state=state,
+                        sample_rate=v7.RATE, **profile.decode_options)
+                live.decoded()
+                if results and (results[-1].status in ('received', 'verified')
+                                or results[-1].diag.get('displayable')):
+                    shown.append((results[-1].diag['source_index'], way))
+        # The forward packet before the turn (source 6) is not decoded: the
+        # receiver next wakes on the reversed preamble, one packet later, and
+        # shows that newer packet. The last packet has no following header.
+        self.assertEqual(shown, [
+            (0, 1), (1, 1), (2, 1), (3, 1), (4, 1), (5, 1),
+            (6, -1), (5, -1), (4, -1), (3, -1),
+            (3, 1), (4, 1), (5, 1), (6, 1), (7, 1)])
 
     def test_direction_switch_resets_tail_but_not_loop_lock(self):
         state = v7.PulseState()

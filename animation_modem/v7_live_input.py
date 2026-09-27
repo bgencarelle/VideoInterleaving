@@ -60,6 +60,37 @@ def windowed_rate(times, now, window=RATE_WINDOW_S, stale=RATE_STALE_S):
     return (len(recent)-1)/(recent[-1]-recent[0])
 
 
+def select_packet_hit(hits, audio_start=0, decoded_through=None):
+    """The pulse hit whose packet a wake should decode, or None.
+
+    `hits` are LiveInput.pulse_hits() tuples ``(start, scale, confidence,
+    direction)`` with `start` relative to the audio that begins at absolute
+    sample `audio_start`; `decoded_through` is the absolute arrival of the
+    last hit already handed to a decoder.
+
+    The newest hit is normally right. A reversed hit marks a packet that is
+    already complete, since its preamble arrives last. A forward hit marks a
+    packet that has only begun, and the forward decoder then decodes the
+    forward packet before it. At a reverse-to-forward turn-around the last
+    reversed preamble and the first forward preamble are adjacent, so both
+    usually arrive in the same wake. The forward hit then has no complete
+    forward packet before it, and choosing it would skip the intact reversed
+    packet. Choose that reversed packet instead, unless it was already
+    decoded.
+    """
+    if not hits:
+        return None
+    ordered = sorted(hits, key=lambda hit: hit[0])
+    newest = ordered[-1]
+    if newest[3] > 0 and len(ordered) > 1:
+        previous = ordered[-2]
+        arrival = int(round(audio_start+previous[0]))
+        if previous[3] < 0 and (decoded_through is None or
+                                arrival > decoded_through):
+            return previous
+    return newest
+
+
 class DirectionStreak:
     """Confirm playback direction after two distinct validated arrivals."""
 

@@ -90,6 +90,19 @@ confirmed after two distinct metadata-validated arrivals. A direction change
 resets order-dependent tail history while retaining the learned loop lock. A
 missing or damaged reverse packet leaves the last good picture in place.
 
+Turn-arounds on a packet boundary, as in a sampler's ping-pong loop or a tape
+reversing exactly there, get two rules. At a reverse-to-forward turn, the last
+reversed preamble and the first forward preamble are exactly `SYNC_LEN` apart.
+The matcher discards opposite words only when they are closer than one
+preamble length (`transport3.OPPOSITE_WORD_SPACING`), so both packets are
+acquired. Both preambles usually arrive in the same wake, and the forward one
+does not yet complete a forward packet, so the receiver decodes the reversed
+packet in that wake (`v7_live_input.select_packet_hit`). At a
+forward-to-reverse turn, the last forward packet is not decoded: the receiver
+next wakes on the reversed packet's trailing preamble, one packet later, and
+shows that newer packet instead. `modem_tests/test_v7_reverse.py` pins both on
+the default wire.
+
 The paired synthetic CPU check is reproducible with
 `.venv/bin/python test_modem_v7/reverse_cpu.py`. On a warmed 4,048-sample
 interior-packet window (500 paired batches of five packets, 48 kHz,
@@ -326,10 +339,12 @@ quality, impairments, tables, and shared modem support:
 modem_tests/test_clock.py
 modem_tests/test_impairments.py
 modem_tests/test_modem_clock.py
+modem_tests/test_v7_aliasing.py
 modem_tests/test_v7_capture_video.py
 modem_tests/test_v7_decode_speed.py
-modem_tests/test_v7_eof.py
+modem_tests/test_v7_display.py
 modem_tests/test_v7_encode_speed.py
+modem_tests/test_v7_eof.py
 modem_tests/test_v7_experimental_fold.py
 modem_tests/test_v7_gl_viewer.py
 modem_tests/test_v7_image_quality.py
@@ -338,11 +353,15 @@ modem_tests/test_v7_loop.py
 modem_tests/test_v7_metadata.py
 modem_tests/test_v7_mono.py
 modem_tests/test_v7_mono_torture.py
+modem_tests/test_v7_perceptual_resize.py
 modem_tests/test_v7_pilot_tones.py
 modem_tests/test_v7_pulse_warp.py
+modem_tests/test_v7_receiver_gui.py
+modem_tests/test_v7_reverse.py
 modem_tests/test_v7_speed.py
 modem_tests/test_v7_tables.py
 modem_tests/test_v7_tone_equalization.py
+modem_tests/test_v7_torture_matrix.py
 modem_tests/test_v7_wire_profile.py
 ```
 
@@ -353,7 +372,7 @@ The standalone coded-pilot prototype has a separate suite:
 ```
 
 Its current regression module is `test_modem_v7/test_tone_code.py`. On
-2026-09-27, the modem suite passed **204 tests** and the prototype suite passed
+2026-09-27, the modem suite passed **207 tests** and the prototype suite passed
 **13 tests**. Rerun the relevant suite and report fresh results after changes;
 these counts are a dated snapshot, not permanent expectations. Both suites are
 synthetic/unit evidence, not a real device or tape test.
