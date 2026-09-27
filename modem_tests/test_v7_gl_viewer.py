@@ -4,7 +4,9 @@ import unittest
 import numpy as np
 from PIL import Image
 
-from tools.v7_gl_viewer import (DISPLAY_MODES, fit_viewport, float_planes,
+from tools.v7_gl_viewer import (DISPLAY_MODES, FILTER_LUT_MODES,
+                                FLOAT_MODE_IDS, fit_viewport, float_planes,
+                                build_filter_lut,
                                 title_for_status,
                                 toolbar_layout, _toolbar_image,
                                 _diagnostic_image)
@@ -23,10 +25,8 @@ class GLViewerHelperTests(unittest.TestCase):
 
     def test_toolbar_dropdowns_expose_only_supported_choices(self):
         upscale = toolbar_layout(960, 'upscale')
-        self.assertIn('mode:nearest', upscale)
-        self.assertIn('mode:bilinear', upscale)
-        self.assertIn('mode:sharp-bilinear', upscale)
-        self.assertIn('mode:bicubic', upscale)
+        for mode in DISPLAY_MODES:
+            self.assertIn(f'mode:{mode}', upscale)
         self.assertNotIn('mode:lanczos3', upscale)
         panel = toolbar_layout(960, 'panel')
         self.assertIn('panel:1', panel)
@@ -66,6 +66,15 @@ class GLViewerHelperTests(unittest.TestCase):
             float_planes(np.zeros(2), ((2, 2),))
         with self.assertRaisesRegex(ValueError, 'must be finite'):
             float_planes(np.array([0, np.nan]), ((1, 2),))
+
+    def test_windowed_filter_luts_have_unit_peaks_and_finite_weights(self):
+        for mode in FILTER_LUT_MODES:
+            with self.subTest(mode=mode):
+                weights = build_filter_lut(mode, sample_count=257)
+                self.assertEqual(weights.shape, (257,))
+                self.assertTrue(np.all(np.isfinite(weights)))
+                self.assertAlmostEqual(float(weights[0]), 1.0, places=6)
+                self.assertAlmostEqual(float(weights[-1]), 0.0, places=6)
 
     def test_diagnostic_cards_expand_for_decode_cpu_and_gui_resources(self):
         diagnostics = {
@@ -130,6 +139,7 @@ class FloatShaderReferenceTests(unittest.TestCase):
         cls.program['plane_y'].value = 0
         cls.program['plane_cb'].value = 1
         cls.program['plane_cr'].value = 2
+        cls.program['kernel_lut'].value = 3
         cls.vertex_array = cls.context.vertex_array(cls.program, [])
         cls.output = cls.context.texture((1, 1), 4, dtype='f4')
         cls.framebuffer = cls.context.framebuffer(
@@ -144,7 +154,8 @@ class FloatShaderReferenceTests(unittest.TestCase):
                 resource.release()
 
     def _render(self, rgb, mode):
-        from tools.v7_gl_viewer import _float_texture_filter, float_planes
+        from tools.v7_gl_viewer import (_float_texture_filter, build_filter_lut,
+                                        float_planes)
 
         ycbcr = np.asarray(
             Image.new('RGB', (1, 1), rgb).convert('YCbCr').getpixel((0, 0)),
@@ -152,6 +163,7 @@ class FloatShaderReferenceTests(unittest.TestCase):
         values = ycbcr.astype(np.float32)/127.5-1.0
         planes = float_planes(values, ((1, 1), (1, 1), (1, 1)))
         textures = []
+        kernel_texture = None
         try:
             filtering = _float_texture_filter(mode, self.moderngl)
             for unit, plane in enumerate(planes):
@@ -162,6 +174,14 @@ class FloatShaderReferenceTests(unittest.TestCase):
                 texture.repeat_y = False
                 texture.use(location=unit)
                 textures.append(texture)
+            weights = build_filter_lut(mode)
+            kernel_texture = self.context.texture(
+                (weights.size, 1), 1, weights.tobytes(), dtype='f4')
+            kernel_texture.filter = (self.moderngl.LINEAR,
+                                     self.moderngl.LINEAR)
+            kernel_texture.repeat_x = False
+            kernel_texture.repeat_y = False
+            kernel_texture.use(location=3)
             self.program['reconstruction'].value = self.mode_ids[mode]
             self.program['output_size'].value = (1.0, 1.0)
             self.framebuffer.use()
@@ -174,16 +194,20 @@ class FloatShaderReferenceTests(unittest.TestCase):
         finally:
             for texture in textures:
                 texture.release()
+            if kernel_texture is not None:
+                kernel_texture.release()
         reference = np.asarray(
             Image.fromarray(ycbcr.reshape(1, 1, 3), 'YCbCr')
             .convert('RGB').getpixel((0, 0)), dtype=np.float32)/255.0
         return rendered[:3], reference
 
     def _render_luma_ramp(self, mode):
-        from tools.v7_gl_viewer import _float_texture_filter, float_planes
+        from tools.v7_gl_viewer import (_float_texture_filter, build_filter_lut,
+                                        float_planes)
 
-        planes = float_planes(np.array([-1.0, 1.0]), ((1, 2),))
+        planes = float_planes(np.array([-.6, .6]), ((1, 2),))
         textures = []
+        kernel_texture = None
         output = self.context.texture((4, 1), 4, dtype='f4')
         framebuffer = self.context.framebuffer(color_attachments=[output])
         try:
@@ -197,6 +221,14 @@ class FloatShaderReferenceTests(unittest.TestCase):
                 texture.repeat_y = False
                 texture.use(location=unit)
                 textures.append(texture)
+            weights = build_filter_lut(mode)
+            kernel_texture = self.context.texture(
+                (weights.size, 1), 1, weights.tobytes(), dtype='f4')
+            kernel_texture.filter = (self.moderngl.LINEAR,
+                                     self.moderngl.LINEAR)
+            kernel_texture.repeat_x = False
+            kernel_texture.repeat_y = False
+            kernel_texture.use(location=3)
             self.program['reconstruction'].value = self.mode_ids[mode]
             self.program['output_size'].value = (4.0, 1.0)
             framebuffer.use()
@@ -209,6 +241,8 @@ class FloatShaderReferenceTests(unittest.TestCase):
         finally:
             for texture in textures:
                 texture.release()
+            if kernel_texture is not None:
+                kernel_texture.release()
             framebuffer.release()
             output.release()
         return rendered
@@ -216,7 +250,7 @@ class FloatShaderReferenceTests(unittest.TestCase):
     def test_float_reconstruction_color_matches_pillow_ycbcr_reference(self):
         colors = ((0, 0, 0), (255, 255, 255), (128, 128, 128),
                   (255, 0, 0), (0, 255, 0), (0, 0, 255))
-        for mode in ('bilinear', 'sharp-bilinear', 'bicubic'):
+        for mode in FLOAT_MODE_IDS:
             for color in colors:
                 with self.subTest(mode=mode, color=color):
                     rendered, reference = self._render(color, mode)
@@ -229,20 +263,32 @@ class FloatShaderReferenceTests(unittest.TestCase):
         sharp = self._render_luma_ramp('sharp-bilinear')
         bicubic = self._render_luma_ramp('bicubic')
 
-        np.testing.assert_allclose(bilinear[:, 0], [0.0, .25, .75, 1.0],
+        np.testing.assert_allclose(bilinear[:, 0], [.2, .35, .65, .8],
                                    atol=1e-6)
-        np.testing.assert_allclose(sharp[:, 0], [0.0, 0.0, 1.0, 1.0],
+        np.testing.assert_allclose(sharp[:, 0], [.2, .2, .8, .8],
                                    atol=1e-6)
         np.testing.assert_allclose(bilinear, np.repeat(bilinear[:, :1], 3,
                                                         axis=1), atol=1e-6)
         np.testing.assert_allclose(sharp, np.repeat(sharp[:, :1], 3,
                                                      axis=1), atol=1e-6)
-        self.assertGreater(bicubic[1, 0], .20)
-        self.assertLess(bicubic[1, 0], .25)
+        self.assertGreater(bicubic[1, 0], .32)
+        self.assertLess(bicubic[1, 0], .35)
         self.assertAlmostEqual(float(bicubic[1, 0]+bicubic[2, 0]), 1.0,
                                places=6)
         np.testing.assert_allclose(bicubic, np.repeat(bicubic[:, :1], 3,
                                                        axis=1), atol=1e-6)
+
+        profiles = {mode: self._render_luma_ramp(mode)[:, 0]
+                    for mode in FLOAT_MODE_IDS
+                    if mode not in ('bilinear', 'sharp-bilinear')}
+        self.assertEqual(len({tuple(np.round(profile, 4))
+                              for profile in profiles.values()}),
+                         len(profiles))
+        for mode, profile in profiles.items():
+            with self.subTest(mode=mode):
+                self.assertTrue(np.all(np.isfinite(profile)))
+                np.testing.assert_allclose(profile+profile[::-1], 1.0,
+                                           atol=1e-6)
 
 
 if __name__ == '__main__':

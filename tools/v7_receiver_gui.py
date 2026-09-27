@@ -29,7 +29,7 @@ from tools.v7_gl_viewer import (DISPLAY_LABELS, DISPLAY_MODES,
                                 FLOAT_FRAGMENT_SHADER, FLOAT_MODE_IDS,
                                 FRAGMENT_SHADER, VERTEX_SHADER,
                                 _diagnostic_image, _float_texture_filter,
-                                fit_viewport, float_planes)
+                                build_filter_lut, fit_viewport, float_planes)
 
 
 ROW_HEIGHT = 36
@@ -1215,6 +1215,7 @@ class ReceiverGui:
         ui_texture = picture_texture = None
         plane_textures = []
         plane_texture_shapes = None
+        kernel_textures = {}
         picture_texture_size = None
         picture_texture_mode = None
         frame_buffer = getattr(self.v7_live, 'FRAME_BUFFER', None)
@@ -1306,7 +1307,21 @@ class ReceiverGui:
                 float_program['plane_y'].value = 0
                 float_program['plane_cb'].value = 1
                 float_program['plane_cr'].value = 2
+                float_program['kernel_lut'].value = 3
                 float_array = context.vertex_array(float_program, [])
+
+            def kernel_texture_for(mode):
+                texture_for_mode = kernel_textures.get(mode)
+                if texture_for_mode is None:
+                    weights = build_filter_lut(mode)
+                    texture_for_mode = context.texture(
+                        (weights.size, 1), 1, weights.tobytes(), dtype='f4')
+                    texture_for_mode.filter = (moderngl.LINEAR,
+                                               moderngl.LINEAR)
+                    texture_for_mode.repeat_x = False
+                    texture_for_mode.repeat_y = False
+                    kernel_textures[mode] = texture_for_mode
+                return texture_for_mode
 
             def render_picture(viewport):
                 context.viewport = viewport
@@ -1317,6 +1332,7 @@ class ReceiverGui:
                 ensure_float_renderer()
                 for unit, plane_texture in enumerate(plane_textures):
                     plane_texture.use(location=unit)
+                kernel_texture_for(self.display_mode).use(location=3)
                 float_program['reconstruction'].value = FLOAT_MODE_IDS[
                     self.display_mode]
                 float_program['output_size'].value = (
@@ -1436,6 +1452,8 @@ class ReceiverGui:
                 picture_texture.release()
             for plane_texture in plane_textures:
                 plane_texture.release()
+            for kernel_texture in kernel_textures.values():
+                kernel_texture.release()
             if vertex_array is not None:
                 vertex_array.release()
             if float_array is not None:

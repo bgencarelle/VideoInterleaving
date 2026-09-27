@@ -1,5 +1,6 @@
 """Minimal GLFW/ModernGL viewer for the standalone V7 receiver."""
 import json
+import math
 import os
 import sys
 import time
@@ -10,7 +11,11 @@ from PIL import Image, ImageDraw, ImageFont
 from animation_modem.imaging import values_image
 
 
-DISPLAY_MODES = ('nearest', 'bilinear', 'sharp-bilinear', 'bicubic')
+DISPLAY_MODES = (
+    'nearest', 'bilinear', 'sharp-bilinear', 'bicubic',
+    'spline36', 'robidoux', 'robidoux-sharp', 'cubic-bspline',
+    'kaiser-sinc', 'hann-sinc', 'ewa-jinc',
+)
 FULLSCREEN_TOOLBAR_HIDE_SECONDS = 2.0
 FULLSCREEN_TOOLBAR_EDGE = 14
 DISPLAY_LABELS = {
@@ -18,8 +23,32 @@ DISPLAY_LABELS = {
     'bilinear': 'Bilinear',
     'sharp-bilinear': 'Sharp bilinear',
     'bicubic': 'Bicubic · Mitchell',
+    'spline36': 'Spline36',
+    'robidoux': 'Robidoux',
+    'robidoux-sharp': 'Robidoux Sharp',
+    'cubic-bspline': 'Cubic B-spline',
+    'kaiser-sinc': 'Kaiser sinc · β=8.6',
+    'hann-sinc': 'Hann sinc',
+    'ewa-jinc': 'EWA Jinc · 3 lobes',
 }
-FLOAT_MODE_IDS = {'bilinear': 0, 'sharp-bilinear': 1, 'bicubic': 2}
+FLOAT_MODE_IDS = {
+    'bilinear': 0,
+    'sharp-bilinear': 1,
+    'bicubic': 2,
+    'ewa-jinc': 3,
+    'spline36': 4,
+    'robidoux': 5,
+    'robidoux-sharp': 6,
+    'kaiser-sinc': 7,
+    'hann-sinc': 8,
+    'cubic-bspline': 9,
+}
+FILTER_LUT_MODES = frozenset(('ewa-jinc', 'kaiser-sinc', 'hann-sinc'))
+FILTER_LUT_SIZE = 2048
+EWA_JINC_RADIUS = 3.2383154841662362
+KAISER_SINC_RADIUS = 3.0
+KAISER_SINC_BETA = 8.6
+HANN_SINC_RADIUS = 3.0
 
 
 def toolbar_layout(width, open_dropdown=None):
@@ -174,6 +203,55 @@ def float_planes(values, shapes):
     return tuple(planes)
 
 
+def _bessel_j1_series(x):
+    """J1 evaluated by its convergent power series for the short Jinc LUT."""
+    half_x = .5*x
+    term = half_x
+    total = term
+    for order in range(1, 40):
+        term *= -(half_x*half_x)/(order*(order+1))
+        total += term
+        if abs(term) <= 1e-16*max(1.0, abs(total)):
+            break
+    return total
+
+
+def _jinc(x):
+    if abs(x) < 1e-12:
+        return 1.0
+    argument = math.pi*x
+    return 2.0*_bessel_j1_series(argument)/argument
+
+
+def build_filter_lut(mode, sample_count=FILTER_LUT_SIZE):
+    """Return normalized 1-D or radial kernel weights for GLSL lookup."""
+    sample_count = int(sample_count)
+    if sample_count < 2:
+        raise ValueError('filter LUT needs at least two samples')
+    if mode == 'ewa-jinc':
+        radius = EWA_JINC_RADIUS
+        distances = np.linspace(0.0, radius, sample_count)
+        window_scale = 1.2196698912665045/radius
+        weights = np.asarray([
+            _jinc(float(distance))*_jinc(float(distance)*window_scale)
+            for distance in distances], dtype=np.float64)
+    elif mode == 'kaiser-sinc':
+        radius = KAISER_SINC_RADIUS
+        distances = np.linspace(0.0, radius, sample_count)
+        window = np.i0(KAISER_SINC_BETA*np.sqrt(
+            np.maximum(0.0, 1.0-(distances/radius)**2)))/np.i0(
+                KAISER_SINC_BETA)
+        weights = np.sinc(distances)*window
+    elif mode == 'hann-sinc':
+        radius = HANN_SINC_RADIUS
+        distances = np.linspace(0.0, radius, sample_count)
+        window = .5+.5*np.cos(np.pi*distances/radius)
+        weights = np.sinc(distances)*window
+    else:
+        weights = np.ones(1, dtype=np.float32)
+    return np.ascontiguousarray(weights, dtype=np.float32)
+
+
 VERTEX_SHADER = '''#version 330
 out vec2 uv;
 void main() {
@@ -200,6 +278,7 @@ FLOAT_FRAGMENT_SHADER = '''#version 330
 uniform sampler2D plane_y;
 uniform sampler2D plane_cb;
 uniform sampler2D plane_cr;
+uniform sampler2D kernel_lut;
 uniform int reconstruction;
 uniform vec2 output_size;
 in vec2 uv;
@@ -233,6 +312,117 @@ float sample_mitchell(sampler2D plane, vec2 coord) {
     return value/weight_sum;
 }
 
+float cubic_bc_weight(float x, float b, float c) {
+    x = abs(x);
+    if (x < 1.0)
+        return ((12.0 - 9.0*b - 6.0*c)*x*x*x
+                + (-18.0 + 12.0*b + 6.0*c)*x*x
+                + (6.0 - 2.0*b))/6.0;
+    if (x < 2.0)
+        return ((-b - 6.0*c)*x*x*x
+                + (6.0*b + 30.0*c)*x*x
+                + (-12.0*b - 48.0*c)*x
+                + (8.0*b + 24.0*c))/6.0;
+    return 0.0;
+}
+
+float spline36_weight(float x) {
+    x = abs(x);
+    if (x < 1.0)
+        return ((13.0/11.0*x - 453.0/209.0)*x - 3.0/209.0)*x + 1.0;
+    if (x < 2.0) {
+        float t = x - 1.0;
+        return ((-6.0/11.0*t + 270.0/209.0)*t - 156.0/209.0)*t;
+    }
+    if (x < 3.0) {
+        float t = x - 2.0;
+        return ((1.0/11.0*t - 45.0/209.0)*t + 26.0/209.0)*t;
+    }
+    return 0.0;
+}
+
+float lut_weight(float distance, float support) {
+    float count = float(textureSize(kernel_lut, 0).x);
+    float position = clamp(abs(distance)/support, 0.0, 1.0);
+    float texel = (position*(count-1.0) + 0.5)/count;
+    return texture(kernel_lut, vec2(texel, 0.5)).r;
+}
+
+float separable_radius() {
+    if (reconstruction == 4 || reconstruction == 7 || reconstruction == 8)
+        return 3.0;
+    if (reconstruction == 5 || reconstruction == 6 ||
+        reconstruction == 9)
+        return 2.0;
+    return 0.0;
+}
+
+float separable_weight(float distance) {
+    if (reconstruction == 4)
+        return spline36_weight(distance);
+    if (reconstruction == 5)
+        return cubic_bc_weight(distance, 0.3782157551, 0.3108921225);
+    if (reconstruction == 6)
+        return cubic_bc_weight(distance, 0.2620145124, 0.3689927438);
+    if (reconstruction == 7)
+        return lut_weight(distance, 3.0);
+    if (reconstruction == 8)
+        return lut_weight(distance, 3.0);
+    if (reconstruction == 9)
+        return cubic_bc_weight(distance, 1.0, 0.0);
+    return 0.0;
+}
+
+float sample_separable(sampler2D plane, vec2 coord) {
+    ivec2 size = textureSize(plane, 0);
+    vec2 sample_position = coord*vec2(size) - 0.5;
+    vec2 fraction = fract(sample_position);
+    ivec2 base = ivec2(floor(sample_position));
+    float radius = separable_radius();
+    float value = 0.0;
+    float weight_sum = 0.0;
+    for (int y = -3; y <= 3; ++y) {
+        float dy = float(y) - fraction.y;
+        if (abs(dy) >= radius)
+            continue;
+        float wy = separable_weight(dy);
+        for (int x = -3; x <= 3; ++x) {
+            float dx = float(x) - fraction.x;
+            if (abs(dx) >= radius)
+                continue;
+            float weight = wy*separable_weight(dx);
+            ivec2 at = clamp(base + ivec2(x, y), ivec2(0), size-1);
+            value += texelFetch(plane, at, 0).r*weight;
+            weight_sum += weight;
+        }
+    }
+    return value/weight_sum;
+}
+
+float sample_ewa_jinc(sampler2D plane, vec2 coord) {
+    const float radius = 3.2383154841662362;
+    ivec2 size = textureSize(plane, 0);
+    vec2 sample_position = coord*vec2(size) - 0.5;
+    vec2 fraction = fract(sample_position);
+    ivec2 base = ivec2(floor(sample_position));
+    float value = 0.0;
+    float weight_sum = 0.0;
+    for (int y = -4; y <= 4; ++y) {
+        float dy = float(y) - fraction.y;
+        for (int x = -4; x <= 4; ++x) {
+            float dx = float(x) - fraction.x;
+            float distance = length(vec2(dx, dy));
+            if (distance >= radius)
+                continue;
+            float weight = lut_weight(distance, radius);
+            ivec2 at = clamp(base + ivec2(x, y), ivec2(0), size-1);
+            value += texelFetch(plane, at, 0).r*weight;
+            weight_sum += weight;
+        }
+    }
+    return value/weight_sum;
+}
+
 vec2 sharp_bilinear_coord(sampler2D plane, vec2 coord) {
     vec2 size = vec2(textureSize(plane, 0));
     vec2 source_position = coord*size - 0.5;
@@ -249,6 +439,10 @@ float sample_plane(sampler2D plane, vec2 coord) {
         return sample_mitchell(plane, coord);
     if (reconstruction == 1)
         return texture(plane, sharp_bilinear_coord(plane, coord)).r;
+    if (reconstruction == 3)
+        return sample_ewa_jinc(plane, coord);
+    if (reconstruction >= 4)
+        return sample_separable(plane, coord);
     return texture(plane, coord).r;
 }
 
@@ -270,7 +464,8 @@ void main() {
 
 
 def _float_texture_filter(mode, moderngl):
-    return (moderngl.NEAREST if mode == 'bicubic' else moderngl.LINEAR)
+    return (moderngl.LINEAR if mode in ('bilinear', 'sharp-bilinear')
+            else moderngl.NEAREST)
 
 
 def fit_viewport(framebuffer_size, image_aspect):
@@ -395,6 +590,7 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
     texture = None
     plane_textures = []
     plane_texture_shapes = None
+    kernel_textures = {}
     overlay = None
     toolbar = None
     context = None
@@ -470,7 +666,20 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
             float_program['plane_y'].value = 0
             float_program['plane_cb'].value = 1
             float_program['plane_cr'].value = 2
+            float_program['kernel_lut'].value = 3
             float_array = context.vertex_array(float_program, [])
+
+        def kernel_texture_for(mode):
+            texture_for_mode = kernel_textures.get(mode)
+            if texture_for_mode is None:
+                weights = build_filter_lut(mode)
+                texture_for_mode = context.texture(
+                    (weights.size, 1), 1, weights.tobytes(), dtype='f4')
+                texture_for_mode.filter = (moderngl.LINEAR, moderngl.LINEAR)
+                texture_for_mode.repeat_x = False
+                texture_for_mode.repeat_y = False
+                kernel_textures[mode] = texture_for_mode
+            return texture_for_mode
 
         open_dropdown = None
         save_notice = ''
@@ -553,7 +762,8 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
                 update_texture_filters()
                 open_dropdown = None
                 last_title = None
-            elif glfw.KEY_1 <= key < glfw.KEY_1+len(DISPLAY_MODES):
+            elif (glfw.KEY_1 <= key <= glfw.KEY_9 and
+                  key-glfw.KEY_1 < len(DISPLAY_MODES)):
                 display_mode = DISPLAY_MODES[key-glfw.KEY_1]
                 update_texture_filters()
                 open_dropdown = None
@@ -787,6 +997,7 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
                         ensure_float_renderer()
                         for unit, plane_texture in enumerate(plane_textures):
                             plane_texture.use(location=unit)
+                        kernel_texture_for(display_mode).use(location=3)
                         float_program['reconstruction'].value = FLOAT_MODE_IDS[
                             display_mode]
                         float_program['output_size'].value = (
@@ -847,6 +1058,8 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
             texture.release()
         for plane_texture in plane_textures:
             plane_texture.release()
+        for kernel_texture in kernel_textures.values():
+            kernel_texture.release()
         if context is not None:
             context.release()
         if window is not None:
