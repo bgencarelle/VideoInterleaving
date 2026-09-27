@@ -64,6 +64,10 @@ class ReceiverGuiOptionTests(unittest.TestCase):
                       if field.action is not None and
                       field.action.dest == 'device')
         device.value = 3
+        side = next(field for field in gui.fields
+                    if field.action is not None and
+                    field.action.dest == 'mono_video_side')
+        side.value = 'right'
         args = gui._build_arguments()
         self.assertEqual(args.mode, 'receive')
         self.assertEqual(args.device, 3)
@@ -72,6 +76,7 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertFalse(args.log)
         self.assertTrue(args.no_log)
         self.assertIsNone(args.save_dir)
+        self.assertEqual(args.mono_video_side, 'right')
 
     def test_receiver_output_wakes_the_event_driven_window(self):
         output = queue.Queue()
@@ -90,6 +95,20 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
         with self.assertRaisesRegex(ValueError, 'Select an input audio device'):
             gui._build_arguments()
+
+    def test_mono_video_fold_selects_a_single_receiver_profile(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        by_dest = {field.dest: field for field in gui.fields
+                   if field.action is not None}
+        by_dest['experimental_mono'].value = True
+        by_dest['experimental_fold'].value = 500
+
+        gui._adjust_field(by_dest['experimental_mono_fold'], 1)
+
+        self.assertTrue(by_dest['experimental_mono_fold'].value)
+        self.assertFalse(by_dest['experimental_mono'].value)
+        self.assertIsNone(by_dest['experimental_fold'].value)
+        self.assertFalse(by_dest['baseline'].value)
 
     def test_first_available_input_is_preselected(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser,

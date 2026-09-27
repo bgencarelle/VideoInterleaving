@@ -25,6 +25,7 @@ class SenderGuiTests(unittest.TestCase):
             'source': 'screen',
             'rate': None,
             'profile': 'fold-500',
+            'mono_video_side': 'left',
             'speed': '1',
             'encode_filter': 'auto',
             'brightness': '',
@@ -98,6 +99,43 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(args.video_source, 'a clip with spaces.mp4')
         self.assertTrue(args.video_live)
         self.assertEqual(args.speed, 1.5)
+
+    def test_mono_video_fold_profile_reaches_cli_and_uses_box_model(self):
+        self.settings.update(profile='mono-fold-500', mono_video_side='right')
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+
+        self.assertTrue(args.experimental_mono_fold)
+        self.assertEqual(args.mono_video_side, 'right')
+        self.assertIsNone(args.experimental_fold)
+        self.assertIsNone(args.encode_filter)
+        self.assertIn('--experimental-mono-fold', command)
+
+    def test_mono_video_side_selector_is_visible_only_for_that_profile(self):
+        gui = SenderGui(self.devices)
+        self.assertNotIn('mono_video_side', gui._visible_fields())
+
+        gui.settings.update(profile='mono-fold-500', mono_video_side='right')
+        self.assertIn('mono_video_side', gui._visible_fields())
+        self.assertEqual(gui._value_label('mono_video_side'),
+                         'Right output · left stays clear')
+
+    def test_mono_video_fold_requires_pilots_eof_and_no_pre_resize(self):
+        self.settings.update(profile='mono-fold-500', pilot_tones=False)
+        with self.assertRaisesRegex(ValueError, 'require pilot tones'):
+            validate_settings(self.settings, self.devices, self.sd)
+
+        self.settings.update(pilot_tones=True, eof_marker=False)
+        with self.assertRaisesRegex(ValueError, 'requires the EOF marker'):
+            validate_settings(self.settings, self.devices, self.sd)
+
+        self.settings.update(eof_marker=True, perceptual_resize='linear-box')
+        with self.assertRaisesRegex(ValueError, 'requires the pre-encode downscaler off'):
+            validate_settings(self.settings, self.devices, self.sd)
+
+        self.settings.update(perceptual_resize='off', mono_sum=True)
+        with self.assertRaisesRegex(ValueError, 'needs two output channels'):
+            validate_settings(self.settings, self.devices, self.sd)
 
     def test_ffmpeg_screen_input_is_forwarded_only_for_ffmpeg_capture(self):
         self.settings.update(source='screen', screen_backend='ffmpeg',

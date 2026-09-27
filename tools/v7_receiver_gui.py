@@ -176,6 +176,8 @@ def _field_label(action):
         'tone_equalization': 'Tone equalization',
         'baseline': 'Use baseline profile',
         'experimental_fold': 'Fold profile',
+        'experimental_mono_fold': 'Experimental mono video fold',
+        'mono_video_side': 'Mono video input side',
     }
     return friendly.get(action.dest,
                         action.dest.replace('_', ' ').capitalize())
@@ -642,10 +644,7 @@ class ReceiverGui:
             return
         field.value = value
         if field.dest == 'experimental_fold':
-            baseline = next((item for item in self.fields
-                             if item.dest == 'baseline'), None)
-            if baseline is not None:
-                baseline.value = False
+            self._clear_other_profiles(field.dest)
         self.dropdown = None
         self.dropdown_scroll = 0
         if field.label == 'Display upscaler':
@@ -654,6 +653,16 @@ class ReceiverGui:
             self.display_menu_open = False
         self.notice = f'{field.label}: {self._field_value_label(field)}'
         self.dirty = True
+
+    def _clear_other_profiles(self, active):
+        for item in self.fields:
+            if item.dest == active:
+                continue
+            if item.dest == 'experimental_fold':
+                item.value = None
+            elif item.dest in ('baseline', 'experimental_mono',
+                               'experimental_mono_fold'):
+                item.value = False
 
     def _adjust_field(self, field, direction):
         if self.started and field.action is not None:
@@ -665,11 +674,9 @@ class ReceiverGui:
             return
         if field.kind == 'bool':
             field.value = not field.value
-            if field.dest == 'baseline' and field.value:
-                fold = next((item for item in self.fields
-                             if item.dest == 'experimental_fold'), None)
-                if fold is not None:
-                    fold.value = None
+            if field.dest in ('baseline', 'experimental_mono',
+                              'experimental_mono_fold') and field.value:
+                self._clear_other_profiles(field.dest)
         elif field.kind == 'choice' and field.options:
             values = [value for _label, value in field.options]
             try:
@@ -678,10 +685,7 @@ class ReceiverGui:
                 index = -1
             field.value = values[(index+direction) % len(values)]
             if field.dest == 'experimental_fold':
-                baseline = next((item for item in self.fields
-                                 if item.dest == 'baseline'), None)
-                if baseline is not None:
-                    baseline.value = False
+                self._clear_other_profiles(field.dest)
             if field.label == 'Display upscaler':
                 self.display_mode = field.value
                 self.picture_dirty = True

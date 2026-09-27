@@ -1595,12 +1595,14 @@ should automatically select or persist a new default based on metric scores.
 
 ## 13. Mono enhancement
 
-**Status: experimental standalone mono fold-off prototype implemented,
-September 27, 2026; not production-integrated.** The prototype and its clean
-loopback tests live in `test_modem_v7/mono_wire.py`, `tools/v7_live.py`, and
-`modem_tests/test_v7_mono_wire.py`. Folded tiers, quality predictions, backward
-rejection, and default selection remain gated on measurements. Application
-integration remains Section 10.8.
+**Status: experimental standalone mono fold-off and all-fresh mono 500-class
+video prototypes implemented, September 27, 2026; not production-integrated.**
+The rotating fold-off prototype remains in `test_modem_v7/mono_wire.py`; the
+video prototype is in `test_modem_v7/mono_video.py`. Both are opt-in through
+`tools/v7_live.py`. Their tests live in `modem_tests/test_v7_mono_wire.py` and
+`modem_tests/test_v7_mono_video.py`. The moving-scene synthetic comparison is
+in `tools/v7_mono_video_bench.py`. The live default and application integration
+remain unchanged; real tape validation remains outstanding.
 
 ### 13.1 Goal and scope
 
@@ -1695,6 +1697,10 @@ The 500-class row has enough aggregate slack after subtracting 32 (2,884),
 but needs explicit rank coverage proving the signature-displaced hosts and
 guests are carried elsewhere. These are capacity budgets, not pinned tables.
 Any high-fold allocation must be recalculated with the final signature scheme.
+
+The rotating allocation above is the still-image prototype, not the video
+allocation. The all-fresh video profile below uses 1,264 fixed physical M slots
+on every packet and does not reuse `MONO_OFF` or its rotating rank map.
 
 The signature measures noise on folded slots as well as table identity; coded
 status alone does not replace this function. New mono tables must explicitly
@@ -1827,13 +1833,13 @@ between mono and stereo layouts.
 
 The six status words are defined in `test_modem_v7/tone_code.py`: the three
 existing fold words and their balanced complements. `FOLD_OFF` and `MONO_OFF`
-are independently recognized; only `MONO_OFF` has a changed body layout.
-`MONO_500` and `MONO_1000` words are reserved candidates, not implemented fold
-tiers. Current mono uses 992 fresh plus 272 rotating slots, with 16 padding
-positions on the final phase. Clean synthetic decode confirmed that all seven
-phases cover the 2,880 corner coefficients and that the channel fit/equalizer
-run with S prior zero. No mono fold signature is present because folding is
-off.
+are independently recognized; only `MONO_OFF` has the original rotating mono
+layout. `MONO_500` identifies the distinct all-fresh 500-class video profile.
+`MONO_1000` remains reserved by live profiles and is used only by the offline
+fold-off comparison control. The existing `MONO_OFF` wire remains 992 fresh
+plus 272 rotating slots, with 16 padding positions on the final phase. Clean
+synthetic decode confirmed that all seven phases cover the 2,880 corner
+coefficients and that the channel fit/equalizer run with S prior zero.
 
 Reproduce the targeted tests and the 25-case synthetic channel matrix with:
 
@@ -1918,3 +1924,89 @@ Real-time playback remains outstanding. The available audio device list in the
 development environment contained PulseAudio `pulse`/`default`, not
 `BlackHole 2ch`, so no real audio stream was opened. Synthetic loopback does not
 substitute for the Section 1 playback validation.
+
+### 13.8 All-fresh mono video with a 500-class fold
+
+The video-only profile is separately opt-in with `--experimental-mono-fold`;
+it does not alter `--experimental-mono` or the `MONO_OFF` rotating wire:
+
+```text
+.venv/bin/python tools/v7_live.py send --source test \
+  --device 'BlackHole 2ch' --experimental-mono-fold --mono-video-side left
+.venv/bin/python tools/v7_live.py receive \
+  --device 'BlackHole 2ch' --experimental-mono-fold --mono-video-side left
+```
+
+It requires the canonical box model, coded pilot timing, EOF framing, and no
+pre-encode perceptual resizer. Every packet transmits the same 1,264 M-only
+physical slots: the protected 208-coefficient head followed by 1,056 fresh body
+slots. There is no rotating tail and the live receiver disables tail memory.
+Five hundred hosts within the fresh body carry the fold; the final 16 hosts are
+the fold-table signature and replace their host and guest picture values. The
+remaining 484 folded guests are the next box-model corner ranks. This gives
+1,732 current-frame picture coefficients at most (1,248 host-picture values
+plus 484 guests), with the wire budget often described approximately as 1,750
+coefficient positions. The fold step and complete table identity are pinned in
+`test_modem_v7/mono_video.py`.
+
+The sender's `--mono-video-side left|right` selects the output leg for the
+complete modem signal, including timing/status tones; the other output leg is
+zero and remains available for a separate audio track. The receiver uses the
+matching option to run pulse acquisition and decoding on only that input leg,
+ignoring audio on the other. Both default to `left`; the sender GUI exposes the
+choice and describes which side remains clear. The two-leg form is retained in
+the offline comparison harness, not used by this side-selected live profile.
+
+`MONO_500` is the distinct coded status for this rank map. The updated receiver
+checks the status before image equalization and rejects both the legacy
+`MONO_OFF` rotating layout and stereo fold status, holding the previous image.
+This status gate is not a promise that pre-existing receivers reject the new
+profile; they do not implement this check. The benchmark-only all-fresh
+fold-off control uses the reserved `MONO_1000` code as a separate identity and
+is not exposed by the live CLI or GUI.
+
+The runner `tools/v7_mono_video_bench.py` compares the new profile against the
+current stereo fold-500 decode, that stereo wire downmixed to mono, the
+rotating mono fold-off profile with tail memory on/off, and an all-fresh mono
+fold-off control. The mono video profiles use the selected left leg; the other
+leg is silent. It scores packets 8–23 against the matching generated source
+frame and reports decoded, current-frame-displayable, held-picture, EOF, encode
+and decode costs separately. The encode/decode times are local wall time per
+packet (not process CPU), measured after decoder warm-up. Pans, six-packet cuts,
+and a moving graphic blob are deterministic synthetic scenes; the previous review script
+`tmp/mono/video.py` is unavailable in this checkout, so these are scene-class
+substitutes, not identical stimuli. The selected Type-II and fast-flutter cases
+are limited synthetic regressions, not cassette emulation. No real-tape result
+is inferred from them.
+
+The first complete run contains four 24-packet scenes, with 16 scored frames per
+scene and profile/channel pair. Mean SSIMULACRA2 across the four scenes, plus
+mean per-packet wall time across the run, is:
+
+| Profile | Clean | Type II | Fast flutter | Encode ms/packet | Decode ms/packet |
+|---|---:|---:|---:|---:|---:|
+| Stereo fold-500, both legs | −4.70 | −16.67 | −13.03 | 1.425 | 1.064 |
+| Stereo fold-500, mono-summed | −34.52 | −36.99 | −35.21 | 1.425 | 1.032 |
+| Rotating mono fold-off, tail memory on | −54.65 | −54.98 | −54.88 | 1.511 | 1.260 |
+| Rotating mono fold-off, tail memory off | −39.85 | −40.44 | −40.55 | 1.511 | 1.231 |
+| All-fresh mono fold-off, left leg | −34.50 | −35.80 | −35.44 | 1.346 | 1.159 |
+| All-fresh mono 500-class fold, left leg | **−29.23** | **−35.02** | **−34.14** | 1.496 | 1.180 |
+
+All 72 profile/scene/channel runs received and displayed 24/24 packets, held no
+previous pictures, and validated 24/24 EOF markers. Across the four scenes, the
+fold improved on its all-fresh fold-off control by 5.27 points clean, 0.78 in
+Type II, and 1.31 under fast flutter. The generated cut scene remains difficult
+in absolute score; the fold advantage there is about 3.1 clean points and below
+1 point in the two stresses. These are comparative synthetic results, not
+performance claims for cassette media or the missing original stimuli. Results
+are saved at `tmp/v7-mono-video-left/results.json`.
+
+Reproduce the profile checks and complete comparison with:
+
+```text
+.venv/bin/python -m unittest modem_tests.test_v7_mono_video \
+  modem_tests.test_v7_mono_wire modem_tests.test_v7_send_gui \
+  modem_tests.test_v7_receiver_gui -v
+.venv/bin/python tools/v7_mono_video_bench.py \
+  --out tmp/v7-mono-video-left
+```

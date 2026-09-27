@@ -277,9 +277,16 @@ def _ensure_test_modem_path():
 def _fold_slots(args):
     """Resolve the shared live profile; the historical profile is explicit opt-out."""
     requested = getattr(args, 'experimental_fold', None)
-    if getattr(args, 'experimental_mono', False):
+    mono_off = bool(getattr(args, 'experimental_mono', False))
+    mono_fold = bool(getattr(args, 'experimental_mono_fold', False))
+    baseline = bool(getattr(args, 'baseline', False))
+    if mono_off and mono_fold:
+        raise ValueError('experimental mono profiles are mutually exclusive')
+    if (mono_off or mono_fold) and (requested is not None or baseline):
+        raise ValueError('experimental mono profiles must be selected on their own')
+    if mono_off or mono_fold:
         return 0
-    if getattr(args, 'baseline', False):
+    if baseline:
         if requested is not None:
             raise ValueError('--baseline cannot be combined with --experimental-fold')
         return 0
@@ -395,16 +402,22 @@ def run_send(args):
 
     slots = _fold_slots(args)
     mono_profile = bool(getattr(args, 'experimental_mono', False))
+    mono_fold_profile = bool(getattr(args, 'experimental_mono_fold', False))
     fold = _experimental_fold(slots)
     mono_wire = None
-    if mono_profile:
+    if mono_profile or mono_fold_profile:
         if not getattr(args, 'pilot_tones', True):
-            raise ValueError('the experimental mono profile requires coded pilot tones')
+            raise ValueError('experimental mono profiles require coded pilot tones')
         if not getattr(args, 'eof_marker', True):
-            raise ValueError('the experimental mono profile requires the EOF marker')
-        _ensure_test_modem_path()
-        from mono_wire import MonoWire
-    args.encode_filter, args.brightness = _send_profile(args, slots)
+            raise ValueError('experimental mono profiles require the EOF marker')
+    if mono_fold_profile and getattr(args, 'perceptual_resize', 'off') != 'off':
+        raise ValueError('the experimental mono fold profile requires '
+                         '--perceptual-resize off')
+    if mono_fold_profile and getattr(args, 'mono_sum', False):
+        raise ValueError('the mono-video side selector requires two output '
+                         'channels; do not combine it with --mono-sum')
+    profile_slots = 500 if mono_fold_profile else slots
+    args.encode_filter, args.brightness = _send_profile(args, profile_slots)
     if getattr(args, 'perceptual_resize', 'off') != 'off':
         # Compile the optional Numba resize before an output stream is open;
         # first-call JIT latency must not stall the live sender.
@@ -412,7 +425,16 @@ def run_send(args):
         warmup_resize((2, 2), args.perceptual_resize,
                       args.perceptual_detail_strength)
     model = _model(args.fixture, args.encode_filter)
-    if mono_profile:
+    if mono_fold_profile:
+        _ensure_test_modem_path()
+        from mono_video import MonoFreshFoldWire
+        mono_wire = MonoFreshFoldWire(
+            model, side=getattr(args, 'mono_video_side', 'left'))
+        from tone_code import warmup_status_templates, MONO_500
+        warmup_status_templates(MONO_500)
+    elif mono_profile:
+        _ensure_test_modem_path()
+        from mono_wire import MonoWire
         mono_wire = MonoWire(model)
         from tone_code import warmup_status_templates, MONO_OFF
         warmup_status_templates(MONO_OFF)
@@ -506,10 +528,14 @@ def run_send(args):
                 'limiter_active': limiter_gain < 1.0,
                 'limiter_gain': limiter_gain,
                 'samples_limited': limiter_samples,
-                'fold_slots': 0 if fold is None else fold.slots,
+                'fold_slots': (fold.slots if fold is not None else
+                               getattr(mono_wire, 'fold_slots', 0)),
                 'coded_pilot': fold is not None or mono_wire is not None,
-                'wire_profile': ('mono-fold-off' if mono_wire is not None else
+                'wire_profile': (getattr(mono_wire, 'wire_profile',
+                                         'mono-fold-off')
+                                 if mono_wire is not None else
                                  'folded' if fold is not None else 'baseline'),
+                'mono_video_side': getattr(mono_wire, 'side', None),
             }
         else:
             stats = {'frames_encoded': len(frames)}
@@ -615,13 +641,18 @@ def run_send(args):
                 else:
                     capture_text = (f'{args.capture_width}px/'
                                     f'{_capture_scale_flags(args)}')
+                wire_mode = (getattr(mono_wire, 'wire_profile',
+                                     'mono-fold-off')
+                             if mono_wire is not None else
+                             'mono-sum' if args.mono_sum else 'M/S')
+                if mono_fold_profile:
+                    wire_mode += f' side={mono_wire.side}'
                 print(f'V7 send ready: source={args.source} device={args.device!r} '
                        f'rate={output_rate:g}Hz wire={wire_fps:.3f}fps '
                        f'speed={args.speed:g}x {camera_text}'
-                       f'pilot-tones={"on" if getattr(args, "pilot_tones", False) else "off"} '
-                        f'capture={capture_text} '
-                        f'encode={args.encode_filter} mode='
-                        f'{"mono-fold-off" if mono_wire is not None else "mono-sum" if args.mono_sum else "M/S"}',
+                        f'pilot-tones={"on" if getattr(args, "pilot_tones", False) else "off"} '
+                         f'capture={capture_text} '
+                         f'encode={args.encode_filter} mode={wire_mode}',
                        flush=True)
             while True:
                 item = batches.get()
@@ -675,17 +706,24 @@ def run_receive(args):
         raise ValueError('--image-only cannot be combined with --headless')
     slots = _fold_slots(args)
     mono_profile = bool(getattr(args, 'experimental_mono', False))
+    mono_fold_profile = bool(getattr(args, 'experimental_mono_fold', False))
     fold = _experimental_fold(slots)
-    if mono_profile:
+    if mono_profile or mono_fold_profile:
         if getattr(args, 'pilot_timing', 'tone-seeded') == 'baseline':
-            raise ValueError('the experimental mono profile requires tone-assisted timing')
+            raise ValueError('experimental mono profiles require tone-assisted timing')
         if getattr(args, 'frame_boundary', 'eof') != 'eof':
-            raise ValueError('the experimental mono profile requires EOF packet boundaries')
+            raise ValueError('experimental mono profiles require EOF packet boundaries')
         _ensure_test_modem_path()
-        from mono_wire import MonoWire
         from tone_code import coded_pilot_timing
-        model = _model(args.fixture, 'nearest')
-        mono_wire = MonoWire(model)
+        if mono_fold_profile:
+            from mono_video import MonoFreshFoldWire
+            model = _model(args.fixture, 'box')
+            mono_wire = MonoFreshFoldWire(
+                model, side=getattr(args, 'mono_video_side', 'left'))
+        else:
+            from mono_wire import MonoWire
+            model = _model(args.fixture, 'nearest')
+            mono_wire = MonoWire(model)
         mono_wire.install()
         try:
             with coded_pilot_timing():
@@ -719,7 +757,10 @@ def _run_receive(args, fold, mono_wire=None):
     stop = getattr(args, 'stop_event', None) or threading.Event()
     # Metadata is decoded with the common bootstrap model; the body model is
     # selected from the protected encoding ID carried by each frame.
-    base_model = _model(args.fixture, 'box' if fold is not None else 'nearest')
+    base_model = _model(
+        args.fixture,
+        'box' if fold is not None or getattr(mono_wire, 'requires_box', False)
+        else 'nearest')
     model = mono_wire.model_for(base_model) if mono_wire is not None else base_model
     if fold is not None:
         fold.check(model)
@@ -736,8 +777,12 @@ def _run_receive(args, fold, mono_wire=None):
         warmup_wire = mono_wire.encode(
             base_model, [np.zeros(base_model.coder.source_count)]*3,
             start_counter=1, eof_marker=True)
+        warmup_audio = warmup_wire
+        carrier_index = getattr(mono_wire, 'carrier_index', None)
+        if carrier_index is not None:
+            warmup_audio = warmup_wire[:, carrier_index]
         P.decode_pulse_stream(
-            model, warmup_wire, sample_rate=capture_rate_for(
+            model, warmup_audio, sample_rate=capture_rate_for(
                 sd.query_devices(args.device, 'input')),
             pilot_timing=args.pilot_timing, frame_boundary='eof')
     if stop.is_set():
@@ -754,6 +799,9 @@ def _run_receive(args, fold, mono_wire=None):
         return models[encoding_type]
     device_info = sd.query_devices(args.device, 'input')
     input_channels = 1 if device_info['max_input_channels'] < 2 else 2
+    video_input_index = getattr(mono_wire, 'carrier_index', None)
+    if video_input_index is not None and input_channels < 2:
+        video_input_index = 0
     capture_rate = capture_rate_for(device_info)
     blocks = queue.Queue(maxsize=INPUT_AUDIO_QUEUE_BLOCKS)
     input_gap = threading.Event()
@@ -766,7 +814,9 @@ def _run_receive(args, fold, mono_wire=None):
     # The sample clock never rewinds, so an input gap needs no reset here.
     decoded_through = None
     # Tail store and learned loop constants (N, p) persist across decodes.
-    pulse_state = P.PulseState(tail_memory=not args.no_tail_memory)
+    pulse_state = P.PulseState(
+        tail_memory=(not args.no_tail_memory and
+                     not getattr(mono_wire, 'disable_tail_memory', False)))
     lag_ticks = deque(maxlen=32)        # recent picture lags, loop ticks
     decode_times = deque(maxlen=64)     # wall time of every decode cycle
     decode_cpu_times = deque(maxlen=512)  # (completion time, thread CPU seconds)
@@ -794,7 +844,9 @@ def _run_receive(args, fold, mono_wire=None):
              'aspect_streak': 0, 'input_samples': 0, 'started': time.monotonic(),
              'auto_gain': 1.0, 'polarity': 1,
              'input_fps': 0., 'decode_fps': 0., 'shown_fps': 0.,
-             'mode': 'mono-input' if input_channels == 1 else 'M/S',
+              'mode': (f'mono-video-{getattr(mono_wire, "side", "")}'
+                       if mono_wire is not None and video_input_index is not None
+                       else 'mono-input' if input_channels == 1 else 'M/S'),
              'device': str(args.device), 'capture_rate': capture_rate,
              'input_channels': input_channels}
 
@@ -955,7 +1007,11 @@ def _run_receive(args, fold, mono_wire=None):
             try:
                 # Blocks are private copies of the callback data; LiveInput
                 # applies the leveler's polarity to the stored audio itself.
-                live_input.add(blocks.get_nowait())
+                block = blocks.get_nowait()
+                if (video_input_index is not None and block.ndim == 2 and
+                        block.shape[1] > video_input_index):
+                    block = block[:, video_input_index:video_input_index+1]
+                live_input.add(block)
                 added = True
             except queue.Empty:
                 break
@@ -1082,6 +1138,9 @@ def _run_receive(args, fold, mono_wire=None):
                     values = fold.values(
                         models.get(result.diag.get('encoding_type'), model), result,
                         metadata_confirmed=_coded_mode_matches_fold(result, fold))
+                elif mono_wire is not None:
+                    values = mono_wire.values(
+                        models.get(result.diag.get('encoding_type'), model), result)
                 else:
                     values = P.values_from(model, result.coeffs)
                 if args.mono_compatible:
@@ -1247,6 +1306,10 @@ def parser():
                       help='source gamma; >1 lifts midtones (default: 1.0)')
     send.add_argument('--mono-sum', action='store_true',
                        help='emit mono-summed M content on one channel')
+    send.add_argument('--mono-video-side', choices=('left', 'right'),
+                      default='left',
+                      help=('all-fresh mono video: send on this output leg and '
+                            'leave the other leg silent (default: left)'))
     send.add_argument('--pilot-tones', action=argparse.BooleanOptionalAction,
                       default=True,
                        help='baseline: add steady bin-1/bin-3 references (default on); '
@@ -1259,6 +1322,8 @@ def parser():
                               help='restore the pre-fold profile (nearest, brightness 1.05, steady pilots)')
     send_profile.add_argument('--experimental-mono', action='store_true',
                               help='send the opt-in V7 mono fold-off layout; requires an updated receiver')
+    send_profile.add_argument('--experimental-mono-fold', action='store_true',
+                              help='send the all-fresh mono video layout with a 500-class fold')
     send_profile.add_argument('--experimental-fold', type=int, default=None,
                               choices=(0, 500, 1000), metavar='M',
                               help='fold M luma slots and send coded pilots (default: 500); '
@@ -1316,7 +1381,11 @@ def parser():
     recv.add_argument('--profile-ui', action='store_true',
                       help='report viewer-thread and total process CPU every 5 s')
     recv.add_argument('--mono-compatible', action='store_true',
-                      help='stabilize weak chroma for mono/one-leg playback')
+                       help='stabilize weak chroma for mono/one-leg playback')
+    recv.add_argument('--mono-video-side', choices=('left', 'right'),
+                      default='left',
+                      help=('all-fresh mono video: decode from this input leg, '
+                            'ignoring the other leg (default: left)'))
     recv.set_defaults(show_diagnostics=True)
     recv.add_argument('--no-log', dest='no_log', action='store_true',
                       default=False, help=argparse.SUPPRESS)
@@ -1358,6 +1427,8 @@ def parser():
                               help='restore the pre-fold receiver profile; use with sender --baseline')
     recv_profile.add_argument('--experimental-mono', action='store_true',
                               help='receive only the opt-in mono fold-off layout; unknown profiles hold the last picture')
+    recv_profile.add_argument('--experimental-mono-fold', action='store_true',
+                              help='receive the all-fresh mono video layout with a 500-class fold')
     recv_profile.add_argument('--experimental-fold', type=int, default=None,
                                choices=(0, 500, 1000), metavar='M',
                                help='unfold M luma slots using coded-pilot status (default: 500); '
