@@ -673,6 +673,7 @@ def _run_receive(args, fold):
     pulse_state = P.PulseState(tail_memory=not args.no_tail_memory)
     lag_ticks = deque(maxlen=32)        # recent picture lags, loop ticks
     decode_times = deque(maxlen=64)     # wall time of every decode cycle
+    decode_cpu_times = deque(maxlen=512)  # (completion time, thread CPU seconds)
     shown_times = deque(maxlen=64)      # wall time of every published picture
     latest = None
     display_frames = FRAME_BUFFER
@@ -683,6 +684,7 @@ def _run_receive(args, fold):
              'rms': np.zeros(input_channels), 'blocks': 0,
              'dropped': 0, 'decoded': 0, 'verified': 0, 'lost': 0,
              'status': 'acquiring', 'counter': None, 'decode_ms': None,
+              'decode_cpu_ms': None, 'decode_cpu_percent': 0.0,
              'quality': '--',
              'timing_delta': None, 'playback_speed': None, 'source_index': None,
              # Largest source index (N-1) and the picture's lag behind the live
@@ -750,6 +752,12 @@ def _run_receive(args, fold):
         now = time.monotonic()
         meter['decode_fps'] = windowed_rate(decode_times, now)
         meter['shown_fps'] = windowed_rate(shown_times, now)
+        decode_cpu_seconds = sum(
+            cpu_seconds for completed, cpu_seconds in decode_cpu_times
+            if completed >= now-2.0)
+        cpu_window = min(2.0, max(0.0, now-meter['started']))
+        meter['decode_cpu_percent'] = (
+            100.0*decode_cpu_seconds/cpu_window if cpu_window > 0 else 0.0)
         incoming = live_input.incoming_fps(now)
         meter['input_fps'] = incoming
         shown = meter['shown_index']
@@ -802,6 +810,10 @@ def _run_receive(args, fold):
                 f'shown {meter["shown_fps"]:5.2f} fps',
                 f'decode time {decode_ms}',
                 f'input blocks {meter["blocks"]}   dropped {meter["dropped"]}'),
+            'decode_cpu': (
+                ('last -- ms/frame' if meter['decode_cpu_ms'] is None else
+                 f'last {meter["decode_cpu_ms"]:.1f} ms/frame'),
+                f'2s avg {meter["decode_cpu_percent"]:.0f}% / core'),
             'input': (*channel_levels,
                       f'auto gain {meter["auto_gain"]:5.2f}×',
                       f'right leg {"inverted" if meter["polarity"] < 0 else "normal"}'),
@@ -884,6 +896,7 @@ def _run_receive(args, fold):
         if not args.refine:
             P.REFINE = False
         decode_times.append(time.monotonic())
+        decode_cpu_start = time.thread_time()
         try:
             pulse_state.set_playback_direction(packet_direction)
             options = dict(
@@ -910,6 +923,9 @@ def _run_receive(args, fold):
             # reacquire.  A single bad frame must not stop the live receiver.
             results, info = [], {'words': 0,
                                  'recovery_error': type(exc).__name__}
+        decode_cpu_seconds = time.thread_time()-decode_cpu_start
+        decode_cpu_times.append((time.monotonic(), decode_cpu_seconds))
+        meter['decode_cpu_ms'] = decode_cpu_seconds*1000.0
         live_input.decoded()
         if results:
             result = results[-1]

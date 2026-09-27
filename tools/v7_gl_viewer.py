@@ -207,7 +207,7 @@ def title_for_status(meter, details=False, display_mode='nearest'):
 
 
 def _diagnostic_image(size, diagnostics):
-    """Build the four compact diagnostic cards at a low, fixed refresh rate."""
+    """Build compact diagnostic cards at a low, fixed refresh rate."""
     width, height = size
     image = Image.new('RGBA', (max(1, width), max(1, height)),
                       (9, 16, 24, 224))
@@ -225,20 +225,27 @@ def _diagnostic_image(size, diagnostics):
     padding = 14
     gap = 12
     heading_height = 20
-    card_width = max(1, (width-2*padding-gap)//2)
-    card_height = max(1, (height-2*padding-heading_height-gap)//2)
     status = diagnostics.get('status', ('ACQUIRING',))[0].upper()
     draw.text((padding, 3),
               f'{status}  ·  F fullscreen  ·  I toggle diagnostics  ·  Esc exit',
               fill=(132, 153, 173, 255), font=heading_font)
-    specs = (
+    specs = [
         ('SYNC  /  INDEX', 'sync'),
         ('DECODE  /  FLOW', 'decode'),
         ('INPUT  /  LEVEL', 'input'),
         ('PICTURE  /  SIGNAL', 'signal'),
-    )
+    ]
+    if 'decode_cpu' in diagnostics:
+        specs.append(('DECODE CPU', 'decode_cpu'))
+    if 'resources' in diagnostics:
+        specs.append(('GUI RESOURCES', 'resources'))
+    columns = 3 if len(specs) > 4 else 2
+    rows = (len(specs)+columns-1)//columns
+    card_width = max(1, (width-2*padding-(columns-1)*gap)//columns)
+    card_height = max(
+        1, (height-2*padding-heading_height-(rows-1)*gap)//rows)
     for index, (heading, key) in enumerate(specs):
-        col, row = index % 2, index // 2
+        col, row = index % columns, index // columns
         x = padding + col*(card_width+gap)
         y = padding+heading_height + row*(card_height+gap)
         box = (x, y, x+card_width, y+card_height)

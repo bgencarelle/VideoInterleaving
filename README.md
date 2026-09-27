@@ -186,13 +186,15 @@ Open two terminals from the repository root and start the receiver first:
 ```
 
 To configure a receiver interactively before opening audio, run
-`.venv/bin/python tools/v7_live.py gui`. Select an input device in the
-Setup and press **Start**; **Live** is an image-first view with optional
-diagnostics. `I` toggles the details panel, `P` switches to image-only
-fullscreen, `Esc` returns from image-only, and `F` toggles fullscreen. In
-fullscreen, the toolbar, status strip, and optional details panel are hidden on
-entry. Move the pointer to the top edge or press a key to bring them back; they
-hide again after two seconds of inactivity. The GUI also exposes an **Image
+`.venv/bin/python tools/v7_live.py gui`. The first available input device is
+preselected in Setup; change it if needed, then press **Start**. **Live** is an
+image-first view with optional diagnostics. `I` opens Live and toggles the
+details panel, `P` switches to image-only fullscreen, `Esc` returns from
+image-only, and `F` toggles fullscreen. In fullscreen, the toolbar, status
+strip, and optional details panel are hidden on entry. Move the pointer to the
+top edge or press a key to bring them back; they hide again after two seconds
+of inactivity. The detailed panel includes decoder CPU time/load and GUI-thread
+CPU, process CPU, and resident-memory readings. The GUI also exposes an **Image
 only** button and a start-in-image-only option.
 
 For a live decoded image with no controls or diagnostics, use the regular

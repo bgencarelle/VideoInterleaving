@@ -2,6 +2,7 @@
 import threading
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -22,6 +23,16 @@ class MouseStub:
 
     def get_cursor_pos(self, _window):
         return self.position
+
+
+class KeyStub:
+    PRESS = 1
+    REPEAT = 2
+    KEY_F = 70
+    KEY_I = 73
+    KEY_ESCAPE = 256
+    KEY_P = 80
+    MOD_CONTROL = 2
 
 
 class ReceiverGuiOptionTests(unittest.TestCase):
@@ -57,6 +68,14 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
         with self.assertRaisesRegex(ValueError, 'Select an input audio device'):
             gui._build_arguments()
+
+    def test_first_available_input_is_preselected(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser,
+                          (('first input', 4), ('second input', 9)))
+        device = next(field for field in gui.fields
+                      if field.dest == 'device')
+        self.assertEqual(device.value, 4)
+        self.assertEqual(gui._build_arguments().device, 4)
 
     def test_selected_cli_options_reach_receiver_arguments(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser,
@@ -164,6 +183,7 @@ class ReceiverGuiOptionTests(unittest.TestCase):
 
     def test_entering_fullscreen_starts_with_the_hud_hidden(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        focused = []
         glfw = SimpleNamespace(
             DONT_CARE=0,
             get_primary_monitor=lambda: object(),
@@ -172,12 +192,15 @@ class ReceiverGuiOptionTests(unittest.TestCase):
             get_video_mode=lambda _monitor: SimpleNamespace(
                 size=SimpleNamespace(width=1920, height=1080),
                 refresh_rate=60),
-            set_window_monitor=lambda *_args: None)
+            set_window_monitor=lambda *_args: None,
+            focus_window=lambda window: focused.append(window))
+        window = object()
 
-        gui._toggle_fullscreen(glfw, object())
+        gui._toggle_fullscreen(glfw, window)
 
         self.assertTrue(gui.fullscreen)
         self.assertFalse(gui.toolbar_visible)
+        self.assertEqual(focused, [window])
 
     def test_hidden_fullscreen_toolbar_is_removed_from_live_canvas(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
@@ -192,6 +215,52 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertNotIn('fullscreen', gui.hits)
         self.assertFalse(gui._diagnostics_visible())
         self.assertEqual(gui._picture_box((960, 720))[1], 8)
+
+    def test_fullscreen_i_reveals_and_toggles_diagnostics(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        gui.fullscreen = True
+        gui.toolbar_visible = False
+        gui.page = 'info'
+
+        gui._on_key(KeyStub(), object(), KeyStub.KEY_I, 0, KeyStub.PRESS, 0)
+
+        field = next(field for field in gui.fields
+                     if field.dest == 'show_diagnostics')
+        self.assertTrue(gui.toolbar_visible)
+        self.assertTrue(field.value)
+        self.assertTrue(gui._diagnostics_visible())
+
+    def test_fullscreen_f_works_while_text_editing(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        gui.fullscreen = True
+        save_dir = next(field for field in gui.fields
+                        if field.dest == 'save_dir')
+        gui.selected = gui.fields.index(save_dir)
+        gui.editing = True
+        gui.edit_buffer = 'captures'
+        toggles = []
+        gui._toggle_fullscreen = lambda *_args: toggles.append(True)
+
+        gui._on_key(KeyStub(), object(), KeyStub.KEY_F, 0, KeyStub.PRESS, 0)
+
+        self.assertEqual(toggles, [True])
+        self.assertFalse(gui.editing)
+        self.assertEqual(save_dir.value, 'captures')
+
+    def test_gui_resource_monitor_reports_thread_process_and_memory(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        gui.gui_resource_wall = 10.0
+        gui.gui_resource_process = 5.0
+        gui.gui_resource_thread = 2.0
+        with (patch('tools.v7_receiver_gui.time.process_time', return_value=5.5),
+              patch('tools.v7_receiver_gui.time.thread_time', return_value=2.2),
+              patch('tools.v7_receiver_gui._process_memory_mib',
+                    return_value=(256.0, 'RSS'))):
+            lines = gui._sample_gui_resources(11.0)
+
+        self.assertIn('20%', lines[0])
+        self.assertIn('50%', lines[0])
+        self.assertEqual(lines[1], 'RSS 256 MiB')
 
     def test_receiver_cli_accepts_image_only_mode(self):
         args = v7_live.parser().parse_args([

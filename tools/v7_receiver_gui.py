@@ -33,6 +33,7 @@ ROW_HEIGHT = 36
 TOOLBAR_HEIGHT = 54
 DISPLAY_MODES = ('nearest', 'bilinear')
 INFO_REFRESH_SECONDS = 0.2
+RESOURCE_REFRESH_SECONDS = 1.0
 FULLSCREEN_TOOLBAR_HIDE_SECONDS = 2.0
 FULLSCREEN_TOOLBAR_EDGE = 14
 BASIC_OPTION_DESTS = frozenset((
@@ -107,6 +108,23 @@ def _input_devices():
     return tuple(choices), ''
 
 
+def _process_memory_mib():
+    """Current resident memory when available, otherwise the process peak."""
+    try:
+        import psutil
+        return psutil.Process().memory_info().rss/(1024*1024), 'RSS'
+    except Exception:
+        try:
+            import resource
+            peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            # Darwin reports bytes; Linux and the BSDs report KiB.
+            peak_mib = (peak/(1024*1024) if sys.platform == 'darwin'
+                        else peak/1024)
+            return peak_mib, 'peak RSS'
+        except Exception:
+            return None, 'RSS'
+
+
 def _field_label(action):
     friendly = {
         'device': 'Input audio device',
@@ -150,7 +168,8 @@ def _make_fields(receive_parser, device_choices):
                                       'bool', locked=True))
             continue
         if action.dest == 'device':
-            fields.append(OptionField(action, None, _field_label(action),
+            first_device = device_choices[0][1] if device_choices else None
+            fields.append(OptionField(action, first_device, _field_label(action),
                                       'choice', device_choices))
             continue
 
@@ -244,7 +263,7 @@ class ReceiverGui:
         self.editing = False
         self.edit_buffer = ''
         self.advanced_options = False
-        self.notice = 'Choose an input device, review settings, then start receiving.'
+        self.notice = 'Review the selected input and settings, then start receiving.'
         self.info_scroll = 0
         self.info_follow = True
         self.dirty = True
@@ -280,6 +299,11 @@ class ReceiverGui:
         self.profile_wall = None
         self.profile_process = None
         self.profile_thread = None
+        self.gui_resource_wall = None
+        self.gui_resource_process = None
+        self.gui_resource_thread = None
+        self.gui_resource_next_sample = 0.0
+        self.gui_resource_lines = ('thread -- · proc --', 'RSS --')
 
     def _field_value_label(self, field):
         if field.dest == 'device':
@@ -315,6 +339,9 @@ class ReceiverGui:
                                     mode.size.height, mode.refresh_rate)
             self.fullscreen = True
             self.toolbar_visible = False
+        focus_window = getattr(glfw, 'focus_window', None)
+        if focus_window is not None:
+            focus_window(window)
         self.last_ui_activity = time.monotonic()
         self.dirty = True
 
@@ -326,6 +353,13 @@ class ReceiverGui:
         self.last_ui_activity = time.monotonic()
         if was_hidden:
             self.dirty = True
+
+    def _toggle_details(self):
+        self.page = 'info'
+        field = next(field for field in self.fields
+                     if field.dest == 'show_diagnostics')
+        field.value = not field.value
+        self.dirty = True
 
     def _on_cursor_position(self, _window, _x, y):
         if not self.fullscreen or self.image_only:
@@ -615,6 +649,34 @@ class ReceiverGui:
             now, process, thread)
         self.dirty = True
 
+    def _sample_gui_resources(self, now):
+        if now < self.gui_resource_next_sample:
+            return self.gui_resource_lines
+        process = time.process_time()
+        thread = time.thread_time()
+        if self.gui_resource_wall is not None:
+            elapsed = now-self.gui_resource_wall
+            if elapsed > 0:
+                process_percent = 100*(process-self.gui_resource_process)/elapsed
+                thread_percent = 100*(thread-self.gui_resource_thread)/elapsed
+                self.gui_resource_lines = (
+                    f'thread {thread_percent:3.0f}% · proc {process_percent:3.0f}%',
+                    self._memory_line())
+        else:
+            self.gui_resource_lines = ('thread -- · proc --',
+                                       self._memory_line())
+        self.gui_resource_wall = now
+        self.gui_resource_process = process
+        self.gui_resource_thread = thread
+        self.gui_resource_next_sample = now+RESOURCE_REFRESH_SECONDS
+        return self.gui_resource_lines
+
+    @staticmethod
+    def _memory_line():
+        memory_mib, label = _process_memory_mib()
+        return (f'{label} {memory_mib:.0f} MiB' if memory_mib is not None
+                else f'{label} unavailable')
+
     def _poll_frame(self):
         frame = self.v7_live.FRAME_BUFFER.snapshot()
         if frame is None or frame.generation == self.last_generation:
@@ -639,9 +701,10 @@ class ReceiverGui:
         if provider is None:
             return
         try:
-            diagnostics = provider()
+            diagnostics = dict(provider())
         except Exception:
             return
+        diagnostics['resources'] = self._sample_gui_resources(now)
         packet = snapshot.get('latest_packet')
         decode_info = snapshot.get('decode_info')
         meter = snapshot.get('meter')
@@ -674,7 +737,7 @@ class ReceiverGui:
         draw.text((24, 70), 'Receiver setup',
                   fill=(240, 245, 249), font=font)
         draw.text((24, 98),
-                  'Choose an input and start. Advanced decoder controls are optional.',
+                  'First available input is selected; change it or review advanced controls.',
                   fill=(151, 174, 192), font=small)
         order = self._config_field_indexes()
         top = 140
@@ -833,8 +896,10 @@ class ReceiverGui:
                 'status': ('ACQUIRING',),
                 'sync': ('waiting for pulse header',),
                 'decode': ('no decoded frames yet',),
+                'decode_cpu': ('last -- ms/frame', 'average -- / core'),
                 'input': ('waiting for audio',),
                 'signal': ('picture appears here as soon as it decodes',),
+                'resources': self.gui_resource_lines,
             }
             panel = Image.fromarray(_diagnostic_image(
                 (width, panel_height), diagnostics), mode='RGBA')
@@ -1003,6 +1068,16 @@ class ReceiverGui:
     def _on_key(self, glfw, window, key, _scancode, action, mods):
         if action not in (glfw.PRESS, glfw.REPEAT):
             return
+        if (self.fullscreen and not self.image_only and
+                key in (glfw.KEY_F, glfw.KEY_I)):
+            if self.editing:
+                self._finish_edit(self.fields[self.selected])
+            self._reveal_toolbar()
+            if key == glfw.KEY_F:
+                self._toggle_fullscreen(glfw, window)
+            else:
+                self._toggle_details()
+            return
         self._reveal_toolbar()
         if self.editing:
             field = self.fields[self.selected]
@@ -1025,13 +1100,7 @@ class ReceiverGui:
         elif key == glfw.KEY_P:
             self._set_image_only(True)
         elif key == glfw.KEY_I:
-            if self.page == 'info':
-                field = next(field for field in self.fields
-                             if field.dest == 'show_diagnostics')
-                field.value = not field.value
-            else:
-                self.page = 'info'
-            self.dirty = True
+            self._toggle_details()
         elif key == glfw.KEY_TAB:
             self._change_page()
         elif key == glfw.KEY_C:

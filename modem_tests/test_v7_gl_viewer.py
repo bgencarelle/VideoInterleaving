@@ -2,7 +2,8 @@
 import unittest
 
 from tools.v7_gl_viewer import (fit_viewport, title_for_status,
-                                toolbar_layout, _toolbar_image)
+                                toolbar_layout, _toolbar_image,
+                                _diagnostic_image)
 from tools.v7_viewer import main as preview_main
 
 
@@ -30,6 +31,19 @@ class GLViewerHelperTests(unittest.TestCase):
     def test_toolbar_draws_dropdown_in_viewer_style(self):
         pixels = _toolbar_image((960, 720), 'bilinear', True, 'upscale')
         self.assertEqual(pixels.shape, (110, 960, 4))
+
+    def test_diagnostic_cards_expand_for_decode_cpu_and_gui_resources(self):
+        diagnostics = {
+            'status': ('RECEIVED',),
+            'sync': ('shown 1 / 10',),
+            'decode': ('good 1 · lost 0',),
+            'input': ('peak mono -2 dBFS',),
+            'signal': ('aspect 4:3',),
+            'decode_cpu': ('last 3.1 ms/frame', 'average 8% / core'),
+            'resources': ('thread 2% · proc 12%', 'RSS 256 MiB'),
+        }
+        pixels = _diagnostic_image((960, 194), diagnostics)
+        self.assertEqual(pixels.shape, (194, 960, 4))
 
     def test_preview_rejects_nonpositive_or_nonfinite_fps_before_loading(self):
         for fps in ('0', '-1', 'nan', 'inf', '-inf'):
