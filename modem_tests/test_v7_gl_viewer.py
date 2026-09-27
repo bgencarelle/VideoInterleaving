@@ -5,10 +5,12 @@ import numpy as np
 from PIL import Image
 
 from tools.v7_gl_viewer import (DISPLAY_MODES, FILTER_LUT_MODES,
+                                FILTER_PRECOMPUTE_MODES,
                                 FLOAT_MODE_IDS, fit_viewport, float_planes,
                                 build_filter_lut,
                                 title_for_status,
                                 toolbar_layout, _toolbar_image,
+                                resample_filter_planes,
                                 _diagnostic_image)
 from tools.v7_viewer import main as preview_main
 
@@ -75,6 +77,46 @@ class GLViewerHelperTests(unittest.TestCase):
                 self.assertTrue(np.all(np.isfinite(weights)))
                 self.assertAlmostEqual(float(weights[0]), 1.0, places=6)
                 self.assertAlmostEqual(float(weights[-1]), 0.0, places=6)
+
+    def test_separable_filter_intermediates_preserve_constants_and_input(self):
+        planes = (
+            np.full((2, 3), .25, np.float32),
+            np.full((1, 2), -.5, np.float32),
+            np.full((1, 2), .75, np.float32),
+        )
+        originals = tuple(plane.copy() for plane in planes)
+        expected_shapes = ((8, 12), (4, 8), (4, 8))
+        for mode in FILTER_PRECOMPUTE_MODES:
+            with self.subTest(mode=mode):
+                enlarged = resample_filter_planes(planes, mode)
+                self.assertEqual(tuple(p.shape for p in enlarged),
+                                 expected_shapes)
+                for actual, original in zip(enlarged, originals):
+                    np.testing.assert_allclose(
+                        actual, original[0, 0], rtol=0.0, atol=1e-6)
+        for actual, original in zip(planes, originals):
+            np.testing.assert_array_equal(actual, original)
+
+    def test_separable_filter_intermediates_have_symmetric_edge_profiles(self):
+        step = np.array([[0, 0, 0, 1, 1, 1]], dtype=np.float32)
+        profiles = {}
+        for mode in FILTER_PRECOMPUTE_MODES:
+            with self.subTest(mode=mode):
+                profile = resample_filter_planes((step,), mode)[0][0]
+                self.assertTrue(np.all(np.isfinite(profile)))
+                np.testing.assert_allclose(profile+profile[::-1], 1.0,
+                                           atol=1e-6)
+                profiles[mode] = profile
+        self.assertEqual(len({tuple(np.round(p, 4))
+                              for p in profiles.values()}), len(profiles))
+        bspline = profiles['cubic-bspline']
+        self.assertGreaterEqual(float(bspline.min()), 0.0)
+        self.assertLessEqual(float(bspline.max()), 1.0)
+        self.assertTrue(np.all(np.diff(bspline) >= 0.0))
+        for mode in ('spline36', 'robidoux', 'robidoux-sharp',
+                     'kaiser-sinc', 'hann-sinc'):
+            self.assertLess(float(profiles[mode].min()), 0.0)
+            self.assertGreater(float(profiles[mode].max()), 1.0)
 
     def test_diagnostic_cards_expand_for_decode_cpu_and_gui_resources(self):
         diagnostics = {
@@ -247,6 +289,55 @@ class FloatShaderReferenceTests(unittest.TestCase):
             output.release()
         return rendered
 
+    def _render_filter_intermediate(self, mode):
+        from tools.v7_gl_viewer import (_float_texture_filter, build_filter_lut,
+                                        float_planes, resample_filter_planes)
+
+        source = float_planes(np.array([-.6, .6]), ((1, 2),))
+        planes = resample_filter_planes(source, mode)
+        textures = []
+        kernel_texture = None
+        output = self.context.texture((16, 1), 4, dtype='f4')
+        framebuffer = self.context.framebuffer(color_attachments=[output])
+        try:
+            filtering = _float_texture_filter(mode, self.moderngl)
+            for unit, plane in enumerate(planes):
+                texture = self.context.texture(
+                    (plane.shape[1], plane.shape[0]), 1,
+                    plane.tobytes(), dtype='f4')
+                texture.filter = (filtering, filtering)
+                texture.repeat_x = False
+                texture.repeat_y = False
+                texture.use(location=unit)
+                textures.append(texture)
+            weights = build_filter_lut(mode)
+            kernel_texture = self.context.texture(
+                (weights.size, 1), 1, weights.tobytes(), dtype='f4')
+            kernel_texture.filter = (self.moderngl.LINEAR,
+                                     self.moderngl.LINEAR)
+            kernel_texture.repeat_x = False
+            kernel_texture.repeat_y = False
+            kernel_texture.use(location=3)
+            self.program['reconstruction'].value = self.mode_ids[mode]
+            self.program['filtered_intermediate'].value = 1
+            self.program['output_size'].value = (16.0, 1.0)
+            framebuffer.use()
+            self.context.viewport = (0, 0, 16, 1)
+            self.vertex_array.render(
+                mode=self.moderngl.TRIANGLES, vertices=3)
+            rendered = np.frombuffer(
+                framebuffer.read(components=4, dtype='f4'),
+                dtype=np.float32).reshape(1, 16, 4)[0, :, :3].copy()
+        finally:
+            self.program['filtered_intermediate'].value = 0
+            for texture in textures:
+                texture.release()
+            if kernel_texture is not None:
+                kernel_texture.release()
+            framebuffer.release()
+            output.release()
+        return rendered
+
     def test_float_reconstruction_color_matches_pillow_ycbcr_reference(self):
         colors = ((0, 0, 0), (255, 255, 255), (128, 128, 128),
                   (255, 0, 0), (0, 255, 0), (0, 0, 255))
@@ -289,6 +380,22 @@ class FloatShaderReferenceTests(unittest.TestCase):
                 self.assertTrue(np.all(np.isfinite(profile)))
                 np.testing.assert_allclose(profile+profile[::-1], 1.0,
                                            atol=1e-6)
+
+    def test_precomputed_filter_shader_path_preserves_gray_edge_profiles(self):
+        profiles = {}
+        for mode in FILTER_PRECOMPUTE_MODES:
+            with self.subTest(mode=mode):
+                rendered = self._render_filter_intermediate(mode)
+                np.testing.assert_allclose(
+                    rendered, np.repeat(rendered[:, :1], 3, axis=1),
+                    atol=1e-6)
+                profile = rendered[:, 0]
+                self.assertTrue(np.all(np.isfinite(profile)))
+                np.testing.assert_allclose(profile+profile[::-1], 1.0,
+                                           atol=1e-6)
+                profiles[mode] = profile
+        self.assertEqual(len({tuple(np.round(p, 4))
+                              for p in profiles.values()}), len(profiles))
 
 
 if __name__ == '__main__':

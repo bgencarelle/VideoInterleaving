@@ -1261,20 +1261,23 @@ toggles fullscreen. Fullscreen hides the toolbar, status strip, and diagnostics
 on entry. The HUD reappears at the top edge or on key input, stays up while a
 control is open, and hides again after two idle seconds. It reads
 decoded values and live diagnostics directly from the receiver mailbox/status
-callback. The display menu provides nearest, bilinear, sharp-bilinear, and
-Mitchell bicubic. Nearest remains the initial display default and preserves the
-legacy 8-bit RGB conversion and nearest-sampled shader path. The three new modes
-reconstruct directly from float Y/Cb/Cr planes as described in 12.2–12.3; their
-planes and shader are allocated only when a non-nearest mode is selected.
+callback. The display menu provides eleven presentation choices: nearest,
+bilinear, sharp-bilinear, Mitchell bicubic, Spline36, Robidoux, Robidoux Sharp,
+cubic B-spline, Kaiser-windowed sinc, Hann-windowed sinc, and EWA Jinc. Nearest
+remains the initial display default and preserves the legacy 8-bit RGB
+conversion and nearest-sampled shader path. All other modes reconstruct float
+Y/Cb/Cr planes; selecting a mode does not alter transport decoding or decoded
+exports. Float planes, the shader, and any filter intermediates are allocated
+only when a non-nearest mode is selected.
 Standalone image-sequence preview is available as
 `.venv/bin/python tools/v7_viewer.py IMAGE...`.
 
-Status: implementation brief, September 27, 2026. This replaces the earlier
-keyboard-only/blind-trial proposal with mouse-accessible dropdowns, named
-comparisons, a preview caller, and an explicitly saved user preference. The
-custom V7 Perceptual mode is included below. The initial float path currently
-implements bilinear, sharp-bilinear, and Mitchell bicubic; nearest remains the
-reference. No new mode is claimed to have won.
+Status: implementation brief, September 27, 2026. The receiver and preview
+currently implement the eleven display choices above, mouse-accessible menus,
+and an explicitly saved display preference in the standalone viewer. The
+additional filters are experimental presentation choices; Nearest remains the
+reference/default, and no new mode is claimed to have won. The DCT and custom
+V7 Perceptual paths below remain proposals, not available display modes.
 
 ### 12.1 Ownership and immutable boundaries
 
@@ -1326,19 +1329,29 @@ deterministic pattern must be named accurately, not called blue noise without
 justification. Float precision and dither reduce contouring; they do not
 guarantee the absence of bands. Dither is always disabled for legacy nearest.
 
-### 12.3 Modes and orthogonal effects
+### 12.3 Implemented filters and orthogonal effects
 
-Stable CLI/settings mode names:
+The current display menu uses these stable mode names and fixed kernel variants:
 
 | Name | Reconstruction contract |
 |---|---|
 | `nearest` | Exact legacy reference and initial default |
-| `sharp-bilinear` | Preserve block interiors, antialias boundaries using separate horizontal/vertical output footprints |
 | `bilinear` | Hardware-linear sampling of float planes |
-| `bicubic` | Explicit `mitchell` (B=C=1/3) or `catmull-rom` (B=0, C=1/2) variant |
-| `lanczos3` | Radius-3 windowed-sinc reconstruction, separable intermediate passes |
-| `dct` | DCT-consistent 4× plane reconstruction, followed by bicubic |
-| `v7-perceptual` | DCT reconstruction plus the bounded processing in 12.5 |
+| `sharp-bilinear` | Preserve block interiors, antialias boundaries using separate horizontal/vertical output footprints |
+| `bicubic` | Mitchell–Netravali cubic with B=C=1/3 |
+| `spline36` | Interpolating Spline36 cubic, support radius 3 |
+| `robidoux` | Cubic B/C kernel with B=12/(19+9√2), C=113/(58+216√2) |
+| `robidoux-sharp` | Cubic B/C kernel with B=6/(13+7√2), C=7/(2+12√2) |
+| `cubic-bspline` | Cubic B-spline, B=1 and C=0; smooth and non-interpolating |
+| `kaiser-sinc` | Separable radius-3 sinc with Kaiser window β=8.6 |
+| `hann-sinc` | Separable radius-3 sinc with Hann window |
+| `ewa-jinc` | Radial Jinc×Jinc reconstruction, support radius 3.2383154842 |
+
+Spline36, Robidoux, Robidoux Sharp, cubic B-spline, Kaiser sinc, and Hann sinc
+are resampled into bounded 4× float intermediates, then linearly sampled for
+the final display scaling. EWA Jinc uses a radial kernel in the display shader;
+its LUT is generated on demand. The filter choices are opt-in and affect only
+presentation. Keep source planes unclipped until the final RGB conversion.
 
 Sharp bilinear uses `p = uv*plane_size - 0.5`, `f = fract(p)`, and the separate
 per-axis output footprint `s = max(output_size/plane_size, 1)`. It remaps the
@@ -1346,9 +1359,9 @@ fraction as `f' = clamp((f - 0.5)*s + 0.5, 0, 1)` and samples bilinearly at
 `(floor(p) + f' + 0.5)/plane_size`. Below 1× magnification `s=1`, so it reduces
 to ordinary bilinear. This is a coordinate remap, not exact area integration;
 it does not promise equal integer block widths or eliminate motion shimmer.
-The bicubic mode is 4×4 Mitchell–Netravali sampling (`B=C=1/3`) with
-clamp-to-edge source taps. Plane sampling costs multiple reads, not the one read
-of an RGB-texture implementation.
+Direct source-plane shader sampling uses clamp-to-edge taps and normalizes each
+footprint at image boundaries. Bilinear sampling uses one hardware texture read
+per plane; direct cubic and EWA shader kernels use multiple taps when selected.
 
 Dering and luma-guided chroma are optional processing stages, not competing
 upscaler names. Dither is an output option. Crossfade and tape/CRT styling are
@@ -1357,9 +1370,9 @@ implemented, shows the first frame immediately, blends for at most one measured
 frame interval, bypasses cuts, and reports the blend duration. It is not motion
 interpolation. No temporal effect is enabled by default.
 
-Render expensive spatial passes at bounded intermediate sizes around 4× the
-source grid. Cache intermediates per frame generation and settings revision.
-The final scaling pass still costs screen-resolution-dependent GPU work.
+Cache CPU-generated intermediates per frame generation and selected filter.
+Bounded 4× intermediate dimensions keep work independent of desktop resolution;
+the final scaling pass still costs screen-resolution-dependent GPU work.
 
 ### 12.4 DCT reconstruction: precise implementation boundary
 
@@ -1434,17 +1447,24 @@ diagnostic interface. Never invent that metadata in this implementation.
 
 ### 12.6 GUI, preferences, and interaction
 
-Add a compact toolbar above the picture, keeping the existing diagnostic cards
-below it. Use the existing dark colors and text style. Reserve toolbar space
-instead of covering picture content in windowed mode. Dropdowns are drawn in
-the GL UI with explicit hit regions; reuse Pillow text/overlay facilities where
-practical rather than introducing a second windowing toolkit.
+The receiver GUI currently exposes the eleven display modes in a mouse-selectable
+dropdown and retains Nearest as its initial mode. The standalone viewer has the
+compact GL toolbar, versioned saved default, diagnostics toggle, and fullscreen
+controls. U/Shift+U cycles display modes in the viewer; digits 1–9 select the
+first nine entries. The preview caller accepts `--display-mode`.
+
+The controls below are remaining interaction proposals, not shipped behavior.
+When extending the GUI, keep the existing dark style, reserve toolbar space in
+windowed mode, and use explicit hit regions rather than introducing a second
+windowing toolkit.
 
 Toolbar controls:
 
-- **View:** the seven modes above. Unsupported modes are disabled with a short
-  reason. Only working modes participate in keyboard cycling.
-- **Variant:** shown for bicubic; Mitchell or Catmull–Rom.
+- **View:** the eleven implemented filters above. Unsupported future modes are
+  disabled with a short reason. Only working modes participate in keyboard
+  cycling.
+- **Variant:** shown for bicubic only if a second variant is implemented; the
+  current mode is Mitchell–Netravali.
 - **Effects:** popover for implemented independent effects and output dither.
 - **Mode controls:** labeled contextual sliders, not a universal strength.
   V7 Perceptual exposes Halo restraint, Definition, and Chroma guidance.
@@ -1454,8 +1474,9 @@ Toolbar controls:
   hidden labels: the user judges what they prefer.
 - **Save as default**, **Reset mode**, **Screenshot**, **Info**, **Fullscreen**.
 
-Preserve F, I and Esc semantics. Add U/Shift+U cycling, 1–7 mode selection,
-A to toggle the wipe, and S for screenshots. Dropdowns support pointer input,
+Preserve F, I and Esc semantics. U/Shift+U cycling is implemented; extend direct
+digit selection if desired, and reserve A for the wipe and S for screenshots.
+Dropdowns support pointer input,
 keyboard focus, arrows and Enter; Esc closes an open control before leaving
 fullscreen. Sliders expose their numeric values. Do not overload [ and ] with
 an ambiguous global strength; they may adjust the focused slider.
@@ -1476,7 +1497,7 @@ Precedence: explicit CLI fields > valid saved fields > factory settings.
 Factory reconstruction is legacy nearest. An unsupported saved mode falls
 back visibly to nearest without overwriting the saved preference.
 
-Add `--display-mode NAME` and explicit contextual overrides such as
+If display controls are added to headless receive, add `--display-mode NAME` and explicit contextual overrides such as
 `--display-variant`, `--display-halo`, `--display-definition`,
 `--display-chroma-guidance`, and `--display-dither on|off` to receive and preview.
 Use parser defaults of unset for preference-overridable fields. Do not add the
@@ -1485,9 +1506,10 @@ GUI/preferences merely because these parser options exist.
 
 ### 12.7 Preview caller and screenshots
 
-Add `tools/v7_viewer.py` as a standalone caller of the same viewer, with no
-audio capture or decoder thread. Accept image paths for a still/sequence and
-an explicit playback FPS. Support pause and frame stepping for comparison.
+`tools/v7_viewer.py` is implemented as a standalone caller of the same viewer,
+with no audio capture or decoder thread. It accepts image paths for a
+still/sequence and an explicit playback FPS. Pause, frame stepping, and the
+decoded-frame fixture format remain proposed extensions.
 Image previews use the documented box preparation and fixed V7 spatial grids;
 they demonstrate presentation, not decoded-wire fidelity.
 

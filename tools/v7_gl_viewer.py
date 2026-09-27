@@ -44,6 +44,11 @@ FLOAT_MODE_IDS = {
     'cubic-bspline': 9,
 }
 FILTER_LUT_MODES = frozenset(('ewa-jinc', 'kaiser-sinc', 'hann-sinc'))
+FILTER_PRECOMPUTE_MODES = frozenset((
+    'spline36', 'robidoux', 'robidoux-sharp', 'cubic-bspline',
+    'kaiser-sinc', 'hann-sinc',
+))
+FILTER_INTERMEDIATE_SCALE = 4
 FILTER_LUT_SIZE = 2048
 EWA_JINC_RADIUS = 3.2383154841662362
 KAISER_SINC_RADIUS = 3.0
@@ -252,6 +257,102 @@ def build_filter_lut(mode, sample_count=FILTER_LUT_SIZE):
     return np.ascontiguousarray(weights, dtype=np.float32)
 
 
+def _separable_filter_radius(mode):
+    return 3.0 if mode in ('spline36', 'kaiser-sinc', 'hann-sinc') else 2.0
+
+
+def _separable_filter_weight(mode, distance):
+    x = np.abs(np.asarray(distance, dtype=np.float64))
+    if mode == 'spline36':
+        result = np.zeros_like(x)
+        mask = x < 1.0
+        t = x[mask]
+        result[mask] = ((13.0/11.0*t - 453.0/209.0)*t - 3.0/209.0)*t + 1.0
+        mask = (x >= 1.0) & (x < 2.0)
+        t = x[mask]-1.0
+        result[mask] = ((-6.0/11.0*t + 270.0/209.0)*t - 156.0/209.0)*t
+        mask = (x >= 2.0) & (x < 3.0)
+        t = x[mask]-2.0
+        result[mask] = ((1.0/11.0*t - 45.0/209.0)*t + 26.0/209.0)*t
+        return result
+    if mode in ('robidoux', 'robidoux-sharp', 'cubic-bspline'):
+        if mode == 'robidoux':
+            b, c = 0.37821575509399867, 0.31089212245300067
+        elif mode == 'robidoux-sharp':
+            b, c = 0.2620145123990142, 0.3689927438004929
+        else:
+            b, c = 1.0, 0.0
+        result = np.zeros_like(x)
+        mask = x < 1.0
+        t = x[mask]
+        result[mask] = ((12.0-9.0*b-6.0*c)*t**3
+                        + (-18.0+12.0*b+6.0*c)*t**2
+                        + 6.0-2.0*b)/6.0
+        mask = (x >= 1.0) & (x < 2.0)
+        t = x[mask]
+        result[mask] = ((-b-6.0*c)*t**3
+                        + (6.0*b+30.0*c)*t**2
+                        + (-12.0*b-48.0*c)*t
+                        + 8.0*b+24.0*c)/6.0
+        return result
+    if mode == 'kaiser-sinc':
+        window = np.i0(KAISER_SINC_BETA*np.sqrt(
+            np.maximum(0.0, 1.0-(x/KAISER_SINC_RADIUS)**2)))/np.i0(
+                KAISER_SINC_BETA)
+        return np.sinc(x)*window
+    if mode == 'hann-sinc':
+        window = .5+.5*np.cos(np.pi*x/HANN_SINC_RADIUS)
+        return np.sinc(x)*window
+    raise ValueError(f'no separable kernel for display mode {mode!r}')
+
+
+def _resample_axis(values, output_length, axis, mode):
+    values = np.asarray(values, dtype=np.float32)
+    source_length = values.shape[axis]
+    output_length = int(output_length)
+    if output_length <= 0:
+        raise ValueError('resampled plane dimensions must be positive')
+    scale = max(source_length/output_length, 1.0)
+    support = _separable_filter_radius(mode)*scale
+    radius = int(math.ceil(support))
+    offsets = np.arange(-radius, radius+1, dtype=np.int64)
+    positions = ((np.arange(output_length, dtype=np.float64)+.5)
+                 *source_length/output_length-.5)
+    base = np.floor(positions).astype(np.int64)
+    distances = (offsets[None, :] - (positions-base)[:, None])/scale
+    weights = _separable_filter_weight(mode, distances)
+    weights[np.abs(distances) >= _separable_filter_radius(mode)] = 0.0
+    total = weights.sum(axis=1, keepdims=True)
+    if np.any(np.abs(total) < 1e-12):
+        raise ValueError(f'{mode} produced a zero-weight resampling footprint')
+    weights /= total
+    indexes = np.clip(base[:, None]+offsets[None, :], 0, source_length-1)
+    samples = np.take(values, indexes, axis=axis)
+    if axis == 0:
+        result = np.sum(samples*weights[:, :, None], axis=1, dtype=np.float64)
+    elif axis == 1:
+        result = np.sum(samples*weights[None, :, :], axis=2, dtype=np.float64)
+    else:
+        raise ValueError('resampling axis must be 0 or 1')
+    return np.ascontiguousarray(result, dtype=np.float32)
+
+
+def resample_filter_planes(planes, mode,
+                           scale=FILTER_INTERMEDIATE_SCALE):
+    """Build bounded 4x separable reconstruction planes for the display GPU."""
+    if mode not in FILTER_PRECOMPUTE_MODES:
+        raise ValueError(f'{mode!r} is not a precomputed separable filter')
+    scale = int(scale)
+    if scale < 1:
+        raise ValueError('intermediate scale must be positive')
+    output = []
+    for plane in planes:
+        height, width = plane.shape
+        horizontal = _resample_axis(plane, width*scale, 1, mode)
+        output.append(_resample_axis(horizontal, height*scale, 0, mode))
+    return tuple(output)
+
+
 VERTEX_SHADER = '''#version 330
 out vec2 uv;
 void main() {
@@ -280,6 +381,7 @@ uniform sampler2D plane_cb;
 uniform sampler2D plane_cr;
 uniform sampler2D kernel_lut;
 uniform int reconstruction;
+uniform int filtered_intermediate;
 uniform vec2 output_size;
 in vec2 uv;
 out vec4 color;
@@ -435,6 +537,8 @@ vec2 sharp_bilinear_coord(sampler2D plane, vec2 coord) {
 }
 
 float sample_plane(sampler2D plane, vec2 coord) {
+    if (filtered_intermediate == 1)
+        return texture(plane, coord).r;
     if (reconstruction == 2)
         return sample_mitchell(plane, coord);
     if (reconstruction == 1)
@@ -464,7 +568,8 @@ void main() {
 
 
 def _float_texture_filter(mode, moderngl):
-    return (moderngl.LINEAR if mode in ('bilinear', 'sharp-bilinear')
+    return (moderngl.LINEAR if mode in (
+        'bilinear', 'sharp-bilinear', *FILTER_PRECOMPUTE_MODES)
             else moderngl.NEAREST)
 
 
@@ -641,6 +746,7 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
         show_details = bool(show_diagnostics) and not image_only
         last_frame_generation = None
         last_float_generation = None
+        last_float_mode = None
         last_viewport = None
         last_title = None
         overlay_key = None
@@ -867,8 +973,13 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
                 dirty = True
 
             if (frame is not None and display_mode != 'nearest' and
-                    frame.generation != last_float_generation):
+                    (frame.generation != last_float_generation or
+                     display_mode != last_float_mode)):
                 planes = float_planes(frame.values, frame.shapes)
+                filtered_intermediate = (
+                    display_mode in FILTER_PRECOMPUTE_MODES)
+                if filtered_intermediate:
+                    planes = resample_filter_planes(planes, display_mode)
                 plane_sizes = tuple((plane.shape[1], plane.shape[0])
                                     for plane in planes)
                 if (plane_texture_shapes != plane_sizes or
@@ -888,6 +999,7 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
                         plane_texture.write(plane.tobytes())
                 update_texture_filters()
                 last_float_generation = frame.generation
+                last_float_mode = display_mode
                 dirty = True
 
             now = time.monotonic()
@@ -1002,6 +1114,8 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
                             display_mode]
                         float_program['output_size'].value = (
                             float(viewport[2]), float(viewport[3]))
+                        float_program['filtered_intermediate'].value = int(
+                            display_mode in FILTER_PRECOMPUTE_MODES)
                         float_array.render(mode=moderngl.TRIANGLES, vertices=3)
                 if details_visible and overlay is not None and panel_height:
                     context.enable(moderngl.BLEND)

@@ -196,8 +196,12 @@ top edge or press a key to bring them back; they hide again after two seconds
 of inactivity. The detailed panel includes decoder CPU time/load and GUI-thread
 CPU, process CPU, and resident-memory readings. The GUI also exposes an **Image
 only** button and a start-in-image-only option. The Live view's **Display
-upscaler** control offers Nearest (default), Bilinear, Sharp bilinear, and
-Mitchell bicubic; this changes presentation only, not the decoded image data.
+upscaler** control offers Nearest (default), Bilinear, Sharp bilinear, Mitchell
+bicubic, Spline36, Robidoux, Robidoux Sharp, cubic B-spline, Kaiser-windowed
+sinc, Hann-windowed sinc, and EWA Jinc. These are presentation filters only;
+Nearest retains the legacy rendering path, and filter selection does not change
+decoded image data. The standalone preview accepts the same choices with
+`--display-mode`.
 
 For a live decoded image with no controls or diagnostics, use the regular
 receiver with `--image-only`:

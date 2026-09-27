@@ -26,10 +26,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tools.v7_gl_viewer import (DISPLAY_LABELS, DISPLAY_MODES,
+                                FILTER_PRECOMPUTE_MODES,
                                 FLOAT_FRAGMENT_SHADER, FLOAT_MODE_IDS,
                                 FRAGMENT_SHADER, VERTEX_SHADER,
                                 _diagnostic_image, _float_texture_filter,
-                                build_filter_lut, fit_viewport, float_planes)
+                                build_filter_lut, fit_viewport, float_planes,
+                                resample_filter_planes)
 
 
 ROW_HEIGHT = 36
@@ -1274,6 +1276,9 @@ class ReceiverGui:
                 if self.display_mode != 'nearest':
                     planes = float_planes(
                         self.current_frame.values, self.current_frame.shapes)
+                    if self.display_mode in FILTER_PRECOMPUTE_MODES:
+                        planes = resample_filter_planes(
+                            planes, self.display_mode)
                     plane_sizes = tuple((plane.shape[1], plane.shape[0])
                                         for plane in planes)
                     if (plane_texture_shapes != plane_sizes or
@@ -1337,6 +1342,8 @@ class ReceiverGui:
                     self.display_mode]
                 float_program['output_size'].value = (
                     float(viewport[2]), float(viewport[3]))
+                float_program['filtered_intermediate'].value = int(
+                    self.display_mode in FILTER_PRECOMPUTE_MODES)
                 float_array.render(mode=moderngl.TRIANGLES, vertices=3)
 
             while not glfw.window_should_close(window):
