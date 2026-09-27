@@ -258,11 +258,19 @@ def run(args):
         return ((time.perf_counter()-wall_start)*1000.0,
                 (time.process_time()-cpu_start)*1000.0)
 
+    def live_frame(capture):
+        # The live sender receives each capture as a read-only RGB uint8 array
+        # (np.frombuffer over the FFmpeg pipe), not a Pillow image; time both
+        # paths from that same form.
+        pixels = np.asarray(capture.convert('RGB'), dtype=np.uint8)
+        return np.frombuffer(pixels.tobytes(), np.uint8).reshape(pixels.shape)
+
     for mode, strength in settings:
         name = _setting_name(mode, strength)
         frame_baselines, frame_candidates, frame_deltas = [], [], []
         frame_cpu_baselines, frame_cpu_candidates, frame_cpu_deltas = [], [], []
-        for _, _, capture in frames:
+        for _, _, capture_image in frames:
+            capture = live_frame(capture_image)
             baseline_samples, candidate_samples = [], []
             for repeat in range(args.repeats):
                 order = (('off', None, baseline_samples),
@@ -355,8 +363,9 @@ def run(args):
         'timing_method': (
             'per frame, interleaved off-box and candidate order, alternating by '
             'repeat; records wall and process CPU time for sender _values plus '
-            'pinned FoldCodec coefficient folding, excludes packet waveform/audio '
-            'I/O; medians per frame then means across frames'),
+            'pinned FoldCodec coefficient folding from a read-only RGB uint8 '
+            'capture array (the live FFmpeg frame form), excludes packet '
+            'waveform/audio I/O; medians per frame then means across frames'),
         'settings': results,
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)

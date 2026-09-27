@@ -183,16 +183,32 @@ def _model(fixture, encode_filter='nearest'):
 def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0,
             perceptual_resize='off', perceptual_detail_strength=0.25):
     _validate_tone_controls(brightness, gamma)
-    image = frame if isinstance(frame, Image.Image) else Image.fromarray(frame)
+    rgb_frame = (isinstance(frame, np.ndarray) and frame.dtype == np.uint8 and
+                 frame.ndim == 3 and frame.shape[2] == 3)
     if perceptual_resize == 'off':
         # Keep this default path byte-identical to the established sender.
+        image = frame if isinstance(frame, Image.Image) else Image.fromarray(frame)
         prepared = prepare_image(image, encode_filter=encode_filter)
+        size = image.size
     else:
         if encode_filter != 'box':
             raise ValueError('perceptual resize requires --encode-filter box')
-        from animation_modem.perceptual_resize import resize_image
-        prepared = resize_image(image, perceptual_resize,
-                                perceptual_detail_strength)
+        from animation_modem.perceptual_resize import resize_image, resize_rgb
+        if rgb_frame:
+            # Captured frames are already RGB uint8 arrays. Going through
+            # Pillow and back would copy them three times and change nothing.
+            # Strided views (mss BGRA->RGB) are made contiguous once, so the
+            # kernels see only the C layouts warmup_resize compiled.
+            prepared = Image.fromarray(
+                resize_rgb(np.ascontiguousarray(frame), perceptual_resize,
+                           perceptual_detail_strength), mode='RGB')
+            size = (frame.shape[1], frame.shape[0])
+        else:
+            image = (frame if isinstance(frame, Image.Image)
+                     else Image.fromarray(frame))
+            prepared = resize_image(image, perceptual_resize,
+                                    perceptual_detail_strength)
+            size = image.size
     if brightness != 1.0:
         prepared = ImageEnhance.Brightness(prepared).enhance(brightness)
     if gamma != 1.0:
@@ -203,7 +219,7 @@ def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0,
         prepared = adjusted
     return (image_values(prepared, model.coder.grids,
                          encode_filter=encode_filter),
-            P.aspect_wire_code(image.size))
+            P.aspect_wire_code(size))
 
 
 def _experimental_fold(slots):

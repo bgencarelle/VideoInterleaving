@@ -1194,6 +1194,47 @@ decode test. With this limited face-only sample and failed CPU budget, no
 candidate is promoted and canonical box-table adequacy remains undecided.
 Results and Numba caches stay under repo-local `tmp/`.
 
+A profile of that run found four costs, and the resize was then made faster
+without changing any output byte:
+
+- **Linear-light quantization.** A binary search whose branches the CPU
+  cannot predict cost about 1 ms/frame. A bin lookup with a one-step
+  correction now finds the same code.
+- **Gamma input conversion.** It divided every sample by 255. Both domains
+  now convert through a 256-entry table.
+- **The detail kernel.** It made three strided passes over every footprint.
+  Each output row's contributors are now gathered once, and the three passes
+  run as vectorized loops across the row. Shorter footprints are padded with
+  zero weights, which add an exact +0.0.
+- **The Pillow round trip.** The sender now hands captured RGB uint8 arrays
+  straight to the resize.
+
+The kernels are also cached on disk now. `modem_tests/test_v7_perceptual_resize.py`
+pins every output byte, and the area and detail kernels' floats, against a
+verbatim copy of the first implementation.
+
+The table below is paired on a different machine from the run above: a 2-vCPU
+Intel Xeon (Emerald Rapids), Python 3.11.15, Numba 0.67.0 and NumPy 2.4.4. It
+is measured from a read-only 160×213 capture array with fold-500 coefficient
+encoding included, over 400 rounds, as medians against `off` in the same
+rounds. CPU time was within 1% of wall time.
+
+| Setting | Before | After |
+|---|---|---|
+| `linear-box` | +221% | +29% |
+| `gamma-detail`, strength 0 (box weights) | +48% | +11% |
+| `gamma-detail`, strength 0.25 / 1.0 | +144% / +144% | +69% / +70% |
+| `linear-detail`, strength 0.25 / 1.0 | +307% / +320% | +83% / +88% |
+
+The gamma box-weight control is inside the 25% budget, and `linear-box` is
+just over it. Both detail domains still exceed it: at strength 0.25 the
+detail weighting still adds about 0.3 ms/frame over box weights in the same
+domain on this machine. Compiling the resize
+kernels at sender start fell from about 1.3 s in every process to about
+0.3 s once they are cached. `test_modem_v7/perceptual_resize.py` now times the
+same read-only array form the live sender receives. Its quality results
+cannot change, since every output byte is the same.
+
 `tools/v7_torture_matrix.py` now defaults to the wire the senders emit (fold
 500, coded pilots, EOF marker; Section 9), where the Section 11.6 12/12 request
 applies: every forward packet is committed by its EOF marker. The historical

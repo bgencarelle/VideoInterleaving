@@ -3,14 +3,141 @@ import unittest
 from types import SimpleNamespace
 
 import numpy as np
+from numba import njit
 from PIL import Image
 
 from animation_modem import v7
+from animation_modem import perceptual_resize
 from animation_modem.perceptual_resize import (
-    RESIZE_MODES, _axis_footprints, _linear_to_srgb, _srgb_to_linear,
-    resize_rgb,
+    RESIZE_MODES, _LINEAR_ROUND_THRESHOLDS, _SRGB8_TO_LINEAR, _axis_footprints,
+    _linear_to_srgb, _quantize_output, _srgb_to_linear, resize_rgb,
+    warmup_resize,
 )
 from tools import v7_live
+
+
+# The first, direct per-pixel implementation, kept verbatim as the byte-exact
+# reference for the faster kernels in animation_modem/perceptual_resize.py.
+@njit(nogil=True, cache=True)
+def _legacy_kernel(source, yi, yw, yc, xi, xw, xc, strength):
+    height, width, _ = source.shape
+    out_height, out_width = len(yc), len(xc)
+    output = np.empty((out_height, out_width, 3), np.float64)
+    for oy in range(out_height):
+        for ox in range(out_width):
+            area = 0.0
+            mean0 = 0.0
+            mean1 = 0.0
+            mean2 = 0.0
+            for yk in range(yc[oy]):
+                sy = yi[oy, yk]
+                wy = yw[oy, yk]
+                for xk in range(xc[ox]):
+                    sx = xi[ox, xk]
+                    weight = wy*xw[ox, xk]
+                    area += weight
+                    mean0 += weight*source[sy, sx, 0]
+                    mean1 += weight*source[sy, sx, 1]
+                    mean2 += weight*source[sy, sx, 2]
+            mean0 /= area
+            mean1 /= area
+            mean2 /= area
+            if strength == 0.0:
+                output[oy, ox, 0] = mean0
+                output[oy, ox, 1] = mean1
+                output[oy, ox, 2] = mean2
+                continue
+
+            weighted_distance2 = 0.0
+            for yk in range(yc[oy]):
+                sy = yi[oy, yk]
+                wy = yw[oy, yk]
+                for xk in range(xc[ox]):
+                    sx = xi[ox, xk]
+                    weight = wy*xw[ox, xk]
+                    d0 = source[sy, sx, 0]-mean0
+                    d1 = source[sy, sx, 1]-mean1
+                    d2 = source[sy, sx, 2]-mean2
+                    distance2 = (d0*d0+d1*d1+d2*d2)/3.0
+                    weighted_distance2 += weight*distance2
+            scale = max(np.sqrt(weighted_distance2/area), 1.0/255.0)
+            weighted_total = 0.0
+            accum0 = 0.0
+            accum1 = 0.0
+            accum2 = 0.0
+            for yk in range(yc[oy]):
+                sy = yi[oy, yk]
+                wy = yw[oy, yk]
+                for xk in range(xc[ox]):
+                    sx = xi[ox, xk]
+                    base_weight = wy*xw[ox, xk]
+                    d0 = source[sy, sx, 0]-mean0
+                    d1 = source[sy, sx, 1]-mean1
+                    d2 = source[sy, sx, 2]-mean2
+                    distance = np.sqrt((d0*d0+d1*d1+d2*d2)/3.0)
+                    detail = min(distance/scale, 2.0)
+                    weight = base_weight*(1.0+strength*detail)
+                    weighted_total += weight
+                    accum0 += weight*source[sy, sx, 0]
+                    accum1 += weight*source[sy, sx, 1]
+                    accum2 += weight*source[sy, sx, 2]
+            output[oy, ox, 0] = accum0/weighted_total
+            output[oy, ox, 1] = accum1/weighted_total
+            output[oy, ox, 2] = accum2/weighted_total
+    return output
+
+
+@njit(nogil=True, cache=True)
+def _legacy_input_domain(pixels, linear, table):
+    height, width, _ = pixels.shape
+    output = np.empty((height, width, 3), np.float64)
+    for y in range(height):
+        for x in range(width):
+            for channel in range(3):
+                if linear:
+                    output[y, x, channel] = table[pixels[y, x, channel]]
+                else:
+                    output[y, x, channel] = pixels[y, x, channel]/255.0
+    return output
+
+
+@njit(nogil=True, cache=True)
+def _legacy_quantize(resized, linear, thresholds):
+    height, width, _ = resized.shape
+    output = np.empty((height, width, 3), np.uint8)
+    for y in range(height):
+        for x in range(width):
+            for channel in range(3):
+                value = resized[y, x, channel]
+                if linear:
+                    value = min(max(value, 0.0), 1.0)
+                    low, high = 0, len(thresholds)
+                    while low < high:
+                        middle = (low+high)//2
+                        if thresholds[middle] < value:
+                            low = middle+1
+                        else:
+                            high = middle
+                    code = low
+                    if (code < 255 and value == thresholds[code]
+                            and code % 2):
+                        code += 1
+                    output[y, x, channel] = np.uint8(code)
+                else:
+                    value = min(max(value, 0.0), 1.0)
+                    output[y, x, channel] = np.uint8(np.rint(value*255.0))
+    return output
+
+
+def legacy_resize_rgb(rgb, mode, strength, target_size=(80, 96)):
+    linear = mode.startswith('linear-')
+    pixels = np.asarray(rgb)
+    source = _legacy_input_domain(pixels, linear, _SRGB8_TO_LINEAR)
+    yi, yw, yc = _axis_footprints(pixels.shape[0], target_size[1])
+    xi, xw, xc = _axis_footprints(pixels.shape[1], target_size[0])
+    resized = _legacy_kernel(source, yi, yw, yc, xi, xw, xc,
+                             0.0 if mode == 'linear-box' else float(strength))
+    return _legacy_quantize(resized, linear, _LINEAR_ROUND_THRESHOLDS)
 
 
 def reference_area_resize(rgb, mode, strength, target_size):
@@ -102,6 +229,98 @@ class PerceptualResizeTests(unittest.TestCase):
             np.testing.assert_array_equal(first, image)
             np.testing.assert_array_equal(first, resize_rgb(image, mode, 0.25))
 
+    def test_fast_kernels_match_the_direct_implementation_byte_for_byte(self):
+        rng = np.random.default_rng(2026)
+        with Image.open(v7.REFERENCE_FIXTURE) as image:
+            face = image.convert('RGB')
+        for size in ((160, 213), (160, 90), (131, 73), (320, 427), (7, 11),
+                     (1, 1)):
+            smooth = np.asarray(face.resize(size, Image.Resampling.BILINEAR))
+            grain = np.clip(smooth.astype(int)+rng.integers(-3, 4, smooth.shape),
+                            0, 255).astype(np.uint8)
+            contents = {
+                'face': np.asarray(face.resize(size, Image.Resampling.LANCZOS)),
+                'noise': rng.integers(0, 256, (size[1], size[0], 3), np.uint8),
+                'grain': grain,
+            }
+            for content, rgb in contents.items():
+                for mode in RESIZE_MODES:
+                    for strength in (0.0, 0.25, 1.0):
+                        for target in ((80, 96), (4, 3), (13, 7)):
+                            with self.subTest(size=size, content=content,
+                                              mode=mode, strength=strength,
+                                              target=target):
+                                np.testing.assert_array_equal(
+                                    resize_rgb(rgb, mode, strength, target),
+                                    legacy_resize_rgb(rgb, mode, strength,
+                                                      target))
+
+    def test_fast_kernels_match_the_direct_floats_exactly(self):
+        # Stricter than the bytes: any reordering of the per-pixel arithmetic
+        # shows up here even when it rounds to the same code.
+        rng = np.random.default_rng(17)
+        for size, target in (((160, 213), (80, 96)), ((131, 73), (13, 7))):
+            rgb = rng.integers(0, 256, (size[1], size[0], 3), np.uint8)
+            yi, yw, yc = _axis_footprints(size[1], target[1])
+            xi, xw, xc = _axis_footprints(size[0], target[0])
+            xidx, xwt = perceptual_resize._padded_footprints(size[0], target[0])
+            for linear in (False, True):
+                table = (_SRGB8_TO_LINEAR if linear
+                         else perceptual_resize._SRGB8_TO_GAMMA)
+                source = _legacy_input_domain(rgb, linear, _SRGB8_TO_LINEAR)
+                np.testing.assert_array_equal(
+                    perceptual_resize._to_float(rgb, table), source)
+                np.testing.assert_array_equal(
+                    perceptual_resize._area_mean_kernel(
+                        source, yi, yw, yc, xi, xw, xc),
+                    _legacy_kernel(source, yi, yw, yc, xi, xw, xc, 0.0))
+                planes = perceptual_resize._to_planes(rgb, table)
+                for strength in (0.25, 1.0):
+                    with self.subTest(size=size, linear=linear,
+                                      strength=strength):
+                        np.testing.assert_array_equal(
+                            perceptual_resize._detail_kernel(
+                                planes, yi, yw, yc, xidx, xwt, strength),
+                            _legacy_kernel(source, yi, yw, yc, xi, xw, xc,
+                                           strength))
+
+    def test_linear_quantizer_matches_binary_search_at_every_threshold(self):
+        rng = np.random.default_rng(5)
+        values = np.concatenate((
+            _LINEAR_ROUND_THRESHOLDS,
+            np.nextafter(_LINEAR_ROUND_THRESHOLDS, 0.0),
+            np.nextafter(_LINEAR_ROUND_THRESHOLDS, 1.0),
+            rng.random(30000), rng.random(3000)*1e-3,
+            [0.0, 1.0, np.nextafter(1.0, 0.0), 5e-324, -0.5, 1.5, -0.0]))
+        values = values[:len(values)//3*3].reshape(1, -1, 3)
+        for linear in (True, False):
+            np.testing.assert_array_equal(
+                _quantize_output(values, linear),
+                _legacy_quantize(values, linear, _LINEAR_ROUND_THRESHOLDS))
+
+    def test_warmup_covers_read_only_capture_frames(self):
+        # Live frames are read-only (np.frombuffer over the FFmpeg pipe) and
+        # Numba compiles those separately; warmup must leave nothing to
+        # compile on the first live frame.
+        kernels = (perceptual_resize._to_float, perceptual_resize._to_planes,
+                   perceptual_resize._area_mean_kernel,
+                   perceptual_resize._detail_kernel,
+                   perceptual_resize._quantize_kernel)
+        for mode, strength in (('linear-box', 0.25), ('gamma-detail', 0.0),
+                               ('gamma-detail', 0.25), ('linear-detail', 1.0)):
+            warmup_resize((2, 2), mode, strength)
+            compiled = [len(kernel.signatures) for kernel in kernels]
+            frame = np.frombuffer(
+                np.random.default_rng(3).integers(
+                    0, 256, 213*160*3, np.uint8).tobytes(),
+                np.uint8).reshape(213, 160, 3)
+            self.assertFalse(frame.flags.writeable)
+            resize_rgb(frame, mode, strength)
+            resize_rgb(frame.copy(), mode, strength)
+            with self.subTest(mode=mode, strength=strength):
+                self.assertEqual(
+                    [len(kernel.signatures) for kernel in kernels], compiled)
+
     def test_bounds_and_input_validation(self):
         rgb = np.zeros((2, 3, 3), np.uint8)
         for bad in (-0.01, 1.01, float('nan')):
@@ -144,6 +363,35 @@ class PerceptualResizeTests(unittest.TestCase):
         np.testing.assert_array_equal(values, expected)
         with self.assertRaisesRegex(ValueError, 'requires --encode-filter box'):
             v7_live._values(Model(), image, 'nearest', perceptual_resize='linear-box')
+
+    def test_sender_array_frames_match_the_pillow_path(self):
+        class Model:
+            coder = SimpleNamespace(grids=v7.V7_GRIDS)
+
+        rng = np.random.default_rng(11)
+        pixels = rng.integers(0, 256, (131, 97, 3), np.uint8)
+        read_only = np.frombuffer(pixels.tobytes(), np.uint8).reshape(
+            pixels.shape)
+        bgra = rng.integers(0, 256, (131, 97, 4), np.uint8)
+        frames = {
+            'ffmpeg read-only': read_only,
+            'writable': pixels.copy(),
+            'mss strided view': bgra[:, :, 2::-1],
+            'rgba fallback': bgra,
+            'gray fallback': pixels[:, :, 0].copy(),
+        }
+        for name, frame in frames.items():
+            for mode in RESIZE_MODES:
+                with self.subTest(frame=name, mode=mode):
+                    expected = v7_live._values(
+                        Model(), Image.fromarray(frame), 'box', brightness=1.0,
+                        gamma=1.0, perceptual_resize=mode,
+                        perceptual_detail_strength=0.5)
+                    actual = v7_live._values(
+                        Model(), frame, 'box', brightness=1.0, gamma=1.0,
+                        perceptual_resize=mode, perceptual_detail_strength=0.5)
+                    np.testing.assert_array_equal(actual[0], expected[0])
+                    self.assertEqual(actual[1], expected[1])
 
     def test_sender_rejects_tone_controls_that_can_emit_black_or_nan(self):
         class Model:
