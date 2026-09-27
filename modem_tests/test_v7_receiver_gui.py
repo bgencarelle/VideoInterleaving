@@ -1,8 +1,9 @@
 """Receiver GUI configuration maps every receive CLI setting safely."""
+import queue
 import threading
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from PIL import Image
 
@@ -12,6 +13,7 @@ from tools.v7_gl_viewer import DISPLAY_MODES
 from tools.v7_receiver_gui import (ROOT, ReceiverGui, _make_fields,
                                    FULLSCREEN_TOOLBAR_EDGE,
                                    FULLSCREEN_TOOLBAR_HIDE_SECONDS,
+                                   QueueWriter,
                                    _logical_rect_to_framebuffer,
                                    _scissors_outside_viewport,
                                    _receive_parser)
@@ -70,6 +72,19 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertFalse(args.log)
         self.assertTrue(args.no_log)
         self.assertIsNone(args.save_dir)
+
+    def test_receiver_output_wakes_the_event_driven_window(self):
+        output = queue.Queue()
+        notify = Mock()
+        writer = QueueWriter(output, notify)
+
+        writer.write('receiver ready')
+        self.assertEqual(notify.call_count, 0)
+        writer.write('\nstatus updated\n')
+
+        self.assertEqual(output.get_nowait(), 'receiver ready')
+        self.assertEqual(output.get_nowait(), 'status updated')
+        self.assertEqual(notify.call_count, 1)
 
     def test_start_requires_an_explicit_input_device(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
@@ -378,6 +393,43 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertIn('50%', lines[0])
         self.assertEqual(lines[1], 'RSS 256 MiB')
 
+    def test_hidden_diagnostics_only_copy_the_footer_meter(self):
+        meter = {'decoded': 12, 'input_fps': 11.25}
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        gui.page = 'info'
+        gui.v7_live = SimpleNamespace(RECEIVER_GUI_STATUS={
+            'meter': meter,
+            'diagnostics': lambda: self.fail(
+                'hidden diagnostics should not be formatted'),
+        })
+        gui.dirty = False
+
+        gui._poll_diagnostics()
+
+        self.assertIs(gui.live_meter, meter)
+        self.assertIsNone(gui.live_diagnostics)
+        self.assertTrue(gui.dirty)
+
+    def test_visible_diagnostics_still_refresh_the_full_panel(self):
+        meter = {'decoded': 12, 'input_fps': 11.25}
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        gui.page = 'info'
+        next(field for field in gui.fields
+             if field.dest == 'show_diagnostics').value = True
+        gui.v7_live = SimpleNamespace(RECEIVER_GUI_STATUS={
+            'meter': meter,
+            'diagnostics': lambda: {'decode': ('frame 12',)},
+        })
+        gui.dirty = False
+
+        with patch.object(gui, '_sample_gui_resources',
+                          return_value=('thread 0% · proc 0%', 'RSS 1 MiB')):
+            gui._poll_diagnostics()
+
+        self.assertEqual(gui.live_diagnostics['decode'], ('frame 12',))
+        self.assertEqual(gui.live_meter['decoded'], 12)
+        self.assertTrue(gui.dirty)
+
     def test_receiver_cli_accepts_image_only_mode(self):
         args = v7_live.parser().parse_args([
             'receive', '--device', 'named-loopback', '--image-only'])
@@ -401,6 +453,7 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertTrue(gui.picture_dirty)
         self.assertFalse(gui.dirty)
         self.assertEqual(gui.current_frame, frame)
+        self.assertIsNone(gui.latest_values_image)
 
     def test_clicking_start_commits_active_text_edit_first(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())

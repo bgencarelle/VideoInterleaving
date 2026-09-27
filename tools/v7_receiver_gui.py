@@ -8,6 +8,7 @@ import argparse
 import ast
 import contextlib
 from dataclasses import dataclass
+from functools import lru_cache
 import io
 import json
 from pathlib import Path
@@ -37,6 +38,8 @@ from tools.v7_gl_viewer import (DISPLAY_LABELS, DISPLAY_MODES,
 ROW_HEIGHT = 36
 TOOLBAR_HEIGHT = 54
 INFO_REFRESH_SECONDS = 0.2
+FOOTER_REFRESH_SECONDS = 0.5
+QUIET_WAIT_SECONDS = 0.5
 RESOURCE_REFRESH_SECONDS = 1.0
 FULLSCREEN_TOOLBAR_HIDE_SECONDS = 2.0
 FULLSCREEN_TOOLBAR_EDGE = 14
@@ -64,14 +67,23 @@ class OptionField:
 
 class QueueWriter:
     """Thread-safe text sink for the receiver's ordinary diagnostic output."""
-    def __init__(self, output):
+    def __init__(self, output, notifier=None):
         self.output = output
+        self.notifier = notifier
         self.pending = ''
         self.lock = threading.Lock()
+
+    def notify(self):
+        if self.notifier is not None:
+            try:
+                self.notifier()
+            except Exception:
+                pass
 
     def write(self, text):
         if not text:
             return 0
+        wrote_lines = False
         with self.lock:
             self.pending += str(text)
             lines = self.pending.split('\n')
@@ -79,13 +91,20 @@ class QueueWriter:
             for line in lines:
                 if line:
                     self.output.put(line)
+                    wrote_lines = True
+        if wrote_lines:
+            self.notify()
         return len(text)
 
     def flush(self):
+        wrote_line = False
         with self.lock:
             if self.pending:
                 self.output.put(self.pending)
                 self.pending = ''
+                wrote_line = True
+        if wrote_line:
+            self.notify()
 
 
 def _receive_parser(v7_live):
@@ -213,6 +232,7 @@ def _make_fields(receive_parser, device_choices):
     return fields
 
 
+@lru_cache(maxsize=32)
 def _font(size, mono=False):
     names = ('DejaVuSansMono.ttf', 'DejaVuSans.ttf') if mono else (
         'DejaVuSans.ttf', 'DejaVuSansMono.ttf')
@@ -520,6 +540,11 @@ class ReceiverGui:
         parsed.fullscreen = False
         return parsed
 
+    def _notify_ui(self):
+        glfw = self._glfw
+        if glfw is not None:
+            glfw.post_empty_event()
+
     def _start_receiver(self):
         if self.editing:
             self._finish_edit(self.fields[self.selected])
@@ -564,7 +589,7 @@ class ReceiverGui:
             self._toggle_fullscreen(self._glfw, self._window)
 
         def receive():
-            writer = QueueWriter(self.output)
+            writer = QueueWriter(self.output, self._notify_ui)
             try:
                 with contextlib.redirect_stdout(writer), \
                         contextlib.redirect_stderr(writer):
@@ -574,6 +599,7 @@ class ReceiverGui:
             finally:
                 writer.flush()
                 self.output.put('[receiver thread returned]')
+                writer.notify()
 
         self.receiver_thread = threading.Thread(
             target=receive, name='v7-receiver', daemon=True)
@@ -694,10 +720,13 @@ class ReceiverGui:
             else:
                 self.info_refresh_pending = True
 
+    def _profile_ui_enabled(self):
+        return any(field.action is not None and
+                   field.action.dest == 'profile_ui' and field.value
+                   for field in self.fields)
+
     def _profile_ui_if_enabled(self):
-        enabled = any(field.action is not None and
-                      field.action.dest == 'profile_ui' and field.value
-                      for field in self.fields)
+        enabled = self._profile_ui_enabled()
         now = time.monotonic()
         if not enabled:
             self.profile_wall = now
@@ -756,20 +785,38 @@ class ReceiverGui:
             return
         self.last_generation = frame.generation
         self.current_frame = frame
-        try:
-            self.latest_values_image = self.v7_live.values_image(
-                frame.values, frame.shapes).convert('RGB')
-            self.picture_dirty = True
-        except Exception as exc:
-            self.lines.append(f'Could not render decoded frame: {exc}')
-            self.dirty = True
+        # RGB conversion is only used by nearest-neighbour display. All other
+        # upscalers consume the decoded planes directly in their GL shader.
+        self.latest_values_image = None
+        self.picture_dirty = True
 
     def _poll_diagnostics(self):
         now = time.monotonic()
-        if now-self.last_diagnostics_poll < INFO_REFRESH_SECONDS:
+        if self.page != 'info' or self.image_only:
+            return
+        diagnostics_visible = self._diagnostics_visible()
+        interval = (INFO_REFRESH_SECONDS if diagnostics_visible else
+                    FOOTER_REFRESH_SECONDS)
+        if now-self.last_diagnostics_poll < interval:
             return
         self.last_diagnostics_poll = now
         snapshot = dict(self.v7_live.RECEIVER_GUI_STATUS)
+        meter = snapshot.get('meter')
+        if not diagnostics_visible:
+            # The compact footer needs only two scalar fields. Avoid building
+            # all diagnostic strings and JSON-copying the full meter while its
+            # panel is hidden.
+            if meter is None:
+                return
+            old_meter = self.live_meter or {}
+            old_footer = (old_meter.get('decoded'),
+                          round(float(old_meter.get('input_fps', 0.0)), 1))
+            new_footer = (meter.get('decoded'),
+                          round(float(meter.get('input_fps', 0.0)), 1))
+            self.live_meter = meter
+            if new_footer != old_footer:
+                self.dirty = True
+            return
         provider = snapshot.get('diagnostics')
         if provider is None:
             return
@@ -783,7 +830,6 @@ class ReceiverGui:
             f'{self.display_latency_ms:.1f}')
         packet = snapshot.get('latest_packet')
         decode_info = snapshot.get('decode_info')
-        meter = snapshot.get('meter')
         try:
             meter_json = (json.dumps(
                 meter, sort_keys=True,
@@ -958,11 +1004,11 @@ class ReceiverGui:
         left, top, picture_w, picture_h = self._picture_box(image.size)
         draw.rectangle((left, top, left+picture_w, top+picture_h),
                        fill=(14, 19, 24), outline=(49, 69, 83), width=1)
-        if self.latest_values_image is None and not self.started:
+        if self.current_frame is None and not self.started:
             label = 'Choose an input in Setup, then press Start.'
             draw.text((left+18, top+18), label,
                       fill=(205, 219, 229), font=font)
-        elif self.latest_values_image is None:
+        elif self.current_frame is None:
             draw.text((left+18, top+18), 'Waiting for the first decoded picture…',
                       fill=(205, 219, 229), font=font)
 
@@ -1415,30 +1461,43 @@ class ReceiverGui:
             glfw.set_mouse_button_callback(
                 window, lambda w, b, a, m: self._on_mouse(glfw, w, b, a, m))
             glfw.set_scroll_callback(window, self._on_scroll)
+            glfw.set_window_refresh_callback(
+                window, lambda _window: setattr(self, 'dirty', True))
 
             def upload_picture():
                 nonlocal picture_texture, picture_texture_size
                 nonlocal plane_textures, plane_texture_shapes
-                if self.latest_values_image is None:
+                frame = self.current_frame
+                if frame is None:
                     return
-                pixels = np.ascontiguousarray(np.asarray(
-                    self.latest_values_image, dtype=np.uint8))
-                picture_size = (pixels.shape[1], pixels.shape[0])
-                if (picture_texture is None or
-                        picture_texture_size != picture_size):
-                    if picture_texture is not None:
-                        picture_texture.release()
-                    picture_texture = context.texture(
-                        picture_size, 3, pixels.tobytes(), dtype='f1')
-                    picture_texture_size = picture_size
-                    picture_texture.repeat_x = False
-                    picture_texture.repeat_y = False
+                if self.display_mode == 'nearest':
+                    if self.latest_values_image is None:
+                        try:
+                            self.latest_values_image = self.v7_live.values_image(
+                                frame.values, frame.shapes).convert('RGB')
+                        except Exception as exc:
+                            self.lines.append(
+                                f'Could not render decoded frame: {exc}')
+                            self.dirty = True
+                            return
+                    pixels = np.ascontiguousarray(np.asarray(
+                        self.latest_values_image, dtype=np.uint8))
+                    picture_size = (pixels.shape[1], pixels.shape[0])
+                    pixel_bytes = pixels.tobytes()
+                    if (picture_texture is None or
+                            picture_texture_size != picture_size):
+                        if picture_texture is not None:
+                            picture_texture.release()
+                        picture_texture = context.texture(
+                            picture_size, 3, pixel_bytes, dtype='f1')
+                        picture_texture_size = picture_size
+                        picture_texture.repeat_x = False
+                        picture_texture.repeat_y = False
+                    else:
+                        picture_texture.write(pixel_bytes)
                 else:
-                    picture_texture.write(pixels.tobytes())
-
-                if self.display_mode != 'nearest':
                     planes = float_planes(
-                        self.current_frame.values, self.current_frame.shapes)
+                        frame.values, frame.shapes)
                     if self.display_mode in FILTER_PRECOMPUTE_MODES:
                         planes = resample_filter_planes(
                             planes, self.display_mode)
@@ -1459,11 +1518,17 @@ class ReceiverGui:
                     else:
                         for plane_texture, plane in zip(plane_textures, planes):
                             plane_texture.write(plane.tobytes())
-                picture_texture.filter = (moderngl.NEAREST,
-                                          moderngl.NEAREST)
+                if picture_texture is not None:
+                    picture_texture.filter = (moderngl.NEAREST,
+                                              moderngl.NEAREST)
                 filtering = _float_texture_filter(self.display_mode, moderngl)
                 for plane_texture in plane_textures:
                     plane_texture.filter = (filtering, filtering)
+
+            def picture_uploaded():
+                return (picture_texture is not None
+                        if self.display_mode == 'nearest' else
+                        len(plane_textures) == 3)
 
             def ensure_float_renderer():
                 nonlocal float_program, float_array
@@ -1509,10 +1574,61 @@ class ReceiverGui:
                     self.display_mode in FILTER_PRECOMPUTE_MODES)
                 float_array.render(mode=moderngl.TRIANGLES, vertices=3)
 
+            def next_event_timeout(now):
+                # GLFW's blocking wait delays Python signal handling. Keep a
+                # low-frequency fallback so Ctrl-C is observed while idle.
+                timeout = QUIET_WAIT_SECONDS
+                receiver_active = (self.receiver_thread is not None and
+                                   self.receiver_thread.is_alive())
+                receiver_stopped = (self.receiver_thread is not None and
+                                    not receiver_active and
+                                    (self.started or self.notice.startswith(
+                                        'Stopping receiver')))
+                if (receiver_active and not self.image_only and
+                        self.page == 'info'):
+                    timeout = (INFO_REFRESH_SECONDS
+                               if self._diagnostics_visible() else
+                               FOOTER_REFRESH_SECONDS)
+
+                if receiver_stopped or not self.output.empty():
+                    timeout = (0.001 if timeout is None else
+                               min(timeout, 0.001))
+
+                if self.info_refresh_pending:
+                    remaining = max(
+                        0.001, self.last_info_refresh+
+                        INFO_REFRESH_SECONDS-now)
+                    timeout = (remaining if timeout is None else
+                               min(timeout, remaining))
+
+                if (self.fullscreen and self.toolbar_visible and
+                        not self.image_only and self.dropdown is None and
+                        not self.display_menu_open and not self.editing and
+                        glfw.get_cursor_pos(window)[1] >
+                        FULLSCREEN_TOOLBAR_EDGE):
+                    remaining = max(
+                        0.001, self.last_ui_activity+
+                        FULLSCREEN_TOOLBAR_HIDE_SECONDS-now)
+                    timeout = (remaining if timeout is None else
+                               min(timeout, remaining))
+
+                if self._profile_ui_enabled():
+                    remaining = (0.001 if self.profile_wall is None else
+                                 max(0.001, self.profile_wall+5.0-now))
+                    timeout = (remaining if timeout is None else
+                               min(timeout, remaining))
+                return timeout
+
+            first_iteration = True
             while not glfw.window_should_close(window):
-                # Frame publication wakes GLFW immediately; the 60 Hz timeout
-                # remains a fallback for input, diagnostics and lifecycle work.
-                glfw.wait_events_timeout(1/60)
+                # Frame publication and window callbacks wake GLFW immediately.
+                # Timed waits are reserved for visible status, toolbar, and
+                # profiler refreshes; a stopped, idle window blocks in GLFW.
+                if first_iteration:
+                    first_iteration = False
+                else:
+                    timeout = next_event_timeout(time.monotonic())
+                    glfw.wait_events_timeout(timeout)
                 self._process_output()
                 self._poll_frame()
                 self._poll_diagnostics()
@@ -1558,7 +1674,7 @@ class ReceiverGui:
                     if self.dirty or picture_needs_draw:
                         context.viewport = (0, 0, *framebuffer_size)
                         context.clear(.035, .045, .055, 1.0)
-                        if picture_texture is not None and self.current_frame is not None:
+                        if picture_uploaded() and self.current_frame is not None:
                             aspect = self.v7_live.P.V7_ASPECT_RATIOS[
                                 self.current_frame.aspect & 7]
                             render_picture(fit_viewport(
@@ -1595,7 +1711,7 @@ class ReceiverGui:
                 if ui_needs_draw or picture_needs_draw:
                     picture_viewport = None
                     if (self.page == 'info' and self.current_frame is not None
-                            and picture_texture is not None):
+                            and picture_uploaded()):
                         aspect = self.v7_live.P.V7_ASPECT_RATIOS[
                             self.current_frame.aspect & 7]
                         picture_viewport = self._picture_viewport(
@@ -1644,6 +1760,10 @@ class ReceiverGui:
                 self.receiver_thread.join(timeout=2)
             if set_frame_notifier is not None:
                 set_frame_notifier(None)
+            # The receiver may outlive the bounded join; suppress its optional
+            # event notification before destroying GLFW's global state.
+            self._window = None
+            self._glfw = None
             if ui_texture is not None:
                 ui_texture.release()
             if picture_texture is not None:
