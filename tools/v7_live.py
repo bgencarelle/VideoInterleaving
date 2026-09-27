@@ -277,6 +277,8 @@ def _ensure_test_modem_path():
 def _fold_slots(args):
     """Resolve the shared live profile; the historical profile is explicit opt-out."""
     requested = getattr(args, 'experimental_fold', None)
+    if getattr(args, 'experimental_mono', False):
+        return 0
     if getattr(args, 'baseline', False):
         if requested is not None:
             raise ValueError('--baseline cannot be combined with --experimental-fold')
@@ -324,11 +326,13 @@ def _validate_tone_controls(brightness, gamma):
 
 
 def _encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
-                               source_index=None, eof_marker=True):
+                               source_index=None, eof_marker=True,
+                               pilot_values=None):
     """Build one folded pulse packet without an inverse/forward DCT round trip."""
     if source_index is None:
         source_index = int(counter)-1
-    body = P.encode_frame_coeffs(model, np.asarray(coeffs), counter)
+    body = P.encode_frame_coeffs(
+        model, np.asarray(coeffs), counter, pilot_values=pilot_values)
     packet = np.zeros((P.PULSE_FRAME, 2), np.float32)
     packet[P.PULSE.SYNC_LEN:P.PULSE.SYNC_LEN+P.FRAME] = body
     packet[16:16+len(P.PULSE.PREAMBLE), :] = P.PULSE.PREAMBLE[:, None]
@@ -390,7 +394,16 @@ def run_send(args):
     from tools.v7_capture import Throttled
 
     slots = _fold_slots(args)
+    mono_profile = bool(getattr(args, 'experimental_mono', False))
     fold = _experimental_fold(slots)
+    mono_wire = None
+    if mono_profile:
+        if not getattr(args, 'pilot_tones', True):
+            raise ValueError('the experimental mono profile requires coded pilot tones')
+        if not getattr(args, 'eof_marker', True):
+            raise ValueError('the experimental mono profile requires the EOF marker')
+        _ensure_test_modem_path()
+        from mono_wire import MonoWire
     args.encode_filter, args.brightness = _send_profile(args, slots)
     if getattr(args, 'perceptual_resize', 'off') != 'off':
         # Compile the optional Numba resize before an output stream is open;
@@ -399,6 +412,10 @@ def run_send(args):
         warmup_resize((2, 2), args.perceptual_resize,
                       args.perceptual_detail_strength)
     model = _model(args.fixture, args.encode_filter)
+    if mono_profile:
+        mono_wire = MonoWire(model)
+        from tone_code import warmup_status_templates, MONO_OFF
+        warmup_status_templates(MONO_OFF)
     if fold is not None:
         # Fail before any audio: the table folds only the model it was built
         # for (the canonical box profile).
@@ -428,7 +445,13 @@ def run_send(args):
 
     def encode_batch(frames, aspects, counter):
         values = np.asarray(frames)
-        if fold is not None:
+        if mono_wire is not None:
+            audio = mono_wire.encode(
+                model, values, start_counter=counter,
+                aspect_codes=aspects,
+                source_indices=[counter+i-1 for i in range(len(values))],
+                eof_marker=True)
+        elif fold is not None:
             audio = np.concatenate([
                 _encode_pulse_frame_coeffs(
                     model, fold.encode_coefficients(model, value),
@@ -449,7 +472,8 @@ def run_send(args):
         limiter_gain = 1.0
         limiter_samples = 0
         if args.mono_sum:
-            audio = audio.sum(axis=1, keepdims=True)/np.sqrt(2)
+            audio = (audio[:, :1].copy() if mono_wire is not None else
+                     audio.sum(axis=1, keepdims=True)/np.sqrt(2))
             before_peak = float(np.max(np.abs(audio))) if audio.size else 0.0
             if report_stats:
                 before_rms = float(np.sqrt(np.mean(audio*audio))) if audio.size else 0.0
@@ -483,7 +507,9 @@ def run_send(args):
                 'limiter_gain': limiter_gain,
                 'samples_limited': limiter_samples,
                 'fold_slots': 0 if fold is None else fold.slots,
-                'coded_pilot': fold is not None,
+                'coded_pilot': fold is not None or mono_wire is not None,
+                'wire_profile': ('mono-fold-off' if mono_wire is not None else
+                                 'folded' if fold is not None else 'baseline'),
             }
         else:
             stats = {'frames_encoded': len(frames)}
@@ -593,9 +619,10 @@ def run_send(args):
                        f'rate={output_rate:g}Hz wire={wire_fps:.3f}fps '
                        f'speed={args.speed:g}x {camera_text}'
                        f'pilot-tones={"on" if getattr(args, "pilot_tones", False) else "off"} '
-                       f'capture={capture_text} '
-                      f'encode={args.encode_filter} mode={"mono-sum" if args.mono_sum else "M/S"}',
-                      flush=True)
+                        f'capture={capture_text} '
+                        f'encode={args.encode_filter} mode='
+                        f'{"mono-fold-off" if mono_wire is not None else "mono-sum" if args.mono_sum else "M/S"}',
+                       flush=True)
             while True:
                 item = batches.get()
                 if item is sentinel:
@@ -647,7 +674,24 @@ def run_receive(args):
     if getattr(args, 'image_only', False) and getattr(args, 'headless', False):
         raise ValueError('--image-only cannot be combined with --headless')
     slots = _fold_slots(args)
+    mono_profile = bool(getattr(args, 'experimental_mono', False))
     fold = _experimental_fold(slots)
+    if mono_profile:
+        if getattr(args, 'pilot_timing', 'tone-seeded') == 'baseline':
+            raise ValueError('the experimental mono profile requires tone-assisted timing')
+        if getattr(args, 'frame_boundary', 'eof') != 'eof':
+            raise ValueError('the experimental mono profile requires EOF packet boundaries')
+        _ensure_test_modem_path()
+        from mono_wire import MonoWire
+        from tone_code import coded_pilot_timing
+        model = _model(args.fixture, 'nearest')
+        mono_wire = MonoWire(model)
+        mono_wire.install()
+        try:
+            with coded_pilot_timing():
+                return _run_receive(args, None, mono_wire)
+        finally:
+            mono_wire.uninstall()
     if fold is None:
         return _run_receive(args, None)
     if getattr(args, 'pilot_timing', 'tone-seeded') == 'baseline':
@@ -666,7 +710,7 @@ def run_receive(args):
         fold.uninstall()
 
 
-def _run_receive(args, fold):
+def _run_receive(args, fold, mono_wire=None):
     import sounddevice as sd
 
     RECEIVER_GUI_STATUS.clear()
@@ -675,7 +719,8 @@ def _run_receive(args, fold):
     stop = getattr(args, 'stop_event', None) or threading.Event()
     # Metadata is decoded with the common bootstrap model; the body model is
     # selected from the protected encoding ID carried by each frame.
-    model = _model(args.fixture, 'box' if fold is not None else 'nearest')
+    base_model = _model(args.fixture, 'box' if fold is not None else 'nearest')
+    model = mono_wire.model_for(base_model) if mono_wire is not None else base_model
     if fold is not None:
         fold.check(model)
     # Compile acquisition, equalizer and coded status kernels before opening
@@ -685,6 +730,16 @@ def _run_receive(args, fold):
     if fold is not None:
         from tone_code import warmup_coded_decoder
         warmup_coded_decoder(model)
+    if mono_wire is not None:
+        from tone_code import warmup_coded_decoder
+        warmup_coded_decoder(model)
+        warmup_wire = mono_wire.encode(
+            base_model, [np.zeros(base_model.coder.source_count)]*3,
+            start_counter=1, eof_marker=True)
+        P.decode_pulse_stream(
+            model, warmup_wire, sample_rate=capture_rate_for(
+                sd.query_devices(args.device, 'input')),
+            pilot_timing=args.pilot_timing, frame_boundary='eof')
     if stop.is_set():
         return
     models = {model.encoding_type: model}
@@ -693,7 +748,9 @@ def _run_receive(args, fold):
         """Build an alternate source model only when metadata requests it."""
         if encoding_type not in models:
             name = P.ENCODING_FILTERS[int(encoding_type)]
-            models[encoding_type] = _model(args.fixture, name)
+            candidate = _model(args.fixture, name)
+            models[encoding_type] = (mono_wire.model_for(candidate)
+                                     if mono_wire is not None else candidate)
         return models[encoding_type]
     device_info = sd.query_devices(args.device, 'input')
     input_channels = 1 if device_info['max_input_channels'] < 2 else 2
@@ -1200,6 +1257,8 @@ def parser():
     send_profile = send.add_mutually_exclusive_group()
     send_profile.add_argument('--baseline', action='store_true',
                               help='restore the pre-fold profile (nearest, brightness 1.05, steady pilots)')
+    send_profile.add_argument('--experimental-mono', action='store_true',
+                              help='send the opt-in V7 mono fold-off layout; requires an updated receiver')
     send_profile.add_argument('--experimental-fold', type=int, default=None,
                               choices=(0, 500, 1000), metavar='M',
                               help='fold M luma slots and send coded pilots (default: 500); '
@@ -1297,6 +1356,8 @@ def parser():
     recv_profile = recv.add_mutually_exclusive_group()
     recv_profile.add_argument('--baseline', action='store_true',
                               help='restore the pre-fold receiver profile; use with sender --baseline')
+    recv_profile.add_argument('--experimental-mono', action='store_true',
+                              help='receive only the opt-in mono fold-off layout; unknown profiles hold the last picture')
     recv_profile.add_argument('--experimental-fold', type=int, default=None,
                                choices=(0, 500, 1000), metavar='M',
                                help='unfold M luma slots using coded-pilot status (default: 500); '

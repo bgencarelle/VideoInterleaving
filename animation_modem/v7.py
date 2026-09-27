@@ -914,7 +914,8 @@ def encode_frame(model, values, counter):
     return encode_frame_coeffs(model, model.coder.forward(values)/model.coder.gains, counter)
 
 
-def encode_frame_coeffs(model, coeffs, counter, return_X=False):
+def encode_frame_coeffs(model, coeffs, counter, return_X=False,
+                        pilot_values=None):
     c = coeffs - model.mu
     idx = model.rank_tables[counter % TAIL_PHASES]
     X = np.zeros((F, 65, 2), complex)                        # symbol, bin, M/S
@@ -925,7 +926,7 @@ def encode_frame_coeffs(model, coeffs, counter, return_X=False):
     cells = X.reshape(-1)
     cells.real[CELLS_I] = tx[GROUP_IS_I].ravel()
     cells.imag[CELLS_Q] = tx[~GROUP_IS_I].ravel()
-    X += SCATTERED_PILOTS
+    X += SCATTERED_PILOTS if pilot_values is None else pilot_values
     if return_X:
         return X
     XL = (X[..., 0]+X[..., 1])/np.sqrt(2)*model.phase

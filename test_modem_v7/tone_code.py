@@ -7,7 +7,7 @@ status chips. The known pilot code and the steady bin-1 reference let the
 receiver validate chip alignment and decode status before restoring the bin-3
 phase track.
 
-The 12-chip status is one of three length-12 codewords. Their pairwise Hamming
+The 12-chip status is one of six length-12 codewords. Their pairwise Hamming
 distance is six, so nearest-correlation decoding corrects two chip errors or
 any five erased chips without a table ID, CRC, or soft-bit heuristic.
 """
@@ -27,7 +27,12 @@ from common import RATE as CAPTURE_RATE, v7
 FOLD_OFF = 0
 FOLD_500 = 1
 FOLD_1000 = 2
+MONO_OFF = 3
+MONO_500 = 4
+MONO_1000 = 5
 FOLD_MODE_TO_SLOTS = {FOLD_OFF: 0, FOLD_500: 500, FOLD_1000: 1000}
+STATUS_MODES = (FOLD_OFF, FOLD_500, FOLD_1000,
+                MONO_OFF, MONO_500, MONO_1000)
 
 DATA_SYMBOLS = np.arange(1, v7.F, 2, dtype=int)
 PILOT_SYMBOLS = np.arange(0, v7.F, 2, dtype=int)
@@ -49,20 +54,23 @@ def _repeat_four_chip_pattern(pattern):
     return tuple(int(bit) for _ in range(3) for bit in pattern)
 
 
-# Three balanced codewords derived from distinct weight-two four-chip masks.
-# Repeating the masks three times gives pairwise distance six in 12 chips.
+# Six balanced codewords from the three weight-two masks and their complements.
+# Repeating each four-chip word three times gives pairwise distance six.
 STATUS_WORD_BY_MODE = {
     FOLD_OFF: _repeat_four_chip_pattern((0, 0, 1, 1)),
     FOLD_500: _repeat_four_chip_pattern((0, 1, 0, 1)),
     FOLD_1000: _repeat_four_chip_pattern((0, 1, 1, 0)),
+    MONO_OFF: _repeat_four_chip_pattern((1, 1, 0, 0)),
+    MONO_500: _repeat_four_chip_pattern((1, 0, 1, 0)),
+    MONO_1000: _repeat_four_chip_pattern((1, 0, 0, 1)),
 }
 
 
 def encode_status(mode):
-    """Return the registered distance-six codeword for fold mode."""
+    """Return a registered distance-six fold/mono profile codeword."""
     mode = int(mode)
-    if mode not in FOLD_MODE_TO_SLOTS:
-        raise ValueError('fold mode must be 0 (off), 1 (500), or 2 (1000)')
+    if mode not in STATUS_WORD_BY_MODE:
+        raise ValueError('unknown coded pilot profile mode')
     return STATUS_WORD_BY_MODE[mode]
 
 
@@ -71,7 +79,12 @@ def warmup_tone_templates(fold_slots):
     mode_by_slots = {slots: mode for mode, slots in FOLD_MODE_TO_SLOTS.items()}
     if fold_slots not in mode_by_slots or not fold_slots:
         return
-    mode = mode_by_slots[fold_slots]
+    warmup_status_templates(mode_by_slots[fold_slots])
+
+
+def warmup_status_templates(mode):
+    """Prepare every packet-phase template for any coded profile mode."""
+    mode = int(mode)
     bits = encode_status(mode)
     pilot_code = tuple(int(sign) for sign in PILOT_CODE)
     phase_count = v7.N//math.gcd(v7.N, v7.PILOT_TONE_DURATION)
@@ -109,13 +122,13 @@ def decode_status(chips):
     _, errors, mode, mismatches = best[0]
     if 2*errors+erasures >= STATUS_MIN_DISTANCE:
         return None
-    return {'mode': mode, 'fold_slots': FOLD_MODE_TO_SLOTS[mode],
+    return {'mode': mode, 'fold_slots': FOLD_MODE_TO_SLOTS.get(mode),
             'errors_corrected': errors, 'erasures_filled': erasures,
             'corrected_chips': list(mismatches)}
 
 
 STATUS_CODEBOOK = tuple(
-    (word, {'mode': mode, 'fold_slots': FOLD_MODE_TO_SLOTS[mode]})
+    (word, {'mode': mode, 'fold_slots': FOLD_MODE_TO_SLOTS.get(mode)})
     for mode, word in STATUS_WORD_BY_MODE.items())
 
 
@@ -408,9 +421,11 @@ def decode_tone_body(body, sample_rate=v7.RATE):
 
 
 _STATUS_WORDS = np.asarray(
-    [STATUS_WORD_BY_MODE[mode] for mode in (FOLD_OFF, FOLD_500, FOLD_1000)],
+    [STATUS_WORD_BY_MODE[mode] for mode in STATUS_MODES],
     dtype=np.int8)
 _STATUS_WORDS.setflags(write=False)
+_STATUS_MODES_ARRAY = np.asarray(STATUS_MODES, dtype=np.int8)
+_STATUS_MODES_ARRAY.setflags(write=False)
 _LOW_EARLY = np.asarray(v7.EARLY[:4])
 _LOW_EARLY.setflags(write=False)
 
@@ -558,8 +573,10 @@ def decode_tone_spectrum(Z, model):
     mode, signs, pilot_score = _decode_tone_spectrum_kernel(
         spectrum, float(model.scale), model.phase, _LOW_EARLY,
         PILOT_CODE, _STATUS_WORDS)
-    status = (None if mode < 0 else {
-        'mode': int(mode), 'fold_slots': FOLD_MODE_TO_SLOTS[int(mode)],
+    status_mode = (None if mode < 0 else int(_STATUS_MODES_ARRAY[mode]))
+    status = (None if status_mode is None else {
+        'mode': status_mode,
+        'fold_slots': FOLD_MODE_TO_SLOTS.get(status_mode),
         'errors_corrected': None, 'erasures_filled': None,
         'corrected_chips': []})
     return {'valid': mode >= 0,

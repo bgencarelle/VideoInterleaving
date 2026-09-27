@@ -1592,3 +1592,329 @@ Finally compare box/perceptual sender × ordinary/perceptual display as four
 separate configurations. Hold sender fixed while choosing a display kernel,
 and display fixed while judging sender improvements. No implementation agent
 should automatically select or persist a new default based on metric scores.
+
+## 13. Mono enhancement
+
+**Status: experimental standalone mono fold-off prototype implemented,
+September 27, 2026; not production-integrated.** The prototype and its clean
+loopback tests live in `test_modem_v7/mono_wire.py`, `tools/v7_live.py`, and
+`modem_tests/test_v7_mono_wire.py`. Folded tiers, quality predictions, backward
+rejection, and default selection remain gated on measurements. Application
+integration remains Section 10.8.
+
+### 13.1 Goal and scope
+
+An identical-leg mono V7 wire would remove single-leg M/S interference and
+refresh the existing 2,880-coefficient corner over seven packets within today's
+packet geometry. It targets reliable mono-sum, left-only, right-only, and
+two-leg reception. These paths carry the same information, but their noise and
+decoded fidelity need not be identical.
+
+The target is the 48×40 Y plus two 24×20 chroma corners, not the entire picture
+carried by today's live stereo fold-500 profile. Stereo's outside-corner luma
+guests are not included. Matching stereo on stills or approaching it within a
+specified dB gap is an evaluation question, not a promised result.
+
+Today's stereo body has 2,320 coefficient slots: 1,264 M and 1,056 S. With
+the existing modulator, L=(M+S)/√2 and R=(M−S)/√2, so averaging the legs
+cancels S and leaves only M. The existing M-first rank map does not make those
+1,264 slots cover the whole image: across its seven tail phases, the M union
+contains ranks 0–1,231 plus 32 of ranks 1,232–1,295, and no ranks 1,296 onward
+(pinned by `modem_tests/test_v7_mono.py`). Thus 1,616 of the 2,880 corner
+coefficients are never recovered by a mono sum. A single leg avoids exact S
+cancellation but is not the intended two-leg M/S observation used by the
+existing equalizer. This explains why the current stereo wire can look very
+poor after downmix even though the full stereo decode is good. The reported
+9–12 dB live gap motivates the experiment; it is not a universal
+channel-independent penalty.
+
+### 13.2 Wire and receiver design
+
+- Retain the 48 kHz reference geometry: 3,920 samples per packet, 24 OFDM
+  symbols, 128-sample FFT, 16-sample prefix, and 12.245 packets/s at 1×.
+- Retain body carriers at bins 4–34 (1.5–12.75 kHz). This describes the OFDM
+  band, not the entire signal: timing tones remain on bins 1 and 3, and the
+  nominal emission edge remains 14 kHz.
+- Send data and continual/scattered pilots on M only, with S zero, so L = R.
+  There are 79 data blocks × two I/Q groups × eight coefficients = 1,264 slots.
+- Keep the 208-coefficient head on its current 26 M groups for the first
+  experiment. Head relocation away from bins 5–6 is a separate measured
+  ablation, not part of the initial allocation change.
+- Preserve metadata content, EOF framing, and edge-counted pulse acquisition.
+  Compatibility signalling must be settled explicitly as described below;
+  a distinct-sync alternative would change the sync word, not packet length.
+- Normalize against the stereo reference at matched leg RMS. Measure pilot
+  power, peaks, crest factor, and limiter behavior; equal RMS alone does not
+  establish equal headroom or identical noise-reduction behavior.
+- Estimate one complex channel gain per cell per leg. Combine observations
+  using their complex responses and noise estimates, or use the surviving
+  leg. Raw SNR-weighted leg addition is insufficient under azimuth/phase error.
+  Use a single-stream equalizer or a correctly reduced S-prior-zero path.
+
+Two independently noisy copies can yield a 3 dB combining advantage over one
+copy. The gain relative to today's stereo M slots must be measured with the
+actual gains, rank allocation, pilots, normalization, and noise correlation.
+No uniform +3 dB per-slot or single-leg quality guarantee is assumed.
+
+### 13.3 Allocation and fold overhead
+
+Let F be fresh physical slots, T rotating physical slots, and G nominal folded
+guest positions. Before signature overhead:
+
+```text
+F + T = 1264
+F + G + 7T >= 2880
+G <= F - 208          # fresh hosts only; protected head; one guest per host
+```
+
+Tail slots are whole Hadamard groups of eight. The initial allocation is:
+
+| Candidate | Fresh slots F | Nominal guests G | Tail slots T | Nominal seven-phase capacity |
+|---|---:|---:|---:|---:|
+| Mono fold-off: first prototype | 992 | 0 | 272 | 2,896 |
+| Mono 500-class: deferred | 1,072 | 500 | 192 | 2,916 |
+| Mono high-fold: before overhead only | 1,152 | 944 | 112 | 2,880 |
+
+Fold-off carries 992 fresh coefficients and rotates the remaining 1,888 using
+1,904 available tail positions: 16 positions are padding. A complete refresh
+cycle is seven packets, about 0.57 s at 1×, provided those packets are decoded.
+
+The original 1,160-fresh/1,000-guest proposal is invalid: protecting the head
+leaves only 952 fresh hosts. The 1,152/944/112 alternative is the maximum
+guest count under these pre-overhead rules, but is not a complete live design.
+
+The current live fold uses 16 host positions as a fixed signature. Each
+replaces both a picture host and its guest. Thus a nominal fold-500 table
+delivers 484 guests and sacrifices 16 hosts; nominal fold-944 would deliver
+928 guests and sacrifice 16 hosts. The seven-phase picture budget loses 32
+coefficients, not just 16, unless those omitted coefficients are carried
+elsewhere. The high-fold row therefore provides only 2,848 under that design
+and does not cover the full corner.
+
+The 500-class row has enough aggregate slack after subtracting 32 (2,884),
+but needs explicit rank coverage proving the signature-displaced hosts and
+guests are carried elsewhere. These are capacity budgets, not pinned tables.
+Any high-fold allocation must be recalculated with the final signature scheme.
+
+The signature measures noise on folded slots as well as table identity; coded
+status alone does not replace this function. New mono tables must explicitly
+budget that measurement, host/guest locations, padding, per-plane means and
+scales, and complete seven-phase coverage. Guests may be luma or chroma within
+the existing corner; today's outside-corner luma tables cannot simply be reused.
+
+### 13.4 Signalling and compatibility
+
+The current 12-chip status words repeat `0011`, `0101`, and `0110` three times.
+Repeating their complements `1100`, `1010`, and `1001` supplies three candidate
+mono words. All six words are balanced and retain minimum pairwise distance
+six. Test chip alignment, polarity handling, despreading, noise/erasures, and
+unknown-mode behavior before assigning permanent mono mode identities.
+
+The current pulse metadata has no spare profile bit. Its aspect, encoding,
+tail slice, direction, source index, and CRC/loop-mask fields are allocated.
+The older clock word's profile field is not available here. A second witness
+requires a separately specified wire change.
+
+**Mono requires an updated receiver for the initial prototype.** Existing
+receivers can display received or displayable packets without recognized coded
+status; rejecting an unfolding table does not reject a different rank layout.
+An unknown status or changed CRC mask must not be advertised as making old
+receivers hold. They may display incorrectly assigned coefficients.
+
+New receivers must validate layout identity before body interpretation and
+picture/tail-state updates. An unknown or invalid layout holds the last good
+picture. A known layout may show a damaged but decodable picture; an
+undecodable packet holds the last good picture. There is no black fallback.
+
+If rejection by old receivers becomes a requirement, investigate a distinct
+pulse sync word with the same length and edge-counted acquisition. This needs
+forward/reverse template separation and false-acquisition tests against old
+receivers; it is not yet a proven rejection guarantee. Choose that alternative
+explicitly before freezing the wire.
+
+### 13.5 Tail state and quality hypotheses
+
+Reset tail history on layout changes while retaining the last displayed good
+picture. Current history is indexed by coefficient, so switching layouts does
+not inherently permute stored values, but freshness and update schedules differ.
+Folded guests need explicit history/update handling as well as host ranks.
+Keep the seven phases and loop-field slices 5 and 6, and verify reverse playback,
+direction changes, dropped packets, and profile changes with the new layout.
+
+Current tail ages advance on `TailStore.update()` calls and expiry substitutes
+the model mean; it does not gradually fade detail or independently track elapsed
+packet time. Specify and test aging across losses before relying on a 0.57 s
+staleness bound. More rotation increases the importance of cut and motion tests.
+
+A missing coefficient and a stale coefficient have different errors. For
+unrelated zero-mean values with variance lambda, substitution of the mean has
+expected error lambda, while reuse of the previous value has expected error
+2 lambda. Real motion depends on temporal correlation. Counting stale values as
+missing does not produce a worst-case moving-picture estimate.
+
+The original numerical quality table, fold SNR thresholds, and 1.56–1.71×
+capacity ratio are not adopted as forecasts. They assumed a rank^-1.5 model,
+uniform relative slot error, a guaranteed mono power gain, and a variable fold
+step. The live fold instead uses pinned steps, confidence fallback, measured
+signature noise, and guest weighting. A Shannon slot-capacity comparison under
+assumed +3 dB is conditional, not a measured image-quality or resolution ratio.
+
+Use the frozen V7 variance/gain arrays and representative content to measure
+host loss, guest recovery, chroma fidelity, and temporal error. Stereo retains
+more simultaneous physical slots; the useful still/motion trade must be measured.
+
+### 13.6 Evaluation and delivery order
+
+1. **Freeze the experimental contract.** Specify layout identity, receiver
+   compatibility, exact rank coverage, profile-aware tail reset, per-leg channel
+   combining, and level normalization. Start with mono fold-off and the existing
+   protected head. Keep it opt-in.
+2. **Validate fold-off.** Compare with today's standalone live stereo reference
+   (box, fold-500, coded pilots, EOF) and that reference's mono-sum/left-only/
+   right-only reception. Also use an unfolded stereo control to isolate the
+   effect of excluding outside-corner guests.
+3. **Measure visible output.** Use SSIMULACRA2 against both the prepared source
+   and the matching stereo decode, with fixed aspect, display reconstruction,
+   brightness, gamma, and score size. Include stills, slow pans, hard cuts, fine
+   detail, and saturated/chroma boundaries. Score actual displayed sequences,
+   including held pictures, and report packet availability separately. Do not
+   use PSNR against a higher-resolution source to claim the mono gap is closed.
+4. **Check transport.** Exercise stereo, mono sum, left-only, and right-only
+   inputs through the default-wire synthetic torture matrix: hiss, Type I/II
+   models, wow/flutter, fast flutter, azimuth, crosstalk, mains buzz, NR pumping,
+   and dropouts. At the standard forward reference point, target 12/12 packets
+   with valid metadata and report received/displayable/held counts separately.
+   Test 44.1 kHz resampling and 0.5×–2× speed with capture bandwidth stated:
+   use 96 kHz for full-band 2×; 44.1/48 kHz fast cases are bandwidth-limited
+   tests, not guaranteed full-band recovery. At 48 kHz the nominal 14 kHz
+   emission-edge limit is about 1.71×. Verify reverse and loop-field behavior.
+5. **Measure cost and play live.** Pair warmed encode/decode CPU and wall time
+   with stereo on the same workload, including leg combining and any unfolding.
+   Report absolute time and percentage change. After relevant synthetic checks,
+   prioritize real-time playback per Section 1. Synthetic tape models remain
+   regression checks; real tape/deck validation belongs to actual captures.
+6. **Evaluate folded tiers later.** Start with a fully budgeted 500-class table;
+   reconsider high folding only after solving host and signature allocation.
+   A tier must demonstrate a useful moving-content benefit over mono fold-off
+   and disclose still/chroma regressions before promotion. The sender cannot
+   measure the future medium's SNR: explicit tier selection is the initial
+   model, with no automatic fold-500 default based on theoretical thresholds.
+
+Before pinning folded tables, decide whether a future layered stereo wire
+should share this M layout and put enhancements on S. That is a separate design
+decision, not a dependency of the fold-off experiment. The first deliverable is
+evidence for or against mono fold-off, not a promise to ship all tiers.
+
+### 13.7 Implemented prototype and initial results
+
+The standalone sender/receiver opt into the profile with `--experimental-mono`:
+
+```text
+.venv/bin/python tools/v7_live.py send --source test \
+  --device 'BlackHole 2ch' --experimental-mono
+.venv/bin/python tools/v7_live.py receive \
+  --device 'BlackHole 2ch' --experimental-mono
+```
+
+The sender emits the mono layout, identical L/R legs, M-only data pilots, the
+`MONO_OFF` coded status, and EOF. The receiver requires tone-seeded timing and
+EOF; it validates the coded profile before equalization and holds/rejects any
+unknown or non-mono layout. The prototype uses the nearest model and current
+sender brightness default unless explicitly overridden. It does not claim that
+old receivers safely reject mono packets. The receiver only enables the mono
+profile for the duration of this receive run; it does not dynamically switch
+between mono and stereo layouts.
+
+The six status words are defined in `test_modem_v7/tone_code.py`: the three
+existing fold words and their balanced complements. `FOLD_OFF` and `MONO_OFF`
+are independently recognized; only `MONO_OFF` has a changed body layout.
+`MONO_500` and `MONO_1000` words are reserved candidates, not implemented fold
+tiers. Current mono uses 992 fresh plus 272 rotating slots, with 16 padding
+positions on the final phase. Clean synthetic decode confirmed that all seven
+phases cover the 2,880 corner coefficients and that the channel fit/equalizer
+run with S prior zero. No mono fold signature is present because folding is
+off.
+
+Reproduce the targeted tests and the 25-case synthetic channel matrix with:
+
+```text
+.venv/bin/python -m unittest modem_tests.test_v7_mono_wire \
+  modem_tests.test_v7_pilot_tones modem_tests.test_v7_wire_profile \
+  modem_tests.test_v7_experimental_fold -v
+.venv/bin/python tools/v7_mono_enhancement.py \
+  --out tmp/v7-mono-enhancement
+```
+
+The tests verify six balanced status words at minimum distance six; complete
+rank coverage; identical legs; forward decode from stereo, mono sum, and either
+leg; rejection of a known stereo fold-off status before image equalization;
+reverse EOF/status handling; sender CLI integration; and hook restoration.
+All 25 synthetic cases at 96 kHz returned 12 results with 12 valid metadata
+words, 12 displayable pictures, and 12 validated EOF markers. The soft
+saturation case had 9 `received` results and 3 degraded/lost-but-displayable
+results; the other cases had 12 received. This is a synthetic tape-model check,
+not real tape evidence.
+
+A clean static comparison used 12 repeated packets from `v7_reference_face.png`,
+the same box-prepared source, 405×540 output, and SSIMULACRA2 against that
+prepared source. Averaged over counters 8–12, after the seven tail phases had
+refreshed the full corner, the scores were:
+
+| Playback | SSIMULACRA2 vs prepared source |
+|---|---:|
+| Current live stereo fold-500, both legs | +6.49 |
+| Current live stereo fold-500, mono sum | −44.38 |
+| Current live stereo fold-500, left leg only | −64.22 |
+| Current live stereo fold-500, right leg only | −64.21 |
+| New mono fold-off, both legs / mono sum / either leg | −9.85 |
+
+For context, stereo fold-off without the outside-corner guests scored −9.86
+steady-state on the same fixture. The new mono profile therefore improves this
+fixture's current live-wire mono sum by about 34.5 SSIMULACRA2 points and either
+single leg by about 54.4 points, while remaining about 16.3 points behind the
+full current stereo fold-500 decode. These are SSIMULACRA2 score differences,
+not dB, and the stereo fold-500 wire includes outside-corner guests that mono
+does not carry.
+
+The first mono packet scored −49.06, worse than the current stereo mono sum
+(−44.39); mono cold-start detail remains poor until the larger rotating set has
+arrived. On this repeated still, the seventh packet is the first steady one.
+These are single-fixture results, not predictions for other content or
+channels.
+
+The quality difference has two separate causes. First, the old stereo layout
+uses the M/S transform above, so mono summing removes S; its fixed M rank
+allocation also omits ranks 1,296–2,879 entirely and half of ranks 1,232–1,295.
+Second, the mono fold-off prototype deliberately reassigns its 1,264 per-packet
+slots to 992 fresh ranks and 272 rotating ranks, so the union refreshes the
+whole 2,880-coefficient corner after seven packets. Its identical legs survive
+sum or single-leg playback without M/S cancellation. It is consequently a
+large improvement over current stereo downmix after warm-up, but remains below
+full stereo because it does not send S independently or the live fold-500
+outside-corner guests. The seven-packet still result is a refresh-cycle
+measurement; moving content can make rotating detail stale or delayed.
+
+Reverse playback validated EOF and the mono status. On an eight-packet cold
+reverse sequence, two loop-field slices were held under the existing
+independent-metadata startup rule; six pictures were received. This is the
+existing reverse cold-start behavior, not a mono status failure.
+
+A paired warmed process-CPU probe used 16 repeated box-profile packets per
+batch, four timed batches per profile, and per-packet medians after a warm-up
+batch. On a 4-logical-CPU AMD EPYC-Milan VM (Python 3.13.5, NumPy 2.2.4), it
+measured:
+
+| Profile | Encode CPU ms/packet | Decode CPU ms/packet |
+|---|---:|---:|
+| Mono fold-off | 1.322 | 1.140 |
+| Stereo fold-off, coded status | 1.293 | 1.046 |
+| Current live stereo fold-500 | 1.288 | 1.014 |
+
+Against the current live profile, this is about +2.6% encode CPU and +12.4%
+decode CPU. It is a local process-CPU measurement, not a wall-time or real-time
+audio result; paired wall-time and additional-machine checks remain outstanding.
+
+Real-time playback remains outstanding. The available audio device list in the
+development environment contained PulseAudio `pulse`/`default`, not
+`BlackHole 2ch`, so no real audio stream was opened. Synthetic loopback does not
+substitute for the Section 1 playback validation.
