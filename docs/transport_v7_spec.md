@@ -372,7 +372,7 @@ The standalone coded-pilot prototype has a separate suite:
 ```
 
 Its current regression module is `test_modem_v7/test_tone_code.py`. On
-2026-09-27, the modem suite passed **207 tests** and the prototype suite passed
+2026-09-27, the modem suite passed **212 tests** and the prototype suite passed
 **13 tests**. Rerun the relevant suite and report fresh results after changes;
 these counts are a dated snapshot, not permanent expectations. Both suites are
 synthetic/unit evidence, not a real device or tape test.
