@@ -10,10 +10,16 @@ from PIL import Image, ImageDraw, ImageFont
 from animation_modem.imaging import values_image
 
 
-DISPLAY_MODES = ('nearest', 'bilinear')
+DISPLAY_MODES = ('nearest', 'bilinear', 'sharp-bilinear', 'bicubic')
 FULLSCREEN_TOOLBAR_HIDE_SECONDS = 2.0
 FULLSCREEN_TOOLBAR_EDGE = 14
-DISPLAY_LABELS = {'nearest': 'Nearest', 'bilinear': 'Bilinear'}
+DISPLAY_LABELS = {
+    'nearest': 'Nearest',
+    'bilinear': 'Bilinear',
+    'sharp-bilinear': 'Sharp bilinear',
+    'bicubic': 'Bicubic · Mitchell',
+}
+FLOAT_MODE_IDS = {'bilinear': 0, 'sharp-bilinear': 1, 'bicubic': 2}
 
 
 def toolbar_layout(width, open_dropdown=None):
@@ -74,7 +80,7 @@ def _toolbar_image(size, mode, show_details, open_dropdown, notice=''):
     width = max(320, int(size[0]))
     height = 48
     if open_dropdown == 'upscale':
-        height += 2*29 + 4
+        height += len(DISPLAY_MODES)*29 + 4
     elif open_dropdown == 'panel':
         height += 2*29 + 4
     image = Image.new('RGBA', (width, height), (9, 16, 24, 246))
@@ -122,7 +128,8 @@ def _toolbar_image(size, mode, show_details, open_dropdown, notice=''):
         hits = toolbar_layout(width, open_dropdown)
         prefix = 'mode:' if open_dropdown == 'upscale' else 'panel:'
         rows = [key for key in hits if key.startswith(prefix)]
-        active = f'mode:{mode}' if open_dropdown == 'upscale' else f'panel:{int(show_details)}'
+        active = (f'mode:{mode}' if open_dropdown == 'upscale' else
+                  f'panel:{int(show_details)}')
         anchor = (12, 224) if open_dropdown == 'upscale' else (224, 382)
         draw.rounded_rectangle((anchor[0], 47, anchor[1], height-3), radius=4,
                                fill=(18, 29, 40, 255),
@@ -139,6 +146,32 @@ def _toolbar_image(size, mode, show_details, open_dropdown, notice=''):
             draw.text((box[0]+10, box[1]+6), label,
                       fill=(232, 240, 246, 255), font=small)
     return np.ascontiguousarray(np.asarray(image, dtype=np.uint8))
+
+
+def float_planes(values, shapes):
+    """Copy decoded Y/Cb/Cr values into owned, unclipped float32 planes."""
+    values = np.asarray(values)
+    shapes = tuple((int(rows), int(cols)) for rows, cols in shapes)
+    if len(shapes) not in (1, 3) or any(rows <= 0 or cols <= 0
+                                       for rows, cols in shapes):
+        raise ValueError('display planes need one or three positive shapes')
+    expected = sum(rows*cols for rows, cols in shapes)
+    if values.ndim != 1 or values.size != expected:
+        raise ValueError('decoded values do not match their display shapes')
+    if not np.all(np.isfinite(values)):
+        raise ValueError('decoded display values must be finite')
+    planes = []
+    offset = 0
+    for rows, cols in shapes:
+        count = rows*cols
+        planes.append(np.array(values[offset:offset+count].reshape(rows, cols),
+                               dtype=np.float32, order='C', copy=True))
+        offset += count
+    if len(planes) == 1:
+        # Code 128 is the neutral chroma value in the 8-bit Pillow convention.
+        neutral_chroma = np.full((1, 1), 1.0/255.0, np.float32)
+        planes.extend((neutral_chroma.copy(), neutral_chroma))
+    return tuple(planes)
 
 
 VERTEX_SHADER = '''#version 330
@@ -161,6 +194,83 @@ void main() {
     color = texture(image, uv);
 }
 '''
+
+
+FLOAT_FRAGMENT_SHADER = '''#version 330
+uniform sampler2D plane_y;
+uniform sampler2D plane_cb;
+uniform sampler2D plane_cr;
+uniform int reconstruction;
+uniform vec2 output_size;
+in vec2 uv;
+out vec4 color;
+
+float mitchell_weight(float distance) {
+    float x = abs(distance);
+    if (x < 1.0)
+        return ((7.0*x - 12.0)*x*x + 16.0/3.0)/6.0;
+    if (x < 2.0)
+        return ((-7.0/3.0*x + 12.0)*x - 20.0)*x/6.0 + 16.0/9.0;
+    return 0.0;
+}
+
+float sample_mitchell(sampler2D plane, vec2 coord) {
+    ivec2 size = textureSize(plane, 0);
+    vec2 sample_position = coord*vec2(size) - 0.5;
+    vec2 fraction = fract(sample_position);
+    ivec2 base = ivec2(floor(sample_position));
+    float value = 0.0;
+    float weight_sum = 0.0;
+    for (int y = -1; y <= 2; ++y) {
+        float wy = mitchell_weight(float(y) - fraction.y);
+        for (int x = -1; x <= 2; ++x) {
+            float weight = wy*mitchell_weight(float(x) - fraction.x);
+            ivec2 at = clamp(base + ivec2(x, y), ivec2(0), size-1);
+            value += texelFetch(plane, at, 0).r*weight;
+            weight_sum += weight;
+        }
+    }
+    return value/weight_sum;
+}
+
+vec2 sharp_bilinear_coord(sampler2D plane, vec2 coord) {
+    vec2 size = vec2(textureSize(plane, 0));
+    vec2 source_position = coord*size - 0.5;
+    vec2 fraction = fract(source_position);
+    vec2 scale = max(output_size/size, vec2(1.0));
+    // Compress each bilinear transition to one output-pixel footprint. This
+    // preserves flat cell interiors while softening only source-cell edges.
+    vec2 remapped = clamp((fraction - 0.5)*scale + 0.5, 0.0, 1.0);
+    return (floor(source_position) + remapped + 0.5)/size;
+}
+
+float sample_plane(sampler2D plane, vec2 coord) {
+    if (reconstruction == 2)
+        return sample_mitchell(plane, coord);
+    if (reconstruction == 1)
+        return texture(plane, sharp_bilinear_coord(plane, coord)).r;
+    return texture(plane, coord).r;
+}
+
+void main() {
+    float y_code = sample_plane(plane_y, uv);
+    float cb_code = sample_plane(plane_cb, uv);
+    float cr_code = sample_plane(plane_cr, uv);
+    // Values are code/127.5 - 1. Recover full-range Y and 8-bit BT.601 chroma
+    // centered at code 128, matching Pillow's YCbCr conversion convention.
+    float y = (y_code + 1.0)*0.5;
+    float cb = cb_code*0.5 - 0.5/255.0;
+    float cr = cr_code*0.5 - 0.5/255.0;
+    vec3 rgb = vec3(y + 1.402*cr,
+                    y - 0.344136*cb - 0.714136*cr,
+                    y + 1.772*cb);
+    color = vec4(clamp(rgb, 0.0, 1.0), 1.0);
+}
+'''
+
+
+def _float_texture_filter(mode, moderngl):
+    return (moderngl.NEAREST if mode == 'bicubic' else moderngl.LINEAR)
 
 
 def fit_viewport(framebuffer_size, image_aspect):
@@ -283,11 +393,15 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
 
     window = None
     texture = None
+    plane_textures = []
+    plane_texture_shapes = None
     overlay = None
     toolbar = None
     context = None
     program = None
     vertex_array = None
+    float_program = None
+    float_array = None
     overlay_program = None
     overlay_array = None
     try:
@@ -330,6 +444,7 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
         is_fullscreen = bool(fullscreen)
         show_details = bool(show_diagnostics) and not image_only
         last_frame_generation = None
+        last_float_generation = None
         last_viewport = None
         last_title = None
         overlay_key = None
@@ -337,6 +452,26 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
         display_mode = display_mode or _load_display_default()
         if display_mode not in DISPLAY_MODES:
             display_mode = 'nearest'
+
+        def update_texture_filters():
+            if texture is not None:
+                texture.filter = (moderngl.NEAREST, moderngl.NEAREST)
+            filtering = _float_texture_filter(display_mode, moderngl)
+            for plane_texture in plane_textures:
+                plane_texture.filter = (filtering, filtering)
+
+        def ensure_float_renderer():
+            nonlocal float_program, float_array
+            if float_program is not None:
+                return
+            float_program = context.program(
+                vertex_shader=VERTEX_SHADER,
+                fragment_shader=FLOAT_FRAGMENT_SHADER)
+            float_program['plane_y'].value = 0
+            float_program['plane_cb'].value = 1
+            float_program['plane_cr'].value = 2
+            float_array = context.vertex_array(float_program, [])
+
         open_dropdown = None
         save_notice = ''
         save_notice_until = 0.0
@@ -415,18 +550,12 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
                 step = -1 if _mods & glfw.MOD_SHIFT else 1
                 display_mode = DISPLAY_MODES[
                     (DISPLAY_MODES.index(display_mode)+step) % len(DISPLAY_MODES)]
-                if texture is not None:
-                    filtering = (moderngl.NEAREST if display_mode == 'nearest'
-                                 else moderngl.LINEAR)
-                    texture.filter = (filtering, filtering)
+                update_texture_filters()
                 open_dropdown = None
                 last_title = None
-            elif key in (glfw.KEY_1, glfw.KEY_2):
+            elif glfw.KEY_1 <= key < glfw.KEY_1+len(DISPLAY_MODES):
                 display_mode = DISPLAY_MODES[key-glfw.KEY_1]
-                if texture is not None:
-                    filtering = (moderngl.NEAREST if display_mode == 'nearest'
-                                 else moderngl.LINEAR)
-                    texture.filter = (filtering, filtering)
+                update_texture_filters()
                 open_dropdown = None
                 last_title = None
             elif key == glfw.KEY_ESCAPE:
@@ -477,10 +606,7 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
                 save_notice_until = time.monotonic()+1.5
             elif key and key.startswith('mode:'):
                 display_mode = key.split(':', 1)[1]
-                filtering = (moderngl.NEAREST if display_mode == 'nearest'
-                             else moderngl.LINEAR)
-                if texture is not None:
-                    texture.filter = (filtering, filtering)
+                update_texture_filters()
                 open_dropdown = None
                 last_title = None
             elif key and key.startswith('panel:'):
@@ -521,14 +647,37 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
                         texture.release()
                     texture = context.texture(size, 3, data=pixels.tobytes(),
                                               dtype='f1')
-                    filtering = (moderngl.NEAREST if display_mode == 'nearest'
-                                 else moderngl.LINEAR)
-                    texture.filter = (filtering, filtering)
+                    texture.filter = (moderngl.NEAREST, moderngl.NEAREST)
                     texture.repeat_x = False
                     texture.repeat_y = False
                 else:
                     texture.write(pixels.tobytes())
+
                 last_frame_generation = frame.generation
+                dirty = True
+
+            if (frame is not None and display_mode != 'nearest' and
+                    frame.generation != last_float_generation):
+                planes = float_planes(frame.values, frame.shapes)
+                plane_sizes = tuple((plane.shape[1], plane.shape[0])
+                                    for plane in planes)
+                if (plane_texture_shapes != plane_sizes or
+                        len(plane_textures) != len(planes)):
+                    for plane_texture in plane_textures:
+                        plane_texture.release()
+                    plane_textures = [
+                        context.texture(plane_size, 1, plane.tobytes(),
+                                        dtype='f4')
+                        for plane_size, plane in zip(plane_sizes, planes)]
+                    for plane_texture in plane_textures:
+                        plane_texture.repeat_x = False
+                        plane_texture.repeat_y = False
+                    plane_texture_shapes = plane_sizes
+                else:
+                    for plane_texture, plane in zip(plane_textures, planes):
+                        plane_texture.write(plane.tobytes())
+                update_texture_filters()
+                last_float_generation = frame.generation
                 dirty = True
 
             now = time.monotonic()
@@ -588,7 +737,10 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
                 toolbar_state = (window_size, display_mode,
                                  show_details, open_dropdown, save_notice,
                                  toolbar_visible, is_fullscreen)
-                toolbar_height = 48 + (62 if open_dropdown else 0)
+                dropdown_height = (
+                    len(DISPLAY_MODES)*29+4 if open_dropdown == 'upscale'
+                    else 62 if open_dropdown == 'panel' else 0)
+                toolbar_height = 48+dropdown_height
                 toolbar_size = (max(320, int(window_size[0])), toolbar_height)
                 if (toolbar is None or toolbar.size != toolbar_size or
                         toolbar_key != toolbar_state):
@@ -628,8 +780,18 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
                 context.clear(.025, .032, .045, 1.0)
                 if texture is not None:
                     context.viewport = viewport
-                    texture.use(location=0)
-                    vertex_array.render(mode=moderngl.TRIANGLES, vertices=3)
+                    if display_mode == 'nearest':
+                        texture.use(location=0)
+                        vertex_array.render(mode=moderngl.TRIANGLES, vertices=3)
+                    else:
+                        ensure_float_renderer()
+                        for unit, plane_texture in enumerate(plane_textures):
+                            plane_texture.use(location=unit)
+                        float_program['reconstruction'].value = FLOAT_MODE_IDS[
+                            display_mode]
+                        float_program['output_size'].value = (
+                            float(viewport[2]), float(viewport[3]))
+                        float_array.render(mode=moderngl.TRIANGLES, vertices=3)
                 if details_visible and overlay is not None and panel_height:
                     context.enable(moderngl.BLEND)
                     context.blend_func = (moderngl.SRC_ALPHA,
@@ -671,6 +833,10 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
             overlay_program.release()
         if vertex_array is not None:
             vertex_array.release()
+        if float_array is not None:
+            float_array.release()
+        if float_program is not None:
+            float_program.release()
         if program is not None:
             program.release()
         if overlay is not None:
@@ -679,6 +845,8 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
             toolbar.release()
         if texture is not None:
             texture.release()
+        for plane_texture in plane_textures:
+            plane_texture.release()
         if context is not None:
             context.release()
         if window is not None:

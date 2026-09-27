@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from animation_modem import v7
+from tools.v7_gl_viewer import DISPLAY_MODES
 
 
 @dataclass(frozen=True)
@@ -46,7 +47,7 @@ def parser():
     ap.add_argument('--loop', action='store_true',
                     help='loop the sequence after its final image')
     ap.add_argument('--fullscreen', action='store_true')
-    ap.add_argument('--display-mode', choices=('nearest', 'bilinear'),
+    ap.add_argument('--display-mode', choices=DISPLAY_MODES,
                     help='initial viewer mode (default: saved preference)')
     ap.add_argument('--show-info', action='store_true',
                     help='open the diagnostics panel initially')

@@ -1249,9 +1249,9 @@ Delivery order: (1) resize ablations plus statistics; (2) decide table adequacy;
 Each stage has independent on/off comparison and must not invalidate earlier
 gates. Keep experiment artifacts and Numba caches under repo-local `tmp/`.
 
-## 12. Planned: receiver display GUI and reconstruction modes
+## 12. Receiver display GUI and reconstruction modes
 
-Initial receiver-shell implementation is available as
+The receiver-shell implementation is available as
 `.venv/bin/python tools/v7_live.py gui`. It opens in configuration without
 opening an audio stream, enumerates input devices for explicit selection,
 exposes every `receive` CLI option, starts/stops the existing receiver path,
@@ -1261,17 +1261,20 @@ toggles fullscreen. Fullscreen hides the toolbar, status strip, and diagnostics
 on entry. The HUD reappears at the top edge or on key input, stays up while a
 control is open, and hides again after two idle seconds. It reads
 decoded values and live diagnostics directly from the receiver mailbox/status
-callback. This first slice provides nearest and bilinear display selection. Its
-current bilinear preview linearly filters the reconstructed 8-bit RGB texture;
-it is a temporary shell behavior, not the float-plane bilinear contract in
-Section 12.2. Exact nearest-pixel parity and actual offscreen-GL verification
-are also still to be checked. The additional reconstruction/effect modes below
-remain planned work.
+callback. The display menu provides nearest, bilinear, sharp-bilinear, and
+Mitchell bicubic. Nearest remains the initial display default and preserves the
+legacy 8-bit RGB conversion and nearest-sampled shader path. The three new modes
+reconstruct directly from float Y/Cb/Cr planes as described in 12.2–12.3; their
+planes and shader are allocated only when a non-nearest mode is selected.
+Standalone image-sequence preview is available as
+`.venv/bin/python tools/v7_viewer.py IMAGE...`.
 
 Status: implementation brief, September 27, 2026. This replaces the earlier
 keyboard-only/blind-trial proposal with mouse-accessible dropdowns, named
 comparisons, a preview caller, and an explicitly saved user preference. The
-custom V7 Perceptual mode is included below. No mode is claimed to have won.
+custom V7 Perceptual mode is included below. The initial float path currently
+implements bilinear, sharp-bilinear, and Mitchell bicubic; nearest remains the
+reference. No new mode is claimed to have won.
 
 ### 12.1 Ownership and immutable boundaries
 
@@ -1303,9 +1306,15 @@ For new modes, split values into owned contiguous float32 Y/Cb/Cr planes,
 mapping normalized values to the existing YCbCr convention without premature
 clipping. Upload single-channel float textures; handle a one-plane frame as
 grayscale. Define chroma center alignment explicitly and use clamp-to-edge
-sampling. Convert to gamma-encoded RGB with full-range YCbCr semantics, not
-limited-range video levels. Document the conversion constants and establish
-neutral-gray and saturated-color reference tests.
+sampling. Each plane spans the same normalized frame rectangle and uses the
+same `uv`, so reduced chroma grids are centered on that rectangle. Values use
+`v = code/127.5 - 1`; recover full-range luma as
+`Y = (vY + 1)/2` and 8-bit BT.601 chroma centered at code 128 as
+`Cb/Cr = vCb/Cr / 2 - 0.5/255`. Convert with `R = Y + 1.402 Cr`,
+`G = Y - 0.344136 Cb - 0.714136 Cr`, and `B = Y + 1.772 Cb`, then clamp
+RGB to `[0, 1]`. This matches the existing Pillow YCbCr code convention and
+uses full-range levels, not limited-range video levels. Shader reference tests
+compare neutral gray and saturated RGB colors against the Pillow conversion.
 
 Keep float intermediates through filtering. Define one output transfer policy
 to avoid accidental double sRGB encoding: gamma-encoded RGB written to a
@@ -1331,11 +1340,15 @@ Stable CLI/settings mode names:
 | `dct` | DCT-consistent 4× plane reconstruction, followed by bicubic |
 | `v7-perceptual` | DCT reconstruction plus the bounded processing in 12.5 |
 
-Sharp bilinear is not a promise of equal integer block widths or elimination
-of motion shimmer. Document its coordinate-remap/footprint equation; do not
-claim exact area integration unless implemented and tested. Specify behavior
-below 1× magnification (ordinary bilinear is acceptable). Plane sampling costs
-multiple reads, not the one read of an RGB-texture implementation.
+Sharp bilinear uses `p = uv*plane_size - 0.5`, `f = fract(p)`, and the separate
+per-axis output footprint `s = max(output_size/plane_size, 1)`. It remaps the
+fraction as `f' = clamp((f - 0.5)*s + 0.5, 0, 1)` and samples bilinearly at
+`(floor(p) + f' + 0.5)/plane_size`. Below 1× magnification `s=1`, so it reduces
+to ordinary bilinear. This is a coordinate remap, not exact area integration;
+it does not promise equal integer block widths or eliminate motion shimmer.
+The bicubic mode is 4×4 Mitchell–Netravali sampling (`B=C=1/3`) with
+clamp-to-edge source taps. Plane sampling costs multiple reads, not the one read
+of an RGB-texture implementation.
 
 Dering and luma-guided chroma are optional processing stages, not competing
 upscaler names. Dither is an output option. Crossfade and tape/CRT styling are

@@ -25,13 +25,15 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tools.v7_gl_viewer import (FRAGMENT_SHADER, VERTEX_SHADER,
-                                _diagnostic_image, fit_viewport)
+from tools.v7_gl_viewer import (DISPLAY_LABELS, DISPLAY_MODES,
+                                FLOAT_FRAGMENT_SHADER, FLOAT_MODE_IDS,
+                                FRAGMENT_SHADER, VERTEX_SHADER,
+                                _diagnostic_image, _float_texture_filter,
+                                fit_viewport, float_planes)
 
 
 ROW_HEIGHT = 36
 TOOLBAR_HEIGHT = 54
-DISPLAY_MODES = ('nearest', 'bilinear')
 INFO_REFRESH_SECONDS = 0.2
 RESOURCE_REFRESH_SECONDS = 1.0
 FULLSCREEN_TOOLBAR_HIDE_SECONDS = 2.0
@@ -202,7 +204,7 @@ def _make_fields(receive_parser, device_choices):
             fields.append(OptionField(action, value, _field_label(action),
                                       'text'))
     fields.append(OptionField(None, 'nearest', 'Display upscaler', 'choice',
-                              tuple((name.capitalize(), name)
+                              tuple((DISPLAY_LABELS[name], name)
                                     for name in DISPLAY_MODES)))
     return fields
 
@@ -555,6 +557,7 @@ class ReceiverGui:
         self.dropdown_scroll = 0
         if field.label == 'Display upscaler':
             self.display_mode = value
+            self.picture_dirty = True
         self.notice = f'{field.label}: {self._field_value_label(field)}'
         self.dirty = True
 
@@ -587,6 +590,7 @@ class ReceiverGui:
                     baseline.value = False
             if field.label == 'Display upscaler':
                 self.display_mode = field.value
+                self.picture_dirty = True
         self.notice = f'{field.label}: {self._field_value_label(field)}'
         self.dirty = True
 
@@ -944,7 +948,7 @@ class ReceiverGui:
                 ('config_tab', 'Setup', 12, 104),
                 ('info_tab', 'Live', 112, 184),
                 ('start_stop', 'Stop' if self.started else 'Start', 192, 284),
-                ('mode_button', f'{self.display_mode.capitalize()}  ▾',
+                ('mode_button', f'{DISPLAY_LABELS[self.display_mode]}  ▾',
                  width-414, width-300),
                 ('details_button', 'Info On' if diagnostics_visible else
                  'Info Off', width-292, width-220),
@@ -1207,7 +1211,10 @@ class ReceiverGui:
         if not glfw.init():
             raise RuntimeError('GLFW initialization failed')
         window = context = program = vertex_array = None
+        float_program = float_array = None
         ui_texture = picture_texture = None
+        plane_textures = []
+        plane_texture_shapes = None
         picture_texture_size = None
         picture_texture_mode = None
         frame_buffer = getattr(self.v7_live, 'FRAME_BUFFER', None)
@@ -1245,6 +1252,7 @@ class ReceiverGui:
 
             def upload_picture():
                 nonlocal picture_texture, picture_texture_size
+                nonlocal plane_textures, plane_texture_shapes
                 if self.latest_values_image is None:
                     return
                 pixels = np.ascontiguousarray(np.asarray(
@@ -1261,6 +1269,59 @@ class ReceiverGui:
                     picture_texture.repeat_y = False
                 else:
                     picture_texture.write(pixels.tobytes())
+
+                if self.display_mode != 'nearest':
+                    planes = float_planes(
+                        self.current_frame.values, self.current_frame.shapes)
+                    plane_sizes = tuple((plane.shape[1], plane.shape[0])
+                                        for plane in planes)
+                    if (plane_texture_shapes != plane_sizes or
+                            len(plane_textures) != len(planes)):
+                        for plane_texture in plane_textures:
+                            plane_texture.release()
+                        plane_textures = [
+                            context.texture(plane_size, 1, plane.tobytes(),
+                                            dtype='f4')
+                            for plane_size, plane in zip(plane_sizes, planes)]
+                        for plane_texture in plane_textures:
+                            plane_texture.repeat_x = False
+                            plane_texture.repeat_y = False
+                        plane_texture_shapes = plane_sizes
+                    else:
+                        for plane_texture, plane in zip(plane_textures, planes):
+                            plane_texture.write(plane.tobytes())
+                picture_texture.filter = (moderngl.NEAREST,
+                                          moderngl.NEAREST)
+                filtering = _float_texture_filter(self.display_mode, moderngl)
+                for plane_texture in plane_textures:
+                    plane_texture.filter = (filtering, filtering)
+
+            def ensure_float_renderer():
+                nonlocal float_program, float_array
+                if float_program is not None:
+                    return
+                float_program = context.program(
+                    vertex_shader=VERTEX_SHADER,
+                    fragment_shader=FLOAT_FRAGMENT_SHADER)
+                float_program['plane_y'].value = 0
+                float_program['plane_cb'].value = 1
+                float_program['plane_cr'].value = 2
+                float_array = context.vertex_array(float_program, [])
+
+            def render_picture(viewport):
+                context.viewport = viewport
+                if self.display_mode == 'nearest':
+                    picture_texture.use(location=0)
+                    vertex_array.render(mode=moderngl.TRIANGLES, vertices=3)
+                    return
+                ensure_float_renderer()
+                for unit, plane_texture in enumerate(plane_textures):
+                    plane_texture.use(location=unit)
+                float_program['reconstruction'].value = FLOAT_MODE_IDS[
+                    self.display_mode]
+                float_program['output_size'].value = (
+                    float(viewport[2]), float(viewport[3]))
+                float_array.render(mode=moderngl.TRIANGLES, vertices=3)
 
             while not glfw.window_should_close(window):
                 # Frame publication wakes GLFW immediately; the 60 Hz timeout
@@ -1299,10 +1360,12 @@ class ReceiverGui:
 
                 if (picture_texture is not None and
                         picture_texture_mode != self.display_mode):
-                    filtering = (moderngl.NEAREST
-                                 if self.display_mode == 'nearest'
-                                 else moderngl.LINEAR)
-                    picture_texture.filter = (filtering, filtering)
+                    picture_texture.filter = (moderngl.NEAREST,
+                                              moderngl.NEAREST)
+                    filtering = _float_texture_filter(
+                        self.display_mode, moderngl)
+                    for plane_texture in plane_textures:
+                        plane_texture.filter = (filtering, filtering)
                     picture_texture_mode = self.display_mode
 
                 if self.image_only:
@@ -1312,11 +1375,8 @@ class ReceiverGui:
                         if picture_texture is not None and self.current_frame is not None:
                             aspect = self.v7_live.P.V7_ASPECT_RATIOS[
                                 self.current_frame.aspect & 7]
-                            context.viewport = fit_viewport(
-                                framebuffer_size, aspect)
-                            picture_texture.use(location=0)
-                            vertex_array.render(
-                                mode=moderngl.TRIANGLES, vertices=3)
+                            render_picture(fit_viewport(
+                                framebuffer_size, aspect))
                         glfw.swap_buffers(window)
                     self.dirty = False
                     title = 'V7 Receiver · Image only'
@@ -1354,10 +1414,7 @@ class ReceiverGui:
                         picture_viewport = self._picture_viewport(
                             window_size, framebuffer_size, aspect)
                         if picture_viewport[2] and picture_viewport[3]:
-                            context.viewport = picture_viewport
-                            picture_texture.use(location=0)
-                            vertex_array.render(
-                                mode=moderngl.TRIANGLES, vertices=3)
+                            render_picture(picture_viewport)
                     glfw.swap_buffers(window)
                 title = ('V7 Receiver · ' +
                          ('Receiving' if self.started else
@@ -1377,8 +1434,14 @@ class ReceiverGui:
                 ui_texture.release()
             if picture_texture is not None:
                 picture_texture.release()
+            for plane_texture in plane_textures:
+                plane_texture.release()
             if vertex_array is not None:
                 vertex_array.release()
+            if float_array is not None:
+                float_array.release()
+            if float_program is not None:
+                float_program.release()
             if program is not None:
                 program.release()
             if context is not None:

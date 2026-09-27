@@ -195,7 +195,9 @@ strip, and optional details panel are hidden on entry. Move the pointer to the
 top edge or press a key to bring them back; they hide again after two seconds
 of inactivity. The detailed panel includes decoder CPU time/load and GUI-thread
 CPU, process CPU, and resident-memory readings. The GUI also exposes an **Image
-only** button and a start-in-image-only option.
+only** button and a start-in-image-only option. The Live view's **Display
+upscaler** control offers Nearest (default), Bilinear, Sharp bilinear, and
+Mitchell bicubic; this changes presentation only, not the decoded image data.
 
 For a live decoded image with no controls or diagnostics, use the regular
 receiver with `--image-only`:

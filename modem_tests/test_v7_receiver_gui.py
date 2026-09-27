@@ -8,6 +8,7 @@ from PIL import Image
 
 from animation_modem import v7
 from tools import v7_live
+from tools.v7_gl_viewer import DISPLAY_MODES
 from tools.v7_receiver_gui import (ROOT, ReceiverGui, _make_fields,
                                    FULLSCREEN_TOOLBAR_EDGE,
                                    FULLSCREEN_TOOLBAR_HIDE_SECONDS,
@@ -130,6 +131,14 @@ class ReceiverGuiOptionTests(unittest.TestCase):
 
         self.assertEqual(gui.display_mode, 'bilinear')
         self.assertEqual(gui.notice, 'Display upscaler: Bilinear')
+        field = next(field for field in gui.fields
+                     if field.label == 'Display upscaler')
+        self.assertEqual(tuple(value for _label, value in field.options),
+                         DISPLAY_MODES)
+        gui._adjust_field(field, 1)
+        self.assertEqual(gui.display_mode, 'sharp-bilinear')
+        gui._adjust_field(field, 1)
+        self.assertEqual(gui.display_mode, 'bicubic')
 
         direction = next(field for field in gui.fields
                          if field.dest == 'direction')
