@@ -96,6 +96,19 @@ class VideoSourceCommandTests(unittest.TestCase):
                 self.assertIn('-rw_timeout', cmd)
                 grab.close()
 
+    def test_ffmpeg_screen_capture_applies_selected_windows_monitor_region(self):
+        process = self.Process()
+        with mock.patch('tools.v7_capture.shutil.which', return_value='ffmpeg'), \
+                mock.patch('tools.v7_capture.subprocess.Popen',
+                           return_value=process) as popen:
+            grab = ffmpeg_source('gdigrab:desktop', 30,
+                                 region=(-1920, 0, 1920, 1080))
+            cmd = popen.call_args.args[0]
+            self.assertEqual(cmd[cmd.index('-offset_x')+1], '-1920')
+            self.assertEqual(cmd[cmd.index('-offset_y')+1], '0')
+            self.assertEqual(cmd[cmd.index('-video_size')+1], '1920x1080')
+            grab.close()
+
     def test_direct_v7_grid_scale_keeps_original_aspect_metadata(self):
         ppm = b'P6\n80 96\n255\n'+bytes(80*96*3)
         showinfo = (b'[Parsed_showinfo_0 @ 0x1] n: 0 fmt:yuv420p '

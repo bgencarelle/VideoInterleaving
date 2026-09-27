@@ -146,7 +146,11 @@ To configure the standalone sender with a small event-driven GUI instead, run
 `./vi.modem-send-gui`. It launches the same `vi.modem-send` path in a separate
 process, uses no capture preview or per-frame logging, and stops it with a
 graceful interrupt. The output sample rate defaults to the device-native clock;
-capture FPS is a separate setting. Match the selected wire profile on the
+capture FPS is a separate setting. For video, use **Browse**, type a file path
+or URL, or drop a file onto the window. Camera and screen/display options are
+discovered when their pickers open. **Advanced → Pre-encode downscaler** exposes
+the experimental preprocessing modes and strength; they require Fold 500 or
+Fold 1000 with the Box encode filter. Match the selected wire profile on the
 receiver.
 
 The device argument is required on both sides. Route the sender's output to the

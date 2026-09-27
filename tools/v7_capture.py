@@ -233,6 +233,9 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320,
     if fmt == 'x11grab' and region:
         cmd += ['-video_size', f'{region[2]}x{region[3]}',
                 '-i', f'{src}+{region[0]},{region[1]}']
+    elif fmt == 'gdigrab' and region:
+        cmd += ['-offset_x', str(region[0]), '-offset_y', str(region[1]),
+                '-video_size', f'{region[2]}x{region[3]}', '-i', src]
     else:
         cmd += ['-i', src]
     scale = (f'scale={output_size[0]}:{output_size[1]}:flags={scale_flags}'

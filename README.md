@@ -206,11 +206,16 @@ all eleven choices; click a filter or use Up/Down and Enter, with Esc to close.
 
 For a lightweight sender controller, run `./vi.modem-send-gui`. Choose an
 explicit output device, source, sample rate, and wire profile, then press
-**Start**. **Native** uses the output device's clock; Capture FPS is a separate
-advanced setting. The sender runs as the existing CLI in a child process, and
-the GUI shows only occasional startup/shutdown output—there is no capture
-preview or per-frame logging. Press **Stop** to request a graceful shutdown.
-The receiver must use the matching wire profile.
+**Start**. For video, use **Browse**, type a path/URL, or drop a file onto the
+window. **Native** uses the output device's clock; Capture FPS is a separate
+advanced setting. Camera and screen/display choices are discovered when their
+pickers open. **Advanced → Pre-encode downscaler** selects the experimental
+preprocessing path; it requires Fold 500 or Fold 1000 with the Box encode
+filter, and its strength is adjustable from 0 to 1. The sender runs as the
+existing CLI in a child process, and the GUI shows only occasional
+startup/shutdown output—there is no capture preview or per-frame logging. Press
+**Stop** to request a graceful shutdown. The receiver must use the matching
+wire profile.
 
 For a live decoded image with no controls or diagnostics, use the regular
 receiver with `--image-only`:

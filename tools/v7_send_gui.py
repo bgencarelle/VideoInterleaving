@@ -9,10 +9,13 @@ import math
 import os
 from pathlib import Path
 import queue
+import re
 import signal
+import shutil
 import subprocess
 import sys
 import threading
+from dataclasses import dataclass
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -48,6 +51,12 @@ CAPTURE_FILTER_CHOICES = (
     ('Bicubic', 'bicubic'),
     ('Lanczos', 'lanczos'),
 )
+DOWNSCALER_CHOICES = (
+    ('Off', 'off'),
+    ('Linear box', 'linear-box'),
+    ('Gamma detail', 'gamma-detail'),
+    ('Linear detail', 'linear-detail'),
+)
 
 FIELD_HELP = {
     'device': 'Choose the explicit audio output device that feeds the receiver or recording path.',
@@ -59,30 +68,37 @@ FIELD_HELP = {
     'brightness': 'Optional source brightness multiplier. Blank keeps the profile default.',
     'gamma': 'Source gamma; 1.0 is neutral.',
     'capture_fps': 'Optional capture pacing rate. Blank uses the source-specific default.',
-    'video_source': 'Video file path or FFmpeg-supported URL. You can type a path or drop a file on the window.',
+    'video_source': 'Choose a video with Browse, type a path or URL, or drop a file on the window.',
     'video_live': 'Treat an HTTP(S) video URL as a live stream rather than a looping clip.',
-    'camera': 'Camera index passed to the capture backend (default 0).',
+    'camera': 'Choose a camera discovered from the host capture devices.',
+    'screen_target': 'Choose the monitor or screen capture device. Discovery runs only when you open this picker.',
     'ffmpeg_input': 'Optional FFmpeg input specification for a particular camera or display backend.',
     'screen_backend': 'mss is the simple native screen capture path; FFmpeg can be useful when capture rate matters.',
-    'display': 'Optional display index for FFmpeg screen capture.',
     'region': 'Optional screen crop as left,top,width,height.',
     'capture_width': 'Capture width for screen/video and initial mouse-follow crop; camera is sampled at 80×96.',
     'capture_filter': 'Optional FFmpeg capture scaler. Automatic follows the sender defaults.',
     'mono_sum': 'Send mono-summed content on one output channel instead of stereo.',
     'pilot_tones': 'Pilot references are required by folded-coded profiles.',
     'eof_marker': 'Packet end marker. The experimental mono profile requires it.',
+    'perceptual_resize': 'Experimental pre-encode downscaler. Requires Fold 500 or Fold 1000 with the Box encode filter.',
+    'perceptual_detail_strength': 'Strength for the selected pre-encode downscaler, from 0 to 1.',
 }
 FIELD_LABELS = {
     'device': 'Audio output device',
     'source': 'Capture source',
     'rate': 'Audio output sample rate',
     'capture_fps': 'Capture FPS',
+    'screen_target': 'Screen / display',
     'video_live': 'Treat URL as live',
+    'camera': 'Camera',
     'ffmpeg_input': 'FFmpeg input',
     'mono_sum': 'Mono output',
     'pilot_tones': 'Pilot tones',
     'eof_marker': 'EOF marker',
+    'perceptual_resize': 'Pre-encode downscaler',
+    'perceptual_detail_strength': 'Downscaler strength',
 }
+VIDEO_FILE_GLOB = '*.mp4 *.m4v *.mov *.mkv *.webm *.avi *.mpeg *.mpg *.wmv *.ts'
 
 
 class OutputDevice:
@@ -97,6 +113,169 @@ class OutputDevice:
         rate = f'{self.default_rate/1000:g} kHz' if self.default_rate else 'rate unknown'
         return (f'{self.index}: {self.name} · {self.channels} out · '
                 f'{rate}')
+
+
+@dataclass(frozen=True)
+class ScreenTarget:
+    label: str
+    region: str = ''
+    display: int | None = None
+
+
+def linux_camera_sources(video_paths, names=None):
+    """Build V4L2 choices from video nodes without opening a capture stream."""
+    names = names or {}
+    choices = []
+    paths = [Path(path) for path in video_paths
+             if re.fullmatch(r'video\d+', Path(path).name)]
+    for path in sorted(paths, key=lambda item: int(item.name[5:])):
+        name = names.get(str(path)) or path.name
+        choices.append((f'{name} · {path}', f'v4l2:{path}'))
+    return tuple(choices)
+
+
+def _ffmpeg_devices(command, ffmpeg_path=None, run=None):
+    ffmpeg_path = ffmpeg_path or shutil.which('ffmpeg')
+    if not ffmpeg_path:
+        raise RuntimeError('FFmpeg is required to enumerate capture devices.')
+    run = subprocess.run if run is None else run
+    result = run(command(ffmpeg_path), capture_output=True, text=True,
+                 encoding='utf-8', errors='replace', timeout=10, check=False)
+    return '\n'.join((getattr(result, 'stdout', '') or '',
+                      getattr(result, 'stderr', '') or ''))
+
+
+def parse_ffmpeg_camera_sources(output, platform):
+    """Parse the camera sections of FFmpeg's AVFoundation / DirectShow listing."""
+    choices = []
+    if platform == 'darwin':
+        in_video = False
+        for line in output.splitlines():
+            lowered = line.lower()
+            if 'avfoundation video devices:' in lowered:
+                in_video = True
+                continue
+            if 'avfoundation audio devices:' in lowered:
+                in_video = False
+            if not in_video:
+                continue
+            match = re.search(r'\[(\d+)\]\s+(.+?)\s*$', line)
+            if match and 'capture screen' not in match.group(2).lower():
+                index, name = match.groups()
+                choices.append((f'{name} · AVFoundation {index}',
+                                f'avfoundation:{index}'))
+    elif platform.startswith('win'):
+        in_video = False
+        for line in output.splitlines():
+            lowered = line.lower()
+            if 'directshow video devices' in lowered:
+                in_video = True
+                continue
+            if 'directshow audio devices' in lowered:
+                in_video = False
+            if not in_video:
+                continue
+            if 'alternative name' in lowered:
+                continue
+            match = re.search(r'"([^"]+)"', line)
+            if match:
+                name = match.group(1)
+                choices.append((name, f'dshow:video={name}'))
+    return tuple(choices)
+
+
+def parse_avfoundation_screen_sources(output):
+    choices = []
+    in_video = False
+    for line in output.splitlines():
+        lowered = line.lower()
+        if 'avfoundation video devices:' in lowered:
+            in_video = True
+            continue
+        if 'avfoundation audio devices:' in lowered:
+            in_video = False
+        if not in_video:
+            continue
+        match = re.search(r'\[(\d+)\]\s+(.+?)\s*$', line)
+        if match and 'screen' in match.group(2).lower():
+            index, name = match.groups()
+            choices.append(ScreenTarget(name, display=int(index)))
+    return tuple(choices)
+
+
+def screen_targets_from_monitors(monitors):
+    targets = []
+    for index, monitor in enumerate(monitors):
+        left = int(monitor['left'])
+        top = int(monitor['top'])
+        width = int(monitor['width'])
+        height = int(monitor['height'])
+        label = ('All displays' if index == 0 else f'Display {index}')
+        label += f' · {width}×{height} · ({left},{top})'
+        region = f'{left},{top},{width},{height}'
+        targets.append(ScreenTarget(label, region=region))
+    return tuple(targets)
+
+
+def enumerate_camera_sources(platform=None, ffmpeg_path=None, run=None,
+                             dev_root='/dev', sys_root='/sys/class/video4linux'):
+    platform = sys.platform if platform is None else platform
+    if platform.startswith('linux'):
+        nodes = list(Path(dev_root).glob('video*'))
+        names = {}
+        for node in nodes:
+            try:
+                names[str(node)] = (Path(sys_root)/node.name/'name').read_text(
+                    encoding='utf-8').strip()
+            except OSError:
+                pass
+        choices = linux_camera_sources(nodes, names)
+    else:
+        if platform == 'darwin':
+            def command(executable):
+                return [executable, '-hide_banner', '-f', 'avfoundation',
+                        '-list_devices', 'true', '-i', '']
+        elif platform.startswith('win'):
+            def command(executable):
+                return [executable, '-hide_banner', '-list_devices', 'true',
+                        '-f', 'dshow', '-i', 'dummy']
+        else:
+            raise RuntimeError(f'Camera discovery is not implemented for {platform}.')
+        output = _ffmpeg_devices(command, ffmpeg_path, run)
+        choices = parse_ffmpeg_camera_sources(output, platform)
+    if not choices:
+        raise RuntimeError('No camera devices were found.')
+    return choices
+
+
+def enumerate_screen_targets(backend='mss', platform=None, mss_module=None,
+                             ffmpeg_path=None, run=None):
+    platform = sys.platform if platform is None else platform
+    if backend == 'ffmpeg' and platform == 'darwin':
+        def command(executable):
+            return [executable, '-hide_banner', '-f', 'avfoundation',
+                    '-list_devices', 'true', '-i', '']
+        output = _ffmpeg_devices(command, ffmpeg_path, run)
+        targets = parse_avfoundation_screen_sources(output)
+    else:
+        if mss_module is None:
+            try:
+                import mss as mss_module
+            except ImportError as exc:
+                raise RuntimeError('Screen discovery requires the mss package.') from exc
+        factory = getattr(mss_module, 'MSS', None)
+        if factory is None:
+            factory = mss_module.mss
+        capture = factory()
+        try:
+            targets = screen_targets_from_monitors(capture.monitors)
+        finally:
+            close = getattr(capture, 'close', None)
+            if close is not None:
+                close()
+    if not targets:
+        raise RuntimeError('No screen/display capture targets were found.')
+    return targets
 
 
 def output_devices(sd_module=None):
@@ -143,6 +322,72 @@ def sample_rate_options(device, channels, sd_module=None):
     return (('Native (device clock)', None),) + tuple(
         (_rate_label(rate), rate) for rate in sorted(rates)) + (
             ('Custom…', 'custom'),)
+
+
+def pick_video_file(current_path='', platform=None, which=None, run=None):
+    """Open the host's native file picker without adding a GUI dependency."""
+    platform = sys.platform if platform is None else platform
+    which = shutil.which if which is None else which
+    run = subprocess.run if run is None else run
+
+    current = Path(str(current_path)).expanduser() if current_path else None
+    if current is not None and current.is_dir():
+        initial_dir = str(current)
+    elif current is not None and current.parent.is_dir():
+        initial_dir = str(current.parent)
+    else:
+        initial_dir = str(ROOT)
+
+    if platform == 'darwin':
+        executable = which('osascript')
+        if executable is None:
+            raise RuntimeError('macOS file picker (osascript) is unavailable.')
+        command = [executable, '-e',
+                   'POSIX path of (choose file with prompt "Select a video file")']
+    elif platform.startswith('win'):
+        executable = which('powershell.exe') or which('powershell')
+        if executable is None:
+            raise RuntimeError('Windows PowerShell file picker is unavailable.')
+        script = (
+            'Add-Type -AssemblyName System.Windows.Forms; '
+            '$d = New-Object System.Windows.Forms.OpenFileDialog; '
+            "$d.Title = 'Select a video file'; "
+            f"$d.InitialDirectory = '{initial_dir.replace(chr(39), chr(39)*2)}'; "
+            f"$d.Filter = 'Video files|{VIDEO_FILE_GLOB.replace(' ', ';')}|All files|*.*'; "
+            'if ($d.ShowDialog() -eq '
+            '[System.Windows.Forms.DialogResult]::OK) '
+            '{ [Console]::Write($d.FileName) }'
+        )
+        command = [executable, '-NoProfile', '-STA', '-Command', script]
+    else:
+        executable = which('zenity')
+        if executable is not None:
+            start_at = initial_dir.rstrip(os.sep)+os.sep
+            command = [
+                executable, '--file-selection',
+                '--title=Select a video file', f'--filename={start_at}',
+                f'--file-filter=Video files | {VIDEO_FILE_GLOB}',
+                '--file-filter=All files | *',
+            ]
+        else:
+            executable = which('kdialog')
+            if executable is None:
+                raise RuntimeError(
+                    'No native file picker found. Install zenity or kdialog, '
+                    'or type the path / drop a video file on the window.')
+            command = [
+                executable, '--getopenfilename', initial_dir,
+                f'Video files ({VIDEO_FILE_GLOB})', '--title',
+                'Select a video file',
+            ]
+
+    result = run(command, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        error = str(getattr(result, 'stderr', '') or '').strip()
+        if error and 'user canceled' not in error.lower():
+            raise RuntimeError(error)
+        return None
+    return str(getattr(result, 'stdout', '') or '').strip() or None
 
 
 def _float_setting(value, label, optional=False):
@@ -214,6 +459,21 @@ def validate_settings(settings, devices, sd_module=None):
             raise ValueError('Experimental mono requires pilot tones.')
         if not settings.get('eof_marker', True):
             raise ValueError('Experimental mono requires the EOF marker.')
+    perceptual_resize = settings.get('perceptual_resize', 'off')
+    if perceptual_resize not in dict(DOWNSCALER_CHOICES).values():
+        raise ValueError('Choose a supported pre-encode downscaler.')
+    if perceptual_resize != 'off':
+        if profile not in ('fold-500', 'fold-1000'):
+            raise ValueError('The pre-encode downscaler requires Fold 500 or Fold 1000.')
+        if encode_filter != 'box':
+            raise ValueError('The pre-encode downscaler requires the Box encode filter.')
+        perceptual_strength = _float_setting(
+            settings.get('perceptual_detail_strength', '0.25'),
+            'Downscaler strength')
+        if not 0.0 <= perceptual_strength <= 1.0:
+            raise ValueError('Downscaler strength must be between 0 and 1.')
+    else:
+        perceptual_strength = 0.25
 
     speed = _float_setting(settings.get('speed', '1'), 'Speed')
     if not .25 <= speed <= 4.0:
@@ -233,16 +493,42 @@ def validate_settings(settings, devices, sd_module=None):
     video_source = str(settings.get('video_source', '')).strip()
     if source == 'video' and not video_source:
         raise ValueError('Set a video file path or stream URL.')
-    camera = (_integer_setting(settings.get('camera', '0'), 'Camera index', 0)
-              if source == 'camera' else 0)
+    raw_ffmpeg_input = str(settings.get('ffmpeg_input', '')).strip()
+    ffmpeg_input = (raw_ffmpeg_input
+                    if (source == 'camera' or
+                        source == 'screen' and screen_backend == 'ffmpeg')
+                    else '')
+    camera = None
+    camera_spec = ''
+    if source == 'camera':
+        selected_camera = settings.get('camera')
+        if ffmpeg_input:
+            camera_spec = ffmpeg_input
+        elif selected_camera is None:
+            raise ValueError('Select a camera before starting.')
+        else:
+            try:
+                camera = int(selected_camera)
+            except (TypeError, ValueError):
+                camera_spec = str(selected_camera).strip()
+                if not camera_spec:
+                    raise ValueError('Select a camera before starting.')
+            if camera is not None and camera < 0:
+                raise ValueError('Camera index must be non-negative.')
     capture_width = (
         _integer_setting(settings.get('capture_width', '160'), 'Capture width', 1)
         if source in ('screen', 'video', 'mouse-follow') else 160)
-    display = (_integer_setting(settings.get('display', ''), 'Display index', 0,
-                                optional=True)
-               if source == 'screen' else None)
-    region = (str(settings.get('region', '')).strip()
-              if source == 'screen' else '')
+    screen_target = settings.get('screen_target') if source == 'screen' else None
+    if screen_target is not None and not isinstance(screen_target, ScreenTarget):
+        raise ValueError('Choose a screen/display from the picker.')
+    display = screen_target.display if screen_target is not None else None
+    region_override = (str(settings.get('region', '')).strip()
+                       if source == 'screen' else '')
+    region = (region_override or
+              (screen_target.region if screen_target is not None else ''))
+    if (source == 'screen' and screen_target is None and not region and
+            not ffmpeg_input):
+        raise ValueError('Choose a screen/display before starting.')
     if region:
         try:
             parts = tuple(int(part.strip()) for part in region.split(','))
@@ -264,14 +550,14 @@ def validate_settings(settings, devices, sd_module=None):
         'capture_fps': capture_fps,
         'video_source': video_source,
         'camera': camera,
-        'ffmpeg_input': (str(settings.get('ffmpeg_input', '')).strip()
-                         if (source == 'camera' or
-                             source == 'screen' and screen_backend == 'ffmpeg')
-                         else ''),
+        'camera_spec': camera_spec,
+        'ffmpeg_input': ffmpeg_input,
         'screen_backend': screen_backend,
         'capture_width': capture_width,
         'display': display,
         'region': region,
+        'perceptual_resize': perceptual_resize,
+        'perceptual_detail_strength': perceptual_strength,
     }
 
 
@@ -318,6 +604,11 @@ def build_command(settings, devices, sd_module=None, python=None):
         command.extend(('--brightness', str(checked['brightness'])))
     if checked['gamma'] != 1.0:
         command.extend(('--gamma', str(checked['gamma'])))
+    if checked['perceptual_resize'] != 'off':
+        command.extend(('--perceptual-resize', checked['perceptual_resize']))
+        if checked['perceptual_detail_strength'] != 0.25:
+            command.extend(('--perceptual-detail-strength',
+                            str(checked['perceptual_detail_strength'])))
     if checked['capture_fps'] is not None:
         command.extend(('--capture-fps', str(checked['capture_fps'])))
 
@@ -326,9 +617,10 @@ def build_command(settings, devices, sd_module=None, python=None):
         if settings.get('video_live'):
             command.append('--video-live')
     elif checked['source'] == 'camera':
-        command.extend(('--camera', str(checked['camera'])))
-        if checked['ffmpeg_input']:
-            command.extend(('--ffmpeg-input', checked['ffmpeg_input']))
+        if checked['camera_spec']:
+            command.extend(('--ffmpeg-input', checked['camera_spec']))
+        else:
+            command.extend(('--camera', str(checked['camera'])))
     elif checked['source'] == 'screen':
         command.extend(('--screen-backend', checked['screen_backend']))
         if checked['screen_backend'] == 'ffmpeg' and checked['ffmpeg_input']:
@@ -336,7 +628,7 @@ def build_command(settings, devices, sd_module=None, python=None):
         if checked['display'] is not None:
             command.extend(('--display', str(checked['display'])))
         if checked['region']:
-            command.extend(('--region', checked['region']))
+            command.append(f"--region={checked['region']}")
 
     if checked['source'] in ('screen', 'video', 'mouse-follow'):
         command.extend(('--capture-width', str(checked['capture_width'])))
@@ -393,12 +685,12 @@ class SenderGui:
     ROW_HEIGHT = 39
     BASIC_FIELDS = (
         'device', 'source', 'rate', 'profile', 'speed', 'encode_filter',
-        'video_source', 'video_live', 'camera',
+        'video_source', 'video_live', 'camera', 'screen_target',
     )
     ADVANCED_FIELDS = (
-        'capture_fps', 'brightness', 'gamma', 'screen_backend', 'display',
-        'region', 'ffmpeg_input', 'capture_width', 'capture_filter', 'mono_sum',
-        'pilot_tones', 'eof_marker',
+        'capture_fps', 'brightness', 'gamma', 'screen_backend', 'region',
+        'ffmpeg_input', 'capture_width', 'capture_filter', 'perceptual_resize',
+        'perceptual_detail_strength', 'mono_sum', 'pilot_tones', 'eof_marker',
     )
 
     def __init__(self, devices=(), device_error=''):
@@ -416,16 +708,18 @@ class SenderGui:
             'capture_fps': '',
             'video_source': '',
             'video_live': False,
-            'camera': '0',
+            'camera': None,
             'ffmpeg_input': '',
             'screen_backend': 'mss',
-            'display': '',
+            'screen_target': None,
             'region': '',
             'capture_width': '160',
             'capture_filter': 'auto',
             'mono_sum': False,
             'pilot_tones': True,
             'eof_marker': True,
+            'perceptual_resize': 'off',
+            'perceptual_detail_strength': '0.25',
         }
         self.page = 'setup'
         self.advanced = False
@@ -449,6 +743,7 @@ class SenderGui:
         self._window = None
         self._sd = None
         self.rate_cache = {}
+        self.capture_choice_cache = {}
 
     def _device(self):
         return next((device for device in self.devices
@@ -482,7 +777,40 @@ class SenderGui:
             return (('mss · lightweight', 'mss'), ('FFmpeg', 'ffmpeg'))
         if dest == 'capture_filter':
             return CAPTURE_FILTER_CHOICES
+        if dest == 'perceptual_resize':
+            if self.settings['profile'] not in ('fold-500', 'fold-1000'):
+                return DOWNSCALER_CHOICES[:1]
+            return DOWNSCALER_CHOICES
+        if dest in ('camera', 'screen_target'):
+            return self.capture_choice_cache.get(dest, ())
         return ()
+
+    def _open_dropdown(self, dest):
+        if self.process is not None:
+            self.notice = 'Settings are locked while the sender is running.'
+            return
+        if dest == 'camera':
+            try:
+                self.capture_choice_cache[dest] = enumerate_camera_sources()
+            except Exception as exc:
+                self.capture_choice_cache[dest] = ()
+                self.notice = f'Camera discovery failed: {exc}'
+                self.dropdown = None
+                self.dirty = True
+                return
+        elif dest == 'screen_target':
+            try:
+                self.capture_choice_cache[dest] = enumerate_screen_targets(
+                    self.settings['screen_backend'])
+            except Exception as exc:
+                self.capture_choice_cache[dest] = ()
+                self.notice = f'Screen discovery failed: {exc}'
+                self.dropdown = None
+                self.dirty = True
+                return
+        self.dropdown = dest
+        self.dropdown_scroll = 0
+        self.dirty = True
 
     def _sounddevice(self):
         if self._sd is None:
@@ -499,10 +827,13 @@ class SenderGui:
             dest == 'video_source' and source != 'video' or
             dest == 'video_live' and source != 'video' or
             dest == 'camera' and source != 'camera' or
+            dest == 'screen_target' and source != 'screen' or
             dest == 'ffmpeg_input' and source not in ('camera', 'screen') or
             dest == 'ffmpeg_input' and source == 'screen' and
             self.settings['screen_backend'] != 'ffmpeg' or
-            dest in ('screen_backend', 'display', 'region') and source != 'screen' or
+            dest in ('screen_backend', 'region') and source != 'screen' or
+            dest == 'perceptual_detail_strength' and
+            self.settings['perceptual_resize'] == 'off' or
             dest == 'capture_width' and source not in ('screen', 'video', 'mouse-follow'))]
         return fields
 
@@ -511,12 +842,21 @@ class SenderGui:
         if dest == 'device':
             device = self._device()
             return device.label if device else 'Select output device…'
+        if dest in ('camera', 'screen_target'):
+            if value is None:
+                return 'Choose a camera…' if dest == 'camera' else 'Choose a display…'
+            if dest == 'screen_target' and isinstance(value, ScreenTarget):
+                return value.label
+            choices = self._choices(dest)
+            return next((label for label, candidate in choices
+                         if candidate == value), str(value))
         if dest in ('source', 'profile', 'encode_filter', 'screen_backend',
-                    'capture_filter'):
+                    'capture_filter', 'perceptual_resize'):
             choices = (SOURCE_CHOICES if dest == 'source' else
                        PROFILE_CHOICES if dest == 'profile' else
                        FILTER_CHOICES if dest == 'encode_filter' else
                        CAPTURE_FILTER_CHOICES if dest == 'capture_filter' else
+                       DOWNSCALER_CHOICES if dest == 'perceptual_resize' else
                        (('mss · lightweight', 'mss'), ('FFmpeg', 'ffmpeg')))
             label = next((label for label, candidate in choices
                           if candidate == value), None)
@@ -548,8 +888,12 @@ class SenderGui:
         self.settings[dest] = value
         if dest == 'profile':
             self._profile_changed(value)
+            if value not in ('fold-500', 'fold-1000'):
+                self.settings['perceptual_resize'] = 'off'
         elif dest == 'device':
             self.settings['rate'] = None
+        elif dest == 'screen_backend':
+            self.settings['screen_target'] = None
         elif dest == 'mono_sum':
             options = self._choices('rate')
             if self.settings['rate'] not in {item[1] for item in options}:
@@ -736,14 +1080,28 @@ class SenderGui:
             value_left = max(300, int(width*.37))
             draw.text((30, y+10), label, font=small, fill=(205, 218, 228))
             value = self.edit_buffer if self.editing and dest == self.selected else self._value_label(dest)
-            value = _fit(value, small, width-value_left-45)
+            if dest == 'video_source':
+                browse_left = width-104
+                value = _fit(value, small, browse_left-value_left-14)
+                browse_rect = (browse_left, y+4, width-26, y+self.ROW_HEIGHT-7)
+                draw.rounded_rectangle(browse_rect, radius=4, fill=(30, 58, 76),
+                                       outline=(75, 111, 132), width=1)
+                draw.text((browse_left+10, y+10), 'Browse', font=small,
+                          fill=(229, 239, 246))
+                self.hits['browse:video_source'] = browse_rect
+                field_right = browse_left-8
+            else:
+                value = _fit(value, small, width-value_left-45)
+                field_right = width-18
             draw.text((value_left, y+10), value,
                       font=small, fill=(237, 242, 246))
             draw.text((width-40, y+9), '▾' if dest in (
                 'device', 'source', 'rate', 'profile', 'encode_filter',
-                'screen_backend', 'capture_filter') else '',
+                'screen_backend', 'capture_filter', 'camera', 'screen_target',
+                'perceptual_resize') else '',
                 font=small, fill=(134, 169, 188))
-            self.hits[f'field:{dest}'] = (18, y, width-18, y+self.ROW_HEIGHT-3)
+            self.hits[f'field:{dest}'] = (
+                18, y, field_right, y+self.ROW_HEIGHT-3)
 
         toggle_y = height-123
         draw.rounded_rectangle((22, toggle_y, 154, toggle_y+28), radius=4,
@@ -918,6 +1276,21 @@ class SenderGui:
                 self.advanced = not self.advanced
                 self.scroll = 0
                 self.dropdown = None
+        elif hit == 'browse:video_source':
+            if self.process is not None:
+                self.notice = 'Settings are locked while the sender is running.'
+            else:
+                try:
+                    path = pick_video_file(self.settings['video_source'])
+                except (OSError, RuntimeError) as exc:
+                    self.notice = str(exc)
+                else:
+                    if path:
+                        self.settings['video_source'] = path
+                        self.selected = 'video_source'
+                        self.notice = f'Selected video: {Path(path).name}'
+                    else:
+                        self.notice = 'Video selection cancelled.'
         elif hit and hit.startswith('option:') and self.dropdown is not None:
             index = int(hit.split(':', 1)[1])
             choices = self._choices(self.dropdown)
@@ -932,9 +1305,9 @@ class SenderGui:
             elif dest in ('video_live', 'mono_sum', 'pilot_tones', 'eof_marker'):
                 self._assign(dest, not self.settings[dest])
             elif dest in ('device', 'source', 'rate', 'profile',
-                          'encode_filter', 'screen_backend', 'capture_filter'):
-                self.dropdown = dest
-                self.dropdown_scroll = 0
+                          'encode_filter', 'screen_backend', 'capture_filter',
+                          'camera', 'screen_target', 'perceptual_resize'):
+                self._open_dropdown(dest)
             elif dest in self._visible_fields():
                 self.editing = True
                 current = self.settings[dest]
@@ -1011,16 +1384,18 @@ class SenderGui:
                 if dest in ('video_live', 'mono_sum', 'pilot_tones', 'eof_marker'):
                     self._assign(dest, not self.settings[dest])
                 elif dest in ('device', 'source', 'rate', 'profile',
-                              'encode_filter', 'screen_backend', 'capture_filter'):
-                    self.dropdown = dest
+                              'encode_filter', 'screen_backend', 'capture_filter',
+                              'camera', 'screen_target', 'perceptual_resize'):
+                    self._open_dropdown(dest)
                 else:
                     self.editing = True
                     self.edit_buffer = str(self.settings.get(dest) or '')
             elif key in (glfw.KEY_ENTER, glfw.KEY_KP_ENTER) and self.selected in fields:
                 dest = self.selected
                 if dest in ('device', 'source', 'rate', 'profile',
-                            'encode_filter', 'screen_backend', 'capture_filter'):
-                    self.dropdown = dest
+                            'encode_filter', 'screen_backend', 'capture_filter',
+                            'camera', 'screen_target', 'perceptual_resize'):
+                    self._open_dropdown(dest)
                 elif dest in ('video_live', 'mono_sum', 'pilot_tones', 'eof_marker'):
                     self._assign(dest, not self.settings[dest])
                 else:
