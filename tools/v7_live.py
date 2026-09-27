@@ -76,6 +76,12 @@ from tools.v7_display import LatestFrame                                      # 
 FPS = P.PULSE_FPS
 CAMERA_CAPTURE_FPS = 15
 INPUT_AUDIO_QUEUE_BLOCKS = 8
+ENCODE_TO_FFMPEG_SCALE = {
+    'nearest': 'neighbor',
+    'box': 'area',
+    'lanczos': 'lanczos',
+    'bicubic': 'bicubic',
+}
 DEFAULT_FIXTURE = ROOT / 'modem_tests/fixtures/v7_reference_face.png'
 # The display stays independent of the modem decoder and can consume the latest
 # frame without building a backlog.
@@ -147,11 +153,12 @@ def _capture(args):
                                   test_source, video_source, Throttled, _region)
 
     region = _region(args.region)
+    capture_filter = _capture_scale_flags(args)
     if args.source == 'test':
         return test_source()
     if args.source == 'video':
         return video_source(args.video_source, width=args.capture_width,
-                            scale_flags=args.capture_filter,
+                            scale_flags=capture_filter,
                             live=True if args.video_live else None)
     if args.source == 'mouse-follow':
         return mouse_follow_source(initial_width=args.capture_width)
@@ -159,9 +166,14 @@ def _capture(args):
         # Let FFmpeg probe the lowest mode/rate when the user did not override
         # it.  Some AVFoundation devices advertise 15 fps but reject a forced
         # 15-fps open unless their exact mode is selected first.
+        if getattr(args, 'perceptual_resize', 'off') == 'off':
+            return camera_source(
+                args.camera, args.capture_fps, width=args.capture_width,
+                spec=args.ffmpeg_input, scale_flags=capture_filter,
+                output_size=P.PREPARED_SIZE)
         return camera_source(args.camera, args.capture_fps,
                              width=args.capture_width, spec=args.ffmpeg_input,
-                             scale_flags=args.capture_filter)
+                             scale_flags=capture_filter)
     if args.screen_backend == 'mss':
         return screen_source(region)
     capture_fps = args.capture_fps
@@ -171,7 +183,19 @@ def _capture(args):
         capture_fps = 60
     return screen_capture_source(capture_fps or FPS, region, args.display,
                                  args.capture_width, args.ffmpeg_input,
-                                 args.capture_filter)
+                                 capture_filter)
+
+
+def _capture_scale_flags(args):
+    """Resolve FFmpeg's scaler, deriving the direct camera default from profile."""
+    selected = getattr(args, 'capture_filter', None)
+    if selected:
+        return selected
+    if (getattr(args, 'source', None) == 'camera' and
+            getattr(args, 'perceptual_resize', 'off') == 'off'):
+        encode_filter = getattr(args, 'encode_filter', None) or 'box'
+        return ENCODE_TO_FFMPEG_SCALE[encode_filter]
+    return 'neighbor'
 
 
 def _model(fixture, encode_filter='nearest'):
@@ -183,13 +207,18 @@ def _model(fixture, encode_filter='nearest'):
 def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0,
             perceptual_resize='off', perceptual_detail_strength=0.25):
     _validate_tone_controls(brightness, gamma)
+    source_size = getattr(frame, 'source_size', None)
+    capture_prepared = bool(getattr(frame, 'prepared', False))
+    if source_size is not None:
+        frame = frame.rgb
     rgb_frame = (isinstance(frame, np.ndarray) and frame.dtype == np.uint8 and
                  frame.ndim == 3 and frame.shape[2] == 3)
     if perceptual_resize == 'off':
         # Keep this default path byte-identical to the established sender.
         image = frame if isinstance(frame, Image.Image) else Image.fromarray(frame)
-        prepared = prepare_image(image, encode_filter=encode_filter)
-        size = image.size
+        prepared = (image.convert('RGB') if capture_prepared else
+                    prepare_image(image, encode_filter=encode_filter))
+        size = source_size or image.size
     else:
         if encode_filter != 'box':
             raise ValueError('perceptual resize requires --encode-filter box')
@@ -202,13 +231,13 @@ def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0,
             prepared = Image.fromarray(
                 resize_rgb(np.ascontiguousarray(frame), perceptual_resize,
                            perceptual_detail_strength), mode='RGB')
-            size = (frame.shape[1], frame.shape[0])
+            size = source_size or (frame.shape[1], frame.shape[0])
         else:
             image = (frame if isinstance(frame, Image.Image)
                      else Image.fromarray(frame))
             prepared = resize_image(image, perceptual_resize,
                                     perceptual_detail_strength)
-            size = image.size
+            size = source_size or image.size
     if brightness != 1.0:
         prepared = ImageEnhance.Brightness(prepared).enhance(brightness)
     if gamma != 1.0:
@@ -550,11 +579,21 @@ def run_send(args):
             if not args.no_log:
                 camera_text = (f'camera={args.camera} '
                                if args.source == 'camera' else '')
+                if (args.source == 'camera' and
+                        getattr(args, 'perceptual_resize', 'off') == 'off'):
+                    capture_text = f'80x96/{_capture_scale_flags(args)}'
+                elif (args.source == 'screen' and
+                      args.screen_backend == 'mss') or args.source in (
+                          'mouse-follow', 'test'):
+                    capture_text = 'native'
+                else:
+                    capture_text = (f'{args.capture_width}px/'
+                                    f'{_capture_scale_flags(args)}')
                 print(f'V7 send ready: source={args.source} device={args.device!r} '
                        f'rate={output_rate:g}Hz wire={wire_fps:.3f}fps '
                        f'speed={args.speed:g}x {camera_text}'
                        f'pilot-tones={"on" if getattr(args, "pilot_tones", False) else "off"} '
-                       f'capture={args.capture_width}px/{args.capture_filter} '
+                       f'capture={capture_text} '
                       f'encode={args.encode_filter} mode={"mono-sum" if args.mono_sum else "M/S"}',
                       flush=True)
             while True:
@@ -1175,12 +1214,15 @@ def parser():
     send.add_argument('--screen-backend', choices=('mss', 'ffmpeg'), default='mss',
                       help='screen capture backend; mss avoids an FFmpeg child')
     send.add_argument('--region')
-    send.add_argument('--capture-width', type=int, default=160)
+    send.add_argument('--capture-width', type=int, default=160,
+                      help=('FFmpeg screen/video width and initial mouse-follow '
+                            'crop width; camera uses 80x96 (default: 160)'))
     send.add_argument('--capture-filter',
                       choices=('neighbor', 'area', 'bilinear', 'bicubic',
                                'lanczos'),
-                      default='neighbor',
-                      help='FFmpeg capture scaler (default: neighbor)')
+                      default=None,
+                      help=('override FFmpeg capture scaler; camera defaults '
+                            'to the selected encode filter'))
     send.add_argument('--capture-fps', '--fps', dest='capture_fps', type=float)
     send.add_argument('--batch-frames', type=int, default=1,
                       help='frames encoded before submission (default: 1)')

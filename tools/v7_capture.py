@@ -4,18 +4,38 @@ This module contains no modem encoder or decoder.
 """
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 import numpy as np
 
-# Capture sources. Each returns grab() -> RGB uint8 array, any size.
+# Capture sources return RGB uint8 arrays, or a CapturedFrame when preprocessing
+# changes the pixel dimensions but the original source aspect must be retained.
 # --------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class CapturedFrame:
+    """Pixels plus source geometry when capture preprocessing changes size."""
+    rgb: np.ndarray
+    source_size: tuple
+    prepared: bool = False
+
+
+def _showinfo_source_size(line):
+    """Read the pre-filter width/height printed by FFmpeg's showinfo filter."""
+    match = re.search(rb'\bs:(\d+)x(\d+)\b', line)
+    if match is None:
+        return None
+    width, height = (int(part) for part in match.groups())
+    return (width, height) if width > 0 and height > 0 else None
+
 
 def _read_exact(stream, count):
     """Read exactly `count` bytes, or return None at end of stream.
@@ -171,15 +191,17 @@ def mouse_follow_source(initial_width=400, aspect_ratio=4/3):
 
 
 def ffmpeg_source(spec, fps, region=None, display=None, width=320,
-                  scale_flags='neighbor'):
+                  scale_flags='neighbor', output_size=None):
     """Capture through ffmpeg's platform fast path.
 
     mss goes via CoreGraphics on macOS and costs tens of milliseconds a grab.
     ffmpeg uses avfoundation / x11grab / gdigrab and scales before handing the
     frame over, so Python receives a small RGB array and does no image work.
 
-    PPM frames carry their dimensions in the pipe. Scale by width and preserve
-    the actual input aspect, including for cameras unrelated to screen size.
+    PPM frames carry their output dimensions in the pipe. The optional fixed
+    output size is used by the camera sender to produce the V7 sampling grid in
+    one FFmpeg resize; showinfo preserves the pre-scale source geometry for the
+    packet aspect code.
     """
     if shutil.which('ffmpeg') is None:
         raise SystemExit('ffmpeg not found. brew install ffmpeg / apt install ffmpeg')
@@ -189,6 +211,10 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320,
     fps = 30 if fps is None else fps
     if scale_flags not in ('neighbor', 'area', 'bilinear', 'bicubic', 'lanczos'):
         raise ValueError(f'Unsupported FFmpeg scale flags: {scale_flags}')
+    if output_size is not None:
+        output_size = tuple(map(int, output_size))
+        if len(output_size) != 2 or min(output_size) < 1:
+            raise ValueError('Output size must contain two positive dimensions')
 
     if spec:
         fmt, src = spec.split(':', 1)
@@ -199,38 +225,83 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320,
     else:
         fmt, src = 'x11grab', os.environ.get('DISPLAY', ':0.0')
 
-    cmd = ['ffmpeg', '-nostdin', '-loglevel', 'error', '-f', fmt,
+    cmd = ['ffmpeg', '-nostdin', '-loglevel',
+           'info' if output_size is not None else 'error', '-f', fmt,
            '-framerate', str(int(max(fps, 1)))]
+    if output_size is not None:
+        cmd.append('-nostats')
     if fmt == 'x11grab' and region:
         cmd += ['-video_size', f'{region[2]}x{region[3]}',
                 '-i', f'{src}+{region[0]},{region[1]}']
     else:
         cmd += ['-i', src]
-    cmd += ['-vf', f'scale={w}:-1:flags={scale_flags}', '-pix_fmt', 'rgb24',
-            '-fps_mode', 'passthrough',
-            '-c:v', 'ppm', '-f', 'image2pipe', '-an', '-sn', '-']
+    scale = (f'scale={output_size[0]}:{output_size[1]}:flags={scale_flags}'
+             if output_size is not None else
+             f'scale={w}:-1:flags={scale_flags}')
+    video_filter = f'showinfo=checksum=0,{scale}' if output_size else scale
     # Device timestamps are not necessarily a constant-rate timeline. The
     # default sync mode can emit thousands of duplicates to fill their gaps.
     # This pipe needs exactly one image for each input frame.
+    cmd += ['-vf', video_filter, '-pix_fmt', 'rgb24',
+            '-fps_mode', 'passthrough',
+            '-c:v', 'ppm', '-f', 'image2pipe', '-an', '-sn', '-']
     errors = tempfile.TemporaryFile()
+    log_lock = threading.Lock()
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stdin=subprocess.DEVNULL,
-                                stderr=errors, bufsize=0, start_new_session=True)
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stdin=subprocess.DEVNULL,
+            stderr=(subprocess.PIPE if output_size is not None else errors),
+            bufsize=0, start_new_session=True)
     except BaseException:
         errors.close()
         raise
     closed = threading.Event()
     close_lock = threading.Lock()
+    source_size = {'value': None}
+    source_size_ready = threading.Event()
+    stderr_thread = None
+
+    def save_error_line(line):
+        with log_lock:
+            errors.write(line)
+            errors.flush()
+
+    if output_size is not None:
+        def drain_stderr():
+            for line in iter(proc.stderr.readline, b''):
+                reported_size = _showinfo_source_size(line)
+                if reported_size is not None and source_size['value'] is None:
+                    source_size['value'] = reported_size
+                    source_size_ready.set()
+                    continue
+                if b'Parsed_showinfo' not in line:
+                    save_error_line(line)
+
+        stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+        stderr_thread.start()
+
+    def error_detail():
+        with log_lock:
+            errors.flush()
+            errors.seek(0)
+            detail = errors.read().decode('utf-8', errors='replace').strip()
+            errors.seek(0, os.SEEK_END)
+        return detail
 
     def grab():
         try:
-            return _read_ppm(proc.stdout)
+            frame = _read_ppm(proc.stdout)
+            if output_size is None:
+                return frame
+            if not source_size_ready.wait(5.0):
+                raise RuntimeError(
+                    'FFmpeg did not report the original capture dimensions')
+            return CapturedFrame(frame, source_size['value'], prepared=True)
         except RuntimeError as exc:
             with close_lock:
                 if closed.is_set():
                     raise
-                errors.seek(0)
-                detail = errors.read().decode('utf-8', errors='replace').strip()
+                detail = error_detail()
             raise RuntimeError(f'{exc}\n{detail}' if detail else str(exc)) from exc
 
     def close():
@@ -247,7 +318,10 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320,
                         proc.kill()
                         proc.wait(timeout=2)
             finally:
-                errors.close()
+                if stderr_thread is not None:
+                    stderr_thread.join(timeout=2)
+                with log_lock:
+                    errors.close()
         # Closing stdout is left to the capture worker after its read exits.
 
     grab.proc = proc
@@ -257,15 +331,16 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320,
 
 
 def camera_source(index=0, fps=30, width=320, spec=None,
-                  scale_flags='neighbor'):
-    """Webcam through ffmpeg, same reasoning as screen capture."""
+                  scale_flags='neighbor', output_size=None):
+    """Webcam through FFmpeg, optionally scaled to the fixed V7 grid."""
     if sys.platform == 'darwin':
         spec = spec or f'avfoundation:{index}'
     elif sys.platform.startswith('win'):
         spec = spec or 'dshow:video=Integrated Camera'
     else:
         spec = spec or f'v4l2:/dev/video{index}'
-    return ffmpeg_source(spec, fps, width=width, scale_flags=scale_flags)
+    return ffmpeg_source(spec, fps, width=width, scale_flags=scale_flags,
+                         output_size=output_size)
 
 
 def screen_capture_source(fps, region=None, display=None, width=320,

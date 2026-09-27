@@ -224,6 +224,13 @@ capture; for a clip, use `--source video --video-source PATH`:
   --video-source clip.mp4 --encode-filter box
 ```
 
+Camera capture is scaled directly by FFmpeg to the V7 80×96 sampling grid,
+using the selected encode filter (`box` maps to FFmpeg's area scaler). The
+sender separately puts the camera's original dimensions into the packet aspect
+code, so the nonuniform sampling-grid scale does not change the displayed
+source aspect. `--capture-filter` overrides the camera's direct-scale filter;
+perceptual-resize experiments retain their separate preprocessing path.
+
 `--device` is required on both commands. Route the sender's output into the
 receiver's input; device names can differ on separate machines. List PortAudio
 devices with `.venv/bin/python -m sounddevice`. Press Ctrl-C in each terminal to

@@ -11,8 +11,9 @@ from unittest import mock
 import numpy as np
 
 from animation_modem import v7
-from tools.v7_capture import video_source
-from tools.v7_live import _resolve_send_source, run_send
+from tools.v7_capture import (CapturedFrame, _showinfo_source_size,
+                              ffmpeg_source, video_source)
+from tools.v7_live import _capture, _resolve_send_source, _values, run_send
 
 
 class VideoSourceSelectionTests(unittest.TestCase):
@@ -94,6 +95,106 @@ class VideoSourceCommandTests(unittest.TestCase):
                 self.assertEqual('-re' in cmd, not live)
                 self.assertIn('-rw_timeout', cmd)
                 grab.close()
+
+    def test_direct_v7_grid_scale_keeps_original_aspect_metadata(self):
+        ppm = b'P6\n80 96\n255\n'+bytes(80*96*3)
+        showinfo = (b'[Parsed_showinfo_0 @ 0x1] n: 0 fmt:yuv420p '
+                    b'sar:1/1 s:1920x1080 i:P\n')
+
+        class DirectGridProcess:
+            def __init__(self):
+                self.stdout = io.BytesIO(ppm)
+                self.stderr = io.BytesIO(showinfo)
+                self.terminated = False
+
+            def poll(self):
+                return 0 if self.terminated else None
+
+            def terminate(self):
+                self.terminated = True
+
+            def wait(self, timeout=None):
+                self.terminated = True
+                return 0
+
+        process = DirectGridProcess()
+        with mock.patch('tools.v7_capture.shutil.which', return_value='ffmpeg'), \
+                mock.patch('tools.v7_capture.subprocess.Popen',
+                           return_value=process) as popen:
+            grab = ffmpeg_source('v4l2:/dev/video0', 15,
+                                 output_size=(80, 96), scale_flags='area')
+            frame = grab()
+            cmd = popen.call_args.args[0]
+            self.assertIn('showinfo=checksum=0,scale=80:96:flags=area', cmd)
+            self.assertIn('-loglevel', cmd)
+            self.assertEqual(cmd[cmd.index('-loglevel')+1], 'info')
+            self.assertIsInstance(frame, CapturedFrame)
+            self.assertEqual(frame.rgb.shape, (96, 80, 3))
+            self.assertEqual(frame.source_size, (1920, 1080))
+            self.assertTrue(frame.prepared)
+            grab.close()
+
+    def test_showinfo_parser_rejects_missing_or_invalid_source_geometry(self):
+        self.assertEqual(_showinfo_source_size(
+            b'Parsed_showinfo n:0 fmt:yuv420p s:640x480 i:P'), (640, 480))
+        self.assertIsNone(_showinfo_source_size(b'frame has no dimensions'))
+        self.assertIsNone(_showinfo_source_size(b's:0x480'))
+
+
+class SenderPreparationTests(unittest.TestCase):
+    def test_prepared_camera_grid_uses_original_geometry_for_packet_aspect(self):
+        frame = CapturedFrame(np.zeros((96, 80, 3), np.uint8),
+                              (1920, 1080), prepared=True)
+        model = type('Model', (), {
+            'coder': type('Coder', (), {'grids': v7.V7_GRIDS})()})()
+        with mock.patch('tools.v7_live.prepare_image',
+                        side_effect=AssertionError('prepared frame resized twice')), \
+                mock.patch('tools.v7_live.image_values',
+                           return_value=np.zeros(4)) as image_values:
+            _, aspect = _values(
+                model, frame, encode_filter='box', brightness=1.0, gamma=1.0)
+        self.assertEqual(image_values.call_args.args[0].size, (80, 96))
+        self.assertEqual(image_values.call_args.kwargs['encode_filter'], 'box')
+        self.assertEqual(aspect, v7.aspect_wire_code((1920, 1080)))
+
+    def test_camera_capture_maps_encode_filter_to_direct_v7_scale(self):
+        for encode_filter, scale_flags in (('box', 'area'),
+                                           ('nearest', 'neighbor'),
+                                           ('lanczos', 'lanczos'),
+                                           ('bicubic', 'bicubic')):
+            args = Namespace(
+                source='camera', camera=0, capture_fps=None,
+                capture_width=160, ffmpeg_input=None,
+                region=None,
+                encode_filter=encode_filter, capture_filter=None,
+                perceptual_resize='off')
+            with self.subTest(encode_filter=encode_filter), \
+                    mock.patch('tools.v7_capture.camera_source') as camera:
+                _capture(args)
+                self.assertEqual(camera.call_args.kwargs['output_size'],
+                                 (80, 96))
+                self.assertEqual(camera.call_args.kwargs['scale_flags'],
+                                 scale_flags)
+
+    def test_opt_in_perceptual_resize_retains_intermediate_camera_path(self):
+        args = Namespace(
+            source='camera', camera=0, capture_fps=None,
+            capture_width=160, ffmpeg_input=None, region=None,
+            encode_filter='box',
+            capture_filter=None, perceptual_resize='linear-box')
+        with mock.patch('tools.v7_capture.camera_source') as camera:
+            _capture(args)
+        self.assertNotIn('output_size', camera.call_args.kwargs)
+
+    def test_camera_capture_filter_override_wins_over_encode_profile(self):
+        args = Namespace(
+            source='camera', camera=0, capture_fps=None,
+            capture_width=160, ffmpeg_input=None, region=None,
+            encode_filter='box', capture_filter='lanczos',
+            perceptual_resize='off')
+        with mock.patch('tools.v7_capture.camera_source') as camera:
+            _capture(args)
+        self.assertEqual(camera.call_args.kwargs['scale_flags'], 'lanczos')
 
 
 class SenderFailureTests(unittest.TestCase):
