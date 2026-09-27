@@ -926,16 +926,22 @@ class SenderGui:
     TOOLBAR = 54
     ROW_HEIGHT = 39
     BASIC_FIELDS = (
-        'device', 'source', 'rate', 'capture_fps', 'profile', 'mono_video_side',
-        'brightness', 'gamma', 'speed',
-        'source_audio', 'source_audio_device', 'source_audio_input_side',
-        'source_audio_gain', 'source_audio_delay_ms',
-        'video_source', 'video_live', 'camera', 'screen_target',
+        'device', 'source', 'video_source', 'video_live', 'camera',
+        'screen_target', 'source_audio', 'source_audio_device',
+        'source_audio_input_side', 'source_audio_gain',
+        'source_audio_delay_ms', 'rate', 'capture_fps', 'profile',
+        'mono_video_side', 'brightness', 'gamma', 'speed',
+    )
+    DROPDOWN_FIELDS = (
+        'device', 'source', 'rate', 'capture_fps', 'profile',
+        'mono_video_side', 'source_audio', 'source_audio_device',
+        'source_audio_input_side', 'screen_backend', 'capture_filter',
+        'camera', 'screen_target', 'perceptual_resize',
     )
     ADVANCED_FIELDS = (
-        'screen_backend', 'region',
-        'ffmpeg_input', 'capture_width', 'capture_filter', 'perceptual_resize',
-        'perceptual_detail_strength',
+        'perceptual_resize', 'perceptual_detail_strength',
+        'screen_backend', 'region', 'ffmpeg_input', 'capture_width',
+        'capture_filter',
     )
 
     def __init__(self, devices=(), device_error='', audio_devices=(),
@@ -1413,10 +1419,7 @@ class SenderGui:
                 field_right = width-18
             draw.text((value_left, y+10), value,
                       font=small, fill=(237, 242, 246))
-            draw.text((width-40, y+9), '▾' if dest in (
-                'device', 'source', 'rate', 'capture_fps', 'profile',
-                'screen_backend', 'capture_filter', 'camera', 'screen_target',
-                'perceptual_resize') else '',
+            draw.text((width-40, y+9), '▾' if dest in self.DROPDOWN_FIELDS else '',
                 font=small, fill=(134, 169, 188))
             self.hits[f'field:{dest}'] = (
                 18, y, field_right, y+self.ROW_HEIGHT-3)
@@ -1624,9 +1627,7 @@ class SenderGui:
                 self.notice = 'Settings are locked while the sender is running.'
             elif dest == 'video_live':
                 self._assign(dest, not self.settings[dest])
-            elif dest in ('device', 'source', 'rate', 'capture_fps', 'profile',
-                          'screen_backend', 'capture_filter',
-                          'camera', 'screen_target', 'perceptual_resize'):
+            elif dest in self.DROPDOWN_FIELDS:
                 self._open_dropdown(dest)
             elif dest in self._visible_fields():
                 self.editing = True
@@ -1705,18 +1706,14 @@ class SenderGui:
                 dest = self.selected
                 if dest == 'video_live':
                     self._assign(dest, not self.settings[dest])
-                elif dest in ('device', 'source', 'rate', 'capture_fps', 'profile',
-                              'screen_backend', 'capture_filter',
-                              'camera', 'screen_target', 'perceptual_resize'):
+                elif dest in self.DROPDOWN_FIELDS:
                     self._open_dropdown(dest)
                 else:
                     self.editing = True
                     self.edit_buffer = str(self.settings.get(dest) or '')
             elif key in (glfw.KEY_ENTER, glfw.KEY_KP_ENTER) and self.selected in fields:
                 dest = self.selected
-                if dest in ('device', 'source', 'rate', 'capture_fps', 'profile',
-                            'screen_backend', 'capture_filter',
-                            'camera', 'screen_target', 'perceptual_resize'):
+                if dest in self.DROPDOWN_FIELDS:
                     self._open_dropdown(dest)
                 elif dest == 'video_live':
                     self._assign(dest, not self.settings[dest])

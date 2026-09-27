@@ -167,6 +167,67 @@ class SenderGuiTests(unittest.TestCase):
                 self.assertIn('source_audio', gui._visible_fields())
                 self.assertIn('source_audio_device', gui._visible_fields())
 
+    def test_video_audio_source_and_input_pickers_are_clickable(self):
+        audio_device = InputDevice(8, 'Loopback', 2, 48000)
+        gui = SenderGui(self.devices, audio_devices=(audio_device,))
+        gui.settings.update(source='video', video_source='clip.mp4')
+
+        def click(key):
+            rect = gui.hits[key]
+            position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
+            glfw = SimpleNamespace(
+                MOUSE_BUTTON_LEFT=1, PRESS=1,
+                get_cursor_pos=lambda _window: position)
+            gui._on_mouse(glfw, None, 1, 1, 0)
+
+        gui._canvas((960, 720))
+        self.assertIn('field:source_audio', gui.hits)
+        click('field:source_audio')
+        self.assertEqual(gui.dropdown, 'source_audio')
+        gui._canvas((960, 720))
+        click('option:1')
+        self.assertEqual(gui.settings['source_audio'], 'device')
+
+        gui._canvas((960, 720))
+        self.assertIn('field:source_audio_device', gui.hits)
+        self.assertIn('field:source_audio_input_side', gui.hits)
+        click('field:source_audio_device')
+        self.assertEqual(gui.dropdown, 'source_audio_device')
+        gui._canvas((960, 720))
+        click('option:0')
+        self.assertEqual(gui.settings['source_audio_device'], 8)
+
+        gui._canvas((960, 720))
+        click('field:source_audio_input_side')
+        self.assertEqual(gui.dropdown, 'source_audio_input_side')
+        gui._canvas((960, 720))
+        click('option:1')
+        self.assertEqual(gui.settings['source_audio_input_side'], 'left')
+
+    def test_advanced_downscaler_picker_is_visible_and_selectable(self):
+        gui = SenderGui(self.devices)
+        gui.settings.update(source='video', profile='fold-500')
+        gui.advanced = True
+        gui._canvas((960, 720))
+        self.assertIn('field:perceptual_resize', gui.hits)
+
+        rect = gui.hits['field:perceptual_resize']
+        position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
+        glfw = SimpleNamespace(
+            MOUSE_BUTTON_LEFT=1, PRESS=1,
+            get_cursor_pos=lambda _window: position)
+        gui._on_mouse(glfw, None, 1, 1, 0)
+        self.assertEqual(gui.dropdown, 'perceptual_resize')
+
+        gui._canvas((960, 720))
+        options = gui._choices('perceptual_resize')
+        option_index = next(index for index, item in enumerate(options)
+                            if item[1] == 'gamma-detail')
+        rect = gui.hits[f'option:{option_index}']
+        position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
+        gui._on_mouse(glfw, None, 1, 1, 0)
+        self.assertEqual(gui.settings['perceptual_resize'], 'gamma-detail')
+
     def test_mono_video_side_selector_is_visible_only_for_that_profile(self):
         gui = SenderGui(self.devices)
         self.assertIn('mono_video_side', gui._visible_fields())
@@ -310,6 +371,38 @@ class SenderGuiTests(unittest.TestCase):
             self.assertEqual(gui._choices('camera'),
                              (('USB camera', 'v4l2:/dev/video0'),))
             list_devices.assert_called_once_with()
+
+    def test_video_and_camera_pick_controls_are_visible_and_clickable(self):
+        gui = SenderGui(self.devices)
+        gui.settings.update(source='video')
+        gui._canvas((960, 720))
+        self.assertIn('browse:video_source', gui.hits)
+        rect = gui.hits['browse:video_source']
+        position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
+        glfw = SimpleNamespace(
+            MOUSE_BUTTON_LEFT=1, PRESS=1,
+            get_cursor_pos=lambda _window: position)
+        with patch('tools.v7_send_gui.pick_video_file',
+                   return_value='/media/clip.mp4'):
+            gui._on_mouse(glfw, None, 1, 1, 0)
+        self.assertEqual(gui.settings['video_source'], '/media/clip.mp4')
+
+        gui.settings.update(source='camera')
+        gui._canvas((960, 720))
+        self.assertIn('field:camera', gui.hits)
+        rect = gui.hits['field:camera']
+        position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
+        with patch('tools.v7_send_gui.enumerate_camera_sources',
+                   return_value=(('USB camera', 'v4l2:/dev/video0'),)):
+            gui._on_mouse(glfw, None, 1, 1, 0)
+        self.assertEqual(gui.dropdown, 'camera')
+        self.assertEqual(gui._choices('camera'),
+                         (('USB camera', 'v4l2:/dev/video0'),))
+        gui._canvas((960, 720))
+        rect = gui.hits['option:0']
+        position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
+        gui._on_mouse(glfw, None, 1, 1, 0)
+        self.assertEqual(gui.settings['camera'], 'v4l2:/dev/video0')
 
     def test_capture_fps_dropdown_uses_rates_reported_by_camera_driver(self):
         output = ('Interval: Discrete 0.033s (30.000 fps)\n'
