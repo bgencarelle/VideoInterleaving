@@ -5,6 +5,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 import tempfile
 import sys
+import threading
 import unittest
 from unittest import mock
 
@@ -12,7 +13,7 @@ import numpy as np
 
 from animation_modem import v7
 from tools.v7_capture import (CapturedFrame, _showinfo_source_size,
-                              ffmpeg_source, video_source)
+                              Throttled, ffmpeg_source, video_source)
 from tools.v7_live import _capture, _resolve_send_source, _values, run_send
 
 
@@ -80,6 +81,7 @@ class VideoSourceCommandTests(unittest.TestCase):
             self.assertIn('-rw_timeout', cmd)
             self.assertIn('rtsp://camera.example/live', cmd)
             grab.close()
+
 
     def test_https_vod_loops_unless_explicitly_marked_live(self):
         for live in (False, True):
@@ -152,6 +154,36 @@ class VideoSourceCommandTests(unittest.TestCase):
             b'Parsed_showinfo n:0 fmt:yuv420p s:640x480 i:P'), (640, 480))
         self.assertIsNone(_showinfo_source_size(b'frame has no dimensions'))
         self.assertIsNone(_showinfo_source_size(b's:0x480'))
+
+
+class ThrottledCleanupTests(unittest.TestCase):
+    def test_close_releases_a_blocked_source_without_a_process_handle(self):
+        class Capture:
+            paced = True
+
+            def __init__(self):
+                self.calls = 0
+                self.release = threading.Event()
+                self.closed = False
+
+            def __call__(self):
+                self.calls += 1
+                if self.calls > 1:
+                    self.release.wait(2)
+                return np.zeros((2, 2, 3), dtype=np.uint8)
+
+            def close(self):
+                self.closed = True
+                self.release.set()
+
+        capture = Capture()
+        throttled = Throttled(capture, 30)
+        np.testing.assert_array_equal(throttled.first_frame, 0.0)
+
+        throttled.close()
+
+        self.assertTrue(capture.closed)
+        self.assertFalse(throttled._thread.is_alive())
 
 
 class SenderPreparationTests(unittest.TestCase):

@@ -2,6 +2,8 @@
 import sys
 import unittest
 from pathlib import Path
+import time
+from unittest.mock import patch
 
 import numpy as np
 from PIL import Image
@@ -19,6 +21,7 @@ from mono_video import (FRESH_SLOTS, FOLDED_GUESTS, FOLD_SLOTS, HEAD_GROUPS,
                         MonoFreshFoldWire, fresh_rank_tables)            # noqa: E402
 from mono_wire import MonoWire                                            # noqa: E402
 from tools import v7_live                                                  # noqa: E402
+from tools.v7_source_audio import PacketAudioDelay                          # noqa: E402
 
 
 PACKETS = 8
@@ -147,6 +150,228 @@ class MonoVideoWireTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'requires EOF markers'):
             self.wire.encode(self.model, [self.values], eof_marker=False)
 
+    def test_source_audio_is_delayed_one_packet_on_left_of_right_video(self):
+        class AudioSource:
+            def __init__(self):
+                self.next = .1
+
+            def read(self, count):
+                values = np.full(count, self.next, dtype=np.float32)
+                self.next += .1
+                return values
+
+        modem = np.zeros((8, 2), dtype=np.float32)
+        modem[:, 1] = .25
+        mixed = v7_live._mix_mono_video_audio(
+            modem, frames=2, source=AudioSource(),
+            delay=PacketAudioDelay(), video_side=1, sample_rate=48_000)
+
+        np.testing.assert_array_equal(mixed[:4, 0], 0.0)
+        np.testing.assert_allclose(mixed[4:, 0], np.full(4, .1))
+        np.testing.assert_array_equal(mixed[:, 1], .25)
+
+    def test_burst_offset_is_one_speed_scaled_packet_from_mono_header(self):
+        class AudioBurst:
+            def __init__(self, samples):
+                self.samples = samples
+                self.position = 0
+
+            def read(self, count):
+                start = self.position
+                self.position += count
+                return self.samples[start:self.position]
+
+        speed = 2.0
+        video = MonoFreshFoldWire(self.model, side='right').encode(
+            self.model, [self.values]*2)
+        modem = v7.speed_pulse_stream(video, speed)
+        packet_samples = len(modem)//2
+        burst_offset = 128
+        burst = np.zeros(2*packet_samples, dtype=np.float32)
+        burst[burst_offset:burst_offset+24] = .25
+        mixed = v7_live._mix_mono_video_audio(
+            modem, 2, AudioBurst(burst), PacketAudioDelay(), video_side=1,
+            sample_rate=v7.RATE)
+
+        headers = v7.pulse_frame_hits(
+            mixed[:, 1:2], sample_rate=v7.RATE, direction='forward')
+        decoded, info = self._decode(mixed[:, 1:2])
+        burst_samples = np.flatnonzero(np.abs(mixed[:, 0]) > .2)
+        self.assertEqual(len(headers), 2)
+        self.assertEqual(info.get('eof_markers_validated'), 2)
+        self.assertTrue(decoded[0].diag.get('displayable'))
+        self.assertEqual(len(burst_samples), 24)
+        offset_from_second_header = burst_samples[0]-round(headers[1][0])
+        self.assertEqual(offset_from_second_header, burst_offset)
+        picture_available = decoded[0].diag['eof_marker']['end']
+        self.assertGreaterEqual(burst_samples[0], picture_available)
+        self.assertLess(burst_samples[0]-picture_available, burst_offset+2)
+        self.assertEqual(packet_samples, round(v7.PULSE_FRAME/speed))
+
+    def test_opposite_leg_probe_flags_video_and_dual_mono_routing(self):
+        wire = MonoFreshFoldWire(self.model, side='right')
+        stereo = wire.encode(self.model, [self.values]*PACKETS)
+
+        def probe_streak(samples):
+            probe = v7_live._MonoChannelProbe(v7.RATE, 'forward')
+            for start in range(0, len(samples), 1024):
+                probe.add(samples[start:start+1024])
+                probe.scan(time.monotonic())
+            return probe.streak
+
+        right_streak = probe_streak(stereo[:, 1:2])
+        left_streak = probe_streak(stereo[:, 0:1])
+        duplicated = np.repeat(stereo[:, 1:2], 2, axis=1)
+        duplicate_streaks = [
+            probe_streak(duplicated[:, index:index+1]) for index in (0, 1)
+        ]
+
+        self.assertGreaterEqual(right_streak, 2)
+        self.assertLess(left_streak, 2)
+        self.assertTrue(all(streak >= 2 for streak in duplicate_streaks))
+
+    def test_auto_side_waits_for_mono_status_and_keeps_right_preferred(self):
+        from tone_code import FOLD_500
+        result = self._decode(self.audio[:, 1])[0][-1]
+
+        self.assertEqual(v7_live._mono_packet_status_mode(result),
+                         MONO_VIDEO_MODE)
+        # Right starts active and is retained once its distinct mono status is
+        # decoded, even when the opposite leg also has a pulse train.
+        self.assertFalse(v7_live._should_try_other_mono_leg(
+            MONO_VIDEO_MODE, MONO_VIDEO_MODE, 8,
+            active_has_packet=True, switch_count=0))
+        # A pulse-only opposite-leg candidate can be tried when the preferred
+        # right leg is silent; selection is not locked until MONO_500 arrives.
+        self.assertTrue(v7_live._should_try_other_mono_leg(
+            None, MONO_VIDEO_MODE, 2,
+            active_has_packet=False, switch_count=0))
+        # A decoded non-mono status allows testing the other leg, while a weak
+        # pulse streak or a packet with no decoded status does not.
+        self.assertTrue(v7_live._should_try_other_mono_leg(
+            FOLD_500, MONO_VIDEO_MODE, 2,
+            active_has_packet=True, switch_count=0))
+        self.assertFalse(v7_live._should_try_other_mono_leg(
+            None, MONO_VIDEO_MODE, 2,
+            active_has_packet=True, switch_count=0))
+        self.assertFalse(v7_live._should_try_other_mono_leg(
+            None, MONO_VIDEO_MODE, 1,
+            active_has_packet=False, switch_count=0))
+
+    def test_live_sender_places_input_audio_left_and_video_right(self):
+        written = []
+
+        class OutputStream:
+            samplerate = float(v7.RATE)
+
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def write(self, samples):
+                written.append(np.array(samples, dtype=np.float32, copy=True))
+
+        class AudioSource:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def wait_for_samples(self, *_args):
+                return True
+
+            def read(self, count):
+                return np.full(count, .1, dtype=np.float32)
+
+            def close(self):
+                pass
+
+        import types
+        fake_sounddevice = types.ModuleType('sounddevice')
+        fake_sounddevice.OutputStream = OutputStream
+        with patch.dict(sys.modules, {'sounddevice': fake_sounddevice}), \
+                patch.object(v7_live, '_model', return_value=self.model), \
+                patch.object(v7_live, '_capture', return_value=lambda: self.image), \
+                patch('tools.v7_source_audio.DeviceSourceAudio', AudioSource):
+            args = v7_live.parser().parse_args([
+                'send', '--device', 'memory', '--source', 'test',
+                '--seconds', '.24', '--no-log', '--experimental-mono-fold',
+                '--source-audio', 'device', '--source-audio-device', '7'])
+            v7_live.run_send(args)
+
+        self.assertGreaterEqual(len(written), 2)
+        self.assertEqual(written[0].shape[1], 2)
+        self.assertGreater(float(np.max(np.abs(written[0][:, 1]))), 0.0)
+        np.testing.assert_array_equal(written[0][:, 0], 0.0)
+        np.testing.assert_allclose(written[1][:, 0], .1)
+        self.assertGreater(float(np.max(np.abs(written[1][:, 1]))), 0.0)
+
+    def test_embedded_video_audio_uses_the_shared_capture_clock(self):
+        written = []
+        captures = []
+
+        class OutputStream:
+            samplerate = float(v7.RATE)
+
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def write(self, samples):
+                written.append(np.array(samples, dtype=np.float32, copy=True))
+
+        class SharedSource:
+            def __init__(self, source, sample_rate, **kwargs):
+                captures.append((source, sample_rate, kwargs))
+                self.has_audio = True
+
+                def grab():
+                    return MonoVideoWireTests.image
+
+                grab.close = self.close
+                grab.paced = True
+                self.video_grab = grab
+
+            def wait_for_samples(self, *_args):
+                return True
+
+            def read(self, count):
+                return np.full(count, .1, dtype=np.float32)
+
+            def close(self):
+                pass
+
+        import types
+        fake_sounddevice = types.ModuleType('sounddevice')
+        fake_sounddevice.OutputStream = OutputStream
+        with patch.dict(sys.modules, {'sounddevice': fake_sounddevice}), \
+                patch.object(v7_live, '_model', return_value=self.model), \
+                patch('tools.v7_source_audio.SharedVideoAudioSource',
+                      SharedSource), \
+                patch.object(v7_live, '_capture',
+                             side_effect=AssertionError('separate capture')):
+            args = v7_live.parser().parse_args([
+                'send', '--device', 'memory', '--source', 'video',
+                '--video-source', 'clip.mkv', '--seconds', '.24', '--no-log',
+                '--experimental-mono-fold'])
+            v7_live.run_send(args)
+
+        self.assertEqual(captures[0][0], 'clip.mkv')
+        self.assertEqual(captures[0][1], v7.RATE)
+        self.assertEqual(captures[0][2]['width'], args.capture_width)
+        self.assertGreaterEqual(len(written), 2)
+        np.testing.assert_array_equal(written[0][:, 0], 0.0)
+        np.testing.assert_allclose(written[1][:, 0], .1)
+        self.assertGreater(float(np.max(np.abs(written[0][:, 1]))), 0.0)
+
     def test_selected_output_side_leaves_the_other_leg_silent_and_decodes(self):
         for side, index, silent in (('left', 0, 1), ('right', 1, 0)):
             with self.subTest(side=side):
@@ -180,8 +405,10 @@ class MonoVideoWireTests(unittest.TestCase):
             'receive', '--device', 'null', '--experimental-mono-fold'])
         self.assertTrue(send.experimental_mono_fold)
         self.assertTrue(recv.experimental_mono_fold)
-        self.assertEqual(send.mono_video_side, 'left')
-        self.assertEqual(recv.mono_video_side, 'left')
+        self.assertEqual(send.mono_video_side, 'right')
+        self.assertEqual(recv.mono_video_side, 'auto')
+        self.assertIsNone(send.source_audio)
+        self.assertIsNone(send.source_audio_device)
         self.assertEqual(v7_live._fold_slots(send), 0)
         self.assertEqual(v7_live._fold_slots(recv), 0)
         with self.assertRaisesRegex(ValueError, 'mutually exclusive'):

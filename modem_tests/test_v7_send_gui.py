@@ -7,10 +7,10 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from tools import v7_live
-from tools.v7_send_gui import (OutputDevice, ScreenTarget, SenderGui,
+from tools.v7_send_gui import (InputDevice, OutputDevice, ScreenTarget, SenderGui,
                                build_command, enumerate_screen_targets,
                                enumerate_camera_sources, linux_camera_sources,
-                               output_devices,
+                               input_devices, output_devices,
                                parse_avfoundation_screen_sources,
                                parse_ffmpeg_camera_sources, pick_video_file,
                                sample_rate_options, validate_settings)
@@ -25,7 +25,12 @@ class SenderGuiTests(unittest.TestCase):
             'source': 'screen',
             'rate': None,
             'profile': 'fold-500',
-            'mono_video_side': 'left',
+            'mono_video_side': 'right',
+            'source_audio': 'source',
+            'source_audio_device': None,
+            'source_audio_input_side': 'mix',
+            'source_audio_gain': '1',
+            'source_audio_delay_ms': '0',
             'speed': '1',
             'encode_filter': 'auto',
             'brightness': '',
@@ -64,6 +69,21 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(devices[0].index, 1)
         gui = SenderGui(devices)
         self.assertIsNone(gui.settings['device'])
+
+    def test_input_device_picker_lists_only_input_capable_devices(self):
+        sd = Mock()
+        sd.query_devices.return_value = [
+            {'name': 'Input', 'max_input_channels': 2,
+             'max_output_channels': 0, 'default_samplerate': 48000},
+            {'name': 'Output', 'max_input_channels': 0,
+             'max_output_channels': 2, 'default_samplerate': 96000},
+        ]
+
+        devices = input_devices(sd)
+
+        self.assertEqual([(item.index, item.channels) for item in devices],
+                         [(0, 2)])
+        self.assertIsInstance(devices[0], InputDevice)
 
     def test_sample_rates_are_probed_for_selected_device_and_channel_count(self):
         options = sample_rate_options(self.device, 2, self.sd)
@@ -110,6 +130,28 @@ class SenderGuiTests(unittest.TestCase):
         self.assertIsNone(args.experimental_fold)
         self.assertIsNone(args.encode_filter)
         self.assertIn('--experimental-mono-fold', command)
+        self.assertEqual(args.source_audio, 'source')
+
+    def test_mono_video_can_route_an_explicit_audio_input_device(self):
+        audio_device = InputDevice(8, 'Loopback', 2, 48000)
+        self.settings.update(
+            profile='mono-fold-500', source='video',
+            video_source='clip.mp4', source_audio='device',
+            source_audio_device=8, source_audio_input_side='left',
+            source_audio_gain='0.7', source_audio_delay_ms='12')
+
+        command = build_command(
+            self.settings, self.devices, self.sd,
+            audio_devices=(audio_device,))
+        args = v7_live.parser().parse_args(command[2:])
+
+        self.assertEqual(args.mono_video_side, 'right')
+        self.assertEqual(args.source_audio, 'device')
+        self.assertEqual(args.source_audio_device, 8)
+        self.assertEqual(args.source_audio_input_side, 'left')
+        self.assertEqual(args.source_audio_gain, .7)
+        self.assertEqual(args.source_audio_delay_ms, 12)
+        self.sd.check_input_settings.assert_called_once()
 
     def test_mono_video_side_selector_is_visible_only_for_that_profile(self):
         gui = SenderGui(self.devices)
@@ -117,8 +159,13 @@ class SenderGuiTests(unittest.TestCase):
 
         gui.settings.update(profile='mono-fold-500', mono_video_side='right')
         self.assertIn('mono_video_side', gui._visible_fields())
+        self.assertIn('source_audio', gui._visible_fields())
+        self.assertNotIn('source_audio_device', gui._visible_fields())
         self.assertEqual(gui._value_label('mono_video_side'),
                          'Right output · left stays clear')
+
+        gui.settings['source_audio'] = 'device'
+        self.assertIn('source_audio_device', gui._visible_fields())
 
     def test_mono_video_fold_requires_pilots_eof_and_no_pre_resize(self):
         self.settings.update(profile='mono-fold-500', pilot_tones=False)

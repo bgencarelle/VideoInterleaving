@@ -492,6 +492,7 @@ class Throttled:
     def __init__(self, grab, hz):
         self._grab = grab
         self._latest = None
+        self._first_frame = None
         self._error = None
         self._updated = None
         self._ready = threading.Event()
@@ -517,6 +518,8 @@ class Throttled:
                     raise RuntimeError('Capture produced no frames')
                 with self._lock:
                     self._latest = frame
+                    if self._first_frame is None:
+                        self._first_frame = frame
                     self._updated = time.monotonic()
                     self.grabs += 1
                 self._ready.set()
@@ -545,6 +548,12 @@ class Throttled:
         with self._lock:
             self._period = 1.0/max(hz, .1)
 
+    @property
+    def first_frame(self):
+        """The first captured frame, retained for soundtrack-start pairing."""
+        with self._lock:
+            return self._first_frame
+
     def __call__(self):
         with self._lock:
             if self._error is not None:
@@ -557,16 +566,16 @@ class Throttled:
     def close(self):
         self._stop.set()
         proc = getattr(self._grab, 'proc', None)
-        if proc is not None:
-            if hasattr(self._grab, 'close'):
-                self._grab.close()
-            else:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(timeout=2)
+        close = getattr(self._grab, 'close', None)
+        if close is not None:
+            close()
+        elif proc is not None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
         self._thread.join(timeout=2)
 
 

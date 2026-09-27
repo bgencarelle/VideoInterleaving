@@ -24,6 +24,7 @@ the receiver can diagnose the behavior rather than silently restarting it.
 """
 import argparse
 from collections import deque
+import os
 import queue
 import sys
 import threading
@@ -396,6 +397,30 @@ def _coded_mode_matches_fold(result, fold):
     return mode is not None and FOLD_MODE_TO_SLOTS.get(mode) == fold.slots
 
 
+def _mix_mono_video_audio(modem, frames, source, delay, video_side,
+                          sample_rate, gain=1.0):
+    """Put delayed source audio opposite the mono video carrier."""
+    output = np.array(modem, dtype=np.float32, copy=True, order='C')
+    if output.ndim != 2 or output.shape[1] != 2:
+        raise ValueError('mono video plus source audio requires stereo output')
+    frames = max(1, int(frames))
+    audio_side = 1-int(video_side)
+    base, extra = divmod(len(output), frames)
+    offset = 0
+    for frame in range(frames):
+        count = base + (frame < extra)
+        if count <= 0:
+            continue
+        samples = (source.read(count) if source is not None else
+                   np.zeros(count, dtype=np.float32))
+        samples = np.clip(np.asarray(samples, dtype=np.float32)*float(gain),
+                          -1.0, 1.0)
+        output[offset:offset+count, audio_side] = delay.apply(
+            samples, count, sample_rate)
+        offset += count
+    return output
+
+
 def run_send(args):
     import sounddevice as sd
     from tools.v7_capture import Throttled
@@ -416,6 +441,21 @@ def run_send(args):
     if mono_fold_profile and getattr(args, 'mono_sum', False):
         raise ValueError('the mono-video side selector requires two output '
                          'channels; do not combine it with --mono-sum')
+    source_audio_mode = getattr(args, 'source_audio', None)
+    if mono_fold_profile:
+        source_audio_mode = source_audio_mode or 'source'
+        if (source_audio_mode == 'device' and
+                getattr(args, 'source_audio_device', None) is None):
+            raise ValueError('--source-audio device requires '
+                             '--source-audio-device')
+    elif source_audio_mode not in (None, 'off'):
+        raise ValueError('source audio requires --experimental-mono-fold')
+    audio_gain = float(getattr(args, 'source_audio_gain', 1.0))
+    extra_audio_delay_ms = float(getattr(args, 'source_audio_delay_ms', 0.0))
+    if not np.isfinite(audio_gain) or not 0.0 <= audio_gain <= 4.0:
+        raise ValueError('--source-audio-gain must be between 0 and 4')
+    if not np.isfinite(extra_audio_delay_ms) or extra_audio_delay_ms < 0:
+        raise ValueError('--source-audio-delay-ms must be finite and non-negative')
     profile_slots = 500 if mono_fold_profile else slots
     args.encode_filter, args.brightness = _send_profile(args, profile_slots)
     if getattr(args, 'perceptual_resize', 'off') != 'off':
@@ -429,7 +469,7 @@ def run_send(args):
         _ensure_test_modem_path()
         from mono_video import MonoFreshFoldWire
         mono_wire = MonoFreshFoldWire(
-            model, side=getattr(args, 'mono_video_side', 'left'))
+            model, side=getattr(args, 'mono_video_side', 'right'))
         from tone_code import warmup_status_templates, MONO_500
         warmup_status_templates(MONO_500)
     elif mono_profile:
@@ -447,16 +487,15 @@ def run_send(args):
         warmup_tone_templates(fold.slots)
     requested_rate = getattr(args, 'rate', None)
     output_rate = None
-    raw_grab = _capture(args)
     capture_hz = args.capture_fps or (CAMERA_CAPTURE_FPS
                                       if args.source == 'camera' else
                                       (60 if args.screen_backend == 'ffmpeg' and
                                        sys.platform == 'darwin' else FPS))
     wire_fps = FPS*args.speed
-    # Drain a paced FFmpeg source continuously and expose only
-    # the newest frame to the audio encoder. Reading the pipe once per encoded
-    # frame creates seconds of stale-camera latency.
-    grab = Throttled(raw_grab, capture_hz)
+    raw_grab = None
+    grab = None
+    source_audio = None
+    audio_delay = None
     batches = queue.Queue(maxsize=2)
     stop = threading.Event()
     sentinel = object()
@@ -554,6 +593,9 @@ def run_send(args):
         frames = []
         aspects = []
         counter = 1
+        first_audio_video_frame = (
+            getattr(grab, 'first_frame', None) if source_audio is not None
+            else None)
         next_capture = time.monotonic()
         failure = None
         try:
@@ -562,7 +604,11 @@ def run_send(args):
                 delay = next_capture-time.monotonic()
                 if delay > 0:
                     time.sleep(delay)
-                value, aspect = _values(model, grab(), args.encode_filter,
+                frame = first_audio_video_frame
+                first_audio_video_frame = None
+                if frame is None:
+                    frame = grab()
+                value, aspect = _values(model, frame, args.encode_filter,
                                         args.brightness, args.gamma,
                                         getattr(args, 'perceptual_resize', 'off'),
                                         getattr(args, 'perceptual_detail_strength', 0.25))
@@ -619,13 +665,57 @@ def run_send(args):
             # The producer must wait until that clock is known so its packet
             # resampling preserves 1x playback speed on any supported device.
             output_rate = float(stream.samplerate)
-            if hasattr(grab, 'retune'):
-                grab.retune(wire_fps)
             if (not np.isfinite(args.speed) or
                     not P.MIN_PLAYBACK_SPEED <= args.speed <= P.MAX_PLAYBACK_SPEED):
                 raise ValueError(
                     f'--speed must be between {P.MIN_PLAYBACK_SPEED:g} and '
                     f'{P.MAX_PLAYBACK_SPEED:g} (higher speeds may lose high-frequency detail)')
+            first_packet_samples = len(P.speed_pulse_stream(
+                np.zeros(P.PULSE_FRAME, dtype=np.float32), args.speed,
+                rate=output_rate))
+            # Start picture and soundtrack capture only after the output clock
+            # is known, and close together so file/stream timelines begin near
+            # the same source time.
+            if (mono_fold_profile and source_audio_mode == 'source' and
+                    args.source == 'video' and hasattr(os, 'mkfifo')):
+                from tools.v7_source_audio import SharedVideoAudioSource
+                capture = SharedVideoAudioSource(
+                    args.video_source, output_rate, width=args.capture_width,
+                    scale_flags=_capture_scale_flags(args),
+                    live=True if args.video_live else None,
+                    target_samples=first_packet_samples)
+                raw_grab = capture.video_grab
+                source_audio = capture if capture.has_audio else None
+            else:
+                raw_grab = _capture(args)
+            if (mono_fold_profile and source_audio_mode == 'source' and
+                    args.source == 'video' and not hasattr(os, 'mkfifo')):
+                from tools.v7_source_audio import FFmpegSourceAudio
+                source_audio = FFmpegSourceAudio(
+                    args.video_source, output_rate,
+                    live=True if args.video_live else None,
+                    target_samples=first_packet_samples)
+            elif mono_fold_profile and source_audio_mode == 'device':
+                from tools.v7_source_audio import DeviceSourceAudio
+                source_audio = DeviceSourceAudio(
+                    args.source_audio_device, output_rate,
+                    input_side=getattr(args, 'source_audio_input_side', 'mix'),
+                    target_samples=first_packet_samples)
+            if mono_fold_profile:
+                from tools.v7_source_audio import PacketAudioDelay
+                audio_delay = PacketAudioDelay(extra_audio_delay_ms)
+            # Drain paced FFmpeg capture continuously and expose the newest
+            # frame; reading once per encoded frame creates stale-video lag.
+            grab = Throttled(raw_grab, capture_hz)
+            if hasattr(grab, 'retune'):
+                grab.retune(wire_fps)
+            if source_audio is not None:
+                # Preserve the soundtrack beginning by waiting for up to one
+                # packet of samples. No-track sources end immediately; startup
+                # underflow remains zero-filled rather than discarding audio.
+                source_audio.wait_for_samples(
+                    first_packet_samples,
+                    first_packet_samples/output_rate+.2)
             worker.start()
             worker_started = True
             if not args.no_log:
@@ -646,7 +736,15 @@ def run_send(args):
                              if mono_wire is not None else
                              'mono-sum' if args.mono_sum else 'M/S')
                 if mono_fold_profile:
-                    wire_mode += f' side={mono_wire.side}'
+                    audio_side = 'right' if mono_wire.side == 'left' else 'left'
+                    audio_label = source_audio_mode
+                    if source_audio_mode == 'source' and source_audio is None:
+                        audio_label += '/no-track'
+                    if source_audio_mode == 'device':
+                        audio_label += (
+                            f'/{getattr(args, "source_audio_input_side", "mix")}')
+                    wire_mode += (f' video={mono_wire.side} '
+                                  f'audio={audio_label}->{audio_side}')
                 print(f'V7 send ready: source={args.source} device={args.device!r} '
                        f'rate={output_rate:g}Hz wire={wire_fps:.3f}fps '
                        f'speed={args.speed:g}x {camera_text}'
@@ -659,9 +757,25 @@ def run_send(args):
                 if item is sentinel:
                     break
                 counter, audio, stats = item
-                # sounddevice requires a C-contiguous interleaved buffer;
-                # filtering/resampling can return a strided view here.
-                stream.write(np.ascontiguousarray(audio, dtype=np.float32))
+                if mono_fold_profile:
+                    frames = max(1, int(stats['frames_encoded']))
+                    base, extra = divmod(len(audio), frames)
+                    offset = 0
+                    for index in range(frames):
+                        count = base + (index < extra)
+                        packet = _mix_mono_video_audio(
+                            audio[offset:offset+count], 1, source_audio,
+                            audio_delay, mono_wire.carrier_index, output_rate,
+                            audio_gain)
+                        # One packet per blocking write lets paced soundtrack
+                        # capture advance while the DAC plays this video frame.
+                        stream.write(np.ascontiguousarray(
+                            packet, dtype=np.float32))
+                        offset += count
+                else:
+                    # sounddevice requires a C-contiguous interleaved buffer;
+                    # filtering/resampling can return a strided view here.
+                    stream.write(np.ascontiguousarray(audio, dtype=np.float32))
                 if args.log and not args.no_log:
                     print({
                         'sent_through_frame': (
@@ -677,8 +791,20 @@ def run_send(args):
             worker.join(timeout=2)
         else:
             close = getattr(grab, 'close', None)
+            if close is None:
+                close = getattr(raw_grab, 'close', None)
             if close is not None:
                 close()
+        if source_audio is not None:
+            source_audio.close()
+            if args.log and not args.no_log:
+                buffer = getattr(source_audio, 'buffer', None)
+                clock = getattr(source_audio, 'clock_match', None)
+                print({
+                    'source_audio_dropped_samples': getattr(buffer, 'dropped', 0),
+                    'source_audio_max_clock_correction_ppm': round(
+                        getattr(clock, 'max_correction', 0.0)*1_000_000, 1),
+                }, flush=True)
     if producer_errors:
         failure = producer_errors[0]
         raise RuntimeError(f'V7 live producer failed: {failure}') from failure
@@ -701,6 +827,81 @@ def capture_rate_for(device_info):
     return min(rate, MAX_CAPTURE_RATE)
 
 
+class _MonoChannelProbe:
+    """Pulse-only monitor for the non-selected receiver leg."""
+
+    MIN_CONFIDENCE = .75
+
+    def __init__(self, rate, direction='auto', decode_history=1,
+                 decode_batch=1):
+        self.input = LiveInput(decode_history, decode_batch, rate=rate,
+                               direction=direction)
+        self.last_position = None
+        self.last_scale = None
+        self.last_direction = None
+        self.streak = 0
+
+    def add(self, block):
+        self.input.add(block)
+
+    def reset(self):
+        self.input.reset()
+        self.last_position = None
+        self.last_scale = None
+        self.last_direction = None
+        self.streak = 0
+
+    def scan(self, now):
+        audio = self.input.take(now)
+        if audio is None:
+            return self.streak
+        audio_start = self.input.total-len(audio)
+        for position, scale, confidence, direction in self.input.pulse_hits(audio):
+            absolute = int(round(audio_start+position))
+            if (self.last_position is not None and
+                    absolute <= self.last_position):
+                continue
+            if confidence < self.MIN_CONFIDENCE:
+                continue
+            if self.last_position is None:
+                self.streak = 1
+            else:
+                expected = P.PULSE_FRAME*.5*(scale+self.last_scale)
+                tolerance = max(3*scale, .15*expected)
+                if (direction == self.last_direction and
+                        abs((absolute-self.last_position)-expected) <= tolerance):
+                    self.streak = min(self.streak+1, 8)
+                else:
+                    self.streak = 1
+            self.last_position = absolute
+            self.last_scale = scale
+            self.last_direction = direction
+        self.input.decoded()
+        return self.streak
+
+
+def _mono_packet_status_mode(result):
+    """Coded status mode carried by a decoded mono-profile candidate."""
+    if result is None:
+        return None
+    diag = getattr(result, 'diag', {}) or {}
+    timing = diag.get('pilot_timing') or {}
+    return timing.get('coded_status_mode', diag.get('coded_status_mode'))
+
+
+def _should_try_other_mono_leg(active_mode, expected_mode, opposite_streak,
+                               active_has_packet, switch_count):
+    """Probe the other leg only when it has pulses and this leg is unproven."""
+    if opposite_streak < 2 or switch_count >= 2:
+        return False
+    if active_mode == expected_mode:
+        return False
+    # A pulse-only candidate may rescue an otherwise silent selected leg. If
+    # this leg did decode a packet, require a known, non-mono status before
+    # abandoning it; a damaged packet alone must not make us leave the right leg.
+    return not active_has_packet or active_mode is not None
+
+
 def run_receive(args):
     if getattr(args, 'image_only', False) and getattr(args, 'headless', False):
         raise ValueError('--image-only cannot be combined with --headless')
@@ -718,8 +919,10 @@ def run_receive(args):
         if mono_fold_profile:
             from mono_video import MonoFreshFoldWire
             model = _model(args.fixture, 'box')
+            requested_side = getattr(args, 'mono_video_side', 'auto')
             mono_wire = MonoFreshFoldWire(
-                model, side=getattr(args, 'mono_video_side', 'left'))
+                model, side=('right' if requested_side == 'auto'
+                             else requested_side))
         else:
             from mono_wire import MonoWire
             model = _model(args.fixture, 'nearest')
@@ -809,6 +1012,20 @@ def _run_receive(args, fold, mono_wire=None):
     live_input = LiveInput(
         args.decode_history, args.decode_batch, rate=capture_rate,
         direction=getattr(args, 'direction', 'auto'))
+    auto_mono_side = bool(
+        mono_wire is not None and
+        getattr(mono_wire, 'wire_profile', None) == 'mono-fresh-500' and
+        getattr(args, 'mono_video_side', 'auto') == 'auto' and
+        input_channels > 1)
+    auto_mono_locked = not auto_mono_side
+    auto_mono_switches = 0
+    opposite_input_index = (
+        1-video_input_index if mono_wire is not None and
+        video_input_index is not None and input_channels > 1 else None)
+    opposite_probe = (_MonoChannelProbe(
+        capture_rate, getattr(args, 'direction', 'auto'),
+        args.decode_history, args.decode_batch)
+        if opposite_input_index is not None else None)
     direction_streak = DirectionStreak()
     # Absolute capture arrival of the last pulse hit handed to a decoder.
     # The sample clock never rewinds, so an input gap needs no reset here.
@@ -826,6 +1043,13 @@ def _run_receive(args, fold, mono_wire=None):
     previous_values = None
     diagnostics = {} if args.diagnostics else None
     auto_gain = 1.0
+    if auto_mono_side:
+        initial_side = 'left' if video_input_index == 0 else 'right'
+        input_mode = f'mono-video-auto-{initial_side}'
+    elif mono_wire is not None and video_input_index is not None:
+        input_mode = f'mono-video-{getattr(mono_wire, "side", "")}'
+    else:
+        input_mode = 'mono-input' if input_channels == 1 else 'M/S'
     meter = {'peak': np.zeros(input_channels),
              'rms': np.zeros(input_channels), 'blocks': 0,
              'dropped': 0, 'decoded': 0, 'verified': 0, 'lost': 0,
@@ -842,11 +1066,10 @@ def _run_receive(args, fold, mono_wire=None):
              'direction_streak': 0,
              'pulse': None, 'aspect': 0, 'aspect_candidate': 0,
              'aspect_streak': 0, 'input_samples': 0, 'started': time.monotonic(),
-             'auto_gain': 1.0, 'polarity': 1,
-             'input_fps': 0., 'decode_fps': 0., 'shown_fps': 0.,
-              'mode': (f'mono-video-{getattr(mono_wire, "side", "")}'
-                       if mono_wire is not None and video_input_index is not None
-                       else 'mono-input' if input_channels == 1 else 'M/S'),
+              'auto_gain': 1.0, 'polarity': 1,
+              'input_fps': 0., 'decode_fps': 0., 'shown_fps': 0.,
+              'channel_hint': '',
+              'mode': input_mode,
              'device': str(args.device), 'capture_rate': capture_rate,
              'input_channels': input_channels}
 
@@ -970,15 +1193,71 @@ def _run_receive(args, fold, mono_wire=None):
                 f'foundation {meter["quality"]}',
                 f'pulse {pulse_text}   speed {speed_text}',
                 f'audio {playback_text}',
-                f'timing {timing_text}'),
+                f'timing {timing_text}',
+                meter['channel_hint'] or 'channel route not independently flagged'),
         }
 
     RECEIVER_GUI_STATUS.update(meter=meter,
                                diagnostics=display_diagnostics)
 
+    def update_channel_hint():
+        if auto_mono_side and not auto_mono_locked:
+            selected = 'left' if video_input_index == 0 else 'right'
+            hint = (f'auto probing {selected} for MONO_500; right wins '
+                    'if both legs validate')
+        elif (auto_mono_side and opposite_probe is not None and
+              opposite_probe.streak >= 2):
+            hint = ('V7 pulses on both legs; possible duplicated mono '
+                    '(MONO_500 validated on selected leg)')
+        elif auto_mono_side:
+            selected = 'left' if video_input_index == 0 else 'right'
+            hint = f'auto selected {selected} after MONO_500 validation'
+        elif opposite_probe is None or opposite_probe.streak < 2:
+            hint = ''
+        elif meter['verified']:
+            hint = ('V7 pulses on both legs; possible duplicated mono '
+                    '(decoder profile verified on selected leg)')
+        else:
+            other = 'left' if opposite_input_index == 0 else 'right'
+            selected = 'left' if video_input_index == 0 else 'right'
+            hint = (f'V7 pulses on {other}; selected {selected} has not '
+                    'validated MONO_500 — check --mono-video-side')
+        if hint != meter['channel_hint']:
+            meter['channel_hint'] = hint
+            if hint and not args.no_log:
+                print({'status': 'mono_channel_hint', 'hint': hint}, flush=True)
+
+    def switch_to_other_mono_leg():
+        """Try the probed leg while keeping its pulse history for decoding."""
+        nonlocal live_input, video_input_index, opposite_input_index
+        nonlocal decoded_through, direction_streak, auto_mono_switches
+        if (not auto_mono_side or auto_mono_locked or opposite_probe is None or
+                auto_mono_switches >= 2):
+            return False
+        live_input, opposite_probe.input = opposite_probe.input, live_input
+        video_input_index, opposite_input_index = (
+            opposite_input_index, video_input_index)
+        opposite_probe.last_position = None
+        opposite_probe.last_scale = None
+        opposite_probe.last_direction = None
+        opposite_probe.streak = 0
+        auto_mono_switches += 1
+        decoded_through = None
+        pulse_state.tail.reset()
+        pulse_state.last_verified = None
+        direction_streak = DirectionStreak()
+        meter['playback_direction'] = None
+        meter['direction_candidate'] = None
+        meter['direction_streak'] = 0
+        selected = 'left' if video_input_index == 0 else 'right'
+        meter['mode'] = f'mono-video-auto-{selected}'
+        meter['channel_hint'] = (
+            f'probing {selected} for MONO_500; right wins if both validate')
+        return True
+
     def decode_available():
         nonlocal latest, auto_gain, previous_values, direction_streak
-        nonlocal decoded_through
+        nonlocal decoded_through, auto_mono_locked
         if input_gap.is_set():
             # Never stitch samples across a callback drop.  Keep displaying
             # the last good image while pulse acquisition starts over.
@@ -987,6 +1266,9 @@ def _run_receive(args, fold, mono_wire=None):
             pulse_state.tail.reset()
             pulse_state.last_verified = None
             direction_streak = DirectionStreak()
+            if opposite_probe is not None:
+                opposite_probe.reset()
+                meter['channel_hint'] = ''
             meter['playback_direction'] = None
             meter['direction_candidate'] = None
             meter['direction_streak'] = 0
@@ -1008,6 +1290,10 @@ def _run_receive(args, fold, mono_wire=None):
                 # Blocks are private copies of the callback data; LiveInput
                 # applies the leveler's polarity to the stored audio itself.
                 block = blocks.get_nowait()
+                if (opposite_probe is not None and block.ndim == 2 and
+                        block.shape[1] > opposite_input_index):
+                    opposite_probe.add(
+                        block[:, opposite_input_index:opposite_input_index+1].copy())
                 if (video_input_index is not None and block.ndim == 2 and
                         block.shape[1] > video_input_index):
                     block = block[:, video_input_index:video_input_index+1]
@@ -1024,10 +1310,19 @@ def _run_receive(args, fold, mono_wire=None):
         # decode cycles follow the wire, not the capture block size, and an
         # idle or signal-free input never reaches the demodulator.
         now = time.monotonic()
+        if opposite_probe is not None:
+            opposite_probe.scan(now)
+            update_channel_hint()
         audio = live_input.take(now)
         meter['input_fps'] = live_input.incoming_fps(now)
         meter['polarity'] = live_input.polarity
         if audio is None:
+            if _should_try_other_mono_leg(
+                    None, getattr(mono_wire, 'status_mode', None),
+                    opposite_probe.streak if opposite_probe is not None else 0,
+                    active_has_packet=False, switch_count=auto_mono_switches):
+                if switch_to_other_mono_leg():
+                    update_channel_hint()
             return
         pulse_hits = live_input.pulse_hits(audio)
         if not pulse_hits:
@@ -1079,6 +1374,22 @@ def _run_receive(args, fold, mono_wire=None):
         decode_cpu_times.append((time.monotonic(), decode_cpu_seconds))
         meter['decode_cpu_ms'] = decode_cpu_seconds*1000.0
         live_input.decoded()
+        if auto_mono_side:
+            modes = [_mono_packet_status_mode(result) for result in results]
+            expected_mode = getattr(mono_wire, 'status_mode', None)
+            if expected_mode in modes:
+                auto_mono_locked = True
+                update_channel_hint()
+            else:
+                active_mode = next((mode for mode in reversed(modes)
+                                    if mode is not None), None)
+                if _should_try_other_mono_leg(
+                        active_mode, expected_mode,
+                        opposite_probe.streak if opposite_probe is not None else 0,
+                        active_has_packet=bool(results),
+                        switch_count=auto_mono_switches):
+                    if switch_to_other_mono_leg():
+                        update_channel_hint()
         if results:
             result = results[-1]
             independently_validated = bool(
@@ -1175,6 +1486,7 @@ def _run_receive(args, fold, mono_wire=None):
                                        1000/P.LOOP_IPS)
             if result.status in ('received', 'verified'):
                 meter['verified'] += 1
+                update_channel_hint()
             if result.status == 'lost' and not displayable:
                 meter['lost'] += 1
             report = {'counter': meter['decoded'], 'wire_counter': result.counter,
@@ -1307,9 +1619,22 @@ def parser():
     send.add_argument('--mono-sum', action='store_true',
                        help='emit mono-summed M content on one channel')
     send.add_argument('--mono-video-side', choices=('left', 'right'),
-                      default='left',
+                      default='right',
                       help=('all-fresh mono video: send on this output leg and '
-                            'leave the other leg silent (default: left)'))
+                            'leave the other leg for audio (default: right)'))
+    send.add_argument('--source-audio', choices=('source', 'device', 'off'),
+                      default=None,
+                      help=('mono-video channel audio: embedded video soundtrack '
+                            '(default), selected input device, or off'))
+    send.add_argument('--source-audio-device', type=_device_arg,
+                      help='explicit input device for --source-audio device')
+    send.add_argument('--source-audio-input-side',
+                      choices=('mix', 'left', 'right'), default='mix',
+                      help='downmix both input legs or choose one (default: mix)')
+    send.add_argument('--source-audio-gain', type=float, default=1.0,
+                      help='independent source-audio gain, 0..4 (default: 1)')
+    send.add_argument('--source-audio-delay-ms', type=float, default=0.0,
+                      help='additional audio delay beyond one emitted video packet')
     send.add_argument('--pilot-tones', action=argparse.BooleanOptionalAction,
                       default=True,
                        help='baseline: add steady bin-1/bin-3 references (default on); '
@@ -1382,10 +1707,10 @@ def parser():
                       help='report viewer-thread and total process CPU every 5 s')
     recv.add_argument('--mono-compatible', action='store_true',
                        help='stabilize weak chroma for mono/one-leg playback')
-    recv.add_argument('--mono-video-side', choices=('left', 'right'),
-                      default='left',
-                      help=('all-fresh mono video: decode from this input leg, '
-                            'ignoring the other leg (default: left)'))
+    recv.add_argument('--mono-video-side', choices=('auto', 'left', 'right'),
+                      default='auto',
+                      help=('all-fresh mono video input leg (default: auto; '
+                            'validates MONO_500 and prefers right if both work)'))
     recv.set_defaults(show_diagnostics=True)
     recv.add_argument('--no-log', dest='no_log', action='store_true',
                       default=False, help=argparse.SUPPRESS)

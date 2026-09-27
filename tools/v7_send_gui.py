@@ -30,6 +30,16 @@ PROFILE_CHOICES = (
     ('Baseline', 'baseline'),
     ('Experimental mono', 'mono'),
 )
+SOURCE_AUDIO_CHOICES = (
+    ('Video soundtrack (if present)', 'source'),
+    ('Input device', 'device'),
+    ('Off · silence', 'off'),
+)
+SOURCE_AUDIO_SIDE_CHOICES = (
+    ('Stereo downmix', 'mix'),
+    ('Left input', 'left'),
+    ('Right input', 'right'),
+)
 SOURCE_CHOICES = (
     ('Camera', 'camera'),
     ('Screen', 'screen'),
@@ -85,6 +95,13 @@ FIELD_HELP = {
     'mono_sum': 'Send mono-summed content on one output channel instead of stereo.',
     'mono_video_side': ('For the mono video profile, carry the modem on one '
                         'leg and leave the other free for separate audio.'),
+    'source_audio': ('Choose the embedded video soundtrack, an explicit input '
+                     'device, or silence on the free output leg.'),
+    'source_audio_device': 'Choose an explicit microphone, line, or loopback input device.',
+    'source_audio_input_side': 'Select one input leg or downmix stereo input to mono.',
+    'source_audio_gain': 'Gain applied only to source audio on the free output leg.',
+    'source_audio_delay_ms': ('Additional sync delay beyond one emitted video '
+                              'packet; zero is the low-latency starting point.'),
     'pilot_tones': 'Pilot references are required by folded-coded profiles.',
     'eof_marker': 'Packet end marker. Experimental mono profiles require it.',
     'perceptual_resize': 'Experimental pre-encode downscaler. Requires Fold 500 or Fold 1000 with the Box encode filter.',
@@ -101,6 +118,11 @@ FIELD_LABELS = {
     'ffmpeg_input': 'FFmpeg input',
     'mono_sum': 'Mono output',
     'mono_video_side': 'Mono video output side',
+    'source_audio': 'Audio source',
+    'source_audio_device': 'Audio input device',
+    'source_audio_input_side': 'Audio input channels',
+    'source_audio_gain': 'Source-audio gain',
+    'source_audio_delay_ms': 'Additional audio delay (ms)',
     'pilot_tones': 'Pilot tones',
     'eof_marker': 'EOF marker',
     'perceptual_resize': 'Pre-encode downscaler',
@@ -120,6 +142,20 @@ class OutputDevice:
     def label(self):
         rate = f'{self.default_rate/1000:g} kHz' if self.default_rate else 'rate unknown'
         return (f'{self.index}: {self.name} · {self.channels} out · '
+                f'{rate}')
+
+
+class InputDevice:
+    def __init__(self, index, name, channels, default_rate):
+        self.index = int(index)
+        self.name = str(name)
+        self.channels = int(channels)
+        self.default_rate = int(round(float(default_rate or 0)))
+
+    @property
+    def label(self):
+        rate = f'{self.default_rate/1000:g} kHz' if self.default_rate else 'rate unknown'
+        return (f'{self.index}: {self.name} · {self.channels} in · '
                 f'{rate}')
 
 
@@ -301,6 +337,21 @@ def output_devices(sd_module=None):
     return tuple(result)
 
 
+def input_devices(sd_module=None):
+    """Return input-capable devices without selecting the system default."""
+    if sd_module is None:
+        import sounddevice as sd_module
+    devices = sd_module.query_devices()
+    result = []
+    for index, device in enumerate(devices):
+        channels = int(device.get('max_input_channels') or 0)
+        if channels:
+            result.append(InputDevice(
+                index, device.get('name', f'Audio device {index}'), channels,
+                device.get('default_samplerate')))
+    return tuple(result)
+
+
 def _rate_label(rate):
     if rate is None:
         return 'Native (device clock)'
@@ -410,7 +461,7 @@ def _float_setting(value, label, optional=False):
     return number
 
 
-def validate_settings(settings, devices, sd_module=None):
+def validate_settings(settings, devices, sd_module=None, audio_devices=()):
     """Validate sender GUI state before launching the sender process."""
     by_index = {device.index: device for device in devices}
     device = by_index.get(settings.get('device'))
@@ -448,12 +499,47 @@ def validate_settings(settings, devices, sd_module=None):
     profile = settings.get('profile')
     if profile not in dict(PROFILE_CHOICES).values():
         raise ValueError('Choose a supported wire profile.')
-    mono_video_side = settings.get('mono_video_side', 'left')
+    mono_video_side = settings.get('mono_video_side', 'right')
     if mono_video_side not in dict(MONO_VIDEO_SIDE_CHOICES).values():
         raise ValueError('Choose the left or right mono-video output side.')
     if profile == 'mono-fold-500' and settings.get('mono_sum', False):
         raise ValueError('Mono video side selection needs two output channels; '
                          'turn Mono output off.')
+    source_audio = settings.get('source_audio', 'source')
+    if source_audio not in dict(SOURCE_AUDIO_CHOICES).values():
+        raise ValueError('Choose video soundtrack, an input device, or Off.')
+    source_audio_input_side = settings.get('source_audio_input_side', 'mix')
+    if source_audio_input_side not in dict(SOURCE_AUDIO_SIDE_CHOICES).values():
+        raise ValueError('Choose a supported source-audio input channel.')
+    source_audio_gain = _float_setting(
+        settings.get('source_audio_gain', '1'), 'Source-audio gain')
+    if not 0.0 <= source_audio_gain <= 4.0:
+        raise ValueError('Source-audio gain must be between 0 and 4.')
+    source_audio_delay_ms = _float_setting(
+        settings.get('source_audio_delay_ms', '0'), 'Source-audio delay')
+    if source_audio_delay_ms < 0:
+        raise ValueError('Source-audio delay cannot be negative.')
+    audio_device = None
+    if profile == 'mono-fold-500' and source_audio == 'device':
+        audio_device = next((item for item in audio_devices
+                             if item.index == settings.get('source_audio_device')),
+                            None)
+        if audio_device is None:
+            raise ValueError('Select an input device for source audio.')
+        if source_audio_input_side == 'right' and audio_device.channels < 2:
+            raise ValueError('Right input selection requires a stereo input device.')
+        input_channels = min(audio_device.channels, 2)
+        input_rate = rate or device.default_rate or audio_device.default_rate or None
+        try:
+            sd_module.check_input_settings(
+                device=audio_device.index, channels=input_channels,
+                dtype='float32', samplerate=input_rate)
+        except Exception as exc:
+            sample_text = (f'{input_rate} Hz' if input_rate else
+                           'the input device native rate')
+            raise ValueError(
+                f'{audio_device.name} cannot open {input_channels} input '
+                f'channel(s) at {sample_text}: {exc}') from exc
     folded_profiles = ('fold-500', 'fold-1000', 'mono-fold-500')
     encode_filter = settings.get('encode_filter', 'auto')
     if encode_filter not in dict(FILTER_CHOICES).values():
@@ -561,6 +647,11 @@ def validate_settings(settings, devices, sd_module=None):
         'rate': rate,
         'profile': profile,
         'mono_video_side': mono_video_side,
+        'source_audio': source_audio,
+        'source_audio_device': audio_device,
+        'source_audio_input_side': source_audio_input_side,
+        'source_audio_gain': source_audio_gain,
+        'source_audio_delay_ms': source_audio_delay_ms,
         'encode_filter': encode_filter,
         'speed': speed,
         'brightness': brightness,
@@ -591,9 +682,10 @@ def _integer_setting(value, label, minimum, optional=False):
     return result
 
 
-def build_command(settings, devices, sd_module=None, python=None):
+def build_command(settings, devices, sd_module=None, python=None,
+                  audio_devices=()):
     """Build an argv list for the existing V7 CLI; never invokes a shell."""
-    checked = validate_settings(settings, devices, sd_module)
+    checked = validate_settings(settings, devices, sd_module, audio_devices)
     command = [
         python or sys.executable,
         str(ROOT/'tools'/'v7_live.py'),
@@ -608,7 +700,19 @@ def build_command(settings, devices, sd_module=None, python=None):
         command.extend(('--experimental-fold', '1000'))
     elif checked['profile'] == 'mono-fold-500':
         command.extend(('--experimental-mono-fold', '--mono-video-side',
-                        checked['mono_video_side']))
+                        checked['mono_video_side'], '--source-audio',
+                        checked['source_audio']))
+        if checked['source_audio'] == 'device':
+            command.extend(('--source-audio-device',
+                            str(checked['source_audio_device'].index),
+                            '--source-audio-input-side',
+                            checked['source_audio_input_side']))
+        if checked['source_audio_gain'] != 1.0:
+            command.extend(('--source-audio-gain',
+                            str(checked['source_audio_gain'])))
+        if checked['source_audio_delay_ms'] != 0.0:
+            command.extend(('--source-audio-delay-ms',
+                            str(checked['source_audio_delay_ms'])))
     elif checked['profile'] == 'baseline':
         command.extend(('--experimental-fold', '0'))
     else:
@@ -706,7 +810,8 @@ class SenderGui:
     ROW_HEIGHT = 39
     BASIC_FIELDS = (
         'device', 'source', 'rate', 'profile', 'mono_video_side', 'speed',
-        'encode_filter',
+        'source_audio', 'source_audio_device', 'source_audio_input_side',
+        'source_audio_gain', 'source_audio_delay_ms', 'encode_filter',
         'video_source', 'video_live', 'camera', 'screen_target',
     )
     ADVANCED_FIELDS = (
@@ -715,15 +820,23 @@ class SenderGui:
         'perceptual_detail_strength', 'mono_sum', 'pilot_tones', 'eof_marker',
     )
 
-    def __init__(self, devices=(), device_error=''):
+    def __init__(self, devices=(), device_error='', audio_devices=(),
+                 audio_device_error=''):
         self.devices = tuple(devices)
         self.device_error = device_error
+        self.audio_devices = tuple(audio_devices)
+        self.audio_device_error = audio_device_error
         self.settings = {
             'device': None,
             'source': None,
             'rate': None,
             'profile': 'fold-500',
-            'mono_video_side': 'left',
+            'mono_video_side': 'right',
+            'source_audio': 'source',
+            'source_audio_device': None,
+            'source_audio_input_side': 'mix',
+            'source_audio_gain': '1',
+            'source_audio_delay_ms': '0',
             'speed': '1',
             'encode_filter': 'auto',
             'brightness': '',
@@ -775,6 +888,9 @@ class SenderGui:
     def _choices(self, dest):
         if dest == 'device':
             return tuple((device.label, device.index) for device in self.devices)
+        if dest == 'source_audio_device':
+            return tuple((device.label, device.index)
+                         for device in self.audio_devices)
         if dest == 'source':
             return SOURCE_CHOICES
         if dest == 'rate':
@@ -794,6 +910,10 @@ class SenderGui:
             return PROFILE_CHOICES
         if dest == 'mono_video_side':
             return MONO_VIDEO_SIDE_CHOICES
+        if dest == 'source_audio':
+            return SOURCE_AUDIO_CHOICES
+        if dest == 'source_audio_input_side':
+            return SOURCE_AUDIO_SIDE_CHOICES
         if dest == 'encode_filter':
             if self.settings['profile'] in (
                     'fold-500', 'fold-1000', 'mono-fold-500'):
@@ -814,6 +934,11 @@ class SenderGui:
     def _open_dropdown(self, dest):
         if self.process is not None:
             self.notice = 'Settings are locked while the sender is running.'
+            return
+        if dest == 'source_audio_device' and not self.audio_devices:
+            self.notice = (self.audio_device_error or
+                           'No audio input devices are available.')
+            self.dirty = True
             return
         if dest == 'camera':
             try:
@@ -862,6 +987,17 @@ class SenderGui:
             self.settings['perceptual_resize'] == 'off' or
             dest == 'mono_video_side' and
             self.settings['profile'] != 'mono-fold-500' or
+            dest == 'source_audio' and
+            self.settings['profile'] != 'mono-fold-500' or
+            dest == 'source_audio_device' and not (
+                self.settings['profile'] == 'mono-fold-500' and
+                self.settings['source_audio'] == 'device') or
+            dest == 'source_audio_input_side' and not (
+                self.settings['profile'] == 'mono-fold-500' and
+                self.settings['source_audio'] == 'device') or
+            dest in ('source_audio_gain', 'source_audio_delay_ms') and not (
+                self.settings['profile'] == 'mono-fold-500' and
+                self.settings['source_audio'] != 'off') or
             dest == 'capture_width' and source not in ('screen', 'video', 'mouse-follow'))]
         return fields
 
@@ -870,23 +1006,22 @@ class SenderGui:
         if dest == 'device':
             device = self._device()
             return device.label if device else 'Select output device…'
-        if dest in ('camera', 'screen_target'):
+        if dest in ('camera', 'screen_target', 'source_audio_device'):
             if value is None:
-                return 'Choose a camera…' if dest == 'camera' else 'Choose a display…'
+                if dest == 'camera':
+                    return 'Choose a camera…'
+                if dest == 'source_audio_device':
+                    return 'Choose an input device…'
+                return 'Choose a display…'
             if dest == 'screen_target' and isinstance(value, ScreenTarget):
                 return value.label
             choices = self._choices(dest)
             return next((label for label, candidate in choices
                          if candidate == value), str(value))
         if dest in ('source', 'profile', 'encode_filter', 'screen_backend',
-                    'capture_filter', 'perceptual_resize', 'mono_video_side'):
-            choices = (SOURCE_CHOICES if dest == 'source' else
-                       PROFILE_CHOICES if dest == 'profile' else
-                       FILTER_CHOICES if dest == 'encode_filter' else
-                       CAPTURE_FILTER_CHOICES if dest == 'capture_filter' else
-                       DOWNSCALER_CHOICES if dest == 'perceptual_resize' else
-                       MONO_VIDEO_SIDE_CHOICES if dest == 'mono_video_side' else
-                       (('mss · lightweight', 'mss'), ('FFmpeg', 'ffmpeg')))
+                    'capture_filter', 'perceptual_resize', 'mono_video_side',
+                    'source_audio', 'source_audio_input_side'):
+            choices = self._choices(dest)
             label = next((label for label, candidate in choices
                           if candidate == value), None)
             if label is None:
@@ -945,7 +1080,8 @@ class SenderGui:
         self._assign(dest, value)
 
     def _build_command(self):
-        return build_command(self.settings, self.devices, self._sounddevice())
+        return build_command(self.settings, self.devices, self._sounddevice(),
+                             audio_devices=self.audio_devices)
 
     def _start(self):
         if self.editing:
@@ -1587,7 +1723,15 @@ def main():
         device_error = '' if devices else 'No audio output devices are available.'
     except Exception as exc:
         devices, device_error = (), f'Audio device enumeration failed: {exc}'
-    SenderGui(devices, device_error).run()
+    try:
+        audio_devices = input_devices()
+        audio_device_error = ('' if audio_devices else
+                              'No audio input devices are available.')
+    except Exception as exc:
+        audio_devices = ()
+        audio_device_error = f'Audio input enumeration failed: {exc}'
+    SenderGui(devices, device_error, audio_devices,
+              audio_device_error).run()
 
 
 if __name__ == '__main__':

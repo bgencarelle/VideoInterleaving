@@ -1932,9 +1932,9 @@ it does not alter `--experimental-mono` or the `MONO_OFF` rotating wire:
 
 ```text
 .venv/bin/python tools/v7_live.py send --source test \
-  --device 'BlackHole 2ch' --experimental-mono-fold --mono-video-side left
+  --device 'BlackHole 2ch' --experimental-mono-fold --mono-video-side right
 .venv/bin/python tools/v7_live.py receive \
-  --device 'BlackHole 2ch' --experimental-mono-fold --mono-video-side left
+  --device 'BlackHole 2ch' --experimental-mono-fold --mono-video-side auto
 ```
 
 It requires the canonical box model, coded pilot timing, EOF framing, and no
@@ -1950,12 +1950,51 @@ coefficient positions. The fold step and complete table identity are pinned in
 `test_modem_v7/mono_video.py`.
 
 The sender's `--mono-video-side left|right` selects the output leg for the
-complete modem signal, including timing/status tones; the other output leg is
-zero and remains available for a separate audio track. The receiver uses the
-matching option to run pulse acquisition and decoding on only that input leg,
-ignoring audio on the other. Both default to `left`; the sender GUI exposes the
-choice and describes which side remains clear. The two-leg form is retained in
-the offline comparison harness, not used by this side-selected live profile.
+complete modem signal, including timing/status tones; the other output leg
+carries source audio. The default mapping is **left audio, right video**. The
+receiver defaults to `--mono-video-side auto`: it tries the right input leg
+first, probes the other leg for a consistent pulse train, and validates the
+`MONO_500` coded status before locking onto a leg. If right and left both carry
+valid mono video, right remains selected. Explicit `left` or `right` disables
+automatic side selection. Once selected, pulse acquisition and decoding use
+only that video leg, ignoring audio on the other. The sender GUI exposes the
+side choice and soundtrack/input-device/off audio-source selector. Source audio
+defaults to the video's embedded soundtrack; when no track is present the
+channel is zero-filled. An explicitly selected input device can provide
+microphone, line, or loopback audio. Independent gain and additional delay
+controls affect only that channel. The output stream remains stereo and the
+ordinary receiver does not decode or delay the audio leg.
+
+For example, use the embedded soundtrack (the default), an explicitly selected
+input device, or silence:
+
+```text
+--source-audio source
+--source-audio device --source-audio-device 'BlackHole 2ch'
+--source-audio off
+```
+
+Audio is inserted after packet speed conversion, so its pitch and sample rate
+remain natural while the modem packet duration changes with `--speed`. Startup
+waits for up to one emitted packet of source samples to preserve the audio
+beginning; any remaining underflow is zero-filled. The presentation delay uses
+the actual emitted packet sample count, plus the optional
+`--source-audio-delay-ms`. This delay therefore scales with speed and output
+rate. The first captured video frame is held for the first packet during that
+startup wait, preserving the visual event paired with the initial audio
+samples. A bounded fractional reader tracks independent capture/output clocks
+with at most 0.1% rate correction; extreme overflow still drops oldest samples
+to cap latency, while underflow is zero-filled. Logged runs report maximum
+clock correction and dropped samples. The synthetic 500-ppm drift test models
+over 80 seconds and confirms the FIFO stays bounded without sample drops.
+
+On POSIX hosts, video and embedded audio share one FFmpeg demux/process and
+source clock; the audio output preserves late audio-stream start timestamps as
+leading silence. A real FFmpeg smoke check confirmed a soundtrack beginning at
+200 ms stays silent until that point, and a video with no audio yields silence. The
+burst-offset unit test sends a known burst beside real mono-encoded packets and
+locates it from the pulse-counted header, including at 2× packet speed. A live
+flash/click test is still needed to calibrate any residual source-start offset.
 
 `MONO_500` is the distinct coded status for this rank map. The updated receiver
 checks the status before image equalization and rejects both the legacy
@@ -1968,8 +2007,8 @@ is not exposed by the live CLI or GUI.
 The runner `tools/v7_mono_video_bench.py` compares the new profile against the
 current stereo fold-500 decode, that stereo wire downmixed to mono, the
 rotating mono fold-off profile with tail memory on/off, and an all-fresh mono
-fold-off control. The mono video profiles use the selected left leg; the other
-leg is silent. It scores packets 8–23 against the matching generated source
+fold-off control. The mono video profiles use the selected video leg; the other
+leg is silent in this video-only benchmark. It scores packets 8–23 against the matching generated source
 frame and reports decoded, current-frame-displayable, held-picture, EOF, encode
 and decode costs separately. The encode/decode times are local wall time per
 packet (not process CPU), measured after decoder warm-up. Pans, six-packet cuts,
@@ -2006,7 +2045,7 @@ Reproduce the profile checks and complete comparison with:
 ```text
 .venv/bin/python -m unittest modem_tests.test_v7_mono_video \
   modem_tests.test_v7_mono_wire modem_tests.test_v7_send_gui \
-  modem_tests.test_v7_receiver_gui -v
+  modem_tests.test_v7_receiver_gui modem_tests.test_v7_source_audio -v
 .venv/bin/python tools/v7_mono_video_bench.py \
   --out tmp/v7-mono-video-left
 ```
