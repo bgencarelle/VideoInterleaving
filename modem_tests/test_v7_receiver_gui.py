@@ -13,6 +13,7 @@ from tools.v7_gl_viewer import DISPLAY_MODES
 from tools.v7_receiver_gui import (ROOT, ReceiverGui, _make_fields,
                                    FULLSCREEN_TOOLBAR_EDGE,
                                    FULLSCREEN_TOOLBAR_HIDE_SECONDS,
+                                   HIDDEN_DECODE_OPTIONS,
                                    QueueWriter,
                                    _logical_rect_to_framebuffer,
                                    _scissors_outside_viewport,
@@ -54,7 +55,8 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         represented = {field.action.dest for field in fields
                        if field.action is not None}
         expected = {action.dest for action in self.receive_parser._actions
-                    if action.dest not in ('help', 'mode')}
+                    if action.dest not in ('help', 'mode') and
+                    action.dest not in HIDDEN_DECODE_OPTIONS}
         self.assertEqual(represented, expected)
 
     def test_builds_headless_receiver_args_without_opening_audio(self):
@@ -64,10 +66,6 @@ class ReceiverGuiOptionTests(unittest.TestCase):
                       if field.action is not None and
                       field.action.dest == 'device')
         device.value = 3
-        side = next(field for field in gui.fields
-                    if field.action is not None and
-                    field.action.dest == 'mono_video_side')
-        side.value = 'right'
         args = gui._build_arguments()
         self.assertEqual(args.mode, 'receive')
         self.assertEqual(args.device, 3)
@@ -76,7 +74,7 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertFalse(args.log)
         self.assertTrue(args.no_log)
         self.assertIsNone(args.save_dir)
-        self.assertEqual(args.mono_video_side, 'right')
+        self.assertEqual(args.mono_video_side, 'auto')
 
     def test_receiver_output_wakes_the_event_driven_window(self):
         output = queue.Queue()
@@ -96,19 +94,22 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Select an input audio device'):
             gui._build_arguments()
 
-    def test_mono_video_fold_selects_a_single_receiver_profile(self):
-        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
-        by_dest = {field.dest: field for field in gui.fields
-                   if field.action is not None}
-        by_dest['experimental_mono'].value = True
-        by_dest['experimental_fold'].value = 500
-
-        gui._adjust_field(by_dest['experimental_mono_fold'], 1)
-
-        self.assertTrue(by_dest['experimental_mono_fold'].value)
-        self.assertFalse(by_dest['experimental_mono'].value)
-        self.assertIsNone(by_dest['experimental_fold'].value)
-        self.assertFalse(by_dest['baseline'].value)
+    def test_wire_profile_and_decoder_tuners_are_not_gui_options(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser,
+                          (('test input device', 3),))
+        represented = {field.dest for field in gui.fields
+                       if field.action is not None}
+        self.assertTrue(HIDDEN_DECODE_OPTIONS.isdisjoint(represented))
+        args = gui._build_arguments()
+        self.assertFalse(args.experimental_mono_fold)
+        self.assertIsNone(args.experimental_fold)
+        self.assertEqual(args.frame_boundary, 'eof')
+        self.assertEqual(args.pilot_timing, 'tone-seeded')
+        receiver_help = self.receive_parser.format_help()
+        for hidden in ('--pilot-timing', '--frame-boundary',
+                       '--pulse-timing', '--tone-equalization',
+                       '--experimental-mono-fold'):
+            self.assertNotIn(hidden, receiver_help)
 
     def test_first_available_input_is_preselected(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser,
@@ -124,17 +125,13 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         values = {field.dest: field for field in gui.fields
                   if field.action is not None}
         values['device'].value = 3
-        values['direction'].value = 'reverse'
-        values['decode_history'].value = 4
-        values['pilot_timing'].value = 'tone-joint'
         values['show_diagnostics'].value = False
-        values['no_tail_memory'].value = True
         args = gui._build_arguments()
-        self.assertEqual(args.direction, 'reverse')
-        self.assertEqual(args.decode_history, 4)
-        self.assertEqual(args.pilot_timing, 'tone-joint')
+        self.assertEqual(args.direction, 'auto')
+        self.assertEqual(args.decode_history, 1)
+        self.assertEqual(args.pilot_timing, 'tone-seeded')
         self.assertFalse(args.show_diagnostics)
-        self.assertTrue(args.no_tail_memory)
+        self.assertFalse(args.no_tail_memory)
 
     def test_save_directory_is_used_only_when_explicit(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser,
@@ -198,11 +195,11 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertEqual(gui.display_mode, 'nearest')
         self.assertFalse(gui.display_menu_open)
 
-        direction = next(field for field in gui.fields
-                         if field.dest == 'direction')
-        before = direction.value
-        gui._adjust_field(direction, 1)
-        self.assertEqual(direction.value, before)
+        device = next(field for field in gui.fields
+                      if field.dest == 'device')
+        before = device.value
+        gui._adjust_field(device, 1)
+        self.assertEqual(device.value, before)
         self.assertIn('locked while receiving', gui.notice)
 
     def test_display_menu_bounds_scale_to_a_hidpi_scissor(self):
@@ -239,13 +236,14 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         basic = {gui.fields[index].dest
                  for index in gui._config_field_indexes()}
         self.assertIn('device', basic)
-        self.assertIn('experimental_fold', basic)
+        self.assertNotIn('experimental_fold', basic)
+        self.assertNotIn('direction', basic)
         self.assertNotIn('decode_history', basic)
 
         gui.advanced_options = True
         advanced = {gui.fields[index].dest
                     for index in gui._config_field_indexes()}
-        self.assertIn('decode_history', advanced)
+        self.assertTrue(HIDDEN_DECODE_OPTIONS.isdisjoint(advanced))
 
     def test_image_only_view_restores_the_live_page(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())

@@ -227,7 +227,7 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320,
 
     cmd = ['ffmpeg', '-nostdin', '-loglevel',
            'info' if output_size is not None else 'error', '-f', fmt,
-           '-framerate', str(int(max(fps, 1)))]
+           '-framerate', f'{max(float(fps), 1.0):g}']
     if output_size is not None:
         cmd.append('-nostats')
     if fmt == 'x11grab' and region:

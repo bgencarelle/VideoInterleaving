@@ -3,6 +3,7 @@ import sys
 import unittest
 from pathlib import Path
 import time
+import types
 from unittest.mock import patch
 
 import numpy as np
@@ -236,6 +237,8 @@ class MonoVideoWireTests(unittest.TestCase):
 
         self.assertEqual(v7_live._mono_packet_status_mode(result),
                          MONO_VIDEO_MODE)
+        self.assertEqual(v7_live._coded_status_mode(
+            self.audio[:, 1:2], 0, 1.0, v7.RATE), MONO_VIDEO_MODE)
         # Right starts active and is retained once its distinct mono status is
         # decoded, even when the opposite leg also has a pulse train.
         self.assertFalse(v7_live._should_try_other_mono_leg(
@@ -257,6 +260,90 @@ class MonoVideoWireTests(unittest.TestCase):
         self.assertFalse(v7_live._should_try_other_mono_leg(
             None, MONO_VIDEO_MODE, 1,
             active_has_packet=False, switch_count=0))
+
+    def test_profile_autodetection_requires_consistent_valid_mono_status(self):
+        from tone_code import FOLD_500
+
+        self.assertEqual(v7_live._mono_fold_input_side(
+            [[MONO_VIDEO_MODE, MONO_VIDEO_MODE],
+             [MONO_VIDEO_MODE, MONO_VIDEO_MODE]], MONO_VIDEO_MODE), 'right')
+        self.assertEqual(v7_live._mono_fold_input_side(
+            [[MONO_VIDEO_MODE, MONO_VIDEO_MODE], [None, None]],
+            MONO_VIDEO_MODE), 'left')
+        self.assertIsNone(v7_live._mono_fold_input_side(
+            [[MONO_VIDEO_MODE], [None]], MONO_VIDEO_MODE))
+        self.assertIsNone(v7_live._mono_fold_input_side(
+            [[MONO_VIDEO_MODE, FOLD_500], [None, None]], MONO_VIDEO_MODE))
+
+        # Damaging the profile-bearing body makes the coded word fail closed;
+        # startup then keeps its ordinary Fold-500 fallback.
+        damaged = self.audio[:v7.PULSE_FRAME, 1:2].copy()
+        damaged[v7.PULSE.SYNC_LEN:v7.PULSE.SYNC_LEN+v7.FRAME] = 0
+        with np.errstate(divide='ignore', invalid='ignore'):
+            self.assertIsNone(v7_live._coded_status_mode(
+                damaged, 0, 1.0, v7.RATE))
+
+    def test_default_receiver_dispatches_mono_and_falls_back_to_fold500(self):
+        from unittest.mock import Mock
+
+        args = v7_live.parser().parse_args(
+            ['receive', '--device', 'null', '--headless'])
+        args.no_log = True
+        with (patch.object(v7_live, '_detect_mono_fold_side',
+                           return_value='right'),
+              patch.object(v7_live, '_run_receive', return_value='mono') as run):
+            self.assertEqual(v7_live.run_receive(args), 'mono')
+        self.assertTrue(args.experimental_mono_fold)
+        self.assertEqual(args._detected_mono_video_side, 'right')
+        self.assertIsInstance(run.call_args.args[2], MonoFreshFoldWire)
+        self.assertEqual(run.call_args.args[2].side, 'right')
+
+        fallback = v7_live.parser().parse_args(
+            ['receive', '--device', 'null', '--headless'])
+        fallback.no_log = True
+        fold = Mock()
+        with (patch.object(v7_live, '_detect_mono_fold_side',
+                           return_value=None),
+              patch.object(v7_live, '_experimental_fold', return_value=fold),
+              patch.object(v7_live, '_run_receive', return_value='fold') as run):
+            self.assertEqual(v7_live.run_receive(fallback), 'fold')
+        self.assertIs(run.call_args.args[1], fold)
+        self.assertEqual(len(run.call_args.args), 2)
+
+    def test_startup_probe_reads_synthetic_status_and_falls_back_on_damage(self):
+        class InputStream:
+            def __init__(self, **kwargs):
+                self.callback = kwargs['callback']
+
+            def start(self):
+                self.callback(samples, len(samples), None, None)
+
+            def stop(self):
+                pass
+
+            def close(self):
+                pass
+
+        sounddevice = types.ModuleType('sounddevice')
+        sounddevice.query_devices = lambda *_args: {
+            'max_input_channels': 2, 'default_samplerate': v7.RATE}
+        sounddevice.InputStream = InputStream
+        args = types.SimpleNamespace(
+            device=3, direction='auto', no_log=True, stop_event=None)
+
+        def detect(audio):
+            nonlocal samples
+            samples = audio
+            with patch.dict(sys.modules, {'sounddevice': sounddevice}), \
+                    patch('tools.v7_live.time.monotonic',
+                          side_effect=(0.0, 0.0, 0.0, 0.2)):
+                return v7_live._detect_mono_fold_side(args, timeout=.1)
+
+        samples = self.audio
+        self.assertEqual(detect(self.audio), 'right')
+        damaged = self.audio.copy()
+        damaged[:, :] = 0
+        self.assertIsNone(detect(damaged))
 
     def test_live_sender_places_input_audio_left_and_video_right(self):
         written = []
@@ -298,7 +385,7 @@ class MonoVideoWireTests(unittest.TestCase):
                 patch('tools.v7_source_audio.DeviceSourceAudio', AudioSource):
             args = v7_live.parser().parse_args([
                 'send', '--device', 'memory', '--source', 'test',
-                '--seconds', '.24', '--no-log', '--experimental-mono-fold',
+                '--seconds', '.24', '--no-log', '--profile', 'mono-fold-500',
                 '--source-audio', 'device', '--source-audio-device', '7'])
             v7_live.run_send(args)
 

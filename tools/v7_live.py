@@ -24,6 +24,7 @@ the receiver can diagnose the behavior rather than silently restarting it.
 """
 import argparse
 from collections import deque
+import json
 import os
 import queue
 import sys
@@ -90,6 +91,50 @@ FRAME_BUFFER = LatestFrame()
 # Read-only bridge for an external configuration UI. The receiver does not
 # depend on a GUI; an attached UI may poll the diagnostic callback.
 RECEIVER_GUI_STATUS = {}
+
+
+class LiveToneControls:
+    """Thread-safe brightness/gamma values updated by the sender GUI pipe."""
+
+    def __init__(self, brightness, gamma):
+        self._values = {'brightness': float(brightness), 'gamma': float(gamma)}
+        self._lock = threading.Lock()
+
+    def update(self, line):
+        try:
+            update = json.loads(line)
+        except (TypeError, ValueError):
+            return False
+        if not isinstance(update, dict):
+            return False
+        accepted = {}
+        for key in ('brightness', 'gamma'):
+            if key not in update:
+                continue
+            try:
+                value = float(update[key])
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(value) and value > 0:
+                accepted[key] = value
+        if not accepted:
+            return False
+        with self._lock:
+            self._values.update(accepted)
+        return True
+
+    def snapshot(self):
+        with self._lock:
+            return dict(self._values)
+
+
+def _read_live_tone_controls(stream, controls, stop):
+    """Consume newline-delimited GUI updates until EOF or shutdown."""
+    while not stop.is_set():
+        line = stream.readline()
+        if not line:
+            return
+        controls.update(line)
 
 
 def _device_arg(value):
@@ -425,6 +470,13 @@ def run_send(args):
     import sounddevice as sd
     from tools.v7_capture import Throttled
 
+    profile = getattr(args, 'profile', None)
+    if profile == 'mono-fold-500':
+        args.experimental_mono_fold = True
+    elif profile == 'fold-500':
+        args.experimental_fold = 500
+    elif profile == 'fold-1000':
+        args.experimental_fold = 1000
     slots = _fold_slots(args)
     mono_profile = bool(getattr(args, 'experimental_mono', False))
     mono_fold_profile = bool(getattr(args, 'experimental_mono_fold', False))
@@ -458,6 +510,13 @@ def run_send(args):
         raise ValueError('--source-audio-delay-ms must be finite and non-negative')
     profile_slots = 500 if mono_fold_profile else slots
     args.encode_filter, args.brightness = _send_profile(args, profile_slots)
+    tone_controls = LiveToneControls(args.brightness, args.gamma)
+    control_stop = threading.Event()
+    if getattr(args, 'gui_control', False):
+        threading.Thread(
+            target=_read_live_tone_controls,
+            args=(sys.stdin, tone_controls, control_stop),
+            name='v7-live-tone-controls', daemon=True).start()
     if getattr(args, 'perceptual_resize', 'off') != 'off':
         # Compile the optional Numba resize before an output stream is open;
         # first-call JIT latency must not stall the live sender.
@@ -608,8 +667,10 @@ def run_send(args):
                 first_audio_video_frame = None
                 if frame is None:
                     frame = grab()
+                current_tones = tone_controls.snapshot()
                 value, aspect = _values(model, frame, args.encode_filter,
-                                        args.brightness, args.gamma,
+                                        current_tones['brightness'],
+                                        current_tones['gamma'],
                                         getattr(args, 'perceptual_resize', 'off'),
                                         getattr(args, 'perceptual_detail_strength', 0.25))
                 # Keep captured source values unfolded. encode_batch folds
@@ -786,6 +847,7 @@ def run_send(args):
     except KeyboardInterrupt:
         stop.set()
     finally:
+        control_stop.set()
         stop.set()
         if worker_started:
             worker.join(timeout=2)
@@ -889,6 +951,128 @@ def _mono_packet_status_mode(result):
     return timing.get('coded_status_mode', diag.get('coded_status_mode'))
 
 
+def _coded_status_mode(samples, frame_start, frame_scale, sample_rate,
+                       direction=1):
+    """Read the in-band profile code from one pulse-anchored packet."""
+    _ensure_test_modem_path()
+    from tone_code import decode_tone_code
+
+    audio = np.asarray(samples)
+    start = float(frame_start)
+    scale = float(frame_scale)
+    if direction < 0:
+        region = P.reverse_packet_region(audio, start, scale)
+        if region is None:
+            return None
+        audio, region_start = region
+        start = len(audio)+region_start-(float(frame_start)+
+                                         P.PULSE_FRAME*scale)
+    status = decode_tone_code(
+        audio, frame_start=start, frame_scale=scale,
+        sample_rate=sample_rate)
+    if not status.get('valid') or status.get('status') is None:
+        return None
+    return int(status['status']['mode'])
+
+
+def _mono_fold_input_side(channel_modes, mono_mode):
+    """Choose a leg only when its observed coded statuses consistently agree.
+
+    Require two valid packet statuses on a leg. A missing/damaged status is
+    ignored, while a conflicting valid status makes that leg ambiguous. Right
+    wins when both input legs independently validate the mono-video profile.
+    """
+    valid = []
+    for index, modes in enumerate(channel_modes):
+        modes = tuple(modes)
+        if len(modes) >= 2 and all(mode == mono_mode for mode in modes):
+            valid.append(index)
+    if not valid:
+        return None
+    selected = 1 if 1 in valid else valid[0]
+    return 'right' if selected == 1 else 'left'
+
+
+def _detect_mono_fold_side(args, timeout=2.0):
+    """Probe both input legs for the distinct MONO_500 status before decoding.
+
+    A short startup pass lets the ordinary receiver choose its model and rank
+    map before it opens the live decode path. If no mono status is found, the
+    caller keeps the ordinary stereo Fold-500 profile.
+    """
+    import sounddevice as sd
+    _ensure_test_modem_path()
+    from tone_code import MONO_500
+
+    device_info = sd.query_devices(args.device, 'input')
+    channels = 1 if int(device_info.get('max_input_channels') or 0) < 2 else 2
+    rate = capture_rate_for(device_info)
+    direction = getattr(args, 'direction', 'auto')
+    inputs = [LiveInput(1, 1, rate=rate, direction=direction)
+              for _ in range(channels)]
+    observed_modes = [[] for _ in range(channels)]
+    last_positions = [set() for _ in range(channels)]
+    blocks = queue.Queue(maxsize=32)
+    stop = getattr(args, 'stop_event', None)
+
+    def callback(indata, _frames, _timing, status):
+        if status and not args.no_log:
+            print(f'profile probe input: {status}', file=sys.stderr, flush=True)
+        values = np.asarray(indata)
+        if not values.size or np.max(np.abs(values)) <= 1e-5:
+            return
+        try:
+            blocks.put_nowait(np.array(values, dtype=np.float32, copy=True))
+        except queue.Full:
+            try:
+                blocks.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                blocks.put_nowait(np.array(values, dtype=np.float32, copy=True))
+            except queue.Full:
+                pass
+
+    stream = sd.InputStream(
+        samplerate=rate, channels=channels, dtype='float32',
+        device=args.device, blocksize=1024, callback=callback)
+    deadline = time.monotonic()+max(0.0, float(timeout))
+    first_detection = None
+    try:
+        stream.start()
+        while time.monotonic() < deadline and not (stop and stop.is_set()):
+            try:
+                block = blocks.get(timeout=.05)
+            except queue.Empty:
+                continue
+            now = time.monotonic()
+            for index, live_input in enumerate(inputs):
+                live_input.add(block[:, index:index+1].copy())
+                audio = live_input.take(now)
+                if audio is None:
+                    continue
+                audio_start = live_input.total-len(audio)
+                for position, scale, _confidence, way in live_input.pulse_hits(audio):
+                    absolute = int(round(audio_start+position))
+                    if absolute in last_positions[index]:
+                        continue
+                    last_positions[index].add(absolute)
+                    mode = _coded_status_mode(
+                        audio, position, scale, rate, way)
+                    if mode is not None:
+                        observed_modes[index].append(mode)
+                        if first_detection is None:
+                            first_detection = now
+                live_input.decoded()
+            if (first_detection is not None and
+                    now-first_detection >= .25):
+                break
+    finally:
+        stream.stop()
+        stream.close()
+    return _mono_fold_input_side(observed_modes, MONO_500)
+
+
 def _should_try_other_mono_leg(active_mode, expected_mode, opposite_streak,
                                active_has_packet, switch_count):
     """Probe the other leg only when it has pulses and this leg is unproven."""
@@ -905,6 +1089,26 @@ def _should_try_other_mono_leg(active_mode, expected_mode, opposite_streak,
 def run_receive(args):
     if getattr(args, 'image_only', False) and getattr(args, 'headless', False):
         raise ValueError('--image-only cannot be combined with --headless')
+    profile_is_explicit = bool(
+        getattr(args, 'experimental_mono', False) or
+        getattr(args, 'experimental_mono_fold', False) or
+        getattr(args, 'baseline', False) or
+        getattr(args, 'experimental_fold', None) is not None)
+    if not profile_is_explicit:
+        detected_side = _detect_mono_fold_side(args)
+        if getattr(args, 'stop_event', None) is not None and args.stop_event.is_set():
+            return
+        if detected_side is not None:
+            args.experimental_mono_fold = True
+            args._detected_mono_video_side = detected_side
+            if not args.no_log:
+                print({'status': 'wire_profile_detected',
+                       'profile': 'mono-fresh-500',
+                       'video_side': detected_side}, flush=True)
+        elif not args.no_log:
+            print({'status': 'wire_profile_default',
+                   'profile': 'fold-500',
+                   'reason': 'MONO_500 status not detected'}, flush=True)
     slots = _fold_slots(args)
     mono_profile = bool(getattr(args, 'experimental_mono', False))
     mono_fold_profile = bool(getattr(args, 'experimental_mono_fold', False))
@@ -920,9 +1124,11 @@ def run_receive(args):
             from mono_video import MonoFreshFoldWire
             model = _model(args.fixture, 'box')
             requested_side = getattr(args, 'mono_video_side', 'auto')
+            detected_side = getattr(args, '_detected_mono_video_side', None)
+            selected_side = (requested_side if requested_side in ('left', 'right')
+                             else detected_side or 'right')
             mono_wire = MonoFreshFoldWire(
-                model, side=('right' if requested_side == 'auto'
-                             else requested_side))
+                model, side=selected_side)
         else:
             from mono_wire import MonoWire
             model = _model(args.fixture, 'nearest')
@@ -1602,22 +1808,21 @@ def parser():
                       help='capture source; omitted interactively prompts for one')
     send.add_argument('--device', type=_device_arg, required=True,
                       help='explicit sounddevice output, e.g. BlackHole 2ch')
-    send.add_argument('--fixture', type=Path, default=DEFAULT_FIXTURE)
+    send.add_argument('--fixture', type=Path, default=DEFAULT_FIXTURE,
+                      help=argparse.SUPPRESS)
     send.add_argument('--encode-filter', choices=('nearest', 'box', 'lanczos', 'bicubic'),
                       default=None,
-                      help='source resize filter (default: box with fold, nearest in baseline mode)')
+                      help=argparse.SUPPRESS)
     send.add_argument('--perceptual-resize',
-                      choices=('off', 'linear-box', 'gamma-detail', 'linear-detail'),
-                      default='off',
-                      help='opt-in 80x96 sender resize ablation (requires pinned box fold profile)')
+                       choices=('off', 'linear-box', 'gamma-detail', 'linear-detail'),
+                       default='off',
+                       help=argparse.SUPPRESS)
     send.add_argument('--perceptual-detail-strength', type=float, default=0.25,
-                      help='DPID-inspired area weight strength in [0, 1] (default: 0.25)')
+                      help=argparse.SUPPRESS)
     send.add_argument('--brightness', type=float, default=None,
-                      help='source brightness multiplier (default: 1.0 with fold, 1.05 in baseline mode)')
+                      help='source brightness multiplier (default: 1.0 for folded profiles)')
     send.add_argument('--gamma', type=float, default=1.0,
                       help='source gamma; >1 lifts midtones (default: 1.0)')
-    send.add_argument('--mono-sum', action='store_true',
-                       help='emit mono-summed M content on one channel')
     send.add_argument('--mono-video-side', choices=('left', 'right'),
                       default='right',
                       help=('all-fresh mono video: send on this output leg and '
@@ -1635,24 +1840,24 @@ def parser():
                       help='independent source-audio gain, 0..4 (default: 1)')
     send.add_argument('--source-audio-delay-ms', type=float, default=0.0,
                       help='additional audio delay beyond one emitted video packet')
-    send.add_argument('--pilot-tones', action=argparse.BooleanOptionalAction,
-                      default=True,
-                       help='baseline: add steady bin-1/bin-3 references (default on); '
-                            'folded profiles always send their coded references')
-    send.add_argument('--eof-marker', action=argparse.BooleanOptionalAction,
-                      default=True,
-                      help='add the V7 packet EOF marker (default on)')
+    # These wire essentials remain explicit internal defaults, not user-facing
+    # toggles. The GUI and CLI always emit the current reference/pilot/EOF wire.
+    send.set_defaults(mono_sum=False, pilot_tones=True, eof_marker=True)
     send_profile = send.add_mutually_exclusive_group()
+    send_profile.add_argument(
+        '--profile', choices=('mono-fold-500', 'fold-500', 'fold-1000'),
+        default=None,
+        help=('wire profile: mono video with Fold 500 (recommended), '
+              'stereo Fold 500 (default), or advanced Fold 1000'))
     send_profile.add_argument('--baseline', action='store_true',
-                              help='restore the pre-fold profile (nearest, brightness 1.05, steady pilots)')
+                              help=argparse.SUPPRESS)
     send_profile.add_argument('--experimental-mono', action='store_true',
-                              help='send the opt-in V7 mono fold-off layout; requires an updated receiver')
+                              help=argparse.SUPPRESS)
     send_profile.add_argument('--experimental-mono-fold', action='store_true',
-                              help='send the all-fresh mono video layout with a 500-class fold')
+                              help=argparse.SUPPRESS)
     send_profile.add_argument('--experimental-fold', type=int, default=None,
-                              choices=(0, 500, 1000), metavar='M',
-                              help='fold M luma slots and send coded pilots (default: 500); '
-                                   '0 selects the baseline. Use the same profile on receiver.')
+                               choices=(0, 500, 1000), metavar='M',
+                               help=argparse.SUPPRESS)
     send.add_argument('--camera', type=int, default=0)
     send.add_argument('--video-source', '--video', dest='video_source',
                       help='local video file or FFmpeg-supported live stream URL')
@@ -1670,11 +1875,10 @@ def parser():
                       choices=('neighbor', 'area', 'bilinear', 'bicubic',
                                'lanczos'),
                       default=None,
-                      help=('override FFmpeg capture scaler; camera defaults '
-                            'to the selected encode filter'))
+                       help=argparse.SUPPRESS)
     send.add_argument('--capture-fps', '--fps', dest='capture_fps', type=float)
     send.add_argument('--batch-frames', type=int, default=1,
-                      help='frames encoded before submission (default: 1)')
+                      help=argparse.SUPPRESS)
     send.add_argument('--speed', type=float, default=1.0,
                        help='pitch-shifted playback speed, 0.25..4.0; speeds '
                        'above the DAC Nyquist limit lose high-frequency detail')
@@ -1685,6 +1889,8 @@ def parser():
                       help='0 means until Ctrl-C')
     send.add_argument('--no-log', dest='no_log', action='store_true',
                       default=False, help=argparse.SUPPRESS)
+    send.add_argument('--gui-control', action='store_true',
+                      help=argparse.SUPPRESS)
     send.add_argument('--log', dest='log', action='store_true',
                       default=False,
                       help='enable routine status output')
@@ -1758,6 +1964,17 @@ def parser():
                                choices=(0, 500, 1000), metavar='M',
                                help='unfold M luma slots using coded-pilot status (default: 500); '
                                     '0 selects baseline. Use the sender\'s profile.')
+    receiver_tuners = {
+        'direction', 'fixture', 'profile_ui', 'mono_compatible',
+        'mono_video_side', 'decode_batch', 'decode_history', 'refine',
+        'no_tail_memory', 'force_float32', 'pilot_timing', 'frame_boundary',
+        'pilot_speed_diagnostics', 'pulse_timing', 'tone_equalization',
+        'baseline', 'experimental_mono', 'experimental_mono_fold',
+        'experimental_fold',
+    }
+    for action in recv._actions:
+        if action.dest in receiver_tuners:
+            action.help = argparse.SUPPRESS
     sub.add_parser('gui', help='open the receiver configuration and information GUI')
     return ap
 

@@ -5,6 +5,7 @@ The sender runs unchanged in its own process. The GUI has no capture preview,
 per-frame polling, or verbose sender logging; it wakes on user input and the
 sender's occasional startup/shutdown messages.
 """
+import json
 import math
 import os
 from pathlib import Path
@@ -24,12 +25,11 @@ if str(ROOT) not in sys.path:
 
 RATE_CANDIDATES = (32000, 44100, 48000, 88200, 96000, 176400, 192000)
 PROFILE_CHOICES = (
-    ('Fold 500 · recommended', 'fold-500'),
-    ('Fold 1000', 'fold-1000'),
-    ('Experimental mono video · Fold 500', 'mono-fold-500'),
-    ('Baseline', 'baseline'),
-    ('Experimental mono', 'mono'),
+    ('Mono video · Fold 500 · recommended', 'mono-fold-500'),
+    ('Fold 500 stereo', 'fold-500'),
+    ('Fold 1000 · advanced', 'fold-1000'),
 )
+PRIMARY_PROFILE_CHOICES = PROFILE_CHOICES[:2]
 SOURCE_AUDIO_CHOICES = (
     ('Video soundtrack (if present)', 'source'),
     ('Input device', 'device'),
@@ -77,12 +77,12 @@ FIELD_HELP = {
     'device': 'Choose the explicit audio output device that feeds the receiver or recording path.',
     'source': 'Choose what the sender captures. Capture starts only after Start.',
     'rate': 'Audio output sample rate. Native uses the device clock; this is separate from Capture FPS.',
-    'profile': 'Choose the wire profile. The receiver must use the matching fold profile.',
+    'profile': 'Mono video is recommended; the receiver detects it automatically. Fold 500 stereo is also available.',
     'speed': 'Playback speed from 0.25× to 4×. Faster playback raises the transmitted carrier frequencies.',
     'encode_filter': 'Resize filter. Folded profiles require Box; Profile default selects the profile recommendation.',
-    'brightness': 'Optional source brightness multiplier. Blank keeps the profile default.',
-    'gamma': 'Source gamma; 1.0 is neutral.',
-    'capture_fps': 'Optional capture pacing rate. Blank uses the source-specific default.',
+    'brightness': 'Live source brightness multiplier. 1.0 is neutral.',
+    'gamma': 'Live source gamma; 1.0 is neutral.',
+    'capture_fps': 'Choose a frame rate reported by the capture source, or leave it at Source default.',
     'video_source': 'Choose a video with Browse, type a path or URL, or drop a file on the window.',
     'video_live': 'Treat an HTTP(S) video URL as a live stream rather than a looping clip.',
     'camera': 'Choose a camera discovered from the host capture devices.',
@@ -92,7 +92,6 @@ FIELD_HELP = {
     'region': 'Optional screen crop as left,top,width,height.',
     'capture_width': 'Capture width for screen/video and initial mouse-follow crop; camera is sampled at 80×96.',
     'capture_filter': 'Optional FFmpeg capture scaler. Automatic follows the sender defaults.',
-    'mono_sum': 'Send mono-summed content on one output channel instead of stereo.',
     'mono_video_side': ('For the mono video profile, carry the modem on one '
                         'leg and leave the other free for separate audio.'),
     'source_audio': ('Choose the embedded video soundtrack, an explicit input '
@@ -102,8 +101,6 @@ FIELD_HELP = {
     'source_audio_gain': 'Gain applied only to source audio on the free output leg.',
     'source_audio_delay_ms': ('Additional sync delay beyond one emitted video '
                               'packet; zero is the low-latency starting point.'),
-    'pilot_tones': 'Pilot references are required by folded-coded profiles.',
-    'eof_marker': 'Packet end marker. Experimental mono profiles require it.',
     'perceptual_resize': 'Experimental pre-encode downscaler. Requires Fold 500 or Fold 1000 with the Box encode filter.',
     'perceptual_detail_strength': 'Strength for the selected pre-encode downscaler, from 0 to 1.',
 }
@@ -112,19 +109,18 @@ FIELD_LABELS = {
     'source': 'Capture source',
     'rate': 'Audio output sample rate',
     'capture_fps': 'Capture FPS',
+    'brightness': 'Brightness · live',
+    'gamma': 'Gamma · live',
     'screen_target': 'Screen / display',
     'video_live': 'Treat URL as live',
     'camera': 'Camera',
     'ffmpeg_input': 'FFmpeg input',
-    'mono_sum': 'Mono output',
     'mono_video_side': 'Mono video output side',
     'source_audio': 'Audio source',
     'source_audio_device': 'Audio input device',
     'source_audio_input_side': 'Audio input channels',
     'source_audio_gain': 'Source-audio gain',
     'source_audio_delay_ms': 'Additional audio delay (ms)',
-    'pilot_tones': 'Pilot tones',
-    'eof_marker': 'EOF marker',
     'perceptual_resize': 'Pre-encode downscaler',
     'perceptual_detail_strength': 'Downscaler strength',
 }
@@ -290,6 +286,150 @@ def enumerate_camera_sources(platform=None, ffmpeg_path=None, run=None,
     if not choices:
         raise RuntimeError('No camera devices were found.')
     return choices
+
+
+def parse_capture_fps(output):
+    """Parse frame rates reported by the host's capture driver/tools."""
+    text = str(output or '')
+    found = set()
+
+    def add(value, denominator=None):
+        try:
+            rate = float(value)
+            if denominator is not None:
+                divisor = float(denominator)
+                if divisor <= 0:
+                    return
+                rate /= divisor
+        except (TypeError, ValueError, ZeroDivisionError):
+            return
+        if math.isfinite(rate) and 0 < rate <= 1000:
+            found.add(round(rate, 3))
+
+    for match in re.finditer(
+            r'\bfps\s*[:=]\s*(\d+(?:\.\d+)?)(?:/(\d+(?:\.\d+)?))?',
+            text, re.IGNORECASE):
+        add(match.group(1), match.group(2))
+    for match in re.finditer(
+            r'(\d+(?:\.\d+)?)\s*fps\b', text, re.IGNORECASE):
+        add(match.group(1))
+    for match in re.finditer(
+            r'\b(?:avg_frame_rate|r_frame_rate)\s*[=:]\s*'
+            r'(\d+(?:\.\d+)?)/(\d+(?:\.\d+)?)', text,
+            re.IGNORECASE):
+        add(match.group(1), match.group(2))
+    return tuple(sorted(found))
+
+
+def _fps_choices(rates):
+    choices = [('Source default', '')]
+    choices.extend((f'{rate:g} fps', str(rate)) for rate in sorted(set(rates)))
+    return tuple(choices)
+
+
+def enumerate_capture_fps(source, camera=None, video_source='',
+                          platform=None, ffmpeg_path=None, which=None,
+                          run=None):
+    """Return source-specific capture rates, preferring host-reported modes."""
+    platform = sys.platform if platform is None else platform
+    which = shutil.which if which is None else which
+    run = subprocess.run if run is None else run
+    output = ''
+
+    def collect(command):
+        nonlocal output
+        result = run(command, capture_output=True, text=True,
+                      encoding='utf-8', errors='replace', timeout=10,
+                      check=False)
+        output = '\n'.join((getattr(result, 'stdout', '') or '',
+                            getattr(result, 'stderr', '') or ''))
+
+    if source == 'camera':
+        selected = str(camera if camera is not None else '')
+        if platform.startswith('linux'):
+            node = selected.split(':', 1)[1] if selected.startswith('v4l2:') else selected
+            ctl = which('v4l2-ctl')
+            if ctl and node:
+                try:
+                    collect([ctl, '--list-formats-ext', '--device', node])
+                except (OSError, subprocess.SubprocessError):
+                    output = ''
+            if not parse_capture_fps(output):
+                executable = ffmpeg_path or which('ffmpeg')
+                if executable and node:
+                    try:
+                        collect([executable, '-hide_banner', '-f', 'v4l2',
+                                 '-list_formats', 'all', '-i', node])
+                    except (OSError, subprocess.SubprocessError):
+                        output = ''
+        elif selected:
+            executable = ffmpeg_path or which('ffmpeg')
+            if executable:
+                if selected.startswith('dshow:'):
+                    fmt, device = 'dshow', selected.split(':', 1)[1]
+                elif selected.startswith('avfoundation:'):
+                    fmt, device = 'avfoundation', selected.split(':', 1)[1]
+                else:
+                    fmt, device = ('avfoundation' if platform == 'darwin'
+                                   else 'dshow'), selected
+                try:
+                    collect([executable, '-hide_banner', '-f', fmt,
+                             '-list_options', 'true', '-i', device])
+                except (OSError, subprocess.SubprocessError):
+                    output = ''
+    elif source == 'video' and video_source:
+        executable = which('ffprobe')
+        if executable:
+            try:
+                collect([executable, '-v', 'error', '-select_streams', 'v:0',
+                         '-show_entries', 'stream=avg_frame_rate,r_frame_rate',
+                         '-of', 'default=noprint_wrappers=1', video_source])
+            except (OSError, subprocess.SubprocessError):
+                output = ''
+    elif source == 'screen':
+        if platform.startswith('linux'):
+            executable = which('xrandr')
+            command = [executable, '--query'] if executable else None
+        elif platform == 'darwin':
+            executable = which('system_profiler') or '/usr/sbin/system_profiler'
+            command = [executable, 'SPDisplaysDataType']
+        elif platform.startswith('win'):
+            executable = which('powershell.exe') or which('powershell')
+            script = (
+                'Get-CimInstance -Namespace root/wmi '
+                '-ClassName WmiMonitorListedSupportedSourceModes | '
+                'ForEach-Object { $_.SupportedDisplayModes } | '
+                'ForEach-Object { $_.RefreshRate }')
+            command = ([executable, '-NoProfile', '-Command', script]
+                       if executable else None)
+        else:
+            command = None
+        if command:
+            try:
+                collect(command)
+            except (OSError, subprocess.SubprocessError):
+                output = ''
+        # xrandr lists display modes' rates without an "fps" suffix.
+        rates = set(parse_capture_fps(output))
+        if platform.startswith('linux'):
+            for line in output.splitlines():
+                if re.match(r'^\s+\d{3,5}x\d{3,5}\s+', line):
+                    rates.update(float(value) for value in re.findall(
+                        r'(?<![\w.])(\d{2,3}(?:\.\d+)?)[*+]?\b', line))
+        elif platform == 'darwin':
+            rates.update(float(value) for value in re.findall(
+                r'\b(\d{2,3}(?:\.\d+)?)\s*(?:Hz|Hertz)\b', output,
+                re.IGNORECASE))
+        elif platform.startswith('win'):
+            rates.update(float(value) for value in re.findall(
+                r'(?m)^\s*(\d{2,3}(?:\.\d+)?)\s*$', output))
+        if rates:
+            return _fps_choices(rates)
+
+    rates = parse_capture_fps(output)
+    if rates:
+        return _fps_choices(rates)
+    return _fps_choices(())
 
 
 def enumerate_screen_targets(backend='mss', platform=None, mss_module=None,
@@ -470,12 +610,11 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
     source = settings.get('source')
     if source not in dict(SOURCE_CHOICES).values():
         raise ValueError('Choose a capture source before starting.')
-    channels = 1 if settings.get('mono_sum') else 2
+    channels = 2
     if device.channels < channels:
         raise ValueError(
             f'{device.name} supports {device.channels} output channel(s); '
-            f'this configuration needs {channels}. Enable mono output or '
-            'choose another device.')
+            f'this configuration needs {channels}. Choose another device.')
 
     rate = settings.get('rate')
     if rate is not None:
@@ -502,9 +641,6 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
     mono_video_side = settings.get('mono_video_side', 'right')
     if mono_video_side not in dict(MONO_VIDEO_SIDE_CHOICES).values():
         raise ValueError('Choose the left or right mono-video output side.')
-    if profile == 'mono-fold-500' and settings.get('mono_sum', False):
-        raise ValueError('Mono video side selection needs two output channels; '
-                         'turn Mono output off.')
     source_audio = settings.get('source_audio', 'source')
     if source_audio not in dict(SOURCE_AUDIO_CHOICES).values():
         raise ValueError('Choose video soundtrack, an input device, or Off.')
@@ -548,18 +684,11 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
         encode_filter = 'box' if profile in folded_profiles else 'nearest'
     if profile in folded_profiles and encode_filter != 'box':
         raise ValueError('Folded profiles require the Box encode filter.')
-    if profile in folded_profiles and not settings.get('pilot_tones', True):
-        raise ValueError('Folded profiles require pilot tones.')
     screen_backend = settings.get('screen_backend', 'mss')
     if source == 'screen' and screen_backend not in ('mss', 'ffmpeg'):
         raise ValueError('Choose a supported screen capture backend.')
     if settings.get('capture_filter', 'auto') not in dict(CAPTURE_FILTER_CHOICES).values():
         raise ValueError('Choose a supported capture filter.')
-    if profile in ('mono', 'mono-fold-500'):
-        if not settings.get('pilot_tones', True):
-            raise ValueError('Experimental mono requires pilot tones.')
-        if not settings.get('eof_marker', True):
-            raise ValueError('Experimental mono requires the EOF marker.')
     if profile == 'mono-fold-500' and settings.get('perceptual_resize', 'off') != 'off':
         raise ValueError('Mono video folding requires the pre-encode downscaler off.')
     perceptual_resize = settings.get('perceptual_resize', 'off')
@@ -694,12 +823,9 @@ def build_command(settings, devices, sd_module=None, python=None,
         '--source', checked['source'],
     ]
 
-    if checked['profile'] == 'fold-500':
-        command.extend(('--experimental-fold', '500'))
-    elif checked['profile'] == 'fold-1000':
-        command.extend(('--experimental-fold', '1000'))
-    elif checked['profile'] == 'mono-fold-500':
-        command.extend(('--experimental-mono-fold', '--mono-video-side',
+    command.extend(('--profile', checked['profile']))
+    if checked['profile'] == 'mono-fold-500':
+        command.extend(('--mono-video-side',
                         checked['mono_video_side'], '--source-audio',
                         checked['source_audio']))
         if checked['source_audio'] == 'device':
@@ -713,10 +839,6 @@ def build_command(settings, devices, sd_module=None, python=None,
         if checked['source_audio_delay_ms'] != 0.0:
             command.extend(('--source-audio-delay-ms',
                             str(checked['source_audio_delay_ms'])))
-    elif checked['profile'] == 'baseline':
-        command.extend(('--experimental-fold', '0'))
-    else:
-        command.append('--experimental-mono')
 
     if checked['rate'] is not None:
         command.extend(('--rate', str(checked['rate'])))
@@ -760,12 +882,7 @@ def build_command(settings, devices, sd_module=None, python=None,
     capture_filter = settings.get('capture_filter', 'auto')
     if capture_filter != 'auto':
         command.extend(('--capture-filter', capture_filter))
-    if settings.get('mono_sum'):
-        command.append('--mono-sum')
-    if not settings.get('pilot_tones', True):
-        command.append('--no-pilot-tones')
-    if not settings.get('eof_marker', True):
-        command.append('--no-eof-marker')
+    command.append('--gui-control')
     return command
 
 
@@ -809,15 +926,16 @@ class SenderGui:
     TOOLBAR = 54
     ROW_HEIGHT = 39
     BASIC_FIELDS = (
-        'device', 'source', 'rate', 'profile', 'mono_video_side', 'speed',
+        'device', 'source', 'rate', 'capture_fps', 'profile', 'mono_video_side',
+        'brightness', 'gamma', 'speed',
         'source_audio', 'source_audio_device', 'source_audio_input_side',
-        'source_audio_gain', 'source_audio_delay_ms', 'encode_filter',
+        'source_audio_gain', 'source_audio_delay_ms',
         'video_source', 'video_live', 'camera', 'screen_target',
     )
     ADVANCED_FIELDS = (
-        'capture_fps', 'brightness', 'gamma', 'screen_backend', 'region',
+        'screen_backend', 'region',
         'ffmpeg_input', 'capture_width', 'capture_filter', 'perceptual_resize',
-        'perceptual_detail_strength', 'mono_sum', 'pilot_tones', 'eof_marker',
+        'perceptual_detail_strength',
     )
 
     def __init__(self, devices=(), device_error='', audio_devices=(),
@@ -830,7 +948,7 @@ class SenderGui:
             'device': None,
             'source': None,
             'rate': None,
-            'profile': 'fold-500',
+            'profile': 'mono-fold-500',
             'mono_video_side': 'right',
             'source_audio': 'source',
             'source_audio_device': None,
@@ -851,9 +969,6 @@ class SenderGui:
             'region': '',
             'capture_width': '160',
             'capture_filter': 'auto',
-            'mono_sum': False,
-            'pilot_tones': True,
-            'eof_marker': True,
             'perceptual_resize': 'off',
             'perceptual_detail_strength': '0.25',
         }
@@ -894,7 +1009,7 @@ class SenderGui:
         if dest == 'source':
             return SOURCE_CHOICES
         if dest == 'rate':
-            channels = 1 if self.settings['mono_sum'] else 2
+            channels = 2
             device = self._device()
             key = (None if device is None else device.index, channels)
             if key in self.rate_cache:
@@ -906,19 +1021,17 @@ class SenderGui:
                 options = (('Native (device clock)', None),)
             self.rate_cache[key] = options
             return options
+        if dest == 'capture_fps':
+            return self.capture_choice_cache.get(
+                dest, _fps_choices(()))
         if dest == 'profile':
-            return PROFILE_CHOICES
+            return PROFILE_CHOICES if self.advanced else PRIMARY_PROFILE_CHOICES
         if dest == 'mono_video_side':
             return MONO_VIDEO_SIDE_CHOICES
         if dest == 'source_audio':
             return SOURCE_AUDIO_CHOICES
         if dest == 'source_audio_input_side':
             return SOURCE_AUDIO_SIDE_CHOICES
-        if dest == 'encode_filter':
-            if self.settings['profile'] in (
-                    'fold-500', 'fold-1000', 'mono-fold-500'):
-                return FILTER_CHOICES[:2]
-            return FILTER_CHOICES
         if dest == 'screen_backend':
             return (('mss · lightweight', 'mss'), ('FFmpeg', 'ffmpeg'))
         if dest == 'capture_filter':
@@ -957,6 +1070,16 @@ class SenderGui:
                 self.capture_choice_cache[dest] = ()
                 self.notice = f'Screen discovery failed: {exc}'
                 self.dropdown = None
+                self.dirty = True
+                return
+        elif dest == 'capture_fps':
+            try:
+                self.capture_choice_cache[dest] = enumerate_capture_fps(
+                    self.settings['source'], self.settings.get('camera'),
+                    self.settings.get('video_source', ''))
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                self.capture_choice_cache[dest] = _fps_choices(())
+                self.notice = f'Capture-rate discovery failed: {exc}'
                 self.dirty = True
                 return
         self.dropdown = dest
@@ -1003,6 +1126,8 @@ class SenderGui:
 
     def _value_label(self, dest):
         value = self.settings[dest]
+        if dest == 'brightness' and not str(value).strip():
+            return '1.0 · profile default'
         if dest == 'device':
             device = self._device()
             return device.label if device else 'Select output device…'
@@ -1018,9 +1143,9 @@ class SenderGui:
             choices = self._choices(dest)
             return next((label for label, candidate in choices
                          if candidate == value), str(value))
-        if dest in ('source', 'profile', 'encode_filter', 'screen_backend',
+        if dest in ('source', 'profile', 'screen_backend',
                     'capture_filter', 'perceptual_resize', 'mono_video_side',
-                    'source_audio', 'source_audio_input_side'):
+                    'source_audio', 'source_audio_input_side', 'capture_fps'):
             choices = self._choices(dest)
             label = next((label for label, candidate in choices
                           if candidate == value), None)
@@ -1058,12 +1183,12 @@ class SenderGui:
             self.settings['rate'] = None
         elif dest == 'screen_backend':
             self.settings['screen_target'] = None
-        elif dest == 'mono_sum':
-            options = self._choices('rate')
-            if self.settings['rate'] not in {item[1] for item in options}:
-                self.settings['rate'] = None
+            self.capture_choice_cache.pop('capture_fps', None)
         elif dest == 'source':
             self.dropdown = None
+            self.capture_choice_cache.pop('capture_fps', None)
+        elif dest == 'camera':
+            self.capture_choice_cache.pop('capture_fps', None)
         self.notice = f'{dest.replace("_", " ").capitalize()} updated.'
         self.dirty = True
 
@@ -1092,7 +1217,7 @@ class SenderGui:
             command = self._build_command()
             kwargs = {
                 'cwd': str(ROOT),
-                'stdin': subprocess.DEVNULL,
+                'stdin': subprocess.PIPE,
                 'stdout': subprocess.PIPE,
                 'stderr': subprocess.STDOUT,
                 'text': True,
@@ -1171,6 +1296,12 @@ class SenderGui:
         self.stop_requested = True
         self.notice = 'Stopping sender and closing its audio stream…'
         self.dirty = True
+        control = getattr(process, 'stdin', None)
+        if control is not None:
+            try:
+                control.close()
+            except OSError:
+                pass
         try:
             if os.name == 'nt':
                 process.send_signal(signal.CTRL_BREAK_EVENT)
@@ -1214,10 +1345,32 @@ class SenderGui:
     def _finish_edit(self, commit=True):
         dest = self.selected
         if commit:
+            previous = self.settings.get(dest)
             self.settings[dest] = self.edit_buffer
-            self.notice = f'{dest.replace("_", " ").capitalize()} updated.'
+            if dest == 'video_source':
+                self.capture_choice_cache.pop('capture_fps', None)
+            try:
+                if self.process is not None and dest in ('brightness', 'gamma'):
+                    self._send_live_tone_update()
+                self.notice = f'{dest.replace("_", " ").capitalize()} updated.'
+            except (OSError, ValueError, RuntimeError) as exc:
+                self.settings[dest] = previous
+                self.notice = str(exc)
         self.editing = False
         self.dirty = True
+
+    def _send_live_tone_update(self):
+        brightness = _float_setting(
+            self.settings.get('brightness', ''), 'Brightness', optional=True)
+        brightness = 1.0 if brightness is None else brightness
+        gamma = _float_setting(self.settings.get('gamma', '1'), 'Gamma')
+        if brightness <= 0 or gamma <= 0:
+            raise ValueError('Brightness and gamma must be positive.')
+        control = getattr(self.process, 'stdin', None)
+        if control is None:
+            raise RuntimeError('Live sender controls are unavailable.')
+        control.write(json.dumps({'brightness': brightness, 'gamma': gamma})+'\n')
+        control.flush()
 
     def _render_setup(self, image, draw, font, small):
         width, height = image.size
@@ -1261,7 +1414,7 @@ class SenderGui:
             draw.text((value_left, y+10), value,
                       font=small, fill=(237, 242, 246))
             draw.text((width-40, y+9), '▾' if dest in (
-                'device', 'source', 'rate', 'profile', 'encode_filter',
+                'device', 'source', 'rate', 'capture_fps', 'profile',
                 'screen_backend', 'capture_filter', 'camera', 'screen_target',
                 'perceptual_resize') else '',
                 font=small, fill=(134, 169, 188))
@@ -1452,6 +1605,7 @@ class SenderGui:
                 else:
                     if path:
                         self.settings['video_source'] = path
+                        self.capture_choice_cache.pop('capture_fps', None)
                         self.selected = 'video_source'
                         self.notice = f'Selected video: {Path(path).name}'
                     else:
@@ -1465,12 +1619,13 @@ class SenderGui:
         elif hit and hit.startswith('field:') and self.page == 'setup':
             dest = hit.split(':', 1)[1]
             self.selected = dest
-            if self.process is not None:
+            if (self.process is not None and
+                    dest not in ('brightness', 'gamma')):
                 self.notice = 'Settings are locked while the sender is running.'
-            elif dest in ('video_live', 'mono_sum', 'pilot_tones', 'eof_marker'):
+            elif dest == 'video_live':
                 self._assign(dest, not self.settings[dest])
-            elif dest in ('device', 'source', 'rate', 'profile',
-                          'encode_filter', 'screen_backend', 'capture_filter',
+            elif dest in ('device', 'source', 'rate', 'capture_fps', 'profile',
+                          'screen_backend', 'capture_filter',
                           'camera', 'screen_target', 'perceptual_resize'):
                 self._open_dropdown(dest)
             elif dest in self._visible_fields():
@@ -1529,7 +1684,9 @@ class SenderGui:
                 self.dropdown = None
         elif self.page == 'setup':
             fields = self._visible_fields()
-            if self.process is not None and key not in (glfw.KEY_UP, glfw.KEY_DOWN):
+            live_tone_selected = self.selected in ('brightness', 'gamma')
+            if (self.process is not None and not live_tone_selected and
+                    key not in (glfw.KEY_UP, glfw.KEY_DOWN)):
                 self.notice = 'Settings are locked while the sender is running.'
                 self.dirty = True
                 return
@@ -1546,10 +1703,10 @@ class SenderGui:
                     self.scroll = position-visible_count+1
             elif key in (glfw.KEY_LEFT, glfw.KEY_RIGHT) and self.selected in fields:
                 dest = self.selected
-                if dest in ('video_live', 'mono_sum', 'pilot_tones', 'eof_marker'):
+                if dest == 'video_live':
                     self._assign(dest, not self.settings[dest])
-                elif dest in ('device', 'source', 'rate', 'profile',
-                              'encode_filter', 'screen_backend', 'capture_filter',
+                elif dest in ('device', 'source', 'rate', 'capture_fps', 'profile',
+                              'screen_backend', 'capture_filter',
                               'camera', 'screen_target', 'perceptual_resize'):
                     self._open_dropdown(dest)
                 else:
@@ -1557,11 +1714,11 @@ class SenderGui:
                     self.edit_buffer = str(self.settings.get(dest) or '')
             elif key in (glfw.KEY_ENTER, glfw.KEY_KP_ENTER) and self.selected in fields:
                 dest = self.selected
-                if dest in ('device', 'source', 'rate', 'profile',
-                            'encode_filter', 'screen_backend', 'capture_filter',
+                if dest in ('device', 'source', 'rate', 'capture_fps', 'profile',
+                            'screen_backend', 'capture_filter',
                             'camera', 'screen_target', 'perceptual_resize'):
                     self._open_dropdown(dest)
-                elif dest in ('video_live', 'mono_sum', 'pilot_tones', 'eof_marker'):
+                elif dest == 'video_live':
                     self._assign(dest, not self.settings[dest])
                 else:
                     self.editing = True
@@ -1590,6 +1747,7 @@ class SenderGui:
     def _on_drop(self, _window, paths):
         if paths and self.settings.get('source') == 'video':
             self.settings['video_source'] = paths[0]
+            self.capture_choice_cache.pop('capture_fps', None)
             self.selected = 'video_source'
             self.notice = f'Video path selected: {Path(paths[0]).name}'
             self.dirty = True

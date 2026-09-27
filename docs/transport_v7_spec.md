@@ -1927,15 +1927,24 @@ substitute for the Section 1 playback validation.
 
 ### 13.8 All-fresh mono video with a 500-class fold
 
-The video-only profile is separately opt-in with `--experimental-mono-fold`;
-it does not alter `--experimental-mono` or the `MONO_OFF` rotating wire:
+The video-only profile is selected as `--profile mono-fold-500` (and is the
+sender GUI default). It does not alter the legacy `--experimental-mono` or the
+`MONO_OFF` rotating wire:
 
 ```text
 .venv/bin/python tools/v7_live.py send --source test \
-  --device 'BlackHole 2ch' --experimental-mono-fold --mono-video-side right
+  --device 'BlackHole 2ch' --profile mono-fold-500 --mono-video-side right
 .venv/bin/python tools/v7_live.py receive \
-  --device 'BlackHole 2ch' --experimental-mono-fold --mono-video-side auto
+  --device 'BlackHole 2ch'
 ```
+
+The default receiver probes packet status before choosing a decoder. Two
+consistent `MONO_500` statuses identify this profile; right is preferred if
+both input legs validate, otherwise the validated leg is selected. Missing,
+damaged, or conflicting status falls back to the ordinary stereo Fold-500
+decoder rather than choosing the mono rank map speculatively. The GUI leaves
+legacy profile and decoder-tuning switches out of its setup fields; those
+specialized CLI paths remain available for recovery and experiments.
 
 It requires the canonical box model, coded pilot timing, EOF framing, and no
 pre-encode perceptual resizer. Every packet transmits the same 1,264 M-only
@@ -1964,6 +1973,13 @@ channel is zero-filled. An explicitly selected input device can provide
 microphone, line, or loopback audio. Independent gain and additional delay
 controls affect only that channel. The output stream remains stereo and the
 ordinary receiver does not decode or delay the audio leg.
+
+The sender GUI exposes an input-device audio source for every capture source
+when this mono-video profile is selected. Capture FPS is a dropdown populated
+from the selected camera driver's reported modes (or video frame rate / display
+refresh choices when available). Brightness and gamma can be edited from Setup
+while sending; updates apply to subsequent captured frames without restarting
+the audio stream.
 
 For example, use the embedded soundtrack (the default), an explicitly selected
 input device, or silence:

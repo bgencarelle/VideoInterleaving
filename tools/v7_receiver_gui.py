@@ -46,9 +46,14 @@ FULLSCREEN_TOOLBAR_EDGE = 14
 DISPLAY_MENU_ROW_HEIGHT = 29
 DISPLAY_MENU_WIDTH = 250
 BASIC_OPTION_DESTS = frozenset((
-    'device', 'direction', 'fixture', 'fullscreen', 'show_diagnostics',
-    'image_only', 'experimental_fold', 'baseline', 'save_dir',
-    'mono_compatible'))
+    'device', 'fullscreen', 'show_diagnostics', 'image_only', 'save_dir'))
+HIDDEN_DECODE_OPTIONS = frozenset((
+    'direction', 'fixture', 'experimental_fold', 'baseline',
+    'experimental_mono', 'experimental_mono_fold', 'mono_compatible',
+    'mono_video_side', 'profile_ui', 'decode_batch', 'decode_history',
+    'refine', 'no_tail_memory', 'force_float32', 'pilot_timing',
+    'frame_boundary', 'pilot_speed_diagnostics', 'pulse_timing',
+    'tone_equalization'))
 
 
 @dataclass
@@ -186,7 +191,7 @@ def _field_label(action):
 def _make_fields(receive_parser, device_choices):
     fields = []
     for action in receive_parser._actions:
-        if action.dest in ('help', 'mode'):
+        if action.dest in ('help', 'mode') or action.dest in HIDDEN_DECODE_OPTIONS:
             continue
         if action.dest == 'headless':
             # The integrated GUI owns display; this internal CLI switch keeps

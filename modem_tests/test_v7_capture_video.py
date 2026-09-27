@@ -103,9 +103,10 @@ class VideoSourceCommandTests(unittest.TestCase):
         with mock.patch('tools.v7_capture.shutil.which', return_value='ffmpeg'), \
                 mock.patch('tools.v7_capture.subprocess.Popen',
                            return_value=process) as popen:
-            grab = ffmpeg_source('gdigrab:desktop', 30,
+            grab = ffmpeg_source('gdigrab:desktop', 59.94,
                                  region=(-1920, 0, 1920, 1080))
             cmd = popen.call_args.args[0]
+            self.assertEqual(cmd[cmd.index('-framerate')+1], '59.94')
             self.assertEqual(cmd[cmd.index('-offset_x')+1], '-1920')
             self.assertEqual(cmd[cmd.index('-offset_y')+1], '0')
             self.assertEqual(cmd[cmd.index('-video_size')+1], '1920x1080')
