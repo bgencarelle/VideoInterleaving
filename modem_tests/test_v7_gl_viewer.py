@@ -12,7 +12,9 @@ from tools.v7_gl_viewer import (DISPLAY_MODES, FILTER_LUT_MODES,
                                 toolbar_layout, _toolbar_image,
                                 resample_filter_planes,
                                 _diagnostic_image)
-from tools.v7_receiver_gui import _draw_scissored_ui
+from tools.v7_receiver_gui import (_draw_scissored_ui,
+                                   _draw_scissored_ui_regions,
+                                   _scissors_outside_viewport)
 from tools.v7_viewer import main as preview_main
 
 
@@ -379,6 +381,47 @@ class FloatShaderReferenceTests(unittest.TestCase):
             vertex_array.release()
             program.release()
             overlay.release()
+            framebuffer.release()
+            output.release()
+
+    def test_ui_background_draw_skips_the_picture_rectangle(self):
+        from tools.v7_gl_viewer import FRAGMENT_SHADER, VERTEX_SHADER
+
+        size = (8, 8)
+        output = self.context.texture(size, 4)
+        framebuffer = self.context.framebuffer(color_attachments=[output])
+        ui = self.context.texture(
+            size, 4, bytes((255, 0, 0, 255))*size[0]*size[1])
+        picture = self.context.texture(
+            size, 4, bytes((0, 0, 255, 255))*size[0]*size[1])
+        program = self.context.program(
+            vertex_shader=VERTEX_SHADER, fragment_shader=FRAGMENT_SHADER)
+        program['image'].value = 0
+        vertex_array = self.context.vertex_array(program, [])
+        try:
+            framebuffer.use()
+            self.context.viewport = (0, 0, *size)
+            self.context.clear(0, 1, 0, 1)
+
+            _draw_scissored_ui_regions(
+                self.context, size,
+                _scissors_outside_viewport(size, (2, 2, 4, 4)), ui,
+                vertex_array, self.moderngl.TRIANGLES)
+            self.context.scissor = (2, 2, 4, 4)
+            picture.use(location=0)
+            vertex_array.render(mode=self.moderngl.TRIANGLES, vertices=3)
+            self.context.scissor = None
+
+            pixels = np.frombuffer(output.read(alignment=1), dtype=np.uint8)
+            pixels = pixels.reshape(size[1], size[0], 4)
+            np.testing.assert_array_equal(pixels[0, 0, :3], (255, 0, 0))
+            np.testing.assert_array_equal(pixels[3, 3, :3], (0, 0, 255))
+        finally:
+            self.context.scissor = None
+            vertex_array.release()
+            program.release()
+            picture.release()
+            ui.release()
             framebuffer.release()
             output.release()
 

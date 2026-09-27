@@ -13,6 +13,7 @@ from tools.v7_receiver_gui import (ROOT, ReceiverGui, _make_fields,
                                    FULLSCREEN_TOOLBAR_EDGE,
                                    FULLSCREEN_TOOLBAR_HIDE_SECONDS,
                                    _logical_rect_to_framebuffer,
+                                   _scissors_outside_viewport,
                                    _receive_parser)
 
 
@@ -186,6 +187,12 @@ class ReceiverGuiOptionTests(unittest.TestCase):
                 bounds, (960, 720), (1920, 1440)),
             (bounds[0]*2, 1440-bounds[3]*2,
              (bounds[2]-bounds[0])*2, (bounds[3]-bounds[1])*2))
+
+    def test_picture_viewport_complement_has_four_nonoverlapping_regions(self):
+        self.assertEqual(
+            _scissors_outside_viewport((8, 8), (2, 2, 4, 4)),
+            ((0, 0, 8, 2), (0, 6, 8, 2),
+             (0, 2, 2, 4), (6, 2, 2, 4)))
 
     def test_picture_viewport_uses_framebuffer_pixels_on_hidpi(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())

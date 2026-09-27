@@ -268,13 +268,41 @@ def _logical_rect_to_framebuffer(rect, window_size, framebuffer_size):
 def _draw_scissored_ui(context, framebuffer_size, scissor, texture,
                        vertex_array, triangle_mode):
     """Draw the UI texture over the current picture inside one rectangle."""
+    _draw_scissored_ui_regions(context, framebuffer_size, (scissor,), texture,
+                               vertex_array, triangle_mode)
+
+
+def _draw_scissored_ui_regions(context, framebuffer_size, scissors, texture,
+                               vertex_array, triangle_mode):
+    """Blit the full UI texture through several framebuffer-space clips."""
     context.viewport = (0, 0, *framebuffer_size)
-    context.scissor = scissor
     try:
         texture.use(location=0)
-        vertex_array.render(mode=triangle_mode, vertices=3)
+        for scissor in scissors:
+            if scissor[2] <= 0 or scissor[3] <= 0:
+                continue
+            context.scissor = scissor
+            vertex_array.render(mode=triangle_mode, vertices=3)
     finally:
         context.scissor = None
+
+
+def _scissors_outside_viewport(framebuffer_size, viewport):
+    """Return nonempty GL scissor rectangles covering everything but a view."""
+    framebuffer_width, framebuffer_height = framebuffer_size
+    x, y, width, height = viewport
+    left = max(0, min(framebuffer_width, x))
+    bottom = max(0, min(framebuffer_height, y))
+    right = max(left, min(framebuffer_width, x+width))
+    top = max(bottom, min(framebuffer_height, y+height))
+    regions = (
+        (0, 0, framebuffer_width, bottom),
+        (0, top, framebuffer_width, framebuffer_height-top),
+        (0, bottom, left, top-bottom),
+        (right, bottom, framebuffer_width-right, top-bottom),
+    )
+    return tuple(region for region in regions
+                 if region[2] > 0 and region[3] > 0)
 
 
 class ReceiverGui:
@@ -1565,27 +1593,38 @@ class ReceiverGui:
                     self.dirty = False
 
                 if ui_needs_draw or picture_needs_draw:
-                    context.viewport = (0, 0, *framebuffer_size)
-                    context.clear(.03, .05, .07, 1.0)
-                    ui_texture.use(location=0)
-                    vertex_array.render(mode=moderngl.TRIANGLES, vertices=3)
+                    picture_viewport = None
                     if (self.page == 'info' and self.current_frame is not None
                             and picture_texture is not None):
                         aspect = self.v7_live.P.V7_ASPECT_RATIOS[
                             self.current_frame.aspect & 7]
                         picture_viewport = self._picture_viewport(
                             window_size, framebuffer_size, aspect)
-                        if picture_viewport[2] and picture_viewport[3]:
-                            render_picture(picture_viewport)
-                            menu_bounds = self._display_menu_bounds(
-                                window_size[0])
-                            if menu_bounds is not None:
-                                scissor = _logical_rect_to_framebuffer(
-                                    menu_bounds, window_size, framebuffer_size)
-                                _draw_scissored_ui(
-                                    context, framebuffer_size, scissor,
-                                    ui_texture, vertex_array,
-                                    moderngl.TRIANGLES)
+                        if not picture_viewport[2] or not picture_viewport[3]:
+                            picture_viewport = None
+                    if picture_viewport is None:
+                        context.viewport = (0, 0, *framebuffer_size)
+                        ui_texture.use(location=0)
+                        vertex_array.render(
+                            mode=moderngl.TRIANGLES, vertices=3)
+                    else:
+                        # Recompose both buffers every swap, but shade the
+                        # image rectangle only once instead of under the UI.
+                        _draw_scissored_ui_regions(
+                            context, framebuffer_size,
+                            _scissors_outside_viewport(
+                                framebuffer_size, picture_viewport),
+                            ui_texture, vertex_array, moderngl.TRIANGLES)
+                        render_picture(picture_viewport)
+                        menu_bounds = self._display_menu_bounds(
+                            window_size[0])
+                        if menu_bounds is not None:
+                            scissor = _logical_rect_to_framebuffer(
+                                menu_bounds, window_size, framebuffer_size)
+                            _draw_scissored_ui(
+                                context, framebuffer_size, scissor,
+                                ui_texture, vertex_array,
+                                moderngl.TRIANGLES)
                     glfw.swap_buffers(window)
                     if picture_needs_draw and self.current_frame is not None:
                         self.display_latency_ms = max(
