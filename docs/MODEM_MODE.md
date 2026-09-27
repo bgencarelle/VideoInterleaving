@@ -142,6 +142,13 @@ needed for the default M=500 coded profile:
   --video-source clip.mp4
 ```
 
+To configure the standalone sender with a small event-driven GUI instead, run
+`./vi.modem-send-gui`. It launches the same `vi.modem-send` path in a separate
+process, uses no capture preview or per-frame logging, and stops it with a
+graceful interrupt. The output sample rate defaults to the device-native clock;
+capture FPS is a separate setting. Match the selected wire profile on the
+receiver.
+
 The device argument is required on both sides. Route the sender's output to the
 receiver's input; on a same-machine loopback, select the loopback device for
 both. The sender runs until Ctrl-C (or `--seconds N`); stop the receiver with
