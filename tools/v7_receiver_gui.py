@@ -249,6 +249,34 @@ def _fit_text(text, font, width):
     return text
 
 
+def _logical_rect_to_framebuffer(rect, window_size, framebuffer_size):
+    """Scale a top-left-origin logical rectangle to GL scissor coordinates."""
+    window_width, window_height = window_size
+    framebuffer_width, framebuffer_height = framebuffer_size
+    if window_width <= 0 or window_height <= 0:
+        return 0, 0, 0, 0
+    scale_x = framebuffer_width/window_width
+    scale_y = framebuffer_height/window_height
+    left, top, right, bottom = rect
+    x0 = round(left*scale_x)
+    x1 = round(right*scale_x)
+    y0 = framebuffer_height-round(bottom*scale_y)
+    y1 = framebuffer_height-round(top*scale_y)
+    return x0, y0, max(0, x1-x0), max(0, y1-y0)
+
+
+def _draw_scissored_ui(context, framebuffer_size, scissor, texture,
+                       vertex_array, triangle_mode):
+    """Draw the UI texture over the current picture inside one rectangle."""
+    context.viewport = (0, 0, *framebuffer_size)
+    context.scissor = scissor
+    try:
+        texture.use(location=0)
+        vertex_array.render(mode=triangle_mode, vertices=3)
+    finally:
+        context.scissor = None
+
+
 class ReceiverGui:
     def __init__(self, v7_live, root_parser, receive_parser, device_choices,
                  device_error=''):
@@ -296,6 +324,8 @@ class ReceiverGui:
         self.last_generation = None
         self.current_frame = None
         self.latest_values_image = None
+        self.display_latency_ms = None
+        self.last_display_latency_label = None
         self.display_mode = 'nearest'
         self.image_only = False
         self.image_only_previous_page = 'info'
@@ -720,6 +750,9 @@ class ReceiverGui:
         except Exception:
             return
         diagnostics['resources'] = self._sample_gui_resources(now)
+        display_latency_label = (
+            None if self.display_latency_ms is None else
+            f'{self.display_latency_ms:.1f}')
         packet = snapshot.get('latest_packet')
         decode_info = snapshot.get('decode_info')
         meter = snapshot.get('meter')
@@ -735,7 +768,9 @@ class ReceiverGui:
         changed |= packet is not self.live_packet
         changed |= decode_info is not self.live_decode_info
         changed |= meter_json != self.live_meter_json
+        changed |= display_latency_label != self.last_display_latency_label
         if changed:
+            self.last_display_latency_label = display_latency_label
             self.live_diagnostics = diagnostics
             self.live_packet = packet
             self.live_decode_info = decode_info
@@ -934,7 +969,9 @@ class ReceiverGui:
             if self.current_frame is not None:
                 status = (self.latest_report or {}).get(
                     'status', 'picture decoded')
-                detail = (f'{state} · {status} · {count} pictures · '
+                display = ('' if self.display_latency_ms is None else
+                           f' · GUI handoff {self.display_latency_ms:.1f} ms')
+                detail = (f'{state}{display} · {status} · {count} pictures · '
                           f'input {input_fps:.1f} fps')
             else:
                 detail = f'{state} · {self.notice}'
@@ -943,17 +980,10 @@ class ReceiverGui:
                       (189, 203, 214), font=small)
 
     def _render_display_menu(self, image, draw, small):
-        if (not self.display_menu_open or self.page != 'info' or
-                self.image_only or not self.toolbar_visible):
+        bounds = self._display_menu_bounds(image.size[0])
+        if bounds is None:
             return
-        button = self.hits.get('mode_button')
-        if button is None:
-            return
-        width = image.size[0]
-        left = button[0]
-        right = min(width-14, left+DISPLAY_MENU_WIDTH)
-        menu_top = TOOLBAR_HEIGHT+2
-        menu_bottom = menu_top+len(DISPLAY_MODES)*DISPLAY_MENU_ROW_HEIGHT+4
+        left, menu_top, right, menu_bottom = bounds
         draw.rounded_rectangle((left, menu_top, right, menu_bottom), radius=5,
                                fill=(12, 22, 31, 250),
                                outline=(93, 132, 155), width=1)
@@ -969,6 +999,19 @@ class ReceiverGui:
                       font=small)
             self.hits[f'display_mode:{mode}'] = (
                 left, top, right, top+DISPLAY_MENU_ROW_HEIGHT-1)
+
+    def _display_menu_bounds(self, width):
+        if (not self.display_menu_open or self.page != 'info' or
+                self.image_only or not self.toolbar_visible):
+            return None
+        button = self.hits.get('mode_button')
+        if button is None:
+            return None
+        left = button[0]
+        right = min(width-14, left+DISPLAY_MENU_WIDTH)
+        top = TOOLBAR_HEIGHT+2
+        bottom = top+len(DISPLAY_MODES)*DISPLAY_MENU_ROW_HEIGHT+4
+        return left, top, right, bottom
 
     def _canvas(self, size):
         width, height = size
@@ -1130,8 +1173,20 @@ class ReceiverGui:
     def _on_key(self, glfw, window, key, _scancode, action, mods):
         if action not in (glfw.PRESS, glfw.REPEAT):
             return
-        if (self.fullscreen and not self.image_only and
-                key in (glfw.KEY_F, glfw.KEY_I)):
+        if self.image_only and key in (glfw.KEY_F, glfw.KEY_I):
+            was_fullscreen = self.image_only_previous_fullscreen
+            self._set_image_only(False)
+            if key == glfw.KEY_F:
+                # Image-only may have entered fullscreen on its own, or may
+                # have been enabled from an already-fullscreen Live view.
+                # In both cases F must leave fullscreen exactly once.
+                if was_fullscreen and self.fullscreen:
+                    self._toggle_fullscreen(glfw, window)
+            else:
+                self._reveal_toolbar()
+                self._toggle_details()
+            return
+        if (self.fullscreen and key in (glfw.KEY_F, glfw.KEY_I)):
             if self.editing:
                 self._finish_edit(self.fields[self.selected])
             self._reveal_toolbar()
@@ -1481,6 +1536,10 @@ class ReceiverGui:
                             render_picture(fit_viewport(
                                 framebuffer_size, aspect))
                         glfw.swap_buffers(window)
+                        if picture_needs_draw and self.current_frame is not None:
+                            self.display_latency_ms = max(
+                                0.0, 1000*(time.monotonic()-
+                                          self.current_frame.published_at))
                     self.dirty = False
                     title = 'V7 Receiver · Image only'
                     if title != self.last_title:
@@ -1518,7 +1577,20 @@ class ReceiverGui:
                             window_size, framebuffer_size, aspect)
                         if picture_viewport[2] and picture_viewport[3]:
                             render_picture(picture_viewport)
+                            menu_bounds = self._display_menu_bounds(
+                                window_size[0])
+                            if menu_bounds is not None:
+                                scissor = _logical_rect_to_framebuffer(
+                                    menu_bounds, window_size, framebuffer_size)
+                                _draw_scissored_ui(
+                                    context, framebuffer_size, scissor,
+                                    ui_texture, vertex_array,
+                                    moderngl.TRIANGLES)
                     glfw.swap_buffers(window)
+                    if picture_needs_draw and self.current_frame is not None:
+                        self.display_latency_ms = max(
+                            0.0, 1000*(time.monotonic()-
+                                      self.current_frame.published_at))
                 title = ('V7 Receiver · ' +
                          ('Receiving' if self.started else
                           'Stopped' if self.ever_started else 'Not started') +

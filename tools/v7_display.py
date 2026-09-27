@@ -6,6 +6,7 @@ existing ModernGL renderer without making the transport import display code.
 """
 from dataclasses import dataclass
 import threading
+import time
 
 
 @dataclass(frozen=True)
@@ -14,6 +15,7 @@ class DisplayFrame:
     shapes: object
     aspect: int
     generation: int
+    published_at: float
 
 
 class LatestFrame:
@@ -35,7 +37,7 @@ class LatestFrame:
         with self._lock:
             self._generation += 1
             self._frame = DisplayFrame(values, shapes, int(aspect),
-                                       self._generation)
+                                       self._generation, time.monotonic())
             notifier = self._notifier
         if notifier is not None:
             try:

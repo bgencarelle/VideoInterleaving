@@ -12,6 +12,7 @@ from tools.v7_gl_viewer import (DISPLAY_MODES, FILTER_LUT_MODES,
                                 toolbar_layout, _toolbar_image,
                                 resample_filter_planes,
                                 _diagnostic_image)
+from tools.v7_receiver_gui import _draw_scissored_ui
 from tools.v7_viewer import main as preview_main
 
 
@@ -348,6 +349,38 @@ class FloatShaderReferenceTests(unittest.TestCase):
                     self.assertLessEqual(
                         float(np.max(np.abs(rendered-reference))),
                         1.0/255.0+1e-6)
+
+    def test_filter_menu_overlay_is_scissored_over_picture(self):
+        from tools.v7_gl_viewer import FRAGMENT_SHADER, VERTEX_SHADER
+
+        size = (8, 8)
+        output = self.context.texture(size, 4)
+        framebuffer = self.context.framebuffer(color_attachments=[output])
+        overlay = self.context.texture(
+            size, 4, bytes((255, 0, 0, 255))*size[0]*size[1])
+        program = self.context.program(
+            vertex_shader=VERTEX_SHADER, fragment_shader=FRAGMENT_SHADER)
+        program['image'].value = 0
+        vertex_array = self.context.vertex_array(program, [])
+        try:
+            framebuffer.use()
+            self.context.viewport = (0, 0, *size)
+            self.context.clear(0, 0, 1, 1)
+
+            _draw_scissored_ui(
+                self.context, size, (2, 2, 3, 3), overlay,
+                vertex_array, self.moderngl.TRIANGLES)
+
+            pixels = np.frombuffer(output.read(alignment=1), dtype=np.uint8)
+            pixels = pixels.reshape(size[1], size[0], 4)
+            np.testing.assert_array_equal(pixels[3, 3, :3], (255, 0, 0))
+            np.testing.assert_array_equal(pixels[0, 0, :3], (0, 0, 255))
+        finally:
+            vertex_array.release()
+            program.release()
+            overlay.release()
+            framebuffer.release()
+            output.release()
 
     def test_reconstruction_modes_have_distinct_expected_edge_profiles(self):
         bilinear = self._render_luma_ramp('bilinear')

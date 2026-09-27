@@ -12,6 +12,7 @@ from tools.v7_gl_viewer import DISPLAY_MODES
 from tools.v7_receiver_gui import (ROOT, ReceiverGui, _make_fields,
                                    FULLSCREEN_TOOLBAR_EDGE,
                                    FULLSCREEN_TOOLBAR_HIDE_SECONDS,
+                                   _logical_rect_to_framebuffer,
                                    _receive_parser)
 
 
@@ -169,6 +170,23 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertEqual(direction.value, before)
         self.assertIn('locked while receiving', gui.notice)
 
+    def test_display_menu_bounds_scale_to_a_hidpi_scissor(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        gui.page = 'info'
+        gui.display_menu_open = True
+        gui._canvas((960, 720))
+
+        bounds = gui._display_menu_bounds(960)
+        self.assertIsNotNone(bounds)
+        first_mode = gui.hits['display_mode:'+DISPLAY_MODES[0]]
+        self.assertGreaterEqual(first_mode[1], bounds[1])
+        self.assertLessEqual(first_mode[3], bounds[3])
+        self.assertEqual(
+            _logical_rect_to_framebuffer(
+                bounds, (960, 720), (1920, 1440)),
+            (bounds[0]*2, 1440-bounds[3]*2,
+             (bounds[2]-bounds[0])*2, (bounds[3]-bounds[1])*2))
+
     def test_picture_viewport_uses_framebuffer_pixels_on_hidpi(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
         self.assertEqual(
@@ -260,6 +278,66 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertTrue(gui.toolbar_visible)
         self.assertTrue(field.value)
         self.assertTrue(gui._diagnostics_visible())
+
+    def test_image_only_f_exits_fullscreen_once_when_entered_from_windowed(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        gui.image_only = True
+        gui.image_only_previous_page = 'info'
+        gui.image_only_previous_fullscreen = False
+        gui.fullscreen = True
+        gui._glfw = SimpleNamespace(
+            CURSOR=1, CURSOR_NORMAL=0,
+            set_input_mode=lambda *_args: None)
+        gui._window = object()
+        toggles = []
+
+        def toggle(*_args):
+            toggles.append(True)
+            gui.fullscreen = False
+
+        gui._toggle_fullscreen = toggle
+        gui._on_key(KeyStub(), gui._window, KeyStub.KEY_F, 0,
+                    KeyStub.PRESS, 0)
+
+        self.assertFalse(gui.image_only)
+        self.assertFalse(gui.fullscreen)
+        self.assertEqual(toggles, [True])
+
+    def test_image_only_f_exits_fullscreen_once_when_already_fullscreen(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        gui.image_only = True
+        gui.image_only_previous_page = 'info'
+        gui.image_only_previous_fullscreen = True
+        gui.fullscreen = True
+        toggles = []
+        gui._toggle_fullscreen = lambda *_args: (
+            toggles.append(True), setattr(gui, 'fullscreen', False))
+
+        gui._on_key(KeyStub(), object(), KeyStub.KEY_F, 0,
+                    KeyStub.PRESS, 0)
+
+        self.assertFalse(gui.image_only)
+        self.assertFalse(gui.fullscreen)
+        self.assertEqual(toggles, [True])
+
+    def test_image_only_i_returns_to_live_with_diagnostics_visible(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        gui.image_only = True
+        gui.image_only_previous_page = 'info'
+        gui.image_only_previous_fullscreen = True
+        gui.fullscreen = True
+        gui.toolbar_visible = False
+
+        gui._on_key(KeyStub(), object(), KeyStub.KEY_I, 0,
+                    KeyStub.PRESS, 0)
+
+        diagnostics = next(field for field in gui.fields
+                           if field.dest == 'show_diagnostics')
+        self.assertFalse(gui.image_only)
+        self.assertTrue(gui.fullscreen)
+        self.assertEqual(gui.page, 'info')
+        self.assertTrue(gui.toolbar_visible)
+        self.assertTrue(diagnostics.value)
 
     def test_fullscreen_f_works_while_text_editing(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())

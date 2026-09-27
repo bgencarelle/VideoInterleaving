@@ -17,6 +17,7 @@ class LatestFrameTests(unittest.TestCase):
         snapshot = frames.snapshot()
         self.assertEqual(snapshot.generation, 2)
         self.assertEqual(snapshot.aspect, 2)
+        self.assertGreater(snapshot.published_at, 0)
 
     def test_viewer_shutdown_callback_cannot_break_frame_publication(self):
         frames = LatestFrame()
