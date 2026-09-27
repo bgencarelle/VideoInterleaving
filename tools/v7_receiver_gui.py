@@ -40,6 +40,8 @@ INFO_REFRESH_SECONDS = 0.2
 RESOURCE_REFRESH_SECONDS = 1.0
 FULLSCREEN_TOOLBAR_HIDE_SECONDS = 2.0
 FULLSCREEN_TOOLBAR_EDGE = 14
+DISPLAY_MENU_ROW_HEIGHT = 29
+DISPLAY_MENU_WIDTH = 250
 BASIC_OPTION_DESTS = frozenset((
     'device', 'direction', 'fixture', 'fullscreen', 'show_diagnostics',
     'image_only', 'experimental_fold', 'baseline', 'save_dir',
@@ -264,6 +266,8 @@ class ReceiverGui:
         self.scroll = 0
         self.dropdown = None
         self.dropdown_scroll = 0
+        self.display_menu_open = False
+        self.display_menu_index = 0
         self.editing = False
         self.edit_buffer = ''
         self.advanced_options = False
@@ -328,6 +332,7 @@ class ReceiverGui:
         primary = glfw.get_primary_monitor()
         if primary is None:
             return
+        self.display_menu_open = False
         if self.fullscreen:
             x, y = self.windowed_bounds['position']
             width, height = self.windowed_bounds['size']
@@ -359,6 +364,7 @@ class ReceiverGui:
             self.dirty = True
 
     def _toggle_details(self):
+        self.display_menu_open = False
         self.page = 'info'
         field = next(field for field in self.fields
                      if field.dest == 'show_diagnostics')
@@ -382,8 +388,8 @@ class ReceiverGui:
             return
         if not self.fullscreen:
             self.toolbar_visible = True
-        elif (self.dropdown is not None or self.editing or
-              cursor_y <= FULLSCREEN_TOOLBAR_EDGE):
+        elif (self.dropdown is not None or self.display_menu_open or
+              self.editing or cursor_y <= FULLSCREEN_TOOLBAR_EDGE):
             self.toolbar_visible = True
             if not was_visible:
                 self.last_ui_activity = now
@@ -397,6 +403,7 @@ class ReceiverGui:
         enabled = bool(enabled)
         if enabled == self.image_only:
             return
+        self.display_menu_open = False
         if enabled:
             self.image_only_previous_page = self.page
             self.image_only_previous_fullscreen = self.fullscreen
@@ -560,6 +567,7 @@ class ReceiverGui:
         if field.label == 'Display upscaler':
             self.display_mode = value
             self.picture_dirty = True
+            self.display_menu_open = False
         self.notice = f'{field.label}: {self._field_value_label(field)}'
         self.dirty = True
 
@@ -593,6 +601,7 @@ class ReceiverGui:
             if field.label == 'Display upscaler':
                 self.display_mode = field.value
                 self.picture_dirty = True
+                self.display_menu_open = False
         self.notice = f'{field.label}: {self._field_value_label(field)}'
         self.dirty = True
 
@@ -933,6 +942,34 @@ class ReceiverGui:
                       fill=(147, 206, 169) if self.started else
                       (189, 203, 214), font=small)
 
+    def _render_display_menu(self, image, draw, small):
+        if (not self.display_menu_open or self.page != 'info' or
+                self.image_only or not self.toolbar_visible):
+            return
+        button = self.hits.get('mode_button')
+        if button is None:
+            return
+        width = image.size[0]
+        left = button[0]
+        right = min(width-14, left+DISPLAY_MENU_WIDTH)
+        menu_top = TOOLBAR_HEIGHT+2
+        menu_bottom = menu_top+len(DISPLAY_MODES)*DISPLAY_MENU_ROW_HEIGHT+4
+        draw.rounded_rectangle((left, menu_top, right, menu_bottom), radius=5,
+                               fill=(12, 22, 31, 250),
+                               outline=(93, 132, 155), width=1)
+        for index, mode in enumerate(DISPLAY_MODES):
+            top = menu_top+2+index*DISPLAY_MENU_ROW_HEIGHT
+            box = (left+2, top, right-2, top+DISPLAY_MENU_ROW_HEIGHT-1)
+            if mode == self.display_mode:
+                draw.rectangle(box, fill=(42, 75, 96))
+            if index == self.display_menu_index:
+                draw.rectangle(box, outline=(105, 165, 195), width=1)
+            label = _fit_text(DISPLAY_LABELS[mode], small, right-left-20)
+            draw.text((left+10, top+6), label, fill=(235, 241, 246),
+                      font=small)
+            self.hits[f'display_mode:{mode}'] = (
+                left, top, right, top+DISPLAY_MENU_ROW_HEIGHT-1)
+
     def _canvas(self, size):
         width, height = size
         image = Image.new('RGBA', (width, height), (8, 14, 20, 255))
@@ -979,6 +1016,7 @@ class ReceiverGui:
             self._render_config(image, draw, font, small, mono)
         else:
             self._render_info(image, draw, font, small, mono)
+            self._render_display_menu(image, draw, small)
         return np.ascontiguousarray(np.asarray(image, dtype=np.uint8))
 
     def _config_field_indexes(self):
@@ -998,6 +1036,7 @@ class ReceiverGui:
             self._finish_edit(self.fields[self.selected])
         self.page = 'info' if self.page == 'config' else 'config'
         self.dropdown = None
+        self.display_menu_open = False
         self.editing = False
         self.dirty = True
 
@@ -1009,15 +1048,24 @@ class ReceiverGui:
         keys = list(self.hits)
         if self.dropdown is not None:
             keys.sort(key=lambda key: 0 if key.startswith('option:') else 1)
+        if self.display_menu_open:
+            keys.sort(key=lambda key: 0 if key.startswith('display_mode:') else 1)
         hit = next((key for key in keys
                     if self.hits[key][0] <= x < self.hits[key][2] and
                     self.hits[key][1] <= y < self.hits[key][3]), None)
+        is_display_choice = (hit is not None and
+                             hit.startswith('display_mode:'))
+        if (self.display_menu_open and not is_display_choice and
+                hit != 'mode_button'):
+            self.display_menu_open = False
         if self.editing:
             self._finish_edit(self.fields[self.selected])
         if hit == 'config_tab':
             self.page, self.dropdown = 'config', None
+            self.display_menu_open = False
         elif hit == 'info_tab':
             self.page, self.dropdown = 'info', None
+            self.display_menu_open = False
         elif hit == 'fullscreen':
             self._toggle_fullscreen(glfw, window)
         elif hit == 'image_only':
@@ -1033,9 +1081,16 @@ class ReceiverGui:
             else:
                 self._start_receiver()
         elif hit == 'mode_button':
+            self.dropdown = None
+            self.display_menu_open = not self.display_menu_open
+            self.display_menu_index = DISPLAY_MODES.index(self.display_mode)
+            self.dirty = True
+        elif is_display_choice:
+            mode = hit.split(':', 1)[1]
             field = next(field for field in self.fields
                          if field.label == 'Display upscaler')
-            self._adjust_field(field, 1)
+            self._select_choice(field, mode)
+            self.display_menu_open = False
         elif hit and hit.startswith('option:') and self.dropdown is not None:
             index = int(hit.split(':', 1)[1])
             field = self.fields[self.dropdown]
@@ -1065,8 +1120,9 @@ class ReceiverGui:
             if order and self.selected not in order:
                 self.selected = order[0]
             self.dirty = True
-        elif self.dropdown is not None:
+        elif self.dropdown is not None or self.display_menu_open:
             self.dropdown = None
+            self.display_menu_open = False
             self.dirty = True
         else:
             self.dirty = True
@@ -1101,6 +1157,26 @@ class ReceiverGui:
             if key in (glfw.KEY_ESCAPE, glfw.KEY_P):
                 self._set_image_only(False)
             return
+        if self.display_menu_open:
+            if key == glfw.KEY_ESCAPE:
+                self.display_menu_open = False
+                self.dirty = True
+                return
+            if key in (glfw.KEY_UP, glfw.KEY_DOWN):
+                direction = -1 if key == glfw.KEY_UP else 1
+                self.display_menu_index = (
+                    self.display_menu_index+direction) % len(DISPLAY_MODES)
+                self.dirty = True
+                return
+            if key in (glfw.KEY_ENTER, glfw.KEY_KP_ENTER):
+                mode = DISPLAY_MODES[self.display_menu_index]
+                field = next(field for field in self.fields
+                             if field.label == 'Display upscaler')
+                self._select_choice(field, mode)
+                self.display_menu_open = False
+                return
+            self.display_menu_open = False
+            self.dirty = True
         if key == glfw.KEY_F:
             self._toggle_fullscreen(glfw, window)
         elif key == glfw.KEY_P:
@@ -1112,6 +1188,7 @@ class ReceiverGui:
         elif key == glfw.KEY_C:
             self.page = 'config'
             self.dropdown = None
+            self.display_menu_open = False
             self.dirty = True
         elif key == glfw.KEY_ESCAPE:
             if self.dropdown is not None:
@@ -1188,7 +1265,10 @@ class ReceiverGui:
     def _on_scroll(self, _window, _xoffset, yoffset):
         self._reveal_toolbar()
         delta = -1 if yoffset > 0 else 1
-        if self.dropdown is not None:
+        if self.display_menu_open:
+            self.display_menu_index = (
+                self.display_menu_index+delta) % len(DISPLAY_MODES)
+        elif self.dropdown is not None:
             field = self.fields[self.dropdown]
             self.dropdown_scroll = max(
                 0, min(max(0, len(field.options)-1),

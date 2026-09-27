@@ -32,6 +32,10 @@ class KeyStub:
     KEY_F = 70
     KEY_I = 73
     KEY_ESCAPE = 256
+    KEY_ENTER = 257
+    KEY_DOWN = 264
+    KEY_UP = 265
+    KEY_KP_ENTER = 335
     KEY_P = 80
     MOD_CONTROL = 2
 
@@ -126,19 +130,37 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
         gui.started = True
         gui.page = 'info'
-        gui.hits = {'mode_button': (0, 0, 40, 20)}
-        gui._on_mouse(MouseStub((10, 10)), None, 0, 1, 0)
+        gui._canvas((960, 720))
+        x1, y1, x2, y2 = gui.hits['mode_button']
+        gui._on_mouse(MouseStub(((x1+x2)/2, (y1+y2)/2)), None, 0, 1, 0)
+        self.assertTrue(gui.display_menu_open)
+        gui._canvas((720, 480))
+        display_mode_hits = [key for key in gui.hits
+                             if key.startswith('display_mode:')]
+        self.assertEqual(
+            tuple(key.split(':', 1)[1] for key in display_mode_hits),
+            DISPLAY_MODES)
+        self.assertLessEqual(max(gui.hits[key][3]
+                                 for key in display_mode_hits), 480)
+        x1, y1, x2, y2 = gui.hits['display_mode:ewa-jinc']
+        gui._on_mouse(MouseStub(((x1+x2)/2, (y1+y2)/2)), None, 0, 1, 0)
+        self.assertEqual(gui.display_mode, 'ewa-jinc')
+        self.assertIn('EWA Jinc', gui.notice)
+        self.assertFalse(gui.display_menu_open)
+        self.assertTrue(gui.picture_dirty)
 
-        self.assertEqual(gui.display_mode, 'bilinear')
-        self.assertEqual(gui.notice, 'Display upscaler: Bilinear')
         field = next(field for field in gui.fields
                      if field.label == 'Display upscaler')
         self.assertEqual(tuple(value for _label, value in field.options),
                          DISPLAY_MODES)
-        gui._adjust_field(field, 1)
-        self.assertEqual(gui.display_mode, 'sharp-bilinear')
-        gui._adjust_field(field, 1)
-        self.assertEqual(gui.display_mode, 'bicubic')
+        gui._canvas((720, 480))
+        x1, y1, x2, y2 = gui.hits['mode_button']
+        gui._on_mouse(MouseStub(((x1+x2)/2, (y1+y2)/2)), None, 0, 1, 0)
+        gui._on_key(KeyStub, None, KeyStub.KEY_DOWN, 0, KeyStub.PRESS, 0)
+        self.assertEqual(gui.display_menu_index, 0)
+        gui._on_key(KeyStub, None, KeyStub.KEY_ENTER, 0, KeyStub.PRESS, 0)
+        self.assertEqual(gui.display_mode, 'nearest')
+        self.assertFalse(gui.display_menu_open)
 
         direction = next(field for field in gui.fields
                          if field.dest == 'direction')

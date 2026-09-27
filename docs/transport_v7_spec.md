@@ -1447,11 +1447,12 @@ diagnostic interface. Never invent that metadata in this implementation.
 
 ### 12.6 GUI, preferences, and interaction
 
-The receiver GUI currently exposes the eleven display modes in a mouse-selectable
-dropdown and retains Nearest as its initial mode. The standalone viewer has the
-compact GL toolbar, versioned saved default, diagnostics toggle, and fullscreen
-controls. U/Shift+U cycles display modes in the viewer; digits 1–9 select the
-first nine entries. The preview caller accepts `--display-mode`.
+The receiver GUI Live toolbar opens a mouse-selectable menu showing all eleven
+display modes at once and retains Nearest as its initial mode. The menu also
+supports Up/Down, Enter, and Esc. The standalone viewer has the compact GL
+toolbar, versioned saved default, diagnostics toggle, and fullscreen controls.
+U/Shift+U cycles display modes in the viewer; digits 1–9 select the first nine
+entries. The preview caller accepts `--display-mode`.
 
 The controls below are remaining interaction proposals, not shipped behavior.
 When extending the GUI, keep the existing dark style, reserve toolbar space in

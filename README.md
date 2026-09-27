@@ -201,7 +201,8 @@ bicubic, Spline36, Robidoux, Robidoux Sharp, cubic B-spline, Kaiser-windowed
 sinc, Hann-windowed sinc, and EWA Jinc. These are presentation filters only;
 Nearest retains the legacy rendering path, and filter selection does not change
 decoded image data. The standalone preview accepts the same choices with
-`--display-mode`.
+`--display-mode`. In Live, click the displayed upscaler name to open a menu of
+all eleven choices; click a filter or use Up/Down and Enter, with Esc to close.
 
 For a live decoded image with no controls or diagnostics, use the regular
 receiver with `--image-only`:
