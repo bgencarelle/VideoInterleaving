@@ -1294,14 +1294,18 @@ Initial receiver-shell implementation is available as
 `.venv/bin/python tools/v7_live.py gui`. It opens in configuration without
 opening an audio stream, enumerates input devices for explicit selection,
 exposes every `receive` CLI option, starts/stops the existing receiver path,
-and switches between configuration and decoder information with `I` or the
-tabs in either windowed or fullscreen mode. It reads decoded values and live
-diagnostics directly from the receiver mailbox/status callback. This first
-slice provides nearest and bilinear display selection. Its current bilinear
-preview linearly filters the reconstructed 8-bit RGB texture; it is a temporary
-shell behavior, not the float-plane bilinear contract in Section 12.2. Exact
-nearest-pixel parity and actual offscreen-GL verification are also still to be
-checked. The additional reconstruction/effect modes below remain planned work.
+and switches between Setup and Live. The Live view is image-first with optional
+diagnostics; `P` or the Image only button hides all application UI, and `F`
+toggles fullscreen. Fullscreen hides the toolbar, status strip, and diagnostics
+on entry. The HUD reappears at the top edge or on key input, stays up while a
+control is open, and hides again after two idle seconds. It reads
+decoded values and live diagnostics directly from the receiver mailbox/status
+callback. This first slice provides nearest and bilinear display selection. Its
+current bilinear preview linearly filters the reconstructed 8-bit RGB texture;
+it is a temporary shell behavior, not the float-plane bilinear contract in
+Section 12.2. Exact nearest-pixel parity and actual offscreen-GL verification
+are also still to be checked. The additional reconstruction/effect modes below
+remain planned work.
 
 Status: implementation brief, September 27, 2026. This replaces the earlier
 keyboard-only/blind-trial proposal with mouse-accessible dropdowns, named

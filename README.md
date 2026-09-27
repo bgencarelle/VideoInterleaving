@@ -189,8 +189,11 @@ To configure a receiver interactively before opening audio, run
 `.venv/bin/python tools/v7_live.py gui`. Select an input device in the
 Setup and press **Start**; **Live** is an image-first view with optional
 diagnostics. `I` toggles the details panel, `P` switches to image-only
-fullscreen, `Esc` returns from image-only, and `F` toggles fullscreen. The
-GUI also exposes an **Image only** button and a start-in-image-only option.
+fullscreen, `Esc` returns from image-only, and `F` toggles fullscreen. In
+fullscreen, the toolbar, status strip, and optional details panel are hidden on
+entry. Move the pointer to the top edge or press a key to bring them back; they
+hide again after two seconds of inactivity. The GUI also exposes an **Image
+only** button and a start-in-image-only option.
 
 For a live decoded image with no controls or diagnostics, use the regular
 receiver with `--image-only`:

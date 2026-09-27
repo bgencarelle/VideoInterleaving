@@ -33,6 +33,8 @@ ROW_HEIGHT = 36
 TOOLBAR_HEIGHT = 54
 DISPLAY_MODES = ('nearest', 'bilinear')
 INFO_REFRESH_SECONDS = 0.2
+FULLSCREEN_TOOLBAR_HIDE_SECONDS = 2.0
+FULLSCREEN_TOOLBAR_EDGE = 14
 BASIC_OPTION_DESTS = frozenset((
     'device', 'direction', 'fixture', 'fullscreen', 'show_diagnostics',
     'image_only', 'experimental_fold', 'baseline', 'save_dir',
@@ -232,6 +234,8 @@ class ReceiverGui:
         self.device_error = device_error
         self.page = 'config'
         self.fullscreen = False
+        self.toolbar_visible = True
+        self.last_ui_activity = time.monotonic()
         self.windowed_bounds = {'position': (80, 80), 'size': (960, 720)}
         self.selected = 0
         self.scroll = 0
@@ -302,6 +306,7 @@ class ReceiverGui:
             glfw.set_window_monitor(window, None, x, y, width, height,
                                     glfw.DONT_CARE)
             self.fullscreen = False
+            self.toolbar_visible = True
         else:
             self.windowed_bounds['position'] = glfw.get_window_pos(window)
             self.windowed_bounds['size'] = glfw.get_window_size(window)
@@ -309,7 +314,46 @@ class ReceiverGui:
             glfw.set_window_monitor(window, primary, 0, 0, mode.size.width,
                                     mode.size.height, mode.refresh_rate)
             self.fullscreen = True
+            self.toolbar_visible = False
+        self.last_ui_activity = time.monotonic()
         self.dirty = True
+
+    def _reveal_toolbar(self):
+        if self.image_only:
+            return
+        was_hidden = not self.toolbar_visible
+        self.toolbar_visible = True
+        self.last_ui_activity = time.monotonic()
+        if was_hidden:
+            self.dirty = True
+
+    def _on_cursor_position(self, _window, _x, y):
+        if not self.fullscreen or self.image_only:
+            return
+        now = time.monotonic()
+        if self.toolbar_visible:
+            self.last_ui_activity = now
+        elif y <= FULLSCREEN_TOOLBAR_EDGE:
+            self.toolbar_visible = True
+            self.last_ui_activity = now
+            self.dirty = True
+
+    def _update_toolbar_visibility(self, now, cursor_y):
+        was_visible = self.toolbar_visible
+        if self.image_only:
+            return
+        if not self.fullscreen:
+            self.toolbar_visible = True
+        elif (self.dropdown is not None or self.editing or
+              cursor_y <= FULLSCREEN_TOOLBAR_EDGE):
+            self.toolbar_visible = True
+            if not was_visible:
+                self.last_ui_activity = now
+        elif (self.toolbar_visible and
+              now-self.last_ui_activity >= FULLSCREEN_TOOLBAR_HIDE_SECONDS):
+            self.toolbar_visible = False
+        if self.toolbar_visible != was_visible:
+            self.dirty = True
 
     def _set_image_only(self, enabled):
         enabled = bool(enabled)
@@ -741,14 +785,16 @@ class ReceiverGui:
                               fill=(123, 148, 168), font=small)
 
     def _diagnostics_visible(self):
-        return any(field.value for field in self.fields
-                   if field.dest == 'show_diagnostics')
+        enabled = any(field.value for field in self.fields
+                      if field.dest == 'show_diagnostics')
+        return enabled and (not self.fullscreen or self.toolbar_visible)
 
     def _picture_box(self, size):
         width, height = size
-        top = TOOLBAR_HEIGHT+8
+        chrome_visible = not self.fullscreen or self.toolbar_visible
+        top = (TOOLBAR_HEIGHT if chrome_visible else 0)+8
         details_height = round(height*.27) if self._diagnostics_visible() else 0
-        footer_height = 38
+        footer_height = 38 if chrome_visible else 0
         picture_height = max(1, height-top-details_height-footer_height-8)
         return (10, top, max(1, width-20), picture_height)
 
@@ -781,7 +827,8 @@ class ReceiverGui:
 
         if self._diagnostics_visible():
             panel_height = round(height*.27)
-            panel_top = height-38-panel_height
+            footer_height = 38 if not self.fullscreen or self.toolbar_visible else 0
+            panel_top = height-footer_height-panel_height
             diagnostics = self.live_diagnostics or {
                 'status': ('ACQUIRING',),
                 'sync': ('waiting for pulse header',),
@@ -793,61 +840,70 @@ class ReceiverGui:
                 (width, panel_height), diagnostics), mode='RGBA')
             image.alpha_composite(panel, (0, panel_top))
 
-        footer_top = height-38
-        draw.rectangle((0, footer_top, width, height), fill=(10, 18, 25))
-        state = ('RECEIVER RUNNING' if self.started else
-                 'RECEIVER STOPPED' if self.ever_started else 'NOT STARTED')
-        if self.receiver_thread is not None and not self.receiver_thread.is_alive():
-            state = 'RECEIVER STOPPED'
-        count = (self.live_meter or {}).get('decoded', 0)
-        input_fps = (self.live_meter or {}).get('input_fps', 0.0)
-        if self.current_frame is not None:
-            status = (self.latest_report or {}).get('status', 'picture decoded')
-            detail = f'{state} · {status} · {count} pictures · input {input_fps:.1f} fps'
-        else:
-            detail = f'{state} · {self.notice}'
-        draw.text((14, footer_top+11), _fit_text(detail, small, width-28),
-                  fill=(147, 206, 169) if self.started else (189, 203, 214),
-                  font=small)
+        chrome_visible = not self.fullscreen or self.toolbar_visible
+        if chrome_visible:
+            footer_top = height-38
+            draw.rectangle((0, footer_top, width, height), fill=(10, 18, 25))
+            state = ('RECEIVER RUNNING' if self.started else
+                     'RECEIVER STOPPED' if self.ever_started else 'NOT STARTED')
+            if (self.receiver_thread is not None and
+                    not self.receiver_thread.is_alive()):
+                state = 'RECEIVER STOPPED'
+            count = (self.live_meter or {}).get('decoded', 0)
+            input_fps = (self.live_meter or {}).get('input_fps', 0.0)
+            if self.current_frame is not None:
+                status = (self.latest_report or {}).get(
+                    'status', 'picture decoded')
+                detail = (f'{state} · {status} · {count} pictures · '
+                          f'input {input_fps:.1f} fps')
+            else:
+                detail = f'{state} · {self.notice}'
+            draw.text((14, footer_top+11), _fit_text(detail, small, width-28),
+                      fill=(147, 206, 169) if self.started else
+                      (189, 203, 214), font=small)
 
     def _canvas(self, size):
         width, height = size
         image = Image.new('RGBA', (width, height), (8, 14, 20, 255))
         draw = ImageDraw.Draw(image)
         font, small, mono = _font(17), _font(13), _font(12, mono=True)
-        draw.rectangle((0, 0, width, TOOLBAR_HEIGHT), fill=(10, 18, 25, 255))
-        draw.rectangle((0, TOOLBAR_HEIGHT-1, width, TOOLBAR_HEIGHT),
-                       fill=(47, 68, 83, 255))
         self.hits = {}
-        diagnostics_visible = self._diagnostics_visible()
-        controls = (
-            ('config_tab', 'Setup', 12, 104),
-            ('info_tab', 'Live', 112, 184),
-            ('start_stop', 'Stop' if self.started else 'Start', 192, 284),
-            ('mode_button', f'{self.display_mode.capitalize()}  ▾',
-             width-414, width-300),
-            ('details_button', 'Info On' if diagnostics_visible else
-             'Info Off', width-292, width-220),
-            ('image_only', 'Image only', width-212, width-112),
-            ('fullscreen', 'Fullscreen', width-104, width-12),
-        )
-        for key, label, x1, x2 in controls:
-            if key in ('mode_button', 'details_button', 'image_only') and self.page != 'info':
-                continue
-            self.hits[key] = (x1, 9, x2, 46)
-            active = ((key == 'config_tab' and self.page == 'config') or
-                      (key == 'info_tab' and self.page == 'info'))
-            fill = ((39, 67, 86) if active else
-                    (82, 55, 40) if key == 'start_stop' and self.started else
-                    (43, 94, 123) if key == 'start_stop' else
-                    (22, 35, 46))
-            draw.rounded_rectangle(self.hits[key], radius=5, fill=fill,
-                                   outline=(67, 100, 122), width=1)
-            text_width = max(1, x2-x1-16)
-            shown = _fit_text(label, small, text_width)
-            draw.text((x1+8, 18), shown,
-                      fill=(246, 240, 235) if key == 'start_stop' and self.started
-                      else (236, 242, 247), font=small)
+        chrome_visible = not self.fullscreen or self.toolbar_visible
+        if chrome_visible:
+            draw.rectangle((0, 0, width, TOOLBAR_HEIGHT),
+                           fill=(10, 18, 25, 255))
+            draw.rectangle((0, TOOLBAR_HEIGHT-1, width, TOOLBAR_HEIGHT),
+                           fill=(47, 68, 83, 255))
+            diagnostics_visible = self._diagnostics_visible()
+            controls = (
+                ('config_tab', 'Setup', 12, 104),
+                ('info_tab', 'Live', 112, 184),
+                ('start_stop', 'Stop' if self.started else 'Start', 192, 284),
+                ('mode_button', f'{self.display_mode.capitalize()}  ▾',
+                 width-414, width-300),
+                ('details_button', 'Info On' if diagnostics_visible else
+                 'Info Off', width-292, width-220),
+                ('image_only', 'Image only', width-212, width-112),
+                ('fullscreen', 'Fullscreen', width-104, width-12),
+            )
+            for key, label, x1, x2 in controls:
+                if (key in ('mode_button', 'details_button', 'image_only') and
+                        self.page != 'info'):
+                    continue
+                self.hits[key] = (x1, 9, x2, 46)
+                active = ((key == 'config_tab' and self.page == 'config') or
+                          (key == 'info_tab' and self.page == 'info'))
+                fill = ((39, 67, 86) if active else
+                        (82, 55, 40) if key == 'start_stop' and self.started else
+                        (43, 94, 123) if key == 'start_stop' else
+                        (22, 35, 46))
+                draw.rounded_rectangle(self.hits[key], radius=5, fill=fill,
+                                       outline=(67, 100, 122), width=1)
+                text_width = max(1, x2-x1-16)
+                shown = _fit_text(label, small, text_width)
+                draw.text((x1+8, 18), shown,
+                          fill=(246, 240, 235) if key == 'start_stop' and self.started
+                          else (236, 242, 247), font=small)
         if self.page == 'config':
             self._render_config(image, draw, font, small, mono)
         else:
@@ -877,6 +933,7 @@ class ReceiverGui:
     def _on_mouse(self, glfw, window, button, action, _mods):
         if button != glfw.MOUSE_BUTTON_LEFT or action != glfw.PRESS:
             return
+        self._reveal_toolbar()
         x, y = glfw.get_cursor_pos(window)
         keys = list(self.hits)
         if self.dropdown is not None:
@@ -946,6 +1003,7 @@ class ReceiverGui:
     def _on_key(self, glfw, window, key, _scancode, action, mods):
         if action not in (glfw.PRESS, glfw.REPEAT):
             return
+        self._reveal_toolbar()
         if self.editing:
             field = self.fields[self.selected]
             if key in (glfw.KEY_ENTER, glfw.KEY_KP_ENTER):
@@ -1053,6 +1111,7 @@ class ReceiverGui:
         self.dirty = True
 
     def _on_scroll(self, _window, _xoffset, yoffset):
+        self._reveal_toolbar()
         delta = -1 if yoffset > 0 else 1
         if self.dropdown is not None:
             field = self.fields[self.dropdown]
@@ -1110,6 +1169,7 @@ class ReceiverGui:
             glfw.set_key_callback(
                 window, lambda w, k, s, a, m: self._on_key(glfw, w, k, s, a, m))
             glfw.set_char_callback(window, self._on_char)
+            glfw.set_cursor_pos_callback(window, self._on_cursor_position)
             glfw.set_mouse_button_callback(
                 window, lambda w, b, a, m: self._on_mouse(glfw, w, b, a, m))
             glfw.set_scroll_callback(window, self._on_scroll)
@@ -1143,6 +1203,8 @@ class ReceiverGui:
                 self._profile_ui_if_enabled()
                 self._poll_receiver_lifecycle()
                 now = time.monotonic()
+                cursor_y = glfw.get_cursor_pos(window)[1]
+                self._update_toolbar_visibility(now, cursor_y)
                 if (self.info_refresh_pending and
                         now-self.last_info_refresh >= INFO_REFRESH_SECONDS):
                     self.dirty = True

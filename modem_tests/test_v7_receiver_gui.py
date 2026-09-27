@@ -8,6 +8,8 @@ from PIL import Image
 from animation_modem import v7
 from tools import v7_live
 from tools.v7_receiver_gui import (ROOT, ReceiverGui, _make_fields,
+                                   FULLSCREEN_TOOLBAR_EDGE,
+                                   FULLSCREEN_TOOLBAR_HIDE_SECONDS,
                                    _receive_parser)
 
 
@@ -146,6 +148,50 @@ class ReceiverGuiOptionTests(unittest.TestCase):
 
         self.assertFalse(gui.image_only)
         self.assertEqual(gui.page, 'info')
+
+    def test_fullscreen_toolbar_hides_and_reappears_at_top_edge(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        gui.fullscreen = True
+        gui.last_ui_activity = 10.0
+
+        gui._update_toolbar_visibility(
+            10.0+FULLSCREEN_TOOLBAR_HIDE_SECONDS, FULLSCREEN_TOOLBAR_EDGE+1)
+        self.assertFalse(gui.toolbar_visible)
+
+        gui._update_toolbar_visibility(
+            11.0, FULLSCREEN_TOOLBAR_EDGE)
+        self.assertTrue(gui.toolbar_visible)
+
+    def test_entering_fullscreen_starts_with_the_hud_hidden(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        glfw = SimpleNamespace(
+            DONT_CARE=0,
+            get_primary_monitor=lambda: object(),
+            get_window_pos=lambda _window: (0, 0),
+            get_window_size=lambda _window: (960, 720),
+            get_video_mode=lambda _monitor: SimpleNamespace(
+                size=SimpleNamespace(width=1920, height=1080),
+                refresh_rate=60),
+            set_window_monitor=lambda *_args: None)
+
+        gui._toggle_fullscreen(glfw, object())
+
+        self.assertTrue(gui.fullscreen)
+        self.assertFalse(gui.toolbar_visible)
+
+    def test_hidden_fullscreen_toolbar_is_removed_from_live_canvas(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        gui.page = 'info'
+        gui.fullscreen = True
+        gui.toolbar_visible = False
+        next(field for field in gui.fields
+             if field.dest == 'show_diagnostics').value = True
+
+        gui._canvas((960, 720))
+
+        self.assertNotIn('fullscreen', gui.hits)
+        self.assertFalse(gui._diagnostics_visible())
+        self.assertEqual(gui._picture_box((960, 720))[1], 8)
 
     def test_receiver_cli_accepts_image_only_mode(self):
         args = v7_live.parser().parse_args([

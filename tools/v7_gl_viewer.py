@@ -11,6 +11,8 @@ from animation_modem.imaging import values_image
 
 
 DISPLAY_MODES = ('nearest', 'bilinear')
+FULLSCREEN_TOOLBAR_HIDE_SECONDS = 2.0
+FULLSCREEN_TOOLBAR_EDGE = 14
 DISPLAY_LABELS = {'nearest': 'Nearest', 'bilinear': 'Bilinear'}
 
 
@@ -331,6 +333,8 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
         open_dropdown = None
         save_notice = ''
         save_notice_until = 0.0
+        toolbar_visible = not is_fullscreen
+        last_ui_activity = time.monotonic()
         toolbar_hits = toolbar_layout(width)
         last_overlay_update = 0.0
         last_window_size = (width, height)
@@ -339,7 +343,8 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
         profile_thread = time.thread_time()
 
         def toggle_fullscreen():
-            nonlocal is_fullscreen
+            nonlocal is_fullscreen, toolbar_visible, last_ui_activity
+            nonlocal toolbar_key, dirty
             primary = glfw.get_primary_monitor()
             if primary is None:
                 return
@@ -357,16 +362,39 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
                                         mode.size.width, mode.size.height,
                                         mode.refresh_rate)
                 is_fullscreen = True
+            toolbar_visible = not is_fullscreen
+            last_ui_activity = time.monotonic()
+            toolbar_key = None
+            dirty = True
+
+        def on_cursor_position(_window, _x, y):
+            nonlocal toolbar_visible, last_ui_activity, toolbar_key, dirty
+            if not is_fullscreen or image_only:
+                return
+            now = time.monotonic()
+            if toolbar_visible:
+                last_ui_activity = now
+            elif y <= FULLSCREEN_TOOLBAR_EDGE:
+                toolbar_visible = True
+                last_ui_activity = now
+                toolbar_key = None
+                dirty = True
 
         def on_key(_window, key, _scancode, action, _mods):
             nonlocal show_details, last_title, display_mode, open_dropdown
-            nonlocal toolbar_key, dirty
+            nonlocal toolbar_key, dirty, toolbar_visible, last_ui_activity
             if action != glfw.PRESS:
                 return
             if image_only:
                 if key in (glfw.KEY_ESCAPE, glfw.KEY_Q):
                     glfw.set_window_should_close(window, True)
                 return
+            was_hidden = not toolbar_visible
+            toolbar_visible = True
+            last_ui_activity = time.monotonic()
+            if was_hidden:
+                toolbar_key = None
+                dirty = True
             if key == glfw.KEY_ESCAPE and open_dropdown is not None:
                 open_dropdown = None
                 last_title = None
@@ -403,14 +431,24 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
             dirty = True
 
         glfw.set_key_callback(window, on_key)
+        glfw.set_cursor_pos_callback(window, on_cursor_position)
         dirty = True
 
         def on_mouse_button(_window, button, action, _mods):
             nonlocal show_details, display_mode, open_dropdown
             nonlocal toolbar_key, last_title, dirty
             nonlocal save_notice, save_notice_until
+            nonlocal toolbar_visible, last_ui_activity
             if button != glfw.MOUSE_BUTTON_LEFT or action != glfw.PRESS:
                 return
+            if not image_only:
+                was_hidden = not toolbar_visible
+                toolbar_visible = True
+                last_ui_activity = time.monotonic()
+                if was_hidden:
+                    toolbar_key = None
+                    dirty = True
+                    return
             x, y = glfw.get_cursor_pos(window)
             key = next((name for name, rect in toolbar_hits.items()
                         if _contains(rect, x, y)), None)
@@ -487,8 +525,21 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
                 dirty = True
 
             now = time.monotonic()
+            if is_fullscreen and not image_only:
+                cursor_y = glfw.get_cursor_pos(window)[1]
+                toolbar_was_visible = toolbar_visible
+                if open_dropdown is not None or cursor_y <= FULLSCREEN_TOOLBAR_EDGE:
+                    toolbar_visible = True
+                elif (toolbar_visible and
+                      now-last_ui_activity >= FULLSCREEN_TOOLBAR_HIDE_SECONDS):
+                    toolbar_visible = False
+                if toolbar_visible != toolbar_was_visible:
+                    toolbar_key = None
+                    dirty = True
+            details_visible = (show_details and
+                               (not is_fullscreen or toolbar_visible))
             window_size = glfw.get_window_size(window)
-            if show_details and diagnostics_source is not None and (
+            if details_visible and diagnostics_source is not None and (
                     now-last_overlay_update >= .2 or
                     window_size != last_window_size):
                 last_overlay_update = now
@@ -511,7 +562,7 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
                     overlay.repeat_y = False
                     overlay_key = key
                     dirty = True
-            elif not show_details and overlay is not None:
+            elif not details_visible and overlay is not None:
                 overlay.release()
                 overlay = None
                 overlay_key = None
@@ -523,9 +574,13 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
                 save_notice = ''
                 toolbar_key = None
             toolbar_fb_height = 0
-            if not image_only:
+            show_toolbar = (not image_only and
+                            (not is_fullscreen or toolbar_visible or
+                             open_dropdown is not None))
+            if show_toolbar:
                 toolbar_state = (window_size, display_mode,
-                                 show_details, open_dropdown, save_notice)
+                                 show_details, open_dropdown, save_notice,
+                                 toolbar_visible, is_fullscreen)
                 toolbar_height = 48 + (62 if open_dropdown else 0)
                 toolbar_size = (max(320, int(window_size[0])), toolbar_height)
                 if (toolbar is None or toolbar.size != toolbar_size or
@@ -546,10 +601,12 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
                 toolbar_fb_height = (
                     round(fb_size[1]*toolbar_size[1]/window_size[1])
                     if window_size[1] else 0)
+            else:
+                toolbar_hits = {}
             ratio = (aspect_ratios[frame.aspect & 7]
                      if frame is not None else 4/3)
             panel_height = (round(fb_size[1]*.36)
-                            if show_details and overlay is not None else 0)
+                            if details_visible and overlay is not None else 0)
             picture_area = (fb_size[0], max(
                 0, fb_size[1]-panel_height-toolbar_fb_height))
             picture_viewport = fit_viewport(picture_area, ratio)
@@ -566,7 +623,7 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
                     context.viewport = viewport
                     texture.use(location=0)
                     vertex_array.render(mode=moderngl.TRIANGLES, vertices=3)
-                if show_details and overlay is not None and panel_height:
+                if details_visible and overlay is not None and panel_height:
                     context.enable(moderngl.BLEND)
                     context.blend_func = (moderngl.SRC_ALPHA,
                                           moderngl.ONE_MINUS_SRC_ALPHA)
@@ -574,7 +631,7 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
                     overlay.use(location=0)
                     overlay_array.render(mode=moderngl.TRIANGLES, vertices=3)
                     context.disable(moderngl.BLEND)
-                if not image_only and toolbar is not None and toolbar_fb_height:
+                if show_toolbar and toolbar is not None and toolbar_fb_height:
                     context.enable(moderngl.BLEND)
                     context.blend_func = (moderngl.SRC_ALPHA,
                                           moderngl.ONE_MINUS_SRC_ALPHA)
