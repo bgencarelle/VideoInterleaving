@@ -90,7 +90,10 @@ FIELD_HELP = {
     'ffmpeg_input': 'Optional FFmpeg input specification for a particular camera or display backend.',
     'screen_backend': 'mss is the simple native screen capture path; FFmpeg can be useful when capture rate matters.',
     'region': 'Optional screen crop as left,top,width,height.',
-    'capture_width': 'Capture width for screen/video and initial mouse-follow crop; camera is sampled at 80×96.',
+    'capture_width': ('Intermediate FFmpeg width for video/FFmpeg screen and '
+                      'initial mouse-follow crop; the sender then prepares the '
+                      'fixed 80×96 wire image. Camera default capture is '
+                      'sampled directly at 80×96.'),
     'capture_filter': 'Optional FFmpeg capture scaler. Automatic follows the sender defaults.',
     'mono_video_side': ('For the mono video profile, carry the modem on one '
                         'leg and leave the other free for separate audio.'),
@@ -101,7 +104,9 @@ FIELD_HELP = {
     'source_audio_gain': 'Gain applied only to source audio on the free output leg.',
     'source_audio_delay_ms': ('Additional sync delay beyond one emitted video '
                               'packet; zero is the low-latency starting point.'),
-    'perceptual_resize': 'Experimental pre-encode downscaler. Requires Fold 500 or Fold 1000 with the Box encode filter.',
+    'perceptual_resize': ('Experimental pre-encode downscaler. Requires '
+                          'Fold 500, Fold 1000, or Mono video with the Box '
+                          'encode filter.'),
     'perceptual_detail_strength': 'Strength for the selected pre-encode downscaler, from 0 to 1.',
 }
 FIELD_LABELS = {
@@ -689,14 +694,12 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
         raise ValueError('Choose a supported screen capture backend.')
     if settings.get('capture_filter', 'auto') not in dict(CAPTURE_FILTER_CHOICES).values():
         raise ValueError('Choose a supported capture filter.')
-    if profile == 'mono-fold-500' and settings.get('perceptual_resize', 'off') != 'off':
-        raise ValueError('Mono video folding requires the pre-encode downscaler off.')
     perceptual_resize = settings.get('perceptual_resize', 'off')
     if perceptual_resize not in dict(DOWNSCALER_CHOICES).values():
         raise ValueError('Choose a supported pre-encode downscaler.')
     if perceptual_resize != 'off':
-        if profile not in ('fold-500', 'fold-1000'):
-            raise ValueError('The pre-encode downscaler requires Fold 500 or Fold 1000.')
+        if profile not in ('fold-500', 'fold-1000', 'mono-fold-500'):
+            raise ValueError('The pre-encode downscaler requires a folded profile.')
         if encode_filter != 'box':
             raise ValueError('The pre-encode downscaler requires the Box encode filter.')
         perceptual_strength = _float_setting(
@@ -1043,8 +1046,6 @@ class SenderGui:
         if dest == 'capture_filter':
             return CAPTURE_FILTER_CHOICES
         if dest == 'perceptual_resize':
-            if self.settings['profile'] not in ('fold-500', 'fold-1000'):
-                return DOWNSCALER_CHOICES[:1]
             return DOWNSCALER_CHOICES
         if dest in ('camera', 'screen_target'):
             return self.capture_choice_cache.get(dest, ())
@@ -1183,7 +1184,7 @@ class SenderGui:
         self.settings[dest] = value
         if dest == 'profile':
             self._profile_changed(value)
-            if value not in ('fold-500', 'fold-1000'):
+            if value not in ('fold-500', 'fold-1000', 'mono-fold-500'):
                 self.settings['perceptual_resize'] = 'off'
         elif dest == 'device':
             self.settings['rate'] = None

@@ -231,35 +231,16 @@ class MonoVideoWireTests(unittest.TestCase):
         self.assertLess(left_streak, 2)
         self.assertTrue(all(streak >= 2 for streak in duplicate_streaks))
 
-    def test_auto_side_waits_for_mono_status_and_keeps_right_preferred(self):
-        from tone_code import FOLD_500
+    def test_auto_side_waits_for_valid_mono_status(self):
         result = self._decode(self.audio[:, 1])[0][-1]
 
         self.assertEqual(v7_live._mono_packet_status_mode(result),
                          MONO_VIDEO_MODE)
         self.assertEqual(v7_live._coded_status_mode(
             self.audio[:, 1:2], 0, 1.0, v7.RATE), MONO_VIDEO_MODE)
-        # Right starts active and is retained once its distinct mono status is
-        # decoded, even when the opposite leg also has a pulse train.
-        self.assertFalse(v7_live._should_try_other_mono_leg(
-            MONO_VIDEO_MODE, MONO_VIDEO_MODE, 8,
-            active_has_packet=True, switch_count=0))
-        # A pulse-only opposite-leg candidate can be tried when the preferred
-        # right leg is silent; selection is not locked until MONO_500 arrives.
-        self.assertTrue(v7_live._should_try_other_mono_leg(
-            None, MONO_VIDEO_MODE, 2,
-            active_has_packet=False, switch_count=0))
-        # A decoded non-mono status allows testing the other leg, while a weak
-        # pulse streak or a packet with no decoded status does not.
-        self.assertTrue(v7_live._should_try_other_mono_leg(
-            FOLD_500, MONO_VIDEO_MODE, 2,
-            active_has_packet=True, switch_count=0))
-        self.assertFalse(v7_live._should_try_other_mono_leg(
-            None, MONO_VIDEO_MODE, 2,
-            active_has_packet=True, switch_count=0))
-        self.assertFalse(v7_live._should_try_other_mono_leg(
-            None, MONO_VIDEO_MODE, 1,
-            active_has_packet=False, switch_count=0))
+        self.assertEqual(v7_live._mono_fold_input_side(
+            [[None, None], [MONO_VIDEO_MODE, MONO_VIDEO_MODE]],
+            MONO_VIDEO_MODE), 'right')
 
     def test_profile_autodetection_requires_consistent_valid_mono_status(self):
         from tone_code import FOLD_500

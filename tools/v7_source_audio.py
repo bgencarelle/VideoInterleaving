@@ -86,6 +86,12 @@ class SampleBuffer:
         with self._condition:
             self._condition.notify_all()
 
+    def clear(self):
+        with self._condition:
+            self._chunks.clear()
+            self._offset = 0
+            self._samples = 0
+
     @property
     def available(self):
         with self._condition:
@@ -123,12 +129,19 @@ class ClockMatchedReader:
     MAX_CORRECTION = 0.001
     PROPORTIONAL_GAIN = 0.1
 
-    def __init__(self, buffer, target_samples):
+    def __init__(self, buffer, target_samples, nominal_ratio=1.0):
         self.buffer = buffer
         self.target_samples = max(1, int(target_samples))
+        self.nominal_ratio = float(nominal_ratio)
+        if not np.isfinite(self.nominal_ratio) or self.nominal_ratio <= 0:
+            raise ValueError('nominal sample-rate ratio must be positive')
         self._phase = 0.0
         self._pending = np.empty(0, dtype=np.float32)
         self.max_correction = 0.0
+
+    def reset(self):
+        self._phase = 0.0
+        self._pending = np.empty(0, dtype=np.float32)
 
     def read(self, count):
         count = max(0, int(count))
@@ -140,10 +153,12 @@ class ClockMatchedReader:
             error*self.PROPORTIONAL_GAIN,
             -self.MAX_CORRECTION, self.MAX_CORRECTION))
         self.max_correction = max(self.max_correction, abs(correction))
-        step = 1.0+correction
+        step = self.nominal_ratio*(1.0+correction)
 
         positions = self._phase+np.arange(count, dtype=np.float64)*step
-        needed = int(np.floor(positions[-1]))+2
+        advanced = self._phase+count*step
+        consumed = int(advanced)
+        needed = max(int(np.floor(positions[-1]))+2, consumed)
         if needed > len(self._pending):
             self._pending = np.concatenate((
                 self._pending,
@@ -153,8 +168,6 @@ class ClockMatchedReader:
         output = (self._pending[indexes]*(1.0-fraction) +
                   self._pending[indexes+1]*fraction)
 
-        advanced = self._phase+count*step
-        consumed = int(advanced)
         self._phase = advanced-consumed
         self._pending = self._pending[consumed:].copy()
         return output.astype(np.float32, copy=False)

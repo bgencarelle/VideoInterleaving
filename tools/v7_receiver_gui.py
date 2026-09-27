@@ -45,8 +45,15 @@ FULLSCREEN_TOOLBAR_HIDE_SECONDS = 2.0
 FULLSCREEN_TOOLBAR_EDGE = 14
 DISPLAY_MENU_ROW_HEIGHT = 29
 DISPLAY_MENU_WIDTH = 250
+RECEIVER_PREFERENCES_PATH = (
+    Path.home()/'.config'/'modemTest'/'v7_receiver_gui.json')
 BASIC_OPTION_DESTS = frozenset((
-    'device', 'fullscreen', 'show_diagnostics', 'image_only', 'save_dir'))
+    'device', 'audio_output_device', 'audio_muted', 'freewheel_seconds',
+    'show_sync_warning', 'fullscreen', 'show_diagnostics', 'image_only',
+    'save_dir'))
+LIVE_RUNTIME_DESTS = frozenset((
+    'audio_output_device', 'audio_muted', 'freewheel_seconds',
+    'show_sync_warning'))
 HIDDEN_DECODE_OPTIONS = frozenset((
     'direction', 'fixture', 'experimental_fold', 'baseline',
     'experimental_mono', 'experimental_mono_fold', 'mono_compatible',
@@ -138,6 +145,95 @@ def _input_devices():
     return tuple(choices), ''
 
 
+def _output_devices():
+    try:
+        import sounddevice as sd
+        devices = sd.query_devices()
+    except Exception as exc:
+        return (), f'Audio output enumeration failed: {exc}'
+    choices = []
+    for index, device in enumerate(devices):
+        channels = int(device.get('max_output_channels') or 0)
+        if channels:
+            rate = float(device.get('default_samplerate') or 0)
+            label = (f'{index}: {device["name"]} · {channels} out · '
+                     f'{rate/1000:g} kHz')
+            choices.append((label, index))
+    if not choices:
+        return (), 'No audio output devices are available.'
+    return tuple(choices), ''
+
+
+def _device_identity(index, kind):
+    if index is None:
+        return None
+    import sounddevice as sd
+    device = sd.query_devices(index)
+    hostapis = sd.query_hostapis()
+    hostapi_index = device.get('hostapi')
+    hostapi = (hostapis[int(hostapi_index)].get('name')
+               if hostapi_index is not None and
+               0 <= int(hostapi_index) < len(hostapis) else '')
+    return {'name': str(device.get('name', '')),
+            'hostapi': str(hostapi)}
+
+
+def _find_device(identity, choices, kind):
+    if identity is None:
+        return None
+    for _label, index in choices:
+        try:
+            current = _device_identity(index, kind)
+        except Exception:
+            continue
+        if (current['name'] == identity.get('name') and
+                current['hostapi'] == identity.get('hostapi')):
+            return index
+    return None
+
+
+def _load_preferences(path=RECEIVER_PREFERENCES_PATH):
+    try:
+        values = json.loads(Path(path).read_text(encoding='utf-8'))
+    except (OSError, ValueError, TypeError):
+        return {}
+    return values if isinstance(values, dict) else {}
+
+
+def _save_preferences(values, path=RECEIVER_PREFERENCES_PATH):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(values, indent=2, sort_keys=True)+'\n',
+                    encoding='utf-8')
+
+
+def pick_save_directory(current=''):
+    """Open the platform's native directory picker for decoded images."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except ImportError as exc:
+        raise RuntimeError('A native folder picker is unavailable.') from exc
+    root = None
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            root.attributes('-topmost', True)
+        except tk.TclError:
+            pass
+        options = {'parent': root, 'title': 'Save decoded images to'}
+        if current and Path(current).is_dir():
+            options['initialdir'] = str(current)
+        selected = filedialog.askdirectory(**options)
+        return str(selected) if selected else None
+    except tk.TclError as exc:
+        raise RuntimeError(f'Could not open the folder picker: {exc}') from exc
+    finally:
+        if root is not None:
+            root.destroy()
+
+
 def _process_memory_mib():
     """Current resident memory when available, otherwise the process peak."""
     try:
@@ -158,6 +254,10 @@ def _process_memory_mib():
 def _field_label(action):
     friendly = {
         'device': 'Input audio device',
+        'audio_output_device': 'Passthrough output device',
+        'audio_muted': 'Mute passthrough audio',
+        'freewheel_seconds': 'Freewheel before sync warning (s)',
+        'show_sync_warning': 'Show sync-loss warning',
         'direction': 'Playback direction',
         'fixture': 'Model fixture',
         'fullscreen': 'Start fullscreen',
@@ -188,7 +288,7 @@ def _field_label(action):
                         action.dest.replace('_', ' ').capitalize())
 
 
-def _make_fields(receive_parser, device_choices):
+def _make_fields(receive_parser, device_choices, audio_output_choices=()):
     fields = []
     for action in receive_parser._actions:
         if action.dest in ('help', 'mode') or action.dest in HIDDEN_DECODE_OPTIONS:
@@ -203,6 +303,18 @@ def _make_fields(receive_parser, device_choices):
             first_device = device_choices[0][1] if device_choices else None
             fields.append(OptionField(action, first_device, _field_label(action),
                                       'choice', device_choices))
+            continue
+
+        if action.dest == 'audio_output_device':
+            fields.append(OptionField(action, None, _field_label(action),
+                                      'choice',
+                                      (('Off · passthrough disabled', None),) +
+                                      tuple(audio_output_choices)))
+            continue
+
+        if action.dest == 'save_dir':
+            fields.append(OptionField(action, None, _field_label(action),
+                                      'folder'))
             continue
 
         value = action.default
@@ -334,12 +446,23 @@ def _scissors_outside_viewport(framebuffer_size, viewport):
 
 class ReceiverGui:
     def __init__(self, v7_live, root_parser, receive_parser, device_choices,
-                 device_error=''):
+                 device_error='', audio_output_choices=(),
+                 audio_output_error='',
+                 preference_path=RECEIVER_PREFERENCES_PATH):
         self.v7_live = v7_live
         self.root_parser = root_parser
         self.receive_parser = receive_parser
-        self.fields = _make_fields(receive_parser, device_choices)
+        self.fields = _make_fields(receive_parser, device_choices,
+                                   audio_output_choices)
         self.device_error = device_error
+        self.audio_output_error = audio_output_error
+        self.runtime_options = None
+        self.preference_path = Path(preference_path)
+        self.preferences = _load_preferences(self.preference_path)
+        self.input_device_identity = self.preferences.get('input_device')
+        self.audio_output_identity = self.preferences.get('output_device')
+        self.unavailable_input_identity = None
+        self.unavailable_output_identity = None
         self.page = 'config'
         self.fullscreen = False
         self.toolbar_visible = True
@@ -397,11 +520,27 @@ class ReceiverGui:
         self.gui_resource_thread = None
         self.gui_resource_next_sample = 0.0
         self.gui_resource_lines = ('thread -- · proc --', 'RSS --')
+        self._restore_preferences(device_choices, audio_output_choices)
 
     def _field_value_label(self, field):
         if field.dest == 'device':
+            if self.unavailable_input_identity is not None:
+                name = self.unavailable_input_identity.get('name', 'saved input')
+                return f'Unavailable · {name} — reselect'
             return next((label for label, value in field.options
                          if value == field.value), 'Select an input device…')
+        if field.dest == 'audio_output_device':
+            if self.unavailable_output_identity is not None:
+                name = self.unavailable_output_identity.get(
+                    'name', 'saved output')
+                return f'Unavailable · {name} — reselect or choose Off'
+            if field.value is None:
+                return 'Select output · passthrough off'
+            return next((label for label, value in field.options
+                         if value == field.value), 'Reselect output device…')
+        if field.kind == 'folder':
+            return (str(field.value) if field.value else
+                    'Choose a folder…')
         if field.kind == 'bool':
             if field.locked:
                 return 'On · required for this integrated viewer'
@@ -412,6 +551,122 @@ class ReceiverGui:
                         'Default (500)' if field.dest == 'experimental_fold'
                         and field.value is None else 'Select…')
         return str(field.value) if field.value not in (None, '') else '(not set)'
+
+    def _restore_preferences(self, input_choices, output_choices):
+        by_dest = {field.dest: field for field in self.fields}
+        input_field = by_dest.get('device')
+        output_field = by_dest.get('audio_output_device')
+        if (input_field is not None and self.input_device_identity is None and
+                input_field.value is not None):
+            try:
+                self.input_device_identity = _device_identity(
+                    input_field.value, 'input')
+            except Exception:
+                pass
+        if input_field is not None and self.input_device_identity is not None:
+            selected = _find_device(self.input_device_identity,
+                                    input_choices, 'input')
+            if selected is None:
+                input_field.value = None
+                self.unavailable_input_identity = self.input_device_identity
+            else:
+                input_field.value = selected
+        if output_field is not None and self.audio_output_identity is not None:
+            selected = _find_device(self.audio_output_identity,
+                                    output_choices, 'output')
+            if selected is None:
+                output_field.value = None
+                self.unavailable_output_identity = self.audio_output_identity
+            else:
+                output_field.value = selected
+        for dest in ('audio_muted', 'show_sync_warning'):
+            field = by_dest.get(dest)
+            if field is not None and dest in self.preferences:
+                field.value = bool(self.preferences[dest])
+        freewheel = by_dest.get('freewheel_seconds')
+        if freewheel is not None and 'freewheel_seconds' in self.preferences:
+            try:
+                value = float(self.preferences['freewheel_seconds'])
+                if np.isfinite(value) and value >= 0:
+                    freewheel.value = value
+            except (TypeError, ValueError):
+                pass
+        save_dir = by_dest.get('save_dir')
+        if save_dir is not None:
+            save_dir.value = self.preferences.get('save_dir')
+        if self.unavailable_input_identity is not None:
+            name = self.unavailable_input_identity.get('name', 'Saved input')
+            self.notice = f'{name} is unavailable; reselect the input device.'
+        elif self.unavailable_output_identity is not None:
+            name = self.unavailable_output_identity.get('name', 'Saved output')
+            self.notice = f'{name} is unavailable; reselect it or choose Off.'
+
+    def _persist_preferences(self):
+        by_dest = {field.dest: field for field in self.fields}
+        input_field = by_dest.get('device')
+        output_field = by_dest.get('audio_output_device')
+        if (input_field is not None and input_field.value is not None and
+                self.unavailable_input_identity is None):
+            try:
+                self.input_device_identity = _device_identity(
+                    input_field.value, 'input')
+            except Exception:
+                pass
+        if (output_field is not None and output_field.value is not None and
+                self.unavailable_output_identity is None):
+            try:
+                self.audio_output_identity = _device_identity(
+                    output_field.value, 'output')
+            except Exception:
+                pass
+        elif (output_field is not None and output_field.value is None and
+              self.unavailable_output_identity is None):
+            self.audio_output_identity = None
+        values = {
+            'input_device': self.input_device_identity,
+            'output_device': self.audio_output_identity,
+        }
+        for dest in ('audio_muted', 'freewheel_seconds',
+                     'show_sync_warning', 'save_dir'):
+            if dest in by_dest:
+                values[dest] = by_dest[dest].value
+        self.preferences = values
+        try:
+            _save_preferences(values, self.preference_path)
+        except OSError as exc:
+            self.notice = f'Could not save receiver preferences: {exc}'
+
+    def _prepare_input_device(self):
+        field = next((field for field in self.fields
+                      if field.dest == 'device'), None)
+        if field is None:
+            return False
+        if self.input_device_identity is None and field.value is not None:
+            try:
+                self.input_device_identity = _device_identity(
+                    field.value, 'input')
+            except Exception:
+                self.notice = 'Could not verify the selected input device.'
+                return False
+        choices, error = _input_devices()
+        if not choices:
+            self.device_error = error
+            self.notice = error or 'No input audio devices are available.'
+            field.options = ()
+            field.value = None
+            return False
+        field.options = choices
+        selected = _find_device(self.input_device_identity, choices, 'input')
+        if selected is None:
+            field.value = None
+            self.unavailable_input_identity = self.input_device_identity
+            name = (self.input_device_identity or {}).get('name',
+                                                           'selected input')
+            self.notice = f'{name} is unavailable; reselect the input device.'
+            return False
+        field.value = selected
+        self.unavailable_input_identity = None
+        return True
 
     def _toggle_fullscreen(self, glfw, window):
         primary = glfw.get_primary_monitor()
@@ -562,6 +817,9 @@ class ReceiverGui:
             self.notice = 'Waiting for the previous receiver to stop…'
             self.dirty = True
             return
+        if not self._prepare_input_device():
+            self.dirty = True
+            return
         try:
             output = io.StringIO()
             with contextlib.redirect_stdout(output), \
@@ -573,6 +831,15 @@ class ReceiverGui:
                            str(exc) or 'Receiver options are invalid.')
             self.dirty = True
             return
+        from tools.v7_receiver_audio import ReceiverRuntimeOptions
+        self.runtime_options = ReceiverRuntimeOptions(
+            audio_output_device=args.audio_output_device,
+            audio_output_identity=self.audio_output_identity,
+            audio_input_identity=self.input_device_identity,
+            audio_muted=args.audio_muted,
+            freewheel_seconds=args.freewheel_seconds,
+            show_sync_warning=args.show_sync_warning)
+        args.runtime_options = self.runtime_options
         start_image_only = any(
             field.value for field in self.fields
             if field.dest == 'image_only')
@@ -641,13 +908,26 @@ class ReceiverGui:
             self.dirty = True
 
     def _select_choice(self, field, value):
-        if self.started and field.action is not None:
+        if (self.started and field.action is not None and
+                field.dest not in LIVE_RUNTIME_DESTS):
             self.dropdown = None
             self.notice = ('Receiver options are locked while receiving; '
                            'close and relaunch to change them.')
             self.dirty = True
             return
         field.value = value
+        if field.dest == 'device':
+            self.unavailable_input_identity = None
+            try:
+                self.input_device_identity = _device_identity(value, 'input')
+            except Exception:
+                self.input_device_identity = None
+        elif field.dest == 'audio_output_device':
+            self.unavailable_output_identity = None
+            try:
+                self.audio_output_identity = _device_identity(value, 'output')
+            except Exception:
+                self.audio_output_identity = None
         if field.dest == 'experimental_fold':
             self._clear_other_profiles(field.dest)
         self.dropdown = None
@@ -657,6 +937,11 @@ class ReceiverGui:
             self.picture_dirty = True
             self.display_menu_open = False
         self.notice = f'{field.label}: {self._field_value_label(field)}'
+        self._update_runtime_option(field)
+        if field.dest in ('device', 'audio_output_device', 'audio_muted',
+                          'freewheel_seconds', 'show_sync_warning',
+                          'save_dir'):
+            self._persist_preferences()
         self.dirty = True
 
     def _clear_other_profiles(self, active):
@@ -670,7 +955,8 @@ class ReceiverGui:
                 item.value = False
 
     def _adjust_field(self, field, direction):
-        if self.started and field.action is not None:
+        if (self.started and field.action is not None and
+                field.dest not in LIVE_RUNTIME_DESTS):
             self.notice = ('Receiver options are locked while receiving; '
                            'close and relaunch to change them.')
             self.dirty = True
@@ -696,7 +982,59 @@ class ReceiverGui:
                 self.picture_dirty = True
                 self.display_menu_open = False
         self.notice = f'{field.label}: {self._field_value_label(field)}'
+        self._update_runtime_option(field)
+        if field.dest in ('audio_muted', 'freewheel_seconds',
+                          'show_sync_warning'):
+            self._persist_preferences()
         self.dirty = True
+
+    def _refresh_audio_output_choices(self):
+        field = next((field for field in self.fields
+                      if field.dest == 'audio_output_device'), None)
+        if field is None:
+            return
+        choices, error = _output_devices()
+        field.options = (('Off · passthrough disabled', None),) + choices
+        self.audio_output_error = error
+        if self.audio_output_identity is not None:
+            selected = _find_device(self.audio_output_identity,
+                                    choices, 'output')
+            if selected is None:
+                field.value = None
+                self.unavailable_output_identity = self.audio_output_identity
+            else:
+                field.value = selected
+                self.unavailable_output_identity = None
+
+    def _update_runtime_option(self, field):
+        if (self.runtime_options is None or
+                field.dest not in LIVE_RUNTIME_DESTS):
+            return
+        try:
+            if field.dest == 'audio_output_device':
+                if field.value is not None:
+                    try:
+                        self.audio_output_identity = _device_identity(
+                            field.value, 'output')
+                    except Exception:
+                        self.audio_output_identity = None
+                elif self.unavailable_output_identity is None:
+                    self.audio_output_identity = None
+                self.runtime_options.update(
+                    audio_output_device=field.value,
+                    audio_output_identity=self.audio_output_identity)
+            elif field.dest == 'audio_muted':
+                self.runtime_options.update(audio_muted=field.value)
+            elif field.dest == 'freewheel_seconds':
+                value = float(field.value)
+                if not np.isfinite(value) or value < 0:
+                    raise ValueError('Freewheel duration must be non-negative.')
+                field.value = value
+                self.runtime_options.update(freewheel_seconds=value)
+            elif field.dest == 'show_sync_warning':
+                self.runtime_options.update(show_sync_warning=field.value)
+        except (TypeError, ValueError) as exc:
+            self.notice = str(exc)
 
     def _process_output(self):
         other_output = False
@@ -916,6 +1254,11 @@ class ReceiverGui:
                                        fill=(21, 35, 47),
                                        outline=(65, 91, 108), width=1)
                 value = self._field_value_label(field)+'  ▾'
+            elif field.kind == 'folder':
+                draw.rounded_rectangle(value_box, radius=4,
+                                       fill=(21, 35, 47),
+                                       outline=(65, 91, 108), width=1)
+                value = self._field_value_label(field)+'   Browse…'
             else:
                 draw.rounded_rectangle(value_box, radius=4,
                                        fill=(21, 35, 47),
@@ -1020,6 +1363,12 @@ class ReceiverGui:
         elif self.current_frame is None:
             draw.text((left+18, top+18), 'Waiting for the first decoded picture…',
                       fill=(205, 219, 229), font=font)
+        if (self.live_meter or {}).get('sync_warning'):
+            warning = (left+14, top+12, left+194, top+43)
+            draw.rounded_rectangle(warning, radius=5, fill=(125, 42, 31),
+                                   outline=(238, 130, 93), width=1)
+            draw.text((warning[0]+9, warning[1]+7), 'SYNC LOST',
+                      fill=(255, 239, 228), font=small)
 
         if self._diagnostics_visible():
             panel_height = round(height*.27)
@@ -1049,15 +1398,28 @@ class ReceiverGui:
                 state = 'RECEIVER STOPPED'
             count = (self.live_meter or {}).get('decoded', 0)
             input_fps = (self.live_meter or {}).get('input_fps', 0.0)
+            meter = self.live_meter or {}
+            routing = (f'{meter.get("detected_mode", "acquiring")} · '
+                       f'video {meter.get("video_side") or "--"} / '
+                       f'audio {meter.get("audio_side") or "--"}')
+            output = meter.get('audio_output_device') or 'off'
+            audio = (f'muted → {output}' if meter.get('audio_muted') else
+                     output if meter.get('audio_side') else 'off')
+            audio_error = meter.get('audio_device_error')
+            if audio_error:
+                audio = f'RESELECT · {audio_error}'
+            sync = meter.get('sync_state', 'acquiring')
             if self.current_frame is not None:
                 status = (self.latest_report or {}).get(
                     'status', 'picture decoded')
                 display = ('' if self.display_latency_ms is None else
                            f' · GUI handoff {self.display_latency_ms:.1f} ms')
                 detail = (f'{state}{display} · {status} · {count} pictures · '
-                          f'input {input_fps:.1f} fps')
+                          f'input {input_fps:.1f} fps · {routing} · '
+                          f'audio {audio} · sync {sync}')
             else:
-                detail = f'{state} · {self.notice}'
+                detail = (f'{state} · {self.notice} · {routing} · '
+                          f'audio {audio} · sync {sync}')
             draw.text((14, footer_top+11), _fit_text(detail, small, width-28),
                       fill=(147, 206, 169) if self.started else
                       (189, 203, 214), font=small)
@@ -1225,15 +1587,22 @@ class ReceiverGui:
             index = int(hit.split(':', 1)[1])
             self.selected = index
             field = self.fields[index]
-            if self.started and field.action is not None:
+            if (self.started and field.action is not None and
+                    field.dest not in LIVE_RUNTIME_DESTS):
                 self.notice = ('Receiver options are locked while receiving; '
                                'close and relaunch to change them.')
             elif not field.locked:
                 if field.kind == 'bool':
                     self._adjust_field(field, 1)
                 elif field.kind == 'choice':
+                    if field.dest == 'audio_output_device':
+                        self._refresh_audio_output_choices()
                     self.dropdown = (None if self.dropdown == index else index)
                     self.dropdown_scroll = 0
+                    if len(field.options) <= 1 and self.audio_output_error:
+                        self.notice = self.audio_output_error
+                elif field.kind == 'folder':
+                    self._choose_save_directory(field)
                 else:
                     self.editing = True
                     self.edit_buffer = '' if field.value is None else str(field.value)
@@ -1346,8 +1715,22 @@ class ReceiverGui:
                 if field.kind == 'bool':
                     self._adjust_field(field, 1)
                 elif field.kind == 'choice':
+                    if field.dest == 'audio_output_device':
+                        self._refresh_audio_output_choices()
                     self.dropdown = self.selected
                     self.dropdown_scroll = 0
+                    if (field.dest == 'audio_output_device' and
+                            len(field.options) <= 1 and
+                            self.audio_output_error):
+                        self.notice = self.audio_output_error
+                elif (field.dest == 'freewheel_seconds' and
+                      (not self.started or
+                       field.dest in LIVE_RUNTIME_DESTS) and
+                      not field.locked):
+                    self.editing = True
+                    self.edit_buffer = str(field.value or '')
+                elif field.kind == 'folder' and not field.locked:
+                    self._choose_save_directory(field)
                 elif not self.started and not field.locked:
                     self.editing = True
                     self.edit_buffer = str(field.value or '')
@@ -1395,9 +1778,37 @@ class ReceiverGui:
             self.dirty = True
 
     def _finish_edit(self, field):
-        field.value = self.edit_buffer.strip()
+        value = self.edit_buffer.strip()
+        if field.dest == 'freewheel_seconds':
+            try:
+                seconds = float(value)
+                if not np.isfinite(seconds) or seconds < 0:
+                    raise ValueError
+            except ValueError:
+                self.editing = False
+                self.notice = 'Freewheel duration must be a non-negative number.'
+                self.dirty = True
+                return
+            field.value = seconds
+        else:
+            field.value = value
         self.editing = False
         self.notice = f'{field.label} updated.'
+        self._update_runtime_option(field)
+        if field.dest in ('freewheel_seconds', 'save_dir'):
+            self._persist_preferences()
+        self.dirty = True
+
+    def _choose_save_directory(self, field):
+        try:
+            selected = pick_save_directory(field.value or '')
+        except (OSError, RuntimeError) as exc:
+            self.notice = str(exc)
+        else:
+            if selected:
+                field.value = selected
+                self.notice = f'Save folder: {selected}'
+                self._persist_preferences()
         self.dirty = True
 
     def _on_scroll(self, _window, _xoffset, yoffset):
@@ -1804,8 +2215,9 @@ def main(v7_live_module=None):
     v7_live = v7_live_module
     root_parser, receive_parser = _receive_parser(v7_live)
     devices, device_error = _input_devices()
+    audio_outputs, audio_output_error = _output_devices()
     ReceiverGui(v7_live, root_parser, receive_parser, devices,
-                device_error).run()
+                device_error, audio_outputs, audio_output_error).run()
 
 
 if __name__ == '__main__':

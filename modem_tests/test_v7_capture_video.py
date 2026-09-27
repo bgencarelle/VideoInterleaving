@@ -365,6 +365,60 @@ class SenderSchedulingTests(unittest.TestCase):
         self.assertAlmostEqual(two_x_retune, 2*v7.PULSE_FPS)
         self.assertGreaterEqual(two_x, 1.6*one_x)
 
+    def test_playback_waits_for_encoded_startup_cushion(self):
+        encoded = [0]
+        writes = []
+
+        class RecordingOutputStream:
+            samplerate = 96000
+
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def write(self, _audio):
+                writes.append(encoded[0])
+
+        args = Namespace(
+            fixture=None, encode_filter='nearest', rate=None, source='test',
+            capture_fps=30, screen_backend='mss', speed=1.0,
+            batch_frames=1, seconds=.35, mono_sum=False, device=0,
+            no_log=True, log=False, brightness=1.0, gamma=1.0,
+            camera=0, capture_width=160, capture_filter='neighbor',
+            ffmpeg_input=None, region=None, display=None, baseline=True,
+        )
+        fake_sounddevice = type(
+            'SoundDevice', (), {'OutputStream': RecordingOutputStream})
+        audio = np.zeros((v7.PULSE_FRAME, 2), np.float32)
+
+        def encode(*_args, **_kwargs):
+            encoded[0] += 1
+            return audio
+
+        with mock.patch.dict(sys.modules, {'sounddevice': fake_sounddevice}), \
+                mock.patch('tools.v7_live._model', return_value=object()), \
+                mock.patch('tools.v7_live._capture',
+                           return_value=lambda: object()), \
+                mock.patch('tools.v7_capture.Throttled', self.Throttle), \
+                mock.patch('tools.v7_live._values',
+                           return_value=(np.zeros(1), 0)), \
+                mock.patch('tools.v7_live.P.encode_pulse_stream',
+                           side_effect=encode), \
+                mock.patch('tools.v7_live.P.speed_pulse_stream',
+                           return_value=audio), \
+                mock.patch('tools.v7_live.SENDER_STARTUP_BUFFER_SECONDS', .08):
+            run_send(args)
+
+        self.assertTrue(writes)
+        # One call compiles the path before capture; two real packets must then
+        # be queued before the first sample is handed to the output stream.
+        self.assertGreaterEqual(writes[0], 3)
+
 
 if __name__ == '__main__':
     unittest.main()

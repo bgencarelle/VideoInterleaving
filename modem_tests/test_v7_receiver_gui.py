@@ -1,5 +1,6 @@
 """Receiver GUI configuration maps every receive CLI setting safely."""
 import queue
+import json
 import threading
 import unittest
 from types import SimpleNamespace
@@ -381,11 +382,12 @@ class ReceiverGuiOptionTests(unittest.TestCase):
     def test_fullscreen_f_works_while_text_editing(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
         gui.fullscreen = True
-        save_dir = next(field for field in gui.fields
-                        if field.dest == 'save_dir')
-        gui.selected = gui.fields.index(save_dir)
+        text_field = next(field for field in gui.fields
+                          if field.dest == 'freewheel_seconds')
+        gui.selected = gui.fields.index(text_field)
         gui.editing = True
-        gui.edit_buffer = 'captures'
+        gui.edit_buffer = '2.5'
+        gui._persist_preferences = lambda: None
         toggles = []
         gui._toggle_fullscreen = lambda *_args: toggles.append(True)
 
@@ -393,7 +395,7 @@ class ReceiverGuiOptionTests(unittest.TestCase):
 
         self.assertEqual(toggles, [True])
         self.assertFalse(gui.editing)
-        self.assertEqual(save_dir.value, 'captures')
+        self.assertEqual(text_field.value, 2.5)
 
     def test_gui_resource_monitor_reports_thread_process_and_memory(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
@@ -474,35 +476,131 @@ class ReceiverGuiOptionTests(unittest.TestCase):
 
     def test_clicking_start_commits_active_text_edit_first(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
-        save_dir = next(field for field in gui.fields
-                        if field.dest == 'save_dir')
-        gui.selected = gui.fields.index(save_dir)
+        text_field = next(field for field in gui.fields
+                          if field.dest == 'freewheel_seconds')
+        gui.selected = gui.fields.index(text_field)
         gui.editing = True
-        gui.edit_buffer = 'captures with spaces'
+        gui.edit_buffer = '2.5'
+        gui._persist_preferences = lambda: None
         gui.hits = {'start_stop': (0, 0, 100, 40)}
         started_with = []
-        gui._start_receiver = lambda: started_with.append(save_dir.value)
+        gui._start_receiver = lambda: started_with.append(text_field.value)
 
         gui._on_mouse(MouseStub((20, 20)), None, 0, 1, 0)
 
-        self.assertEqual(save_dir.value, 'captures with spaces')
-        self.assertEqual(started_with, ['captures with spaces'])
+        self.assertEqual(text_field.value, 2.5)
+        self.assertEqual(started_with, [2.5])
         self.assertFalse(gui.editing)
 
     def test_switching_tabs_commits_active_text_edit(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
-        save_dir = next(field for field in gui.fields
-                        if field.dest == 'save_dir')
-        gui.selected = gui.fields.index(save_dir)
+        text_field = next(field for field in gui.fields
+                          if field.dest == 'freewheel_seconds')
+        gui.selected = gui.fields.index(text_field)
         gui.editing = True
-        gui.edit_buffer = 'captures with spaces'
+        gui.edit_buffer = '3.5'
+        gui._persist_preferences = lambda: None
         gui.hits = {'info_tab': (0, 0, 100, 40)}
 
         gui._on_mouse(MouseStub((20, 20)), None, 0, 1, 0)
 
         self.assertEqual(gui.page, 'info')
-        self.assertEqual(save_dir.value, 'captures with spaces')
+        self.assertEqual(text_field.value, 3.5)
         self.assertFalse(gui.editing)
+
+    def test_save_directory_uses_native_folder_picker(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, (),
+                          preference_path=ROOT/'tmp'/'receiver-gui-test.json')
+        save_dir = next(field for field in gui.fields
+                        if field.dest == 'save_dir')
+        self.assertEqual(save_dir.kind, 'folder')
+        index = gui.fields.index(save_dir)
+        gui.hits = {f'row:{index}': (0, 0, 300, 40)}
+        with patch('tools.v7_receiver_gui.pick_save_directory',
+                   return_value='captures') as picker:
+            gui._on_mouse(MouseStub((20, 20)), None, 0, 1, 0)
+        picker.assert_called_once()
+        self.assertEqual(save_dir.value, 'captures')
+
+    def test_saved_audio_devices_restore_by_identity_not_old_index(self):
+        path = ROOT/'tmp'/'receiver-gui-preferences-test.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            'input_device': {'name': 'Loopback In', 'hostapi': 'test'},
+            'output_device': {'name': 'Loopback Out', 'hostapi': 'test'},
+            'audio_muted': True,
+            'freewheel_seconds': 3.5,
+            'show_sync_warning': False,
+        }), encoding='utf-8')
+        identities = {
+            (12, 'input'): {'name': 'Loopback In', 'hostapi': 'test'},
+            (17, 'output'): {'name': 'Loopback Out', 'hostapi': 'test'},
+        }
+        try:
+            with patch('tools.v7_receiver_gui._device_identity',
+                       side_effect=lambda index, kind:
+                       identities[(index, kind)]):
+                gui = ReceiverGui(
+                    self, self.root_parser, self.receive_parser,
+                    (('renumbered input', 12),), audio_output_choices=(
+                        ('renumbered output', 17),), preference_path=path)
+            values = {field.dest: field.value for field in gui.fields}
+            self.assertEqual(values['device'], 12)
+            self.assertEqual(values['audio_output_device'], 17)
+            self.assertTrue(values['audio_muted'])
+            self.assertEqual(values['freewheel_seconds'], 3.5)
+            self.assertFalse(values['show_sync_warning'])
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_missing_saved_audio_devices_require_reselection(self):
+        path = ROOT/'tmp'/'receiver-gui-missing-preferences-test.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            'input_device': {'name': 'Missing In', 'hostapi': 'test'},
+            'output_device': {'name': 'Missing Out', 'hostapi': 'test'},
+        }), encoding='utf-8')
+        try:
+            with patch('tools.v7_receiver_gui._device_identity',
+                       return_value={'name': 'Other', 'hostapi': 'test'}):
+                gui = ReceiverGui(
+                    self, self.root_parser, self.receive_parser,
+                    (('other input', 4),), audio_output_choices=(
+                        ('other output', 5),), preference_path=path)
+            values = {field.dest: field.value for field in gui.fields}
+            self.assertIsNone(values['device'])
+            self.assertIsNone(values['audio_output_device'])
+            self.assertIn('Missing In', gui._field_value_label(
+                next(field for field in gui.fields
+                     if field.dest == 'device')))
+            self.assertIn('Missing Out', gui._field_value_label(
+                next(field for field in gui.fields
+                     if field.dest == 'audio_output_device')))
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_passthrough_device_and_mute_update_live_runtime(self):
+        path = ROOT/'tmp'/'receiver-gui-live-preferences-test.json'
+        identity = {'name': 'Output', 'hostapi': 'test'}
+        with patch('tools.v7_receiver_gui._device_identity',
+                   return_value=identity):
+            gui = ReceiverGui(
+                self, self.root_parser, self.receive_parser, (),
+                audio_output_choices=(('Output', 9),), preference_path=path)
+            from tools.v7_receiver_audio import ReceiverRuntimeOptions
+            gui.runtime_options = ReceiverRuntimeOptions()
+            gui.started = True
+            output = next(field for field in gui.fields
+                          if field.dest == 'audio_output_device')
+            gui._select_choice(output, 9)
+            mute = next(field for field in gui.fields
+                        if field.dest == 'audio_muted')
+            gui._adjust_field(mute, 1)
+        snapshot = gui.runtime_options.snapshot()
+        self.assertEqual(snapshot['audio_output_device'], 9)
+        self.assertEqual(snapshot['audio_output_identity'], identity)
+        self.assertTrue(snapshot['audio_muted'])
+        path.unlink(missing_ok=True)
 
 
 if __name__ == '__main__':

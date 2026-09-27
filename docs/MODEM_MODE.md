@@ -149,9 +149,27 @@ graceful interrupt. The output sample rate defaults to the device-native clock;
 capture FPS is a separate setting. For video, use **Browse**, type a file path
 or URL, or drop a file onto the window. Camera and screen/display options are
 discovered when their pickers open. **Advanced → Pre-encode downscaler** exposes
-the experimental preprocessing modes and strength; they require Fold 500 or
-Fold 1000 with the Box encode filter. Match the selected wire profile on the
-receiver.
+the experimental preprocessing modes and strength; they work with Mono video,
+Fold 500, or Fold 1000 using the Box encode filter. Match the selected wire
+profile on the receiver.
+
+For file/stream video and FFmpeg-based screen capture, **Capture width** is an
+intermediate FFmpeg downscale that limits raw-frame pipe bandwidth and CPU. The
+sender then prepares the fixed 80×96 V7 image, so those paths currently rescale
+twice. It is not the wire resolution. The camera's normal path can prepare
+80×96 directly; the opt-in perceptual resizer runs on the intermediate image
+(160 pixels wide by default), not the source's full resolution. The GUI help
+describes which sources use this setting.
+
+The standalone V7 receiver GUI can be launched with
+`.venv/bin/python -m tools.v7_receiver_gui`. It selects an explicit input and
+can optionally pass the non-video channel to an explicitly selected output
+device, with live mute and sync-warning controls. The Info view reports the
+detected profile, video/audio channel assignment, output state, and sync state;
+the decoded-image destination is chosen with **Browse**. Device preferences
+are matched by device name and host API when PortAudio indices change. There is
+no receiver WAV recorder yet; the proposed recording extension and its
+overhead gate are documented in `transport_v7_spec.md`.
 
 The device argument is required on both sides. Route the sender's output to the
 receiver's input; on a same-machine loopback, select the loopback device for

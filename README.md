@@ -210,10 +210,10 @@ explicit output device, source, sample rate, and wire profile, then press
 window. **Native** uses the output device's clock; Capture FPS is a separate
 advanced setting. Camera and screen/display choices are discovered when their
 pickers open. **Advanced → Pre-encode downscaler** selects the experimental
-preprocessing path; it requires Fold 500 or Fold 1000 with the Box encode
-filter, and its strength is adjustable from 0 to 1. The sender runs as the
-existing CLI in a child process, and the GUI shows only occasional
-startup/shutdown output—there is no capture preview or per-frame logging. Press
+preprocessing path; it is available for Mono video, Fold 500, and Fold 1000
+with the Box encode filter, and its strength is adjustable from 0 to 1. The
+sender runs as the existing CLI in a child process, and the GUI shows only
+occasional startup/shutdown output—there is no capture preview or per-frame logging. Press
 **Stop** to request a graceful shutdown. The receiver must use the matching
 wire profile.
 

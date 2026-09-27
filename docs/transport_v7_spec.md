@@ -1946,9 +1946,10 @@ decoder rather than choosing the mono rank map speculatively. The GUI leaves
 legacy profile and decoder-tuning switches out of its setup fields; those
 specialized CLI paths remain available for recovery and experiments.
 
-It requires the canonical box model, coded pilot timing, EOF framing, and no
-pre-encode perceptual resizer. Every packet transmits the same 1,264 M-only
-physical slots: the protected 208-coefficient head followed by 1,056 fresh body
+It requires the canonical box model, coded pilot timing, and EOF framing.
+Optional pre-encode perceptual resizing changes picture samples before encoding
+but does not change the wire layout. Every packet transmits the same 1,264
+M-only physical slots: the protected 208-coefficient head followed by 1,056 fresh body
 slots. There is no rotating tail and the live receiver disables tail memory.
 Five hundred hosts within the fresh body carry the fold; the final 16 hosts are
 the fold-table signature and replace their host and guest picture values. The
@@ -2065,3 +2066,26 @@ Reproduce the profile checks and complete comparison with:
 .venv/bin/python tools/v7_mono_video_bench.py \
   --out tmp/v7-mono-video-left
 ```
+
+### Proposed extension: receiver audio WAV capture
+
+This is a proposal for a later receiver feature, not a current wire or GUI
+capability. The V7 receiver currently saves decoded pictures as image files but
+does not record incoming audio to WAV. The legacy `main.py --modem-wav` option
+saves generated modem waveforms and is a different workflow.
+
+For confirmed `MONO_500` reception, an optional recorder could write the
+non-video input leg to a user-selected WAV file. It should record the captured
+samples at the input device's actual sample rate, independently of passthrough
+mute and output-device selection. It must not infer an audio leg from pulse
+activity or from packet loss: recording starts only when the coded profile and
+channel route identify the non-video leg. Unknown/stereo profiles remain
+unrouted. Recording I/O belongs on a bounded worker queue, not the PortAudio
+callback; queue overflow and file/device failures must be visible, with no
+silent fallback. The file format, behavior across route loss/reacquisition, and
+GUI file-picker controls remain open implementation details.
+
+Before exposing this extension, benchmark receive/decode CPU and callback
+stability with recording off and on, and verify duration/sample continuity on a
+synthetic input. The implementation and overhead results are deferred until
+that check.

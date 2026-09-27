@@ -243,13 +243,12 @@ class SenderGuiTests(unittest.TestCase):
         gui.settings['source_audio'] = 'device'
         self.assertIn('source_audio_device', gui._visible_fields())
 
-    def test_mono_video_always_uses_wire_defaults_and_disables_pre_resize(self):
+    def test_mono_video_keeps_wire_defaults_and_allows_pre_resize(self):
         self.settings.update(profile='mono-fold-500', perceptual_resize='linear-box')
-        with self.assertRaisesRegex(ValueError, 'requires the pre-encode downscaler off'):
-            validate_settings(self.settings, self.devices, self.sd)
-
-        self.settings.update(perceptual_resize='off')
         command = build_command(self.settings, self.devices, self.sd)
+        self.assertEqual(command[command.index('--perceptual-resize')+1],
+                         'linear-box')
+
         self.assertNotIn('--mono-sum', command)
         self.assertNotIn('--no-pilot-tones', command)
         self.assertNotIn('--no-eof-marker', command)
@@ -296,8 +295,9 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(args.perceptual_detail_strength, 0.6)
 
         self.settings.update(profile='mono-fold-500')
-        with self.assertRaisesRegex(ValueError, 'requires the pre-encode downscaler off'):
-            validate_settings(self.settings, self.devices, self.sd)
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertEqual(command[command.index('--perceptual-resize')+1],
+                         'gamma-detail')
 
     def test_capture_device_discovery_parsers(self):
         cameras = linux_camera_sources(

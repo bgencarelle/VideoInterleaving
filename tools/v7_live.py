@@ -78,6 +78,8 @@ from tools.v7_display import LatestFrame                                      # 
 FPS = P.PULSE_FPS
 CAMERA_CAPTURE_FPS = 15
 INPUT_AUDIO_QUEUE_BLOCKS = 8
+SENDER_ENCODE_QUEUE_BATCHES = 64
+SENDER_STARTUP_BUFFER_SECONDS = .4
 ENCODE_TO_FFMPEG_SCALE = {
     'nearest': 'neighbor',
     'box': 'area',
@@ -487,9 +489,6 @@ def run_send(args):
             raise ValueError('experimental mono profiles require coded pilot tones')
         if not getattr(args, 'eof_marker', True):
             raise ValueError('experimental mono profiles require the EOF marker')
-    if mono_fold_profile and getattr(args, 'perceptual_resize', 'off') != 'off':
-        raise ValueError('the experimental mono fold profile requires '
-                         '--perceptual-resize off')
     if mono_fold_profile and getattr(args, 'mono_sum', False):
         raise ValueError('the mono-video side selector requires two output '
                          'channels; do not combine it with --mono-sum')
@@ -555,8 +554,11 @@ def run_send(args):
     grab = None
     source_audio = None
     audio_delay = None
-    batches = queue.Queue(maxsize=2)
+    batches = queue.Queue(maxsize=SENDER_ENCODE_QUEUE_BATCHES)
     stop = threading.Event()
+    producer_done = threading.Event()
+    prebuffer_ready = threading.Event()
+    buffered_audio_seconds = 0.0
     sentinel = object()
     producer_errors = []
     batch_size = max(1, args.batch_frames)
@@ -648,7 +650,7 @@ def run_send(args):
         return output, stats
 
     def produce():
-        nonlocal total
+        nonlocal total, buffered_audio_seconds
         frames = []
         aspects = []
         counter = 1
@@ -684,6 +686,9 @@ def run_send(args):
                     continue
                 audio, stats = encode_batch(frames, aspects, counter)
                 batches.put((counter, audio, stats))
+                buffered_audio_seconds += len(audio)/output_rate
+                if buffered_audio_seconds >= SENDER_STARTUP_BUFFER_SECONDS:
+                    prebuffer_ready.set()
                 total += len(frames)
                 counter += len(frames)
                 frames = []
@@ -695,6 +700,9 @@ def run_send(args):
             try:
                 audio, stats = encode_batch(frames, aspects, counter)
                 batches.put((counter, audio, stats))
+                buffered_audio_seconds += len(audio)/output_rate
+                if buffered_audio_seconds >= SENDER_STARTUP_BUFFER_SECONDS:
+                    prebuffer_ready.set()
                 total += len(frames)
             except Exception as exc:
                 failure = exc
@@ -708,6 +716,7 @@ def run_send(args):
                 failure = exc
         if failure is not None:
             producer_errors.append(failure)
+        producer_done.set()
         batches.put(sentinel)
 
     worker = threading.Thread(target=produce, daemon=True)
@@ -734,6 +743,18 @@ def run_send(args):
             first_packet_samples = len(P.speed_pulse_stream(
                 np.zeros(P.PULSE_FRAME, dtype=np.float32), args.speed,
                 rate=output_rate))
+            # Compile the per-frame image and pulse encoder path before the
+            # first real packet. Numba's first-call work must not become a gap
+            # in the recorded modem waveform.
+            warm_frame = np.zeros(
+                (P.PREPARED_SIZE[1], P.PREPARED_SIZE[0], 3), dtype=np.uint8)
+            warm_tones = tone_controls.snapshot()
+            warm_values, _ = _values(
+                model, warm_frame, args.encode_filter,
+                warm_tones['brightness'], warm_tones['gamma'],
+                getattr(args, 'perceptual_resize', 'off'),
+                getattr(args, 'perceptual_detail_strength', 0.25))
+            encode_batch([warm_values], [0], 1)
             # Start picture and soundtrack capture only after the output clock
             # is known, and close together so file/stream timelines begin near
             # the same source time.
@@ -779,6 +800,13 @@ def run_send(args):
                     first_packet_samples/output_rate+.2)
             worker.start()
             worker_started = True
+            # Start playback only after a small encoded cushion exists. This
+            # absorbs transient frame/encoder stalls; the bounded queue limits
+            # latency and memory if capture runs faster than the output clock.
+            while (not prebuffer_ready.is_set() and
+                   not producer_done.wait(.02)):
+                if stop.is_set():
+                    break
             if not args.no_log:
                 camera_text = (f'camera={args.camera} '
                                if args.source == 'camera' else '')
@@ -902,6 +930,10 @@ class _MonoChannelProbe:
         self.last_scale = None
         self.last_direction = None
         self.streak = 0
+        self.status_mode = None
+        self.status_candidate = None
+        self.status_streak = 0
+        self.last_valid = None
 
     def add(self, block):
         self.input.add(block)
@@ -912,6 +944,10 @@ class _MonoChannelProbe:
         self.last_scale = None
         self.last_direction = None
         self.streak = 0
+        self.status_mode = None
+        self.status_candidate = None
+        self.status_streak = 0
+        self.last_valid = None
 
     def scan(self, now):
         audio = self.input.take(now)
@@ -925,6 +961,17 @@ class _MonoChannelProbe:
                 continue
             if confidence < self.MIN_CONFIDENCE:
                 continue
+            mode = _coded_status_mode(
+                audio, position, scale, self.input.rate, direction)
+            if mode is not None:
+                if mode == self.status_candidate:
+                    self.status_streak += 1
+                else:
+                    self.status_candidate = mode
+                    self.status_streak = 1
+                if self.status_streak >= 2:
+                    self.status_mode = mode
+                    self.last_valid = float(now)
             if self.last_position is None:
                 self.streak = 1
             else:
@@ -1073,22 +1120,17 @@ def _detect_mono_fold_side(args, timeout=2.0):
     return _mono_fold_input_side(observed_modes, MONO_500)
 
 
-def _should_try_other_mono_leg(active_mode, expected_mode, opposite_streak,
-                               active_has_packet, switch_count):
-    """Probe the other leg only when it has pulses and this leg is unproven."""
-    if opposite_streak < 2 or switch_count >= 2:
-        return False
-    if active_mode == expected_mode:
-        return False
-    # A pulse-only candidate may rescue an otherwise silent selected leg. If
-    # this leg did decode a packet, require a known, non-mono status before
-    # abandoning it; a damaged packet alone must not make us leave the right leg.
-    return not active_has_packet or active_mode is not None
-
-
 def run_receive(args):
     if getattr(args, 'image_only', False) and getattr(args, 'headless', False):
         raise ValueError('--image-only cannot be combined with --headless')
+    runtime_options = getattr(args, 'runtime_options', None)
+    if runtime_options is not None:
+        identity = runtime_options.snapshot().get('audio_input_identity')
+        if identity is not None:
+            import sounddevice as sd
+            from tools.v7_receiver_audio import resolve_device_index
+            args.device = resolve_device_index(
+                sd, args.device, identity, 'input')
     profile_is_explicit = bool(
         getattr(args, 'experimental_mono', False) or
         getattr(args, 'experimental_mono_fold', False) or
@@ -1159,6 +1201,9 @@ def run_receive(args):
 
 def _run_receive(args, fold, mono_wire=None):
     import sounddevice as sd
+    from tools.v7_receiver_audio import (AudioPassthrough,
+                                         ReceiverChannelRouter,
+                                         ReceiverRuntimeOptions)
 
     RECEIVER_GUI_STATUS.clear()
     # The standalone configuration GUI can cancel setup before the capture
@@ -1213,6 +1258,7 @@ def _run_receive(args, fold, mono_wire=None):
         video_input_index = 0
     capture_rate = capture_rate_for(device_info)
     blocks = queue.Queue(maxsize=INPUT_AUDIO_QUEUE_BLOCKS)
+    audio_blocks = queue.Queue(maxsize=64)
     input_gap = threading.Event()
     input_ready = threading.Event()
     live_input = LiveInput(
@@ -1256,6 +1302,24 @@ def _run_receive(args, fold, mono_wire=None):
         input_mode = f'mono-video-{getattr(mono_wire, "side", "")}'
     else:
         input_mode = 'mono-input' if input_channels == 1 else 'M/S'
+    _ensure_test_modem_path()
+    from tone_code import FOLD_500, FOLD_1000, FOLD_OFF, MONO_500
+    initial_side = (getattr(mono_wire, 'side', None)
+                    if mono_wire is not None else None)
+    receiver_router = ReceiverChannelRouter(
+        MONO_500, (FOLD_OFF, FOLD_500, FOLD_1000),
+        initial_video_side=(initial_side if initial_side in (
+            'left', 'right', 'both') else None))
+    runtime_options = getattr(args, 'runtime_options', None)
+    if runtime_options is None:
+        runtime_options = ReceiverRuntimeOptions(
+            audio_output_device=getattr(args, 'audio_output_device', None),
+            audio_muted=getattr(args, 'audio_muted', False),
+            freewheel_seconds=getattr(args, 'freewheel_seconds', 2.0),
+            show_sync_warning=getattr(args, 'show_sync_warning', True))
+    audio_bridge_enabled = bool(
+        getattr(args, 'runtime_options', None) is not None or
+        runtime_options.snapshot()['audio_output_device'] is not None)
     meter = {'peak': np.zeros(input_channels),
              'rms': np.zeros(input_channels), 'blocks': 0,
              'dropped': 0, 'decoded': 0, 'verified': 0, 'lost': 0,
@@ -1274,7 +1338,24 @@ def _run_receive(args, fold, mono_wire=None):
              'aspect_streak': 0, 'input_samples': 0, 'started': time.monotonic(),
               'auto_gain': 1.0, 'polarity': 1,
               'input_fps': 0., 'decode_fps': 0., 'shown_fps': 0.,
-              'channel_hint': '',
+               'channel_hint': '',
+               'route_state': receiver_router.state,
+               'detected_mode': receiver_router.state,
+               'channel_modes': (None, None),
+               'video_side': receiver_router.video_side,
+              'audio_side': receiver_router.audio_side,
+              'sync_state': 'acquiring',
+              'sync_age': None,
+              'sync_warning': bool(runtime_options.snapshot().get(
+                  'show_sync_warning', True)),
+               'audio_muted': bool(runtime_options.snapshot().get(
+                   'audio_muted', False)),
+               'audio_output_device': runtime_options.snapshot().get(
+                   'audio_output_device'),
+               'audio_output_identity': runtime_options.snapshot().get(
+                   'audio_output_identity'),
+              'audio_device_error': None,
+              'audio_dropped_blocks': 0,
               'mode': input_mode,
              'device': str(args.device), 'capture_rate': capture_rate,
              'input_channels': input_channels}
@@ -1292,13 +1373,27 @@ def _run_receive(args, fold, mono_wire=None):
             print(f'input: {status}', file=sys.stderr, flush=True)
         if not has_data:
             return
+        block = np.array(indata, copy=True)
         try:
-            blocks.put_nowait(np.array(indata, copy=True))
+            blocks.put_nowait(block)
         except queue.Full:
             # Dropping an input block is an explicit discontinuity; keeping
             # stale audio would make the V7 clock appear to run backward.
             meter['dropped'] += 1
             input_gap.set()
+        if audio_bridge_enabled:
+            audio_block = np.array(block, copy=True)
+            try:
+                audio_blocks.put_nowait(audio_block)
+            except queue.Full:
+                try:
+                    audio_blocks.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    audio_blocks.put_nowait(audio_block)
+                except queue.Full:
+                    meter['audio_dropped_blocks'] += 1
         input_ready.set()
 
     def live_loop_position():
@@ -1400,11 +1495,100 @@ def _run_receive(args, fold, mono_wire=None):
                 f'pulse {pulse_text}   speed {speed_text}',
                 f'audio {playback_text}',
                 f'timing {timing_text}',
+                f'route {meter["route_state"]} · '
+                f'video {meter["video_side"] or "--"} · '
+                f'audio {meter["audio_side"] or "--"}',
+                f'passthrough {"muted" if meter["audio_muted"] else "live"} · '
+                f'output {meter["audio_output_device"] or "not selected"}' +
+                ('' if not meter['audio_device_error'] else
+                 f' · {meter["audio_device_error"]}'),
+                f'sync {meter["sync_state"]}' +
+                ('' if meter['sync_age'] is None else
+                 f' · {meter["sync_age"]:.1f}s since valid packet'),
                 meter['channel_hint'] or 'channel route not independently flagged'),
         }
 
     RECEIVER_GUI_STATUS.update(meter=meter,
                                diagnostics=display_diagnostics)
+
+    def refresh_runtime_state(now=None):
+        now = time.monotonic() if now is None else float(now)
+        options = runtime_options.snapshot()
+        route = receiver_router.snapshot(now)
+        meter['route_state'] = route['state']
+        meter['detected_mode'] = route['state']
+        meter['channel_modes'] = route['channel_modes']
+        meter['video_side'] = route['video_side']
+        meter['audio_side'] = (route['audio_side']
+                               if input_channels > 1 else None)
+        meter['sync_state'] = receiver_router.sync_state(
+            now, options['freewheel_seconds'])
+        meter['sync_age'] = (None if route['last_packet'] is None else
+                             max(0.0, now-route['last_packet']))
+        meter['sync_warning'] = bool(
+            meter['sync_state'] == 'sync-lost' and
+            options['show_sync_warning'])
+        meter['audio_muted'] = options['audio_muted']
+        identity = options['audio_output_identity']
+        meter['audio_output_identity'] = identity
+        meter['audio_output_device'] = (
+            identity.get('name') if identity is not None else
+            options['audio_output_device'])
+        if passthrough is not None:
+            passthrough.set_route(route['audio_side'], options['audio_muted'])
+            meter['audio_device_error'] = passthrough.error
+
+    passthrough = (AudioPassthrough(
+        capture_rate, sounddevice_module=sd,
+        status_callback=lambda error: meter.__setitem__(
+            'audio_device_error', error)) if audio_bridge_enabled else None)
+
+    def audio_output_monitor():
+        current_device = object()
+        last_attempt = 0.0
+        last_health_check = 0.0
+        while not stop.is_set():
+            options = runtime_options.snapshot()
+            device = options['audio_output_device']
+            identity = options['audio_output_identity']
+            selection = (device, identity)
+            now = time.monotonic()
+            reopen = selection != current_device
+            retry = (passthrough is not None and
+                     (device is not None or identity is not None) and
+                     not passthrough.is_open and now-last_attempt >= 3.0)
+            if (passthrough is not None and selection == current_device and
+                    passthrough.is_open and now-last_health_check >= 2.0):
+                last_health_check = now
+                if not passthrough.check_device(identity):
+                    reopen = True
+            if passthrough is not None and (reopen or retry):
+                passthrough.close()
+                if device is not None or identity is not None:
+                    passthrough.open(device, identity)
+                current_device = selection
+                last_attempt = now
+            if passthrough is not None:
+                passthrough.set_muted(options['audio_muted'])
+            refresh_runtime_state(now)
+            stop.wait(.1)
+
+    def audio_input_worker():
+        while not stop.is_set():
+            try:
+                block = audio_blocks.get(timeout=.1)
+            except queue.Empty:
+                continue
+            passthrough.push(block)
+
+    audio_threads = [threading.Thread(
+        target=audio_output_monitor, daemon=True,
+        name='v7-receiver-runtime-monitor')]
+    if passthrough is not None:
+        refresh_runtime_state()
+        audio_threads.append(threading.Thread(
+            target=audio_input_worker, daemon=True,
+            name='v7-receiver-audio-passthrough'))
 
     def update_channel_hint():
         if auto_mono_side and not auto_mono_locked:
@@ -1433,20 +1617,52 @@ def _run_receive(args, fold, mono_wire=None):
             if hint and not args.no_log:
                 print({'status': 'mono_channel_hint', 'hint': hint}, flush=True)
 
+    def update_route_from_packets(active_mode=None, active_valid=False,
+                                  now=None):
+        now = time.monotonic() if now is None else float(now)
+        channel_modes = [None, None]
+        channel_times = [None, None]
+        channel_confirmed = [False, False]
+        if active_valid and active_mode is not None:
+            if video_input_index is None:
+                # A stereo decoder's valid coded profile describes the joined
+                # two-leg wire; it does not identify either leg as passthrough.
+                channel_modes = [active_mode, active_mode]
+                channel_times = [now, now]
+            else:
+                channel_modes[video_input_index] = active_mode
+                channel_times[video_input_index] = now
+        if (opposite_probe is not None and opposite_input_index is not None and
+                opposite_probe.status_mode is not None and
+                opposite_probe.last_valid is not None):
+            channel_modes[opposite_input_index] = opposite_probe.status_mode
+            channel_times[opposite_input_index] = opposite_probe.last_valid
+            channel_confirmed[opposite_input_index] = True
+        route = receiver_router.observe(
+            channel_modes[0], channel_modes[1], now=now,
+            left_seen_at=channel_times[0], right_seen_at=channel_times[1],
+            left_confirmed=channel_confirmed[0],
+            right_confirmed=channel_confirmed[1])
+        meter['route_state'] = route['state']
+        meter['video_side'] = route['video_side']
+        meter['audio_side'] = route['audio_side']
+        if auto_mono_side and route['state'] in ('mono-left', 'mono-right'):
+            desired = {'mono-left': 0, 'mono-right': 1}[route['state']]
+            if desired != video_input_index and route['channel_active'][desired]:
+                if switch_to_other_mono_leg():
+                    update_channel_hint()
+        return route
+
     def switch_to_other_mono_leg():
         """Try the probed leg while keeping its pulse history for decoding."""
         nonlocal live_input, video_input_index, opposite_input_index
         nonlocal decoded_through, direction_streak, auto_mono_switches
-        if (not auto_mono_side or auto_mono_locked or opposite_probe is None or
-                auto_mono_switches >= 2):
+        if not auto_mono_side or opposite_probe is None:
             return False
         live_input, opposite_probe.input = opposite_probe.input, live_input
         video_input_index, opposite_input_index = (
             opposite_input_index, video_input_index)
-        opposite_probe.last_position = None
-        opposite_probe.last_scale = None
-        opposite_probe.last_direction = None
-        opposite_probe.streak = 0
+        opposite_probe.reset()
         auto_mono_switches += 1
         decoded_through = None
         pulse_state.tail.reset()
@@ -1523,12 +1739,8 @@ def _run_receive(args, fold, mono_wire=None):
         meter['input_fps'] = live_input.incoming_fps(now)
         meter['polarity'] = live_input.polarity
         if audio is None:
-            if _should_try_other_mono_leg(
-                    None, getattr(mono_wire, 'status_mode', None),
-                    opposite_probe.streak if opposite_probe is not None else 0,
-                    active_has_packet=False, switch_count=auto_mono_switches):
-                if switch_to_other_mono_leg():
-                    update_channel_hint()
+            update_route_from_packets(now=now)
+            update_channel_hint()
             return
         pulse_hits = live_input.pulse_hits(audio)
         if not pulse_hits:
@@ -1586,16 +1798,6 @@ def _run_receive(args, fold, mono_wire=None):
             if expected_mode in modes:
                 auto_mono_locked = True
                 update_channel_hint()
-            else:
-                active_mode = next((mode for mode in reversed(modes)
-                                    if mode is not None), None)
-                if _should_try_other_mono_leg(
-                        active_mode, expected_mode,
-                        opposite_probe.streak if opposite_probe is not None else 0,
-                        active_has_packet=bool(results),
-                        switch_count=auto_mono_switches):
-                    if switch_to_other_mono_leg():
-                        update_channel_hint()
         if results:
             result = results[-1]
             independently_validated = bool(
@@ -1603,6 +1805,13 @@ def _run_receive(args, fold, mono_wire=None):
                 not result.diag.get('metadata_provisional') and
                 (packet_direction < 0 or args.frame_boundary != 'eof' or
                  result.diag.get('eof_marker') is not None))
+            result_mode = _mono_packet_status_mode(result)
+            packet_valid = bool(
+                independently_validated and
+                result.status in ('received', 'verified'))
+            update_route_from_packets(
+                result_mode, active_valid=packet_valid,
+                now=time.monotonic())
             confirmed_direction, direction_switched = direction_streak.observe(
                 absolute_arrival, packet_direction, independently_validated)
             meter['playback_direction'] = confirmed_direction
@@ -1773,6 +1982,8 @@ def _run_receive(args, fold, mono_wire=None):
                            'error': repr(exc)}, flush=True)
 
     decoder_thread = threading.Thread(target=decode_worker, daemon=True)
+    for thread in audio_threads:
+        thread.start()
     decoder_thread.start()
 
     try:
@@ -1794,6 +2005,10 @@ def _run_receive(args, fold, mono_wire=None):
         stop.set()
         input_ready.set()
         decoder_thread.join(timeout=2)
+        for thread in audio_threads:
+            thread.join(timeout=2)
+        if passthrough is not None:
+            passthrough.close()
         stream.stop()
         stream.close()
 
@@ -1897,6 +2112,15 @@ def parser():
     recv = sub.add_parser('receive', help='receive V7 audio and display it')
     recv.add_argument('--device', type=_device_arg, required=True,
                       help='explicit sounddevice input, e.g. BlackHole 2ch')
+    recv.add_argument('--audio-output-device', type=_device_arg,
+                      help='explicit output device for the non-video input leg')
+    recv.add_argument('--audio-muted', action='store_true',
+                      help='mute receiver audio passthrough')
+    recv.add_argument('--freewheel-seconds', type=float, default=2.0,
+                      help='time without valid video packets before sync-loss status')
+    recv.add_argument('--no-sync-warning', dest='show_sync_warning',
+                      action='store_false', default=True,
+                      help='show the optional on-screen sync-loss warning')
     recv.add_argument('--direction', choices=('auto', 'forward', 'reverse'),
                       default='auto',
                       help='pulse direction detection (default: auto)')
