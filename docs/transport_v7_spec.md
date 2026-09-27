@@ -33,11 +33,12 @@ At the 48 kHz reference geometry, one pulse packet is 3,920 samples:
 | **Total** | **3,920** | **12.245 packets/s at 1×** |
 
 The pulse word contains 16 known bits with 8-sample half-bits and nominal
-amplitude 0.55. `transport3.measure_pulses()` locates its Schmitt-triggered
-edges, interpolates zero crossings, matches the short/long edge-interval
-pattern, and estimates packet scale. V7 timing acquisition is pulse-counted,
-not FFT-correlated. Captures are measured in their native sample coordinates;
-the accepted scale is normalized by the capture rate relative to 48 kHz.
+amplitude 0.55. `transport3.measure_pulses()` locates the forward word;
+`measure_pulses_both()` shares that Schmitt-edge pass while matching the
+forward and reversed gap patterns. Both interpolate zero crossings and
+estimate packet scale. V7 timing acquisition is pulse-counted, not
+FFT-correlated. Captures are measured in their native sample coordinates; the
+accepted scale is normalized by the capture rate relative to 48 kHz.
 
 The receiver supports two packet-completion modes:
 
@@ -55,6 +56,32 @@ and receiver and the application sender enable EOF by default. The low-level
 `encode_pulse_frame()` / `encode_pulse_stream()` and
 `decode_pulse_stream()` APIs default to legacy framing unless their EOF options
 are specified.
+
+### 2.1 Reverse playback
+
+`tools/v7_live.py receive` detects forward and reversed pulse words by default;
+`--direction forward|reverse|auto` can force a direction. A reversed candidate
+is retained until its full packet interval has arrived, boundedly extracted,
+and normalized into forward time. The receiver then re-acquires the forward
+preamble and uses the ordinary V7 decoder. Reverse packets require a validated
+EOF marker and independently valid metadata; provisional loop-field metadata
+is held without updating picture-tail memory. Packets without EOF are not yet
+supported in reverse.
+
+Playback direction is separate from source-animation direction. The UI and
+receiver diagnostics report both; the displayed playback direction is
+confirmed after two distinct metadata-validated arrivals. A direction change
+resets order-dependent tail history while retaining the learned loop lock. A
+missing or damaged reverse packet leaves the last good picture in place.
+
+The paired synthetic CPU check is reproducible with
+`.venv/bin/python test_modem_v7/reverse_cpu.py`. On a warmed 4,048-sample
+interior-packet window (500 paired batches of five packets, 48 kHz,
+tone-seeded timing), automatic direction detection added 1.75% over
+forward-only detection and decoding; reverse decode added 1.61% over the
+auto-detected forward path. These local CPU-time measurements include
+acquisition and one packet decode, but exclude audio capture, rendering, and
+real-medium effects.
 
 ## 3. OFDM body and stereo mapping
 
@@ -188,10 +215,11 @@ conditions scored 20 frames; the 0.3% jitter case scored 19. This suggests the
 current receiver can fall back when the tones are absent; it does not establish
 that an on/off code can be decoded over tape or real audio hardware.
 
-Packets may be pitch-shifted in the range 0.25×–4×. The receiver measures the
-resulting pulse scale and resamples the packet onto the reference grid. Faster
-playback increases both packet rate and carrier frequencies. With a 14 kHz
-nominal emission edge, the full-band Nyquist guide is
+Packets may be pitch-shifted in the range 0.01×–4× (pulse scales 100×–0.25×).
+The receiver measures the resulting pulse scale and resamples the packet onto
+the reference grid. Slower playback reduces both packet rate and carrier
+frequencies; faster playback increases both. With a 14 kHz nominal emission
+edge, the full-band Nyquist guide is
 `output_sample_rate / 28,000` (about 1.71× at 48 kHz and 3.43× at 96 kHz).
 This is not a transmit limit; above it, resampling filters or aliasing remove
 high-frequency detail. The application sender uses the output device's rate;
@@ -314,6 +342,125 @@ from the same machine and workload; do not present a feature-only timing.
 Measurements are informational, not pass/fail thresholds. See
 `test_modem_v7/HOWTO.md` for invocation and scope.
 
+For slow reverse playback, run
+`.venv/bin/python test_modem_v7/slow_reverse_torture.py`. It stores one fixed
+eight-packet reference/mirror series in `tmp/v7_slow_reverse_series.npz`, then
+tests that identical packet payload series from 0.25× through 0.01× through the
+chunked `LiveInput` acquisition and reverse decoder. At 48 kHz, three warmed
+runs on 2026-09-27 received all eight frames at every speed, with validated EOF
+and source order 7→0. The series SHA-256 was
+`044b010d38f604aae0e30caffe4ca0b1630295234450ae0c2f3241ef435ff41b`.
+
+| Playback speed | Pulse acquisition CPU / 8-packet series | Reverse decode CPU / packet | Live-input CPU / one core |
+| ---: | ---: | ---: | ---: |
+| 0.25× | 1.89 ms | 0.98 ms | 0.82% |
+| 0.10× | 3.15 ms | 1.05 ms | 0.91% |
+| 0.05× | 5.22 ms | 1.12 ms | 1.40% |
+| 0.025× | 11.67 ms | 1.12 ms | 2.36% |
+| 0.01× | 25.34 ms | 1.38 ms | 5.63% |
+
+The same fixed packets were also scored for image quality against their matching
+reference/mirror source. The source was Lanczos-resized to 405×540; decoded
+80×96 images were bicubic-resized to that same display size. SSIMULACRA2 is
+higher-is-better. Pixel RMSE and PSNR use the displayed RGB images.
+
+| Playback speed | Mean SSIMULACRA2 | RGB RMSE / 255 | RGB PSNR |
+| ---: | ---: | ---: | ---: |
+| 0.25× | −35.575 | 11.949 | 26.58 dB |
+| 0.20× | −35.572 | 11.948 | 26.58 dB |
+| 0.15× | −35.588 | 11.949 | 26.58 dB |
+| 0.10× | −35.573 | 11.949 | 26.58 dB |
+| 0.075× | −35.572 | 11.949 | 26.58 dB |
+| 0.05× | −35.572 | 11.949 | 26.58 dB |
+| 0.025× | −35.570 | 11.948 | 26.58 dB |
+| 0.0125× | −35.571 | 11.948 | 26.58 dB |
+| 0.01× | −35.571 | 11.948 | 26.58 dB |
+
+Quality is effectively invariant with playback speed in this clean synthetic
+case: normalized source-value RMSE stays at 0.068049, and the 0.01× display
+differs from the 0.25× display by only 0.18/255 RGB RMSE across corresponding
+frames. The roughly −35.6 SSIMULACRA2 and 26.58 dB PSNR describe this fixture's
+baseline encode/reconstruction quality, not tape quality. This comparison
+isolates whether speed changes fidelity; it does not establish that the image
+encoding is optimal.
+
+A fast-playback follow-up tested the same reverse series at 1×, 1.5× and 2×
+with 96 kHz capture, comparing each result to a 1×/96 kHz baseline. All eight
+frames passed EOF and metadata validation at each speed. Mean SSIMULACRA2 was
+−35.574 at 1×, −35.619 at 1.5×, and −35.596 at 2×; normalized source-value
+RMSE was 0.068050, 0.068053, and 0.068056 respectively. This indicates no
+material quality change at 2× when the capture sample rate preserves the
+expanded signal bandwidth. At 48 kHz, 1.5× also decoded all eight frames with
+mean SSIMULACRA2 −35.645. At 2×/48 kHz only 1/8 frame had independently valid
+metadata; the remaining frames were rejected and the live receiver holds its
+last good picture. This matches the transport's Nyquist guidance: 2× playback
+at 48 kHz pushes the fast wire's full band beyond the capture bandwidth; 96 kHz
+has sufficient Nyquist headroom for this synthetic case.
+
+An additional 2×/48 kHz clean-reverse probe found all eight pulse headers and
+EOF markers but only one independently valid metadata frame. Before playback
+speed conversion, the same source wire was optionally filtered with a
+zero-phase fourth-order Butterworth low-pass at 14, 12, 11, 10, or 8 kHz. The
+14–10 kHz settings still produced only one valid frame; 8 kHz produced none.
+This simple prefilter did not recover the packets. The speed converter already
+uses a polyphase anti-alias filter when compressing the waveform to the 48 kHz
+capture clock; that prevents out-of-band energy from folding back, but it also
+removes high wire carriers that the fast playback needs. At 96 kHz, 2× puts the
+nominal 14 kHz emission edge near 28 kHz, below the 48 kHz Nyquist limit, so the
+full-matrix failures there are due to the specified fixed-bandwidth impairments
+(notably Type I/II and low-pass cases), not ordinary sample-rate aliasing. A
+more aggressive low-pass is therefore not a general 2× fix; use sufficient
+capture bandwidth or deliberately design a lower-bandwidth wire profile.
+
+The clean reverse series was swept more finely from 1.7× through 2.2×. At
+48 kHz, all eight frames remained independently valid through 1.8×; quality
+then fell at 1.9×, only one frame was valid at 2.0× and 2.1×, and none at
+2.2×. At 96 kHz, all eight frames decoded in order at every tested speed with
+stable quality:
+
+| Speed | 48 kHz valid frames | 48 kHz mean SSIMULACRA2 | 96 kHz valid frames | 96 kHz mean SSIMULACRA2 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1.7× | 8/8 | −35.677 | 8/8 | −35.590 |
+| 1.8× | 8/8 | −35.696 | 8/8 | −35.625 |
+| 1.9× | 8/8 | −42.366 | 8/8 | −35.643 |
+| 2.0× | 1/8 | −46.159 | 8/8 | −35.596 |
+| 2.1× | 1/8 | −49.669 | 8/8 | −35.645 |
+| 2.2× | 0/8 | n/a | 8/8 | −35.594 |
+
+Every point still acquired 8/8 reverse headers and validated 8/8 EOFs at both
+rates; failures at 48 kHz were metadata/picture recovery, not scale estimation.
+
+The 96 kHz full impairment matrix was also sampled at those six speeds. In
+forward playback, cases with all 11 metadata-valid results / received totals
+were: 1.7× 23/25 and 256/275; 1.8× 23/25 and 253/275; 1.9× 22/25 and 249/275;
+2.0× 21/25 and 242/275; 2.1× 21/25 and 239/275; 2.2× 20/25 and 233/275.
+The reverse EOF matrix met its 10-picture cold-start acceptance in 21/25,
+22/25, 20/25, 21/25, 19/25, and 19/25 cases respectively, with 228, 229, 220,
+221, 208, and 204 received frames out of 300. Failures accumulate mainly in
+low-pass and Type I/II combinations as speed rises. Clean frames remain intact
+at 96 kHz, confirming that these impairment-matrix failures are not caused by
+sample-rate aliasing at that capture rate. Results are saved under
+`tmp/v7-torture-speed-1_7x/` through `tmp/v7-torture-speed-2_2x/` and
+`tmp/v7-torture-reverse-1_7x/` through `tmp/v7-torture-reverse-2_2x/`.
+
+Live-input CPU includes 1,024-sample block ingestion, rolling-buffer work,
+incremental pulse acquisition, and packet decode, normalized by the series'
+media duration. It is a single-machine synthetic measurement, not an audio-device
+or tape benchmark. The same warmed benchmark's 30-second unknown-speed silence
+baseline used 2.22% of one core while retaining the full 882,000-sample startup
+cap. At 0.01×, isolated packet demodulation is only about 1.4 ms; the higher
+continuous live percentage is chiefly input-buffer maintenance and pulse
+acquisition, not slow OFDM work.
+
+As a separate audio-stack check, the last packet (source index 7) from this
+same saved series was reversed and captured through a 48 kHz PulseAudio null
+sink at 0.1× and 0.01×. Both acquisitions and EOF validations passed; warmed
+decode ran 15/15 times at each speed. Median CPU was 1.03 ms (p95 1.10 ms) at
+0.1× and 1.38 ms (p95 1.45 ms) at 0.01×. The one-second leading/trailing
+silence absorbs duplex startup latency; it is needed so capture startup does
+not clip the reverse packet's EOF marker. This validates the PulseAudio path,
+not physical audio hardware.
+
 For repository test-selection cautions, follow `AGENTS.md`; in particular, do
 not blanket-discover `tests/`, which includes interactive and audio-device scope
 tests.
@@ -349,6 +496,77 @@ one of the 11 frames did not pass metadata validation under that specific
 4 kHz low-pass impairment.
 
 The saved matrix output is `tmp/v7-spec-rerun/results.json`.
+
+The same 25-case matrix was repeated at 1×, 1.5× and 2× playback at its
+96 kHz sample rate, using the same seed and 12 packets per case. The runner now
+accepts `--speed`; for example:
+
+```text
+.venv/bin/python tools/v7_torture_matrix.py --speed 2 --out tmp/v7-torture-speed-2x
+```
+
+| Speed | Cases with 11/11 metadata-valid | Received / 275 | Clean mean value RMSE | Clean image SSIM |
+| ---: | ---: | ---: | ---: | ---: |
+| 1× | 24/25 | 270/275 | 0.067602 | 0.982180 |
+| 1.5× | 23/25 | 257/275 | 0.067616 | 0.982214 |
+| 2× | 21/25 | 242/275 | 0.067602 | 0.982182 |
+
+At 1×, `lowpass-4k` is the existing known metadata failure. At 1.5×,
+`lowpass-4k` and `type-i` fail full metadata recovery (`type-i` receives 4/11).
+At 2×, `lowpass-10k` receives 8/11, `type-i` 0/11, `type-ii` 4/11, and
+`lowpass-4k` 0/11. Their missing metadata causes those packets to be rejected;
+the receiver retains its last good picture. For cases with all 11 metadata
+frames, paired mean image-SSIM change versus 1× was +0.00063 at 1.5× and
++0.00026 at 2×, so the primary fast-speed regression is robustness on the
+combined filtering/impairment cases rather than a general clean-image quality
+shift. The baseline `dropouts` and `mains-buzz` cases also have partial received
+counts despite metadata-valid frames, as shown in the per-case results.
+
+These are the matrix's **forward-playback** cases at 96 kHz. Reverse-direction
+validation remains the separate EOF-marked receiver path described above; these
+matrix counts should not be read as reverse-playback torture results. Outputs
+are in `tmp/v7-torture-speed-1x/`, `tmp/v7-torture-speed-1_5x/`, and
+`tmp/v7-torture-speed-2x/`.
+
+The matrix now also supports `--direction reverse`; that mode encodes EOF,
+reverses the samples, runs bidirectional pulse acquisition restricted to the
+reverse word, and decodes each hit through `decode_reverse_packet`. A 96 kHz
+slow-reverse run used 12 packets per case and the same 25 cases and seed at
+0.25×, 0.1×, 0.05×, 0.025×, and 0.01×. Each case is accepted when all 12 pulse
+hits and EOFs validate, at least 11 metadata words validate, and at least 10
+frames are received/displayable. The two-picture allowance is the cold-start
+hold for an invalid and a provisional rotating-CRC slice.
+
+| Reverse speed | Cases meeting reverse acceptance | Received / 300 | Clean RMSE | Clean image SSIM |
+| ---: | ---: | ---: | ---: | ---: |
+| 0.25× | 21/25 | 221/300 | 0.067618 | 0.981333 |
+| 0.10× | 17/25 | 189/300 | 0.067618 | 0.981333 |
+| 0.05× | 18/25 | 186/300 | 0.067618 | 0.981333 |
+| 0.025× | 17/25 | 176/300 | 0.067618 | 0.981333 |
+| 0.01× | 18/25 | 186/300 | 0.067618 | 0.981333 |
+
+Every clean reverse case found all 12 hits, validated all 12 EOF markers, and
+received 10 pictures; clean attempted-frame fidelity was stable through 0.01×.
+The matrix's aggregate `image_quality` currently includes coefficients from
+results marked lost, so it is not yet a score of only the pictures displayed by
+the live receiver. The per-frame received/lost counts are authoritative for
+availability; add a received-only/hold-last-good score before using this metric
+to compare visible-picture quality. Additional acceptance failures were:
+
+| Speed | Cases failing beyond the two-frame cold-start allowance |
+| ---: | --- |
+| 0.25× | `dropouts`, `type-i`, `mains-buzz`, `highpass-300` |
+| 0.10× | `wow-flutter`, `bias-leak-30k`, `dropouts`, `type-i`, `type-ii`, `fast-flutter`, `mains-buzz`, `highpass-300` |
+| 0.05× | `wow-flutter`, `dropouts`, `type-i`, `type-ii`, `fast-flutter`, `mains-buzz`, `highpass-300` |
+| 0.025× | `wow-flutter`, `dc-hum`, `dropouts`, `type-i`, `type-ii`, `fast-flutter`, `mains-buzz`, `highpass-300` |
+| 0.01× | `wow-flutter`, `dropouts`, `type-i`, `type-ii`, `fast-flutter`, `mains-buzz`, `highpass-300` |
+
+Some failures are acquisition/EOF losses (`type-ii`, `highpass-300`); others
+retain timing and EOF but lose metadata or valid pictures under severe
+impairment. No uniform monotonic trend appeared across speeds; this synthetic
+matrix changes how fixed-frequency filtering and interference overlap the
+slowed wire. Results are in `tmp/v7-torture-reverse-0_25x/` through
+`tmp/v7-torture-reverse-0_01x/`.
 
 A separate synthetic 3.4 kHz low-pass probe returned 11 frames, with zero
 metadata-valid/received frames and all 11 tagged lost; the decoder's

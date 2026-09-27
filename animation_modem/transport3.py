@@ -36,6 +36,10 @@ PREAMBLE = _biphase()
 NOMINAL_EDGES = np.flatnonzero(np.diff(np.signbit(PREAMBLE)))
 NOMINAL_SPAN = float(NOMINAL_EDGES[-1] - NOMINAL_EDGES[0])
 NOMINAL_GAPS = np.diff(NOMINAL_EDGES).astype(float)
+REVERSED_PREAMBLE = PREAMBLE[::-1].copy()
+REVERSED_EDGES = np.flatnonzero(np.diff(np.signbit(REVERSED_PREAMBLE)))
+REVERSED_SPAN = float(REVERSED_EDGES[-1] - REVERSED_EDGES[0])
+REVERSED_GAPS = np.diff(REVERSED_EDGES).astype(float)
 MIN_RUN = len(NOMINAL_GAPS) - 4
 
 
@@ -75,8 +79,9 @@ def _runs(gaps, tolerance=0.28):
 
 
 @njit(cache=True, fastmath=False)
-def _pulse_word_kernel(samples, hysteresis, nominal_gaps, nominal_span,
-                       min_scale, max_scale, positions, starts):
+def _pulse_word_kernel(samples, hysteresis, nominal_gaps, reversed_gaps,
+                       nominal_span, min_scale, max_scale, match_both,
+                       positions, starts):
     """Schmitt edges, their interpolated zero crossings, and the start of
     every edge run whose spacing matches the preamble word.
 
@@ -100,7 +105,15 @@ def _pulse_word_kernel(samples, hysteresis, nominal_gaps, nominal_span,
             continue
         if state != 0 and now != state:
             left = last_crossing
-            positions[edges] = left + samples[left]/(samples[left]-samples[left+1])
+            denominator = samples[left]-samples[left+1]
+            if denominator == 0.0:
+                # Opposite signed zeros can mark a sign-bit transition inside
+                # a dropout. Its only finite sample-time estimate is the
+                # midpoint; the subsequent word matcher rejects the spurious
+                # edge unless the surrounding pulse intervals also fit.
+                positions[edges] = left+.5
+            else:
+                positions[edges] = left+samples[left]/denominator
             edges += 1
         state = now
     width = nominal_gaps.shape[0]+1
@@ -109,14 +122,25 @@ def _pulse_word_kernel(samples, hysteresis, nominal_gaps, nominal_span,
         scale = (positions[j+width-1]-positions[j])/nominal_span
         if scale < .98*min_scale or scale > 1.02*max_scale:
             continue
-        ok = True
+        forward_ok = True
+        reverse_ok = match_both
         for g in range(width-1):
-            expected = nominal_gaps[g]*scale
-            if abs(positions[j+g+1]-positions[j+g]-expected) > max(1.2, .45*expected):
-                ok = False
+            observed = positions[j+g+1]-positions[j+g]
+            if forward_ok:
+                expected = nominal_gaps[g]*scale
+                if abs(observed-expected) > max(1.2, .45*expected):
+                    forward_ok = False
+            if reverse_ok:
+                expected = reversed_gaps[g]*scale
+                if abs(observed-expected) > max(1.2, .45*expected):
+                    reverse_ok = False
+            if not forward_ok and not reverse_ok:
                 break
-        if ok:
-            starts[valid] = j
+        if forward_ok or reverse_ok:
+            # Signed, one-based edge indices leave zero available to mark an
+            # ambiguous window which satisfies both templates.
+            starts[valid] = (j+1 if forward_ok and not reverse_ok else
+                             -(j+1) if reverse_ok and not forward_ok else 0)
             valid += 1
     return edges, valid
 
@@ -137,11 +161,70 @@ def measure_pulses(samples, min_scale=0.5, max_scale=4.0):
     starts = np.empty(len(samples), np.int64)
     edges, valid = _pulse_word_kernel(
         samples, np.float64(EDGE_HYSTERESIS*PREAMBLE_AMPLITUDE), NOMINAL_GAPS,
-        NOMINAL_SPAN, float(min_scale), float(max_scale), positions, starts)
+        REVERSED_GAPS, NOMINAL_SPAN, float(min_scale), float(max_scale), False,
+        positions, starts)
     if edges < count or not valid:
         return None
-    words = (positions[start:start+count] for start in starts[:valid])
-    return _fit_pulse_words(samples, words)
+    words = (positions[start-1:start-1+count]
+             for start in starts[:valid] if start > 0)
+    return _fit_pulse_words(samples, words, _FIT_NOMINAL)
+
+
+def measure_pulses_both(samples, min_scale=0.5, max_scale=4.0,
+                        direction='auto'):
+    """Acquire the earliest unambiguous pulse word in either direction.
+
+    Returns ``(template_start, scale, confidence, direction)``, with direction
+    ``+1`` for the ordinary word and ``-1`` for its reversed gap pattern.
+    Schmitt edges are extracted once; both gap templates are tested against
+    that same edge list. A candidate matching both patterns is discarded.
+    """
+    if direction not in ('auto', 'forward', 'reverse'):
+        raise ValueError(f'unknown pulse direction {direction!r}')
+    requested_direction = direction
+    samples = np.asarray(samples)
+    if samples.ndim != 1 or samples.dtype not in (np.float32, np.float64):
+        return measure_pulses_both_numpy(
+            samples, min_scale, max_scale, direction=direction)
+    count = len(NOMINAL_EDGES)
+    positions = np.empty(len(samples))
+    starts = np.empty(len(samples), np.int64)
+    edges, valid = _pulse_word_kernel(
+        samples, np.float64(EDGE_HYSTERESIS*PREAMBLE_AMPLITUDE), NOMINAL_GAPS,
+        REVERSED_GAPS, NOMINAL_SPAN, float(min_scale), float(max_scale), True,
+        positions, starts)
+    if edges < count or not valid:
+        return None
+    first = {1: None, -1: None}
+    for code in starts[:valid]:
+        if code == 0:
+            continue
+        direction = 1 if code > 0 else -1
+        if ((direction == 1 and requested_direction == 'reverse') or
+                (direction == -1 and requested_direction == 'forward')):
+            continue
+        if first[direction] is not None:
+            continue
+        index = abs(int(code))-1
+        nominal = _FIT_NOMINAL if direction > 0 else _FIT_REVERSED_NOMINAL
+        hit = _fit_pulse_words(
+            samples, (positions[index:index+count],), nominal)
+        if hit is not None:
+            first[direction] = (*hit, direction)
+        if first[1] is not None and first[-1] is not None:
+            break
+    forward, reverse = first[1], first[-1]
+    if requested_direction == 'forward':
+        return forward
+    if requested_direction == 'reverse':
+        return reverse
+    if forward is not None and reverse is not None:
+        # Opposite hypotheses in one sync-sized neighborhood are not enough
+        # evidence to choose an orientation.
+        if abs(forward[0]-reverse[0]) <= SYNC_LEN*min(forward[1], reverse[1]):
+            return None
+    candidates = [hit for hit in (forward, reverse) if hit is not None]
+    return min(candidates, key=lambda hit: hit[0]) if candidates else None
 
 
 def measure_pulses_numpy(samples, min_scale=0.5, max_scale=4.0):
@@ -162,7 +245,57 @@ def measure_pulses_numpy(samples, min_scale=0.5, max_scale=4.0):
     valid &= np.all(
         np.abs(np.diff(words, axis=1) - expected)
         <= np.maximum(1.2, 0.45 * expected), axis=1)
-    return _fit_pulse_words(samples, words[valid])
+    return _fit_pulse_words(samples, words[valid], _FIT_NOMINAL)
+
+
+def warmup_pulse_kernels():
+    """Compile both acquisition signatures before a live input is opened."""
+    silence = np.zeros(2048, dtype=np.float32)
+    measure_pulses(silence)
+    measure_pulses_both(silence)
+
+
+def measure_pulses_both_numpy(samples, min_scale=0.5, max_scale=4.0,
+                              direction='auto'):
+    """Reference implementation for bidirectional pulse acquisition."""
+    if direction not in ('auto', 'forward', 'reverse'):
+        raise ValueError(f'unknown pulse direction {direction!r}')
+    samples = np.asarray(samples)
+    edges = edge_intervals(samples)
+    count = len(NOMINAL_EDGES)
+    if len(edges) < count:
+        return None
+    crossings = np.flatnonzero(np.diff(np.signbit(samples)))
+    crossing_indexes = np.searchsorted(crossings, edges-1, side='right')-1
+    crossing_indexes = np.clip(crossing_indexes, 0, max(len(samples)-2, 0))
+    left = crossings[crossing_indexes]
+    values = samples[left]
+    positions = left + values/(values-samples[left+1])
+    words = np.lib.stride_tricks.sliding_window_view(positions, count)
+    scales = (words[:, -1]-words[:, 0])/NOMINAL_SPAN
+    allowed = (scales >= .98*min_scale) & (scales <= 1.02*max_scale)
+    observed = np.diff(words, axis=1)
+    forward = allowed & np.all(
+        np.abs(observed-NOMINAL_GAPS[None, :]*scales[:, None]) <=
+        np.maximum(1.2, .45*NOMINAL_GAPS[None, :]*scales[:, None]), axis=1)
+    reverse = allowed & np.all(
+        np.abs(observed-REVERSED_GAPS[None, :]*scales[:, None]) <=
+        np.maximum(1.2, .45*REVERSED_GAPS[None, :]*scales[:, None]), axis=1)
+    candidates = []
+    for way, mask, nominal in (
+            (1, forward & ~reverse, _FIT_NOMINAL),
+            (-1, reverse & ~forward, _FIT_REVERSED_NOMINAL)):
+        if direction == 'forward' and way != 1:
+            continue
+        if direction == 'reverse' and way != -1:
+            continue
+        hit = _fit_pulse_words(samples, words[mask], nominal)
+        if hit is not None:
+            candidates.append((*hit, way))
+    if len(candidates) == 2 and abs(candidates[0][0]-candidates[1][0]) <= (
+            SYNC_LEN*min(candidates[0][1], candidates[1][1])):
+        return None
+    return min(candidates, key=lambda hit: hit[0]) if candidates else None
 
 
 @njit(cache=True, fastmath=False)
@@ -193,9 +326,10 @@ def _fit_pulse_word(word, nominal):
 
 
 _FIT_NOMINAL = NOMINAL_EDGES.astype(float) + 0.5
+_FIT_REVERSED_NOMINAL = REVERSED_EDGES.astype(float) + 0.5
 
 
-def _fit_pulse_words(samples, words):
+def _fit_pulse_words(samples, words, nominal):
     """Refine and fit candidate edge words; first confident fit wins.
 
     A word from slowed playback (span below nominal) is first refined on the
@@ -218,7 +352,7 @@ def _fit_pulse_words(samples, words):
                     word - 0.5, word + 0.5)
             word = refined
         position, scale, confidence = _fit_pulse_word(
-            np.ascontiguousarray(word, dtype=np.float64), _FIT_NOMINAL)
+            np.ascontiguousarray(word, dtype=np.float64), nominal)
         if confidence >= 0.45:
             return float(position), float(scale), float(confidence)
     return None

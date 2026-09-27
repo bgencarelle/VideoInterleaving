@@ -63,7 +63,7 @@ PULSE_WARP_MIN_SLOPE_DELTA = 500e-6
 # Pulse scale bounds are relative to the 48 kHz reference geometry. A capture
 # at another sample rate observes raw sample scales multiplied by rate/RATE.
 PULSE_MIN_SCALE = .25
-PULSE_MAX_SCALE = 4.0
+PULSE_MAX_SCALE = 100.0   # 0.01x playback; inverse scale sets LiveInput's bound
 MIN_PLAYBACK_SPEED = .25
 MAX_PLAYBACK_SPEED = 4.0
 PILOT_TONE_BINS = (1, 3)
@@ -89,7 +89,7 @@ def pulse_sample_scale_bounds(sample_rate=RATE):
 
     The scale limits describe playback relative to the 48 kHz wire geometry.
     A different capture rate changes the number of input samples per packet,
-    not the admissible playback-speed range.
+    not the admissible playback-speed range. The current range is 0.01x--4x.
     """
     sample_rate = float(sample_rate)
     if not np.isfinite(sample_rate) or sample_rate <= 0:
@@ -511,6 +511,11 @@ class TailStore:
         self._encoding = None
         self._values = self._age = None
 
+    def reset(self):
+        """Forget coefficients whose temporal order crossed a discontinuity."""
+        self._encoding = None
+        self._values = self._age = None
+
     def prior(self, model):
         if (not self.enabled or self._values is None or
                 self._encoding != model.encoding_type):
@@ -539,6 +544,21 @@ class PulseState:
         self.tail = TailStore(enabled=tail_memory)
         self.lock = LoopLock()
         self.last_verified = None
+        self.playback_direction = None
+        self._require_independent_tail_metadata = False
+
+    def set_playback_direction(self, direction):
+        """Reset order-dependent picture state before decoding a turn-around."""
+        direction = int(direction)
+        if direction not in (-1, 1):
+            raise ValueError('playback direction must be +1 or -1')
+        changed = (self.playback_direction is not None and
+                   self.playback_direction != direction)
+        if changed:
+            self.tail.reset()
+            self.last_verified = None
+        self.playback_direction = direction
+        return changed
 
     def accept(self, meta):
         """True if the metadata can be used: CRC-verified, or -- before p/N
@@ -3118,6 +3138,10 @@ def warmup_equalizer(model):
     values = np.zeros(model.coder.source_count)
     wire = encode_pulse_stream(model, [values]*3, pilot_tones=True,
                                eof_marker=True).astype(np.float32)
+    # Reverse packets stay as negative-stride views at unity gain. Compile
+    # that sample-reader layout here so first live reverse playback cannot
+    # stall the capture callback for JIT work.
+    _sample_at(wire[::-1], np.asarray([PULSE.SYNC_LEN+16.5]), taps=4)
     for stream in (wire, speed_pulse_stream(wire, .8).astype(np.float32)):
         decode_pulse_stream(model, stream, frame_boundary='eof',
                             pilot_timing='tone-seeded')
@@ -3575,7 +3599,10 @@ def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
     gain = np.float32(input_gain)
     if gain.ndim and samples.shape[1] != len(gain):
         gain = gain[:samples.shape[1]]          # per-channel gain on mono input
-    samples = samples*gain
+    # The sample readers honor ndarray strides, so leave unity-gain input
+    # untouched; this also avoids copying a normalized reverse-playback view.
+    if not (gain.size and np.all(gain == 1)):
+        samples = samples*gain
     if state is None:
         state = PulseState()
     results, info = _decode_pulse_samples(model, samples, diagnostics,
@@ -3647,6 +3674,134 @@ def pulse_frame_starts(samples, sample_rate=RATE):
         starts.append((fs, sc, conf))
         scan = int(fs + (PULSE_FRAME-32)*sc)
     return starts
+
+
+def pulse_frame_hits(samples, sample_rate=RATE, direction='auto'):
+    """Find pulse packet starts in either playback direction.
+
+    Returns ``(packet_start, scale, confidence, direction)`` hits. The pulse
+    matcher fits the start of its 256-sample template. Forward packets place
+    that template at sample 16; a reversed packet places it at
+    ``PULSE_FRAME - 16 - len(PREAMBLE)``. Positions remain fractional capture
+    samples, and timing remains exclusively edge-counted.
+
+    Unlike ``pulse_frame_starts``, this helper does not require forward
+    metadata samples after a hit. The live input layer decides when enough of
+    the selected packet is present to decode it.
+    """
+    if direction not in ('auto', 'forward', 'reverse'):
+        raise ValueError(f'unknown pulse direction {direction!r}')
+    min_scale, max_scale = pulse_sample_scale_bounds(sample_rate)
+    mono = _mono(samples)
+    hits = []
+    scan = 0
+    minimum = len(PULSE.PREAMBLE)+16
+    reverse_offset = PULSE_FRAME-16-len(PULSE.PREAMBLE)
+    while scan+minimum <= len(mono):
+        hit = PULSE.measure_pulses_both(
+            mono[scan:], min_scale=min_scale, max_scale=max_scale,
+            direction=direction)
+        if hit is None:
+            break
+        template_start, scale, confidence, way = hit
+        template_start += scan
+        packet_start = (template_start-16*scale if way > 0 else
+                        template_start-reverse_offset*scale)
+        if confidence >= .45:
+            hits.append((float(packet_start), float(scale),
+                         float(confidence), int(way)))
+        # Keep enough room before the following packet's template. Both wire
+        # orientations have one preamble per packet, though their offsets
+        # within that packet differ.
+        scan = max(scan+1, int(packet_start+(PULSE_FRAME-32)*scale))
+    return hits
+
+
+REVERSE_PACKET_MARGIN = 64
+
+
+def reverse_packet_region(samples, packet_start, scale,
+                          margin=REVERSE_PACKET_MARGIN):
+    """Return a bounded candidate region reversed into forward time.
+
+    The predicted packet bounds must be present in the capture. Margins may be
+    clipped at a recording edge; the decoder still has to reacquire the
+    preamble and validate the EOF marker before publishing a result.
+    Returns ``(region, region_start)`` or ``None`` for an incomplete packet.
+    """
+    audio = np.asarray(samples)
+    packet_start, scale = float(packet_start), float(scale)
+    if (audio.ndim not in (1, 2) or not np.isfinite(packet_start+scale) or
+            scale <= 0 or margin < 0):
+        return None
+    packet_end = packet_start+PULSE_FRAME*scale
+    if packet_start < -1.0 or packet_end > len(audio)+1.0:
+        return None
+    lo = max(0, int(np.floor(packet_start-margin*scale)))
+    hi = min(len(audio), int(np.ceil(packet_end+margin*scale)))
+    if hi <= lo:
+        return None
+    # Keep the bounded reverse view; the decoder's sample readers honor its
+    # stride, and non-unity input gain materializes it only when needed.
+    return audio[lo:hi][::-1], lo
+
+
+def decode_reverse_packet(model, samples, packet_start, scale, **kwargs):
+    """Reverse and decode one EOF-marked packet candidate.
+
+    The existing forward decoder remains the only OFDM/metadata path. Reverse
+    candidates always require a validated EOF marker and independently valid
+    metadata; provisional metadata must not authorize a picture on cold start.
+    """
+    region = reverse_packet_region(samples, packet_start, scale)
+    if region is None:
+        return [], {'frames': 0, 'pulse_frames': 0, 'recovered': False,
+                    'reverse_rejected': 'incomplete_candidate'}
+    candidate, region_start = region
+    # Reversal maps the packet's exclusive capture end to its normalized
+    # forward-time origin. Seed the normal decoder with that predicted anchor;
+    # its usual short-window pulse remeasurement must confirm it before the
+    # EOF or image path can proceed, avoiding a second full-window scan.
+    normalized_start = (len(candidate)+region_start-
+                        (float(packet_start)+PULSE_FRAME*float(scale)))
+    options = kwargs
+    state = options.get('state')
+    if state is None:
+        state = PulseState()
+        options['state'] = state
+    state.set_playback_direction(-1)
+    options.pop('latest_only', None)
+    options.pop('frame_boundary', None)
+    options.pop('pulse_starts', None)
+    previous_tail_gate = state._require_independent_tail_metadata
+    state._require_independent_tail_metadata = True
+    try:
+        results, info = decode_pulse_stream(
+            model, candidate, latest_only=True, frame_boundary='eof',
+            pulse_starts=((normalized_start, float(scale), 1.0),), **options)
+    finally:
+        state._require_independent_tail_metadata = previous_tail_gate
+    marker_valid = bool(info.get('eof_markers_validated'))
+    for result in results:
+        result.diag['playback_direction'] = -1
+        result.diag['reverse_candidate_start'] = float(packet_start)
+        result.diag['reverse_candidate_scale'] = float(scale)
+        result.diag['reverse_region_start'] = int(region_start)
+        # Loop-field slices may only be provisionally accepted from prior
+        # metadata. They are not safe for independent reverse startup.
+        result_marker_valid = result.diag.get('eof_marker') is not None
+        if (not marker_valid or not result_marker_valid or
+                not result.diag.get('metadata_valid') or
+                result.diag.get('metadata_provisional')):
+            result.status = 'lost'
+            result.diag['displayable'] = False
+            result.diag['reverse_rejected'] = (
+                'eof_marker_not_validated'
+                if not marker_valid or not result_marker_valid else
+                'metadata_not_independently_valid')
+    info['playback_direction'] = -1
+    info['reverse_candidate_start'] = float(packet_start)
+    return results, info
 
 
 def _remeasure_pulse_starts(samples, anchors, sample_rate=RATE, mono=None):
@@ -4434,7 +4589,9 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                 result.diag['pilot_tone_speed'] = pilot_tone_speed(
                     samples, sample_rate, frame_start, frame_scale)
             results.append(result)
-            if result.status != 'lost' and tail_slice is not None:
+            if (result.status != 'lost' and tail_slice is not None and
+                    not (state._require_independent_tail_metadata and
+                         provisional)):
                 state.tail.update(selected_model, result.coeffs, tail_slice)
             if latest_only:
                 break

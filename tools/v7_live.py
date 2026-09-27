@@ -37,7 +37,8 @@ sys.path.insert(0, str(ROOT))
 
 from animation_modem.imaging import values_image                         # noqa: E402
 from animation_modem import v7 as P                                       # noqa: E402
-from animation_modem.v7_live_input import LiveInput, windowed_rate         # noqa: E402
+from animation_modem.v7_live_input import (DirectionStreak, LiveInput,
+                                           windowed_rate)                 # noqa: E402
 image_values = P.image_values
 prepare_image = P.prepare_image
 try:
@@ -574,8 +575,9 @@ def _run_receive(args, fold):
     model = _model(args.fixture, 'box' if fold is not None else 'nearest')
     if fold is not None:
         fold.check(model)
-    # Compile the equalizer and coded status kernel before opening the audio
-    # stream so first-call compilation cannot stall live capture and drop data.
+    # Compile acquisition, equalizer and coded status kernels before opening
+    # the audio stream so first-call compilation cannot stall live capture.
+    P.PULSE.warmup_pulse_kernels()
     P.warmup_equalizer(model)
     if fold is not None:
         from tone_code import warmup_coded_decoder
@@ -594,7 +596,10 @@ def _run_receive(args, fold):
     blocks = queue.Queue(maxsize=32)
     stop = threading.Event()
     input_gap = threading.Event()
-    live_input = LiveInput(args.decode_history, args.decode_batch, rate=capture_rate)
+    live_input = LiveInput(
+        args.decode_history, args.decode_batch, rate=capture_rate,
+        direction=getattr(args, 'direction', 'auto'))
+    direction_streak = DirectionStreak()
     # Tail store and learned loop constants (N, p) persist across decodes.
     pulse_state = P.PulseState(tail_memory=not args.no_tail_memory)
     lag_ticks = deque(maxlen=32)        # recent picture lags, loop ticks
@@ -616,6 +621,8 @@ def _run_receive(args, fold):
              # '--' until learned (about a second) or if the sender has none.
              'max_index': None, 'lag_ms': None, 'loop': None,
              'shown_index': None, 'shown_direction': None,
+             'playback_direction': None, 'direction_candidate': None,
+             'direction_streak': 0,
              'pulse': None, 'aspect': 0, 'aspect_candidate': 0,
              'aspect_streak': 0, 'input_samples': 0, 'started': time.monotonic(),
              'auto_gain': 1.0, 'polarity': 1,
@@ -693,6 +700,14 @@ def _run_receive(args, fold):
         timing_text = '--' if timing is None else f'{timing:+.1f} ppm'
         speed = meter['playback_speed']
         speed_text = '--' if speed is None else f'{speed:.3f}×'
+        playback_direction = meter['playback_direction']
+        playback_text = {1: 'forward', -1: 'reverse'}.get(
+            playback_direction, 'acquiring')
+        if meter['direction_candidate'] in (-1, 1):
+            playback_text += ('; candidate ' +
+                              ('forward' if meter['direction_candidate'] > 0
+                               else 'reverse') +
+                              f' ×{meter["direction_streak"]}')
         aspect = P.V7_ASPECT_NAMES[int(meter['aspect']) & 7]
         candidate = P.V7_ASPECT_NAMES[int(meter['aspect_candidate']) & 7]
         peak = 20*np.log10(np.maximum(meter['peak'], 1e-9))
@@ -724,16 +739,23 @@ def _run_receive(args, fold):
                 f'aspect {aspect}  ·  candidate {candidate} ×{meter["aspect_streak"]}',
                 f'foundation {meter["quality"]}',
                 f'pulse {pulse_text}   speed {speed_text}',
+                f'audio {playback_text}',
                 f'timing {timing_text}'),
         }
 
     def decode_available():
-        nonlocal latest, auto_gain, previous_values
+        nonlocal latest, auto_gain, previous_values, direction_streak
         if input_gap.is_set():
             # Never stitch samples across a callback drop.  Keep displaying
             # the last good image while pulse acquisition starts over.
             input_gap.clear()
             live_input.reset()
+            pulse_state.tail.reset()
+            pulse_state.last_verified = None
+            direction_streak = DirectionStreak()
+            meter['playback_direction'] = None
+            meter['direction_candidate'] = None
+            meter['direction_streak'] = 0
             if not args.no_log:
                 print({'status': 'input_gap_reacquire',
                        'dropped': meter['dropped']}, flush=True)
@@ -761,7 +783,15 @@ def _run_receive(args, fold):
         meter['polarity'] = live_input.polarity
         if audio is None:
             return
+        pulse_hits = live_input.pulse_hits(audio)
+        if not pulse_hits:
+            live_input.decoded()
+            return
+        packet_start, packet_scale, _, packet_direction = max(
+            pulse_hits, key=lambda hit: hit[0])
         pulse_starts = live_input.pulse_starts(audio)
+        audio_start = live_input.total-len(audio)
+        absolute_arrival = int(round(audio_start+packet_start))
         # LiveInput levels the input before it searches for headers (a quiet
         # capture is otherwise never found); decode with that same gain.
         auto_gain = live_input.gain
@@ -770,17 +800,26 @@ def _run_receive(args, fold):
             P.REFINE = False
         decode_times.append(time.monotonic())
         try:
-            results, info = P.decode_pulse_stream(
-                model, audio, diagnostics=diagnostics, latest_only=True,
-                input_gain=auto_gain, models=models,
+            pulse_state.set_playback_direction(packet_direction)
+            options = dict(
+                diagnostics=diagnostics, input_gain=auto_gain, models=models,
                 model_factory=model_factory,
                 force_float32=args.force_float32, state=pulse_state,
-                pulse_starts=pulse_starts, sample_rate=capture_rate,
-                pilot_timing=args.pilot_timing,
+                sample_rate=capture_rate, pilot_timing=args.pilot_timing,
                 pilot_speed_diagnostics=args.pilot_speed_diagnostics,
                 pulse_timing=args.pulse_timing,
-                frame_boundary=args.frame_boundary,
                 tone_equalization=args.tone_equalization)
+            if packet_direction < 0:
+                results, info = P.decode_reverse_packet(
+                    model, audio, packet_start, packet_scale, **options)
+            else:
+                results, info = P.decode_pulse_stream(
+                    model, audio, latest_only=True,
+                    pulse_starts=pulse_starts,
+                    frame_boundary=args.frame_boundary, **options)
+                for result in results:
+                    result.diag['playback_direction'] = 1
+                info['playback_direction'] = 1
         except Exception as exc:
             # Drop the damaged window and let the next retained clock history
             # reacquire.  A single bad frame must not stop the live receiver.
@@ -789,6 +828,20 @@ def _run_receive(args, fold):
         live_input.decoded()
         if results:
             result = results[-1]
+            independently_validated = bool(
+                result.diag.get('metadata_valid') and
+                not result.diag.get('metadata_provisional') and
+                (packet_direction < 0 or args.frame_boundary != 'eof' or
+                 result.diag.get('eof_marker') is not None))
+            confirmed_direction, direction_switched = direction_streak.observe(
+                absolute_arrival, packet_direction, independently_validated)
+            meter['playback_direction'] = confirmed_direction
+            meter['direction_candidate'] = direction_streak.candidate
+            meter['direction_streak'] = direction_streak.streak
+            if direction_switched and not args.no_log:
+                print({'status': 'playback_direction_switch',
+                       'playback_direction': confirmed_direction,
+                       'capture_position': absolute_arrival}, flush=True)
             # Each call is gated by newly arrived audio.  The short rolling
             # history intentionally restarts the prototype's local counter,
             # so comparing result.counter here would suppress valid frames.
@@ -872,23 +925,26 @@ def _run_receive(args, fold):
                       'source_index': result.diag.get('source_index'),
                       'status': meter['status'], 'displayable': displayable,
                       'pulse_frames': info.get('pulse_frames'),
-                       'encoding': result.diag.get('encoding_name'),
-                       'tail_slice': result.diag.get('tail_slice'),
-                       'max_index': meter['max_index'],
-                       'lag_ms': meter['lag_ms'],
-                       'ideal_index': live_loop_position()[0],
-                       'direction': result.diag.get('direction'),
-                       'input_gain': round(meter['auto_gain'], 3),
-                       'right_polarity': meter['polarity'],
-                       'incoming_fps': round(meter['input_fps'], 3),
-                       'decode_cycles_per_s': round(windowed_rate(decode_times, time.monotonic()), 3),
-                       'head_confidence': result.diag.get('head_confidence'),
-                       'head_coverage': result.diag.get('head_coverage'),
-                       'timing_delta_ppm': result.diag.get('timing_delta_ppm'),
-                       'playback_speed': meter['playback_speed'],
-                       'capture_rate_hz': capture_rate,
-                       'pilot_tone_speed': result.diag.get('pilot_tone_speed'),
-                       'noise': result.diag.get('noise'),
+                      'encoding': result.diag.get('encoding_name'),
+                      'tail_slice': result.diag.get('tail_slice'),
+                      'max_index': meter['max_index'],
+                      'lag_ms': meter['lag_ms'],
+                      'ideal_index': live_loop_position()[0],
+                      'direction': result.diag.get('direction'),
+                      'source_direction': result.diag.get('direction'),
+                      'playback_direction': packet_direction,
+                      'confirmed_playback_direction': confirmed_direction,
+                      'input_gain': round(meter['auto_gain'], 3),
+                      'right_polarity': meter['polarity'],
+                      'incoming_fps': round(meter['input_fps'], 3),
+                      'decode_cycles_per_s': round(windowed_rate(decode_times, time.monotonic()), 3),
+                      'head_confidence': result.diag.get('head_confidence'),
+                      'head_coverage': result.diag.get('head_coverage'),
+                      'timing_delta_ppm': result.diag.get('timing_delta_ppm'),
+                      'playback_speed': meter['playback_speed'],
+                      'capture_rate_hz': capture_rate,
+                      'pilot_tone_speed': result.diag.get('pilot_tone_speed'),
+                      'noise': result.diag.get('noise'),
                       'metadata_valid': result.diag.get('metadata_valid'),
                       'skipped_frames': len(info.get('skipped_frames', [])),
                       'recovered': info.get('recovered', False)}
@@ -900,8 +956,14 @@ def _run_receive(args, fold):
                 args.save_dir.mkdir(parents=True, exist_ok=True)
                 values_image(latest, model.coder.grids).save(
                     args.save_dir/f'v7_{meter["decoded"]:08d}.png')
-        elif args.diagnostics and not args.no_log:
-            print({'status': 'reacquiring', **info}, flush=True)
+        else:
+            confirmed_direction, _ = direction_streak.observe(
+                absolute_arrival, packet_direction, False)
+            meter['playback_direction'] = confirmed_direction
+            meter['direction_candidate'] = direction_streak.candidate
+            meter['direction_streak'] = direction_streak.streak
+            if args.diagnostics and not args.no_log:
+                print({'status': 'reacquiring', **info}, flush=True)
 
     try:
         stream = sd.InputStream(samplerate=capture_rate, channels=input_channels,
@@ -1024,6 +1086,9 @@ def parser():
     recv = sub.add_parser('receive', help='receive V7 audio and display it')
     recv.add_argument('--device', type=_device_arg, required=True,
                       help='explicit sounddevice input, e.g. BlackHole 2ch')
+    recv.add_argument('--direction', choices=('auto', 'forward', 'reverse'),
+                      default='auto',
+                      help='pulse direction detection (default: auto)')
     recv.add_argument('--fixture', type=Path, default=DEFAULT_FIXTURE)
     recv.add_argument('--headless', action='store_true')
     recv.add_argument('--fullscreen', action='store_true',

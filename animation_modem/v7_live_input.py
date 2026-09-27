@@ -24,7 +24,7 @@ import numpy as np
 
 from animation_modem import transport3 as PULSE
 from animation_modem.v7 import (META_SYMBOL, PULSE_FRAME, RATE, leg_polarity,
-                                pulse_frame_starts,
+                                pulse_frame_hits,
                                 pulse_sample_scale_bounds)
 
 GUARD_FRAMES = .25          # header, timing tolerance and block granularity
@@ -60,16 +60,66 @@ def windowed_rate(times, now, window=RATE_WINDOW_S, stale=RATE_STALE_S):
     return (len(recent)-1)/(recent[-1]-recent[0])
 
 
+class DirectionStreak:
+    """Confirm playback direction after two distinct validated arrivals."""
+
+    def __init__(self, confirmed=None):
+        if confirmed not in (None, -1, 1):
+            raise ValueError('confirmed direction must be +1, -1 or None')
+        self.confirmed = confirmed
+        self.candidate = None
+        self.streak = 0
+        self.last_arrival = None
+
+    def observe(self, arrival, direction, validated):
+        """Return ``(confirmed_direction, switched)`` for an arrival.
+
+        Capture position is the identity: seeing the same region in an
+        overlapping rolling window does not advance the streak, while a replay
+        at a later capture position is a new arrival even with the same source
+        index.
+        """
+        arrival, direction = int(arrival), int(direction)
+        if direction not in (-1, 1):
+            raise ValueError('direction must be +1 or -1')
+        if self.last_arrival is not None and arrival <= self.last_arrival:
+            return self.confirmed, False
+        self.last_arrival = arrival
+        if not validated:
+            self.candidate = None
+            self.streak = 0
+            return self.confirmed, False
+        if direction == self.confirmed:
+            self.candidate = None
+            self.streak = 0
+            return self.confirmed, False
+        if direction == self.candidate:
+            self.streak += 1
+        else:
+            self.candidate = direction
+            self.streak = 1
+        if self.streak >= 2:
+            self.confirmed = direction
+            self.candidate = None
+            self.streak = 0
+            return self.confirmed, True
+        return self.confirmed, False
+
+
 class LiveInput:
     """Rolling live input.  Feed blocks with add(); take() returns audio to
     decode exactly when a new frame header has arrived (a new frame is then
     complete), so decode cycles follow the wire rather than the capture block
     size; call decoded() after each decode."""
 
-    def __init__(self, decode_history=1, decode_batch=1, rate=RATE):
+    def __init__(self, decode_history=1, decode_batch=1, rate=RATE,
+                 direction='auto'):
+        if direction not in ('auto', 'forward', 'reverse'):
+            raise ValueError(f'unknown playback direction {direction!r}')
         self.decode_history = max(1, int(decode_history))
         self.decode_batch = max(1, int(decode_batch))
         self.rate = float(rate)
+        self.direction = direction
         self.min_scale, self.max_scale = pulse_sample_scale_bounds(self.rate)
         # Two hits closer than half the shortest accepted frame are the same.
         self._same_header = PULSE_FRAME*self.min_scale/2
@@ -81,7 +131,8 @@ class LiveInput:
         self._judged_to = 0        # absolute sample up to which polarity was judged
         self._scan_from = 0        # absolute sample where the next header scan starts
         self._pending = 0          # headers arrived since the last take()
-        # Absolute frame start, measured scale and pulse confidence. The live
+        # Absolute frame start, measured scale, pulse confidence and playback
+        # direction. The live
         # decoder consumes these anchors so it need not scan this same window
         # for headers a second time.
         self._headers = deque(maxlen=256)
@@ -158,17 +209,21 @@ class LiveInput:
         audio = self._blocks[-1] if len(self._blocks) == 1 else np.concatenate(self._blocks)
         self._blocks = [audio[-keep:]] if len(audio) > keep else [audio]
 
+    def pulse_hits(self, audio):
+        """Pulse anchors as ``(start, scale, confidence, direction)``."""
+        start = self.total-len(audio)
+        return tuple((position-start, scale, confidence, direction)
+                     for position, scale, confidence, direction in self._headers
+                     if start <= position < self.total)
+
     def pulse_starts(self, audio):
         """Pulse anchors in `audio`, as ``(start, scale, confidence)``.
 
-        `take()` returns a suffix of the absolute input history. Convert the
-        already measured header positions into that suffix's sample clock.
-        The decoder locally rechecks these anchors after its gain adjustment.
+        Keep the legacy forward-only interface for the existing decoder.
         """
-        start = self.total - len(audio)
-        return tuple((position-start, scale, confidence)
-                     for position, scale, confidence in self._headers
-                     if start <= position < self.total)
+        return tuple((position, scale, confidence)
+                     for position, scale, confidence, direction
+                     in self.pulse_hits(audio) if direction > 0)
 
     # ------------------------------------------------------------ polarity
     def _judge_polarity(self, audio):
@@ -177,7 +232,12 @@ class LiveInput:
         (a rewire or new tape): toggle it and re-flip the audio not judged
         before -- all of it at start-up, at least that newest frame.  Audio
         already judged correct is left alone."""
-        frame = int(self.span())
+        # Before pulse acquisition, use a one-wire-frame-sized observation at
+        # the device clock. Waiting for the maximum allowed slow frame would
+        # postpone polarity detection by up to 8.2 seconds and cancel the M-only
+        # acquisition signal on a reversed stereo leg.
+        frame_scale = self.scale if self.scale else self.rate/RATE
+        frame = int(PULSE_FRAME*frame_scale)
         if len(audio) >= frame//2 and leg_polarity(audio[-frame:], 1) < 0:
             self.polarity = -self.polarity
             judged = self._judged_to - (self.total - len(audio))
@@ -215,15 +275,33 @@ class LiveInput:
         # header itself grows with scale: honour whichever is longer.
         overlap = max(self._scaled(_HEADER_OVERLAP), _HEADER_OVERLAP)
         found = 0
-        for frame_start, scale, confidence in pulse_frame_starts(
-                audio[begin:]*np.float32(self.gain), sample_rate=self.rate):
+        for frame_start, scale, confidence, direction in pulse_frame_hits(
+                audio[begin:]*np.float32(self.gain), sample_rate=self.rate,
+                direction=self.direction):
             position = start + begin + frame_start
-            if position > self.total - overlap:
-                break
+            if position < 0 and position >= -scale:
+                # The shaped packet's first measured crossing can extrapolate
+                # a fraction of one capture sample before sample zero.
+                position = 0.0
+            if direction > 0:
+                # Keep the scan history sized for the slowest possible
+                # preamble, but don't make ordinary-speed forward packets
+                # wait for that worst-case duration before they become
+                # decodable. The pulse fit has already measured this packet's
+                # actual scale.
+                ready_overlap = max(float(scale)*_HEADER_OVERLAP,
+                                    float(_HEADER_OVERLAP))
+                if position > self.total-ready_overlap:
+                    break
+            elif position+PULSE_FRAME*scale > self.total+1.0:
+                # A reversed header arrives at the packet's trailing edge.
+                # Wait until its complete predicted interval is retained.
+                continue
             if (self._headers and
                     position - self._headers[-1][0] < self._same_header):
                 continue
-            self._headers.append((position, float(scale), float(confidence)))
+            self._headers.append((position, float(scale), float(confidence),
+                                  int(direction)))
             self._header_walls.append(now)
             self.scale = float(scale)
             found += 1

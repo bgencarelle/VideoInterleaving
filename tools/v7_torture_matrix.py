@@ -424,6 +424,16 @@ def _waveform_metrics(audio):
     }
 
 
+def _playback_wire(audio48, speed, direction):
+    """Preserve the legacy 1x forward matrix waveform byte-for-byte."""
+    if direction == 'forward' and speed == 1.0:
+        # This is the original matrix's conversion from the 48 kHz wire to its
+        # 96 kHz capture clock. Keep it as the control condition; speed_resample
+        # applies a peak guard and packet-local filter padding by design.
+        return resample_poly(audio48, 2, 1, axis=0).astype(np.float32)
+    return v7.speed_pulse_stream(audio48, speed, rate=RATE)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', type=Path, default=DEFAULT_OUT,
@@ -431,6 +441,12 @@ def main(argv=None):
     parser.add_argument('--frames', type=int, default=None,
                         help='identical V7 frames to generate (default: 12; '
                              'pilot A/B defaults to 40)')
+    parser.add_argument('--speed', type=float, default=1.0,
+                        help='wire playback speed at 96 kHz (default: 1; '
+                             'slow and fast playback are supported')
+    parser.add_argument('--direction', choices=('forward', 'reverse'),
+                        default='forward',
+                        help='playback direction (reverse uses EOF framing)')
     parser.add_argument('--pilot-ab', action='store_true',
                         help='40-packet tones-off/on and receiver-mode A/B')
     parser.add_argument('--diffmaps', action='store_true',
@@ -447,6 +463,10 @@ def main(argv=None):
         40 if args.pilot_ab else DEFAULT_FRAMES)
     if args.frames < 3:
         parser.error('--frames must be at least 3')
+    if not np.isfinite(args.speed) or not .01 <= args.speed <= 4:
+        parser.error('--speed must be finite and in the supported range .01–4')
+    if args.pilot_ab and args.direction == 'reverse':
+        parser.error('--pilot-ab currently applies only to forward playback')
     selected = set(args.only)
     known = {case.name for case in CASES}
     unknown = selected - known
@@ -460,15 +480,25 @@ def main(argv=None):
         reference = v7.prepare_image(image, 'nearest')
         values = v7.image_values(reference,
                                  model.coder.grids, 'nearest')
-    audio48 = v7.encode_pulse_stream(model, [values] * args.frames, 1,
-                                     [0] * args.frames)
-    wire96 = resample_poly(audio48, 2, 1, axis=0).astype(np.float32)
+    audio48 = v7.encode_pulse_stream(
+        model, [values]*args.frames, 1, [0]*args.frames,
+        source_indices=list(range(args.frames)),
+        eof_marker=args.direction == 'reverse')
+    wire96 = _playback_wire(audio48, args.speed, args.direction)
+    if args.direction == 'reverse':
+        wire96 = wire96[::-1].copy()
+        # Reverse candidates need complete bounded extraction at both recording
+        # edges. One wire-frame of silence also tolerates acquisition jitter.
+        guard = int(math.ceil(v7.PULSE_FRAME*RATE/
+                              (v7.RATE*args.speed)))
+        silence = np.zeros((guard, 2), dtype=np.float32)
+        wire96 = np.concatenate((silence, wire96, silence))
     if args.pilot_ab:
         audio48_tones = v7.encode_pulse_stream(
             model, [values]*args.frames, 1, [0]*args.frames,
             pilot_tones=True)
-        wire96_tones = resample_poly(
-            audio48_tones, 2, 1, axis=0).astype(np.float32)
+        wire96_tones = _playback_wire(
+            audio48_tones, args.speed, args.direction)
         variants = (
             ('off/baseline', wire96, 'baseline'),
             ('on/baseline', wire96_tones, 'baseline'),
@@ -485,7 +515,11 @@ def main(argv=None):
         for case in CASES:
             if selected and case.name not in selected:
                 continue
-            row = {'case': case.name, 'expected_frames': args.frames-1,
+            expected_frames = (args.frames if args.direction == 'reverse'
+                               else args.frames-1)
+            row = {'case': case.name, 'speed': args.speed,
+                   'direction': args.direction, 'sample_rate': RATE,
+                   'expected_frames': expected_frames,
                    'results': {}}
             damaged_by_wire = {}
             retained_images = {}
@@ -624,9 +658,27 @@ def main(argv=None):
     failures = []
     for case in cases:
         damaged = impair(wire96, case, seed=args.seed)
-        results, info = v7.decode_pulse_stream(
-            model, damaged, force_float32=args.force_float32,
-            sample_rate=RATE)
+        if args.direction == 'reverse':
+            hits = v7.pulse_frame_hits(
+                damaged, sample_rate=RATE, direction='reverse')
+            # Keep the same temporal picture reconstruction state as the live
+            # receiver; reverse playback still gates provisional metadata.
+            state = v7.PulseState()
+            results = []
+            eof_validated = 0
+            for start, scale, _confidence, _direction in hits:
+                decoded, info = v7.decode_reverse_packet(
+                    model, damaged, start, scale, state=state,
+                    force_float32=args.force_float32, sample_rate=RATE)
+                results.extend(decoded)
+                eof_validated += int(info.get('eof_markers_validated') or 0)
+            info = {'recovered': bool(results),
+                    'pulse_hits': len(hits),
+                    'eof_markers_validated': eof_validated}
+        else:
+            results, info = v7.decode_pulse_stream(
+                model, damaged, force_float32=args.force_float32,
+                sample_rate=RATE)
         errors = []
         quality_rows = []
         metadata = 0
@@ -641,6 +693,9 @@ def main(argv=None):
                 errors.append(float(np.sqrt(np.mean((decoded - values)**2))))
         row = {
             'case': case.name,
+            'speed': args.speed,
+            'direction': args.direction,
+            'sample_rate': RATE,
             'input_samples': len(damaged),
             'decoded_frames': len(results),
             'received': sum(r.status != 'lost' for r in results),
@@ -651,14 +706,34 @@ def main(argv=None):
             'max_rmse': float(np.max(errors)) if errors else None,
             'image_quality': image_quality(quality_rows) if quality_rows else None,
             'recovered': bool(info.get('recovered')),
+            'eof_markers_validated': info.get('eof_markers_validated'),
+            'pulse_hits': info.get('pulse_hits'),
         }
         rows.append(row)
         print(json.dumps(row), flush=True)
-        expected = args.frames - 1  # the last packet has no following header
-        if (row['decoded_frames'] != expected or
-                row['metadata_valid'] != expected or
-                row['displayable'] != expected):
-            failures.append(case.name)
+        if args.direction == 'reverse':
+            # A cold reverse receiver intentionally holds the first invalid
+            # and first provisional loop-field pictures while it establishes
+            # CRC state. Every pulse still needs EOF validation; one invalid
+            # metadata word and that provisional arrival are the baseline
+            # startup cost, not a picture-quality failure.
+            reverse_ok = (
+                row['decoded_frames'] == args.frames and
+                row['pulse_hits'] == args.frames and
+                row['eof_markers_validated'] == args.frames and
+                row['metadata_valid'] >= args.frames-1 and
+                row['received'] >= args.frames-2 and
+                row['displayable'] >= args.frames-2)
+            if not reverse_ok:
+                failures.append(case.name)
+        else:
+            # Forward legacy packets use the next preamble as their endpoint
+            # witness; there is no witness after the last packet.
+            expected = args.frames-1
+            if (row['decoded_frames'] != expected or
+                    row['metadata_valid'] != expected or
+                    row['displayable'] != expected):
+                failures.append(case.name)
     (out / 'results.json').write_text(json.dumps(rows, indent=2) + '\n')
     if failures:
         print('FAILED cases: ' + ', '.join(failures), file=sys.stderr)
