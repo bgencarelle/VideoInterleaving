@@ -185,6 +185,13 @@ Open two terminals from the repository root and start the receiver first:
 ./vi.modem-send --device "BlackHole 2ch"
 ```
 
+To configure a receiver interactively before opening audio, run
+`.venv/bin/python tools/v7_live.py gui`. Select an input device in the
+Configuration tab and press **Start receiver**; **Information** switches to
+the live decoded picture and diagnostics. `I` toggles the two views and `F`
+toggles fullscreen. Configuration and the information view work in either
+windowed or fullscreen mode.
+
 For a non-interactive send, specify the source. `screen` is a simple live
 capture; for a clip, use `--source video --video-source PATH`:
 

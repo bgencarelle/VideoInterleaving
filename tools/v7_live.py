@@ -16,6 +16,7 @@ Examples::
         --video-source 'rtsp://camera.example/live' --device 'BlackHole 2ch'
     .venv/bin/python tools/v7_live.py receive --device 'BlackHole 2ch'
     .venv/bin/python tools/v7_live.py receive --device 'BlackHole 2ch' --force-float32
+    .venv/bin/python tools/v7_live.py gui
 
 The prototype currently emits finite batches. Batch boundaries are therefore a
 known live-experiment limitation; the clock counter continues across batches so
@@ -77,6 +78,9 @@ DEFAULT_FIXTURE = ROOT / 'modem_tests/fixtures/v7_reference_face.png'
 # The display stays independent of the modem decoder and can consume the latest
 # frame without building a backlog.
 FRAME_BUFFER = LatestFrame()
+# Read-only bridge for an external configuration UI. The receiver does not
+# depend on a GUI; an attached UI may poll the diagnostic callback.
+RECEIVER_GUI_STATUS = {}
 
 
 def _device_arg(value):
@@ -174,11 +178,19 @@ def _model(fixture, encode_filter='nearest'):
     return model
 
 
-def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0):
-    if gamma <= 0:
-        raise ValueError('gamma must be positive')
+def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0,
+            perceptual_resize='off', perceptual_detail_strength=0.25):
+    _validate_tone_controls(brightness, gamma)
     image = frame if isinstance(frame, Image.Image) else Image.fromarray(frame)
-    prepared = prepare_image(image, encode_filter=encode_filter)
+    if perceptual_resize == 'off':
+        # Keep this default path byte-identical to the established sender.
+        prepared = prepare_image(image, encode_filter=encode_filter)
+    else:
+        if encode_filter != 'box':
+            raise ValueError('perceptual resize requires --encode-filter box')
+        from animation_modem.perceptual_resize import resize_image
+        prepared = resize_image(image, perceptual_resize,
+                                perceptual_detail_strength)
     if brightness != 1.0:
         prepared = ImageEnhance.Brightness(prepared).enhance(brightness)
     if gamma != 1.0:
@@ -229,19 +241,39 @@ def _send_profile(args, slots):
     """Apply profile defaults while preserving explicit user overrides."""
     encode_filter = getattr(args, 'encode_filter', None)
     brightness = getattr(args, 'brightness', None)
+    perceptual_resize = getattr(args, 'perceptual_resize', 'off')
     if slots:
         encode_filter = encode_filter or 'box'
         brightness = 1.0 if brightness is None else brightness
         if encode_filter != 'box':
             raise ValueError('folded coded-pilot mode requires --encode-filter box')
         if not P._is_reference(getattr(args, 'fixture', None)):
+            if perceptual_resize != 'off':
+                raise ValueError('--perceptual-resize requires the canonical V7 fixture and matching pinned fold table')
             raise ValueError('folded coded-pilot mode requires the default V7 fixture')
         if not getattr(args, 'pilot_tones', True):
             raise ValueError('coded-pilot folding cannot be combined with --no-pilot-tones')
     else:
         encode_filter = encode_filter or 'nearest'
         brightness = 1.05 if brightness is None else brightness
+    _validate_tone_controls(brightness, getattr(args, 'gamma', 1.0))
+    if perceptual_resize != 'off':
+        if slots not in (500, 1000):
+            raise ValueError('--perceptual-resize requires a pinned --experimental-fold 500 or 1000 profile')
+        if encode_filter != 'box':
+            raise ValueError('--perceptual-resize requires --encode-filter box')
+        strength = float(getattr(args, 'perceptual_detail_strength', 0.25))
+        if not np.isfinite(strength) or not 0.0 <= strength <= 1.0:
+            raise ValueError('--perceptual-detail-strength must be finite and in [0, 1]')
     return encode_filter, float(brightness)
+
+
+def _validate_tone_controls(brightness, gamma):
+    """Reject tone controls that could turn a frame into invalid/black data."""
+    if not np.isfinite(brightness) or brightness <= 0:
+        raise ValueError('--brightness must be finite and positive')
+    if not np.isfinite(gamma) or gamma <= 0:
+        raise ValueError('--gamma must be finite and positive')
 
 
 def _encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
@@ -313,6 +345,12 @@ def run_send(args):
     slots = _fold_slots(args)
     fold = _experimental_fold(slots)
     args.encode_filter, args.brightness = _send_profile(args, slots)
+    if getattr(args, 'perceptual_resize', 'off') != 'off':
+        # Compile the optional Numba resize before an output stream is open;
+        # first-call JIT latency must not stall the live sender.
+        from animation_modem.perceptual_resize import warmup_resize
+        warmup_resize((2, 2), args.perceptual_resize,
+                      args.perceptual_detail_strength)
     model = _model(args.fixture, args.encode_filter)
     if fold is not None:
         # Fail before any audio: the table folds only the model it was built
@@ -426,7 +464,9 @@ def run_send(args):
                 if delay > 0:
                     time.sleep(delay)
                 value, aspect = _values(model, grab(), args.encode_filter,
-                                        args.brightness, args.gamma)
+                                        args.brightness, args.gamma,
+                                        getattr(args, 'perceptual_resize', 'off'),
+                                        getattr(args, 'perceptual_detail_strength', 0.25))
                 # Keep captured source values unfolded. encode_batch folds
                 # exactly once, directly in coefficient space; a second fold
                 # would quantize the hosts again and erase the guest residuals.
@@ -570,6 +610,10 @@ def run_receive(args):
 def _run_receive(args, fold):
     import sounddevice as sd
 
+    RECEIVER_GUI_STATUS.clear()
+    # The standalone configuration GUI can cancel setup before the capture
+    # stream is opened. The CLI keeps the original self-owned lifecycle.
+    stop = getattr(args, 'stop_event', None) or threading.Event()
     # Metadata is decoded with the common bootstrap model; the body model is
     # selected from the protected encoding ID carried by each frame.
     model = _model(args.fixture, 'box' if fold is not None else 'nearest')
@@ -582,6 +626,8 @@ def _run_receive(args, fold):
     if fold is not None:
         from tone_code import warmup_coded_decoder
         warmup_coded_decoder(model)
+    if stop.is_set():
+        return
     models = {model.encoding_type: model}
 
     def model_factory(encoding_type):
@@ -594,7 +640,6 @@ def _run_receive(args, fold):
     input_channels = 1 if device_info['max_input_channels'] < 2 else 2
     capture_rate = capture_rate_for(device_info)
     blocks = queue.Queue(maxsize=32)
-    stop = threading.Event()
     input_gap = threading.Event()
     live_input = LiveInput(
         args.decode_history, args.decode_batch, rate=capture_rate,
@@ -742,6 +787,9 @@ def _run_receive(args, fold):
                 f'audio {playback_text}',
                 f'timing {timing_text}'),
         }
+
+    RECEIVER_GUI_STATUS.update(meter=meter,
+                               diagnostics=display_diagnostics)
 
     def decode_available():
         nonlocal latest, auto_gain, previous_values, direction_streak
@@ -950,6 +998,8 @@ def _run_receive(args, fold):
                       'recovered': info.get('recovered', False)}
             if args.diagnostics:
                 report['diagnostics'] = info.get('diagnostics')
+            RECEIVER_GUI_STATUS.update(latest_packet=report,
+                                       decode_info=info)
             if (args.log or args.diagnostics) and not args.no_log:
                 print(report, flush=True)
             if args.save_dir:
@@ -1031,6 +1081,12 @@ def parser():
     send.add_argument('--encode-filter', choices=('nearest', 'box', 'lanczos', 'bicubic'),
                       default=None,
                       help='source resize filter (default: box with fold, nearest in baseline mode)')
+    send.add_argument('--perceptual-resize',
+                      choices=('off', 'linear-box', 'gamma-detail', 'linear-detail'),
+                      default='off',
+                      help='opt-in 80x96 sender resize ablation (requires pinned box fold profile)')
+    send.add_argument('--perceptual-detail-strength', type=float, default=0.25,
+                      help='DPID-inspired area weight strength in [0, 1] (default: 0.25)')
     send.add_argument('--brightness', type=float, default=None,
                       help='source brightness multiplier (default: 1.0 with fold, 1.05 in baseline mode)')
     send.add_argument('--gamma', type=float, default=1.0,
@@ -1140,9 +1196,10 @@ def parser():
     recv_profile.add_argument('--baseline', action='store_true',
                               help='restore the pre-fold receiver profile; use with sender --baseline')
     recv_profile.add_argument('--experimental-fold', type=int, default=None,
-                              choices=(0, 500, 1000), metavar='M',
-                              help='unfold M luma slots using coded-pilot status (default: 500); '
-                                   '0 selects baseline. Use the sender\'s profile.')
+                               choices=(0, 500, 1000), metavar='M',
+                               help='unfold M luma slots using coded-pilot status (default: 500); '
+                                    '0 selects baseline. Use the sender\'s profile.')
+    sub.add_parser('gui', help='open the receiver configuration and information GUI')
     return ap
 
 
@@ -1164,5 +1221,8 @@ if __name__ == '__main__':
             run_send(args)
         except Exception as exc:
             ap.exit(1, f'V7 send failed: {exc}\n')
+    elif args.mode == 'gui':
+        from tools.v7_receiver_gui import main as gui_main
+        gui_main(sys.modules[__name__])
     else:
         run_receive(args)

@@ -1,10 +1,142 @@
 """Minimal GLFW/ModernGL viewer for the standalone V7 receiver."""
+import json
+import os
 import sys
 import time
+from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from animation_modem.imaging import values_image
+
+
+DISPLAY_MODES = ('nearest', 'bilinear')
+DISPLAY_LABELS = {'nearest': 'Nearest', 'bilinear': 'Bilinear'}
+
+
+def toolbar_layout(width, open_dropdown=None):
+    """Logical-pixel hit regions for the compact in-viewer toolbar."""
+    width = max(320, int(width))
+    upscale = (12, 7, 204, 42)
+    panel = (224, 7, 382, 42)
+    fullscreen = (width-102, 7, width-12, 42)
+    hits = {'upscale_button': upscale, 'panel_button': panel}
+    if width >= 500:
+        hits['fullscreen_button'] = fullscreen
+    if width >= 720:
+        hits['save_default_button'] = (width-226, 7, width-112, 42)
+    if open_dropdown == 'upscale':
+        for index, mode in enumerate(DISPLAY_MODES):
+            y = 48 + index*29
+            hits[f'mode:{mode}'] = (upscale[0], y, upscale[2], y+28)
+    elif open_dropdown == 'panel':
+        for index, visible in enumerate((True, False)):
+            y = 48 + index*29
+            hits[f'panel:{int(visible)}'] = (panel[0], y, panel[2], y+28)
+    return hits
+
+
+def _contains(rect, x, y):
+    return rect[0] <= x < rect[2] and rect[1] <= y < rect[3]
+
+
+def _preference_path():
+    root = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home()/'.config')
+    return root/'modemTest'/'v7_display.json'
+
+
+def _load_display_default():
+    try:
+        data = json.loads(_preference_path().read_text())
+        if (isinstance(data, dict) and data.get('version') == 1 and
+                data.get('mode') in DISPLAY_MODES):
+            return data['mode']
+    except (OSError, ValueError, TypeError):
+        pass
+    return 'nearest'
+
+
+def _save_display_default(mode):
+    if mode not in DISPLAY_MODES:
+        raise ValueError(f'unsupported display mode: {mode}')
+    path = _preference_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix('.tmp')
+    temporary.write_text(json.dumps({'version': 1, 'mode': mode},
+                                    sort_keys=True)+'\n')
+    os.replace(temporary, path)
+
+
+def _toolbar_image(size, mode, show_details, open_dropdown, notice=''):
+    """Build a small, dark toolbar and optional dropdown using the viewer style."""
+    width = max(320, int(size[0]))
+    height = 48
+    if open_dropdown == 'upscale':
+        height += 2*29 + 4
+    elif open_dropdown == 'panel':
+        height += 2*29 + 4
+    image = Image.new('RGBA', (width, height), (9, 16, 24, 246))
+    draw = ImageDraw.Draw(image)
+    try:
+        font = ImageFont.truetype('DejaVuSans.ttf', 14)
+        small = ImageFont.truetype('DejaVuSans.ttf', 12)
+    except OSError:
+        try:
+            font = ImageFont.load_default(size=14)
+            small = ImageFont.load_default(size=12)
+        except TypeError:
+            font = small = ImageFont.load_default()
+
+    draw.rectangle((0, 46, width, 47), fill=(50, 70, 89, 255))
+    draw.rounded_rectangle((12, 7, 204, 41), radius=5,
+                           fill=(25, 39, 52, 255),
+                           outline=(66, 94, 116, 255), width=1)
+    draw.text((22, 15), f'Upscale  {DISPLAY_LABELS[mode]}  ▾',
+              fill=(232, 240, 246, 255), font=font)
+    panel_label = 'Info panel  On' if show_details else 'Info panel  Off'
+    draw.rounded_rectangle((224, 7, 382, 41), radius=5,
+                           fill=(25, 39, 52, 255),
+                           outline=(66, 94, 116, 255), width=1)
+    draw.text((234, 15), f'{panel_label}  ▾',
+              fill=(232, 240, 246, 255), font=small)
+    if width >= 920:
+        draw.text((404, 17), 'F fullscreen  ·  I info  ·  Esc exit',
+                  fill=(137, 162, 184, 255), font=small)
+    save_box = (width-226, 7, width-112, 41)
+    if width >= 500:
+        draw.rounded_rectangle((width-102, 7, width-12, 41), radius=5,
+                               fill=(25, 39, 52, 255),
+                               outline=(66, 94, 116, 255), width=1)
+        draw.text((width-90, 15), 'Fullscreen',
+                  fill=(232, 240, 246, 255), font=small)
+    if width >= 720:
+        draw.rounded_rectangle(save_box, radius=5,
+                               fill=(25, 39, 52, 255),
+                               outline=(66, 94, 116, 255), width=1)
+        draw.text((save_box[0]+8, 15), notice or 'Save default',
+                  fill=(232, 240, 246, 255), font=small)
+
+    if open_dropdown:
+        hits = toolbar_layout(width, open_dropdown)
+        prefix = 'mode:' if open_dropdown == 'upscale' else 'panel:'
+        rows = [key for key in hits if key.startswith(prefix)]
+        active = f'mode:{mode}' if open_dropdown == 'upscale' else f'panel:{int(show_details)}'
+        anchor = (12, 224) if open_dropdown == 'upscale' else (224, 382)
+        draw.rounded_rectangle((anchor[0], 47, anchor[1], height-3), radius=4,
+                               fill=(18, 29, 40, 255),
+                               outline=(66, 94, 116, 255), width=1)
+        for key in rows:
+            box = hits[key]
+            if key == active:
+                draw.rectangle((box[0]+1, box[1], box[2]-1, box[3]),
+                               fill=(45, 76, 98, 255))
+            if key.startswith('mode:'):
+                label = DISPLAY_LABELS[key.split(':', 1)[1]]
+            else:
+                label = 'Show diagnostics' if key.endswith(':1') else 'Hide diagnostics'
+            draw.text((box[0]+10, box[1]+6), label,
+                      fill=(232, 240, 246, 255), font=small)
+    return np.ascontiguousarray(np.asarray(image, dtype=np.uint8))
 
 
 VERTEX_SHADER = '''#version 330
@@ -45,10 +177,11 @@ def fit_viewport(framebuffer_size, image_aspect):
             view_width, view_height)
 
 
-def title_for_status(meter, details=False):
+def title_for_status(meter, details=False, display_mode='nearest'):
     """Keep receiver state visible without putting diagnostic widgets over video."""
     status = str(meter.get('status') or 'acquiring').upper()
     parts = ['V7 Receiver']
+    parts.append(f'view {DISPLAY_LABELS.get(display_mode, display_mode)}')
     device = meter.get('device')
     if device is not None:
         rate = float(meter.get('capture_rate') or 0)/1000
@@ -123,7 +256,7 @@ def _diagnostic_image(size, diagnostics):
 
 def run(frame_source, status_source, aspect_ratios, fullscreen=False,
         show_diagnostics=True, diagnostics_source=None,
-        profile_cpu=False):
+        profile_cpu=False, display_mode=None):
     """Display new frames on a vsynced GL window, sleeping between events.
 
     GLFW and ModernGL are imported here so headless receive stays independent
@@ -139,6 +272,7 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
     window = None
     texture = None
     overlay = None
+    toolbar = None
     context = None
     program = None
     vertex_array = None
@@ -182,6 +316,14 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
         last_viewport = None
         last_title = None
         overlay_key = None
+        toolbar_key = None
+        display_mode = display_mode or _load_display_default()
+        if display_mode not in DISPLAY_MODES:
+            display_mode = 'nearest'
+        open_dropdown = None
+        save_notice = ''
+        save_notice_until = 0.0
+        toolbar_hits = toolbar_layout(width)
         last_overlay_update = 0.0
         last_window_size = (width, height)
         profile_wall = time.monotonic()
@@ -209,22 +351,91 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
                 is_fullscreen = True
 
         def on_key(_window, key, _scancode, action, _mods):
-            nonlocal show_details, last_title
+            nonlocal show_details, last_title, display_mode, open_dropdown
+            nonlocal toolbar_key, dirty
             if action != glfw.PRESS:
                 return
-            if key == glfw.KEY_F:
+            if key == glfw.KEY_ESCAPE and open_dropdown is not None:
+                open_dropdown = None
+                last_title = None
+            elif key == glfw.KEY_F:
                 toggle_fullscreen()
             elif key == glfw.KEY_I:
                 show_details = not show_details
+                last_title = None
+                open_dropdown = None
+            elif key == glfw.KEY_U:
+                step = -1 if _mods & glfw.MOD_SHIFT else 1
+                display_mode = DISPLAY_MODES[
+                    (DISPLAY_MODES.index(display_mode)+step) % len(DISPLAY_MODES)]
+                if texture is not None:
+                    filtering = (moderngl.NEAREST if display_mode == 'nearest'
+                                 else moderngl.LINEAR)
+                    texture.filter = (filtering, filtering)
+                open_dropdown = None
+                last_title = None
+            elif key in (glfw.KEY_1, glfw.KEY_2):
+                display_mode = DISPLAY_MODES[key-glfw.KEY_1]
+                if texture is not None:
+                    filtering = (moderngl.NEAREST if display_mode == 'nearest'
+                                 else moderngl.LINEAR)
+                    texture.filter = (filtering, filtering)
+                open_dropdown = None
                 last_title = None
             elif key == glfw.KEY_ESCAPE:
                 if is_fullscreen:
                     toggle_fullscreen()
                 else:
                     glfw.set_window_should_close(window, True)
+            toolbar_key = None
+            dirty = True
 
         glfw.set_key_callback(window, on_key)
         dirty = True
+
+        def on_mouse_button(_window, button, action, _mods):
+            nonlocal show_details, display_mode, open_dropdown
+            nonlocal toolbar_key, last_title, dirty
+            nonlocal save_notice, save_notice_until
+            if button != glfw.MOUSE_BUTTON_LEFT or action != glfw.PRESS:
+                return
+            x, y = glfw.get_cursor_pos(window)
+            key = next((name for name, rect in toolbar_hits.items()
+                        if _contains(rect, x, y)), None)
+            if key == 'upscale_button':
+                open_dropdown = None if open_dropdown == 'upscale' else 'upscale'
+            elif key == 'panel_button':
+                open_dropdown = None if open_dropdown == 'panel' else 'panel'
+            elif key == 'fullscreen_button':
+                open_dropdown = None
+                toggle_fullscreen()
+            elif key == 'save_default_button':
+                try:
+                    _save_display_default(display_mode)
+                    save_notice = 'Saved'
+                except OSError as exc:
+                    print(f'Could not save V7 display preference: {exc}',
+                          file=sys.stderr, flush=True)
+                    save_notice = 'Save failed'
+                save_notice_until = time.monotonic()+1.5
+            elif key and key.startswith('mode:'):
+                display_mode = key.split(':', 1)[1]
+                filtering = (moderngl.NEAREST if display_mode == 'nearest'
+                             else moderngl.LINEAR)
+                if texture is not None:
+                    texture.filter = (filtering, filtering)
+                open_dropdown = None
+                last_title = None
+            elif key and key.startswith('panel:'):
+                show_details = key.endswith(':1')
+                open_dropdown = None
+                last_title = None
+            elif open_dropdown is not None:
+                open_dropdown = None
+            toolbar_key = None
+            dirty = True
+
+        glfw.set_mouse_button_callback(window, on_mouse_button)
 
         def on_refresh(_window):
             nonlocal dirty
@@ -237,7 +448,7 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
             glfw.wait_events_timeout(1/60)
 
             meter = status_source()
-            title = title_for_status(meter, show_details)
+            title = title_for_status(meter, show_details, display_mode)
             if title != last_title:
                 glfw.set_window_title(window, title)
                 last_title = title
@@ -253,7 +464,9 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
                         texture.release()
                     texture = context.texture(size, 3, data=pixels.tobytes(),
                                               dtype='f1')
-                    texture.filter = (moderngl.NEAREST, moderngl.NEAREST)
+                    filtering = (moderngl.NEAREST if display_mode == 'nearest'
+                                 else moderngl.LINEAR)
+                    texture.filter = (filtering, filtering)
                     texture.repeat_x = False
                     texture.repeat_y = False
                 else:
@@ -293,11 +506,37 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
                 dirty = True
 
             fb_size = glfw.get_framebuffer_size(window)
+            window_size = glfw.get_window_size(window)
+            if save_notice and time.monotonic() >= save_notice_until:
+                save_notice = ''
+                toolbar_key = None
+            toolbar_state = (window_size, display_mode,
+                             show_details, open_dropdown, save_notice)
+            toolbar_height = 48 + (62 if open_dropdown else 0)
+            toolbar_size = (max(320, int(window_size[0])), toolbar_height)
+            if (toolbar is None or toolbar.size != toolbar_size or
+                    toolbar_key != toolbar_state):
+                toolbar_pixels = _toolbar_image(
+                    window_size, display_mode, show_details, open_dropdown,
+                    save_notice)
+                if toolbar is not None:
+                    toolbar.release()
+                toolbar = context.texture(
+                    toolbar_size, 4, data=toolbar_pixels.tobytes(), dtype='f1')
+                toolbar.filter = (moderngl.LINEAR, moderngl.LINEAR)
+                toolbar.repeat_x = False
+                toolbar.repeat_y = False
+                toolbar_key = toolbar_state
+                toolbar_hits = toolbar_layout(window_size[0], open_dropdown)
+                dirty = True
+            toolbar_fb_height = (round(fb_size[1]*toolbar_size[1]/window_size[1])
+                                 if window_size[1] else 0)
             ratio = (aspect_ratios[frame.aspect & 7]
                      if frame is not None else 4/3)
             panel_height = (round(fb_size[1]*.36)
                             if show_details and overlay is not None else 0)
-            picture_area = (fb_size[0], max(0, fb_size[1]-panel_height))
+            picture_area = (fb_size[0], max(
+                0, fb_size[1]-panel_height-toolbar_fb_height))
             picture_viewport = fit_viewport(picture_area, ratio)
             viewport = ((picture_viewport[0],
                          panel_height+picture_viewport[1],
@@ -320,6 +559,15 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
                     overlay.use(location=0)
                     overlay_array.render(mode=moderngl.TRIANGLES, vertices=3)
                     context.disable(moderngl.BLEND)
+                if toolbar is not None and toolbar_fb_height:
+                    context.enable(moderngl.BLEND)
+                    context.blend_func = (moderngl.SRC_ALPHA,
+                                          moderngl.ONE_MINUS_SRC_ALPHA)
+                    context.viewport = (0, fb_size[1]-toolbar_fb_height,
+                                        fb_size[0], toolbar_fb_height)
+                    toolbar.use(location=0)
+                    overlay_array.render(mode=moderngl.TRIANGLES, vertices=3)
+                    context.disable(moderngl.BLEND)
                 glfw.swap_buffers(window)
                 dirty = False
 
@@ -331,7 +579,7 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
                     print(
                         'V7 viewer CPU over '
                         f'{elapsed:.1f}s: process {100*process_cpu/elapsed:.1f}% '
-                        '(all threads), UI {100*thread_cpu/elapsed:.1f}% '
+                        f'(all threads), UI {100*thread_cpu/elapsed:.1f}% '
                         '(viewer thread; event waits excluded)',
                         file=sys.stderr, flush=True)
                     profile_wall = time.monotonic()
@@ -348,6 +596,8 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
             program.release()
         if overlay is not None:
             overlay.release()
+        if toolbar is not None:
+            toolbar.release()
         if texture is not None:
             texture.release()
         if context is not None:
