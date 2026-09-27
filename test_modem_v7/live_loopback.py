@@ -104,6 +104,12 @@ def main(argv=None):
     ap.add_argument('--fold', type=int, default=0, help='sender --experimental-fold')
     ap.add_argument('--receiver-fold', type=int, help='receiver --experimental-fold (default: --fold)')
     ap.add_argument('--encode-filter', default='box')
+    ap.add_argument('--perceptual-resize',
+                    choices=('off', 'linear-box', 'gamma-detail', 'linear-detail'),
+                    default='off', help='sender resize ablation')
+    ap.add_argument('--perceptual-detail-strength', type=float, default=0.25)
+    ap.add_argument('--capture-width', type=int,
+                    help='resize a still source to this capture width before send')
     ap.add_argument('--seconds', type=float, default=8.0)
     ap.add_argument('--out', type=Path, default=REPO/'tmp'/'test_modem_v7'/'loopback')
     args = ap.parse_args(argv)
@@ -118,7 +124,23 @@ def main(argv=None):
     sys.path.insert(0, str(REPO))
     from tools import v7_live
 
-    frame = Image.open(args.frame).convert('RGB') if args.frame else None
+    frame = None
+    if args.frame:
+        source_path = args.frame.resolve()
+        try:
+            source_path.relative_to((REPO/'images_sbs').resolve())
+        except ValueError:
+            with Image.open(source_path) as source:
+                frame = source.convert('RGB')
+        else:
+            from utilities.convert_to_xy import load_rgba
+            rgb, _alpha = load_rgba(source_path)
+            frame = Image.fromarray(np.asarray(rgb, dtype=np.uint8), 'RGB')
+        if args.capture_width is not None:
+            if args.capture_width <= 0:
+                ap.error('--capture-width must be positive')
+            height = max(1, int(round(frame.height*args.capture_width/frame.width)))
+            frame = frame.resize((args.capture_width, height), Image.Resampling.LANCZOS)
     if frame is not None:
         still = np.asarray(frame)
         v7_live._capture = lambda _args: (lambda: still)
@@ -126,11 +148,15 @@ def main(argv=None):
     ap_live = v7_live.parser()
     recv_args = ap_live.parse_args(['receive', '--device', 'loopback', '--headless', '--no-log',
                                     '--save-dir', str(out),
-                                    '--experimental-fold', str(receiver_fold)])
-    send_args = ap_live.parse_args(['send', '--device', 'loopback', '--source', 'test',
-                                    '--encode-filter', args.encode_filter, '--brightness', '1.0',
-                                    '--seconds', str(args.seconds), '--no-log',
-                                    '--experimental-fold', str(args.fold)])
+                                    '--experimental-fold', str(receiver_fold),
+                                    '--direction', 'forward'])
+    send_options = ['send', '--device', 'loopback', '--source', 'test',
+                    '--encode-filter', args.encode_filter, '--brightness', '1.0',
+                    '--seconds', str(args.seconds), '--no-log',
+                    '--experimental-fold', str(args.fold),
+                    '--perceptual-resize', args.perceptual_resize,
+                    '--perceptual-detail-strength', str(args.perceptual_detail_strength)]
+    send_args = ap_live.parse_args(send_options)
     v7_live._resolve_send_source(send_args)
     threading.Thread(target=v7_live.run_receive, args=(recv_args,), daemon=True).start()
     try:

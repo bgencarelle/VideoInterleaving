@@ -3,7 +3,9 @@
 This document describes the V7 transport as implemented in
 `animation_modem/v7.py`, its live input adapter, the application sender, and
 `tools/v7_live.py`. It is a current-state specification, not a claim that every
-wire option has been validated on real tape.
+wire option has been validated on real tape. Section 11's first sender-resize
+ablation is implemented as an opt-in experiment; its later stages and Section
+12 remain planned work.
 
 ## 1. Current status and scope
 
@@ -19,6 +21,16 @@ audio devices. `modem_v7_display.py` adapts it to the application image library
 and audio output. `tools/v7_live.py` provides a standalone capture sender and
 receiver. Synthetic decode tests are available; real tape and deck validation
 remains pending.
+
+### Validation priority
+
+After the relevant synthetic/unit tests pass, prioritize real-time audio
+playback as the next validation step. This takes priority over additional
+synthetic-only benchmarks or analysis while live playback remains available and
+unverified. Synthetic and in-memory loopbacks validate software paths but do
+not substitute for real-time playback. Repeat this order after subsequent
+changes; if playback is blocked, record the concrete blocker and leave live
+validation explicitly outstanding.
 
 ## 2. Packet format and acquisition
 
@@ -412,6 +424,27 @@ full-matrix failures there are due to the specified fixed-bandwidth impairments
 more aggressive low-pass is therefore not a general 2× fix; use sufficient
 capture bandwidth or deliberately design a lower-bandwidth wire profile.
 
+The folding diagnostic is reproducible with
+`.venv/bin/python test_modem_v7/alias_fold.py`. It synthesizes a 28 kHz
+component and 56/84 kHz harmonics at 192 kHz, then downsamples to 48 kHz. Naïve
+decimation folds these to 20/8/12 kHz at their original amplitudes; polyphase
+anti-alias resampling suppresses those aliases by about 74–76 dB. On the V7
+reverse packet probe, 2×/96 kHz receives 8/8 frames in order; 2×/48 kHz with
+polyphase filtering receives 1/8; deliberately unfiltered decimation receives
+0/8. All three retain 8/8 pulse hits and EOF validations. This distinguishes
+folded harmonic energy from high-carrier removal: allowing aliasing does not
+recover the V7 metadata/picture data.
+
+That script also tests candidate sender-wide fourth-order zero-phase LPFs at
+13, 15, and 18 kHz before speed conversion. They all leave clean 2×/48 kHz
+recovery at 1/8 and clean 2×/96 kHz at 8/8. A separate clean sweep over 1.7×–2.2×
+found 15 kHz made a small improvement at 1.9×/48 kHz (SSIMULACRA2 −42.048 vs
+−42.366) but still decoded only 8/8 headers with no robustness margin; at 2×
+and above, all three cutoffs left recovery unchanged. The 18 kHz filter dropped
+1.9×/48 kHz to 5/8 valid frames. At 1×, the 13 kHz filter reduced SSIMULACRA2
+by about 0.06–0.09 points. There is no consistent fast-speed recovery gain to
+justify a sender-wide cutoff; it trims useful wire energy at ordinary speed.
+
 The clean reverse series was swept more finely from 1.7× through 2.2×. At
 48 kHz, all eight frames remained independently valid through 1.8×; quality
 then fell at 1.9×, only one frame was valid at 2.0× and 2.1×, and none at
@@ -793,7 +826,7 @@ sender folds each captured source frame exactly once in coefficient space
 before pulse encoding and overlays the coded status. The
 receiver despreads status chips before tone timing, retains each packet's
 equaliser output, and unfolds before display. Its prototype hooks are restored
-in `finally`. `animation_modem` is unchanged.
+in `finally`; the fold-specific integration remains a standalone prototype.
 
 Table loading fails closed:
 - **Pinned files.** Each table file must match a SHA-256 pinned in
@@ -1017,3 +1050,544 @@ export NUMBA_CACHE_DIR=tmp/numba_cache
 
 Full instructions and the reference numbers are in `test_modem_v7/HOWTO.md`.
 Results are written to `tmp/test_modem_v7/`.
+
+## 11. Perceptual sender preprocessing
+
+Status: the first resize ablation is implemented as an opt-in experiment in
+11.2. It remains disabled by default, and no mode is claimed to be generally
+better or ready to replace the existing path. The later sender stages and
+Section 12 remain planned experiments. Continue in the milestone order below;
+do not enable an unmeasured stage by default. None of this work requires a new
+wire format.
+
+### 11.1 Goal, scope, and fixed contracts
+
+Improve the decoded picture by preparing source content for the frequencies V7
+actually retains. Favor recognizable small features, acceptable color, and
+reduced ringing over nominal sharpness. All processing is classical and
+deterministic. No learned models, random jitter, grain injection, region-based
+packet allocation, or receiver changes belong in this work.
+
+- Live integration: `tools/v7_live.py::_values`, before the current brightness
+  and gamma adjustments. Keep their ordering and settings identical in paired
+  comparisons. Share preprocessing through a self-contained modem module; do
+  not import application settings into `animation_modem`.
+- Bake integration: `utilities/convert_to_modem_dct.py`, where full-resolution
+  layers are still available. Existing Lanczos-reduced layers cannot regain
+  lost source detail through runtime preprocessing.
+- Coefficient integration: inside the fold encoder's existing full-DCT path,
+  before host/guest construction, not by transforming pixels back and forth.
+- Preserve packet length, metadata, encoding codes, model tables, fold pins,
+  synchronization, receiver behavior, and the 80×96 prepared canvas.
+- Experiments declare canonical `box` encoding and use its pinned fold table.
+  Reject a perceptual-preprocess/other-model combination with a clear error.
+  The disabled path must retain existing outputs.
+
+The grids are rows × columns: Y 96×80, Cb/Cr 48×40. Retained corners are Y
+48×40 and Cb/Cr 24×20. Chroma is half the retained luma dimensions per axis,
+one quarter its coefficient count per plane; it is quarter-sized per axis
+relative to the luma sampling grid. Fold-500 adds selected outside-corner
+guests, with signature slots reducing the number that carry picture data.
+Read guest and signature counts from the loaded table, not a hard-coded claim
+about an effective rectangular bandwidth.
+
+The head/body/tail allocation is variance-ranked, not spatial-frequency sorted.
+The 656 tail coefficients refresh in seven packets (about 0.57 s at 1×).
+Any reference to a body or tail band must use actual `model.order` membership;
+a radial low-pass does not isolate the tail.
+
+### 11.2 First experiment: disentangle light handling and detail weights
+
+Add a sender-only `--perceptual-resize` selection with these stable names:
+
+| Value | Light domain | Resampling |
+|---|---|---|
+| `off` | Existing path | Existing selected encoding filter; default |
+| `linear-box` | Linear RGB | Area averaging |
+| `gamma-detail` | Gamma-encoded RGB | Detail-weighted area averaging |
+| `linear-detail` | Linear RGB | Detail-weighted area averaging |
+
+Use `off --encode-filter box` as the baseline. Use the standard piecewise sRGB
+transfer function, not a power-2.2 approximation. Return linear-domain results
+to gamma-encoded RGB before the existing YCbCr conversion. Linear averaging
+preserves average light energy; it does not guarantee visible catchlights.
+Detail weighting may improve visibility but is not energy preserving.
+
+Implement a documented DPID-inspired kernel, without claiming reference-DPID
+equivalence unless that algorithm is actually reproduced:
+
+1. For each output pixel, compute exact source-pixel area-overlap weights and
+   the area-weighted RGB mean in the selected light domain.
+2. For contributing pixels, compute a scalar RGB distance from that mean:
+   the square root of the mean squared difference across the three channels.
+3. Multiply area weights by `1 + strength * min(distance / scale, 2)`, where
+   `scale = max(weighted_RMS_distance, 1/255)` for normalized RGB.
+4. Renormalize and average RGB with the same scalar weights for all channels.
+   Strength zero is area averaging in that domain. Initial strength candidates
+   are 0, 0.25, 0.5, and 1; do not automatically change strength per frame.
+
+Use a separate `--perceptual-detail-strength` in [0, 1], default 0.25 for the
+detail candidates. Freeze the selected value for an entire comparison. Keep
+intermediate math floating-point and quantize only at the existing prepared
+RGB interface for this first experiment. Do not simultaneously redesign the
+YCbCr conversion, brightness adjustment, or capture resize.
+
+**First-step implementation:** `animation_modem/perceptual_resize.py` provides
+the exact-overlap area kernel and the three non-default modes. Linear modes use
+the standard piecewise sRGB transfer; detail modes apply the RGB-distance
+weighting above with shared channel weights. The Numba kernel caches per-axis
+footprints. `tools/v7_live.py send` exposes `--perceptual-resize` and
+`--perceptual-detail-strength`; preprocessing requires the canonical box model
+and a matching pinned M=500 or M=1,000 fold table. `off` remains byte-identical
+to the established selected-filter path and remains the default. The bake
+converter is unchanged because bake integration is gated on a resize candidate
+winning.
+
+Precompute footprint geometry for repeated source sizes. Hot pixel loops use
+Numba, with compilation excluded from steady-state measurements but reported
+separately. Verify constants, bounds, identity-size input, unusual dimensions,
+and deterministic output. Live captures around 160 pixels wide undergo roughly
+2× reduction here, not the tenfold reduction possible in full-resolution bakes.
+
+### 11.3 Statistics instrumentation before additional filtering
+
+Collect these measurements with the initial resize comparison, without
+refitting or changing the declared model:
+
+- Per-plane and per-tier coefficient means and variances relative to canonical
+  `model.mu` and `model.lam`; summarize ratios and the largest departures.
+- Actual tail-slot energy, host normalized magnitudes, and guest normalized
+  magnitudes before clipping, using the pinned `sd_guest` values.
+- Guest fractions above 2σ and 2.5σ, plus maxima/percentiles. Exclude signature
+  slots from picture-guest statistics and report their count separately.
+- Unfolded-packet and unfolded-slot rates with explicit denominators.
+- Decoded fidelity and send cost, using the same source/packet order as box.
+
+Use held-out scoring frames; never fit and score on the same frames. The
+canonical model is not refitted even on the training split in this experiment.
+Decide whether the existing box tables are adequate from these measurements.
+All four 2-bit profile codes are occupied. A new model or replacement profile
+requires a separate compatibility decision and new pinned fold tables; do not
+silently replace `lanczos`/`bicubic` or relax digest validation.
+
+### 11.4 Later sender stages, independently switchable
+
+**Band shaping.** Apply a fixed gain array to the full DCT before folding.
+Define the array from DCT coordinates and frozen tier membership. Keep DC at
+gain 1; start with luma-only gains. Test a small acutance lift independently
+from a short cutoff taper. Do not taper recovered guests simply because they
+are outside the rectangular corner. Record the exact gain array or generation
+parameters in every result. No promise of halo elimination is made.
+
+**Guest soft knee.** `FoldCodec.encode_coefficients(values)` currently accepts
+spatial values and computes the DCT in `_split`; it is not an API accepting a
+full coefficient vector. Refactor that internal boundary only as needed to
+avoid a second transform. Apply the knee to normalized picture guests before
+the existing safety clip and before constructing folded symbols. Leave host
+quantization, signature symbols, fold power normalization and tables intact.
+Initial knee: for magnitude `a <= 2`, output `a`; otherwise output
+`2 + 0.5*tanh((a-2)/0.5)`, restoring the sign. This is continuous with matching
+slope at 2 and bounded by 2.5. It is nonlinear compression, not a fixed gain.
+The receiver intentionally displays the compressed value without expansion.
+Measure error against original guests as well as clip counts: eliminating
+clips by construction is not evidence of improved fidelity.
+
+**Luma-guided chroma.** Experimental and luma-preserving. Define filtering in
+linear RGB where light averaging is intended, then convert to the existing
+gamma-domain YCbCr convention. Do not substitute linear-RGB-derived chroma
+into that convention. Guide chroma reduction with coherent luma edges, bound
+the guidance, and retain chroma-only boundaries. Test saturation compensation
+separately, initially off. Evaluate after the 24×20 chroma cut and normal
+receiver reconstruction, not just on prepared pixels.
+
+**Change-adaptive softening, live only.** A frame difference is a change
+detector, not a displacement estimate. Use timestamp-based attack/release
+smoothing, bounded local strength, and explicit resets on source/shape changes
+and cuts. Preserve static regions. Report actual tail-slot energy before/after
+filtering; do not equate a spatial blur with removing tail ranks. This stage
+must earn its place on motion sequences without worsening static flicker or
+slow drifts. Final thresholds and time constants are experimental parameters
+to record, not values the implementation agent should auto-tune invisibly.
+
+### 11.5 Bake integration
+
+Add an opt-in modem bake option only after a resize candidate wins. Filter
+linear-light RGB premultiplied by alpha; filter alpha consistently and
+unpremultiply only where alpha is nonzero. Transparent RGB must not leak into
+visible edges. Preserve the existing bake format and dimensions and record
+preprocessing settings in a backward-compatible manifest field.
+
+Layers are composited after baking. Nonlinear detail weighting per layer is
+not equivalent to filtering the final composite: evaluate representative
+composites over several backgrounds, including fine translucent edges. Heavier
+offline codec-in-the-loop optimization is deferred, not required for the first
+bake implementation. Application-runtime coefficient shaping and knees are
+gated on explicit application fold-profile support; do not assume that support
+from the standalone prototype or a nonexistent section reference.
+
+### 11.6 Evaluation and delivery gates
+
+Existing evidence in `test_modem_v7/HOWTO.md` favors box over nearest by about
+7 SSIMULACRA2 points and Lanczos by about 2 on its face sequence. A taper and
+finer DCT reconstruction did not improve that reference run. These are starting
+observations, not predictions for the new stages.
+
+- Score decoded output at a fixed documented display size against the same
+  Lanczos-resized source reference. Fix crop, aspect, brightness, gamma, and
+  display reconstruction across sender comparisons.
+- Use the face sequence plus fine bright/dark features, saturated boundaries,
+  text, static frames, slow drifts, and cuts. Report per-case scores, not only
+  an average. Report ΔE2000 with an explicit sRGB-to-Lab convention and fixed
+  skin/lip regions, plus temporal error in source-defined static regions.
+- Run the existing default-wire torture matrix unchanged; every required case
+  must retain 12/12 packets. Also report unfold rates and picture fidelity;
+  packet counts alone are insufficient. Synthetic impairments are regression
+  checks, not claims about real tape.
+- Named on-screen comparisons are sufficient: the user chooses the preferred
+  result. No randomized or blind trial is required. Promote a candidate only
+  after user preference plus improved metrics, or neutral metrics with a clear
+  user preference. Report regressions rather than hiding them in averages.
+- Pair warmed CPU time and wall time against box on each tested machine.
+  The complete enabled live preprocessing path must add at most 25% to the
+  send path in both measures. The historical roughly 1.4 ms/frame is context,
+  not a portable threshold. Bake cost has no realtime limit.
+
+The reproducible first-step report is written by
+`test_modem_v7/perceptual_resize.py`; its JSON includes per-plane/tier
+coefficient deviations, actual transmitted tail-slot energy, host and
+pre-clipping guest magnitudes, guest threshold fractions, clean coefficient
+unfold denominators, decoded fidelity, and paired warmed sender cost. A smoke
+run on nine held-out frames from `images_sbs/face/00_C_BG_faceSource_960`
+uses the SBS color panel, a fixed Lanczos capture proxy of 160×213, the frozen
+box model, and the pinned M=500 table. In that run, `off --encode-filter box`
+scored −19.38 mean SSIMULACRA2, 27.16 dB luma PSNR, and ΔE2000 3.039. The best
+resize scores were around −17.94 (about +1.44 SSIMULACRA2), with luma PSNR
+within 0.03 dB and ΔE2000 around 3.04. On Linux x86_64 with an AMD EPYC-Milan
+CPU (4 logical CPUs), Python 3.13.5 and Numba 0.67.0, paired warmed sender cost
+rose from 0.510 ms/frame to at least 0.795 ms/frame (+46%) and up to 2.183
+ms/frame (+312%); process CPU deltas were similar, also exceeding the 25%
+budget. The coefficient-perfect clean fold check unfolded 9/9 packets and
+4,356/4,356 picture slots for every setting; it is not a tape or waveform
+decode test. With this limited face-only sample and failed CPU budget, no
+candidate is promoted and canonical box-table adequacy remains undecided.
+Results and Numba caches stay under repo-local `tmp/`.
+
+The original default `tools/v7_torture_matrix.py` forward run produces 11
+decoded results from 12 legacy next-header packets. That remains the default
+contract: the final packet has no following-header witness. Its historical
+smoke result was 11/11 metadata-valid and displayable results in 24/25 cases;
+`lowpass-4k` returned 10/11 metadata-valid, matching the known matrix failure
+above in Section 9. The Section 11.6 12/12 request does not apply to that
+legacy framing. The runner now has opt-in `--speed` and `--direction reverse`
+EOF-aware torture modes (reported above); the default forward 1×/96 kHz wire
+is pinned byte-for-byte to the original `resample_poly` path by
+`modem_tests/test_v7_torture_matrix.py`.
+
+Delivery order: (1) resize ablations plus statistics; (2) decide table adequacy;
+(3) band shaping; (4) knee; (5) guided chroma; (6) change adaptation; (7) bake.
+Each stage has independent on/off comparison and must not invalidate earlier
+gates. Keep experiment artifacts and Numba caches under repo-local `tmp/`.
+
+## 12. Planned: receiver display GUI and reconstruction modes
+
+Initial receiver-shell implementation is available as
+`.venv/bin/python tools/v7_live.py gui`. It opens in configuration without
+opening an audio stream, enumerates input devices for explicit selection,
+exposes every `receive` CLI option, starts/stops the existing receiver path,
+and switches between configuration and decoder information with `I` or the
+tabs in either windowed or fullscreen mode. It reads decoded values and live
+diagnostics directly from the receiver mailbox/status callback. This first
+slice provides nearest and bilinear display selection. Its current bilinear
+preview linearly filters the reconstructed 8-bit RGB texture; it is a temporary
+shell behavior, not the float-plane bilinear contract in Section 12.2. Exact
+nearest-pixel parity and actual offscreen-GL verification are also still to be
+checked. The additional reconstruction/effect modes below remain planned work.
+
+Status: implementation brief, September 27, 2026. This replaces the earlier
+keyboard-only/blind-trial proposal with mouse-accessible dropdowns, named
+comparisons, a preview caller, and an explicitly saved user preference. The
+custom V7 Perceptual mode is included below. No mode is claimed to have won.
+
+### 12.1 Ownership and immutable boundaries
+
+The live receiver supplies decoded float spatial values and plane shapes to
+`tools/v7_gl_viewer.py` through its latest-frame mailbox. Treat those arrays as
+read-only. Display processing must not mutate decoder state, tail memory,
+metadata, diagnostics measurements, or `--save-dir` decoded exports.
+
+Retain GLFW/ModernGL, the OpenGL 3.3 core requirement, lazy graphics imports,
+the dark visual style, the large picture, and the four existing diagnostic
+cards. Keep the GL context and resource lifecycle on the viewer thread.
+Viewer-only helpers may be factored into `tools/v7_display_*.py`; do not grow a
+second decoder, import GUI dependencies into headless receive, or modify other
+application modes. Additional DCT transforms described here are an explicit
+viewer-only experiment, not changes to pulse acquisition or transport decode.
+
+Preserve metadata aspect correction. The 80×96 canvas is a sampling geometry;
+square display pixels would distort most sources. Use framebuffer pixels for
+sampling and logical-window coordinates converted for hit testing on HiDPI.
+
+### 12.2 Exact nearest and the float path
+
+`nearest` must retain the current `values_image` → 8-bit RGB texture → nearest
+shader path, with no dither or new color correction. Pillow's rounding,
+clipping, chroma resize and integer color conversion are part of this reference.
+Float-plane nearest sampling is not pixel-identical and must not replace it.
+
+For new modes, split values into owned contiguous float32 Y/Cb/Cr planes,
+mapping normalized values to the existing YCbCr convention without premature
+clipping. Upload single-channel float textures; handle a one-plane frame as
+grayscale. Define chroma center alignment explicitly and use clamp-to-edge
+sampling. Convert to gamma-encoded RGB with full-range YCbCr semantics, not
+limited-range video levels. Document the conversion constants and establish
+neutral-gray and saturated-color reference tests.
+
+Keep float intermediates through filtering. Define one output transfer policy
+to avoid accidental double sRGB encoding: gamma-encoded RGB written to a
+non-sRGB-converting framebuffer is the initial policy. Optional deterministic,
+screen-pixel-anchored, zero-mean dither is added immediately before 8-bit output
+quantization with peak amplitude at most half an output code step. A fixed
+blue-noise tile may be shipped with documented provenance; an alternative
+deterministic pattern must be named accurately, not called blue noise without
+justification. Float precision and dither reduce contouring; they do not
+guarantee the absence of bands. Dither is always disabled for legacy nearest.
+
+### 12.3 Modes and orthogonal effects
+
+Stable CLI/settings mode names:
+
+| Name | Reconstruction contract |
+|---|---|
+| `nearest` | Exact legacy reference and initial default |
+| `sharp-bilinear` | Preserve block interiors, antialias boundaries using separate horizontal/vertical output footprints |
+| `bilinear` | Hardware-linear sampling of float planes |
+| `bicubic` | Explicit `mitchell` (B=C=1/3) or `catmull-rom` (B=0, C=1/2) variant |
+| `lanczos3` | Radius-3 windowed-sinc reconstruction, separable intermediate passes |
+| `dct` | DCT-consistent 4× plane reconstruction, followed by bicubic |
+| `v7-perceptual` | DCT reconstruction plus the bounded processing in 12.5 |
+
+Sharp bilinear is not a promise of equal integer block widths or elimination
+of motion shimmer. Document its coordinate-remap/footprint equation; do not
+claim exact area integration unless implemented and tested. Specify behavior
+below 1× magnification (ordinary bilinear is acceptable). Plane sampling costs
+multiple reads, not the one read of an RGB-texture implementation.
+
+Dering and luma-guided chroma are optional processing stages, not competing
+upscaler names. Dither is an output option. Crossfade and tape/CRT styling are
+deferred optional effects and must not delay the core GUI/modes. Crossfade, if
+implemented, shows the first frame immediately, blends for at most one measured
+frame interval, bypasses cuts, and reports the blend duration. It is not motion
+interpolation. No temporal effect is enabled by default.
+
+Render expensive spatial passes at bounded intermediate sizes around 4× the
+source grid. Cache intermediates per frame generation and settings revision.
+The final scaling pass still costs screen-resolution-dependent GPU work.
+
+### 12.4 DCT reconstruction: precise implementation boundary
+
+The mailbox contains spatial samples, not coefficients. For each plane:
+
+1. Compute a 2D DCT-II with orthonormal normalization.
+2. Copy all coefficients into the top-left of a zero-filled 4H×4W array.
+3. Multiply coefficients by `sqrt((4H*4W)/(H*W))`, i.e. 4 for this scaling.
+4. Apply the matching orthonormal inverse transform to obtain the larger plane.
+
+This samples the same cosine expansion on the finer cell-centered grid.
+Account for the corresponding sample centers in GPU texture coordinates.
+Do not compare every fourth enlarged pixel directly to an original pixel:
+their centers do not coincide for this even enlargement factor. Verify against
+direct cosine evaluation at selected coordinates instead.
+
+Do not clip planes before this operation, discard outside-corner guests, or
+apply a new rectangular cutoff. Test constants, single basis components,
+amplitude, orientation, grayscale, and boundaries. Reuse buffers and perform
+transforms once per new frame, not on toolbar redraws. Lazily load the existing
+CPU transform dependency. This is a cosine-consistent presentation of decoded
+samples, including their noise; it is not recovery of the lost source image.
+
+### 12.5 Custom mode: V7 Perceptual
+
+Goal: smooth reconstruction with readable small facial features, restrained
+halos, and less color bleeding. Initial settings are light halo restraint,
+light chroma guidance, definition off, and output dither on. Initial numerical
+strengths are halo 0.25, chroma guidance 0.25, and definition 0. These are trial
+settings, not an instruction to make this mode the user's default.
+
+Implement the following separately measurable stages on float intermediates:
+
+**A. DCT base.** Use 12.4 exactly. Initially apply no extra coefficient gains.
+The sender already may shape coefficients; do not silently sharpen twice.
+
+**B. Soft halo restraint.** At each enlarged luma pixel, derive local bounds
+from a 3×3 neighborhood on the original decoded grid. Use a bilinearly sampled
+local range/edge field to avoid per-cell parameter jumps. Allow a small
+range-relative overshoot and soft-compress only excursions beyond it; blend
+the correction by `halo_strength` in [0, 1]. An initial allowed margin is
+`0.05 * local_range + 1/255` in normalized luma. Above upper bound `b`, a
+candidate bounded mapping is `b + margin*tanh((value-b)/margin)`, with its
+symmetric counterpart below the lower bound. Leave in-range values unchanged.
+Reduce strength around isolated source extrema using a documented bounded
+local-extremum mask; test catchlights and pupils explicitly. This heuristic
+restrains reconstruction overshoot, not all ringing already in decoded samples.
+
+**C. Optional definition.** Add a bounded local-contrast correction at one to
+two source-pixel scales, not a finest-band boost. Initial experiment: subtract
+an edge-aware local luma mean, multiply by `definition` in [0, 0.25], and cap
+the correction to 0.02 normalized luma. Suppress it in near-flat regions, near
+output limits, and where halo restraint is active. Default is zero. Record
+kernel and thresholds, and do not adapt global strength per frame.
+
+**D. Guided chroma.** Start from smooth DCT-reconstructed chroma. Use coherent
+luma boundaries to downweight chroma contributions across the boundary, with
+bounded guidance and a blend back to the unguided result. Use a fixed-size
+joint-bilateral neighborhood at the intermediate grid; publish spatial/range
+weights and their sample-center mapping. Guide with lightly smoothed luma so
+fine grain does not print into color. Preserve chroma-only boundaries; test
+isoluminant color edges. `chroma_guidance` is in [0, 1], initially 0.25.
+Luma is unchanged by this stage; automatic saturation gain is initially off.
+
+**E. Output.** Convert and dither according to 12.2. Preserve all input arrays.
+
+No temporal history is required for this mode. A later change-aware option may
+reduce added definition in changing regions, with timestamp-smoothed control,
+but may not claim to identify stale tail coefficients from pictures alone.
+True coefficient-age-aware processing needs a separately specified read-only
+diagnostic interface. Never invent that metadata in this implementation.
+
+### 12.6 GUI, preferences, and interaction
+
+Add a compact toolbar above the picture, keeping the existing diagnostic cards
+below it. Use the existing dark colors and text style. Reserve toolbar space
+instead of covering picture content in windowed mode. Dropdowns are drawn in
+the GL UI with explicit hit regions; reuse Pillow text/overlay facilities where
+practical rather than introducing a second windowing toolkit.
+
+Toolbar controls:
+
+- **View:** the seven modes above. Unsupported modes are disabled with a short
+  reason. Only working modes participate in keyboard cycling.
+- **Variant:** shown for bicubic; Mitchell or Catmull–Rom.
+- **Effects:** popover for implemented independent effects and output dither.
+- **Mode controls:** labeled contextual sliders, not a universal strength.
+  V7 Perceptual exposes Halo restraint, Definition, and Chroma guidance.
+- **Compare:** enable a draggable, labeled wipe of the same full-size picture;
+  reference dropdown offers Nearest, Bicubic, and DCT when available. Both sides
+  share a frame generation, viewport, and aspect. No side randomization or
+  hidden labels: the user judges what they prefer.
+- **Save as default**, **Reset mode**, **Screenshot**, **Info**, **Fullscreen**.
+
+Preserve F, I and Esc semantics. Add U/Shift+U cycling, 1–7 mode selection,
+A to toggle the wipe, and S for screenshots. Dropdowns support pointer input,
+keyboard focus, arrows and Enter; Esc closes an open control before leaving
+fullscreen. Sliders expose their numeric values. Do not overload [ and ] with
+an ambiguous global strength; they may adjust the focused slider.
+
+Fullscreen toolbar auto-hides after inactivity, reappears at the top edge or
+on control-key use, and stays visible while a control is open. Schedule redraws
+for label expiry and toolbar hiding. Mode changes show a brief label; title
+and picture-info card show active mode and measured GPU time. Existing decoder
+diagnostics measurements remain unchanged. Ordinary rendering is event-driven;
+diagnostic updates already can trigger redraws independently of picture arrival.
+
+Store versioned JSON preferences at
+`$XDG_CONFIG_HOME/modemTest/v7_display.json` (otherwise
+`~/.config/modemTest/v7_display.json`). Validate enums, ranges and version;
+ignore invalid settings with a visible notice. Write atomically only when
+Save as default is pressed. Merely experimenting must not persist changes.
+Precedence: explicit CLI fields > valid saved fields > factory settings.
+Factory reconstruction is legacy nearest. An unsupported saved mode falls
+back visibly to nearest without overwriting the saved preference.
+
+Add `--display-mode NAME` and explicit contextual overrides such as
+`--display-variant`, `--display-halo`, `--display-definition`,
+`--display-chroma-guidance`, and `--display-dither on|off` to receive and preview.
+Use parser defaults of unset for preference-overridable fields. Do not add the
+draft's ambiguous `--display-strength`. Headless receive must not initialize
+GUI/preferences merely because these parser options exist.
+
+### 12.7 Preview caller and screenshots
+
+Add `tools/v7_viewer.py` as a standalone caller of the same viewer, with no
+audio capture or decoder thread. Accept image paths for a still/sequence and
+an explicit playback FPS. Support pause and frame stepping for comparison.
+Image previews use the documented box preparation and fixed V7 spatial grids;
+they demonstrate presentation, not decoded-wire fidelity.
+
+Also accept a documented `.npz` decoded-frame fixture containing `values`
+(frame × value float array), `shapes` (plane × 2 integer array), `aspect`
+(one wire aspect code per frame), and optional `timestamps` (seconds). Validate
+sizes, finite values and codes; load without pickle. This lets experiments
+feed exact decoded float pictures without changing normal decoded exports.
+The live and preview callers share settings parsing and the `run` interface;
+do not copy the viewer implementation into the launcher.
+
+Screenshots are explicit display exports, separate from `--save-dir`. Default
+to `tmp/v7_viewer/screenshots/`, allow an output-directory override, and avoid
+overwriting existing files. Save the visible picture/wipe at framebuffer
+resolution without toolbar or diagnostics, with a JSON sidecar recording mode,
+parameters, reference, source generation, aspect, viewport, and output policy.
+Perform framebuffer readback only on request, outside performance samples.
+
+### 12.8 Failure handling and resource lifetime
+
+Compile/validate candidate shader programs independently while retaining the
+legacy program. Allocate new textures/framebuffers and upload a complete frame
+before replacing the last usable resources. A failure must not release the
+last good picture or publish a mixed-generation Y/Cb/Cr set. On unsupported
+mode/resource failure, report it, disable that candidate, and use legacy
+nearest or retain the last successfully rendered picture. No black fallback.
+Before the first picture, retain the existing acquiring presentation; do not
+fabricate a decoded frame. Release superseded resources on the GL thread.
+
+### 12.9 Verification, budgets, and delivery order
+
+Use actual offscreen GL rendering for shader/reference checks where supported,
+and report skipped GL checks rather than pretending CPU tests exercised them.
+No audio device is needed for these checks.
+
+Required checks:
+
+- Legacy nearest picture pixels match the previous renderer at identical
+  viewport sizes, including fractional magnification and portrait aspects.
+- Input arrays and normal decoded saved-frame bytes remain unchanged after
+  exercising each mode and switching modes during a sequence.
+- DCT normalization/coordinates, color conversion, grayscale and chroma-edge
+  alignment meet analytic/reference checks described above.
+- Mode/upload failure retains a usable picture; unsupported modes cannot be
+  selected. Verify settings precedence, explicit persistence, HiDPI hit tests,
+  resize, fullscreen, screenshot orientation and comparison synchronization.
+- Compare clean, hiss and fast-flutter decoded fixtures at actual screen sizes;
+  create labeled contact sheets under `tmp/`. Compute SSIMULACRA2 against the
+  same aspect-correct source reference without GUI overlays. Freeze dither and
+  color policy for kernel comparisons; separately ablate precision and dither.
+- The user chooses their favorite named mode and saves it as default. A blind
+  trial, a metric winner, and a claim of zero shimmer/banding are not shipping
+  requirements. Report fidelity tradeoffs openly; optional effects need an
+  observable benefit, not just an implemented control.
+
+Measure warmed UI-thread CPU with `--profile-ui`, paired with nearest, and GPU
+time using asynchronously retrieved timer queries. Do not wait synchronously
+for a query result on each redraw. Report median and high-percentile times,
+machine/GPU/driver, framebuffer size, frame/redraw rate, and settings. Target:
+at most two additional percentage points of one CPU core and GPU p95 below
+2 ms per redraw at the tested size. Report absolute cost and relative changes;
+do not generalize results to other GPUs. Measure comparison mode and optional
+vsync-rate crossfade separately. Include CPU forward/inverse DCT and uploads;
+exclude compilation, screenshots, and setup from steady-state figures while
+reporting their latency separately. If a budget fails, keep the mode explicitly
+experimental or optimize it; never silently substitute a different algorithm.
+
+Delivery order:
+
+1. GUI shell, exact nearest, preferences, live wiring and preview caller.
+2. Float path, bilinear, bicubic and sharp bilinear; contextual controls.
+3. Wipe comparison, screenshots and asynchronous GPU timing.
+4. DCT and separable Lanczos, validated independently and measured.
+5. V7 Perceptual: DCT base, then halo restraint, guided chroma, optional
+   definition, with on/off comparisons for each component.
+6. Optional temporal/stylized effects only after user interest is confirmed.
+
+Finally compare box/perceptual sender × ordinary/perceptual display as four
+separate configurations. Hold sender fixed while choosing a display kernel,
+and display fixed while judging sender improvements. No implementation agent
+should automatically select or persist a new default based on metric scores.

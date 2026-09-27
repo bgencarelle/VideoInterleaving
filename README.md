@@ -187,10 +187,20 @@ Open two terminals from the repository root and start the receiver first:
 
 To configure a receiver interactively before opening audio, run
 `.venv/bin/python tools/v7_live.py gui`. Select an input device in the
-Configuration tab and press **Start receiver**; **Information** switches to
-the live decoded picture and diagnostics. `I` toggles the two views and `F`
-toggles fullscreen. Configuration and the information view work in either
-windowed or fullscreen mode.
+Setup and press **Start**; **Live** is an image-first view with optional
+diagnostics. `I` toggles the details panel, `P` switches to image-only
+fullscreen, `Esc` returns from image-only, and `F` toggles fullscreen. The
+GUI also exposes an **Image only** button and a start-in-image-only option.
+
+For a live decoded image with no controls or diagnostics, use the regular
+receiver with `--image-only`:
+
+```bash
+.venv/bin/python tools/v7_live.py receive \
+  --device 'BlackHole 2ch' --experimental-fold 500 --image-only
+```
+
+Image-only mode fills the screen with the decoded picture; press Esc to exit.
 
 For a non-interactive send, specify the source. `screen` is a simple live
 capture; for a clip, use `--source video --video-source PATH`:

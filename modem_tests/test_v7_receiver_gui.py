@@ -47,7 +47,8 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertEqual(args.device, 3)
         self.assertTrue(args.headless)
         self.assertTrue(args.diagnostics)
-        self.assertTrue(args.log)
+        self.assertFalse(args.log)
+        self.assertTrue(args.no_log)
         self.assertIsNone(args.save_dir)
 
     def test_start_requires_an_explicit_input_device(self):
@@ -120,7 +121,36 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
         self.assertEqual(
             gui._picture_viewport((960, 720), (1920, 1440), 4/3),
-            (64, 526, 1038, 778))
+            (144, 92, 1632, 1224))
+
+    def test_basic_setup_hides_advanced_options_until_requested(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        basic = {gui.fields[index].dest
+                 for index in gui._config_field_indexes()}
+        self.assertIn('device', basic)
+        self.assertIn('experimental_fold', basic)
+        self.assertNotIn('decode_history', basic)
+
+        gui.advanced_options = True
+        advanced = {gui.fields[index].dest
+                    for index in gui._config_field_indexes()}
+        self.assertIn('decode_history', advanced)
+
+    def test_image_only_view_restores_the_live_page(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        gui.page = 'info'
+
+        gui._set_image_only(True)
+        self.assertTrue(gui.image_only)
+        gui._set_image_only(False)
+
+        self.assertFalse(gui.image_only)
+        self.assertEqual(gui.page, 'info')
+
+    def test_receiver_cli_accepts_image_only_mode(self):
+        args = v7_live.parser().parse_args([
+            'receive', '--device', 'named-loopback', '--image-only'])
+        self.assertTrue(args.image_only)
 
     def test_new_picture_does_not_dirty_the_full_ui_canvas(self):
         image = Image.new('RGB', (80, 96), (90, 120, 160))
@@ -148,7 +178,7 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         gui.selected = gui.fields.index(save_dir)
         gui.editing = True
         gui.edit_buffer = 'captures with spaces'
-        gui.hits = {'start': (0, 0, 100, 40)}
+        gui.hits = {'start_stop': (0, 0, 100, 40)}
         started_with = []
         gui._start_receiver = lambda: started_with.append(save_dir.value)
 

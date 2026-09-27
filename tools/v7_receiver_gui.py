@@ -25,13 +25,18 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tools.v7_gl_viewer import FRAGMENT_SHADER, VERTEX_SHADER, fit_viewport
+from tools.v7_gl_viewer import (FRAGMENT_SHADER, VERTEX_SHADER,
+                                _diagnostic_image, fit_viewport)
 
 
 ROW_HEIGHT = 36
 TOOLBAR_HEIGHT = 54
 DISPLAY_MODES = ('nearest', 'bilinear')
 INFO_REFRESH_SECONDS = 0.2
+BASIC_OPTION_DESTS = frozenset((
+    'device', 'direction', 'fixture', 'fullscreen', 'show_diagnostics',
+    'image_only', 'experimental_fold', 'baseline', 'save_dir',
+    'mono_compatible'))
 
 
 @dataclass
@@ -107,6 +112,7 @@ def _field_label(action):
         'fixture': 'Model fixture',
         'fullscreen': 'Start fullscreen',
         'show_diagnostics': 'Show diagnostics',
+        'image_only': 'Start in image-only view',
         'profile_ui': 'Profile viewer CPU',
         'mono_compatible': 'Mono-compatible chroma',
         'no_log': 'Quiet receiver logs',
@@ -149,9 +155,16 @@ def _make_fields(receive_parser, device_choices):
         value = action.default
         if value is argparse.SUPPRESS:
             value = None
-        if action.dest in ('diagnostics', 'log'):
-            # The information view should be useful on the first run.
+        if action.dest == 'diagnostics':
+            # Keep decoder timing for the optional live diagnostic panel.
             value = True
+        if action.dest == 'log':
+            value = False
+        if action.dest == 'no_log':
+            value = True
+        if action.dest == 'show_diagnostics':
+            # Keep the live picture large; details are a one-click drawer.
+            value = False
         if isinstance(action, (argparse._StoreTrueAction,
                                 argparse._StoreFalseAction)):
             fields.append(OptionField(action, bool(value),
@@ -226,6 +239,7 @@ class ReceiverGui:
         self.dropdown_scroll = 0
         self.editing = False
         self.edit_buffer = ''
+        self.advanced_options = False
         self.notice = 'Choose an input device, review settings, then start receiving.'
         self.info_scroll = 0
         self.info_follow = True
@@ -252,6 +266,11 @@ class ReceiverGui:
         self.current_frame = None
         self.latest_values_image = None
         self.display_mode = 'nearest'
+        self.image_only = False
+        self.image_only_previous_page = 'info'
+        self.image_only_previous_fullscreen = False
+        self._glfw = None
+        self._window = None
         self.last_title = None
         self.last_ui_size = None
         self.profile_wall = None
@@ -292,6 +311,37 @@ class ReceiverGui:
             self.fullscreen = True
         self.dirty = True
 
+    def _set_image_only(self, enabled):
+        enabled = bool(enabled)
+        if enabled == self.image_only:
+            return
+        if enabled:
+            self.image_only_previous_page = self.page
+            self.image_only_previous_fullscreen = self.fullscreen
+            self.image_only = True
+            if self._glfw is not None and self._window is not None:
+                self._glfw.set_input_mode(
+                    self._window, self._glfw.CURSOR,
+                    self._glfw.CURSOR_HIDDEN)
+            if not self.fullscreen and self._glfw is not None:
+                self._toggle_fullscreen(self._glfw, self._window)
+        else:
+            self.image_only = False
+            self.page = self.image_only_previous_page
+            if self._glfw is not None and self._window is not None:
+                self._glfw.set_input_mode(
+                    self._window, self._glfw.CURSOR,
+                    self._glfw.CURSOR_NORMAL)
+            if (self.fullscreen and not self.image_only_previous_fullscreen and
+                    self._glfw is not None):
+                self._toggle_fullscreen(self._glfw, self._window)
+        for field in self.fields:
+            if field.dest == 'image_only':
+                field.value = enabled
+                break
+        self.picture_dirty = True
+        self.dirty = True
+
     def _build_arguments(self):
         words = ['receive', '--headless']
         for field in self.fields:
@@ -301,7 +351,8 @@ class ReceiverGui:
                     self.display_mode = field.value
                 continue
             dest = action.dest
-            if dest in ('help', 'mode', 'headless', 'fullscreen'):
+            if dest in ('help', 'mode', 'headless', 'fullscreen',
+                        'image_only'):
                 continue
             if dest == 'device' and field.value is None:
                 raise ValueError('Select an input audio device before starting.')
@@ -343,6 +394,9 @@ class ReceiverGui:
                            str(exc) or 'Receiver options are invalid.')
             self.dirty = True
             return
+        start_image_only = any(
+            field.value for field in self.fields
+            if field.dest == 'image_only')
         self.started = True
         self.ever_started = True
         self.receiver_stop = threading.Event()
@@ -378,6 +432,8 @@ class ReceiverGui:
             target=receive, name='v7-receiver', daemon=True)
         self.receiver_thread.start()
         self.page = 'info'
+        if start_image_only:
+            self._set_image_only(True)
         self.dirty = True
 
     def _stop_receiver(self):
@@ -571,24 +627,31 @@ class ReceiverGui:
 
     def _render_config(self, image, draw, font, small, mono):
         width, height = image.size
-        draw.text((24, 70), 'Receiver configuration',
+        draw.text((24, 70), 'Receiver setup',
                   fill=(240, 245, 249), font=font)
         draw.text((24, 98),
-                  'Idle · choose an input, review options, then Start. Wheel or ↑/↓ scrolls.',
+                  'Choose an input and start. Advanced decoder controls are optional.',
                   fill=(151, 174, 192), font=small)
-        top = 132
+        order = self._config_field_indexes()
+        top = 140
         bottom = height-126
         visible = max(1, (bottom-top)//ROW_HEIGHT)
-        self.scroll = max(0, min(self.scroll, len(self.fields)-visible))
-        draw.text((width-190, 74),
-                  f'{self.scroll+1}–{min(len(self.fields), self.scroll+visible)} / {len(self.fields)}',
-                  fill=(120, 147, 166), font=small)
-        self.hits.update({'start': (width-236, height-62,
-                                    width-18, height-16)})
+        self.scroll = max(0, min(self.scroll, max(0, len(order)-visible)))
+        if order and self.selected not in order:
+            self.selected = order[0]
+        self.hits['advanced_toggle'] = (width-256, 94, width-14, 124)
+        advanced_label = ('Hide advanced settings' if self.advanced_options else
+                          f'Show advanced settings · {len(self.fields)-len(order)}')
+        draw.rounded_rectangle(self.hits['advanced_toggle'], radius=5,
+                               fill=(22, 35, 46), outline=(67, 100, 122),
+                               width=1)
+        draw.text((width-244, 101), advanced_label,
+                  fill=(196, 216, 229), font=small)
         for row in range(visible):
-            index = self.scroll+row
-            if index >= len(self.fields):
+            order_index = self.scroll+row
+            if order_index >= len(order):
                 break
+            index = order[order_index]
             field = self.fields[index]
             y = top+row*ROW_HEIGHT
             selected = index == self.selected
@@ -633,7 +696,11 @@ class ReceiverGui:
             max_items = min(7, len(menu_items))
             self.dropdown_scroll = max(
                 0, min(self.dropdown_scroll, len(menu_items)-max_items))
-            yrow = top+(self.dropdown-self.scroll)*ROW_HEIGHT
+            try:
+                field_position = order.index(self.dropdown)
+            except ValueError:
+                field_position = self.scroll
+            yrow = top+(field_position-self.scroll)*ROW_HEIGHT
             menu_top = yrow+ROW_HEIGHT
             if menu_top+max_items*29 > bottom:
                 menu_top = max(top, yrow-max_items*29)
@@ -663,19 +730,6 @@ class ReceiverGui:
         if self.notice:
             draw.text((24, height-60), self.notice[:150],
                       fill=(165, 190, 207), font=small)
-        draw.rounded_rectangle(
-            self.hits['start'], radius=6,
-            fill=(82, 65, 48) if self.started else (43, 94, 123),
-            outline=(170, 122, 79) if self.started else (90, 159, 192),
-            width=1)
-        draw.text((self.hits['start'][0]+18, self.hits['start'][1]+12),
-                  'Stop receiver' if self.started else 'Start receiver',
-                  fill=(246, 250, 252), font=font)
-        if self.started:
-            draw.text((self.hits['start'][0]-275, self.hits['start'][1]+13),
-                      'Receiver running',
-                      fill=(255, 204, 140), font=small)
-
         if 0 <= self.selected < len(self.fields):
             field = self.fields[self.selected]
             help_text = getattr(field.action, 'help', '') if field.action else (
@@ -686,10 +740,17 @@ class ReceiverGui:
                     draw.text((24, height-118), lines[0][:150],
                               fill=(123, 148, 168), font=small)
 
+    def _diagnostics_visible(self):
+        return any(field.value for field in self.fields
+                   if field.dest == 'show_diagnostics')
+
     def _picture_box(self, size):
         width, height = size
-        return (18, 68, max(240, round(width*.57)),
-                max(160, round((height-92)*.62)))
+        top = TOOLBAR_HEIGHT+8
+        details_height = round(height*.27) if self._diagnostics_visible() else 0
+        footer_height = 38
+        picture_height = max(1, height-top-details_height-footer_height-8)
+        return (10, top, max(1, width-20), picture_height)
 
     def _picture_viewport(self, window_size, framebuffer_size, aspect_ratio):
         left, top, picture_w, picture_h = self._picture_box(window_size)
@@ -707,124 +768,47 @@ class ReceiverGui:
 
     def _render_info(self, image, draw, font, small, mono):
         width, height = image.size
-        self.hits.update({'mode_button': (width-400, 9,
-                                          width-250, 46)})
-        mode_box = self.hits['mode_button']
-        draw.rounded_rectangle(mode_box, radius=5, fill=(22, 35, 46),
-                               outline=(67, 100, 122), width=1)
-        draw.text((mode_box[0]+10, 18),
-                  f'Upscale {self.display_mode.capitalize()}  ▾',
-                  fill=(236, 242, 247), font=small)
         left, top, picture_w, picture_h = self._picture_box(image.size)
-        picture_area = (picture_w, picture_h)
-        draw.rounded_rectangle((left, top, left+picture_w, top+picture_h),
-                               radius=6, fill=(4, 8, 12),
-                               outline=(49, 69, 83), width=1)
+        draw.rectangle((left, top, left+picture_w, top+picture_h),
+                       fill=(14, 19, 24), outline=(49, 69, 83), width=1)
         if self.latest_values_image is None and not self.started:
-            draw.text((left+20, top+22), 'Receiver not started',
+            label = 'Choose an input in Setup, then press Start.'
+            draw.text((left+18, top+18), label,
                       fill=(205, 219, 229), font=font)
-            draw.text((left+20, top+55),
-                      'Open Configuration, choose an input device, and press Start.',
-                      fill=(134, 159, 179), font=small)
-        else:
-            draw.text((left+20, top+22), 'Waiting for a decoded frame…',
+        elif self.latest_values_image is None:
+            draw.text((left+18, top+18), 'Waiting for the first decoded picture…',
                       fill=(205, 219, 229), font=font)
 
-        right = left+picture_w+16
-        panel_w = max(220, width-right-18)
+        if self._diagnostics_visible():
+            panel_height = round(height*.27)
+            panel_top = height-38-panel_height
+            diagnostics = self.live_diagnostics or {
+                'status': ('ACQUIRING',),
+                'sync': ('waiting for pulse header',),
+                'decode': ('no decoded frames yet',),
+                'input': ('waiting for audio',),
+                'signal': ('picture appears here as soon as it decodes',),
+            }
+            panel = Image.fromarray(_diagnostic_image(
+                (width, panel_height), diagnostics), mode='RGBA')
+            image.alpha_composite(panel, (0, panel_top))
+
+        footer_top = height-38
+        draw.rectangle((0, footer_top, width, height), fill=(10, 18, 25))
         state = ('RECEIVER RUNNING' if self.started else
                  'RECEIVER STOPPED' if self.ever_started else 'NOT STARTED')
         if self.receiver_thread is not None and not self.receiver_thread.is_alive():
             state = 'RECEIVER STOPPED'
-        draw.rounded_rectangle((right, top, width-18, top+72), radius=5,
-                               fill=(15, 26, 35), outline=(49, 69, 83), width=1)
-        draw.text((right+12, top+10), state,
-                  fill=(147, 206, 169) if self.started else (189, 203, 214),
-                  font=font)
+        count = (self.live_meter or {}).get('decoded', 0)
+        input_fps = (self.live_meter or {}).get('input_fps', 0.0)
         if self.current_frame is not None:
             status = (self.latest_report or {}).get('status', 'picture decoded')
-            index = (self.latest_report or {}).get('source_index', '--')
-            detail = f'{status} · source index {index}'
+            detail = f'{state} · {status} · {count} pictures · input {input_fps:.1f} fps'
         else:
-            detail = self.notice[:80]
-        draw.text((right+12, top+42), _fit_text(detail, small, panel_w-24),
-                  fill=(156, 177, 192), font=small)
-        device_field = next(
-            (field for field in self.fields
-             if field.action is not None and field.action.dest == 'device'),
-            None)
-        device_text = (self._field_value_label(device_field)
-                       if device_field is not None else 'not selected')
-        draw.text((right+12, top+60),
-                  _fit_text(f'Input: {device_text}', small, panel_w-24),
-                  fill=(131, 154, 171), font=small)
-
-        info_top = top+84
-        info_bottom = height-20
-        draw.rounded_rectangle((right, info_top, width-18, info_bottom),
-                               radius=5, fill=(13, 23, 32),
-                               outline=(49, 69, 83), width=1)
-        show_details = next(
-            (field.value for field in self.fields
-             if field.action is not None and
-             field.action.dest == 'show_diagnostics'), True)
-        if not show_details:
-            draw.text((right+12, info_top+12),
-                      'Diagnostics hidden. Enable Show diagnostics in Configuration.',
-                      fill=(175, 194, 208), font=small)
-        else:
-            draw.text((right+12, info_top+9), 'LATEST DECODER INFORMATION',
-                      fill=(134, 166, 188), font=small)
-            if self.live_diagnostics is not None:
-                sections = []
-                for key in ('status', 'sync', 'decode', 'input', 'signal'):
-                    values = self.live_diagnostics.get(key, ())
-                    sections.append(f'{key.upper()}')
-                    sections.extend(f'  {line}' for line in values)
-                if self.live_meter is not None:
-                    sections.extend(('LIVE METER', json.dumps(
-                        self.live_meter, indent=2, default=str)))
-                packet = self.live_packet or self.latest_report
-                if packet is not None:
-                    sections.extend(('LATEST PACKET', json.dumps(
-                        packet, indent=2, default=str)))
-                if self.live_decode_info is not None:
-                    sections.extend(('DECODE DETAILS', json.dumps(
-                        self.live_decode_info, indent=2, default=str)))
-                report_text = '\n'.join(sections)
-            elif self.latest_report is not None:
-                report_text = json.dumps(self.latest_report, indent=2, default=str)
-            elif self.lines:
-                report_text = '\n'.join(self.lines)
-            elif self.started:
-                report_text = 'Waiting for receiver status…'
-            else:
-                report_text = ('The receiver is idle. No audio stream is open.\n'
-                               'Configuration and device selection remain available.')
-            if self.lines:
-                report_text += '\n\nRECENT OUTPUT\n' + '\n'.join(
-                    str(line) for line in list(self.lines)[-3:])
-            chars = max(24, int((panel_w-26)/max(1, mono.getlength('M'))))
-            lines = []
-            for raw in report_text.splitlines():
-                while len(raw) > chars:
-                    lines.append(raw[:chars])
-                    raw = raw[chars:]
-                lines.append(raw)
-            max_lines = max(1, (info_bottom-info_top-44)//17)
-            max_start = max(0, len(lines)-max_lines)
-            if self.info_follow:
-                self.info_scroll = max_start
-            else:
-                self.info_scroll = max(0, min(self.info_scroll, max_start))
-            start = self.info_scroll
-            for index, line in enumerate(lines[start:start+max_lines]):
-                draw.text((right+12, info_top+32+index*17), line,
-                          fill=(223, 232, 239), font=mono)
-        draw.text((left, top+picture_h+10), _fit_text(
-                  f'View: {self.display_mode} · I toggles config/info · F fullscreen · wheel scrolls details',
-                  small, picture_w),
-                  fill=(135, 159, 178), font=small)
+            detail = f'{state} · {self.notice}'
+        draw.text((14, footer_top+11), _fit_text(detail, small, width-28),
+                  fill=(147, 206, 169) if self.started else (189, 203, 214),
+                  font=small)
 
     def _canvas(self, size):
         width, height = size
@@ -835,38 +819,51 @@ class ReceiverGui:
         draw.rectangle((0, TOOLBAR_HEIGHT-1, width, TOOLBAR_HEIGHT),
                        fill=(47, 68, 83, 255))
         self.hits = {}
-        tabs = (('config_tab', 'Configuration', 14, 160),
-                ('info_tab', 'Information', 168, 310))
-        for key, label, x1, x2 in tabs:
-            active = (key == 'config_tab' and self.page == 'config') or (
-                key == 'info_tab' and self.page == 'info')
-            box = (x1, 9, x2, 46)
-            self.hits[key] = box
-            draw.rounded_rectangle(box, radius=5,
-                                   fill=(39, 67, 86) if active else (22, 35, 46),
+        diagnostics_visible = self._diagnostics_visible()
+        controls = (
+            ('config_tab', 'Setup', 12, 104),
+            ('info_tab', 'Live', 112, 184),
+            ('start_stop', 'Stop' if self.started else 'Start', 192, 284),
+            ('mode_button', f'{self.display_mode.capitalize()}  ▾',
+             width-414, width-300),
+            ('details_button', 'Info On' if diagnostics_visible else
+             'Info Off', width-292, width-220),
+            ('image_only', 'Image only', width-212, width-112),
+            ('fullscreen', 'Fullscreen', width-104, width-12),
+        )
+        for key, label, x1, x2 in controls:
+            if key in ('mode_button', 'details_button', 'image_only') and self.page != 'info':
+                continue
+            self.hits[key] = (x1, 9, x2, 46)
+            active = ((key == 'config_tab' and self.page == 'config') or
+                      (key == 'info_tab' and self.page == 'info'))
+            fill = ((39, 67, 86) if active else
+                    (82, 55, 40) if key == 'start_stop' and self.started else
+                    (43, 94, 123) if key == 'start_stop' else
+                    (22, 35, 46))
+            draw.rounded_rectangle(self.hits[key], radius=5, fill=fill,
                                    outline=(67, 100, 122), width=1)
-            draw.text((x1+12, 18), label, fill=(236, 242, 247), font=small)
-        full_box = (width-120, 9, width-14, 46)
-        self.hits['fullscreen'] = full_box
-        draw.rounded_rectangle(full_box, radius=5, fill=(22, 35, 46),
-                               outline=(67, 100, 122), width=1)
-        draw.text((width-106, 18), 'Fullscreen',
-                  fill=(236, 242, 247), font=small)
-        if self.started:
-            stop_box = (width-240, 9, width-132, 46)
-            self.hits['start_stop'] = stop_box
-            draw.rounded_rectangle(stop_box, radius=5, fill=(82, 55, 40),
-                                   outline=(170, 122, 79), width=1)
-            draw.text((stop_box[0]+14, 18), 'Stop',
-                      fill=(246, 240, 235), font=small)
+            text_width = max(1, x2-x1-16)
+            shown = _fit_text(label, small, text_width)
+            draw.text((x1+8, 18), shown,
+                      fill=(246, 240, 235) if key == 'start_stop' and self.started
+                      else (236, 242, 247), font=small)
         if self.page == 'config':
             self._render_config(image, draw, font, small, mono)
         else:
             self._render_info(image, draw, font, small, mono)
         return np.ascontiguousarray(np.asarray(image, dtype=np.uint8))
 
+    def _config_field_indexes(self):
+        indexes = []
+        for index, field in enumerate(self.fields):
+            if (self.advanced_options or field.dest in BASIC_OPTION_DESTS or
+                    field.label == 'Display upscaler'):
+                indexes.append(index)
+        return indexes
+
     def _visible_fields(self, height):
-        top, bottom = 132, height-126
+        top, bottom = 140, height-126
         return top, max(1, (bottom-top)//ROW_HEIGHT)
 
     def _change_page(self):
@@ -895,10 +892,18 @@ class ReceiverGui:
             self.page, self.dropdown = 'info', None
         elif hit == 'fullscreen':
             self._toggle_fullscreen(glfw, window)
-        elif hit == 'start':
-            self._start_receiver()
+        elif hit == 'image_only':
+            self._set_image_only(True)
+        elif hit == 'details_button':
+            field = next(field for field in self.fields
+                         if field.dest == 'show_diagnostics')
+            field.value = not field.value
+            self.dirty = True
         elif hit == 'start_stop':
-            self._stop_receiver()
+            if self.started:
+                self._stop_receiver()
+            else:
+                self._start_receiver()
         elif hit == 'mode_button':
             field = next(field for field in self.fields
                          if field.label == 'Display upscaler')
@@ -924,6 +929,14 @@ class ReceiverGui:
                     self.editing = True
                     self.edit_buffer = '' if field.value is None else str(field.value)
             self.dirty = True
+        elif hit == 'advanced_toggle':
+            self.advanced_options = not self.advanced_options
+            self.dropdown = None
+            self.scroll = 0
+            order = self._config_field_indexes()
+            if order and self.selected not in order:
+                self.selected = order[0]
+            self.dirty = True
         elif self.dropdown is not None:
             self.dropdown = None
             self.dirty = True
@@ -945,9 +958,23 @@ class ReceiverGui:
                 self.edit_buffer = ''
             self.dirty = True
             return
+        if self.image_only:
+            if key in (glfw.KEY_ESCAPE, glfw.KEY_P):
+                self._set_image_only(False)
+            return
         if key == glfw.KEY_F:
             self._toggle_fullscreen(glfw, window)
-        elif key in (glfw.KEY_I, glfw.KEY_TAB):
+        elif key == glfw.KEY_P:
+            self._set_image_only(True)
+        elif key == glfw.KEY_I:
+            if self.page == 'info':
+                field = next(field for field in self.fields
+                             if field.dest == 'show_diagnostics')
+                field.value = not field.value
+            else:
+                self.page = 'info'
+            self.dirty = True
+        elif key == glfw.KEY_TAB:
             self._change_page()
         elif key == glfw.KEY_C:
             self.page = 'config'
@@ -985,13 +1012,16 @@ class ReceiverGui:
                            (1 if key == glfw.KEY_DOWN else -1)))
             else:
                 delta = -1 if key == glfw.KEY_UP else 1
-                self.selected = max(0, min(len(self.fields)-1,
-                                           self.selected+delta))
+                order = self._config_field_indexes()
+                position = order.index(self.selected) if self.selected in order else 0
+                position = max(0, min(len(order)-1, position+delta))
+                if order:
+                    self.selected = order[position]
                 top, visible = self._visible_fields(self.height)
-                if self.selected < self.scroll:
-                    self.scroll = self.selected
-                elif self.selected >= self.scroll+visible:
-                    self.scroll = self.selected-visible+1
+                if position < self.scroll:
+                    self.scroll = position
+                elif position >= self.scroll+visible:
+                    self.scroll = position-visible+1
             self.dirty = True
         elif key in (glfw.KEY_UP, glfw.KEY_DOWN) and self.page == 'info':
             if key == glfw.KEY_DOWN:
@@ -1031,7 +1061,7 @@ class ReceiverGui:
                        self.dropdown_scroll+delta))
         elif self.page == 'config':
             _top, visible = self._visible_fields(self.height)
-            self.scroll = max(0, min(max(0, len(self.fields)-visible),
+            self.scroll = max(0, min(max(0, len(self._config_field_indexes())-visible),
                                      self.scroll+delta))
         else:
             if delta > 0:
@@ -1052,6 +1082,8 @@ class ReceiverGui:
         ui_texture = picture_texture = None
         picture_texture_size = None
         picture_texture_mode = None
+        frame_buffer = getattr(self.v7_live, 'FRAME_BUFFER', None)
+        set_frame_notifier = getattr(frame_buffer, 'set_notifier', None)
         try:
             glfw.default_window_hints()
             glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
@@ -1064,6 +1096,9 @@ class ReceiverGui:
                 raise RuntimeError('GLFW could not create the V7 receiver window')
             glfw.make_context_current(window)
             self._window = window
+            self._glfw = glfw
+            if set_frame_notifier is not None:
+                set_frame_notifier(glfw.post_empty_event)
             glfw.set_window_size_limits(window, 720, 480,
                                         glfw.DONT_CARE, glfw.DONT_CARE)
             glfw.swap_interval(1)
@@ -1079,8 +1114,29 @@ class ReceiverGui:
                 window, lambda w, b, a, m: self._on_mouse(glfw, w, b, a, m))
             glfw.set_scroll_callback(window, self._on_scroll)
 
+            def upload_picture():
+                nonlocal picture_texture, picture_texture_size
+                if self.latest_values_image is None:
+                    return
+                pixels = np.ascontiguousarray(np.asarray(
+                    self.latest_values_image, dtype=np.uint8))
+                picture_size = (pixels.shape[1], pixels.shape[0])
+                if (picture_texture is None or
+                        picture_texture_size != picture_size):
+                    if picture_texture is not None:
+                        picture_texture.release()
+                    picture_texture = context.texture(
+                        picture_size, 3, pixels.tobytes(), dtype='f1')
+                    picture_texture_size = picture_size
+                    picture_texture.repeat_x = False
+                    picture_texture.repeat_y = False
+                else:
+                    picture_texture.write(pixels.tobytes())
+
             while not glfw.window_should_close(window):
-                glfw.wait_events_timeout(.04)
+                # Frame publication wakes GLFW immediately; the 60 Hz timeout
+                # remains a fallback for input, diagnostics and lifecycle work.
+                glfw.wait_events_timeout(1/60)
                 self._process_output()
                 self._poll_frame()
                 self._poll_diagnostics()
@@ -1101,57 +1157,61 @@ class ReceiverGui:
                     self.last_ui_size = window_size
                     self.dirty = True
                 if (ui_texture is not None and
-                        ui_texture.size != window_size):
+                        ui_texture.size != window_size and not self.image_only):
                     self.dirty = True
+
                 picture_needs_draw = (self.picture_dirty and
-                                      self.page == 'info')
-                if self.dirty or picture_needs_draw:
-                    if self.dirty:
-                        rgba = self._canvas(window_size)
-                        ui_size = (rgba.shape[1], rgba.shape[0])
-                        if ui_texture is None or ui_texture.size != ui_size:
-                            if ui_texture is not None:
-                                ui_texture.release()
-                            ui_texture = context.texture(
-                                ui_size, 4, rgba.tobytes(), dtype='f1')
-                        else:
-                            ui_texture.write(rgba.tobytes())
-                        ui_texture.filter = (moderngl.LINEAR,
-                                             moderngl.LINEAR)
-                        ui_texture.repeat_x = False
-                        ui_texture.repeat_y = False
-                        self.dirty = False
-                        if (self.page == 'info' and self.current_frame is not None
-                                and self.latest_values_image is not None):
-                            self.picture_dirty = True
-                            picture_needs_draw = True
+                                      (self.page == 'info' or self.image_only))
+                if picture_needs_draw:
+                    upload_picture()
+                    self.picture_dirty = False
 
-                    if picture_needs_draw:
-                        if self.latest_values_image is not None:
-                            pixels = np.ascontiguousarray(np.asarray(
-                                self.latest_values_image, dtype=np.uint8))
-                            picture_size = (pixels.shape[1], pixels.shape[0])
-                            if (picture_texture is None or
-                                    picture_texture_size != picture_size):
-                                if picture_texture is not None:
-                                    picture_texture.release()
-                                picture_texture = context.texture(
-                                    picture_size, 3, pixels.tobytes(), dtype='f1')
-                                picture_texture_size = picture_size
-                                picture_texture.repeat_x = False
-                                picture_texture.repeat_y = False
-                            else:
-                                picture_texture.write(pixels.tobytes())
-                        self.picture_dirty = False
+                if (picture_texture is not None and
+                        picture_texture_mode != self.display_mode):
+                    filtering = (moderngl.NEAREST
+                                 if self.display_mode == 'nearest'
+                                 else moderngl.LINEAR)
+                    picture_texture.filter = (filtering, filtering)
+                    picture_texture_mode = self.display_mode
 
-                    if (picture_texture is not None and
-                            picture_texture_mode != self.display_mode):
-                        filtering = (moderngl.NEAREST
-                                     if self.display_mode == 'nearest'
-                                     else moderngl.LINEAR)
-                        picture_texture.filter = (filtering, filtering)
-                        picture_texture_mode = self.display_mode
+                if self.image_only:
+                    if self.dirty or picture_needs_draw:
+                        context.viewport = (0, 0, *framebuffer_size)
+                        context.clear(.035, .045, .055, 1.0)
+                        if picture_texture is not None and self.current_frame is not None:
+                            aspect = self.v7_live.P.V7_ASPECT_RATIOS[
+                                self.current_frame.aspect & 7]
+                            context.viewport = fit_viewport(
+                                framebuffer_size, aspect)
+                            picture_texture.use(location=0)
+                            vertex_array.render(
+                                mode=moderngl.TRIANGLES, vertices=3)
+                        glfw.swap_buffers(window)
+                    self.dirty = False
+                    title = 'V7 Receiver · Image only'
+                    if title != self.last_title:
+                        glfw.set_window_title(window, title)
+                        self.last_title = title
+                    continue
 
+                ui_needs_draw = self.dirty
+                if ui_needs_draw:
+                    rgba = self._canvas(window_size)
+                    ui_size = (rgba.shape[1], rgba.shape[0])
+                    if ui_texture is None or ui_texture.size != ui_size:
+                        if ui_texture is not None:
+                            ui_texture.release()
+                        ui_texture = context.texture(
+                            ui_size, 4, rgba.tobytes(), dtype='f1')
+                    else:
+                        ui_texture.write(rgba.tobytes())
+                    ui_texture.filter = (moderngl.LINEAR,
+                                         moderngl.LINEAR)
+                    ui_texture.repeat_x = False
+                    ui_texture.repeat_y = False
+                    self.dirty = False
+
+                if ui_needs_draw or picture_needs_draw:
                     context.viewport = (0, 0, *framebuffer_size)
                     context.clear(.03, .05, .07, 1.0)
                     ui_texture.use(location=0)
@@ -1180,6 +1240,8 @@ class ReceiverGui:
                 self.receiver_stop.set()
             if self.receiver_thread is not None:
                 self.receiver_thread.join(timeout=2)
+            if set_frame_notifier is not None:
+                set_frame_notifier(None)
             if ui_texture is not None:
                 ui_texture.release()
             if picture_texture is not None:
@@ -1193,6 +1255,8 @@ class ReceiverGui:
             if window is not None:
                 glfw.destroy_window(window)
             glfw.terminate()
+            self._window = None
+            self._glfw = None
 
 
 def main(v7_live_module=None):

@@ -23,6 +23,12 @@ class LatestFrame:
         self._lock = threading.Lock()
         self._frame = None
         self._generation = 0
+        self._notifier = None
+
+    def set_notifier(self, notifier):
+        """Set an optional thread-safe wake callback for a waiting viewer."""
+        with self._lock:
+            self._notifier = notifier
 
     def publish(self, values, shapes, aspect=0):
         """Publish a frame reference and discard any older unpublished frame."""
@@ -30,6 +36,13 @@ class LatestFrame:
             self._generation += 1
             self._frame = DisplayFrame(values, shapes, int(aspect),
                                        self._generation)
+            notifier = self._notifier
+        if notifier is not None:
+            try:
+                notifier()
+            except Exception:
+                # A closing viewer must not break the decoder's publication path.
+                pass
 
     def snapshot(self):
         """Return the newest frame, or ``None`` before the first decode."""

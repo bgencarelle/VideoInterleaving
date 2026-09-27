@@ -74,6 +74,7 @@ from tools.v7_display import LatestFrame                                      # 
 
 FPS = P.PULSE_FPS
 CAMERA_CAPTURE_FPS = 15
+INPUT_AUDIO_QUEUE_BLOCKS = 8
 DEFAULT_FIXTURE = ROOT / 'modem_tests/fixtures/v7_reference_face.png'
 # The display stays independent of the modem decoder and can consume the latest
 # frame without building a backlog.
@@ -587,6 +588,8 @@ def capture_rate_for(device_info):
 
 
 def run_receive(args):
+    if getattr(args, 'image_only', False) and getattr(args, 'headless', False):
+        raise ValueError('--image-only cannot be combined with --headless')
     slots = _fold_slots(args)
     fold = _experimental_fold(slots)
     if fold is None:
@@ -639,8 +642,9 @@ def _run_receive(args, fold):
     device_info = sd.query_devices(args.device, 'input')
     input_channels = 1 if device_info['max_input_channels'] < 2 else 2
     capture_rate = capture_rate_for(device_info)
-    blocks = queue.Queue(maxsize=32)
+    blocks = queue.Queue(maxsize=INPUT_AUDIO_QUEUE_BLOCKS)
     input_gap = threading.Event()
+    input_ready = threading.Event()
     live_input = LiveInput(
         args.decode_history, args.decode_batch, rate=capture_rate,
         direction=getattr(args, 'direction', 'auto'))
@@ -696,6 +700,7 @@ def _run_receive(args, fold):
             # stale audio would make the V7 clock appear to run backward.
             meter['dropped'] += 1
             input_gap.set()
+        input_ready.set()
 
     def live_loop_position():
         """(calculated index now, its direction, picture index minus it).
@@ -804,6 +809,14 @@ def _run_receive(args, fold):
             meter['playback_direction'] = None
             meter['direction_candidate'] = None
             meter['direction_streak'] = 0
+            # A full queue contains stale audio. Discard it after declaring the
+            # discontinuity so recovery starts at live input instead of playing
+            # through up to 0.7 s of buffered blocks.
+            while True:
+                try:
+                    blocks.get_nowait()
+                except queue.Empty:
+                    break
             if not args.no_log:
                 print({'status': 'input_gap_reacquire',
                        'dropped': meter['dropped']}, flush=True)
@@ -1031,7 +1044,11 @@ def _run_receive(args, fold):
         raise
 
     def decode_worker():
-        while not stop.is_set():
+        while True:
+            input_ready.wait()
+            input_ready.clear()
+            if stop.is_set():
+                break
             try:
                 decode_available()
             except Exception as exc:
@@ -1041,7 +1058,6 @@ def _run_receive(args, fold):
                 if not args.no_log:
                     print({'status': 'decoder_exception',
                            'error': repr(exc)}, flush=True)
-            stop.wait(.01)
 
     decoder_thread = threading.Thread(target=decode_worker, daemon=True)
     decoder_thread.start()
@@ -1057,11 +1073,13 @@ def _run_receive(args, fold):
                 P.V7_ASPECT_RATIOS, fullscreen=args.fullscreen,
                 show_diagnostics=args.show_diagnostics,
                 diagnostics_source=display_diagnostics,
-                profile_cpu=args.profile_ui)
+                profile_cpu=args.profile_ui,
+                image_only=getattr(args, 'image_only', False))
     except KeyboardInterrupt:
         pass
     finally:
         stop.set()
+        input_ready.set()
         decoder_thread.join(timeout=2)
         stream.stop()
         stream.close()
@@ -1149,6 +1167,8 @@ def parser():
     recv.add_argument('--headless', action='store_true')
     recv.add_argument('--fullscreen', action='store_true',
                       help='start fullscreen; F toggles, Escape exits fullscreen')
+    recv.add_argument('--image-only', action='store_true',
+                      help='show only the decoded picture fullscreen; Esc exits')
     recv.add_argument('--no-diagnostics', dest='show_diagnostics',
                       action='store_false',
                       help='hide the diagnostic overlay (I toggles it)')

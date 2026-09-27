@@ -117,10 +117,13 @@ The WAV path does not invoke the project's stochastic folder selector.
 
 For direct camera, screen, or video-file transmission, use the standalone
 `vi.modem-send` and `vi.modem-receive` wrappers. This path is separate from
-`main.py --mode modem`, which sends the baked image library described above.
-From the repository root, start the receiver first. Both live tools default to
-the pinned M=500 fold with coded pilot status; the sender selects the matching
-box profile and the receiver despreads the chips before tone-assisted timing.
+`main.py --mode modem`. The application path defaults to the baked image slabs,
+but `--modem-source images` loads ordinary source images and encodes them at
+runtime. Both paths use V7 pulse framing; the standalone live tools default to
+the pinned M=500 fold with coded pilot status, while that fold is not the
+application mode's default. From the repository root, start the standalone
+receiver first. The sender selects the matching box profile and the receiver
+despreads the chips before tone-assisted timing.
 
 ```bash
 # Terminal 1
@@ -153,9 +156,9 @@ List available device names with `.venv/bin/python -m sounddevice`. On separate
 machines, use the actual output-device name for sending and input-device name
 for receiving; they do not need to match.
 
-## Live output from the baked-image application
+## Live output from the application
 
-The remaining instructions here are for the baked-library path through
+The remaining instructions here are for the application path through
 `main.py --mode modem`, not the standalone `vi.modem-*` V7 capture tools above.
 List PortAudio devices using the legacy link checker:
 

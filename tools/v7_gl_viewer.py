@@ -227,7 +227,7 @@ def _diagnostic_image(size, diagnostics):
     card_height = max(1, (height-2*padding-heading_height-gap)//2)
     status = diagnostics.get('status', ('ACQUIRING',))[0].upper()
     draw.text((padding, 3),
-              f'{status}  ·  F fullscreen  ·  I toggle info  ·  Esc exit',
+              f'{status}  ·  F fullscreen  ·  I toggle diagnostics  ·  Esc exit',
               fill=(132, 153, 173, 255), font=heading_font)
     specs = (
         ('SYNC  /  INDEX', 'sync'),
@@ -256,7 +256,7 @@ def _diagnostic_image(size, diagnostics):
 
 def run(frame_source, status_source, aspect_ratios, fullscreen=False,
         show_diagnostics=True, diagnostics_source=None,
-        profile_cpu=False, display_mode=None):
+        profile_cpu=False, display_mode=None, image_only=False):
     """Display new frames on a vsynced GL window, sleeping between events.
 
     GLFW and ModernGL are imported here so headless receive stays independent
@@ -268,6 +268,9 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
 
     if not glfw.init():
         raise RuntimeError('GLFW initialization failed')
+
+    image_only = bool(image_only)
+    fullscreen = bool(fullscreen or image_only)
 
     window = None
     texture = None
@@ -285,6 +288,8 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
         glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
         glfw.window_hint(glfw.OPENGL_FORWARD_COMPAT, glfw.TRUE)
         glfw.window_hint(glfw.RESIZABLE, glfw.TRUE)
+        if image_only:
+            glfw.window_hint(glfw.DECORATED, glfw.FALSE)
         monitor = glfw.get_primary_monitor() if fullscreen else None
         if fullscreen:
             mode = glfw.get_video_mode(monitor) if monitor else None
@@ -292,10 +297,13 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
             height = mode.size.height if mode else 720
         else:
             width, height = 960, 720
-        window = glfw.create_window(width, height, 'V7 Receiver', monitor, None)
+        title = 'V7 · Image only' if image_only else 'V7 Receiver'
+        window = glfw.create_window(width, height, title, monitor, None)
         if not window:
             raise RuntimeError('GLFW could not create the V7 receiver window')
         glfw.make_context_current(window)
+        if image_only:
+            glfw.set_input_mode(window, glfw.CURSOR, glfw.CURSOR_HIDDEN)
         glfw.swap_interval(1)
 
         context = moderngl.create_context(require=330)
@@ -311,7 +319,7 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
 
         windowed_bounds = {'position': (80, 80), 'size': (960, 720)}
         is_fullscreen = bool(fullscreen)
-        show_details = bool(show_diagnostics)
+        show_details = bool(show_diagnostics) and not image_only
         last_frame_generation = None
         last_viewport = None
         last_title = None
@@ -354,6 +362,10 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
             nonlocal show_details, last_title, display_mode, open_dropdown
             nonlocal toolbar_key, dirty
             if action != glfw.PRESS:
+                return
+            if image_only:
+                if key in (glfw.KEY_ESCAPE, glfw.KEY_Q):
+                    glfw.set_window_should_close(window, True)
                 return
             if key == glfw.KEY_ESCAPE and open_dropdown is not None:
                 open_dropdown = None
@@ -510,27 +522,30 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
             if save_notice and time.monotonic() >= save_notice_until:
                 save_notice = ''
                 toolbar_key = None
-            toolbar_state = (window_size, display_mode,
-                             show_details, open_dropdown, save_notice)
-            toolbar_height = 48 + (62 if open_dropdown else 0)
-            toolbar_size = (max(320, int(window_size[0])), toolbar_height)
-            if (toolbar is None or toolbar.size != toolbar_size or
-                    toolbar_key != toolbar_state):
-                toolbar_pixels = _toolbar_image(
-                    window_size, display_mode, show_details, open_dropdown,
-                    save_notice)
-                if toolbar is not None:
-                    toolbar.release()
-                toolbar = context.texture(
-                    toolbar_size, 4, data=toolbar_pixels.tobytes(), dtype='f1')
-                toolbar.filter = (moderngl.LINEAR, moderngl.LINEAR)
-                toolbar.repeat_x = False
-                toolbar.repeat_y = False
-                toolbar_key = toolbar_state
-                toolbar_hits = toolbar_layout(window_size[0], open_dropdown)
-                dirty = True
-            toolbar_fb_height = (round(fb_size[1]*toolbar_size[1]/window_size[1])
-                                 if window_size[1] else 0)
+            toolbar_fb_height = 0
+            if not image_only:
+                toolbar_state = (window_size, display_mode,
+                                 show_details, open_dropdown, save_notice)
+                toolbar_height = 48 + (62 if open_dropdown else 0)
+                toolbar_size = (max(320, int(window_size[0])), toolbar_height)
+                if (toolbar is None or toolbar.size != toolbar_size or
+                        toolbar_key != toolbar_state):
+                    toolbar_pixels = _toolbar_image(
+                        window_size, display_mode, show_details, open_dropdown,
+                        save_notice)
+                    if toolbar is not None:
+                        toolbar.release()
+                    toolbar = context.texture(
+                        toolbar_size, 4, data=toolbar_pixels.tobytes(), dtype='f1')
+                    toolbar.filter = (moderngl.LINEAR, moderngl.LINEAR)
+                    toolbar.repeat_x = False
+                    toolbar.repeat_y = False
+                    toolbar_key = toolbar_state
+                    toolbar_hits = toolbar_layout(window_size[0], open_dropdown)
+                    dirty = True
+                toolbar_fb_height = (
+                    round(fb_size[1]*toolbar_size[1]/window_size[1])
+                    if window_size[1] else 0)
             ratio = (aspect_ratios[frame.aspect & 7]
                      if frame is not None else 4/3)
             panel_height = (round(fb_size[1]*.36)
@@ -559,7 +574,7 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
                     overlay.use(location=0)
                     overlay_array.render(mode=moderngl.TRIANGLES, vertices=3)
                     context.disable(moderngl.BLEND)
-                if toolbar is not None and toolbar_fb_height:
+                if not image_only and toolbar is not None and toolbar_fb_height:
                     context.enable(moderngl.BLEND)
                     context.blend_func = (moderngl.SRC_ALPHA,
                                           moderngl.ONE_MINUS_SRC_ALPHA)
