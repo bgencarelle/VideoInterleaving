@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Test V7 luma/chroma allocation changes at a fixed coefficient budget."""
+"""Test V7 luma/chroma allocation changes at a fixed coefficient budget.
+
+Both arms use the live framing -- EOF marker, coded pilots, tone-seeded timing,
+EOF boundaries -- with the fold off, because the pinned fold tables belong to
+the canonical box model only (tools/v7_wire_profile.py). ``--profile baseline``
+reruns the historical no-tone / no-EOF wire.
+"""
 import argparse
 import json
 import sys
@@ -15,7 +21,8 @@ from animation_modem import v7
 from animation_modem.imaging import values_image
 from tools.measure_plane_survival import plane_metrics_arrays
 from tools.v7_grid_comparison import crop_sbs, sample_values
-from tools.v7_torture_matrix import CASES, TARGET, impair
+from tools.v7_torture_matrix import CASES, RATE, TARGET, impair
+from tools.v7_wire_profile import WireProfile, add_profile_argument
 
 CURRENT_SHAPES = v7.V7_SHAPES
 # Same 2,880 transmitted coefficients: +420 (+21.9%) luma; -210 (-43.8%)
@@ -38,14 +45,14 @@ def custom_shape_model(source, shapes):
         v7.V7_SHAPES = old_shapes
 
 
-def decode(model, audio, reference):
-    results, _ = v7.decode_pulse_stream(model, audio)
+def decode(profile, model, audio, reference):
+    results, _ = profile.decode(model, audio, sample_rate=RATE)
     frames = []
     scores = []
     for result in results:
         if result.status == 'lost' or not result.diag.get('displayable', False):
             continue
-        pixels = model.coder.inverse(result.coeffs * model.coder.gains)
+        pixels = profile.values(model, result)
         frame = values_image(pixels, model.coder.grids)
         frames.append(frame)
         scores.append(plane_metrics_arrays(
@@ -96,6 +103,7 @@ def main(argv=None):
     parser.add_argument('--only', action='append', default=[])
     parser.add_argument('--allocation', choices=('luma-heavy', 'chroma-heavy'),
                         default='luma-heavy')
+    add_profile_argument(parser)
     args = parser.parse_args(argv)
     if args.frames < 3 or args.max_images < 1:
         parser.error('--frames must be >= 3 and --max-images >= 1')
@@ -112,6 +120,8 @@ def main(argv=None):
     candidate_shapes = (LUMA_HEAVY_SHAPES if args.allocation == 'luma-heavy'
                         else CHROMA_HEAVY_SHAPES)
     current_model = v7.load_model(TARGET, 'nearest')
+    profile = WireProfile(args.profile, fold=False)
+    print(f'wire profile: {profile.label}', flush=True)
     rows = []
     for path in paths:
         source = crop_sbs(path)
@@ -122,28 +132,29 @@ def main(argv=None):
         with Image.open(v7.REFERENCE_FIXTURE) as fixture:
             candidate_model = custom_shape_model(fixture.convert('RGB'), candidate_shapes)
         values = sample_values(source, current_model.coder.grids, 'NEAREST')
-        audio48 = v7.encode_pulse_stream(current_model, [values]*args.frames, 1,
-                                         [0]*args.frames)
+        audio48 = profile.encode(current_model, [values]*args.frames, 1,
+                                 [0]*args.frames)
         stereo = resample_poly(audio48, 2, 1, axis=0).astype(np.float32)
         # Encode once per shape set; the candidate's source slots and transforms
         # are different even though the wire count and packet timing are equal.
         candidate_values = sample_values(source, candidate_model.coder.grids, 'NEAREST')
-        candidate_audio48 = v7.encode_pulse_stream(
+        candidate_audio48 = profile.encode(
             candidate_model, [candidate_values]*args.frames, 1, [0]*args.frames)
         candidate_stereo = resample_poly(candidate_audio48, 2, 1, axis=0).astype(np.float32)
         for case in cases:
             selected = []
             candidate_name = args.allocation
-            for profile, model, audio in (('current', current_model, stereo),
-                                          (candidate_name, candidate_model, candidate_stereo)):
+            for arm, model, audio in (('current', current_model, stereo),
+                                      (candidate_name, candidate_model, candidate_stereo)):
                 damaged = impair(audio, case, seed=args.seed)
-                images, stats = decode(model, damaged, source)
+                images, stats = decode(profile, model, damaged, source)
                 picture = images[len(images)//2] if images else None
                 if picture is not None:
-                    picture.save(args.out / f'{stem}_{case.name}_{profile}.png')
+                    picture.save(args.out / f'{stem}_{case.name}_{arm}.png')
                 selected.append(picture)
                 rows.append({'image': path.name, 'case': case.name,
-                             'profile': profile, 'seed': args.seed,
+                             'profile': arm, 'wire': profile.label,
+                             'seed': args.seed,
                              'shapes': [list(s) for s in model.coder.shapes], **stats})
             comparison_sheet(args.out / f'{stem}_{case.name}_comparison.png',
                              source, selected[0], selected[1],

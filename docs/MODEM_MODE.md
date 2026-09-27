@@ -160,6 +160,14 @@ for receiving; they do not need to match.
 
 The remaining instructions here are for the application path through
 `main.py --mode modem`, not the standalone `vi.modem-*` V7 capture tools above.
+
+This path sends V7 with the nearest encoding profile, steady pilot tones and
+the EOF marker. It does not fold yet; the standalone tools above send the
+fold-500 coded profile, and moving this sender to it is planned
+(`docs/transport_v7_spec.md` section 10.8). The normal live profile includes
+the EOF marker; `--no-modem-eof-marker` remains available for legacy-wire tests
+and comparisons.
+
 List PortAudio devices using the legacy link checker:
 
 ```bash

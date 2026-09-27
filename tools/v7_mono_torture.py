@@ -5,6 +5,10 @@ The wire geometry stays fixed.  Smaller sources are box-downsampled and
 upsampled before encoding, so this tests pre-smoothing, not a new wire profile.
 Each stereo wire is impaired before its two tracks are mixed into a mono WAV.
 Only the resulting WAV samples are passed to the mono decoder.
+
+By default the wire is the one the senders emit (M=500 fold, coded pilots, EOF
+marker; tools/v7_wire_profile.py). ``--profile baseline`` reruns the historical
+nearest / no-tone / no-EOF wire.
 """
 import argparse
 import json
@@ -22,6 +26,7 @@ from animation_modem.imaging import values_image
 from tools.measure_plane_survival import plane_metrics_arrays
 from tools.v7_torture_matrix import (CASES, DEFAULT_FRAMES, FIXTURE, RATE,
                                      TARGET, image_quality, impair)
+from tools.v7_wire_profile import WireProfile, add_profile_argument
 
 SIZES = ((80, 96), (40, 48), (20, 24))
 TILE_SIZE = (320, 384)
@@ -45,8 +50,8 @@ def mono_wav(path, stereo):
     return readback
 
 
-def decode_trial(model, audio, reference, values, force_float32=False):
-    results, info = v7.decode_pulse_stream(
+def decode_trial(profile, model, audio, reference, values, force_float32=False):
+    results, info = profile.decode(
         model, audio, force_float32=force_float32, sample_rate=RATE)
     usable = []
     quality_rows = []
@@ -54,7 +59,7 @@ def decode_trial(model, audio, reference, values, force_float32=False):
     for result in results:
         if result.status == 'lost' or not result.diag.get('displayable', False):
             continue
-        decoded = v7.values_from(model, result.coeffs)
+        decoded = profile.values(model, result)
         picture = values_image(decoded, model.coder.grids)
         usable.append((result.counter, picture))
         quality_rows.append(plane_metrics_arrays(reference, picture))
@@ -99,26 +104,31 @@ def main(argv=None):
     parser.add_argument('--only', action='append', default=[],
                         help='repeat to select cases from tools/v7_torture_matrix.py')
     parser.add_argument('--force-float32', action='store_true')
+    add_profile_argument(parser)
     args = parser.parse_args(argv)
     if args.frames < 3:
-        parser.error('--frames must be at least 3 (the final packet needs a following header)')
+        parser.error('--frames must be at least 3')
     unknown = set(args.only) - {case.name for case in CASES}
     if unknown:
         parser.error('unknown case(s): ' + ', '.join(sorted(unknown)))
 
     args.out.mkdir(parents=True, exist_ok=True)
-    model = v7.load_model(TARGET, 'nearest')
+    profile = WireProfile(args.profile)
+    model = v7.load_model(TARGET, profile.encode_filter)
+    # The EOF marker commits every packet; without it the last packet has no
+    # following header.
+    expected = args.frames if args.profile == 'default' else args.frames - 1
     with Image.open(args.fixture) as image:
-        reference = v7.prepare_image(image, 'nearest')
+        reference = v7.prepare_image(image, profile.encode_filter)
     reference.save(args.out / 'reference.png')
     variants = {}
     for size in SIZES:
         name = f'{size[0]}x{size[1]}'
         source = source_variant(reference, size)
         source.save(args.out / f'source_{name}.png')
-        values = v7.image_values(source, model.coder.grids, 'nearest')
-        audio48 = v7.encode_pulse_stream(model, [values]*args.frames, 1,
-                                          [0]*args.frames)
+        values = v7.image_values(source, model.coder.grids, profile.encode_filter)
+        audio48 = profile.encode(model, [values]*args.frames, 1,
+                                 [0]*args.frames)
         variants[name] = (values, resample_poly(audio48, 2, 1, axis=0).astype(np.float32))
 
     rows = []
@@ -129,9 +139,10 @@ def main(argv=None):
             damaged = impair(wire, case, seed=args.seed)
             # Stereo control from the same damaged full-resolution signal.
             if name == '80x96':
-                control, images = decode_trial(model, damaged, reference, values,
+                control, images = decode_trial(profile, model, damaged, reference, values,
                                                args.force_float32)
-                control.update(case=case.name, variant='stereo-80x96')
+                control.update(case=case.name, variant='stereo-80x96',
+                               profile=profile.label)
                 rows.append(control)
                 picture = images[len(images)//2][1] if images else None
                 if picture is not None:
@@ -140,14 +151,15 @@ def main(argv=None):
 
             wav_path = args.out / f'{case.name}_mono-{name}.wav'
             mono = mono_wav(wav_path, damaged)
-            row, images = decode_trial(model, mono, reference, values,
+            row, images = decode_trial(profile, model, mono, reference, values,
                                        args.force_float32)
-            row.update(case=case.name, variant=f'mono-{name}', wav=wav_path.name)
+            row.update(case=case.name, variant=f'mono-{name}', wav=wav_path.name,
+                       profile=profile.label)
             rows.append(row)
             picture = images[len(images)//2][1] if images else None
             if picture is not None:
                 picture.save(args.out / f'{case.name}_mono-{name}.png')
-            columns.append((f'Mono {name}  {row["displayable"]}/{args.frames-1}', picture))
+            columns.append((f'Mono {name}  {row["displayable"]}/{expected}', picture))
             print(json.dumps(row), flush=True)
         contact_sheet(args.out / f'{case.name}_comparison.png', columns)
     (args.out / 'results.json').write_text(json.dumps(rows, indent=2) + '\n')

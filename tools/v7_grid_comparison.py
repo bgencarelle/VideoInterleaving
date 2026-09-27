@@ -3,6 +3,11 @@
 
 The transmitted DCT shapes and packet geometry remain fixed. This is a
 synthetic, profile-matched bench, not a production wire profile.
+
+Both grids use the live framing -- EOF marker, coded pilots, tone-seeded
+timing, EOF boundaries -- with the fold off, because the pinned fold tables
+belong to the canonical box model only (tools/v7_wire_profile.py).
+``--profile baseline`` reruns the historical no-tone / no-EOF wire.
 """
 import argparse
 import json
@@ -19,6 +24,7 @@ from animation_modem import v7
 from animation_modem.imaging import values_image
 from tools.measure_plane_survival import plane_metrics_arrays
 from tools.v7_torture_matrix import CASES, RATE, TARGET, impair
+from tools.v7_wire_profile import WireProfile, add_profile_argument
 
 SHAPES = v7.V7_SHAPES
 GRIDS = {
@@ -63,13 +69,13 @@ def experimental_model(grids, source):
         v7.V7_GRIDS, v7.prepare_image = old_grids, old_prepare
 
 
-def decode(model, audio, reference):
-    results, _ = v7.decode_pulse_stream(model, audio)
+def decode(profile, model, audio, reference):
+    results, _ = profile.decode(model, audio, sample_rate=RATE)
     frames = []
     for result in results:
         if result.status == 'lost' or not result.diag.get('displayable', False):
             continue
-        values = v7.values_from(model, result.coeffs)
+        values = profile.values(model, result)
         picture = values_image(values, model.coder.grids)
         frames.append(picture)
     scores = [plane_metrics_arrays(reference, frame.resize(reference.size,
@@ -96,6 +102,7 @@ def main(argv=None):
     parser.add_argument('--seed', type=int, default=2026)
     parser.add_argument('--only', action='append', default=[])
     parser.add_argument('--max-images', type=int, default=6)
+    add_profile_argument(parser)
     args = parser.parse_args(argv)
     if args.frames < 3 or args.max_images < 1:
         parser.error('--frames must be >= 3 and --max-images >= 1')
@@ -108,6 +115,8 @@ def main(argv=None):
     if not paths:
         parser.error(f'no image files in {args.source_dir}')
     args.out.mkdir(parents=True, exist_ok=True)
+    profile = WireProfile(args.profile, fold=False)
+    print(f'wire profile: {profile.label}', flush=True)
     rows = []
     chosen_cases = [cases_by_name[n] for n in args.only] if args.only else list(CASES)
     for path in paths:
@@ -123,17 +132,18 @@ def main(argv=None):
             model = experimental_model(grids, source)
             prep = source.resize((grids[0][1], grids[0][0]), Image.Resampling.NEAREST)
             values = sample_values(prep, grids, 'NEAREST')
-            audio48 = v7.encode_pulse_stream(model, [values] * args.frames,
-                                             1, [0] * args.frames)
+            audio48 = profile.encode(model, [values] * args.frames,
+                                     1, [0] * args.frames)
             audios[name] = resample_poly(audio48, 2, 1, axis=0).astype(np.float32)
             models[name] = model
         for case in chosen_cases:
             sheet_cols = [('Source (left SBS half)', source)]
             for name in GRIDS:
                 damaged = impair(audios[name], case, seed=args.seed)
-                frames, stats = decode(models[name], damaged, reference)
+                frames, stats = decode(profile, models[name], damaged, reference)
                 row = {'image': path.name, 'case': case.name,
-                       'profile': name, 'seed': args.seed, **stats}
+                       'profile': name, 'wire': profile.label,
+                       'seed': args.seed, **stats}
                 rows.append(row)
                 picture = frames[len(frames)//2] if frames else None
                 if picture is not None:

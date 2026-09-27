@@ -4,6 +4,13 @@
 This reconstructs the historical 19-case matrix, excluding worn-deck. It is
 deliberately a synthetic regression matrix, not a claim to model a particular
 deck; real tape captures remain authoritative. Outputs go under tmp/.
+
+By default it tests the wire the senders emit: the M=500 luma fold with coded
+pilots and the EOF marker, decoded with tone-seeded timing and EOF boundaries
+(tools/v7_wire_profile.py). ``--profile baseline`` reruns the historical
+nearest / no-tone wire, with the EOF marker only for reverse playback.
+``--pilot-ab`` compares steady tones on the baseline wire and always uses that
+profile.
 """
 import argparse
 import json
@@ -21,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from animation_modem import v7
 from animation_modem.imaging import values_image
 from tools.measure_plane_survival import plane_metrics_arrays
+from tools.v7_wire_profile import WireProfile, add_profile_argument
 
 RATE = 96_000
 DEFAULT_FRAMES = 12
@@ -458,6 +466,7 @@ def main(argv=None):
                         help='run only this case; may be repeated')
     parser.add_argument('--force-float32', action='store_true',
                         help='use the experimental float32/complex64 decoder')
+    add_profile_argument(parser)
     args = parser.parse_args(argv)
     args.frames = args.frames if args.frames is not None else (
         40 if args.pilot_ab else DEFAULT_FRAMES)
@@ -475,12 +484,15 @@ def main(argv=None):
 
     out = args.out
     out.mkdir(parents=True, exist_ok=True)
-    model = v7.load_model(TARGET, 'nearest')
+    # The pilot A/B compares steady tones, which only the baseline wire has.
+    profile = WireProfile('baseline' if args.pilot_ab else args.profile)
+    model = v7.load_model(TARGET, profile.encode_filter)
     with Image.open(FIXTURE) as image:
-        reference = v7.prepare_image(image, 'nearest')
+        reference = v7.prepare_image(image, profile.encode_filter)
         values = v7.image_values(reference,
-                                 model.coder.grids, 'nearest')
-    audio48 = v7.encode_pulse_stream(
+                                 model.coder.grids, profile.encode_filter)
+    print(f'wire profile: {profile.label}', flush=True)
+    audio48 = profile.encode(
         model, [values]*args.frames, 1, [0]*args.frames,
         source_indices=list(range(args.frames)),
         eof_marker=args.direction == 'reverse')
@@ -515,8 +527,8 @@ def main(argv=None):
         for case in CASES:
             if selected and case.name not in selected:
                 continue
-            expected_frames = (args.frames if args.direction == 'reverse'
-                               else args.frames-1)
+            expected_frames = (args.frames if args.direction == 'reverse' or
+                               profile.name == 'default' else args.frames-1)
             row = {'case': case.name, 'speed': args.speed,
                    'direction': args.direction, 'sample_rate': RATE,
                    'expected_frames': expected_frames,
@@ -666,17 +678,19 @@ def main(argv=None):
             state = v7.PulseState()
             results = []
             eof_validated = 0
-            for start, scale, _confidence, _direction in hits:
-                decoded, info = v7.decode_reverse_packet(
-                    model, damaged, start, scale, state=state,
-                    force_float32=args.force_float32, sample_rate=RATE)
-                results.extend(decoded)
-                eof_validated += int(info.get('eof_markers_validated') or 0)
+            with profile.receiving():
+                for start, scale, _confidence, _direction in hits:
+                    decoded, info = v7.decode_reverse_packet(
+                        model, damaged, start, scale, state=state,
+                        force_float32=args.force_float32, sample_rate=RATE,
+                        **profile.decode_options)
+                    results.extend(decoded)
+                    eof_validated += int(info.get('eof_markers_validated') or 0)
             info = {'recovered': bool(results),
                     'pulse_hits': len(hits),
                     'eof_markers_validated': eof_validated}
         else:
-            results, info = v7.decode_pulse_stream(
+            results, info = profile.decode(
                 model, damaged, force_float32=args.force_float32,
                 sample_rate=RATE)
         errors = []
@@ -686,13 +700,14 @@ def main(argv=None):
         for result in results:
             metadata += int(result.diag.get('metadata_valid', False))
             displayable += int(result.diag.get('displayable', False))
-            decoded = v7.values_from(model, result.coeffs)
+            decoded = profile.values(model, result)
             quality_rows.append(plane_metrics_arrays(
                 reference, values_image(decoded, model.coder.grids)))
             if result.status != 'lost':
                 errors.append(float(np.sqrt(np.mean((decoded - values)**2))))
         row = {
             'case': case.name,
+            'profile': profile.label,
             'speed': args.speed,
             'direction': args.direction,
             'sample_rate': RATE,
@@ -727,9 +742,11 @@ def main(argv=None):
             if not reverse_ok:
                 failures.append(case.name)
         else:
-            # Forward legacy packets use the next preamble as their endpoint
-            # witness; there is no witness after the last packet.
-            expected = args.frames-1
+            # The EOF marker commits every forward packet. Forward baseline
+            # packets use the next preamble as their endpoint witness, and
+            # there is none after the last packet.
+            expected = (args.frames if profile.name == 'default'
+                        else args.frames-1)
             if (row['decoded_frames'] != expected or
                     row['metadata_valid'] != expected or
                     row['displayable'] != expected):

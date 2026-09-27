@@ -13,8 +13,9 @@ V7 is the pulse-framed modem transport used by modem mode. The live wire uses
 the edge-counted pulse acquisition retained in `animation_modem/transport3.py`;
 it does not use the continuous 72-bit clock-track proposal described in older
 sections of this document. The live packet carries an OFDM image body, a
-CRC-protected metadata symbol, optional low-bin timing tones, and an optional
-end-of-packet (EOF) marker.
+CRC-protected metadata symbol, low-bin timing tones, and an end-of-packet (EOF)
+marker. The live sender defaults always include EOF; the option to omit it is
+retained for legacy-wire tests and comparisons.
 
 The transport package is independent of application settings, renderers, and
 audio devices. `modem_v7_display.py` adapts it to the application image library
@@ -41,7 +42,7 @@ At the 48 kHz reference geometry, one pulse packet is 3,920 samples:
 | Pulse header | 288 | Edge-counted biphase-mark preamble |
 | OFDM body | 3,456 | 24 symbols × 144 samples |
 | Metadata symbol | 144 | One OFDM symbol carrying 40 protected bits |
-| Guard | 32 | Packet endpoint region; final 24 samples carry EOF when enabled, and packet-wide timing tones continue through it |
+| Guard | 32 | Packet endpoint region; final 24 samples carry the EOF marker, and packet-wide timing tones continue through it |
 | **Total** | **3,920** | **12.245 packets/s at 1×** |
 
 The pulse word contains 16 known bits with 8-sample half-bits and nominal
@@ -64,10 +65,13 @@ The receiver supports two packet-completion modes:
   that packet.
 
 EOF changes neither packet length nor frame rate. The standalone live sender
-and receiver and the application sender enable EOF by default. The low-level
-`encode_pulse_frame()` / `encode_pulse_stream()` and
-`decode_pulse_stream()` APIs default to legacy framing unless their EOF options
-are specified.
+and receiver and the application sender enable EOF by default. Their
+`--no-eof-marker` and `--no-modem-eof-marker` options are retained for legacy
+wire tests and comparisons. The low-level `encode_pulse_frame()` /
+`encode_pulse_stream()` and `decode_pulse_stream()` APIs still default to the
+older framing (no EOF marker, next-header boundaries) for unit tests. Bench
+tools that model the default live wire use `tools/v7_wire_profile.py` (section
+9).
 
 ### 2.1 Reverse playback
 
@@ -279,19 +283,24 @@ black-frame fallback.
 
 ## 8. Runtime and defaults
 
-The application sender and standalone live sender default to the nearest
-encoding profile, 1× playback, pilot tones enabled, and EOF markers enabled.
-The standalone sender additionally defaults to brightness 1.05 and gamma 1.0.
-The standalone receiver defaults to EOF boundaries, tone-seeded pilot timing,
-baseline pulse timing, tone equalization off, one decode batch, one frame of
-history, and tail memory enabled. Both standalone sender and receiver require
-an explicit audio device.
+The standalone live sender (`tools/v7_live.py`) defaults to the M=500 luma
+fold with coded pilots (section 10.7): box encoding profile, brightness 1.0,
+gamma 1.0, 1× playback, and the EOF marker. `--baseline` selects the previous
+nearest / brightness 1.05 / steady-pilot profile on both ends. The standalone
+receiver defaults to the matching coded M=500 profile, EOF boundaries,
+tone-seeded pilot timing, baseline pulse timing, tone equalization off, one
+decode batch, one frame of history, and tail memory enabled. Both require an
+explicit audio device.
+
+The application sender (`main.py --mode modem`) does not fold yet. It sends
+the nearest encoding profile with steady pilot tones and the EOF marker at 1×.
+Moving it to the fold-500 coded default is planned (section 10.8).
 
 The low-level encoder's pilot-tone and EOF-marker switches default off, and
-the low-level decoder defaults to legacy next-header boundaries and baseline
-pilot timing. This distinction is intentional in the current implementation:
-the application and standalone live adapters set live defaults explicitly,
-while unit tests and synthetic baseline runs can select the older wire.
+the low-level decoder defaults to next-header boundaries and baseline pilot
+timing. These defaults serve unit tests of the older framing; live adapters set
+the live defaults explicitly, and bench tools use
+`tools/v7_wire_profile.py`.
 
 Numba is imported unconditionally by the V7 transport and pulse-acquisition
 modules. The default equalizer and selected acquisition kernels use Numba JIT;
@@ -334,6 +343,7 @@ modem_tests/test_v7_pulse_warp.py
 modem_tests/test_v7_speed.py
 modem_tests/test_v7_tables.py
 modem_tests/test_v7_tone_equalization.py
+modem_tests/test_v7_wire_profile.py
 ```
 
 The standalone coded-pilot prototype has a separate suite:
@@ -343,8 +353,8 @@ The standalone coded-pilot prototype has a separate suite:
 ```
 
 Its current regression module is `test_modem_v7/test_tone_code.py`. On
-2026-09-26, the modem suite passed **144 tests** and the prototype suite passed
-**12 tests**. Rerun the relevant suite and report fresh results after changes;
+2026-09-27, the modem suite passed **204 tests** and the prototype suite passed
+**13 tests**. Rerun the relevant suite and report fresh results after changes;
 these counts are a dated snapshot, not permanent expectations. Both suites are
 synthetic/unit evidence, not a real device or tape test.
 
@@ -515,18 +525,33 @@ The synthetic impairment matrix was run with:
 It encodes 12 identical reference-fixture packets, resamples the wire from
 48 kHz to 96 kHz, and applies 25 deterministic synthetic cases (seed 2026),
 including clean, low-pass, hiss, wow/flutter, crosstalk, track imbalance,
-dropouts, NR pumping, saturation, mono sum, and one-leg-only paths. The
-baseline decoder is expected to return 11 frames because the final packet has
-no next-header witness. Its acceptance check requires 11 results, 11
-metadata-valid results, and 11 displayable results; it does not require every
-result status to be `received`.
+dropouts, NR pumping, saturation, mono sum, and one-leg-only paths.
 
-The run failed only the `lowpass-4k` acceptance row: it returned 11 frames,
-10 received, 1 lost, 10 metadata-valid, and 11 displayable. The other 24 cases
-met the matrix's stated acceptance check. This is a synthetic threshold
-failure, not a claim that the image was wholly undecodable: it records that
-one of the 11 frames did not pass metadata validation under that specific
-4 kHz low-pass impairment.
+**Default wire.** The matrix tests the wire the senders emit: the M=500 fold
+with coded pilots and the EOF marker, decoded with the coded-pilot timing
+hook, tone-seeded timing and EOF boundaries (`tools/v7_wire_profile.py`). The
+EOF marker commits every packet, so forward acceptance requires 12 results,
+12 metadata-valid and 12 displayable. On 2026-09-27 all 25 cases passed. The
+lowest `received` counts were `mains-buzz` (9 of 12), `hiss-35` and `dropouts`
+(11 of 12); every other case received all 12.
+
+**Historical baseline.** `--profile baseline` reruns the older nearest /
+no-tone wire with next-header boundaries (EOF only for `--direction
+reverse`). Forward, it returns 11 frames, because the final packet has no
+next-header witness, and its acceptance requires 11 results, 11
+metadata-valid and 11 displayable. The saved baseline run failed only
+`lowpass-4k` (11 frames, 10 received, 1 lost, 10 metadata-valid, 11
+displayable): a synthetic threshold failure, not a claim that the image was
+wholly undecodable. `--pilot-ab` compares steady tones and always uses the
+baseline wire. The speed and slow-reverse tables below were measured on this
+baseline wire; rerun them with `--profile baseline` to reproduce them.
+
+`tools/v7_mono_torture.py` uses the same default wire. The allocation and grid
+benches (`tools/v7_luma_budget.py`, `tools/v7_grid_comparison.py`) derive
+their own models, which the pinned fold tables do not cover, so they use the
+live framing (EOF marker, coded pilots with a fold-off status, tone-seeded
+timing, EOF boundaries) with the fold off. Every one of these tools accepts
+`--profile baseline`.
 
 The saved matrix output is `tmp/v7-spec-rerun/results.json`.
 
@@ -535,7 +560,8 @@ The same 25-case matrix was repeated at 1×, 1.5× and 2× playback at its
 accepts `--speed`; for example:
 
 ```text
-.venv/bin/python tools/v7_torture_matrix.py --speed 2 --out tmp/v7-torture-speed-2x
+.venv/bin/python tools/v7_torture_matrix.py --profile baseline --speed 2 \
+  --out tmp/v7-torture-speed-2x
 ```
 
 | Speed | Cases with 11/11 metadata-valid | Received / 275 | Clean mean value RMSE | Clean image SSIM |
@@ -896,160 +922,37 @@ Loopback through the real `tools/v7_live.py` sender and receiver
   shown unfolded, not unfolded with the wrong table.
 - `--experimental-fold` with `--encode-filter nearest` refuses to start.
 
-## 10. Fold proposal
+### 10.8 Planned: fold and coded pilot in the application sender
 
-**Status: experimental live profile, not integrated into the production
-transport.** The standalone tools default to coded M=500; the measurements below are
-synthetic. They come from `test_modem_v7/`, run on 11 frames of an 810×1080
-portrait face video: frames 1, 3, 5, … fit the statistics and frames 2, 4,
-6, … are scored. Each reconstruction is scored with SSIMULACRA2 at 405×540
-against the source at 405×540 (higher is better; about 90 is visually
-lossless). No real tape or deck has been tested.
+The standalone live tools send the fold-500 coded profile, but the application
+sender (`main.py --mode modem`, `modem_v7_display.py`) still sends the
+unfolded nearest profile. This plan moves the prototype into the transport
+package so the application can send the same wire. Every step is gated by
+paired CPU checks (percentage change in CPU time and wall time against a
+matched baseline on each tested machine) and by picture quality on the
+reference fixture.
 
-### 10.1 Idea
-
-V7 sends 2,880 coefficients as analog values. On a clean path each slot
-arrives with far more precision than the picture needs, while detail beyond
-the 48×40 Y corner is not sent at all. Linear rearrangements cannot move that
-spare precision into resolution: for a linear analog code, sending the
-highest-variance coefficients is already mean-square optimal. A nonlinear 2:1 mapping
-can. It trades SNR for resolution the way FM trades bandwidth for SNR, and it
-has the same kind of threshold.
-
-The **M weakest Y slots of the body tier** each carry two Y coefficients.
-With `h` the slot's own coefficient (the host) and `u` the most important Y
-coefficient that V7 does not send today (the guest), both normalised to unit
-variance:
-
-```text
-s = D·round(h / D) + β·clip(u, −2.5, 2.5)        β = 0.8·D / 5
-```
-
-- **Host:** sent coarsely, as a multiple of the step D.
-- **Guest:** rides inside the step as a small analog residual.
-- **Scaling:** `s` is scaled by `1/sqrt(1 + D²/12 + β²)` and replaces the
-  host coefficient at the host's own variance. Slot power, slot layout,
-  Hadamard spreading and the equaliser are therefore unchanged: a normal V7
-  encode of the modified coefficients is a folded packet.
-- **Host slots:** Y only, ranks 208–2,223 (the body tier), taken from the
-  weakest end. Never the head, never the rotating tail, never Cb/Cr.
-- **Guests:** Y coefficients of the 96×80 grid outside the 48×40 corner,
-  in fitted-variance order.
-- **Step D:** chosen for a 30 dB design SNR (D ≈ 0.97 for both M = 500 and
-  M = 1,000).
-
-The receiver:
-1. takes the equaliser's per-coefficient estimate and confidence for the host
-   slots;
-2. removes the MMSE shrink by dividing by the confidence;
-3. rounds to the step, giving the host;
-4. reads the remainder as the guest;
-5. rebuilds Y on the full 96×80 grid.
-
-**Fallback:** a host whose equaliser confidence is below 0.9 is read as a
-plain (noisy) host, and its guest is dropped.
-
-### 10.2 Measured results
-
-Real V7 modem, 1×, box encode filter, current slot layout, still pictures,
-mean over every decoded steady packet:
-
-| Condition | No fold | Fold 500 (+fallback) | Fold 1,000 (+fallback) |
-|---|---:|---:|---:|
-| Clean | −16.9 | −7.0 | **−4.1** |
-| Low-pass 12 kHz | −17.0 | −7.0 | **−4.3** |
-| Low-pass 10 kHz | −17.0 | −7.1 | **−4.3** |
-| Dropouts (12 ms every 0.7 s) | −17.3 | −7.6 | **−4.7** |
-| Wow/flutter (0.45 % at 0.55 Hz, 0.12 % at 7.3 Hz) | −17.7 | **−10.3** | −10.4 |
-| Random speed jitter 0.1 % RMS, 20–300 Hz | −19.5 | **−16.3** | −18.3 |
-| Fast flutter (adds 0.1 % at 25 Hz, 0.05 % at 60 Hz) | −19.4 | −19.8 | −21.5 |
-| Fast flutter + 12 kHz low-pass + dropouts | −24.0 | −24.5 | −26.8 |
-| Random speed jitter 0.3 % RMS | −33.0 | −43.1 (**−34.3**) | −49.8 (−43.4) |
-
-- **Low-pass and dropouts** do not affect folding. The Hadamard spreading and
-  the equaliser absorb them before the folded symbols are read.
-- **Fast flutter and jitter** hurt. Timing smear moves symbols across a step.
-  The fallback has a measurable effect only in the 0.3 % jitter case, where
-  it brings fold 500 back to within 1.3 points of no folding.
-- **Contact sheets:** where folding scores even, it looks different: fine
-  grain instead of blur.
-
-On the simulated channel (per-slot noise, below the 30 dB design point), Y
-folding costs about 3.5 points (M = 500) to 6 points (M = 1,000) at 20 dB,
-and 5–10 points at 15 dB.
-
-Folding into Cb/Cr slots raised the mean colour error (CIEDE2000) from about
-3.4 to 7–11 and is excluded. With Y-only hosts, colour error is unchanged.
-
-### 10.3 Recommendation
-
-**M = 500 with the fallback.** It is now the default profile in the standalone
-V7 live prototype, with `--baseline` to restore the prior profile. The earlier
-measurements show about +10 on clean, low-pass and dropouts, +7 with slow wow,
-and −0.4 to −1.3 at worst (fast flutter, combined impairments, 0.3 % jitter).
-M = 1,000 gains more on clean paths but loses 2–3 points under flutter; it
-remains an explicit experiment rather than the default.
-
-This matches the recovery priority in `AGENTS.md`: colour is unchanged, and
-on bad paths only detail degrades.
-
-### 10.4 Proposed implementation
-
-1. **Frozen fold table.** Freeze M, D, the host list, the guest positions and
-   the guest variances into the model tables, under the same hash check as
-   the canonical tables. Sender and receiver must not depend on local frames
-   for these statistics.
-2. **Sender.** Apply the fold to the coefficient vector inside
-   `encode_frame_coeffs()`, before gains and slot placement. It applies to
-   `modem_v7_display.py` and `tools/v7_live.py send`.
-3. **Receiver.** Unfold inside `decode_frame()` from the equaliser's `xhat`
-   and `conf` for the host slots, apply the fallback, then reconstruct Y on
-   the 96×80 grid. Hosts are in the body tier, so tail memory is unaffected.
-4. **Signalling.** The 2-bit source-encoding field is fully used by the four
-   encode filters. Options:
-    - reassign one filter code (for example `bicubic`) to "box + fold";
-    - extend the metadata word;
-    - the standalone live prototype uses one matched profile on both ends;
-      it defaults to coded M=500 and `--baseline` restores the prior profile.
-
-   A sender/receiver mismatch affects only the folded slots.
-5. **Tests.** Add fold/unfold round-trip tests (noiseless unfold within the
-   step quantisation; the fallback path) to `modem_tests/`, plus a regression
-   that an unfolded wire decodes identically.
-
-### 10.5 Related measurements that need no folding
-
-Same harness, same frames:
-
-- **Encode filter.** `box` beats today's default `nearest` by 4.8–7 points
-  on every tested case through the real modem (clean −23.9 → −16.9; Type II
-  −27.5 → −20.9; dropouts −24.6 → −17.8), with no wire change. The receiver
-  already selects the model from the metadata.
-- **Y-first coefficient selection.** Choosing the 2,880 coefficients by
-  variance across all three planes keeps about 2,620 Y and 260 Cb/Cr
-  coefficients, instead of 1,920 and 960.
-  - With box sampling, it scores −16.8 → −5.8 at 50 dB and −18.6 → −8.1 at
-    25 dB (simulated channel).
-  - Mean colour error (CIEDE2000) rises from 2.6 to 3.3.
-  - It is a wire change, and it trades against the colour priority, so it
-    needs a decision before adoption.
-- **Prefiltering.** A smooth taper before the coefficient cutoff reduces
-  ringing. At best it only matches today's box sampling, and on the Y-first
-  selection it scores 3–7 points worse. Reconstructing on a finer grid
-  without more coefficients does not help.
-
-### 10.6 Reproducing
-
-```text
-.venv/bin/python -m pip install ssimulacra2 scikit-image
-export NUMBA_CACHE_DIR=tmp/numba_cache
-.venv/bin/python test_modem_v7/fold_modem.py      FRAME... [--quick]
-.venv/bin/python test_modem_v7/compare_filters.py FRAME... [--quick]
-.venv/bin/python test_modem_v7/layout_oracle.py   FRAME... [--quick]
-```
-
-Full instructions and the reference numbers are in `test_modem_v7/HOWTO.md`.
-Results are written to `tmp/test_modem_v7/`.
+1. **Move the runtime into `animation_modem/`.** This covers the table-driven
+   fold codec (`FoldCodec.from_table`, encode and unfold), the pinned tables
+   with their SHA-256 pins, and the coded-pilot overlay and status kernel
+   (`add_tone_code`, `decode_tone_spectrum`, `coded_pilot_timing`). Table
+   building and fitting stay in `test_modem_v7/`, which then imports the
+   runtime from the package. The moved code has no application imports.
+2. **Replace the monkeypatch hooks with decoder options.** The prototype wraps
+   `v7.decode_frame`, the equalisers and `v7.pilot_tone_timing`. In the
+   package, `decode_frame` returns the host-slot equaliser output when asked,
+   and tone timing accepts recovered chip signs directly.
+3. **Switch the application sender.** Make the fold-500 coded profile the
+   default in `modem_v7_display.py`, with a baseline switch that restores
+   today's profile. The box filter needs full compositing instead of the
+   nearest-only fast path (`composite_nearest`), so measure the prepare-time
+   change against `--modem-prepare-ms` first. Coordinate any `main.py` option
+   change with the separate `main.py` work (section 9).
+4. **Tests.** Carry `modem_tests/test_v7_experimental_fold.py` and the
+   coded-pilot tests over to the package, and add an application-sender round
+   trip that decodes fold-500 packets with the standard receiver.
+5. **Docs.** Update section 8, `docs/MODEM_MODE.md` and
+   `test_modem_v7/HOWTO.md`.
 
 ## 11. Perceptual sender preprocessing
 
@@ -1272,16 +1175,14 @@ decode test. With this limited face-only sample and failed CPU budget, no
 candidate is promoted and canonical box-table adequacy remains undecided.
 Results and Numba caches stay under repo-local `tmp/`.
 
-The original default `tools/v7_torture_matrix.py` forward run produces 11
-decoded results from 12 legacy next-header packets. That remains the default
-contract: the final packet has no following-header witness. Its historical
-smoke result was 11/11 metadata-valid and displayable results in 24/25 cases;
-`lowpass-4k` returned 10/11 metadata-valid, matching the known matrix failure
-above in Section 9. The Section 11.6 12/12 request does not apply to that
-legacy framing. The runner now has opt-in `--speed` and `--direction reverse`
-EOF-aware torture modes (reported above); the default forward 1×/96 kHz wire
-is pinned byte-for-byte to the original `resample_poly` path by
-`modem_tests/test_v7_torture_matrix.py`.
+`tools/v7_torture_matrix.py` now defaults to the wire the senders emit (fold
+500, coded pilots, EOF marker; Section 9), where the Section 11.6 12/12 request
+applies: every forward packet is committed by its EOF marker. The historical
+baseline remains available as `--profile baseline`: 11 decoded results from 12
+next-header packets, 11/11 metadata-valid and displayable in 24/25 cases, with
+`lowpass-4k` at 10/11. The `--speed` and `--direction reverse` modes work with
+either profile. Forward 1×/96 kHz conversion remains pinned byte-for-byte to
+the original `resample_poly` path by `modem_tests/test_v7_torture_matrix.py`.
 
 Delivery order: (1) resize ablations plus statistics; (2) decide table adequacy;
 (3) band shaping; (4) knee; (5) guided chroma; (6) change adaptation; (7) bake.
