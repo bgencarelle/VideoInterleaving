@@ -1123,6 +1123,48 @@ equalizer, metadata path, and body-frame confidence/result work. Within a
 the host per packet (roughly 0.6 ms per packet under 15×), so measure a change
 before taking on decoder complexity.
 
+##### Follow-up: metadata remainder, Numba kernels, and channel-fit evaluations
+
+A second 2,000-packet run wrapped the metadata stages, individual compiled
+kernels, and both channel residual evaluators. It again validated 2,000/2,000
+frames, coded Fold 500 statuses, and EOF markers. Every frame used tone-seeded
+timing and the absolute timing-quality gate; no comparison refit ran. Source-line
+tracing was disabled in the reported run: sampling it every tenth metadata call
+inflated those calls, so its coarse group measurements are not suitable as
+absolute timings. The table reports host process-CPU milliseconds; the
+projection is 15× host p95. Rows explicitly marked inclusive overlap their
+nested rows.
+
+| Operation | Host median (ms) | Host p95 (ms) | Host p99 (ms) | Estimated Pi p95 (ms) |
+|---|---:|---:|---:|---:|
+| Metadata decode total | 0.135 | 0.186 | 0.230 | 2.8 |
+| └ sample interpolation | 0.008 | 0.013 | 0.019 | 0.2 |
+| └ metadata RFFT | 0.027 | 0.038 | 0.055 | 0.6 |
+| └ CRC/word parse | 0.015 | 0.021 | 0.028 | 0.3 |
+| └ remainder excluding the three above | 0.084 | 0.121 | 0.152 | 1.8 |
+| Coded-status decode, inclusive | 0.022 | 0.032 | 0.046 | 0.5 |
+| └ coded-status Numba kernel | 0.014 | 0.020 | 0.028 | 0.3 |
+| Tone timing, inclusive of coded status | 0.096 | 0.138 | 0.173 | 2.1 |
+| Channel fit, excluding tone timing | 0.152 | 0.198 | 0.240 | 3.0 |
+| └ channel-fit Numba kernel | 0.081 | 0.107 | 0.122 | 1.6 |
+| └ pilot-residual evaluation | 0.019 | 0.026 | 0.033 | 0.4 |
+| └ timing-residual evaluation | 0.015 | 0.022 | 0.029 | 0.3 |
+| Channel fit, inclusive of tone timing | 0.251 | 0.320 | 0.387 | 4.8 |
+| Fade/noise Numba kernel | 0.056 | 0.080 | 0.090 | 1.2 |
+| Equalizer Numba kernel | 0.197 | 0.239 | 0.300 | 3.6 |
+| Body-frame decode total | 0.746 | 0.879 | 1.099 | 13.2 |
+
+The equalizer kernel is the largest individual measured operation. The channel
+path is the next larger combined cost: about 0.152 ms median excluding tone
+timing, including 0.081 ms in the compiled fit and 0.034 ms across the two
+residual-evaluation calls; tone timing adds about 0.096 ms inclusive of coded
+status. Metadata decode takes about 0.135 ms median. Sampling, its RFFT, and CRC
+account for about 0.051 ms, leaving about 0.084 ms in interpolation, response
+handling, and symbol demodulation. These values rank optimization candidates;
+they do not show that metadata or channel fitting alone is the end-to-end
+bottleneck. No decoder optimization was made in this follow-up. Actual audio
+callback and GUI-rendering costs and Pi-specific performance remain unmeasured.
+
 The JSON summary, per-frame CSV, and log are in
 `tmp/v7-zero2-profile/receiver-decode-components-final.json`,
 `tmp/v7-zero2-profile/per-frame-decode-components-final.csv`, and
