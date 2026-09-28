@@ -461,6 +461,31 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(targets[2].region, '1920,0,1080,1080')
         capture.close.assert_called_once_with()
 
+    def test_screen_target_picker_opens_and_selects_screen_targets(self):
+        gui = SenderGui(self.devices)
+        gui.settings['source'] = 'screen'
+        targets = (
+            ScreenTarget('Display 1 · 1920×1080 · (0,0)',
+                         region='0,0,1920,1080'),
+            ScreenTarget('Display 2 · 1280×720 · (1920,0)',
+                         region='1920,0,1280,720'),
+        )
+
+        with patch('tools.v7_send_gui.enumerate_screen_targets',
+                   return_value=targets):
+            gui._open_dropdown('screen_target')
+            self.assertEqual(gui.dropdown_scroll, 0)
+            self.assertEqual(
+                gui._choices('screen_target'),
+                tuple((target.label, target) for target in targets))
+            gui._on_key(SenderKeyStub, None, SenderKeyStub.KEY_DOWN, 0,
+                        SenderKeyStub.PRESS, 0)
+            gui._on_key(SenderKeyStub, None, SenderKeyStub.KEY_ENTER, 0,
+                        SenderKeyStub.PRESS, 0)
+
+        self.assertEqual(gui.settings['screen_target'], targets[1])
+        self.assertEqual(gui._value_label('screen_target'), targets[1].label)
+
     def test_capture_picker_enumerates_only_when_opened(self):
         gui = SenderGui(self.devices)
         gui.settings.update(source='camera')

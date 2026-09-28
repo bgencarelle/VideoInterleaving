@@ -1087,8 +1087,11 @@ class SenderGui:
             return CAPTURE_FILTER_CHOICES
         if dest == 'perceptual_resize':
             return DOWNSCALER_CHOICES
-        if dest in ('camera', 'screen_target'):
+        if dest == 'camera':
             return self.capture_choice_cache.get(dest, ())
+        if dest == 'screen_target':
+            return tuple((target.label, target) for target in
+                         self.capture_choice_cache.get(dest, ()))
         return ()
 
     def _open_dropdown(self, dest):
