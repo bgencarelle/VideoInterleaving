@@ -19,9 +19,14 @@ def decode_metadata_spectrum(spectrum, phase, early, scale,
         left = spectrum[b, 0]/scale
         left = left*np.conj(phase[b])
         left = left*early[b]
-        right = spectrum[b, 1]/scale
-        right = right*np.conj(phase[b])
-        right = right*early[b]
+        if spectrum.shape[1] == 1:
+            # Live mono capture is duplicated into M/S after resampling. Match
+            # that shared observation here, before the body is available.
+            right = left
+        else:
+            right = spectrum[b, 1]/scale
+            right = right*np.conj(phase[b])
+            right = right*early[b]
         observed[b] = left+right
 
     usable = 0

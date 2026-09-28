@@ -136,6 +136,45 @@ class MonoVideoWireTests(unittest.TestCase):
         self.assertEqual(values.size, mono_model.coder.source_count)
         self.assertTrue(np.all(np.isfinite(values)))
 
+    def test_live_input_decodes_colour_profile_from_single_channel_capture(self):
+        wire = MonoColourFoldWire(self.model, side='left')
+        mono_model = wire.model_for(self.model)
+        audio = wire.encode(self.model, [self.values]*PACKETS)
+        mono_audio = audio[:, wire.carrier_index:wire.carrier_index+1].copy()
+        live_input = LiveInput(rate=v7.RATE)
+        live_input.add(mono_audio)
+        window = live_input.take(now=1.0)
+
+        self.assertIsNotNone(window)
+        pulse_starts = live_input.pulse_starts(window)
+        self.assertTrue(pulse_starts)
+        with wire.receiving():
+            results, info = v7.decode_pulse_stream(
+                mono_model, window, latest_only=True, pulse_starts=pulse_starts,
+                input_gain=live_input.gain, sample_rate=v7.RATE,
+                pilot_timing='tone-seeded', frame_boundary='eof',
+                state=v7.PulseState(tail_memory=False))
+
+        self.assertTrue(results, info)
+        self.assertTrue(any(result.status != 'lost' for result in results), info)
+        self.assertTrue(any(
+            result.diag['pilot_timing']['coded_status_mode'] == MONO_COLOUR_MODE
+            for result in results if result.status != 'lost'))
+
+    def test_single_channel_metadata_matches_duplicated_mono(self):
+        wire = MonoColourFoldWire(self.model, side='both')
+        mono_model = wire.model_for(self.model)
+        audio = wire.encode(self.model, [self.values])
+        mono = audio[:, :1].copy()
+        metadata_start = v7.PULSE.SYNC_LEN+v7.FRAME
+
+        expected = v7.decode_metadata(
+            mono_model, audio, metadata_start, 1.0, None)
+        actual = v7.decode_metadata(
+            mono_model, mono, metadata_start, 1.0, None)
+
+        self.assertEqual(actual, expected)
+
     def test_each_mono_receiver_holds_on_the_other_profile(self):
         profiles = (MonoFreshFoldWire, MonoColourFoldWire)
         for sender_class, receiver_class in (profiles, profiles[::-1]):
