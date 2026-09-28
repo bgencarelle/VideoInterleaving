@@ -242,6 +242,27 @@ class SenderGuiTests(unittest.TestCase):
         self.assertIsNone(gui.settings['device'])
         self.assertEqual(gui.dropdown, 'device')
 
+    def test_background_device_refresh_adds_devices_without_fallback(self):
+        gui = SenderGui(())
+        gui.settings.update(source='camera',
+                            camera='avfoundation:Disconnected camera')
+        output = OutputDevice(7, 'New interface', 2, 48000)
+        audio_input = InputDevice(8, 'New loopback', 2, 48000)
+        cameras = (('Capture card', 'avfoundation:Capture card'),)
+
+        gui._apply_device_snapshot(((output,), '', (audio_input,), '',
+                                    cameras, None))
+
+        self.assertEqual(gui._choices('device'),
+                         (('7: New interface · 2 out · 48 kHz', 7),))
+        self.assertEqual(gui._choices('source_audio_device'),
+                         (('8: New loopback · 2 in · 48 kHz', 8),))
+        self.assertIsNone(gui.settings['device'])
+        self.assertEqual(gui.settings['camera'],
+                         'avfoundation:Disconnected camera')
+        self.assertEqual(gui._choices('camera'), cameras)
+        self.assertIn('unavailable', gui.notice)
+
     def test_advanced_downscaler_picker_is_visible_and_selectable(self):
         gui = SenderGui(self.devices)
         gui.settings.update(source='video', profile='fold-500')

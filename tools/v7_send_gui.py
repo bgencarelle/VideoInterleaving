@@ -131,6 +131,8 @@ FIELD_LABELS = {
     'perceptual_detail_strength': 'Downscaler strength',
 }
 VIDEO_FILE_GLOB = '*.mp4 *.m4v *.mov *.mkv *.webm *.avi *.mpeg *.mpg *.wmv *.ts'
+DEVICE_REFRESH_SECONDS = 3.0
+GUI_EVENT_WAIT_SECONDS = 0.5
 
 
 class OutputDevice:
@@ -1034,6 +1036,8 @@ class SenderGui:
         self._sd = None
         self.rate_cache = {}
         self.capture_choice_cache = {}
+        self.device_watch_stop = threading.Event()
+        self.device_watch_thread = None
 
     def _device(self):
         return next((device for device in self.devices
@@ -1141,39 +1145,58 @@ class SenderGui:
 
     def _refresh_audio_device_choices(self, dest):
         if dest == 'device':
-            previous = self._device()
             try:
                 devices = output_devices(self._sounddevice())
                 error = '' if devices else 'No audio output devices are available.'
             except Exception as exc:
                 devices = ()
                 error = f'Audio device discovery failed: {exc}'
-            self.devices = tuple(devices)
-            self.device_error = error
-            current = next((device for device in self.devices
-                            if previous is not None and
-                            device.index == previous.index and
-                            device.name == previous.name), None)
-            if self.settings['device'] is not None:
-                if current is None:
-                    self.settings['device'] = None
-                    self.settings['rate'] = None
-                    self.notice = ('Selected output device is unavailable; '
-                                   'choose an available device.')
-                else:
-                    self.settings['device'] = current.index
-            self.rate_cache.clear()
+            self._set_output_devices(devices, error)
             return bool(self.devices)
 
-        previous = next((device for device in self.audio_devices
-                         if device.index == self.settings['source_audio_device']),
-                        None)
         try:
             devices = input_devices(self._sounddevice())
             error = '' if devices else 'No audio input devices are available.'
         except Exception as exc:
             devices = ()
             error = f'Audio input enumeration failed: {exc}'
+        self._set_input_devices(devices, error)
+        return bool(self.audio_devices)
+
+    def _set_output_devices(self, devices, error=''):
+        previous = self._device()
+        old_devices, old_error = self.devices, self.device_error
+        changed = (self._audio_device_signature(old_devices) !=
+                   self._audio_device_signature(devices))
+        self.devices = tuple(devices)
+        self.device_error = error
+        current = next((device for device in self.devices
+                        if previous is not None and
+                        device.index == previous.index and
+                        device.name == previous.name), None)
+        if self.settings['device'] is not None:
+            if current is None:
+                self.settings['device'] = None
+                self.settings['rate'] = None
+                self.notice = ('Selected output device is unavailable; '
+                               'choose an available device.')
+            else:
+                self.settings['device'] = current.index
+        if changed:
+            self.rate_cache.clear()
+            self._device_choices_changed('device')
+            if 'unavailable' not in self.notice:
+                self.notice = 'Audio devices changed; open a picker to review.'
+        if old_error != self.device_error:
+            self.dirty = True
+
+    def _set_input_devices(self, devices, error=''):
+        previous = next((device for device in self.audio_devices
+                         if device.index == self.settings['source_audio_device']),
+                        None)
+        old_devices, old_error = self.audio_devices, self.audio_device_error
+        changed = (self._audio_device_signature(old_devices) !=
+                   self._audio_device_signature(devices))
         self.audio_devices = tuple(devices)
         self.audio_device_error = error
         current = next((device for device in self.audio_devices
@@ -1187,7 +1210,99 @@ class SenderGui:
                                'choose an available device.')
             else:
                 self.settings['source_audio_device'] = current.index
-        return bool(self.audio_devices)
+        if changed:
+            self._device_choices_changed('source_audio_device')
+            if 'unavailable' not in self.notice:
+                self.notice = 'Audio devices changed; open a picker to review.'
+        if old_error != self.audio_device_error:
+            self.dirty = True
+
+    def _device_choices_changed(self, dest):
+        if self.dropdown == dest:
+            options = self._choices(dest)
+            selected = self.settings.get(dest)
+            self.dropdown_scroll = next(
+                (index for index, (_label, value) in enumerate(options)
+                 if value == selected), 0)
+        self.dirty = True
+
+    @staticmethod
+    def _audio_device_signature(devices):
+        return tuple((device.index, device.name, device.channels,
+                      device.default_rate) for device in devices)
+
+    def _watch_devices(self, stop):
+        known = None
+        while not stop.is_set():
+            try:
+                outputs = output_devices(self._sounddevice())
+                output_error = ('' if outputs else
+                                'No audio output devices are available.')
+            except Exception as exc:
+                outputs = self.devices
+                output_error = f'Audio device discovery failed: {exc}'
+            try:
+                inputs = input_devices(self._sounddevice())
+                input_error = ('' if inputs else
+                               'No audio input devices are available.')
+            except Exception as exc:
+                inputs = self.audio_devices
+                input_error = f'Audio input enumeration failed: {exc}'
+
+            cameras = None
+            camera_error = None
+            if self.settings.get('source') == 'camera' and self.process is None:
+                try:
+                    cameras = enumerate_camera_sources()
+                except RuntimeError as exc:
+                    if 'No camera devices were found' in str(exc):
+                        cameras = ()
+                        camera_error = 'No camera sources are available.'
+                    else:
+                        cameras = self.capture_choice_cache.get('camera')
+                        camera_error = f'Camera discovery failed: {exc}'
+                except Exception as exc:
+                    cameras = self.capture_choice_cache.get('camera')
+                    camera_error = f'Camera discovery failed: {exc}'
+
+            signature = (
+                self._audio_device_signature(outputs), output_error,
+                self._audio_device_signature(inputs), input_error,
+                cameras if cameras is not None else 'not-scanned',
+                camera_error)
+            if signature != known:
+                known = signature
+                self.events.put(('devices', (outputs, output_error, inputs,
+                                             input_error, cameras,
+                                             camera_error)))
+                self._wake()
+            if stop.wait(DEVICE_REFRESH_SECONDS):
+                return
+
+    def _apply_device_snapshot(self, snapshot):
+        outputs, output_error, inputs, input_error, cameras, camera_error = snapshot
+        previous_camera_error = self.notice.startswith((
+            'Camera discovery failed:', 'No camera sources are available.'))
+        self._set_output_devices(outputs, output_error)
+        self._set_input_devices(inputs, input_error)
+        if cameras is not None:
+            old_cameras = self.capture_choice_cache.get('camera')
+            self.capture_choice_cache['camera'] = tuple(cameras)
+            selected = self.settings.get('camera')
+            if selected is not None and selected not in {
+                    value for _label, value in cameras}:
+                self.notice = ('Selected camera is unavailable; reopen the '
+                               'camera picker and select it again.')
+            if old_cameras != tuple(cameras):
+                self._device_choices_changed('camera')
+                if selected is None or selected in {
+                        value for _label, value in cameras}:
+                    self.notice = 'Camera list changed; open the picker to review.'
+            elif previous_camera_error and camera_error is None:
+                self.notice = 'Camera discovery recovered; open the picker to review.'
+        if camera_error:
+            self.notice = camera_error
+            self.dirty = True
 
     def _sounddevice(self):
         if self._sd is None:
@@ -1458,6 +1573,8 @@ class SenderGui:
                     self.notice = f'Sender exited with status {return_code}.'
                 if self.close_when_stopped and self._window is not None:
                     self._glfw.set_window_should_close(self._window, True)
+            elif kind == 'devices':
+                self._apply_device_snapshot(value)
         if changed:
             self.dirty = True
 
@@ -1927,8 +2044,15 @@ class SenderGui:
 
             # The initial canvas is dirty before the first blocking wait.
             glfw.post_empty_event()
+            self.device_watch_stop.clear()
+            self.device_watch_thread = threading.Thread(
+                target=self._watch_devices, args=(self.device_watch_stop,),
+                name='v7-send-gui-device-watch', daemon=True)
+            self.device_watch_thread.start()
             while not glfw.window_should_close(window):
-                glfw.wait_events()
+                # A bounded wait keeps Python signal handling responsive while
+                # remaining event-driven between UI/device notifications.
+                glfw.wait_events_timeout(GUI_EVENT_WAIT_SECONDS)
                 self._drain_events()
                 if not self.dirty:
                     continue
@@ -1957,7 +2081,12 @@ class SenderGui:
                 self.dirty = False
                 title = 'V7 Sender · '+('Sending' if self.process else 'Setup')
                 glfw.set_window_title(window, title)
+        except KeyboardInterrupt:
+            # Ctrl-C should follow the same graceful child shutdown as closing
+            # the window, without leaving a traceback that looks like a crash.
+            pass
         finally:
+            self.device_watch_stop.set()
             if self.process is not None:
                 self.close_when_stopped = True
                 self._stop()

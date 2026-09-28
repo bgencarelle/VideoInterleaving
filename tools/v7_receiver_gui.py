@@ -45,6 +45,7 @@ INFO_REFRESH_SECONDS = 0.2
 FOOTER_REFRESH_SECONDS = 0.5
 QUIET_WAIT_SECONDS = 0.5
 RESOURCE_REFRESH_SECONDS = 1.0
+DEVICE_REFRESH_SECONDS = 3.0
 FULLSCREEN_TOOLBAR_HIDE_SECONDS = 2.0
 FULLSCREEN_TOOLBAR_EDGE = 14
 DISPLAY_MENU_ROW_HEIGHT = 29
@@ -649,6 +650,9 @@ class ReceiverGui:
         self._window = None
         self.last_title = None
         self.last_ui_size = None
+        self.device_updates = queue.Queue()
+        self.device_watch_stop = threading.Event()
+        self.device_watch_thread = None
         self.profile_wall = None
         self.profile_process = None
         self.profile_thread = None
@@ -814,18 +818,23 @@ class ReceiverGui:
         return True
 
     def _refresh_input_choices(self):
+        choices, error = _input_devices()
+        return self._set_input_choices(choices, error)
+
+    def _set_input_choices(self, choices, error=''):
         field = next((field for field in self.fields
                       if field.dest == 'device'), None)
         if field is None:
-            return
-        choices, error = _input_devices()
+            return False
+        old_options, old_error = field.options, self.device_error
         field.options = choices
         self.device_error = error
         if not choices:
             field.value = None
             if self.input_device_identity is not None:
                 self.unavailable_input_identity = self.input_device_identity
-            return
+            self._device_choices_updated(field, old_options, old_error)
+            return False
         if self.input_device_identity is not None:
             selected = _find_device(
                 self.input_device_identity, choices, 'input')
@@ -834,11 +843,26 @@ class ReceiverGui:
                 self.unavailable_input_identity = self.input_device_identity
                 name = self.input_device_identity.get('name', 'Saved input')
                 self.notice = f'{name} is unavailable; reselect the input device.'
-                return
+                self._device_choices_updated(field, old_options, old_error)
+                return False
             field.value = selected
         elif field.value not in {value for _label, value in choices}:
             field.value = choices[0][1]
         self.unavailable_input_identity = None
+        self._device_choices_updated(field, old_options, old_error)
+        return True
+
+    def _device_choices_updated(self, field, old_options, old_error):
+        if old_options == field.options and old_error == self.device_error:
+            return
+        if self.dropdown == self.fields.index(field):
+            self.dropdown_scroll = next(
+                (index for index, (_label, value) in enumerate(field.options)
+                 if value == field.value), 0)
+        if (self.unavailable_input_identity is None and
+                self.unavailable_output_identity is None):
+            self.notice = 'Audio device list refreshed; open a picker to review.'
+        self.dirty = True
 
     def _toggle_fullscreen(self, glfw, window):
         primary = glfw.get_primary_monitor()
@@ -1175,11 +1199,15 @@ class ReceiverGui:
         self.dirty = True
 
     def _refresh_audio_output_choices(self):
+        choices, error = _output_devices()
+        self._set_audio_output_choices(choices, error)
+
+    def _set_audio_output_choices(self, choices, error=''):
         field = next((field for field in self.fields
                       if field.dest == 'audio_output_device'), None)
         if field is None:
             return
-        choices, error = _output_devices()
+        old_options, old_error = field.options, self.audio_output_error
         field.options = (('Off · passthrough disabled', None),) + choices
         self.audio_output_error = error
         if self.audio_output_identity is not None:
@@ -1191,6 +1219,59 @@ class ReceiverGui:
             else:
                 field.value = selected
                 self.unavailable_output_identity = None
+        if old_options != field.options or old_error != error:
+            if self.dropdown == self.fields.index(field):
+                self.dropdown_scroll = next(
+                    (index for index, (_label, value) in enumerate(field.options)
+                     if value == field.value), 0)
+            if (self.unavailable_input_identity is None and
+                    self.unavailable_output_identity is None):
+                self.notice = 'Audio device list refreshed; open a picker to review.'
+            self.dirty = True
+
+    def _watch_devices(self, stop):
+        known = None
+        while not stop.is_set():
+            try:
+                inputs, input_error = _input_devices()
+            except Exception as exc:
+                field = next((field for field in self.fields
+                              if field.dest == 'device'), None)
+                inputs = () if field is None else field.options
+                input_error = f'Audio device enumeration failed: {exc}'
+            try:
+                outputs, output_error = _output_devices()
+            except Exception as exc:
+                field = next((field for field in self.fields
+                              if field.dest == 'audio_output_device'), None)
+                outputs = () if field is None else field.options[1:]
+                output_error = f'Audio output enumeration failed: {exc}'
+            inputs, outputs = tuple(inputs), tuple(outputs)
+            signature = (inputs, input_error, outputs, output_error)
+            if signature != known:
+                known = signature
+                self.device_updates.put((inputs, input_error, outputs,
+                                         output_error))
+                try:
+                    self._notify_ui()
+                except Exception:
+                    pass
+            if stop.wait(DEVICE_REFRESH_SECONDS):
+                return
+
+    def _process_device_updates(self):
+        changed = False
+        while True:
+            try:
+                inputs, input_error, outputs, output_error = (
+                    self.device_updates.get_nowait())
+            except queue.Empty:
+                break
+            self._set_input_choices(inputs, input_error)
+            self._set_audio_output_choices(outputs, output_error)
+            changed = True
+        if changed:
+            self.dirty = True
 
     def _update_runtime_option(self, field):
         if (self.runtime_options is None or
@@ -2358,6 +2439,12 @@ class ReceiverGui:
                                min(timeout, remaining))
                 return timeout
 
+            self.device_watch_stop.clear()
+            self.device_watch_thread = threading.Thread(
+                target=self._watch_devices, args=(self.device_watch_stop,),
+                name='v7-receiver-device-watch', daemon=True)
+            self.device_watch_thread.start()
+
             first_iteration = True
             while not glfw.window_should_close(window):
                 # Frame publication and window callbacks wake GLFW immediately.
@@ -2369,6 +2456,7 @@ class ReceiverGui:
                     timeout = next_event_timeout(time.monotonic())
                     glfw.wait_events_timeout(timeout)
                 self._process_output()
+                self._process_device_updates()
                 self._poll_frame()
                 self._poll_diagnostics()
                 self._profile_ui_if_enabled()
@@ -2493,6 +2581,7 @@ class ReceiverGui:
                     glfw.set_window_title(window, title)
                     self.last_title = title
         finally:
+            self.device_watch_stop.set()
             if self.receiver_stop is not None:
                 self.receiver_stop.set()
             if self.receiver_thread is not None:

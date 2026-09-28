@@ -341,6 +341,28 @@ class ReceiverGuiOptionTests(unittest.TestCase):
 
         self.assertEqual(gui.fields[field_index].value, 12)
 
+    def test_background_device_refresh_updates_input_and_output_pickers(self):
+        new_inputs = (('newly connected input · 2 in · 48 kHz', 12),)
+        new_outputs = (('newly connected output · 2 out · 48 kHz', 14),)
+        with patch('tools.v7_receiver_gui._load_preferences', return_value={}):
+            gui = ReceiverGui(
+                self, self.root_parser, self.receive_parser, (),
+                audio_output_choices=(),
+                preference_path='unused-preferences.json')
+        gui.device_updates.put((new_inputs, '', new_outputs, ''))
+
+        gui._process_device_updates()
+
+        input_field = next(field for field in gui.fields
+                           if field.dest == 'device')
+        output_field = next(field for field in gui.fields
+                            if field.dest == 'audio_output_device')
+        self.assertEqual(input_field.options, new_inputs)
+        self.assertEqual(input_field.value, 12)
+        self.assertEqual(output_field.options,
+                         (('Off · passthrough disabled', None),) + new_outputs)
+        self.assertIsNone(output_field.value)
+
     def test_selected_cli_options_reach_receiver_arguments(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser,
                           (('test input device', 3),))
