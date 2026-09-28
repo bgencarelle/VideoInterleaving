@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from tools import v7_live
-from tools.v7_send_gui import (InputDevice, OutputDevice, PROFILE_CHOICES,
+from tools.v7_send_gui import (InputDevice, OutputDevice,
                                 PRIMARY_PROFILE_CHOICES, ScreenTarget, SenderGui,
                                build_command, enumerate_screen_targets,
                                enumerate_camera_sources, linux_camera_sources,
@@ -75,12 +75,10 @@ class SenderGuiTests(unittest.TestCase):
         self.sd = Mock()
         self.sd.check_output_settings.return_value = None
 
-    def test_colour_mono_profile_is_available_without_changing_primary_choices(self):
-        self.assertIn('mono-colour-500',
-                      tuple(value for _label, value in PROFILE_CHOICES))
+    def test_colour_mono_profile_is_available_in_primary_picker(self):
         self.assertEqual(
             tuple(value for _label, value in PRIMARY_PROFILE_CHOICES),
-            ('mono-fold-500', 'fold-500'))
+            ('mono-fold-500', 'fold-500', 'mono-colour-500'))
 
     def test_device_list_contains_only_output_devices_and_does_not_default(self):
         sd = Mock()
@@ -711,7 +709,7 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(gui.settings['profile'], 'mono-fold-500')
         self.assertEqual(tuple(value for _label, value in
                                gui._choices('profile')),
-                         ('mono-fold-500', 'fold-500'))
+                         ('mono-fold-500', 'fold-500', 'mono-colour-500'))
         gui.advanced = True
         self.assertIn('fold-1000', [value for _label, value in
                                     gui._choices('profile')])

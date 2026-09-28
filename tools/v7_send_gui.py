@@ -31,7 +31,7 @@ PROFILE_CHOICES = (
     ('Fold 1000 · advanced', 'fold-1000'),
 )
 MONO_PROFILES = ('mono-fold-500', 'mono-colour-500')
-PRIMARY_PROFILE_CHOICES = PROFILE_CHOICES[:2]
+PRIMARY_PROFILE_CHOICES = PROFILE_CHOICES[:3]
 SOURCE_AUDIO_CHOICES = (
     ('Video soundtrack (if present)', 'source'),
     ('Input device', 'device'),
@@ -79,7 +79,8 @@ FIELD_HELP = {
     'device': 'Choose the explicit audio output device that feeds the receiver or recording path.',
     'source': 'Choose what the sender captures. Capture starts only after Start.',
     'rate': 'Audio output sample rate. Native uses the device clock; this is separate from Capture FPS.',
-    'profile': 'Mono video is recommended; the receiver detects it automatically. Fold 500 stereo is also available.',
+    'profile': ('Mono video is recommended; the receiver detects it automatically. '
+                'Colour-weighted mono is experimental; Fold 500 stereo is also available.'),
     'speed': 'Playback speed from 0.25× to 4×. Faster playback raises the transmitted carrier frequencies.',
     'encode_filter': 'Resize filter. Folded profiles require Box; Profile default selects the profile recommendation.',
     'brightness': 'Live source brightness multiplier. 1.0 is neutral.',
