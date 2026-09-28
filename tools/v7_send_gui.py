@@ -542,6 +542,16 @@ def sample_rate_options(device, channels, sd_module=None):
             ('Custom…', 'custom'),)
 
 
+def _clipboard_text(glfw, window):
+    """Read the shared clipboard without GLFW 3.4's deprecated handle."""
+    try:
+        version = tuple(glfw.get_version())
+    except Exception:
+        version = (0, 0, 0)
+    clipboard_window = None if version >= (3, 4, 0) else window
+    return glfw.get_clipboard_string(clipboard_window) or ''
+
+
 def pick_video_file(current_path='', platform=None, which=None, run=None):
     """Open the host's native file picker without adding a GUI dependency."""
     platform = sys.platform if platform is None else platform
@@ -1900,7 +1910,7 @@ class SenderGui:
                 self.edit_buffer = ''
             elif key == glfw.KEY_V and mods & paste_modifiers:
                 try:
-                    self.edit_buffer += glfw.get_clipboard_string(window) or ''
+                    self.edit_buffer += _clipboard_text(glfw, window)
                 except Exception:
                     pass
             self.dirty = True

@@ -79,6 +79,9 @@ FPS = P.PULSE_FPS
 CAMERA_CAPTURE_FPS = 15
 INPUT_AUDIO_QUEUE_BLOCKS = 8
 SENDER_ENCODE_QUEUE_BATCHES = 64
+# GUI users often start the receiver before the sender has finished warming up.
+PROFILE_PROBE_TIMEOUT = 2.0
+GUI_PROFILE_PROBE_TIMEOUT = 8.0
 # Hold two normal-speed packets before starting output. Once the first packet is
 # handed off, one queued packet remains to absorb a brief capture/encode stall.
 SENDER_STARTUP_BUFFER_SECONDS = 2 * P.PULSE_FRAME / P.RATE
@@ -460,10 +463,8 @@ def _mix_mono_video_audio(modem, frames, source, delay, video_side,
     return output
 
 
-def run_send(args):
-    import sounddevice as sd
-    from tools.v7_capture import Throttled
-
+def _apply_profile_option(args):
+    """Translate the sender GUI/CLI profile name to the wire flags."""
     profile = getattr(args, 'profile', None)
     if profile == 'mono-fold-500':
         args.experimental_mono_fold = True
@@ -474,6 +475,13 @@ def run_send(args):
         args.experimental_fold = 500
     elif profile == 'fold-1000':
         args.experimental_fold = 1000
+
+
+def run_send(args):
+    import sounddevice as sd
+    from tools.v7_capture import Throttled
+
+    _apply_profile_option(args)
     slots = _fold_slots(args)
     mono_profile = bool(getattr(args, 'experimental_mono', False))
     mono_fold_profile = bool(getattr(args, 'experimental_mono_fold', False))
@@ -1038,12 +1046,14 @@ def _mono_fold_input_side(channel_modes, mono_mode):
     return 'right' if selected == 1 else 'left'
 
 
-def _detect_mono_fold_side(args, timeout=2.0):
+def _detect_mono_fold_side(args, timeout=2.0, wait_for_signal=False):
     """Return (side, mode) for a valid mono status, or (None, None).
 
     A short startup pass lets the ordinary receiver choose its model and rank
     map before it opens the live decode path. If neither mono status validates,
-    the caller keeps the ordinary stereo Fold-500 profile.
+    the caller keeps the ordinary stereo Fold-500 profile. The GUI can wait for
+    the first non-silent block before starting its profile-detection timeout, so
+    it can be opened before its sender.
     """
     import sounddevice as sd
     _ensure_test_modem_path()
@@ -1059,6 +1069,13 @@ def _detect_mono_fold_side(args, timeout=2.0):
     last_positions = [set() for _ in range(channels)]
     blocks = queue.Queue(maxsize=32)
     stop = getattr(args, 'stop_event', None)
+
+    def confirmed_profile():
+        for candidate in (MONO_1000, MONO_500):
+            side = _mono_fold_input_side(observed_modes, candidate)
+            if side is not None:
+                return side, candidate
+        return None, None
 
     def callback(indata, _frames, _timing, status):
         if status and not args.no_log:
@@ -1081,16 +1098,20 @@ def _detect_mono_fold_side(args, timeout=2.0):
     stream = sd.InputStream(
         samplerate=rate, channels=channels, dtype='float32',
         device=args.device, blocksize=1024, callback=callback)
-    deadline = time.monotonic()+max(0.0, float(timeout))
-    first_detection = None
+    timeout = max(0.0, float(timeout))
+    deadline = (None if wait_for_signal else time.monotonic()+timeout)
     try:
         stream.start()
-        while time.monotonic() < deadline and not (stop and stop.is_set()):
+        while not (stop and stop.is_set()):
+            if deadline is not None and time.monotonic() >= deadline:
+                break
             try:
                 block = blocks.get(timeout=.05)
             except queue.Empty:
                 continue
             now = time.monotonic()
+            if deadline is None:
+                deadline = now+timeout
             for index, live_input in enumerate(inputs):
                 live_input.add(block[:, index:index+1].copy())
                 audio = live_input.take(now)
@@ -1106,20 +1127,13 @@ def _detect_mono_fold_side(args, timeout=2.0):
                         audio, position, scale, rate, way)
                     if mode is not None:
                         observed_modes[index].append(mode)
-                        if first_detection is None:
-                            first_detection = now
                 live_input.decoded()
-            if (first_detection is not None and
-                    now-first_detection >= .25):
+            if confirmed_profile()[0] is not None:
                 break
     finally:
         stream.stop()
         stream.close()
-    for mode in (MONO_1000, MONO_500):
-        side = _mono_fold_input_side(observed_modes, mode)
-        if side is not None:
-            return side, mode
-    return None, None
+    return confirmed_profile()
 
 
 def run_receive(args):
@@ -1140,7 +1154,11 @@ def run_receive(args):
         getattr(args, 'baseline', False) or
         getattr(args, 'experimental_fold', None) is not None)
     if not profile_is_explicit:
-        detected_side, detected_mode = _detect_mono_fold_side(args)
+        probe_timeout = (GUI_PROFILE_PROBE_TIMEOUT if runtime_options is not None
+                         else PROFILE_PROBE_TIMEOUT)
+        detected_side, detected_mode = _detect_mono_fold_side(
+            args, timeout=probe_timeout,
+            wait_for_signal=runtime_options is not None)
         if getattr(args, 'stop_event', None) is not None and args.stop_event.is_set():
             return
         if detected_side is not None:

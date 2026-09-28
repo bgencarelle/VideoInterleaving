@@ -5,8 +5,10 @@ import numpy as np
 from PIL import Image
 
 from tools.v7_gl_viewer import (DISPLAY_MODES, FILTER_LUT_MODES,
+                                DCT_RECONSTRUCTION_MODES,
                                 FILTER_PRECOMPUTE_MODES,
                                 FLOAT_MODE_IDS, fit_viewport, float_planes,
+                                dct_reconstruct_planes,
                                 build_filter_lut,
                                 title_for_status,
                                 toolbar_layout, _toolbar_image,
@@ -65,6 +67,38 @@ class GLViewerHelperTests(unittest.TestCase):
         neutral = np.full((1, 1), 1.0/255.0, np.float32)
         np.testing.assert_array_equal(cb, neutral)
         np.testing.assert_array_equal(cr, neutral)
+
+    def test_dct_reconstruction_samples_the_same_cosine_at_higher_resolution(self):
+        x = np.arange(4, dtype=np.float32)
+        cosine = np.cos(np.pi*(x+.5)/4)
+        source = np.tile(cosine, (2, 1))
+
+        (enlarged,) = dct_reconstruct_planes((source,), '2x')
+
+        target_x = np.arange(8, dtype=np.float32)
+        expected = np.tile(np.cos(np.pi*(target_x+.5)/8), (4, 1))
+        self.assertEqual(enlarged.shape, (4, 8))
+        np.testing.assert_allclose(enlarged, expected, atol=1e-6)
+
+    def test_viewport_dct_reconstruction_matches_picture_and_chroma_scale(self):
+        planes = (np.full((2, 4), .25, np.float32),
+                  np.full((1, 2), -.5, np.float32),
+                  np.full((1, 2), .75, np.float32))
+
+        enlarged = dct_reconstruct_planes(planes, 'viewport', (16, 8))
+
+        self.assertEqual(tuple(plane.shape for plane in enlarged),
+                         ((8, 16), (4, 8), (4, 8)))
+        for actual, value in zip(enlarged, (.25, -.5, .75)):
+            np.testing.assert_allclose(actual, value, atol=1e-6)
+        self.assertEqual(DCT_RECONSTRUCTION_MODES,
+                         ('off', '2x', '4x', '8x', 'viewport'))
+
+    def test_dct_reconstruction_rejects_invalid_viewport_size(self):
+        with self.assertRaisesRegex(ValueError, 'needs a size'):
+            dct_reconstruct_planes((np.ones((2, 2)),), 'viewport')
+        with self.assertRaisesRegex(ValueError, 'positive'):
+            dct_reconstruct_planes((np.ones((2, 2)),), 'viewport', (0, 4))
 
     def test_float_plane_validation_rejects_mismatched_or_nonfinite_values(self):
         with self.assertRaisesRegex(ValueError, 'do not match'):
@@ -227,7 +261,7 @@ class FloatShaderReferenceTests(unittest.TestCase):
             kernel_texture.repeat_x = False
             kernel_texture.repeat_y = False
             kernel_texture.use(location=3)
-            self.program['reconstruction'].value = self.mode_ids[mode]
+            self.program['reconstruction'].value = self.mode_ids.get(mode, 0)
             self.program['output_size'].value = (1.0, 1.0)
             self.framebuffer.use()
             self.context.viewport = (0, 0, 1, 1)
@@ -351,6 +385,10 @@ class FloatShaderReferenceTests(unittest.TestCase):
                     self.assertLessEqual(
                         float(np.max(np.abs(rendered-reference))),
                         1.0/255.0+1e-6)
+
+    def test_nearest_float_path_supports_dct_reconstruction(self):
+        rendered, reference = self._render((64, 128, 192), 'nearest')
+        np.testing.assert_allclose(rendered, reference, atol=1.0/255.0+1e-6)
 
     def test_filter_menu_overlay_is_scissored_over_picture(self):
         from tools.v7_gl_viewer import FRAGMENT_SHADER, VERTEX_SHADER

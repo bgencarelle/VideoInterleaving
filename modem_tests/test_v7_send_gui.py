@@ -10,13 +10,14 @@ from unittest.mock import Mock, patch
 from tools import v7_live
 from tools.v7_send_gui import (InputDevice, OutputDevice,
                                 PRIMARY_PROFILE_CHOICES, ScreenTarget, SenderGui,
-                               build_command, enumerate_screen_targets,
-                               enumerate_camera_sources, linux_camera_sources,
-                               enumerate_capture_fps, parse_capture_fps,
-                               input_devices, output_devices,
-                               parse_avfoundation_screen_sources,
-                               parse_ffmpeg_camera_sources, pick_video_file,
-                               sample_rate_options, validate_settings)
+                                build_command, enumerate_screen_targets,
+                                enumerate_camera_sources, linux_camera_sources,
+                                enumerate_capture_fps, parse_capture_fps,
+                                input_devices, output_devices,
+                                parse_avfoundation_screen_sources,
+                                parse_ffmpeg_camera_sources, pick_video_file,
+                                sample_rate_options, validate_settings,
+                                _clipboard_text)
 
 
 class SenderKeyStub:
@@ -160,6 +161,22 @@ class SenderGuiTests(unittest.TestCase):
         self.assertIn('--profile', command)
         self.assertNotIn('--experimental-mono-fold', command)
         self.assertEqual(args.source_audio, 'source')
+
+    def test_mono_colour_profile_reaches_sender_cli_as_a_profile_choice(self):
+        self.settings.update(profile='mono-colour-500', mono_video_side='left')
+
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+
+        v7_live._apply_profile_option(args)
+
+        self.assertEqual(args.profile, 'mono-colour-500')
+        self.assertEqual(args.mono_video_side, 'left')
+        self.assertTrue(args.experimental_mono_fold)
+        self.assertTrue(args.experimental_mono_colour)
+        self.assertEqual(command[command.index('--profile')+1],
+                         'mono-colour-500')
+        self.assertNotIn('--experimental-mono-colour', command)
 
     def test_mono_video_can_route_an_explicit_audio_input_device(self):
         audio_device = InputDevice(8, 'Loopback', 2, 48000)
@@ -623,6 +640,8 @@ class SenderGuiTests(unittest.TestCase):
         for modifier in (SenderKeyStub.MOD_CONTROL, 8):
             with self.subTest(modifier=modifier):
                 gui.edit_buffer = 'old-url'
+                clipboard = Mock(
+                    return_value='https://example.test/clip.mp4')
                 glfw = SimpleNamespace(
                     PRESS=SenderKeyStub.PRESS,
                     REPEAT=SenderKeyStub.REPEAT,
@@ -634,20 +653,32 @@ class SenderGuiTests(unittest.TestCase):
                     KEY_V=SenderKeyStub.KEY_V,
                     MOD_CONTROL=SenderKeyStub.MOD_CONTROL,
                     MOD_SUPER=8,
-                    get_clipboard_string=Mock(
-                        return_value='https://example.test/clip.mp4'))
+                    get_version=lambda: (3, 4, 0),
+                    get_clipboard_string=clipboard)
 
                 gui._on_key(glfw, None, glfw.KEY_A, 0, glfw.PRESS, modifier)
                 self.assertEqual(gui.edit_buffer, '')
-                gui._on_key(glfw, None, glfw.KEY_V, 0, glfw.PRESS, modifier)
+                window = object()
+                gui._on_key(glfw, window, glfw.KEY_V, 0, glfw.PRESS, modifier)
 
                 self.assertEqual(gui.edit_buffer,
                                  'https://example.test/clip.mp4')
+                clipboard.assert_called_once_with(None)
                 gui._on_key(glfw, None, glfw.KEY_ENTER, 0,
                             glfw.PRESS, modifier)
                 self.assertEqual(gui.settings['video_source'],
                                  'https://example.test/clip.mp4')
                 gui.editing = True
+
+    def test_clipboard_read_keeps_window_argument_for_legacy_glfw(self):
+        window = object()
+        clipboard = Mock(return_value='clipboard text')
+        glfw = SimpleNamespace(
+            get_version=lambda: (3, 3, 8),
+            get_clipboard_string=clipboard)
+
+        self.assertEqual(_clipboard_text(glfw, window), 'clipboard text')
+        clipboard.assert_called_once_with(window)
 
     def test_capture_fps_dropdown_uses_rates_reported_by_camera_driver(self):
         output = ('Interval: Discrete 0.033s (30.000 fps)\n'

@@ -1678,23 +1678,30 @@ toggles fullscreen. Fullscreen hides the toolbar, status strip, and diagnostics
 on entry. The HUD reappears at the top edge or on key input, stays up while a
 control is open, and hides again after two idle seconds. It reads
 decoded values and live diagnostics directly from the receiver mailbox/status
-callback. The display menu provides eleven presentation choices: nearest,
+callback. The receiver auto-selects mono-fresh or mono-colour decoding from the
+in-band coded profile status; those manual profile overrides are CLI-only. The
+display menu provides eleven presentation choices: nearest,
 bilinear, sharp-bilinear, Mitchell bicubic, Spline36, Robidoux, Robidoux Sharp,
 cubic B-spline, Kaiser-windowed sinc, Hann-windowed sinc, and EWA Jinc. Nearest
 remains the initial display default and preserves the legacy 8-bit RGB
 conversion and nearest-sampled shader path. All other modes reconstruct float
 Y/Cb/Cr planes; selecting a mode does not alter transport decoding or decoded
 exports. Float planes, the shader, and any filter intermediates are allocated
-only when a non-nearest mode is selected.
+when a non-nearest display mode or DCT reconstruction is selected. Advanced
+receiver settings add DCT reconstruction choices Off, 2×, 4×, 8×, and Viewport
+size. Off is the default; fixed scales reconstruct a larger cosine grid before
+the display scaler, while Viewport size reconstructs directly at the picture
+viewport's framebuffer dimensions and refreshes when that viewport changes.
 Standalone image-sequence preview is available as
 `.venv/bin/python tools/v7_viewer.py IMAGE...`.
 
-Status: implementation brief, September 27, 2026. The receiver and preview
-currently implement the eleven display choices above, mouse-accessible menus,
-and an explicitly saved display preference in the standalone viewer. The
-additional filters are experimental presentation choices; Nearest remains the
-reference/default, and no new mode is claimed to have won. The DCT and custom
-V7 Perceptual paths below remain proposals, not available display modes.
+Status: implementation brief, September 28, 2026. The receiver and preview
+implement the eleven display choices above; the receiver also exposes the
+display-only DCT reconstruction choices in Advanced settings. Nearest and DCT
+Off remain the reference/default. The additional filters and DCT reconstruction
+are experimental presentation choices; no new mode is claimed to have won. The
+custom V7 Perceptual path below remains a proposal, not an available display
+mode.
 
 ### 12.1 Ownership and immutable boundaries
 
@@ -1766,9 +1773,12 @@ The current display menu uses these stable mode names and fixed kernel variants:
 
 Spline36, Robidoux, Robidoux Sharp, cubic B-spline, Kaiser sinc, and Hann sinc
 are resampled into bounded 4× float intermediates, then linearly sampled for
-the final display scaling. EWA Jinc uses a radial kernel in the display shader;
-its LUT is generated on demand. The filter choices are opt-in and affect only
-presentation. Keep source planes unclipped until the final RGB conversion.
+the final display scaling when DCT reconstruction is Off. With DCT
+reconstruction active, the selected kernel runs in the display shader so its
+intermediate does not grow beyond the selected DCT grid. EWA Jinc uses a radial
+kernel in the display shader; its LUT is generated on demand. The filter choices
+are opt-in and affect only presentation. Keep source planes unclipped until the
+final RGB conversion.
 
 Sharp bilinear uses `p = uv*plane_size - 0.5`, `f = fract(p)`, and the separate
 per-axis output footprint `s = max(output_size/plane_size, 1)`. It remaps the
@@ -1787,31 +1797,35 @@ implemented, shows the first frame immediately, blends for at most one measured
 frame interval, bypasses cuts, and reports the blend duration. It is not motion
 interpolation. No temporal effect is enabled by default.
 
-Cache CPU-generated intermediates per frame generation and selected filter.
-Bounded 4× intermediate dimensions keep work independent of desktop resolution;
-the final scaling pass still costs screen-resolution-dependent GPU work.
+Avoid rebuilding DCT intermediates on toolbar redraws. Fixed 2×/4×/8× dimensions
+bound the CPU work independently of desktop resolution; Viewport size is
+intentionally viewport-resolution-dependent. The final scaling pass still costs
+screen-resolution-dependent GPU work.
 
 ### 12.4 DCT reconstruction: precise implementation boundary
 
-The mailbox contains spatial samples, not coefficients. For each plane:
+The mailbox contains spatial samples, not coefficients. For each plane, compute
+a 2D DCT-II with orthonormal normalization, copy the shared low-frequency corner
+into a zero-filled array of the target dimensions, multiply coefficients by
+`sqrt((target_height*target_width)/(source_height*source_width))`, and apply the
+matching inverse transform. The supported targets are Off (no transform), fixed
+2×/4×/8× grids, or the picture viewport's framebuffer dimensions. Viewport mode
+uses the same horizontal and vertical scale ratios for the reduced chroma
+planes, and rebuilds when the picture viewport changes.
 
-1. Compute a 2D DCT-II with orthonormal normalization.
-2. Copy all coefficients into the top-left of a zero-filled 4H×4W array.
-3. Multiply coefficients by `sqrt((4H*4W)/(H*W))`, i.e. 4 for this scaling.
-4. Apply the matching orthonormal inverse transform to obtain the larger plane.
+This samples the same cosine expansion on the target cell-centered grid.
+Account for the corresponding sample centers in GPU texture coordinates. Do
+not compare every Nth enlarged pixel directly to an original pixel: their
+centers do not generally coincide. Verify against direct cosine evaluation at
+selected coordinates instead.
 
-This samples the same cosine expansion on the finer cell-centered grid.
-Account for the corresponding sample centers in GPU texture coordinates.
-Do not compare every fourth enlarged pixel directly to an original pixel:
-their centers do not coincide for this even enlargement factor. Verify against
-direct cosine evaluation at selected coordinates instead.
-
-Do not clip planes before this operation, discard outside-corner guests, or
-apply a new rectangular cutoff. Test constants, single basis components,
-amplitude, orientation, grayscale, and boundaries. Reuse buffers and perform
-transforms once per new frame, not on toolbar redraws. Lazily load the existing
-CPU transform dependency. This is a cosine-consistent presentation of decoded
-samples, including their noise; it is not recovery of the lost source image.
+Do not clip planes before this operation or apply a new rectangular cutoff.
+Test constants, single basis components, amplitude, orientation, grayscale,
+and boundaries. Keep it display-only and perform transforms on picture updates
+or when the target viewport changes, not on toolbar redraws. Lazily load the
+existing CPU transform dependency. This is a cosine-consistent presentation of
+decoded samples, including their noise; it is not recovery of the lost source
+image.
 
 ### 12.5 Custom mode: V7 Perceptual
 

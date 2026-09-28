@@ -54,6 +54,14 @@ EWA_JINC_RADIUS = 3.2383154841662362
 KAISER_SINC_RADIUS = 3.0
 KAISER_SINC_BETA = 8.6
 HANN_SINC_RADIUS = 3.0
+DCT_RECONSTRUCTION_MODES = ('off', '2x', '4x', '8x', 'viewport')
+DCT_RECONSTRUCTION_LABELS = {
+    'off': 'Off',
+    '2x': '2×',
+    '4x': '4×',
+    '8x': '8×',
+    'viewport': 'Viewport size',
+}
 
 
 def toolbar_layout(width, open_dropdown=None):
@@ -206,6 +214,61 @@ def float_planes(values, shapes):
         neutral_chroma = np.full((1, 1), 1.0/255.0, np.float32)
         planes.extend((neutral_chroma.copy(), neutral_chroma))
     return tuple(planes)
+
+
+def dct_reconstruct_planes(planes, mode, viewport_size=None):
+    """Resample decoded planes by evaluating their retained DCT spectrum.
+
+    The input planes are already spatial-domain inverse-DCT output. Transforming
+    them back recovers the transmitted low-frequency corner; padding or
+    truncating that corner before the inverse transform evaluates the same
+    cosine reconstruction on a larger or smaller display grid. The coefficient
+    scale preserves pixel amplitude across the changed orthonormal grid size.
+    """
+    if mode not in DCT_RECONSTRUCTION_MODES:
+        raise ValueError(f'unknown DCT reconstruction mode {mode!r}')
+    planes = tuple(np.asarray(plane, dtype=np.float32) for plane in planes)
+    if not planes or any(plane.ndim != 2 or min(plane.shape) <= 0
+                         for plane in planes):
+        raise ValueError('DCT reconstruction needs non-empty 2-D planes')
+    if mode == 'off':
+        return planes
+
+    if mode == 'viewport':
+        if viewport_size is None or len(viewport_size) != 2:
+            raise ValueError('viewport-size DCT reconstruction needs a size')
+        target_width, target_height = (int(value) for value in viewport_size)
+        if target_width <= 0 or target_height <= 0:
+            raise ValueError('viewport dimensions must be positive')
+        luma_height, luma_width = planes[0].shape
+        scale_x = target_width/luma_width
+        scale_y = target_height/luma_height
+        target_shapes = tuple((max(1, round(plane.shape[0]*scale_y)),
+                               max(1, round(plane.shape[1]*scale_x)))
+                              for plane in planes)
+        target_shapes = ((target_height, target_width), *target_shapes[1:])
+    else:
+        scale = int(mode[:-1])
+        target_shapes = tuple((plane.shape[0]*scale,
+                               plane.shape[1]*scale) for plane in planes)
+
+    from scipy.fft import dctn, idctn
+
+    output = []
+    for plane, (target_height, target_width) in zip(planes, target_shapes):
+        source_height, source_width = plane.shape
+        coefficients = dctn(plane, norm='ortho')
+        resized = np.zeros((target_height, target_width),
+                           dtype=coefficients.dtype)
+        copy_height = min(source_height, target_height)
+        copy_width = min(source_width, target_width)
+        resized[:copy_height, :copy_width] = coefficients[
+            :copy_height, :copy_width]
+        resized *= math.sqrt((target_height*target_width) /
+                             (source_height*source_width))
+        output.append(np.ascontiguousarray(
+            idctn(resized, norm='ortho'), dtype=np.float32))
+    return tuple(output)
 
 
 def _bessel_j1_series(x):

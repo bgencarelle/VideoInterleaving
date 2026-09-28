@@ -11,6 +11,7 @@ from PIL import Image
 from animation_modem import v7
 from tools import v7_live
 from tools.v7_gl_viewer import (DISPLAY_MODES, FLOAT_FRAGMENT_SHADER,
+                                DCT_RECONSTRUCTION_MODES,
                                 FRAGMENT_SHADER, VERTEX_SHADER)
 from tools.v7_receiver_gui import (ROOT, ReceiverGui, _make_fields,
                                    FULLSCREEN_TOOLBAR_EDGE,
@@ -295,16 +296,42 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         represented = {field.dest for field in gui.fields
                        if field.action is not None}
         self.assertTrue(HIDDEN_DECODE_OPTIONS.isdisjoint(represented))
+        self.assertNotIn('experimental_mono_colour', represented)
         args = gui._build_arguments()
         self.assertFalse(args.experimental_mono_fold)
+        self.assertFalse(args.experimental_mono_colour)
         self.assertIsNone(args.experimental_fold)
         self.assertEqual(args.frame_boundary, 'eof')
         self.assertEqual(args.pilot_timing, 'tone-seeded')
         receiver_help = self.receive_parser.format_help()
         for hidden in ('--pilot-timing', '--frame-boundary',
                        '--pulse-timing', '--tone-equalization',
-                       '--experimental-mono-fold'):
+                       '--experimental-mono-fold',
+                       '--experimental-mono-colour'):
             self.assertNotIn(hidden, receiver_help)
+
+    def test_gui_auto_detects_mono_colour_from_the_coded_status(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser,
+                          (('test input device', 3),))
+        args = gui._build_arguments()
+        args.no_log = True
+        args.runtime_options = SimpleNamespace(
+            snapshot=lambda: {'audio_input_identity': None})
+
+        with (patch.object(v7_live, '_detect_mono_fold_side',
+                           return_value=('right', 5)) as detect,
+              patch.object(v7_live, '_run_receive', return_value='decoded') as run):
+            self.assertEqual(v7_live.run_receive(args), 'decoded')
+
+        detect.assert_called_once_with(
+            args, timeout=v7_live.GUI_PROFILE_PROBE_TIMEOUT,
+            wait_for_signal=True)
+        self.assertTrue(args.experimental_mono_fold)
+        self.assertFalse(args.experimental_mono_colour)
+        self.assertEqual(args._detected_mono_mode, 5)
+        mono_wire = run.call_args.args[2]
+        self.assertEqual(mono_wire.wire_profile, 'mono-colour-500')
+        self.assertEqual(mono_wire.side, 'right')
 
     def test_first_available_input_is_preselected(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser,
@@ -480,6 +507,7 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         basic = {gui.fields[index].dest
                  for index in gui._config_field_indexes()}
         self.assertIn('device', basic)
+        self.assertNotIn('DCT reconstruction', basic)
         self.assertNotIn('experimental_fold', basic)
         self.assertNotIn('direction', basic)
         self.assertNotIn('decode_history', basic)
@@ -488,6 +516,26 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         advanced = {gui.fields[index].dest
                     for index in gui._config_field_indexes()}
         self.assertTrue(HIDDEN_DECODE_OPTIONS.isdisjoint(advanced))
+        self.assertIn('DCT reconstruction', advanced)
+
+    def test_dct_reconstruction_is_a_display_only_advanced_choice(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser,
+                          (('test input device', 3),))
+        field = next(field for field in gui.fields
+                     if field.label == 'DCT reconstruction')
+        self.assertEqual(field.value, 'off')
+        self.assertEqual(tuple(value for _label, value in field.options),
+                         DCT_RECONSTRUCTION_MODES)
+
+        gui.picture_dirty = False
+        gui._select_choice(field, '4x')
+
+        self.assertEqual(gui.dct_reconstruction, '4x')
+        self.assertTrue(gui.picture_dirty)
+        self.assertEqual(gui.notice, 'DCT reconstruction: 4×')
+
+        gui._build_arguments()
+        self.assertEqual(gui.dct_reconstruction, '4x')
 
     def test_image_only_view_restores_the_live_page(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())

@@ -3,6 +3,7 @@ import sys
 import unittest
 import hashlib
 from pathlib import Path
+import threading
 import time
 import types
 from unittest.mock import patch
@@ -498,7 +499,42 @@ class MonoVideoWireTests(unittest.TestCase):
         damaged[:, :] = 0
         self.assertEqual(detect(damaged), (None, None))
 
-    def test_live_sender_places_input_audio_left_and_video_right(self):
+    def test_gui_profile_probe_waits_for_sender_audio_before_timing_out(self):
+        colour_audio = MonoColourFoldWire(self.model).encode(
+            self.model, [self.values]*PACKETS)
+
+        class InputStream:
+            def __init__(self, **kwargs):
+                self.callback = kwargs['callback']
+                self.thread = None
+
+            def start(self):
+                self.thread = threading.Thread(
+                    target=lambda: (time.sleep(.03), self.callback(
+                        colour_audio, len(colour_audio), None, None)))
+                self.thread.start()
+
+            def stop(self):
+                if self.thread is not None:
+                    self.thread.join()
+
+            def close(self):
+                pass
+
+        sounddevice = types.ModuleType('sounddevice')
+        sounddevice.query_devices = lambda *_args: {
+            'max_input_channels': 2, 'default_samplerate': v7.RATE}
+        sounddevice.InputStream = InputStream
+        args = types.SimpleNamespace(
+            device=3, direction='auto', no_log=True, stop_event=None)
+
+        with patch.dict(sys.modules, {'sounddevice': sounddevice}):
+            detected = v7_live._detect_mono_fold_side(
+                args, timeout=.5, wait_for_signal=True)
+
+        self.assertEqual(detected, ('right', MONO_COLOUR_MODE))
+
+    def test_live_sender_emits_each_mono_profile_status_on_video_leg(self):
         written = []
 
         class OutputStream:
@@ -532,28 +568,36 @@ class MonoVideoWireTests(unittest.TestCase):
         import types
         fake_sounddevice = types.ModuleType('sounddevice')
         fake_sounddevice.OutputStream = OutputStream
-        with patch.dict(sys.modules, {'sounddevice': fake_sounddevice}), \
-                patch.object(v7_live, '_model', return_value=self.model), \
-                patch.object(v7_live, '_capture', return_value=lambda: self.image), \
-                patch('tools.v7_source_audio.DeviceSourceAudio', AudioSource):
-            args = v7_live.parser().parse_args([
-                'send', '--device', 'memory', '--source', 'test',
-                '--seconds', '.24', '--no-log', '--profile', 'mono-fold-500',
-                '--source-audio', 'device', '--source-audio-device', '7'])
-            v7_live.run_send(args)
-
-        self.assertGreaterEqual(len(written), 2)
-        self.assertEqual(written[0].shape[1], 2)
-        self.assertGreater(float(np.max(np.abs(written[0][:, 1]))), 0.0)
-        np.testing.assert_array_equal(written[0][:, 0], 0.0)
-        # Verify the status on samples emitted by run_send itself, after the
-        # CLI profile selection, mono-leg routing, and final output processing.
         from tone_code import decode_tone_code
-        status = decode_tone_code(written[0][:, 1], sample_rate=v7.RATE)
-        self.assertTrue(status['valid'], status)
-        self.assertEqual(status['status']['mode'], MONO_VIDEO_MODE)
-        np.testing.assert_allclose(written[1][:, 0], .1)
-        self.assertGreater(float(np.max(np.abs(written[1][:, 1]))), 0.0)
+        for profile, expected_mode in (
+                ('mono-fold-500', MONO_VIDEO_MODE),
+                ('mono-colour-500', MONO_COLOUR_MODE)):
+            with self.subTest(profile=profile):
+                written.clear()
+                with patch.dict(sys.modules, {'sounddevice': fake_sounddevice}), \
+                        patch.object(v7_live, '_model', return_value=self.model), \
+                        patch.object(v7_live, '_capture',
+                                     return_value=lambda: self.image), \
+                        patch('tools.v7_source_audio.DeviceSourceAudio',
+                              AudioSource):
+                    args = v7_live.parser().parse_args([
+                        'send', '--device', 'memory', '--source', 'test',
+                        '--seconds', '.24', '--no-log', '--profile', profile,
+                        '--source-audio', 'device', '--source-audio-device', '7'])
+                    v7_live.run_send(args)
+
+                self.assertGreaterEqual(len(written), 2)
+                self.assertEqual(written[0].shape[1], 2)
+                self.assertGreater(float(np.max(np.abs(written[0][:, 1]))), 0.0)
+                np.testing.assert_array_equal(written[0][:, 0], 0.0)
+                # Inspect run_send's emitted samples after profile selection,
+                # mono-leg routing, and final output processing.
+                status = decode_tone_code(
+                    written[0][:, 1], sample_rate=v7.RATE)
+                self.assertTrue(status['valid'], status)
+                self.assertEqual(status['status']['mode'], expected_mode)
+                np.testing.assert_allclose(written[1][:, 0], .1)
+                self.assertGreater(float(np.max(np.abs(written[1][:, 1]))), 0.0)
 
     def test_embedded_video_audio_uses_the_shared_capture_clock(self):
         written = []

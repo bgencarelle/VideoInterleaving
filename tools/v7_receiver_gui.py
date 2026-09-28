@@ -28,11 +28,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tools.v7_gl_viewer import (DISPLAY_LABELS, DISPLAY_MODES,
+                                DCT_RECONSTRUCTION_LABELS,
+                                DCT_RECONSTRUCTION_MODES,
                                 FILTER_PRECOMPUTE_MODES,
                                 FLOAT_FRAGMENT_SHADER, FLOAT_MODE_IDS,
                                 FRAGMENT_SHADER, VERTEX_SHADER,
                                 _diagnostic_image, _float_texture_filter,
-                                build_filter_lut, fit_viewport, float_planes,
+                                build_filter_lut, dct_reconstruct_planes,
+                                fit_viewport, float_planes,
                                 resample_filter_planes)
 
 
@@ -165,7 +168,8 @@ LIVE_RUNTIME_DESTS = frozenset((
     'show_sync_warning'))
 HIDDEN_DECODE_OPTIONS = frozenset((
     'direction', 'fixture', 'experimental_fold', 'baseline',
-    'experimental_mono', 'experimental_mono_fold', 'mono_compatible',
+    'experimental_mono', 'experimental_mono_fold', 'experimental_mono_colour',
+    'mono_compatible',
     'mono_video_side', 'profile_ui', 'decode_batch', 'decode_history',
     'refine', 'no_tail_memory', 'force_float32', 'pilot_timing',
     'frame_boundary', 'pilot_speed_diagnostics', 'pulse_timing',
@@ -474,6 +478,10 @@ def _make_fields(receive_parser, device_choices, audio_output_choices=()):
     fields.append(OptionField(None, 'nearest', 'Display upscaler', 'choice',
                               tuple((DISPLAY_LABELS[name], name)
                                     for name in DISPLAY_MODES)))
+    fields.append(OptionField(
+        None, 'off', 'DCT reconstruction', 'choice',
+        tuple((DCT_RECONSTRUCTION_LABELS[name], name)
+              for name in DCT_RECONSTRUCTION_MODES)))
     return fields
 
 
@@ -643,6 +651,8 @@ class ReceiverGui:
         self.display_latency_ms = None
         self.last_display_latency_label = None
         self.display_mode = 'nearest'
+        self.dct_reconstruction = 'off'
+        self.last_dct_viewport_size = None
         self.image_only = False
         self.image_only_previous_page = 'info'
         self.image_only_previous_fullscreen = False
@@ -985,6 +995,8 @@ class ReceiverGui:
             if action is None:
                 if field.label == 'Display upscaler':
                     self.display_mode = field.value
+                elif field.label == 'DCT reconstruction':
+                    self.dct_reconstruction = field.value
                 continue
             dest = action.dest
             if dest in ('help', 'mode', 'headless', 'fullscreen',
@@ -1146,6 +1158,9 @@ class ReceiverGui:
             self.display_mode = value
             self.picture_dirty = True
             self.display_menu_open = False
+        elif field.label == 'DCT reconstruction':
+            self.dct_reconstruction = value
+            self.picture_dirty = True
         self.notice = f'{field.label}: {self._field_value_label(field)}'
         self._update_runtime_option(field)
         if field.dest in ('device', 'audio_output_device', 'audio_muted',
@@ -1191,6 +1206,9 @@ class ReceiverGui:
                 self.display_mode = field.value
                 self.picture_dirty = True
                 self.display_menu_open = False
+            elif field.label == 'DCT reconstruction':
+                self.dct_reconstruction = field.value
+                self.picture_dirty = True
         self.notice = f'{field.label}: {self._field_value_label(field)}'
         self._update_runtime_option(field)
         if field.dest in ('audio_muted', 'audio_volume', 'freewheel_seconds',
@@ -2284,13 +2302,15 @@ class ReceiverGui:
             glfw.set_window_refresh_callback(
                 window, lambda _window: setattr(self, 'dirty', True))
 
-            def upload_picture():
+            def upload_picture(viewport_size=None):
                 nonlocal picture_texture, picture_texture_size
                 nonlocal plane_textures, plane_texture_shapes
                 frame = self.current_frame
                 if frame is None:
                     return
-                if self.display_mode == 'nearest':
+                use_float_display = (self.display_mode != 'nearest' or
+                                     self.dct_reconstruction != 'off')
+                if not use_float_display:
                     if self.latest_values_image is None:
                         try:
                             self.latest_values_image = self.v7_live.values_image(
@@ -2318,7 +2338,11 @@ class ReceiverGui:
                 else:
                     planes = float_planes(
                         frame.values, frame.shapes)
-                    if self.display_mode in FILTER_PRECOMPUTE_MODES:
+                    if self.dct_reconstruction != 'off':
+                        planes = dct_reconstruct_planes(
+                            planes, self.dct_reconstruction, viewport_size)
+                    if (self.display_mode in FILTER_PRECOMPUTE_MODES and
+                            self.dct_reconstruction == 'off'):
                         planes = resample_filter_planes(
                             planes, self.display_mode)
                     plane_sizes = tuple((plane.shape[1], plane.shape[0])
@@ -2346,9 +2370,10 @@ class ReceiverGui:
                     plane_texture.filter = (filtering, filtering)
 
             def picture_uploaded():
-                return (picture_texture is not None
-                        if self.display_mode == 'nearest' else
-                        len(plane_textures) == 3)
+                use_float_display = (self.display_mode != 'nearest' or
+                                     self.dct_reconstruction != 'off')
+                return (len(plane_textures) == 3 if use_float_display else
+                        picture_texture is not None)
 
             def ensure_float_renderer():
                 nonlocal float_program, float_array
@@ -2378,7 +2403,9 @@ class ReceiverGui:
 
             def render_picture(viewport):
                 context.viewport = viewport
-                if self.display_mode == 'nearest':
+                use_float_display = (self.display_mode != 'nearest' or
+                                     self.dct_reconstruction != 'off')
+                if not use_float_display:
                     picture_texture.use(location=0)
                     vertex_array.render(mode=moderngl.TRIANGLES, vertices=3)
                     return
@@ -2386,12 +2413,13 @@ class ReceiverGui:
                 for unit, plane_texture in enumerate(plane_textures):
                     plane_texture.use(location=unit)
                 kernel_texture_for(self.display_mode).use(location=3)
-                float_program['reconstruction'].value = FLOAT_MODE_IDS[
-                    self.display_mode]
+                float_program['reconstruction'].value = FLOAT_MODE_IDS.get(
+                    self.display_mode, 0)
                 float_program['output_size'].value = (
                     float(viewport[2]), float(viewport[3]))
                 float_program['filtered_intermediate'].value = int(
-                    self.display_mode in FILTER_PRECOMPUTE_MODES)
+                    self.display_mode in FILTER_PRECOMPUTE_MODES and
+                    self.dct_reconstruction == 'off')
                 float_array.render(mode=moderngl.TRIANGLES, vertices=3)
 
             def next_event_timeout(now):
@@ -2481,10 +2509,33 @@ class ReceiverGui:
                         ui_texture.size != window_size and not self.image_only):
                     self.dirty = True
 
-                picture_needs_draw = (self.picture_dirty and
-                                      (self.page == 'info' or self.image_only))
+                picture_viewport = None
+                if self.current_frame is not None:
+                    aspect = self.v7_live.P.V7_ASPECT_RATIOS[
+                        self.current_frame.aspect & 7]
+                    if self.image_only:
+                        picture_viewport = fit_viewport(
+                            framebuffer_size, aspect)
+                    elif self.page == 'info':
+                        picture_viewport = self._picture_viewport(
+                            window_size, framebuffer_size, aspect)
+                viewport_size = (picture_viewport[2:]
+                                 if picture_viewport is not None and
+                                 picture_viewport[2] > 0 and
+                                 picture_viewport[3] > 0 else None)
+                if (self.dct_reconstruction == 'viewport' and
+                        viewport_size is not None and
+                        viewport_size != self.last_dct_viewport_size):
+                    self.last_dct_viewport_size = viewport_size
+                    self.picture_dirty = True
+
+                picture_needs_draw = (
+                    self.picture_dirty and
+                    (self.page == 'info' or self.image_only) and
+                    (self.dct_reconstruction != 'viewport' or
+                     viewport_size is not None))
                 if picture_needs_draw:
-                    upload_picture()
+                    upload_picture(viewport_size)
                     self.picture_dirty = False
 
                 if (picture_texture is not None and
@@ -2502,10 +2553,8 @@ class ReceiverGui:
                         context.viewport = (0, 0, *framebuffer_size)
                         context.clear(0.0, 0.0, 0.0, 1.0)
                         if picture_uploaded() and self.current_frame is not None:
-                            aspect = self.v7_live.P.V7_ASPECT_RATIOS[
-                                self.current_frame.aspect & 7]
-                            render_picture(fit_viewport(
-                                framebuffer_size, aspect))
+                            if picture_viewport is not None:
+                                render_picture(picture_viewport)
                         glfw.swap_buffers(window)
                         if picture_needs_draw and self.current_frame is not None:
                             self.display_latency_ms = max(
@@ -2536,13 +2585,9 @@ class ReceiverGui:
                     self.dirty = False
 
                 if ui_needs_draw or picture_needs_draw:
-                    picture_viewport = None
                     if (self.page == 'info' and self.current_frame is not None
-                            and picture_uploaded()):
-                        aspect = self.v7_live.P.V7_ASPECT_RATIOS[
-                            self.current_frame.aspect & 7]
-                        picture_viewport = self._picture_viewport(
-                            window_size, framebuffer_size, aspect)
+                            and picture_uploaded() and
+                            picture_viewport is not None):
                         if not picture_viewport[2] or not picture_viewport[3]:
                             picture_viewport = None
                     if picture_viewport is None:
