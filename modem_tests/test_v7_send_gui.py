@@ -41,6 +41,7 @@ class SenderGuiTests(unittest.TestCase):
             'video_source': '',
             'video_live': False,
             'camera': None,
+            'ffmpeg_input': '',
             'screen_backend': 'mss',
             'screen_target': ScreenTarget(
                 'Display 1 · 1920×1080 · (0,0)', '0,0,1920,1080'),
@@ -263,7 +264,19 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(args.screen_backend, 'ffmpeg')
         self.assertEqual(args.ffmpeg_input, 'x11grab::0.0')
 
+        self.settings['screen_target'] = ScreenTarget(
+            'Capture screen 1', display=1)
+        with self.assertRaisesRegex(ValueError, 'display from the picker'):
+            build_command(self.settings, self.devices, self.sd)
+
     def test_camera_picker_values_and_screen_targets_map_to_sender_cli(self):
+        self.settings.update(source='camera', camera='avfoundation:4',
+                             screen_target=None)
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+        self.assertEqual(args.ffmpeg_input, 'avfoundation:4')
+        self.assertNotIn('--camera', command)
+
         self.settings.update(source='camera', camera='v4l2:/dev/video2',
                              screen_target=None)
         command = build_command(self.settings, self.devices, self.sd)
@@ -284,6 +297,18 @@ class SenderGuiTests(unittest.TestCase):
         command = build_command(self.settings, self.devices, self.sd)
         args = v7_live.parser().parse_args(command[2:])
         self.assertEqual(args.display, 1)
+
+    def test_custom_camera_input_cannot_silently_override_picker_selection(self):
+        self.settings.update(source='camera', camera='avfoundation:4',
+                             ffmpeg_input='avfoundation:0')
+
+        with self.assertRaisesRegex(ValueError, 'camera from the picker'):
+            build_command(self.settings, self.devices, self.sd)
+
+        self.settings['camera'] = None
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+        self.assertEqual(args.ffmpeg_input, 'avfoundation:0')
 
     def test_downscaler_is_forwarded_and_constrained(self):
         self.settings.update(source='video', video_source='clip.mp4',
@@ -310,13 +335,19 @@ class SenderGuiTests(unittest.TestCase):
 
         listing = ('[AVFoundation indev @ 0x1] AVFoundation video devices:\n'
                    '[AVFoundation indev @ 0x1] [0] Face Camera\n'
-                   '[AVFoundation indev @ 0x1] [1] Capture screen 0\n'
+                   '[AVFoundation indev @ 0x1] [1] Capture Screen Pro\n'
+                   '[AVFoundation indev @ 0x1] [2] USB Screen Capture\n'
+                   '[AVFoundation indev @ 0x1] [3] Capture screen 0\n'
+                   '[AVFoundation indev @ 0x1] [4] HDMI Capture Card\n'
                    '[AVFoundation indev @ 0x1] AVFoundation audio devices:\n'
-                   '[AVFoundation indev @ 0x1] [2] Microphone')
+                   '[AVFoundation indev @ 0x1] [0] Microphone')
         self.assertEqual(parse_ffmpeg_camera_sources(listing, 'darwin'), (
-            ('Face Camera · AVFoundation 0', 'avfoundation:0'),))
+            ('Face Camera · AVFoundation 0', 'avfoundation:0'),
+            ('Capture Screen Pro · AVFoundation 1', 'avfoundation:1'),
+            ('USB Screen Capture · AVFoundation 2', 'avfoundation:2'),
+            ('HDMI Capture Card · AVFoundation 4', 'avfoundation:4')))
         self.assertEqual(parse_avfoundation_screen_sources(listing), (
-            ScreenTarget('Capture screen 0', display=1),))
+            ScreenTarget('Capture screen 0', display=3),))
 
         directshow = ('[dshow @ 0x1] DirectShow video devices\n'
                       '[dshow @ 0x1] "USB Camera" (video)\n'

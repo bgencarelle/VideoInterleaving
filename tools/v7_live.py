@@ -820,7 +820,7 @@ def run_send(args):
                 if stop.is_set():
                     break
             if not args.no_log:
-                camera_text = (f'camera={args.camera} '
+                camera_text = (f'camera={args.ffmpeg_input or args.camera} '
                                if args.source == 'camera' else '')
                 if (args.source == 'camera' and
                         getattr(args, 'perceptual_resize', 'off') == 'off'):
@@ -1552,7 +1552,8 @@ def _run_receive(args, fold, mono_wire=None):
             identity.get('name') if identity is not None else
             options['audio_output_device'])
         if passthrough is not None:
-            passthrough.set_route(route['audio_side'], options['audio_muted'])
+            audio_side = (route['audio_side'] if input_channels > 1 else None)
+            passthrough.set_route(audio_side, options['audio_muted'])
             passthrough.set_volume(options['audio_volume'])
             meter['audio_device_error'] = passthrough.error
 

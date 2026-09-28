@@ -188,6 +188,17 @@ class ThrottledCleanupTests(unittest.TestCase):
 
 
 class SenderPreparationTests(unittest.TestCase):
+    def test_avfoundation_picker_spec_reaches_capture_without_renumbering(self):
+        args = Namespace(
+            source='camera', camera=0, capture_fps=None,
+            capture_width=160, ffmpeg_input='avfoundation:4', region=None,
+            encode_filter='box', capture_filter=None,
+            perceptual_resize='off')
+        with mock.patch('tools.v7_capture.camera_source') as camera:
+            _capture(args)
+
+        self.assertEqual(camera.call_args.kwargs['spec'], 'avfoundation:4')
+
     def test_prepared_camera_grid_uses_original_geometry_for_packet_aspect(self):
         frame = CapturedFrame(np.zeros((96, 80, 3), np.uint8),
                               (1920, 1080), prepared=True)

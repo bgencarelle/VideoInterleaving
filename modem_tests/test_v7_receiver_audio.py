@@ -159,6 +159,18 @@ class _FakeSoundDevice:
 
 class AudioPassthroughTests(unittest.TestCase):
 
+    def test_mono_input_is_not_mistaken_for_the_audio_leg(self):
+        passthrough = AudioPassthrough(
+            1000, sounddevice_module=_FakeSoundDevice)
+        passthrough.set_route('left')
+
+        passthrough.push(np.array([[.1], [.2], [.3]], dtype=np.float32))
+
+        self.assertEqual(passthrough.buffer.available, 0)
+
+        passthrough.push(np.array([[.1, .8], [.2, .6]], dtype=np.float32))
+        self.assertEqual(passthrough.buffer.available, 2)
+
     def test_selected_side_routes_to_output_and_mute_is_immediate(self):
         passthrough = AudioPassthrough(
             1000, sounddevice_module=_FakeSoundDevice)

@@ -419,7 +419,9 @@ class AudioPassthrough:
             return
         index = 0 if side == 'left' else 1
         values = np.asarray(block)
-        if values.ndim == 2 and values.shape[1] > index:
+        # Passthrough needs a distinct modem leg and audio leg. A mono input
+        # cannot provide that separation, even when the router selected left.
+        if values.ndim == 2 and values.shape[1] >= 2:
             self.buffer.push(values[:, index])
 
     def close(self):

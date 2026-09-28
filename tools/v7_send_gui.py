@@ -87,7 +87,8 @@ FIELD_HELP = {
     'video_live': 'Treat an HTTP(S) video URL as a live stream rather than a looping clip.',
     'camera': 'Choose a camera discovered from the host capture devices.',
     'screen_target': 'Choose the monitor or screen capture device. Discovery runs only when you open this picker.',
-    'ffmpeg_input': 'Optional FFmpeg input specification for a particular camera or display backend.',
+    'ffmpeg_input': ('Optional custom FFmpeg input for a camera or display. '
+                     'Use it instead of choosing that device from the picker.'),
     'screen_backend': 'mss is the simple native screen capture path; FFmpeg can be useful when capture rate matters.',
     'region': 'Optional screen crop as left,top,width,height.',
     'capture_width': ('Intermediate FFmpeg width for video/FFmpeg screen and '
@@ -190,6 +191,11 @@ def _ffmpeg_devices(command, ffmpeg_path=None, run=None):
                       getattr(result, 'stderr', '') or ''))
 
 
+def _is_avfoundation_screen_source(name):
+    return bool(re.fullmatch(r'capture screen\s+\d+', str(name).strip(),
+                             re.IGNORECASE))
+
+
 def parse_ffmpeg_camera_sources(output, platform):
     """Parse the camera sections of FFmpeg's AVFoundation / DirectShow listing."""
     choices = []
@@ -205,8 +211,10 @@ def parse_ffmpeg_camera_sources(output, platform):
             if not in_video:
                 continue
             match = re.search(r'\[(\d+)\]\s+(.+?)\s*$', line)
-            if match and 'capture screen' not in match.group(2).lower():
+            if match and not _is_avfoundation_screen_source(match.group(2)):
                 index, name = match.groups()
+                # AVFoundation indices belong to the complete video list;
+                # removing synthetic screen entries must not renumber cameras.
                 choices.append((f'{name} · AVFoundation {index}',
                                 f'avfoundation:{index}'))
     elif platform.startswith('win'):
@@ -242,7 +250,7 @@ def parse_avfoundation_screen_sources(output):
         if not in_video:
             continue
         match = re.search(r'\[(\d+)\]\s+(.+?)\s*$', line)
-        if match and 'screen' in match.group(2).lower():
+        if match and _is_avfoundation_screen_source(match.group(2)):
             index, name = match.groups()
             choices.append(ScreenTarget(name, display=int(index)))
     return tuple(choices)
@@ -738,6 +746,10 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
     if source == 'camera':
         selected_camera = settings.get('camera')
         if ffmpeg_input:
+            if selected_camera is not None:
+                raise ValueError(
+                    'Choose a camera from the picker or enter a custom '
+                    'FFmpeg input, not both.')
             camera_spec = ffmpeg_input
         elif selected_camera is None:
             raise ValueError('Select a camera before starting.')
@@ -750,6 +762,13 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
                     raise ValueError('Select a camera before starting.')
             if camera is not None and camera < 0:
                 raise ValueError('Camera index must be non-negative.')
+    elif (source == 'screen' and screen_backend == 'ffmpeg' and
+          ffmpeg_input and
+          isinstance(settings.get('screen_target'), ScreenTarget) and
+          settings['screen_target'].display is not None):
+        raise ValueError(
+            'Choose a display from the picker or enter a custom FFmpeg '
+            'input, not both.')
     capture_width = (
         _integer_setting(settings.get('capture_width', '160'), 'Capture width', 1)
         if source in ('screen', 'video', 'mouse-follow') else 160)
