@@ -614,6 +614,41 @@ class SenderGuiTests(unittest.TestCase):
         gui._on_mouse(glfw, None, 1, 1, 0)
         self.assertEqual(gui.settings['camera'], 'v4l2:/dev/video0')
 
+    def test_video_source_accepts_control_v_and_command_v_paste(self):
+        gui = SenderGui(self.devices)
+        gui.settings['source'] = 'video'
+        gui.selected = 'video_source'
+        gui.editing = True
+
+        for modifier in (SenderKeyStub.MOD_CONTROL, 8):
+            with self.subTest(modifier=modifier):
+                gui.edit_buffer = 'old-url'
+                glfw = SimpleNamespace(
+                    PRESS=SenderKeyStub.PRESS,
+                    REPEAT=SenderKeyStub.REPEAT,
+                    KEY_ENTER=SenderKeyStub.KEY_ENTER,
+                    KEY_KP_ENTER=SenderKeyStub.KEY_KP_ENTER,
+                    KEY_ESCAPE=SenderKeyStub.KEY_ESCAPE,
+                    KEY_BACKSPACE=SenderKeyStub.KEY_BACKSPACE,
+                    KEY_A=SenderKeyStub.KEY_A,
+                    KEY_V=SenderKeyStub.KEY_V,
+                    MOD_CONTROL=SenderKeyStub.MOD_CONTROL,
+                    MOD_SUPER=8,
+                    get_clipboard_string=Mock(
+                        return_value='https://example.test/clip.mp4'))
+
+                gui._on_key(glfw, None, glfw.KEY_A, 0, glfw.PRESS, modifier)
+                self.assertEqual(gui.edit_buffer, '')
+                gui._on_key(glfw, None, glfw.KEY_V, 0, glfw.PRESS, modifier)
+
+                self.assertEqual(gui.edit_buffer,
+                                 'https://example.test/clip.mp4')
+                gui._on_key(glfw, None, glfw.KEY_ENTER, 0,
+                            glfw.PRESS, modifier)
+                self.assertEqual(gui.settings['video_source'],
+                                 'https://example.test/clip.mp4')
+                gui.editing = True
+
     def test_capture_fps_dropdown_uses_rates_reported_by_camera_driver(self):
         output = ('Interval: Discrete 0.033s (30.000 fps)\n'
                   'Interval: Discrete 0.017s (59.940 fps)\n')

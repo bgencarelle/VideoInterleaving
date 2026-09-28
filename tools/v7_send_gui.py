@@ -1888,15 +1888,17 @@ class SenderGui:
         if action not in (glfw.PRESS, glfw.REPEAT):
             return
         if self.editing:
+            paste_modifiers = (glfw.MOD_CONTROL |
+                               getattr(glfw, 'MOD_SUPER', 0))
             if key in (glfw.KEY_ENTER, glfw.KEY_KP_ENTER):
                 self._finish_edit()
             elif key == glfw.KEY_ESCAPE:
                 self._finish_edit(commit=False)
             elif key == glfw.KEY_BACKSPACE:
                 self.edit_buffer = self.edit_buffer[:-1]
-            elif key == glfw.KEY_A and mods & glfw.MOD_CONTROL:
+            elif key == glfw.KEY_A and mods & paste_modifiers:
                 self.edit_buffer = ''
-            elif key == glfw.KEY_V and mods & glfw.MOD_CONTROL:
+            elif key == glfw.KEY_V and mods & paste_modifiers:
                 try:
                     self.edit_buffer += glfw.get_clipboard_string(window) or ''
                 except Exception:
