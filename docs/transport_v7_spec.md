@@ -2359,9 +2359,9 @@ substitute for the Section 1 playback validation.
 
 ### 13.8 All-fresh mono video with a 500-class fold
 
-The video-only profile is selected as `--profile mono-fold-500` (and is the
-sender GUI default). It does not alter the legacy `--experimental-mono` or the
-`MONO_OFF` rotating wire:
+The video-only profile is selected as `--profile mono-fold-500`. The sender GUI
+defaults to stereo `fold-500`; selecting this mono profile does not alter the
+legacy `--experimental-mono` or the `MONO_OFF` rotating wire:
 
 ```text
 .venv/bin/python tools/v7_live.py send --source test \
@@ -2370,13 +2370,18 @@ sender GUI default). It does not alter the legacy `--experimental-mono` or the
   --device 'BlackHole 2ch'
 ```
 
-The default receiver probes packet status before choosing a decoder. Two
-consistent `MONO_500` statuses identify this profile; right is preferred if
-both input legs validate, otherwise the validated leg is selected. Missing,
-damaged, or conflicting status falls back to the ordinary stereo Fold-500
-decoder rather than choosing the mono rank map speculatively. The GUI leaves
-legacy profile and decoder-tuning switches out of its setup fields; those
-specialized CLI paths remain available for recovery and experiments.
+The default receiver starts with the ordinary stereo Fold-500 decoder and
+classifies complete packet statuses while receiving. Three distinct, matching
+`MONO_500` statuses switch the decoder to this profile on the third packet;
+the first two candidate packets are held. The status probes track each input
+leg independently, and right is preferred if both legs validate. Three
+matching stereo Fold-500 statuses switch back in the same way. Invalid,
+ambiguous, or unsupported status never inherits the preceding packet's mode and
+holds the last picture. A profile transition resets profile-specific tail
+state but keeps pulse acquisition. Input gaps and scale-aware sync inactivity
+clear a pending three-status candidate. The GUI leaves legacy profile and
+decoder-tuning switches out of its setup fields; those specialized CLI paths
+remain available for recovery and experiments.
 
 It requires the canonical box model, coded pilot timing, and EOF framing.
 Optional pre-encode perceptual resizing changes picture samples before encoding
@@ -2445,14 +2450,16 @@ burst-offset unit test sends a known burst beside real mono-encoded packets and
 locates it from the pulse-counted header, including at 2× packet speed. A live
 flash/click test is still needed to calibrate any residual source-start offset.
 
-`MONO_500` is the distinct coded status for this rank map. The updated receiver
-checks the status before image equalization and rejects both the legacy
-`MONO_OFF` rotating layout and stereo fold status, holding the previous image.
-This status gate is not a promise that pre-existing receivers reject the new
-profile; they do not implement this check. `MONO_1000` is allocated to the
-colour-weighted profile in §13.9. A previous offline fold-off control used that
-status during the historical comparison below; the control is no longer in the
-wire implementation or current benchmark.
+`MONO_500` is the distinct coded status for this rank map. The default adaptive
+receiver checks the status before image equalization, holds packets from a
+candidate layout, and changes its decoder only after three matching packet
+statuses. The standalone `MonoFreshFoldWire` gate also rejects a different
+status when that specialized decoder is selected explicitly. This is not a
+promise that pre-existing receivers reject the new profile; they do not
+implement this check. `MONO_1000` identifies the colour-weighted profile in
+§13.9. A previous offline fold-off control used that status during the
+historical comparison below; the control is no longer in the wire
+implementation or current benchmark.
 
 The runner `tools/v7_mono_video_bench.py` compares the current stereo fold-500
 decode, that stereo wire downmixed to mono, the rotating mono fold-off profile
@@ -2549,11 +2556,15 @@ colour fold-table SHA-256 is
 The byte-identity baseline for three `mono-fold-500` packets on this machine is
 `ba74e9ff3426cf8fa58f7a8fa5562adc9c7b3b1cabc389eba8213a6f1e659036`.
 
-The receiver probes for two agreeing statuses at startup. `MONO_500` selects
-the existing `MonoFreshFoldWire`; `MONO_1000` selects `MonoColourFoldWire`.
-Packets with the wrong status are rejected before equalization and hold the
-last picture. Profile changes mid-stream are not detected; the receiver must
-restart to select a different rank map.
+The default receiver uses three distinct matching status packets before
+switching its active layout. `MONO_500` selects `MonoFreshFoldWire`;
+`MONO_1000` selects `MonoColourFoldWire`. Packets in a candidate layout are
+held until the third status confirms the switch, when that confirming packet
+is decoded with the new rank map. The same rule applies when switching back to
+stereo Fold-500 or between the mono layouts; no session-level profile latch is
+used. Invalid or ambiguous status breaks the candidate streak and holds the
+last picture. The selected input leg is tracked per packet, with right
+preferred if both legs validate.
 
 The synthetic comparison uses four original motion scenes (slow pan, fast pan,
 cut every six packets, and moving blob) and a saturated colour-chart scene. The

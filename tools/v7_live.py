@@ -995,6 +995,350 @@ class _MonoChannelProbe:
         return self.streak
 
 
+class _ProfileStatusProbe:
+    """Find complete coded-profile packets independently on one input leg."""
+
+    MIN_CONFIDENCE = .45
+
+    def __init__(self, rate, side_index, direction='auto', decode_history=1,
+                 decode_batch=1):
+        self.input = LiveInput(decode_history, decode_batch, rate=rate,
+                               direction=direction)
+        self.side_index = int(side_index)
+        self.last_position = None
+        self.audio = None
+
+    def add(self, block):
+        self.input.add(block)
+
+    def reset(self):
+        self.input.reset()
+        self.last_position = None
+        self.audio = None
+
+    def scan(self, now):
+        """Return one status observation per distinct complete packet."""
+        self.audio = self.input.take(now)
+        if self.audio is None:
+            return ()
+        audio_start = self.input.total-len(self.audio)
+        events = []
+        for position, scale, confidence, direction in self.input.pulse_hits(
+                self.audio):
+            absolute = int(round(audio_start+position))
+            if (self.last_position is not None and
+                    absolute <= self.last_position):
+                continue
+            # A header arrives before the profile chips. Leave it pending until
+            # its complete packet region is in the rolling input buffer.
+            if position+P.PULSE_FRAME*scale > len(self.audio)+1.0:
+                continue
+            if confidence < self.MIN_CONFIDENCE:
+                self.last_position = absolute
+                events.append({'position': absolute, 'scale': scale,
+                               'side_index': self.side_index, 'mode': None})
+                continue
+            mode = _coded_status_mode(
+                self.audio, position, scale, self.input.rate, direction)
+            self.last_position = absolute
+            events.append({'position': absolute, 'scale': scale,
+                           'side_index': self.side_index, 'mode': mode})
+        self.input.decoded()
+        return tuple(events)
+
+
+class _AdaptiveProfileDecoder:
+    """Dispatch coded Fold-500 and mono-video packets after three confirmations."""
+
+    REQUIRED_STREAK = 3
+
+    def __init__(self, fold, base_model, preferred_side='auto'):
+        from animation_modem import v7
+        _ensure_test_modem_path()
+        from live_fold import LiveFold
+        from mono_video import (MonoColourFoldWire, MonoFreshFoldWire,
+                                mono_channel_profile)
+        from tone_code import FOLD_500, MONO_500, MONO_1000
+
+        self.fold = fold
+        self.v7 = v7
+        self.base_model = base_model
+        self.preferred_side = preferred_side
+        self.input_channels = 2
+        self.mono_wires = {
+            MONO_500: MonoFreshFoldWire(base_model, side='both'),
+            MONO_1000: MonoColourFoldWire(base_model, side='both'),
+        }
+        self.mono_channel_profile = mono_channel_profile
+        self.mono_status_modes = frozenset(self.mono_wires)
+        self.supported_modes = frozenset((FOLD_500, *self.mono_wires))
+        self._mode_names = {
+            FOLD_500: 'fold-500',
+            MONO_500: 'mono-fold-500',
+            MONO_1000: 'mono-colour-500',
+        }
+        self.active_mode = FOLD_500
+        self.active_side = None
+        self.candidate = None
+        self.streak = 0
+        self.candidate_last_seen = None
+        self.last_packet = None
+        self.last_decoded_packet = None
+        self.generation = 0
+        self.capture_rate = v7.RATE
+        self.candidate_scale = None
+        self.state = None
+        self.stereo_tail_memory = True
+        self.dispatch_mode = None
+        self.dispatch_side = None
+        self._local = threading.local()
+        self._installed = None
+        # LiveFold is also the equalizer-output capture hook used by mono
+        # profiles; the selected table is applied later, after status dispatch.
+        if not isinstance(fold, LiveFold):
+            raise TypeError('adaptive V7 profile dispatch requires LiveFold')
+
+    @property
+    def profile_name(self):
+        return self._mode_names[self.active_mode]
+
+    @property
+    def candidate_name(self):
+        if self.candidate is None:
+            return None
+        return self._mode_names[self.candidate[0]]
+
+    def bind_state(self, state):
+        self.state = state
+        self.stereo_tail_memory = bool(state.tail.enabled)
+        if self.active_mode in self.mono_status_modes:
+            state.tail.enabled = False
+
+    def reset_candidate(self):
+        self.candidate = None
+        self.streak = 0
+        self.candidate_last_seen = None
+        self.candidate_scale = None
+
+    def reset_candidate_if_stale(self, now, timeout):
+        packet_seconds = (
+            1.5*P.PULSE_FRAME*self.candidate_scale/self.capture_rate
+            if self.candidate_scale is not None else 0.0)
+        timeout = max(float(timeout), packet_seconds)
+        if (self.candidate is not None and
+                self.candidate_last_seen is not None and
+                float(now)-self.candidate_last_seen > max(0.0, timeout)):
+            self.reset_candidate()
+
+    def observe_packets(self, events, now=None):
+        """Group leg observations and update the confirmed packet profile."""
+        if not events:
+            return ()
+        now = time.monotonic() if now is None else float(now)
+        grouped = []
+        for event in sorted(events, key=lambda item: item['position']):
+            group = next((item for item in reversed(grouped)
+                          if abs(event['position']-item['position']) <=
+                          max(32.0, .25*P.PULSE_FRAME*min(
+                              event['scale'], item['scale']))), None)
+            if group is None:
+                group = {'position': event['position'],
+                         'scale': event['scale'], 'events': []}
+                grouped.append(group)
+            group['events'].append(event)
+
+        decisions = []
+        for group in grouped:
+            position = int(round(group['position']))
+            scale = float(group['scale'])
+            if (self.last_packet is not None and
+                    position <= self.last_packet+
+                    .5*P.PULSE_FRAME*scale):
+                continue
+            self.last_packet = position
+            channel_modes = [None, None]
+            observed = {int(event['mode']) for event in group['events']
+                        if event['mode'] is not None}
+            for event in group['events']:
+                if event['mode'] is not None:
+                    channel_modes[event['side_index']] = int(event['mode'])
+            mode = next(iter(observed)) if len(observed) == 1 else None
+            if mode not in self.supported_modes:
+                mode = None
+            side = None
+            if mode in self.mono_status_modes:
+                sides = [event['side_index'] for event in group['events']
+                         if event['mode'] == mode]
+                preferred_index = {'left': 0, 'right': 1}.get(
+                    self.preferred_side)
+                if (preferred_index is not None and
+                        (preferred_index in sides or
+                         self.input_channels == 1 and 0 in sides)):
+                    side = (0 if self.input_channels == 1 else
+                            preferred_index)
+                elif preferred_index is None:
+                    side = (1 if 1 in sides else sides[0]) if sides else None
+                else:
+                    mode = None
+
+            decision = self._observe(position, scale, mode, side, now)
+            decision['channel_modes'] = tuple(channel_modes)
+            decisions.append(decision)
+        return tuple(decisions)
+
+    def _observe(self, position, scale, mode, side, now):
+        changed = False
+        confirmed = False
+        if mode is None:
+            self.reset_candidate()
+        else:
+            key = (mode, side if mode in self.mono_status_modes else None)
+            if mode == self.active_mode:
+                self.reset_candidate()
+                if mode in self.mono_status_modes and side is not None:
+                    self.active_side = side
+                confirmed = True
+            else:
+                if key == self.candidate:
+                    self.streak += 1
+                else:
+                    self.candidate = key
+                    self.streak = 1
+                self.candidate_last_seen = now
+                self.candidate_scale = scale
+                if self.streak >= self.REQUIRED_STREAK:
+                    self.active_mode, self.active_side = key
+                    self.reset_candidate()
+                    self.generation += 1
+                    changed = confirmed = True
+                    if self.state is not None:
+                        self.state.tail.reset()
+                        self.state.tail.enabled = (
+                            self.stereo_tail_memory and self.active_mode not in
+                            self.mono_status_modes)
+                        self.state.last_verified = None
+        return {
+            'position': position, 'scale': scale, 'mode': mode,
+            'side_index': side, 'confirmed': confirmed,
+            'switched': changed, 'active_mode': self.active_mode,
+            'active_side': self.active_side,
+        }
+
+    def claim(self, decision):
+        """Prevent a rolling input window from decoding the same status twice."""
+        if decision is None or not decision.get('confirmed'):
+            return False
+        position = int(decision['position'])
+        span = P.PULSE_FRAME*float(decision['scale'])
+        if (self.last_decoded_packet is not None and
+                position <= self.last_decoded_packet+.5*span):
+            return False
+        self.last_decoded_packet = position
+        self.dispatch_mode = int(decision['mode'])
+        self.dispatch_side = decision['side_index']
+        return True
+
+    def install(self):
+        if self._installed is not None:
+            return
+        self.fold.install()
+        real_decode = self.v7.decode_frame
+        real_numba = self.v7._equalize_numba
+        real_numpy = self.v7._equalize_numpy
+        local = self._local
+
+        def equalize_numba(model, Z, H, noise, counter):
+            result = real_numba(model, Z, H, noise, counter)
+            local.equalized = (result[0].copy(), result[1].copy())
+            return result
+
+        def equalize_numpy(model, Z, H, noise, counter,
+                           force_float32=False):
+            result = real_numpy(model, Z, H, noise, counter,
+                                force_float32=force_float32)
+            local.equalized = (result[0].copy(), result[1].copy())
+            return result
+
+        self._real_decode = real_decode
+        self._real_equalizers = (real_numba, real_numpy)
+        self.v7._equalize_numba, self.v7._equalize_numpy = (
+            equalize_numba, equalize_numpy)
+        self.v7.decode_frame = self._decode_frame
+        self._installed = True
+
+    def uninstall(self):
+        if self._installed is None:
+            return
+        self.v7.decode_frame = self._real_decode
+        self.v7._equalize_numba, self.v7._equalize_numpy = (
+            self._real_equalizers)
+        self._installed = None
+        self.fold.uninstall()
+
+    def _decode_frame(self, model, x, tmap, counter, prev_tail, *args,
+                      **kwargs):
+        from mono_wire import MonoWire
+
+        def held(reason, observed_mode=None):
+            if self.state is not None:
+                self.state.last_verified = None
+            return self.v7.Result(
+                counter, 'lost', np.asarray(prev_tail).copy(),
+                {'displayable': False, 'held': True,
+                 'coded_status_mode': observed_mode,
+                 'profile_rejected': reason})
+
+        mode = self.dispatch_mode
+        body = kwargs.get('direct_body')
+        observed_mode = None
+        if body is not None:
+            try:
+                status = MonoWire._status_for_body(
+                    model, body, kwargs.get('force_float32', False))
+                if status and status.get('valid') and status.get('status'):
+                    observed_mode = int(status['status']['mode'])
+            except (ValueError, FloatingPointError, np.linalg.LinAlgError):
+                observed_mode = None
+        if (mode is None or observed_mode != mode or mode != self.active_mode):
+            return held('status_not_confirmed_for_active_profile',
+                        observed_mode)
+
+        profile_model = model
+        if mode in self.mono_status_modes:
+            try:
+                profile_model = self.mono_wires[mode].model_for(model)
+            except ValueError:
+                return held('unsupported_model_for_profile', observed_mode)
+            # Mono layouts have no cross-packet tail memory. The outer pulse
+            # loop owns the shared store, so give this decoder its own prior.
+            prev_tail = profile_model.mu
+        self._local.equalized = None
+        if mode in self.mono_status_modes:
+            with self.mono_channel_profile():
+                result = self._real_decode(
+                    profile_model, x, tmap, counter, prev_tail, *args,
+                    **kwargs)
+        else:
+            result = self._real_decode(
+                profile_model, x, tmap, counter, prev_tail, *args, **kwargs)
+        if result is not None:
+            result.diag['coded_status_mode'] = mode
+            result.diag['profile_mode'] = mode
+            result.diag['wire_profile'] = self._mode_names[mode]
+            if mode in self.mono_status_modes and self._local.equalized is not None:
+                result.diag['mono_fold_eq'] = self._local.equalized
+        return result
+
+    def values(self, model, result):
+        mode = result.diag.get('profile_mode')
+        if mode == 1:
+            return self.fold.values(model, result, metadata_confirmed=True)
+        if mode in self.mono_status_modes:
+            wire = self.mono_wires[mode]
+            return wire.values(wire.model_for(model), result)
+        return self.v7.values_from(model, result.coeffs)
+
+
 def _mono_packet_status_mode(result):
     """Coded status mode carried by a decoded mono-profile candidate."""
     if result is None:
@@ -1142,6 +1486,13 @@ def _detect_mono_fold_side(args, timeout=2.0, wait_for_signal=False):
     return confirmed_profile()
 
 
+def _make_auto_profile_decoder(args, fold):
+    """Build the default status-driven Fold-500/mono-video receiver."""
+    return _AdaptiveProfileDecoder(
+        fold, _model(args.fixture, 'box'),
+        preferred_side=getattr(args, 'mono_video_side', 'auto'))
+
+
 def run_receive(args):
     if getattr(args, 'image_only', False) and getattr(args, 'headless', False):
         raise ValueError('--image-only cannot be combined with --headless')
@@ -1160,26 +1511,21 @@ def run_receive(args):
         getattr(args, 'baseline', False) or
         getattr(args, 'experimental_fold', None) is not None)
     if not profile_is_explicit:
-        probe_timeout = (GUI_PROFILE_PROBE_TIMEOUT if runtime_options is not None
-                         else PROFILE_PROBE_TIMEOUT)
-        detected_side, detected_mode = _detect_mono_fold_side(
-            args, timeout=probe_timeout,
-            wait_for_signal=runtime_options is not None)
-        if getattr(args, 'stop_event', None) is not None and args.stop_event.is_set():
-            return
-        if detected_side is not None:
-            args.experimental_mono_fold = True
-            args._detected_mono_video_side = detected_side
-            args._detected_mono_mode = detected_mode
-            if not args.no_log:
-                print({'status': 'wire_profile_detected',
-                       'profile': ('mono-colour-500' if detected_mode == 5
-                                   else 'mono-fresh-500'),
-                       'video_side': detected_side}, flush=True)
-        elif not args.no_log:
-            print({'status': 'wire_profile_default',
-                   'profile': 'fold-500',
-                   'reason': 'mono status not detected'}, flush=True)
+        if getattr(args, 'pilot_timing', 'tone-seeded') == 'baseline':
+            raise ValueError('automatic profile selection requires tone-assisted timing')
+        if getattr(args, 'frame_boundary', 'eof') != 'eof':
+            raise ValueError('automatic profile selection requires EOF packet boundaries')
+        fold = _experimental_fold(500)
+        profile_decoder = _make_auto_profile_decoder(args, fold)
+        _ensure_test_modem_path()
+        from tone_code import coded_pilot_timing
+        profile_decoder.install()
+        try:
+            with coded_pilot_timing():
+                return _run_receive(
+                    args, fold, adaptive_profile=profile_decoder)
+        finally:
+            profile_decoder.uninstall()
     slots = _fold_slots(args)
     mono_profile = bool(getattr(args, 'experimental_mono', False))
     mono_fold_profile = bool(getattr(args, 'experimental_mono_fold', False) or
@@ -1233,7 +1579,7 @@ def run_receive(args):
         fold.uninstall()
 
 
-def _run_receive(args, fold, mono_wire=None):
+def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
     import sounddevice as sd
     from tools.v7_receiver_audio import (AudioPassthrough,
                                          ReceiverChannelRouter,
@@ -1247,7 +1593,8 @@ def _run_receive(args, fold, mono_wire=None):
     # selected from the protected encoding ID carried by each frame.
     base_model = _model(
         args.fixture,
-        'box' if fold is not None or getattr(mono_wire, 'requires_box', False)
+        'box' if (fold is not None or adaptive_profile is not None or
+                  getattr(mono_wire, 'requires_box', False))
         else 'nearest')
     model = mono_wire.model_for(base_model) if mono_wire is not None else base_model
     if fold is not None:
@@ -1275,6 +1622,12 @@ def _run_receive(args, fold, mono_wire=None):
             model, warmup_audio, sample_rate=capture_rate_for(
                 sd.query_devices(args.device, 'input')),
             pilot_timing=args.pilot_timing, frame_boundary='eof')
+    if adaptive_profile is not None:
+        _ensure_test_modem_path()
+        from tone_code import warmup_status_templates
+        from tone_code import FOLD_500, MONO_500, MONO_1000
+        for mode in (FOLD_500, MONO_500, MONO_1000):
+            warmup_status_templates(mode)
     if stop.is_set():
         return
     models = {model.encoding_type: model}
@@ -1289,10 +1642,20 @@ def _run_receive(args, fold, mono_wire=None):
         return models[encoding_type]
     device_info = sd.query_devices(args.device, 'input')
     input_channels = 1 if device_info['max_input_channels'] < 2 else 2
+    if adaptive_profile is not None:
+        adaptive_profile.input_channels = input_channels
     video_input_index = getattr(mono_wire, 'carrier_index', None)
     if video_input_index is not None and input_channels < 2:
         video_input_index = 0
     capture_rate = capture_rate_for(device_info)
+    if adaptive_profile is not None:
+        adaptive_profile.capture_rate = capture_rate
+    profile_probes = (
+        [_ProfileStatusProbe(
+            capture_rate, index, getattr(args, 'direction', 'auto'),
+            args.decode_history, args.decode_batch)
+         for index in range(input_channels)]
+        if adaptive_profile is not None else None)
     blocks = queue.Queue(maxsize=INPUT_AUDIO_QUEUE_BLOCKS)
     audio_blocks = queue.Queue(maxsize=64)
     input_gap = threading.Event()
@@ -1323,6 +1686,10 @@ def _run_receive(args, fold, mono_wire=None):
     pulse_state = P.PulseState(
         tail_memory=(not args.no_tail_memory and
                      not getattr(mono_wire, 'disable_tail_memory', False)))
+    if adaptive_profile is not None:
+        adaptive_profile.bind_state(pulse_state)
+    profile_generation_seen = (adaptive_profile.generation
+                               if adaptive_profile is not None else 0)
     lag_ticks = deque(maxlen=32)        # recent picture lags, loop ticks
     decode_times = deque(maxlen=64)     # wall time of every decode cycle
     decode_cpu_times = deque(maxlen=512)  # (completion time, thread CPU seconds)
@@ -1341,9 +1708,12 @@ def _run_receive(args, fold, mono_wire=None):
         input_mode = 'mono-input' if input_channels == 1 else 'M/S'
     _ensure_test_modem_path()
     from tone_code import FOLD_500, FOLD_1000, FOLD_OFF, MONO_500, MONO_1000
-    mono_status = (MONO_1000 if getattr(mono_wire, 'wire_profile', None) ==
+    mono_status = ((MONO_500, MONO_1000) if adaptive_profile is not None else
+                   MONO_1000 if getattr(mono_wire, 'wire_profile', None) ==
                    'mono-colour-500' else MONO_500)
-    mono_status_name = ('MONO_1000' if mono_status == MONO_1000 else
+    mono_status_name = ('MONO_500 / MONO_1000'
+                        if adaptive_profile is not None else
+                        'MONO_1000' if mono_status == MONO_1000 else
                         'MONO_500')
     initial_side = (getattr(mono_wire, 'side', None)
                     if mono_wire is not None else None)
@@ -1377,8 +1747,11 @@ def _run_receive(args, fold, mono_wire=None):
              'playback_direction': None, 'direction_candidate': None,
              'direction_streak': 0,
              'pulse': None, 'aspect': 0, 'aspect_candidate': 0,
-             'aspect_streak': 0, 'input_samples': 0, 'started': time.monotonic(),
-              'auto_gain': 1.0, 'polarity': 1,
+              'aspect_streak': 0, 'input_samples': 0, 'started': time.monotonic(),
+              'wire_profile': (adaptive_profile.profile_name
+                               if adaptive_profile is not None else None),
+              'profile_candidate': None, 'profile_streak': 0,
+               'auto_gain': 1.0, 'polarity': 1,
               'input_fps': 0., 'decode_fps': 0., 'shown_fps': 0.,
                'channel_hint': '',
                'route_state': receiver_router.state,
@@ -1535,6 +1908,10 @@ def _run_receive(args, fold, mono_wire=None):
                       f'right leg {"inverted" if meter["polarity"] < 0 else "normal"}'),
             'signal': (
                 f'aspect {aspect}  ·  candidate {candidate} ×{meter["aspect_streak"]}',
+                (f'wire {meter["wire_profile"] or "--"}' +
+                 (f' · candidate {meter["profile_candidate"]} '
+                  f'×{meter["profile_streak"]}/3'
+                  if meter['profile_candidate'] else '')),
                 f'foundation {meter["quality"]}',
                 f'pulse {pulse_text}   speed {speed_text}',
                 f'audio {playback_text}',
@@ -1639,7 +2016,18 @@ def _run_receive(args, fold, mono_wire=None):
             name='v7-receiver-audio-passthrough'))
 
     def update_channel_hint():
-        if auto_mono_side and not auto_mono_locked:
+        if adaptive_profile is not None:
+            if adaptive_profile.candidate is not None:
+                hint = (f'profile candidate {adaptive_profile.candidate_name} '
+                        f'×{adaptive_profile.streak}/'
+                        f'{adaptive_profile.REQUIRED_STREAK}')
+            elif adaptive_profile.active_mode in adaptive_profile.mono_status_modes:
+                side = ('left' if adaptive_profile.active_side == 0 else
+                        'right' if adaptive_profile.active_side == 1 else 'mono')
+                hint = f'{adaptive_profile.profile_name} on {side}'
+            else:
+                hint = adaptive_profile.profile_name
+        elif auto_mono_side and not auto_mono_locked:
             selected = 'left' if video_input_index == 0 else 'right'
             hint = (f'auto probing {selected} for {mono_status_name}; right wins '
                     'if both legs validate')
@@ -1666,12 +2054,18 @@ def _run_receive(args, fold, mono_wire=None):
                 print({'status': 'mono_channel_hint', 'hint': hint}, flush=True)
 
     def update_route_from_packets(active_mode=None, active_valid=False,
-                                  now=None):
+                                  now=None, observed_channel_modes=None):
         now = time.monotonic() if now is None else float(now)
         channel_modes = [None, None]
         channel_times = [None, None]
         channel_confirmed = [False, False]
-        if active_valid and active_mode is not None:
+        if observed_channel_modes is not None:
+            for index, mode in enumerate(observed_channel_modes):
+                if mode is not None:
+                    channel_modes[index] = mode
+                    channel_times[index] = now
+                    channel_confirmed[index] = True
+        elif active_valid and active_mode is not None:
             if video_input_index is None:
                 # A stereo decoder's valid coded profile describes the joined
                 # two-leg wire; it does not identify either leg as passthrough.
@@ -1727,12 +2121,16 @@ def _run_receive(args, fold, mono_wire=None):
 
     def decode_available():
         nonlocal latest, auto_gain, previous_values, direction_streak
-        nonlocal decoded_through, auto_mono_locked
+        nonlocal decoded_through, auto_mono_locked, profile_generation_seen
         if input_gap.is_set():
             # Never stitch samples across a callback drop.  Keep displaying
             # the last good image while pulse acquisition starts over.
             input_gap.clear()
             live_input.reset()
+            if profile_probes is not None:
+                for probe in profile_probes:
+                    probe.reset()
+                adaptive_profile.reset_candidate()
             pulse_state.tail.reset()
             pulse_state.last_verified = None
             direction_streak = DirectionStreak()
@@ -1764,6 +2162,10 @@ def _run_receive(args, fold, mono_wire=None):
                         block.shape[1] > opposite_input_index):
                     opposite_probe.add(
                         block[:, opposite_input_index:opposite_input_index+1].copy())
+                if profile_probes is not None and block.ndim == 2:
+                    for index, probe in enumerate(profile_probes):
+                        if block.shape[1] > index:
+                            probe.add(block[:, index:index+1].copy())
                 if (video_input_index is not None and block.ndim == 2 and
                         block.shape[1] > video_input_index):
                     block = block[:, video_input_index:video_input_index+1]
@@ -1783,28 +2185,85 @@ def _run_receive(args, fold, mono_wire=None):
         if opposite_probe is not None:
             opposite_probe.scan(now)
             update_channel_hint()
+        profile_decisions = ()
+        if profile_probes is not None:
+            profile_events = []
+            for probe in profile_probes:
+                profile_events.extend(probe.scan(now))
+            adaptive_profile.reset_candidate_if_stale(
+                now, runtime_options.snapshot().get('freewheel_seconds', 2.0))
+            profile_decisions = adaptive_profile.observe_packets(
+                profile_events, now=now)
+            for decision in profile_decisions:
+                update_route_from_packets(
+                    decision['mode'], active_valid=decision['mode'] is not None,
+                    now=now, observed_channel_modes=decision['channel_modes'])
+                if decision['switched'] and not args.no_log:
+                    print({'status': 'wire_profile_switch',
+                           'profile': adaptive_profile.profile_name,
+                           'video_side': decision['active_side'],
+                           'confirming_packets': adaptive_profile.REQUIRED_STREAK},
+                          flush=True)
+            if adaptive_profile.generation != profile_generation_seen:
+                previous_values = None
+                profile_generation_seen = adaptive_profile.generation
+            meter['wire_profile'] = adaptive_profile.profile_name
+            meter['profile_candidate'] = adaptive_profile.candidate_name
+            meter['profile_streak'] = adaptive_profile.streak
+            update_channel_hint()
         audio = live_input.take(now)
-        meter['input_fps'] = live_input.incoming_fps(now)
-        meter['polarity'] = live_input.polarity
-        if audio is None:
+        if profile_probes is None:
+            decode_audio = audio
+            decode_input = live_input
+            decision = None
+        else:
+            decision = profile_decisions[-1] if profile_decisions else None
+            decode_input = live_input
+            decode_audio = audio
+            if decision is None or not decision['confirmed']:
+                decode_audio = None
+            elif decision['mode'] in adaptive_profile.mono_status_modes:
+                side = decision['side_index']
+                if side is None and input_channels == 1:
+                    side = 0
+                if side is not None and 0 <= side < len(profile_probes):
+                    decode_input = profile_probes[side].input
+                    decode_audio = profile_probes[side].audio
+            if (decode_audio is not None and
+                    not adaptive_profile.claim(decision)):
+                decode_audio = None
+        meter['input_fps'] = decode_input.incoming_fps(now)
+        meter['polarity'] = decode_input.polarity
+        meter['auto_gain'] = decode_input.gain
+        if decode_audio is None:
+            if audio is not None:
+                live_input.decoded()
+            if profile_probes is not None and decision is not None:
+                meter['status'] = 'waiting for three valid profile statuses'
             update_route_from_packets(now=now)
             update_channel_hint()
             return
-        pulse_hits = live_input.pulse_hits(audio)
+        if profile_probes is not None:
+            adaptive_profile.dispatch_mode = decision['mode']
+            adaptive_profile.dispatch_side = decision['side_index']
+        pulse_hits = decode_input.pulse_hits(decode_audio)
         if not pulse_hits:
-            live_input.decoded()
+            if profile_probes is None:
+                decode_input.decoded()
+            elif audio is not None:
+                live_input.decoded()
             return
-        audio_start = live_input.total-len(audio)
+        audio_start = decode_input.total-len(decode_audio)
         # Normally the newest hit; at a reverse-to-forward turn-around, the
         # last reversed packet (see select_packet_hit).
         packet_start, packet_scale, _, packet_direction = select_packet_hit(
             pulse_hits, audio_start, decoded_through)
-        pulse_starts = live_input.pulse_starts(audio)
+        pulse_starts = decode_input.pulse_starts(decode_audio)
         absolute_arrival = int(round(audio_start+packet_start))
         decoded_through = absolute_arrival
         # LiveInput levels the input before it searches for headers (a quiet
         # capture is otherwise never found); decode with that same gain.
-        auto_gain = live_input.gain
+        auto_gain = decode_input.gain
         meter['auto_gain'] = auto_gain
         if not args.refine:
             P.REFINE = False
@@ -1822,10 +2281,10 @@ def _run_receive(args, fold, mono_wire=None):
                 tone_equalization=args.tone_equalization)
             if packet_direction < 0:
                 results, info = P.decode_reverse_packet(
-                    model, audio, packet_start, packet_scale, **options)
+                    model, decode_audio, packet_start, packet_scale, **options)
             else:
                 results, info = P.decode_pulse_stream(
-                    model, audio, latest_only=True,
+                    model, decode_audio, latest_only=True,
                     pulse_starts=pulse_starts,
                     frame_boundary=args.frame_boundary, **options)
                 for result in results:
@@ -1839,7 +2298,13 @@ def _run_receive(args, fold, mono_wire=None):
         decode_cpu_seconds = time.thread_time()-decode_cpu_start
         decode_cpu_times.append((time.monotonic(), decode_cpu_seconds))
         meter['decode_cpu_ms'] = decode_cpu_seconds*1000.0
-        live_input.decoded()
+        if profile_probes is None:
+            decode_input.decoded()
+        else:
+            if audio is not None:
+                live_input.decoded()
+            if decode_input is not live_input:
+                decode_input.decoded()
         if auto_mono_side:
             modes = [_mono_packet_status_mode(result) for result in results]
             expected_mode = getattr(mono_wire, 'status_mode', None)
@@ -1857,9 +2322,10 @@ def _run_receive(args, fold, mono_wire=None):
             packet_valid = bool(
                 independently_validated and
                 result.status in ('received', 'verified'))
-            update_route_from_packets(
-                result_mode, active_valid=packet_valid,
-                now=time.monotonic())
+            if adaptive_profile is None:
+                update_route_from_packets(
+                    result_mode, active_valid=packet_valid,
+                    now=time.monotonic())
             confirmed_direction, direction_switched = direction_streak.observe(
                 absolute_arrival, packet_direction, independently_validated)
             meter['playback_direction'] = confirmed_direction
@@ -1882,7 +2348,7 @@ def _run_receive(args, fold, mono_wire=None):
             meter['pulse'] = result.diag.get('pulse_confidence')
             meter['timing_delta'] = result.diag.get('timing_delta_ppm')
             speed = result.diag.get('playback_speed')
-            incoming_fps = live_input.incoming_fps(time.monotonic())
+            incoming_fps = decode_input.incoming_fps(time.monotonic())
             meter['playback_speed'] = (
                 incoming_fps/P.PULSE_FPS if incoming_fps > 0 else speed)
             meter['quality'] = (
@@ -1908,7 +2374,11 @@ def _run_receive(args, fold, mono_wire=None):
             meter['decode_ms'] = (info.get('diagnostics') or {}).get(
                 'last_elapsed_ms')
             if result.status in ('received', 'verified') or displayable:
-                if fold is not None:
+                if adaptive_profile is not None:
+                    values = adaptive_profile.values(
+                        models.get(result.diag.get('encoding_type'), model),
+                        result)
+                elif fold is not None:
                     values = fold.values(
                         models.get(result.diag.get('encoding_type'), model), result,
                         metadata_confirmed=_coded_mode_matches_fold(result, fold))

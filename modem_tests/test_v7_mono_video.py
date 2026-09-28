@@ -422,44 +422,203 @@ class MonoVideoWireTests(unittest.TestCase):
             self.assertIsNone(v7_live._coded_status_mode(
                 damaged, 0, 1.0, v7.RATE))
 
-    def test_default_receiver_dispatches_mono_and_falls_back_to_fold500(self):
+    def test_default_receiver_uses_packet_profile_dispatch(self):
         from unittest.mock import Mock
 
         args = v7_live.parser().parse_args(
             ['receive', '--device', 'null', '--headless'])
         args.no_log = True
-        with (patch.object(v7_live, '_detect_mono_fold_side',
-                           return_value=('right', 4)),
-              patch.object(v7_live, '_run_receive', return_value='mono') as run):
-            self.assertEqual(v7_live.run_receive(args), 'mono')
-        self.assertTrue(args.experimental_mono_fold)
-        self.assertEqual(args._detected_mono_video_side, 'right')
-        self.assertEqual(args._detected_mono_mode, 4)
-        self.assertIsInstance(run.call_args.args[2], MonoFreshFoldWire)
-        self.assertEqual(run.call_args.args[2].side, 'right')
+        fold, profiles = Mock(), Mock()
+        with (patch.object(v7_live, '_experimental_fold', return_value=fold),
+              patch.object(v7_live, '_make_auto_profile_decoder',
+                           return_value=profiles),
+              patch.object(v7_live, '_detect_mono_fold_side') as startup_probe,
+              patch.object(v7_live, '_run_receive', return_value='auto') as run):
+            self.assertEqual(v7_live.run_receive(args), 'auto')
 
-        colour = v7_live.parser().parse_args(
-            ['receive', '--device', 'null', '--headless'])
-        colour.no_log = True
-        with (patch.object(v7_live, '_detect_mono_fold_side',
-                           return_value=('right', 5)),
-              patch.object(v7_live, '_run_receive', return_value='mono') as run):
-            self.assertEqual(v7_live.run_receive(colour), 'mono')
-        self.assertTrue(colour.experimental_mono_fold)
-        self.assertEqual(colour._detected_mono_mode, 5)
-        self.assertIsInstance(run.call_args.args[2], MonoColourFoldWire)
-
-        fallback = v7_live.parser().parse_args(
-            ['receive', '--device', 'null', '--headless'])
-        fallback.no_log = True
-        fold = Mock()
-        with (patch.object(v7_live, '_detect_mono_fold_side',
-                           return_value=(None, None)),
-              patch.object(v7_live, '_experimental_fold', return_value=fold),
-              patch.object(v7_live, '_run_receive', return_value='fold') as run):
-            self.assertEqual(v7_live.run_receive(fallback), 'fold')
+        startup_probe.assert_not_called()
+        profiles.install.assert_called_once_with()
+        profiles.uninstall.assert_called_once_with()
+        self.assertIs(run.call_args.args[0], args)
         self.assertIs(run.call_args.args[1], fold)
-        self.assertEqual(len(run.call_args.args), 2)
+        self.assertIs(run.call_args.kwargs['adaptive_profile'], profiles)
+
+    def test_profile_changes_need_three_distinct_valid_status_packets(self):
+        from tone_code import FOLD_500, MONO_500, MONO_1000
+
+        profile = v7_live._AdaptiveProfileDecoder(
+            v7_live._experimental_fold(500), self.model)
+
+        def observe(position, left, right):
+            events = [
+                {'position': position, 'scale': 1., 'side_index': 0,
+                 'mode': left},
+                {'position': position, 'scale': 1., 'side_index': 1,
+                 'mode': right},
+            ]
+            return profile.observe_packets(events)[0]
+
+        self.assertEqual(profile.active_mode, FOLD_500)
+        self.assertFalse(observe(0, None, MONO_500)['confirmed'])
+        self.assertEqual(profile.streak, 1)
+        self.assertFalse(observe(v7.PULSE_FRAME, None, MONO_500)['confirmed'])
+        self.assertEqual(profile.active_mode, FOLD_500)
+        switched = observe(2*v7.PULSE_FRAME, None, MONO_500)
+        self.assertTrue(switched['switched'])
+        self.assertEqual(profile.active_mode, MONO_500)
+        self.assertEqual(profile.active_side, 1)
+
+        # An invalid or conflicting status breaks the candidate; it never
+        # inherits the previous packet's profile bit.
+        observe(3*v7.PULSE_FRAME, None, MONO_1000)
+        self.assertEqual(profile.streak, 1)
+        active_elsewhere = observe(
+            4*v7.PULSE_FRAME, MONO_500, None)
+        self.assertTrue(active_elsewhere['confirmed'])
+        self.assertEqual(profile.streak, 0)
+        self.assertEqual(profile.active_side, 0)
+        ambiguous = observe(5*v7.PULSE_FRAME, FOLD_500, MONO_1000)
+        self.assertIsNone(ambiguous['mode'])
+        self.assertEqual(profile.streak, 0)
+        observe(6*v7.PULSE_FRAME, None, MONO_1000)
+        observe(7*v7.PULSE_FRAME, None, MONO_1000)
+        self.assertEqual(profile.active_mode, MONO_500)
+        switched = observe(8*v7.PULSE_FRAME, None, MONO_1000)
+        self.assertTrue(switched['switched'])
+        self.assertEqual(profile.active_mode, MONO_1000)
+
+    def test_candidate_streak_resets_after_sync_loss_timeout(self):
+        from tone_code import FOLD_500, MONO_500
+
+        profile = v7_live._AdaptiveProfileDecoder(
+            v7_live._experimental_fold(500), self.model)
+        event = {'position': 0, 'scale': 1., 'side_index': 1,
+                 'mode': MONO_500}
+
+        profile.observe_packets([event], now=1.0)
+        self.assertEqual(profile.streak, 1)
+        profile.reset_candidate_if_stale(now=3.1, timeout=2.0)
+        self.assertEqual(profile.streak, 0)
+        profile.observe_packets([dict(event, position=v7.PULSE_FRAME)],
+                                now=3.2)
+        profile.observe_packets([dict(event, position=2*v7.PULSE_FRAME)],
+                                now=3.3)
+        self.assertEqual(profile.active_mode, FOLD_500)
+        decision = profile.observe_packets(
+            [dict(event, position=3*v7.PULSE_FRAME)], now=3.4)[0]
+        self.assertTrue(decision['switched'])
+
+    def test_slow_packet_spacing_does_not_look_like_sync_loss(self):
+        from tone_code import FOLD_500, MONO_500
+
+        profile = v7_live._AdaptiveProfileDecoder(
+            v7_live._experimental_fold(500), self.model)
+        scale = 100.0
+        packet_seconds = v7.PULSE_FRAME*scale/v7.RATE
+        event = {'position': 0, 'scale': scale, 'side_index': 1,
+                 'mode': MONO_500}
+        profile.observe_packets([event], now=1.0)
+        profile.reset_candidate_if_stale(
+            now=1.0+packet_seconds, timeout=2.0)
+        profile.observe_packets(
+            [dict(event, position=v7.PULSE_FRAME*scale)],
+            now=1.0+packet_seconds)
+        profile.reset_candidate_if_stale(
+            now=1.0+2*packet_seconds, timeout=2.0)
+        decision = profile.observe_packets(
+            [dict(event, position=2*v7.PULSE_FRAME*scale)],
+            now=1.0+2*packet_seconds)[0]
+
+        self.assertTrue(decision['switched'])
+        self.assertEqual(profile.active_mode, MONO_500)
+        self.assertNotEqual(profile.active_mode, FOLD_500)
+
+    def test_profile_status_probes_follow_mixed_stereo_and_mono_packets(self):
+        from mono_video import MonoColourFoldWire, MonoFreshFoldWire
+        from tone_code import FOLD_500, MONO_500, MONO_1000, encode_packet
+
+        fresh = MonoFreshFoldWire(self.model, side='right')
+        colour = MonoColourFoldWire(self.model, side='right')
+        packets = []
+        kinds = (['stereo']*3 + ['fresh']*3 + ['colour']*3 + ['stereo']*4)
+        for counter, kind in enumerate(kinds, 1):
+            if kind == 'stereo':
+                packet = encode_packet(
+                    self.model, self.values, counter, mode=FOLD_500,
+                    eof_marker=True)
+            elif kind == 'fresh':
+                packet = fresh.encode_packet(self.model, self.values, counter)
+            else:
+                packet = colour.encode_packet(self.model, self.values, counter)
+            packets.append(packet)
+        audio = np.concatenate(packets)
+        probes = [v7_live._ProfileStatusProbe(v7.RATE, index)
+                  for index in range(2)]
+        profile = v7_live._AdaptiveProfileDecoder(
+            v7_live._experimental_fold(500), self.model)
+        decisions = []
+        claims = []
+        for start in range(0, len(audio), 1024):
+            block = audio[start:start+1024]
+            events = []
+            for index, probe in enumerate(probes):
+                probe.add(block[:, index:index+1].copy())
+                events.extend(probe.scan((start+len(block))/v7.RATE))
+            for decision in profile.observe_packets(events):
+                decisions.append(decision)
+                if profile.claim(decision):
+                    claims.append((decision['position'], decision['mode'],
+                                   decision['switched']))
+
+        switches = [item['mode'] for item in decisions if item['switched']]
+        self.assertEqual(switches, [MONO_500, MONO_1000, FOLD_500])
+        self.assertEqual(profile.active_mode, FOLD_500)
+        self.assertEqual(profile.active_side, None)
+        switch_claims = [item for item in claims if item[2]]
+        self.assertEqual(
+            switch_claims,
+            [(5*v7.PULSE_FRAME, MONO_500, True),
+             (8*v7.PULSE_FRAME, MONO_1000, True),
+             (11*v7.PULSE_FRAME, FOLD_500, True)])
+
+    def test_adaptive_decoder_dispatches_each_confirmed_packet_layout(self):
+        from tone_code import (FOLD_500, MONO_500, MONO_1000,
+                               coded_pilot_timing, encode_packet)
+
+        fold = v7_live._experimental_fold(500)
+        profile = v7_live._AdaptiveProfileDecoder(fold, self.model)
+        fresh = MonoFreshFoldWire(self.model, side='right')
+        colour = MonoColourFoldWire(self.model, side='right')
+        cases = (
+            (FOLD_500, np.concatenate([
+                encode_packet(self.model, self.values, counter,
+                              mode=FOLD_500, eof_marker=True)
+                for counter in range(1, 5)])),
+            (MONO_500, fresh.encode(self.model, [self.values]*4)[:, 1:2]),
+            (MONO_1000, colour.encode(self.model, [self.values]*4)[:, 1:2]),
+        )
+
+        profile.install()
+        try:
+            with coded_pilot_timing():
+                for mode, audio in cases:
+                    with self.subTest(mode=mode):
+                        profile.active_mode = mode
+                        profile.dispatch_mode = mode
+                        results, _ = v7.decode_pulse_stream(
+                            self.model, audio, latest_only=True,
+                            state=v7.PulseState(tail_memory=False),
+                            sample_rate=v7.RATE, pilot_timing='tone-seeded',
+                            frame_boundary='eof')
+                        self.assertTrue(results)
+                        result = results[-1]
+                        self.assertIn(result.status, ('received', 'verified'))
+                        self.assertEqual(result.diag['profile_mode'], mode)
+                        self.assertEqual(
+                            profile.values(self.model, result).shape,
+                            (self.model.coder.source_count,))
+        finally:
+            profile.uninstall()
 
     def test_startup_probe_reads_synthetic_status_and_falls_back_on_damage(self):
         class InputStream:

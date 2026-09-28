@@ -56,6 +56,17 @@ class ReceiverChannelRouterTests(unittest.TestCase):
         self.assertEqual(state['video_side'], 'both')
         self.assertIsNone(state['audio_side'])
 
+    def test_router_recognizes_both_transmitted_mono_profile_statuses(self):
+        router = ReceiverChannelRouter(
+            (self.MONO_500, 5), stereo_modes=(self.FOLD_500,))
+
+        router.observe(5, None, now=1.0, left_confirmed=True)
+        state = router.observe(5, None, now=1.1, left_confirmed=True)
+
+        self.assertEqual(state['state'], 'mono-left')
+        self.assertEqual(state['video_side'], 'left')
+        self.assertEqual(state['audio_side'], 'right')
+
     def test_two_active_fold_legs_are_stereo_and_loss_does_not_reclassify(self):
         router = ReceiverChannelRouter(self.MONO_500,
                                        stereo_modes=(self.FOLD_500,))

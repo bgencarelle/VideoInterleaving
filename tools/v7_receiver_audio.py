@@ -143,7 +143,15 @@ class ReceiverChannelRouter:
                  initial_video_side=None):
         if initial_video_side not in (None, 'left', 'right', 'both'):
             raise ValueError('initial video side must be left, right, both, or None')
-        self.mono_mode = int(mono_mode)
+        if isinstance(mono_mode, (tuple, list, set, frozenset)):
+            mono_modes = frozenset(map(int, mono_mode))
+            if not mono_modes:
+                raise ValueError('at least one mono status mode is required')
+            self.mono_mode = min(mono_modes)
+            self.mono_modes = mono_modes
+        else:
+            self.mono_mode = int(mono_mode)
+            self.mono_modes = frozenset((self.mono_mode,))
         self.stereo_modes = frozenset(map(int, stereo_modes))
         self.loss_seconds = max(0.0, float(loss_seconds))
         self.channels = (_ChannelEvidence(self.loss_seconds),
@@ -181,7 +189,7 @@ class ReceiverChannelRouter:
                                        item.last_valid)
 
         if all(active):
-            if modes[0] == modes[1] == self.mono_mode:
+            if modes[0] == modes[1] and modes[0] in self.mono_modes:
                 self.state, self.video_side, self.audio_side = (
                     'dual-mono', 'both', None)
             elif modes[0] == modes[1] and modes[0] in self.stereo_modes:
@@ -202,7 +210,7 @@ class ReceiverChannelRouter:
             # packet loss; never leak the damaged modem leg to audio output.
             self.state, self.video_side, self.audio_side = (
                 'stereo', 'both', None)
-        elif mode == self.mono_mode:
+        elif mode in self.mono_modes:
             side = 'left' if active_index == 0 else 'right'
             current = ({'left': 0, 'right': 1}.get(self.video_side)
                        if self.video_side in ('left', 'right') else None)

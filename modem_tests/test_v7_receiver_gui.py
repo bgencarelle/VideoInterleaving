@@ -310,7 +310,7 @@ class ReceiverGuiOptionTests(unittest.TestCase):
                        '--experimental-mono-colour'):
             self.assertNotIn(hidden, receiver_help)
 
-    def test_gui_auto_detects_mono_colour_from_the_coded_status(self):
+    def test_gui_uses_packet_profile_dispatch_without_a_startup_latch(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser,
                           (('test input device', 3),))
         args = gui._build_arguments()
@@ -318,20 +318,21 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         args.runtime_options = SimpleNamespace(
             snapshot=lambda: {'audio_input_identity': None})
 
-        with (patch.object(v7_live, '_detect_mono_fold_side',
-                           return_value=('right', 5)) as detect,
+        fold, profiles = Mock(), Mock()
+        with (patch.object(v7_live, '_experimental_fold', return_value=fold),
+              patch.object(v7_live, '_make_auto_profile_decoder',
+                           return_value=profiles),
+              patch.object(v7_live, '_detect_mono_fold_side') as detect,
               patch.object(v7_live, '_run_receive', return_value='decoded') as run):
             self.assertEqual(v7_live.run_receive(args), 'decoded')
 
-        detect.assert_called_once_with(
-            args, timeout=v7_live.GUI_PROFILE_PROBE_TIMEOUT,
-            wait_for_signal=True)
-        self.assertTrue(args.experimental_mono_fold)
+        detect.assert_not_called()
+        profiles.install.assert_called_once_with()
+        profiles.uninstall.assert_called_once_with()
+        self.assertIs(run.call_args.args[1], fold)
+        self.assertIs(run.call_args.kwargs['adaptive_profile'], profiles)
+        self.assertFalse(args.experimental_mono_fold)
         self.assertFalse(args.experimental_mono_colour)
-        self.assertEqual(args._detected_mono_mode, 5)
-        mono_wire = run.call_args.args[2]
-        self.assertEqual(mono_wire.wire_profile, 'mono-colour-500')
-        self.assertEqual(mono_wire.side, 'right')
 
     def test_first_available_input_is_preselected(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser,
