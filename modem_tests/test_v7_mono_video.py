@@ -389,20 +389,32 @@ class MonoVideoWireTests(unittest.TestCase):
             ['receive', '--device', 'null', '--headless'])
         args.no_log = True
         with (patch.object(v7_live, '_detect_mono_fold_side',
-                           return_value='right'),
+                           return_value=('right', 4)),
               patch.object(v7_live, '_run_receive', return_value='mono') as run):
             self.assertEqual(v7_live.run_receive(args), 'mono')
         self.assertTrue(args.experimental_mono_fold)
         self.assertEqual(args._detected_mono_video_side, 'right')
+        self.assertEqual(args._detected_mono_mode, 4)
         self.assertIsInstance(run.call_args.args[2], MonoFreshFoldWire)
         self.assertEqual(run.call_args.args[2].side, 'right')
+
+        colour = v7_live.parser().parse_args(
+            ['receive', '--device', 'null', '--headless'])
+        colour.no_log = True
+        with (patch.object(v7_live, '_detect_mono_fold_side',
+                           return_value=('right', 5)),
+              patch.object(v7_live, '_run_receive', return_value='mono') as run):
+            self.assertEqual(v7_live.run_receive(colour), 'mono')
+        self.assertTrue(colour.experimental_mono_fold)
+        self.assertEqual(colour._detected_mono_mode, 5)
+        self.assertIsInstance(run.call_args.args[2], MonoColourFoldWire)
 
         fallback = v7_live.parser().parse_args(
             ['receive', '--device', 'null', '--headless'])
         fallback.no_log = True
         fold = Mock()
         with (patch.object(v7_live, '_detect_mono_fold_side',
-                           return_value=None),
+                           return_value=(None, None)),
               patch.object(v7_live, '_experimental_fold', return_value=fold),
               patch.object(v7_live, '_run_receive', return_value='fold') as run):
             self.assertEqual(v7_live.run_receive(fallback), 'fold')
@@ -439,10 +451,13 @@ class MonoVideoWireTests(unittest.TestCase):
                 return v7_live._detect_mono_fold_side(args, timeout=.1)
 
         samples = self.audio
-        self.assertEqual(detect(self.audio), 'right')
+        self.assertEqual(detect(self.audio), ('right', 4))
+        colour_audio = MonoColourFoldWire(self.model).encode(
+            self.model, [self.values]*PACKETS)
+        self.assertEqual(detect(colour_audio), ('right', 5))
         damaged = self.audio.copy()
         damaged[:, :] = 0
-        self.assertIsNone(detect(damaged))
+        self.assertEqual(detect(damaged), (None, None))
 
     def test_live_sender_places_input_audio_left_and_video_right(self):
         written = []

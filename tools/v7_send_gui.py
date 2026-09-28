@@ -27,8 +27,10 @@ RATE_CANDIDATES = (32000, 44100, 48000, 88200, 96000, 176400, 192000)
 PROFILE_CHOICES = (
     ('Mono video · Fold 500 · recommended', 'mono-fold-500'),
     ('Fold 500 stereo', 'fold-500'),
+    ('Mono video · colour Fold 500 · experimental', 'mono-colour-500'),
     ('Fold 1000 · advanced', 'fold-1000'),
 )
+MONO_PROFILES = ('mono-fold-500', 'mono-colour-500')
 PRIMARY_PROFILE_CHOICES = PROFILE_CHOICES[:2]
 SOURCE_AUDIO_CHOICES = (
     ('Video soundtrack (if present)', 'source'),
@@ -654,7 +656,7 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
     profile = settings.get('profile')
     if profile not in dict(PROFILE_CHOICES).values():
         raise ValueError('Choose a supported wire profile.')
-    mono_profile = profile == 'mono-fold-500'
+    mono_profile = profile in MONO_PROFILES
     mono_video_side = (settings.get('mono_video_side', 'right')
                        if mono_profile else 'right')
     if (mono_profile and
@@ -702,7 +704,8 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
             raise ValueError(
                 f'{audio_device.name} cannot open {input_channels} input '
                 f'channel(s) at {sample_text}: {exc}') from exc
-    folded_profiles = ('fold-500', 'fold-1000', 'mono-fold-500')
+    folded_profiles = ('fold-500', 'fold-1000', 'mono-fold-500',
+                       'mono-colour-500')
     encode_filter = settings.get('encode_filter', 'auto')
     if encode_filter not in dict(FILTER_CHOICES).values():
         raise ValueError('Choose a supported encode filter.')
@@ -719,7 +722,8 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
     if perceptual_resize not in dict(DOWNSCALER_CHOICES).values():
         raise ValueError('Choose a supported pre-encode downscaler.')
     if perceptual_resize != 'off':
-        if profile not in ('fold-500', 'fold-1000', 'mono-fold-500'):
+        if profile not in ('fold-500', 'fold-1000', 'mono-fold-500',
+                           'mono-colour-500'):
             raise ValueError('The pre-encode downscaler requires a folded profile.')
         if encode_filter != 'box':
             raise ValueError('The pre-encode downscaler requires the Box encode filter.')
@@ -859,7 +863,7 @@ def build_command(settings, devices, sd_module=None, python=None,
     ]
 
     command.extend(('--profile', checked['profile']))
-    if checked['profile'] == 'mono-fold-500':
+    if checked['profile'] in MONO_PROFILES:
         command.extend(('--mono-video-side',
                         checked['mono_video_side'], '--source-audio',
                         checked['source_audio']))
@@ -880,7 +884,8 @@ def build_command(settings, devices, sd_module=None, python=None,
     if checked['speed'] != 1.0:
         command.extend(('--speed', str(checked['speed'])))
     if checked['encode_filter'] != ('box' if checked['profile'] in (
-            'fold-500', 'fold-1000', 'mono-fold-500') else 'nearest'):
+            'fold-500', 'fold-1000', 'mono-fold-500',
+            'mono-colour-500') else 'nearest'):
         command.extend(('--encode-filter', checked['encode_filter']))
     if checked['brightness'] is not None:
         command.extend(('--brightness', str(checked['brightness'])))
@@ -1327,17 +1332,17 @@ class SenderGui:
             dest == 'perceptual_detail_strength' and
             self.settings['perceptual_resize'] == 'off' or
             dest == 'mono_video_side' and
-            self.settings['profile'] != 'mono-fold-500' or
+            self.settings['profile'] not in MONO_PROFILES or
             dest == 'source_audio' and
-            self.settings['profile'] != 'mono-fold-500' or
+            self.settings['profile'] not in MONO_PROFILES or
             dest == 'source_audio_device' and not (
-                self.settings['profile'] == 'mono-fold-500' and
+                self.settings['profile'] in MONO_PROFILES and
                 self.settings['source_audio'] == 'device') or
             dest == 'source_audio_input_side' and not (
-                self.settings['profile'] == 'mono-fold-500' and
+                self.settings['profile'] in MONO_PROFILES and
                 self.settings['source_audio'] == 'device') or
             dest in ('source_audio_gain', 'source_audio_delay_ms') and not (
-                self.settings['profile'] == 'mono-fold-500' and
+                self.settings['profile'] in MONO_PROFILES and
                 self.settings['source_audio'] != 'off') or
             dest == 'capture_width' and source not in ('screen', 'video', 'mouse-follow'))]
         return fields
@@ -1388,14 +1393,16 @@ class SenderGui:
     def _profile_changed(self, value):
         if self.settings['encode_filter'] == 'auto':
             return
-        if value in ('fold-500', 'fold-1000', 'mono-fold-500') and self.settings['encode_filter'] != 'box':
+        if value in ('fold-500', 'fold-1000', 'mono-fold-500',
+                     'mono-colour-500') and self.settings['encode_filter'] != 'box':
             self.settings['encode_filter'] = 'auto'
 
     def _assign(self, dest, value):
         self.settings[dest] = value
         if dest == 'profile':
             self._profile_changed(value)
-            if value not in ('fold-500', 'fold-1000', 'mono-fold-500'):
+            if value not in ('fold-500', 'fold-1000', 'mono-fold-500',
+                             'mono-colour-500'):
                 self.settings['perceptual_resize'] = 'off'
         elif dest == 'device':
             self.settings['rate'] = None

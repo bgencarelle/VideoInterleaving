@@ -465,6 +465,9 @@ def run_send(args):
     profile = getattr(args, 'profile', None)
     if profile == 'mono-fold-500':
         args.experimental_mono_fold = True
+    elif profile == 'mono-colour-500':
+        args.experimental_mono_fold = True
+        args.experimental_mono_colour = True
     elif profile == 'fold-500':
         args.experimental_fold = 500
     elif profile == 'fold-1000':
@@ -515,11 +518,14 @@ def run_send(args):
     model = _model(args.fixture, args.encode_filter)
     if mono_fold_profile:
         _ensure_test_modem_path()
-        from mono_video import MonoFreshFoldWire
-        mono_wire = MonoFreshFoldWire(
+        from mono_video import MonoColourFoldWire, MonoFreshFoldWire
+        wire_class = (MonoColourFoldWire
+                      if getattr(args, 'experimental_mono_colour', False)
+                      else MonoFreshFoldWire)
+        mono_wire = wire_class(
             model, side=getattr(args, 'mono_video_side', 'right'))
-        from tone_code import warmup_status_templates, MONO_500
-        warmup_status_templates(MONO_500)
+        from tone_code import warmup_status_templates
+        warmup_status_templates(mono_wire.status_mode)
     elif mono_profile:
         _ensure_test_modem_path()
         from mono_wire import MonoWire
@@ -1031,15 +1037,15 @@ def _mono_fold_input_side(channel_modes, mono_mode):
 
 
 def _detect_mono_fold_side(args, timeout=2.0):
-    """Probe both input legs for the distinct MONO_500 status before decoding.
+    """Return (side, mode) for a valid mono status, or (None, None).
 
     A short startup pass lets the ordinary receiver choose its model and rank
-    map before it opens the live decode path. If no mono status is found, the
-    caller keeps the ordinary stereo Fold-500 profile.
+    map before it opens the live decode path. If neither mono status validates,
+    the caller keeps the ordinary stereo Fold-500 profile.
     """
     import sounddevice as sd
     _ensure_test_modem_path()
-    from tone_code import MONO_500
+    from tone_code import MONO_500, MONO_1000
 
     device_info = sd.query_devices(args.device, 'input')
     channels = 1 if int(device_info.get('max_input_channels') or 0) < 2 else 2
@@ -1107,7 +1113,11 @@ def _detect_mono_fold_side(args, timeout=2.0):
     finally:
         stream.stop()
         stream.close()
-    return _mono_fold_input_side(observed_modes, MONO_500)
+    for mode in (MONO_1000, MONO_500):
+        side = _mono_fold_input_side(observed_modes, mode)
+        if side is not None:
+            return side, mode
+    return None, None
 
 
 def run_receive(args):
@@ -1124,26 +1134,30 @@ def run_receive(args):
     profile_is_explicit = bool(
         getattr(args, 'experimental_mono', False) or
         getattr(args, 'experimental_mono_fold', False) or
+        getattr(args, 'experimental_mono_colour', False) or
         getattr(args, 'baseline', False) or
         getattr(args, 'experimental_fold', None) is not None)
     if not profile_is_explicit:
-        detected_side = _detect_mono_fold_side(args)
+        detected_side, detected_mode = _detect_mono_fold_side(args)
         if getattr(args, 'stop_event', None) is not None and args.stop_event.is_set():
             return
         if detected_side is not None:
             args.experimental_mono_fold = True
             args._detected_mono_video_side = detected_side
+            args._detected_mono_mode = detected_mode
             if not args.no_log:
                 print({'status': 'wire_profile_detected',
-                       'profile': 'mono-fresh-500',
+                       'profile': ('mono-colour-500' if detected_mode == 5
+                                   else 'mono-fresh-500'),
                        'video_side': detected_side}, flush=True)
         elif not args.no_log:
             print({'status': 'wire_profile_default',
                    'profile': 'fold-500',
-                   'reason': 'MONO_500 status not detected'}, flush=True)
+                   'reason': 'mono status not detected'}, flush=True)
     slots = _fold_slots(args)
     mono_profile = bool(getattr(args, 'experimental_mono', False))
-    mono_fold_profile = bool(getattr(args, 'experimental_mono_fold', False))
+    mono_fold_profile = bool(getattr(args, 'experimental_mono_fold', False) or
+                             getattr(args, 'experimental_mono_colour', False))
     fold = _experimental_fold(slots)
     if mono_profile or mono_fold_profile:
         if getattr(args, 'pilot_timing', 'tone-seeded') == 'baseline':
@@ -1153,13 +1167,17 @@ def run_receive(args):
         _ensure_test_modem_path()
         from tone_code import coded_pilot_timing
         if mono_fold_profile:
-            from mono_video import MonoFreshFoldWire
+            from mono_video import MonoColourFoldWire, MonoFreshFoldWire
+            from tone_code import MONO_1000
+            use_colour = (getattr(args, 'experimental_mono_colour', False) or
+                          getattr(args, '_detected_mono_mode', None) == MONO_1000)
+            wire_class = MonoColourFoldWire if use_colour else MonoFreshFoldWire
             model = _model(args.fixture, 'box')
             requested_side = getattr(args, 'mono_video_side', 'auto')
             detected_side = getattr(args, '_detected_mono_video_side', None)
             selected_side = (requested_side if requested_side in ('left', 'right')
                              else detected_side or 'right')
-            mono_wire = MonoFreshFoldWire(
+            mono_wire = wire_class(
                 model, side=selected_side)
         else:
             from mono_wire import MonoWire
@@ -1258,7 +1276,8 @@ def _run_receive(args, fold, mono_wire=None):
         direction=getattr(args, 'direction', 'auto'))
     auto_mono_side = bool(
         mono_wire is not None and
-        getattr(mono_wire, 'wire_profile', None) == 'mono-fresh-500' and
+        getattr(mono_wire, 'wire_profile', None) in
+        ('mono-fresh-500', 'mono-colour-500') and
         getattr(args, 'mono_video_side', 'auto') == 'auto' and
         input_channels > 1)
     auto_mono_locked = not auto_mono_side
@@ -1295,11 +1314,15 @@ def _run_receive(args, fold, mono_wire=None):
     else:
         input_mode = 'mono-input' if input_channels == 1 else 'M/S'
     _ensure_test_modem_path()
-    from tone_code import FOLD_500, FOLD_1000, FOLD_OFF, MONO_500
+    from tone_code import FOLD_500, FOLD_1000, FOLD_OFF, MONO_500, MONO_1000
+    mono_status = (MONO_1000 if getattr(mono_wire, 'wire_profile', None) ==
+                   'mono-colour-500' else MONO_500)
+    mono_status_name = ('MONO_1000' if mono_status == MONO_1000 else
+                        'MONO_500')
     initial_side = (getattr(mono_wire, 'side', None)
                     if mono_wire is not None else None)
     receiver_router = ReceiverChannelRouter(
-        MONO_500, (FOLD_OFF, FOLD_500, FOLD_1000),
+        mono_status, (FOLD_OFF, FOLD_500, FOLD_1000),
         initial_video_side=(initial_side if initial_side in (
             'left', 'right', 'both') else None))
     runtime_options = getattr(args, 'runtime_options', None)
@@ -1592,15 +1615,15 @@ def _run_receive(args, fold, mono_wire=None):
     def update_channel_hint():
         if auto_mono_side and not auto_mono_locked:
             selected = 'left' if video_input_index == 0 else 'right'
-            hint = (f'auto probing {selected} for MONO_500; right wins '
+            hint = (f'auto probing {selected} for {mono_status_name}; right wins '
                     'if both legs validate')
         elif (auto_mono_side and opposite_probe is not None and
               opposite_probe.streak >= 2):
             hint = ('V7 pulses on both legs; possible duplicated mono '
-                    '(MONO_500 validated on selected leg)')
+                    f'({mono_status_name} validated on selected leg)')
         elif auto_mono_side:
             selected = 'left' if video_input_index == 0 else 'right'
-            hint = f'auto selected {selected} after MONO_500 validation'
+            hint = f'auto selected {selected} after {mono_status_name} validation'
         elif opposite_probe is None or opposite_probe.streak < 2:
             hint = ''
         elif meter['verified']:
@@ -1610,7 +1633,7 @@ def _run_receive(args, fold, mono_wire=None):
             other = 'left' if opposite_input_index == 0 else 'right'
             selected = 'left' if video_input_index == 0 else 'right'
             hint = (f'V7 pulses on {other}; selected {selected} has not '
-                    'validated MONO_500 — check --mono-video-side')
+                    f'validated {mono_status_name} — check --mono-video-side')
         if hint != meter['channel_hint']:
             meter['channel_hint'] = hint
             if hint and not args.no_log:
@@ -1673,7 +1696,7 @@ def _run_receive(args, fold, mono_wire=None):
         selected = 'left' if video_input_index == 0 else 'right'
         meter['mode'] = f'mono-video-auto-{selected}'
         meter['channel_hint'] = (
-            f'probing {selected} for MONO_500; right wins if both validate')
+            f'probing {selected} for {mono_status_name}; right wins if both validate')
         return True
 
     def decode_available():
@@ -2059,10 +2082,12 @@ def parser():
     send.set_defaults(mono_sum=False, pilot_tones=True, eof_marker=True)
     send_profile = send.add_mutually_exclusive_group()
     send_profile.add_argument(
-        '--profile', choices=('mono-fold-500', 'fold-500', 'fold-1000'),
+        '--profile', choices=('mono-fold-500', 'fold-500', 'mono-colour-500',
+                              'fold-1000'),
         default=None,
         help=('wire profile: mono video with Fold 500 (recommended), '
-              'stereo Fold 500 (default), or advanced Fold 1000'))
+              'stereo Fold 500 (default), or advanced Fold 1000, '
+              'mono video with colour-weighted Fold 500 (experimental)'))
     send_profile.add_argument('--baseline', action='store_true',
                               help=argparse.SUPPRESS)
     send_profile.add_argument('--experimental-mono', action='store_true',
@@ -2141,7 +2166,7 @@ def parser():
     recv.add_argument('--mono-video-side', choices=('auto', 'left', 'right'),
                       default='auto',
                       help=('all-fresh mono video input leg (default: auto; '
-                            'validates MONO_500 and prefers right if both work)'))
+                            'validates the mono status and prefers right if both work)'))
     recv.set_defaults(show_diagnostics=True)
     recv.add_argument('--no-log', dest='no_log', action='store_true',
                       default=False, help=argparse.SUPPRESS)
@@ -2185,6 +2210,8 @@ def parser():
                               help='receive only the opt-in mono fold-off layout; unknown profiles hold the last picture')
     recv_profile.add_argument('--experimental-mono-fold', action='store_true',
                               help='receive the all-fresh mono video layout with a 500-class fold')
+    recv_profile.add_argument('--experimental-mono-colour', action='store_true',
+                              help='receive the mono colour-weighted 500-class fold (MONO_1000)')
     recv_profile.add_argument('--experimental-fold', type=int, default=None,
                                choices=(0, 500, 1000), metavar='M',
                                help='unfold M luma slots using coded-pilot status (default: 500); '
@@ -2195,6 +2222,7 @@ def parser():
         'no_tail_memory', 'force_float32', 'pilot_timing', 'frame_boundary',
         'pilot_speed_diagnostics', 'pulse_timing', 'tone_equalization',
         'baseline', 'experimental_mono', 'experimental_mono_fold',
+        'experimental_mono_colour',
         'experimental_fold',
     }
     for action in recv._actions:

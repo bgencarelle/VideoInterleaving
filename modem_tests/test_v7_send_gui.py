@@ -8,7 +8,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from tools import v7_live
-from tools.v7_send_gui import (InputDevice, OutputDevice, ScreenTarget, SenderGui,
+from tools.v7_send_gui import (InputDevice, OutputDevice, PROFILE_CHOICES,
+                                PRIMARY_PROFILE_CHOICES, ScreenTarget, SenderGui,
                                build_command, enumerate_screen_targets,
                                enumerate_camera_sources, linux_camera_sources,
                                enumerate_capture_fps, parse_capture_fps,
@@ -73,6 +74,13 @@ class SenderGuiTests(unittest.TestCase):
         }
         self.sd = Mock()
         self.sd.check_output_settings.return_value = None
+
+    def test_colour_mono_profile_is_available_without_changing_primary_choices(self):
+        self.assertIn('mono-colour-500',
+                      tuple(value for _label, value in PROFILE_CHOICES))
+        self.assertEqual(
+            tuple(value for _label, value in PRIMARY_PROFILE_CHOICES),
+            ('mono-fold-500', 'fold-500'))
 
     def test_device_list_contains_only_output_devices_and_does_not_default(self):
         sd = Mock()
