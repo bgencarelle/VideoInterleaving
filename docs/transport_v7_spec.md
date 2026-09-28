@@ -2058,6 +2058,206 @@ Reproduce the profile checks and complete comparison with:
   --out tmp/v7-mono-video-left
 ```
 
+### Evaluation protocol: Mono 500, stereo Fold 500, and source filters
+
+This protocol defines the next controlled comparison; it does not claim that
+the existing benchmark runners implement every requirement below. Earlier
+eight-image filter sweeps and generated-motion scores are exploratory. Do not
+combine their absolute scores: source preparation, reference geometry, temporal
+history, and ideal versus waveform reconstruction differ. No default changes
+follow from those measurements alone.
+
+#### 1. Freeze and validate the measurement path
+
+Save a run manifest containing the Git revision and relevant local diff,
+model/fold-table hashes, source-file hashes, software/metric versions, hardware,
+commands, random seeds, and all sender/receiver settings. Store scripts,
+manifests, per-frame results, contact sheets, and clips under a named repo-local
+`tmp/` run directory. Temporary paths alone are not durable provenance: retain
+the manifest and exact reproduction instructions with any published conclusion.
+
+Before scoring candidates, establish these correctness gates:
+
+- Load SBS sources through the production source loader. Verify that the colour
+  image and alpha side are interpreted correctly, rather than treating the
+  entire SBS file as an ordinary RGB photograph. Pin alpha/background handling,
+  colour conversion, orientation, aspect handling, and image dimensions.
+- Define one reference-rendering function and one decoded-picture rendering
+  function. Record their dimensions and interpolation methods. Use the same
+  unfiltered reference for every filter/profile pair. An additional comparison
+  against prepared 80×96 source pixels may isolate transport loss, but must be
+  labelled separately from end-to-end source fidelity.
+- Check metric identity on identical reference pixels and deterministic repeat
+  runs. Check that displayed and scored pixels are identical. Do not rescale or
+  tune references separately for a candidate to improve its score.
+- Match decoded pictures to explicit source-frame identities and presentation
+  times. Verify that association using deliberately distinct consecutive
+  frames, including a dropped packet and a cut. Do not silently substitute a
+  decoder-result ordinal when source identity is missing.
+- For ideal reconstruction, simulate the actual profile's transmitted rank
+  map, fold/signature slots, receiver initialization, and history policy. Mono
+  500 must receive only its fresh slots and recoverable folded guests; passing
+  a full encoder coefficient vector directly into an unfold routine is not
+  sufficient evidence of a profile-constrained ideal decode. Perturbing omitted
+  coefficients at the receiver input must not change the reconstructed image.
+- Compare ideal and clean-waveform reconstructions on the same static source.
+  Record pixel/coefficient error, fold acceptance, profile status, and EOF
+  validation. Explain discrepancies before using the ideal path for rankings;
+  do not assume waveform and ideal scores must be identical.
+
+An unexplained mapping, reference, or rank-mask failure invalidates the quality
+comparison. Preserve its diagnostic output and fix the measurement path before
+collecting a larger sweep.
+
+#### 2. Fixed sources and paired experiment matrix
+
+Freeze a held-out corpus before tuning: at least four independent still sources
+in each of six categories—faces/natural photographs, fine texture/repeated
+patterns, text/UI/line art, smooth gradients, saturated colour boundaries, and
+dark detail/bright highlights. Adjacent frames from one clip do not count as
+independent sources. Document selection rules and keep tuning sources separate.
+Include both ordinary production material and labelled diagnostic patterns.
+
+Freeze at least two sequences for each temporal class: static hold, slow pan,
+fast motion, hard cuts, and gradual transition. Record frame cadence, duration,
+cut times, and any synthetic motion-generation parameters. Sequences must span
+multiple complete stereo tail cycles and include both startup and settled
+operation. Use real motion clips where available; generated pans alone do not
+cover temporal quality.
+
+The primary matrix is `mono-fold-500` versus `fold-500` with both stereo legs,
+each using the canonical frozen Box model and these sender settings:
+
+| Pre-encode resize | Detail strengths |
+|---|---|
+| `off` with `--encode-filter box` | Not applicable; baseline |
+| `linear-box` | Not applicable |
+| `gamma-detail` | 0, 0.25, 0.5, 1 |
+| `linear-detail` | 0.25, 0.5, 1 |
+
+Check separately that `linear-detail` strength 0 equals `linear-box`. Feed
+identical prepared capture frames to both profiles for each setting. Pin
+brightness, gamma, capture scaling, frame cadence, sample rates, playback speed,
+receiver history, equalization, and display reconstruction; list their actual
+values. Use each profile's intended history policy rather than disabling stereo
+history to make its layout resemble Mono. Reset receiver state between runs.
+
+Mono-summed stereo and all-fresh mono fold-off are optional diagnostic controls,
+not substitutes for the full-stereo baseline. Capture-scaler choices (direct
+80×96, aspect-preserving 80-pixel width, 160-pixel width) belong in a separately
+labelled paired experiment; do not change capture preparation within a filter
+comparison.
+
+#### 3. Three separate quality experiments
+
+1. **Profile-constrained ideal reconstruction:** measure the layout/filter
+   ceiling without waveform or channel errors, using the validated rank mask
+   and state simulation. Label whether stereo has complete static history or
+   a time-varying coefficient history. An ideal ceiling is not a live result.
+2. **Clean waveform, static holds:** encode and decode each still repeatedly
+   from reset. Report startup separately; score settled output only after at
+   least one complete stereo tail refresh and valid profile acquisition.
+   Verify all expected packets, statuses, fold decisions, and EOF markers.
+3. **Clean waveform, motion:** use the frozen sequences at their specified
+   cadence. Score against the current intended frame, not a previous frame
+   chosen for a better match. Report startup, steady motion, and each post-cut
+   frame through at least one full stereo tail cycle. Review stale detail,
+   shimmer, colour instability, and recovery after cuts as well as frame scores.
+
+Use a common primary clean capture rate of 96 kHz at 1× playback; label any
+48 kHz compatibility run separately. Keep impairment checks to a small,
+deterministic regression set, reported independently from clean fidelity.
+Synthetic Type-II/flutter labels are not evidence of real tape performance.
+Real tape assessment is a separate user measurement with its own acquisition
+and alignment record.
+
+For every expected presentation interval, record received/damaged/missing
+status, current-frame displayability, profile/EOF validity, and whether the
+display held its previous picture. Score held pictures against the current
+intended source and report hold counts, durations, and longest consecutive
+hold. Before the first displayable picture, report no-picture duration and
+metric coverage rather than inventing a black frame or dropping the interval
+silently. Distinguish conditional decoded-frame quality from displayed-sequence
+quality so loss cannot improve a headline score by removing difficult frames.
+
+#### 4. Quality reporting and blind review
+
+SSIMULACRA2 is the primary structure metric: **higher is better**, including
+positive scores; −40 is better than −60, and +20 is better than either. It is
+not a percentage. Report supporting luminance PSNR (higher is better) and
+ΔE2000 colour error (lower is better), with metric implementations and settings.
+
+Every quality table must identify corpus, reference geometry, reconstruction
+path, temporal window, and scored/expected frame counts. Use these columns:
+
+| Setting | Stereo score | Mono score | Stereo filter gain | Mono filter gain | Stereo advantage |
+|---|---|---|---|---|---|
+| Each matched setting | Absolute | Absolute | Versus stereo Box | Versus Mono Box | Stereo minus Mono |
+
+Positive filter gain means improvement within that profile. Positive stereo
+advantage means stereo scored higher. For example, stereo −40 and Mono −55
+give a **15-point stereo advantage**, not a 15% improvement. Do not present a
+subtracted score as another image-quality score.
+
+Retain per-source paired differences and report category means, medians, worst
+cases, and an equal-category overall mean. Report sequence-level summaries
+separately from stills. Use a fixed-seed paired bootstrap over independent
+sources/sequences for 95% confidence intervals; adjacent video frames are not
+independent samples. Small or overlapping differences need visual evidence,
+not a claim of a decisive ranking from a single mean.
+
+Produce randomly labelled, blinded comparisons at native 80×96 and intended
+display size using the same display scaler. Include the reference and baseline,
+record the label key separately, and retain reviewer preferences and reasons.
+Review motion as clips at the actual cadence, not only contact sheets. Inspect
+text readability, gradients, colour boundaries, clipping, texture, stale detail,
+and temporal stability. Summarize category regressions alongside aggregate wins.
+
+#### 5. Paired CPU, latency, and resource measurements
+
+Measure quality and performance in separate runs: metric calculation, saved
+images, and diagnostic scans must not enter codec timings. Warm compilation,
+tables, and caches before steady-state measurement; report cold startup
+separately. Use at least 30 paired timed batches, alternate baseline/candidate
+order with a recorded schedule, and report batch sizes and warm-up counts.
+Benchmark on the intended host as well as recording the development host.
+
+Report process-CPU milliseconds per frame and wall-time median/p95 for source
+preparation/filtering, encode, decode, and decode plus picture reconstruction.
+Distinguish batch throughput from single-frame service time. Report peak memory
+and CPU consumption at the actual frame rate, with 100% explicitly meaning one
+fully occupied logical CPU.
+
+For end-to-end capture tests, include FFmpeg child-process CPU, capture scaling,
+queueing, and presentation. Measure source-to-display frame age using traceable
+timestamps or a visible timed stimulus; record clock/alignment uncertainty.
+Report latency median/p95, queue depth, dropped/repeated frames, missed frame
+deadlines, and audio callback under/overruns over a fixed run duration. A Python
+preprocessing saving alone is not an end-to-end CPU saving. Keep the sender GUI
+event-driven: benchmark instrumentation must not add capture preview, per-frame
+UI updates, or per-frame logging to the normal sender path.
+
+Pure synthetic runs open no audio device. If live I/O is needed, explicitly
+select and verify a virtual/loopback device; never assume a named default is a
+loopback or send test signals to physical speakers.
+
+#### 6. Decision and reproducibility gates
+
+Before the final held-out run, record numeric target-host budgets for added
+CPU, p95 frame age, memory, missed deadlines, and acceptable category quality
+regressions. The budget values are an explicit project decision, not numbers to
+choose after seeing which filter wins. Without agreed budgets, publish findings
+as exploratory rather than a default recommendation.
+
+A default candidate must pass the measurement correctness gates, show
+repeatable paired quality gains across the corpus, pass blind still/motion
+review without material text/colour/temporal regressions, fit those resource
+budgets, and preserve clean decode/profile/EOF reliability. Publish failures
+and exclusions with their reasons. Repeat only where changed code, failures,
+or unresolved variability justify it. Archive the manifest, per-source results,
+comparison assets, and exact commands with the decision. Until these gates are
+met, retain `off --encode-filter box` as the low-cost default.
+
 ### Proposed extension: receiver audio WAV capture
 
 This is a proposal for a later receiver feature, not a current wire or GUI

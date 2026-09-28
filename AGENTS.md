@@ -137,8 +137,10 @@ inside the modem subsystem (`animation_modem/`, `modem_*.py`,
   an interactive inspection tool, not a unit test). Never blanket
   `discover -s tests` — it would collect it.
 - `tests/test_scope_stochastic.py` and `tests/test_scope_pair.py` each
-  construct a bare `Scope()` (default device = the speakers). Run them only
-  on a box where the default output is safe (e.g. BlackHole 2ch).
+  construct a bare `Scope()` using the default device. Run them only when the
+  default is configured as a safe virtual loopback; otherwise skip them or
+  arrange a loopback before running. Never route test output to physical
+  speakers.
 - `tests/test_scope_pair.py`, `tools/spec.py`, `tools/bake_advisor.py`,
   `tools/verify_scope_files.py` are inspection/diagnostic tools, not part of
   the suite.
@@ -147,9 +149,10 @@ inside the modem subsystem (`animation_modem/`, `modem_*.py`,
 
 - `animation_modem/` is a self-contained transport package: keep it free of
   app imports (renderer, settings, status).
-- Audio output uses `sounddevice`; give a device by name (`--device BlackHole`)
-  or index, never assume the default. `--device null` runs scope headless
-  (browser renders the samples). Anything that opens a REAL device must use
-  `BlackHole 2ch`. BlackHole is not stock macOS: if this is a Mac and
-  BlackHole is missing, STOP and ask the user to install it
-  (`brew install blackhole-2ch`) — never let tests use the built-in speakers.
+- Audio output uses `sounddevice`; give a device by name or index rather than
+  relying on an implicit default. `--device null` runs scope headless (the
+  browser renders the samples). Tests that open audio may use an explicitly
+  selected virtual/loopback device, such as `pulse` when configured as a
+  loopback or `BlackHole 2ch`. Verify the selected device with
+  `sounddevice.query_devices()`; never send test output to physical speakers
+  or assume that a device named `pulse` is a loopback on every setup.

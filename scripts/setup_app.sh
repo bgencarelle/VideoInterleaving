@@ -234,9 +234,9 @@ detect_os() {
             case "$ID" in
                 debian|ubuntu|raspbian)
                     os="debian"
-                    pkg_manager="apt"
-                    pkg_update_cmd="apt update -qq"
-                    pkg_install_cmd="apt install -y"
+                    pkg_manager="apt-get"
+                    pkg_update_cmd="apt-get update -qq"
+                    pkg_install_cmd="apt-get install -y"
                     ;;
                 fedora|rhel|centos|rocky|almalinux)
                     os="rhel"
@@ -260,17 +260,17 @@ detect_os() {
                     echo "⚠️  WARNING: Unsupported Linux distribution: $ID" >&2
                     echo "   Attempting Debian/Ubuntu package names..." >&2
                     os="debian"
-                    pkg_manager="apt"
-                    pkg_update_cmd="apt update -qq"
-                    pkg_install_cmd="apt install -y"
+                    pkg_manager="apt-get"
+                    pkg_update_cmd="apt-get update -qq"
+                    pkg_install_cmd="apt-get install -y"
                     ;;
             esac
         else
             echo "⚠️  WARNING: Cannot detect Linux distribution. Assuming Debian/Ubuntu." >&2
             os="debian"
-            pkg_manager="apt"
-            pkg_update_cmd="apt update -qq"
-            pkg_install_cmd="apt install -y"
+            pkg_manager="apt-get"
+            pkg_update_cmd="apt-get update -qq"
+            pkg_install_cmd="apt-get install -y"
         fi
     else
         echo "❌ ERROR: Unsupported OS: $OSTYPE" >&2
@@ -416,7 +416,7 @@ install_system_packages() {
         failure_count=$((failure_count + 1))
         echo "Package index update failed; attempting packages using the available index." >&2
     fi
-    if [ "$pkg_manager" = apt ]; then
+    if [ "$pkg_manager" = apt-get ]; then
         packages=$(remap_packages_for_platform "$packages")
     fi
     for package in $packages; do

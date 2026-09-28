@@ -374,6 +374,12 @@ class MonoVideoWireTests(unittest.TestCase):
         self.assertEqual(written[0].shape[1], 2)
         self.assertGreater(float(np.max(np.abs(written[0][:, 1]))), 0.0)
         np.testing.assert_array_equal(written[0][:, 0], 0.0)
+        # Verify the status on samples emitted by run_send itself, after the
+        # CLI profile selection, mono-leg routing, and final output processing.
+        from tone_code import decode_tone_code
+        status = decode_tone_code(written[0][:, 1], sample_rate=v7.RATE)
+        self.assertTrue(status['valid'], status)
+        self.assertEqual(status['status']['mode'], MONO_VIDEO_MODE)
         np.testing.assert_allclose(written[1][:, 0], .1)
         self.assertGreater(float(np.max(np.abs(written[1][:, 1]))), 0.0)
 
