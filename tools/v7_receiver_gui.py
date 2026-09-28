@@ -75,7 +75,6 @@ def _create_graphics_context(glfw, moderngl, wayland=None):
             glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
             glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 0)
             require = 300
-            backend = 'egl'
         else:
             glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_API)
             glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
@@ -83,7 +82,6 @@ def _create_graphics_context(glfw, moderngl, wayland=None):
             glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
             glfw.window_hint(glfw.OPENGL_FORWARD_COMPAT, glfw.TRUE)
             require = 330
-            backend = None
         glfw.window_hint(glfw.RESIZABLE, glfw.TRUE)
         try:
             window = glfw.create_window(
@@ -104,10 +102,10 @@ def _create_graphics_context(glfw, moderngl, wayland=None):
         context = None
         try:
             glfw.make_context_current(window)
-            options = {'require': require}
-            if backend is not None:
-                options['backend'] = backend
-            context = moderngl.create_context(**options)
+            # GLFW owns the window and its EGL/native context. ModernGL must
+            # wrap that current context rather than selecting its standalone
+            # EGL backend (which rejects the GLFW GLES context as unknown mode).
+            context = moderngl.create_context(require=require)
             context_version = getattr(context, 'version_code', 0)
             if context_version < 300:
                 raise RuntimeError(

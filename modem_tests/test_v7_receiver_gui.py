@@ -110,8 +110,7 @@ class ReceiverGuiGraphicsContextTests(unittest.TestCase):
 
         self.assertTrue(use_gles)
         self.assertEqual(glfw.apis, [glfw.OPENGL_ES_API])
-        self.assertEqual(moderngl.options,
-                         [{'require': 300, 'backend': 'egl'}])
+        self.assertEqual(moderngl.options, [{'require': 300}])
 
     def test_desktop_context_failure_falls_back_to_gles(self):
         glfw = GraphicsGlfwStub(fail_desktop=True)
@@ -123,8 +122,7 @@ class ReceiverGuiGraphicsContextTests(unittest.TestCase):
         self.assertTrue(use_gles)
         self.assertEqual(glfw.apis,
                          [glfw.OPENGL_API, glfw.OPENGL_ES_API])
-        self.assertEqual(moderngl.options,
-                         [{'require': 300, 'backend': 'egl'}])
+        self.assertEqual(moderngl.options, [{'require': 300}])
 
     def test_gles_shader_variant_uses_es_300_and_precision(self):
         for shader in (VERTEX_SHADER, FRAGMENT_SHADER,
