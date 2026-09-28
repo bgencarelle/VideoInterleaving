@@ -38,6 +38,9 @@ from tools.v7_gl_viewer import (DISPLAY_LABELS, DISPLAY_MODES,
 
 ROW_HEIGHT = 36
 TOOLBAR_HEIGHT = 54
+INFO_PANEL_FRACTION = 0.40
+COMPACT_INFO_PANEL_FRACTION = 0.46
+NARROW_INFO_PANEL_FRACTION = 0.55
 INFO_REFRESH_SECONDS = 0.2
 FOOTER_REFRESH_SECONDS = 0.5
 QUIET_WAIT_SECONDS = 0.5
@@ -66,6 +69,31 @@ def _create_graphics_context(glfw, moderngl, wayland=None):
                        'wayland')
     apis = (('gles', 'opengl') if wayland else ('opengl', 'gles'))
     failures = []
+    window_size = (960, 720)
+    get_monitor = getattr(glfw, 'get_primary_monitor', None)
+    get_video_mode = getattr(glfw, 'get_video_mode', None)
+    get_workarea = getattr(glfw, 'get_monitor_workarea', None)
+    if get_monitor is not None:
+        try:
+            monitor = get_monitor()
+            area = (get_workarea(monitor)
+                    if monitor is not None and get_workarea is not None else
+                    None)
+            if area is not None:
+                _x, _y, available_width, available_height = area
+                window_size = (
+                    max(320, min(window_size[0], int(available_width)-32)),
+                    max(240, min(window_size[1], int(available_height)-80)))
+            elif get_video_mode is not None and monitor is not None:
+                mode = get_video_mode(monitor)
+                if mode is not None:
+                    window_size = (
+                        max(320, min(window_size[0],
+                                     int(mode.size.width)-32)),
+                        max(240, min(window_size[1],
+                                     int(mode.size.height)-80)))
+        except Exception:
+            pass
     for api in apis:
         gles = api == 'gles'
         glfw.default_window_hints()
@@ -85,7 +113,7 @@ def _create_graphics_context(glfw, moderngl, wayland=None):
         glfw.window_hint(glfw.RESIZABLE, glfw.TRUE)
         try:
             window = glfw.create_window(
-                960, 720, 'V7 Receiver · Setup', None, None)
+                *window_size, 'V7 Receiver · Setup', None, None)
         except Exception as exc:
             failures.append(f'{api}: window creation raised {exc}')
             continue
@@ -476,6 +504,17 @@ def _text_lines(text, width, font):
     if current:
         lines.append(current)
     return lines
+
+
+def _info_panel_height(size):
+    width, height = size
+    if width < 720 and height < 560:
+        fraction = NARROW_INFO_PANEL_FRACTION
+    elif height < 560:
+        fraction = COMPACT_INFO_PANEL_FRACTION
+    else:
+        fraction = INFO_PANEL_FRACTION
+    return round(height*fraction)
 
 
 def _fit_text(text, font, width):
@@ -1302,6 +1341,15 @@ class ReceiverGui:
         self.last_diagnostics_poll = now
         snapshot = dict(self.v7_live.RECEIVER_GUI_STATUS)
         meter = snapshot.get('meter')
+        warning = bool(meter and meter.get('sync_warning'))
+        warning_changed = warning != self.live_sync_warning
+        self.live_sync_warning = warning
+        if (self.live_meter is not None and
+                self.live_meter.get('sync_warning') != warning):
+            self.live_meter['sync_warning'] = warning
+            warning_changed = True
+        if warning_changed:
+            self.dirty = True
         if not diagnostics_visible:
             # The compact footer needs only two scalar fields. Avoid building
             # all diagnostic strings and JSON-copying the full meter while its
@@ -1313,11 +1361,8 @@ class ReceiverGui:
                           round(float(old_meter.get('input_fps', 0.0)), 1))
             new_footer = (meter.get('decoded'),
                           round(float(meter.get('input_fps', 0.0)), 1))
-            warning = bool(meter.get('sync_warning'))
-            warning_changed = warning != self.live_sync_warning
-            self.live_sync_warning = warning
             self.live_meter = dict(meter)
-            if new_footer != old_footer or warning_changed:
+            if new_footer != old_footer:
                 self.dirty = True
             return
         provider = snapshot.get('diagnostics')
@@ -1365,8 +1410,10 @@ class ReceiverGui:
         width, height = image.size
         draw.text((24, 70), 'Receiver setup',
                   fill=(240, 245, 249), font=font)
-        draw.text((24, 98),
-                  'First available input is selected; change it or review advanced controls.',
+        intro = ('First available input is selected; change it or review advanced controls.'
+                 if width >= 760 else
+                 'Input auto-selected · advanced settings optional')
+        draw.text((24, 98), _fit_text(intro, small, max(80, width-290)),
                   fill=(151, 174, 192), font=small)
         order = self._config_field_indexes()
         top = 140
@@ -1495,12 +1542,13 @@ class ReceiverGui:
     def _picture_box(self, size):
         width, height = size
         if self._video_fullscreen():
-            details_height = (round(height*.27)
+            details_height = (_info_panel_height(size)
                               if self._diagnostics_visible() else 0)
             return 0, 0, max(1, width), max(1, height-details_height)
         chrome_visible = not self.fullscreen or self.toolbar_visible
         top = (TOOLBAR_HEIGHT if chrome_visible else 0)+8
-        details_height = round(height*.27) if self._diagnostics_visible() else 0
+        details_height = (_info_panel_height(size)
+                          if self._diagnostics_visible() else 0)
         footer_height = 38 if chrome_visible else 0
         picture_height = max(1, height-top-details_height-footer_height-8)
         return (10, top, max(1, width-20), picture_height)
@@ -1528,12 +1576,15 @@ class ReceiverGui:
                            fill=(14, 19, 24), outline=(49, 69, 83), width=1)
         if not fullscreen_image and self.current_frame is None and not self.started:
             label = 'Choose an input in Setup, then press Start.'
-            draw.text((left+18, top+18), label,
+            message_y = top+(58 if self.live_sync_warning else 18)
+            draw.text((left+18, message_y), label,
                       fill=(205, 219, 229), font=font)
         elif not fullscreen_image and self.current_frame is None:
-            draw.text((left+18, top+18), 'Waiting for the first decoded picture…',
+            message_y = top+(58 if self.live_sync_warning else 18)
+            draw.text((left+18, message_y),
+                      'Waiting for the first decoded picture…',
                       fill=(205, 219, 229), font=font)
-        if ((self.live_meter or {}).get('sync_warning') and
+        if (self.live_sync_warning and
                 (not fullscreen_image or self._diagnostics_visible())):
             warning = (left+14, top+12, left+194, top+43)
             draw.rounded_rectangle(warning, radius=5, fill=(125, 42, 31),
@@ -1542,7 +1593,7 @@ class ReceiverGui:
                       fill=(255, 239, 228), font=small)
 
         if self._diagnostics_visible():
-            panel_height = round(height*.27)
+            panel_height = _info_panel_height(image.size)
             footer_height = (0 if fullscreen_image else
                              38 if not self.fullscreen or self.toolbar_visible
                              else 0)
@@ -1585,7 +1636,15 @@ class ReceiverGui:
             if audio_error:
                 audio = f'RESELECT · {audio_error}'
             sync = meter.get('sync_state', 'acquiring')
-            if self.current_frame is not None:
+            if width < 720:
+                if self.current_frame is not None:
+                    detail = (f'{state} · {count} pictures · '
+                              f'input {input_fps:.1f} fps · sync {sync}')
+                elif self.started:
+                    detail = f'{state} · sync {sync}'
+                else:
+                    detail = f'{state} · {self.notice}'
+            elif self.current_frame is not None:
                 status = (self.latest_report or {}).get(
                     'status', 'picture decoded')
                 display = ('' if self.display_latency_ms is None else
@@ -1661,6 +1720,23 @@ class ReceiverGui:
                 ('image_only', 'Image only', width-212, width-112),
                 ('fullscreen', 'Fullscreen', width-104, width-12),
             )
+            if width < 720:
+                compact = (
+                    ('config_tab', 'Setup', 84),
+                    ('info_tab', 'Live', 64),
+                    ('start_stop', 'Stop' if self.started else 'Start', 80),
+                    ('mode_button', 'Mode', 54),
+                    ('details_button', 'Info', 48),
+                    ('image_only', 'Image', 58),
+                    ('fullscreen', 'Full', 52),
+                )
+                compact_controls = []
+                x = 12
+                for key, label, button_width in compact:
+                    compact_controls.append((key, label, x,
+                                             x+button_width))
+                    x += button_width+4
+                controls = tuple(compact_controls)
             for key, label, x1, x2 in controls:
                 if (key in ('mode_button', 'details_button', 'image_only') and
                         self.page != 'info'):
@@ -1838,6 +1914,16 @@ class ReceiverGui:
                 self._reveal_toolbar()
                 self._toggle_details()
             return
+        if self.image_only and key == glfw.KEY_C:
+            self._set_image_only(False)
+            self.page = 'config'
+            self.dropdown = None
+            self.display_menu_open = False
+            if self.fullscreen:
+                self._toggle_fullscreen(glfw, window)
+            self._reveal_toolbar()
+            self.dirty = True
+            return
         if (self.fullscreen and key in (glfw.KEY_F, glfw.KEY_I)):
             if self.editing:
                 self._finish_edit(self.fields[self.selected])
@@ -1896,6 +1982,10 @@ class ReceiverGui:
             self.page = 'config'
             self.dropdown = None
             self.display_menu_open = False
+            if self.fullscreen:
+                self._toggle_fullscreen(glfw, window)
+            self.toolbar_visible = True
+            self.last_ui_activity = time.monotonic()
             self.dirty = True
         elif key == glfw.KEY_ESCAPE:
             if self.dropdown is not None:
@@ -2086,7 +2176,10 @@ class ReceiverGui:
             self._glfw = glfw
             if set_frame_notifier is not None:
                 set_frame_notifier(glfw.post_empty_event)
-            glfw.set_window_size_limits(window, 720, 480,
+            initial_width, initial_height = glfw.get_window_size(window)
+            minimum_width = max(320, min(520, int(initial_width)))
+            minimum_height = max(240, min(400, int(initial_height)))
+            glfw.set_window_size_limits(window, minimum_width, minimum_height,
                                         glfw.DONT_CARE, glfw.DONT_CARE)
             glfw.swap_interval(1)
             vertex_shader = _shader_for_context(VERTEX_SHADER, use_gles)

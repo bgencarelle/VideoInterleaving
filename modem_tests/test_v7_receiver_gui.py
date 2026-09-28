@@ -51,6 +51,16 @@ class KeyStub:
     MOD_CONTROL = 2
 
 
+class FullscreenKeyStub(KeyStub):
+    DONT_CARE = 0
+
+    def get_primary_monitor(self):
+        return object()
+
+    def set_window_monitor(self, *_args):
+        pass
+
+
 class GraphicsGlfwStub:
     CLIENT_API = 1
     OPENGL_ES_API = 2
@@ -69,6 +79,7 @@ class GraphicsGlfwStub:
         self.fail_desktop = fail_desktop
         self.hints = {}
         self.apis = []
+        self.window_sizes = []
 
     def default_window_hints(self):
         self.hints = {}
@@ -77,6 +88,7 @@ class GraphicsGlfwStub:
         self.hints[hint] = value
 
     def create_window(self, *_args):
+        self.window_sizes.append(_args[:2])
         api = self.hints[self.CLIENT_API]
         self.apis.append(api)
         if self.fail_desktop and api == self.OPENGL_API:
@@ -103,6 +115,18 @@ class GraphicsModernGlStub:
 
 
 class ReceiverGuiGraphicsContextTests(unittest.TestCase):
+    def test_setup_window_starts_within_a_small_display_mode(self):
+        glfw = GraphicsGlfwStub()
+        glfw.get_primary_monitor = lambda: object()
+        glfw.get_video_mode = lambda _monitor: SimpleNamespace(
+            size=SimpleNamespace(width=800, height=600))
+        moderngl = GraphicsModernGlStub()
+
+        _window, _context, _use_gles = _create_graphics_context(
+            glfw, moderngl, wayland=False)
+
+        self.assertEqual(glfw.window_sizes, [(768, 520)])
+
     def test_wayland_prefers_gles_egl(self):
         glfw = GraphicsGlfwStub()
         moderngl = GraphicsModernGlStub()
@@ -500,7 +524,7 @@ class ReceiverGuiOptionTests(unittest.TestCase):
 
         self.assertNotIn('fullscreen', gui.hits)
         self.assertTrue(gui._diagnostics_visible())
-        self.assertEqual(gui._picture_box((960, 720)), (0, 0, 960, 526))
+        self.assertEqual(gui._picture_box((960, 720)), (0, 0, 960, 432))
         self.assertEqual(canvas.getpixel((0, 0)), (0, 0, 0))
         self.assertNotEqual(canvas.getpixel((0, 710)), (0, 0, 0))
 
@@ -533,6 +557,78 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertTrue(gui.dirty)
         self.assertFalse(gui.live_meter['sync_warning'])
         self.assertFalse(gui.live_sync_warning)
+
+    def test_sync_warning_clears_even_if_diagnostics_provider_fails(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        gui.page = 'info'
+        gui.last_diagnostics_poll = 0.0
+        gui.live_sync_warning = True
+        gui.live_meter = {'sync_warning': True}
+        gui.dirty = False
+        gui.v7_live = SimpleNamespace(RECEIVER_GUI_STATUS={
+            'meter': {'sync_warning': False},
+            'diagnostics': Mock(side_effect=RuntimeError('temporary status race')),
+        })
+        next(field for field in gui.fields
+             if field.dest == 'show_diagnostics').value = True
+
+        with patch('tools.v7_receiver_gui.time.monotonic', return_value=1.0):
+            gui._poll_diagnostics()
+
+        self.assertTrue(gui.dirty)
+        self.assertFalse(gui.live_sync_warning)
+        self.assertFalse(gui.live_meter['sync_warning'])
+
+    def test_c_returns_directly_to_setup_from_image_only(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        gui.image_only = True
+        gui.image_only_previous_page = 'info'
+        gui.image_only_previous_fullscreen = True
+        gui.fullscreen = True
+
+        gui._on_key(FullscreenKeyStub(), object(), KeyStub.KEY_C, 0,
+                    KeyStub.PRESS, 0)
+
+        self.assertFalse(gui.image_only)
+        self.assertEqual(gui.page, 'config')
+        self.assertFalse(gui.fullscreen)
+        self.assertTrue(gui.toolbar_visible)
+
+    def test_c_returns_directly_to_setup_from_fullscreen_live_view(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        gui.page = 'info'
+        gui.fullscreen = True
+        gui.toolbar_visible = False
+
+        gui._on_key(FullscreenKeyStub(), object(), KeyStub.KEY_C, 0,
+                    KeyStub.PRESS, 0)
+        gui._update_toolbar_visibility(100.0, 200.0)
+
+        self.assertEqual(gui.page, 'config')
+        self.assertTrue(gui.toolbar_visible)
+        self.assertFalse(gui.fullscreen)
+
+    def test_compact_toolbar_controls_fit_a_lower_resolution_canvas(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        gui.page = 'info'
+
+        canvas = Image.fromarray(gui._canvas((640, 480)))
+        controls = [gui.hits[key] for key in (
+            'config_tab', 'info_tab', 'start_stop', 'mode_button',
+            'details_button', 'image_only', 'fullscreen')]
+
+        self.assertEqual(canvas.size, (640, 480))
+        self.assertTrue(all(left[2] <= right[0]
+                            for left, right in zip(controls, controls[1:])))
+
+    def test_compact_info_panel_gets_more_height_for_readability(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        gui.page = 'info'
+        gui.fullscreen = True
+        next(field for field in gui.fields
+             if field.dest == 'show_diagnostics').value = True
+
+        self.assertEqual(gui._picture_box((640, 480)), (0, 0, 640, 216))
 
     def test_fullscreen_i_reveals_and_toggles_diagnostics(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())

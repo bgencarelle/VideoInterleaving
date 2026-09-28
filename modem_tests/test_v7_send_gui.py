@@ -307,11 +307,13 @@ class SenderGuiTests(unittest.TestCase):
             build_command(self.settings, self.devices, self.sd)
 
     def test_camera_picker_values_and_screen_targets_map_to_sender_cli(self):
-        self.settings.update(source='camera', camera='avfoundation:4',
-                             screen_target=None)
+        self.settings.update(
+            source='camera', camera='avfoundation:HDMI Capture Card',
+            screen_target=None)
         command = build_command(self.settings, self.devices, self.sd)
         args = v7_live.parser().parse_args(command[2:])
-        self.assertEqual(args.ffmpeg_input, 'avfoundation:4')
+        self.assertEqual(args.ffmpeg_input,
+                         'avfoundation:HDMI Capture Card')
         self.assertNotIn('--camera', command)
 
         self.settings.update(source='camera', camera='v4l2:/dev/video2',
@@ -336,8 +338,9 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(args.display, 1)
 
     def test_custom_camera_input_cannot_silently_override_picker_selection(self):
-        self.settings.update(source='camera', camera='avfoundation:4',
-                             ffmpeg_input='avfoundation:0')
+        self.settings.update(
+            source='camera', camera='avfoundation:HDMI Capture Card',
+            ffmpeg_input='avfoundation:0')
 
         with self.assertRaisesRegex(ValueError, 'camera from the picker'):
             build_command(self.settings, self.devices, self.sd)
@@ -379,10 +382,13 @@ class SenderGuiTests(unittest.TestCase):
                    '[AVFoundation indev @ 0x1] AVFoundation audio devices:\n'
                    '[AVFoundation indev @ 0x1] [0] Microphone')
         self.assertEqual(parse_ffmpeg_camera_sources(listing, 'darwin'), (
-            ('Face Camera · AVFoundation 0', 'avfoundation:0'),
-            ('Capture Screen Pro · AVFoundation 1', 'avfoundation:1'),
-            ('USB Screen Capture · AVFoundation 2', 'avfoundation:2'),
-            ('HDMI Capture Card · AVFoundation 4', 'avfoundation:4')))
+            ('Face Camera · AVFoundation 0', 'avfoundation:Face Camera'),
+            ('Capture Screen Pro · AVFoundation 1',
+             'avfoundation:Capture Screen Pro'),
+            ('USB Screen Capture · AVFoundation 2',
+             'avfoundation:USB Screen Capture'),
+            ('HDMI Capture Card · AVFoundation 4',
+             'avfoundation:HDMI Capture Card')))
         self.assertEqual(parse_avfoundation_screen_sources(listing), (
             ScreenTarget('Capture screen 0', display=3),))
 
@@ -453,10 +459,10 @@ class SenderGuiTests(unittest.TestCase):
 
     def test_keyboard_camera_picker_starts_at_selected_item_and_moves_focus(self):
         gui = SenderGui(self.devices)
-        gui.settings.update(source='camera', camera='avfoundation:1')
-        choices = (('Camera 0', 'avfoundation:0'),
-                   ('Camera 1', 'avfoundation:1'),
-                   ('Capture card', 'avfoundation:2'))
+        gui.settings.update(source='camera', camera='avfoundation:Camera 1')
+        choices = (('Camera 0', 'avfoundation:Camera 0'),
+                   ('Camera 1', 'avfoundation:Camera 1'),
+                   ('Capture card', 'avfoundation:Capture card'))
 
         with patch('tools.v7_send_gui.enumerate_camera_sources',
                    return_value=choices):
@@ -464,7 +470,8 @@ class SenderGuiTests(unittest.TestCase):
             self.assertEqual(gui.dropdown_scroll, 1)
             gui._on_key(SenderKeyStub, None, SenderKeyStub.KEY_ENTER, 0,
                         SenderKeyStub.PRESS, 0)
-            self.assertEqual(gui.settings['camera'], 'avfoundation:1')
+            self.assertEqual(gui.settings['camera'],
+                             'avfoundation:Camera 1')
 
             gui._open_dropdown('camera')
             gui._on_key(SenderKeyStub, None, SenderKeyStub.KEY_DOWN, 0,
@@ -472,7 +479,45 @@ class SenderGuiTests(unittest.TestCase):
             gui._on_key(SenderKeyStub, None, SenderKeyStub.KEY_KP_ENTER, 0,
                         SenderKeyStub.PRESS, 0)
 
-        self.assertEqual(gui.settings['camera'], 'avfoundation:2')
+        self.assertEqual(gui.settings['camera'],
+                         'avfoundation:Capture card')
+
+    def test_camera_start_reenumerates_and_rejects_stale_picker_values(self):
+        gui = SenderGui(self.devices)
+        gui.settings.update(source='camera', camera='avfoundation:4')
+
+        with patch('tools.v7_send_gui.enumerate_camera_sources',
+                   return_value=(('HDMI Capture Card · AVFoundation 4',
+                                  'avfoundation:HDMI Capture Card'),)) as scan, \
+                patch.object(gui, '_build_command') as build_command:
+            gui._start()
+
+        scan.assert_called_once_with()
+        build_command.assert_not_called()
+        self.assertIsNone(gui.process)
+        self.assertIn('reopen the camera picker', gui.notice)
+
+    def test_camera_start_uses_freshly_enumerated_name_selection(self):
+        gui = SenderGui(self.devices)
+        gui.settings.update(source='camera',
+                            camera='avfoundation:HDMI Capture Card')
+        child = Mock()
+        child.poll.return_value = None
+
+        with patch('tools.v7_send_gui.enumerate_camera_sources',
+                   return_value=(('HDMI Capture Card · AVFoundation 4',
+                                  'avfoundation:HDMI Capture Card'),)) as scan, \
+                patch.object(gui, '_build_command',
+                             return_value=['python', 'send']) as build_command, \
+                patch('tools.v7_send_gui.subprocess.Popen',
+                      return_value=child), \
+                patch('tools.v7_send_gui.threading.Thread') as thread:
+            gui._start()
+
+        scan.assert_called_once_with()
+        build_command.assert_called_once_with()
+        self.assertEqual(gui.page, 'live')
+        thread.return_value.start.assert_called_once_with()
 
     def test_fractional_scroll_moves_sender_dropdown_and_zero_does_nothing(self):
         gui = SenderGui(self.devices)

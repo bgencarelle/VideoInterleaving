@@ -31,6 +31,7 @@ from animation_modem import transport3 as PULSE                             # no
 from animation_modem.v7_core import (SourceCoder, _sample_at, speed_length,
                                   speed_resample)                  # noqa: E402
 from animation_modem.v7_core import bound_emission                         # noqa: E402
+from animation_modem.v7_input_kernels import _leg_correlation_sums          # noqa: E402
 
 # ------------------------------------------------------------------ §6.1
 RATE, N, CP, SYM, F = 48000, 128, 16, 144, 24
@@ -3507,29 +3508,6 @@ def decode_stream(model, x, verbose=False, diagnostics=None,
 POLARITY_THRESHOLD = .3
 
 
-@njit(cache=True, fastmath=False)
-def _leg_correlation_sums(x):
-    """Mean-removed left/right powers and cross product of a stereo block."""
-    count = x.shape[0]
-    left_mean = 0.0
-    right_mean = 0.0
-    for i in range(count):
-        left_mean += x[i, 0]
-        right_mean += x[i, 1]
-    left_mean /= count
-    right_mean /= count
-    left_power = 0.0
-    right_power = 0.0
-    cross = 0.0
-    for i in range(count):
-        left = x[i, 0]-left_mean
-        right = x[i, 1]-right_mean
-        left_power += left*left
-        right_power += right*right
-        cross += left*right
-    return left_power, right_power, cross
-
-
 def leg_polarity(samples, previous=1, threshold=POLARITY_THRESHOLD):
     """Right-leg polarity (+1 or -1) of a stereo capture, with hysteresis.
 
@@ -3556,6 +3534,15 @@ def leg_polarity(samples, previous=1, threshold=POLARITY_THRESHOLD):
     if correlation >= threshold:
         return 1
     return previous
+
+
+def warmup_leg_polarity():
+    """Compile the production stereo-input signature before capture starts.
+
+    The correlation kernel uses Numba's disk cache, so compatible subsequent
+    processes can load the compiled signature rather than compile it again.
+    """
+    leg_polarity(np.zeros((PULSE_FRAME, 2), dtype=np.float32))
 
 
 def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,

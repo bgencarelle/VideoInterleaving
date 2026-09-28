@@ -195,6 +195,13 @@ class V7LiveInputTests(unittest.TestCase):
             self.assertGreater(np.dot(chunk[:, 0], chunk[:, 1]), 0)
         self.assertGreaterEqual(len([i for i in indices if i is not None]), FRAMES-2)
 
+    def test_polarity_kernel_warmup_compiles_stereo_float32_signature(self):
+        v7.warmup_leg_polarity()
+        self.assertTrue(any(
+            signature[0].ndim == 2 and signature[0].layout == 'C' and
+            str(signature[0].dtype) == 'float32'
+            for signature in v7._leg_correlation_sums.signatures))
+
     def test_silence_never_decodes_and_stays_bounded(self):
         live = LiveInput()
         for step in range(40):

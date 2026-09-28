@@ -1208,9 +1208,11 @@ def _run_receive(args, fold, mono_wire=None):
     model = mono_wire.model_for(base_model) if mono_wire is not None else base_model
     if fold is not None:
         fold.check(model)
-    # Compile acquisition, equalizer and coded status kernels before opening
-    # the audio stream so first-call compilation cannot stall live capture.
+    # Compile acquisition, polarity, equalizer and coded-status kernels before
+    # opening audio. The Numba disk cache reuses unchanged kernels on compatible
+    # later runs; a cold cache is still compiled before capture begins.
     P.PULSE.warmup_pulse_kernels()
+    P.warmup_leg_polarity()
     P.warmup_equalizer(model)
     if fold is not None:
         from tone_code import warmup_coded_decoder

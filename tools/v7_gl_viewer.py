@@ -637,7 +637,7 @@ def _diagnostic_image(size, diagnostics):
     heading_height = 20
     status = diagnostics.get('status', ('ACQUIRING',))[0].upper()
     draw.text((padding, 3),
-              f'{status}  ·  F fullscreen  ·  I toggle diagnostics  ·  Esc exit',
+              f'{status}  ·  F full  ·  I info  ·  C setup  ·  Esc exit',
               fill=(132, 153, 173, 255), font=heading_font)
     specs = [
         ('SYNC  /  INDEX', 'sync'),
@@ -649,7 +649,7 @@ def _diagnostic_image(size, diagnostics):
         specs.append(('DECODE CPU', 'decode_cpu'))
     if 'resources' in diagnostics:
         specs.append(('GUI RESOURCES', 'resources'))
-    columns = 3 if len(specs) > 4 else 2
+    columns = (2 if width < 720 else 3 if len(specs) > 4 else 2)
     rows = (len(specs)+columns-1)//columns
     card_width = max(1, (width-2*padding-(columns-1)*gap)//columns)
     card_height = max(
@@ -664,13 +664,29 @@ def _diagnostic_image(size, diagnostics):
         draw.text((x+10, y+7), heading, fill=(137, 162, 184, 255),
                   font=heading_font)
         line_y = y+26
-        for line in diagnostics.get(key, ()):
-            if line_y + 16 > y+card_height:
-                break
-            draw.text((x+10, line_y), str(line), fill=(227, 237, 245, 255),
+        available_width = max(1, card_width-20)
+        max_lines = max(0, (card_height-46)//17+1)
+        lines = [str(line) for line in diagnostics.get(key, ())]
+        visible_lines = lines[:max_lines]
+        if len(lines) > max_lines and visible_lines:
+            visible_lines[-1] = f'{visible_lines[-1]} …'
+        for line in visible_lines:
+            line = _fit_diagnostic_text(line, font, available_width)
+            draw.text((x+10, line_y), line, fill=(227, 237, 245, 255),
                       font=font)
             line_y += 17
     return np.ascontiguousarray(np.asarray(image, dtype=np.uint8))
+
+
+def _fit_diagnostic_text(text, font, width):
+    """Keep diagnostic lines inside their card at compact window sizes."""
+    text = str(text)
+    if font.getlength(text) <= width:
+        return text
+    ellipsis = '…'
+    while text and font.getlength(text+ellipsis) > width:
+        text = text[:-1]
+    return text+ellipsis if text else ellipsis
 
 
 def run(frame_source, status_source, aspect_ratios, fullscreen=False,

@@ -213,10 +213,11 @@ def parse_ffmpeg_camera_sources(output, platform):
             match = re.search(r'\[(\d+)\]\s+(.+?)\s*$', line)
             if match and not _is_avfoundation_screen_source(match.group(2)):
                 index, name = match.groups()
-                # AVFoundation indices belong to the complete video list;
-                # removing synthetic screen entries must not renumber cameras.
+                # Keep FFmpeg's original index in the label for reference, but
+                # open the picked camera by its enumerated name. Synthetic
+                # screen entries must not affect those reference indices.
                 choices.append((f'{name} · AVFoundation {index}',
-                                f'avfoundation:{index}'))
+                                f'avfoundation:{name}'))
     elif platform.startswith('win'):
         in_video = False
         for line in output.splitlines():
@@ -1315,6 +1316,22 @@ class SenderGui:
             self._finish_edit()
         if self.process is not None:
             return
+        if (self.settings.get('source') == 'camera' and
+                not str(self.settings.get('ffmpeg_input', '')).strip()):
+            try:
+                choices = enumerate_camera_sources()
+            except Exception as exc:
+                self.notice = f'Camera discovery failed: {exc}'
+                self.dirty = True
+                return
+            self.capture_choice_cache['camera'] = choices
+            selected_camera = self.settings.get('camera')
+            if selected_camera not in {value for _label, value in choices}:
+                self.notice = (
+                    'Camera is unavailable or changed; reopen the camera '
+                    'picker and select it again.')
+                self.dirty = True
+                return
         try:
             command = self._build_command()
             kwargs = {

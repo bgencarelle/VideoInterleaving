@@ -964,6 +964,206 @@ coded-status timing out of prototype monkeypatch hooks into explicit transport
 decoder APIs, while retaining the fail-closed profile checks and verifying the
 same wire on loopback.
 
+### 10.9 Planned: normal-speed receiver CPU and memory profile
+
+Establish the production-default stereo Fold 500 receive cost and assess
+feasibility on a Raspberry Pi Zero 2 W with 512 MB RAM. Until that hardware is
+available, use a deliberately conservative **15× CPU slowdown** for planning;
+this is an estimate, not a target-device result. Restrict the assessment to
+normal-speed playback.
+
+Profile at least 2,000 changing synthetic packets. Generate the packet stream in
+a separate process and store it under a named, gitignored `tmp/` run directory;
+the receiver process must stream fixed-size blocks from the file rather than
+load or memory-map the whole capture. Use the live 1,024-sample block cadence,
+`LiveInput` rolling buffer and acquisition, persistent `PulseState`, canonical
+Box model, stereo Fold 500, coded-pilot timing, EOF boundaries, default
+precision, pulse timing and tone equalization. Open no audio device and do not
+include sender work in receiver measurements. Pin the Git revision, table and
+fixture hashes, Python/dependency versions, CPU, commands and all settings in a
+run manifest.
+
+After warmup, separately measure process CPU and wall time for input buffering,
+leveling and pulse acquisition; packet decode (status, metadata, demodulation
+and equalization); Fold 500 unfold/reconstruction; and latest-frame publication.
+Also report complete per-frame processing latency. Collect at least 2,000
+successful frame samples and report median, p95, p99 and maximum by stage,
+successful frames, coded-status and EOF validation counts, and CPU seconds per
+second of nominal input. Derive frame cadence from `PULSE_FRAME / RATE`, not
+from the image-body duration. The playback interval and estimated target CPU
+utilization must be stated explicitly; apply 15× only to measured CPU work, not
+audio duration, sleep, or RAM.
+
+Record RSS, PSS, private memory and peak RSS after imports, model loading, JIT
+warmup, and at regular points through the sustained run. Report cold JIT compile
+time/peak separately when feasible using a dedicated run-local
+`NUMBA_CACHE_DIR`; do not delete or overwrite existing Numba caches. Avoid
+counting mapped input pages as receiver memory. Measure graphics-context,
+windowed display and setup-GUI overhead separately from headless decode; module
+imports alone are not a rendering measurement. Document that Pi estimates use
+cross-CPU proxies, and account for the fact that memory does not scale with the
+CPU slowdown. Keep all outputs and reproducible scripts in `tmp/`.
+
+Report the baseline before changing code. Rank optimization opportunities by
+measured CPU and memory cost, then validate any later changes against identical
+packet/profile correctness and picture reconstruction. Synthetic timing does
+not establish audio callback reliability on the Pi.
+
+#### Initial host-only baseline (2026-09-28; exploratory)
+
+The first 2,000-packet profile used a 4-vCPU AMD EPYC-Milan 2.0 GHz KVM host
+(Python 3.13.5, NumPy 2.2.4, SciPy 1.18.1, Numba 0.67.0), not a Pi. Two
+cached-JIT runs supplied 4,000 sustained frame samples. A third run used a new,
+empty Numba cache for the cold-start and memory comparison. All three decoded,
+reconstructed, and validated 2,000/2,000 pictures, Fold 500 status words, and
+EOF markers. The stream contained 16 deterministic variants of the reference
+fixture and was generated in a separate process. No audio device or graphics
+context was opened.
+
+The reference packet is 3,920 samples at 48 kHz, so its interval is **81.67 ms**
+(12.245 packets/s). The table reports pooled warmed process-CPU time per frame;
+the last column applies the assumed 15× CPU factor to p95 only.
+
+| Stage | Host median (ms) | Host p95 (ms) | Host p99 (ms) | Estimated Pi p95 (ms) |
+|---|---:|---:|---:|---:|
+| Input buffering, leveling, acquisition | 0.487 | 0.610 | 0.760 | 9.1 |
+| Packet-hit selection | 0.041 | 0.065 | 0.081 | 1.0 |
+| Status, metadata, demodulation, equalization | 1.062 | 1.365 | 1.642 | 20.5 |
+| Fold 500 unfold/reconstruction | 0.298 | 0.413 | 0.532 | 6.2 |
+| Latest-frame publication | 0.006 | 0.009 | 0.011 | 0.1 |
+| **Complete receiver processing** | **1.918** | **2.380** | **2.908** | **35.7** |
+
+Pooled p95 and p99 process-CPU time project to about **35.7 ms and 43.6 ms**,
+respectively; warmed wall-time p95/p99 were 2.39/2.92 ms. The two warmed runs
+used 2.40–2.41% of one host core in instrumented receiver work, or an estimated
+36.0–36.2% of one Pi core under the 15× assumption. One of 4,000 warmed samples
+reached 6.90 ms on the host (103.5 ms under 15×), above the 81.67 ms packet
+interval; this is a single observed outlier, so the profile supports
+normal-speed feasibility as a hypothesis, not a deadline guarantee. Timings
+exclude actual audio callbacks, pixel rendering, and window-system work.
+
+| Receiver memory stage | Warm-cache RSS | Warm-cache PSS | Cold-cache RSS | Cold-cache PSS |
+|---|---:|---:|---:|---:|
+| Imports | 172.3 MiB | 164.6 MiB | 172.3 MiB | 164.7 MiB |
+| Model and fold table | 173.7 MiB | 166.0 MiB | 173.8 MiB | 166.1 MiB |
+| After receiver JIT warmup | 229.3 MiB | 221.5 MiB | 355.0 MiB | 347.3 MiB |
+| Peak RSS during run | **234.3 MiB** | — | **357.8 MiB** | — |
+
+With cached JIT, RSS rose from 231.8–232.0 MiB at 500 frames to 232.7–232.8 MiB
+at 2,000; PSS rose from 224.0–224.3 to 224.9–225.2 MiB. That is a small
+settling increase, not evidence of unbounded growth over this run. Cold
+compilation took 16.0 seconds on this host and had a much larger memory peak.
+These are process measurements; they do not include OS, desktop,
+GPU/framebuffer, or other application memory. The warmed headless footprint
+looks plausible against 512 MB, while the cold peak leaves little room for the
+Pi's OS; neither case is validated on ARM.
+
+In the pre-change cold-cache run, the first successful frame spent 110 ms of
+host CPU in input/acquisition, versus a warmed p99 of 0.76 ms. An isolated
+first call to `v7.leg_polarity()` took 132 ms with a fresh Numba cache; the
+production startup warmups left its `_leg_correlation_sums` Numba signature
+uncompiled.
+
+#### Polarity-kernel cache follow-up (2026-09-28)
+
+The production receiver now calls `v7.warmup_leg_polarity()` before opening the
+audio stream. The `cache=True` Numba kernel lives alone in
+`animation_modem/v7_input_kernels.py`, so unrelated edits to the large `v7.py`
+module do not invalidate it. Numba writes the compiled signature to its disk
+cache on first use and loads it on compatible later processes; changing the
+kernel module source or the Python/Numba cache environment causes a rebuild.
+Use `NUMBA_CACHE_DIR` to choose a cache location, or Numba's default package
+`__pycache__` location.
+
+A 2,000-packet run with a fresh cache validated all frames, Fold 500 status
+words, and EOF markers. Cold compilation (all receiver warmups) completed
+before capture in 16.42 s on this host; the first live-frame acquisition then
+took 0.55 ms of CPU, and the maximum across the run was 0.94 ms. A repeat
+process loaded the polarity `.nbi`/`.nbc` cache entries (confirmed with
+`NUMBA_DEBUG_CACHE=1`), completed startup warmup in 0.22 s, and its first
+acquisition took 0.59 ms. Thus the one-time JIT cost is before audio capture,
+and unchanged source reuses compiled code on subsequent runs. Peak receiver RSS
+was 359.4 MiB for that cold-cache run and 234.5 MiB for its cached repeat. Cold
+compilation time on ARM will differ and should not be estimated by the 15× CPU
+multiplier.
+
+#### Decoder substage profile (2026-09-28; exploratory)
+
+A cached-JIT 2,000-packet run added per-call CPU/wall timers around the production
+Fold 500 decoder components. All 2,000 pictures, coded statuses, and EOF markers
+validated. The table gives host process-CPU median/p95 and the p95 projection
+using the planning 15× factor. The rows are nested/inclusive as marked; do not
+sum them. Wall-time medians tracked process CPU within a few microseconds on this
+host.
+
+| Operation | Host median (ms) | Host p95 (ms) | Estimated Pi p95 (ms) | Scope |
+|---|---:|---:|---:|---|
+| Metadata decode | 0.140 | 0.206 | 3.09 | Includes metadata sampling, FFT, and CRC parse |
+| Metadata RFFT | 0.028 | 0.042 | 0.63 | Nested in metadata decode |
+| Metadata parse/CRC | 0.015 | 0.021 | 0.31 | Nested in metadata decode |
+| Body sample interpolation | 0.083 | 0.128 | 1.92 | Fractional-delay sample walk before frame demodulation |
+| Body RFFT demodulation | 0.053 | 0.089 | 1.34 | 24 fixed-size symbol transforms |
+| Coded status decode | 0.019 | 0.027 | 0.41 | Nested in tone timing/channel fit |
+| Pilot-tone timing, excluding status | 0.076 | 0.114 | 1.71 | Exclusive estimate |
+| Channel fit, excluding tone timing | 0.136 | 0.189 | 2.83 | Exclusive estimate |
+| Fade/noise estimation | 0.059 | 0.087 | 1.30 | Per-frame channel/noise work |
+| Equalizer Numba kernel | 0.197 | 0.290 | 4.35 | Nested in equalizer dispatch |
+| Equalizer dispatch | 0.220 | 0.328 | 4.92 | Includes setup and the Numba kernel |
+| Remaining body-frame work | 0.148 | 0.210 | 3.15 | Approximate exclusive residual, including confidence/gating/result assembly |
+| **Body-frame decode total** | **0.728** | **0.966** | **14.49** | Includes RFFT, channel, fade/noise, equalizer, and residual |
+
+An otherwise identical run without per-function timers measured the complete
+decode stage at **1.089 ms median / 1.353 ms p95 / 1.627 ms p99**. The detailed
+instrumentation raised that to 1.183/1.514 ms at median/p95, about 0.10/0.16 ms
+of measurement overhead, so use the component profile for ranking rather than
+as an uninstrumented total or deadline budget. The status decoder and body RFFT
+are small individually; the larger components are the combined channel fit,
+equalizer, metadata path, and body-frame confidence/result work. Within a
+20%-faster equalizer kernel scenario, the saving would be only about 0.04 ms on
+the host per packet (roughly 0.6 ms per packet under 15×), so measure a change
+before taking on decoder complexity.
+
+The JSON summary, per-frame CSV, and log are in
+`tmp/v7-zero2-profile/receiver-decode-components-final.json`,
+`tmp/v7-zero2-profile/per-frame-decode-components-final.csv`, and
+`tmp/v7-zero2-profile/receiver-log-decode-components-final.jsonl`. No audio
+device or graphics context was opened.
+
+The shell was a TTY without `DISPLAY` or `WAYLAND_DISPLAY`, so real viewer/GL
+memory and rendering cost were not measured. The reusable profiler, manifests,
+per-frame CSVs, logs, packet capture, and `lscpu` output are in
+`tmp/v7-zero2-profile/`; they are gitignored.
+
+Reproduce the stream generation and warmed receiver run with:
+
+```bash
+NUMBA_CACHE_DIR=tmp/v7-zero2-profile/sender-numba-cache \
+  .venv/bin/python -B tmp/v7_zero2_receiver_profile.py generate \
+  --packets 2001 --output tmp/v7-zero2-profile/fold500-2001.f32 \
+  --manifest tmp/v7-zero2-profile/generator-manifest.json
+NUMBA_CACHE_DIR=tmp/v7-zero2-profile/receiver-numba-kernel-isolated-cold \
+  .venv/bin/python -B tmp/v7_zero2_receiver_profile.py receive \
+  --packets 2000 --wire-packets 2001 \
+  --input tmp/v7-zero2-profile/fold500-2001.f32 \
+  --output tmp/v7-zero2-profile/receiver-results-kernel-isolated-cached.json \
+  --csv-output tmp/v7-zero2-profile/per-frame-kernel-isolated-cached.csv \
+  --memory-interval 500
+```
+
+For the cold-cache run, use a new empty cache directory rather than removing an
+existing cache:
+
+```bash
+mkdir -p tmp/v7-zero2-profile/receiver-numba-cold-repro
+NUMBA_CACHE_DIR=tmp/v7-zero2-profile/receiver-numba-cold-repro \
+  .venv/bin/python -B tmp/v7_zero2_receiver_profile.py receive \
+  --packets 2000 --wire-packets 2001 \
+  --input tmp/v7-zero2-profile/fold500-2001.f32 \
+  --output tmp/v7-zero2-profile/receiver-results-cold-repro.json \
+  --csv-output tmp/v7-zero2-profile/per-frame-cold-repro.csv \
+  --memory-interval 500
+```
+
 ## 11. Perceptual sender preprocessing
 
 Status: the first resize ablation is implemented as an opt-in experiment in

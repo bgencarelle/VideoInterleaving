@@ -82,6 +82,19 @@ class VideoSourceCommandTests(unittest.TestCase):
             self.assertIn('rtsp://camera.example/live', cmd)
             grab.close()
 
+    def test_avfoundation_camera_opens_the_selected_device_name(self):
+        process = self.Process()
+        with mock.patch('tools.v7_capture.shutil.which', return_value='ffmpeg'), \
+                mock.patch('tools.v7_capture.subprocess.Popen',
+                           return_value=process) as popen:
+            grab = ffmpeg_source(
+                'avfoundation:HDMI Capture Card', 30)
+            command = popen.call_args.args[0]
+            grab.close()
+
+        self.assertEqual(command[command.index('-i')+1],
+                         'HDMI Capture Card')
+
 
     def test_https_vod_loops_unless_explicitly_marked_live(self):
         for live in (False, True):
@@ -188,16 +201,18 @@ class ThrottledCleanupTests(unittest.TestCase):
 
 
 class SenderPreparationTests(unittest.TestCase):
-    def test_avfoundation_picker_spec_reaches_capture_without_renumbering(self):
+    def test_avfoundation_picker_passes_camera_name_to_capture(self):
         args = Namespace(
             source='camera', camera=0, capture_fps=None,
-            capture_width=160, ffmpeg_input='avfoundation:4', region=None,
+            capture_width=160,
+            ffmpeg_input='avfoundation:HDMI Capture Card', region=None,
             encode_filter='box', capture_filter=None,
             perceptual_resize='off')
         with mock.patch('tools.v7_capture.camera_source') as camera:
             _capture(args)
 
-        self.assertEqual(camera.call_args.kwargs['spec'], 'avfoundation:4')
+        self.assertEqual(camera.call_args.kwargs['spec'],
+                         'avfoundation:HDMI Capture Card')
 
     def test_prepared_camera_grid_uses_original_geometry_for_packet_aspect(self):
         frame = CapturedFrame(np.zeros((96, 80, 3), np.uint8),
