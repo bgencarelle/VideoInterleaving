@@ -2156,11 +2156,12 @@ The six status words are defined in `test_modem_v7/tone_code.py`: the three
 existing fold words and their balanced complements. `FOLD_OFF` and `MONO_OFF`
 are independently recognized; only `MONO_OFF` has the original rotating mono
 layout. `MONO_500` identifies the distinct all-fresh 500-class video profile.
-`MONO_1000` remains reserved by live profiles and is used only by the offline
-fold-off comparison control. The existing `MONO_OFF` wire remains 992 fresh
-plus 272 rotating slots, with 16 padding positions on the final phase. Clean
-synthetic decode confirmed that all seven phases cover the 2,880 corner
-coefficients and that the channel fit/equalizer run with S prior zero.
+`MONO_1000` identifies the colour-weighted all-fresh profile in §13.9. The
+offline all-fresh fold-off comparison that temporarily used `MONO_1000` has
+been retired. The existing `MONO_OFF` wire remains 992 fresh plus 272 rotating
+slots, with 16 padding positions on the final phase. Clean synthetic decode
+confirmed that all seven phases cover the 2,880 corner coefficients and that
+the channel fit/equalizer run with S prior zero.
 
 Reproduce the targeted tests and the 25-case synthetic channel matrix with:
 
@@ -2338,27 +2339,31 @@ flash/click test is still needed to calibrate any residual source-start offset.
 checks the status before image equalization and rejects both the legacy
 `MONO_OFF` rotating layout and stereo fold status, holding the previous image.
 This status gate is not a promise that pre-existing receivers reject the new
-profile; they do not implement this check. The benchmark-only all-fresh
-fold-off control uses the reserved `MONO_1000` code as a separate identity and
-is not exposed by the live CLI or GUI.
+profile; they do not implement this check. `MONO_1000` is allocated to the
+colour-weighted profile in §13.9. A previous offline fold-off control used that
+status during the historical comparison below; the control is no longer in the
+wire implementation or current benchmark.
 
-The runner `tools/v7_mono_video_bench.py` compares the new profile against the
-current stereo fold-500 decode, that stereo wire downmixed to mono, the
-rotating mono fold-off profile with tail memory on/off, and an all-fresh mono
-fold-off control. The mono video profiles use the selected video leg; the other
-leg is silent in this video-only benchmark. It scores packets 8–23 against the matching generated source
-frame and reports decoded, current-frame-displayable, held-picture, EOF, encode
-and decode costs separately. The encode/decode times are local wall time per
-packet (not process CPU), measured after decoder warm-up. Pans, six-packet cuts,
-and a moving graphic blob are deterministic synthetic scenes; the previous review script
-`tmp/mono/video.py` is unavailable in this checkout, so these are scene-class
-substitutes, not identical stimuli. The selected Type-II and fast-flutter cases
-are limited synthetic regressions, not cassette emulation. No real-tape result
-is inferred from them.
+The runner `tools/v7_mono_video_bench.py` compares the current stereo fold-500
+decode, that stereo wire downmixed to mono, the rotating mono fold-off profile
+with tail memory on/off, and both all-fresh mono 500-class folded profiles. The
+removed all-fresh fold-off control remains only as a historical row in the
+original comparison below. The mono video profiles use the selected video leg;
+the other leg is silent in this video-only benchmark. It scores packets 8–23
+against the matching generated source frame and reports decoded,
+current-frame-displayable, held-picture, EOF, encode and decode costs
+separately. The encode/decode times are local wall time per packet (not process
+CPU), measured after decoder warm-up. Pans, six-packet cuts, a moving graphic
+blob, and a colour chart are deterministic synthetic scenes; the previous
+review script `tmp/mono/video.py` is unavailable in this checkout, so these are
+scene-class substitutes, not identical stimuli. The selected Type-II and
+fast-flutter cases are limited synthetic regressions, not cassette emulation.
+No real-tape result is inferred from them.
 
-The first complete run contains four 24-packet scenes, with 16 scored frames per
-scene and profile/channel pair. Mean SSIMULACRA2 across the four scenes, plus
-mean per-packet wall time across the run, is:
+The original comparison, before the colour profile was added and the fold-off
+control retired, contained four 24-packet scenes, with 16 scored frames per
+scene and profile/channel pair. Its mean SSIMULACRA2 across the four scenes,
+plus mean per-packet wall time, was:
 
 | Profile | Clean | Type II | Fast flutter | Encode ms/packet | Decode ms/packet |
 |---|---:|---:|---:|---:|---:|
@@ -2369,7 +2374,7 @@ mean per-packet wall time across the run, is:
 | All-fresh mono fold-off, left leg | −34.50 | −35.80 | −35.44 | 1.346 | 1.159 |
 | All-fresh mono 500-class fold, left leg | **−29.23** | **−35.02** | **−34.14** | 1.496 | 1.180 |
 
-All 72 profile/scene/channel runs received and displayed 24/24 packets, held no
+All 72 rows in that historical run received and displayed 24/24 packets, held no
 previous pictures, and validated 24/24 EOF markers. Across the four scenes, the
 fold improved on its all-fresh fold-off control by 5.27 points clean, 0.78 in
 Type II, and 1.31 under fast flutter. The generated cut scene remains difficult
@@ -2382,11 +2387,102 @@ Reproduce the profile checks and complete comparison with:
 
 ```text
 .venv/bin/python -m unittest modem_tests.test_v7_mono_video \
-  modem_tests.test_v7_mono_wire modem_tests.test_v7_send_gui \
-  modem_tests.test_v7_receiver_gui modem_tests.test_v7_source_audio -v
+  modem_tests.test_v7_send_gui modem_tests.test_v7_receiver_audio -v
 .venv/bin/python tools/v7_mono_video_bench.py \
-  --out tmp/v7-mono-video-left
+  --out tmp/v7-mono-colour
 ```
+
+### 13.9 Mono colour-weighted fold (MONO_1000)
+
+`--profile mono-colour-500` is an opt-in sender profile; the existing
+`mono-fold-500` default is unchanged. It uses the same 3,920-sample packet,
+`MONO_PILOT_VALUES`, M-only 1,264 fresh slots per packet, 208 protected head
+coefficients in 26 groups, remaining fresh slots in 132 groups, `scale*sqrt(2)`,
+tail memory off, required EOF marker, 500 fold slots, 16 signature slots,
+`U_CLIP = 2.5`, and `--mono-video-side` leg handling as `mono-fold-500`.
+
+The profile-specific changes are:
+
+| Item | `mono-fold-500` (`MONO_500`) | `mono-colour-500` (`MONO_1000`) |
+|---|---|---|
+| Coded status | `MONO_500` (4) | `MONO_1000` (5) |
+| Wire profile | `mono-fresh-500` | `mono-colour-500` |
+| Coefficient order | `model.order` | `colour_order(model)` below |
+| Fold hosts | ranks 764–1,263 of `model.order`, any plane | 500 weakest luma coefficients among the 1,264 fresh slots |
+| Fold guests | ranks 1,264–1,763 of `model.order`, any plane | first 500 luma coefficients after the fresh 1,264 |
+| Fold step D | 1.1409647181002305 | 0.6 |
+
+The coefficient order is constructed deterministically:
+
+1. Preserve `model.order[:208]` as the protected head without reordering it.
+2. Copy `model.lam` to a floating-point array and multiply entries whose
+   `model.plane` is 1 or 2 by `CHROMA_RANK_WEIGHT = 4.0`.
+3. Take `model.order[208:]` and sort it by weighted lambda, descending, using a
+   stable sort.
+4. Concatenate the protected head and sorted remainder to produce the 2,880
+   coefficient order.
+5. The first 1,264 entries are fresh. Hosts are the final 500 luma entries in
+   that fresh prefix; guests are the first 500 luma entries after it.
+
+For the pinned box model, the resulting allocations are:
+
+| Set | Luma | Cb + Cr | Total |
+|---|---:|---:|---:|
+| Fresh | 1,054 | 210 | 1,264 |
+| Hosts | 500 | 0 | 500 |
+| Guests | 500 | 0 | 500 |
+
+No host is in the protected head, and no guest is in the fresh set. As in the
+base codec, the final 16 hosts carry the fold-table signature. The complete
+colour fold-table SHA-256 is
+`76e6f7b3592fcc2d657197d86ab189a320ca16b1f3bf73ed0fc3a5bed24989f6`.
+The byte-identity baseline for three `mono-fold-500` packets on this machine is
+`ba74e9ff3426cf8fa58f7a8fa5562adc9c7b3b1cabc389eba8213a6f1e659036`.
+
+The receiver probes for two agreeing statuses at startup. `MONO_500` selects
+the existing `MonoFreshFoldWire`; `MONO_1000` selects `MonoColourFoldWire`.
+Packets with the wrong status are rejected before equalization and hold the
+last picture. Profile changes mid-stream are not detected; the receiver must
+restart to select a different rank map.
+
+The synthetic comparison uses four original motion scenes (slow pan, fast pan,
+cut every six packets, and moving blob) and a saturated colour-chart scene. The
+four-scene values are means of the 16 scored packets per scene. The chart values
+are its 16-packet means, shown for each synthetic channel:
+
+| Synthetic channel | Fresh four-scene mean | Colour four-scene mean | Δ | Fresh colour-chart mean | Colour colour-chart mean |
+|---|---:|---:|---:|---:|---:|
+| Clean 96 kHz | −72.957 | −78.047 | −5.091 | −58.795 | −53.968 |
+| Type II | −58.012 | −49.421 | +8.592 | −62.081 | −58.936 |
+| Fast flutter | −57.688 | −49.464 | +8.225 | −61.929 | −58.393 |
+
+On the rebased run, the clean four-scene target of +4.0 is a measured miss:
+`mono-colour-500` scored 5.091 points below `mono-fresh-500-fold`, 9.091 points
+short of that target. Type II and fast flutter both scored higher than the
+fresh-fold profile; the colour-chart score also improved on all three channels.
+No fold-step or rank-weight tuning was performed. Mean decode cost across all
+15 scene/channel rows was 2.154 ms/input packet for `mono-fresh-500-fold` and
+2.130 ms/input packet for `mono-colour-500` (−1.12%).
+
+The `stereo-fold500-both` four-scene control means were −4.697, −16.672, and
+−13.032 for clean, Type II, and fast flutter, matching the §13.8 table within
+0.01 points. The `stereo-fold500-mono-sum` means were −85.188, −48.473, and
+−49.838 respectively; these do not match the historical §13.8 mono-sum row.
+Keep that control discrepancy visible when comparing this latest-base run.
+
+All 90 rows decoded 24 results and validated 24/24 EOF markers. Over the five
+scenes and three channels, `mono-fresh-500-fold` had 12 received results,
+300/360 current frames displayable, and 60 held-picture frames;
+`mono-colour-500` had 11 received results, 295/360 current frames displayable,
+and 65 held-picture frames. Every scored row kept a visible picture; scores
+therefore include prior-picture holds where the current frame was not
+displayable. The received/displayable counts are separate from the decoded and
+EOF counts.
+
+These scores are from synthetic channels, not tape. Type-II and fast-flutter
+impairments are limited regression inputs and are not cassette emulation. No
+real-tape performance claim is made. The complete row data is saved at
+`tmp/v7-mono-colour/results.json`.
 
 ### Evaluation protocol: Mono 500, stereo Fold 500, and source filters
 

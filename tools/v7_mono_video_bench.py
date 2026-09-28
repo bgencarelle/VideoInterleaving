@@ -24,7 +24,7 @@ sys.path.insert(0, str(ROOT/'test_modem_v7'))
 from animation_modem import v7                                           # noqa: E402
 from animation_modem.imaging import values_image                         # noqa: E402
 from common import TARGET, ssimulacra2                                    # noqa: E402
-from mono_video import MonoFreshFoldWire                                  # noqa: E402
+from mono_video import (MonoColourFoldWire, MonoFreshFoldWire)             # noqa: E402
 from mono_wire import MonoWire                                            # noqa: E402
 from tools import v7_live                                                 # noqa: E402
 from tools.v7_torture_matrix import CASES, RATE, impair                   # noqa: E402
@@ -34,8 +34,12 @@ from tools.v7_wire_profile import WireProfile                             # noqa
 PACKETS = 24
 DISPLAY_SIZE = (400, 480)  # 5:6, the V7 source/display aspect.
 SCORE_RANGE = range(7, 23)  # packets 8..23, matching the review's steady window.
-SCENE_NAMES = ('slow-pan', 'fast-pan', 'cut-every-6', 'moving-blob')
+SCENE_NAMES = ('slow-pan', 'fast-pan', 'cut-every-6', 'moving-blob',
+               'colour-chart')
 CASE_NAMES = ('clean-96k', 'type-ii', 'fast-flutter')
+CHART_COLOURS = ((220, 40, 40), (40, 200, 40), (40, 60, 220), (230, 210, 40),
+                 (40, 200, 210), (210, 40, 200), (240, 140, 30), (120, 70, 40),
+                 (250, 180, 170))
 
 
 def _base_frames():
@@ -96,12 +100,26 @@ def _blob_frames():
     return frames
 
 
+def _colour_chart_frames():
+    """Saturated patches drifting 0-2 px: the colour case the face scenes miss."""
+    frames = []
+    for index in range(PACKETS):
+        image = Image.new('RGB', (400, 480), (128, 128, 128))
+        draw = ImageDraw.Draw(image)
+        for i, colour in enumerate(CHART_COLOURS):
+            x, y = (i % 5)*80 + index % 3, (i//5)*160 + 40
+            draw.rectangle((x+4, y, x+76, y+120), fill=colour)
+        frames.append(image.resize((80, 96), Image.Resampling.LANCZOS))
+    return frames
+
+
 def scenes():
     return {
         'slow-pan': _pan_frames(1.0),
         'fast-pan': _pan_frames(3.0),
         'cut-every-6': _cut_frames(),
         'moving-blob': _blob_frames(),
+        'colour-chart': _colour_chart_frames(),
     }
 
 
@@ -139,6 +157,16 @@ def _decode_rows(profile, audio, model, source_frames, case_name):
             results, info = v7.decode_pulse_stream(
                 mono_model, audio, sample_rate=RATE,
                 pilot_timing='tone-seeded', frame_boundary='eof', state=state)
+        value_fn = lambda result: wire.values(mono_model, result)
+    elif profile == 'mono-colour-500':
+        wire = MonoColourFoldWire(model, side='left')
+        mono_model = wire.model_for(model)
+        decode_started = time.perf_counter()
+        with wire.receiving():
+            results, info = v7.decode_pulse_stream(
+                mono_model, audio[:, 0], sample_rate=RATE,
+                pilot_timing='tone-seeded', frame_boundary='eof',
+                state=v7.PulseState(tail_memory=False))
         value_fn = lambda result: wire.values(mono_model, result)
     else:
         wire = MonoFreshFoldWire(model, side='left')
@@ -229,6 +257,7 @@ def run(out, selected_scenes=None, selected_channels=None):
         'mono-rotating-tail-on',
         'mono-rotating-tail-off',
         'mono-fresh-500-fold',
+        'mono-colour-500',
     )
     cases = {case.name: case for case in CASES}
     unknown_scenes = set(selected_scenes)-set(scene_frames)
@@ -264,12 +293,18 @@ def run(out, selected_scenes=None, selected_channels=None):
             model, values, source_indices=list(range(PACKETS)))
         encode_times['mono-fresh-500-fold'] = (
             time.perf_counter()-before)*1000
+        before = time.perf_counter()
+        colour_wire = MonoColourFoldWire(model, side='left').encode(
+            model, values, source_indices=list(range(PACKETS)))
+        encode_times['mono-colour-500'] = (
+            time.perf_counter()-before)*1000
         audio_by_profile = {
             'stereo-fold500-both': stereo_wire,
             'stereo-fold500-mono-sum': stereo_wire,
             'mono-rotating-tail-on': rotating_wire,
             'mono-rotating-tail-off': rotating_wire,
             'mono-fresh-500-fold': fresh_wire,
+            'mono-colour-500': colour_wire,
         }
 
         for case_name in selected_channels:
