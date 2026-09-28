@@ -670,6 +670,27 @@ class SenderGuiTests(unittest.TestCase):
                                  'https://example.test/clip.mp4')
                 gui.editing = True
 
+    def test_right_click_pastes_into_video_source_field(self):
+        gui = SenderGui(self.devices)
+        gui.settings['source'] = 'video'
+        gui._canvas((960, 720))
+        rect = gui.hits['field:video_source']
+        position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
+        clipboard = Mock(return_value='https://example.test/clip.mp4')
+        glfw = SimpleNamespace(
+            MOUSE_BUTTON_LEFT=1, MOUSE_BUTTON_RIGHT=2, PRESS=1,
+            get_cursor_pos=lambda _window: position,
+            get_version=lambda: (3, 4, 0),
+            get_clipboard_string=clipboard)
+
+        gui._on_mouse(glfw, object(), glfw.MOUSE_BUTTON_RIGHT,
+                      glfw.PRESS, 0)
+
+        self.assertTrue(gui.editing)
+        self.assertEqual(gui.selected, 'video_source')
+        self.assertEqual(gui.edit_buffer, 'https://example.test/clip.mp4')
+        clipboard.assert_called_once_with(None)
+
     def test_clipboard_read_keeps_window_argument_for_legacy_glfw(self):
         window = object()
         clipboard = Mock(return_value='clipboard text')
@@ -679,6 +700,17 @@ class SenderGuiTests(unittest.TestCase):
 
         self.assertEqual(_clipboard_text(glfw, window), 'clipboard text')
         clipboard.assert_called_once_with(window)
+
+    def test_clipboard_read_falls_back_to_window_when_null_lookup_is_empty(self):
+        window = object()
+        clipboard = Mock(side_effect=(None, 'clipboard text'))
+        glfw = SimpleNamespace(
+            get_version=lambda: (3, 4, 0),
+            get_clipboard_string=clipboard)
+
+        self.assertEqual(_clipboard_text(glfw, window), 'clipboard text')
+        self.assertEqual(clipboard.call_args_list, [
+            unittest.mock.call(None), unittest.mock.call(window)])
 
     def test_capture_fps_dropdown_uses_rates_reported_by_camera_driver(self):
         output = ('Interval: Discrete 0.033s (30.000 fps)\n'

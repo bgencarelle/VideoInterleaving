@@ -543,13 +543,30 @@ def sample_rate_options(device, channels, sd_module=None):
 
 
 def _clipboard_text(glfw, window):
-    """Read the shared clipboard without GLFW 3.4's deprecated handle."""
+    """Read the clipboard, retrying with the active window if needed."""
     try:
         version = tuple(glfw.get_version())
     except Exception:
         version = (0, 0, 0)
-    clipboard_window = None if version >= (3, 4, 0) else window
-    return glfw.get_clipboard_string(clipboard_window) or ''
+    preferred = None if version >= (3, 4, 0) else window
+    candidates = [preferred]
+    fallback = window if preferred is None else None
+    if fallback not in candidates:
+        candidates.append(fallback)
+    last_error = None
+    read_succeeded = False
+    for candidate in candidates:
+        try:
+            text = glfw.get_clipboard_string(candidate)
+        except Exception as exc:
+            last_error = exc
+            continue
+        read_succeeded = True
+        if text:
+            return text
+    if last_error is not None and not read_succeeded:
+        raise last_error
+    return ''
 
 
 def pick_video_file(current_path='', platform=None, which=None, run=None):
@@ -1824,7 +1841,9 @@ class SenderGui:
         return image
 
     def _on_mouse(self, glfw, window, button, action, _mods):
-        if button != glfw.MOUSE_BUTTON_LEFT or action != glfw.PRESS:
+        right_button = getattr(glfw, 'MOUSE_BUTTON_RIGHT', None)
+        if (action != glfw.PRESS or
+                button not in (glfw.MOUSE_BUTTON_LEFT, right_button)):
             return
         x, y = glfw.get_cursor_pos(window)
         ordered = list(self.hits)
@@ -1833,6 +1852,28 @@ class SenderGui:
         hit = next((key for key in ordered
                     if self.hits[key][0] <= x < self.hits[key][2] and
                     self.hits[key][1] <= y < self.hits[key][3]), None)
+        if button == right_button:
+            if (hit is None or not hit.startswith('field:') or
+                    self.page != 'setup'):
+                return
+            dest = hit.split(':', 1)[1]
+            if (dest not in self._visible_fields() or
+                    dest in self.DROPDOWN_FIELDS or dest == 'video_live'):
+                return
+            if (self.process is not None and
+                    dest not in ('brightness', 'gamma')):
+                self.notice = 'Settings are locked while the sender is running.'
+                self.dirty = True
+                return
+            if self.editing and self.selected != dest:
+                self._finish_edit()
+            if not self.editing:
+                self.selected = dest
+                self.editing = True
+                current = self.settings[dest]
+                self.edit_buffer = '' if current is None else str(current)
+            self._paste_clipboard(glfw, window)
+            return
         if self.editing:
             self._finish_edit()
         if hit == 'setup':
@@ -1894,6 +1935,13 @@ class SenderGui:
             self.dropdown = None
         self.dirty = True
 
+    def _paste_clipboard(self, glfw, window):
+        try:
+            self.edit_buffer += _clipboard_text(glfw, window)
+        except Exception as exc:
+            self.notice = f'Clipboard paste failed: {exc}'
+        self.dirty = True
+
     def _on_key(self, glfw, window, key, _scancode, action, mods):
         if action not in (glfw.PRESS, glfw.REPEAT):
             return
@@ -1909,10 +1957,7 @@ class SenderGui:
             elif key == glfw.KEY_A and mods & paste_modifiers:
                 self.edit_buffer = ''
             elif key == glfw.KEY_V and mods & paste_modifiers:
-                try:
-                    self.edit_buffer += _clipboard_text(glfw, window)
-                except Exception:
-                    pass
+                self._paste_clipboard(glfw, window)
             self.dirty = True
             return
         if key == glfw.KEY_ESCAPE:
