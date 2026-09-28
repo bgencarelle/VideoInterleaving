@@ -1122,6 +1122,12 @@ def _detect_mono_fold_side(args, timeout=2.0, wait_for_signal=False):
                     absolute = int(round(audio_start+position))
                     if absolute in last_positions[index]:
                         continue
+                    # A live header is found before its status chips have
+                    # arrived. Keep it pending until the whole bounded packet
+                    # region is available; otherwise marking it seen here
+                    # would permanently discard the profile bit as incomplete.
+                    if position+P.PULSE_FRAME*scale > len(audio)+1.0:
+                        continue
                     last_positions[index].add(absolute)
                     mode = _coded_status_mode(
                         audio, position, scale, rate, way)

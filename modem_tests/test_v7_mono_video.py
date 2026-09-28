@@ -500,7 +500,7 @@ class MonoVideoWireTests(unittest.TestCase):
         self.assertEqual(detect(damaged), (None, None))
 
     def test_gui_profile_probe_waits_for_sender_audio_before_timing_out(self):
-        colour_audio = MonoColourFoldWire(self.model).encode(
+        colour_audio = MonoColourFoldWire(self.model, side='right').encode(
             self.model, [self.values]*PACKETS)
 
         class InputStream:
@@ -509,10 +509,13 @@ class MonoVideoWireTests(unittest.TestCase):
                 self.thread = None
 
             def start(self):
-                self.thread = threading.Thread(
-                    target=lambda: (time.sleep(.03), self.callback(
-                        colour_audio, len(colour_audio), None, None)))
+                self.thread = threading.Thread(target=self._deliver_blocks)
                 self.thread.start()
+
+            def _deliver_blocks(self):
+                for offset in range(0, len(colour_audio), 1024):
+                    block = colour_audio[offset:offset+1024]
+                    self.callback(block, len(block), None, None)
 
             def stop(self):
                 if self.thread is not None:
@@ -530,12 +533,14 @@ class MonoVideoWireTests(unittest.TestCase):
 
         with patch.dict(sys.modules, {'sounddevice': sounddevice}):
             detected = v7_live._detect_mono_fold_side(
-                args, timeout=.5, wait_for_signal=True)
+                args, timeout=v7_live.GUI_PROFILE_PROBE_TIMEOUT,
+                wait_for_signal=True)
 
         self.assertEqual(detected, ('right', MONO_COLOUR_MODE))
 
     def test_live_sender_emits_each_mono_profile_status_on_video_leg(self):
         written = []
+        captured_input = None
 
         class OutputStream:
             samplerate = float(v7.RATE)
@@ -568,6 +573,25 @@ class MonoVideoWireTests(unittest.TestCase):
         import types
         fake_sounddevice = types.ModuleType('sounddevice')
         fake_sounddevice.OutputStream = OutputStream
+        fake_sounddevice.query_devices = lambda *_args: {
+            'max_input_channels': 2, 'default_samplerate': v7.RATE}
+
+        class InputStream:
+            def __init__(self, **kwargs):
+                self.callback = kwargs['callback']
+
+            def start(self):
+                for offset in range(0, len(captured_input), 1024):
+                    block = captured_input[offset:offset+1024]
+                    self.callback(block, len(block), None, None)
+
+            def stop(self):
+                pass
+
+            def close(self):
+                pass
+
+        fake_sounddevice.InputStream = InputStream
         from tone_code import decode_tone_code
         for profile, expected_mode in (
                 ('mono-fold-500', MONO_VIDEO_MODE),
@@ -582,9 +606,15 @@ class MonoVideoWireTests(unittest.TestCase):
                               AudioSource):
                     args = v7_live.parser().parse_args([
                         'send', '--device', 'memory', '--source', 'test',
-                        '--seconds', '.24', '--no-log', '--profile', profile,
+                        '--seconds', '.4', '--no-log', '--profile', profile,
                         '--source-audio', 'device', '--source-audio-device', '7'])
                     v7_live.run_send(args)
+                    captured_input = np.concatenate(written)
+                    receive_args = types.SimpleNamespace(
+                        device='memory', direction='auto', no_log=True,
+                        stop_event=None)
+                    detected = v7_live._detect_mono_fold_side(
+                        receive_args, timeout=2.0, wait_for_signal=True)
 
                 self.assertGreaterEqual(len(written), 2)
                 self.assertEqual(written[0].shape[1], 2)
@@ -596,6 +626,7 @@ class MonoVideoWireTests(unittest.TestCase):
                     written[0][:, 1], sample_rate=v7.RATE)
                 self.assertTrue(status['valid'], status)
                 self.assertEqual(status['status']['mode'], expected_mode)
+                self.assertEqual(detected, ('right', expected_mode))
                 np.testing.assert_allclose(written[1][:, 0], .1)
                 self.assertGreater(float(np.max(np.abs(written[1][:, 1]))), 0.0)
 
