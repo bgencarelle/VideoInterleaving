@@ -18,6 +18,20 @@ PREAMBLE_AMPLITUDE = 0.55
 SHORT, LONG = HALF, 2 * HALF
 EDGE_HYSTERESIS = 0.12
 
+# The six current coded-profile IDs use constant-weight biphase words.  Every
+# word keeps the same first/last edge and the same edge count, so pulse timing
+# geometry is unchanged; the interval pattern carries the profile ID.  ID 1 is
+# the historical V7 word (Fold-500), preserving its existing pulse signature.
+# Words have minimum Hamming distance six after short/long interval parsing.
+PROFILE_PREAMBLE_BITS = {
+    0: (0, 1, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0),  # Fold-off
+    1: PREAMBLE_BITS,                                        # Fold-500
+    2: (0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0),  # Fold-1000
+    3: (0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0),  # Mono-off
+    4: (0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0),  # Mono-500
+    5: (0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0),  # Mono-1000
+}
+
 
 def _biphase(bits=PREAMBLE_BITS, half=HALF, amplitude=PREAMBLE_AMPLITUDE):
     """Build the countable biphase-mark acquisition preamble."""
@@ -41,6 +55,43 @@ REVERSED_EDGES = np.flatnonzero(np.diff(np.signbit(REVERSED_PREAMBLE)))
 REVERSED_SPAN = float(REVERSED_EDGES[-1] - REVERSED_EDGES[0])
 REVERSED_GAPS = np.diff(REVERSED_EDGES).astype(float)
 MIN_RUN = len(NOMINAL_GAPS) - 4
+
+
+def profile_preamble(profile_code):
+    """Return the read-only Schmitt-coded synchronization word for a profile."""
+    try:
+        return _PROFILE_PREAMBLES[int(profile_code)]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f'unknown pulse profile code {profile_code!r}') from exc
+
+
+_PROFILE_CODES = np.asarray(tuple(PROFILE_PREAMBLE_BITS), dtype=np.int64)
+_PROFILE_PREAMBLES = {
+    code: _biphase(bits) for code, bits in PROFILE_PREAMBLE_BITS.items()
+}
+for _wave in _PROFILE_PREAMBLES.values():
+    _wave.setflags(write=False)
+
+_PROFILE_EDGES = np.asarray([
+    np.flatnonzero(np.diff(np.signbit(_PROFILE_PREAMBLES[int(code)])))
+    for code in _PROFILE_CODES], dtype=np.int64)
+_PROFILE_REVERSED_EDGES = np.asarray([
+    np.flatnonzero(np.diff(np.signbit(_PROFILE_PREAMBLES[int(code)][::-1])))
+    for code in _PROFILE_CODES], dtype=np.int64)
+if (not np.all(_PROFILE_EDGES.shape == (len(_PROFILE_CODES), len(NOMINAL_EDGES))) or
+        not np.all(_PROFILE_REVERSED_EDGES.shape == _PROFILE_EDGES.shape) or
+        not np.all(_PROFILE_EDGES[:, -1]-_PROFILE_EDGES[:, 0] == NOMINAL_SPAN) or
+        not np.all(_PROFILE_REVERSED_EDGES[:, -1]-
+                   _PROFILE_REVERSED_EDGES[:, 0] == NOMINAL_SPAN)):
+    raise RuntimeError('pulse profile words must preserve the timing geometry')
+_PROFILE_GAPS = np.diff(_PROFILE_EDGES, axis=1).astype(np.float64)
+_PROFILE_REVERSED_GAPS = np.diff(_PROFILE_REVERSED_EDGES, axis=1).astype(np.float64)
+_PROFILE_NOMINAL = _PROFILE_EDGES.astype(np.float64)+.5
+_PROFILE_REVERSED_NOMINAL = _PROFILE_REVERSED_EDGES.astype(np.float64)+.5
+for _array in (_PROFILE_CODES, _PROFILE_EDGES, _PROFILE_REVERSED_EDGES,
+               _PROFILE_GAPS, _PROFILE_REVERSED_GAPS, _PROFILE_NOMINAL,
+               _PROFILE_REVERSED_NOMINAL):
+    _array.setflags(write=False)
 
 
 def edge_intervals(samples, hysteresis=EDGE_HYSTERESIS * PREAMBLE_AMPLITUDE):
@@ -79,15 +130,18 @@ def _runs(gaps, tolerance=0.28):
 
 
 @njit(cache=True, fastmath=False)
-def _pulse_word_kernel(samples, hysteresis, nominal_gaps, reversed_gaps,
-                       nominal_span, min_scale, max_scale, match_both,
-                       positions, starts):
+def _pulse_word_kernel(samples, hysteresis, profile_gaps,
+                       profile_reversed_gaps, nominal_span, min_scale,
+                       max_scale, match_both, requested_direction,
+                       positions, starts,
+                       profile_ids, fit_profiles):
     """Schmitt edges, their interpolated zero crossings, and the start of
-    every edge run whose spacing matches the preamble word.
+    every edge run whose spacing matches a coded preamble.
 
     Same rules as measure_pulses_numpy: an edge is the first sample of a new
     Schmitt state; its time is the last sign change before that sample,
-    interpolated linearly. Returns (edge count, valid word count).
+    interpolated linearly. Profile words share their edge count and span; the
+    short/long interval pattern is decoded by matching those edge counts.
     """
     count = samples.shape[0]
     edges = 0
@@ -116,33 +170,120 @@ def _pulse_word_kernel(samples, hysteresis, nominal_gaps, reversed_gaps,
                 positions[edges] = left+samples[left]/denominator
             edges += 1
         state = now
-    width = nominal_gaps.shape[0]+1
+    width = profile_gaps.shape[1]+1
     valid = 0
     for j in range(edges-width+1):
         scale = (positions[j+width-1]-positions[j])/nominal_span
         if scale < .98*min_scale or scale > 1.02*max_scale:
             continue
-        forward_ok = True
-        reverse_ok = match_both
-        for g in range(width-1):
-            observed = positions[j+g+1]-positions[j+g]
-            if forward_ok:
-                expected = nominal_gaps[g]*scale
-                if abs(observed-expected) > max(1.2, .45*expected):
-                    forward_ok = False
-            if reverse_ok:
-                expected = reversed_gaps[g]*scale
-                if abs(observed-expected) > max(1.2, .45*expected):
-                    reverse_ok = False
-            if not forward_ok and not reverse_ok:
-                break
-        if forward_ok or reverse_ok:
-            # Signed, one-based edge indices leave zero available to mark an
-            # ambiguous window which satisfies both templates.
-            starts[valid] = (j+1 if forward_ok and not reverse_ok else
-                             -(j+1) if reverse_ok and not forward_ok else 0)
+        match_count = 0
+        matched_profile = -1
+        matched_direction = 0
+        best_profile = -1
+        best_direction = 0
+        best_score = 1e30
+        for profile in range(profile_gaps.shape[0]):
+            for orientation in range(2 if match_both else 1):
+                direction = 1 if orientation == 0 else -1
+                if (requested_direction != 0 and
+                        direction != requested_direction):
+                    continue
+                gaps = (profile_gaps[profile] if direction > 0 else
+                        profile_reversed_gaps[profile])
+                score = 0.0
+                matched = True
+                for g in range(width-1):
+                    observed = positions[j+g+1]-positions[j+g]
+                    expected = gaps[g]*scale
+                    tolerance = max(1.2, .45*expected)
+                    error = abs(observed-expected)
+                    if error > tolerance:
+                        matched = False
+                        break
+                    normalized = error/tolerance
+                    score += normalized*normalized
+                if matched:
+                    match_count += 1
+                    if match_count == 1:
+                        matched_profile = profile
+                        matched_direction = direction
+                    else:
+                        if (matched_profile >= 0 and
+                                profile != matched_profile):
+                            matched_profile = -2
+                        if direction != matched_direction:
+                            matched_direction = 0
+                    if score < best_score:
+                        best_score = score
+                        best_profile = profile
+                        best_direction = direction
+                    elif (profile != best_profile or
+                          direction != best_direction):
+                        # Keep timing from the best template, but fail closed
+                        # on a profile/direction match that is not unique.
+                        pass
+        if match_count:
+            # Signed, one-based edge indices leave zero for an ambiguous
+            # direction. Multiple matching IDs get profile_id=-1.
+            starts[valid] = (best_direction*(j+1)
+                             if matched_direction != 0 else 0)
+            if matched_profile >= 0 and matched_direction != 0:
+                profile_ids[valid] = best_profile
+            else:
+                profile_ids[valid] = -1
+            fit_profiles[valid] = best_profile
             valid += 1
     return edges, valid
+
+
+def _measure_pulse_profiles(samples, min_scale, max_scale, match_both,
+                            requested_direction=0):
+    """Compiled edge matcher; return earliest fitted hit plus profile ID."""
+    samples = np.asarray(samples)
+    if samples.ndim != 1 or samples.dtype not in (np.float32, np.float64):
+        samples = np.asarray(samples, dtype=np.float32).reshape(-1)
+    positions = np.empty(len(samples))
+    starts = np.empty(len(samples), np.int64)
+    profile_ids = np.empty(len(samples), np.int64)
+    fit_profiles = np.empty(len(samples), np.int64)
+    edges, valid = _pulse_word_kernel(
+        samples, np.float64(EDGE_HYSTERESIS*PREAMBLE_AMPLITUDE),
+        _PROFILE_GAPS, _PROFILE_REVERSED_GAPS, NOMINAL_SPAN,
+        float(min_scale), float(max_scale), bool(match_both),
+        int(requested_direction), positions,
+        starts, profile_ids, fit_profiles)
+    if edges < len(NOMINAL_EDGES) or not valid:
+        return None
+    first = {1: None, -1: None}
+    count = len(NOMINAL_EDGES)
+    for candidate in range(valid):
+        signed_start = int(starts[candidate])
+        if signed_start == 0:
+            continue
+        direction = 1 if signed_start > 0 else -1
+        if first[direction] is not None:
+            continue
+        profile = int(fit_profiles[candidate])
+        index = abs(signed_start)-1
+        nominal = (_PROFILE_NOMINAL[profile] if direction > 0 else
+                   _PROFILE_REVERSED_NOMINAL[profile])
+        hit = _fit_pulse_words(
+            samples, (positions[index:index+count],), nominal)
+        if hit is not None:
+            profile_index = int(profile_ids[candidate])
+            profile_code = (int(_PROFILE_CODES[profile_index])
+                            if profile_index >= 0 else None)
+            first[direction] = (*hit, direction, profile_code)
+        if first[1] is not None and first[-1] is not None:
+            break
+    forward, reverse = first[1], first[-1]
+    if not match_both:
+        return forward
+    if forward is not None and reverse is not None:
+        if _opposite_words_overlap(forward, reverse):
+            return None
+    candidates = [hit for hit in (forward, reverse) if hit is not None]
+    return min(candidates, key=lambda hit: hit[0]) if candidates else None
 
 
 def measure_pulses(samples, min_scale=0.5, max_scale=4.0):
@@ -153,21 +294,14 @@ def measure_pulses(samples, min_scale=0.5, max_scale=4.0):
     Edge finding and word matching run compiled; measure_pulses_numpy is the
     reference implementation.
     """
-    samples = np.asarray(samples)
-    if samples.ndim != 1 or samples.dtype not in (np.float32, np.float64):
-        return measure_pulses_numpy(samples, min_scale, max_scale)
-    count = len(NOMINAL_EDGES)
-    positions = np.empty(len(samples))
-    starts = np.empty(len(samples), np.int64)
-    edges, valid = _pulse_word_kernel(
-        samples, np.float64(EDGE_HYSTERESIS*PREAMBLE_AMPLITUDE), NOMINAL_GAPS,
-        REVERSED_GAPS, NOMINAL_SPAN, float(min_scale), float(max_scale), False,
-        positions, starts)
-    if edges < count or not valid:
-        return None
-    words = (positions[start-1:start-1+count]
-             for start in starts[:valid] if start > 0)
-    return _fit_pulse_words(samples, words, _FIT_NOMINAL)
+    hit = _measure_pulse_profiles(samples, min_scale, max_scale, False)
+    return hit[:3] if hit is not None else None
+
+
+def measure_pulses_profile(samples, min_scale=0.5, max_scale=4.0):
+    """Acquire a forward pulse word and return ``(position, scale, conf, id)``."""
+    hit = _measure_pulse_profiles(samples, min_scale, max_scale, False)
+    return hit if hit is None else (hit[0], hit[1], hit[2], hit[4])
 
 
 # Opposite-direction words closer than one preamble length overlap: they read
@@ -199,52 +333,20 @@ def measure_pulses_both(samples, min_scale=0.5, max_scale=4.0,
     Schmitt edges are extracted once; both gap templates are tested against
     that same edge list. A candidate matching both patterns is discarded.
     """
+    hit = measure_pulses_profile_both(
+        samples, min_scale, max_scale, direction=direction)
+    return None if hit is None else hit[:4]
+
+
+def measure_pulses_profile_both(samples, min_scale=0.5, max_scale=4.0,
+                                direction='auto'):
+    """Acquire either direction and return ``(pos, scale, conf, dir, id)``."""
     if direction not in ('auto', 'forward', 'reverse'):
         raise ValueError(f'unknown pulse direction {direction!r}')
-    requested_direction = direction
-    samples = np.asarray(samples)
-    if samples.ndim != 1 or samples.dtype not in (np.float32, np.float64):
-        return measure_pulses_both_numpy(
-            samples, min_scale, max_scale, direction=direction)
-    count = len(NOMINAL_EDGES)
-    positions = np.empty(len(samples))
-    starts = np.empty(len(samples), np.int64)
-    edges, valid = _pulse_word_kernel(
-        samples, np.float64(EDGE_HYSTERESIS*PREAMBLE_AMPLITUDE), NOMINAL_GAPS,
-        REVERSED_GAPS, NOMINAL_SPAN, float(min_scale), float(max_scale), True,
-        positions, starts)
-    if edges < count or not valid:
-        return None
-    first = {1: None, -1: None}
-    for code in starts[:valid]:
-        if code == 0:
-            continue
-        direction = 1 if code > 0 else -1
-        if ((direction == 1 and requested_direction == 'reverse') or
-                (direction == -1 and requested_direction == 'forward')):
-            continue
-        if first[direction] is not None:
-            continue
-        index = abs(int(code))-1
-        nominal = _FIT_NOMINAL if direction > 0 else _FIT_REVERSED_NOMINAL
-        hit = _fit_pulse_words(
-            samples, (positions[index:index+count],), nominal)
-        if hit is not None:
-            first[direction] = (*hit, direction)
-        if first[1] is not None and first[-1] is not None:
-            break
-    forward, reverse = first[1], first[-1]
-    if requested_direction == 'forward':
-        return forward
-    if requested_direction == 'reverse':
-        return reverse
-    if forward is not None and reverse is not None:
-        # Opposite hypotheses whose preambles overlap are not enough evidence
-        # to choose an orientation (see OPPOSITE_WORD_SPACING).
-        if _opposite_words_overlap(forward, reverse):
-            return None
-    candidates = [hit for hit in (forward, reverse) if hit is not None]
-    return min(candidates, key=lambda hit: hit[0]) if candidates else None
+    requested = {'auto': 0, 'forward': 1, 'reverse': -1}[direction]
+    return _measure_pulse_profiles(
+        samples, min_scale, max_scale, True,
+        requested_direction=requested)
 
 
 def measure_pulses_numpy(samples, min_scale=0.5, max_scale=4.0):

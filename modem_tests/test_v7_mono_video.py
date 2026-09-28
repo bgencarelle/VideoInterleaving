@@ -87,7 +87,7 @@ class MonoVideoWireTests(unittest.TestCase):
             np.ascontiguousarray(audio, dtype='<f4').tobytes()).hexdigest()
         self.assertEqual(
             digest,
-            'ba74e9ff3426cf8fa58f7a8fa5562adc9c7b3b1cabc389eba8213a6f1e659036')
+            'e4005e4875c7d3197ef8be865e95bc3fd296fc8c6436fe8dc75d7e2edd1193ce')
 
     def test_colour_order_keeps_head_and_is_a_permutation(self):
         order = colour_order(self.model)
@@ -388,6 +388,27 @@ class MonoVideoWireTests(unittest.TestCase):
         self.assertGreaterEqual(right_streak, 2)
         self.assertLess(left_streak, 2)
         self.assertTrue(all(streak >= 2 for streak in duplicate_streaks))
+
+    def test_opposite_leg_status_streak_resets_on_invalid_or_stale_sync(self):
+        probe = v7_live._MonoChannelProbe(v7.RATE, 'forward')
+        probe._observe_status(MONO_VIDEO_MODE, 1.0, 1.0)
+        self.assertEqual(probe.status_streak, 1)
+
+        probe._observe_status(None, 1.0, 1.1)
+        self.assertIsNone(probe.status_mode)
+        self.assertIsNone(probe.status_candidate)
+        self.assertEqual(probe.status_streak, 0)
+        self.assertIsNone(probe.last_valid)
+
+        probe._observe_status(MONO_VIDEO_MODE, 1.0, 1.2)
+        probe._observe_status(MONO_VIDEO_MODE, 1.0, 1.3)
+        self.assertEqual(probe.status_mode, MONO_VIDEO_MODE)
+        self.assertEqual(probe.status_streak, 2)
+
+        timeout = 1.5*v7.PULSE_FRAME/v7.RATE
+        probe._reset_status_if_stale(1.3+timeout+.001)
+        self.assertIsNone(probe.status_mode)
+        self.assertEqual(probe.status_streak, 0)
 
     def test_auto_side_waits_for_valid_mono_status(self):
         result = self._decode(self.audio[:, 1])[0][-1]

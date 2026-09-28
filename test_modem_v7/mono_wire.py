@@ -138,7 +138,8 @@ class MonoWire:
         packet = _encode_pulse_frame_coeffs(
             mono_model, coeffs, counter, aspect_code=aspect_code,
             source_index=source_index, eof_marker=eof_marker,
-            pilot_values=MONO_PILOT_VALUES)
+            pilot_values=MONO_PILOT_VALUES,
+            pulse_profile_code=MONO_MODE)
         return tone_code.add_tone_code(
             packet, int(counter), tone_code.encode_status(MONO_MODE))
 

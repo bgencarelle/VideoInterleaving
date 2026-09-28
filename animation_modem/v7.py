@@ -989,7 +989,8 @@ def encode_stream(model, values, frames, lead=0.25, tail=0.25,
 
 def encode_pulse_frame(model, values, counter, aspect_code=0, source_index=None,
                        loop=None, direction=1, pilot_tones=False,
-                       pilot_tone_gate_preamble=False, eof_marker=False):
+                       pilot_tone_gate_preamble=False, eof_marker=False,
+                       pulse_profile_code=1):
     """One edge-counted pulse-framed V7 body for low-latency live transport.
 
     ``counter`` is the packet count: counter mod 7 picks the tail slice, which
@@ -1003,20 +1004,22 @@ def encode_pulse_frame(model, values, counter, aspect_code=0, source_index=None,
         source_index=source_index, loop=loop, direction=direction,
         pilot_tones=pilot_tones,
         pilot_tone_gate_preamble=pilot_tone_gate_preamble,
-        eof_marker=eof_marker)
+        eof_marker=eof_marker, pulse_profile_code=pulse_profile_code)
 
 
 def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
                               source_index=None, loop=None, direction=1,
-                              pilot_tones=False,
-                              pilot_tone_gate_preamble=False,
-                              eof_marker=False, pilot_values=None):
+                               pilot_tones=False,
+                               pilot_tone_gate_preamble=False,
+                               eof_marker=False, pilot_values=None,
+                               pulse_profile_code=1):
     """Pulse-frame transformed source coefficients without another DCT pass."""
     body = encode_frame_coeffs(model, coeffs, counter,
                                pilot_values=pilot_values)
     out = np.zeros((PULSE_FRAME, 2), np.float32)
     out[PULSE.SYNC_LEN:PULSE.SYNC_LEN+FRAME] = body
-    out[16:16+len(PULSE.PREAMBLE), :] = PULSE.PREAMBLE[:, None]
+    preamble = PULSE.profile_preamble(pulse_profile_code)
+    out[16:16+len(preamble), :] = preamble[:, None]
     meta = np.zeros((N//2+1, 2), complex)
     if source_index is None:
         source_index = counter - 1
@@ -1051,7 +1054,7 @@ def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
 def encode_pulse_stream(model, values, start_counter=1, aspect_codes=None,
                         source_indices=None, loop=None, directions=None,
                         pilot_tones=False, pilot_tone_gate_preamble=False,
-                        eof_marker=False):
+                        eof_marker=False, pulse_profile_code=1):
     values = list(values) if np.asarray(values).ndim != 1 else [values]
     codes = aspect_codes or [0]*len(values)
     indexes = (list(source_indices) if source_indices is not None else
@@ -1061,8 +1064,9 @@ def encode_pulse_stream(model, values, start_counter=1, aspect_codes=None,
         raise ValueError('aspect_codes, source_indices and directions must match values')
     return np.concatenate([
         encode_pulse_frame(model, value, start_counter+i, code, source_index,
-                           loop, way, pilot_tones,
-                           pilot_tone_gate_preamble, eof_marker)
+                            loop, way, pilot_tones,
+                            pilot_tone_gate_preamble, eof_marker,
+                            pulse_profile_code)
         for i, (value, code, source_index, way) in
         enumerate(zip(values, codes, indexes, ways))])
 
@@ -3739,6 +3743,17 @@ def pulse_frame_hits(samples, sample_rate=RATE, direction='auto'):
     metadata samples after a hit. The live input layer decides when enough of
     the selected packet is present to decode it.
     """
+    return [hit[:4] for hit in pulse_frame_profile_hits(
+        samples, sample_rate=sample_rate, direction=direction)]
+
+
+def pulse_frame_profile_hits(samples, sample_rate=RATE, direction='auto'):
+    """Find packet starts and Schmitt-coded profile IDs in either direction.
+
+    Returns ``(packet_start, scale, confidence, direction, profile_code)``.
+    A missing profile code is an ambiguous/unsupported edge word, while the
+    timing hit remains useful to the ordinary packet decoder.
+    """
     if direction not in ('auto', 'forward', 'reverse'):
         raise ValueError(f'unknown pulse direction {direction!r}')
     min_scale, max_scale = pulse_sample_scale_bounds(sample_rate)
@@ -3748,18 +3763,18 @@ def pulse_frame_hits(samples, sample_rate=RATE, direction='auto'):
     minimum = len(PULSE.PREAMBLE)+16
     reverse_offset = PULSE_FRAME-16-len(PULSE.PREAMBLE)
     while scan+minimum <= len(mono):
-        hit = PULSE.measure_pulses_both(
+        hit = PULSE.measure_pulses_profile_both(
             mono[scan:], min_scale=min_scale, max_scale=max_scale,
             direction=direction)
         if hit is None:
             break
-        template_start, scale, confidence, way = hit
+        template_start, scale, confidence, way, profile_code = hit
         template_start += scan
         packet_start = (template_start-16*scale if way > 0 else
                         template_start-reverse_offset*scale)
         if confidence >= .45:
             hits.append((float(packet_start), float(scale),
-                         float(confidence), int(way)))
+                         float(confidence), int(way), profile_code))
         # Keep enough room before the following packet's template. Both wire
         # orientations have one preamble per packet, though their offsets
         # within that packet differ.

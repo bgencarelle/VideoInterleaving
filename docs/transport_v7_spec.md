@@ -2141,16 +2141,20 @@ the existing corner; today's outside-corner luma tables cannot simply be reused.
 
 ### 13.4 Signalling and compatibility
 
-The current 12-chip status words repeat `0011`, `0101`, and `0110` three times.
-Repeating their complements `1100`, `1010`, and `1001` supplies three candidate
-mono words. All six words are balanced and retain minimum pairwise distance
-six. Test chip alignment, polarity handling, despreading, noise/erasures, and
-unknown-mode behavior before assigning permanent mono mode identities.
+The 12-chip tone status words repeat `0011`, `0101`, and `0110` three times.
+Their complements `1100`, `1010`, and `1001` supply the three mono words. The
+six identities are also encoded in the biphase pulse preamble. Their equal-weight
+words preserve the canonical 256-sample pulse span and edge count, with minimum
+pairwise Hamming distance six; the historical preamble remains the Fold-500
+word. The compiled Schmitt detector identifies the profile from short/long edge
+intervals in the same pulse acquisition pass. Live profile probing therefore
+does not run the tone-chip demodulator. Tone status remains on the wire and the
+frame decoder checks it against the pulse identity while using it for pilot
+despreading and tone timing.
 
 The current pulse metadata has no spare profile bit. Its aspect, encoding,
-tail slice, direction, source index, and CRC/loop-mask fields are allocated.
-The older clock word's profile field is not available here. A second witness
-requires a separately specified wire change.
+tail slice, direction, source index, and CRC/loop-mask fields are allocated. The
+profile identity uses the existing sync preamble rather than a metadata bit.
 
 **Mono requires an updated receiver for the initial prototype.** Existing
 receivers can display received or displayable packets without recognized coded
@@ -2163,11 +2167,10 @@ picture/tail-state updates. An unknown or invalid layout holds the last good
 picture. A known layout may show a damaged but decodable picture; an
 undecodable packet holds the last good picture. There is no black fallback.
 
-If rejection by old receivers becomes a requirement, investigate a distinct
-pulse sync word with the same length and edge-counted acquisition. This needs
-forward/reverse template separation and false-acquisition tests against old
-receivers; it is not yet a proven rejection guarantee. Choose that alternative
-explicitly before freezing the wire.
+Mono profiles use a distinct same-length pulse word, so older receivers that
+only recognize the historical Fold-500 preamble will not acquire those mono
+packets. Compatibility with other pre-existing pulse matchers is not a rejection
+guarantee; test cross-version receivers before freezing compatibility claims.
 
 ### 13.5 Tail state and quality hypotheses
 
@@ -2371,17 +2374,28 @@ legacy `--experimental-mono` or the `MONO_OFF` rotating wire:
 ```
 
 The default receiver starts with the ordinary stereo Fold-500 decoder and
-classifies complete packet statuses while receiving. Three distinct, matching
-`MONO_500` statuses switch the decoder to this profile on the third packet;
-the first two candidate packets are held. The status probes track each input
-leg independently, and right is preferred if both legs validate. Three
-matching stereo Fold-500 statuses switch back in the same way. Invalid,
-ambiguous, or unsupported status never inherits the preceding packet's mode and
-holds the last picture. A profile transition resets profile-specific tail
-state but keeps pulse acquisition. Input gaps and scale-aware sync inactivity
-clear a pending three-status candidate. The GUI leaves legacy profile and
-decoder-tuning switches out of its setup fields; those specialized CLI paths
-remain available for recovery and experiments.
+classifies the profile-coded pulse preamble independently on each input leg.
+Three distinct, matching `MONO_500` words switch the decoder to this profile on
+the third packet; the first two candidate packets are held. Right is preferred
+if both legs validate. Three matching stereo Fold-500 words switch back in the
+same way. An ambiguous or unsupported pulse word is an invalid observation and
+never inherits the preceding packet's mode. A profile transition resets
+profile-specific tail state but keeps pulse acquisition. Input gaps and
+scale-aware sync inactivity clear a pending three-packet candidate. The frame
+decoder also checks the tone-coded status against the pulse identity before
+displaying the packet. The GUI leaves legacy profile and decoder-tuning switches
+out of its setup fields; those specialized CLI paths remain available for
+recovery and experiments.
+
+The per-leg profile probe now uses the existing compiled Schmitt edge finder to
+match the short/long interval word; it does not separately decode the 12 tone
+chips. A warmed 2,000-packet synthetic mixed-profile run (48 kHz stereo,
+1,024-sample blocks, Linux x86-64) reduced total receiver CPU from 29.19 s
+(35.75% of one core over 81.67 s of audio) to 6.43 s (7.87%), a 78% reduction.
+The profile-probe scan fell from 24.93 s to 2.38 s; its per-block p95 dropped
+from 16.08 ms to 0.63 ms. All three transitions occurred, 1,999 valid statuses
+were observed, and all 1,993 submitted displayable frames passed EOF validation.
+This is a warmed synthetic host profile, not a capture-card or tape result.
 
 It requires the canonical box model, coded pilot timing, and EOF framing.
 Optional pre-encode perceptual resizing changes picture samples before encoding
@@ -2400,9 +2414,10 @@ The sender's `--mono-video-side left|right` selects the output leg for the
 complete modem signal, including timing/status tones; the other output leg
 carries source audio. The default mapping is **left audio, right video**. The
 receiver defaults to `--mono-video-side auto`: it tries the right input leg
-first, probes the other leg for a consistent pulse train, and validates the
-`MONO_500` coded status before locking onto a leg. If right and left both carry
-valid mono video, right remains selected. Explicit `left` or `right` disables
+first and probes the other leg for a consistent pulse train and `MONO_500` pulse
+word. The frame decoder confirms that identity against the coded tone status
+before displaying the packet. If right and left both carry valid mono video,
+right remains selected. Explicit `left` or `right` disables
 automatic side selection. Once selected, pulse acquisition and decoding use
 only that video leg, ignoring audio on the other. The sender GUI exposes the
 side choice and soundtrack/input-device/off audio-source selector. Source audio
@@ -2566,39 +2581,35 @@ used. Invalid or ambiguous status breaks the candidate streak and holds the
 last picture. The selected input leg is tracked per packet, with right
 preferred if both legs validate.
 
-The synthetic comparison uses four original motion scenes (slow pan, fast pan,
+The synthetic comparison uses four motion-scene classes (slow pan, fast pan,
 cut every six packets, and moving blob) and a saturated colour-chart scene. The
 four-scene values are means of the 16 scored packets per scene. The chart values
 are its 16-packet means, shown for each synthetic channel:
 
 | Synthetic channel | Fresh four-scene mean | Colour four-scene mean | Δ | Fresh colour-chart mean | Colour colour-chart mean |
 |---|---:|---:|---:|---:|---:|
-| Clean 96 kHz | −72.957 | −78.047 | −5.091 | −58.795 | −53.968 |
-| Type II | −58.012 | −49.421 | +8.592 | −62.081 | −58.936 |
-| Fast flutter | −57.688 | −49.464 | +8.225 | −61.929 | −58.393 |
+| Clean 96 kHz | −29.233 | −24.410 | +4.823 | −58.645 | −53.750 |
+| Type II | −35.020 | −36.649 | −1.630 | −62.053 | −58.918 |
+| Fast flutter | −34.136 | −33.330 | +0.807 | −61.962 | −58.279 |
 
-On the rebased run, the clean four-scene target of +4.0 is a measured miss:
-`mono-colour-500` scored 5.091 points below `mono-fresh-500-fold`, 9.091 points
-short of that target. Type II and fast flutter both scored higher than the
-fresh-fold profile; the colour-chart score also improved on all three channels.
-No fold-step or rank-weight tuning was performed. Mean decode cost across all
-15 scene/channel rows was 2.154 ms/input packet for `mono-fresh-500-fold` and
-2.130 ms/input packet for `mono-colour-500` (−1.12%).
+The 2026-09-28 rerun meets the clean four-scene +4.0 target: `mono-colour-500`
+scored 4.823 points above `mono-fresh-500-fold`. It scored 1.630 points below
+fresh-fold under Type II and 0.807 points above it under fast flutter. The
+colour-chart score improved on all three channels, by 4.895, 3.135, and 3.683
+points respectively. No fold-step or rank-weight tuning was performed. Mean
+decode cost across all 15 scene/channel rows was 1.151 ms/input packet for
+`mono-fresh-500-fold` and 1.113 ms/input packet for `mono-colour-500` (−3.32%);
+mean encode cost was 1.360 and 1.372 ms/packet respectively.
 
 The `stereo-fold500-both` four-scene control means were −4.697, −16.672, and
-−13.032 for clean, Type II, and fast flutter, matching the §13.8 table within
-0.01 points. The `stereo-fold500-mono-sum` means were −85.188, −48.473, and
-−49.838 respectively; these do not match the historical §13.8 mono-sum row.
-Keep that control discrepancy visible when comparing this latest-base run.
+−13.032 for clean, Type II, and fast flutter. The `stereo-fold500-mono-sum`
+means were −34.518, −36.992, and −35.214; both controls match the §13.8 table
+within 0.01 points.
 
-All 90 rows decoded 24 results and validated 24/24 EOF markers. Over the five
-scenes and three channels, `mono-fresh-500-fold` had 12 received results,
-300/360 current frames displayable, and 60 held-picture frames;
-`mono-colour-500` had 11 received results, 295/360 current frames displayable,
-and 65 held-picture frames. Every scored row kept a visible picture; scores
-therefore include prior-picture holds where the current frame was not
-displayable. The received/displayable counts are separate from the decoded and
-EOF counts.
+All 90 rows decoded 24 results, received and displayed all 24 current frames,
+and validated 24/24 EOF markers. Across the five scenes and three channels,
+both `mono-fresh-500-fold` and `mono-colour-500` had 360/360 current frames
+displayable and no held-picture frames.
 
 These scores are from synthetic channels, not tape. Type-II and fast-flutter
 impairments are limited regression inputs and are not cassette emulation. No

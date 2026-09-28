@@ -44,8 +44,9 @@ class WireProfile:
             if self.folded:
                 from live_fold import LiveFold
                 self._fold = LiveFold(FOLD_SLOTS)
-            self._status = tone_code.encode_status(
-                tone_code.FOLD_500 if self.folded else tone_code.FOLD_OFF)
+            self._status_mode = (tone_code.FOLD_500 if self.folded else
+                                 tone_code.FOLD_OFF)
+            self._status = tone_code.encode_status(self._status_mode)
 
     @property
     def label(self):
@@ -84,11 +85,13 @@ class WireProfile:
             if self._fold is not None:
                 packet = v7_live._encode_pulse_frame_coeffs(
                     model, self._fold.encode_coefficients(model, value), counter,
-                    aspect_code=code, source_index=index, eof_marker=True)
+                    aspect_code=code, source_index=index, eof_marker=True,
+                    pulse_profile_code=self._status_mode)
             else:
                 packet = v7.encode_pulse_frame(
                     model, value, counter, aspect_code=code, source_index=index,
-                    pilot_tones=False, eof_marker=True)
+                    pilot_tones=False, eof_marker=True,
+                    pulse_profile_code=self._status_mode)
             packets.append(self._tone.add_tone_code(packet, counter, self._status))
         return np.concatenate(packets)
 

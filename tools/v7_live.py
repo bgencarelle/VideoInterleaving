@@ -399,14 +399,15 @@ def _validate_tone_controls(brightness, gamma):
 
 def _encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
                                source_index=None, eof_marker=True,
-                               pilot_values=None):
+                               pilot_values=None, pulse_profile_code=1):
     """Build one folded pulse packet without an inverse/forward DCT round trip."""
     if source_index is None:
         source_index = int(counter)-1
     return P.encode_pulse_frame_coeffs(
         model, np.asarray(coeffs), counter, aspect_code=aspect_code,
         source_index=source_index, pilot_tones=False,
-        eof_marker=eof_marker, pilot_values=pilot_values)
+        eof_marker=eof_marker, pilot_values=pilot_values,
+        pulse_profile_code=pulse_profile_code)
 
 
 def _add_coded_pilots(audio, start_counter, fold_slots):
@@ -580,12 +581,15 @@ def run_send(args):
                 source_indices=[counter+i-1 for i in range(len(values))],
                 eof_marker=True)
         elif fold is not None:
+            from tone_code import FOLD_500, FOLD_1000
+            pulse_profile_code = {500: FOLD_500, 1000: FOLD_1000}[fold.slots]
             audio = np.concatenate([
                 _encode_pulse_frame_coeffs(
                     model, fold.encode_coefficients(model, value),
                     counter+index, aspect_code=aspects[index],
                     source_index=counter+index-1,
-                    eof_marker=getattr(args, 'eof_marker', True))
+                    eof_marker=getattr(args, 'eof_marker', True),
+                    pulse_profile_code=pulse_profile_code)
                 for index, value in enumerate(values)])
             audio = _add_coded_pilots(audio, counter, fold.slots)
         else:
@@ -942,6 +946,8 @@ class _MonoChannelProbe:
         self.status_candidate = None
         self.status_streak = 0
         self.last_valid = None
+        self.status_last_seen = None
+        self.status_scale = None
 
     def add(self, block):
         self.input.add(block)
@@ -956,37 +962,71 @@ class _MonoChannelProbe:
         self.status_candidate = None
         self.status_streak = 0
         self.last_valid = None
+        self.status_last_seen = None
+        self.status_scale = None
+
+    def _reset_status(self):
+        self.status_mode = None
+        self.status_candidate = None
+        self.status_streak = 0
+        self.last_valid = None
+        self.status_last_seen = None
+        self.status_scale = None
+
+    def _reset_status_if_stale(self, now):
+        if (self.status_candidate is None or
+                self.status_last_seen is None or
+                self.status_scale is None):
+            return
+        timeout = (1.5*P.PULSE_FRAME*self.status_scale/self.input.rate)
+        if float(now)-self.status_last_seen > timeout:
+            self._reset_status()
+
+    def _observe_status(self, mode, scale, now):
+        """Require consecutive, distinct pulse words before routing a leg."""
+        if mode is None:
+            self._reset_status()
+            return
+        mode, scale, now = int(mode), float(scale), float(now)
+        if mode == self.status_candidate:
+            self.status_streak += 1
+        else:
+            self.status_candidate = mode
+            self.status_streak = 1
+        self.status_last_seen = now
+        self.status_scale = scale
+        if self.status_streak >= 2:
+            self.status_mode = mode
+            self.last_valid = now
 
     def scan(self, now):
+        self._reset_status_if_stale(now)
         audio = self.input.take(now)
         if audio is None:
             return self.streak
         audio_start = self.input.total-len(audio)
+        profile_by_position = {
+            int(round(position)): mode
+            for position, mode in self.input.pulse_profile_hits(audio)}
         for position, scale, confidence, direction in self.input.pulse_hits(audio):
             absolute = int(round(audio_start+position))
             if (self.last_position is not None and
                     absolute <= self.last_position):
                 continue
             if confidence < self.MIN_CONFIDENCE:
+                self.last_position = absolute
+                self._reset_status()
                 continue
-            mode = _coded_status_mode(
-                audio, position, scale, self.input.rate, direction)
-            if mode is not None:
-                if mode == self.status_candidate:
-                    self.status_streak += 1
-                else:
-                    self.status_candidate = mode
-                    self.status_streak = 1
-                if self.status_streak >= 2:
-                    self.status_mode = mode
-                    self.last_valid = float(now)
-            if self.last_position is None:
+            mode = profile_by_position.get(int(round(position)))
+            self._observe_status(mode, scale, now)
+            previous_position = self.last_position
+            if previous_position is None:
                 self.streak = 1
             else:
                 expected = P.PULSE_FRAME*.5*(scale+self.last_scale)
                 tolerance = max(3*scale, .15*expected)
                 if (direction == self.last_direction and
-                        abs((absolute-self.last_position)-expected) <= tolerance):
+                        abs((absolute-previous_position)-expected) <= tolerance):
                     self.streak = min(self.streak+1, 8)
                 else:
                     self.streak = 1
@@ -1024,6 +1064,9 @@ class _ProfileStatusProbe:
         if self.audio is None:
             return ()
         audio_start = self.input.total-len(self.audio)
+        profile_by_position = {
+            int(round(position)): mode
+            for position, mode in self.input.pulse_profile_hits(self.audio)}
         events = []
         for position, scale, confidence, direction in self.input.pulse_hits(
                 self.audio):
@@ -1040,8 +1083,7 @@ class _ProfileStatusProbe:
                 events.append({'position': absolute, 'scale': scale,
                                'side_index': self.side_index, 'mode': None})
                 continue
-            mode = _coded_status_mode(
-                self.audio, position, scale, self.input.rate, direction)
+            mode = profile_by_position.get(int(round(position)))
             self.last_position = absolute
             events.append({'position': absolute, 'scale': scale,
                            'side_index': self.side_index, 'mode': mode})
@@ -1464,19 +1506,20 @@ def _detect_mono_fold_side(args, timeout=2.0, wait_for_signal=False):
                 if audio is None:
                     continue
                 audio_start = live_input.total-len(audio)
+                profile_by_position = {
+                    int(round(position)): mode
+                    for position, mode in live_input.pulse_profile_hits(audio)}
                 for position, scale, _confidence, way in live_input.pulse_hits(audio):
                     absolute = int(round(audio_start+position))
                     if absolute in last_positions[index]:
                         continue
-                    # A live header is found before its status chips have
-                    # arrived. Keep it pending until the whole bounded packet
-                    # region is available; otherwise marking it seen here
-                    # would permanently discard the profile bit as incomplete.
+                    # A live header is found before the packet is complete.
+                    # Wait for the full region to align the status decision
+                    # with the frame that becomes ready for latest-only decode.
                     if position+P.PULSE_FRAME*scale > len(audio)+1.0:
                         continue
                     last_positions[index].add(absolute)
-                    mode = _coded_status_mode(
-                        audio, position, scale, rate, way)
+                    mode = profile_by_position.get(int(round(position)))
                     if mode is not None:
                         observed_modes[index].append(mode)
                 live_input.decoded()

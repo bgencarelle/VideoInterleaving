@@ -209,7 +209,8 @@ class MonoFreshFoldWire:
         packet = _encode_pulse_frame_coeffs(
             mono_model, coeffs, counter, aspect_code=aspect_code,
             source_index=source_index, eof_marker=True,
-            pilot_values=MONO_PILOT_VALUES)
+            pilot_values=MONO_PILOT_VALUES,
+            pulse_profile_code=self.status_mode)
         packet = tone_code.add_tone_code(
             packet, int(counter), tone_code.encode_status(self.status_mode))
         # Tone/status pilots are overlaid after pulse encoding and must also be

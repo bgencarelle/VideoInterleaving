@@ -74,7 +74,7 @@ class ToneCodeTests(unittest.TestCase):
 
     def test_status_registry_fails_closed(self):
         with self.assertRaises(ValueError):
-            encode_status(3)
+            encode_status(6)
         self.assertIsNone(decode_status((0, 1, .5) + (0,)*9))
         self.assertIsNone(decode_status((0,)*11))
         self.assertIsNone(decode_status((None,)*6 + encode_status(FOLD_500)[6:]))

@@ -24,7 +24,7 @@ import numpy as np
 
 from animation_modem import transport3 as PULSE
 from animation_modem.v7 import (META_SYMBOL, PULSE_FRAME, RATE, _mono_gain,
-                                leg_polarity, pulse_frame_hits,
+                                leg_polarity, pulse_frame_profile_hits,
                                 pulse_sample_scale_bounds)
 
 GUARD_FRAMES = .25          # header, timing tolerance and block granularity
@@ -167,6 +167,7 @@ class LiveInput:
         # decoder consumes these anchors so it need not scan this same window
         # for headers a second time.
         self._headers = deque(maxlen=256)
+        self._profile_headers = deque(maxlen=256)
         self._header_walls = deque(maxlen=256)
         # Leveler gain applied to header scans; the receiver decodes with the
         # same gain so its own anchor re-check sees the same levels.
@@ -195,6 +196,7 @@ class LiveInput:
         self._pending = 0
         self.scale = None
         self._headers.clear()
+        self._profile_headers.clear()
         self._header_walls.clear()
 
     def add(self, block):
@@ -245,6 +247,13 @@ class LiveInput:
         start = self.total-len(audio)
         return tuple((position-start, scale, confidence, direction)
                      for position, scale, confidence, direction in self._headers
+                     if start <= position < self.total)
+
+    def pulse_profile_hits(self, audio):
+        """Pulse anchors as ``(start, profile_code)`` within `audio`."""
+        start = self.total-len(audio)
+        return tuple((position-start, profile_code)
+                     for position, profile_code in self._profile_headers
                      if start <= position < self.total)
 
     def pulse_starts(self, audio):
@@ -307,7 +316,7 @@ class LiveInput:
         overlap = max(self._scaled(_HEADER_OVERLAP), _HEADER_OVERLAP)
         found = 0
         pulse_mono = _mono_gain(audio[begin:], np.float32(self.gain))
-        for frame_start, scale, confidence, direction in pulse_frame_hits(
+        for frame_start, scale, confidence, direction, profile_code in pulse_frame_profile_hits(
                 pulse_mono, sample_rate=self.rate, direction=self.direction):
             position = start + begin + frame_start
             if position < 0 and position >= -scale:
@@ -333,6 +342,7 @@ class LiveInput:
                 continue
             self._headers.append((position, float(scale), float(confidence),
                                   int(direction)))
+            self._profile_headers.append((position, profile_code))
             self._header_walls.append(now)
             self.scale = float(scale)
             found += 1

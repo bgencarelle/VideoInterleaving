@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from animation_modem import transport3, v7                             # noqa: E402
+from animation_modem.imaging import values_image                        # noqa: E402
 from animation_modem.v7_live_input import (DirectionStreak, LiveInput,  # noqa: E402
                                            select_packet_hit)
 from tools.v7_wire_profile import WireProfile                          # noqa: E402
@@ -63,6 +64,74 @@ class V7ReverseTests(unittest.TestCase):
         rng = np.random.default_rng(771)
         self.assertIsNone(transport3.measure_pulses_both(
             rng.normal(0, .2, 20000).astype(np.float32)))
+
+    def test_schmitt_interval_codes_identify_all_profile_modes_both_directions(self):
+        profiles = tuple(transport3.PROFILE_PREAMBLE_BITS)
+        gap_words = {
+            code: tuple(int(gap == transport3.SHORT)
+                        for gap in transport3._PROFILE_GAPS[index])
+            for index, code in enumerate(profiles)
+        }
+        reversed_gap_words = {
+            code: tuple(int(gap == transport3.SHORT)
+                        for gap in transport3._PROFILE_REVERSED_GAPS[index])
+            for index, code in enumerate(profiles)
+        }
+        distances = [
+            sum(a != b for a, b in zip(left, right))
+            for index, code in enumerate(profiles)
+            for other in profiles[index+1:]
+            for left, right in (
+                (gap_words[code], gap_words[other]),
+                (gap_words[code], reversed_gap_words[other]),
+                (reversed_gap_words[code], gap_words[other]),
+            )
+        ]
+        self.assertEqual(min(distances), 6)
+
+        for profile_code in transport3.PROFILE_PREAMBLE_BITS:
+            preamble = transport3.profile_preamble(profile_code)
+            packet = np.zeros(320, dtype=np.float32)
+            packet[16:16+len(preamble)] = preamble
+            for direction, capture in (
+                    (1, packet), (-1, packet[::-1].copy())):
+                hit = transport3.measure_pulses_profile_both(capture)
+                with self.subTest(profile=profile_code, direction=direction):
+                    self.assertIsNotNone(hit)
+                    self.assertEqual(hit[3], direction)
+                    self.assertEqual(hit[4], profile_code)
+                    self.assertAlmostEqual(hit[1], 1.0, places=5)
+
+    def test_profile_preamble_changes_keep_decoded_picture_equivalent(self):
+        encode = lambda code: v7.encode_pulse_frame(
+            self.model, self.values[0], 1, aspect_code=6, source_index=0,
+            eof_marker=True, pulse_profile_code=code)
+        reference_packet = encode(1)
+        reference_results, reference_info = v7.decode_pulse_stream(
+            self.model, reference_packet, frame_boundary='eof',
+            state=v7.PulseState(tail_memory=False))
+        self.assertEqual(len(reference_results), 1, reference_info)
+        reference_coeffs = reference_results[0].coeffs.copy()
+        reference_image = np.asarray(values_image(
+            v7.values_from(self.model, reference_coeffs),
+            self.model.coder.grids))
+
+        for profile_code in transport3.PROFILE_PREAMBLE_BITS:
+            candidate = encode(profile_code)
+            results, info = v7.decode_pulse_stream(
+                self.model, candidate, frame_boundary='eof',
+                state=v7.PulseState(tail_memory=False))
+            with self.subTest(profile=profile_code):
+                self.assertEqual(len(results), 1, info)
+                self.assertEqual(info['eof_markers_validated'], 1)
+                np.testing.assert_allclose(
+                    results[0].coeffs, reference_coeffs, rtol=0, atol=1.2e-3)
+                image = np.asarray(values_image(
+                    v7.values_from(self.model, results[0].coeffs),
+                    self.model.coder.grids))
+                self.assertLessEqual(
+                    int(np.max(np.abs(image.astype(np.int16)-
+                                      reference_image.astype(np.int16)))), 2)
 
     def test_bidirectional_matcher_tolerates_signed_zero_dropout_edges(self):
         signal = np.asarray([.5, 0.0, -0.0, 0.0, -0.0, -.5],

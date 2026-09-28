@@ -207,7 +207,8 @@ def encode_packet(model, values, counter, mode=FOLD_OFF,
     bits = encode_status(mode)
     packet = v7.encode_pulse_frame(
         model, values, counter, aspect_code=aspect_code,
-        source_index=source_index, pilot_tones=False, eof_marker=eof_marker)
+        source_index=source_index, pilot_tones=False, eof_marker=eof_marker,
+        pulse_profile_code=mode)
     return add_tone_code(packet, counter, bits, pilot_code=pilot_code)
 
 
