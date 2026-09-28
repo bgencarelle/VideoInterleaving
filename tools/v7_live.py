@@ -675,6 +675,8 @@ def run_send(args):
                 first_audio_video_frame = None
                 if frame is None:
                     frame = grab()
+                if frame is None and getattr(grab, 'ended', False):
+                    break
                 current_tones = tone_controls.snapshot()
                 value, aspect = _values(model, frame, args.encode_filter,
                                         current_tones['brightness'],

@@ -142,6 +142,14 @@ def _create_graphics_context(glfw, moderngl, wayland=None):
             if context_version < 300:
                 raise RuntimeError(
                     f'ModernGL context version {context_version} is below 300')
+            focus_window = getattr(glfw, 'focus_window', None)
+            if focus_window is not None:
+                try:
+                    focus_window(window)
+                except Exception:
+                    # Window focus is a best-effort platform request; the GUI
+                    # should still start if the window manager rejects it.
+                    pass
             return window, context, gles
         except Exception as exc:
             failures.append(f'{api}: context setup failed: {exc}')

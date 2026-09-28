@@ -28,6 +28,10 @@ class CapturedFrame:
     prepared: bool = False
 
 
+class CaptureEndOfStream(Exception):
+    """A finite capture source ended cleanly after its final frame."""
+
+
 def _showinfo_source_size(line):
     """Read the pre-filter width/height printed by FFmpeg's showinfo filter."""
     match = re.search(rb'\bs:(\d+)x(\d+)\b', line)
@@ -363,6 +367,10 @@ _NETWORK_SCHEMES = frozenset({
     'rist', 'rtp', 'rtmpe', 'rtmpt',
 })
 _LIVE_SCHEMES = _NETWORK_SCHEMES - {'http', 'https'}
+_FINITE_VIDEO_SUFFIXES = frozenset({
+    '.avi', '.m4v', '.mkv', '.mov', '.mp4', '.mpeg', '.mpg', '.ts', '.webm',
+    '.wmv',
+})
 
 
 def _is_stream_url(source):
@@ -373,10 +381,11 @@ def video_source(source, loop=None, realtime=None, width=320,
                  scale_flags='bicubic', live=None):
     """Read a local video file in a real-time loop or a live stream URL.
 
-    Local files and HTTP(S) media URLs loop and are paced with ``-re``. Native
-    live protocols are read as delivered. Set ``live=True`` for live HLS/HTTP
-    URLs; those protocols can also serve finite VOD playlists. PPM carries each
-    output frame's dimensions, so no ffprobe pass is needed.
+    Local files and HTTP(S) media URLs loop and are paced with ``-re`` by
+    default. Native live protocols are read as delivered. Set ``live=True``
+    for live HLS/HTTP URLs; direct finite HTTP media files remain paced, play
+    once, and end cleanly. PPM carries each output frame's dimensions, so no
+    ffprobe pass is needed.
     """
     if shutil.which('ffmpeg') is None:
         raise SystemExit('ffmpeg not found. brew install ffmpeg / apt install ffmpeg')
@@ -393,10 +402,15 @@ def video_source(source, loop=None, realtime=None, width=320,
                if live is None else bool(live))
     if is_live and not is_stream:
         raise ValueError('--video-live requires a stream URL')
+    parsed_source = urlsplit(source)
+    finite_http_media = (
+        parsed_source.scheme.lower() in ('http', 'https') and
+        os.path.splitext(parsed_source.path)[1].lower() in
+        _FINITE_VIDEO_SUFFIXES)
     if loop is None:
         loop = not is_live
     if realtime is None:
-        realtime = not is_live
+        realtime = not is_live or finite_http_media
 
     cmd = ['ffmpeg', '-nostdin', '-loglevel', 'error']
     if loop:
@@ -429,6 +443,14 @@ def video_source(source, loop=None, realtime=None, width=320,
             with close_lock:
                 if state['closed']:
                     raise
+                return_code = proc.poll()
+                if return_code is None:
+                    try:
+                        return_code = proc.wait(timeout=1.0)
+                    except subprocess.TimeoutExpired:
+                        pass
+                if return_code == 0:
+                    raise CaptureEndOfStream from exc
                 errors.flush()
                 errors.seek(0)
                 detail = errors.read().decode('utf-8', errors='replace').strip()
@@ -494,6 +516,7 @@ class Throttled:
         self._latest = None
         self._first_frame = None
         self._error = None
+        self._ended = False
         self._updated = None
         self._ready = threading.Event()
         self._lock = threading.Lock()
@@ -526,6 +549,9 @@ class Throttled:
                 rest = self._period-(time.perf_counter()-began)
                 if rest > 0 and not getattr(self._grab, 'paced', False):
                     self._stop.wait(rest)
+        except CaptureEndOfStream:
+            with self._lock:
+                self._ended = True
         except BaseException as exc:
             with self._lock:
                 self._error = exc
@@ -554,10 +580,17 @@ class Throttled:
         with self._lock:
             return self._first_frame
 
+    @property
+    def ended(self):
+        with self._lock:
+            return self._ended
+
     def __call__(self):
         with self._lock:
             if self._error is not None:
                 raise RuntimeError(f'Capture failed: {self._error}') from self._error
+            if self._ended:
+                return None
             if self._updated is not None and time.monotonic()-self._updated > max(5, 3*self._period):
                 raise RuntimeError('Capture stalled: no new frame for over '
                                    f'{max(5, 3*self._period):g} seconds')

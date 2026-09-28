@@ -81,6 +81,7 @@ class GraphicsGlfwStub:
         self.hints = {}
         self.apis = []
         self.window_sizes = []
+        self.focused_windows = []
 
     def default_window_hints(self):
         self.hints = {}
@@ -105,6 +106,9 @@ class GraphicsGlfwStub:
     def destroy_window(self, _window):
         pass
 
+    def focus_window(self, window):
+        self.focused_windows.append(window)
+
 
 class GraphicsModernGlStub:
     def __init__(self):
@@ -123,10 +127,11 @@ class ReceiverGuiGraphicsContextTests(unittest.TestCase):
             size=SimpleNamespace(width=800, height=600))
         moderngl = GraphicsModernGlStub()
 
-        _window, _context, _use_gles = _create_graphics_context(
+        window, _context, _use_gles = _create_graphics_context(
             glfw, moderngl, wayland=False)
 
         self.assertEqual(glfw.window_sizes, [(768, 520)])
+        self.assertEqual(glfw.focused_windows, [window])
 
     def test_wayland_prefers_gles_egl(self):
         glfw = GraphicsGlfwStub()
@@ -341,6 +346,18 @@ class ReceiverGuiOptionTests(unittest.TestCase):
                       if field.dest == 'device')
         self.assertEqual(device.value, 4)
         self.assertEqual(gui._build_arguments().device, 4)
+
+    def test_windowed_setup_tab_click_returns_from_live_page(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        gui.page = 'info'
+        gui._canvas((960, 720))
+        left, top, right, bottom = gui.hits['config_tab']
+
+        gui._on_mouse(MouseStub(((left+right)/2, (top+bottom)/2)),
+                      None, MouseStub.MOUSE_BUTTON_LEFT, MouseStub.PRESS, 0)
+
+        self.assertEqual(gui.page, 'config')
+        self.assertTrue(gui.dirty)
 
     def test_input_picker_refreshes_hotplugged_devices_when_opened(self):
         with patch('tools.v7_receiver_gui._load_preferences', return_value={}):

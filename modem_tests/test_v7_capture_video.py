@@ -13,7 +13,8 @@ import numpy as np
 
 from animation_modem import v7
 from tools.v7_capture import (CapturedFrame, _showinfo_source_size,
-                              Throttled, ffmpeg_source, video_source)
+                              CaptureEndOfStream, Throttled, ffmpeg_source,
+                              video_source)
 from tools.v7_live import _capture, _resolve_send_source, _values, run_send
 
 
@@ -111,6 +112,19 @@ class VideoSourceCommandTests(unittest.TestCase):
                 self.assertIn('-rw_timeout', cmd)
                 grab.close()
 
+    def test_live_finite_mp4_url_is_paced_once(self):
+        process = self.Process()
+        with mock.patch('tools.v7_capture.shutil.which', return_value='ffmpeg'), \
+                mock.patch('tools.v7_capture.subprocess.Popen',
+                           return_value=process) as popen:
+            grab = video_source(
+                'https://media.example/flower.mp4?token=abc', live=True)
+            command = popen.call_args.args[0]
+            grab.close()
+
+        self.assertNotIn('-stream_loop', command)
+        self.assertIn('-re', command)
+
     def test_ffmpeg_screen_capture_applies_selected_windows_monitor_region(self):
         process = self.Process()
         with mock.patch('tools.v7_capture.shutil.which', return_value='ffmpeg'), \
@@ -171,6 +185,30 @@ class VideoSourceCommandTests(unittest.TestCase):
 
 
 class ThrottledCleanupTests(unittest.TestCase):
+    def test_clean_end_of_stream_is_not_a_capture_failure(self):
+        class FiniteCapture:
+            paced = True
+
+            def __init__(self):
+                self.calls = 0
+
+            def __call__(self):
+                self.calls += 1
+                if self.calls > 1:
+                    raise CaptureEndOfStream
+                return np.zeros((2, 2, 3), dtype=np.uint8)
+
+            def close(self):
+                pass
+
+        throttled = Throttled(FiniteCapture(), 30)
+        throttled._thread.join(timeout=1)
+
+        self.assertFalse(throttled._thread.is_alive())
+        self.assertTrue(throttled.ended)
+        self.assertIsNone(throttled())
+        np.testing.assert_array_equal(throttled.first_frame, 0)
+
     def test_close_releases_a_blocked_source_without_a_process_handle(self):
         class Capture:
             paced = True
@@ -309,6 +347,58 @@ class SenderFailureTests(unittest.TestCase):
                            side_effect=RuntimeError('broken test source')):
             with self.assertRaisesRegex(RuntimeError, 'broken test source'):
                 run_send(args)
+
+    def test_finite_live_video_eof_stops_sender_without_producer_failure(self):
+        class OutputStream:
+            samplerate = 48000
+
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def write(self, _samples):
+                pass
+
+        class EndedGrab:
+            ended = True
+            first_frame = None
+
+            def __init__(self, *_args):
+                pass
+
+            def __call__(self):
+                return None
+
+            def close(self):
+                pass
+
+        args = Namespace(
+            fixture=None, encode_filter='nearest', rate=None, source='video',
+            video_source='https://media.example/flower.mp4', video_live=True,
+            capture_fps=None, screen_backend='mss', speed=1.0,
+            batch_frames=1, seconds=0, mono_sum=False, device=0,
+            no_log=True, log=False, brightness=1.0, gamma=1.0,
+            baseline=True)
+        audio = np.zeros((v7.PULSE_FRAME, 2), dtype=np.float32)
+        fake_sounddevice = type('SoundDevice', (), {
+            'OutputStream': OutputStream})
+
+        with mock.patch.dict(sys.modules, {'sounddevice': fake_sounddevice}), \
+                mock.patch('tools.v7_live._model', return_value=object()), \
+                mock.patch('tools.v7_live._capture', return_value=lambda: None), \
+                mock.patch('tools.v7_capture.Throttled', EndedGrab), \
+                mock.patch('tools.v7_live._values',
+                           return_value=(np.zeros(1), 0)), \
+                mock.patch('tools.v7_live.P.encode_pulse_stream',
+                           return_value=audio), \
+                mock.patch('tools.v7_live.P.speed_pulse_stream',
+                           return_value=audio):
+            run_send(args)
 
 
 class SenderSchedulingTests(unittest.TestCase):
