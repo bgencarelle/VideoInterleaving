@@ -79,7 +79,7 @@ class SenderGuiTests(unittest.TestCase):
     def test_colour_mono_profile_is_available_in_primary_picker(self):
         self.assertEqual(
             tuple(value for _label, value in PRIMARY_PROFILE_CHOICES),
-            ('mono-fold-500', 'fold-500', 'mono-colour-500'))
+            ('fold-500', 'mono-fold-500', 'mono-colour-500'))
 
     def test_device_list_contains_only_output_devices_and_does_not_default(self):
         sd = Mock()
@@ -201,7 +201,7 @@ class SenderGuiTests(unittest.TestCase):
 
     def test_mono_video_audio_device_is_available_for_every_capture_source(self):
         gui = SenderGui(self.devices)
-        gui.settings['source_audio'] = 'device'
+        gui.settings.update(profile='mono-fold-500', source_audio='device')
         for _label, source in (
                 ('Camera', 'camera'), ('Screen', 'screen'),
                 ('Video', 'video'), ('Test', 'test'),
@@ -214,7 +214,8 @@ class SenderGuiTests(unittest.TestCase):
     def test_video_audio_source_and_input_pickers_are_clickable(self):
         audio_device = InputDevice(8, 'Loopback', 2, 48000)
         gui = SenderGui(self.devices, audio_devices=(audio_device,))
-        gui.settings.update(source='video', video_source='clip.mp4')
+        gui.settings.update(source='video', video_source='clip.mp4',
+                            profile='mono-fold-500')
 
         def click(key):
             rect = gui.hits[key]
@@ -312,16 +313,18 @@ class SenderGuiTests(unittest.TestCase):
 
     def test_mono_video_side_selector_is_visible_only_for_that_profile(self):
         gui = SenderGui(self.devices)
-        self.assertIn('mono_video_side', gui._visible_fields())
-
-        gui.settings.update(profile='fold-500', mono_video_side='right')
         self.assertNotIn('mono_video_side', gui._visible_fields())
-        gui.settings.update(profile='mono-fold-500')
+
+        gui.settings.update(profile='mono-fold-500', mono_video_side='right')
+        self.assertIn('mono_video_side', gui._visible_fields())
         self.assertIn('source_audio', gui._visible_fields())
         self.assertNotIn('source_audio_device', gui._visible_fields())
         self.assertEqual(gui._value_label('mono_video_side'),
                          'Right output · left stays clear')
 
+        gui.settings['profile'] = 'fold-500'
+        self.assertNotIn('mono_video_side', gui._visible_fields())
+        gui.settings['profile'] = 'mono-fold-500'
         gui.settings['source_audio'] = 'device'
         self.assertIn('source_audio_device', gui._visible_fields())
 
@@ -827,12 +830,12 @@ class SenderGuiTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Screen region'):
             validate_settings(self.settings, self.devices, self.sd)
 
-    def test_basic_profile_picker_defaults_to_mono_with_fold500_stereo(self):
+    def test_basic_profile_picker_defaults_to_fold500_stereo(self):
         gui = SenderGui(self.devices)
-        self.assertEqual(gui.settings['profile'], 'mono-fold-500')
+        self.assertEqual(gui.settings['profile'], 'fold-500')
         self.assertEqual(tuple(value for _label, value in
                                gui._choices('profile')),
-                         ('mono-fold-500', 'fold-500', 'mono-colour-500'))
+                         ('fold-500', 'mono-fold-500', 'mono-colour-500'))
         gui.advanced = True
         self.assertIn('fold-1000', [value for _label, value in
                                     gui._choices('profile')])

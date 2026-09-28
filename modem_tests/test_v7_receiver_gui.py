@@ -507,7 +507,7 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         basic = {gui.fields[index].dest
                  for index in gui._config_field_indexes()}
         self.assertIn('device', basic)
-        self.assertNotIn('DCT reconstruction', basic)
+        self.assertIn('DCT reconstruction', basic)
         self.assertNotIn('experimental_fold', basic)
         self.assertNotIn('direction', basic)
         self.assertNotIn('decode_history', basic)
@@ -518,14 +518,23 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertTrue(HIDDEN_DECODE_OPTIONS.isdisjoint(advanced))
         self.assertIn('DCT reconstruction', advanced)
 
-    def test_dct_reconstruction_is_a_display_only_advanced_choice(self):
+    def test_dct_reconstruction_is_a_display_only_basic_choice(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser,
                           (('test input device', 3),))
         field = next(field for field in gui.fields
                      if field.label == 'DCT reconstruction')
-        self.assertEqual(field.value, 'off')
+        self.assertIn(gui.fields.index(field), gui._config_field_indexes())
+        self.assertEqual(gui.display_mode, 'nearest')
+        self.assertEqual(field.value, '4x')
+        self.assertEqual(gui.dct_reconstruction, '4x')
         self.assertEqual(tuple(value for _label, value in field.options),
                          DCT_RECONSTRUCTION_MODES)
+
+        gui.picture_dirty = False
+        gui._select_choice(field, 'off')
+        self.assertEqual(gui.dct_reconstruction, 'off')
+        self.assertTrue(gui.picture_dirty)
+        self.assertEqual(gui.notice, 'DCT reconstruction: Off')
 
         gui.picture_dirty = False
         gui._select_choice(field, '4x')

@@ -25,8 +25,8 @@ if str(ROOT) not in sys.path:
 
 RATE_CANDIDATES = (32000, 44100, 48000, 88200, 96000, 176400, 192000)
 PROFILE_CHOICES = (
-    ('Mono video · Fold 500 · recommended', 'mono-fold-500'),
-    ('Fold 500 stereo', 'fold-500'),
+    ('Fold 500 stereo · recommended', 'fold-500'),
+    ('Mono video · Fold 500', 'mono-fold-500'),
     ('Mono video · colour Fold 500 · experimental', 'mono-colour-500'),
     ('Fold 1000 · advanced', 'fold-1000'),
 )
@@ -79,8 +79,8 @@ FIELD_HELP = {
     'device': 'Choose the explicit audio output device that feeds the receiver or recording path.',
     'source': 'Choose what the sender captures. Capture starts only after Start.',
     'rate': 'Audio output sample rate. Native uses the device clock; this is separate from Capture FPS.',
-    'profile': ('Mono video is recommended; the receiver detects it automatically. '
-                'Colour-weighted mono is experimental; Fold 500 stereo is also available.'),
+    'profile': ('Fold 500 stereo is recommended. Mono Fold 500 is available, '
+                'and colour-weighted mono remains experimental.'),
     'speed': 'Playback speed from 0.25× to 4×. Faster playback raises the transmitted carrier frequencies.',
     'encode_filter': 'Resize filter. Folded profiles require Box; Profile default selects the profile recommendation.',
     'brightness': 'Live source brightness multiplier. 1.0 is neutral.',
@@ -1024,7 +1024,7 @@ class SenderGui:
             'device': None,
             'source': None,
             'rate': None,
-            'profile': 'mono-fold-500',
+            'profile': 'fold-500',
             'mono_video_side': 'right',
             'source_audio': 'source',
             'source_audio_device': None,

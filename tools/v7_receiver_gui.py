@@ -479,7 +479,7 @@ def _make_fields(receive_parser, device_choices, audio_output_choices=()):
                               tuple((DISPLAY_LABELS[name], name)
                                     for name in DISPLAY_MODES)))
     fields.append(OptionField(
-        None, 'off', 'DCT reconstruction', 'choice',
+        None, '4x', 'DCT reconstruction', 'choice',
         tuple((DCT_RECONSTRUCTION_LABELS[name], name)
               for name in DCT_RECONSTRUCTION_MODES)))
     return fields
@@ -651,7 +651,7 @@ class ReceiverGui:
         self.display_latency_ms = None
         self.last_display_latency_label = None
         self.display_mode = 'nearest'
-        self.dct_reconstruction = 'off'
+        self.dct_reconstruction = '4x'
         self.last_dct_viewport_size = None
         self.image_only = False
         self.image_only_previous_page = 'info'
@@ -1869,7 +1869,8 @@ class ReceiverGui:
         indexes = []
         for index, field in enumerate(self.fields):
             if (self.advanced_options or field.dest in BASIC_OPTION_DESTS or
-                    field.label == 'Display upscaler'):
+                    field.label in ('Display upscaler',
+                                    'DCT reconstruction')):
                 indexes.append(index)
         return indexes
 
