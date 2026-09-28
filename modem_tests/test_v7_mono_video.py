@@ -1,13 +1,14 @@
 """All-fresh mono video layout and 500-class fold profile."""
 import sys
 import unittest
+import hashlib
 from pathlib import Path
 import time
 import types
 from unittest.mock import patch
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parent.parent
 for extra in (ROOT/'test_modem_v7', ROOT/'tools'):
@@ -15,17 +16,48 @@ for extra in (ROOT/'test_modem_v7', ROOT/'tools'):
         sys.path.insert(0, str(extra))
 
 from animation_modem import v7                                       # noqa: E402
+from animation_modem.imaging import values_image                        # noqa: E402
 from animation_modem.v7_live_input import LiveInput                    # noqa: E402
 from common import TARGET                                                # noqa: E402
-from mono_video import (FRESH_SLOTS, FOLDED_GUESTS, FOLD_SLOTS, HEAD_GROUPS,
-                        MONO_VIDEO_MODE, MonoFreshFoldOffWire,
-                        MonoFreshFoldWire, fresh_rank_tables)            # noqa: E402
+from mono_video import (CHROMA_RANK_WEIGHT, COLOUR_WIRE_PROFILE, FRESH_SLOTS,
+                        FOLDED_GUESTS, FOLD_SLOTS, HEAD_GROUPS,
+                        MONO_COLOUR_FOLD_D, MONO_COLOUR_FOLD_TABLE_SHA256,
+                        MONO_COLOUR_MODE, MONO_FOLD_TABLE_SHA256,
+                        MONO_VIDEO_MODE, MonoColourFoldCodec,
+                        MonoColourFoldWire, MonoFreshFoldWire,
+                        colour_fold_sets, colour_order,
+                        fresh_rank_tables)                                  # noqa: E402
 from mono_wire import MonoWire                                            # noqa: E402
 from tools import v7_live                                                  # noqa: E402
 from tools.v7_source_audio import PacketAudioDelay                          # noqa: E402
 
 
 PACKETS = 8
+CHART_COLOURS = ((220, 40, 40), (40, 200, 40), (40, 60, 220), (230, 210, 40),
+                 (40, 200, 210), (210, 40, 200), (240, 140, 30), (120, 70, 40),
+                 (250, 180, 170))
+
+
+def colour_chart():
+    image = Image.new('RGB', (400, 480), (128, 128, 128))
+    draw = ImageDraw.Draw(image)
+    for i, colour in enumerate(CHART_COLOURS):
+        x, y = (i % 5)*80, (i//5)*160 + 40
+        draw.rectangle((x+4, y, x+76, y+120), fill=colour)
+    return image
+
+
+def chart_hue_error(shown, reference):
+    """Mean absolute hue error in degrees over the patch centres."""
+    def patches(image):
+        a = np.asarray(image.convert('YCbCr'), float)
+        return np.array([a[(i//5)*160+70:(i//5)*160+130,
+                           (i % 5)*80+20:(i % 5)*80+60].reshape(-1, 3).mean(0)
+                         for i in range(len(CHART_COLOURS))])
+    p, r = patches(shown), patches(reference)
+    hue = np.degrees(np.angle((p[:, 1]-128) + 1j*(p[:, 2]-128)) -
+                     np.angle((r[:, 1]-128) + 1j*(r[:, 2]-128)))
+    return float(np.mean(np.abs((hue + 180) % 360 - 180)))
 
 
 class MonoVideoWireTests(unittest.TestCase):
@@ -46,6 +78,108 @@ class MonoVideoWireTests(unittest.TestCase):
                 self.mono_model, audio, sample_rate=v7.RATE,
                 pilot_timing='tone-seeded', frame_boundary='eof',
                 state=v7.PulseState(tail_memory=False))
+
+    def test_mono_fold_500_packets_are_bit_identical(self):
+        audio = MonoFreshFoldWire(self.model).encode(
+            self.model, [self.values]*3)
+        digest = hashlib.sha256(
+            np.ascontiguousarray(audio, dtype='<f4').tobytes()).hexdigest()
+        self.assertEqual(
+            digest,
+            'ba74e9ff3426cf8fa58f7a8fa5562adc9c7b3b1cabc389eba8213a6f1e659036')
+
+    def test_colour_order_keeps_head_and_is_a_permutation(self):
+        order = colour_order(self.model)
+
+        self.assertEqual(len(order), 2880)
+        self.assertEqual(len(np.unique(order)), 2880)
+        np.testing.assert_array_equal(order[:v7.HEAD], self.model.order[:v7.HEAD])
+
+    def test_colour_fold_sets_are_luma_only(self):
+        order, hosts, guests = colour_fold_sets(self.model)
+        fresh = order[:FRESH_SLOTS]
+        plane = np.asarray(self.model.plane)
+
+        self.assertEqual(np.count_nonzero(plane[fresh] == 0), 1054)
+        self.assertEqual(np.count_nonzero(plane[fresh] > 0), 210)
+        self.assertEqual(len(hosts), 500)
+        self.assertEqual(len(guests), 500)
+        self.assertTrue(np.all(plane[hosts] == 0))
+        self.assertTrue(np.all(plane[guests] == 0))
+        self.assertFalse(np.isin(hosts, self.model.order[:v7.HEAD]).any())
+        self.assertFalse(np.isin(guests, fresh).any())
+
+    def test_colour_codec_identity_is_pinned(self):
+        codec = MonoColourFoldCodec(self.model)
+
+        self.assertEqual(codec.identity, MONO_COLOUR_FOLD_TABLE_SHA256)
+        self.assertNotEqual(codec.identity, MONO_FOLD_TABLE_SHA256)
+        self.assertEqual(codec.D, MONO_COLOUR_FOLD_D)
+        self.assertEqual(codec.table()['chroma_rank_weight'], CHROMA_RANK_WEIGHT)
+
+    def test_colour_packets_carry_mono_1000_and_decode(self):
+        wire = MonoColourFoldWire(self.model)
+        mono_model = wire.model_for(self.model)
+        audio = wire.encode(self.model, [self.values]*3)
+        with wire.receiving():
+            results, info = v7.decode_pulse_stream(
+                mono_model, audio, sample_rate=v7.RATE,
+                pilot_timing='tone-seeded', frame_boundary='eof',
+                state=v7.PulseState(tail_memory=False))
+
+        self.assertEqual(len(results), 3, info)
+        self.assertTrue(all(result.status != 'lost' for result in results))
+        self.assertTrue(all(
+            result.diag['pilot_timing']['coded_status_mode'] == MONO_COLOUR_MODE
+            for result in results))
+        values = wire.values(mono_model, results[-1])
+        self.assertEqual(values.size, mono_model.coder.source_count)
+        self.assertTrue(np.all(np.isfinite(values)))
+
+    def test_each_mono_receiver_holds_on_the_other_profile(self):
+        profiles = (MonoFreshFoldWire, MonoColourFoldWire)
+        for sender_class, receiver_class in (profiles, profiles[::-1]):
+            sender = sender_class(self.model)
+            receiver = receiver_class(self.model)
+            audio = sender.encode(self.model, [self.values]*3)
+            mono_model = receiver.model_for(self.model)
+            with receiver.receiving():
+                results, _info = v7.decode_pulse_stream(
+                    mono_model, audio, sample_rate=v7.RATE,
+                    pilot_timing='tone-seeded', frame_boundary='eof',
+                    state=v7.PulseState(tail_memory=False))
+
+            self.assertEqual(len(results), 3)
+            self.assertTrue(all(result.status == 'lost' for result in results))
+            self.assertTrue(all(result.diag.get('held') is True
+                                for result in results))
+
+    def test_colour_profile_fixes_chart_hue(self):
+        chart = colour_chart()
+        values, _ = v7_live._values(
+            self.model, chart, 'box', brightness=1.0)
+        reference = values_image(values, v7.V7_GRIDS).resize(
+            (400, 480), Image.Resampling.LANCZOS)
+        errors = {}
+        for name, wire_class in (
+                ('mono-fold-500', MonoFreshFoldWire),
+                (COLOUR_WIRE_PROFILE, MonoColourFoldWire)):
+            wire = wire_class(self.model)
+            mono_model = wire.model_for(self.model)
+            audio = wire.encode(self.model, [values]*3)
+            with wire.receiving():
+                results, info = v7.decode_pulse_stream(
+                    mono_model, audio, sample_rate=v7.RATE,
+                    pilot_timing='tone-seeded', frame_boundary='eof',
+                    state=v7.PulseState(tail_memory=False))
+            self.assertEqual(len(results), 3, info)
+            shown = values_image(
+                wire.values(mono_model, results[-1]), v7.V7_GRIDS).resize(
+                    (400, 480), Image.Resampling.LANCZOS)
+            errors[name] = chart_hue_error(shown, reference)
+
+        self.assertLess(errors[COLOUR_WIRE_PROFILE], 4.0, errors)
+        self.assertGreater(errors['mono-fold-500'], 7.0, errors)
 
     def test_rank_map_is_fixed_and_every_slot_is_m_only(self):
         tables = fresh_rank_tables(self.model)
@@ -130,22 +264,6 @@ class MonoVideoWireTests(unittest.TestCase):
         self.assertTrue(all(result.diag.get('mono_profile_rejected') ==
                             'unknown_or_non_mono_status'
                             for result in results))
-
-    def test_all_fresh_foldoff_control_has_a_distinct_coded_status(self):
-        control = MonoFreshFoldOffWire(self.model)
-        audio = control.encode(self.model, [self.values]*3)
-        mono_model = control.model_for(self.model)
-        with control.receiving():
-            results, info = v7.decode_pulse_stream(
-                mono_model, audio, sample_rate=v7.RATE,
-                pilot_timing='tone-seeded', frame_boundary='eof',
-                state=v7.PulseState(tail_memory=False))
-
-        self.assertEqual(len(results), 3, info)
-        self.assertTrue(all(result.status != 'lost' for result in results))
-        self.assertTrue(all(result.diag['pilot_timing']['coded_status_mode'] ==
-                            control.status_mode for result in results))
-        self.assertEqual(control.fold_slots, 0)
 
     def test_video_profile_refuses_missing_eof(self):
         with self.assertRaisesRegex(ValueError, 'requires EOF markers'):

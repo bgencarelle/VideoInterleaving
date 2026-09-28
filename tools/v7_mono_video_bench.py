@@ -24,7 +24,7 @@ sys.path.insert(0, str(ROOT/'test_modem_v7'))
 from animation_modem import v7                                           # noqa: E402
 from animation_modem.imaging import values_image                         # noqa: E402
 from common import TARGET, ssimulacra2                                    # noqa: E402
-from mono_video import (MonoFreshFoldOffWire, MonoFreshFoldWire)           # noqa: E402
+from mono_video import MonoFreshFoldWire                                  # noqa: E402
 from mono_wire import MonoWire                                            # noqa: E402
 from tools import v7_live                                                 # noqa: E402
 from tools.v7_torture_matrix import CASES, RATE, impair                   # noqa: E402
@@ -140,16 +140,6 @@ def _decode_rows(profile, audio, model, source_frames, case_name):
                 mono_model, audio, sample_rate=RATE,
                 pilot_timing='tone-seeded', frame_boundary='eof', state=state)
         value_fn = lambda result: wire.values(mono_model, result)
-    elif profile == 'mono-fresh-fold-off':
-        wire = MonoFreshFoldOffWire(model, side='left')
-        mono_model = wire.model_for(model)
-        decode_started = time.perf_counter()
-        with wire.receiving():
-            results, info = v7.decode_pulse_stream(
-                mono_model, audio[:, 0], sample_rate=RATE,
-                pilot_timing='tone-seeded', frame_boundary='eof',
-                state=v7.PulseState(tail_memory=False))
-        value_fn = lambda result: wire.values(mono_model, result)
     else:
         wire = MonoFreshFoldWire(model, side='left')
         mono_model = wire.model_for(model)
@@ -238,7 +228,6 @@ def run(out, selected_scenes=None, selected_channels=None):
         'stereo-fold500-mono-sum',
         'mono-rotating-tail-on',
         'mono-rotating-tail-off',
-        'mono-fresh-fold-off',
         'mono-fresh-500-fold',
     )
     cases = {case.name: case for case in CASES}
@@ -275,17 +264,11 @@ def run(out, selected_scenes=None, selected_channels=None):
             model, values, source_indices=list(range(PACKETS)))
         encode_times['mono-fresh-500-fold'] = (
             time.perf_counter()-before)*1000
-        before = time.perf_counter()
-        fresh_foldoff_wire = MonoFreshFoldOffWire(model, side='left').encode(
-            model, values, source_indices=list(range(PACKETS)))
-        encode_times['mono-fresh-fold-off'] = (
-            time.perf_counter()-before)*1000
         audio_by_profile = {
             'stereo-fold500-both': stereo_wire,
             'stereo-fold500-mono-sum': stereo_wire,
             'mono-rotating-tail-on': rotating_wire,
             'mono-rotating-tail-off': rotating_wire,
-            'mono-fresh-fold-off': fresh_foldoff_wire,
             'mono-fresh-500-fold': fresh_wire,
         }
 

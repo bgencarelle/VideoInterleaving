@@ -28,13 +28,19 @@ WIRE_PROFILE = 'mono-fresh-500'
 MONO_FOLD_D = 1.1409647181002305
 MONO_FOLD_TABLE_SHA256 = (
     'd075fac930d893b7bdbe9c4218aa45145ef634db06d297dee7ee21131916827d')
+CHROMA_RANK_WEIGHT = 4.0
+MONO_COLOUR_MODE = tone_code.MONO_1000
+COLOUR_WIRE_PROFILE = 'mono-colour-500'
+MONO_COLOUR_FOLD_D = 0.6
+MONO_COLOUR_FOLD_TABLE_SHA256 = (
+    '76e6f7b3592fcc2d657197d86ab189a320ca16b1f3bf73ed0fc3a5bed24989f6')
 _HOST_RANKS = (FRESH_SLOTS-FOLD_SLOTS, FRESH_SLOTS)
 _GUEST_RANKS = (FRESH_SLOTS, FRESH_SLOTS+FOLD_SLOTS)
 
 
-def fresh_rank_tables(model):
+def fresh_rank_tables(model, order=None):
     """Build one fixed rank map: the same 1,264 coefficients every packet."""
-    order = np.asarray(model.order, dtype=int)
+    order = np.asarray(model.order if order is None else order, dtype=int)
     if order.shape != (2880,):
         raise ValueError('mono V7 requires the canonical 2,880 coefficient set')
     ranks = np.full((len(v7.GROUPS), 8), -1, dtype=int)
@@ -46,6 +52,30 @@ def fresh_rank_tables(model):
     for _phase in range(v7.TAIL_PHASES):
         tables.append(ranks)
     return tuple(tables)
+
+
+def colour_order(model):
+    """model.order with the head kept and the rest re-ranked, chroma lam x4."""
+    order = np.asarray(model.order, dtype=int)
+    if order.shape != (2880,):
+        raise ValueError('mono V7 requires the canonical 2,880 coefficient set')
+    lam = np.asarray(model.lam, dtype=float).copy()
+    plane = np.asarray(model.plane)
+    lam[plane > 0] *= CHROMA_RANK_WEIGHT
+    rest = order[v7.HEAD:]
+    rest = rest[np.argsort(-lam[rest], kind='stable')]
+    return np.concatenate([order[:v7.HEAD], rest])
+
+
+def colour_fold_sets(model):
+    """(order, hosts, guests): luma-only hosts and guests, as model indices."""
+    order = colour_order(model)
+    plane = np.asarray(model.plane)
+    fresh = order[:FRESH_SLOTS]
+    hosts = fresh[plane[fresh] == 0][-FOLD_SLOTS:]
+    later = order[FRESH_SLOTS:]
+    guests = later[plane[later] == 0][:FOLD_SLOTS]
+    return order, hosts, guests
 
 
 class MonoFreshFoldCodec(FoldCodec):
@@ -115,6 +145,10 @@ class MonoFreshFoldWire:
     fold_slots = FOLD_SLOTS
     status_mode = MONO_VIDEO_MODE
     use_fold = True
+    codec_class = MonoFreshFoldCodec
+
+    def coefficient_order(self, model):
+        return np.asarray(model.order, dtype=int)
 
     def __init__(self, model, train_frames=None, side='both'):
         if side not in ('left', 'right', 'both'):
@@ -135,14 +169,14 @@ class MonoFreshFoldWire:
             raise ValueError('mono 500-class folding requires the box model')
         key = (model.encoding_type, id(model))
         if key not in self._models:
-            ranks = fresh_rank_tables(model)
+            ranks = fresh_rank_tables(model, self.coefficient_order(model))
             priors = tuple(v7.block_priors(model.gain, model.lam, rank)
                            for rank in ranks)
             mono_model = replace(
                 model, rank_tables=ranks, block_prior_tables=priors,
                 scale=float(model.scale*np.sqrt(2.0)))
             mono_model._mono_wire_profile = self.wire_profile
-            codec = (MonoFreshFoldCodec(model, train_frames=self.train_frames)
+            codec = (self.codec_class(model, train_frames=self.train_frames)
                      if self.use_fold else None)
             self._models[key] = mono_model
             self._base_models[key] = model
@@ -284,14 +318,56 @@ class MonoFreshFoldWire:
         return codec.grid.inverse(full)
 
 
-class MonoFreshFoldOffWire(MonoFreshFoldWire):
-    """Benchmark control: all-fresh mono without folding.
+class MonoColourFoldCodec(FoldCodec):
+    """Luma-only 500-class fold over the colour-weighted fresh ranks."""
 
-    It uses the reserved MONO_1000 status as a distinct experimental layout
-    identity; it is deliberately not exposed as a live sender profile.
-    """
+    def __init__(self, model, train_frames=None, D=MONO_COLOUR_FOLD_D,
+                 design_db=40.0, conf_min=.9, signature=SIGNATURE_SLOTS,
+                 check_identity=True):
+        if int(model.encoding_type) != v7.ENCODING_FILTER_CODES['box']:
+            raise ValueError('mono colour folding requires the box model')
+        if int(signature) != SIGNATURE_SLOTS:
+            raise ValueError('mono colour folding requires 16 signature slots')
+        self.model = model
+        self.M = FOLD_SLOTS
+        self.filter = 'box'
+        self.conf_min = float(conf_min)
+        self.design_db = float(design_db)
+        self.fitted_on = 'v7_reference_face.png; mono colour-weighted ranks'
+        self.signature = int(signature)
+        self.noise_max = .3
+        self.grid = Grids(v7.V7_GRIDS)
+        self.kept = self.grid.corner_positions(v7.V7_SHAPES)
+        _, hosts, guests = colour_fold_sets(model)
+        self.hosts = np.asarray(hosts, dtype=int)
+        self.guest_model_indices = np.asarray(guests, dtype=int)
+        self.guests = self.kept[self.guest_model_indices]
+        self.sd_host = np.sqrt(model.lam[self.hosts])
+        self.sd_guest = np.sqrt(model.lam[self.guest_model_indices])
+        self.train = list(train_frames or ())
+        self.set_step(D)
+        self._set_identity()
+        if check_identity and self.identity != MONO_COLOUR_FOLD_TABLE_SHA256:
+            raise ValueError('mono colour fold table identity is not pinned')
 
-    wire_profile = 'mono-fresh-fold-off-control'
-    fold_slots = 0
-    status_mode = tone_code.MONO_1000
-    use_fold = False
+    def table(self):
+        table = FoldCodec.table(self)
+        table.update({
+            'format': 'v7-mono-colour-fold-1',
+            'layout': COLOUR_WIRE_PROFILE,
+            'fresh_slots': FRESH_SLOTS,
+            'chroma_rank_weight': CHROMA_RANK_WEIGHT,
+            'status_mode': MONO_COLOUR_MODE,
+        })
+        return table
+
+
+class MonoColourFoldWire(MonoFreshFoldWire):
+    """mono-fold-500 with colour-weighted ranks, luma-only fold, D=0.6."""
+
+    wire_profile = COLOUR_WIRE_PROFILE
+    status_mode = MONO_COLOUR_MODE
+    codec_class = MonoColourFoldCodec
+
+    def coefficient_order(self, model):
+        return colour_order(model)
