@@ -107,6 +107,38 @@ def channel_joint_reference(Z, iters=2, force_float32=False):
     return H
 
 
+def metadata_decode_reference(model, samples, start, scale, force_float32=False):
+    """Previous NumPy metadata path, retained as a hard-decision oracle."""
+    indexes = start + np.arange(v7.META_SYMBOL)*scale
+    meta = v7._sample_at(samples, indexes, taps=4)
+    window = meta[v7.WIN:v7.WIN+v7.N]
+    if force_float32:
+        z = (np.fft.rfft(window.astype(np.float32), axis=0) /
+             np.float32(model.scale) *
+             np.conj(model.phase32[-1])[:, None] *
+             v7._EARLY32[:, None]).astype(np.complex64)
+    else:
+        z = (np.fft.rfft(window, axis=0)/model.scale *
+             np.conj(model.phase[-1])[:, None] * v7.EARLY[:, None])
+    observed = z.sum(axis=1)
+    pilot_z = observed[v7.META_PILOTS]
+    if np.sum(np.abs(pilot_z) > 1e-6) < 2:
+        return None
+    response = (np.interp(v7.META_DATA_BINS, v7.META_PILOTS, pilot_z.real) +
+                1j*np.interp(v7.META_DATA_BINS, v7.META_PILOTS, pilot_z.imag))
+    if force_float32:
+        response = response.astype(np.complex64)
+    data = np.divide(observed[v7.META_DATA_BINS], response,
+                     out=np.zeros(len(v7.META_DATA_BINS),
+                                  np.complex64 if force_float32 else complex),
+                     where=np.abs(response) > 1e-9)
+    symbols = data[:20]
+    bits = np.empty(40, np.uint8)
+    bits[0::2] = (symbols.real >= 0).astype(np.uint8)
+    bits[1::2] = (symbols.imag >= 0).astype(np.uint8)
+    return v7.parse_metadata_word(np.packbits(bits).tobytes())
+
+
 class V7DecodeSpeedTests(unittest.TestCase):
     def _channels(self, seed):
         rng = np.random.default_rng(seed)
@@ -177,6 +209,60 @@ class V7DecodeSpeedTests(unittest.TestCase):
                 np.testing.assert_allclose(
                     actual[1], expected[1], rtol=1e-9, atol=1e-11)
                 np.testing.assert_array_equal(actual[2], expected[2])
+
+    def test_numba_metadata_demod_matches_previous_numpy_path(self):
+        model = v7.load_model(TARGET, 'box')
+        values = np.zeros(model.coder.source_count)
+        wire = v7.encode_pulse_frame(
+            model, values, 1, source_index=0x1234, pilot_tones=True)
+        meta_start = v7.PULSE.SYNC_LEN+v7.FRAME
+        damaged = wire.copy()
+        rng = np.random.default_rng(20260928)
+        damaged[meta_start:meta_start+v7.META_SYMBOL] += (
+            rng.normal(0, .002, (v7.META_SYMBOL, 2)).astype(np.float32))
+
+        for samples in (wire, damaged, np.zeros_like(wire)):
+            for dtype in (np.float32, np.float64):
+                typed_samples = samples.astype(dtype)
+                for force_float32 in (False, True):
+                    for offset in (0., -.25, -18.):
+                        expected = metadata_decode_reference(
+                            model, typed_samples, meta_start+offset, 1.,
+                            force_float32=force_float32)
+                        actual = v7.decode_metadata(
+                            model, typed_samples, meta_start+offset, 1., None,
+                            force_float32=force_float32)
+                        with self.subTest(
+                                source='silence' if not samples.any() else
+                                ('damaged' if samples is damaged else 'clean'),
+                                dtype=dtype.__name__,
+                                force_float32=force_float32, offset=offset):
+                            self.assertEqual(actual, expected)
+        decoded = v7.decode_metadata(
+            model, wire, meta_start, 1., None)
+        self.assertEqual(decoded.source_index, 0x1234)
+
+    def test_numba_metadata_demod_preserves_all_wire_fields(self):
+        model = v7.load_model(TARGET, 'box')
+        values = np.zeros(model.coder.source_count)
+        loop = v7.LoopInfo(frames=27, phase=3, pingpong=True)
+        for counter in range(1, 15):
+            direction = -1 if counter % 2 else 1
+            packet = v7.encode_pulse_frame(
+                model, values, counter, aspect_code=counter % 8,
+                source_index=1000+counter, loop=loop, direction=direction)
+            start = v7.PULSE.SYNC_LEN+v7.FRAME
+            expected = metadata_decode_reference(
+                model, packet, start, 1.)
+            actual = v7.decode_metadata(model, packet, start, 1., None)
+            with self.subTest(counter=counter):
+                self.assertIsNotNone(actual)
+                self.assertEqual(actual, expected)
+                self.assertEqual(actual.aspect_code, counter % 8)
+                self.assertEqual(actual.source_index, 1000+counter)
+                self.assertEqual(actual.direction, direction)
+                self.assertEqual(actual.tail_slice,
+                                 counter % v7.TAIL_PHASES)
 
     def _tone_frame(self, model, seed, tone_amp=1.0, empty_amp=.01,
                     coherent=True, muted=()):

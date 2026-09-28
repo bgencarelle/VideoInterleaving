@@ -32,6 +32,8 @@ from animation_modem.v7_core import (SourceCoder, _sample_at, speed_length,
                                   speed_resample)                  # noqa: E402
 from animation_modem.v7_core import bound_emission                         # noqa: E402
 from animation_modem.v7_input_kernels import _leg_correlation_sums          # noqa: E402
+from animation_modem.v7_metadata_kernels import (                            # noqa: E402
+    decode_metadata_spectrum as _decode_metadata_spectrum)
 
 # ------------------------------------------------------------------ §6.1
 RATE, N, CP, SYM, F = 48000, 128, 16, 144, 24
@@ -208,6 +210,8 @@ def _hadamard8(values):
 # The FFT window opens CP-WIN samples early: undo that known linear phase so
 # channel interpolation between pilots sees a smooth response.
 EARLY = np.exp(2j*np.pi*np.arange(65)*(CP-WIN)/N)
+_EARLY32 = EARLY.astype(np.complex64)
+_EARLY32.setflags(write=False)
 
 
 def _solve_2x2_vec(a, b):
@@ -2984,14 +2988,10 @@ def _fade_and_noise_float32(Z, H, tone_reference=False,
 
 
 @njit(cache=True, fastmath=False)
-def _equalize_numba_kernel(Z, H, noise, block_symbols, block_bins,
-                           block_prior, group_block, group_stream, group_q,
-                           ranks, lam, system, weighted, noise_floor, xhat,
-                           conf, got):
-    """Per-cell MMSE and group LMMSE without NumPy's small-matrix overhead."""
+def _equalizer_cell_estimates(Z, H, noise, block_symbols, block_bins,
+                              block_prior, noise_floor, est, var):
+    """Per-cell stereo MMSE estimates and variances."""
     nblocks, nsym = block_symbols.shape
-    est = np.zeros((nblocks, 2, 2, nsym), np.complex128)
-    var = np.full((nblocks, 2, 2, nsym), np.inf)
     for b in range(nblocks):
         k_bin = block_bins[b]
         for t in range(nsym):
@@ -3034,10 +3034,14 @@ def _equalize_numba_kernel(Z, H, noise, block_symbols, block_bins,
                         est[b, k, q, t] = estimate/beta
                         var[b, k, q, t] = variance/(beta*beta)
 
+
+@njit(cache=True, fastmath=False)
+def _equalizer_group_solve(est, var, group_block, group_stream, group_q,
+                           ranks, lam, system, weighted, xhat, conf, got):
+    """Per-group Cholesky/LMMSE solve and confidence assembly."""
     ngroups = ranks.shape[0]
     S = np.empty((8, 8))
     L = np.zeros((8, 8))
-    R = np.empty((8, 9))
     X = np.empty((8, 9))
     lam_g = np.empty(8)
     y = np.empty(8)
@@ -3072,12 +3076,9 @@ def _equalize_numba_kernel(Z, H, noise, block_symbols, block_bins,
                 else:
                     L[i, j] = acc/L[j, j]
         for i in range(8):
-            for j in range(8):
-                R[i, j] = weighted[group, i, j]
-            R[i, 8] = y[i]
-        for i in range(8):
             for column in range(9):
-                acc = R[i, column]
+                acc = (weighted[group, i, column]
+                       if column < 8 else y[i])
                 for k in range(i):
                     acc -= L[i, k]*X[k, column]
                 X[i, column] = acc/L[i, i]
@@ -3096,9 +3097,28 @@ def _equalize_numba_kernel(Z, H, noise, block_symbols, block_bins,
             got[rank] = True
 
 
+@njit(cache=True, fastmath=False)
+def _equalize_numba_kernel(Z, H, noise, block_symbols, block_bins,
+                           block_prior, group_block, group_stream, group_q,
+                           ranks, lam, system, weighted, noise_floor, xhat,
+                           conf, got):
+    """Fused production dispatcher for cell estimates and group solves."""
+    nblocks, nsym = block_symbols.shape
+    est = np.zeros((nblocks, 2, 2, nsym), np.complex128)
+    var = np.full((nblocks, 2, 2, nsym), np.inf)
+    _equalizer_cell_estimates(
+        Z, H, noise, block_symbols, block_bins, block_prior, noise_floor,
+        est, var)
+    _equalizer_group_solve(
+        est, var, group_block, group_stream, group_q, ranks, lam,
+        system, weighted, xhat, conf, got)
+
+
 def _equalize_numba(model, Z, H, noise, counter):
-    """Run the compiled float64 equalizer; float32 retains the NumPy path."""
+    """Run the fused compiled float64 equalizer; float32 keeps the NumPy path."""
     phase = counter % TAIL_PHASES
+    block_prior = model.block_prior_tables[phase]
+    ranks = model.rank_tables[phase]
     xhat = np.zeros_like(model.mu)
     conf = np.zeros_like(model.mu)
     got = np.zeros(model.mu.shape, np.bool_)
@@ -3106,9 +3126,9 @@ def _equalize_numba(model, Z, H, noise, counter):
         np.ascontiguousarray(Z, dtype=np.complex128),
         np.ascontiguousarray(H, dtype=np.complex128),
         np.ascontiguousarray(noise, dtype=np.float64),
-        BLOCK_SYMBOLS, BLOCK_BINS, model.block_prior_tables[phase],
+        BLOCK_SYMBOLS, BLOCK_BINS, block_prior,
         GROUP_BLOCK, GROUP_STREAM_INDEX, GROUP_Q_INDEX,
-        model.rank_tables[phase], model.lam, *_group_systems(model, phase),
+        ranks, model.lam, *_group_systems(model, phase),
         NOISE_FLOOR, xhat, conf, got)
     return xhat, conf, got
 
@@ -3137,8 +3157,13 @@ def _group_systems(model, phase):
 
 def warmup_equalizer(model):
     """Compile every Numba decoder kernel before a real-time receiver opens
-    audio: channel fit, residuals, fade/noise and the equalizer."""
+    audio: metadata, channel fit, residuals, fade/noise and the equalizer."""
     shape = (F, 65)
+    # LiveInput supplies float32 audio, while the default decoder uses the
+    # float64 model phase. Warm exactly that production metadata signature.
+    _decode_metadata_spectrum(
+        np.zeros((65, 2), np.complex64), model.phase[-1], EARLY,
+        model.scale, META_PILOTS, META_DATA_BINS)
     Z = np.zeros(shape+(2,), np.complex128)
     Z[:, BINS] = 1
     H = _channel_joint_batched(Z, 2, False)
@@ -3396,30 +3421,30 @@ def decode_metadata(model, samples, start, scale, channel,
         z = (np.fft.rfft(window.astype(np.float32), axis=0) /
              np.float32(model.scale) *
              np.conj(model.phase32[-1])[:, None] *
-             EARLY.astype(np.complex64)[:, None]).astype(np.complex64)
-    else:
-        z = (np.fft.rfft(window, axis=0)/model.scale *
-             np.conj(model.phase[-1])[:, None] * EARLY[:, None])
-    # The metadata symbol carries known M=1 pilots.  Estimate its own
-    # per-symbol complex response from those pilots; this avoids assuming the
-    # body-channel phase is unchanged across the symbol boundary.
-    observed = z.sum(axis=1)
-    pilot_z = observed[META_PILOTS]
-    if np.sum(np.abs(pilot_z) > 1e-6) < 2:
-        return None
-    response = (np.interp(META_DATA_BINS, META_PILOTS, pilot_z.real) +
-                1j*np.interp(META_DATA_BINS, META_PILOTS, pilot_z.imag))
-    if force_float32:
+             _EARLY32[:, None]).astype(np.complex64)
+        observed = z.sum(axis=1)
+        pilot_z = observed[META_PILOTS]
+        if np.sum(np.abs(pilot_z) > 1e-6) < 2:
+            return None
+        response = (np.interp(META_DATA_BINS, META_PILOTS, pilot_z.real) +
+                    1j*np.interp(META_DATA_BINS, META_PILOTS, pilot_z.imag))
         response = response.astype(np.complex64)
-    data = np.divide(observed[META_DATA_BINS], response,
-                     out=np.zeros(len(META_DATA_BINS),
-                                  np.complex64 if force_float32 else complex),
-                     where=np.abs(response) > 1e-9)
-    symbols = data[:20]
-    bits = np.empty(40, np.uint8)
-    bits[0::2] = (symbols.real >= 0).astype(np.uint8)
-    bits[1::2] = (symbols.imag >= 0).astype(np.uint8)
-    return parse_metadata_word(np.packbits(bits).tobytes())
+        data = np.divide(observed[META_DATA_BINS], response,
+                         out=np.zeros(len(META_DATA_BINS), np.complex64),
+                         where=np.abs(response) > 1e-9)
+        symbols = data[:20]
+        bits = np.empty(40, np.uint8)
+        bits[0::2] = (symbols.real >= 0).astype(np.uint8)
+        bits[1::2] = (symbols.imag >= 0).astype(np.uint8)
+        return parse_metadata_word(np.packbits(bits).tobytes())
+    else:
+        spectrum = np.fft.rfft(window, axis=0)
+        valid, packed = _decode_metadata_spectrum(
+            spectrum, model.phase[-1], EARLY, model.scale,
+            META_PILOTS, META_DATA_BINS)
+    if not valid:
+        return None
+    return parse_metadata_word(packed.tobytes())
 
 
 def _diagnostic_summary(diag, elapsed_ms):

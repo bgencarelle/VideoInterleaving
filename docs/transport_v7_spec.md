@@ -1165,6 +1165,94 @@ they do not show that metadata or channel fitting alone is the end-to-end
 bottleneck. No decoder optimization was made in this follow-up. Actual audio
 callback and GUI-rendering costs and Pi-specific performance remain unmeasured.
 
+##### Metadata demodulation optimization (2026-09-28; host A/B)
+
+The first optimization keeps the wire, pilot thresholds, response threshold,
+hard decisions, and CRC parser unchanged. The production default path now uses
+the cached Numba helper in `animation_modem/v7_metadata_kernels.py` to apply
+metadata phase correction, sum the two channels, interpolate pilot response,
+and pack the 40 hard-decision bits. The helper is warmed by
+`warmup_equalizer()` before live capture. Explicit `force_float32=True` decoding
+retains its previous NumPy path.
+
+The paired control replaces only `decode_metadata()` with the previous NumPy
+implementation in the same profiler process. Each side processed two runs of
+2,000 changing packets with the normal production Fold 500 profile and no
+component timers or line tracing. The table pools 4,000 host process-CPU
+samples per side; estimated target savings multiply the host CPU difference by
+15. The full receiver stage covers acquisition through frame publication.
+
+| Stage | Prior NumPy median (ms) | Optimized median (ms) | Prior p95 (ms) | Optimized p95 (ms) | 15× p95 saving (ms) |
+|---|---:|---:|---:|---:|---:|
+| Decode status/metadata/body/equalization | 1.095 | 1.010 | 1.492 | 1.274 | 3.3 |
+| Complete receiver processing | 1.992 | 1.883 | 2.567 | 2.290 | 4.2 |
+
+A component-timed 2,000-packet A/B measured metadata decode at 0.138 ms median
+with the prior path and 0.071 ms with the helper, a 0.067 ms (about 49%)
+reduction. Timer instrumentation raises the surrounding decode totals, so use
+the untimed A/B above for end-to-end comparisons. Across both paired runs, all
+2,000 frames decoded, reconstructed, and validated their coded Fold 500 status
+and EOF markers. Every timed A/B CSV row matched on source index, receiver
+status, coded status mode, and EOF result. A separate integrity run compared
+aspect, encoding, tail slice, direction, status, coded status, EOF result, and
+SHA-256 hashes of all 2,000 unfolded frame-value arrays; every field and hash
+matched exactly. The focused NumPy-oracle tests also check clean, perturbed,
+silent, float32/float64 input, explicit float32, fractional offset, mistimed
+metadata, and loop metadata across all seven tail slices.
+
+The isolated helper's first compile plus call took 0.99 s host CPU; loading its
+cached signature and calling it took 0.14 s. This helper lives in its own module
+so later edits to `v7.py` do not invalidate its cache. Changing `v7.py` for this
+integration did invalidate that module's existing Numba kernels, so the first
+full receiver warmup after the edit took 11.5 s on this host, versus 0.22–0.24 s
+for cached baseline runs; this is a module-wide cold-cache effect, not the
+helper's isolated compile cost. Warmed candidate runs took 0.23–0.25 s and peaked
+at about 235 MiB RSS. Warmup completes before capture. Cold compilation and
+memory on ARM remain to be measured. A later run with a dedicated empty cache
+and the final metadata/equalizer code took 16.89 s to warm all receiver kernels
+and peaked at 372.0 MiB RSS; its cached repeat warmed in 0.224 s and peaked at
+235.3 MiB. The earlier fresh-cache comparison was 16.42 s / 359.4 MiB, so the
+current cold peak is about 12.6 MiB higher on this host. Cold cache/compiler
+memory on the Pi needs particular validation; do not project these RAM values
+with the CPU slowdown factor.
+
+The reusable control profiler, summaries, CSVs, and logs are in the ignored
+`tmp/v7-zero2-profile/` directory. This measured gain makes the metadata change
+a reasonable first optimization to retain.
+
+##### Equalizer substage profile and group-solve cleanup (2026-09-28)
+
+The equalizer was separated into per-cell stereo MMSE estimation and per-group
+LMMSE solve/confidence helpers. Production still calls them through one fused
+Numba dispatcher. For diagnosis only, the temporary profiler calls the two
+compiled helpers separately from Python; those stage timings include the extra
+Python/Numba dispatch and should be used to rank substage costs, not to predict
+the production total.
+
+Across two 2,000-packet diagnostic runs, per-cell MMSE took about **0.072 ms
+median**, while the group solve took about **0.123 ms median**. This identifies
+the group solve as the larger kernel substage. Hoisting repeated channel
+conjugates/products in the per-cell loop was tested and rejected: its measured
+per-cell median remained about 0.072 ms.
+
+The group solve previously copied the 8×9 right-hand side into a temporary
+matrix before immediately forward-solving it into another matrix. The solve
+now reads each model-weighted or frame-observation RHS directly as it performs
+the same forward-substitution operations, removing that intermediate. The
+diagnostic group-stage median moved from about 0.123 to 0.118 ms across the
+small run set, with per-cell timing unchanged. Untimed fused-production runs
+showed decode medians around 0.993 ms before and 0.997 ms after, within run
+variation; therefore this small local cleanup is retained, but is not credited
+with a demonstrated end-to-end CPU reduction. Across all 2,000 packets, the
+unfolded frame-value hashes and metadata/outcome fields matched the pre-cleanup
+run exactly. The existing equalizer-versus-NumPy oracle passes across all seven
+tail phases.
+
+The group solve remains the most promising equalizer substage for further
+measurement, but its roughly 0.12 ms host median bounds the opportunity. Any
+more invasive solve changes should show a worthwhile uninstrumented whole-
+receiver gain and preserve confidence/recovery decisions before being retained.
+
 The JSON summary, per-frame CSV, and log are in
 `tmp/v7-zero2-profile/receiver-decode-components-final.json`,
 `tmp/v7-zero2-profile/per-frame-decode-components-final.csv`, and
