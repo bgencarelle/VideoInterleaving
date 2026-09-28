@@ -11,19 +11,21 @@ are multiplied by capture_rate / 48 kHz, preserving the same playback-speed
 range on every device. Frame-sized lengths below use the raw captured-sample
 scale. Only incoming_fps() needs the real rate to convert samples to seconds.
 
-Buffer policy.  A latest-only pulse decode needs one complete frame plus the
-next frame's header (the commit boundary), so two frames of audio at the
-current playback speed plus a small guard always suffice.  Display latency is
-set by that header wait, not by how much history is kept, so keeping more only
-costs CPU.  While unlocked (start-up, after repeated failures) the frame length
-is unknown, so the buffer allows the slowest accepted speed instead.
+Buffer policy. Live video commits at its validated EOF marker. Header-only
+readiness remains available to profile probes, which identify the mode in the
+pulse word itself. Two frames plus a small guard retain enough history for
+decode; the buffer cap does not add display latency. While unlocked (start-up,
+after repeated failures) the frame length is unknown, so the buffer allows the
+slowest accepted speed instead.
 """
 from collections import deque
 
 import numpy as np
 
 from animation_modem import transport3 as PULSE
-from animation_modem.v7 import (META_SYMBOL, PULSE_FRAME, RATE, _mono_gain,
+from animation_modem.v7 import (EOF_MARKER_LENGTH, EOF_MARKER_OFFSET,
+                                EOF_SEARCH_FRACTION, META_SYMBOL, PULSE_FRAME,
+                                RATE, _measure_eof_marker, _mono_gain,
                                 leg_polarity, pulse_frame_profile_hits,
                                 pulse_sample_scale_bounds)
 
@@ -139,18 +141,20 @@ class DirectionStreak:
 
 class LiveInput:
     """Rolling live input.  Feed blocks with add(); take() returns audio to
-    decode exactly when a new frame header has arrived (a new frame is then
-    complete), so decode cycles follow the wire rather than the capture block
-    size; call decoded() after each decode."""
+    decode when a frame is complete according to `completion`; call decoded()
+    after each decode."""
 
     def __init__(self, decode_history=1, decode_batch=1, rate=RATE,
-                 direction='auto'):
+                 direction='auto', completion='header'):
         if direction not in ('auto', 'forward', 'reverse'):
             raise ValueError(f'unknown playback direction {direction!r}')
+        if completion not in ('header', 'eof'):
+            raise ValueError(f'unknown packet completion mode {completion!r}')
         self.decode_history = max(1, int(decode_history))
         self.decode_batch = max(1, int(decode_batch))
         self.rate = float(rate)
         self.direction = direction
+        self.completion = completion
         self.min_scale, self.max_scale = pulse_sample_scale_bounds(self.rate)
         # Two hits closer than half the shortest accepted frame are the same.
         self._same_header = PULSE_FRAME*self.min_scale/2
@@ -168,6 +172,8 @@ class LiveInput:
         # for headers a second time.
         self._headers = deque(maxlen=256)
         self._profile_headers = deque(maxlen=256)
+        self._ready_headers = deque(maxlen=256)
+        self._ready_header_set = set()
         self._header_walls = deque(maxlen=256)
         # Leveler gain applied to header scans; the receiver decodes with the
         # same gain so its own anchor re-check sees the same levels.
@@ -197,6 +203,8 @@ class LiveInput:
         self.scale = None
         self._headers.clear()
         self._profile_headers.clear()
+        self._ready_headers.clear()
+        self._ready_header_set.clear()
         self._header_walls.clear()
 
     def add(self, block):
@@ -219,7 +227,11 @@ class LiveInput:
                  else np.concatenate(self._blocks))
         self._judge_polarity(audio)
         self._update_level(audio)
-        self._pending += self._count_headers(audio, now)
+        new_headers = self._count_headers(audio, now)
+        if self.completion == 'header':
+            self._pending += new_headers
+        else:
+            self._pending += self._count_completed_packets(audio)
         if (self._headers and
                 self.total - self._headers[-1][0] >
                 2*self._scaled(PULSE_FRAME)):
@@ -232,6 +244,47 @@ class LiveInput:
             return None
         self._pending = 0
         return audio
+
+    def _count_completed_packets(self, audio):
+        """Count newly complete packets without waiting for the next header.
+
+        Reverse hits are only admitted by _count_headers after their whole
+        reversed interval is retained. Forward hits become ready when their
+        own EOF marker has arrived and validated.
+        """
+        audio_start = self.total-len(audio)
+        available_end = len(audio)
+        marker_audio = None
+        found = 0
+        for position, scale, _confidence, direction in self._headers:
+            key = int(round(position))
+            if key in self._ready_header_set:
+                continue
+            if direction < 0:
+                ready = True
+            else:
+                local_start = float(position)-audio_start
+                marker_end = local_start+(EOF_MARKER_OFFSET+
+                                           EOF_MARKER_LENGTH)*float(scale)
+                search_margin = max(
+                    12*float(scale),
+                    EOF_SEARCH_FRACTION*PULSE_FRAME*float(scale))
+                if marker_end-search_margin > available_end:
+                    continue
+                if marker_audio is None:
+                    marker_audio = _mono_gain(audio, np.float32(self.gain))
+                marker = _measure_eof_marker(
+                    marker_audio, local_start, scale)
+                ready = bool(marker is not None and
+                             marker['end'] <= available_end+1.0)
+            if not ready:
+                continue
+            if len(self._ready_headers) == self._ready_headers.maxlen:
+                self._ready_header_set.discard(self._ready_headers[0])
+            self._ready_headers.append(key)
+            self._ready_header_set.add(key)
+            found += 1
+        return found
 
     def decoded(self):
         """After a decode keep one frame plus the guard: it holds the header

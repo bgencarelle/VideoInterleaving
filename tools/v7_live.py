@@ -1074,10 +1074,6 @@ class _ProfileStatusProbe:
             if (self.last_position is not None and
                     absolute <= self.last_position):
                 continue
-            # A header arrives before the profile chips. Leave it pending until
-            # its complete packet region is in the rolling input buffer.
-            if position+P.PULSE_FRAME*scale > len(self.audio)+1.0:
-                continue
             if confidence < self.MIN_CONFIDENCE:
                 self.last_position = absolute
                 events.append({'position': absolute, 'scale': scale,
@@ -1451,7 +1447,8 @@ def _detect_mono_fold_side(args, timeout=2.0, wait_for_signal=False):
     channels = 1 if int(device_info.get('max_input_channels') or 0) < 2 else 2
     rate = capture_rate_for(device_info)
     direction = getattr(args, 'direction', 'auto')
-    inputs = [LiveInput(1, 1, rate=rate, direction=direction)
+    inputs = [LiveInput(1, 1, rate=rate, direction=direction,
+                        completion='header')
               for _ in range(channels)]
     observed_modes = [[] for _ in range(channels)]
     last_positions = [set() for _ in range(channels)]
@@ -1512,11 +1509,6 @@ def _detect_mono_fold_side(args, timeout=2.0, wait_for_signal=False):
                 for position, scale, _confidence, way in live_input.pulse_hits(audio):
                     absolute = int(round(audio_start+position))
                     if absolute in last_positions[index]:
-                        continue
-                    # A live header is found before the packet is complete.
-                    # Wait for the full region to align the status decision
-                    # with the frame that becomes ready for latest-only decode.
-                    if position+P.PULSE_FRAME*scale > len(audio)+1.0:
                         continue
                     last_positions[index].add(absolute)
                     mode = profile_by_position.get(int(round(position)))
@@ -1648,6 +1640,7 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
     # opening audio. The Numba disk cache reuses unchanged kernels on compatible
     # later runs; a cold cache is still compiled before capture begins.
     P.PULSE.warmup_pulse_kernels()
+    P.warmup_eof_marker()
     P.warmup_leg_polarity()
     P.warmup_equalizer(model)
     if fold is not None:
@@ -1707,7 +1700,8 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
     input_ready = threading.Event()
     live_input = LiveInput(
         args.decode_history, args.decode_batch, rate=capture_rate,
-        direction=getattr(args, 'direction', 'auto'))
+        direction=getattr(args, 'direction', 'auto'),
+        completion=('eof' if args.frame_boundary == 'eof' else 'header'))
     auto_mono_side = bool(
         mono_wire is not None and
         getattr(mono_wire, 'wire_profile', None) in
@@ -2222,10 +2216,10 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
             return
         # take() judges polarity, scans only new audio for frame headers and
         # trims to the minimal buffer (two frames at the current speed plus a
-        # guard; see animation_modem/v7_live_input.py).  It returns audio
-        # only when a new header has arrived, i.e. a new frame is complete, so
-        # decode cycles follow the wire, not the capture block size, and an
-        # idle or signal-free input never reaches the demodulator.
+        # guard; see animation_modem/v7_live_input.py). In EOF mode it returns
+        # when a packet's marker validates; header mode remains available for
+        # the baseline receiver. An idle or signal-free input never reaches
+        # the demodulator.
         now = time.monotonic()
         if opposite_probe is not None:
             opposite_probe.scan(now)
