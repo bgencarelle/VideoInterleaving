@@ -1417,7 +1417,7 @@ class ReceiverGui:
                   fill=(151, 174, 192), font=small)
         order = self._config_field_indexes()
         top = 140
-        bottom = height-126
+        bottom = height-(110 if height < 560 else 126)
         visible = max(1, (bottom-top)//ROW_HEIGHT)
         self.scroll = max(0, min(self.scroll, max(0, len(order)-visible)))
         if order and self.selected not in order:

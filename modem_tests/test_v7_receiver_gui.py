@@ -621,6 +621,14 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertTrue(all(left[2] <= right[0]
                             for left, right in zip(controls, controls[1:])))
 
+    def test_compact_setup_uses_space_above_help_and_footer(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+
+        gui._canvas((520, 400))
+
+        visible_rows = sum(key.startswith('row:') for key in gui.hits)
+        self.assertEqual(visible_rows, 4)
+
     def test_compact_info_panel_gets_more_height_for_readability(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
         gui.page = 'info'
