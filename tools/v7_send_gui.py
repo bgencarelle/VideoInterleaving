@@ -563,6 +563,8 @@ def _clipboard_text(glfw, window):
             continue
         read_succeeded = True
         if text:
+            if isinstance(text, bytes):
+                text = text.decode('utf-8', errors='replace')
             return text
     if last_error is not None and not read_succeeded:
         raise last_error

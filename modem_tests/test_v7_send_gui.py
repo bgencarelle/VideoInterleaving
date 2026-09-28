@@ -676,7 +676,7 @@ class SenderGuiTests(unittest.TestCase):
         gui._canvas((960, 720))
         rect = gui.hits['field:video_source']
         position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
-        clipboard = Mock(return_value='https://example.test/clip.mp4')
+        clipboard = Mock(return_value=b'https://example.test/clip.mp4')
         glfw = SimpleNamespace(
             MOUSE_BUTTON_LEFT=1, MOUSE_BUTTON_RIGHT=2, PRESS=1,
             get_cursor_pos=lambda _window: position,
