@@ -1336,9 +1336,6 @@ class ReceiverGui:
         diagnostics_visible = self._diagnostics_visible()
         interval = (INFO_REFRESH_SECONDS if diagnostics_visible else
                     FOOTER_REFRESH_SECONDS)
-        if now-self.last_diagnostics_poll < interval:
-            return
-        self.last_diagnostics_poll = now
         snapshot = dict(self.v7_live.RECEIVER_GUI_STATUS)
         meter = snapshot.get('meter')
         warning = bool(meter and meter.get('sync_warning'))
@@ -1350,6 +1347,12 @@ class ReceiverGui:
             warning_changed = True
         if warning_changed:
             self.dirty = True
+        # Sync warning transitions ride the event-driven path and must not wait
+        # for the slower diagnostics refresh interval. Full diagnostics remain
+        # throttled below to keep the viewer lightweight.
+        if now-self.last_diagnostics_poll < interval and not warning_changed:
+            return
+        self.last_diagnostics_poll = now
         if not diagnostics_visible:
             # The compact footer needs only two scalar fields. Avoid building
             # all diagnostic strings and JSON-copying the full meter while its

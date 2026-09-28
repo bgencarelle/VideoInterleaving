@@ -558,6 +558,25 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertFalse(gui.live_meter['sync_warning'])
         self.assertFalse(gui.live_sync_warning)
 
+    def test_sync_warning_clears_before_footer_refresh_interval(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        gui.page = 'info'
+        gui.last_diagnostics_poll = 0.8
+        gui.live_meter = {'decoded': 4, 'input_fps': 12.0,
+                          'sync_warning': True}
+        gui.live_sync_warning = True
+        gui.dirty = False
+        gui.v7_live = SimpleNamespace(RECEIVER_GUI_STATUS={
+            'meter': {'decoded': 5, 'input_fps': 12.0,
+                      'sync_warning': False}})
+
+        with patch('tools.v7_receiver_gui.time.monotonic', return_value=1.0):
+            gui._poll_diagnostics()
+
+        self.assertFalse(gui.live_sync_warning)
+        self.assertFalse(gui.live_meter['sync_warning'])
+        self.assertTrue(gui.dirty)
+
     def test_sync_warning_clears_even_if_diagnostics_provider_fails(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
         gui.page = 'info'
