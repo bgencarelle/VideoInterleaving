@@ -193,26 +193,32 @@ for receiving; they do not need to match.
 The remaining instructions here are for the application path through
 `main.py --mode modem`, not the standalone `vi.modem-*` V7 capture tools above.
 
-This path sends V7 with the nearest encoding profile, steady pilot tones and
-the EOF marker. It does not fold yet; the standalone tools above send the
-fold-500 coded profile, and moving this sender to it is planned
-(`docs/transport_v7_spec.md` section 10.8). The normal live profile includes
-the EOF marker; `--no-modem-eof-marker` remains available for legacy-wire tests
-and comparisons.
+This path sends the **stereo Fold 500** V7 profile by default, using the pinned
+Box model, coded pilot status, and the EOF marker. To send the previous fold-off
+wire, use `--modem-baseline`; that mode defaults to nearest resize and steady
+pilot tones. Fold 500 requires the Box model, coded pilot tones, and the EOF
+marker, so other `--modem-encode-filter` values and `--no-modem-pilot-tones` or
+`--no-modem-eof-marker` are rejected unless baseline mode is selected. The
+standalone tools and application sender now use the same stereo Fold 500
+profile.
 
-List PortAudio devices using the legacy link checker:
+List PortAudio devices with:
 
 ```bash
-python utilities/modem_v3_check.py live-receive --list-devices
+.venv/bin/python -m sounddevice
 ```
 
-Start the receiver on the input side, then the modem mode on the output side.
-BlackHole or a stereo cable can connect the two:
+Start the matching Fold 500 receiver on the input side, then the application
+sender on the output side. For a same-machine loopback, select the verified
+loopback device on both:
 
 ```bash
-python utilities/modem_v3_check.py live-receive --device BlackHole --channels 1,2 --emulate clean
-python main.py --mode modem --modem-dir images_modem \
-  --device BlackHole --modem-channels 1,2
+# Terminal 1
+./vi.modem-receive --device "BlackHole 2ch"
+
+# Terminal 2
+.venv/bin/python main.py --mode modem --modem-dir images_modem \
+  --device "BlackHole 2ch" --modem-channels 1,2
 ```
 
 `--modem-channels` is a one-based pair of physical output channels. The

@@ -305,9 +305,10 @@ tone-seeded pilot timing, baseline pulse timing, tone equalization off, one
 decode batch, one frame of history, and tail memory enabled. Both require an
 explicit audio device.
 
-The application sender (`main.py --mode modem`) does not fold yet. It sends
-the nearest encoding profile with steady pilot tones and the EOF marker at 1×.
-Moving it to the fold-500 coded default is planned (section 10.8).
+The application sender (`main.py --mode modem`) defaults to stereo Fold 500:
+the pinned Box model, coded pilots, and EOF marker at 1×. `--modem-baseline`
+selects the previous fold-off profile with nearest encoding and steady pilots
+(section 10.8).
 
 The low-level encoder's pilot-tone and EOF-marker switches default off, and
 the low-level decoder defaults to next-header boundaries and baseline pilot
@@ -941,37 +942,27 @@ Loopback through the real `tools/v7_live.py` sender and receiver
   shown unfolded, not unfolded with the wrong table.
 - `--experimental-fold` with `--encode-filter nearest` refuses to start.
 
-### 10.8 Planned: fold and coded pilot in the application sender
+### 10.8 Application sender stereo Fold 500 integration
 
-The standalone live tools send the fold-500 coded profile, but the application
-sender (`main.py --mode modem`, `modem_v7_display.py`) still sends the
-unfolded nearest profile. This plan moves the prototype into the transport
-package so the application can send the same wire. Every step is gated by
-paired CPU checks (percentage change in CPU time and wall time against a
-matched baseline on each tested machine) and by picture quality on the
-reference fixture.
+The application sender (`main.py --mode modem`) now defaults to the pinned
+stereo Fold 500 profile: Box model, folded luma coefficients, coded pilot
+status, and EOF marker. `--modem-baseline` selects the previous fold-off wire
+and its nearest-resize default. Folded packets are decoded with the existing
+standalone live receiver configured for the matching Fold 500 profile.
 
-1. **Move the runtime into `animation_modem/`.** This covers the table-driven
-   fold codec (`FoldCodec.from_table`, encode and unfold), the pinned tables
-   with their SHA-256 pins, and the coded-pilot overlay and status kernel
-   (`add_tone_code`, `decode_tone_spectrum`, `coded_pilot_timing`). Table
-   building and fitting stay in `test_modem_v7/`, which then imports the
-   runtime from the package. The moved code has no application imports.
-2. **Replace the monkeypatch hooks with decoder options.** The prototype wraps
-   `v7.decode_frame`, the equalisers and `v7.pilot_tone_timing`. In the
-   package, `decode_frame` returns the host-slot equaliser output when asked,
-   and tone timing accepts recovered chip signs directly.
-3. **Switch the application sender.** Make the fold-500 coded profile the
-   default in `modem_v7_display.py`, with a baseline switch that restores
-   today's profile. The box filter needs full compositing instead of the
-   nearest-only fast path (`composite_nearest`), so measure the prepare-time
-   change against `--modem-prepare-ms` first. Coordinate any `main.py` option
-   change with the separate `main.py` work (section 9).
-4. **Tests.** Carry `modem_tests/test_v7_experimental_fold.py` and the
-   coded-pilot tests over to the package, and add an application-sender round
-   trip that decodes fold-500 packets with the standard receiver.
-5. **Docs.** Update section 8, `docs/MODEM_MODE.md` and
-   `test_modem_v7/HOWTO.md`.
+The sender-side Fold 500 codec, its pinned table, and coded-pilot overlay live
+in `animation_modem/`; table fitting and receiver-side prototype hooks remain
+in `test_modem_v7/`. `animation_modem.v7.encode_pulse_frame_coeffs` lets both
+sender paths frame transformed coefficients without an extra DCT pass. Tests
+check coefficient and coded-pilot parity with the standalone sender, decode
+application WAV output with the standalone receiver profile, and verify the
+fold-off baseline switch. Repeat paired CPU and wall-time measurements on the
+target host before treating local encode timings as a performance claim.
+
+The remaining package work is receiver-side: move unfold/equalizer capture and
+coded-status timing out of prototype monkeypatch hooks into explicit transport
+decoder APIs, while retaining the fail-closed profile checks and verifying the
+same wire on loopback.
 
 ## 11. Perceptual sender preprocessing
 

@@ -398,32 +398,10 @@ def _encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
     """Build one folded pulse packet without an inverse/forward DCT round trip."""
     if source_index is None:
         source_index = int(counter)-1
-    body = P.encode_frame_coeffs(
-        model, np.asarray(coeffs), counter, pilot_values=pilot_values)
-    packet = np.zeros((P.PULSE_FRAME, 2), np.float32)
-    packet[P.PULSE.SYNC_LEN:P.PULSE.SYNC_LEN+P.FRAME] = body
-    packet[16:16+len(P.PULSE.PREAMBLE), :] = P.PULSE.PREAMBLE[:, None]
-
-    meta = np.zeros((P.N//2+1, 2), complex)
-    symbols = P.metadata_symbols(
-        aspect_code, model.encoding_type, counter % P.TAIL_PHASES,
-        source_index, None, 1)
-    meta[P.META_PILOTS, 0] = 1
-    meta[P.META_DATA_BINS[:len(symbols)], 0] = symbols
-    mx = meta[:, 0]/np.sqrt(2)*model.phase[-1]
-    meta_wave = np.fft.irfft(mx, n=P.N)
-    meta_pcm = np.concatenate([meta_wave[-P.CP:], meta_wave])*model.scale
-
-    shaped = P.bound_emission(packet, P.EMISSION_EDGE_HZ, P.RATE)
-    meta_start = P.PULSE.SYNC_LEN+P.FRAME
-    shaped[meta_start:meta_start+P.META_SYMBOL, :] += meta_pcm[:, None]
-    if eof_marker:
-        marker = np.concatenate([
-            np.full(run, level, np.float32)
-            for run, level in zip(P.EOF_MARKER_RUNS, P.EOF_MARKER_LEVELS)
-        ])*P.EOF_MARKER_LEVEL
-        shaped[P.EOF_MARKER_OFFSET:P.PULSE_FRAME, :] += marker[:, None]
-    return shaped
+    return P.encode_pulse_frame_coeffs(
+        model, np.asarray(coeffs), counter, aspect_code=aspect_code,
+        source_index=source_index, pilot_tones=False,
+        eof_marker=eof_marker, pilot_values=pilot_values)
 
 
 def _add_coded_pilots(audio, start_counter, fold_slots):

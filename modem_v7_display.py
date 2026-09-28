@@ -18,6 +18,8 @@ from animation_modem.v7_core import speed_length, speed_resample
 from animation_modem.playback import PacketOutput, latency
 from modem_bake import ModemLibrary
 from animation_modem import v7 as _v7
+from animation_modem.v7_coded_pilot import add_fold500_coded_pilot
+from animation_modem.v7_fold import Fold500
 
 
 TARGET_RMS = .1521
@@ -54,7 +56,9 @@ def _source_values(model, image, encode_filter='nearest'):
 def packet(library, model, absolute, source_index, selection, *,
            background=(4, 4, 4), rotation=0, mirror=False,
            encode_filter='nearest', loop=None, direction=1,
-           pilot_tones=True, eof_marker=True):
+           pilot_tones=True, eof_marker=True, fold=None):
+    if fold is not None and encode_filter != 'box':
+        raise ValueError('stereo Fold 500 requires the Box encode filter')
     index, main_folder, float_folder = selection
     if encode_filter == 'nearest' and hasattr(library, 'composite_nearest'):
         # Nearest sampling reads 80x96 source pixels: composite only those
@@ -68,11 +72,20 @@ def packet(library, model, absolute, source_index, selection, *,
     values = _source_values(model, image, encode_filter)
     aspect_code = _v7.aspect_wire_code(
         image.info.get('source_dimensions', image.size))
-    audio = _v7.encode_pulse_frame(
-        model, values, absolute,
-        aspect_code=aspect_code,
-        source_index=source_index, loop=loop, direction=direction,
-        pilot_tones=pilot_tones, eof_marker=eof_marker)
+    if fold is None:
+        audio = _v7.encode_pulse_frame(
+            model, values, absolute,
+            aspect_code=aspect_code,
+            source_index=source_index, loop=loop, direction=direction,
+            pilot_tones=pilot_tones, eof_marker=eof_marker)
+    else:
+        coefficients = fold.encode_coefficients(values)
+        audio = _v7.encode_pulse_frame_coeffs(
+            model, coefficients, absolute,
+            aspect_code=aspect_code, source_index=source_index,
+            loop=loop, direction=direction, pilot_tones=False,
+            eof_marker=eof_marker)
+        audio = add_fold500_coded_pilot(audio, absolute)
     return audio, {
         'frame': absolute,
         'source_index': source_index,
@@ -83,6 +96,7 @@ def packet(library, model, absolute, source_index, selection, *,
         'peak': float(np.max(np.abs(audio))) if audio.size else 0.0,
         'pcm_clip_samples': int(np.count_nonzero(np.abs(audio) >= 1.0)),
         'limiter_active': False,
+        'fold_slots': 500 if fold is not None else 0,
     }
 
 
@@ -146,9 +160,18 @@ def run_modem(args):
     rotation = rotation if rotation is not None else getattr(settings, 'INITIAL_ROTATION', 0)
     mirror = getattr(args, 'mirror', None)
     mirror = mirror if mirror is not None else bool(getattr(settings, 'INITIAL_MIRROR', 0))
-    encode_filter = getattr(args, 'modem_encode_filter', None) or 'nearest'
+    baseline = bool(getattr(args, 'modem_baseline', False))
+    encode_filter = getattr(args, 'modem_encode_filter', None)
+    if encode_filter is None:
+        encode_filter = 'nearest' if baseline else 'box'
+    if not baseline and encode_filter != 'box':
+        raise ValueError('stereo Fold 500 requires --modem-encode-filter box')
     pilot_tones = bool(getattr(args, 'modem_pilot_tones', True))
     eof_marker = bool(getattr(args, 'modem_eof_marker', True))
+    if not baseline and not pilot_tones:
+        raise ValueError('stereo Fold 500 requires coded pilot tones')
+    if not baseline and not eof_marker:
+        raise ValueError('stereo Fold 500 requires EOF markers')
 
     # The V7 statistics are a wire profile, not a property of whichever frame
     # happens to be sent first.  The canonical profile ships as frozen,
@@ -158,6 +181,7 @@ def run_modem(args):
     model = _v7.load_model(
         TARGET_RMS / math.sqrt(1 + 10**(_v7.CLOCK_REL_DB/10)),
         encode_filter=encode_filter)
+    fold = None if baseline else Fold500(model)
 
     channels = pair(args.modem_channels)
     output_latency = latency(args.modem_latency)
@@ -193,8 +217,9 @@ def run_modem(args):
           f'source {settings.IPS:g} IPS, '
           f'loop N={loop.frames} p='
           f'{"none (MIDI clock)" if not loop.clocked else loop.phase} in CRC metadata; '
+          f'profile={"baseline fold-off" if baseline else "stereo Fold 500"}; '
           f'EOF marker={"on" if eof_marker else "off"}; '
-          f'pilot tones={"on" if pilot_tones else "off"}')
+          f'pilot tones={"steady" if baseline and pilot_tones else "coded" if fold else "off"}')
 
     def make_packet(absolute, index, folders, at_time_ns=None):
         started = time.perf_counter()
@@ -207,7 +232,7 @@ def run_modem(args):
             library, model, absolute, index, (index, *folders),
             background=background, rotation=rotation, mirror=mirror,
             encode_filter=encode_filter, loop=loop, direction=direction,
-            pilot_tones=pilot_tones, eof_marker=eof_marker)
+            pilot_tones=pilot_tones, eof_marker=eof_marker, fold=fold)
         report['direction'] = direction
         report['encode_ms'] = (time.perf_counter() - started) * 1000
         if runtime_library is not None:

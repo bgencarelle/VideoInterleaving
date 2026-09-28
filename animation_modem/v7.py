@@ -991,7 +991,23 @@ def encode_pulse_frame(model, values, counter, aspect_code=0, source_index=None,
     (LoopInfo) is carried in the rotating CRC field for receivers that want
     the loop length and the live lag; None sends no loop information.
     """
-    body = encode_frame(model, values, counter)
+    coeffs = model.coder.forward(values)/model.coder.gains
+    return encode_pulse_frame_coeffs(
+        model, coeffs, counter, aspect_code=aspect_code,
+        source_index=source_index, loop=loop, direction=direction,
+        pilot_tones=pilot_tones,
+        pilot_tone_gate_preamble=pilot_tone_gate_preamble,
+        eof_marker=eof_marker)
+
+
+def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
+                              source_index=None, loop=None, direction=1,
+                              pilot_tones=False,
+                              pilot_tone_gate_preamble=False,
+                              eof_marker=False, pilot_values=None):
+    """Pulse-frame transformed source coefficients without another DCT pass."""
+    body = encode_frame_coeffs(model, coeffs, counter,
+                               pilot_values=pilot_values)
     out = np.zeros((PULSE_FRAME, 2), np.float32)
     out[PULSE.SYNC_LEN:PULSE.SYNC_LEN+FRAME] = body
     out[16:16+len(PULSE.PREAMBLE), :] = PULSE.PREAMBLE[:, None]
