@@ -28,6 +28,8 @@ libjpeg-dev
 libturbojpeg0
 
 # OpenGL and graphics libraries
+libglfw3
+libgl1-mesa-dri
 libgl1-mesa-dev
 libglu1-mesa-dev
 libegl1-mesa-dev

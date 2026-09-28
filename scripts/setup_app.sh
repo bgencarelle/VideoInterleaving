@@ -188,7 +188,7 @@ log_info "Project Dir:     $PROJECT_DIR"
 
 # Python may be supplied by the selected package manager below.
 # Validate checkout inputs before installing anything.
-for requirement in requirements.txt requirements-modem.txt requirements-scope.txt system-requirements.txt utilities/check_modem_setup.py; do
+for requirement in requirements.txt requirements-modem.txt requirements-scope.txt system-requirements.txt utilities/check_modem_setup.py utilities/check_graphics_setup.py; do
     if [ ! -f "$PROJECT_DIR/$requirement" ]; then
         log_error "Missing $requirement; update the complete checkout"
         exit 1
@@ -556,8 +556,8 @@ PYCHECK
     fi
 
     # Check if key packages are installed
-    if ! "$VENV_DIR/bin/python" -c "import moderngl" 2>/dev/null; then
-        log_verbose "Key package 'moderngl' not found in venv"
+    if ! "$VENV_DIR/bin/python" -c "import glfw; glfw.get_version(); import moderngl, OpenGL.GL" 2>/dev/null; then
+        log_verbose "Required GLFW/ModernGL/OpenGL Python bindings are not importable"
         return 1
     fi
 
@@ -681,9 +681,10 @@ if [ "$DRY_RUN" = false ]; then
         fi
     fi
     "$VENV_DIR/bin/python" "$PROJECT_DIR/utilities/check_modem_setup.py"
+    "$VENV_DIR/bin/python" "$PROJECT_DIR/utilities/check_graphics_setup.py"
     "$VENV_DIR/bin/python" -c 'import cv2, mss; print("Scope dependencies available (OpenCV and mss).")'
 else
-    log_info "[DRY-RUN] Would check modem/scope imports and install OpenCV if missing"
+    log_info "[DRY-RUN] Would check modem, graphics, and scope imports and install OpenCV if missing"
 fi
 
 # --------------------------------------------

@@ -5,7 +5,7 @@
 moderngl  # Full-app renderer; also checked by setup on macOS
 #webp
 mido
-glfw  # Python bindings - requires libglfw3-dev system package (installed via system-requirements.txt)
+glfw  # Python bindings; libglfw3 and Mesa runtime are installed via system-requirements.txt
 PyTurboJPEG==1.8.2
 SimpleWebsocketServer
 PyOpenGL  # Legacy renderer fallback (GLES2 / GL2.1)
