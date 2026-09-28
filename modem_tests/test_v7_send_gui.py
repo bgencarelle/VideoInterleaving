@@ -18,6 +18,26 @@ from tools.v7_send_gui import (InputDevice, OutputDevice, ScreenTarget, SenderGu
                                sample_rate_options, validate_settings)
 
 
+class SenderKeyStub:
+    PRESS = 1
+    REPEAT = 2
+    KEY_ESCAPE = 256
+    KEY_ENTER = 257
+    KEY_TAB = 258
+    KEY_BACKSPACE = 259
+    KEY_RIGHT = 262
+    KEY_LEFT = 263
+    KEY_DOWN = 264
+    KEY_UP = 265
+    KEY_C = 67
+    KEY_I = 73
+    KEY_SPACE = 32
+    KEY_A = 65
+    KEY_V = 86
+    KEY_KP_ENTER = 335
+    MOD_CONTROL = 2
+
+
 class SenderGuiTests(unittest.TestCase):
     def setUp(self):
         self.device = OutputDevice(3, 'Test output', 2, 48000)
@@ -192,7 +212,9 @@ class SenderGuiTests(unittest.TestCase):
         gui._canvas((960, 720))
         self.assertIn('field:source_audio_device', gui.hits)
         self.assertIn('field:source_audio_input_side', gui.hits)
-        click('field:source_audio_device')
+        with patch('tools.v7_send_gui.input_devices',
+                   return_value=(audio_device,)):
+            click('field:source_audio_device')
         self.assertEqual(gui.dropdown, 'source_audio_device')
         gui._canvas((960, 720))
         click('option:0')
@@ -204,6 +226,21 @@ class SenderGuiTests(unittest.TestCase):
         gui._canvas((960, 720))
         click('option:1')
         self.assertEqual(gui.settings['source_audio_input_side'], 'left')
+
+    def test_output_picker_refreshes_hotplugged_devices_without_defaulting(self):
+        gui = SenderGui(())
+        new_device = OutputDevice(7, 'New interface', 2, 48000)
+
+        with patch('tools.v7_send_gui.output_devices',
+                   return_value=(new_device,)), \
+                patch.object(gui, '_sounddevice', return_value=object()):
+            gui._open_dropdown('device')
+
+        self.assertEqual(gui.devices, (new_device,))
+        self.assertEqual(gui._choices('device'),
+                         (('7: New interface · 2 out · 48 kHz', 7),))
+        self.assertIsNone(gui.settings['device'])
+        self.assertEqual(gui.dropdown, 'device')
 
     def test_advanced_downscaler_picker_is_visible_and_selectable(self):
         gui = SenderGui(self.devices)
@@ -403,6 +440,51 @@ class SenderGuiTests(unittest.TestCase):
                              (('USB camera', 'v4l2:/dev/video0'),))
             list_devices.assert_called_once_with()
 
+    def test_empty_camera_picker_shows_a_notice_without_opening_blank_menu(self):
+        gui = SenderGui(self.devices)
+        gui.settings['source'] = 'camera'
+
+        with patch('tools.v7_send_gui.enumerate_camera_sources',
+                   return_value=()):
+            gui._open_dropdown('camera')
+
+        self.assertIsNone(gui.dropdown)
+        self.assertIn('No camera sources', gui.notice)
+
+    def test_keyboard_camera_picker_starts_at_selected_item_and_moves_focus(self):
+        gui = SenderGui(self.devices)
+        gui.settings.update(source='camera', camera='avfoundation:1')
+        choices = (('Camera 0', 'avfoundation:0'),
+                   ('Camera 1', 'avfoundation:1'),
+                   ('Capture card', 'avfoundation:2'))
+
+        with patch('tools.v7_send_gui.enumerate_camera_sources',
+                   return_value=choices):
+            gui._open_dropdown('camera')
+            self.assertEqual(gui.dropdown_scroll, 1)
+            gui._on_key(SenderKeyStub, None, SenderKeyStub.KEY_ENTER, 0,
+                        SenderKeyStub.PRESS, 0)
+            self.assertEqual(gui.settings['camera'], 'avfoundation:1')
+
+            gui._open_dropdown('camera')
+            gui._on_key(SenderKeyStub, None, SenderKeyStub.KEY_DOWN, 0,
+                        SenderKeyStub.PRESS, 0)
+            gui._on_key(SenderKeyStub, None, SenderKeyStub.KEY_KP_ENTER, 0,
+                        SenderKeyStub.PRESS, 0)
+
+        self.assertEqual(gui.settings['camera'], 'avfoundation:2')
+
+    def test_fractional_scroll_moves_sender_dropdown_and_zero_does_nothing(self):
+        gui = SenderGui(self.devices)
+        gui.dropdown = 'source'
+        gui.dropdown_scroll = 2
+
+        gui._on_scroll(None, 1, 0)
+        self.assertEqual(gui.dropdown_scroll, 2)
+        gui._on_scroll(None, 0, 0.5)
+
+        self.assertEqual(gui.dropdown_scroll, 1)
+
     def test_video_and_camera_pick_controls_are_visible_and_clickable(self):
         gui = SenderGui(self.devices)
         gui.settings.update(source='video')
@@ -498,6 +580,33 @@ class SenderGuiTests(unittest.TestCase):
         self.settings.update(profile='fold-500', encode_filter='nearest')
         with self.assertRaisesRegex(ValueError, 'require the Box'):
             build_command(self.settings, self.devices, self.sd)
+
+    def test_values_from_hidden_mono_audio_controls_do_not_block_other_profiles(self):
+        self.settings.update(
+            source='test', profile='fold-500', mono_video_side='invalid',
+            source_audio='invalid', source_audio_input_side='invalid',
+            source_audio_gain='not a number', source_audio_delay_ms='invalid')
+
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+
+        self.assertEqual(args.profile, 'fold-500')
+        self.assertFalse(any(option in command for option in (
+            '--source-audio', '--source-audio-gain',
+            '--source-audio-delay-ms')))
+
+    def test_disabled_mono_audio_ignores_its_hidden_tuning_fields(self):
+        self.settings.update(
+            source='test', profile='mono-fold-500', source_audio='off',
+            source_audio_input_side='invalid', source_audio_gain='invalid',
+            source_audio_delay_ms='invalid')
+
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+
+        self.assertEqual(args.source_audio, 'off')
+        self.assertNotIn('--source-audio-gain', command)
+        self.assertNotIn('--source-audio-delay-ms', command)
 
     def test_missing_device_source_video_path_and_unsupported_output_are_errors(self):
         for update, message in (

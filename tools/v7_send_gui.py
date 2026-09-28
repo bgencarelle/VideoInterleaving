@@ -651,25 +651,35 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
     profile = settings.get('profile')
     if profile not in dict(PROFILE_CHOICES).values():
         raise ValueError('Choose a supported wire profile.')
-    mono_video_side = settings.get('mono_video_side', 'right')
-    if mono_video_side not in dict(MONO_VIDEO_SIDE_CHOICES).values():
+    mono_profile = profile == 'mono-fold-500'
+    mono_video_side = (settings.get('mono_video_side', 'right')
+                       if mono_profile else 'right')
+    if (mono_profile and
+            mono_video_side not in dict(MONO_VIDEO_SIDE_CHOICES).values()):
         raise ValueError('Choose the left or right mono-video output side.')
-    source_audio = settings.get('source_audio', 'source')
-    if source_audio not in dict(SOURCE_AUDIO_CHOICES).values():
+    source_audio = (settings.get('source_audio', 'source')
+                    if mono_profile else 'off')
+    if (mono_profile and
+            source_audio not in dict(SOURCE_AUDIO_CHOICES).values()):
         raise ValueError('Choose video soundtrack, an input device, or Off.')
-    source_audio_input_side = settings.get('source_audio_input_side', 'mix')
-    if source_audio_input_side not in dict(SOURCE_AUDIO_SIDE_CHOICES).values():
-        raise ValueError('Choose a supported source-audio input channel.')
-    source_audio_gain = _float_setting(
-        settings.get('source_audio_gain', '1'), 'Source-audio gain')
-    if not 0.0 <= source_audio_gain <= 4.0:
-        raise ValueError('Source-audio gain must be between 0 and 4.')
-    source_audio_delay_ms = _float_setting(
-        settings.get('source_audio_delay_ms', '0'), 'Source-audio delay')
-    if source_audio_delay_ms < 0:
-        raise ValueError('Source-audio delay cannot be negative.')
+    source_audio_input_side = 'mix'
+    source_audio_gain = 1.0
+    source_audio_delay_ms = 0.0
+    if mono_profile and source_audio != 'off':
+        source_audio_gain = _float_setting(
+            settings.get('source_audio_gain', '1'), 'Source-audio gain')
+        if not 0.0 <= source_audio_gain <= 4.0:
+            raise ValueError('Source-audio gain must be between 0 and 4.')
+        source_audio_delay_ms = _float_setting(
+            settings.get('source_audio_delay_ms', '0'), 'Source-audio delay')
+        if source_audio_delay_ms < 0:
+            raise ValueError('Source-audio delay cannot be negative.')
     audio_device = None
-    if profile == 'mono-fold-500' and source_audio == 'device':
+    if mono_profile and source_audio == 'device':
+        source_audio_input_side = settings.get(
+            'source_audio_input_side', 'mix')
+        if source_audio_input_side not in dict(SOURCE_AUDIO_SIDE_CHOICES).values():
+            raise ValueError('Choose a supported source-audio input channel.')
         audio_device = next((item for item in audio_devices
                              if item.index == settings.get('source_audio_device')),
                             None)
@@ -1074,11 +1084,15 @@ class SenderGui:
         if self.process is not None:
             self.notice = 'Settings are locked while the sender is running.'
             return
-        if dest == 'source_audio_device' and not self.audio_devices:
-            self.notice = (self.audio_device_error or
-                           'No audio input devices are available.')
-            self.dirty = True
-            return
+        if dest in ('device', 'source_audio_device'):
+            choices_available = self._refresh_audio_device_choices(dest)
+            if not choices_available:
+                self.dropdown = None
+                self.notice = (self.device_error if dest == 'device' else
+                               self.audio_device_error or
+                               'No audio input devices are available.')
+                self.dirty = True
+                return
         if dest == 'camera':
             try:
                 self.capture_choice_cache[dest] = enumerate_camera_sources()
@@ -1109,8 +1123,70 @@ class SenderGui:
                 self.dirty = True
                 return
         self.dropdown = dest
-        self.dropdown_scroll = 0
+        options = self._choices(dest)
+        if not options:
+            self.dropdown = None
+            self.notice = {
+                'camera': 'No camera sources are available.',
+                'screen_target': 'No displays are available.',
+            }.get(dest, 'No choices are available for this option.')
+            self.dirty = True
+            return
+        current = self.settings.get(dest)
+        self.dropdown_scroll = next(
+            (index for index, (_label, value) in enumerate(options)
+             if value == current), 0)
         self.dirty = True
+
+    def _refresh_audio_device_choices(self, dest):
+        if dest == 'device':
+            previous = self._device()
+            try:
+                devices = output_devices(self._sounddevice())
+                error = '' if devices else 'No audio output devices are available.'
+            except Exception as exc:
+                devices = ()
+                error = f'Audio device discovery failed: {exc}'
+            self.devices = tuple(devices)
+            self.device_error = error
+            current = next((device for device in self.devices
+                            if previous is not None and
+                            device.index == previous.index and
+                            device.name == previous.name), None)
+            if self.settings['device'] is not None:
+                if current is None:
+                    self.settings['device'] = None
+                    self.settings['rate'] = None
+                    self.notice = ('Selected output device is unavailable; '
+                                   'choose an available device.')
+                else:
+                    self.settings['device'] = current.index
+            self.rate_cache.clear()
+            return bool(self.devices)
+
+        previous = next((device for device in self.audio_devices
+                         if device.index == self.settings['source_audio_device']),
+                        None)
+        try:
+            devices = input_devices(self._sounddevice())
+            error = '' if devices else 'No audio input devices are available.'
+        except Exception as exc:
+            devices = ()
+            error = f'Audio input enumeration failed: {exc}'
+        self.audio_devices = tuple(devices)
+        self.audio_device_error = error
+        current = next((device for device in self.audio_devices
+                        if previous is not None and
+                        device.index == previous.index and
+                        device.name == previous.name), None)
+        if self.settings['source_audio_device'] is not None:
+            if current is None:
+                self.settings['source_audio_device'] = None
+                self.notice = ('Selected audio input is unavailable; '
+                               'choose an available device.')
+            else:
+                self.settings['source_audio_device'] = current.index
+        return bool(self.audio_devices)
 
     def _sounddevice(self):
         if self._sd is None:
@@ -1469,7 +1545,10 @@ class SenderGui:
         options = self._choices(dest)
         max_items = min(8, len(options))
         self.dropdown_scroll = max(
-            0, min(self.dropdown_scroll, max(0, len(options)-max_items)))
+            0, min(self.dropdown_scroll, max(0, len(options)-1)))
+        first_option = max(
+            0, min(self.dropdown_scroll-max_items+1,
+                   max(0, len(options)-max_items)))
         anchor = self.hits.get(f'field:{dest}')
         if anchor is None:
             return
@@ -1482,11 +1561,14 @@ class SenderGui:
                                radius=4, fill=(9, 18, 25),
                                outline=(98, 145, 169), width=1)
         for index in range(max_items):
-            option_index = self.dropdown_scroll+index
+            option_index = first_option+index
             label, value = options[option_index]
             y = top+2+index*28
             if value == self.settings[dest]:
                 draw.rectangle((left+2, y, right-2, y+26), fill=(42, 78, 99))
+            if option_index == self.dropdown_scroll:
+                draw.rectangle((left+2, y, right-2, y+26),
+                               outline=(117, 174, 199), width=1)
             draw.text((left+9, y+6), _fit(label, small, right-left-18),
                       font=small, fill=(235, 241, 246))
             self.hits[f'option:{option_index}'] = (left, y, right, y+26)
@@ -1748,17 +1830,19 @@ class SenderGui:
             self.dirty = True
 
     def _on_scroll(self, _window, _xoffset, yoffset):
+        if not yoffset:
+            return
+        delta = -1 if yoffset > 0 else 1
         if self.dropdown is not None:
             options = self._choices(self.dropdown)
             self.dropdown_scroll = max(
-                0, min(max(0, len(options)-1), self.dropdown_scroll-
-                       int(yoffset)))
+                0, min(max(0, len(options)-1), self.dropdown_scroll+delta))
         elif self.page == 'setup':
             visible_count = max(
                 1, (self.height-131-137)//self.ROW_HEIGHT)
             self.scroll = max(
                 0, min(max(0, len(self._visible_fields())-visible_count),
-                       self.scroll-int(yoffset)))
+                       self.scroll+delta))
         self.dirty = True
 
     def _on_drop(self, _window, paths):

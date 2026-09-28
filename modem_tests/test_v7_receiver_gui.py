@@ -40,6 +40,8 @@ class KeyStub:
     REPEAT = 2
     KEY_F = 70
     KEY_I = 73
+    KEY_C = 67
+    KEY_TAB = 258
     KEY_ESCAPE = 256
     KEY_ENTER = 257
     KEY_DOWN = 264
@@ -196,6 +198,73 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Select an input audio device'):
             gui._build_arguments()
 
+    def test_enter_on_empty_device_list_closes_dropdown_without_crashing(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        gui.dropdown = next(index for index, field in enumerate(gui.fields)
+                            if field.dest == 'device')
+
+        gui._on_key(KeyStub, None, KeyStub.KEY_ENTER, 0, KeyStub.PRESS, 0)
+
+        self.assertIsNone(gui.dropdown)
+        self.assertIn('No choices', gui.notice)
+
+    def test_empty_input_picker_does_not_open_a_blank_menu(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        field_index = next(index for index, field in enumerate(gui.fields)
+                           if field.dest == 'device')
+        gui._canvas((960, 720))
+        left, top, right, bottom = gui.hits[f'row:{field_index}']
+
+        with patch('tools.v7_receiver_gui._input_devices',
+                   return_value=((), 'No audio inputs attached.')):
+            gui._on_mouse(
+                MouseStub(((left+right)/2, (top+bottom)/2)), None, 0, 1, 0)
+
+        self.assertIsNone(gui.dropdown)
+        self.assertEqual(gui.notice, 'No audio inputs attached.')
+
+    def test_numpad_enter_selects_the_highlighted_device(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser,
+                          (('first input', 3), ('second input', 9)))
+        field_index = next(index for index, field in enumerate(gui.fields)
+                           if field.dest == 'device')
+        gui._canvas((960, 720))
+        left, top, right, bottom = gui.hits[f'row:{field_index}']
+
+        choices = (('first input', 3), ('second input', 9))
+        identities = {
+            3: {'name': 'first input', 'hostapi': 'test'},
+            9: {'name': 'second input', 'hostapi': 'test'},
+        }
+        with patch('tools.v7_receiver_gui._input_devices',
+                   return_value=(choices, '')), \
+                patch('tools.v7_receiver_gui._device_identity',
+                      side_effect=lambda index, _kind: identities[index]), \
+                patch.object(gui, '_persist_preferences'):
+            gui._on_mouse(
+                MouseStub(((left+right)/2, (top+bottom)/2)), None, 0, 1, 0)
+            gui._on_key(KeyStub, None, KeyStub.KEY_DOWN, 0,
+                        KeyStub.PRESS, 0)
+            gui._on_key(KeyStub, None, KeyStub.KEY_KP_ENTER, 0,
+                        KeyStub.PRESS, 0)
+
+        self.assertEqual(gui.fields[field_index].value, 9)
+        self.assertIsNone(gui.dropdown)
+
+    def test_zero_vertical_scroll_does_not_move_receiver_dropdown(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser,
+                          (('test input', 3),))
+        field_index = next(index for index, field in enumerate(gui.fields)
+                           if field.label == 'Display upscaler')
+        gui.dropdown = field_index
+        gui.dropdown_scroll = 0
+
+        gui._on_scroll(None, 1, 0)
+        self.assertEqual(gui.dropdown_scroll, 0)
+        gui._on_scroll(None, 0, -0.5)
+
+        self.assertEqual(gui.dropdown_scroll, 1)
+
     def test_wire_profile_and_decoder_tuners_are_not_gui_options(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser,
                           (('test input device', 3),))
@@ -220,6 +289,33 @@ class ReceiverGuiOptionTests(unittest.TestCase):
                       if field.dest == 'device')
         self.assertEqual(device.value, 4)
         self.assertEqual(gui._build_arguments().device, 4)
+
+    def test_input_picker_refreshes_hotplugged_devices_when_opened(self):
+        with patch('tools.v7_receiver_gui._load_preferences', return_value={}):
+            gui = ReceiverGui(
+                self, self.root_parser, self.receive_parser, (),
+                preference_path='unused-preferences.json')
+        field_index = next(index for index, field in enumerate(gui.fields)
+                           if field.dest == 'device')
+        gui._canvas((960, 720))
+        left, top, right, bottom = gui.hits[f'row:{field_index}']
+        choices = (('newly connected input', 12),)
+
+        with patch('tools.v7_receiver_gui._input_devices',
+                   return_value=(choices, '')), \
+                patch('tools.v7_receiver_gui._device_identity',
+                      return_value={'name': 'newly connected input',
+                                    'hostapi': 'test'}), \
+                patch.object(gui, '_persist_preferences'):
+            gui._on_mouse(
+                MouseStub(((left+right)/2, (top+bottom)/2)), None, 0, 1, 0)
+
+            self.assertEqual(gui.fields[field_index].options, choices)
+            self.assertEqual(gui.dropdown, field_index)
+            gui._on_key(KeyStub, None, KeyStub.KEY_ENTER, 0,
+                        KeyStub.PRESS, 0)
+
+        self.assertEqual(gui.fields[field_index].value, 12)
 
     def test_selected_cli_options_reach_receiver_arguments(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser,
@@ -400,11 +496,43 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         next(field for field in gui.fields
              if field.dest == 'show_diagnostics').value = True
 
-        gui._canvas((960, 720))
+        canvas = Image.fromarray(gui._canvas((960, 720))).convert('RGB')
 
         self.assertNotIn('fullscreen', gui.hits)
-        self.assertFalse(gui._diagnostics_visible())
-        self.assertEqual(gui._picture_box((960, 720))[1], 8)
+        self.assertTrue(gui._diagnostics_visible())
+        self.assertEqual(gui._picture_box((960, 720)), (0, 0, 960, 526))
+        self.assertEqual(canvas.getpixel((0, 0)), (0, 0, 0))
+        self.assertNotEqual(canvas.getpixel((0, 710)), (0, 0, 0))
+
+    def test_fullscreen_without_info_is_black_image_only(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        gui.page = 'info'
+        gui.fullscreen = True
+        gui.toolbar_visible = True
+
+        canvas = Image.fromarray(gui._canvas((960, 720))).convert('RGB')
+
+        self.assertTrue(gui._video_fullscreen())
+        self.assertIsNone(canvas.getbbox())
+        self.assertEqual(gui._picture_box((960, 720)), (0, 0, 960, 720))
+
+    def test_sync_warning_clear_marks_hidden_info_view_dirty(self):
+        meter = {'decoded': 4, 'input_fps': 12.0, 'sync_warning': True}
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        gui.page = 'info'
+        gui.last_diagnostics_poll = 0.0
+        gui.live_meter = dict(meter)
+        gui.live_sync_warning = True
+        gui.dirty = False
+        gui.v7_live = SimpleNamespace(RECEIVER_GUI_STATUS={'meter': meter})
+        meter['sync_warning'] = False
+
+        with patch('tools.v7_receiver_gui.time.monotonic', return_value=1.0):
+            gui._poll_diagnostics()
+
+        self.assertTrue(gui.dirty)
+        self.assertFalse(gui.live_meter['sync_warning'])
+        self.assertFalse(gui.live_sync_warning)
 
     def test_fullscreen_i_reveals_and_toggles_diagnostics(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
@@ -416,7 +544,7 @@ class ReceiverGuiOptionTests(unittest.TestCase):
 
         field = next(field for field in gui.fields
                      if field.dest == 'show_diagnostics')
-        self.assertTrue(gui.toolbar_visible)
+        self.assertFalse(gui.toolbar_visible)
         self.assertTrue(field.value)
         self.assertTrue(gui._diagnostics_visible())
 
@@ -427,7 +555,7 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         gui.image_only_previous_fullscreen = False
         gui.fullscreen = True
         gui._glfw = SimpleNamespace(
-            CURSOR=1, CURSOR_NORMAL=0,
+            CURSOR=1, CURSOR_NORMAL=0, CURSOR_HIDDEN=2,
             set_input_mode=lambda *_args: None)
         gui._window = object()
         toggles = []
@@ -477,7 +605,7 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertFalse(gui.image_only)
         self.assertTrue(gui.fullscreen)
         self.assertEqual(gui.page, 'info')
-        self.assertTrue(gui.toolbar_visible)
+        self.assertFalse(gui.toolbar_visible)
         self.assertTrue(diagnostics.value)
 
     def test_fullscreen_f_works_while_text_editing(self):
@@ -526,7 +654,8 @@ class ReceiverGuiOptionTests(unittest.TestCase):
 
         gui._poll_diagnostics()
 
-        self.assertIs(gui.live_meter, meter)
+        self.assertEqual(gui.live_meter, meter)
+        self.assertIsNot(gui.live_meter, meter)
         self.assertIsNone(gui.live_diagnostics)
         self.assertTrue(gui.dirty)
 
@@ -593,6 +722,31 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertEqual(started_with, [2.5])
         self.assertFalse(gui.editing)
 
+    def test_invalid_active_edit_blocks_start_but_not_stop(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        volume = next(field for field in gui.fields
+                       if field.dest == 'audio_volume')
+        gui.selected = gui.fields.index(volume)
+        gui.editing = True
+        gui.edit_buffer = '1.5'
+        gui.hits = {'start_stop': (0, 0, 100, 40)}
+        gui._start_receiver = Mock()
+
+        gui._on_mouse(MouseStub((20, 20)), None, 0, 1, 0)
+
+        gui._start_receiver.assert_not_called()
+        self.assertEqual(volume.value, 1.0)
+        self.assertIn('between 0 and 1', gui.notice)
+
+        gui.started = True
+        gui.editing = True
+        gui.edit_buffer = 'invalid'
+        gui._stop_receiver = Mock()
+
+        gui._on_mouse(MouseStub((20, 20)), None, 0, 1, 0)
+
+        gui._stop_receiver.assert_called_once_with()
+
     def test_switching_tabs_commits_active_text_edit(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
         text_field = next(field for field in gui.fields
@@ -651,6 +805,29 @@ class ReceiverGuiOptionTests(unittest.TestCase):
             self.assertTrue(values['audio_muted'])
             self.assertEqual(values['freewheel_seconds'], 3.5)
             self.assertFalse(values['show_sync_warning'])
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_malformed_saved_device_identities_are_ignored(self):
+        path = ROOT/'tmp'/'receiver-gui-malformed-preferences-test.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            'input_device': 'not an identity object',
+            'output_device': ['also invalid'],
+        }), encoding='utf-8')
+        try:
+            with patch('tools.v7_receiver_gui._device_identity',
+                       return_value={'name': 'Available input',
+                                     'hostapi': 'test'}):
+                gui = ReceiverGui(
+                    self, self.root_parser, self.receive_parser,
+                    (('available input', 3),), audio_output_choices=(
+                        ('available output', 5),), preference_path=path)
+            values = {field.dest: field.value for field in gui.fields}
+            self.assertEqual(values['device'], 3)
+            self.assertIsNone(values['audio_output_device'])
+            self.assertIsNone(gui.unavailable_input_identity)
+            self.assertIsNone(gui.unavailable_output_identity)
         finally:
             path.unlink(missing_ok=True)
 

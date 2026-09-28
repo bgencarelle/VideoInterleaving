@@ -259,7 +259,9 @@ def _device_identity(index, kind):
 
 
 def _find_device(identity, choices, kind):
-    if identity is None:
+    if (not isinstance(identity, dict) or
+            not isinstance(identity.get('name'), str) or
+            not isinstance(identity.get('hostapi'), str)):
         return None
     for _label, index in choices:
         try:
@@ -277,7 +279,21 @@ def _load_preferences(path=RECEIVER_PREFERENCES_PATH):
         values = json.loads(Path(path).read_text(encoding='utf-8'))
     except (OSError, ValueError, TypeError):
         return {}
-    return values if isinstance(values, dict) else {}
+    if not isinstance(values, dict):
+        return {}
+    for key in ('input_device', 'output_device'):
+        identity = values.get(key)
+        if identity is not None:
+            if (not isinstance(identity, dict) or
+                    not isinstance(identity.get('name'), str) or
+                    not isinstance(identity.get('hostapi'), str)):
+                values[key] = None
+            else:
+                values[key] = {
+                    'name': identity['name'],
+                    'hostapi': identity['hostapi'],
+                }
+    return values
 
 
 def _save_preferences(values, path=RECEIVER_PREFERENCES_PATH):
@@ -576,6 +592,7 @@ class ReceiverGui:
         self.live_decode_info = None
         self.live_meter = None
         self.live_meter_json = None
+        self.live_sync_warning = False
         self.started = False
         self.ever_started = False
         self.receiver_thread = None
@@ -757,6 +774,33 @@ class ReceiverGui:
         self.unavailable_input_identity = None
         return True
 
+    def _refresh_input_choices(self):
+        field = next((field for field in self.fields
+                      if field.dest == 'device'), None)
+        if field is None:
+            return
+        choices, error = _input_devices()
+        field.options = choices
+        self.device_error = error
+        if not choices:
+            field.value = None
+            if self.input_device_identity is not None:
+                self.unavailable_input_identity = self.input_device_identity
+            return
+        if self.input_device_identity is not None:
+            selected = _find_device(
+                self.input_device_identity, choices, 'input')
+            if selected is None:
+                field.value = None
+                self.unavailable_input_identity = self.input_device_identity
+                name = self.input_device_identity.get('name', 'Saved input')
+                self.notice = f'{name} is unavailable; reselect the input device.'
+                return
+            field.value = selected
+        elif field.value not in {value for _label, value in choices}:
+            field.value = choices[0][1]
+        self.unavailable_input_identity = None
+
     def _toggle_fullscreen(self, glfw, window):
         primary = glfw.get_primary_monitor()
         if primary is None:
@@ -780,11 +824,17 @@ class ReceiverGui:
         focus_window = getattr(glfw, 'focus_window', None)
         if focus_window is not None:
             focus_window(window)
+        if (hasattr(glfw, 'set_input_mode') and hasattr(glfw, 'CURSOR') and
+                hasattr(glfw, 'CURSOR_HIDDEN') and
+                hasattr(glfw, 'CURSOR_NORMAL')):
+            glfw.set_input_mode(
+                window, glfw.CURSOR,
+                glfw.CURSOR_HIDDEN if self.fullscreen else glfw.CURSOR_NORMAL)
         self.last_ui_activity = time.monotonic()
         self.dirty = True
 
     def _reveal_toolbar(self):
-        if self.image_only:
+        if self.image_only or self._video_fullscreen():
             return
         was_hidden = not self.toolbar_visible
         self.toolbar_visible = True
@@ -801,7 +851,7 @@ class ReceiverGui:
         self.dirty = True
 
     def _on_cursor_position(self, _window, _x, y):
-        if not self.fullscreen or self.image_only:
+        if not self.fullscreen or self.image_only or self._video_fullscreen():
             return
         now = time.monotonic()
         if self.toolbar_visible:
@@ -813,7 +863,7 @@ class ReceiverGui:
 
     def _update_toolbar_visibility(self, now, cursor_y):
         was_visible = self.toolbar_visible
-        if self.image_only:
+        if self.image_only or self._video_fullscreen():
             return
         if not self.fullscreen:
             self.toolbar_visible = True
@@ -849,6 +899,7 @@ class ReceiverGui:
             if self._glfw is not None and self._window is not None:
                 self._glfw.set_input_mode(
                     self._window, self._glfw.CURSOR,
+                    self._glfw.CURSOR_HIDDEN if self.fullscreen else
                     self._glfw.CURSOR_NORMAL)
             if (self.fullscreen and not self.image_only_previous_fullscreen and
                     self._glfw is not None):
@@ -859,6 +910,10 @@ class ReceiverGui:
                 break
         self.picture_dirty = True
         self.dirty = True
+
+    def _video_fullscreen(self):
+        """Live fullscreen is an image-on-black view, with optional info panel."""
+        return self.fullscreen and self.page == 'info' and not self.image_only
 
     def _build_arguments(self):
         words = ['receive', '--headless']
@@ -897,8 +952,9 @@ class ReceiverGui:
             glfw.post_empty_event()
 
     def _start_receiver(self):
-        if self.editing:
-            self._finish_edit(self.fields[self.selected])
+        if (self.editing and
+                not self._finish_edit(self.fields[self.selected])):
+            return
         if self.started:
             self._stop_receiver()
             return
@@ -942,6 +998,7 @@ class ReceiverGui:
         self.live_decode_info = None
         self.live_meter = None
         self.live_meter_json = None
+        self.live_sync_warning = False
         args.stop_event = self.receiver_stop
         self.notice = f'Starting receiver on {args.device!r}…'
         fullscreen_field = next(
@@ -1256,8 +1313,11 @@ class ReceiverGui:
                           round(float(old_meter.get('input_fps', 0.0)), 1))
             new_footer = (meter.get('decoded'),
                           round(float(meter.get('input_fps', 0.0)), 1))
-            self.live_meter = meter
-            if new_footer != old_footer:
+            warning = bool(meter.get('sync_warning'))
+            warning_changed = warning != self.live_sync_warning
+            self.live_sync_warning = warning
+            self.live_meter = dict(meter)
+            if new_footer != old_footer or warning_changed:
                 self.dirty = True
             return
         provider = snapshot.get('diagnostics')
@@ -1297,6 +1357,8 @@ class ReceiverGui:
                                    if meter_json is not None else None)
             except json.JSONDecodeError:
                 self.live_meter = {'raw': meter_json}
+            self.live_sync_warning = bool(
+                (self.live_meter or {}).get('sync_warning'))
             self.dirty = True
 
     def _render_config(self, image, draw, font, small, mono):
@@ -1374,7 +1436,10 @@ class ReceiverGui:
             menu_items = list(field.options)
             max_items = min(7, len(menu_items))
             self.dropdown_scroll = max(
-                0, min(self.dropdown_scroll, len(menu_items)-max_items))
+                0, min(self.dropdown_scroll, max(0, len(menu_items)-1)))
+            first_option = max(
+                0, min(self.dropdown_scroll-max_items+1,
+                       max(0, len(menu_items)-max_items)))
             try:
                 field_position = order.index(self.dropdown)
             except ValueError:
@@ -1389,12 +1454,15 @@ class ReceiverGui:
                                    fill=(12, 22, 31),
                                    outline=(93, 132, 155), width=1)
             for menu_index in range(max_items):
-                option_index = self.dropdown_scroll+menu_index
+                option_index = first_option+menu_index
                 label, value = menu_items[option_index]
                 option_y = menu_top+2+menu_index*29
                 if value == field.value:
                     draw.rectangle((left+1, option_y, right-1, option_y+28),
                                    fill=(42, 75, 96))
+                if option_index == self.dropdown_scroll:
+                    draw.rectangle((left+1, option_y, right-1, option_y+28),
+                                   outline=(117, 174, 199), width=1)
                 shown = label
                 while shown and small.getlength(shown) > right-left-20:
                     shown = shown[:-2]+'…'
@@ -1422,10 +1490,14 @@ class ReceiverGui:
     def _diagnostics_visible(self):
         enabled = any(field.value for field in self.fields
                       if field.dest == 'show_diagnostics')
-        return enabled and (not self.fullscreen or self.toolbar_visible)
+        return enabled and not self.image_only
 
     def _picture_box(self, size):
         width, height = size
+        if self._video_fullscreen():
+            details_height = (round(height*.27)
+                              if self._diagnostics_visible() else 0)
+            return 0, 0, max(1, width), max(1, height-details_height)
         chrome_visible = not self.fullscreen or self.toolbar_visible
         top = (TOOLBAR_HEIGHT if chrome_visible else 0)+8
         details_height = round(height*.27) if self._diagnostics_visible() else 0
@@ -1449,17 +1521,20 @@ class ReceiverGui:
 
     def _render_info(self, image, draw, font, small, mono):
         width, height = image.size
+        fullscreen_image = self._video_fullscreen()
         left, top, picture_w, picture_h = self._picture_box(image.size)
-        draw.rectangle((left, top, left+picture_w, top+picture_h),
-                       fill=(14, 19, 24), outline=(49, 69, 83), width=1)
-        if self.current_frame is None and not self.started:
+        if not fullscreen_image:
+            draw.rectangle((left, top, left+picture_w, top+picture_h),
+                           fill=(14, 19, 24), outline=(49, 69, 83), width=1)
+        if not fullscreen_image and self.current_frame is None and not self.started:
             label = 'Choose an input in Setup, then press Start.'
             draw.text((left+18, top+18), label,
                       fill=(205, 219, 229), font=font)
-        elif self.current_frame is None:
+        elif not fullscreen_image and self.current_frame is None:
             draw.text((left+18, top+18), 'Waiting for the first decoded picture…',
                       fill=(205, 219, 229), font=font)
-        if (self.live_meter or {}).get('sync_warning'):
+        if ((self.live_meter or {}).get('sync_warning') and
+                (not fullscreen_image or self._diagnostics_visible())):
             warning = (left+14, top+12, left+194, top+43)
             draw.rounded_rectangle(warning, radius=5, fill=(125, 42, 31),
                                    outline=(238, 130, 93), width=1)
@@ -1468,7 +1543,9 @@ class ReceiverGui:
 
         if self._diagnostics_visible():
             panel_height = round(height*.27)
-            footer_height = 38 if not self.fullscreen or self.toolbar_visible else 0
+            footer_height = (0 if fullscreen_image else
+                             38 if not self.fullscreen or self.toolbar_visible
+                             else 0)
             panel_top = height-footer_height-panel_height
             diagnostics = self.live_diagnostics or {
                 'status': ('ACQUIRING',),
@@ -1483,7 +1560,8 @@ class ReceiverGui:
                 (width, panel_height), diagnostics), mode='RGBA')
             image.alpha_composite(panel, (0, panel_top))
 
-        chrome_visible = not self.fullscreen or self.toolbar_visible
+        chrome_visible = not fullscreen_image and (
+            not self.fullscreen or self.toolbar_visible)
         if chrome_visible:
             footer_top = height-38
             draw.rectangle((0, footer_top, width, height), fill=(10, 18, 25))
@@ -1558,11 +1636,14 @@ class ReceiverGui:
 
     def _canvas(self, size):
         width, height = size
-        image = Image.new('RGBA', (width, height), (8, 14, 20, 255))
+        background = (0, 0, 0, 255) if self._video_fullscreen() else (
+            8, 14, 20, 255)
+        image = Image.new('RGBA', (width, height), background)
         draw = ImageDraw.Draw(image)
         font, small, mono = _font(17), _font(13), _font(12, mono=True)
         self.hits = {}
-        chrome_visible = not self.fullscreen or self.toolbar_visible
+        chrome_visible = not self._video_fullscreen() and (
+            not self.fullscreen or self.toolbar_visible)
         if chrome_visible:
             draw.rectangle((0, 0, width, TOOLBAR_HEIGHT),
                            fill=(10, 18, 25, 255))
@@ -1602,7 +1683,8 @@ class ReceiverGui:
             self._render_config(image, draw, font, small, mono)
         else:
             self._render_info(image, draw, font, small, mono)
-            self._render_display_menu(image, draw, small)
+            if not self._video_fullscreen():
+                self._render_display_menu(image, draw, small)
         return np.ascontiguousarray(np.asarray(image, dtype=np.uint8))
 
     def _config_field_indexes(self):
@@ -1644,8 +1726,9 @@ class ReceiverGui:
         if (self.display_menu_open and not is_display_choice and
                 hit != 'mode_button'):
             self.display_menu_open = False
+        edit_valid = True
         if self.editing:
-            self._finish_edit(self.fields[self.selected])
+            edit_valid = self._finish_edit(self.fields[self.selected])
         if hit == 'config_tab':
             self.page, self.dropdown = 'config', None
             self.display_menu_open = False
@@ -1664,7 +1747,7 @@ class ReceiverGui:
         elif hit == 'start_stop':
             if self.started:
                 self._stop_receiver()
-            else:
+            elif edit_valid:
                 self._start_receiver()
         elif hit == 'mode_button':
             self.dropdown = None
@@ -1680,7 +1763,11 @@ class ReceiverGui:
         elif hit and hit.startswith('option:') and self.dropdown is not None:
             index = int(hit.split(':', 1)[1])
             field = self.fields[self.dropdown]
-            self._select_choice(field, field.options[index][1])
+            if 0 <= index < len(field.options):
+                self._select_choice(field, field.options[index][1])
+            else:
+                self.dropdown = None
+                self.dirty = True
         elif hit and hit.startswith('row:') and self.page == 'config':
             index = int(hit.split(':', 1)[1])
             self.selected = index
@@ -1693,10 +1780,25 @@ class ReceiverGui:
                 if field.kind == 'bool':
                     self._adjust_field(field, 1)
                 elif field.kind == 'choice':
-                    if field.dest == 'audio_output_device':
+                    if field.dest == 'device':
+                        self._refresh_input_choices()
+                        if not field.options:
+                            self.dropdown = None
+                            self.notice = (self.device_error or
+                                           'No audio input devices are available.')
+                            self.dirty = True
+                            return
+                    elif field.dest == 'audio_output_device':
                         self._refresh_audio_output_choices()
-                    self.dropdown = (None if self.dropdown == index else index)
-                    self.dropdown_scroll = 0
+                    if self.dropdown == index:
+                        self.dropdown = None
+                        self.dropdown_scroll = 0
+                    else:
+                        self.dropdown = index
+                        self.dropdown_scroll = next(
+                            (option_index for option_index, (_label, value)
+                             in enumerate(field.options)
+                             if value == field.value), 0)
                     if len(field.options) <= 1 and self.audio_output_error:
                         self.notice = self.audio_output_error
                 elif field.kind == 'folder':
@@ -1803,20 +1905,39 @@ class ReceiverGui:
                 self._toggle_fullscreen(glfw, window)
             else:
                 glfw.set_window_should_close(window, True)
-        elif key == glfw.KEY_ENTER and self.page == 'config':
+        elif key in (glfw.KEY_ENTER, glfw.KEY_KP_ENTER) and self.page == 'config':
             if self.dropdown is not None:
-                self._select_choice(self.fields[self.dropdown],
-                                    self.fields[self.dropdown].options[
-                                        self.dropdown_scroll][1])
+                field = self.fields[self.dropdown]
+                if (field.options and
+                        0 <= self.dropdown_scroll < len(field.options)):
+                    self._select_choice(
+                        field, field.options[self.dropdown_scroll][1])
+                else:
+                    self.dropdown = None
+                    self.notice = (self.device_error if field.dest == 'device'
+                                   and self.device_error else
+                                   'No choices are available for this option.')
+                    self.dirty = True
             else:
                 field = self.fields[self.selected]
                 if field.kind == 'bool':
                     self._adjust_field(field, 1)
                 elif field.kind == 'choice':
-                    if field.dest == 'audio_output_device':
+                    if field.dest == 'device':
+                        self._refresh_input_choices()
+                        if not field.options:
+                            self.dropdown = None
+                            self.notice = (self.device_error or
+                                           'No audio input devices are available.')
+                            self.dirty = True
+                            return
+                    elif field.dest == 'audio_output_device':
                         self._refresh_audio_output_choices()
                     self.dropdown = self.selected
-                    self.dropdown_scroll = 0
+                    self.dropdown_scroll = next(
+                        (option_index for option_index, (_label, value)
+                         in enumerate(field.options) if value == field.value),
+                        0)
                     if (field.dest == 'audio_output_device' and
                             len(field.options) <= 1 and
                             self.audio_output_error):
@@ -1892,7 +2013,7 @@ class ReceiverGui:
                     if field.dest == 'freewheel_seconds' else
                     'Passthrough volume must be between 0 and 1.')
                 self.dirty = True
-                return
+                return False
             field.value = number
         else:
             field.value = value
@@ -1902,6 +2023,7 @@ class ReceiverGui:
         if field.dest in ('freewheel_seconds', 'audio_volume', 'save_dir'):
             self._persist_preferences()
         self.dirty = True
+        return True
 
     def _choose_save_directory(self, field):
         try:
@@ -1916,6 +2038,8 @@ class ReceiverGui:
         self.dirty = True
 
     def _on_scroll(self, _window, _xoffset, yoffset):
+        if not yoffset:
+            return
         self._reveal_toolbar()
         delta = -1 if yoffset > 0 else 1
         if self.display_menu_open:
@@ -2192,7 +2316,7 @@ class ReceiverGui:
                 if self.image_only:
                     if self.dirty or picture_needs_draw:
                         context.viewport = (0, 0, *framebuffer_size)
-                        context.clear(.035, .045, .055, 1.0)
+                        context.clear(0.0, 0.0, 0.0, 1.0)
                         if picture_uploaded() and self.current_frame is not None:
                             aspect = self.v7_live.P.V7_ASPECT_RATIOS[
                                 self.current_frame.aspect & 7]
@@ -2304,8 +2428,6 @@ class ReceiverGui:
             if window is not None:
                 glfw.destroy_window(window)
             glfw.terminate()
-            self._window = None
-            self._glfw = None
 
 
 def main(v7_live_module=None):
