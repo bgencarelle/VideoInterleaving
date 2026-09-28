@@ -48,11 +48,12 @@ DISPLAY_MENU_WIDTH = 250
 RECEIVER_PREFERENCES_PATH = (
     Path.home()/'.config'/'modemTest'/'v7_receiver_gui.json')
 BASIC_OPTION_DESTS = frozenset((
-    'device', 'audio_output_device', 'audio_muted', 'freewheel_seconds',
+    'device', 'audio_output_device', 'audio_muted', 'audio_volume',
+    'freewheel_seconds',
     'show_sync_warning', 'fullscreen', 'show_diagnostics', 'image_only',
     'save_dir'))
 LIVE_RUNTIME_DESTS = frozenset((
-    'audio_output_device', 'audio_muted', 'freewheel_seconds',
+    'audio_output_device', 'audio_muted', 'audio_volume', 'freewheel_seconds',
     'show_sync_warning'))
 HIDDEN_DECODE_OPTIONS = frozenset((
     'direction', 'fixture', 'experimental_fold', 'baseline',
@@ -256,6 +257,7 @@ def _field_label(action):
         'device': 'Input audio device',
         'audio_output_device': 'Passthrough output device',
         'audio_muted': 'Mute passthrough audio',
+        'audio_volume': 'Passthrough volume (0–1)',
         'freewheel_seconds': 'Freewheel before sync warning (s)',
         'show_sync_warning': 'Show sync-loss warning',
         'direction': 'Playback direction',
@@ -591,6 +593,14 @@ class ReceiverGui:
                     freewheel.value = value
             except (TypeError, ValueError):
                 pass
+        volume = by_dest.get('audio_volume')
+        if volume is not None and 'audio_volume' in self.preferences:
+            try:
+                value = float(self.preferences['audio_volume'])
+                if np.isfinite(value) and 0.0 <= value <= 1.0:
+                    volume.value = value
+            except (TypeError, ValueError):
+                pass
         save_dir = by_dest.get('save_dir')
         if save_dir is not None:
             save_dir.value = self.preferences.get('save_dir')
@@ -626,7 +636,7 @@ class ReceiverGui:
             'input_device': self.input_device_identity,
             'output_device': self.audio_output_identity,
         }
-        for dest in ('audio_muted', 'freewheel_seconds',
+        for dest in ('audio_muted', 'audio_volume', 'freewheel_seconds',
                      'show_sync_warning', 'save_dir'):
             if dest in by_dest:
                 values[dest] = by_dest[dest].value
@@ -838,7 +848,8 @@ class ReceiverGui:
             audio_input_identity=self.input_device_identity,
             audio_muted=args.audio_muted,
             freewheel_seconds=args.freewheel_seconds,
-            show_sync_warning=args.show_sync_warning)
+            show_sync_warning=args.show_sync_warning,
+            audio_volume=args.audio_volume)
         args.runtime_options = self.runtime_options
         start_image_only = any(
             field.value for field in self.fields
@@ -983,7 +994,7 @@ class ReceiverGui:
                 self.display_menu_open = False
         self.notice = f'{field.label}: {self._field_value_label(field)}'
         self._update_runtime_option(field)
-        if field.dest in ('audio_muted', 'freewheel_seconds',
+        if field.dest in ('audio_muted', 'audio_volume', 'freewheel_seconds',
                           'show_sync_warning'):
             self._persist_preferences()
         self.dirty = True
@@ -1025,6 +1036,12 @@ class ReceiverGui:
                     audio_output_identity=self.audio_output_identity)
             elif field.dest == 'audio_muted':
                 self.runtime_options.update(audio_muted=field.value)
+            elif field.dest == 'audio_volume':
+                value = float(field.value)
+                if not np.isfinite(value) or not 0.0 <= value <= 1.0:
+                    raise ValueError('Passthrough volume must be between 0 and 1.')
+                field.value = value
+                self.runtime_options.update(audio_volume=value)
             elif field.dest == 'freewheel_seconds':
                 value = float(field.value)
                 if not np.isfinite(value) or value < 0:
@@ -1403,8 +1420,10 @@ class ReceiverGui:
                        f'video {meter.get("video_side") or "--"} / '
                        f'audio {meter.get("audio_side") or "--"}')
             output = meter.get('audio_output_device') or 'off'
-            audio = (f'muted → {output}' if meter.get('audio_muted') else
-                     output if meter.get('audio_side') else 'off')
+            volume = meter.get('audio_volume', 1.0)
+            audio = (f'{"muted" if meter.get("audio_muted") else "live"} '
+                     f'{volume:.0%} → {output}'
+                     if meter.get('audio_side') else 'off')
             audio_error = meter.get('audio_device_error')
             if audio_error:
                 audio = f'RESELECT · {audio_error}'
@@ -1723,7 +1742,7 @@ class ReceiverGui:
                             len(field.options) <= 1 and
                             self.audio_output_error):
                         self.notice = self.audio_output_error
-                elif (field.dest == 'freewheel_seconds' and
+                elif (field.dest in ('freewheel_seconds', 'audio_volume') and
                       (not self.started or
                        field.dest in LIVE_RUNTIME_DESTS) and
                       not field.locked):
@@ -1779,23 +1798,29 @@ class ReceiverGui:
 
     def _finish_edit(self, field):
         value = self.edit_buffer.strip()
-        if field.dest == 'freewheel_seconds':
+        if field.dest in ('freewheel_seconds', 'audio_volume'):
             try:
-                seconds = float(value)
-                if not np.isfinite(seconds) or seconds < 0:
+                number = float(value)
+                valid = (np.isfinite(number) and
+                         (number >= 0 if field.dest == 'freewheel_seconds'
+                          else 0.0 <= number <= 1.0))
+                if not valid:
                     raise ValueError
             except ValueError:
                 self.editing = False
-                self.notice = 'Freewheel duration must be a non-negative number.'
+                self.notice = (
+                    'Freewheel duration must be non-negative.'
+                    if field.dest == 'freewheel_seconds' else
+                    'Passthrough volume must be between 0 and 1.')
                 self.dirty = True
                 return
-            field.value = seconds
+            field.value = number
         else:
             field.value = value
         self.editing = False
         self.notice = f'{field.label} updated.'
         self._update_runtime_option(field)
-        if field.dest in ('freewheel_seconds', 'save_dir'):
+        if field.dest in ('freewheel_seconds', 'audio_volume', 'save_dir'):
             self._persist_preferences()
         self.dirty = True
 

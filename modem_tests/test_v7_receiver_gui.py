@@ -77,6 +77,17 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertIsNone(args.save_dir)
         self.assertEqual(args.mono_video_side, 'auto')
 
+    def test_cli_passthrough_volume_defaults_to_vlc_level_and_is_bounded(self):
+        args = self.root_parser.parse_args([
+            'receive', '--device', '3', '--audio-output-device', '4'])
+        self.assertEqual(args.audio_volume, 1.0)
+        args = self.root_parser.parse_args([
+            'receive', '--device', '3', '--audio-volume', '.35'])
+        self.assertEqual(args.audio_volume, .35)
+        with self.assertRaises(SystemExit):
+            self.root_parser.parse_args([
+                'receive', '--device', '3', '--audio-volume', '1.1'])
+
     def test_receiver_output_wakes_the_event_driven_window(self):
         output = queue.Queue()
         notify = Mock()
@@ -596,10 +607,18 @@ class ReceiverGuiOptionTests(unittest.TestCase):
             mute = next(field for field in gui.fields
                         if field.dest == 'audio_muted')
             gui._adjust_field(mute, 1)
+            volume = next(field for field in gui.fields
+                          if field.dest == 'audio_volume')
+            gui.selected = gui.fields.index(volume)
+            gui.editing = True
+            gui.edit_buffer = '0.25'
+            gui._finish_edit(volume)
         snapshot = gui.runtime_options.snapshot()
         self.assertEqual(snapshot['audio_output_device'], 9)
         self.assertEqual(snapshot['audio_output_identity'], identity)
         self.assertTrue(snapshot['audio_muted'])
+        self.assertEqual(snapshot['audio_volume'], .25)
+        self.assertEqual(json.loads(path.read_text())['audio_volume'], .25)
         path.unlink(missing_ok=True)
 
 

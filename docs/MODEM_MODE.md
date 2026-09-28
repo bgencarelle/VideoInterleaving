@@ -164,12 +164,15 @@ describes which sources use this setting.
 The standalone V7 receiver GUI can be launched with
 `.venv/bin/python -m tools.v7_receiver_gui`. It selects an explicit input and
 can optionally pass the non-video channel to an explicitly selected output
-device, with live mute and sync-warning controls. The Info view reports the
-detected profile, video/audio channel assignment, output state, and sync state;
-the decoded-image destination is chosen with **Browse**. Device preferences
-are matched by device name and host API when PortAudio indices change. There is
-no receiver WAV recorder yet; the proposed recording extension and its
-overhead gate are documented in `transport_v7_spec.md`.
+device. Passthrough starts at 1.0 volume (VLC's default 100%, unity gain);
+adjust its live, persisted 0–1 volume control or mute it as needed. The CLI
+exposes the same setting as `--audio-volume`. The GUI also has a live
+sync-warning control. The Info view reports the detected profile, video/audio
+channel assignment, output state, and sync state; the decoded-image destination
+is chosen with **Browse**. Device preferences are matched by device name and
+host API when PortAudio indices change. There is no receiver WAV recorder yet;
+the proposed recording extension and its overhead gate are documented in
+`transport_v7_spec.md`.
 
 The device argument is required on both sides. Route the sender's output to the
 receiver's input; on a same-machine loopback, select the loopback device for

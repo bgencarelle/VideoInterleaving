@@ -147,6 +147,18 @@ def _device_arg(value):
         return value
 
 
+def _audio_volume_arg(value):
+    try:
+        volume = float(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(
+            'audio volume must be a number from 0 to 1') from exc
+    if not np.isfinite(volume) or not 0.0 <= volume <= 1.0:
+        raise argparse.ArgumentTypeError(
+            'audio volume must be between 0 and 1')
+    return volume
+
+
 def _resolve_send_source(args, interactive=None, input_fn=None):
     """Resolve optional interactive source and video-file/stream prompts."""
     if interactive is None:
@@ -1316,7 +1328,8 @@ def _run_receive(args, fold, mono_wire=None):
             audio_output_device=getattr(args, 'audio_output_device', None),
             audio_muted=getattr(args, 'audio_muted', False),
             freewheel_seconds=getattr(args, 'freewheel_seconds', 2.0),
-            show_sync_warning=getattr(args, 'show_sync_warning', True))
+            show_sync_warning=getattr(args, 'show_sync_warning', True),
+            audio_volume=getattr(args, 'audio_volume', 1.0))
     audio_bridge_enabled = bool(
         getattr(args, 'runtime_options', None) is not None or
         runtime_options.snapshot()['audio_output_device'] is not None)
@@ -1348,8 +1361,10 @@ def _run_receive(args, fold, mono_wire=None):
               'sync_age': None,
               'sync_warning': bool(runtime_options.snapshot().get(
                   'show_sync_warning', True)),
-               'audio_muted': bool(runtime_options.snapshot().get(
-                   'audio_muted', False)),
+              'audio_muted': bool(runtime_options.snapshot().get(
+                  'audio_muted', False)),
+              'audio_volume': runtime_options.snapshot().get(
+                  'audio_volume', 1.0),
                'audio_output_device': runtime_options.snapshot().get(
                    'audio_output_device'),
                'audio_output_identity': runtime_options.snapshot().get(
@@ -1499,6 +1514,7 @@ def _run_receive(args, fold, mono_wire=None):
                 f'video {meter["video_side"] or "--"} · '
                 f'audio {meter["audio_side"] or "--"}',
                 f'passthrough {"muted" if meter["audio_muted"] else "live"} · '
+                f'volume {meter["audio_volume"]:.2f} · '
                 f'output {meter["audio_output_device"] or "not selected"}' +
                 ('' if not meter['audio_device_error'] else
                  f' · {meter["audio_device_error"]}'),
@@ -1529,6 +1545,7 @@ def _run_receive(args, fold, mono_wire=None):
             meter['sync_state'] == 'sync-lost' and
             options['show_sync_warning'])
         meter['audio_muted'] = options['audio_muted']
+        meter['audio_volume'] = options['audio_volume']
         identity = options['audio_output_identity']
         meter['audio_output_identity'] = identity
         meter['audio_output_device'] = (
@@ -1536,6 +1553,7 @@ def _run_receive(args, fold, mono_wire=None):
             options['audio_output_device'])
         if passthrough is not None:
             passthrough.set_route(route['audio_side'], options['audio_muted'])
+            passthrough.set_volume(options['audio_volume'])
             meter['audio_device_error'] = passthrough.error
 
     passthrough = (AudioPassthrough(
@@ -2116,6 +2134,8 @@ def parser():
                       help='explicit output device for the non-video input leg')
     recv.add_argument('--audio-muted', action='store_true',
                       help='mute receiver audio passthrough')
+    recv.add_argument('--audio-volume', type=_audio_volume_arg, default=1.0,
+                      help='passthrough volume from 0 to 1 (default: 1.0, VLC unity gain)')
     recv.add_argument('--freewheel-seconds', type=float, default=2.0,
                       help='time without valid video packets before sync-loss status')
     recv.add_argument('--no-sync-warning', dest='show_sync_warning',

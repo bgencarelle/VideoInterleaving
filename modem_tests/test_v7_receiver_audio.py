@@ -83,15 +83,23 @@ class ReceiverRuntimeOptionsTests(unittest.TestCase):
     def test_live_preferences_are_thread_safe_snapshots(self):
         options = ReceiverRuntimeOptions(audio_output_device=3)
         options.update(audio_muted=True, freewheel_seconds=4.5,
-                       show_sync_warning=False)
+                       show_sync_warning=False, audio_volume=.35)
         self.assertEqual(options.snapshot(), {
             'audio_output_device': 3,
             'audio_output_identity': None,
             'audio_input_identity': None,
             'audio_muted': True,
+            'audio_volume': .35,
             'freewheel_seconds': 4.5,
             'show_sync_warning': False,
         })
+
+    def test_passthrough_volume_rejects_values_outside_safe_range(self):
+        options = ReceiverRuntimeOptions()
+        for value in (-.1, 1.01, float('nan')):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, 'volume must be'):
+                    options.update(audio_volume=value)
 
     def test_device_identity_resolves_after_portaudio_index_changes(self):
         class Devices:
@@ -159,11 +167,12 @@ class AudioPassthroughTests(unittest.TestCase):
         self.assertEqual(passthrough.device, 7)
 
         passthrough.set_route('right')
-        passthrough.push(np.array([[1, 11], [2, 12], [3, 13], [4, 14]],
+        passthrough.push(np.array([[.1, .8], [.2, .6], [.3, .4], [.4, .2]],
                                   dtype=np.float32))
         output = np.empty((4, 2), dtype=np.float32)
         passthrough.stream.callback(output, 4, None, None)
-        np.testing.assert_allclose(output[:, 0], [11, 12, 13, 14], atol=.02)
+        np.testing.assert_allclose(output[:, 0], [.8, .6, .4, .2],
+                                   atol=.002)
         np.testing.assert_array_equal(output[:, 0], output[:, 1])
 
         passthrough.set_muted(True)
@@ -171,6 +180,22 @@ class AudioPassthroughTests(unittest.TestCase):
         np.testing.assert_array_equal(output, 0.0)
         passthrough.close()
         self.assertFalse(passthrough.is_open)
+
+    def test_live_volume_change_scales_audio_without_reopening_output(self):
+        passthrough = AudioPassthrough(
+            1000, sounddevice_module=_FakeSoundDevice)
+        passthrough.open(7)
+        passthrough.set_route('left')
+        passthrough.set_volume(.5)
+        passthrough.push(np.array([[.4, .8], [.2, .6], [0.0, .4],
+                                   [-.2, .2]], dtype=np.float32))
+        output = np.empty((4, 2), dtype=np.float32)
+        passthrough.stream.callback(output, 4, None, None)
+        np.testing.assert_allclose(output[:, 0], [.2, .1, 0.0, -.1],
+                                   atol=.002)
+        self.assertEqual(passthrough.volume, .5)
+        self.assertEqual(passthrough.device, 7)
+        passthrough.close()
 
     def test_output_open_failure_is_reported_without_default_fallback(self):
         class BrokenSoundDevice(_FakeSoundDevice):

@@ -4,6 +4,15 @@ import time
 
 import numpy as np
 
+DEFAULT_AUDIO_VOLUME = 1.0  # VLC's default 100% volume (unity gain).
+
+
+def _checked_audio_volume(value):
+    volume = float(value)
+    if not np.isfinite(volume) or not 0.0 <= volume <= 1.0:
+        raise ValueError('Passthrough volume must be between 0 and 1.')
+    return volume
+
 
 def device_identity(sounddevice_module, index):
     """Return a stable name/backend identity for a PortAudio device index."""
@@ -53,12 +62,14 @@ class ReceiverRuntimeOptions:
 
     def __init__(self, audio_output_device=None, audio_muted=False,
                  audio_output_identity=None, audio_input_identity=None,
-                 freewheel_seconds=2.0, show_sync_warning=True):
+                 freewheel_seconds=2.0, show_sync_warning=True,
+                 audio_volume=DEFAULT_AUDIO_VOLUME):
         self._values = {
             'audio_output_device': audio_output_device,
             'audio_output_identity': audio_output_identity,
             'audio_input_identity': audio_input_identity,
             'audio_muted': bool(audio_muted),
+            'audio_volume': _checked_audio_volume(audio_volume),
             'freewheel_seconds': max(0.0, float(freewheel_seconds)),
             'show_sync_warning': bool(show_sync_warning),
         }
@@ -72,6 +83,8 @@ class ReceiverRuntimeOptions:
                 value = values[key]
                 if key == 'freewheel_seconds':
                     value = max(0.0, float(value))
+                elif key == 'audio_volume':
+                    value = _checked_audio_volume(value)
                 elif key in ('audio_muted', 'show_sync_warning'):
                     value = bool(value)
                 self._values[key] = value
@@ -238,7 +251,8 @@ class AudioPassthrough:
     BUFFER_SECONDS = 2.0
     TARGET_SECONDS = 0.12
 
-    def __init__(self, input_rate, sounddevice_module=None, status_callback=None):
+    def __init__(self, input_rate, sounddevice_module=None, status_callback=None,
+                 volume=DEFAULT_AUDIO_VOLUME):
         if sounddevice_module is None:
             import sounddevice as sounddevice_module
         from tools.v7_source_audio import ClockMatchedReader, SampleBuffer
@@ -253,6 +267,7 @@ class AudioPassthrough:
         self.stream = None
         self.route = None
         self.muted = False
+        self.volume = _checked_audio_volume(volume)
         self.error = None
         self._status_callback = status_callback
         self._lock = threading.Lock()
@@ -327,11 +342,12 @@ class AudioPassthrough:
         with self._lock:
             reader = self.reader
             audible = self.route is not None and not self.muted
+            volume = self.volume
         outdata.fill(0)
         if audible and reader is not None:
             try:
                 samples = reader.read(frames)
-                outdata[:] = samples[:, None]
+                outdata[:] = np.clip(samples*volume, -1.0, 1.0)[:, None]
             except Exception as exc:
                 self._report(f'Audio passthrough failed: {exc}')
 
@@ -352,6 +368,11 @@ class AudioPassthrough:
     def set_muted(self, muted):
         with self._lock:
             self.muted = bool(muted)
+
+    def set_volume(self, volume):
+        volume = _checked_audio_volume(volume)
+        with self._lock:
+            self.volume = volume
 
     @property
     def is_open(self):
