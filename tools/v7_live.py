@@ -79,7 +79,9 @@ FPS = P.PULSE_FPS
 CAMERA_CAPTURE_FPS = 15
 INPUT_AUDIO_QUEUE_BLOCKS = 8
 SENDER_ENCODE_QUEUE_BATCHES = 64
-SENDER_STARTUP_BUFFER_SECONDS = .4
+# Hold two normal-speed packets before starting output. Once the first packet is
+# handed off, one queued packet remains to absorb a brief capture/encode stall.
+SENDER_STARTUP_BUFFER_SECONDS = 2 * P.PULSE_FRAME / P.RATE
 ENCODE_TO_FFMPEG_SCALE = {
     'nearest': 'neighbor',
     'box': 'area',

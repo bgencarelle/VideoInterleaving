@@ -1,4 +1,5 @@
 """Persistent Numba kernels for V7's live audio-input path."""
+import numpy as np
 from numba import njit
 
 
@@ -23,3 +24,21 @@ def _leg_correlation_sums(x):
         right_power += right*right
         cross += left*right
     return left_power, right_power, cross
+
+
+@njit(cache=True, fastmath=False)
+def _mono_gain(samples, gain):
+    """Apply capture gain and mono-mix a one- or two-channel scan window."""
+    out = np.empty(samples.shape[0], dtype=samples.dtype)
+    scale = samples.dtype.type(gain)
+    half = samples.dtype.type(.5)
+    for i in range(samples.shape[0]):
+        if samples.ndim == 1:
+            out[i] = samples[i]*scale
+        elif samples.shape[1] == 1:
+            out[i] = samples[i, 0]*scale
+        else:
+            left = samples[i, 0]*scale
+            right = samples[i, 1]*scale
+            out[i] = (left+right)*half
+    return out

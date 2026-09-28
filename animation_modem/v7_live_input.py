@@ -23,8 +23,8 @@ from collections import deque
 import numpy as np
 
 from animation_modem import transport3 as PULSE
-from animation_modem.v7 import (META_SYMBOL, PULSE_FRAME, RATE, leg_polarity,
-                                pulse_frame_hits,
+from animation_modem.v7 import (META_SYMBOL, PULSE_FRAME, RATE, _mono_gain,
+                                leg_polarity, pulse_frame_hits,
                                 pulse_sample_scale_bounds)
 
 GUARD_FRAMES = .25          # header, timing tolerance and block granularity
@@ -306,9 +306,9 @@ class LiveInput:
         # header itself grows with scale: honour whichever is longer.
         overlap = max(self._scaled(_HEADER_OVERLAP), _HEADER_OVERLAP)
         found = 0
+        pulse_mono = _mono_gain(audio[begin:], np.float32(self.gain))
         for frame_start, scale, confidence, direction in pulse_frame_hits(
-                audio[begin:]*np.float32(self.gain), sample_rate=self.rate,
-                direction=self.direction):
+                pulse_mono, sample_rate=self.rate, direction=self.direction):
             position = start + begin + frame_start
             if position < 0 and position >= -scale:
                 # The shaped packet's first measured crossing can extrapolate

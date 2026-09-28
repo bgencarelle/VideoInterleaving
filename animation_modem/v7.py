@@ -31,7 +31,8 @@ from animation_modem import transport3 as PULSE                             # no
 from animation_modem.v7_core import (SourceCoder, _sample_at, speed_length,
                                   speed_resample)                  # noqa: E402
 from animation_modem.v7_core import bound_emission                         # noqa: E402
-from animation_modem.v7_input_kernels import _leg_correlation_sums          # noqa: E402
+from animation_modem.v7_input_kernels import (                               # noqa: E402
+    _leg_correlation_sums, _mono_gain)
 from animation_modem.v7_metadata_kernels import (                            # noqa: E402
     decode_metadata_spectrum as _decode_metadata_spectrum)
 
@@ -2084,8 +2085,8 @@ def channel_joint(Z, iters=2, force_float32=False, pilot_timing='baseline',
                 if pilot_timing == 'tone-seeded'
                 else tone_delta['per_symbol'],
                 tone_replaced=(pilot_timing == 'tone-replaced'))
-            candidate_score = _channel_pilot_residual(Z, candidate)
-            candidate_timing_residual = _channel_timing_residual(Z, candidate)
+            candidate_score, candidate_timing_residual = _channel_residuals(
+                Z, candidate)
             timing_diag.update({
                 'tone_pilot_residual': candidate_score,
                 'tone_timing_residual_samples': candidate_timing_residual,
@@ -2104,8 +2105,8 @@ def channel_joint(Z, iters=2, force_float32=False, pilot_timing='baseline',
                 timing_diag['timing_quality_gate'] = 'absolute'
             else:
                 baseline = _channel_joint_batched(Z, iters, force_float32)
-                base_score = _channel_pilot_residual(Z, baseline)
-                baseline_timing_residual = _channel_timing_residual(Z, baseline)
+                base_score, baseline_timing_residual = _channel_residuals(
+                    Z, baseline)
                 timing_diag.update({
                     'baseline_pilot_residual': base_score,
                     'baseline_timing_residual_samples': baseline_timing_residual,
@@ -2127,18 +2128,16 @@ def channel_joint(Z, iters=2, force_float32=False, pilot_timing='baseline',
                         else 'timing_residual_gate')
         else:
             result = _channel_joint_batched(Z, iters, force_float32)
-            timing_diag['baseline_pilot_residual'] = _channel_pilot_residual(
-                Z, result)
-            timing_diag['baseline_timing_residual_samples'] = (
-                _channel_timing_residual(Z, result))
+            (timing_diag['baseline_pilot_residual'],
+             timing_diag['baseline_timing_residual_samples']) = (
+                 _channel_residuals(Z, result))
     else:
         result = _channel_joint_batched(Z, iters, force_float32)
     if return_timing_diag:
         if pilot_timing == 'baseline':
-            timing_diag['baseline_pilot_residual'] = _channel_pilot_residual(
-                Z, result)
-            timing_diag['baseline_timing_residual_samples'] = (
-                _channel_timing_residual(Z, result))
+            (timing_diag['baseline_pilot_residual'],
+             timing_diag['baseline_timing_residual_samples']) = (
+                 _channel_residuals(Z, result))
         use_tone = (pilot_timing != 'baseline' and
                     timing_diag.get('mode_applied') == pilot_timing)
         timing_diag['pilot_residual'] = (
@@ -2157,8 +2156,7 @@ def _channel_joint_tone_joint(Z, iters, force_float32, model, counter,
     if model is None or counter is None:
         raise ValueError('tone timing requires model and counter')
     result = _channel_joint_batched(Z, iters, force_float32)
-    base_score = _channel_pilot_residual(Z, result)
-    base_timing = _channel_timing_residual(Z, result)
+    base_score, base_timing = _channel_residuals(Z, result)
     timing_diag = {
         'mode_requested': 'tone-joint',
         'mode_applied': 'baseline',
@@ -2197,8 +2195,8 @@ def _channel_joint_tone_joint(Z, iters, force_float32, model, counter,
         if tone_delta is not None:
             candidate = _channel_joint_batched(
                 Z, 1, force_float32, tone_delta=tone_delta['knot_fit'])
-            candidate_score = _channel_pilot_residual(Z, candidate)
-            candidate_timing = _channel_timing_residual(Z, candidate)
+            candidate_score, candidate_timing = _channel_residuals(
+                Z, candidate)
             timing_diag.update({
                 'tone_pilot_residual': candidate_score,
                 'tone_timing_residual_samples': candidate_timing,
@@ -2283,20 +2281,36 @@ def _channel_residuals_kernel(Z, H, symbols, bins, values, n):
 
 
 def _channel_residuals(Z, H):
-    return _channel_residuals_kernel(Z, H, PILOT_SV, PILOT_BV, PILOT_PV, N)
+    """Compute pilot misfit and timing residual together in one pass."""
+    if _is_float64_frame(Z, H):
+        return _channel_residuals_kernel(
+            Z, H, PILOT_SV, PILOT_BV, PILOT_PV, N)
+    return _channel_residuals_numpy(Z, H)
+
+
+def _channel_residuals_numpy(Z, H):
+    """Float32/reference pair sharing pilot prediction and indexing work."""
+    predicted = np.einsum(
+        'nci,ni->nc', H[PILOT_SV, PILOT_BV], PILOT_PV)
+    observed = Z[PILOT_SV, PILOT_BV]
+    numerator = float(np.sum(np.abs(observed-predicted)**2))
+    denominator = float(np.sum(np.abs(observed)**2))
+    pilot_residual = numerator/max(denominator, 1e-12)
+    weights = np.abs(predicted)*np.abs(observed)
+    timing_error = (np.angle(observed*np.conj(predicted))*N /
+                    (2*np.pi*PILOT_BV[:, None]))
+    timing_residual = float(np.sqrt(np.sum(weights*timing_error**2) /
+                                    max(float(np.sum(weights)), 1e-12)))
+    return pilot_residual, timing_residual
 
 
 def _channel_pilot_residual(Z, H):
-    if _is_float64_frame(Z, H):
-        return float(_channel_residuals(Z, H)[0])
-    return _channel_pilot_residual_numpy(Z, H)
+    return float(_channel_residuals(Z, H)[0])
 
 
 def _channel_timing_residual(Z, H):
     """Weighted data-pilot phase residual expressed in reference samples."""
-    if _is_float64_frame(Z, H):
-        return float(_channel_residuals(Z, H)[1])
-    return _channel_timing_residual_numpy(Z, H)
+    return float(_channel_residuals(Z, H)[1])
 
 
 def _channel_pilot_residual_numpy(Z, H):
@@ -3423,6 +3437,8 @@ def decode_metadata(model, samples, start, scale, channel,
              np.conj(model.phase32[-1])[:, None] *
              _EARLY32[:, None]).astype(np.complex64)
         observed = z.sum(axis=1)
+        if z.shape[1] == 1:
+            observed *= np.float32(2.0)
         pilot_z = observed[META_PILOTS]
         if np.sum(np.abs(pilot_z) > 1e-6) < 2:
             return None
@@ -3562,12 +3578,15 @@ def leg_polarity(samples, previous=1, threshold=POLARITY_THRESHOLD):
 
 
 def warmup_leg_polarity():
-    """Compile the production stereo-input signature before capture starts.
+    """Compile the production stereo-input kernels before capture starts.
 
-    The correlation kernel uses Numba's disk cache, so compatible subsequent
-    processes can load the compiled signature rather than compile it again.
+    These kernels use Numba's disk cache, so compatible subsequent processes
+    can load the compiled signatures rather than compile them again.
     """
     leg_polarity(np.zeros((PULSE_FRAME, 2), dtype=np.float32))
+    _mono_gain(np.zeros((PULSE_FRAME, 2), dtype=np.float32), np.float32(1.0))
+    _mono_gain(np.zeros((PULSE_FRAME, 1), dtype=np.float32), np.float32(1.0))
+    _mono_gain(np.zeros(PULSE_FRAME, dtype=np.float32), np.float32(1.0))
 
 
 def decode_pulse_stream(model, x, diagnostics=None, latest_only=False,
@@ -3667,6 +3686,8 @@ def _mono(samples):
     own precision) but without NumPy's slow short-axis reduction, which cost
     ~0.15 ms on every live window."""
     samples = np.asarray(samples)
+    if samples.ndim == 1:
+        return samples
     if samples.ndim == 2 and samples.shape[1] == 2 and samples.dtype in (
             np.float32, np.float64):
         return (samples[:, 0]+samples[:, 1])*samples.dtype.type(.5)

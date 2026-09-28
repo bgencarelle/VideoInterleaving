@@ -340,13 +340,50 @@ class V7DecodeSpeedTests(unittest.TestCase):
             Z, H = self._channels(seed)
             if seed == 3:
                 Z[2:4] = 0
-            with self.subTest(seed=seed):
-                self.assertAlmostEqual(
-                    v7._channel_pilot_residual(Z, H),
-                    v7._channel_pilot_residual_numpy(Z, H), places=12)
-                self.assertAlmostEqual(
-                    v7._channel_timing_residual(Z, H),
-                    v7._channel_timing_residual_numpy(Z, H), places=10)
+            for dtype in (np.complex128, np.complex64):
+                z_typed = Z.astype(dtype)
+                h_typed = H.astype(dtype)
+                expected = (
+                    v7._channel_pilot_residual_numpy(z_typed, h_typed),
+                    v7._channel_timing_residual_numpy(z_typed, h_typed))
+                actual = v7._channel_residuals(z_typed, h_typed)
+                with self.subTest(seed=seed, dtype=dtype.__name__):
+                    self.assertAlmostEqual(actual[0], expected[0], places=12)
+                    self.assertAlmostEqual(actual[1], expected[1], places=10)
+                    self.assertAlmostEqual(
+                        v7._channel_pilot_residual(z_typed, h_typed),
+                        expected[0], places=12)
+                    self.assertAlmostEqual(
+                        v7._channel_timing_residual(z_typed, h_typed),
+                        expected[1], places=10)
+
+    def test_tone_seeded_comparison_refit_uses_relative_gate(self):
+        model = v7.load_model(TARGET, 'nearest')
+        Z = self._tone_frame(model, 11)
+        _, diag = v7.channel_joint(
+            Z, pilot_timing='tone-seeded', model=model, counter=1,
+            return_timing_diag=True)
+        self.assertTrue(diag['comparison_fit_performed'])
+        self.assertEqual(diag['timing_quality_gate'], 'relative')
+        self.assertEqual(diag['mode_applied'], 'tone-seeded')
+        self.assertGreater(diag['tone_pilot_residual'],
+                           v7.PILOT_TONE_MAX_PILOT_RESIDUAL)
+
+    def test_tone_seeded_refit_keeps_both_rejection_gates(self):
+        model = v7.load_model(TARGET, 'nearest')
+        cases = (
+            (35, {'muted': (5, 6, 7, 8)}, 'pilot_residual_gate'),
+            (37, {'empty_amp': .25}, 'timing_residual_gate'),
+        )
+        for seed, options, reason in cases:
+            Z = self._tone_frame(model, seed, **options)
+            _, diag = v7.channel_joint(
+                Z, pilot_timing='tone-seeded', model=model, counter=3,
+                return_timing_diag=True)
+            with self.subTest(seed=seed, reason=reason):
+                self.assertTrue(diag['comparison_fit_performed'])
+                self.assertEqual(diag['mode_applied'], 'baseline')
+                self.assertEqual(diag['reason'], reason)
 
     def test_zero_phasor_carries_no_phase(self):
         zeros = np.array([complex(0., 0.), complex(0., -0.),
@@ -414,6 +451,20 @@ class V7DecodeSpeedTests(unittest.TestCase):
             self.assertAlmostEqual(
                 powers[2]/np.sqrt(powers[0]*powers[1]), expected, places=5)
             self.assertEqual(v7.leg_polarity(stereo.astype(np.float32)), sign)
+
+    def test_compiled_mono_gain_matches_scaled_numpy_mix_exactly(self):
+        rng = np.random.default_rng(38)
+        for dtype in (np.float32, np.float64):
+            for size in (1, 17, v7.PULSE_FRAME):
+                audio = rng.normal(size=(size, 2)).astype(dtype)
+                for gain in (np.float32(.5), np.float32(1.73125),
+                             np.float32(16.0)):
+                    expected = v7._mono(audio*gain)
+                    actual = v7._mono_gain(audio, gain)
+                    with self.subTest(dtype=dtype.__name__, size=size,
+                                      gain=float(gain)):
+                        self.assertEqual(actual.dtype, expected.dtype)
+                        np.testing.assert_array_equal(actual, expected)
 
     def test_sinc_table_is_cached_and_read_only(self):
         first = v7_core._sinc_weight_table(16)

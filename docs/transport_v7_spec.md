@@ -323,6 +323,54 @@ audio stream so first-use compilation does not stall capture. The
 `--force-float32` path is an experimental arithmetic path, not an optional
 Numba installation mode.
 
+### 8.1 Sender capture-to-audio latency profile (2026-09-28)
+
+The production `run_send()` producer, Fold 500 encoder, bounded batch queue, and
+write loop were profiled with a generated 320×240, 15 fps video file read via
+the normal FFmpeg capture pipe. The output was a software sink that paced each
+write to its sample duration; no audio device was opened. The run emitted
+122/122 stereo packets, each 3,920 samples at 48 kHz (81.67 ms), using Box,
+Fold 500, 1× playback, and one frame per batch. Capture timestamps mark each
+RGB frame's arrival in Python; the frame-to-values interval also includes
+waiting for the producer's next capture slot.
+
+| Interval or stage | Median (ms) | p95 (ms) |
+|---|---:|---:|
+| FFmpeg frame-read call, including its 15 fps wait | 66.6 | 66.9 |
+| Frame arrival to start of image-value preparation | 32.4 | 62.5 |
+| Image preparation and DCT values | 0.688 | 0.954 |
+| Fold coefficient transform | 0.403 | 0.563 |
+| OFDM/audio packet encode | 1.317 | 1.836 |
+| Coded-status overlay | 0.180 | 0.255 |
+| Speed/pulse resampling | 0.018 | 0.035 |
+| Frame arrival to completed packet in producer queue | 35.4 | 65.6 |
+| Packet queue residence before `stream.write()` handoff | 348.3 | 356.3 |
+| Frame arrival to `stream.write()` handoff | 383.4 | 415.4 |
+| Frame arrival to simulated full-packet consumption | 465.2 | 497.1 |
+
+The initial profile showed queue residence dominating latency: the sender's
+0.4 s startup cushion left roughly 0.35 s of queued audio. A startup-cushion
+A/B on the same FFmpeg-paced synthetic source measured:
+
+| Startup cushion | Capture to `stream.write()` (median / p95, ms) | Queue residence (median, ms) |
+|---:|---:|---:|
+| 0.400 s (~5 packets) | 383.4 / 415.4 | 348.3 |
+| 0.245 s (3 packets) | 222.0 / 252.3 | 186.1 |
+| 0.163 s (2 packets) | 146.2 / 176.5 | 110.0 |
+| 0.082 s (1 packet) | 59.8 / 90.1 | 24.7 |
+
+The sender default is now two normal-speed packet durations (0.163 s). This
+cuts median capture-to-handoff by about 237 ms while keeping one packet queued
+behind the packet being handed off. A one-packet cushion is faster in the
+steady synthetic run, but removes that additional queued-packet margin against
+a brief capture/encode delay. Frame preparation and packet construction take
+only a few milliseconds; capture cadence contributes additional frame age
+before encoding. The final interval adds one packet's 81.67 ms sample duration
+to the handoff time. It is simulated output-clock consumption, not measured DAC
+latency; actual camera timing, audio-driver behavior, and GUI rendering are not
+included. The reusable profiler, generated video, and summaries are in the
+ignored `tmp/v7-zero2-profile/` directory.
+
 ## 9. Verification evidence and limits
 
 ### Test inventory and routine checks
@@ -1258,6 +1306,54 @@ The JSON summary, per-frame CSV, and log are in
 `tmp/v7-zero2-profile/per-frame-decode-components-final.csv`, and
 `tmp/v7-zero2-profile/receiver-log-decode-components-final.jsonl`. No audio
 device or graphics context was opened.
+
+##### Channel residual pairing and comparison-refit profile (2026-09-28)
+
+The pilot-misfit and weighted timing-residual checks use the same predicted
+pilot values and observations. Previously each metric call repeated the shared
+Numba residual kernel. `channel_joint()` now obtains both metrics from one
+kernel pass; the float32/reference path likewise shares its pilot prediction
+and indexing work. The pilot and timing thresholds, relative comparison, and
+baseline fallback decisions are unchanged.
+
+A focused 2,000-case tone-seeded profile forced the comparison fit on every
+case. It kept the tone candidate for 1,917 cases and rejected it through the
+pilot-residual gate on 44 and timing-residual gate on 39. The uninstrumented
+channel-joint median/p95 was 0.258/0.300 ms on the host, including the candidate
+and baseline fits. A 10,000-call residual microbenchmark measured about 12 us
+saved per paired metric evaluation. Focused tests retain the successful
+relative-gate path and independently exercise both rejection reasons; paired
+float32 and float64 outputs match the NumPy references.
+
+For an end-to-end A/B, two warmed 2,000-packet receiver runs used the same
+changing Fold 500 capture. The separate-pass control emulated the former work
+by evaluating the residual kernel twice. Across 4,000 samples per side, the
+paired path reduced host process-CPU median from 0.997 to 0.971 ms for decode
+and from 1.865 to 1.829 ms for complete per-frame receiver processing. The
+corresponding p95 values were 1.202 to 1.185 ms for decode and 2.216 to 2.165
+ms end to end. All 4,000 reconstructions had identical SHA-256 hashes and
+matching source/status/profile/EOF fields; each run decoded and validated
+2,000/2,000 packets. These short A/Bs show a small whole-receiver gain, not a
+large Pi CPU reduction; apply the 15× projection only as a host estimate until
+direct Pi measurement is available. Reusable profiles and captures are in the
+gitignored `tmp/v7-zero2-profile/` directory.
+
+##### Pulse-scan input preparation (2026-09-28)
+
+`LiveInput._count_headers()` previously multiplied the stereo scan window by
+the leveler gain, then `pulse_frame_hits()` allocated a second mono array. The
+new cached `_mono_gain()` input kernel fuses those operations and passes the
+mono window directly to the existing edge-counted pulse detector. It is warmed
+with the other live-input kernels before capture. Float32 and float64 outputs
+match the prior NumPy expression bit-for-bit.
+
+On the same 2,000-packet capture, pooled across two uninstrumented runs per
+side, input buffering/leveling/acquisition median CPU moved from 0.486 to
+0.479 ms per frame; p95 was 0.600 versus 0.602 ms. All 2,000 reconstructed
+frame hashes and metadata/status/EOF fields matched. The median reduction is
+small and the p95 is unchanged, so this is recorded as a modest copy-reduction
+gain, not a material receiver-tail improvement. The full receiver A/B is
+subject to run-to-run variation in its other stages.
 
 The shell was a TTY without `DISPLAY` or `WAYLAND_DISPLAY`, so real viewer/GL
 memory and rendering cost were not measured. The reusable profiler, manifests,
