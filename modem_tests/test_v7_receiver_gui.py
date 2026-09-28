@@ -10,13 +10,16 @@ from PIL import Image
 
 from animation_modem import v7
 from tools import v7_live
-from tools.v7_gl_viewer import DISPLAY_MODES
+from tools.v7_gl_viewer import (DISPLAY_MODES, FLOAT_FRAGMENT_SHADER,
+                                FRAGMENT_SHADER, VERTEX_SHADER)
 from tools.v7_receiver_gui import (ROOT, ReceiverGui, _make_fields,
                                    FULLSCREEN_TOOLBAR_EDGE,
                                    FULLSCREEN_TOOLBAR_HIDE_SECONDS,
                                    HIDDEN_DECODE_OPTIONS,
                                    QueueWriter,
+                                   _create_graphics_context,
                                    _logical_rect_to_framebuffer,
+                                   _shader_for_context,
                                    _scissors_outside_viewport,
                                    _receive_parser)
 
@@ -44,6 +47,95 @@ class KeyStub:
     KEY_KP_ENTER = 335
     KEY_P = 80
     MOD_CONTROL = 2
+
+
+class GraphicsGlfwStub:
+    CLIENT_API = 1
+    OPENGL_ES_API = 2
+    OPENGL_API = 3
+    CONTEXT_CREATION_API = 4
+    EGL_CONTEXT_API = 5
+    CONTEXT_VERSION_MAJOR = 6
+    CONTEXT_VERSION_MINOR = 7
+    OPENGL_PROFILE = 8
+    OPENGL_CORE_PROFILE = 9
+    OPENGL_FORWARD_COMPAT = 10
+    RESIZABLE = 11
+    TRUE = 1
+
+    def __init__(self, fail_desktop=False):
+        self.fail_desktop = fail_desktop
+        self.hints = {}
+        self.apis = []
+
+    def default_window_hints(self):
+        self.hints = {}
+
+    def window_hint(self, hint, value):
+        self.hints[hint] = value
+
+    def create_window(self, *_args):
+        api = self.hints[self.CLIENT_API]
+        self.apis.append(api)
+        if self.fail_desktop and api == self.OPENGL_API:
+            return None
+        return object()
+
+    def get_error(self):
+        return 65543, b'EGL: Failed to create context: Arguments are inconsistent'
+
+    def make_context_current(self, _window):
+        pass
+
+    def destroy_window(self, _window):
+        pass
+
+
+class GraphicsModernGlStub:
+    def __init__(self):
+        self.options = []
+
+    def create_context(self, **options):
+        self.options.append(options)
+        return SimpleNamespace(version_code=300, release=Mock())
+
+
+class ReceiverGuiGraphicsContextTests(unittest.TestCase):
+    def test_wayland_prefers_gles_egl(self):
+        glfw = GraphicsGlfwStub()
+        moderngl = GraphicsModernGlStub()
+
+        _window, _context, use_gles = _create_graphics_context(
+            glfw, moderngl, wayland=True)
+
+        self.assertTrue(use_gles)
+        self.assertEqual(glfw.apis, [glfw.OPENGL_ES_API])
+        self.assertEqual(moderngl.options,
+                         [{'require': 300, 'backend': 'egl'}])
+
+    def test_desktop_context_failure_falls_back_to_gles(self):
+        glfw = GraphicsGlfwStub(fail_desktop=True)
+        moderngl = GraphicsModernGlStub()
+
+        _window, _context, use_gles = _create_graphics_context(
+            glfw, moderngl, wayland=False)
+
+        self.assertTrue(use_gles)
+        self.assertEqual(glfw.apis,
+                         [glfw.OPENGL_API, glfw.OPENGL_ES_API])
+        self.assertEqual(moderngl.options,
+                         [{'require': 300, 'backend': 'egl'}])
+
+    def test_gles_shader_variant_uses_es_300_and_precision(self):
+        for shader in (VERTEX_SHADER, FRAGMENT_SHADER,
+                       FLOAT_FRAGMENT_SHADER):
+            with self.subTest(shader=shader[:32]):
+                converted = _shader_for_context(shader, use_gles=True)
+                self.assertTrue(converted.startswith(
+                    '#version 300 es\nprecision highp float;'))
+                self.assertNotIn('#version 330', converted)
+        self.assertEqual(_shader_for_context(VERTEX_SHADER, use_gles=False),
+                         VERTEX_SHADER)
 
 
 class ReceiverGuiOptionTests(unittest.TestCase):

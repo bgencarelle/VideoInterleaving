@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 import io
 import json
+import os
 from pathlib import Path
 import queue
 import sys
@@ -47,6 +48,86 @@ DISPLAY_MENU_ROW_HEIGHT = 29
 DISPLAY_MENU_WIDTH = 250
 RECEIVER_PREFERENCES_PATH = (
     Path.home()/'.config'/'modemTest'/'v7_receiver_gui.json')
+
+
+def _shader_for_context(source, use_gles):
+    """Adapt the viewer's GLSL 3.30 shaders to GLSL ES 3.00 when needed."""
+    if not use_gles:
+        return source
+    version = '#version 300 es\nprecision highp float;\nprecision highp int;'
+    return source.replace('#version 330', version, 1)
+
+
+def _create_graphics_context(glfw, moderngl, wayland=None):
+    """Try a Wayland-friendly GLES/EGL context, with desktop GL fallback."""
+    if wayland is None:
+        wayland = bool(os.environ.get('WAYLAND_DISPLAY') or
+                       os.environ.get('XDG_SESSION_TYPE', '').lower() ==
+                       'wayland')
+    apis = (('gles', 'opengl') if wayland else ('opengl', 'gles'))
+    failures = []
+    for api in apis:
+        gles = api == 'gles'
+        glfw.default_window_hints()
+        if gles:
+            glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_ES_API)
+            glfw.window_hint(glfw.CONTEXT_CREATION_API, glfw.EGL_CONTEXT_API)
+            glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
+            glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 0)
+            require = 300
+            backend = 'egl'
+        else:
+            glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_API)
+            glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
+            glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
+            glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
+            glfw.window_hint(glfw.OPENGL_FORWARD_COMPAT, glfw.TRUE)
+            require = 330
+            backend = None
+        glfw.window_hint(glfw.RESIZABLE, glfw.TRUE)
+        try:
+            window = glfw.create_window(
+                960, 720, 'V7 Receiver · Setup', None, None)
+        except Exception as exc:
+            failures.append(f'{api}: window creation raised {exc}')
+            continue
+        if not window:
+            try:
+                code, description = glfw.get_error()
+            except Exception:
+                code, description = None, None
+            detail = (f'GLFW {code}: {description!r}' if code else
+                      'GLFW returned no window')
+            failures.append(f'{api}: {detail}')
+            continue
+
+        context = None
+        try:
+            glfw.make_context_current(window)
+            options = {'require': require}
+            if backend is not None:
+                options['backend'] = backend
+            context = moderngl.create_context(**options)
+            context_version = getattr(context, 'version_code', 0)
+            if context_version < 300:
+                raise RuntimeError(
+                    f'ModernGL context version {context_version} is below 300')
+            return window, context, gles
+        except Exception as exc:
+            failures.append(f'{api}: context setup failed: {exc}')
+            if context is not None:
+                try:
+                    context.release()
+                except Exception:
+                    pass
+            glfw.make_context_current(None)
+            glfw.destroy_window(window)
+
+    details = '; '.join(failures) or 'no context attempts were made'
+    raise RuntimeError(
+        f'Could not create a supported V7 receiver GL context: {details}')
+
+
 BASIC_OPTION_DESTS = frozenset((
     'device', 'audio_output_device', 'audio_muted', 'audio_volume',
     'freewheel_seconds',
@@ -1877,16 +1958,8 @@ class ReceiverGui:
         frame_buffer = getattr(self.v7_live, 'FRAME_BUFFER', None)
         set_frame_notifier = getattr(frame_buffer, 'set_notifier', None)
         try:
-            glfw.default_window_hints()
-            glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
-            glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
-            glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
-            glfw.window_hint(glfw.OPENGL_FORWARD_COMPAT, glfw.TRUE)
-            glfw.window_hint(glfw.RESIZABLE, glfw.TRUE)
-            window = glfw.create_window(960, 720, 'V7 Receiver · Setup', None, None)
-            if not window:
-                raise RuntimeError('GLFW could not create the V7 receiver window')
-            glfw.make_context_current(window)
+            window, context, use_gles = _create_graphics_context(
+                glfw, moderngl)
             self._window = window
             self._glfw = glfw
             if set_frame_notifier is not None:
@@ -1894,9 +1967,12 @@ class ReceiverGui:
             glfw.set_window_size_limits(window, 720, 480,
                                         glfw.DONT_CARE, glfw.DONT_CARE)
             glfw.swap_interval(1)
-            context = moderngl.create_context(require=330)
-            program = context.program(vertex_shader=VERTEX_SHADER,
-                                      fragment_shader=FRAGMENT_SHADER)
+            vertex_shader = _shader_for_context(VERTEX_SHADER, use_gles)
+            fragment_shader = _shader_for_context(FRAGMENT_SHADER, use_gles)
+            float_fragment_shader = _shader_for_context(
+                FLOAT_FRAGMENT_SHADER, use_gles)
+            program = context.program(vertex_shader=vertex_shader,
+                                      fragment_shader=fragment_shader)
             program['image'].value = 0
             vertex_array = context.vertex_array(program, [])
             glfw.set_key_callback(
@@ -1980,8 +2056,8 @@ class ReceiverGui:
                 if float_program is not None:
                     return
                 float_program = context.program(
-                    vertex_shader=VERTEX_SHADER,
-                    fragment_shader=FLOAT_FRAGMENT_SHADER)
+                    vertex_shader=vertex_shader,
+                    fragment_shader=float_fragment_shader)
                 float_program['plane_y'].value = 0
                 float_program['plane_cb'].value = 1
                 float_program['plane_cr'].value = 2
