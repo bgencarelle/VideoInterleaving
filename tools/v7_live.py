@@ -1787,6 +1787,7 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
     blocks = queue.Queue(maxsize=INPUT_AUDIO_QUEUE_BLOCKS)
     input_gap = threading.Event()
     input_ready = threading.Event()
+    capture_sample_cursor = [0]
     live_input = LiveInput(
         args.decode_history, args.decode_batch, rate=capture_rate,
         direction=getattr(args, 'direction', 'auto'))
@@ -1898,14 +1899,19 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                    'audio_output_device'),
                'audio_output_identity': runtime_options.snapshot().get(
                    'audio_output_identity'),
-              'audio_device_error': None,
-               'audio_unmatched_frames': 0,
+               'audio_device_error': None,
               'mode': input_mode,
              'device': str(args.device), 'capture_rate': capture_rate,
              'input_channels': input_channels}
 
     def callback(indata, frames, timing, status):
         values = np.asarray(indata, float)
+        capture_start = capture_sample_cursor[0]
+        capture_sample_cursor[0] += len(values)
+        if passthrough is not None:
+            # Queue the selected leg on every device callback, including
+            # silence. Audio delivery must not depend on frame decoding.
+            passthrough.queue_capture(capture_start, indata)
         meter['peak'] = np.maximum(meter['peak'],
                                    np.max(np.abs(values), axis=0))
         meter['rms'] = np.sqrt(np.mean(values*values, axis=0))
@@ -2035,7 +2041,6 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                 f'audio {meter["audio_side"] or "--"}',
                 f'passthrough {"muted" if meter["audio_muted"] else "live"} · '
                 f'queued {passthrough.buffered_ms if passthrough else 0:.0f} ms · '
-                f'unmatched {meter["audio_unmatched_frames"]} · '
                 f'volume {meter["audio_volume"]:.2f} · '
                 f'output {meter["audio_output_device"] or "not selected"}' +
                 ('' if not meter['audio_device_error'] else
@@ -2057,10 +2062,15 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
         meter['detected_mode'] = route['state']
         meter['channel_modes'] = route['channel_modes']
         meter['video_side'] = route['video_side']
-        meter['audio_side'] = (route['audio_side']
-                               if input_channels > 1 else None)
-        meter['sync_state'] = receiver_router.sync_state(
+        sync_state = receiver_router.sync_state(
             now, options['freewheel_seconds'])
+        if (sync_state == 'acquiring' and
+                now-meter['started'] > options['freewheel_seconds']):
+            sync_state = 'sync-lost'
+        meter['sync_state'] = sync_state
+        meter['audio_side'] = (
+            route['audio_side'] if input_channels > 1 and
+            meter['sync_state'] != 'sync-lost' else None)
         meter['sync_age'] = (None if route['last_packet'] is None else
                              max(0.0, now-route['last_packet']))
         meter['sync_warning'] = bool(
@@ -2074,8 +2084,7 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
             identity.get('name') if identity is not None else
             options['audio_output_device'])
         if passthrough is not None:
-            audio_side = (route['audio_side'] if input_channels > 1 else None)
-            passthrough.set_route(audio_side, options['audio_muted'])
+            passthrough.set_route(meter['audio_side'], options['audio_muted'])
             passthrough.set_volume(options['audio_volume'])
             meter['audio_device_error'] = passthrough.error
 
@@ -2232,8 +2241,6 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
             # the last good image while pulse acquisition starts over.
             input_gap.clear()
             live_input.reset()
-            if passthrough is not None:
-                passthrough.clear_audio()
             if profile_probes is not None:
                 for probe in profile_probes:
                     probe.reset()
@@ -2247,9 +2254,8 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
             meter['playback_direction'] = None
             meter['direction_candidate'] = None
             meter['direction_streak'] = 0
-            # A full queue contains stale audio. Discard it after declaring the
-            # discontinuity so recovery starts at live input instead of playing
-            # through up to 0.7 s of buffered blocks.
+            # Discard stale decoder blocks so video reacquires at the live
+            # edge. Audio is queued independently in the input callback.
             while True:
                 try:
                     blocks.get_nowait()
@@ -2265,8 +2271,6 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                 # Blocks are private copies of the callback data; LiveInput
                 # applies the leveler's polarity to the stored audio itself.
                 block = blocks.get_nowait()
-                if passthrough is not None:
-                    passthrough.record_capture(live_input.total, block)
                 if (opposite_probe is not None and block.ndim == 2 and
                         block.shape[1] > opposite_input_index):
                     opposite_probe.add(
@@ -2508,23 +2512,6 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                 display_frames.publish(latest, model.coder.grids,
                                        meter['aspect'])
                 shown_times.append(time.monotonic())
-                if (passthrough is not None and input_channels > 1 and
-                        result.diag.get('frame_start') is not None and
-                        result.diag.get('frame_scale') is not None):
-                    route = receiver_router.snapshot(time.monotonic())
-                    audio_side = route['audio_side']
-                    passthrough.set_route(
-                        audio_side,
-                        runtime_options.snapshot()['audio_muted'])
-                    if audio_side is not None:
-                        frame_sample_start = int(round(
-                            audio_start+result.diag['frame_start']))
-                        frame_sample_count = int(round(
-                            P.PULSE_FRAME*result.diag['frame_scale']))
-                        if not passthrough.queue_frame(
-                                frame_sample_start, frame_sample_count,
-                                audio_side):
-                            meter['audio_unmatched_frames'] += 1
                 meter['shown_index'] = result.diag.get('source_index')
                 meter['shown_direction'] = result.diag.get('direction')
                 # Lag: where the live loop is now (this machine's clock and
@@ -2601,9 +2588,9 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                                 dtype='float32',
                                 device=args.device, blocksize=1024,
                                 callback=callback)
-        stream.start()
         if passthrough is not None:
             passthrough.set_input_rate(float(stream.samplerate))
+        stream.start()
         if not args.no_log:
             print(f'V7 receive ready: input={args.device!r} '
                   f'rate={float(stream.samplerate):g}Hz (device {float(device_info["default_samplerate"]):g}Hz) '

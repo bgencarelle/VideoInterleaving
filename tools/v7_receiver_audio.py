@@ -237,7 +237,7 @@ class ReceiverChannelRouter:
         age = max(0.0, now-self.last_packet)
         if age <= self.loss_seconds:
             return 'playing'
-        if age < max(self.loss_seconds, float(freewheel_seconds)):
+        if age <= max(self.loss_seconds, float(freewheel_seconds)):
             return 'freewheeling'
         return 'sync-lost'
 
@@ -255,24 +255,28 @@ class ReceiverChannelRouter:
 
 
 class AudioPassthrough:
-    """Play the audio leg paired with each decoded video packet."""
+    """Continuously play the selected captured audio leg."""
 
-    # Bound stale audio aggressively: the modem video path is packet-framed,
-    # but passthrough should remain responsive rather than accumulating a large
-    # monitor delay when the two audio devices run at different clocks.
+    # Keep a short capture-clock buffer: enough to absorb callback jitter while
+    # the bounded FIFO servo prevents unbounded monitor delay.
     BUFFER_SECONDS = 0.5
-    TARGET_SECONDS = 0.02
+    # Prime by about one V7 packet before the continuous output stream starts.
+    TARGET_SECONDS = 0.08
     FRAME_GAP_CROSSFADE_SECONDS = 0.01
     RECOVERY_FADE_SECONDS = 0.005
 
     def __init__(self, input_rate, sounddevice_module=None, status_callback=None,
-                 volume=DEFAULT_AUDIO_VOLUME):
+                 volume=DEFAULT_AUDIO_VOLUME, target_seconds=None):
         if sounddevice_module is None:
             import sounddevice as sounddevice_module
         from tools.v7_source_audio import ClockMatchedReader, SampleBuffer
 
         self.sd = sounddevice_module
         self.input_rate = int(input_rate)
+        self.target_seconds = (self.TARGET_SECONDS if target_seconds is None
+                               else float(target_seconds))
+        if not np.isfinite(self.target_seconds) or self.target_seconds <= 0:
+            raise ValueError('audio target buffer must be positive')
         self.output_rate = None
         self.channels = 0
         self.device = None
@@ -283,6 +287,7 @@ class AudioPassthrough:
         self._queued_last_sample = None
         self.reader = None
         self._fade_in_after_underflow = False
+        self._audio_primed = False
         self.stream = None
         self.route = None
         self.muted = False
@@ -325,7 +330,7 @@ class AudioPassthrough:
                 device=device, channels=channels, dtype='float32',
                 samplerate=rate)
             from tools.v7_source_audio import ClockMatchedReader
-            target = round(self.input_rate*self.TARGET_SECONDS)
+            target = round(self.input_rate*self.target_seconds)
             ratio = self.input_rate/rate
             reader = ClockMatchedReader(
                 self.buffer, target, nominal_ratio=ratio)
@@ -356,6 +361,7 @@ class AudioPassthrough:
             self.channels = channels
             self.reader = reader
             self._fade_in_after_underflow = False
+            self._audio_primed = False
             self.stream = stream
         self._report(None)
 
@@ -370,7 +376,7 @@ class AudioPassthrough:
             self.input_rate = rate
             output_rate = self.output_rate
             if output_rate:
-                target = max(1, int(round(rate*self.TARGET_SECONDS)))
+                target = max(1, int(round(rate*self.target_seconds)))
                 self.reader = ClockMatchedReader(
                     self.buffer, target,
                     nominal_ratio=rate/output_rate)
@@ -380,6 +386,7 @@ class AudioPassthrough:
             self._queued_last_sample = None
             self.buffer.clear()
             self._fade_in_after_underflow = False
+            self._audio_primed = False
 
     def record_capture(self, sample_start, block):
         """Retain raw input with the decoder's absolute sample coordinates."""
@@ -432,30 +439,53 @@ class AudioPassthrough:
             if cursor < sample_end:
                 return False
             audio = np.concatenate(pieces)
-            previous_end = self._queued_sample_end
-            previous_last = self._queued_last_sample
-            if previous_end is not None:
-                gap = sample_start-previous_end
-                if gap < 0:
-                    overlap = min(-gap, len(audio))
-                    if overlap == len(audio):
-                        return True
-                    audio = audio[overlap:]
-                elif gap > max(1, int(round(self.input_rate*.001))):
-                    fade_samples = min(
-                        len(audio), max(1, int(round(
-                            self.input_rate*self.FRAME_GAP_CROSSFADE_SECONDS))))
-                    if fade_samples == 1:
-                        audio[0] = previous_last
-                    else:
-                        phase = np.linspace(
-                            0.0, 1.0, fade_samples, dtype=np.float32)
-                        gain = phase*phase*(3.0-2.0*phase)
-                        audio[:fade_samples] = (
-                            previous_last*(1.0-gain) +
-                            audio[:fade_samples]*gain)
-            self._queued_sample_end = sample_end
-            self._queued_last_sample = float(audio[-1])
+            return self._queue_samples_locked(sample_start, audio)
+
+    def queue_capture(self, sample_start, block):
+        """Queue a captured audio block without waiting for video decoding.
+
+        The PortAudio output stream consumes this FIFO continuously. A missed
+        picture therefore does not pause the audio leg or restart playback.
+        """
+        values = np.asarray(block, dtype=np.float32)
+        if values.ndim != 2 or values.shape[1] < 2 or not len(values):
+            return False
+        with self._lock:
+            if self.route not in ('left', 'right') or self.muted:
+                return False
+            channel = 0 if self.route == 'left' else 1
+            audio = values[:, channel].copy()
+            return self._queue_samples_locked(sample_start, audio)
+
+    def _queue_samples_locked(self, sample_start, audio):
+        """Append samples and gently bridge timestamp gaps or overlaps."""
+        sample_start = int(sample_start)
+        sample_end = sample_start+len(audio)
+        previous_end = self._queued_sample_end
+        if previous_end is not None:
+            gap = sample_start-previous_end
+            if gap < 0:
+                overlap = min(-gap, len(audio))
+                if overlap == len(audio):
+                    return True
+                audio = audio[overlap:].copy()
+            elif gap > max(1, int(round(self.input_rate*.001))):
+                fade_samples = min(
+                    len(audio), max(1, int(round(
+                        self.input_rate*self.FRAME_GAP_CROSSFADE_SECONDS))))
+                if fade_samples == 1:
+                    audio[0] = self._queued_last_sample
+                else:
+                    phase = np.linspace(
+                        0.0, 1.0, fade_samples, dtype=np.float32)
+                    gain = phase*phase*(3.0-2.0*phase)
+                    audio[:fade_samples] = (
+                        self._queued_last_sample*(1.0-gain) +
+                        audio[:fade_samples]*gain)
+        if not len(audio):
+            return True
+        self._queued_sample_end = sample_end
+        self._queued_last_sample = float(audio[-1])
         self.buffer.push(audio)
         return True
 
@@ -470,10 +500,11 @@ class AudioPassthrough:
             self._queued_last_sample = None
             self.buffer.clear()
             self._fade_in_after_underflow = False
+            self._audio_primed = False
             if self.output_rate:
                 self.reader = ClockMatchedReader(
                     self.buffer,
-                    max(1, int(round(self.input_rate*self.TARGET_SECONDS))),
+                    max(1, int(round(self.input_rate*self.target_seconds))),
                     nominal_ratio=self.input_rate/self.output_rate)
 
     @property
@@ -487,8 +518,20 @@ class AudioPassthrough:
             reader = self.reader
             audible = self.route is not None and not self.muted
             volume = self.volume
+            primed = self._audio_primed
         outdata.fill(0)
         if audible and reader is not None:
+            if not primed:
+                required = max(
+                    reader.target_samples,
+                    int(np.ceil(frames*reader.nominal_ratio))+2)
+                if self.buffer.available < required:
+                    return
+                with self._lock:
+                    if (self.reader is not reader or self.route is None or
+                            self.muted):
+                        return
+                    self._audio_primed = True
             try:
                 samples = reader.read(frames)
                 if reader.underflow:
@@ -511,6 +554,7 @@ class AudioPassthrough:
                     with self._lock:
                         if self.reader is reader:
                             self._fade_in_after_underflow = True
+                            self._audio_primed = False
                 else:
                     with self._lock:
                         fade_in = (self.reader is reader and
@@ -548,15 +592,29 @@ class AudioPassthrough:
                 self._queued_sample_end = None
                 self._queued_last_sample = None
                 self._fade_in_after_underflow = False
+                self._audio_primed = False
                 if self.output_rate:
                     self.reader = ClockMatchedReader(
                         self.buffer,
-                        max(1, int(round(self.input_rate*self.TARGET_SECONDS))),
+                        max(1, int(round(self.input_rate*self.target_seconds))),
                         nominal_ratio=self.input_rate/self.output_rate)
 
     def set_muted(self, muted):
         with self._lock:
-            self.muted = bool(muted)
+            muted = bool(muted)
+            if muted != self.muted:
+                self.muted = muted
+                self.buffer.clear()
+                self._queued_sample_end = None
+                self._queued_last_sample = None
+                self._audio_primed = False
+                if self.output_rate:
+                    from tools.v7_source_audio import ClockMatchedReader
+                    self.reader = ClockMatchedReader(
+                        self.buffer,
+                        max(1, int(round(
+                            self.input_rate*self.target_seconds))),
+                        nominal_ratio=self.input_rate/self.output_rate)
 
     def set_volume(self, volume):
         volume = _checked_audio_volume(volume)
@@ -608,6 +666,7 @@ class AudioPassthrough:
             self._queued_sample_end = None
             self._queued_last_sample = None
             self._fade_in_after_underflow = False
+            self._audio_primed = False
             self.output_rate = None
             self.channels = 0
             self.device = None

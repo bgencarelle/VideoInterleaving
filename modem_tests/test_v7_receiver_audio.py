@@ -88,7 +88,8 @@ class ReceiverChannelRouterTests(unittest.TestCase):
         router.observe(None, self.MONO_500, now=1.1)
         self.assertEqual(router.sync_state(1.5, 2.0), 'playing')
         self.assertEqual(router.sync_state(2.0, 2.0), 'freewheeling')
-        self.assertEqual(router.sync_state(3.1, 2.0), 'sync-lost')
+        self.assertEqual(router.sync_state(3.1, 2.0), 'freewheeling')
+        self.assertEqual(router.sync_state(3.101, 2.0), 'sync-lost')
 
 
 class ReceiverRuntimeOptionsTests(unittest.TestCase):
@@ -178,7 +179,24 @@ class _Fake44100SoundDevice(_FakeSoundDevice):
 
 class AudioPassthroughTests(unittest.TestCase):
 
-    def test_negotiated_input_rate_updates_resampling_and_low_latency_target(self):
+    def test_continuous_capture_audio_does_not_wait_for_decoded_frames(self):
+        passthrough = AudioPassthrough(
+            1000, sounddevice_module=_FakeSoundDevice)
+        passthrough.open(7)
+        passthrough.set_route('right')
+        first = np.array([[.1, .2], [.3, .4], [.5, .6]], dtype=np.float32)
+        second = np.array([[.7, .8], [.9, 1.0]], dtype=np.float32)
+
+        self.assertTrue(passthrough.queue_capture(0, first))
+        self.assertTrue(passthrough.queue_capture(3, second))
+
+        self.assertEqual(passthrough.buffer.available, 5)
+        np.testing.assert_allclose(
+            passthrough.buffer.read(5), [.2, .4, .6, .8, 1.0])
+        self.assertTrue(passthrough.stream.started)
+        passthrough.close()
+
+    def test_negotiated_input_rate_updates_clock_matched_target(self):
         passthrough = AudioPassthrough(
             1000, sounddevice_module=_FakeSoundDevice)
         passthrough.open(7)
@@ -188,8 +206,33 @@ class AudioPassthroughTests(unittest.TestCase):
 
         self.assertIsNot(passthrough.reader, old_reader)
         self.assertEqual(passthrough.reader.nominal_ratio, 1.2)
-        self.assertEqual(passthrough.reader.target_samples, 24)
-        self.assertLessEqual(passthrough.TARGET_SECONDS, .05)
+        self.assertEqual(passthrough.reader.target_samples, 96)
+        self.assertEqual(passthrough.target_seconds, .08)
+        passthrough.close()
+
+    def test_output_waits_for_jitter_buffer_then_streams_continuously(self):
+        passthrough = AudioPassthrough(
+            1000, sounddevice_module=_FakeSoundDevice)
+        passthrough.open(7)
+        passthrough.set_route('right')
+        passthrough.queue_capture(
+            0, np.full((40, 2), .2, dtype=np.float32))
+
+        early = np.empty((20, 2), dtype=np.float32)
+        passthrough.stream.callback(early, len(early), None, None)
+        np.testing.assert_array_equal(early, 0.0)
+        self.assertEqual(passthrough.buffer.available, 40)
+
+        passthrough.queue_capture(
+            40, np.full((40, 2), .2, dtype=np.float32))
+        first = np.empty((20, 2), dtype=np.float32)
+        second = np.empty((20, 2), dtype=np.float32)
+        passthrough.stream.callback(first, len(first), None, None)
+        passthrough.stream.callback(second, len(second), None, None)
+
+        self.assertGreater(float(np.min(first)), .19)
+        self.assertGreater(float(np.min(second)), .19)
+        self.assertFalse(passthrough.reader.underflow)
         passthrough.close()
 
     def test_frame_audio_uses_the_decoded_input_interval_and_selected_leg(self):
@@ -220,20 +263,25 @@ class AudioPassthroughTests(unittest.TestCase):
 
     def test_queue_underflow_fades_in_when_audio_resumes(self):
         passthrough = AudioPassthrough(
-            1000, sounddevice_module=_FakeSoundDevice)
+            1000, sounddevice_module=_FakeSoundDevice, target_seconds=.02)
         passthrough.open(7)
         passthrough.set_route('right')
         passthrough.record_capture(
-            0, np.full((60, 2), .1, dtype=np.float32))
-        self.assertTrue(passthrough.queue_frame(0, 20, 'right'))
+            0, np.full((100, 2), .1, dtype=np.float32))
+        self.assertTrue(passthrough.queue_frame(0, 60, 'right'))
 
-        first = np.empty((40, 2), dtype=np.float32)
-        passthrough.stream.callback(first, len(first), None, None)
-        self.assertTrue(np.all(first[20:] == 0.0))
-        self.assertLess(float(np.max(np.abs(np.diff(first[:, 0])))), .04)
+        steady = np.empty((40, 2), dtype=np.float32)
+        passthrough.stream.callback(steady, len(steady), None, None)
+        self.assertGreater(float(np.min(steady)), .09)
+
+        interrupted = np.empty((40, 2), dtype=np.float32)
+        passthrough.stream.callback(
+            interrupted, len(interrupted), None, None)
+        self.assertTrue(np.all(interrupted[21:] == 0.0))
+        self.assertLess(float(np.max(np.abs(np.diff(interrupted[:, 0])))), .04)
         self.assertTrue(passthrough._fade_in_after_underflow)
 
-        self.assertTrue(passthrough.queue_frame(40, 20, 'right'))
+        self.assertTrue(passthrough.queue_frame(60, 40, 'right'))
         resumed = np.empty((20, 2), dtype=np.float32)
         passthrough.stream.callback(resumed, len(resumed), None, None)
 
@@ -244,7 +292,7 @@ class AudioPassthroughTests(unittest.TestCase):
 
     def test_gap_between_decoded_intervals_is_crossfaded_in_place(self):
         passthrough = AudioPassthrough(
-            1000, sounddevice_module=_FakeSoundDevice)
+            1000, sounddevice_module=_FakeSoundDevice, target_seconds=.02)
         passthrough.open(7)
         passthrough.set_route('right')
         audio = np.zeros((80, 2), dtype=np.float32)
@@ -261,7 +309,7 @@ class AudioPassthroughTests(unittest.TestCase):
 
         self.assertFalse(passthrough.reader.underflow)
         self.assertLess(float(np.max(np.abs(np.diff(output[:, 0])))), .04)
-        self.assertEqual(passthrough.TARGET_SECONDS, .02)
+        self.assertEqual(passthrough.target_seconds, .02)
         passthrough.close()
 
     def test_v7_frame_audio_keeps_duration_and_pitch_across_device_rates(self):
@@ -269,20 +317,20 @@ class AudioPassthroughTests(unittest.TestCase):
         output_rate = 44100
         frame_samples = v7.PULSE_FRAME
         total_samples = 2*frame_samples
-        time_axis = np.arange(total_samples)/input_rate
         source_audio = np.column_stack((
-            np.zeros(total_samples),
-            .25*np.sin(2*np.pi*1000*time_axis))).astype(np.float32)
+            np.zeros(total_samples+32),
+            .25*np.sin(2*np.pi*1000*np.arange(total_samples+32)/input_rate)
+        )).astype(np.float32)
         passthrough = AudioPassthrough(
-            input_rate, sounddevice_module=_Fake44100SoundDevice)
+            input_rate, sounddevice_module=_Fake44100SoundDevice,
+            target_seconds=.02)
         passthrough.open(7)
         passthrough.set_input_rate(input_rate)
         passthrough.set_route('right')
         passthrough.record_capture(5000, source_audio)
 
-        self.assertTrue(passthrough.queue_frame(5000, frame_samples, 'right'))
         self.assertTrue(passthrough.queue_frame(
-            5000+frame_samples, frame_samples, 'right'))
+            5000, total_samples+32, 'right'))
         output_frames = round(total_samples*output_rate/input_rate)
         output = np.empty((output_frames, 2), dtype=np.float32)
         passthrough.stream.callback(output, output_frames, None, None)
@@ -301,7 +349,7 @@ class AudioPassthroughTests(unittest.TestCase):
 
     def test_mono_input_is_not_mistaken_for_the_audio_leg(self):
         passthrough = AudioPassthrough(
-            1000, sounddevice_module=_FakeSoundDevice)
+            1000, sounddevice_module=_FakeSoundDevice, target_seconds=.004)
         passthrough.set_route('left')
 
         passthrough.record_capture(
@@ -312,16 +360,17 @@ class AudioPassthroughTests(unittest.TestCase):
 
     def test_selected_side_routes_to_output_and_mute_is_immediate(self):
         passthrough = AudioPassthrough(
-            1000, sounddevice_module=_FakeSoundDevice)
+            1000, sounddevice_module=_FakeSoundDevice, target_seconds=.004)
         passthrough.open(7)
         self.assertTrue(passthrough.is_open)
         self.assertEqual(passthrough.device, 7)
 
         passthrough.set_route('right')
-        audio = np.array([[.1, .8], [.2, .6], [.3, .4], [.4, .2]],
+        audio = np.array([[.1, .8], [.2, .6], [.3, .4], [.4, .2],
+                          [.5, .1], [.6, 0.0]],
                          dtype=np.float32)
         passthrough.record_capture(0, audio)
-        self.assertTrue(passthrough.queue_frame(0, 4, 'right'))
+        self.assertTrue(passthrough.queue_frame(0, 6, 'right'))
         output = np.empty((4, 2), dtype=np.float32)
         passthrough.stream.callback(output, 4, None, None)
         np.testing.assert_allclose(output[:, 0], [.8, .6, .4, .2],
@@ -336,14 +385,15 @@ class AudioPassthroughTests(unittest.TestCase):
 
     def test_live_volume_change_scales_audio_without_reopening_output(self):
         passthrough = AudioPassthrough(
-            1000, sounddevice_module=_FakeSoundDevice)
+            1000, sounddevice_module=_FakeSoundDevice, target_seconds=.004)
         passthrough.open(7)
         passthrough.set_route('left')
         passthrough.set_volume(.5)
-        audio = np.array([[.4, .8], [.2, .6], [0.0, .4], [-.2, .2]],
+        audio = np.array([[.4, .8], [.2, .6], [0.0, .4], [-.2, .2],
+                          [-.4, 0.0], [-.6, -.2]],
                          dtype=np.float32)
         passthrough.record_capture(0, audio)
-        self.assertTrue(passthrough.queue_frame(0, 4, 'left'))
+        self.assertTrue(passthrough.queue_frame(0, 6, 'left'))
         output = np.empty((4, 2), dtype=np.float32)
         passthrough.stream.callback(output, 4, None, None)
         np.testing.assert_allclose(output[:, 0], [.2, .1, 0.0, -.1],

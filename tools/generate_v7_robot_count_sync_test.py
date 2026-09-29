@@ -60,12 +60,13 @@ def synthesize(word, tempo):
 def make_audio():
     total_samples = SECONDS*SAMPLE_RATE
     output = np.zeros(total_samples, dtype=np.float32)
-    start_offset = round(.08*SAMPLE_RATE)
-    max_phrase_samples = round(.9*SAMPLE_RATE)
+    start_offset = round(.02*SAMPLE_RATE)
+    max_phrase_samples = round(.98*SAMPLE_RATE)
     for number in range(SECONDS):
         word = spoken_number(number)
         phrase = None
-        for tempo in (1.2, 1.35, 1.5, 1.7):
+        for tempo in (1.05, 1.1, 1.15, 1.2, 1.25, 1.3, 1.35,
+                      1.4, 1.45, 1.5, 1.6, 1.7):
             candidate = synthesize(word, tempo)
             if len(candidate) <= max_phrase_samples:
                 phrase = candidate
