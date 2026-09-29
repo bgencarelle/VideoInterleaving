@@ -1785,7 +1785,6 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
          for index in range(input_channels)]
         if adaptive_profile is not None else None)
     blocks = queue.Queue(maxsize=INPUT_AUDIO_QUEUE_BLOCKS)
-    audio_blocks = queue.Queue(maxsize=64)
     input_gap = threading.Event()
     input_ready = threading.Event()
     live_input = LiveInput(
@@ -1900,7 +1899,7 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                'audio_output_identity': runtime_options.snapshot().get(
                    'audio_output_identity'),
               'audio_device_error': None,
-              'audio_dropped_blocks': 0,
+               'audio_unmatched_frames': 0,
               'mode': input_mode,
              'device': str(args.device), 'capture_rate': capture_rate,
              'input_channels': input_channels}
@@ -1926,19 +1925,6 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
             # stale audio would make the V7 clock appear to run backward.
             meter['dropped'] += 1
             input_gap.set()
-        if audio_bridge_enabled:
-            audio_block = np.array(block, copy=True)
-            try:
-                audio_blocks.put_nowait(audio_block)
-            except queue.Full:
-                try:
-                    audio_blocks.get_nowait()
-                except queue.Empty:
-                    pass
-                try:
-                    audio_blocks.put_nowait(audio_block)
-                except queue.Full:
-                    meter['audio_dropped_blocks'] += 1
         input_ready.set()
 
     def live_loop_position():
@@ -2048,6 +2034,8 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                 f'video {meter["video_side"] or "--"} · '
                 f'audio {meter["audio_side"] or "--"}',
                 f'passthrough {"muted" if meter["audio_muted"] else "live"} · '
+                f'queued {passthrough.buffered_ms if passthrough else 0:.0f} ms · '
+                f'unmatched {meter["audio_unmatched_frames"]} · '
                 f'volume {meter["audio_volume"]:.2f} · '
                 f'output {meter["audio_output_device"] or "not selected"}' +
                 ('' if not meter['audio_device_error'] else
@@ -2126,22 +2114,11 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
             refresh_runtime_state(now)
             stop.wait(.1)
 
-    def audio_input_worker():
-        while not stop.is_set():
-            try:
-                block = audio_blocks.get(timeout=.1)
-            except queue.Empty:
-                continue
-            passthrough.push(block)
-
     audio_threads = [threading.Thread(
         target=audio_output_monitor, daemon=True,
         name='v7-receiver-runtime-monitor')]
     if passthrough is not None:
         refresh_runtime_state()
-        audio_threads.append(threading.Thread(
-            target=audio_input_worker, daemon=True,
-            name='v7-receiver-audio-passthrough'))
 
     def update_channel_hint():
         if adaptive_profile is not None:
@@ -2255,6 +2232,8 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
             # the last good image while pulse acquisition starts over.
             input_gap.clear()
             live_input.reset()
+            if passthrough is not None:
+                passthrough.clear_audio()
             if profile_probes is not None:
                 for probe in profile_probes:
                     probe.reset()
@@ -2286,6 +2265,8 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                 # Blocks are private copies of the callback data; LiveInput
                 # applies the leveler's polarity to the stored audio itself.
                 block = blocks.get_nowait()
+                if passthrough is not None:
+                    passthrough.record_capture(live_input.total, block)
                 if (opposite_probe is not None and block.ndim == 2 and
                         block.shape[1] > opposite_input_index):
                     opposite_probe.add(
@@ -2527,6 +2508,23 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                 display_frames.publish(latest, model.coder.grids,
                                        meter['aspect'])
                 shown_times.append(time.monotonic())
+                if (passthrough is not None and input_channels > 1 and
+                        result.diag.get('frame_start') is not None and
+                        result.diag.get('frame_scale') is not None):
+                    route = receiver_router.snapshot(time.monotonic())
+                    audio_side = route['audio_side']
+                    passthrough.set_route(
+                        audio_side,
+                        runtime_options.snapshot()['audio_muted'])
+                    if audio_side is not None:
+                        frame_sample_start = int(round(
+                            audio_start+result.diag['frame_start']))
+                        frame_sample_count = int(round(
+                            P.PULSE_FRAME*result.diag['frame_scale']))
+                        if not passthrough.queue_frame(
+                                frame_sample_start, frame_sample_count,
+                                audio_side):
+                            meter['audio_unmatched_frames'] += 1
                 meter['shown_index'] = result.diag.get('source_index')
                 meter['shown_direction'] = result.diag.get('direction')
                 # Lag: where the live loop is now (this machine's clock and
@@ -2604,6 +2602,8 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                                 device=args.device, blocksize=1024,
                                 callback=callback)
         stream.start()
+        if passthrough is not None:
+            passthrough.set_input_rate(float(stream.samplerate))
         if not args.no_log:
             print(f'V7 receive ready: input={args.device!r} '
                   f'rate={float(stream.samplerate):g}Hz (device {float(device_info["default_samplerate"]):g}Hz) '

@@ -3,6 +3,7 @@ import unittest
 
 import numpy as np
 
+from animation_modem import v7
 from tools.v7_receiver_audio import (AudioPassthrough,
                                      ReceiverChannelRouter,
                                      ReceiverRuntimeOptions,
@@ -144,6 +145,7 @@ class _FakeOutputStream:
     def __init__(self, **kwargs):
         self.callback = kwargs['callback']
         self.kwargs = kwargs
+        self.samplerate = kwargs['samplerate']
         self.started = False
 
     def start(self):
@@ -168,19 +170,145 @@ class _FakeSoundDevice:
         pass
 
 
+class _Fake44100SoundDevice(_FakeSoundDevice):
+    @staticmethod
+    def query_devices(_device, _kind):
+        return {'max_output_channels': 2, 'default_samplerate': 44100}
+
+
 class AudioPassthroughTests(unittest.TestCase):
+
+    def test_negotiated_input_rate_updates_resampling_and_low_latency_target(self):
+        passthrough = AudioPassthrough(
+            1000, sounddevice_module=_FakeSoundDevice)
+        passthrough.open(7)
+        old_reader = passthrough.reader
+
+        passthrough.set_input_rate(1200)
+
+        self.assertIsNot(passthrough.reader, old_reader)
+        self.assertEqual(passthrough.reader.nominal_ratio, 1.2)
+        self.assertEqual(passthrough.reader.target_samples, 24)
+        self.assertLessEqual(passthrough.TARGET_SECONDS, .05)
+        passthrough.close()
+
+    def test_frame_audio_uses_the_decoded_input_interval_and_selected_leg(self):
+        passthrough = AudioPassthrough(
+            1000, sounddevice_module=_FakeSoundDevice)
+        passthrough.set_route('right')
+        block = np.array([[.0, .1], [.2, .3], [.4, .5], [.6, .7],
+                          [.8, .9], [1.0, 1.1]], dtype=np.float32)
+        passthrough.record_capture(100, block)
+
+        queued = passthrough.queue_frame(102, 3, 'right')
+
+        self.assertTrue(queued)
+        np.testing.assert_allclose(
+            passthrough.buffer.read(3), [.5, .7, .9], atol=1e-7)
+
+    def test_frame_audio_is_not_queued_if_its_capture_window_was_dropped(self):
+        passthrough = AudioPassthrough(
+            1000, sounddevice_module=_FakeSoundDevice)
+        passthrough.set_route('left')
+        passthrough.record_capture(
+            100, np.ones((4, 2), dtype=np.float32))
+
+        queued = passthrough.queue_frame(102, 4, 'left')
+
+        self.assertFalse(queued)
+        self.assertEqual(passthrough.buffer.available, 0)
+
+    def test_queue_underflow_fades_in_when_audio_resumes(self):
+        passthrough = AudioPassthrough(
+            1000, sounddevice_module=_FakeSoundDevice)
+        passthrough.open(7)
+        passthrough.set_route('right')
+        passthrough.record_capture(
+            0, np.full((60, 2), .1, dtype=np.float32))
+        self.assertTrue(passthrough.queue_frame(0, 20, 'right'))
+
+        first = np.empty((40, 2), dtype=np.float32)
+        passthrough.stream.callback(first, len(first), None, None)
+        self.assertTrue(np.all(first[20:] == 0.0))
+        self.assertLess(float(np.max(np.abs(np.diff(first[:, 0])))), .04)
+        self.assertTrue(passthrough._fade_in_after_underflow)
+
+        self.assertTrue(passthrough.queue_frame(40, 20, 'right'))
+        resumed = np.empty((20, 2), dtype=np.float32)
+        passthrough.stream.callback(resumed, len(resumed), None, None)
+
+        self.assertEqual(resumed[0, 0], 0.0)
+        self.assertLess(float(np.max(np.abs(np.diff(resumed[:, 0])))), .04)
+        self.assertFalse(passthrough._fade_in_after_underflow)
+        passthrough.close()
+
+    def test_gap_between_decoded_intervals_is_crossfaded_in_place(self):
+        passthrough = AudioPassthrough(
+            1000, sounddevice_module=_FakeSoundDevice)
+        passthrough.open(7)
+        passthrough.set_route('right')
+        audio = np.zeros((80, 2), dtype=np.float32)
+        audio[:20, 1] = -.1
+        audio[20:40, 1] = .4
+        audio[40:, 1] = .1
+        passthrough.record_capture(0, audio)
+
+        self.assertTrue(passthrough.queue_frame(0, 20, 'right'))
+        self.assertTrue(passthrough.queue_frame(40, 20, 'right'))
+        self.assertTrue(passthrough.queue_frame(60, 20, 'right'))
+        output = np.empty((40, 2), dtype=np.float32)
+        passthrough.stream.callback(output, len(output), None, None)
+
+        self.assertFalse(passthrough.reader.underflow)
+        self.assertLess(float(np.max(np.abs(np.diff(output[:, 0])))), .04)
+        self.assertEqual(passthrough.TARGET_SECONDS, .02)
+        passthrough.close()
+
+    def test_v7_frame_audio_keeps_duration_and_pitch_across_device_rates(self):
+        input_rate = 48000
+        output_rate = 44100
+        frame_samples = v7.PULSE_FRAME
+        total_samples = 2*frame_samples
+        time_axis = np.arange(total_samples)/input_rate
+        source_audio = np.column_stack((
+            np.zeros(total_samples),
+            .25*np.sin(2*np.pi*1000*time_axis))).astype(np.float32)
+        passthrough = AudioPassthrough(
+            input_rate, sounddevice_module=_Fake44100SoundDevice)
+        passthrough.open(7)
+        passthrough.set_input_rate(input_rate)
+        passthrough.set_route('right')
+        passthrough.record_capture(5000, source_audio)
+
+        self.assertTrue(passthrough.queue_frame(5000, frame_samples, 'right'))
+        self.assertTrue(passthrough.queue_frame(
+            5000+frame_samples, frame_samples, 'right'))
+        output_frames = round(total_samples*output_rate/input_rate)
+        output = np.empty((output_frames, 2), dtype=np.float32)
+        passthrough.stream.callback(output, output_frames, None, None)
+
+        self.assertEqual(passthrough.reader.nominal_ratio,
+                         input_rate/output_rate)
+        self.assertAlmostEqual(output_frames/output_rate,
+                               total_samples/input_rate, delta=1/output_rate)
+        np.testing.assert_array_equal(output[:, 0], output[:, 1])
+        spectrum = np.abs(np.fft.rfft(output[:, 0]))
+        frequencies = np.fft.rfftfreq(output_frames, 1/output_rate)
+        peak = frequencies[np.argmax(spectrum[1:])+1]
+        self.assertAlmostEqual(peak, 1000, delta=15)
+        self.assertGreater(float(np.sqrt(np.mean(output[:, 0]**2))), .15)
+        passthrough.close()
 
     def test_mono_input_is_not_mistaken_for_the_audio_leg(self):
         passthrough = AudioPassthrough(
             1000, sounddevice_module=_FakeSoundDevice)
         passthrough.set_route('left')
 
-        passthrough.push(np.array([[.1], [.2], [.3]], dtype=np.float32))
+        passthrough.record_capture(
+            100, np.array([[.1], [.2], [.3]], dtype=np.float32))
 
         self.assertEqual(passthrough.buffer.available, 0)
-
-        passthrough.push(np.array([[.1, .8], [.2, .6]], dtype=np.float32))
-        self.assertEqual(passthrough.buffer.available, 2)
+        self.assertFalse(passthrough.queue_frame(100, 2, 'left'))
 
     def test_selected_side_routes_to_output_and_mute_is_immediate(self):
         passthrough = AudioPassthrough(
@@ -190,8 +318,10 @@ class AudioPassthroughTests(unittest.TestCase):
         self.assertEqual(passthrough.device, 7)
 
         passthrough.set_route('right')
-        passthrough.push(np.array([[.1, .8], [.2, .6], [.3, .4], [.4, .2]],
-                                  dtype=np.float32))
+        audio = np.array([[.1, .8], [.2, .6], [.3, .4], [.4, .2]],
+                         dtype=np.float32)
+        passthrough.record_capture(0, audio)
+        self.assertTrue(passthrough.queue_frame(0, 4, 'right'))
         output = np.empty((4, 2), dtype=np.float32)
         passthrough.stream.callback(output, 4, None, None)
         np.testing.assert_allclose(output[:, 0], [.8, .6, .4, .2],
@@ -210,8 +340,10 @@ class AudioPassthroughTests(unittest.TestCase):
         passthrough.open(7)
         passthrough.set_route('left')
         passthrough.set_volume(.5)
-        passthrough.push(np.array([[.4, .8], [.2, .6], [0.0, .4],
-                                   [-.2, .2]], dtype=np.float32))
+        audio = np.array([[.4, .8], [.2, .6], [0.0, .4], [-.2, .2]],
+                         dtype=np.float32)
+        passthrough.record_capture(0, audio)
+        self.assertTrue(passthrough.queue_frame(0, 4, 'left'))
         output = np.empty((4, 2), dtype=np.float32)
         passthrough.stream.callback(output, 4, None, None)
         np.testing.assert_allclose(output[:, 0], [.2, .1, 0.0, -.1],

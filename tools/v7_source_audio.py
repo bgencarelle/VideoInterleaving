@@ -54,6 +54,10 @@ class SampleBuffer:
             self._condition.notify_all()
 
     def read(self, count):
+        return self.read_with_status(count)[0]
+
+    def read_with_status(self, count):
+        """Read mono samples and report how many came from the FIFO."""
         count = max(0, int(count))
         result = np.zeros(count, dtype=np.float32)
         with self._condition:
@@ -70,7 +74,7 @@ class SampleBuffer:
                 if self._offset == len(first):
                     self._chunks.popleft()
                     self._offset = 0
-        return result
+        return result, written
 
     def wait_for(self, count, timeout, ended=lambda: False):
         deadline = time.monotonic()+max(0.0, float(timeout))
@@ -138,13 +142,19 @@ class ClockMatchedReader:
         self._phase = 0.0
         self._pending = np.empty(0, dtype=np.float32)
         self.max_correction = 0.0
+        self.underflow = False
+        self.valid_output_samples = 0
 
     def reset(self):
         self._phase = 0.0
         self._pending = np.empty(0, dtype=np.float32)
+        self.underflow = False
+        self.valid_output_samples = 0
 
     def read(self, count):
         count = max(0, int(count))
+        self.underflow = False
+        self.valid_output_samples = 0
         if count == 0:
             return np.empty(0, dtype=np.float32)
         queued = self.buffer.available+len(self._pending)
@@ -159,17 +169,31 @@ class ClockMatchedReader:
         advanced = self._phase+count*step
         consumed = int(advanced)
         needed = max(int(np.floor(positions[-1]))+2, consumed)
+        valid_source_count = len(self._pending)
         if needed > len(self._pending):
+            appended, appended_count = self.buffer.read_with_status(
+                needed-len(self._pending))
+            valid_source_count += appended_count
             self._pending = np.concatenate((
                 self._pending,
-                self.buffer.read(needed-len(self._pending))))
+                appended))
         indexes = np.floor(positions).astype(np.intp)
         fraction = (positions-indexes).astype(np.float32)
         output = (self._pending[indexes]*(1.0-fraction) +
                   self._pending[indexes+1]*fraction)
 
-        self._phase = advanced-consumed
-        self._pending = self._pending[consumed:].copy()
+        valid_output_count = max(0, int(np.floor(
+            (valid_source_count-1-self._phase)/step))+1)
+        self.valid_output_samples = min(count, valid_output_count)
+        self.underflow = self.valid_output_samples < count
+        if self.underflow:
+            self._phase = 0.0
+            self._pending = np.empty(0, dtype=np.float32)
+        else:
+            self._phase = advanced-consumed
+            remaining = max(0, valid_source_count-consumed)
+            self._pending = self._pending[
+                consumed:consumed+remaining].copy()
         return output.astype(np.float32, copy=False)
 
 
