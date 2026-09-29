@@ -263,8 +263,7 @@ class SharedVideoAudioSource:
     """One FFmpeg demux/clock feeding the video and embedded-audio paths."""
 
     def __init__(self, source, sample_rate, width=320, scale_flags='bicubic',
-                 live=None, target_samples=None, buffer_seconds=2.0,
-                 preserve_size=False):
+                 live=None, target_samples=None, buffer_seconds=2.0):
         from tools.v7_capture import _LIVE_SCHEMES, _is_stream_url
 
         if not hasattr(os, 'mkfifo'):
@@ -341,10 +340,8 @@ class SharedVideoAudioSource:
             elif is_stream:
                 command += ['-rw_timeout', '10000000']
             command += ['-i', source, '-map', '0:v:0']
-            if not preserve_size:
-                command += ['-vf',
-                            f'scale={int(width)}:-2:flags={scale_flags}']
-            command += ['-fps_mode', 'passthrough', '-pix_fmt', 'rgb24',
+            command += ['-vf', f'scale={int(width)}:-2:flags={scale_flags}',
+                        '-fps_mode', 'passthrough', '-pix_fmt', 'rgb24',
                         '-c:v', 'ppm', '-f', 'image2pipe',
                         str(self.video_path)]
             if self.has_audio:

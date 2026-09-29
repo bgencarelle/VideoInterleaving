@@ -115,24 +115,6 @@ def encode_image_dct_packet(model, image, absolute, source_index, aspect_code, *
         loop=loop, direction=direction, eof_marker=eof_marker)
 
 
-def encode_folded_source_packet(model, rgb, absolute, source_index, aspect_code, *,
-                                fold, loop=None, direction=1,
-                                eof_marker=True):
-    """Opt-in native RGB projection into the exact Fold-500 source slots."""
-    if fold is None:
-        raise ValueError('native source projection requires Fold 500')
-    if int(model.encoding_type) != _v7.ENCODING_FILTER_CODES['box']:
-        raise ValueError('stereo Fold 500 requires the Box encode filter')
-    from animation_modem.v7_source_dct import source_fold_dct_coefficients
-
-    full = source_fold_dct_coefficients(
-        rgb, _v7.V7_GRIDS, fold.source_positions)
-    coefficients = fold.encode_dct_coefficients(full)
-    return encode_folded_coefficients_packet(
-        model, coefficients, absolute, source_index, aspect_code,
-        loop=loop, direction=direction, eof_marker=eof_marker)
-
-
 def encode_folded_coefficients_packet(
         model, coefficients, absolute, source_index, aspect_code, *,
         loop=None, direction=1, eof_marker=True):

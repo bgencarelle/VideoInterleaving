@@ -72,10 +72,6 @@ class Fold500:
         self.kept = _corner_positions()
         self.sd_host = np.sqrt(model.lam[self.hosts])
         self.sd_guest = np.asarray(table['sd_guest'], dtype=float)
-        # Guests add support outside the ordinary sent corners; the reserved
-        # signature carriers are already among the kept host positions.
-        self.source_positions = np.unique(
-            np.concatenate((self.kept, self.guests))).astype(np.int64)
         self.D = float(table['D'])
         self.beta = .8*self.D/(2*U_CLIP)
         self.power = 1 + self.D**2/12 + self.beta**2

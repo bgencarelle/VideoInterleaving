@@ -82,20 +82,6 @@ class VideoSourceCommandTests(unittest.TestCase):
                 self.assertTrue(grab.paced)
                 grab.close()
 
-    def test_dct_video_capture_keeps_the_decoded_frame_dimensions(self):
-        with tempfile.TemporaryDirectory(dir=ROOT/'tmp') as tmp:
-            path = Path(tmp)/'source.mp4'
-            path.write_bytes(b'placeholder')
-            process = self.Process()
-            with mock.patch('tools.v7_capture.shutil.which', return_value='ffmpeg'), \
-                    mock.patch('tools.v7_capture.subprocess.Popen',
-                               return_value=process) as popen:
-                grab = video_source(path, width=160, preserve_size=True)
-                command = popen.call_args.args[0]
-                self.assertNotIn('-vf', command)
-                self.assertEqual(command[command.index('-i')+1], str(path))
-                grab.close()
-
     def test_stream_url_is_neither_looped_nor_file_paced(self):
         process = self.Process()
         with mock.patch('tools.v7_capture.shutil.which', return_value='ffmpeg'), \

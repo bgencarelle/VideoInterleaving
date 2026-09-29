@@ -230,18 +230,13 @@ def _capture(args):
     if args.source == 'video':
         return video_source(args.video_source, width=args.capture_width,
                             scale_flags=capture_filter,
-                            live=True if args.video_live else None,
-                            preserve_size=bool(getattr(args, 'dct_encode', False)))
+                            live=True if args.video_live else None)
     if args.source == 'mouse-follow':
         return mouse_follow_source(initial_width=args.capture_width)
     if args.source == 'camera':
         # Let FFmpeg probe the lowest mode/rate when the user did not override
         # it.  Some AVFoundation devices advertise 15 fps but reject a forced
         # 15-fps open unless their exact mode is selected first.
-        if getattr(args, 'dct_encode', False):
-            return camera_source(args.camera, args.capture_fps,
-                                 width=args.capture_width, spec=args.ffmpeg_input,
-                                 scale_flags=capture_filter, preserve_size=True)
         if getattr(args, 'perceptual_resize', 'off') == 'off':
             return camera_source(
                 args.camera, args.capture_fps, width=args.capture_width,
@@ -259,8 +254,7 @@ def _capture(args):
         capture_fps = 60
     return screen_capture_source(capture_fps or FPS, region, args.display,
                                  args.capture_width, args.ffmpeg_input,
-                                 capture_filter,
-                                 preserve_size=bool(getattr(args, 'dct_encode', False)))
+                                 capture_filter)
 
 
 def _capture_scale_flags(args):
@@ -282,27 +276,12 @@ def _model(fixture, encode_filter='nearest'):
 
 
 def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0,
-            perceptual_resize='off', perceptual_detail_strength=0.25,
-            dct_encode=False, dct_options=None):
+            perceptual_resize='off', perceptual_detail_strength=0.25):
     _validate_tone_controls(brightness, gamma)
     source_size = getattr(frame, 'source_size', None)
     capture_prepared = bool(getattr(frame, 'prepared', False))
     if source_size is not None:
         frame = frame.rgb
-    if dct_encode:
-        if perceptual_resize != 'off':
-            raise ValueError('--dct-encode cannot be combined with --perceptual-resize')
-        if capture_prepared:
-            raise ValueError('--dct-encode requires an unprepared source frame')
-        from animation_modem.v7_source_dct import source_dct_values
-        rgb = np.asarray(frame.convert('RGB') if isinstance(frame, Image.Image)
-                         else frame)
-        values, _stats = source_dct_values(
-            rgb, model.coder.grids, model.coder.shapes,
-            brightness=brightness, gamma=gamma,
-            **(dct_options or {}))
-        size = source_size or (rgb.shape[1], rgb.shape[0])
-        return values, P.aspect_wire_code(size)
     rgb_frame = (isinstance(frame, np.ndarray) and frame.dtype == np.uint8 and
                  frame.ndim == 3 and frame.shape[2] == 3)
     if perceptual_resize == 'off':
@@ -390,7 +369,6 @@ def _send_profile(args, slots):
     encode_filter = getattr(args, 'encode_filter', None)
     brightness = getattr(args, 'brightness', None)
     perceptual_resize = getattr(args, 'perceptual_resize', 'off')
-    dct_encode = bool(getattr(args, 'dct_encode', False))
     if slots:
         encode_filter = encode_filter or 'box'
         brightness = 1.0 if brightness is None else brightness
@@ -406,28 +384,6 @@ def _send_profile(args, slots):
         encode_filter = encode_filter or 'nearest'
         brightness = 1.05 if brightness is None else brightness
     _validate_tone_controls(brightness, getattr(args, 'gamma', 1.0))
-    dct_options = _dct_encode_options(args)
-    if dct_encode:
-        if slots != 500 or encode_filter != 'box':
-            raise ValueError('--dct-encode requires the canonical box Fold-500 profile')
-        if not P._is_reference(getattr(args, 'fixture', None)):
-            raise ValueError('--dct-encode requires the canonical V7 fixture')
-        from animation_modem.v7_source_dct import (
-            AGGREGATIONS, BAND_PROFILES, SHARPEN_MODES)
-        if dct_options['sharpen'] not in SHARPEN_MODES:
-            raise ValueError('unknown --dct-sharpen mode')
-        if dct_options['aggregation'] not in AGGREGATIONS:
-            raise ValueError('unknown --dct-aggregation mode')
-        if dct_options['band_profile'] not in BAND_PROFILES:
-            raise ValueError('unknown --dct-band-profile')
-        if not 0 <= dct_options['sharpen_strength'] <= 1:
-            raise ValueError('--dct-sharpen-strength must be in [0, 1]')
-        if not 0 <= dct_options['clarity'] <= 1:
-            raise ValueError('--dct-clarity must be in [0, 1]')
-        if not 1 <= dct_options['chroma_gain'] <= 1.3:
-            raise ValueError('--dct-chroma-gain must be in [1, 1.3]')
-    elif _dct_options_explicit(args):
-        raise ValueError('DCT enhancement options require --dct-encode')
     if perceptual_resize != 'off':
         if slots not in (500, 1000):
             raise ValueError('--perceptual-resize requires a pinned --experimental-fold 500 or 1000 profile')
@@ -437,27 +393,6 @@ def _send_profile(args, slots):
         if not np.isfinite(strength) or not 0.0 <= strength <= 1.0:
             raise ValueError('--perceptual-detail-strength must be finite and in [0, 1]')
     return encode_filter, float(brightness)
-
-
-def _dct_encode_options(args):
-    def option(name, default):
-        configured = getattr(args, name, None)
-        return default if configured is None else configured
-
-    return {
-        'sharpen': option('dct_sharpen', 'off'),
-        'sharpen_strength': float(option('dct_sharpen_strength', .25)),
-        'clarity': float(option('dct_clarity', 0.0)),
-        'chroma_gain': float(option('dct_chroma_gain', 1.0)),
-        'aggregation': option('dct_aggregation', 'off'),
-        'band_profile': option('dct_band_profile', 'off'),
-    }
-
-
-def _dct_options_explicit(args):
-    return any(getattr(args, name, None) is not None for name in (
-        'dct_sharpen', 'dct_sharpen_strength', 'dct_clarity',
-        'dct_chroma_gain', 'dct_aggregation', 'dct_band_profile'))
 
 
 def _validate_tone_controls(brightness, gamma):
@@ -584,7 +519,6 @@ def run_send(args):
         raise ValueError('--source-audio-delay-ms must be finite and non-negative')
     profile_slots = 500 if mono_fold_profile else slots
     args.encode_filter, args.brightness = _send_profile(args, profile_slots)
-    dct_options = _dct_encode_options(args)
     tone_controls = LiveToneControls(args.brightness, args.gamma)
     control_stop = threading.Event()
     if getattr(args, 'gui_control', False):
@@ -758,9 +692,7 @@ def run_send(args):
                                         current_tones['brightness'],
                                         current_tones['gamma'],
                                         getattr(args, 'perceptual_resize', 'off'),
-                                        getattr(args, 'perceptual_detail_strength', 0.25),
-                                        dct_encode=getattr(args, 'dct_encode', False),
-                                        dct_options=dct_options)
+                                        getattr(args, 'perceptual_detail_strength', 0.25))
                 # Keep captured source values unfolded. encode_batch folds
                 # exactly once, directly in coefficient space; a second fold
                 # would quantize the hosts again and erase the guest residuals.
@@ -845,9 +777,7 @@ def run_send(args):
                 model, warm_frame, args.encode_filter,
                 warm_tones['brightness'], warm_tones['gamma'],
                 getattr(args, 'perceptual_resize', 'off'),
-                getattr(args, 'perceptual_detail_strength', 0.25),
-                dct_encode=getattr(args, 'dct_encode', False),
-                dct_options=dct_options)
+                getattr(args, 'perceptual_detail_strength', 0.25))
             encode_batch([warm_values], [0], 1)
             # Start picture and soundtrack capture only after the output clock
             # is known, and close together so file/stream timelines begin near
@@ -859,8 +789,7 @@ def run_send(args):
                     args.video_source, output_rate, width=args.capture_width,
                     scale_flags=_capture_scale_flags(args),
                     live=True if args.video_live else None,
-                    target_samples=first_packet_samples,
-                    preserve_size=getattr(args, 'dct_encode', False))
+                    target_samples=first_packet_samples)
                 raw_grab = capture.video_grab
                 source_audio = capture if capture.has_audio else None
             else:
@@ -2676,28 +2605,11 @@ def parser():
     send.add_argument('--encode-filter', choices=('nearest', 'box', 'lanczos', 'bicubic'),
                       default=None,
                       help=argparse.SUPPRESS)
-    source_path = send.add_mutually_exclusive_group()
-    source_path.add_argument('--dct-encode', action='store_true',
-                             help='analyze the unprepared RGB source in the V7 DCT domain')
-    source_path.add_argument(
+    send.add_argument(
         '--perceptual-resize',
         choices=('off', 'linear-box', 'gamma-detail', 'linear-detail'),
         default='off', help=argparse.SUPPRESS)
     send.add_argument('--perceptual-detail-strength', type=float, default=0.25,
-                      help=argparse.SUPPRESS)
-    send.add_argument('--dct-sharpen', choices=('off', 'taper', 'usm'),
-                      default=None, help=argparse.SUPPRESS)
-    send.add_argument('--dct-sharpen-strength', type=float, default=None,
-                      help=argparse.SUPPRESS)
-    send.add_argument('--dct-clarity', type=float, default=None,
-                      help=argparse.SUPPRESS)
-    send.add_argument('--dct-chroma-gain', type=float, default=None,
-                      help=argparse.SUPPRESS)
-    send.add_argument('--dct-aggregation', choices=(
-        'off', 'area-box', 'weighted-tent', 'weighted-cosine',
-        'weighted-gaussian'), default=None, help=argparse.SUPPRESS)
-    send.add_argument('--dct-band-profile', choices=('off', 'mid-luma',
-                      'perceptual-color'), default=None,
                       help=argparse.SUPPRESS)
     send.add_argument('--brightness', type=float, default=None,
                       help='source brightness multiplier (default: 1.0 for folded profiles)')
@@ -2752,8 +2664,7 @@ def parser():
     send.add_argument('--region')
     send.add_argument('--capture-width', type=int, default=160,
                       help=('FFmpeg screen/video width and initial mouse-follow '
-                            'crop width; normal camera mode uses 80x96; '
-                            '--dct-encode preserves captured dimensions'))
+                            'crop width; camera uses 80x96 (default: 160)'))
     send.add_argument('--capture-filter',
                       choices=('neighbor', 'area', 'bilinear', 'bicubic',
                                'lanczos'),
