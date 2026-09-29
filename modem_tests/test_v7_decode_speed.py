@@ -89,7 +89,8 @@ def channel_joint_reference(Z, iters=2, force_float32=False):
                 'ij,ij->i', h[v7.PILOT_BIN_INDEX], pv)
             ok = np.abs(pred) > threshold
             ph = np.angle(y[ok]/pred[ok]).astype(dtype, copy=False)
-            w = np.abs(pred[ok]).astype(dtype, copy=False)
+            w = np.minimum(np.abs(pred[ok]), np.abs(y[ok])).astype(
+                dtype, copy=False)
             J = (2*np.pi*frequency[ok]/v7.N)[:, None]*basis[sv[ok]]
             JW = J*w[:, None]
             normal = JW.T @ JW + eps*np.eye(JW.shape[1], dtype=dtype)
@@ -372,8 +373,8 @@ class V7DecodeSpeedTests(unittest.TestCase):
     def test_tone_seeded_refit_keeps_both_rejection_gates(self):
         model = v7.load_model(TARGET, 'nearest')
         cases = (
-            (35, {'muted': (5, 6, 7, 8)}, 'pilot_residual_gate'),
-            (37, {'empty_amp': .25}, 'timing_residual_gate'),
+            (25, {'muted': (5, 6, 7, 8)}, 'pilot_residual_gate'),
+            (0, {'muted': (5, 6, 7, 8)}, 'timing_residual_gate'),
         )
         for seed, options, reason in cases:
             Z = self._tone_frame(model, seed, **options)

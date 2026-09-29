@@ -585,6 +585,39 @@ class PulseState:
                        PROVISIONAL_INDEX_WINDOW)
         return provisional, provisional
 
+    def accept_candidates(self, candidates):
+        """Choose the intact metadata track when a transient splits the legs."""
+        candidates = list(dict.fromkeys(
+            (meta for meta in candidates if meta is not None)))
+        if not candidates:
+            return None, False, False
+        last = self.last_verified
+
+        def score(meta):
+            known = self.lock.values.get(meta.tail_slice)
+            if known is None and meta.tail_slice in (0, 1, 2, 3, 4):
+                known = 0
+            crc_match = known is not None and meta.mask == known
+            if last is None:
+                continuity = 0
+            elif (meta.encoding_type == last.encoding_type and
+                  meta.aspect_code == last.aspect_code):
+                direction = meta.direction or last.direction or 1
+                expected = last.source_index + direction
+                delta = abs(meta.source_index-expected)
+                continuity = (-delta if delta <= PROVISIONAL_INDEX_WINDOW
+                              else -PROVISIONAL_INDEX_WINDOW-1)
+            else:
+                continuity = -PROVISIONAL_INDEX_WINDOW-2
+            return (crc_match, continuity)
+
+        # Stable ordering keeps the historical combined-track decision when
+        # candidates tie; an independently clean leg wins on CRC/order when
+        # the other has been transiently erased.
+        meta = max(candidates, key=score)
+        valid, provisional = self.accept(meta)
+        return meta, valid, provisional
+
 
 def aspect_wire_code(size):
     """Return the compact V7 family/orientation code for a source size."""
@@ -2390,7 +2423,8 @@ def _channel_joint_kernel(Z, iters, theta0, tone_replaced, tone_delta,
     Same weighted Gauss-Newton as _channel_joint_batched_numpy: each pilot
     bin's two-coefficient response is a fixed linear operator of the
     de-rotated observations, and the timing knots take Gauss-Newton steps on
-    the |pred|-weighted pilot phase errors.
+    pilot phase errors weighted by the lesser of predicted and observed
+    magnitude.
     """
     nbins, width = bin_symbols.shape
     nknots = basis.shape[1]
@@ -2438,7 +2472,10 @@ def _channel_joint_kernel(Z, iters, theta0, tone_replaced, tone_delta,
                 for k in range(width):
                     predicted = rot[b, k]*(values[b, k, 0]*h[b, 0] +
                                            values[b, k, 1]*h[b, 1])
-                    weight = abs(predicted)
+                    # A dropped observation has an arbitrary phase even though
+                    # the pilot model still predicts a normal magnitude. Do
+                    # not let that symbol pull the packet-wide timing fit.
+                    weight = min(abs(predicted), abs(y[b, k]))
                     if not bin_valid[b, k] or weight <= threshold:
                         continue
                     ratio = y[b, k]/predicted
@@ -2548,7 +2585,10 @@ def _channel_joint_batched_numpy(Z, iters, force_float32, tone_delta=None,
                 ok = _PILOT_BIN_VALID & (np.abs(pred) > threshold)
                 rho = np.divide(y, pred, out=np.zeros_like(y), where=ok)
                 ph = _phase_or_zero(rho).astype(real_dtype, copy=False)
-                w = np.where(ok, np.abs(pred), 0).astype(real_dtype, copy=False)
+                # Clamp timing-fit weight by the measured pilot magnitude so
+                # transient erasures do not act like zero-phase observations.
+                w = np.where(ok, np.minimum(np.abs(pred), np.abs(y)), 0).astype(
+                    real_dtype, copy=False)
 
                 # This is the same weighted Gauss-Newton fit as the
                 # observation-ordered loop: both sides are weighted by w².
@@ -2938,6 +2978,54 @@ def _fade_and_noise_numpy(Z, H, tone_reference=False, return_tone_diag=False):
     if return_tone_diag:
         return H, noise, tone_diag
     return H, noise
+
+
+def _stereo_erasure_mask(noise):
+    """Flag localized symbol/channel pilot outliers in the stereo pair.
+
+    A short dropout is a time-local erasure, not a packet-wide noise penalty.
+    Residual spikes relative to that leg's packet median identify isolated
+    bursts when the paired leg is not also an outlier. This leaves common-mode
+    channel-fit excursions to the normal quality gate without requiring the
+    paired leg to be perfectly clean. The paired-leg ratio also catches a
+    dropout that persists through most of a packet, where a within-packet
+    median is no longer a useful reference.
+    """
+    values = np.asarray(noise)
+    if values.ndim != 2 or values.shape[1] != 2:
+        raise ValueError('stereo pilot noise must have shape (symbols, 2)')
+    limit = float(LIVE_MAX_PILOT_NOISE)
+    ratio = 8.0
+    local_limit = np.maximum(limit, ratio*np.median(values, axis=0))
+    local_outlier = values > local_limit[None, :]
+    erase = np.zeros(values.shape, dtype=bool)
+    for channel, paired in ((0, 1), (1, 0)):
+        erase[:, channel] = (
+            (local_outlier[:, channel] & ~local_outlier[:, paired]) |
+            ((values[:, channel] > limit) &
+             (values[:, channel] >
+              ratio*np.maximum(values[:, paired], NOISE_FLOOR)) &
+             (values[:, paired] <= limit)))
+    return erase
+
+
+def _effective_pilot_noise(noise, erased):
+    """Per-leg mean residual after excluding localized erasures.
+
+    A leg erased for every symbol is unavailable, not infinitely noisy: the
+    other leg may still carry a complete M/S observation through the joint
+    equalizer. Report that case at the live rejection boundary so quality
+    gates judge the surviving observation rather than the absent one.
+    """
+    noise = np.asarray(noise)
+    erased = np.asarray(erased, dtype=bool)
+    effective = np.empty(2, dtype=float)
+    for channel in range(2):
+        good = ~erased[:, channel]
+        effective[channel] = (float(np.mean(noise[good, channel]))
+                              if np.any(good) else
+                              float(LIVE_MAX_PILOT_NOISE))
+    return effective
 
 
 def _fade_and_noise_float32(Z, H, tone_reference=False,
@@ -3377,6 +3465,13 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
         Z, H, force_float32=force_float32,
         tone_reference=(tone_equalization == 'm-reference'),
         return_tone_diag=True)
+    pilot_noise = noise.copy()
+    stereo_erasures = _stereo_erasure_mask(pilot_noise)
+    effective_noise = _effective_pilot_noise(pilot_noise, stereo_erasures)
+    # The affected observation is absent only for these OFDM symbols. Keep the
+    # other channel and the rest of this leg's packet in the joint solve.
+    noise[stereo_erasures] = np.maximum(
+        1.0, np.max(pilot_noise)*1e6)
     if tone_equalization != 'off':
         timing_metrics['tone_equalization'] = tone_eq_diag
     if diagnostics is not None:
@@ -3407,25 +3502,28 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
         if displayable:
             display_coeffs[got] = current[got]
         result_diag = {
-            'noise': noise.mean(0).tolist(), 'got': int(got.sum()),
+            'noise': effective_noise.tolist(), 'got': int(got.sum()),
             'head_confidence': head_confidence,
             'head_coverage': head_coverage, 'held': not displayable,
             'displayable': displayable,
+            'stereo_erased_symbols': stereo_erasures.sum(axis=0).tolist(),
             'display_coeffs': display_coeffs}
         result_diag.update(timing_metrics)
         return Result(counter, 'lost', display_coeffs if displayable else
                       np.asarray(prev_tail, dtype=real_dtype).copy(), result_diag)
     coeffs[got] = current[got]
-    result_diag = {'noise': noise.mean(0).tolist(), 'got': int(got.sum()),
+    result_diag = {'noise': effective_noise.tolist(), 'got': int(got.sum()),
                    'head_confidence': head_confidence,
                    'head_coverage': head_coverage, '_H': H,
-                   'displayable': True}
+                   'displayable': True,
+                   'stereo_erased_symbols': stereo_erasures.sum(axis=0).tolist()}
     result_diag.update(timing_metrics)
     return Result(counter, 'verified', coeffs, result_diag)
 
 
 def decode_metadata(model, samples, start, scale, channel,
-                    force_float32=False, sample_indexes=None):
+                    force_float32=False, sample_indexes=None,
+                    return_candidates=False):
     indexes = (start + np.arange(META_SYMBOL)*scale
                if sample_indexes is None else
                np.asarray(sample_indexes, dtype=float))
@@ -3435,36 +3533,50 @@ def decode_metadata(model, samples, start, scale, channel,
         return None
     meta = _sample_at(samples, indexes, taps=4)
     window = meta[WIN:WIN+N]
-    if force_float32:
-        z = (np.fft.rfft(window.astype(np.float32), axis=0) /
-             np.float32(model.scale) *
-             np.conj(model.phase32[-1])[:, None] *
-             _EARLY32[:, None]).astype(np.complex64)
-        observed = z.sum(axis=1)
-        if z.shape[1] == 1:
-            observed *= np.float32(2.0)
-        pilot_z = observed[META_PILOTS]
-        if np.sum(np.abs(pilot_z) > 1e-6) < 2:
-            return None
-        response = (np.interp(META_DATA_BINS, META_PILOTS, pilot_z.real) +
-                    1j*np.interp(META_DATA_BINS, META_PILOTS, pilot_z.imag))
-        response = response.astype(np.complex64)
-        data = np.divide(observed[META_DATA_BINS], response,
-                         out=np.zeros(len(META_DATA_BINS), np.complex64),
-                         where=np.abs(response) > 1e-9)
-        symbols = data[:20]
-        bits = np.empty(40, np.uint8)
-        bits[0::2] = (symbols.real >= 0).astype(np.uint8)
-        bits[1::2] = (symbols.imag >= 0).astype(np.uint8)
-        return parse_metadata_word(np.packbits(bits).tobytes())
-    else:
-        spectrum = np.fft.rfft(window, axis=0)
-        valid, packed = _decode_metadata_spectrum(
-            spectrum, model.phase[-1], EARLY, model.scale,
-            META_PILOTS, META_DATA_BINS)
-    if not valid:
+    spectrum = np.fft.rfft(
+        window.astype(np.float32) if force_float32 else window, axis=0)
+    tracks = [spectrum]
+    if spectrum.shape[1] == 2:
+        # Metadata is duplicated on both legs. A transient on one leg can
+        # corrupt the sum even when the other independent copy is intact.
+        tracks.extend((spectrum[:, 0:1], spectrum[:, 1:2]))
+    candidates = []
+    for track in tracks:
+        if force_float32:
+            z = (track / np.float32(model.scale) *
+                 np.conj(model.phase32[-1])[:, None] *
+                 _EARLY32[:, None]).astype(np.complex64)
+            observed = z.sum(axis=1)
+            if z.shape[1] == 1:
+                observed *= np.float32(2.0)
+            pilot_z = observed[META_PILOTS]
+            if np.sum(np.abs(pilot_z) > 1e-6) < 2:
+                continue
+            response = (np.interp(META_DATA_BINS, META_PILOTS, pilot_z.real) +
+                        1j*np.interp(META_DATA_BINS, META_PILOTS, pilot_z.imag))
+            response = response.astype(np.complex64)
+            data = np.divide(observed[META_DATA_BINS], response,
+                             out=np.zeros(len(META_DATA_BINS), np.complex64),
+                             where=np.abs(response) > 1e-9)
+            symbols = data[:20]
+            bits = np.empty(40, np.uint8)
+            bits[0::2] = (symbols.real >= 0).astype(np.uint8)
+            bits[1::2] = (symbols.imag >= 0).astype(np.uint8)
+            meta = parse_metadata_word(np.packbits(bits).tobytes())
+        else:
+            valid, packed = _decode_metadata_spectrum(
+                track, model.phase[-1], EARLY, model.scale,
+                META_PILOTS, META_DATA_BINS)
+            meta = parse_metadata_word(packed.tobytes()) if valid else None
+        if meta is not None:
+            candidates.append(meta)
+    if return_candidates:
+        return candidates
+    if not candidates:
         return None
-    return parse_metadata_word(packed.tobytes())
+    # Prefer a plain CRC match when available; PulseState has the loop lock
+    # needed to rank the rotated CRC masks on slices 5 and 6.
+    return next((meta for meta in candidates if meta.mask == 0), candidates[0])
 
 
 def _diagnostic_summary(diag, elapsed_ms):
@@ -4516,13 +4628,14 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
         # out; the protected encoding ID can therefore select the source model.
         metadata_scale = (frame_scale if frame_boundary == 'eof' else scale)
         meta_start = (frame_start + (PULSE.SYNC_LEN+FRAME)*metadata_scale)
-        meta = decode_metadata(model, samples, meta_start, metadata_scale, None,
-                               force_float32,
-                               sample_indexes=metadata_indexes)
+        metadata_candidates = decode_metadata(
+            model, samples, meta_start, metadata_scale, None, force_float32,
+            sample_indexes=metadata_indexes, return_candidates=True)
         # Slices 0-4 carry a plain CRC; 5 and 6 carry it XOR p / N, which
         # the lock learns and then checks; until then they are accepted only
         # provisionally (see PulseState.accept).
-        metadata_valid, provisional = state.accept(meta)
+        meta, metadata_valid, provisional = state.accept_candidates(
+            metadata_candidates or [])
         metadata_retry = None
         if not metadata_valid and pilot_timing != 'baseline':
             # A failed CRC may be a timing miss rather than lost metadata bits.
@@ -4540,9 +4653,9 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
             if shift is not None:
                 if pulse_map is None:
                     corrected_start = retry_start-shift*retry_scale
-                    retry_meta = decode_metadata(
+                    retry_candidates = decode_metadata(
                         model, samples, corrected_start, retry_scale, None,
-                        force_float32)
+                        force_float32, return_candidates=True)
                 else:
                     corrected_map = _pulse_warp_map(
                         frame_start, next_start, scale, following_scale,
@@ -4556,11 +4669,13 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                                              else None))
                     corrected_indexes = (None if corrected_map is None else
                                          corrected_map[0])
-                    retry_meta = (decode_metadata(
+                    retry_candidates = (decode_metadata(
                         model, samples, retry_start, retry_scale, None,
-                        force_float32, sample_indexes=corrected_indexes)
+                        force_float32, sample_indexes=corrected_indexes,
+                        return_candidates=True)
                         if corrected_indexes is not None else None)
-                retry_valid, retry_provisional = state.accept(retry_meta)
+                retry_meta, retry_valid, retry_provisional = \
+                    state.accept_candidates(retry_candidates or [])
                 metadata_retry.update({
                     'retried': True, 'valid': bool(retry_valid),
                     'provisional': bool(retry_provisional),
