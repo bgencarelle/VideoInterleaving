@@ -142,12 +142,14 @@ class ClockMatchedReader:
         self._phase = 0.0
         self._pending = np.empty(0, dtype=np.float32)
         self.max_correction = 0.0
+        self.current_correction = 0.0
         self.underflow = False
         self.valid_output_samples = 0
 
     def reset(self):
         self._phase = 0.0
         self._pending = np.empty(0, dtype=np.float32)
+        self.current_correction = 0.0
         self.underflow = False
         self.valid_output_samples = 0
 
@@ -162,6 +164,7 @@ class ClockMatchedReader:
         correction = float(np.clip(
             error*self.PROPORTIONAL_GAIN,
             -self.MAX_CORRECTION, self.MAX_CORRECTION))
+        self.current_correction = correction
         self.max_correction = max(self.max_correction, abs(correction))
         step = self.nominal_ratio*(1.0+correction)
 

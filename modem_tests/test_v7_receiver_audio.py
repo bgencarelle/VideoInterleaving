@@ -285,6 +285,8 @@ class AudioPassthroughTests(unittest.TestCase):
         self.assertEqual(stats['input_status'], {'input overflow': 1})
         self.assertEqual(stats['output_status'], {'output underflow': 1})
         self.assertEqual(stats['dropped_samples'], 0)
+        self.assertIn('current_clock_correction_ppm', stats)
+        self.assertIn('max_clock_correction_ppm', stats)
         passthrough.close()
 
     def test_frame_audio_uses_the_decoded_input_interval_and_selected_leg(self):

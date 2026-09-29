@@ -1900,11 +1900,15 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                 'audio_output_identity': runtime_options.snapshot().get(
                     'audio_output_identity'),
                 'audio_device_error': None,
-                'audio_runtime': {'buffered_ms': 0.0,
-                                  'underflow_events': 0,
-                                  'dropped_samples': 0,
-                                  'input_status': {}, 'output_status': {},
-                                  'clock_correction_ppm': 0.0},
+                'audio_runtime': {
+                     'buffered_ms': 0.0,
+                     'underflow_events': 0,
+                     'dropped_samples': 0,
+                     'current_clock_correction_ppm': 0.0,
+                     'max_clock_correction_ppm': 0.0,
+                     'input_status': {},
+                     'output_status': {},
+                 },
                'mode': input_mode,
              'device': str(args.device), 'capture_rate': capture_rate,
              'input_channels': input_channels}
@@ -2039,7 +2043,8 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                 f'in/out xrun '
                 f'{sum(meter["audio_runtime"]["input_status"].values())}/'
                 f'{sum(meter["audio_runtime"]["output_status"].values())}',
-                f'clock {meter["audio_runtime"]["clock_correction_ppm"]:.0f}ppm · '
+                f'clk {meter["audio_runtime"]["current_clock_correction_ppm"]:+.0f}/'
+                f'{meter["audio_runtime"]["max_clock_correction_ppm"]:.0f}ppm · '
                 f'drop {meter["audio_runtime"]["dropped_samples"]}',
                 f'{meter["audio_output_device"] or "output off"} · '
                 f'volume {meter["audio_volume"]:.2f}'),
@@ -2122,6 +2127,7 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
         current_device = object()
         last_attempt = 0.0
         last_health_check = 0.0
+        last_audio_report = 0.0
         last_audio_error_signature = None
         while not stop.is_set():
             options = runtime_options.snapshot()
@@ -2155,11 +2161,16 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                     audio_stats['dropped_samples'])
                 has_audio_errors = any((
                     signature[0], signature[1], signature[2], signature[3]))
-                if (signature != last_audio_error_signature and
-                        has_audio_errors and not args.no_log and
-                        (args.log or args.diagnostics)):
+                error_changed = (
+                    signature != last_audio_error_signature and
+                    has_audio_errors and (args.log or args.diagnostics))
+                periodic_report = (
+                    args.diagnostics and now-last_audio_report >= 1.0)
+                if (not args.no_log and
+                        (error_changed or periodic_report)):
                     print({'status': 'audio_runtime', **audio_stats},
                           flush=True)
+                    last_audio_report = now
                 last_audio_error_signature = signature
             refresh_runtime_state(now)
             stop.wait(.1)

@@ -355,8 +355,10 @@ class AudioPassthrough:
         stats.update({
             'buffered_ms': self.buffered_ms,
             'dropped_samples': int(self.buffer.dropped),
-            'clock_correction_ppm': (0.0 if reader is None else
-                                      reader.max_correction*1e6),
+            'current_clock_correction_ppm': (0.0 if reader is None else
+                                             reader.current_correction*1e6),
+            'max_clock_correction_ppm': (0.0 if reader is None else
+                                         reader.max_correction*1e6),
             'input_rate': self.input_rate,
             'output_rate': output_rate,
         })

@@ -102,6 +102,22 @@ class SourceAudioTests(unittest.TestCase):
         self.assertLessEqual(reader.max_correction,
                              ClockMatchedReader.MAX_CORRECTION)
 
+    def test_clock_match_exposes_current_and_peak_correction_separately(self):
+        target = 100
+        fifo = SampleBuffer(max_samples=500)
+        fifo.push(np.arange(200, dtype=np.float32))
+        reader = ClockMatchedReader(fifo, target)
+
+        reader.read(10)
+        peak = reader.max_correction
+        self.assertEqual(reader.current_correction, peak)
+
+        fifo.read(90)
+        reader.read(1)
+
+        self.assertEqual(reader.current_correction, 0.0)
+        self.assertEqual(reader.max_correction, peak)
+
     def test_device_capture_selects_or_downmixes_input_channels(self):
         class InputStream:
             def __init__(self, **kwargs):
