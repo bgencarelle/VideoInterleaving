@@ -394,15 +394,33 @@ def _is_stream_url(source):
     return urlsplit(str(source)).scheme.lower() in _NETWORK_SCHEMES
 
 
+def _is_hls_url(source):
+    parsed = urlsplit(str(source))
+    return (parsed.scheme.lower() in ('http', 'https') and
+            parsed.path.lower().endswith(('.m3u8', '.m3u')))
+
+
+def _realtime_input_options(source, live):
+    """Pace finite files and timestamped HTTP media/HLS to their media clock."""
+    if not live or _is_hls_url(source):
+        return ['-re']
+    parsed = urlsplit(str(source))
+    if (parsed.scheme.lower() in ('http', 'https') and
+            os.path.splitext(parsed.path)[1].lower() in
+            _FINITE_VIDEO_SUFFIXES):
+        return ['-re']
+    return []
+
+
 def video_source(source, loop=None, realtime=None, width=320,
                  scale_flags='bicubic', live=None, preserve_size=False):
     """Read a local video file in a real-time loop or a live stream URL.
 
     Local files and HTTP(S) media URLs loop and are paced with ``-re`` by
     default. Native live protocols are read as delivered. Set ``live=True``
-    for live HLS/HTTP URLs; direct finite HTTP media files remain paced, play
-    once, and end cleanly. PPM carries each output frame's dimensions, so no
-    ffprobe pass is needed.
+    for live HLS/HTTP URLs; HLS manifests and direct finite HTTP media remain
+    paced to their media timestamps, play once, and end cleanly. PPM carries
+    each output frame's dimensions, so no ffprobe pass is needed.
     """
     if shutil.which('ffmpeg') is None:
         raise SystemExit('ffmpeg not found. brew install ffmpeg / apt install ffmpeg')
@@ -432,7 +450,7 @@ def video_source(source, loop=None, realtime=None, width=320,
     cmd = ['ffmpeg', '-nostdin', '-loglevel', 'error']
     if loop:
         cmd += ['-stream_loop', '-1']
-    if realtime:
+    if realtime or _is_hls_url(source):
         cmd += ['-re']
     if is_stream:
         # Fail a stalled network read instead of leaving the capture worker

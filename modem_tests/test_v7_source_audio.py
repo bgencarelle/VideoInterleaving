@@ -162,6 +162,28 @@ class SourceAudioTests(unittest.TestCase):
         self.assertIn('-re', command)
         self.assertIn('-stream_loop', command)
 
+    def test_live_hls_audio_is_paced_to_its_source_timestamps(self):
+        class Process:
+            def __init__(self):
+                self.stdout = io.BytesIO()
+
+            def poll(self):
+                return 0
+
+            def terminate(self):
+                pass
+
+        process = Process()
+        with mock.patch('subprocess.Popen', return_value=process) as popen:
+            audio = FFmpegSourceAudio(
+                'https://media.example/master.m3u8', 48_000, live=True)
+            command = popen.call_args.args[0]
+            audio.close()
+
+        self.assertIn('-re', command)
+        self.assertIn('-rw_timeout', command)
+        self.assertNotIn('-stream_loop', command)
+
     @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe') and
                          hasattr(os, 'mkfifo'),
                          'shared A/V smoke test needs POSIX FFmpeg and ffprobe')

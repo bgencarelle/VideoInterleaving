@@ -206,7 +206,8 @@ class FFmpegSourceAudio:
 
     def __init__(self, source, sample_rate, live=None, buffer_seconds=2.0,
                  target_samples=None):
-        from tools.v7_capture import _LIVE_SCHEMES, _is_stream_url
+        from tools.v7_capture import (_LIVE_SCHEMES, _is_stream_url,
+                                      _realtime_input_options)
 
         source = os.path.expanduser(str(source))
         is_stream = _is_stream_url(source)
@@ -216,9 +217,10 @@ class FFmpegSourceAudio:
         is_live = (scheme in _LIVE_SCHEMES if live is None else bool(live))
         command = ['ffmpeg', '-nostdin', '-loglevel', 'error']
         if not is_live:
-            command += ['-stream_loop', '-1', '-re']
+            command += ['-stream_loop', '-1']
         elif is_stream:
             command += ['-rw_timeout', '10000000']
+        command += _realtime_input_options(source, is_live)
         command += [
             '-i', source, '-map', '0:a:0?', '-vn', '-sn', '-dn',
             '-af', 'aresample=async=1:first_pts=0',
@@ -289,7 +291,8 @@ class SharedVideoAudioSource:
     def __init__(self, source, sample_rate, width=320, scale_flags='bicubic',
                  live=None, target_samples=None, buffer_seconds=2.0,
                  preserve_size=False):
-        from tools.v7_capture import _LIVE_SCHEMES, _is_stream_url
+        from tools.v7_capture import (_LIVE_SCHEMES, _is_stream_url,
+                                      _realtime_input_options)
 
         if not hasattr(os, 'mkfifo'):
             raise NotImplementedError('shared FFmpeg pipes require POSIX FIFOs')
@@ -361,9 +364,10 @@ class SharedVideoAudioSource:
 
             command = [ffmpeg, '-nostdin', '-y', '-loglevel', 'error']
             if not is_live:
-                command += ['-stream_loop', '-1', '-re']
+                command += ['-stream_loop', '-1']
             elif is_stream:
                 command += ['-rw_timeout', '10000000']
+            command += _realtime_input_options(source, is_live)
             command += ['-i', source, '-map', '0:v:0']
             if not preserve_size:
                 command += ['-vf',

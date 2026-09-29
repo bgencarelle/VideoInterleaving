@@ -134,7 +134,7 @@ class VideoSourceCommandTests(unittest.TestCase):
                                     live=live)
                 cmd = popen.call_args.args[0]
                 self.assertEqual('-stream_loop' in cmd, not live)
-                self.assertEqual('-re' in cmd, not live)
+                self.assertIn('-re', cmd)
                 self.assertIn('-rw_timeout', cmd)
                 grab.close()
 
