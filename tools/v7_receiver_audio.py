@@ -340,16 +340,44 @@ class AudioPassthrough:
     # the servo target keeps this much audio beyond one output callback.
     CAPTURE_STALL_SECONDS = 0.03
 
+    # Output mode. 'blocking' (default): PortAudio's own C thread plays from
+    # its ring buffer (CoreAudio) or the device buffer (ALSA, JACK, WASAPI),
+    # and a Python writer thread only refills it. The real-time path never
+    # needs the GIL, so a process stall costs buffer headroom, not output.
+    # 'callback': the previous Python output callback (OUTPUT_BLOCKSIZE).
+    OUTPUT_MODE = 'blocking'
+    # Frames per blocking write (and PortAudio framesPerBuffer).
+    BLOCKING_WRITE_FRAMES = 512
+    # Requested output buffer ahead of the device in blocking mode. It must
+    # outlast the longest stall of the writer thread (~26 ms seen on the
+    # reference Mac) plus one write. CoreAudio sizes its blocking ring as the
+    # next power of two >= 2 x suggested latency x rate, so the request is
+    # halved there: 45 ms gives a 2,048-frame (46 ms) ring at 44.1 kHz.
+    BLOCKING_BUFFER_SECONDS = 0.045
+    # FIFO target in blocking mode. The output buffer now absorbs output-side
+    # timing, so the FIFO only covers capture jitter; the target floor still
+    # adds one write, one capture block and CAPTURE_STALL_SECONDS (~52 ms at
+    # 96 kHz in, 44.1 kHz out). Keeps total monitor delay near the old path.
+    BLOCKING_TARGET_SECONDS = 0.05
+
     def __init__(self, input_rate, sounddevice_module=None, status_callback=None,
                  volume=DEFAULT_AUDIO_VOLUME, target_seconds=None,
-                 output_latency=None, output_blocksize=None):
+                 output_latency=None, output_blocksize=None,
+                 output_mode=None):
         if sounddevice_module is None:
             import sounddevice as sounddevice_module
         from tools.v7_source_audio import SampleBuffer
 
         self.sd = sounddevice_module
         self.input_rate = int(input_rate)
-        self.target_seconds = (self.TARGET_SECONDS if target_seconds is None
+        self.output_mode = (self.OUTPUT_MODE if output_mode is None
+                            else str(output_mode))
+        if self.output_mode not in ('blocking', 'callback'):
+            raise ValueError("audio output mode must be 'blocking' or 'callback'")
+        default_target = (self.BLOCKING_TARGET_SECONDS
+                          if self.output_mode == 'blocking'
+                          else self.TARGET_SECONDS)
+        self.target_seconds = (default_target if target_seconds is None
                                else float(target_seconds))
         if not np.isfinite(self.target_seconds) or self.target_seconds <= 0:
             raise ValueError('audio target buffer must be positive')
@@ -376,14 +404,21 @@ class AudioPassthrough:
         # Experimental output buffering: a larger host buffer gives the
         # Python callback more slack before a stall costs audible output.
         self.output_latency = output_latency
-        self.output_blocksize = int(self.OUTPUT_BLOCKSIZE if output_blocksize
+        default_blocksize = (self.BLOCKING_WRITE_FRAMES
+                             if self.output_mode == 'blocking'
+                             else self.OUTPUT_BLOCKSIZE)
+        self.output_blocksize = int(default_blocksize if output_blocksize
                                     is None else output_blocksize)
+        if self.output_mode == 'blocking' and self.output_blocksize == 0:
+            raise ValueError('blocking audio output needs a positive blocksize')
         if self.output_blocksize < 0:
             raise ValueError('output blocksize must be 0 or positive')
         self._max_stall = 0.0
         self._stalls = 0
         self._stall_ms_total = 0.0
         self._probe_stop = None
+        self._writer_stop = None
+        self._writer_thread = None
         self._latency_trims = 0
         self._trimmed_samples = 0
         self.stream = None
@@ -462,6 +497,7 @@ class AudioPassthrough:
             'output_rate': output_rate,
             'output_latency_ms': self._stream_latency_ms(),
             'output_blocksize': self.output_blocksize,
+            'output_mode': self.output_mode,
         })
         return stats
 
@@ -533,12 +569,21 @@ class AudioPassthrough:
                 device=device, channels=channels, dtype='float32',
                 samplerate=rate)
             reader = self._make_clock_reader(self.input_rate, rate)
-            extra = ({} if self.output_latency is None else
-                     {'latency': self.output_latency})
-            stream = self.sd.OutputStream(
-                samplerate=rate, channels=channels, dtype='float32',
-                device=device, blocksize=self.output_blocksize,
-                callback=self._callback, **extra)
+            if self.output_mode == 'blocking':
+                latency = (self.output_latency
+                           if self.output_latency is not None
+                           else self._blocking_latency(device))
+                stream = self.sd.OutputStream(
+                    samplerate=rate, channels=channels, dtype='float32',
+                    device=device, blocksize=self.output_blocksize,
+                    latency=latency)
+            else:
+                extra = ({} if self.output_latency is None else
+                         {'latency': self.output_latency})
+                stream = self.sd.OutputStream(
+                    samplerate=rate, channels=channels, dtype='float32',
+                    device=device, blocksize=self.output_blocksize,
+                    callback=self._callback, **extra)
             stream.start()
             rate = float(getattr(stream, 'samplerate', rate))
             if rate <= 0 or not np.isfinite(rate):
@@ -564,10 +609,65 @@ class AudioPassthrough:
             self._fade_in_after_underflow = False
             self._audio_primed = False
             self.stream = stream
+        if self.output_mode == 'blocking':
+            self._writer_stop = threading.Event()
+            self._writer_thread = threading.Thread(
+                target=self._writer_loop,
+                args=(stream, self._writer_stop, self.output_blocksize,
+                      channels),
+                name='v7-audio-writer', daemon=True)
+            self._writer_thread.start()
         self._probe_stop = threading.Event()
         threading.Thread(target=self._stall_probe, args=(self._probe_stop,),
                          name='v7-audio-stall-probe', daemon=True).start()
         self._report(None)
+
+    def _blocking_latency(self, device):
+        """PortAudio suggested latency giving ~BLOCKING_BUFFER_SECONDS."""
+        seconds = float(self.BLOCKING_BUFFER_SECONDS)
+        try:
+            hostapi = self.sd.query_devices(device)['hostapi']
+            name = str(self.sd.query_hostapis(hostapi)['name'])
+        except Exception:
+            name = ''
+        # CoreAudio's blocking ring is sized from twice the latency.
+        return seconds/2 if 'core audio' in name.lower() else seconds
+
+    def _writer_loop(self, stream, stop, frames, channels):
+        """Refill PortAudio's output buffer; the only Python on this path.
+
+        PortAudio's own thread plays from the buffer, so a stall here only
+        spends buffered audio. The writer never blocks inside PortAudio: it
+        writes only when a whole block fits (write_available) and otherwise
+        sleeps in Python until about that much has played. Stopping a stream
+        while another thread waits in a blocking Pa_WriteStream can deadlock
+        (seen with the JACK host API), and close() must be able to end this
+        loop promptly before it aborts the stream.
+        """
+        block = np.zeros((frames, channels), dtype=np.float32)
+        rate = float(getattr(stream, 'samplerate', 0) or
+                     self.output_rate or self.input_rate)
+        while not stop.is_set():
+            try:
+                available = int(stream.write_available)
+            except Exception as exc:
+                if not stop.is_set():
+                    self._report(f'Audio output failed: {exc}')
+                return
+            if available < frames:
+                stop.wait(max(0.001, (frames-available)/rate))
+                continue
+            self._callback(block, frames, None, None)
+            try:
+                underflowed = stream.write(block)
+            except Exception as exc:
+                if not stop.is_set():
+                    self._report(f'Audio output failed: {exc}')
+                return
+            if underflowed:
+                with self._stats_lock:
+                    self._count_status(
+                        self._output_status_counts, 'output underflow')
 
     def set_input_rate(self, rate):
         """Use the capture stream's negotiated clock for passthrough resampling."""
@@ -928,6 +1028,10 @@ class AudioPassthrough:
         if self._probe_stop is not None:
             self._probe_stop.set()
             self._probe_stop = None
+        writer, writer_stop = self._writer_thread, self._writer_stop
+        self._writer_thread = self._writer_stop = None
+        if writer_stop is not None:
+            writer_stop.set()
         with self._lock:
             stream, self.stream = self.stream, None
             self.reader = None
@@ -938,8 +1042,22 @@ class AudioPassthrough:
             self.output_rate = None
             self.channels = 0
             self.device = None
-        if stream is not None:
+        if stream is None:
+            return
+        if writer is None:
             try:
                 stream.stop()
             finally:
                 stream.close()
+            return
+        # Blocking mode: end the writer before touching the stream. It never
+        # waits inside PortAudio, so it exits within about one block; only
+        # then abort (no drain) and close, so no write races the stop.
+        writer.join(timeout=2.0)
+        if writer.is_alive():
+            self._report('Audio writer did not stop; output stream left open.')
+            return
+        try:
+            stream.abort()
+        finally:
+            stream.close()

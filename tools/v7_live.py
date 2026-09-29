@@ -2120,10 +2120,12 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                        'sync_age': meter['sync_age'],
                        'channel_modes': route['channel_modes']}, flush=True)
 
-    # Output buffering overrides for diagnosing callback stalls:
-    # V7_AUDIO_OUTPUT_LATENCY = seconds, 'low' or 'high'; V7_AUDIO_OUTPUT_
-    # BLOCKSIZE = frames per output callback (0 lets the host choose). Unset,
-    # AudioPassthrough uses its defaults (host latency, 2,048-frame blocks).
+    # Output overrides for diagnosing stalls: V7_AUDIO_OUTPUT_MODE =
+    # 'blocking' (default: PortAudio plays from its own buffer, Python only
+    # refills it) or 'callback' (Python output callback); V7_AUDIO_OUTPUT_
+    # LATENCY = PortAudio suggested latency in seconds, 'low' or 'high';
+    # V7_AUDIO_OUTPUT_BLOCKSIZE = frames per write or callback (callback mode
+    # only: 0 lets the host choose). Unset, AudioPassthrough's defaults apply.
     output_latency = os.environ.get('V7_AUDIO_OUTPUT_LATENCY') or None
     if output_latency not in (None, 'low', 'high'):
         output_latency = float(output_latency)
@@ -2135,7 +2137,8 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
         status_callback=lambda error: meter.__setitem__(
             'audio_device_error', error),
         output_latency=output_latency,
-        output_blocksize=output_blocksize)
+        output_blocksize=output_blocksize,
+        output_mode=os.environ.get('V7_AUDIO_OUTPUT_MODE') or None)
         if audio_bridge_enabled else None)
 
     def audio_output_monitor():

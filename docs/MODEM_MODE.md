@@ -170,7 +170,15 @@ exposes the same setting as `--audio-volume`. The GUI also has a live
 sync-warning control. The Info view reports the detected profile, video/audio
 channel assignment, output state, and sync state; the decoded-image destination
 is chosen with **Browse**. Device preferences are matched by device name and
-host API when PortAudio indices change. There is no receiver WAV recorder yet;
+host API when PortAudio indices change. Passthrough plays through a PortAudio
+blocking stream: PortAudio's own thread plays from a short output buffer (about
+46 ms) and a Python writer refills it, so a decoder or GUI stall spends
+buffered audio instead of dropping output blocks. A clock servo matches the
+capture and output clocks within 0.5%. For diagnosis,
+`V7_AUDIO_OUTPUT_MODE=callback` restores the Python output callback, and
+`V7_AUDIO_OUTPUT_LATENCY` / `V7_AUDIO_OUTPUT_BLOCKSIZE` override PortAudio's
+buffering; `audio_runtime` reports show measured rates, stalls, trims and
+PortAudio underflows. There is no receiver WAV recorder yet;
 the proposed recording extension and its overhead gate are documented in
 `transport_v7_spec.md`.
 

@@ -1,4 +1,5 @@
 """Device-free tests for receiver channel routing and audio handoff."""
+import time
 import unittest
 
 import numpy as np
@@ -213,6 +214,189 @@ class _Fake48000SoundDevice(_FakeSoundDevice):
         return {'max_output_channels': 2, 'default_samplerate': 48000}
 
 
+class _FakeBlockingStream:
+    """PortAudio blocking stream stand-in: a 2,048-frame buffer drained at the
+    device rate by the wall clock, like PortAudio's own playback thread."""
+
+    CAPACITY = 2048
+
+    def __init__(self, **kwargs):
+        assert 'callback' not in kwargs
+        self.kwargs = kwargs
+        self.samplerate = kwargs['samplerate']
+        self.latency = kwargs['latency']
+        self.active = False
+        self.aborted = False
+        self.closed = False
+        self.written = []
+        self.underflows_to_report = 0
+        self.write_after_close = False
+        self.write_while_full = False
+        self._fill = float(self.CAPACITY)  # PortAudio pre-fills with silence
+        self._clock = None
+
+    def _drain(self):
+        now = time.monotonic()
+        if self._clock is not None:
+            self._fill = max(0.0, self._fill-(now-self._clock)*self.samplerate)
+        self._clock = now
+
+    def start(self):
+        self.active = True
+        self._clock = time.monotonic()
+
+    @property
+    def write_available(self):
+        if self.closed:
+            raise RuntimeError('stream closed')
+        self._drain()
+        return int(self.CAPACITY-self._fill)
+
+    def write(self, block):
+        if self.closed:
+            self.write_after_close = True
+            raise RuntimeError('stream closed')
+        if self.aborted:
+            raise RuntimeError('stream aborted')
+        self._drain()
+        if self._fill+len(block) > self.CAPACITY+1:
+            self.write_while_full = True  # a real write would block here
+        self._fill += len(block)
+        self.written.append(np.array(block, copy=True))
+        if self.underflows_to_report:
+            self.underflows_to_report -= 1
+            return True
+        return False
+
+    def abort(self):
+        self.aborted = True
+        self.active = False
+
+    def stop(self):
+        self.active = False
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeBlockingSoundDevice:
+    OutputStream = _FakeBlockingStream
+    HOSTAPI = 'ALSA'
+
+    @classmethod
+    def query_devices(cls, _device=None, _kind=None):
+        return {'max_output_channels': 2, 'default_samplerate': 48000,
+                'hostapi': 0}
+
+    @classmethod
+    def query_hostapis(cls, _index=None):
+        return {'name': cls.HOSTAPI}
+
+    @staticmethod
+    def check_output_settings(**_kwargs):
+        pass
+
+
+class _FakeCoreAudioBlockingSoundDevice(_FakeBlockingSoundDevice):
+    HOSTAPI = 'Core Audio'
+
+
+class AudioPassthroughBlockingTests(unittest.TestCase):
+    """Default output mode: PortAudio plays; a Python writer refills."""
+
+    def _wait(self, predicate, timeout=2.0):
+        deadline = time.monotonic()+timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(.005)
+        return predicate()
+
+    def test_blocking_mode_is_the_default_and_opens_without_a_callback(self):
+        self.assertEqual(AudioPassthrough.OUTPUT_MODE, 'blocking')
+        passthrough = AudioPassthrough(
+            48000, sounddevice_module=_FakeBlockingSoundDevice)
+        passthrough.open(7)
+        try:
+            self.assertEqual(passthrough.stream.kwargs['blocksize'], 512)
+            self.assertEqual(passthrough.stream.latency, .045)
+            self.assertEqual(passthrough.target_seconds, .05)
+            self.assertEqual(passthrough.stats_snapshot()['output_mode'],
+                             'blocking')
+            self.assertTrue(self._wait(lambda: passthrough.stream.written))
+        finally:
+            passthrough.close()
+        core = AudioPassthrough(
+            48000, sounddevice_module=_FakeCoreAudioBlockingSoundDevice)
+        core.open(7)
+        try:
+            # CoreAudio's ring is next_pow2(2 x latency x rate): halve it.
+            self.assertEqual(core.stream.latency, .0225)
+        finally:
+            core.close()
+        with self.assertRaises(ValueError):
+            AudioPassthrough(48000, sounddevice_module=_FakeBlockingSoundDevice,
+                             output_mode='bogus')
+        with self.assertRaises(ValueError):
+            AudioPassthrough(48000, sounddevice_module=_FakeBlockingSoundDevice,
+                             output_blocksize=0)
+
+    def test_writer_plays_real_time_capture_audio_continuously(self):
+        passthrough = AudioPassthrough(
+            48000, sounddevice_module=_FakeBlockingSoundDevice)
+        passthrough.open(7)
+        stream = passthrough.stream
+        try:
+            passthrough.set_route('right')
+            level = np.full((1024, 2), .25, dtype=np.float32)
+            started = time.monotonic()
+            for index in range(30):  # 0.64 s of capture at its real rate
+                passthrough.queue_capture(index*1024, level)
+                delay = started+(index+1)*1024/48000-time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
+            time.sleep(.1)
+        finally:
+            passthrough.close()
+        audio = np.concatenate(stream.written)[:, 0]
+        playing = np.flatnonzero(np.abs(audio-.25) < .01)
+        self.assertGreater(len(playing), 20_000)
+        run = audio[playing[0]:playing[-1]+1]
+        # Once primed, the level plays without gaps or steps until capture
+        # stops; the start ramps in from silence.
+        self.assertTrue(np.all(np.abs(run-.25) < .01))
+        self.assertLess(
+            float(np.max(np.abs(np.diff(audio[:playing[0]+1])))), .1)
+        self.assertEqual(passthrough.stats_snapshot()['latency_trims'], 0)
+
+    def test_portaudio_underflow_from_write_is_reported(self):
+        passthrough = AudioPassthrough(
+            48000, sounddevice_module=_FakeBlockingSoundDevice)
+        passthrough.open(7)
+        try:
+            passthrough.stream.underflows_to_report = 2
+            self.assertTrue(self._wait(
+                lambda: passthrough.stats_snapshot()['output_status'].get(
+                    'output underflow') == 2))
+        finally:
+            passthrough.close()
+
+    def test_close_stops_the_writer_before_closing_the_stream(self):
+        passthrough = AudioPassthrough(
+            48000, sounddevice_module=_FakeBlockingSoundDevice)
+        passthrough.open(7)
+        stream, writer = passthrough.stream, passthrough._writer_thread
+        self.assertTrue(self._wait(lambda: stream.written))
+        passthrough.close()
+        self.assertFalse(writer.is_alive())
+        self.assertTrue(stream.aborted)
+        self.assertTrue(stream.closed)
+        self.assertFalse(stream.write_after_close)
+        self.assertFalse(stream.write_while_full)
+        self.assertIsNone(passthrough.error)
+        self.assertFalse(passthrough.is_open)
+
+
 class AudioPassthroughTests(unittest.TestCase):
     # Most tests run at toy rates (1 kHz, a few samples per block) to check
     # routing, fades and priming; there the 30 ms capture-stall allowance
@@ -223,8 +407,13 @@ class AudioPassthroughTests(unittest.TestCase):
     }
 
     def setUp(self):
+        from unittest.mock import patch
+        # These tests drive the output callback by hand; blocking mode (the
+        # default) is covered by AudioPassthroughBlockingTests.
+        patcher = patch.object(AudioPassthrough, 'OUTPUT_MODE', 'callback')
+        patcher.start()
+        self.addCleanup(patcher.stop)
         if self._testMethodName not in self.REAL_CAPTURE_STALL_ALLOWANCE:
-            from unittest.mock import patch
             patcher = patch.object(
                 AudioPassthrough, 'CAPTURE_STALL_SECONDS', 0.0)
             patcher.start()
