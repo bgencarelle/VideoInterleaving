@@ -15,10 +15,20 @@ from animation_modem import v7
 from tools.v7_capture import (CapturedFrame, _showinfo_source_size,
                               CaptureEndOfStream, Throttled, ffmpeg_source,
                               video_source)
-from tools.v7_live import _capture, _resolve_send_source, _values, run_send
+from tools.v7_live import (_capture, _resolve_send_source,
+                           SENDER_STARTUP_BUFFER_SECONDS,
+                           _sender_queue_batches, _values, run_send)
 
 
 class VideoSourceSelectionTests(unittest.TestCase):
+    def test_live_sender_bounds_queue_by_startup_audio_duration(self):
+        self.assertAlmostEqual(SENDER_STARTUP_BUFFER_SECONDS,
+                               v7.PULSE_FRAME/v7.RATE)
+        self.assertEqual(_sender_queue_batches(
+            SENDER_STARTUP_BUFFER_SECONDS, 48000, 3920), 1)
+        self.assertEqual(_sender_queue_batches(
+            SENDER_STARTUP_BUFFER_SECONDS/4, 96000, 1960), 1)
+
     def test_missing_source_prompts_for_kind_then_video_path(self):
         args = Namespace(source=None, video_source=None)
         answers = iter(('video', 'rtsp://camera.example/live'))
@@ -531,9 +541,9 @@ class SenderSchedulingTests(unittest.TestCase):
             run_send(args)
 
         self.assertTrue(writes)
-        # One call compiles the path before capture; two real packets must then
-        # be queued before the first sample is handed to the output stream.
-        self.assertGreaterEqual(writes[0], 3)
+        # One call compiles the path before capture; the single startup packet
+        # is enough to begin output.
+        self.assertGreaterEqual(writes[0], 2)
 
 
 if __name__ == '__main__':

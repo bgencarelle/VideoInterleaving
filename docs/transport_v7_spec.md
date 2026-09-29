@@ -359,17 +359,20 @@ A/B on the same FFmpeg-paced synthetic source measured:
 | 0.163 s (2 packets) | 146.2 / 176.5 | 110.0 |
 | 0.082 s (1 packet) | 59.8 / 90.1 | 24.7 |
 
-The sender default is now two normal-speed packet durations (0.163 s). This
-cuts median capture-to-handoff by about 237 ms while keeping one packet queued
-behind the packet being handed off. A one-packet cushion is faster in the
-steady synthetic run, but removes that additional queued-packet margin against
-a brief capture/encode delay. Frame preparation and packet construction take
-only a few milliseconds; capture cadence contributes additional frame age
-before encoding. The final interval adds one packet's 81.67 ms sample duration
-to the handoff time. It is simulated output-clock consumption, not measured DAC
-latency; actual camera timing, audio-driver behavior, and GUI rendering are not
-included. The reusable profiler, generated video, and summaries are in the
-ignored `tmp/v7-zero2-profile/` directory.
+The sender used a two-packet cushion at the time of this profile. The current
+live sender starts after one emitted packet (81.67 ms at 1×) and caps the
+producer queue at one batch, prioritizing freshness across capture modes. At
+other playback speeds the cushion scales with the emitted packet duration. In
+the synthetic 15-fps profile, the one-packet setting reduced median
+capture-to-handoff from 146.2 ms to 59.8 ms and p95 from 176.5 ms to 90.1 ms.
+This reduces the margin against a brief capture/encode stall in favor of lower
+live delay. Frame preparation and packet construction take only a few
+milliseconds; capture cadence contributes additional frame age before encoding.
+The final interval adds one packet's 81.67 ms sample duration before the
+receiver can decode the complete frame. These are simulated output-clock
+measurements, not measured DAC latency; actual camera timing, audio-driver
+behavior, and GUI rendering are not included. The reusable profiler, generated
+video, and summaries are in the ignored `tmp/v7-zero2-profile/` directory.
 
 ## 9. Verification evidence and limits
 

@@ -25,6 +25,7 @@ the receiver can diagnose the behavior rather than silently restarting it.
 import argparse
 from collections import deque
 import json
+import math
 import os
 import queue
 import sys
@@ -78,13 +79,18 @@ from tools.v7_display import LatestFrame                                      # 
 FPS = P.PULSE_FPS
 CAMERA_CAPTURE_FPS = 15
 INPUT_AUDIO_QUEUE_BLOCKS = 8
-SENDER_ENCODE_QUEUE_BATCHES = 64
 # GUI users often start the receiver before the sender has finished warming up.
 PROFILE_PROBE_TIMEOUT = 2.0
 GUI_PROFILE_PROBE_TIMEOUT = 8.0
-# Hold two normal-speed packets before starting output. Once the first packet is
-# handed off, one queued packet remains to absorb a brief capture/encode stall.
-SENDER_STARTUP_BUFFER_SECONDS = 2 * P.PULSE_FRAME / P.RATE
+# Start after one packet is ready and allow only one pending encoded batch; the
+# modem packet itself is the unavoidable serialization buffer for each image.
+SENDER_STARTUP_BUFFER_SECONDS = P.PULSE_FRAME / P.RATE
+
+
+def _sender_queue_batches(startup_seconds, output_rate, packet_samples):
+    if startup_seconds <= 0 or output_rate <= 0 or packet_samples <= 0:
+        raise ValueError('startup duration and packet timing must be positive')
+    return max(1, int(math.ceil(startup_seconds*output_rate/packet_samples)))
 ENCODE_TO_FFMPEG_SCALE = {
     'nearest': 'neighbor',
     'box': 'area',
@@ -561,7 +567,7 @@ def run_send(args):
     grab = None
     source_audio = None
     audio_delay = None
-    batches = queue.Queue(maxsize=SENDER_ENCODE_QUEUE_BATCHES)
+    batches = None
     stop = threading.Event()
     producer_done = threading.Event()
     prebuffer_ready = threading.Event()
@@ -699,7 +705,7 @@ def run_send(args):
                 audio, stats = encode_batch(frames, aspects, counter)
                 batches.put((counter, audio, stats))
                 buffered_audio_seconds += len(audio)/output_rate
-                if buffered_audio_seconds >= SENDER_STARTUP_BUFFER_SECONDS:
+                if buffered_audio_seconds >= startup_buffer_seconds:
                     prebuffer_ready.set()
                 total += len(frames)
                 counter += len(frames)
@@ -713,7 +719,7 @@ def run_send(args):
                 audio, stats = encode_batch(frames, aspects, counter)
                 batches.put((counter, audio, stats))
                 buffered_audio_seconds += len(audio)/output_rate
-                if buffered_audio_seconds >= SENDER_STARTUP_BUFFER_SECONDS:
+                if buffered_audio_seconds >= startup_buffer_seconds:
                     prebuffer_ready.set()
                 total += len(frames)
             except Exception as exc:
@@ -755,6 +761,12 @@ def run_send(args):
             first_packet_samples = len(P.speed_pulse_stream(
                 np.zeros(P.PULSE_FRAME, dtype=np.float32), args.speed,
                 rate=output_rate))
+            # Keep exactly one emitted packet as startup/queue headroom at the
+            # actual DAC rate and speed. Packet duration shrinks at fast speed.
+            startup_buffer_seconds = first_packet_samples/output_rate
+            queue_batches = _sender_queue_batches(
+                startup_buffer_seconds, output_rate, first_packet_samples)
+            batches = queue.Queue(maxsize=queue_batches)
             # Compile the per-frame image and pulse encoder path before the
             # first real packet. Numba's first-call work must not become a gap
             # in the recorded modem waveform.
