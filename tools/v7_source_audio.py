@@ -134,7 +134,7 @@ class ClockMatchedReader:
     PROPORTIONAL_GAIN = 0.1
 
     def __init__(self, buffer, target_samples, nominal_ratio=1.0,
-                 correction_limit=None):
+                 correction_limit=None, smoothing_samples=None):
         self.buffer = buffer
         self.target_samples = max(1, int(target_samples))
         self.nominal_ratio = float(nominal_ratio)
@@ -146,6 +146,13 @@ class ClockMatchedReader:
         if (not np.isfinite(self.correction_limit) or
                 not 0.0 <= self.correction_limit < 1.0):
             raise ValueError('clock correction limit must be in [0, 1)')
+        # Optional low-pass on the fill level. Capture callbacks can enqueue
+        # large blocks at once; smoothing keeps those arrivals from modulating
+        # the playback ratio. Existing sender readers remain unfiltered unless
+        # they explicitly request it.
+        self.smoothing_samples = (None if smoothing_samples is None else
+                                  max(1.0, float(smoothing_samples)))
+        self._fill = None
         self._phase = 0.0
         self._pending = np.empty(0, dtype=np.float32)
         self.max_correction = 0.0
@@ -154,6 +161,7 @@ class ClockMatchedReader:
         self.valid_output_samples = 0
 
     def reset(self):
+        self._fill = None
         self._phase = 0.0
         self._pending = np.empty(0, dtype=np.float32)
         self.current_correction = 0.0
@@ -167,6 +175,14 @@ class ClockMatchedReader:
         if count == 0:
             return np.empty(0, dtype=np.float32)
         queued = self.buffer.available+len(self._pending)
+        if self.smoothing_samples is not None:
+            if self._fill is None:
+                self._fill = float(queued)
+            else:
+                alpha = min(
+                    1.0, count*self.nominal_ratio/self.smoothing_samples)
+                self._fill += alpha*(queued-self._fill)
+            queued = self._fill
         error = (queued-self.target_samples)/self.target_samples
         correction = float(np.clip(
             error*self.PROPORTIONAL_GAIN,

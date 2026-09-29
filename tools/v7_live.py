@@ -78,7 +78,9 @@ from tools.v7_display import LatestFrame                                      # 
 
 FPS = P.PULSE_FPS
 CAMERA_CAPTURE_FPS = 15
-INPUT_AUDIO_QUEUE_BLOCKS = 8
+# Retain the pre-low-latency capture cushion: at 96 kHz and 1024-frame input
+# blocks, 32 slots absorb about 341 ms of decoder scheduling stalls.
+INPUT_AUDIO_QUEUE_BLOCKS = 32
 # GUI users often start the receiver before the sender has finished warming up.
 PROFILE_PROBE_TIMEOUT = 2.0
 GUI_PROFILE_PROBE_TIMEOUT = 8.0

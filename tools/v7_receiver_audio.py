@@ -285,6 +285,10 @@ class AudioPassthrough:
     CLOCK_CORRECTION_LIMIT = 0.005
     FRAME_GAP_CROSSFADE_SECONDS = 0.01
     RECOVERY_FADE_SECONDS = 0.005
+    # Route changes, reprimes and clears ramp from the last emitted sample.
+    DECLICK_SECONDS = 0.005
+    # Smooth callback-sized FIFO swings before they reach the clock servo.
+    FILL_SMOOTHING_SECONDS = 0.25
 
     def __init__(self, input_rate, sounddevice_module=None, status_callback=None,
                  volume=DEFAULT_AUDIO_VOLUME, target_seconds=None):
@@ -309,6 +313,9 @@ class AudioPassthrough:
         self.reader = None
         self._fade_in_after_underflow = False
         self._audio_primed = False
+        self._last_output = 0.0
+        self._declick_pending = False
+        self._largest_push = 0
         self.stream = None
         self.route = None
         self.muted = False
@@ -375,7 +382,8 @@ class AudioPassthrough:
         target = max(1, int(round(input_rate*self.target_seconds)))
         return ClockMatchedReader(
             self.buffer, target, nominal_ratio=input_rate/output_rate,
-            correction_limit=self.CLOCK_CORRECTION_LIMIT)
+            correction_limit=self.CLOCK_CORRECTION_LIMIT,
+            smoothing_samples=input_rate*self.FILL_SMOOTHING_SECONDS)
 
     @staticmethod
     def _identity(sd, index):
@@ -431,6 +439,8 @@ class AudioPassthrough:
             self.reader = reader
             self._fade_in_after_underflow = False
             self._audio_primed = False
+            self._last_output = 0.0
+            self._declick_pending = True
             self.stream = stream
         self._report(None)
 
@@ -451,6 +461,8 @@ class AudioPassthrough:
             self.buffer.clear()
             self._fade_in_after_underflow = False
             self._audio_primed = False
+            self._declick_pending = True
+            self._largest_push = 0
 
     def record_capture(self, sample_start, block):
         """Retain raw input with the decoder's absolute sample coordinates."""
@@ -519,6 +531,7 @@ class AudioPassthrough:
                 return False
             channel = 0 if self.route == 'left' else 1
             audio = values[:, channel].copy()
+            self._largest_push = max(self._largest_push, len(audio))
             return self._queue_samples_locked(sample_start, audio)
 
     def _queue_samples_locked(self, sample_start, audio):
@@ -563,6 +576,7 @@ class AudioPassthrough:
             self.buffer.clear()
             self._fade_in_after_underflow = False
             self._audio_primed = False
+            self._declick_pending = True
             if self.output_rate:
                 self.reader = self._make_clock_reader(
                     self.input_rate, self.output_rate)
@@ -570,6 +584,15 @@ class AudioPassthrough:
     @property
     def buffered_ms(self):
         return 1000.0*self.buffer.available/self.input_rate
+
+    def _declick(self, samples, rate, last_output):
+        """Ramp from the last emitted sample into `samples` (in place)."""
+        fade = min(len(samples), int(round(rate*self.DECLICK_SECONDS)))
+        if fade <= 0:
+            return
+        phase = np.arange(1, fade+1, dtype=np.float32)/fade
+        gain = phase*phase*(3.0-2.0*phase)
+        samples[:fade] = last_output*(1.0-gain) + samples[:fade]*gain
 
     def _callback(self, outdata, frames, _timing, status):
         if status:
@@ -581,85 +604,120 @@ class AudioPassthrough:
             audible = self.route is not None and not self.muted
             volume = self.volume
             primed = self._audio_primed
+            declick = self._declick_pending
+            self._declick_pending = False
+            output_rate = self.output_rate or self.input_rate
+            last_output = self._last_output
+            largest_push = self._largest_push
         outdata.fill(0)
-        if audible and reader is not None:
-            if not primed:
-                required = max(
-                    reader.target_samples,
-                    int(np.ceil(frames*reader.nominal_ratio))+2)
-                if self.buffer.available < required:
-                    return
+        samples = np.zeros(frames, dtype=np.float32)
+        try:
+            if audible and reader is not None:
+                # Retain enough audio for one output callback and one complete
+                # capture callback, even when the host requests large blocks.
+                needed = int(np.ceil(frames*reader.nominal_ratio))+2
+                floor = needed+largest_push
+                if reader.target_samples < floor:
+                    reader.target_samples = floor
+                ready = primed
+                if not primed:
+                    # target_samples may have been raised above, so include it
+                    # in the actual prime condition as well as the base target.
+                    required = max(reader.target_samples, needed)
+                    if self.buffer.available >= required:
+                        with self._lock:
+                            ready = (self.reader is reader and
+                                     self.route is not None and not self.muted)
+                            if ready:
+                                self._audio_primed = True
+                        declick = declick or ready
+                if ready:
+                    samples = self._read_locked_state(reader, frames)
+
+            # Apply transitions in output-amplitude space so the fade begins
+            # at the actual last emitted value, including volume and clipping.
+            emitted = np.clip(samples*volume, -1.0, 1.0)
+            if declick or (last_output != 0.0 and not np.any(emitted)):
+                self._declick(emitted, output_rate, last_output)
+            if len(emitted):
                 with self._lock:
-                    if (self.reader is not reader or self.route is None or
-                            self.muted):
-                        return
-                    self._audio_primed = True
-            try:
-                samples = reader.read(frames)
-                if reader.underflow:
-                    with self._stats_lock:
-                        self._output_underflow_callbacks += 1
-                        if not self._output_underflow_active:
-                            self._output_underflow_events += 1
-                        self._output_underflow_active = True
-                    valid_samples = min(
-                        len(samples), reader.valid_output_samples)
-                    if valid_samples:
-                        fade_samples = min(
-                            valid_samples, max(1, int(round(
-                                (self.output_rate or self.input_rate)*
-                                self.RECOVERY_FADE_SECONDS))))
-                        fade_start = valid_samples-fade_samples
-                        if fade_samples == 1:
-                            samples[fade_start] = 0.0
-                        else:
-                            phase = np.linspace(
-                                0.0, 1.0, fade_samples, dtype=np.float32)
-                            gain = 1.0-phase*phase*(3.0-2.0*phase)
-                            samples[fade_start:valid_samples] *= gain
-                    samples[valid_samples:] = 0.0
-                    with self._lock:
-                        if self.reader is reader:
-                            self._fade_in_after_underflow = True
-                            self._audio_primed = False
+                    self._last_output = float(emitted[-1])
+            outdata[:] = emitted[:, None]
+        except Exception as exc:
+            self._report(f'Audio passthrough failed: {exc}')
+
+    def _read_locked_state(self, reader, frames):
+        samples = reader.read(frames)
+        if reader.underflow:
+            with self._stats_lock:
+                self._output_underflow_callbacks += 1
+                if not self._output_underflow_active:
+                    self._output_underflow_events += 1
+                self._output_underflow_active = True
+            valid_samples = min(len(samples), reader.valid_output_samples)
+            if valid_samples:
+                fade_samples = min(
+                    valid_samples, max(1, int(round(
+                        (self.output_rate or self.input_rate)*
+                        self.RECOVERY_FADE_SECONDS))))
+                fade_start = valid_samples-fade_samples
+                if fade_samples == 1:
+                    samples[fade_start] = 0.0
                 else:
-                    with self._stats_lock:
-                        self._output_underflow_active = False
-                    with self._lock:
-                        fade_in = (self.reader is reader and
-                                   self._fade_in_after_underflow)
-                        if fade_in:
-                            self._fade_in_after_underflow = False
-                        output_rate = self.output_rate or self.input_rate
-                    if fade_in and len(samples):
-                        fade_samples = min(
-                            len(samples), max(1, int(round(
-                                output_rate*self.RECOVERY_FADE_SECONDS))))
-                        if fade_samples == 1:
-                            samples[0] = 0.0
-                        else:
-                            phase = np.linspace(
-                                0.0, 1.0, fade_samples, dtype=np.float32)
-                            gain = phase*phase*(3.0-2.0*phase)
-                            samples[:fade_samples] *= gain
-                outdata[:] = np.clip(samples*volume, -1.0, 1.0)[:, None]
-            except Exception as exc:
-                self._report(f'Audio passthrough failed: {exc}')
+                    phase = np.linspace(
+                        0.0, 1.0, fade_samples, dtype=np.float32)
+                    gain = 1.0-phase*phase*(3.0-2.0*phase)
+                    samples[fade_start:valid_samples] *= gain
+            samples[valid_samples:] = 0.0
+            with self._lock:
+                if self.reader is reader:
+                    self._fade_in_after_underflow = True
+                    self._audio_primed = False
+        else:
+            with self._stats_lock:
+                self._output_underflow_active = False
+            with self._lock:
+                fade_in = (self.reader is reader and
+                           self._fade_in_after_underflow)
+                if fade_in:
+                    self._fade_in_after_underflow = False
+                output_rate = self.output_rate or self.input_rate
+            if fade_in and len(samples):
+                fade_samples = min(
+                    len(samples), max(1, int(round(
+                        output_rate*self.RECOVERY_FADE_SECONDS))))
+                if fade_samples == 1:
+                    samples[0] = 0.0
+                else:
+                    phase = np.linspace(
+                        0.0, 1.0, fade_samples, dtype=np.float32)
+                    gain = phase*phase*(3.0-2.0*phase)
+                    samples[:fade_samples] *= gain
+        return samples
 
     def set_route(self, side, muted=None):
         if side not in (None, 'left', 'right'):
             raise ValueError('audio route must be left, right, or None')
         with self._lock:
-            changed = side != self.route
+            route_changed = side != self.route
+            muted_changed = (muted is not None and
+                             bool(muted) != self.muted)
             self.route = side
             if muted is not None:
                 self.muted = bool(muted)
-            if changed:
+            if route_changed or muted_changed:
                 self.buffer.clear()
                 self._queued_sample_end = None
                 self._queued_last_sample = None
                 self._fade_in_after_underflow = False
                 self._audio_primed = False
+                if self.muted:
+                    # A user mute is immediate; subsequent unmute starts from
+                    # silence and ramps back in after the FIFO is primed.
+                    self._last_output = 0.0
+                    self._declick_pending = False
+                else:
+                    self._declick_pending = True
                 if self.output_rate:
                     self.reader = self._make_clock_reader(
                         self.input_rate, self.output_rate)
@@ -669,6 +727,8 @@ class AudioPassthrough:
             muted = bool(muted)
             if muted != self.muted:
                 self.muted = muted
+                self._last_output = 0.0
+                self._declick_pending = not muted
                 self.buffer.clear()
                 self._queued_sample_end = None
                 self._queued_last_sample = None
