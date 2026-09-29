@@ -19,6 +19,8 @@ from tools.v7_live import (_capture, _resolve_send_source,
                            SENDER_STARTUP_BUFFER_SECONDS,
                            _sender_queue_batches, _values, run_send)
 
+ROOT = Path(__file__).resolve().parents[1]
+
 
 class VideoSourceSelectionTests(unittest.TestCase):
     def test_live_sender_bounds_queue_by_startup_audio_duration(self):
@@ -63,7 +65,7 @@ class VideoSourceCommandTests(unittest.TestCase):
             return 0
 
     def test_local_file_loops_and_is_realtime_paced(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=ROOT/'tmp') as tmp:
             path = Path(tmp) / 'clip.mp4'
             path.write_bytes(b'placeholder')
             process = self.Process()
@@ -78,6 +80,20 @@ class VideoSourceCommandTests(unittest.TestCase):
                 self.assertIn(str(path), cmd)
                 self.assertIn('scale=160:-2:flags=bicubic', cmd)
                 self.assertTrue(grab.paced)
+                grab.close()
+
+    def test_dct_video_capture_keeps_the_decoded_frame_dimensions(self):
+        with tempfile.TemporaryDirectory(dir=ROOT/'tmp') as tmp:
+            path = Path(tmp)/'source.mp4'
+            path.write_bytes(b'placeholder')
+            process = self.Process()
+            with mock.patch('tools.v7_capture.shutil.which', return_value='ffmpeg'), \
+                    mock.patch('tools.v7_capture.subprocess.Popen',
+                               return_value=process) as popen:
+                grab = video_source(path, width=160, preserve_size=True)
+                command = popen.call_args.args[0]
+                self.assertNotIn('-vf', command)
+                self.assertEqual(command[command.index('-i')+1], str(path))
                 grab.close()
 
     def test_stream_url_is_neither_looped_nor_file_paced(self):

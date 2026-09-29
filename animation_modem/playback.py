@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import threading
 import numpy as np
 from .audio_common import sounddevice, route
-from .v7_core import band_limited, emit_length, speed_length, speed_resample
+from .v7_core import adapt_packet_for_output, emit_length, speed_length
 
 
 def latency(value):
@@ -168,8 +168,7 @@ class PacketOutput:
         if np.shape(audio) != (self.frame, 2) or not np.isfinite(audio).all():
             raise ValueError('Expected one finite stereo modem frame')
         prepared = route(
-            band_limited(audio, self.rate) if self.speed == 1 else
-            speed_resample(audio, self.rate, self.speed),
+            adapt_packet_for_output(audio, self.rate, self.speed),
             self.channels)
         self.check()
         if slot is not None and self.stream.time + self.stream.latency >= slot.start_time:

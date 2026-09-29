@@ -5,9 +5,20 @@ from types import SimpleNamespace
 import numpy as np
 
 from animation_modem.playback import PacketOutput
+from animation_modem.v7_core import adapt_packet_for_output, band_limited
+from animation_modem import v7
 
 
 class PacketOutputReadinessTests(unittest.TestCase):
+    def test_normal_speed_output_uses_the_production_band_limited_rate_path(self):
+        packet = np.random.default_rng(12).standard_normal(
+            (v7.PULSE_FRAME, 2)).astype(np.float32)
+        output = adapt_packet_for_output(packet, 96_000, speed=1.0)
+
+        self.assertEqual(output.shape, (v7.PULSE_FRAME*2, 2))
+        self.assertEqual(output.dtype, np.float32)
+        np.testing.assert_array_equal(output, band_limited(packet, 96_000))
+
     def test_callback_wakes_waiter_when_it_takes_the_pending_packet(self):
         class ObservedEvent(threading.Event):
             def __init__(self):

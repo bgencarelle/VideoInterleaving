@@ -1,6 +1,6 @@
-"""tools/v7_wire_profile.py: the bench tools' wire must be the one that is sent.
+"""tools/v7_wire_profile.py: offline encoding follows the app production path.
 
-The default profile has to stay byte-identical to the live sender's packets
+The default profile has to stay byte-identical to the application's packets
 (fold 500, coded pilots, EOF marker), decode every packet with the live
 receiver settings, and unfold. The fold-off variant keeps the live framing for
 benches whose models the fold tables do not cover. The baseline profile is the
@@ -9,6 +9,7 @@ low-level encoder's older framing.
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 from PIL import Image
@@ -18,7 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from animation_modem import v7                                          # noqa: E402
-from tools import v7_live                                               # noqa: E402
+from animation_modem.v7_fold import Fold500                             # noqa: E402
 from tools.v7_wire_profile import WireProfile                           # noqa: E402
 
 TARGET = .1521/np.sqrt(1 + 10**(v7.CLOCK_REL_DB/10))
@@ -39,18 +40,51 @@ class WireProfileTests(unittest.TestCase):
         cls.box_values = fixture_values(cls.box, 'box')
         cls.nearest_values = fixture_values(cls.nearest, 'nearest')
 
-    def test_default_profile_is_byte_identical_to_the_live_sender(self):
+    def test_default_profile_is_byte_identical_to_the_application_sender(self):
         profile = WireProfile('default')
+        loop = v7.LoopInfo(13, v7.LOOP_NO_CLOCK, pingpong=True)
+        aspect_code = v7.aspect_wire_code((80, 96))
         wire = profile.encode(self.box, [self.box_values]*PACKETS, 5,
-                              [6]*PACKETS, [10, 11, 12])
-        fold = profile._fold
-        sent = np.concatenate([
-            v7_live._add_coded_pilots(v7_live._encode_pulse_frame_coeffs(
-                self.box, fold.encode_coefficients(self.box, self.box_values),
-                5+i, aspect_code=6, source_index=10+i, eof_marker=True),
-                5+i, 500)
-            for i in range(PACKETS)])
+                              [aspect_code]*PACKETS, [10, 11, 12], loop=loop,
+                              directions=[1]*PACKETS, eof_marker=True)
+        fold = Fold500(self.box)
+        import modem_v7_display
+
+        class Library:
+            def composite(self, *_args, **_kwargs):
+                image = Image.new('RGB', (80, 96))
+                image.info['source_dimensions'] = (80, 96)
+                return image
+
+        with mock.patch('modem_v7_display._source_values',
+                        return_value=self.box_values):
+            sent = np.concatenate([
+                modem_v7_display.packet(
+                    Library(), self.box, 5+i, 10+i, (0, 0, 0),
+                    encode_filter='box', loop=loop, direction=1,
+                    eof_marker=True, fold=fold)[0]
+                for i in range(PACKETS)])
         np.testing.assert_array_equal(wire, sent)
+
+    def test_direct_image_dct_is_byte_identical_to_the_production_value_path(self):
+        import modem_v7_display
+
+        with Image.open(v7.REFERENCE_FIXTURE) as opened:
+            image = opened.convert('RGB')
+        values = v7.image_values(
+            v7.prepare_image(image, 'box'), self.box.coder.grids, 'box')
+        fold = Fold500(self.box)
+        loop = v7.LoopInfo(13, v7.LOOP_NO_CLOCK, pingpong=True)
+        aspect_code = v7.aspect_wire_code(image.size)
+
+        expected = modem_v7_display.encode_values_packet(
+            self.box, values, 5, 10, aspect_code, loop=loop, direction=1,
+            eof_marker=True, fold=fold)
+        actual = modem_v7_display.encode_image_dct_packet(
+            self.box, image, 5, 10, aspect_code, loop=loop, direction=1,
+            eof_marker=True, fold=fold)
+
+        np.testing.assert_array_equal(actual, expected)
 
     def test_default_profile_decodes_every_packet_and_unfolds(self):
         profile = WireProfile('default')

@@ -1,9 +1,8 @@
 """V7 pulse-wire sender using the application's shared image clock.
 
-This is the application adapter around the standalone V7 transport.  The V7
-encoder remains in ``tools.v7_proto`` so the standalone bench and live sender
-use the same implementation; this module owns source selection, shared-clock
-scheduling, and audio output.
+This is the application adapter around the V7 transport. It owns source
+composition and scheduling, and its ``encode_values_packet`` boundary is the
+production fold/pilot/packet path shared by offline image-quality trials.
 """
 import json
 import math
@@ -53,6 +52,104 @@ def _source_values(model, image, encode_filter='nearest'):
                             encode_filter=encode_filter)
 
 
+def _source_dct_coefficients(model, image, encode_filter='box'):
+    """Convert an image straight to the production coder-grid DCT vector.
+
+    This follows the same resize, Pillow YCbCr conversion, and per-plane BOX
+    sampling as ``_source_values``. It skips building and flattening the
+    intermediate spatial value vector, then returns the full-grid DCT that
+    Fold 500 consumes. This is the fast, exact application-grid path; it is
+    separate from the experimental native-resolution DCT projections.
+    """
+    if encode_filter != 'box':
+        raise ValueError('direct image DCT requires the Box encode filter')
+    from PIL import Image
+    from scipy.fft import dctn
+
+    prepared = _v7.prepare_image(image, encode_filter='box')
+    planes = prepared.convert('YCbCr').split()
+    coefficients = []
+    for plane, (rows, cols) in zip(planes, model.coder.grids):
+        if plane.size != (cols, rows):
+            plane = plane.resize((cols, rows), Image.Resampling.BOX)
+        values = np.asarray(plane, dtype=np.float64)/127.5 - 1.0
+        coefficients.append(dctn(values, norm='ortho').ravel())
+    return np.concatenate(coefficients)
+
+
+def encode_values_packet(model, values, absolute, source_index, aspect_code, *,
+                         loop=None, direction=1, pilot_tones=True,
+                         eof_marker=True, fold=None):
+    """Encode prepared values with the application's production V7 packet path.
+
+    Kept separate from compositing so offline image-quality tests can feed
+    candidate value vectors through the exact production fold, packet, and
+    coded-pilot implementation.
+    """
+    if fold is not None and int(model.encoding_type) != \
+            _v7.ENCODING_FILTER_CODES['box']:
+        raise ValueError('stereo Fold 500 requires the Box encode filter')
+    if fold is None:
+        return _v7.encode_pulse_frame(
+            model, values, absolute, aspect_code=aspect_code,
+            source_index=source_index, loop=loop, direction=direction,
+            pilot_tones=pilot_tones, eof_marker=eof_marker)
+    coefficients = fold.encode_coefficients(values)
+    return encode_folded_coefficients_packet(
+        model, coefficients, absolute, source_index, aspect_code,
+        loop=loop, direction=direction, eof_marker=eof_marker)
+
+
+def encode_image_dct_packet(model, image, absolute, source_index, aspect_code, *,
+                            loop=None, direction=1, eof_marker=True,
+                            fold=None, encode_filter='box'):
+    """Opt-in Box image path that sends coder-grid DCTs through Fold 500."""
+    if fold is None:
+        raise ValueError('image-to-DCT packet encoding requires Fold 500')
+    if int(model.encoding_type) != _v7.ENCODING_FILTER_CODES['box']:
+        raise ValueError('stereo Fold 500 requires the Box encode filter')
+    coefficients = fold.encode_dct_coefficients(
+        _source_dct_coefficients(model, image, encode_filter))
+    return encode_folded_coefficients_packet(
+        model, coefficients, absolute, source_index, aspect_code,
+        loop=loop, direction=direction, eof_marker=eof_marker)
+
+
+def encode_folded_source_packet(model, rgb, absolute, source_index, aspect_code, *,
+                                fold, loop=None, direction=1,
+                                eof_marker=True):
+    """Opt-in native RGB projection into the exact Fold-500 source slots."""
+    if fold is None:
+        raise ValueError('native source projection requires Fold 500')
+    if int(model.encoding_type) != _v7.ENCODING_FILTER_CODES['box']:
+        raise ValueError('stereo Fold 500 requires the Box encode filter')
+    from animation_modem.v7_source_dct import source_fold_dct_coefficients
+
+    full = source_fold_dct_coefficients(
+        rgb, _v7.V7_GRIDS, fold.source_positions)
+    coefficients = fold.encode_dct_coefficients(full)
+    return encode_folded_coefficients_packet(
+        model, coefficients, absolute, source_index, aspect_code,
+        loop=loop, direction=direction, eof_marker=eof_marker)
+
+
+def encode_folded_coefficients_packet(
+        model, coefficients, absolute, source_index, aspect_code, *,
+        loop=None, direction=1, eof_marker=True):
+    """Transmit coefficients already mapped through the production Fold 500.
+
+    This is the same pulse/coded-pilot path used by ``encode_values_packet``;
+    the coefficient-domain entry lets source-DCT experiments apply Fold 500
+    directly without a DCT -> pixels -> DCT detour.
+    """
+    audio = _v7.encode_pulse_frame_coeffs(
+        model, coefficients, absolute,
+        aspect_code=aspect_code, source_index=source_index,
+        loop=loop, direction=direction, pilot_tones=False,
+        eof_marker=eof_marker)
+    return add_fold500_coded_pilot(audio, absolute)
+
+
 def packet(library, model, absolute, source_index, selection, *,
            background=(4, 4, 4), rotation=0, mirror=False,
            encode_filter='nearest', loop=None, direction=1,
@@ -72,20 +169,10 @@ def packet(library, model, absolute, source_index, selection, *,
     values = _source_values(model, image, encode_filter)
     aspect_code = _v7.aspect_wire_code(
         image.info.get('source_dimensions', image.size))
-    if fold is None:
-        audio = _v7.encode_pulse_frame(
-            model, values, absolute,
-            aspect_code=aspect_code,
-            source_index=source_index, loop=loop, direction=direction,
-            pilot_tones=pilot_tones, eof_marker=eof_marker)
-    else:
-        coefficients = fold.encode_coefficients(values)
-        audio = _v7.encode_pulse_frame_coeffs(
-            model, coefficients, absolute,
-            aspect_code=aspect_code, source_index=source_index,
-            loop=loop, direction=direction, pilot_tones=False,
-            eof_marker=eof_marker)
-        audio = add_fold500_coded_pilot(audio, absolute)
+    audio = encode_values_packet(
+        model, values, absolute, source_index, aspect_code,
+        loop=loop, direction=direction, pilot_tones=pilot_tones,
+        eof_marker=eof_marker, fold=fold)
     return audio, {
         'frame': absolute,
         'source_index': source_index,

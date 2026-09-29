@@ -197,6 +197,14 @@ class SourceAudioTests(unittest.TestCase):
             finally:
                 source.close()
 
+            source = SharedVideoAudioSource(
+                str(with_audio), 48_000, width=32, target_samples=1024,
+                preserve_size=True)
+            try:
+                self.assertEqual(source.video_grab().shape, (64, 64, 3))
+            finally:
+                source.close()
+
             subprocess.run([
                 'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
                 '-f', 'lavfi', '-i',

@@ -72,6 +72,10 @@ class Fold500:
         self.kept = _corner_positions()
         self.sd_host = np.sqrt(model.lam[self.hosts])
         self.sd_guest = np.asarray(table['sd_guest'], dtype=float)
+        # Guests add support outside the ordinary sent corners; the reserved
+        # signature carriers are already among the kept host positions.
+        self.source_positions = np.unique(
+            np.concatenate((self.kept, self.guests))).astype(np.int64)
         self.D = float(table['D'])
         self.beta = .8*self.D/(2*U_CLIP)
         self.power = 1 + self.D**2/12 + self.beta**2
@@ -81,7 +85,20 @@ class Fold500:
 
     def encode_coefficients(self, values):
         """Return V7 corner coefficients with the guest luma slots folded in."""
-        full = _full_grid_dct(values)
+        return self.encode_dct_coefficients(_full_grid_dct(values))
+
+    def encode_dct_coefficients(self, full):
+        """Fold a precomputed full-grid V7 DCT vector into transmitted slots.
+
+        Source-domain encoders can map their DCT directly onto the sampling-grid
+        basis and enter the exact production fold here, without synthesizing a
+        pixel grid only to transform it again.
+        """
+        full = np.asarray(full, dtype=float)
+        expected = sum(rows*cols for rows, cols in v7.V7_GRIDS)
+        if full.shape != (expected,) or not np.all(np.isfinite(full)):
+            raise ValueError(
+                f'Fold 500 expects {expected} finite full-grid DCT values')
         coeffs = full[self.kept].copy()
         host = (coeffs[self.hosts] - self.model.mu[self.hosts])/self.sd_host
         guest = np.clip(full[self.guests]/self.sd_guest, -U_CLIP, U_CLIP)

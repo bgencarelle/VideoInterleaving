@@ -451,3 +451,14 @@ def speed_resample(samples, rate, speed=1.0, reference=REFERENCE_RATE):
     if src_peak > 0 and out_peak > src_peak:
         out = out*(src_peak/out_peak)
     return np.ascontiguousarray(out, dtype=np.float32)
+
+
+def adapt_packet_for_output(samples, rate, speed=1.0):
+    """Apply the production PacketOutput sample-rate/speed adaptation.
+
+    At normal speed, hold the V7 carriers inside the reference band while
+    adapting packet duration to the device clock. Non-1x playback instead uses
+    the time-compressing speed resampler.
+    """
+    return (band_limited(samples, rate) if float(speed) == 1.0 else
+            speed_resample(samples, rate, speed))

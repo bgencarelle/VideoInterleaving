@@ -12,9 +12,18 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _temporary_error_file():
+    directory = ROOT/'tmp'
+    directory.mkdir(exist_ok=True)
+    return tempfile.TemporaryFile(dir=directory)
 
 # Capture sources return RGB uint8 arrays, or a CapturedFrame when preprocessing
 # changes the pixel dimensions but the original source aspect must be retained.
@@ -195,7 +204,8 @@ def mouse_follow_source(initial_width=400, aspect_ratio=4/3):
 
 
 def ffmpeg_source(spec, fps, region=None, display=None, width=320,
-                  scale_flags='neighbor', output_size=None):
+                  scale_flags='neighbor', output_size=None,
+                  preserve_size=False):
     """Capture through ffmpeg's platform fast path.
 
     mss goes via CoreGraphics on macOS and costs tens of milliseconds a grab.
@@ -219,6 +229,8 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320,
         output_size = tuple(map(int, output_size))
         if len(output_size) != 2 or min(output_size) < 1:
             raise ValueError('Output size must contain two positive dimensions')
+        if preserve_size:
+            raise ValueError('preserve_size cannot be combined with output_size')
 
     if spec:
         fmt, src = spec.split(':', 1)
@@ -245,14 +257,16 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320,
     scale = (f'scale={output_size[0]}:{output_size[1]}:flags={scale_flags}'
              if output_size is not None else
              f'scale={w}:-1:flags={scale_flags}')
-    video_filter = f'showinfo=checksum=0,{scale}' if output_size else scale
+    video_filter = (f'showinfo=checksum=0,{scale}' if output_size else
+                    None if preserve_size else scale)
     # Device timestamps are not necessarily a constant-rate timeline. The
     # default sync mode can emit thousands of duplicates to fill their gaps.
     # This pipe needs exactly one image for each input frame.
-    cmd += ['-vf', video_filter, '-pix_fmt', 'rgb24',
-            '-fps_mode', 'passthrough',
+    if video_filter is not None:
+        cmd += ['-vf', video_filter]
+    cmd += ['-pix_fmt', 'rgb24', '-fps_mode', 'passthrough',
             '-c:v', 'ppm', '-f', 'image2pipe', '-an', '-sn', '-']
-    errors = tempfile.TemporaryFile()
+    errors = _temporary_error_file()
     log_lock = threading.Lock()
     try:
         proc = subprocess.Popen(
@@ -338,7 +352,8 @@ def ffmpeg_source(spec, fps, region=None, display=None, width=320,
 
 
 def camera_source(index=0, fps=30, width=320, spec=None,
-                  scale_flags='neighbor', output_size=None):
+                  scale_flags='neighbor', output_size=None,
+                  preserve_size=False):
     """Webcam through FFmpeg, optionally scaled to the fixed V7 grid."""
     if sys.platform == 'darwin':
         spec = spec or f'avfoundation:{index}'
@@ -347,11 +362,12 @@ def camera_source(index=0, fps=30, width=320, spec=None,
     else:
         spec = spec or f'v4l2:/dev/video{index}'
     return ffmpeg_source(spec, fps, width=width, scale_flags=scale_flags,
-                         output_size=output_size)
+                         output_size=output_size, preserve_size=preserve_size)
 
 
 def screen_capture_source(fps, region=None, display=None, width=320,
-                          spec=None, scale_flags='neighbor'):
+                          spec=None, scale_flags='neighbor',
+                          preserve_size=False):
     """Compatibility adapter for the former modem_screen API."""
     # AVFoundation's device numbering is machine-dependent. The old screen
     # path selected the first screen capture device; do not inherit the
@@ -359,7 +375,8 @@ def screen_capture_source(fps, region=None, display=None, width=320,
     if display is None and sys.platform == 'darwin':
         display = 0
     return ffmpeg_source(spec, fps, region=region, display=display,
-                         width=width, scale_flags=scale_flags)
+                         width=width, scale_flags=scale_flags,
+                         preserve_size=preserve_size)
 
 
 _NETWORK_SCHEMES = frozenset({
@@ -378,7 +395,7 @@ def _is_stream_url(source):
 
 
 def video_source(source, loop=None, realtime=None, width=320,
-                 scale_flags='bicubic', live=None):
+                 scale_flags='bicubic', live=None, preserve_size=False):
     """Read a local video file in a real-time loop or a live stream URL.
 
     Local files and HTTP(S) media URLs loop and are paced with ``-re`` by
@@ -421,12 +438,13 @@ def video_source(source, loop=None, realtime=None, width=320,
         # Fail a stalled network read instead of leaving the capture worker
         # blocked forever during shutdown or source loss.
         cmd += ['-rw_timeout', '10000000']
-    cmd += ['-i', source, '-vf',
-            f'scale={int(width)}:-2:flags={scale_flags}',
-            '-fps_mode', 'passthrough', '-pix_fmt', 'rgb24',
+    cmd += ['-i', source]
+    if not preserve_size:
+        cmd += ['-vf', f'scale={int(width)}:-2:flags={scale_flags}']
+    cmd += ['-fps_mode', 'passthrough', '-pix_fmt', 'rgb24',
             '-c:v', 'ppm', '-f', 'image2pipe', '-an', '-sn', '-']
 
-    errors = tempfile.TemporaryFile()
+    errors = _temporary_error_file()
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                 stderr=errors, bufsize=0)

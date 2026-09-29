@@ -33,6 +33,35 @@ not substitute for real-time playback. Repeat this order after subsequent
 changes; if playback is blocked, record the concrete blocker and leave live
 validation explicitly outstanding.
 
+#### Current development-host resources (checked 2026-09-29)
+
+`Xvfb` and `xvfb-run` are installed. The receiver setup GUI was smoke-tested
+under `xvfb-run -a` and remained open without startup errors for an 8-second
+check; this verifies virtual-display startup, not a complete interaction or
+render-quality test. Use Xvfb for GUI/capture smoke tests when no desktop is
+attached, for example:
+
+```text
+timeout 8s xvfb-run -a .venv/bin/python tools/v7_live.py gui
+```
+
+PortAudio currently reports ALSA devices `pulse` and `default`, each with up to
+32 input and 32 output channels. Concurrent test processes may occupy the
+default low-numbered channels. Reserve a disjoint single channel or stereo pair
+for each live stream and specify that port/channel route in the stream setup;
+record the actual device, channel mapping, and sample rate with the run. Device
+names alone do not establish that a route is a loopback, so verify the chosen
+route before sending any test signal and never assume `pulse` is safe. The
+current `tools/v7_live.py` CLI opens mono or stereo streams on logical channels
+0 or 0–1; it has no channel-offset option. To isolate a live stream on a
+different pair, request enough stream channels to include the selected
+zero-based indices, then route only those columns in the input/output buffers
+(and zero-fill unused output columns); a single-port test uses one selected
+column. The V7 CLI needs explicit stream-channel routing support before it can
+select such non-default ports. Verify that mapping without physical playback
+before a live run. This host inventory does not itself count as a real-time
+playback validation.
+
 ## 2. Packet format and acquisition
 
 At the 48 kHz reference geometry, one pulse packet is 3,920 samples:
@@ -364,12 +393,13 @@ live sender starts after one emitted packet (81.67 ms at 1×) and caps the
 producer queue at one batch, prioritizing freshness across capture modes. At
 other playback speeds the cushion scales with the emitted packet duration. In
 the synthetic 15-fps profile, the one-packet setting reduced median
-capture-to-handoff from 146.2 ms to 59.8 ms and p95 from 176.5 ms to 90.1 ms.
-This reduces the margin against a brief capture/encode stall in favor of lower
-live delay. Frame preparation and packet construction take only a few
-milliseconds; capture cadence contributes additional frame age before encoding.
-The final interval adds one packet's 81.67 ms sample duration before the
-receiver can decode the complete frame. These are simulated output-clock
+capture-to-handoff from
+146.2 ms to 59.8 ms and p95 from 176.5 ms to 90.1 ms. This reduces the margin
+against a brief capture/encode stall in favor of lower live delay. Frame
+preparation and packet construction take only a few milliseconds; capture
+cadence contributes additional frame age before encoding. The final interval
+adds one packet's 81.67 ms sample duration before
+the receiver can decode the complete frame. These are simulated output-clock
 measurements, not measured DAC latency; actual camera timing, audio-driver
 behavior, and GUI rendering are not included. The reusable profiler, generated
 video, and summaries are in the ignored `tmp/v7-zero2-profile/` directory.
@@ -586,6 +616,22 @@ changes into a modem commit without coordination.
 
 The shared image fixture is `modem_tests/fixtures/v7_reference_face.png`.
 The synthetic impairment matrix runner is `tools/v7_torture_matrix.py`.
+The live stereo one-leg dropout suite is `tools/v7_stereo_dropout_torture_suite.py`.
+
+Run the live suite on PulseAudio/PipeWire-Pulse with Xvfb available:
+
+```text
+.venv/bin/python tools/v7_stereo_dropout_torture_suite.py --receiver-profile fold-500
+```
+
+It runs a clean control followed by left-only, right-only, and seeded random
+1–20 ms one-leg dropouts through a PortAudio relay into the live Fold-500 GUI
+receiver, after a two-second receiver-acquisition warmup. A pass requires
+consecutive displayed source indices, valid packet metadata, no genuinely
+held frames (displayable degraded frames are allowed), correct per-leg erasure
+detection, no audio stream errors, and no loss of packet headers on the intact
+leg. The live sender, relay captures, schedules, receiver logs, screenshots,
+and aggregate report are saved under `tmp/`.
 
 The synthetic impairment matrix was run with:
 
