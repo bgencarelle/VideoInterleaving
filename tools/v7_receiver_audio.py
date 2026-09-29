@@ -280,6 +280,9 @@ class AudioPassthrough:
     BUFFER_SECONDS = 0.5
     # Prime by about one V7 packet before the continuous output stream starts.
     TARGET_SECONDS = 0.08
+    # Independent BlackHole/Bluetooth clocks can exceed the generic source
+    # reader's 0.1% cap; permit up to 0.5% correction for receiver monitoring.
+    CLOCK_CORRECTION_LIMIT = 0.005
     FRAME_GAP_CROSSFADE_SECONDS = 0.01
     RECOVERY_FADE_SECONDS = 0.005
 
@@ -287,7 +290,7 @@ class AudioPassthrough:
                  volume=DEFAULT_AUDIO_VOLUME, target_seconds=None):
         if sounddevice_module is None:
             import sounddevice as sounddevice_module
-        from tools.v7_source_audio import ClockMatchedReader, SampleBuffer
+        from tools.v7_source_audio import SampleBuffer
 
         self.sd = sounddevice_module
         self.input_rate = int(input_rate)
@@ -364,6 +367,16 @@ class AudioPassthrough:
         })
         return stats
 
+    def _make_clock_reader(self, input_rate, output_rate):
+        from tools.v7_source_audio import ClockMatchedReader
+
+        input_rate = float(input_rate)
+        output_rate = float(output_rate)
+        target = max(1, int(round(input_rate*self.target_seconds)))
+        return ClockMatchedReader(
+            self.buffer, target, nominal_ratio=input_rate/output_rate,
+            correction_limit=self.CLOCK_CORRECTION_LIMIT)
+
     @staticmethod
     def _identity(sd, index):
         return device_identity(sd, index)
@@ -389,11 +402,7 @@ class AudioPassthrough:
             self.sd.check_output_settings(
                 device=device, channels=channels, dtype='float32',
                 samplerate=rate)
-            from tools.v7_source_audio import ClockMatchedReader
-            target = round(self.input_rate*self.target_seconds)
-            ratio = self.input_rate/rate
-            reader = ClockMatchedReader(
-                self.buffer, target, nominal_ratio=ratio)
+            reader = self._make_clock_reader(self.input_rate, rate)
             stream = self.sd.OutputStream(
                 samplerate=rate, channels=channels, dtype='float32',
                 device=device, blocksize=0,
@@ -430,16 +439,11 @@ class AudioPassthrough:
         rate = float(rate)
         if not np.isfinite(rate) or rate <= 0:
             raise ValueError('audio input sample rate must be positive')
-        from tools.v7_source_audio import ClockMatchedReader
-
         with self._lock:
             self.input_rate = rate
             output_rate = self.output_rate
             if output_rate:
-                target = max(1, int(round(rate*self.target_seconds)))
-                self.reader = ClockMatchedReader(
-                    self.buffer, target,
-                    nominal_ratio=rate/output_rate)
+                self.reader = self._make_clock_reader(rate, output_rate)
             self.history.clear()
             self._history_end = None
             self._queued_sample_end = None
@@ -551,8 +555,6 @@ class AudioPassthrough:
 
     def clear_audio(self):
         """Discard captured history and queued output after a capture gap."""
-        from tools.v7_source_audio import ClockMatchedReader
-
         with self._lock:
             self.history.clear()
             self._history_end = None
@@ -562,10 +564,8 @@ class AudioPassthrough:
             self._fade_in_after_underflow = False
             self._audio_primed = False
             if self.output_rate:
-                self.reader = ClockMatchedReader(
-                    self.buffer,
-                    max(1, int(round(self.input_rate*self.target_seconds))),
-                    nominal_ratio=self.input_rate/self.output_rate)
+                self.reader = self._make_clock_reader(
+                    self.input_rate, self.output_rate)
 
     @property
     def buffered_ms(self):
@@ -649,8 +649,6 @@ class AudioPassthrough:
     def set_route(self, side, muted=None):
         if side not in (None, 'left', 'right'):
             raise ValueError('audio route must be left, right, or None')
-        from tools.v7_source_audio import ClockMatchedReader
-
         with self._lock:
             changed = side != self.route
             self.route = side
@@ -663,10 +661,8 @@ class AudioPassthrough:
                 self._fade_in_after_underflow = False
                 self._audio_primed = False
                 if self.output_rate:
-                    self.reader = ClockMatchedReader(
-                        self.buffer,
-                        max(1, int(round(self.input_rate*self.target_seconds))),
-                        nominal_ratio=self.input_rate/self.output_rate)
+                    self.reader = self._make_clock_reader(
+                        self.input_rate, self.output_rate)
 
     def set_muted(self, muted):
         with self._lock:
@@ -678,12 +674,8 @@ class AudioPassthrough:
                 self._queued_last_sample = None
                 self._audio_primed = False
                 if self.output_rate:
-                    from tools.v7_source_audio import ClockMatchedReader
-                    self.reader = ClockMatchedReader(
-                        self.buffer,
-                        max(1, int(round(
-                            self.input_rate*self.target_seconds))),
-                        nominal_ratio=self.input_rate/self.output_rate)
+                    self.reader = self._make_clock_reader(
+                        self.input_rate, self.output_rate)
 
     def set_volume(self, volume):
         volume = _checked_audio_volume(volume)

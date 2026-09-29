@@ -213,6 +213,9 @@ class AudioPassthroughTests(unittest.TestCase):
         passthrough = AudioPassthrough(
             1000, sounddevice_module=_FakeSoundDevice)
         passthrough.open(7)
+        self.assertEqual(
+            passthrough.reader.correction_limit,
+            AudioPassthrough.CLOCK_CORRECTION_LIMIT)
         passthrough.set_route('right')
         first = np.array([[.1, .2], [.3, .4], [.5, .6]], dtype=np.float32)
         second = np.array([[.7, .8], [.9, 1.0]], dtype=np.float32)

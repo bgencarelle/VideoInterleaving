@@ -118,6 +118,31 @@ class SourceAudioTests(unittest.TestCase):
         self.assertEqual(reader.current_correction, 0.0)
         self.assertEqual(reader.max_correction, peak)
 
+    def test_clock_match_tracks_drift_above_default_limit_when_configured(self):
+        target = 2000
+        fifo = SampleBuffer(max_samples=target*2)
+        fifo.push(np.arange(target, dtype=np.float32))
+        reader = ClockMatchedReader(
+            fifo, target, correction_limit=0.005)
+        next_sample = target
+        source_phase = 0.0
+        levels = []
+
+        for _ in range(10_000):
+            reader.read(100)
+            source_phase += 100.2  # 2,000 ppm faster capture clock.
+            count = int(source_phase)
+            source_phase -= count
+            fifo.push(np.arange(next_sample, next_sample+count,
+                                dtype=np.float32))
+            next_sample += count
+            levels.append(fifo.available+len(reader._pending))
+
+        self.assertEqual(fifo.dropped, 0)
+        self.assertGreater(reader.max_correction, 1000e-6)
+        self.assertLessEqual(reader.max_correction, 0.005)
+        self.assertLess(max(levels)-min(levels), 100)
+
     def test_device_capture_selects_or_downmixes_input_channels(self):
         class InputStream:
             def __init__(self, **kwargs):

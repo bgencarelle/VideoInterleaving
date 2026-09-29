@@ -125,20 +125,27 @@ class PacketAudioDelay:
 class ClockMatchedReader:
     """Read a nominal-rate FIFO while slowly correcting independent clocks.
 
-    The fill-level servo changes the source/output ratio by at most 0.1%.
-    That is enough to track ordinary device-clock error without allowing a
-    separate capture clock to build unbounded monitoring latency.
+    The fill-level servo changes the source/output ratio by a configurable
+    amount, defaulting to 0.1%, without allowing a separate capture clock to
+    build unbounded monitoring latency.
     """
 
     MAX_CORRECTION = 0.001
     PROPORTIONAL_GAIN = 0.1
 
-    def __init__(self, buffer, target_samples, nominal_ratio=1.0):
+    def __init__(self, buffer, target_samples, nominal_ratio=1.0,
+                 correction_limit=None):
         self.buffer = buffer
         self.target_samples = max(1, int(target_samples))
         self.nominal_ratio = float(nominal_ratio)
         if not np.isfinite(self.nominal_ratio) or self.nominal_ratio <= 0:
             raise ValueError('nominal sample-rate ratio must be positive')
+        self.correction_limit = float(
+            self.MAX_CORRECTION if correction_limit is None
+            else correction_limit)
+        if (not np.isfinite(self.correction_limit) or
+                not 0.0 <= self.correction_limit < 1.0):
+            raise ValueError('clock correction limit must be in [0, 1)')
         self._phase = 0.0
         self._pending = np.empty(0, dtype=np.float32)
         self.max_correction = 0.0
@@ -163,7 +170,7 @@ class ClockMatchedReader:
         error = (queued-self.target_samples)/self.target_samples
         correction = float(np.clip(
             error*self.PROPORTIONAL_GAIN,
-            -self.MAX_CORRECTION, self.MAX_CORRECTION))
+            -self.correction_limit, self.correction_limit))
         self.current_correction = correction
         self.max_correction = max(self.max_correction, abs(correction))
         step = self.nominal_ratio*(1.0+correction)
