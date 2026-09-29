@@ -273,17 +273,31 @@ class ReceiverChannelRouter:
 
 
 class _RateMeter:
-    """Wall-clock sample rate over a sliding window (diagnostics only)."""
+    """Wall-clock sample rate over a sliding window (diagnostics only).
+
+    Callbacks often arrive in clusters: with a 4,096-frame host buffer,
+    PortAudio delivers four 1,024-frame blocks back to back. Counting from
+    the first block of a cluster then includes its cluster-mates without
+    their period and reads high by (k-1) blocks per window: +3,200 ppm for
+    96 kHz capture in clusters of four. Arrivals within COALESCE_SECONDS of
+    the first block of a group are therefore counted as one arrival, stamped
+    at its last block.
+    """
 
     WINDOW_SECONDS = 10.0
+    COALESCE_SECONDS = 0.002
 
     def __init__(self):
-        self._points = deque()
+        self._points = deque()  # (last time, cumulative total, group start)
         self._total = 0
 
     def add(self, count, now):
+        now = float(now)
         self._total += int(count)
-        self._points.append((float(now), self._total))
+        if self._points and now-self._points[-1][2] < self.COALESCE_SECONDS:
+            self._points[-1] = (now, self._total, self._points[-1][2])
+        else:
+            self._points.append((now, self._total, now))
         while (len(self._points) > 2 and
                now-self._points[0][0] > self.WINDOW_SECONDS):
             self._points.popleft()
@@ -291,10 +305,10 @@ class _RateMeter:
     def rate(self):
         if len(self._points) < 2:
             return None
-        (t0, n0), (t1, n1) = self._points[0], self._points[-1]
+        (t0, n0, _), (t1, n1, _) = self._points[0], self._points[-1]
         if t1-t0 < 1.0:
             return None
-        # The first point's samples arrived before t0; count from it.
+        # Samples up to t0 arrived at or before t0: count only later ones.
         return (n1-n0)/(t1-t0)
 
 
@@ -317,9 +331,11 @@ class AudioPassthrough:
     # Fill-level low-pass for the clock servo (see ClockMatchedReader).
     FILL_SMOOTHING_SECONDS = 0.25
     # PI servo gains (per second, per second squared): critically damped at
-    # about 0.1 rad/s. The integral holds the steady clock offset (a +3,100
-    # ppm capture clock was measured on the reference Mac), so fill noise
-    # moves the ratio by hundreds of ppm instead of rail to rail.
+    # about 0.1 rad/s. The integral holds whatever steady clock offset there
+    # is, so the proportional term stays gentle and fill noise moves the
+    # ratio by hundreds of ppm instead of rail to rail. (An apparent +3,100
+    # ppm capture clock on the reference Mac was a rate-meter artifact of
+    # clustered callbacks; see _RateMeter.rate.)
     SERVO_KP = 0.2
     SERVO_KI = 0.01
     # If the FIFO still grows past this (output callbacks starved, or a rate

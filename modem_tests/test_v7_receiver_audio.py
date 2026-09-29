@@ -403,7 +403,7 @@ class AudioPassthroughTests(unittest.TestCase):
     # would dwarf the queued audio. These tests keep the real allowance.
     REAL_CAPTURE_STALL_ALLOWANCE = {
         'test_priming_waits_for_target_raised_by_large_callbacks',
-        'test_pi_servo_holds_the_measured_capture_offset_off_the_limit',
+        'test_pi_servo_holds_a_large_capture_offset_off_the_limit',
     }
 
     def setUp(self):
@@ -836,6 +836,24 @@ class AudioPassthroughTests(unittest.TestCase):
         self.assertAlmostEqual(1.0/float(np.mean(periods)), tone_hz, delta=1.0)
         passthrough.close()
 
+    def test_rate_meter_is_unbiased_for_clustered_callbacks(self):
+        from tools.v7_receiver_audio import _RateMeter
+        rng = np.random.default_rng(1)
+        for cluster in (1, 4):
+            meter = _RateMeter()
+            period = cluster*1024/96000
+            t, readings = 100.0, []
+            for index in range(int(30/period)):
+                t += period
+                for block in range(cluster):
+                    meter.add(1024, t+block*1e-4+rng.uniform(0, 5e-4))
+                if index*period > 12:
+                    readings.append(meter.rate())
+            # Counting from each block read 96,305 (+3,176 ppm) for clusters
+            # of four; coalesced clusters read the true 96,000.
+            self.assertAlmostEqual(float(np.mean(readings)), 96000.0,
+                                   delta=96000*50e-6)
+
     def test_stats_report_measured_rates_and_late_output_callbacks(self):
         from unittest.mock import patch
         passthrough = AudioPassthrough(
@@ -914,9 +932,10 @@ class AudioPassthroughTests(unittest.TestCase):
 
     def _drive_field(self, block, seconds=90, true_in=96300.0,
                      burst_blocks=3, burst_every=7, seed=3):
-        """The reference Mac: 96 kHz capture measured at 96,300 (+3,125 ppm)
-        in 1,024-frame blocks, 44.1 kHz output, and capture callbacks held
-        back by GIL stalls (up to three blocks, about 32 ms)."""
+        """A stress case: 96 kHz capture running +3,125 ppm fast (a large but
+        in-range clock error) in 1,024-frame blocks, 44.1 kHz output, and
+        capture callbacks held back by GIL stalls (up to three blocks, about
+        32 ms)."""
         rng = np.random.default_rng(seed)
         passthrough = AudioPassthrough(
             96000, sounddevice_module=_Fake44100SoundDevice)
@@ -939,7 +958,7 @@ class AudioPassthroughTests(unittest.TestCase):
         passthrough.close()
         return np.array(corrections), stats
 
-    def test_pi_servo_holds_the_measured_capture_offset_off_the_limit(self):
+    def test_pi_servo_holds_a_large_capture_offset_off_the_limit(self):
         corrections, stats = self._drive_field(2048)
         # The proportional-only servo tracked the same mean but spent ~60% of
         # the time on the +-5,000 ppm limit (sd ~3,000 ppm): audible warble.
