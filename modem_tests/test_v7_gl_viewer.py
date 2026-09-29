@@ -162,11 +162,30 @@ class GLViewerHelperTests(unittest.TestCase):
             'decode': ('good 1 · lost 0',),
             'input': ('peak mono -2 dBFS',),
             'signal': ('aspect 4:3',),
+            'audio': ('queue 80 ms · underruns 2',
+                      'input xruns 1 · output xruns 0'),
             'decode_cpu': ('last 3.1 ms/frame', 'average 8% / core'),
             'resources': ('thread 2% · proc 12%', 'RSS 256 MiB'),
         }
         pixels = _diagnostic_image((960, 194), diagnostics)
         self.assertEqual(pixels.shape, (194, 960, 4))
+
+    def test_audio_diagnostic_card_reflects_fifo_and_xrun_counts(self):
+        diagnostics = {
+            'status': ('RECEIVED',),
+            'sync': ('shown 1 / 10',),
+            'decode': ('good 1 · lost 0',),
+            'input': ('peak L/R -2/-3 dBFS',),
+            'signal': ('aspect 4:3',),
+            'audio': ('queue 80 ms · underruns 0',
+                      'input xruns 0 · output xruns 0'),
+        }
+        quiet = _diagnostic_image((800, 240), diagnostics)
+        diagnostics['audio'] = ('queue 3 ms · underruns 7',
+                                'input xruns 2 · output xruns 1')
+        starved = _diagnostic_image((800, 240), diagnostics)
+
+        self.assertFalse(np.array_equal(quiet, starved))
 
     def test_preview_rejects_nonpositive_or_nonfinite_fps_before_loading(self):
         for fps in ('0', '-1', 'nan', 'inf', '-inf'):

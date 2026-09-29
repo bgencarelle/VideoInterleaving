@@ -1900,10 +1900,11 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                 'audio_output_identity': runtime_options.snapshot().get(
                     'audio_output_identity'),
                 'audio_device_error': None,
-               'audio_runtime': {'buffered_ms': 0.0,
-                                 'underflow_events': 0,
-                                 'input_status': {}, 'output_status': {},
-                                 'clock_correction_ppm': 0.0},
+                'audio_runtime': {'buffered_ms': 0.0,
+                                  'underflow_events': 0,
+                                  'dropped_samples': 0,
+                                  'input_status': {}, 'output_status': {},
+                                  'clock_correction_ppm': 0.0},
                'mode': input_mode,
              'device': str(args.device), 'capture_rate': capture_rate,
              'input_channels': input_channels}
@@ -2032,6 +2033,16 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
             'input': (*channel_levels,
                       f'auto gain {meter["auto_gain"]:5.2f}×',
                       f'right leg {"inverted" if meter["polarity"] < 0 else "normal"}'),
+            'audio': (
+                f'q{meter["audio_runtime"]["buffered_ms"]:.0f}ms · '
+                f'under {meter["audio_runtime"]["underflow_events"]}',
+                f'in/out xrun '
+                f'{sum(meter["audio_runtime"]["input_status"].values())}/'
+                f'{sum(meter["audio_runtime"]["output_status"].values())}',
+                f'clock {meter["audio_runtime"]["clock_correction_ppm"]:.0f}ppm · '
+                f'drop {meter["audio_runtime"]["dropped_samples"]}',
+                f'{meter["audio_output_device"] or "output off"} · '
+                f'volume {meter["audio_volume"]:.2f}'),
             'signal': (
                 f'aspect {aspect}  ·  candidate {candidate} ×{meter["aspect_streak"]}',
                 (f'wire {meter["wire_profile"] or "--"}' +
@@ -2046,13 +2057,8 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                 f'video {meter["video_side"] or "--"} · '
                 f'audio {meter["audio_side"] or "--"}',
                 f'passthrough {"muted" if meter["audio_muted"] else "live"} · '
-                f'queue {meter["audio_runtime"]["buffered_ms"]:.0f} ms · '
-                f'xruns {meter["audio_runtime"]["underflow_events"]}/'
-                f'{sum(meter["audio_runtime"]["input_status"].values())}/'
-                f'{sum(meter["audio_runtime"]["output_status"].values())} · '
-                f'clock {meter["audio_runtime"]["clock_correction_ppm"]:.0f} ppm · '
-                f'volume {meter["audio_volume"]:.2f} · '
-                f'output {meter["audio_output_device"] or "not selected"}' +
+                f'output {meter["audio_output_device"] or "not selected"} · '
+                f'volume {meter["audio_volume"]:.2f}' +
                 ('' if not meter['audio_device_error'] else
                  f' · {meter["audio_device_error"]}'),
                 f'sync {meter["sync_state"]}' +

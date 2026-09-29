@@ -708,11 +708,15 @@ def _diagnostic_image(size, diagnostics):
         ('INPUT  /  LEVEL', 'input'),
         ('PICTURE  /  SIGNAL', 'signal'),
     ]
+    if 'audio' in diagnostics:
+        specs.append(('AUDIO FIFO  /  XRUNS', 'audio'))
     if 'decode_cpu' in diagnostics:
         specs.append(('DECODE CPU', 'decode_cpu'))
     if 'resources' in diagnostics:
         specs.append(('GUI RESOURCES', 'resources'))
-    columns = (2 if width < 720 else 3 if len(specs) > 4 else 2)
+    columns = (2 if width < 600 else
+               4 if width >= 720 and len(specs) > 6 else
+               3 if len(specs) > 4 else 2)
     rows = (len(specs)+columns-1)//columns
     card_width = max(1, (width-2*padding-(columns-1)*gap)//columns)
     card_height = max(
