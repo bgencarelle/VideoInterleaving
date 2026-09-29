@@ -313,6 +313,12 @@ class AudioPassthrough:
         self.error = None
         self._status_callback = status_callback
         self._lock = threading.Lock()
+        self._stats_lock = threading.Lock()
+        self._output_underflow_events = 0
+        self._output_underflow_callbacks = 0
+        self._output_underflow_active = False
+        self._input_status_counts = {}
+        self._output_status_counts = {}
 
     def _report(self, error):
         self.error = None if error is None else str(error)
@@ -321,6 +327,40 @@ class AudioPassthrough:
                 self._status_callback(self.error)
             except Exception:
                 pass
+
+    @staticmethod
+    def _count_status(counts, status):
+        if not status:
+            return
+        name = str(status)
+        counts[name] = counts.get(name, 0)+1
+
+    def note_input_status(self, status):
+        """Record PortAudio capture xruns for the receiver diagnostics."""
+        with self._stats_lock:
+            self._count_status(self._input_status_counts, status)
+
+    def stats_snapshot(self):
+        """Return audio FIFO, clock correction and PortAudio xrun counters."""
+        with self._stats_lock:
+            stats = {
+                'underflow_events': self._output_underflow_events,
+                'underflow_callbacks': self._output_underflow_callbacks,
+                'input_status': dict(self._input_status_counts),
+                'output_status': dict(self._output_status_counts),
+            }
+        with self._lock:
+            reader = self.reader
+            output_rate = self.output_rate
+        stats.update({
+            'buffered_ms': self.buffered_ms,
+            'dropped_samples': int(self.buffer.dropped),
+            'clock_correction_ppm': (0.0 if reader is None else
+                                      reader.max_correction*1e6),
+            'input_rate': self.input_rate,
+            'output_rate': output_rate,
+        })
+        return stats
 
     @staticmethod
     def _identity(sd, index):
@@ -532,6 +572,8 @@ class AudioPassthrough:
     def _callback(self, outdata, frames, _timing, status):
         if status:
             self._report(f'Audio output warning: {status}')
+            with self._stats_lock:
+                self._count_status(self._output_status_counts, status)
         with self._lock:
             reader = self.reader
             audible = self.route is not None and not self.muted
@@ -553,6 +595,11 @@ class AudioPassthrough:
             try:
                 samples = reader.read(frames)
                 if reader.underflow:
+                    with self._stats_lock:
+                        self._output_underflow_callbacks += 1
+                        if not self._output_underflow_active:
+                            self._output_underflow_events += 1
+                        self._output_underflow_active = True
                     valid_samples = min(
                         len(samples), reader.valid_output_samples)
                     if valid_samples:
@@ -574,6 +621,8 @@ class AudioPassthrough:
                             self._fade_in_after_underflow = True
                             self._audio_primed = False
                 else:
+                    with self._stats_lock:
+                        self._output_underflow_active = False
                     with self._lock:
                         fade_in = (self.reader is reader and
                                    self._fade_in_after_underflow)

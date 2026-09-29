@@ -265,6 +265,28 @@ class AudioPassthroughTests(unittest.TestCase):
         self.assertFalse(passthrough.reader.underflow)
         passthrough.close()
 
+    def test_audio_stats_distinguish_underflow_from_portaudio_xruns(self):
+        passthrough = AudioPassthrough(
+            1000, sounddevice_module=_FakeSoundDevice, target_seconds=.004)
+        passthrough.open(7)
+        passthrough.set_route('right')
+        passthrough.note_input_status('input overflow')
+        passthrough.queue_capture(
+            0, np.full((40, 2), .2, dtype=np.float32))
+        output = np.empty((20, 2), dtype=np.float32)
+        passthrough.stream.callback(output, len(output), None, None)
+        output = np.empty((40, 2), dtype=np.float32)
+        passthrough.stream.callback(
+            output, len(output), None, 'output underflow')
+
+        stats = passthrough.stats_snapshot()
+        self.assertEqual(stats['underflow_events'], 1)
+        self.assertEqual(stats['underflow_callbacks'], 1)
+        self.assertEqual(stats['input_status'], {'input overflow': 1})
+        self.assertEqual(stats['output_status'], {'output underflow': 1})
+        self.assertEqual(stats['dropped_samples'], 0)
+        passthrough.close()
+
     def test_frame_audio_uses_the_decoded_input_interval_and_selected_leg(self):
         passthrough = AudioPassthrough(
             1000, sounddevice_module=_FakeSoundDevice)
