@@ -1069,6 +1069,11 @@ class ReceiverGui:
             show_sync_warning=args.show_sync_warning,
             audio_volume=args.audio_volume)
         args.runtime_options = self.runtime_options
+        # The receiver's ordinary output is captured for the GUI's message
+        # view. Send audio snapshots to the launch terminal separately.
+        args.audio_diagnostics = (
+            args.audio_output_device is not None and sys.stdout is not None)
+        args.audio_diagnostics_stream = sys.stdout
         start_image_only = any(
             field.value for field in self.fields
             if field.dest == 'image_only')

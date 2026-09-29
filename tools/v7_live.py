@@ -1901,14 +1901,14 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                     'audio_output_identity'),
                 'audio_device_error': None,
                 'audio_runtime': {
-                     'buffered_ms': 0.0,
-                     'underflow_events': 0,
-                     'dropped_samples': 0,
-                     'current_clock_correction_ppm': 0.0,
-                     'max_clock_correction_ppm': 0.0,
-                     'input_status': {},
-                     'output_status': {},
-                 },
+                    'buffered_ms': 0.0,
+                    'underflow_events': 0,
+                    'dropped_samples': 0,
+                    'current_clock_correction_ppm': 0.0,
+                    'max_clock_correction_ppm': 0.0,
+                    'input_status': {},
+                    'output_status': {},
+                },
                'mode': input_mode,
              'device': str(args.device), 'capture_rate': capture_rate,
              'input_channels': input_channels}
@@ -2161,15 +2161,21 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                     audio_stats['dropped_samples'])
                 has_audio_errors = any((
                     signature[0], signature[1], signature[2], signature[3]))
+                audio_diagnostics = bool(getattr(
+                    args, 'audio_diagnostics', False))
                 error_changed = (
                     signature != last_audio_error_signature and
-                    has_audio_errors and (args.log or args.diagnostics))
+                    has_audio_errors and
+                    (args.log or args.diagnostics or audio_diagnostics))
                 periodic_report = (
-                    args.diagnostics and now-last_audio_report >= 1.0)
-                if (not args.no_log and
+                    (args.diagnostics or audio_diagnostics) and
+                    now-last_audio_report >= 1.0)
+                if ((not args.no_log or audio_diagnostics) and
                         (error_changed or periodic_report)):
+                    report_stream = getattr(
+                        args, 'audio_diagnostics_stream', None) or sys.stdout
                     print({'status': 'audio_runtime', **audio_stats},
-                          flush=True)
+                          file=report_stream, flush=True)
                     last_audio_report = now
                 last_audio_error_signature = signature
             refresh_runtime_state(now)

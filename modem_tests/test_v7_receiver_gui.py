@@ -1,6 +1,7 @@
 """Receiver GUI configuration maps every receive CLI setting safely."""
-import queue
+import io
 import json
+import queue
 import threading
 import unittest
 from types import SimpleNamespace
@@ -198,6 +199,27 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertTrue(args.no_log)
         self.assertIsNone(args.save_dir)
         self.assertEqual(args.mono_video_side, 'auto')
+
+    def test_start_routes_audio_diagnostics_to_launch_terminal(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser,
+                          (('test input device', 3),),
+                          audio_output_choices=(('test output device', 4),))
+        output = next(field for field in gui.fields
+                      if field.action is not None and
+                      field.action.dest == 'audio_output_device')
+        output.value = 4
+        gui.v7_live = SimpleNamespace(run_receive=Mock())
+        gui._prepare_input_device = Mock(return_value=True)
+        terminal = io.StringIO()
+
+        with patch('tools.v7_receiver_gui.sys.stdout', terminal):
+            gui._start_receiver()
+            gui.receiver_thread.join(timeout=2)
+
+        args = gui.v7_live.run_receive.call_args.args[0]
+        self.assertTrue(args.audio_diagnostics)
+        self.assertIs(args.audio_diagnostics_stream, terminal)
+        gui.receiver_stop.set()
 
     def test_cli_passthrough_volume_defaults_to_vlc_level_and_is_bounded(self):
         args = self.root_parser.parse_args([
