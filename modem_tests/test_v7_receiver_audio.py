@@ -14,6 +14,36 @@ class ReceiverChannelRouterTests(unittest.TestCase):
     MONO_500 = 4
     FOLD_500 = 1
 
+    def test_profile_candidate_cannot_disable_playing_audio(self):
+        router = ReceiverChannelRouter(self.MONO_500,
+                                       stereo_modes=(self.FOLD_500,))
+        good = {'confirmed': True, 'channel_modes': (None, self.MONO_500)}
+        router.observe_profile_decision(good, now=1.0)
+        router.observe_profile_decision(good, now=1.1)
+        candidate = {'confirmed': False,
+                     'channel_modes': (self.FOLD_500, None)}
+        for now in (1.2, 1.3):
+            state = router.observe_profile_decision(candidate, now=now)
+            self.assertEqual(state['audio_side'], 'left')
+            self.assertEqual(state['state'], 'mono-right')
+        self.assertEqual(router.last_packet, 1.1)
+
+    def test_single_soundtrack_status_does_not_disable_audio(self):
+        router = ReceiverChannelRouter(self.MONO_500)
+        good = {'confirmed': True, 'channel_modes': (None, self.MONO_500)}
+        router.observe_profile_decision(good, now=1.0)
+        router.observe_profile_decision(good, now=1.1)
+        stray = {'confirmed': True,
+                 'channel_modes': (self.MONO_500, self.MONO_500)}
+        state = router.observe_profile_decision(stray, now=1.2)
+        self.assertEqual(state['audio_side'], 'left')
+        router.observe_profile_decision(good, now=1.3)
+        state = router.observe_profile_decision(stray, now=1.4)
+        self.assertEqual(state['audio_side'], 'left')
+        state = router.observe_profile_decision(stray, now=1.5)
+        self.assertIsNone(state['audio_side'])
+        self.assertEqual(state['state'], 'dual-mono')
+
     def test_mono_route_does_not_change_on_packet_loss(self):
         router = ReceiverChannelRouter(self.MONO_500,
                                        initial_video_side='right')

@@ -2068,6 +2068,8 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                 now-meter['started'] > options['freewheel_seconds']):
             sync_state = 'sync-lost'
         meter['sync_state'] = sync_state
+        previous_audio_side = (passthrough.route
+                               if passthrough is not None else None)
         meter['audio_side'] = (
             route['audio_side'] if input_channels > 1 and
             meter['sync_state'] != 'sync-lost' else None)
@@ -2087,6 +2089,13 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
             passthrough.set_route(meter['audio_side'], options['audio_muted'])
             passthrough.set_volume(options['audio_volume'])
             meter['audio_device_error'] = passthrough.error
+            if previous_audio_side != meter['audio_side'] and not args.no_log:
+                print({'status': 'audio_route_change',
+                       'audio_side': meter['audio_side'],
+                       'route_state': route['state'],
+                       'sync_state': sync_state,
+                       'sync_age': meter['sync_age'],
+                       'channel_modes': route['channel_modes']}, flush=True)
 
     passthrough = (AudioPassthrough(
         capture_rate, sounddevice_module=sd,
@@ -2308,9 +2317,7 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
             profile_decisions = adaptive_profile.observe_packets(
                 profile_events, now=now)
             for decision in profile_decisions:
-                update_route_from_packets(
-                    decision['mode'], active_valid=decision['mode'] is not None,
-                    now=now, observed_channel_modes=decision['channel_modes'])
+                receiver_router.observe_profile_decision(decision, now=now)
                 if decision['switched'] and not args.no_log:
                     print({'status': 'wire_profile_switch',
                            'profile': adaptive_profile.profile_name,
@@ -2439,6 +2446,10 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                 update_route_from_packets(
                     result_mode, active_valid=packet_valid,
                     now=time.monotonic())
+            elif packet_valid:
+                # Successful picture metadata is also sync evidence. Probe
+                # scheduling must not expire audio while pictures decode.
+                receiver_router.last_packet = time.monotonic()
             confirmed_direction, direction_switched = direction_streak.observe(
                 absolute_arrival, packet_direction, independently_validated)
             meter['playback_direction'] = confirmed_direction

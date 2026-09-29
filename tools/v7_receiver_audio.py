@@ -241,6 +241,24 @@ class ReceiverChannelRouter:
             return 'freewheeling'
         return 'sync-lost'
 
+    def observe_profile_decision(self, decision, now=None):
+        """Route only confirmed profiles, with independent evidence per leg.
+
+        A profile candidate is not permission to silence an established audio
+        route. Even for the active profile, one status hit on the soundtrack
+        must not identify that leg as a second modem channel.
+        """
+        if not decision['confirmed']:
+            return self.snapshot(now)
+        left, right = decision['channel_modes']
+        for evidence, mode in zip(self.channels, (left, right)):
+            if mode is None:
+                # Absence on this packet breaks a candidate streak, without
+                # revoking the established route during a short dropout.
+                evidence.candidate = None
+                evidence.streak = 0
+        return self.observe(left, right, now=now)
+
     def snapshot(self, now=None):
         now = time.monotonic() if now is None else float(now)
         return {
