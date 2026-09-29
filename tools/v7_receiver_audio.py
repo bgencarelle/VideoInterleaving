@@ -316,6 +316,12 @@ class AudioPassthrough:
     DECLICK_SECONDS = 0.005
     # Fill-level low-pass for the clock servo (see ClockMatchedReader).
     FILL_SMOOTHING_SECONDS = 0.25
+    # PI servo gains (per second, per second squared): critically damped at
+    # about 0.1 rad/s. The integral holds the steady clock offset (a +3,100
+    # ppm capture clock was measured on the reference Mac), so fill noise
+    # moves the ratio by hundreds of ppm instead of rail to rail.
+    SERVO_KP = 0.2
+    SERVO_KI = 0.01
     # If the FIFO still grows past this (output callbacks starved, or a rate
     # error beyond the servo limit), skip back to the target with a ramp
     # rather than letting latency grow until the FIFO sheds audio unfaded.
@@ -323,10 +329,20 @@ class AudioPassthrough:
 
     # Wake period of the stall probe (see _stall_probe).
     STALL_PROBE_SECONDS = 0.005
+    # Frames per output callback. The callback is Python, so every period it
+    # must win the GIL before the device deadline. On the reference Mac the
+    # host's own 512-frame (11.6 ms) period lost ~2% of output blocks to
+    # 12-26 ms process stalls; 1,024 frames lost one block in ~25 s. 2,048
+    # frames (46 ms at 44.1 kHz) clears the worst stall seen with margin, for
+    # about 35 ms more monitor delay. 0 lets the host choose.
+    OUTPUT_BLOCKSIZE = 2048
+    # Capture callbacks are delayed by the same stalls (up to ~26 ms seen);
+    # the servo target keeps this much audio beyond one output callback.
+    CAPTURE_STALL_SECONDS = 0.03
 
     def __init__(self, input_rate, sounddevice_module=None, status_callback=None,
                  volume=DEFAULT_AUDIO_VOLUME, target_seconds=None,
-                 output_latency=None, output_blocksize=0):
+                 output_latency=None, output_blocksize=None):
         if sounddevice_module is None:
             import sounddevice as sounddevice_module
         from tools.v7_source_audio import SampleBuffer
@@ -360,7 +376,10 @@ class AudioPassthrough:
         # Experimental output buffering: a larger host buffer gives the
         # Python callback more slack before a stall costs audible output.
         self.output_latency = output_latency
-        self.output_blocksize = int(output_blocksize or 0)
+        self.output_blocksize = int(self.OUTPUT_BLOCKSIZE if output_blocksize
+                                    is None else output_blocksize)
+        if self.output_blocksize < 0:
+            raise ValueError('output blocksize must be 0 or positive')
         self._max_stall = 0.0
         self._stalls = 0
         self._stall_ms_total = 0.0
@@ -484,7 +503,9 @@ class AudioPassthrough:
         return ClockMatchedReader(
             self.buffer, target, nominal_ratio=input_rate/output_rate,
             correction_limit=self.CLOCK_CORRECTION_LIMIT,
-            smoothing_samples=input_rate*self.FILL_SMOOTHING_SECONDS)
+            smoothing_samples=input_rate*self.FILL_SMOOTHING_SECONDS,
+            servo_rate=input_rate, servo_kp=self.SERVO_KP,
+            servo_ki=self.SERVO_KI)
 
     @staticmethod
     def _identity(sd, index):
@@ -734,10 +755,13 @@ class AudioPassthrough:
         samples = np.zeros(frames, dtype=np.float32)
         try:
             if audible and reader is not None:
-                # Keep the servo target above one output callback plus one
-                # capture block, or large host callbacks underflow every time.
+                # Keep the servo target above one output callback, one
+                # capture block and the longest capture delay seen in the
+                # field (a GIL stall holds the capture callback too), or
+                # large output callbacks underflow when capture runs late.
                 needed = int(np.ceil(frames*reader.nominal_ratio))+2
-                floor = needed+self._largest_push
+                floor = (needed+self._largest_push+int(round(
+                    self.input_rate*self.CAPTURE_STALL_SECONDS)))
                 if reader.target_samples < floor:
                     reader.target_samples = floor
                 ready = primed

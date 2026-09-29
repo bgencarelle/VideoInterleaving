@@ -214,6 +214,21 @@ class _Fake48000SoundDevice(_FakeSoundDevice):
 
 
 class AudioPassthroughTests(unittest.TestCase):
+    # Most tests run at toy rates (1 kHz, a few samples per block) to check
+    # routing, fades and priming; there the 30 ms capture-stall allowance
+    # would dwarf the queued audio. These tests keep the real allowance.
+    REAL_CAPTURE_STALL_ALLOWANCE = {
+        'test_priming_waits_for_target_raised_by_large_callbacks',
+        'test_pi_servo_holds_the_measured_capture_offset_off_the_limit',
+    }
+
+    def setUp(self):
+        if self._testMethodName not in self.REAL_CAPTURE_STALL_ALLOWANCE:
+            from unittest.mock import patch
+            patcher = patch.object(
+                AudioPassthrough, 'CAPTURE_STALL_SECONDS', 0.0)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def test_continuous_capture_audio_does_not_wait_for_decoded_frames(self):
         passthrough = AudioPassthrough(
@@ -550,13 +565,18 @@ class AudioPassthroughTests(unittest.TestCase):
             passthrough.queue_capture(written, block)
             written += 1024
         # 4,096 queued clears the 80 ms (3,840) target but not one 4,096
-        # callback plus one 1,024 capture block (5,122): stay silent.
+        # callback plus one 1,024 capture block plus the 30 ms capture-stall
+        # allowance (4,098+1,024+1,440 = 6,562): stay silent.
         passthrough.stream.callback(out, len(out), None, None)
         np.testing.assert_array_equal(out, 0.0)
-        self.assertEqual(passthrough.reader.target_samples, 4098+1024)
+        self.assertEqual(passthrough.reader.target_samples, 4098+1024+1440)
         for _ in range(2):
             passthrough.queue_capture(written, block)
             written += 1024
+        passthrough.stream.callback(out, len(out), None, None)
+        np.testing.assert_array_equal(out, 0.0)  # 6,144 < 6,562
+        passthrough.queue_capture(written, block)
+        written += 1024
         passthrough.stream.callback(out, len(out), None, None)
         self.assertGreater(float(np.min(out)), .29)
         passthrough.close()
@@ -689,8 +709,71 @@ class AudioPassthroughTests(unittest.TestCase):
             48000, sounddevice_module=_Fake48000SoundDevice)
         default.open(7)
         self.assertNotIn('latency', default.stream.kwargs)
-        self.assertEqual(default.stream.kwargs['blocksize'], 0)
+        self.assertEqual(default.stream.kwargs['blocksize'],
+                         AudioPassthrough.OUTPUT_BLOCKSIZE)
+        self.assertEqual(AudioPassthrough.OUTPUT_BLOCKSIZE, 2048)
         default.close()
+        host = AudioPassthrough(
+            48000, sounddevice_module=_Fake48000SoundDevice,
+            output_blocksize=0)
+        host.open(7)
+        self.assertEqual(host.stream.kwargs['blocksize'], 0)
+        host.close()
+        with self.assertRaises(ValueError):
+            AudioPassthrough(48000, sounddevice_module=_Fake48000SoundDevice,
+                             output_blocksize=-1)
+
+    def _drive_field(self, block, seconds=90, true_in=96300.0,
+                     burst_blocks=3, burst_every=7, seed=3):
+        """The reference Mac: 96 kHz capture measured at 96,300 (+3,125 ppm)
+        in 1,024-frame blocks, 44.1 kHz output, and capture callbacks held
+        back by GIL stalls (up to three blocks, about 32 ms)."""
+        rng = np.random.default_rng(seed)
+        passthrough = AudioPassthrough(
+            96000, sounddevice_module=_Fake44100SoundDevice)
+        passthrough.open(7)
+        passthrough.set_route('right')
+        produced = 0
+        out = np.empty((block, 2), dtype=np.float32)
+        corrections = []
+        for index in range(int(seconds*44100/block)):
+            t = (index+1)*block/44100
+            lag = burst_blocks*1024 if rng.random() < 1/burst_every else 0
+            while produced+1024 <= int(t*true_in)-lag:
+                passthrough.queue_capture(
+                    produced, np.zeros((1024, 2), dtype=np.float32))
+                produced += 1024
+            passthrough.stream.callback(out, block, None, None)
+            if t > 30:
+                corrections.append(passthrough.reader.current_correction)
+        stats = passthrough.stats_snapshot()
+        passthrough.close()
+        return np.array(corrections), stats
+
+    def test_pi_servo_holds_the_measured_capture_offset_off_the_limit(self):
+        corrections, stats = self._drive_field(2048)
+        # The proportional-only servo tracked the same mean but spent ~60% of
+        # the time on the +-5,000 ppm limit (sd ~3,000 ppm): audible warble.
+        self.assertAlmostEqual(float(np.mean(corrections)), .003125,
+                               delta=.0003)
+        self.assertLess(float(np.std(corrections)), .001)
+        self.assertEqual(float(np.mean(np.abs(corrections) >= .00499)), 0.0)
+        self.assertEqual(stats['underflow_events'], 0)
+        self.assertEqual(stats['latency_trims'], 0)
+        self.assertEqual(stats['dropped_samples'], 0)
+
+    def test_pi_integral_never_exceeds_the_correction_limit(self):
+        from tools.v7_source_audio import ClockMatchedReader, SampleBuffer
+        fifo = SampleBuffer(max_samples=200_000)
+        fifo.push(np.zeros(150_000, dtype=np.float32))
+        reader = ClockMatchedReader(
+            fifo, 1000, nominal_ratio=1.0, correction_limit=.005,
+            servo_rate=48000)
+        for _ in range(300):  # far above target for seconds: windup pressure
+            reader.read(256)
+            fifo.push(np.zeros(256, dtype=np.float32))
+        self.assertLessEqual(reader.servo_ki*reader._integral, .005+1e-12)
+        self.assertLessEqual(reader.current_correction, .005)
 
     def test_output_open_failure_is_reported_without_default_fallback(self):
         class BrokenSoundDevice(_FakeSoundDevice):

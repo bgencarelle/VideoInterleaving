@@ -2120,18 +2120,22 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                        'sync_age': meter['sync_age'],
                        'channel_modes': route['channel_modes']}, flush=True)
 
-    # Experimental output buffering knobs for diagnosing callback stalls:
+    # Output buffering overrides for diagnosing callback stalls:
     # V7_AUDIO_OUTPUT_LATENCY = seconds, 'low' or 'high'; V7_AUDIO_OUTPUT_
-    # BLOCKSIZE = frames per output callback (0 lets the host choose).
+    # BLOCKSIZE = frames per output callback (0 lets the host choose). Unset,
+    # AudioPassthrough uses its defaults (host latency, 2,048-frame blocks).
     output_latency = os.environ.get('V7_AUDIO_OUTPUT_LATENCY') or None
     if output_latency not in (None, 'low', 'high'):
         output_latency = float(output_latency)
+    output_blocksize = os.environ.get('V7_AUDIO_OUTPUT_BLOCKSIZE')
+    output_blocksize = (None if output_blocksize in (None, '')
+                        else int(output_blocksize))
     passthrough = (AudioPassthrough(
         capture_rate, sounddevice_module=sd,
         status_callback=lambda error: meter.__setitem__(
             'audio_device_error', error),
         output_latency=output_latency,
-        output_blocksize=int(os.environ.get('V7_AUDIO_OUTPUT_BLOCKSIZE') or 0))
+        output_blocksize=output_blocksize)
         if audio_bridge_enabled else None)
 
     def audio_output_monitor():

@@ -134,8 +134,21 @@ class ClockMatchedReader:
     PROPORTIONAL_GAIN = 0.1
 
     def __init__(self, buffer, target_samples, nominal_ratio=1.0,
-                 correction_limit=None, smoothing_samples=None):
+                 correction_limit=None, smoothing_samples=None,
+                 servo_rate=None, servo_kp=0.2, servo_ki=0.01):
         self.buffer = buffer
+        # Optional PI servo; `servo_rate` is source samples per second. The
+        # integral carries a steady clock offset with no standing fill error,
+        # so the proportional term can stay gentle: 0.2/s maps a 5 ms fill
+        # error to 0.1% instead of the full correction limit. Without it the
+        # proportional-only servo below is used (the sender's behaviour).
+        self.servo_rate = None if servo_rate is None else float(servo_rate)
+        if self.servo_rate is not None and not (
+                np.isfinite(self.servo_rate) and self.servo_rate > 0):
+            raise ValueError('servo rate must be positive')
+        self.servo_kp = float(servo_kp)
+        self.servo_ki = float(servo_ki)
+        self._integral = 0.0
         self.target_samples = max(1, int(target_samples))
         self.nominal_ratio = float(nominal_ratio)
         if not np.isfinite(self.nominal_ratio) or self.nominal_ratio <= 0:
@@ -182,10 +195,22 @@ class ClockMatchedReader:
                 alpha = min(1.0, count*self.nominal_ratio/self.smoothing_samples)
                 self._fill += alpha*(queued-self._fill)
             queued = self._fill
-        error = (queued-self.target_samples)/self.target_samples
-        correction = float(np.clip(
-            error*self.PROPORTIONAL_GAIN,
-            -self.correction_limit, self.correction_limit))
+        if self.servo_rate is not None:
+            error_seconds = (queued-self.target_samples)/self.servo_rate
+            dt = count*self.nominal_ratio/self.servo_rate
+            self._integral += error_seconds*dt
+            if self.servo_ki > 0:
+                # Anti-windup: the integral alone never exceeds the limit.
+                bound = self.correction_limit/self.servo_ki
+                self._integral = float(np.clip(self._integral, -bound, bound))
+            correction = float(np.clip(
+                self.servo_kp*error_seconds+self.servo_ki*self._integral,
+                -self.correction_limit, self.correction_limit))
+        else:
+            error = (queued-self.target_samples)/self.target_samples
+            correction = float(np.clip(
+                error*self.PROPORTIONAL_GAIN,
+                -self.correction_limit, self.correction_limit))
         self.current_correction = correction
         self.max_correction = max(self.max_correction, abs(correction))
         step = self.nominal_ratio*(1.0+correction)
