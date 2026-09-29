@@ -4054,11 +4054,6 @@ def _measure_eof_marker(samples, frame_start, start_scale):
     }
 
 
-def warmup_eof_marker():
-    """Compile the production EOF-marker detector before live capture."""
-    _measure_eof_marker(np.zeros(PULSE_FRAME, dtype=np.float32), 0.0, 1.0)
-
-
 def _measure_eof_marker_fit(samples, frame_start, start_scale):
     """Validate the three known transitions in a packet's 32-sample EOF mark.
 

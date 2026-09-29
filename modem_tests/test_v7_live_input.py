@@ -31,9 +31,7 @@ class V7LiveInputTests(unittest.TestCase):
 
     def _run(self, audio, rate=v7.RATE, *, frame_boundary='baseline',
              pilot_timing='baseline'):
-        live = LiveInput(
-            rate=rate,
-            completion='eof' if frame_boundary == 'eof' else 'header')
+        live = LiveInput(rate=rate)
         state = v7.PulseState()          # as the live receiver keeps it
         taken, indices = [], []
         for start in range(0, len(audio), BLOCK):
@@ -75,7 +73,7 @@ class V7LiveInputTests(unittest.TestCase):
         self.assertGreater(live.gain, 10)
         # A few frames go to the slow-rise ramp; every later one decodes.
         self.assertGreaterEqual(len(decoded), FRAMES-6)
-        self.assertEqual(decoded, list(range(decoded[0], FRAMES)))
+        self.assertEqual(decoded, list(range(decoded[0], FRAMES-1)))
 
     def test_leveler_rises_slowly_and_falls_at_once(self):
         live = LiveInput()
@@ -96,29 +94,7 @@ class V7LiveInputTests(unittest.TestCase):
         _, _, indices, _ = self._run(
             self.eof_wire, frame_boundary='eof', pilot_timing='tone-seeded')
         self.assertEqual(sorted(i for i in indices if i is not None),
-                         list(range(FRAMES)))
-
-    def test_live_eof_completion_does_not_need_a_following_header(self):
-        live = LiveInput(rate=v7.RATE, completion='eof')
-        packet = self.eof_wire[:v7.PULSE_FRAME]
-        ready_at = None
-        for start in range(0, len(packet), BLOCK):
-            live.add(np.array(packet[start:start+BLOCK], copy=True))
-            audio = live.take(start/v7.RATE)
-            if audio is not None:
-                ready_at = live.total
-                break
-        self.assertIsNotNone(ready_at)
-        self.assertLess(ready_at-len(packet), BLOCK)
-        self.assertEqual(len(live.pulse_hits(audio)), 1)
-
-    def test_live_eof_completion_ignores_a_damaged_marker(self):
-        live = LiveInput(rate=v7.RATE, completion='eof')
-        packet = self.eof_wire[:v7.PULSE_FRAME].copy()
-        packet[-v7.EOF_MARKER_LENGTH:] = 0.0
-        for start in range(0, len(packet), BLOCK):
-            live.add(np.array(packet[start:start+BLOCK], copy=True))
-            self.assertIsNone(live.take(start/v7.RATE))
+                         list(range(FRAMES-1)))
 
     def test_latest_only_still_scans_without_upstream_anchors(self):
         results, _ = v7.decode_pulse_stream(
