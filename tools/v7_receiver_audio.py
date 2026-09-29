@@ -321,8 +321,12 @@ class AudioPassthrough:
     # rather than letting latency grow until the FIFO sheds audio unfaded.
     TRIM_SECONDS = 0.25
 
+    # Wake period of the stall probe (see _stall_probe).
+    STALL_PROBE_SECONDS = 0.005
+
     def __init__(self, input_rate, sounddevice_module=None, status_callback=None,
-                 volume=DEFAULT_AUDIO_VOLUME, target_seconds=None):
+                 volume=DEFAULT_AUDIO_VOLUME, target_seconds=None,
+                 output_latency=None, output_blocksize=0):
         if sounddevice_module is None:
             import sounddevice as sounddevice_module
         from tools.v7_source_audio import SampleBuffer
@@ -352,6 +356,15 @@ class AudioPassthrough:
         self._last_callback_time = None
         self._max_callback_gap = 0.0
         self._late_callbacks = 0
+        self._late_ms_total = 0.0
+        # Experimental output buffering: a larger host buffer gives the
+        # Python callback more slack before a stall costs audible output.
+        self.output_latency = output_latency
+        self.output_blocksize = int(output_blocksize or 0)
+        self._max_stall = 0.0
+        self._stalls = 0
+        self._stall_ms_total = 0.0
+        self._probe_stop = None
         self._latency_trims = 0
         self._trimmed_samples = 0
         self.stream = None
@@ -392,6 +405,14 @@ class AudioPassthrough:
         """Return audio FIFO, clock correction and PortAudio xrun counters."""
         with self._stats_lock:
             stats = {
+                # Process-wide stalls seen by a thread that wakes every 5 ms.
+                # If these line up with late callbacks, something holds the
+                # GIL (e.g. a compiled kernel without nogil) and the output
+                # callback cannot run.
+                'max_stall_ms': round(self._max_stall*1000.0, 2),
+                'stalls_over_10ms': self._stalls,
+                'stall_ms_total': round(self._stall_ms_total, 1),
+                'late_ms_total': round(self._late_ms_total, 1),
                 'underflow_events': self._output_underflow_events,
                 'underflow_callbacks': self._output_underflow_callbacks,
                 'input_status': dict(self._input_status_counts),
@@ -408,8 +429,6 @@ class AudioPassthrough:
                 'trimmed_ms': round(
                     1000.0*self._trimmed_samples/self.input_rate, 1),
             }
-            # Gap is a per-report maximum.
-            self._max_callback_gap = 0.0
         with self._lock:
             reader = self.reader
             output_rate = self.output_rate
@@ -422,8 +441,39 @@ class AudioPassthrough:
                                          reader.max_correction*1e6),
             'input_rate': self.input_rate,
             'output_rate': output_rate,
+            'output_latency_ms': self._stream_latency_ms(),
+            'output_blocksize': self.output_blocksize,
         })
         return stats
+
+    def reset_report_peaks(self):
+        """Start new per-report maxima (call after printing a report)."""
+        with self._stats_lock:
+            self._max_callback_gap = 0.0
+            self._max_stall = 0.0
+
+    def _stream_latency_ms(self):
+        with self._lock:
+            stream = self.stream
+        try:
+            return (None if stream is None else
+                    round(1000.0*float(stream.latency), 2))
+        except Exception:
+            return None
+
+    def _stall_probe(self, stop):
+        period = self.STALL_PROBE_SECONDS
+        while not stop.is_set():
+            started = time.monotonic()
+            stop.wait(period)
+            late = time.monotonic()-started-period
+            if late <= 0:
+                continue
+            with self._stats_lock:
+                self._max_stall = max(self._max_stall, late)
+                if late > 0.010:
+                    self._stalls += 1
+                    self._stall_ms_total += late*1000.0
 
     def _make_clock_reader(self, input_rate, output_rate):
         from tools.v7_source_audio import ClockMatchedReader
@@ -462,10 +512,12 @@ class AudioPassthrough:
                 device=device, channels=channels, dtype='float32',
                 samplerate=rate)
             reader = self._make_clock_reader(self.input_rate, rate)
+            extra = ({} if self.output_latency is None else
+                     {'latency': self.output_latency})
             stream = self.sd.OutputStream(
                 samplerate=rate, channels=channels, dtype='float32',
-                device=device, blocksize=0,
-                callback=self._callback)
+                device=device, blocksize=self.output_blocksize,
+                callback=self._callback, **extra)
             stream.start()
             rate = float(getattr(stream, 'samplerate', rate))
             if rate <= 0 or not np.isfinite(rate):
@@ -491,6 +543,9 @@ class AudioPassthrough:
             self._fade_in_after_underflow = False
             self._audio_primed = False
             self.stream = stream
+        self._probe_stop = threading.Event()
+        threading.Thread(target=self._stall_probe, args=(self._probe_stop,),
+                         name='v7-audio-stall-probe', daemon=True).start()
         self._report(None)
 
     def set_input_rate(self, rate):
@@ -655,8 +710,10 @@ class AudioPassthrough:
             if previous is not None:
                 gap = now-previous
                 self._max_callback_gap = max(self._max_callback_gap, gap)
-                if gap > 1.5*frames/output_rate+0.005:
+                period = frames/output_rate
+                if gap > 1.5*period+0.005:
                     self._late_callbacks += 1
+                    self._late_ms_total += (gap-period)*1000.0
 
     def _callback(self, outdata, frames, _timing, status):
         self._note_callback_timing(
@@ -844,6 +901,9 @@ class AudioPassthrough:
         return True
 
     def close(self):
+        if self._probe_stop is not None:
+            self._probe_stop.set()
+            self._probe_stop = None
         with self._lock:
             stream, self.stream = self.stream, None
             self.reader = None

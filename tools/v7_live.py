@@ -2120,10 +2120,19 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                        'sync_age': meter['sync_age'],
                        'channel_modes': route['channel_modes']}, flush=True)
 
+    # Experimental output buffering knobs for diagnosing callback stalls:
+    # V7_AUDIO_OUTPUT_LATENCY = seconds, 'low' or 'high'; V7_AUDIO_OUTPUT_
+    # BLOCKSIZE = frames per output callback (0 lets the host choose).
+    output_latency = os.environ.get('V7_AUDIO_OUTPUT_LATENCY') or None
+    if output_latency not in (None, 'low', 'high'):
+        output_latency = float(output_latency)
     passthrough = (AudioPassthrough(
         capture_rate, sounddevice_module=sd,
         status_callback=lambda error: meter.__setitem__(
-            'audio_device_error', error)) if audio_bridge_enabled else None)
+            'audio_device_error', error),
+        output_latency=output_latency,
+        output_blocksize=int(os.environ.get('V7_AUDIO_OUTPUT_BLOCKSIZE') or 0))
+        if audio_bridge_enabled else None)
 
     def audio_output_monitor():
         current_device = object()
@@ -2178,6 +2187,7 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                         args, 'audio_diagnostics_stream', None) or sys.stdout
                     print({'status': 'audio_runtime', **audio_stats},
                           file=report_stream, flush=True)
+                    passthrough.reset_report_peaks()
                     last_audio_report = now
                 last_audio_error_signature = signature
             refresh_runtime_state(now)

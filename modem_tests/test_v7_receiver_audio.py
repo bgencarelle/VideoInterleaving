@@ -644,7 +644,53 @@ class AudioPassthroughTests(unittest.TestCase):
         self.assertAlmostEqual(stats['max_callback_gap_ms'], 110.0, delta=.5)
         self.assertAlmostEqual(stats['measured_output_rate'], 48000*3.0/3.1,
                                delta=200)
+        self.assertAlmostEqual(stats['late_ms_total'], 100.0, delta=.5)
+        # The monitor snapshots every 100 ms; the peak must survive until the
+        # printed report resets it.
+        self.assertAlmostEqual(
+            passthrough.stats_snapshot()['max_callback_gap_ms'], 110.0,
+            delta=.5)
+        passthrough.reset_report_peaks()
+        self.assertEqual(passthrough.stats_snapshot()['max_callback_gap_ms'],
+                         0.0)
         passthrough.close()
+
+    def test_stall_probe_reports_a_process_wide_gil_stall(self):
+        import sys
+        import time
+        passthrough = AudioPassthrough(
+            48000, sounddevice_module=_Fake48000SoundDevice)
+        passthrough.open(7)
+        time.sleep(.05)
+        passthrough.reset_report_peaks()
+        interval = sys.getswitchinterval()
+        sys.setswitchinterval(1.0)
+        try:
+            deadline = time.perf_counter()+.08
+            while time.perf_counter() < deadline:  # hold the GIL for 80 ms
+                pass
+        finally:
+            sys.setswitchinterval(interval)
+        time.sleep(.05)
+        stats = passthrough.stats_snapshot()
+        passthrough.close()
+        self.assertGreater(stats['max_stall_ms'], 40.0)
+        self.assertGreaterEqual(stats['stalls_over_10ms'], 1)
+
+    def test_output_buffering_knobs_reach_the_output_stream(self):
+        passthrough = AudioPassthrough(
+            48000, sounddevice_module=_Fake48000SoundDevice,
+            output_latency=.1, output_blocksize=2048)
+        passthrough.open(7)
+        self.assertEqual(passthrough.stream.kwargs['latency'], .1)
+        self.assertEqual(passthrough.stream.kwargs['blocksize'], 2048)
+        passthrough.close()
+        default = AudioPassthrough(
+            48000, sounddevice_module=_Fake48000SoundDevice)
+        default.open(7)
+        self.assertNotIn('latency', default.stream.kwargs)
+        self.assertEqual(default.stream.kwargs['blocksize'], 0)
+        default.close()
 
     def test_output_open_failure_is_reported_without_default_fallback(self):
         class BrokenSoundDevice(_FakeSoundDevice):
