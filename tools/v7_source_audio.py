@@ -146,12 +146,12 @@ class ClockMatchedReader:
         if (not np.isfinite(self.correction_limit) or
                 not 0.0 <= self.correction_limit < 1.0):
             raise ValueError('clock correction limit must be in [0, 1)')
-        # Optional low-pass on the fill level. Capture callbacks can enqueue
-        # large blocks at once; smoothing keeps those arrivals from modulating
-        # the playback ratio. Existing sender readers remain unfiltered unless
-        # they explicitly request it.
-        self.smoothing_samples = (None if smoothing_samples is None else
-                                  max(1.0, float(smoothing_samples)))
+        # Optional low-pass on the fill level, in source samples. Blocks
+        # arrive in bursts (a 1,024-sample capture callback is ~13% of an
+        # 80 ms target), so an unfiltered servo swings the ratio by the full
+        # correction limit at the callback rate: audible pitch roughness.
+        self.smoothing_samples = (None if smoothing_samples is None
+                                  else max(1.0, float(smoothing_samples)))
         self._fill = None
         self._phase = 0.0
         self._pending = np.empty(0, dtype=np.float32)
@@ -179,8 +179,7 @@ class ClockMatchedReader:
             if self._fill is None:
                 self._fill = float(queued)
             else:
-                alpha = min(
-                    1.0, count*self.nominal_ratio/self.smoothing_samples)
+                alpha = min(1.0, count*self.nominal_ratio/self.smoothing_samples)
                 self._fill += alpha*(queued-self._fill)
             queued = self._fill
         error = (queued-self.target_samples)/self.target_samples
