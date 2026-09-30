@@ -312,7 +312,7 @@ def _model(fixture, encode_filter='nearest'):
 
 def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0,
             perceptual_resize='off', perceptual_detail_strength=0.25,
-            dct_encode=False, dct_options=None):
+            dct_encode=False, dct_options=None, return_resized=False):
     _validate_tone_controls(brightness, gamma)
     source_size = getattr(frame, 'source_size', None)
     capture_prepared = bool(getattr(frame, 'prepared', False))
@@ -331,7 +331,21 @@ def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0,
             brightness=brightness, gamma=gamma,
             **(dct_options or {}))
         size = source_size or (rgb.shape[1], rgb.shape[0])
-        return values, P.aspect_wire_code(size)
+        aspect = P.aspect_wire_code(size)
+        if return_resized:
+            # Direct source-DCT encoding has no resized RGB intermediate.
+            # Show the toned source entering its color/DCT conversion rather
+            # than reconstructing pixels from encoded coefficients.
+            preview_rgb = np.asarray(rgb, dtype=np.float32)
+            if preview_rgb.size and preview_rgb.max() > 1.0:
+                preview_rgb = preview_rgb/255.0
+            preview_rgb = np.clip(preview_rgb*brightness, 0.0, 1.0)
+            if gamma != 1.0:
+                preview_rgb = preview_rgb**(1.0/gamma)
+            preview = Image.fromarray(
+                np.uint8(np.rint(preview_rgb*255.0)), 'RGB')
+            return values, aspect, preview
+        return values, aspect
     rgb_frame = (isinstance(frame, np.ndarray) and frame.dtype == np.uint8 and
                  frame.ndim == 3 and frame.shape[2] == 3)
     if perceptual_resize == 'off':
@@ -367,9 +381,12 @@ def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0,
         adjusted = Image.fromarray(np.uint8(np.rint(values*255)), 'RGB')
         adjusted.info.update(prepared.info)
         prepared = adjusted
-    return (image_values(prepared, model.coder.grids,
-                         encode_filter=encode_filter),
-            P.aspect_wire_code(size))
+    values = image_values(prepared, model.coder.grids,
+                          encode_filter=encode_filter)
+    aspect = P.aspect_wire_code(size)
+    if return_resized:
+        return values, aspect, prepared
+    return values, aspect
 
 
 def _experimental_fold(slots):
@@ -729,10 +746,10 @@ def _run_send_session(args):
     buffered_audio_seconds = 0.0
     sentinel = object()
     producer_errors = []
-    encoded_preview_port = getattr(args, 'encoded_preview_port', None)
-    if (encoded_preview_port is not None and
-            not 1 <= int(encoded_preview_port) <= 65535):
-        raise ValueError('--encoded-preview-port must be between 1 and 65535')
+    image_preview_port = getattr(args, 'image_preview_port', None)
+    if (image_preview_port is not None and
+            not 1 <= int(image_preview_port) <= 65535):
+        raise ValueError('--image-preview-port must be between 1 and 65535')
     preview_worker = None
     batch_size = max(1, args.batch_frames)
     total = getattr(args, '_sender_total', 0)
@@ -832,6 +849,7 @@ def _run_send_session(args):
         nonlocal total, buffered_audio_seconds
         frames = []
         aspects = []
+        preview_images = []
         counter = getattr(args, '_sender_counter', 1)
         first_audio_video_frame = (
             getattr(grab, 'first_frame', None) if source_audio is not None
@@ -851,13 +869,21 @@ def _run_send_session(args):
                 if frame is None and getattr(grab, 'ended', False):
                     break
                 current_tones = tone_controls.snapshot()
-                value, aspect = _values(model, frame, args.encode_filter,
-                                        current_tones['brightness'],
-                                        current_tones['gamma'],
-                                        getattr(args, 'perceptual_resize', 'off'),
-                                        getattr(args, 'perceptual_detail_strength', 0.25),
-                                        dct_encode=getattr(args, 'dct_encode', False),
-                                        dct_options=dct_options)
+                source_preview = (getattr(frame, 'rgb', frame)
+                                  if image_preview_port is not None else None)
+                processed = _values(
+                    model, frame, args.encode_filter,
+                    current_tones['brightness'], current_tones['gamma'],
+                    getattr(args, 'perceptual_resize', 'off'),
+                    getattr(args, 'perceptual_detail_strength', 0.25),
+                    dct_encode=getattr(args, 'dct_encode', False),
+                    dct_options=dct_options,
+                    return_resized=image_preview_port is not None)
+                if image_preview_port is not None:
+                    value, aspect, resized_preview = processed
+                    preview_images.append((source_preview, resized_preview))
+                else:
+                    value, aspect = processed
                 # Keep captured source values unfolded. encode_batch folds
                 # exactly once, directly in coefficient space; a second fold
                 # would quantize the hosts again and erase the guest residuals.
@@ -870,8 +896,8 @@ def _run_send_session(args):
                 audio, stats = encode_batch(frames, aspects, counter)
                 preview_frames = (
                     tuple((counter+index, aspects[index], frame)
-                          for index, frame in enumerate(frames))
-                    if encoded_preview_port is not None else ())
+                          for index, frame in enumerate(preview_images))
+                    if image_preview_port is not None else ())
                 batches.put((counter, audio, stats, preview_frames))
                 buffered_audio_seconds += len(audio)/output_rate
                 if buffered_audio_seconds >= startup_buffer_seconds:
@@ -882,6 +908,7 @@ def _run_send_session(args):
                 args._sender_total = total
                 frames = []
                 aspects = []
+                preview_images = []
         except Exception as exc:
             failure = exc
 
@@ -890,8 +917,8 @@ def _run_send_session(args):
                 audio, stats = encode_batch(frames, aspects, counter)
                 preview_frames = (
                     tuple((counter+index, aspects[index], frame)
-                          for index, frame in enumerate(frames))
-                    if encoded_preview_port is not None else ())
+                          for index, frame in enumerate(preview_images))
+                    if image_preview_port is not None else ())
                 batches.put((counter, audio, stats, preview_frames))
                 buffered_audio_seconds += len(audio)/output_rate
                 if buffered_audio_seconds >= startup_buffer_seconds:
@@ -953,18 +980,15 @@ def _run_send_session(args):
             queue_batches = _sender_queue_batches(
                 startup_buffer_seconds, output_rate, first_packet_samples)
             batches = queue.Queue(maxsize=queue_batches)
-            if encoded_preview_port is not None:
+            if image_preview_port is not None:
                 try:
-                    from tools.v7_encoded_preview import EncodedPreviewWorker
-                    preview_worker = EncodedPreviewWorker(
-                        model, encoded_preview_port, fold=fold,
-                        mono_wire=mono_wire,
-                        history=getattr(args, '_encoded_preview_history', ()))
+                    from tools.v7_image_preview import ImagePreviewWorker
+                    preview_worker = ImagePreviewWorker(image_preview_port)
                     preview_worker.start()
                 except Exception as exc:
                     preview_worker = None
                     print(json.dumps({
-                        'status': 'encoded_preview_unavailable',
+                        'status': 'image_preview_unavailable',
                         'message': str(exc),
                     }), flush=True)
 
@@ -1160,10 +1184,10 @@ def _run_send_session(args):
                         if preview_worker is not None:
                             handoff_ns = time.monotonic_ns()
                             frame_counter, aspect, values = preview_frames[index]
+                            source_image, resized_image = values
                             preview_worker.submit(
-                                frame_counter, aspect, values, handoff_ns)
-                            args._encoded_preview_history = tuple(
-                                preview_worker.history)
+                                frame_counter, aspect, source_image,
+                                resized_image, handoff_ns)
                         offset += count
                 else:
                     # sounddevice requires a C-contiguous interleaved buffer;
@@ -1171,11 +1195,11 @@ def _run_send_session(args):
                     write_output(audio)
                     if preview_worker is not None:
                         handoff_ns = time.monotonic_ns()
-                        for frame_counter, aspect, values in preview_frames:
+                        for frame_counter, aspect, images in preview_frames:
+                            source_image, resized_image = images
                             preview_worker.submit(
-                                frame_counter, aspect, values, handoff_ns)
-                        args._encoded_preview_history = tuple(
-                            preview_worker.history)
+                                frame_counter, aspect, source_image,
+                                resized_image, handoff_ns)
                 if args.log and not args.no_log:
                     print({
                         'sent_through_frame': (
@@ -3264,7 +3288,7 @@ def parser():
                       help='treat an HTTP(S) source as live instead of looping it')
     send.add_argument('--preview', action='store_true',
                       help='open video sources in a desktop player while sending')
-    send.add_argument('--encoded-preview-port', type=int, metavar='PORT',
+    send.add_argument('--image-preview-port', type=int, metavar='PORT',
                       help=argparse.SUPPRESS)
     send.add_argument('--display', type=int)
     send.add_argument('--ffmpeg-input')

@@ -89,11 +89,10 @@ FIELD_HELP = {
     'gamma': 'Live source gamma; 1.0 is neutral.',
     'capture_fps': 'Choose a frame rate reported by the capture source, or leave it at Source default.',
     'video_source': 'Choose a video with Browse, type a path or URL, or drop a file on the window.',
-    'video_preview': ('Open the same file or URL in a desktop player. Finite media '
-                      'requests looping where the player supports it.'),
-    'encoded_preview': ('Show the clean-link reconstruction of each encoded '
-                        'packet near its output handoff. Preview work is '
-                        'bounded and never holds up sending.'),
+    'video_preview': ('Open the same file or URL in muted ffplay. If ffplay is '
+                      'unavailable, no player is opened.'),
+    'image_preview': ('Show the captured source or resized encoder input. '
+                      'Use the receiver to inspect encoded/decoded output.'),
     'video_live': 'Treat an HTTP(S) video URL as a live stream rather than a looping clip.',
     'camera': 'Choose a camera discovered from the host capture devices.',
     'screen_target': 'Choose the monitor or screen capture device. Discovery runs only when you open this picker.',
@@ -108,8 +107,9 @@ FIELD_HELP = {
     'capture_filter': 'Optional FFmpeg capture scaler. Automatic follows the sender defaults.',
     'mono_video_side': ('For the mono video profile, carry the modem on one '
                         'leg and leave the other free for separate audio.'),
-    'source_audio': ('Choose the embedded video soundtrack, an explicit input '
-                     'device, or silence on the free output leg.'),
+    'source_audio': ('In mono-video mode, route the source soundtrack or an '
+                     'input device to the free output leg, or choose Off. '
+                     'This is separate from the muted source-player preview.'),
     'source_audio_device': 'Choose an explicit microphone, line, or loopback input device.',
     'source_audio_input_side': 'Select one input leg or downmix stereo input to mono.',
     'source_audio_gain': 'Gain applied only to source audio on the free output leg.',
@@ -128,7 +128,7 @@ FIELD_LABELS = {
     'gamma': 'Gamma · live',
     'screen_target': 'Screen / display',
     'video_preview': 'Open source in player',
-    'encoded_preview': 'Encoded preview',
+    'image_preview': 'Show image preview',
     'video_live': 'Treat URL as live',
     'camera': 'Camera',
     'ffmpeg_input': 'FFmpeg input',
@@ -212,7 +212,7 @@ SAVED_SETTING_FIELDS = (
     'source_audio_input_side', 'source_audio_gain',
     'source_audio_delay_ms', 'speed', 'encode_filter', 'brightness', 'gamma',
     'capture_fps', 'video_source', 'video_preview', 'video_live', 'camera',
-    'encoded_preview',
+    'image_preview', 'preview_stage',
     'ffmpeg_input', 'screen_backend', 'screen_target', 'region',
     'capture_width', 'capture_filter', 'perceptual_resize',
     'perceptual_detail_strength',
@@ -251,11 +251,16 @@ def _restore_sender_settings(target, saved):
             elif value is None:
                 target[key] = None
             continue
-        if key in ('video_preview', 'video_live', 'encoded_preview'):
+        if key in ('video_preview', 'video_live', 'image_preview'):
             if isinstance(value, bool):
                 target[key] = value
         elif value is None or isinstance(value, (str, int, float, bool)):
             target[key] = value
+    if 'image_preview' not in saved and isinstance(
+            saved.get('encoded_preview'), bool):
+        target['image_preview'] = saved['encoded_preview']
+    if target.get('preview_stage') not in ('source', 'resized'):
+        target['preview_stage'] = 'resized'
 
 
 class OutputDevice:
@@ -989,7 +994,7 @@ def _integer_setting(value, label, minimum, optional=False):
 
 
 def build_command(settings, devices, sd_module=None, python=None,
-                  audio_devices=(), encoded_preview_port=None):
+                  audio_devices=(), image_preview_port=None):
     """Build an argv list for the existing V7 CLI; never invokes a shell."""
     checked = validate_settings(settings, devices, sd_module, audio_devices)
     command = [
@@ -1061,8 +1066,8 @@ def build_command(settings, devices, sd_module=None, python=None,
     if capture_filter != 'auto':
         command.extend(('--capture-filter', capture_filter))
     command.append('--gui-control')
-    if encoded_preview_port is not None:
-        command.extend(('--encoded-preview-port', str(int(encoded_preview_port))))
+    if image_preview_port is not None:
+        command.extend(('--image-preview-port', str(int(image_preview_port)),))
     return command
 
 
@@ -1106,7 +1111,7 @@ class SenderGui:
     TOOLBAR = 54
     ROW_HEIGHT = 36
     BASIC_FIELDS = (
-        'device', 'source', 'video_source', 'video_preview', 'encoded_preview',
+        'device', 'source', 'video_source', 'video_preview', 'image_preview',
         'video_live', 'camera',
         'screen_target', 'source_audio', 'source_audio_device',
         'source_audio_input_side', 'source_audio_gain',
@@ -1153,7 +1158,8 @@ class SenderGui:
             'capture_fps': '',
             'video_source': '',
             'video_preview': False,
-            'encoded_preview': False,
+            'image_preview': False,
+            'preview_stage': 'resized',
             'video_live': False,
             'camera': None,
             'ffmpeg_input': '',
@@ -1185,7 +1191,9 @@ class SenderGui:
         self.preview_image = None
         self.preview_counter = None
         self.preview_aspect = None
+        self.preview_stage = None
         self.preview_handoff_ns = None
+        self.preview_stage_frames = {}
         self.stop_requested = False
         self.close_when_stopped = False
         self.sender_device_lost = False
@@ -1584,7 +1592,18 @@ class SenderGui:
 
     def _assign(self, dest, value):
         self.settings[dest] = value
-        if dest == 'profile':
+        if dest == 'preview_stage':
+            frame = self.preview_stage_frames.get(value)
+            self.preview_stage = value
+            if frame is None:
+                self.preview_image = None
+                self.preview_counter = None
+                self.preview_aspect = None
+                self.preview_handoff_ns = None
+            else:
+                (self.preview_image, self.preview_counter,
+                 self.preview_aspect, self.preview_handoff_ns) = frame
+        elif dest == 'profile':
             self._profile_changed(value)
             if value not in ('fold-500', 'fold-1000', 'mono-fold-500',
                              'mono-colour-500'):
@@ -1610,10 +1629,10 @@ class SenderGui:
     def _select_option(self, dest, value):
         self._assign(dest, value)
 
-    def _build_command(self, encoded_preview_port=None):
+    def _build_command(self, image_preview_port=None):
         return build_command(self.settings, self.devices, self._sounddevice(),
                              audio_devices=self.audio_devices,
-                             encoded_preview_port=encoded_preview_port)
+                             image_preview_port=image_preview_port)
 
     def _start(self):
         if self.editing:
@@ -1639,7 +1658,7 @@ class SenderGui:
         try:
             preview_socket = None
             preview_warning = None
-            if self.settings.get('encoded_preview'):
+            if self.settings.get('image_preview'):
                 try:
                     preview_socket = socket.socket(socket.AF_INET,
                                                    socket.SOCK_DGRAM)
@@ -1652,10 +1671,10 @@ class SenderGui:
                         preview_socket.close()
                     preview_socket = None
                     preview_warning = (
-                        f'Encoded preview unavailable; sending without it: {exc}')
+                        f'Image preview unavailable; sending without it: {exc}')
             if preview_socket is not None:
                 command = self._build_command(
-                    encoded_preview_port=preview_socket.getsockname()[1])
+                    image_preview_port=preview_socket.getsockname()[1])
             else:
                 command = self._build_command()
             kwargs = {
@@ -1685,7 +1704,9 @@ class SenderGui:
         self.preview_image = None
         self.preview_counter = None
         self.preview_aspect = None
+        self.preview_stage = None
         self.preview_handoff_ns = None
+        self.preview_stage_frames = {}
         self.stop_requested = False
         self.page = 'live'
         self.notice = preview_warning or 'Starting sender…'
@@ -1696,13 +1717,13 @@ class SenderGui:
         self.reader.start()
         if preview_socket is not None:
             self.preview_reader = threading.Thread(
-                target=self._read_encoded_preview,
+                target=self._read_image_preview,
                 args=(process, preview_socket),
-                name='v7-send-gui-preview', daemon=True)
+                name='v7-send-gui-image-preview', daemon=True)
             self.preview_reader.start()
         self.dirty = True
 
-    def _read_encoded_preview(self, process, preview_socket):
+    def _read_image_preview(self, process, preview_socket):
         while (self.process is process and
                self._preview_socket is preview_socket):
             try:
@@ -1711,11 +1732,19 @@ class SenderGui:
                 continue
             except OSError:
                 return
-            newest = packet
-            newest_time = -1
-            parsed = parse_preview_datagram(packet)
-            if parsed is not None:
-                newest_time = parsed[2]
+            newest_by_stage = {}
+
+            def remember(candidate):
+                parsed_candidate = parse_preview_datagram(candidate)
+                if parsed_candidate is None:
+                    return
+                stage_candidate = parsed_candidate[3]
+                previous = newest_by_stage.get(stage_candidate)
+                if previous is None or parsed_candidate[2] >= previous[0]:
+                    newest_by_stage[stage_candidate] = (
+                        parsed_candidate[2], candidate)
+
+            remember(packet)
             try:
                 preview_socket.setblocking(False)
             except OSError:
@@ -1727,36 +1756,39 @@ class SenderGui:
                     break
                 except OSError:
                     return
-                parsed = parse_preview_datagram(candidate)
-                if parsed is not None and parsed[2] >= newest_time:
-                    newest, newest_time = candidate, parsed[2]
+                remember(candidate)
             try:
                 preview_socket.settimeout(.2)
             except OSError:
                 return
-            parsed = parse_preview_datagram(newest)
-            if parsed is None:
-                continue
-            counter, aspect, handoff_ns, jpeg = parsed
-            try:
-                from PIL import Image
-                import io
-                with Image.open(io.BytesIO(jpeg)) as image:
-                    image.load()
-                    decoded = image.convert('RGB')
-            except (OSError, ValueError):
-                continue
-            if (self.process is not process or
-                    self._preview_socket is not preview_socket or
-                    (self.preview_handoff_ns is not None and
-                     handoff_ns < self.preview_handoff_ns)):
-                continue
-            self.preview_image = decoded
-            self.preview_counter = int(counter)
-            self.preview_aspect = int(aspect)
-            self.preview_handoff_ns = int(handoff_ns)
-            self.dirty = True
-            self._wake()
+            for _handoff_ns, newest in newest_by_stage.values():
+                parsed = parse_preview_datagram(newest)
+                if parsed is None:
+                    continue
+                counter, aspect, handoff_ns, stage, jpeg = parsed
+                try:
+                    from PIL import Image
+                    import io
+                    with Image.open(io.BytesIO(jpeg)) as image:
+                        image.load()
+                        decoded = image.convert('RGB')
+                except (OSError, ValueError):
+                    continue
+                if (self.process is not process or
+                        self._preview_socket is not preview_socket):
+                    continue
+                previous = self.preview_stage_frames.get(stage)
+                if previous is not None and handoff_ns < previous[3]:
+                    continue
+                image_state = (decoded, int(counter), int(aspect),
+                               int(handoff_ns))
+                self.preview_stage_frames[stage] = image_state
+                if stage == self.settings.get('preview_stage', 'resized'):
+                    (self.preview_image, self.preview_counter,
+                     self.preview_aspect, self.preview_handoff_ns) = image_state
+                    self.preview_stage = stage
+                self.dirty = True
+                self._wake()
 
     def _close_preview_socket(self):
         preview_socket, self._preview_socket = self._preview_socket, None
@@ -2017,7 +2049,7 @@ class SenderGui:
 
     def _render_live(self, image, draw, font, small):
         width, height = image.size
-        preview_enabled = bool(self.settings.get('encoded_preview'))
+        preview_enabled = bool(self.settings.get('image_preview'))
         detail_right = int(width*.47) if preview_enabled else width-24
         draw.text((24, 76), 'Sender status', font=font,
                   fill=(229, 237, 243))
@@ -2071,15 +2103,25 @@ class SenderGui:
             from PIL import ImageOps
             panel_left = int(width*.51)
             panel = (panel_left, 248, width-24, height-48)
-            draw.text((panel_left, 220), 'Encoded preview', font=small,
+            draw.text((panel_left, 220), 'Image preview', font=small,
                       fill=(132, 158, 176))
-            draw.text((panel_left+114, 220), 'clean-link estimate',
-                      font=small, fill=(132, 158, 176))
+            for index, (stage, label) in enumerate((
+                    ('source', 'Source'), ('resized', 'Resized'))):
+                left = panel_left+118+index*88
+                rect = (left, 215, left+80, 241)
+                active = self.settings.get('preview_stage') == stage
+                draw.rounded_rectangle(
+                    rect, radius=4,
+                    fill=(42, 78, 99) if active else (17, 29, 39),
+                    outline=(94, 143, 168) if active else (48, 73, 90))
+                draw.text((left+9, 221), label, font=small,
+                          fill=(235, 242, 247))
+                self.hits[f'preview_stage:{stage}'] = rect
             draw.rounded_rectangle(panel, radius=6, fill=(12, 21, 29),
                                    outline=(48, 73, 90))
             if self.preview_image is None:
                 message = ('Starting preview…' if self.process else
-                           'Start sending to see the encoded image.')
+                           'Start sending to see source and resized images.')
                 draw.text((panel_left+16, panel[1]+16), message, font=small,
                           fill=(165, 187, 202))
             else:
@@ -2091,7 +2133,8 @@ class SenderGui:
                 image.paste(thumbnail.convert('RGBA'), (x, y_image))
                 age_ms = max(0.0, (time.monotonic_ns()-
                                    int(self.preview_handoff_ns or 0))/1e6)
-                caption = (f'Packet {self.preview_counter} · aspect '
+                stage = (self.preview_stage or 'image').capitalize()
+                caption = (f'{stage} · packet {self.preview_counter} · aspect '
                            f'{self.preview_aspect} · {age_ms:.0f} ms after '
                            'output handoff')
                 draw.text((panel_left+10, panel[3]-27),
@@ -2171,7 +2214,7 @@ class SenderGui:
             if (dest not in self._visible_fields() or
                     dest in self.DROPDOWN_FIELDS or
                     dest in ('video_live', 'video_preview',
-                             'encoded_preview')):
+                             'image_preview')):
                 return
             if (self.process is not None and
                     dest not in ('brightness', 'gamma')):
@@ -2208,6 +2251,8 @@ class SenderGui:
                 self._stop()
             else:
                 self._open_source_picker()
+        elif hit in ('preview_stage:source', 'preview_stage:resized'):
+            self._assign('preview_stage', hit.rsplit(':', 1)[1])
         elif hit == 'advanced':
             if self.process is not None:
                 self.notice = 'Settings are locked while the sender is running.'
@@ -2244,7 +2289,7 @@ class SenderGui:
             if (self.process is not None and
                     dest not in ('brightness', 'gamma')):
                 self.notice = 'Settings are locked while the sender is running.'
-            elif dest in ('video_live', 'video_preview', 'encoded_preview'):
+            elif dest in ('video_live', 'video_preview', 'image_preview'):
                 self._assign(dest, not self.settings[dest])
             elif dest in self.DROPDOWN_FIELDS:
                 self._open_dropdown(dest)
@@ -2329,7 +2374,7 @@ class SenderGui:
                     self.scroll = position-visible_count+1
             elif key in (glfw.KEY_LEFT, glfw.KEY_RIGHT) and self.selected in fields:
                 dest = self.selected
-                if dest in ('video_live', 'video_preview', 'encoded_preview'):
+                if dest in ('video_live', 'video_preview', 'image_preview'):
                     self._assign(dest, not self.settings[dest])
                 elif dest in self.DROPDOWN_FIELDS:
                     self._open_dropdown(dest)
@@ -2340,7 +2385,7 @@ class SenderGui:
                 dest = self.selected
                 if dest in self.DROPDOWN_FIELDS:
                     self._open_dropdown(dest)
-                elif dest in ('video_live', 'video_preview', 'encoded_preview'):
+                elif dest in ('video_live', 'video_preview', 'image_preview'):
                     self._assign(dest, not self.settings[dest])
                 else:
                     self.editing = True

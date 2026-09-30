@@ -2,14 +2,19 @@
 import unittest
 import signal
 import json
+from io import BytesIO
 from pathlib import Path
+import socket
 import tempfile
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from PIL import Image
 
 from tools import v7_live
+from tools.v7_preview_protocol import pack_preview_datagram
 from tools.v7_send_gui import (InputDevice, OutputDevice,
                                 PRIMARY_PROFILE_CHOICES, ScreenTarget, SenderGui,
                                 build_command, enumerate_screen_targets,
@@ -142,13 +147,15 @@ class SenderGuiTests(unittest.TestCase):
         self.assertFalse(args.log)
         self.assertNotIn('--rate', command)
 
-    def test_encoded_preview_port_is_forwarded_to_sender_cli(self):
+    def test_image_preview_port_is_forwarded_to_sender_cli(self):
+        self.settings.update(image_preview=True, preview_stage='source')
         command = build_command(
             self.settings, self.devices, self.sd,
-            encoded_preview_port=54321)
+            image_preview_port=54321)
 
-        position = command.index('--encoded-preview-port')
+        position = command.index('--image-preview-port')
         self.assertEqual(command[position+1], '54321')
+        self.assertNotIn('--image-preview-stage', command)
 
     def test_selected_sample_rate_profile_and_video_path_reach_cli(self):
         self.settings.update(source='video', video_source='a clip with spaces.mp4',
@@ -907,20 +914,82 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(gui._canvas((960, 720)).size, (960, 720))
         self.assertEqual(gui._canvas((720, 480)).size, (720, 480))
 
-    def test_live_canvas_renders_the_clean_encoded_preview(self):
+    def test_live_canvas_renders_selected_source_or_resized_preview(self):
         gui = SenderGui(self.devices)
         gui.page = 'live'
-        gui.settings['encoded_preview'] = True
+        gui.settings['image_preview'] = True
+        gui.settings['preview_stage'] = 'source'
         gui.preview_image = Image.new('RGB', (80, 96), (90, 120, 150))
         gui.preview_counter = 18
         gui.preview_aspect = 5
+        gui.preview_stage = 'source'
         gui.preview_handoff_ns = 1
+        source = Image.new('RGB', (640, 480), (30, 60, 90))
+        resized = Image.new('RGB', (80, 96), (90, 120, 150))
+        gui.preview_stage_frames = {
+            'source': (source, 18, 5, 1),
+            'resized': (resized, 18, 5, 1),
+        }
 
         self.assertEqual(gui._canvas((960, 720)).size, (960, 720))
+        self.assertIn('preview_stage:source', gui.hits)
+        self.assertIn('preview_stage:resized', gui.hits)
+        rect = gui.hits['preview_stage:source']
+        position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
+        glfw = SimpleNamespace(
+            MOUSE_BUTTON_LEFT=1, PRESS=1,
+            get_cursor_pos=lambda _window: position)
+        gui._on_mouse(glfw, None, 1, 1, 0)
+        self.assertEqual(gui.settings['preview_stage'], 'source')
+        self.assertIs(gui.preview_image, source)
 
-    def test_encoded_preview_receiver_lifecycle_follows_sender_process(self):
+    def test_preview_receiver_retains_both_stages_for_live_selection(self):
         gui = SenderGui(self.devices)
-        gui.settings.update(device=3, source='screen', encoded_preview=True)
+        process = object()
+        receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        receiver.bind(('127.0.0.1', 0))
+        receiver.settimeout(.1)
+        sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        gui.process = process
+        gui._preview_socket = receiver
+        reader = threading.Thread(
+            target=gui._read_image_preview, args=(process, receiver),
+            daemon=True)
+        reader.start()
+        try:
+            for stage, color in (('source', (20, 40, 60)),
+                                 ('resized', (120, 140, 160))):
+                encoded = BytesIO()
+                Image.new('RGB', (32, 24), color).save(
+                    encoded, format='JPEG')
+                sender.sendto(pack_preview_datagram(
+                    42, 5, time.monotonic_ns(), stage, encoded.getvalue()),
+                    receiver.getsockname())
+
+            deadline = time.monotonic()+2
+            while (time.monotonic() < deadline and
+                   set(gui.preview_stage_frames) != {'source', 'resized'}):
+                time.sleep(.01)
+
+            self.assertEqual(set(gui.preview_stage_frames),
+                             {'source', 'resized'})
+            self.assertEqual(gui.preview_stage, 'resized')
+            gui._assign('preview_stage', 'source')
+            self.assertEqual(gui.preview_counter, 42)
+            pixel = gui.preview_image.getpixel((0, 0))
+            self.assertTrue(all(abs(actual-expected) <= 5
+                                for actual, expected in
+                                zip(pixel, (20, 40, 60))))
+        finally:
+            gui.process = None
+            gui._close_preview_socket()
+            reader.join(timeout=1)
+            sender.close()
+
+    def test_image_preview_receiver_lifecycle_follows_sender_process(self):
+        gui = SenderGui(self.devices)
+        gui.settings.update(device=3, source='screen', image_preview=True,
+                            preview_stage='resized')
         child = Mock()
         child.poll.return_value = None
 
@@ -932,7 +1001,7 @@ class SenderGuiTests(unittest.TestCase):
             gui._start()
 
         build_command.assert_called_once()
-        port = build_command.call_args.kwargs['encoded_preview_port']
+        port = build_command.call_args.kwargs['image_preview_port']
         self.assertIsNotNone(gui._preview_socket)
         self.assertEqual(gui._preview_socket.getsockname(),
                          ('127.0.0.1', port))
@@ -979,6 +1048,7 @@ class SenderGuiTests(unittest.TestCase):
             gui.settings.update(
                 device=3, source='video', video_source='clip with spaces.mp4',
                 video_preview=True, video_live=False, profile='fold-500',
+                image_preview=True, preview_stage='source',
                 source_audio='device', source_audio_device=8,
                 source_audio_input_side='right')
             gui._persist_preferences()
@@ -996,7 +1066,22 @@ class SenderGuiTests(unittest.TestCase):
                          'clip with spaces.mp4')
         self.assertTrue(restored.settings['video_preview'])
         self.assertFalse(restored.settings['video_live'])
+        self.assertTrue(restored.settings['image_preview'])
+        self.assertEqual(restored.settings['preview_stage'], 'source')
         self.assertIsNone(restored.process)
+
+    def test_old_encoded_preview_preference_migrates_to_resized_stage(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary)/'sender.json'
+            path.write_text(json.dumps({
+                'version': 1,
+                'settings': {'encoded_preview': True},
+            }), encoding='utf-8')
+            gui = SenderGui(self.devices, preference_path=path,
+                            restore_preferences=True)
+
+        self.assertTrue(gui.settings['image_preview'])
+        self.assertEqual(gui.settings['preview_stage'], 'resized')
 
     def test_unavailable_saved_output_is_not_replaced_by_a_default(self):
         with tempfile.TemporaryDirectory() as temporary:

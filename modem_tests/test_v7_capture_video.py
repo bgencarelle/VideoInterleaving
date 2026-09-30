@@ -146,7 +146,7 @@ class VideoSourceCommandTests(unittest.TestCase):
         process.terminate.assert_called_once()
         process.wait.assert_called_once_with(timeout=2)
 
-    def test_preview_falls_back_to_system_player_with_loop_notice(self):
+    def test_preview_does_not_open_uncontrolled_system_player(self):
         with mock.patch('tools.v7_video_preview.shutil.which',
                         side_effect=lambda name: {
                             'ffplay': None, 'xdg-open': '/usr/bin/xdg-open'
@@ -155,9 +155,9 @@ class VideoSourceCommandTests(unittest.TestCase):
             preview = launch_video_preview(
                 'clip.mp4', platform='linux')
 
-        self.assertEqual(popen.call_args.args[0],
-                         ['/usr/bin/xdg-open', 'clip.mp4'])
-        self.assertIn('repeat', preview.warning)
+        popen.assert_not_called()
+        self.assertIn('ffplay was not found', preview.warning)
+        self.assertIn('no player was opened', preview.warning)
         self.assertIsNone(preview.process)
 
     def test_avfoundation_camera_opens_the_selected_device_name(self):

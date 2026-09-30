@@ -39,28 +39,13 @@ class VideoPreview:
             pass
 
 
-def _platform_open_command(source, platform, which):
-    value = os.path.expanduser(str(source))
-    if platform == 'darwin':
-        return ['open', value]
-    if platform.startswith('win'):
-        return None
-    opener = which('xdg-open')
-    if opener:
-        return [opener, value]
-    gio = which('gio')
-    if gio:
-        return [gio, 'open', value]
-    raise RuntimeError('No desktop video player or file opener is available.')
-
-
 def launch_video_preview(source, live=None, *, platform=None, which=None,
-                         popen=None, startfile=None):
+                         popen=None):
     """Open a video in a desktop player without blocking sender startup.
 
-    ffplay is preferred because its loop option can follow the sender's file
-    policy and its preview audio can be disabled. The platform-associated app
-    is the fallback; its loop and audio behavior are application-controlled.
+    ffplay is used because its loop option can follow the sender's file policy
+    and its preview audio can be disabled. If it is unavailable, do not launch
+    an uncontrolled system player that may play audio.
     """
     platform = sys.platform if platform is None else platform
     which = shutil.which if which is None else which
@@ -76,16 +61,6 @@ def launch_video_preview(source, live=None, *, platform=None, which=None,
             **({} if platform.startswith('win') else {'start_new_session': True}))
         return VideoPreview(process=process)
 
-    if platform.startswith('win'):
-        startfile = startfile or getattr(os, 'startfile', None)
-        if startfile is None:
-            raise RuntimeError('No system video-player launcher is available.')
-        startfile(source)
-    else:
-        command = _platform_open_command(source, platform, which)
-        popen(command, stdin=subprocess.DEVNULL,
-              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-              **({} if platform.startswith('win') else {'start_new_session': True}))
-    warning = ('System video player opened; repeat and audio settings are '
-               'controlled by that application.')
-    return VideoPreview(warning=warning)
+    return VideoPreview(warning=(
+        'Muted source preview unavailable: ffplay was not found, so no player '
+        'was opened. Install ffplay to use Open source in player.'))
