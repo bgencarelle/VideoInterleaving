@@ -33,8 +33,11 @@ PROFILE_CHOICES = (
     ('Mono video · Fold 500', 'mono-fold-500'),
     ('Mono video · colour Fold 500 · experimental', 'mono-colour-500'),
     ('Fold 1000 · advanced', 'fold-1000'),
+    ('Baseline · legacy', 'baseline'),
 )
 MONO_PROFILES = ('mono-fold-500', 'mono-colour-500')
+FOLDED_PROFILES = ('fold-500', 'fold-1000', 'mono-fold-500',
+                   'mono-colour-500')
 PRIMARY_PROFILE_CHOICES = PROFILE_CHOICES[:3]
 SOURCE_AUDIO_CHOICES = (
     ('Video soundtrack · default', 'source'),
@@ -55,10 +58,10 @@ SOURCE_CHOICES = (
 )
 FILTER_CHOICES = (
     ('Profile default', 'auto'),
-    ('Box', 'box'),
-    ('Nearest', 'nearest'),
-    ('Lanczos', 'lanczos'),
-    ('Bicubic', 'bicubic'),
+    ('Box · Pillow', 'box'),
+    ('Nearest · Pillow', 'nearest'),
+    ('Lanczos · Pillow', 'lanczos'),
+    ('Bicubic · Pillow', 'bicubic'),
 )
 CAPTURE_FILTER_CHOICES = (
     ('Automatic', 'auto'),
@@ -82,10 +85,13 @@ MONO_VIDEO_SIDE_CHOICES = (
 FIELD_HELP = {
     'device': 'Choose the explicit audio output device that feeds the receiver or recording path.',
     'source': 'Choose what the sender captures. Capture starts only after Start.',
-    'profile': ('Fold 500 stereo is recommended. Mono Fold 500 is available, '
-                'and colour-weighted mono remains experimental.'),
+    'profile': ('Fold 500 stereo is recommended. Baseline is the legacy '
+                'non-folded profile for alternate Pillow filters; the receiver '
+                'must use the same profile.'),
     'speed': 'Playback speed from 0.25× to 4×. Faster playback raises the transmitted carrier frequencies.',
-    'encode_filter': 'Resize filter. Folded profiles require Box; Profile default selects the profile recommendation.',
+    'encode_filter': ('Pillow encoder resize to the fixed 80×96 image. Profile '
+                      'default uses Box for Fold and Nearest for Baseline. '
+                      'Folded profiles require Box; Baseline supports all Pillow filters.'),
     'brightness': 'Live source brightness multiplier. 1.0 is neutral.',
     'gamma': 'Live source gamma; 1.0 is neutral.',
     'capture_fps': 'Choose a frame rate reported by the capture source, or leave it at Source default.',
@@ -105,7 +111,8 @@ FIELD_HELP = {
                       'initial mouse-follow crop; the sender then prepares the '
                       'fixed 80×96 wire image. Camera default capture is '
                       'sampled directly at 80×96.'),
-    'capture_filter': 'Optional FFmpeg capture scaler. Automatic follows the sender defaults.',
+    'capture_filter': ('Optional FFmpeg capture scaler before encoder preparation. '
+                       'This is separate from the Pillow encoder resize.'),
     'mono_video_side': ('For the mono video profile, carry the modem on one '
                         'leg and leave the other free for separate audio.'),
     'source_audio': ('In mono-video mode, route the source soundtrack by '
@@ -134,6 +141,8 @@ FIELD_LABELS = {
     'camera': 'Camera',
     'ffmpeg_input': 'FFmpeg input',
     'mono_video_side': 'Mono video output side',
+    'encode_filter': 'Encoder resize · Pillow',
+    'capture_filter': 'Capture scaler · FFmpeg',
     'source_audio': 'Audio source',
     'source_audio_device': 'Audio input device',
     'source_audio_input_side': 'Audio input channels',
@@ -855,14 +864,12 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
             raise ValueError(
                 f'{audio_device.name} cannot open {input_channels} input '
                 f'channel(s) at {sample_text}: {exc}') from exc
-    folded_profiles = ('fold-500', 'fold-1000', 'mono-fold-500',
-                       'mono-colour-500')
     encode_filter = settings.get('encode_filter', 'auto')
     if encode_filter not in dict(FILTER_CHOICES).values():
         raise ValueError('Choose a supported encode filter.')
     if encode_filter == 'auto':
-        encode_filter = 'box' if profile in folded_profiles else 'nearest'
-    if profile in folded_profiles and encode_filter != 'box':
+        encode_filter = 'box' if profile in FOLDED_PROFILES else 'nearest'
+    if profile in FOLDED_PROFILES and encode_filter != 'box':
         raise ValueError('Folded profiles require the Box encode filter.')
     screen_backend = settings.get('screen_backend', 'mss')
     if source == 'screen' and screen_backend not in ('mss', 'ffmpeg'):
@@ -873,8 +880,7 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
     if perceptual_resize not in dict(DOWNSCALER_CHOICES).values():
         raise ValueError('Choose a supported pre-encode downscaler.')
     if perceptual_resize != 'off':
-        if profile not in ('fold-500', 'fold-1000', 'mono-fold-500',
-                           'mono-colour-500'):
+        if profile not in FOLDED_PROFILES:
             raise ValueError('The pre-encode downscaler requires a folded profile.')
         if encode_filter != 'box':
             raise ValueError('The pre-encode downscaler requires the Box encode filter.')
@@ -1012,7 +1018,10 @@ def build_command(settings, devices, sd_module=None, python=None,
         '--source', checked['source'],
     ]
 
-    command.extend(('--profile', checked['profile']))
+    if checked['profile'] == 'baseline':
+        command.append('--baseline')
+    else:
+        command.extend(('--profile', checked['profile']))
     if checked['profile'] in MONO_PROFILES:
         command.extend(('--mono-video-side',
                         checked['mono_video_side'], '--source-audio',
@@ -1031,9 +1040,8 @@ def build_command(settings, devices, sd_module=None, python=None,
 
     if checked['speed'] != 1.0:
         command.extend(('--speed', str(checked['speed'])))
-    if checked['encode_filter'] != ('box' if checked['profile'] in (
-            'fold-500', 'fold-1000', 'mono-fold-500',
-            'mono-colour-500') else 'nearest'):
+    if checked['encode_filter'] != (
+            'box' if checked['profile'] in FOLDED_PROFILES else 'nearest'):
         command.extend(('--encode-filter', checked['encode_filter']))
     if checked['brightness'] is not None:
         command.extend(('--brightness', str(checked['brightness'])))
@@ -1126,13 +1134,13 @@ class SenderGui:
         'mono_video_side', 'brightness', 'gamma', 'speed',
     )
     DROPDOWN_FIELDS = (
-        'device', 'source', 'capture_fps', 'profile',
+        'device', 'source', 'capture_fps', 'profile', 'encode_filter',
         'mono_video_side', 'source_audio', 'source_audio_device',
         'source_audio_input_side', 'screen_backend', 'capture_filter',
         'camera', 'screen_target', 'perceptual_resize',
     )
     ADVANCED_FIELDS = (
-        'perceptual_resize', 'perceptual_detail_strength',
+        'encode_filter', 'perceptual_resize', 'perceptual_detail_strength',
         'screen_backend', 'region', 'ffmpeg_input', 'capture_width',
         'capture_filter',
     )
@@ -1182,7 +1190,8 @@ class SenderGui:
         if restore_preferences and self.preference_path is not None:
             self._restore_preferences()
         self.page = 'setup'
-        self.advanced = False
+        self.advanced = self.settings.get('profile') in {
+            value for _label, value in PROFILE_CHOICES[3:]}
         self.selected = 'device'
         self.scroll = 0
         self.dropdown = None
@@ -1277,7 +1286,18 @@ class SenderGui:
             return self.capture_choice_cache.get(
                 dest, _fps_choices(()))
         if dest == 'profile':
-            return PROFILE_CHOICES if self.advanced else PRIMARY_PROFILE_CHOICES
+            choices = (PROFILE_CHOICES if self.advanced else
+                       PRIMARY_PROFILE_CHOICES)
+            selected = self.settings.get('profile')
+            if (selected not in {value for _label, value in choices} and
+                    selected in {value for _label, value in PROFILE_CHOICES}):
+                choices += tuple(item for item in PROFILE_CHOICES
+                                 if item[1] == selected)
+            return choices
+        if dest == 'encode_filter':
+            if self.settings.get('profile') in FOLDED_PROFILES:
+                return FILTER_CHOICES[:2]
+            return FILTER_CHOICES
         if dest == 'mono_video_side':
             return MONO_VIDEO_SIDE_CHOICES
         if dest == 'source_audio':
@@ -1580,7 +1600,8 @@ class SenderGui:
             return next((label for label, candidate in choices
                          if candidate == value), str(value))
         if dest in ('source', 'profile', 'screen_backend',
-                    'capture_filter', 'perceptual_resize', 'mono_video_side',
+                    'encode_filter', 'capture_filter', 'perceptual_resize',
+                    'mono_video_side',
                     'source_audio', 'source_audio_input_side', 'capture_fps'):
             choices = self._choices(dest)
             label = next((label for label, candidate in choices
@@ -1595,8 +1616,8 @@ class SenderGui:
     def _profile_changed(self, value):
         if self.settings['encode_filter'] == 'auto':
             return
-        if value in ('fold-500', 'fold-1000', 'mono-fold-500',
-                     'mono-colour-500') and self.settings['encode_filter'] != 'box':
+        if (value in FOLDED_PROFILES and
+                self.settings['encode_filter'] != 'box'):
             self.settings['encode_filter'] = 'auto'
 
     def _assign(self, dest, value):
@@ -1614,8 +1635,7 @@ class SenderGui:
                  self.preview_aspect, self.preview_handoff_ns) = frame
         elif dest == 'profile':
             self._profile_changed(value)
-            if value not in ('fold-500', 'fold-1000', 'mono-fold-500',
-                             'mono-colour-500'):
+            if value not in FOLDED_PROFILES:
                 self.settings['perceptual_resize'] = 'off'
         elif dest == 'device':
             self.output_device_identity = _device_identity(self._device())

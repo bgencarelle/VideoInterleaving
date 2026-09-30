@@ -326,6 +326,10 @@ class SenderGuiTests(unittest.TestCase):
         gui = SenderGui(self.devices)
         gui.settings.update(source='video', profile='fold-500')
         gui.advanced = True
+        visible_count = ((gui.WINDOW_SIZE[1]-131-137)//gui.ROW_HEIGHT)
+        fields = gui._visible_fields()
+        gui.scroll = max(0, fields.index('perceptual_resize')-
+                         visible_count+1)
         gui._canvas((960, 720))
         self.assertIn('field:perceptual_resize', gui.hits)
 
@@ -345,6 +349,54 @@ class SenderGuiTests(unittest.TestCase):
         position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
         gui._on_mouse(glfw, None, 1, 1, 0)
         self.assertEqual(gui.settings['perceptual_resize'], 'gamma-detail')
+
+    def test_pillow_encoder_filter_is_distinct_from_ffmpeg_capture_filter(self):
+        gui = SenderGui(self.devices)
+        gui.advanced = True
+        self.assertIn('encode_filter', gui.ADVANCED_FIELDS)
+        self.assertIn('encode_filter', gui._visible_fields())
+        self.assertIn('baseline', tuple(value for _label, value in
+                                        gui._choices('profile')))
+        self.assertEqual(tuple(value for _label, value in
+                               gui._choices('encode_filter')),
+                         ('auto', 'box'))
+
+        gui.settings.update(profile='baseline', encode_filter='auto')
+        fields = gui._visible_fields()
+        visible_count = ((gui.WINDOW_SIZE[1]-131-137)//gui.ROW_HEIGHT)
+        gui.scroll = max(0, fields.index('encode_filter')-
+                         visible_count+1)
+        gui._canvas(gui.WINDOW_SIZE)
+        rect = gui.hits['field:encode_filter']
+        position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
+        glfw = SimpleNamespace(
+            MOUSE_BUTTON_LEFT=1, PRESS=1,
+            get_cursor_pos=lambda _window: position)
+        gui._on_mouse(glfw, None, 1, 1, 0)
+        gui._canvas(gui.WINDOW_SIZE)
+        option_index = next(index for index, item in
+                            enumerate(gui._choices('encode_filter'))
+                            if item[1] == 'bicubic')
+        rect = gui.hits[f'option:{option_index}']
+        position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
+        gui._on_mouse(glfw, None, 1, 1, 0)
+        self.assertEqual(gui.settings['encode_filter'], 'bicubic')
+        self.assertEqual(tuple(value for _label, value in
+                               gui._choices('encode_filter')),
+                         ('auto', 'box', 'nearest', 'lanczos', 'bicubic'))
+        gui.advanced = False
+        self.assertEqual(gui._value_label('profile'), 'Baseline · legacy')
+        self.settings.update(
+            source='video', video_source='clip.mp4', profile='baseline',
+            encode_filter='bicubic', capture_filter='lanczos')
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+
+        self.assertIn('--baseline', command)
+        self.assertNotIn('--profile', command)
+        self.assertEqual(args.encode_filter, 'bicubic')
+        self.assertEqual(args.capture_filter, 'lanczos')
+        self.assertEqual(v7_live._send_profile(args, 0)[0], 'bicubic')
 
     def test_mono_video_side_selector_is_visible_only_for_that_profile(self):
         gui = SenderGui(self.devices)
