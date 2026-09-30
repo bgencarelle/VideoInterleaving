@@ -123,10 +123,9 @@ receiver's primary input and optional passthrough output.
 - [x] Confirm all preceding checkboxes represent completed and verified work.
 - [x] Commit the finished feature on `feature/v7-live-preview-recovery` with a
   descriptive commit message.
-- [ ] After bug-fixing and review, merge the feature branch into
-  `modem-v7-integration`. Reconcile the original worktree's uncommitted
-  `docs/MODEM_MODE.md` edit before merging so both documentation changes are
-  preserved.
+- [x] After review, fast-forward `modem-v7-integration` to the feature commit;
+  preserve and reapply the original worktree's uncommitted
+  `docs/MODEM_MODE.md` edit.
 
 ## Progress log
 
@@ -152,5 +151,5 @@ receiver's primary input and optional passthrough output.
 - [x] Repeated the PortAudio preview send after rebasing to the latest V7 commit:
   68 packets sent and 66 decode reports.
 - [x] Final review and feature commit (`feat: add V7 sender preview and device recovery`).
-- [ ] Merge pending: the original `modem-v7-integration` worktree still has
-  source-DCT edits, including `docs/MODEM_MODE.md`; reconcile those before merge.
+- [x] Merged locally by fast-forward to feature commit `fde81404`; reapplied the
+  original `docs/MODEM_MODE.md` edit, which remains unstaged in the worktree.
