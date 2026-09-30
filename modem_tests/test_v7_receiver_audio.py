@@ -8,6 +8,7 @@ from animation_modem import v7
 from tools.v7_receiver_audio import (AudioPassthrough,
                                      ReceiverChannelRouter,
                                      ReceiverRuntimeOptions,
+                                     passthrough_audio_side,
                                      resolve_device_index)
 
 
@@ -59,6 +60,18 @@ class ReceiverChannelRouterTests(unittest.TestCase):
         self.assertEqual(state['audio_side'], 'left')
         self.assertEqual(router.sync_state(4.0, freewheel_seconds=2.0),
                          'sync-lost')
+
+    def test_mono_audio_passthrough_keeps_last_side_after_sync_loss(self):
+        router = ReceiverChannelRouter(self.MONO_500)
+        router.observe(None, self.MONO_500, now=1.0)
+        router.observe(None, self.MONO_500, now=1.1)
+
+        route = router.observe(now=4.0)
+
+        self.assertEqual(router.sync_state(4.0, freewheel_seconds=2.0),
+                         'sync-lost')
+        self.assertEqual(passthrough_audio_side(route, 2), 'left')
+        self.assertIsNone(passthrough_audio_side(route, 1))
 
     def test_side_changes_only_after_current_expires_and_other_is_confirmed(self):
         router = ReceiverChannelRouter(self.MONO_500,

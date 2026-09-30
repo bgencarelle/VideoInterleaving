@@ -2003,7 +2003,8 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
     import sounddevice as sd
     from tools.v7_receiver_audio import (AudioPassthrough,
                                          ReceiverChannelRouter,
-                                         ReceiverRuntimeOptions)
+                                         ReceiverRuntimeOptions,
+                                         passthrough_audio_side)
     from tools.v7_device_recovery import (
         DEVICE_RATE_FRAME_INTERVAL, DeviceRateDebouncer,
         query_device_snapshot)
@@ -2479,9 +2480,7 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
         meter['sync_state'] = sync_state
         previous_audio_side = (passthrough.route
                                if passthrough is not None else None)
-        meter['audio_side'] = (
-            route['audio_side'] if input_channels > 1 and
-            meter['sync_state'] != 'sync-lost' else None)
+        meter['audio_side'] = passthrough_audio_side(route, input_channels)
         meter['sync_age'] = (None if route['last_packet'] is None else
                              max(0.0, now-route['last_packet']))
         meter['sync_warning'] = bool(

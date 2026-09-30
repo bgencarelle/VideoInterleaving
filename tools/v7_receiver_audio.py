@@ -234,6 +234,14 @@ class ReceiverChannelRouter:
         }
 
 
+def passthrough_audio_side(route, input_channels):
+    """Return the confirmed side-channel audio leg, independent of sync age."""
+    if int(input_channels) < 2 or not isinstance(route, dict):
+        return None
+    side = route.get('audio_side')
+    return side if side in ('left', 'right') else None
+
+
 class _RateMeter:
     """Wall-clock sample rate over a sliding window (diagnostics only).
 
