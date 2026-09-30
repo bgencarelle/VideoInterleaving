@@ -361,5 +361,40 @@ class ReceiverReconnectTests(unittest.TestCase):
         self.assertEqual(Passthrough.instances[0].opens[:2], [48000.0, 96000.0])
 
 
+class AdaptiveProfileTimelineTests(unittest.TestCase):
+    def _decoder(self):
+        decoder = object.__new__(v7_live._AdaptiveProfileDecoder)
+        decoder.supported_modes = frozenset((5,))
+        decoder.mono_status_modes = frozenset((5,))
+        decoder.preferred_side = 'auto'
+        decoder.input_channels = 2
+        decoder.active_mode, decoder.active_side = 5, 1
+        decoder.candidate = decoder.candidate_last_seen = None
+        decoder.candidate_scale = None
+        decoder.streak = decoder.generation = 0
+        decoder.last_packet = decoder.last_decoded_packet = None
+        decoder.state = None
+        return decoder
+
+    @staticmethod
+    def _packet(position):
+        return [{'position': float(position), 'scale': 1.0, 'mode': 5,
+                 'side_index': 1}]
+
+    def test_reopened_input_accepts_positions_from_zero_again(self):
+        decoder = self._decoder()
+        late = 2_000_000
+        decision, = decoder.observe_packets(self._packet(late), now=1.0)
+        self.assertTrue(decoder.claim(decision))
+        # A reopened stream counts capture samples from zero: without a
+        # reset every packet reads as already seen and nothing decodes.
+        self.assertEqual(decoder.observe_packets(self._packet(5000), now=2.0), ())
+        decoder.reset_capture_timeline()
+        decision, = decoder.observe_packets(self._packet(5000), now=3.0)
+        self.assertTrue(decision['confirmed'])
+        self.assertTrue(decoder.claim(decision))
+        self.assertEqual((decoder.active_mode, decoder.active_side), (5, 1))
+
+
 if __name__ == '__main__':
     unittest.main()

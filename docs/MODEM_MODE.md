@@ -144,7 +144,9 @@ needed for the default M=500 coded profile:
 
 To configure the standalone sender with a small event-driven GUI instead, run
 `./vi.modem-send-gui`. It launches the same `vi.modem-send` path in a separate
-process and stops it with a graceful interrupt. Its **Change source** action
+process and stops it with a graceful interrupt. It plays at the rate the OS has
+the output device set to (shown on the live page); change that rate in the OS
+audio settings. The CLI keeps `--rate` for scripted use. Its **Change source** action
 stops the current send and opens the source picker; select the next source and
 press **Start**. Source-specific settings are retained while switching. The GUI
 restores the last configuration on launch but does not auto-start the sender.

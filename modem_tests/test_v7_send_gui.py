@@ -16,7 +16,7 @@ from tools.v7_send_gui import (InputDevice, OutputDevice,
                                 input_devices, output_devices,
                                 parse_avfoundation_screen_sources,
                                 parse_ffmpeg_camera_sources, pick_video_file,
-                                sample_rate_options, validate_settings,
+                                device_rate_text, validate_settings,
                                 _clipboard_text)
 
 
@@ -112,14 +112,20 @@ class SenderGuiTests(unittest.TestCase):
                          [(0, 2)])
         self.assertIsInstance(devices[0], InputDevice)
 
-    def test_sample_rates_are_probed_for_selected_device_and_channel_count(self):
-        options = sample_rate_options(self.device, 2, self.sd)
+    def test_sender_uses_the_output_rate_the_os_is_set_to(self):
+        # A rate left in older saved settings must not reach the CLI.
+        self.settings['rate'] = '96000'
+        command = build_command(self.settings, self.devices, self.sd)
 
-        self.assertEqual(options[0], ('Native (device clock)', None))
-        self.assertIn(('48 kHz', 48000), options)
-        self.assertEqual(options[-1], ('Custom…', 'custom'))
-        self.assertEqual(self.sd.check_output_settings.call_args.kwargs['device'], 3)
-        self.assertEqual(self.sd.check_output_settings.call_args.kwargs['channels'], 2)
+        self.assertNotIn('--rate', command)
+        kwargs = self.sd.check_output_settings.call_args.kwargs
+        self.assertEqual(kwargs['device'], 3)
+        self.assertEqual(kwargs['channels'], 2)
+        self.assertEqual(kwargs['samplerate'], self.device.default_rate)
+        self.assertEqual(device_rate_text(self.device),
+                         f'{self.device.default_rate/1000:g} kHz · OS setting')
+        self.assertEqual(device_rate_text(None), 'OS setting')
+        self.assertNotIn('rate', SenderGui(self.devices)._visible_fields())
 
     def test_folded_default_builds_sender_cli_without_verbose_logging(self):
         command = build_command(self.settings, self.devices, self.sd)
@@ -136,14 +142,14 @@ class SenderGuiTests(unittest.TestCase):
 
     def test_selected_sample_rate_profile_and_video_path_reach_cli(self):
         self.settings.update(source='video', video_source='a clip with spaces.mp4',
-                             video_live=True, video_preview=True, rate='96000',
+                             video_live=True, video_preview=True,
                              profile='fold-1000', speed='1.5')
 
         command = build_command(self.settings, self.devices, self.sd)
         args = v7_live.parser().parse_args(command[2:])
 
         self.assertEqual(args.profile, 'fold-1000')
-        self.assertEqual(args.rate, 96000)
+        self.assertIsNone(args.rate)
         self.assertEqual(args.video_source, 'a clip with spaces.mp4')
         self.assertTrue(args.video_live)
         self.assertTrue(args.preview)
@@ -878,7 +884,7 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(image.size, (960, 720))
         self.assertIn('start_stop', gui.hits)
 
-        gui.settings.update(source='video', rate='88200', profile='fold-500',
+        gui.settings.update(source='video', profile='fold-500',
                             video_source='clip.mp4')
         gui.page = 'setup'
         self.assertIn('video_source', gui._visible_fields())

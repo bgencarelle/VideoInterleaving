@@ -1431,6 +1431,17 @@ class _AdaptiveProfileDecoder:
         self.candidate_last_seen = None
         self.candidate_scale = None
 
+    def reset_capture_timeline(self):
+        """Forget capture-sample positions after the input stream reopens.
+
+        Packet positions count samples from the start of one input stream. A
+        reopened stream counts from zero again, so positions kept from the
+        previous stream would reject every new packet as already seen.
+        """
+        self.reset_candidate()
+        self.last_packet = None
+        self.last_decoded_packet = None
+
     def reset_candidate_if_stale(self, now, timeout):
         packet_seconds = (
             1.5*P.PULSE_FRAME*self.candidate_scale/self.capture_rate
@@ -1911,7 +1922,7 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
         device, rate, reason = recovery
         args.device = device
         if adaptive_profile is not None:
-            adaptive_profile.reset_candidate()
+            adaptive_profile.reset_capture_timeline()
         print(json.dumps({
             'status': 'receiver_input_reconnected',
             'device': identity.get('name'),

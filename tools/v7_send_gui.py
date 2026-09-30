@@ -22,7 +22,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-RATE_CANDIDATES = (32000, 44100, 48000, 88200, 96000, 176400, 192000)
 PROFILE_CHOICES = (
     ('Fold 500 stereo · recommended', 'fold-500'),
     ('Mono video · Fold 500', 'mono-fold-500'),
@@ -77,7 +76,6 @@ MONO_VIDEO_SIDE_CHOICES = (
 FIELD_HELP = {
     'device': 'Choose the explicit audio output device that feeds the receiver or recording path.',
     'source': 'Choose what the sender captures. Capture starts only after Start.',
-    'rate': 'Audio output sample rate. Native uses the device clock; this is separate from Capture FPS.',
     'profile': ('Fold 500 stereo is recommended. Mono Fold 500 is available, '
                 'and colour-weighted mono remains experimental.'),
     'speed': 'Playback speed from 0.25× to 4×. Faster playback raises the transmitted carrier frequencies.',
@@ -117,7 +115,6 @@ FIELD_HELP = {
 FIELD_LABELS = {
     'device': 'Audio output device',
     'source': 'Capture source',
-    'rate': 'Audio output sample rate',
     'capture_fps': 'Capture FPS',
     'brightness': 'Brightness · live',
     'gamma': 'Gamma · live',
@@ -202,7 +199,7 @@ def _match_device(devices, identity):
 
 
 SAVED_SETTING_FIELDS = (
-    'source', 'rate', 'profile', 'mono_video_side', 'source_audio',
+    'source', 'profile', 'mono_video_side', 'source_audio',
     'source_audio_input_side', 'source_audio_gain',
     'source_audio_delay_ms', 'speed', 'encode_filter', 'brightness', 'gamma',
     'capture_fps', 'video_source', 'video_preview', 'video_live', 'camera',
@@ -642,35 +639,11 @@ def input_devices(sd_module=None):
     return tuple(result)
 
 
-def _rate_label(rate):
-    if rate is None:
-        return 'Native (device clock)'
-    return f'{float(rate)/1000:g} kHz'
-
-
-def sample_rate_options(device, channels, sd_module=None):
-    """List common rates the selected device reports as valid, without opening it."""
-    if device is None:
-        return (('Native (device clock)', None),)
-    if sd_module is None:
-        import sounddevice as sd_module
-
-    candidates = []
-    if device.default_rate > 0:
-        candidates.append(device.default_rate)
-    candidates.extend(RATE_CANDIDATES)
-    rates = []
-    for rate in dict.fromkeys(candidates):
-        try:
-            sd_module.check_output_settings(
-                device=device.index, channels=channels, dtype='float32',
-                samplerate=rate)
-        except Exception:
-            continue
-        rates.append(rate)
-    return (('Native (device clock)', None),) + tuple(
-        (_rate_label(rate), rate) for rate in sorted(rates)) + (
-            ('Custom…', 'custom'),)
+def device_rate_text(device):
+    """The output device's current rate as the OS reports it."""
+    if device is None or not device.default_rate:
+        return 'OS setting'
+    return f'{device.default_rate/1000:g} kHz · OS setting'
 
 
 def _clipboard_text(glfw, window):
@@ -795,22 +768,17 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
             f'{device.name} supports {device.channels} output channel(s); '
             f'this configuration needs {channels}. Choose another device.')
 
-    rate = settings.get('rate')
-    if rate is not None:
-        try:
-            rate = int(rate)
-        except (TypeError, ValueError) as exc:
-            raise ValueError('Audio sample rate must be a positive integer.') from exc
-        if rate <= 0:
-            raise ValueError('Audio sample rate must be a positive integer.')
+    # The sender plays at the rate the OS has the output device set to; the
+    # GUI does not offer other rates (PortAudio cannot list a device's
+    # supported rates portably, and some hosts resample any request).
     if sd_module is None:
         import sounddevice as sd_module
     try:
         sd_module.check_output_settings(
             device=device.index, channels=channels, dtype='float32',
-            samplerate=rate or device.default_rate or None)
+            samplerate=device.default_rate or None)
     except Exception as exc:
-        sample_text = f'{rate} Hz' if rate else 'the device native rate'
+        sample_text = 'its current OS rate'
         raise ValueError(
             f'{device.name} cannot open {channels} channel(s) at {sample_text}: {exc}') from exc
 
@@ -854,7 +822,7 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
         if source_audio_input_side == 'right' and audio_device.channels < 2:
             raise ValueError('Right input selection requires a stereo input device.')
         input_channels = min(audio_device.channels, 2)
-        input_rate = rate or device.default_rate or audio_device.default_rate or None
+        input_rate = device.default_rate or audio_device.default_rate or None
         try:
             sd_module.check_input_settings(
                 device=audio_device.index, channels=input_channels,
@@ -973,7 +941,6 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
         'device': device,
         'source': source,
         'channels': channels,
-        'rate': rate,
         'profile': profile,
         'mono_video_side': mono_video_side,
         'source_audio': source_audio,
@@ -1040,8 +1007,6 @@ def build_command(settings, devices, sd_module=None, python=None,
             command.extend(('--source-audio-delay-ms',
                             str(checked['source_audio_delay_ms'])))
 
-    if checked['rate'] is not None:
-        command.extend(('--rate', str(checked['rate'])))
     if checked['speed'] != 1.0:
         command.extend(('--speed', str(checked['speed'])))
     if checked['encode_filter'] != ('box' if checked['profile'] in (
@@ -1132,11 +1097,11 @@ class SenderGui:
         'device', 'source', 'video_source', 'video_preview', 'video_live', 'camera',
         'screen_target', 'source_audio', 'source_audio_device',
         'source_audio_input_side', 'source_audio_gain',
-        'source_audio_delay_ms', 'rate', 'capture_fps', 'profile',
+        'source_audio_delay_ms', 'capture_fps', 'profile',
         'mono_video_side', 'brightness', 'gamma', 'speed',
     )
     DROPDOWN_FIELDS = (
-        'device', 'source', 'rate', 'capture_fps', 'profile',
+        'device', 'source', 'capture_fps', 'profile',
         'mono_video_side', 'source_audio', 'source_audio_device',
         'source_audio_input_side', 'screen_backend', 'capture_filter',
         'camera', 'screen_target', 'perceptual_resize',
@@ -1161,7 +1126,6 @@ class SenderGui:
         self.settings = {
             'device': None,
             'source': None,
-            'rate': None,
             'profile': 'fold-500',
             'mono_video_side': 'right',
             'source_audio': 'source',
@@ -1211,7 +1175,6 @@ class SenderGui:
         self._glfw = None
         self._window = None
         self._sd = None
-        self.rate_cache = {}
         self.capture_choice_cache = {}
         self.device_watch_stop = threading.Event()
         self.device_watch_thread = None
@@ -1273,19 +1236,6 @@ class SenderGui:
                          for device in self.audio_devices)
         if dest == 'source':
             return SOURCE_CHOICES
-        if dest == 'rate':
-            channels = 2
-            device = self._device()
-            key = (None if device is None else device.index, channels)
-            if key in self.rate_cache:
-                return self.rate_cache[key]
-            try:
-                options = sample_rate_options(device, channels, self._sounddevice())
-            except Exception as exc:
-                self.notice = f'Cannot query supported sample rates: {exc}'
-                options = (('Native (device clock)', None),)
-            self.rate_cache[key] = options
-            return options
         if dest == 'capture_fps':
             return self.capture_choice_cache.get(
                 dest, _fps_choices(()))
@@ -1410,7 +1360,6 @@ class SenderGui:
             self.settings['device'] = current.index
             self.output_device_identity = _device_identity(current)
         if changed:
-            self.rate_cache.clear()
             self._device_choices_changed('device')
             if 'unavailable' not in self.notice:
                 self.notice = 'Audio devices changed; open a picker to review.'
@@ -1602,17 +1551,6 @@ class SenderGui:
             if label is None:
                 return 'Profile default' if value == 'auto' else 'Choose…'
             return label
-        if dest == 'rate':
-            if value is None:
-                device = self._device()
-                rate = f' · {device.default_rate/1000:g} kHz' if device and device.default_rate else ''
-                return 'Native'+rate
-            if value == 'custom':
-                return 'Enter custom rate in Hz…'
-            try:
-                return _rate_label(int(value))
-            except (TypeError, ValueError):
-                return str(value)
         if isinstance(value, bool):
             return 'On' if value else 'Off'
         return str(value) if str(value).strip() else '(not set)'
@@ -1632,7 +1570,6 @@ class SenderGui:
                              'mono-colour-500'):
                 self.settings['perceptual_resize'] = 'off'
         elif dest == 'device':
-            self.settings['rate'] = None
             self.output_device_identity = _device_identity(self._device())
         elif dest == 'source_audio_device':
             device = next((item for item in self.audio_devices
@@ -1651,15 +1588,6 @@ class SenderGui:
         self._persist_preferences()
 
     def _select_option(self, dest, value):
-        if dest == 'rate' and value == 'custom':
-            self.settings['rate'] = None
-            self.selected = 'rate'
-            self.editing = True
-            self.edit_buffer = ''
-            self.notice = 'Enter the requested audio sample rate in Hz.'
-            self.dropdown = None
-            self.dirty = True
-            return
         self._assign(dest, value)
 
     def _build_command(self):
@@ -1926,8 +1854,6 @@ class SenderGui:
         self.hits['advanced'] = (22, toggle_y, 154, toggle_y+28)
 
         help_text = FIELD_HELP.get(self.selected, '')
-        if self.selected == 'rate':
-            help_text = FIELD_HELP['rate']
         help_top = height-87
         lines = _wrapped(help_text, small, width-48)
         for index, line in enumerate(lines[:2]):
@@ -1991,14 +1917,7 @@ class SenderGui:
                               if value == self.settings['profile']), 'Unknown')
         source_label = next((label for label, value in SOURCE_CHOICES
                              if value == self.settings['source']), 'Not selected')
-        rate = self.settings['rate']
-        if rate is None and device is not None:
-            rate_text = (f'Native · {device.default_rate/1000:g} kHz'
-                         if device.default_rate else 'Native')
-        elif rate is None:
-            rate_text = 'Native'
-        else:
-            rate_text = _rate_label(rate)
+        rate_text = device_rate_text(device)
         details = (
             ('Source', source_label),
             ('Output device', device.name if device else 'Not selected'),
