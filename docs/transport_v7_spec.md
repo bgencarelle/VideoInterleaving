@@ -1446,7 +1446,9 @@ Status: the first resize ablation is implemented as an opt-in experiment in
 better or ready to replace the existing path. The later sender stages and
 Section 12 remain planned experiments. Continue in the milestone order below;
 do not enable an unmeasured stage by default. None of this work requires a new
-wire format.
+wire format. Section 11.7 records the implemented opt-in source-domain DCT
+experiment and benchmark; it does not supersede the resize experiment or
+change the sender default.
 
 ### 11.1 Goal, scope, and fixed contracts
 
@@ -1456,17 +1458,23 @@ reduced ringing over nominal sharpness. All processing is classical and
 deterministic. No learned models, random jitter, grain injection, region-based
 packet allocation, or receiver changes belong in this work.
 
-- Live integration: `tools/v7_live.py::_values`, before the current brightness
-  and gamma adjustments. Keep their ordering and settings identical in paired
-  comparisons. Share preprocessing through a self-contained modem module; do
-  not import application settings into `animation_modem`.
+- Existing resize-track live integration: `tools/v7_live.py::_values`, before
+  the current brightness and gamma adjustments. Keep their ordering and
+  settings identical in paired comparisons. Share preprocessing through a
+  self-contained modem module; do not import application settings into
+  `animation_modem`.
 - Bake integration: `utilities/convert_to_modem_dct.py`, where full-resolution
   layers are still available. Existing Lanczos-reduced layers cannot regain
   lost source detail through runtime preprocessing.
-- Coefficient integration: inside the fold encoder's existing full-DCT path,
-  before host/guest construction, not by transforming pixels back and forth.
+- Existing coefficient-shaping integration: inside the fold encoder's existing
+  full-DCT path, before host/guest construction, not by transforming pixels
+  back and forth. The separate native-source analysis implemented in 11.7 uses
+  an explicit DCT/IDCT bridge to preserve the current coder-grid interface.
 - Preserve packet length, metadata, encoding codes, model tables, fold pins,
-  synchronization, receiver behavior, and the 80×96 prepared canvas.
+  synchronization, receiver behavior, and the 80×96 prepared canvas for the
+  existing resize track. Section 11.7 implements a separate opt-in path that
+  bypasses that prepared canvas while preserving the coder-grid value-vector
+  contract.
 - Experiments declare canonical `box` encoding and use its pinned fold table.
   Reject a perceptual-preprocess/other-model combination with a clear error.
   The disabled path must retain existing outputs.
@@ -1714,6 +1722,1404 @@ Delivery order: (1) resize ablations plus statistics; (2) decide table adequacy;
 (3) band shaping; (4) knee; (5) guided chroma; (6) change adaptation; (7) bake.
 Each stage has independent on/off comparison and must not invalidate earlier
 gates. Keep experiment artifacts and Numba caches under repo-local `tmp/`.
+
+### 11.7 Native-source DCT analysis and perceptual coefficient reduction
+
+**Current direction:** Section 11.8 is the corrective execution plan for this
+work. It prioritizes optimizing the existing full-resolution preparation call.
+The experiments and measurements below are historical evidence, not completion
+of that plan or approval to substitute block averaging for full-resolution work.
+
+**Status: implemented as an opt-in live-sender path and reproducible benchmark.**
+This is a separate experiment, not a replacement for the current resize path or
+the 11.2 resize ablation. The default remains the resize-first sender and wire
+path. For integer-ratio BOX geometries, that path now uses the faster Pillow
+`Image.reduce` operation described in Section 11.8; its channel rounding can
+differ by one code value from generic `resize(BOX)`. Other filters and
+non-integral geometries keep the generic resize behavior. `--dct-encode`
+selects the native-source path and is mutually exclusive with
+`--perceptual-resize`. All DCT-enhancement controls are off by default. The
+receiver, wire, rank maps, fold tables, status codes, packet duration, and
+current transmitted coefficient budget remain unchanged. Use the canonical
+`box` model and the existing matching fold table for each tested profile; do
+not refit or silently substitute model/fold statistics for this experiment.
+Enhancement options without `--dct-encode` are an argument error, as is a frame
+marked as already prepared at 80×96.
+
+#### Objective
+
+Test whether mapping the source directly into the DCT representation preserves
+more useful picture information than first resizing RGB to the prepared canvas
+and then transforming that raster. The initial comparison uses the existing
+wire budget. The design should also keep source analysis separate from budget
+selection so future, explicitly supported profiles can select a different
+coefficient budget without requiring a different RGB resize path.
+
+The native source-DCT path must not resize RGB to 80×96 before analysis or pass
+an 8-bit YCbCr image between stages. It may analyze a capture at its configured
+source dimensions, but the capture path must provide the unprepared frame rather
+than its 80×96 prepared result. Images smaller than the required coder grid are
+rejected; this path does not upscale a small source. The original source
+dimensions continue to determine the aspect code. The separate `area-box`
+candidate is explicitly a spatial-resampling path and does average source pixel
+areas before its target-grid DCT.
+
+#### Source-to-coder-grid pipeline
+
+For an input RGB frame of shape `H×W×3`, apply the existing brightness and gamma
+controls in float64:
+
+```text
+x = clip((rgb / 255) * brightness, 0, 1)
+x = x ** (1 / gamma)
+```
+
+The paired baseline and DCT candidates must use identical control values. Use
+neutral brightness and gamma for the primary source-analysis comparison;
+non-neutral tone tests follow separately because this path intentionally applies
+tone before DCT analysis. Convert the resulting gamma-encoded RGB planes to
+floating-point full-range YCbCr using the same BT.601/Pillow convention as the
+receiver:
+
+```text
+Y  =  0.299000*R + 0.587000*G + 0.114000*B
+Cb = clip(128/255 - 0.168736*R - 0.331264*G + 0.500000*B, 0, 1)
+Cr = clip(128/255 + 0.500000*R - 0.418688*G - 0.081312*B, 0, 1)
+```
+
+Use the receiver-compatible neutral chroma center `128/255`, not `0.5`; report
+the fraction of chroma samples clipped to the full-range endpoints. No 8-bit
+YCbCr intermediate is created.
+
+For each Y, Cb, and Cr plane, use the corresponding rows×columns grid from
+`model.coder.grids`. Let the full-resolution plane be `P` of size `H×W`, and
+let its coder grid be `r×c`:
+
+```text
+F = dctn(P, norm="ortho")
+C = F[:r, :c] * sqrt((r*c) / (H*W))
+grid_plane = idctn(C, norm="ortho")
+values = 2*grid_plane - 1
+```
+
+This selects the source plane's low-frequency DCT representation directly and
+evaluates it on the coder grid. It does not construct an intermediate resized
+RGB image. The selected planes are concatenated in the existing Y, Cb, Cr
+order and passed through the existing spatial-value/coder interface. The
+existing coder then applies the current DCT/rank/fold processing, including
+selected fold guests. This interface round trip must recover the selected grid
+coefficients within numerical tolerance when no clipping or enhancement is
+applied.
+
+The current coder grids and sent corners are:
+
+| Plane | Coder grid, rows×columns | Ordinary sent corner, rows×columns |
+|---|---:|---:|
+| Y | 96×80 | 48×40 |
+| Cb | 48×40 | 24×20 |
+| Cr | 48×40 | 24×20 |
+
+All dimensions come from the loaded model. They are not constants in the new
+encoder. The ordinary corners describe the current model representation;
+fold-500 may also carry selected coefficients outside those corners. Its rank
+and guest membership are not equivalent to a simple frequency band.
+
+The existing coder-value convention is bounded to `[-1, 1]`. The compatibility
+candidate clips `values` to that range before invoking the coder and reports
+the fraction and magnitude of samples clipped. DCT truncation can overshoot
+near edges, so clipping is a nonlinear image operation and can alter
+coefficients, including guest statistics. Include an unclipped float diagnostic
+when the existing model/fold path accepts it; do not describe clipped output as
+an exact retained-spectrum round trip. Final RGB display clipping remains at
+the receiver output as today.
+
+The DCT uses a finite-frame cosine basis and can show boundary ringing. Report
+that behavior rather than claiming that source-domain DCT eliminates aliasing
+or all resampling artifacts. The direct-DCT candidate is the reference for
+testing reduction strategies, not an assumed visual winner.
+
+#### Invariants
+
+- With `--dct-encode` disabled, output remains byte-identical to the established
+  sender. With it enabled and enhancements off, the output is the plain direct
+  source-DCT candidate.
+- Plane dimensions and the concatenated value count come from
+  `model.coder.grids`; the current vector contains 11,520 values.
+- A source plane already at its coder-grid dimensions is reproduced within
+  numerical tolerance by the DCT/IDCT mapping.
+- With enhancements off, flat planes remain constant within numerical
+  tolerance. Chroma gain leaves neutral grey unchanged; non-neutral flat-color
+  changes are expected.
+- Results are finite. The bounded compatibility path returns values in
+  `[-1, 1]` and reports its clipping; the unclipped diagnostic is not subject to
+  that range invariant.
+- Taper does not directly modify coefficients outside its declared sent
+  luma region or any chroma coefficients. Any later clipping effects are
+  measured separately.
+
+#### Coefficient reduction and perceptual bands
+
+The first `weighted-tent`, `weighted-cosine`, and `weighted-gaussian`
+implementation used the wrong frequency coordinate. It mapped source mode
+`u` to `u*r/H` (and `v` to `v*c/W`) before averaging signed coefficients.
+DCT-II mode indices count cosine modes over the complete image frame; changing
+raster dimensions does not rescale those indices. For example, the old
+720-to-96 mapping sent source mode 80 to target bin 11 even though its
+same-frame target mode is 80, outside the target grid. This mixed unrelated
+cosines and folded out-of-band modes into low-frequency output, causing the
+nearly constant brown collapse in the archived results.
+
+The corrected implementation retains matching whole-frame mode indices and
+applies a gain to each retained coefficient independently. It never averages
+signed coefficients, and modes outside the target support are omitted rather
+than reassigned to lower bins. For normalized target-axis mode `q=k/N`, the
+separable windows are `1-q` (tent), `0.5+0.5*cos(pi*q)` (cosine), and
+`exp(-0.5*(q/0.5)^2)` (Gaussian); all preserve DC at unit gain. These are
+coefficient-domain low-pass experiments, not spatial resampling operators, and
+remain opt-in. The old collapsed rows are invalid as candidate-quality results
+and must be replaced by measurements using the corrected implementation.
+
+For a same-frame DCT projection, retain matching low-frequency mode indices
+and apply the orthonormal amplitude factor `sqrt(grid area/source area)`, as in
+`direct-retention`. A true spatial resampling candidate must instead apply its
+declared pixel-domain filter/resampling operator and then transform that
+result, or use the exact DCT-domain operator `D_target * R * D_source.T`; a
+normalized mean of neighboring signed DCT coefficients is not equivalent.
+Exact resampling-kernel probes are recorded in the evaluation section.
+
+The repaired `area-box` candidate uses exact pixel-footprint overlaps to build
+separable spatial averaging operators `R_y` and `R_x`, then computes
+`dctn(R_y @ plane @ R_x.T, norm='ortho')` on each target coder grid. It does not
+average or renumber source-frequency bins. The direct output remains a regular
+model-grid value vector and is sent through the unchanged production Fold-500
+path. Select it explicitly with `--dct-encode --dct-aggregation area-box`; the
+native direct-retention path remains the default DCT transform option. This
+correct spatial reducer is not a Fold-native transform and remains an explicit
+benchmark/CLI experiment because its full-resolution color-plane preparation
+misses the sender latency budget.
+
+The corrected weighted modes remain opt-in in the live sender through
+`--dct-encode --dct-aggregation ...`; the benchmark includes them in its default
+candidate catalog. The default DCT path remains direct-retention.
+
+#### Fold-native direct projection
+
+`fold-native-projection` bypasses the model-grid value vector entirely. It
+builds the union of the actual Fold-500 kept and guest positions, projects the
+native RGB frame onto the enclosing source-DCT rectangles (60×50 for luma and
+24×20 for each chroma plane), and applies the normal source-to-coder-grid
+amplitude factor. The projection is float32 and uses the linear BT.601/Pillow
+coefficients around neutral chroma 128/255; it omits only the tiny chroma
+endpoint clamp (at most 1/(2×255) per saturated source sample).
+
+The resulting sparse full-grid vector is passed to
+`Fold500.encode_dct_coefficients`, which performs the pinned host quantization,
+guest clipping, and reserved signature-slot replacement. The folded result then
+uses the same `encode_folded_coefficients_packet` pulse, coded-pilot, metadata,
+and EOF path as the application sender. No receiver, model, table, or wire
+changes are made. This candidate is an explicit still-image benchmark option
+(`--variant fold-native-projection`) and requires
+`--profile stereo-fold-500`.
+
+Fixed perceptual frequency-band weighting is a separate operation: multiply
+each retained coefficient by its declared gain in normalized whole-frame DCT
+coordinates. Keep DC at unit gain, use smooth transitions, and declare separate
+luma/chroma behavior. For at least one candidate, map a documented spatial
+contrast-sensitivity curve to cycles per degree using the fixed display size
+and viewing distance; cap and archive the resulting gains. Do not adapt these
+gains frame-by-frame in the first experiment; temporal gain changes could make
+fine detail flicker. Perceptual weighting changes the reconstructed picture;
+it does not add wire capacity.
+
+Also test fixed perceptual frequency-band weighting. Define the curves in
+normalized horizontal and vertical DCT coordinates, keep DC at unit gain, use
+smooth transitions, and declare separate luma/chroma behavior. For at least
+one candidate, map a documented spatial contrast-sensitivity curve to cycles
+per degree using the fixed display size and viewing distance; cap and archive
+the resulting gains. Include a conservative mid-band luma emphasis and at least
+one luma/chroma-weighted profile. Do not adapt these gains frame-by-frame in
+the first experiment; temporal gain changes could make fine detail flicker.
+Perceptual weighting changes the reconstructed picture; it does not add wire
+capacity.
+
+#### Optional pre-enhancement controls
+
+The controls below are implemented opt-in candidates. Their default values are
+no-ops; each is valid only with `--dct-encode`:
+
+| Option | Values | Default |
+|---|---|---:|
+| `--dct-sharpen` | `off`, `taper`, `usm` | `off` |
+| `--dct-sharpen-strength` | 0.0–1.0 | 0.25 |
+| `--dct-clarity` | 0.0–1.0 | 0.0 |
+| `--dct-chroma-gain` | 1.0–1.3 | 1.0 |
+| `--dct-aggregation` | `off`, `area-box`, `weighted-tent`, `weighted-cosine`, `weighted-gaussian` | `off` |
+| `--dct-band-profile` | `off`, `mid-luma`, `perceptual-color` | `off` |
+
+`off` remains the plain direct-DCT path. Taper and USM are mutually exclusive;
+clarity and chroma gain may combine with either. Run a one-factor comparison
+before testing combinations.
+
+**Taper sharpen** operates on the source-DCT luma coefficients inside the
+ordinary sent luma corner only. With row and column indices `u,v` and sent
+corner `R×C` (rows×columns), define:
+
+```text
+f = sqrt((u/R)^2 + (v/C)^2)
+b(f) = (27/4) * f^2 * (1-f), for f < 1; otherwise 0
+C[u,v] *= 1 + strength*b(f)
+```
+
+This boost is zero at DC and at the elliptical boundary, and peaks at one for
+`f=2/3`. Coefficients outside the sent corner are not directly modified by
+taper. If a later pixel-domain clipping step is enabled, it can still change
+the resulting coefficient statistics; report that separately.
+
+**USM sharpen** and **clarity** operate on the full-resolution luma plane
+before its DCT. Define their Gaussian radii in source pixels from the source
+dimensions and model grid, separately for rows and columns. USM uses
+`Y += strength*(Y - G_sigma(Y))` with `sigma=0.8` coder-grid pixels; clarity
+uses the same form with `sigma=6` coder-grid pixels. Both have broad frequency
+responses: clarity is not confined to low/mid frequencies, and either can
+increase energy in fold-guest coefficients. Use a boundary rule compatible
+with the DCT frame assumptions and measure guest changes; do not claim these
+operations stay inside a frequency band.
+
+**Chroma gain** applies `Cb/Cr = neutral + gain*(Cb/Cr - neutral)` using the
+receiver-compatible neutral value `128/255`, followed by the declared source
+chroma bounds. Neutral grey is unchanged; non-neutral flat colors are
+intentionally changed. Report chroma clipping and decoded color error.
+
+#### Candidate batch and evaluation
+
+The original full-matrix run used 19 candidates, including six weighted-average
+variants with the invalid source-to-target DCT index mapping. The corrected
+default catalog retains all 19 variants so their repaired behavior is measured.
+`area-box-resample` and `fold-native-projection` are specialized, explicit-only
+probes; the former is not Fold-native and the latter is stereo Fold-500 only.
+Run the candidates through the actual modem, using identical full-size
+source frames, model/fold tables, wire budget, channel settings, and receiver
+display reconstruction:
+
+| Archived candidates | Comparison |
+|---|---|
+| 1 | Current resize-first sender baseline |
+| 1 | Direct source-DCT retention, plain compatibility path |
+| 1 | Direct source-DCT unclipped diagnostic, if accepted by the current model |
+| 6 | Tent, cosine, and Gaussian coefficient windows, with clipped and unclipped pairs; each applies gains to matching DCT modes |
+| 2 | Taper sharpen at strengths 0.25 and 0.5 |
+| 2 | USM sharpen at strengths 0.25 and 0.5 |
+| 2 | Clarity at strengths 0.15 and 0.3 |
+| 2 | Chroma gain at 1.1 and 1.2 |
+| 2 | Predeclared perceptual luma/chroma band-weight profiles |
+
+The separate `area-box-resample` and `fold-native-projection` probes are
+explicit-only and are not part of the 19-candidate default count.
+
+The direct-retention candidate is the principal test of source-domain analysis.
+The clipped/unclipped diagnostic separates coefficient behavior from the
+existing coder-value bound. Enhancement candidates are judged independently;
+do not combine all gains before the one-factor results are understood.
+
+Use native-resolution 720×960 left-eye images from the SBS face set, without
+resizing the eye image, plus high-resolution chart/text and float-precision smooth-gradient
+scenes. Include fine edges, saturated boundaries, texture, luminance/chroma
+gradients, and moving detail. First compare all variants on the clean channel
+with stereo fold-500, mono-fold-500, and mono-colour-500. Then run the fixed
+Type II synthetic channel on selected finalists in those same profiles. Type II
+is a regression input, not tape emulation.
+Render through the receiver's DCT reconstruction at a fixed 1080×900 display
+size using the same aspect-preserving viewport and display settings for every
+variant. Compare against the original source shown in that same viewport.
+The `perceptual-color` curve uses 96-dpi pixels, a 600-mm viewing distance, and
+the displayed aspect-preserving viewport to map DCT modes to cycles per degree;
+archive those assumptions with the gain curves.
+
+For each scene/profile/channel, deliver numbered side-by-side PNGs and a
+contact sheet. Report SSIMULACRA2 as a guard, not the sole judge; inspect the
+images for detail, ringing, chroma errors, gradient banding, and clipping. Also
+report source-DCT/grid clipping fractions, fold-guest clip fractions and
+exceedance magnitudes, decode success, waveform peak/RMS, and encoder time.
+Keep three results distinct: (1) the direct source-DCT reconstruction mapped to
+the coder grid and enlarged through the receiver-equivalent DCT display path;
+(2) an ideal reconstruction using the actual model/fold coefficient selection
+without waveform/channel effects; and (3) the modem-decoded result. These
+separate source-analysis loss, coefficient-budget/fold-selection loss, and
+waveform/channel effects.
+
+Keep all experiment code opt-in and the default byte-identical. Synthetic
+clean/Type II measurements guide candidate selection; real tape validation
+remains the user's measurement. Archive commands, variant definitions,
+comparison images, and results under repo-local `tmp/`.
+
+Run the complete clean-wire matrix (two native SBS images plus the built-in
+float-precision gradient and chart/text scenes) with:
+
+```bash
+.venv/bin/python tools/v7_source_dct_bench.py \
+  --out tmp/v7-source-dct-bench --channel clean-96k
+```
+
+The standard stereo Fold-500 benchmark sends candidate value vectors through
+the same `modem_v7_display.encode_values_packet` function as the application
+sender. `fold-native-projection` instead enters the same production path through
+`encode_folded_coefficients_packet` after applying the same pinned
+`animation_modem.v7_fold.Fold500`. Both paths use the production coded-pilot
+overlay and loop/aspect/source-index metadata. Source-preparation timing for all
+variants is the median of seven warmed runs; the projection's PNG-only inverse
+transform is excluded. Output adaptation
+uses `animation_modem.v7_core.adapt_packet_for_output`, the helper called by
+`PacketOutput`; at 1× and a 96 kHz device rate this selects per-packet
+`band_limited` adaptation. This bypasses only image compositing/preparation for
+the candidate branch under test. Experimental mono profiles continue through
+their matching `MonoFreshFoldWire` implementations.
+
+Run Type II for selected finalists with repeated `--variant` options and
+`--channel type-ii`; for example:
+
+```bash
+.venv/bin/python tools/v7_source_dct_bench.py \
+  --out tmp/v7-source-dct-type-ii \
+  --variant resize-first --variant direct-retention \
+  --variant direct-unclipped \
+  --channel type-ii
+```
+
+The still-scene matrix sends 12 packets per trial. Run a packet-synchronous
+moving-detail sequence (12 changing native 720×960 frames) for the baseline,
+direct-retention candidate, and unclipped diagnostic with:
+
+```bash
+.venv/bin/python tools/v7_source_dct_bench.py \
+  --out tmp/v7-source-dct-motion-clean --motion-only \
+  --variant resize-first --variant direct-retention \
+  --variant direct-unclipped --profile stereo-fold-500 \
+  --profile mono-fold-500 --profile mono-colour-500 \
+  --channel clean-96k
+```
+
+The motion report pairs decoded frames by packet counter and reports temporal
+change error in a fixed source region outside the moving target.
+
+#### Evaluation record
+
+**Production-path correction (2026-09-29):** the earlier V7 source-DCT receive
+matrices below used the standalone `tools/v7_live` fold/tone wrapper and
+`speed_pulse_stream` at 96 kHz. The application sender instead uses
+`modem_v7_display.encode_values_packet` with `animation_modem.v7_fold.Fold500`
+and `add_fold500_coded_pilot`; `PacketOutput` adapts each 1× packet with
+`band_limited` at the device rate. Those differences change the emitted
+96-kHz waveform, so the earlier received-score tables and decoded images are
+historical diagnostics, not production-path rankings. Focused clean and Type II
+production-parity checks in `tmp/v7-source-dct-production-parity-focused/` and
+`tmp/v7-source-dct-production-parity-type-ii/` cover the two native face
+images, resize-first/direct-retention/direct-unclipped, and the application
+stereo Fold-500 sender. All 144/144 packets displayed and passed EOF validation.
+On clean, direct-retention's received SSIMULACRA2 change against resize-first
+was +0.32 and +0.01 on the two images; direct-unclipped was +0.35 and +0.14.
+On Type II, changes were −0.37 and +0.01 for direct-retention, −0.54 and +0.13
+for direct-unclipped. These remain small/inconsistent gains, so no candidate is
+promoted. This focused check does not rerun the full 228-row matrix. The
+source-grid analyses remain valid, and the pinned standalone/application fold
+coefficient identity is covered by `modem_tests.test_v7_application_fold`.
+
+**Fold-native direct projection (2026-09-29):** a partial separable source-DCT
+projection now covers Fold-500's actual kept/host/guest/signature support and
+enters the unchanged production packet path directly. The clean 12-packet run in
+`tmp/v7-fold-native-projection-clean-final/` displayed and EOF-validated all
+24/24 candidate packets. On the two 720×960 face images, the received
+SSIMULACRA2 changes versus resize-first were +0.35 and +0.14; side-by-side
+inspection showed no clear visible improvement. Median full image-to-packet
+time was 7.41 ms versus 2.96 ms for resize-first (paired median ratio 2.50), so
+the candidate is still well outside the few-percent latency target and is not
+promoted. The exact Fold coefficient and packet path is covered by
+`modem_tests.test_v7_source_dct`.
+
+The earlier 12-packet finalist run is archived in
+`tmp/v7-source-dct-finalists-12pkt/`. It covers resize-first, direct retention,
+and the unclipped diagnostic on both native face images and both synthetic
+scenes, through clean and Type II channels in all three profiles. All 72 rows
+displayed and EOF-validated 12/12 packets (864/864 total). Averaged over the two
+native face images, direct retention's received SSIMULACRA2 change versus
+resize-first was +0.16 / −0.16 / +0.03 for clean stereo / mono-fold / mono-colour
+and −0.14 / −0.06 / −0.34 for Type II. The face results therefore show no
+consistent source-DCT gain. Direct retention did improve the synthetic gradient
+and chart scores slightly in several profiles; it did not change the profile
+ordering or establish a general image-quality win. Unclipped direct retention
+was effectively tied with clipped direct retention.
+
+The earlier full clean run is in `tmp/v7-source-dct-clean-final/`; it covers all
+19 candidates but predates the 12-packet finalist gate and weighted-index
+correction below. Its three signed
+coefficient-averaging candidates collapsed fine detail and the smooth gradient
+(about −97 mean received SSIMULACRA2 across all four scenes and profiles,
+versus about −18 for resize-first). They are rejected as finalists. The
+archived 12-packet full clean run is `tmp/v7-source-dct-clean-12pkt/`; it
+contains the original weighted-index bug and is not a measurement of the
+corrected weighted variants. It contains 228
+paired rows (four scenes × three profiles × 19 candidates), all on the clean
+96 kHz channel. Every row displayed and EOF-validated all 12 packets: 2,736 /
+2,736 packets total. This is packet-level success, not a claim that every
+candidate produced a usable image. The six weighted signed-frequency
+aggregators collapsed to near-constant images in source preparation, before
+modem encoding; their rows are classified separately below. The quality table
+reports image-preserving candidates' mean received SSIMULACRA2 change against
+resize-first over 12 paired scene/profile comparisons; positive is better.
+`Wins` counts strictly positive paired changes.
+
+| Candidate | Mean ΔSSIMULACRA2 | Wins |
+|---|---:|---:|
+| direct-unclipped | +0.39 | 10/12 |
+| direct-retention | +0.35 | 10/12 |
+| usm-025 | +0.07 | 6/12 |
+| clarity-015 | +0.05 | 6/12 |
+| band-mid-luma | −0.05 | 4/12 |
+| taper-025 | −0.30 | 4/12 |
+| usm-050 | −0.51 | 4/12 |
+| clarity-030 | −1.25 | 3/12 |
+| chroma-110 | −1.96 | 3/12 |
+| taper-050 | −2.18 | 4/12 |
+| chroma-120 | −6.21 | 2/12 |
+| band-perceptual-color | −9.36 | 1/12 |
+
+The small positive direct-retention aggregates are driven by the synthetic
+chart (+0.36 mean) and gradient (+1.02), not by consistent native-face gains:
+the two face images averaged +0.08 and −0.06, respectively. Direct-unclipped
+was similarly close to baseline (+0.12 and +0.04 on those faces). The
+mid-luma profile gained +1.05 on the gradient but averaged −0.64 on each face;
+the perceptual-color profile lost 32.95 on the gradient and about 2 points per
+face. Direct retention is a near-tie rather than a reliable general improvement.
+
+The six weighted signed-frequency aggregators are **source-transform
+failures**, not merely low-scoring modem decodes. Their mean source-grid
+SSIMULACRA2 was −96.9 and mean received score was −97.1; visual outputs were
+near-constant brown fields because signed averaging cancelled useful AC energy.
+All 72 scene/profile rows still passed packet framing (864/864 packets
+displayable and EOF-validated), which confirms that this failure occurred in
+the candidate's image transform before transmission, not in transport decode.
+Their −78.5 mean deltas versus resize-first are retained only as failure
+diagnostics and are excluded from the image-preserving candidate ranking.
+
+**Weighted DCT correction and recheck (2026-09-29):** the broken signed-mode
+averaging was replaced with same-index coefficient gains. The tent, cosine,
+and Gaussian modes now multiply each retained DCT coefficient by separable
+frequency windows; no coefficient is mixed with a neighboring mode. The full
+21-variant production-path comparison on
+`images_sbs/face/00_C_BG_faceSource_960/benFaceSource0000.jpg` used stereo
+Fold-500 and the clean 96 kHz channel. All 252/252 packets were displayable and
+all EOF markers validated. Received SSIMULACRA2 on the full 1080×900 comparison
+canvas was −44.385 for resize-first. The corrected weighted variants scored:
+
+| Candidate | Canvas ΔSSIMULACRA2 | Viewport ΔSSIMULACRA2 | Prep + encode/packet | Relative to resize-first |
+|---|---:|---:|---:|---:|
+| weighted-tent | −8.84 | −4.80 | 34.02 ms | 11.25× |
+| weighted-cosine | −4.80 | −2.79 | 36.70 ms | 12.14× |
+| weighted-gaussian | −2.66 | −1.60 | 43.54 ms | 14.40× |
+
+Clipped/unclipped pairs produced identical received scores. The transform no
+longer produces the near-constant brown collapse, but the tapers soften detail
+and none improves on resize-first. The decoded planes were already reconstructed
+to the benchmark viewport (675×900) and centered on the canvas; the initial
+score included the shared gray side bars. A second score pass cropped both
+reference and decoded images to that exact viewport. Its baseline was −57.767;
+the table reports viewport-only deltas. This is a single source/profile
+recheck, not the earlier 12-case aggregate. The 21-row report, viewport-only
+scores, and comparison sheets are in
+`tmp/v7-first-face-weighted-spectral-recheck/`; no candidate is promoted.
+
+Per-trial source-preparation wall times in the finalist run were about 1.8 ms
+for resize-first and 38–51 ms for direct source DCT at 720×960. A warmed paired
+measurement on the native 0000 face frame (three warmups, ten interleaved
+rounds) measured resize-first at 2.19 ms median and direct retention at 47.65
+ms median: +2,073% wall time. CPU medians were 2.20 ms and 47.64 ms
+respectively, also far beyond the Section 11.6 25% budget. Full measurements
+and environment details are in
+`tmp/v7-source-dct-finalists-12pkt/timing-pair.json`. No candidate is promoted
+and the default remains unchanged. The unclipped diagnostic does not offset
+this cost or provide a consistent native-face quality improvement.
+
+#### Fold-aware grid-DCT encode timing
+
+The opt-in `modem_v7_display.encode_image_dct_packet` path transforms the
+application's already sampled YCbCr planes directly to the full-grid DCT vector
+consumed by Fold 500. It skips the intermediate flattened spatial-value vector
+and enters the same `Fold500.encode_dct_coefficients` and production packet
+path. It still includes the application's BOX resize to 80×96; it is not the
+native-resolution `source_dct_values` projection above, whose preparation cost
+remains far outside the encode budget. Since the new path produces a
+byte-identical packet, this is an encoder implementation/timing result, not an
+image-quality candidate.
+
+Run the paired timing gate with:
+
+```bash
+.venv/bin/python tools/modem_v7_dct_encode_bench.py
+```
+
+On the native 720×960 left-eye crop, 120 alternating pairs with ten warmups
+measured resize-first at 2.833 ms median and direct grid-DCT at 2.822 ms; the
+paired median was 0.9882× (−1.18%, −0.034 ms). Packets were byte-identical.
+The timer includes source preparation, Fold 500, coded-pilot insertion, and
+packet synthesis; it excludes compositing, output-rate adaptation, and audio
+device output. The full measurements are in
+`tmp/v7-folded-grid-dct-timing.json`; byte-level parity is covered by
+`modem_tests.test_v7_wire_profile`.
+
+The unchanged default-wire gate is archived in
+`tmp/v7-source-dct-wire-gate/`: all 25 cases produced 12/12 displayable,
+EOF-validated outputs (300/300). `hiss-35`, `dropouts`, and `mains-buzz` still
+reported some lost decode statuses, while the output path remained displayable
+for every packet. This confirms the wire regression gate; it does not make the
+synthetic impairments a tape model.
+
+The earlier packet-synchronous motion results are archived in
+`tmp/v7-source-dct-motion-final/`. All 18 profile/variant/channel trials
+displayed and EOF-validated 12/12 frames (216/216). On this synthetic moving
+checker/bar scene, direct retention improved mean received SSIMULACRA2 by
+5.1–7.4 points over resize-first, but the decoded high-frequency checker detail
+remained visibly soft. Static-region temporal-delta MAE increased slightly
+(0.04–0.17 Y levels) in the same comparisons; direct-unclipped was similar or
+slightly worse. The sequence therefore shows a motion-detail score gain without
+a temporal-stability gain, and does not override the native-face results or the
+preprocessing-cost gate.
+
+| Profile | Clean ΔSSIMULACRA2 | Clean Δtemporal MAE (Y) | Type II ΔSSIMULACRA2 | Type II Δtemporal MAE (Y) |
+|---|---:|---:|---:|---:|
+| stereo-fold-500 | +7.42 | +0.04 | +7.12 | +0.11 |
+| mono-fold-500 | +5.82 | +0.09 | +5.09 | +0.17 |
+| mono-colour-500 | +5.91 | +0.06 | +5.66 | +0.10 |
+
+#### Follow-on dither and transform probes
+
+The follow-on dither probe is archived in `tmp/v7-dither-wire-probe/`. It
+used stochastic rounding at the fold host quantizers, with white, pink, or
+brown-correlated threshold fields; the same unchanged receiver decoded all
+42 twelve-packet sequences (504/504 packets displayable and EOF-validated).
+Across two scenes, three profiles, and both direct-DCT variants, the mean
+per-frame SSIMULACRA2 change versus ordinary nearest rounding was −1.25 for
+white, −1.15 for pink, and −0.96 for brown. Averaging the 12 decoded RGB frames
+offline changed those means to +0.68, +0.73, and +0.77, respectively. That
+average is not what the receiver displays; the single-frame dither result is
+worse, so colored dither is not a promotion candidate.
+
+The direct-DCT, dither, corrected chroma-transfer, and viewport-fit probes used
+the existing frozen M=500 tables only: `stereo-fold-500`, `mono-fold-500`, and
+`mono-colour-500`. They did not retune the fold or test M=1000. The replacement
+production-parity clean matrix generates packets at the nominal 48 kHz
+reference rate, then applies the production per-packet 1× `band_limited`
+adapter for 96 kHz output and receiver decode. No receiver-side 48 kHz or
+44.1 kHz comparison was run.
+
+Other ideal-fold screens tested stronger luma shelves, coefficient
+companding, edge-weighted coefficient fitting, exact signed DCT resampling
+kernels, chroma-detail projection into luma, and perceptual choices of fold
+host quantizer levels. None showed a repeatable large gain; aggressive shelves
+and edge-weighted quantization noticeably regressed the face fixtures, while
+the better exact-resampling and chroma-transfer cases were near ties. These
+screens and decoded examples are under `tmp/v7-dct-resample-probe/`,
+`tmp/v7-edgefit-probe/`, `tmp/v7-chroma-luma-transfer-probe/`, and
+`tmp/v7-lattice-*.png`. The probes reinforce the current limit:
+with the same 2,880 transmitted coefficients and unchanged DCT reconstruction,
+transform-only changes can redistribute error but cannot restore omitted
+spatial detail. A genuinely large fidelity jump likely needs a receiver-side
+image prior or a larger wire budget.
+
+A corrected chroma-to-luma probe then targeted only the actual 500 fold guest
+slots, transferring the least-squares RGB projection of otherwise-unsent
+high-frequency Cb/Cr coefficients into those luma modes. The earlier screen
+had mistakenly selected chroma modes beyond the entire 48×40 chroma grid and
+missed most coefficients lost at the smaller 24×20 transmitted corner. With
+the corrected mask, the strength-1.5 ideal-fold screen gained 0.05–0.12
+points on the native-face comparisons, but lost on the gradient and chart; its
+12-pair mean was −0.03. The actual stereo modem probe is archived in
+`tmp/v7-chroma-guest-wire-probe/`: all 144 packets (three scenes × two
+variants × two channels × 12 packets) displayed and EOF-validated. Against
+direct retention, mean-frame SSIMULACRA2 changed by −0.03 on clean and +0.04
+on Type II when averaged across the face, gradient, and chart. The face gained
+about +0.10/+0.13 on clean/Type II, while synthetic scenes were flat or slightly
+worse. Visual comparison showed no compelling detail recovery, so this remains
+rejected.
+
+One additional diagnostic fitted each transmitted DCT mode to the actual
+aspect-correct receiver viewport instead of analyzing the source frame's DCT.
+After the ordinary FoldCodec quantizer, it averaged +0.05 SSIMULACRA2 over the
+12 scene/profile pairs (8 wins), again a near-tie. Bypassing host quantization
+and directly placing those fitted values into the receiver's 2,880 model modes
+plus fixed guest modes gave a +1.93 mean score reference, but that version is
+not encodable through the existing fold quantizer. The outputs and metrics are
+in `tmp/v7-display-fit-candidate/` and
+`tmp/v7-receiver-subspace-upper-bound/`. The gap between these two diagnostic
+results points to host quantization and its fixed codepoints as an important
+remaining loss; the practical encoder-only fit recovers almost none of that
+idealized gain.
+
+#### Future wire budgets
+
+Separating source DCT analysis from coefficient selection provides a basis for
+future supported budgets. This proposal tests only the existing budget and
+current model/fold tables. A different budget requires a defined coefficient
+map, matching sender/receiver profile, and compatible model/fold tables; it
+must not be inferred dynamically from available bandwidth or introduced as an
+unannounced wire change.
+
+#### Block-integrated projection timing probe (2026-09-29)
+
+`source_fold_block_dct_coefficients` is an explicit-only approximation probe
+for reducing the Fold-native projection cost. A compiled RGB block-average pass
+feeds separable projections using the original full-resolution DCT basis
+integrated over each block. This keeps retained modes at native-source
+frequencies; it is not a same-index DCT of a resized image. It is exact for
+block-constant input and loses within-block detail on general images. It sends
+the resulting coefficient vector through the unchanged Fold-500 and production
+packet/receiver path. The normal sender and wire are unchanged.
+
+The production comparison in
+`tmp/v7-under3-block-multi-cached/results.json` covers four 720×960 inputs from the
+first `images_sbs/face` folder, resize-first and 8× block projection, stereo
+Fold-500, clean 96 kHz output, and 12 packets per case. All 96/96 packets were
+displayable and EOF-validated. Received viewport SSIMULACRA2 improved by
++0.17, +0.27, +0.21, and +0.21 (mean +0.21; four wins). Side-by-side viewport
+inspection showed no clear visible improvement, so this remains a timing
+probe, not a promoted quality transform.
+
+A 200-pair randomized-order profile compares the normal resize/value path, the
+byte-identical direct grid-DCT path in the pending sender changes, and the
+block-8 candidate. Reproduce all three with:
+
+```bash
+.venv/bin/python tools/v7_fold_block_encode_profile.py \
+  --source images_sbs/face/00_C_BG_faceSource_960/benFaceSource0000.jpg \
+  --source images_sbs/face/00_C_BG_faceSource_960/benFaceSource0016.jpg \
+  --source images_sbs/face/00_C_BG_faceSource_960/benFaceSource0037.jpg \
+  --source images_sbs/face/00_C_BG_faceSource_960/benFaceSource0044.jpg \
+  --out tmp/v7-under3-paired-three-way-profile.json --rounds 200
+```
+
+The cached-plan block-8 candidate measured 2.28–2.34 ms/frame median across the
+four images; the direct grid-DCT path measured 2.87–3.03 ms and resize-first
+measured 2.88–3.01 ms. Paired candidate/direct-grid median ratios were
+0.75–0.78. The stated sub-2 ms baseline was not reproduced by this in-process
+profile, even for the pending direct grid-DCT sender path. Block-8 P90 was
+3.02–3.67 ms, so its median meets the target but its tail latency does not do so
+reliably. The cached projector setup is reported separately (about 0.17–2.06 ms
+once per source geometry); per-frame timings exclude that setup and source/model
+loading. The 7-run quality-benchmark timings are less stable and remain in the
+results JSON; use the 200-pair profile for latency comparison. The native
+full-resolution projection remains about 5–6 ms preparation before packet
+encoding. No transform is promoted.
+
+A 12× block-factor probe in `tmp/v7-under3-block12-paired-profile.json` lowered
+the complete-path median to 2.10–2.19 ms/frame and P90 to 2.27–2.82 ms across
+the same four images. Its production decode comparison in
+`tmp/v7-under3-block12-multi/results.json` lost 0.55–1.10 viewport
+SSIMULACRA2 points (mean −0.79; zero wins). All 96/96 packets still displayed
+and passed EOF validation, but the quality loss rules this factor out.
+
+### 11.8 Corrective plan: full-resolution preparation optimization
+
+#### Agreed objective and correction of scope
+
+The requested engineering task is to optimize full-resolution pixel preparation
+first, then its forward DCTs, while retaining acceptable numerical and decoded
+image output. The first concrete task is to split tone/color/clipping costs,
+record dtype and allocation behavior, and implement neutral-tone fast paths
+plus single-allocation normalization. That work and the partial-DCT experiment
+are measured in Steps 1–4 below; neither produced an accepted sender
+optimization. The subsequent integer-factor BOX reducer in this section does
+improve the resize-first sender: the warmed 100-frame result is about 0.9 ms
+for preparation and 2.5 ms for preparation plus packet, versus the pre-reducer
+1.7 ms and 3.3 ms baseline. The full-resolution DCT results remain slower
+algorithmic comparisons, not the source of the sender improvement.
+
+The block-integrated Fold-500 projection in 11.7 was an assistant-proposed
+approximation in pursuit of the earlier image-quality/under-3-ms encode goal.
+“4×–12×” describes square source-pixel averaging blocks, not decode settings,
+speed multipliers, or added wire capacity. It is a different algorithm that
+discards within-block detail. Its measurements do not demonstrate optimization
+of the existing full-resolution preparation function. Keep it as an opt-in
+research result; do not use its timings to claim completion of this plan.
+
+The long-term goal remains better received images with low complete-encode
+latency. The immediate milestones below are preparation targets, not promises
+that the full-resolution path will meet the earlier 3-ms complete-encode goal.
+Preserve the packet format, receiver, model/fold tables, coefficient budget,
+tone ordering, aspect metadata, and normal sender defaults. Support source
+geometry through the existing full-resolution input contract; do not introduce
+block-divisibility restrictions or an RGB prescale as an implicit optimization.
+
+#### Step 0: repair the commit boundary
+
+Commit `03848213` was described as separate pending V7 integration work, but it
+also includes experimental entry points in `tools/v7_live.py` and
+`modem_v7_display.py` that import the still-untracked
+`animation_modem/v7_source_dct.py`. The separation is therefore incomplete:
+those experimental paths can fail on a fresh checkout.
+
+**Progress (2026-09-29):** a repair is committed on and pushed to branch
+`fix/v7-source-dct-checkout-boundary` as `96398f35`. It removes the live
+`--dct-encode` entry point, native-source capture-preserve-size plumbing, and
+`encode_folded_source_packet` dependency from that branch. The independent
+direct grid-DCT packet path and its parity benchmark remain because they do not
+depend on the untracked source-DCT module. The user's separate receiver-audio
+worktree edits were not included. The repair branch has not been merged;
+`modem-v7-integration` and its origin still point at `03848213`.
+
+The repair branch was checked without the untracked source-DCT files: 51
+targeted sender, capture, audio-source, wire-profile, Fold, and lazy-import tests
+passed; `tools/v7_live.py send --help` and compilation succeeded; and the
+committed Python tree has no source-DCT import, `--dct-encode`, or
+`preserve_size` references. No live audio stream was opened.
+
+The dependency inspection, repair commit, branch push, clean-tree tests, CLI
+help, compilation, and dependency scan are complete. The target integration
+branch still needs review and merge; keep that review boundary explicit while
+full-resolution preparation profiling proceeds on the repair branch.
+
+Before packaging any later opt-in feature:
+
+1. Inspect the committed dependency graph and identify every experimental
+   entry point, supporting refactor, test, and documentation dependency.
+2. Merge the reviewed repair branch without rewriting the already-pushed
+   commit. Keep the removed implementation locally with the experiment.
+3. Re-verify the resulting target branch independently of untracked files. Check
+   CLI startup, normal sender behavior, lazy imports, and relevant packet-parity
+   tests. Do not validate solely against the mixed development worktree.
+4. Package any later opt-in feature with all of its dependencies and tests in
+   the same coherent change. Report the exact commit contents before any push.
+
+#### Step 1: establish the reference and measurement harness
+
+**Baseline-scope correction (2026-09-29):** the 46.670-ms Step 1 reference is
+the original *experimental full-resolution source-DCT function*. It is not the
+existing sender baseline. The actual sender resizes first, then computes the
+small coder-grid values. A fresh 200-pair production-path profile is saved at
+`tmp/v7-source-dct-production-baseline-20260929/current-numba-baseline-profile.json`.
+For `benFaceSource0000.jpg`, resize-first preparation measured 1.585/1.822 ms
+median/P90 and preparation plus the production packet measured 2.911/3.871 ms.
+The four-source profile in `tmp/v7-under3-paired-three-way-profile.json` puts
+resize-first total medians at 2.88–3.01 ms. The full-resolution partial-DCT
+numbers below were compared with the full-resolution reference, not paired
+against this sender baseline; they do not establish a sender speedup. The
+candidate did use the fused Numba color kernel, but its separable DCT uses
+NumPy/BLAS matrix products; this does not change the baseline mismatch. I did
+not carry the Numba block-average kernel into the full-resolution algorithm,
+because it is an approximation and the spec keeps block averaging separate.
+The existing Numba block-8 projector is measured as its own path: the fresh
+profile reports 1.077/1.767 ms preparation and 2.272/3.437 ms
+preparation-plus-packet on this image. Keep that block-averaging result
+separate from full-resolution DCT conclusions.
+
+**Reference baseline captured (2026-09-29; 200 timed samples per path, 10
+warm-ups):** the file hash is
+`f1b55bbe2fba878763b4fb526a65fa81853177719a7484ef9fad8641d6163cf0`; the
+decoded left-eye RGB array is 960×720×3 `uint8`, C-contiguous, read-only. The
+reference output and full report are in
+`tmp/v7-source-prep-baseline-20260929/{baseline-output.npz,profile.json}`.
+Output values are float64, length 11,520, hash
+`121da3288dd5c6714239c443adf5e42ff8c24dc79787488dd220f6788421bd0f`.
+
+On the 4-vCPU AMD EPYC-Milan host (Python 3.13.5, NumPy 2.2.4, SciPy 1.18.1,
+Pillow 11.1.0), with no line tracing or competing benchmark, the experimental
+full-resolution reference preparation measured 46.670 ms median / 48.660 ms
+P90. With that experimental preparation, the production Fold-500
+prepare-plus-packet path measured 49.458 / 53.437 ms. Stage medians
+(P90) were: normalization/input checks 2.461 (2.738) ms; brightness/tone clip
+6.581 (7.143); recomputed brightness diagnostic scan 2.043 (2.220); neutral
+gamma branch below timer resolution; YCbCr arithmetic 9.334 (10.585); chroma
+clip 0.632 (0.720); chroma diagnostic scan 0.510 (0.578); forward DCTs Y/Cb/Cr
+4.411/4.398/4.424 ms; inverse DCTs Y/Cb/Cr 0.058/0.026/0.026 ms. The current
+tone and chroma clipping fractions are both zero; the final coder-grid clipping
+fraction is 0.00104167. A separate `tracemalloc` call observed a 66,483,492-byte
+peak; it is not a latency measurement and may not include all native FFT memory.
+The report includes the complete 200-sample raw timing arrays, setup costs,
+array layouts, expression/allocation inventory, software, CPU, and thread
+environment. This run establishes the full-resolution algorithmic reference
+and saved numerical oracle; the existing sender baseline is recorded in the
+scope correction above.
+
+Use the same decoded 720×960 left-eye frame from the first `images_sbs/face`
+folder, initially `00_C_BG_faceSource_960/benFaceSource0000.jpg`, with identical
+settings for reference and candidate. Retain the original full-resolution
+`source_dct_values` implementation as an evaluation reference and save its
+output values and diagnostics under `tmp/` before modifying the algorithm.
+Record source identity, dimensions, dtype, settings, software versions, CPU,
+and numerical-library thread configuration.
+
+Measure both individual preparation stages and the complete uninstrumented
+call. Warm up all paths; exclude loading, plan creation, and compilation from
+steady-state timing and report their costs separately. Alternate reference and
+candidate order across at least 200 paired runs. Record median and P90, sample
+counts, and raw timings. Run timing jobs serially without simultaneous quality
+benchmarks or test suites competing for CPU. Final performance numbers must
+come from runs without line tracing.
+
+First split the previously reported 25.13-ms tone/color/clipping stage into:
+brightness/tone adjustment, gamma, YCbCr arithmetic, clipping, and diagnostic
+scans. Record input/intermediate dtypes, shapes, strides, ownership, and the
+full-image temporary arrays each expression creates. Measure allocations
+separately from latency when instrumentation affects execution. Timings locate
+cost; they do not establish whether precision, allocation, layout, bandwidth,
+or arithmetic is the cause.
+
+#### Step 2: normalization and exact neutral-tone fast paths
+
+**Initial Step 2 result (2026-09-29):** on branch
+`perf/v7-source-dct-preparation`, the reference implementation is retained as
+`source_dct_values_reference`; `source_dct_values` now uses a single owned
+float64 normalization destination where conversion is needed and skips the
+neutral brightness/clip pass only when normalization proves the input is in
+[0, 1]. Neutral gamma remains an identity. Non-neutral tone and accepted float
+inputs retain the prior clipping/range behavior. This is still float64.
+
+The comparison artifact
+`tmp/v7-source-prep-comparison-20260929/comparison.json` contains 200
+alternating reference/candidate pairs (10 warm-ups), raw timings, isolated
+stage samples, and separate allocation traces. These timings are for the
+experimental full-resolution path, not the existing resize-first sender. Paired
+median preparation was 47.795 ms reference / 39.572 ms candidate (−17.2%);
+P90 was 51.764 / 43.990 ms (−15.0%). The experimental-preparation-plus-
+production-Fold-500-packet median was 49.269 / 40.974 ms (−16.8%); P90 was
+53.275 / 45.553 ms (−14.5%). The
+candidate's traced peak was 49,894,406 bytes versus 66,483,588 bytes, about one
+16.6-MB RGB float64 frame lower. These traced numbers are allocation evidence,
+not timings.
+
+For the saved 720×960 frame, values remained bit-identical (max/RMS error 0,
+zero changed values); tone, Cb, Cr, and coder-grid clipping decisions had zero
+changed entries. Three production packets decoded and passed all three EOF
+markers for each path; rendered receiver images were byte-identical (900×675,
+zero changed pixels). The source-path tests and all 422 `modem_tests` passed.
+This exact normalization/neutral-tone step is complete at float64. The
+arithmetic/color work and its final paired result are recorded in Step 3 below;
+no reduced-precision transform has been accepted.
+
+Implement and evaluate these first, at the original precision:
+
+- Validate shape and dtype inexpensively. For uint8 input, use its guaranteed
+  finite 0–255 range instead of repeated content scans. Preserve necessary
+  finite/range checks and the existing accepted float-input behavior.
+- Convert to the working dtype once and normalize into that owned destination
+  buffer using destination operations, avoiding successive full-image arrays.
+- Skip neutral brightness multiplication when the input-range contract makes
+  that exact. Skip neutral gamma computation. Avoid redundant copies and
+  clipping only where bounds are guaranteed; float inputs need particular care.
+- Preserve brightness, clipping, gamma, color conversion, and chroma clipping
+  order. Reuse computed expressions for diagnostics without changing their
+  meaning or modifying caller-owned input.
+
+Deliver a before/after stage and whole-function timing report, output errors,
+and clipping-decision comparisons. Only then benchmark float32 against float64
+through the entire preparation call, including transforms and final packing.
+Reduced precision is a separately reported tradeoff, not an assumed equivalent
+implementation.
+
+#### Step 3: reduce pixel-pass and temporary-array costs
+
+**Step 3 result (2026-09-29):** two original-precision color implementations
+were compared. The buffered NumPy arithmetic preserved exact outputs and
+lowered peak memory, but its isolated YCbCr/chroma stage was not faster, so the
+experimental candidate uses a fused, parallel Numba color loop instead. It
+writes the three contiguous float64 planes directly and counts chroma clip
+decisions while clipping. At the measured neutral brightness/gamma settings, normalization's
+owned RGB buffer is reused directly, so no extra tone buffer is created; the
+fused color kernel avoids full-image arithmetic temporaries. For non-neutral
+controls, the existing tone/gamma operations remain ahead of this kernel.
+
+The final 200-pair run is saved in
+`tmp/v7-source-prep-final-comparison-20260929/comparison.json`. Reference versus
+fused candidate median/P90 preparation was 43.293/47.201 ms versus
+19.904/22.161 ms. The experimental-preparation-plus-production-packet path
+was 44.795/48.803 ms
+versus 21.368/23.712 ms, a 52.3% median reduction; encode-only time stayed
+about 1.47 ms. The fused candidate's isolated color+chroma median was 0.594 ms;
+the reference color arithmetic and chroma clip/diagnostic stages were 8.868 ms
+and 1.183 ms. A separate alternating kernel microbenchmark measured buffered
+NumPy at 11.100/13.384 ms median/P90 and Numba at 1.457/2.206 ms. Isolated
+stage timings are diagnostic; accept on the paired complete-call measurements.
+
+Values, diagnostics, and packet samples were bit-identical. Tone/chroma/grid
+clip masks had zero changed decisions, and all three decoded packets passed EOF
+validation. Receiver-rendered RGB remained byte-identical with zero changed
+pixels. Traced peak memory fell from 66,483,588 to 38,834,644 bytes. This is
+allocation evidence, separate from latency.
+
+Numba used four threads. On an empty cache, eager compilation of the color
+kernel took 1,339 ms; its first execution after compilation took 4.526 ms and
+the subsequent direct-kernel median/P90 was 2.876/3.466 ms. The full candidate's
+first preparation call took about 1.49 s when it compiled lazily. The paired
+steady-state run excludes this one-time compile/first-call cost. Keep it
+explicit in any application startup or real-time decision. The compiled path is
+still float64 and is exact against the original expression path on the saved
+frame, random RGB input, and saturated primary colors.
+
+Within the experimental full-resolution pipeline, preparation is substantially
+faster than its original reference; this does not beat the existing
+resize-first sender baseline. The next section evaluates forward-DCT
+configuration. Precision remains unchanged.
+
+After the first measured change, optimize tone and color array operations using
+owned reusable buffers and destination scaling/clipping. Produce planes in a
+layout suitable for the DCT and include that layout's creation cost. Avoid
+recomputing brightness/color expressions just to collect diagnostics.
+
+If array operations remain dominant, compare a compiled fused loop combining
+normalization, brightness, clipping, gamma, color conversion, and chroma
+clipping against the optimized array implementation. Report compilation and
+first-call cost separately. Keep the original reference available throughout
+evaluation. Exercise neutral and non-neutral brightness/gamma, saturated
+colors, values at and around clipping boundaries, and accepted input dtypes.
+
+#### Step 4: forward DCT configuration
+
+**Step 4 full-transform selection (2026-09-29):** the screening run is saved
+under `tmp/v7-source-dct-transform-screen-20260929/transform-screen.json` and
+covered 23 paired 40-sample configurations, including separate/batched float64
+and float32 transforms, workers 1/2/4, and overwrite on/off. SciPy returned the
+requested float32/float64 output dtype. Float32 reduced coefficients had max
+absolute error `5.96e-7`, RMS `1.36e-7`, and no changed clipping decisions, but
+the fastest measured complete-call median was the exact float64 separate,
+four-worker, overwrite-enabled setting. A dedicated alternating 200-pair
+comparison is in `tmp/v7-source-dct-dct-final-20260929/`:
+float64 four-worker overwrite reduced median/P90 preparation from
+18.939/21.258 ms to 9.716/11.292 ms. Values, coder-grid clipping decisions,
+production packet audio, EOF validation (3/3), decoded grid values, and
+900×675 receiver RGB were identical. This remains the best full-transform
+reference configuration for the experimental full-resolution pipeline. The
+partial-DCT method below is also experimental; it is not the production sender.
+
+**Initial retained-mode separable projection result (NumPy/BLAS, 2026-09-29):**
+the first `source_dct_values` experiment evaluated the orthonormal DCT-II
+retained corner directly with cached float64 cosine bases and two matrix
+products per plane. It did not resize or block-average the source. The
+full-resolution reference remains selectable via
+`source_dct_values_configured(..., dct_partial=False, dct_workers=4,
+dct_overwrite=True)`. The final alternating
+200-pair report is `tmp/v7-source-dct-partial-screen-20260929/partial-profile.json`.
+Against that best full-DCT configuration, partial preparation measured
+7.955/15.067 ms median/P90 versus 19.461/31.329 ms; preparation plus the
+production Fold-500 packet measured 9.630/18.130 ms versus 21.151/33.424 ms.
+Paired candidate-minus-full P90 deltas were −6.558 ms for preparation and
+−4.895 ms for prepare-plus-packet. Packet encoding alone was slightly slower
+(1.607/1.891 ms versus 1.462/1.738 ms), but the total path improved. Timing
+tails varied on this four-CPU host; paired distributions and raw samples are
+preserved in the report.
+
+These are within-experiment comparisons, not a performance win against the
+sender. The actual resize-first sender prepared the same frame in 1.585/1.822
+ms and completed preparation plus packet in 2.911/3.871 ms in the separate
+200-pair profile above. Thus the partial-DCT run's medians were about 5.0× the
+sender's preparation and 3.3× its complete path. Since those reports were not
+alternated in one paired run, treat the ratios as a scope correction, not a
+precision claim; the candidate fails the existing sender's latency gate either
+way. The new three-path attempt and the follow-up two-path alternating run are
+not used as canonical results because the sender-path timings were unstable:
+the three-path run measured 4.700/5.417 ms and the two-path run measured
+4.504/5.868 ms, versus 2.911/3.871 ms in the isolated production-baseline
+profile. Their raw reports are
+`tmp/v7-source-dct-production-baseline-20260929/production-baseline-profile.json`
+and `tmp/v7-source-dct-production-baseline-20260929/resize-first-vs-partial-paired.json`.
+No full-resolution sender speedup is claimed.
+
+The predeclared float64 tolerance passed: max absolute coder-value error was
+`1.14e-14`, RMS `2.18e-15`; on the first image both methods clipped the same
+12 grid values, with zero changed mask entries. Basis-plan setup was 4.34 ms
+and 1.80 MB, excluded from steady-state samples. Full-call traced peaks were
+similar (33.58 MB full
+DCT, 33.86 MB partial); only retained coefficient storage fell substantially,
+from 16.59 MB to 92 KB. The isolated per-plane transform median/P90 was
+4.251/9.066 ms full versus 0.802/1.982 ms partial; the complete paired call is
+the acceptance timing.
+
+The four-image report is
+`tmp/v7-source-dct-quality-four-20260929/quality-four-images.json`. Each path
+used production Fold-500 packet synthesis and the production 96 kHz output
+adaptation before receiver decoding. Across four images, both paths produced
+12/12 displayable packets and validated 12/12 EOF markers. Packet audio and
+decoded grid hashes matched; all four 900×675 viewport comparisons had zero
+changed RGB samples/pixels. Across the four frames, maximum absolute/RMS coder
+error was `1.14e-14`/`2.22e-15`; there were zero changed grid-clipping
+decisions.
+`source_dct_values` selects the partial float64 method in the experimental
+module; it has not been integrated into the live sender. No tape-channel test
+or live playback-latency claim is made.
+
+**Direct Numba projection follow-up (2026-09-29):** in the isolated
+`perf/v7-source-dct-preparation` worktree, both retained-mode matrix products
+were moved into parallel Numba loops with cached mode-first float64 bases. The
+kernel uses `fastmath=True`; the four-image numerical and receiver checks below
+passed. This is a genuine Numba projection, not a Numba wrapper around BLAS.
+
+The warmed, alternating 200-pair comparison against the existing resize-first
+sender is
+`tmp/v7-source-dct-numba-pure-prod-20260929/resize-first-vs-numba-pure-final.json`.
+It used four Numba and four OpenBLAS threads with a 50 ms out-of-timer settle
+interval between paths. The resize-first path measured 2.245/2.524 ms
+preparation and 3.952/4.817 ms preparation-plus-packet; the Numba
+full-resolution path measured 13.497/15.720 ms and 15.255/17.308 ms. Paired
+candidate-minus-sender deltas were 11.246/13.374 ms for preparation and
+11.091/13.250 ms for the complete path. An independent same-thread-setting
+sender profile, `tmp/v7-source-dct-numba-pure-prod-20260929/canonical-sender-four-threads.json`,
+measured 1.608/2.058 ms preparation and 2.957/4.106 ms complete, confirming that
+the Numba candidate does not approach the sender latency gate. The paired report
+retains raw samples and order-stratified results.
+
+**100-frame warmup follow-up:** 10 separate frames warmed each path, followed
+by 100 distinct measured frames (`benFaceSource0010.jpg`–`benFaceSource0109.jpg`).
+The paired raw report is `tmp/v7-source-dct-numba-100frame-warmup-20260930.json`;
+the resize-only report is
+`tmp/v7-source-dct-numba-100frame-resize-only-warmup-20260930.json`. In the
+paired run, resize-first measured 2.007/2.466 ms preparation and 3.729/4.399 ms
+complete; Numba partial measured 13.197/15.977 ms and 15.028/17.551 ms. The
+Numba first warmup call took 3.290 s including compilation; its tenth warmup
+call was 14.350 ms. In the isolated resize-only run, the 100-frame warmed
+median/P90 was 1.677/1.906 ms preparation and 3.306/3.689 ms complete. Its
+measured first-ten and last-ten medians were stable at 1.681/1.658 ms for
+preparation and 3.300/3.269 ms end-to-end. The paired run still showed an order
+effect when the resize-first path followed Numba, so the resize-only pass is the
+cleaner view of resize warmup behavior.
+
+**Exact current standalone live-build comparison:** because `tools/v7_live.py`
+has its own `_values` and LiveFold-500 packet path, it was measured separately
+from the `modem_v7_display` profile above. The 100-frame paired report is
+`tmp/v7-source-dct-current-live-build-100frame-20260930.json`; it invokes the
+current `_values`, LiveFold-500 coefficient/pilot encoder, and 48 kHz speed
+adapter, without opening an audio device. With 10 warmup frames, current-build
+resize-first measured 2.132/2.620 ms preparation and 3.926/5.025 ms complete;
+the Numba candidate measured 14.544/17.887 ms and 16.287/19.724 ms. Paired
+candidate-minus-current deltas were 12.544/15.749 ms for preparation and
+12.226/16.168 ms complete. The paired sender-only report,
+`tmp/v7-source-dct-current-live-build-100frame-resize-only-20260930.json`,
+measured the pre-integer-reducer path at 1.706/2.079 ms preparation and
+3.315/4.165 ms complete; first-ten and last-ten medians were stable. The Numba
+first warmup call took 3.334 s including JIT compilation; the tenth took
+16.384 ms. The interleaved profile has an order effect after Numba, so use the
+sender-only profile for the clean pre-optimization baseline.
+
+#### Integer-factor BOX preparation fast path (2026-09-30)
+
+The profile suite and artifacts are under
+`tmp/v7-source-prep-deep-profile-20260930/`. It covers the current live
+`tools/v7_live._values` path, `modem_v7_display._source_values`, the source-DCT
+reference and optimized transform variants used by the preparation/transform/
+partial/fused comparison scripts, native Fold projection, block-8 projection,
+and the exact live packet path. It also stores cProfile data for the complete
+`tools/v7_source_dct_bench.py` and `tools/v7_fold_block_encode_profile.py`
+entry points. Whole-bench profiling showed why source preparation must be
+isolated: the source-DCT quality bench spent 30.8 s cumulatively in 24
+SSIMULACRA2 scores, including 12.4 s encoding 65 PNGs, far more than in
+preparation.
+
+The current resize-first sender profile attributed about 1.3 ms/frame to
+Pillow's generic full-resolution BOX resize on a 720×960 RGB frame. For BOX
+input dimensions divisible by the prepared 80×96 grid,
+`animation_modem.v7.prepare_image` now uses `Image.reduce` with those exact
+integer factors; other dimensions and filters retain the generic resize path.
+For the 720×960 face frames this uses 9×10 source-pixel regions. The changed
+rounding is bounded by one RGB code value; this is an optimization of the
+existing resize-first pipeline, separate from the native-resolution DCT and
+the Fold block-projector approximation.
+
+This gain comes from exact integer-factor reduction, **not** from changing
+aspect-ratio handling. `prepare_image` already maps every input onto the fixed
+80×96 canvas. The fast path is selected exactly when
+`width % 80 == 0 and height % 96 == 0`; it works for varying source ratios
+(including 640×480, 720×960, and 800×480) and falls back to generic BOX resize
+when either axis is not divisible. The transmitted aspect metadata is not
+involved in this dispatch.
+
+A reproducible size suite is generated and benchmarked by
+`tools/v7_prepare_image_size_bench.py`. It writes 15 deterministic textured
+RGB images of different sizes/aspects to
+`tmp/v7-prepare-image-size-suite-20260930/images/` and stores every warmed raw
+timing sample in `results.json`. Each case has 40 paired runs with randomized
+operation order; timings cover RGB conversion plus the 80×96 BOX preparation,
+exclude image loading and `image_values`, and use no audio device. The table
+reports median/P90 milliseconds for the old generic resize and current
+`prepare_image`:
+
+| Input | Path | Generic resize | Current prepare | Median change | Max RGB delta |
+|---|---|---:|---:|---:|---:|
+| 320×240 | fallback | 0.225/0.262 | 0.228/0.254 | −1.4% | 0 |
+| 400×480 | reduce (5×5) | 0.470/0.500 | 0.165/0.182 | +65.0% | 1 |
+| 640×480 | reduce (8×5) | 0.593/0.626 | 0.305/0.340 | +48.6% | 1 |
+| 800×480 | reduce (10×5) | 0.752/0.772 | 0.345/0.367 | +54.1% | 1 |
+| 720×960 | reduce (9×10) | 1.365/1.432 | 0.555/0.599 | +59.3% | 1 |
+| 1280×768 | reduce (16×8) | 1.728/2.014 | 0.716/0.984 | +58.5% | 1 |
+| 1440×960 | reduce (18×10) | 2.399/2.599 | 0.963/1.178 | +59.9% | 1 |
+| 1920×1152 | reduce (24×12) | 3.869/4.244 | 1.683/2.088 | +56.5% | 1 |
+| 1280×720 | fallback | 1.655/1.717 | 1.665/1.727 | −0.6% | 0 |
+| 1600×900 | fallback | 2.461/2.536 | 2.445/2.503 | +0.6% | 0 |
+| 1920×1080 | fallback | 3.482/3.557 | 3.489/3.586 | −0.2% | 0 |
+| 2560×1440 | reduce (32×15) | 6.368/6.692 | 2.904/3.422 | +54.4% | 1 |
+| 3840×2160 | fallback | 14.599/14.892 | 14.683/15.209 | −0.6% | 0 |
+| 721×961 | fallback | 1.377/1.447 | 1.380/1.532 | −0.2% | 0 |
+| 1080×1920 | fallback | 3.705/3.902 | 3.732/3.963 | −0.7% | 0 |
+
+For all eight eligible images, coder-value error was at most 0.00380 RMS
+(maximum one RGB code value); the seven fallback outputs were byte-identical
+to generic resize. Fallback timing differences are within measurement noise
+(−0.7% to +0.6%), as expected from retaining the same resize operation. The
+suite verifies common HD/UHD inputs too: they do not necessarily qualify just
+because width divides by 80 (for example, 1920×1080 and 3840×2160 fail the
+height-divisibility check). Rerun with
+`.venv/bin/python tools/v7_prepare_image_size_bench.py`; the exact dimensions,
+eligibility decisions, accuracy metrics, and raw samples are in the JSON.
+
+#### Old/new smoke and synthetic-torture comparison
+
+The repository's standard modem torture fixture is 180×240. It does not enter
+the integer-reduce path, and generic BOX resize versus current preparation is
+byte-identical at that size. The size suite and `test_v7_prepare_image.py` now
+cover both that fallback behavior and eligible dimensions. To compare the
+optimized path under channel stress, the full 25-case default-wire synthetic
+torture matrix was also run old/new on a real 720×960 face crop (12 repeated
+packets per case, fixed seed). Received/lost counts matched in 24 of 25 cases;
+across all 25, both paths decoded and displayed 12/12 frames and validated
+12/12 EOF markers. `lowpass-4k` had 10/12 metadata-valid packets in both runs
+and was the same absolute matrix failure for both.
+
+Under `soft-saturation`, the old/new `received` status was 10/12 versus 9/12 for
+that particular crop, although both still displayed all 12 frames. A follow-up
+on four unique face crops gave received counts 10→9, 5→6, 11→11, and 12→12;
+each old/new run displayed 12/12. Thus the one-code rounding change can move a
+borderline packet's received/lost classification in a severe synthetic
+channel, but this sample did not show a systematic direction or a display
+drop. The clean paired decode check across the four unique crops remains
+12/12 with no changed clipping decisions. Raw matrix results are in
+`tmp/v7-source-prep-deep-profile-20260930/torture-old-vs-reduce/`, including
+`comparison.json` and `soft-saturation-multi-image/comparison.json`.
+
+In a warmed 100-distinct-frame sender-only run (10 warmups, 50 ms settling,
+the current LiveFold-500 encoder, coded pilots and 48 kHz packet adapter, no
+audio device), preparation measured **0.904/1.125 ms median/P90** and
+preparation-plus-packet **2.535/2.952 ms**. Against the sender-only profile just
+above, that is −0.802 ms median preparation (−47%) and −0.780 ms median total
+(−24%). The raw report is
+`tmp/v7-source-prep-deep-profile-20260930/current-live-resize-reduce-100frame.json`.
+The four-distinct-image quality check is
+`box-reduce-quality-four-unique.json`. Across the four 3:4 face frames, coder
+values changed by max/RMS `0.00784`/`0.00206–0.00212`, with no changed clipping
+decisions. Every resize and reduced path decoded 12/12 packets and validated
+12/12 EOF markers. Received Y-PSNR and Y-MAE were marginally better for all
+four samples. Decoded RGB differs from the old resize path by MAE
+`0.213–0.254` and at most three code values; packet audio is therefore not
+byte-identical, while the measured picture quality did not regress.
+
+`profile.json` includes warmed cProfile summaries, allocation probes, and
+steady-state call timings; each `.pstats` file can be opened with `pstats`. On
+the updated live path, `Image.reduce` is about 0.48 ms under cProfile and
+`image_values` about 0.27 ms. In the final warmed isolated profile, both the
+Numba partial-DCT and optimized full-DCT preparation calls were about 11 ms,
+versus 0.74 ms for the current live preparation path. Traced whole-call peaks
+were about 0.19 MB for the live path, 33.6 MB for optimized full DCT, and
+33.9 MB for Numba partial DCT. The reducer improves actual default sender
+preparation; the experimental full-resolution DCT algorithms remain slower.
+
+#### Aspect-aware DCT canvas geometry follow-up (2026-09-30)
+
+The three-bit V7 aspect field selects one of eight fixed display ratios; it is
+not an arbitrary exact-ratio value. The viewer uses that selection to choose
+the display viewport. For the tested 720×960 sources, the code is 3:4 exactly.
+This means preparation may map the source non-uniformly onto the fixed 80×96
+sampling grid and let the viewer's 3:4 viewport restore the intended outer
+frame geometry. The metadata does not undo arbitrary crops, zooms, or shifts;
+those changes remain in the decoded pixels and must be scored as such.
+
+To test whether a coder-grid-aligned DCT raster makes the math cheaper, the
+source was Lanczos-mapped to `(80k)×(96k)` before source DCT. These canvases
+match the 5:6 luma-grid aspect and make every input dimension the same integer
+multiple of its coder-grid dimension. All candidates used the same aspect code,
+default Fold-500 packet path, and decoded viewport. Across four distinct
+source frames and 40 uninstrumented
+preparation samples per variant, `k=6` (480×576) reduced DCT preparation from
+**37.57/55.45 ms median/P90** for native 720×960 DCT to **22.58/24.15 ms**,
+while mean received Y-PSNR remained
+27.5772 dB versus 27.5773 dB for native DCT. Decoded RGB differed from native
+DCT by mean 0.086 and at most two code values. All candidates decoded and
+validated 12/12 packets. This is a meaningful geometry result for the DCT
+experiment, but it is still far slower than current resize-first preparation
+at 0.71/0.80 ms.
+
+The aligned-grid sweep also tested smaller and larger multiples. `k=1` and
+`k=2` measured 7.25/7.49 ms and 9.00/9.51 ms, respectively; `k=10` creates an
+800×960 canvas, slightly upscaling the 720-pixel source width to match the
+sampling-grid aspect, and measured 53.77/64.20 ms. Its decoded result was almost
+identical to native DCT, with mean RGB error 0.008 and maximum one code value,
+but it was slower. The raw report is
+`tmp/v7-source-prep-deep-profile-20260930/aspect-aligned-grid-dct-sweep-k1-6-and10.json`.
+
+The aligned rasters were also tested with the exact Fold-support matrix
+projection, which avoids reconstructing spatial planes before Fold-500. With
+four BLAS threads, 40 warmed preparation samples per variant gave median prep
+times of **0.689 ms** for resize-first, **4.933 ms** for native Fold
+projection, **6.947 ms** for aligned `k=1`, **8.040 ms** for `k=2`, and
+**13.625 ms** for `k=6`. The native projection's mean received Y-PSNR was
+27.5787 dB; aligned results stayed within 0.005 dB, and all decoded 12/12
+packets. A one-BLAS-thread run did not improve those prep medians. This route
+skips the DCT/image/DCT detour, but remains slower than the optimized sender
+path; raw samples for four and one BLAS threads are in
+`aspect-fold-projection-sweep-openblas4.json` and
+`aspect-fold-projection-sweep-openblas1.json`.
+
+A separate zoom-and-crop sweep did not support using overscan zoom to improve
+the truncated DCT. Relative to native DCT, 1%, 2%, and 4% centered zooms reduced
+mean received Y-PSNR by about 1.07, 2.82, and 6.34 dB; the tested ±2/±4-pixel
+crop offsets did not recover those losses. Pure ±1/±2-pixel translations also
+did not improve on the unshifted native-DCT result. Those results are in
+`aspect-geometry-zoom-crop-shift-sweep.json` in the same artifact directory.
+The useful next geometry constraint is therefore matching the DCT analysis
+canvas to the fixed coder grid and the decoded viewport—not assuming metadata
+will reverse zoom, crop, or translation.
+
+A shared three-plane Numba kernel was also evaluated in a randomized 100-frame
+comparison (`tmp/v7-source-dct-numba-fused3-100frame-20260930.json`). Despite a
+small isolated-kernel improvement, its complete preparation was 1.899/4.448 ms
+slower median/P90 than the per-plane Numba calls, and preparation-plus-packet
+was 2.003/4.275 ms slower. It was removed from the candidate implementation;
+the per-plane Numba result remains the measured version.
+
+A 100-sample thread-count sweep of the per-plane Numba transforms
+(`tmp/v7-source-dct-numba-thread-sweep-20260930.json`) found four threads best:
+the three-plane transform median/P90 was 5.225/7.023 ms at four threads,
+compared with 2.092/2.505 ms for the NumPy/BLAS projection. One, two, and three
+Numba threads were slower (16.498/17.364, 7.865/8.588, and 5.664/6.578 ms).
+The Numba outputs were bit-identical across these thread counts. This confirms
+that thread tuning does not close the projection-performance gap.
+
+The same candidate was slower than the best full-DCT path as well (see
+`tmp/v7-source-dct-numba-pure-quality-20260929/full-dct-paired-profile.json/partial-profile.json`):
+10.477/12.820 ms preparation versus 9.588/12.377 ms, and 12.101/14.664 ms
+preparation-plus-packet versus 11.139/14.394 ms. The isolated per-plane
+transform was 4.794/11.947 ms for the Numba loops, compared with 1.118/2.278 ms
+for the NumPy/BLAS projection and 5.035/10.534 ms for the full SciPy DCT.
+Cached basis creation took 4.287 ms and 1.80 MB; the first Numba call including
+compilation took 1.971 s in the full-DCT profile (3.363 s in the production-pair
+process). The float64 result is 11,520 values / 92,160 bytes. Traced whole-call
+peaks were 33.58 MB for full DCT and 33.86 MB for Numba partial DCT.
+
+The four-image report is
+`tmp/v7-source-dct-numba-pure-quality-20260929/quality-four-images.json`.
+Maximum/RMS coder-value error was `9.55e-15`/`2.04e-15`; clipping decisions
+did not change. All 12/12 packets were displayable with validated EOF markers,
+packet audio matched, and all four decoded 900×675 viewports had zero changed
+pixels. The direct Numba kernel therefore preserves the checked image result,
+but it is not a preparation or sender-performance optimization. It remains an
+isolated experiment and is not integrated into the live sender.
+
+The source-DCT prototype has 18 focused regression tests; the integer-factor
+BOX reducer adds two more preparation checks.
+`python -m unittest discover -s modem_tests -v` passed all 468 tests, including
+the integer-factor reducer regression checks; the 12-test modem-integration/
+lazy-import suite passed, and `tools/v7_live.py send
+--help` completed successfully. These checks ran after the steady-state timing
+jobs.
+
+Once pixel preparation has been measured and optimized, compare:
+
+1. Float64 and float32, checking actual transform output dtype and downstream
+   numerical error rather than assuming single precision is retained.
+2. Contiguous planes and the current layout, charging any layout conversion to
+   preparation time.
+3. Three separate transforms and a batched transform over spatial axes only;
+   never transform across the color-plane axis.
+4. A small explicit worker set, such as 1, 2, and 4. Choose by complete-call
+   latency and P90, with the host/thread environment recorded.
+5. Overwrite-capable transforms only for buffers whose contents can safely be
+   consumed.
+
+Verify orthonormal scaling and retained-mode coordinates against the reference.
+The retained-mode variants above complete the current partial/separable
+projection experiment. Any further projection change must include all
+preparation/layout costs and compare against both the best full DCT and actual
+resize-first sender. Fewer output coefficients are not evidence of a faster
+implementation. Reuse prior projection code only where its numerical contract
+matches this path; do not substitute block averaging.
+
+#### Step 5: combined numerical, image, and encode acceptance
+
+For every retained change, require an improvement in the complete preparation
+call, not only its isolated stage. Report median and P90 and investigate tail
+regressions. Exact fast paths should preserve reference results; for changes
+in precision or arithmetic order, report maximum absolute error, RMS error,
+and changed clipping decisions/counts. Declare and justify numerical tolerances
+before accepting a candidate rather than choosing them to fit observed errors.
+
+Run promising candidates through production Fold-500, packet synthesis, output
+adaptation, and receiver decoding on the same four first-folder face images.
+Inspect received viewport comparisons and report image metrics separately from
+displayable-packet and EOF-validation counts. A numerical near-tie or successful
+packet decode alone is not proof of acceptable picture quality. Recheck full
+preparation-plus-packet encoding directly; do not add an assumed fixed encoder
+cost to preparation measurements. Distinguish this timing from output-device
+and real-time playback latency. Synthetic channels are not tape validation.
+
+Use this reporting table, including median/P90 for new measurements. The
+resize-first column is the existing sender; full-DCT and partial-DCT columns
+are experimental full-resolution paths. The block-8 column is a separate
+approximation and must not be treated as a full-resolution result.
+
+| Measurement | Existing resize-first sender | Full-resolution DCT oracle | Initial partial-DCT (NumPy/BLAS) | Numba block-8 approximation |
+|---|---:|---:|---:|---:|
+| Source preparation | 1.585/1.822 ms | 19.461/31.329 ms | 7.955/15.067 ms | 1.077/1.767 ms |
+| Preparation plus packet | 2.911/3.871 ms | 21.151/33.424 ms | 9.630/18.130 ms | 2.272/3.437 ms |
+| Isolated forward DCT, per plane | Not applicable | 4.251/9.066 ms | 0.802/1.982 ms | Not measured |
+| Numerical comparison | Different resize-first sampling basis | Float64 full-resolution oracle | Four-image max/RMS `1.14e-14`/`2.22e-15`; zero changed clipping decisions versus oracle | Approximate; see Section 11.7 |
+| Received viewport comparison | Quality baseline | Full-DCT receiver render | Four images: zero changed pixels versus oracle | See Section 11.7 |
+
+The later direct-Numba comparison uses its own warmed 200-pair profile and the
+same-process sender baseline; its full-DCT comparison uses the paired
+full-resolution profile. These measurements are kept separate from the
+first-iteration table above:
+
+| Measurement | Resize-first sender | Full-resolution partial-DCT, direct Numba |
+|---|---:|---:|
+| Source preparation, median/P90 | 2.245/2.524 ms | 13.497/15.720 ms |
+| Preparation plus packet, median/P90 | 3.952/4.817 ms | 15.255/17.308 ms |
+| Numerical/clipping result | Different resize-first sampling basis | Four-image max/RMS `9.55e-15`/`2.04e-15`; zero changed clipping decisions versus full-DCT oracle |
+| Receiver result | Quality baseline | 12/12 displayable and EOF-validated; zero changed viewport pixels versus full-DCT oracle |
+
+The separate paired full-resolution comparison was:
+
+| Measurement | Full-resolution DCT | Full-resolution partial-DCT, direct Numba |
+|---|---:|---:|
+| Source preparation, median/P90 | 9.588/12.377 ms | 10.477/12.820 ms |
+| Preparation plus packet, median/P90 | 11.139/14.394 ms | 12.101/14.664 ms |
+| Isolated forward transform per plane, median/P90 | 5.035/10.534 ms | 4.794/11.947 ms |
+
+The first, NumPy/BLAS production-baseline and full-resolution results are
+separate runs, so their cross-column ratios are a scope correction, not a paired
+acceptance result. The direct-Numba sender comparison above is paired; its
+full-DCT comparison is a separate paired full-resolution profile. Stage medians
+need not sum to whole-function medians. Selection, scaling,
+inverse DCTs, and packing were together about 0.58 ms in the full-resolution
+experiment; that optimization opportunity does not alter the sender-baseline
+comparison.
+
+#### Milestones and communication contract
+
+- **First deliverable:** baseline stage split, dtype/allocation findings,
+  single-allocation normalization, and exact neutral-tone fast paths with
+  whole-call and numerical comparisons.
+- **Below 35 ms preparation:** engineering target for redundant-pass removal
+  and buffer/neutral-path work, subject to measured evidence.
+- **Below 25 ms preparation:** engineering target for fused pixel preparation
+  and validated DCT precision/layout changes, not a prediction.
+- **Reassessment:** the initial NumPy/BLAS retained-mode projection passed the
+  declared numerical and four-image receiver checks and improved timing against
+  the full-resolution oracle, but remained slower than the resize-first sender.
+  The direct Numba port also passed quality checks, but was slower than both the
+  NumPy/BLAS projection and full-DCT path. Neither is an accepted sender
+  optimization. Any future full-res candidate must be timed directly against
+  that sender baseline; block averaging remains a separate approximation
+  requiring an explicit scope decision.
+
+Each progress report must state which requested step was completed, what code
+changed, the input/settings tested, reference versus candidate median/P90,
+numerical and image findings, and what remains unmeasured. Distinguish a
+benchmark-only prototype from a live-sender feature and an experiment from an
+accepted optimization. Preserve results under `tmp/` and record durable
+conclusions here. Do not describe work as unrelated or independently shippable
+until its committed dependencies have been checked.
 
 ## 12. Receiver display GUI and reconstruction modes
 
@@ -2404,10 +3810,11 @@ Against the current live profile, this is about +2.6% encode CPU and +12.4%
 decode CPU. It is a local process-CPU measurement, not a wall-time or real-time
 audio result; paired wall-time and additional-machine checks remain outstanding.
 
-Real-time playback remains outstanding. The available audio device list in the
-development environment contained PulseAudio `pulse`/`default`, not
-`BlackHole 2ch`, so no real audio stream was opened. Synthetic loopback does not
-substitute for the Section 1 playback validation.
+Real-time playback remains outstanding. At the time of this historical check,
+the available device list contained PulseAudio `pulse`/`default`, not
+`BlackHole 2ch`, so no real audio stream was opened. The current host inventory
+and Xvfb smoke check are recorded in Section 1; they do not retroactively
+validate playback. Synthetic loopback does not substitute for that validation.
 
 ### 13.8 All-fresh mono video with a 500-class fold
 

@@ -108,7 +108,16 @@ PREPARED_SIZE = (80, 96)        # (width, height) every source is resized to
 def prepare_image(image, encode_filter='lanczos'):
     """Prepare an RGB source without depending on the application imaging API."""
     resampling = getattr(Image.Resampling, encode_filter.upper())
-    return image.convert('RGB').resize(PREPARED_SIZE, resampling)
+    image = image.convert('RGB')
+    if (resampling == Image.Resampling.BOX and
+            image.width % PREPARED_SIZE[0] == 0 and
+            image.height % PREPARED_SIZE[1] == 0):
+        # Pillow's integer-factor box reducer avoids the general resize filter
+        # setup for common camera/capture sizes. Its rounding can differ from
+        # resize(BOX) by one RGB code value, so keep this to BOX and exact grids.
+        return image.reduce((image.width//PREPARED_SIZE[0],
+                             image.height//PREPARED_SIZE[1]))
+    return image.resize(PREPARED_SIZE, resampling)
 
 
 def image_values(image, shapes=V7_SHAPES, encode_filter='lanczos'):
