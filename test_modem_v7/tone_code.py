@@ -30,6 +30,9 @@ from common import RATE as CAPTURE_RATE, v7
 FOLD_OFF = 0
 FOLD_500 = 1
 FOLD_1000 = 2
+# Code 3 ("mono fold off") is emitted live only by the hidden
+# --experimental-mono sender; the default receiver dispatches it as the
+# experimental aspect-mono-500 profile (aspect_mono.py).
 MONO_OFF = 3
 MONO_500 = 4
 MONO_1000 = 5

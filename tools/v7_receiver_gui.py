@@ -174,8 +174,8 @@ BASIC_OPTION_DESTS = frozenset((
 LIVE_RUNTIME_DESTS = frozenset((
     'audio_output_device', 'audio_muted', 'audio_volume', 'freewheel_seconds',
     'show_sync_warning'))
-# The aspect-fold-500 profile's layout and tail are not signalled on the
-# wire; the receiver's settings must match the sender's.
+# The aspect profiles' layout (and aspect-fold-500's tail) are not signalled
+# on the wire; the receiver's settings must match the sender's.
 ASPECT_OPTION_LABELS = {
     'aspect_layout': {'auto': 'Auto · source aspect in each packet'},
     'aspect_tail': {
@@ -431,7 +431,7 @@ def _field_label(action):
         'experimental_fold': 'Fold profile',
         'experimental_mono_fold': 'Experimental mono video fold',
         'mono_video_side': 'Mono video input side',
-        'aspect_layout': 'Aspect Fold 500 layout · match sender',
+        'aspect_layout': 'Aspect layout (stereo + mono) · match sender',
         'aspect_tail': 'Aspect Fold 500 tail · match sender',
     }
     return friendly.get(action.dest,

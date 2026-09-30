@@ -194,12 +194,17 @@ class MonoFreshFoldWire:
             raise ValueError('model is not registered for the mono video wire')
         return codec
 
+    def _packet_model(self, model, aspect_code):
+        """Mono model for one packet; layouts that follow the source aspect
+        choose it from the packet's aspect code."""
+        return self.model_for(model)
+
     def encode_packet(self, model, values, counter, aspect_code=0,
                       source_index=None, eof_marker=True):
         if not eof_marker:
             raise ValueError('the mono video profile requires EOF markers')
         base = model
-        mono_model = self.model_for(base)
+        mono_model = self._packet_model(base, aspect_code)
         codec = self._codec(mono_model) if self.use_fold else None
         coeffs = (codec.encode_coefficients(values) if self.use_fold else
                   base.coder.forward(values)/base.coder.gains)

@@ -34,12 +34,15 @@ PROFILE_CHOICES = (
     ('Mono video · colour Fold 500 · experimental', 'mono-colour-500'),
     ('Fold 1000 · advanced', 'fold-1000'),
     ('Aspect Fold 500 · experimental', 'aspect-fold-500'),
+    ('Mono video · aspect colour Fold 500 · experimental', 'aspect-mono-500'),
     ('Baseline · legacy', 'baseline'),
 )
-MONO_PROFILES = ('mono-fold-500', 'mono-colour-500')
+MONO_PROFILES = ('mono-fold-500', 'mono-colour-500', 'aspect-mono-500')
 FOLDED_PROFILES = ('fold-500', 'fold-1000', 'mono-fold-500',
-                   'mono-colour-500', 'aspect-fold-500')
-ASPECT_PROFILES = ('aspect-fold-500',)
+                   'mono-colour-500', 'aspect-fold-500', 'aspect-mono-500')
+ASPECT_PROFILES = ('aspect-fold-500', 'aspect-mono-500')
+# Only the stereo aspect profile has a V7 tail (mono packets carry none).
+ASPECT_TAIL_PROFILES = ('aspect-fold-500',)
 ASPECT_LAYOUT_CHOICES = (
     ('Auto · source aspect', 'auto'),
     ('1:1', '1:1'), ('4:3', '4:3'), ('3:2', '3:2'), ('16:9', '16:9'),
@@ -96,7 +99,7 @@ DCT_SHARPEN_CHOICES = (
 )
 # Direct DCT encode runs the 500-slot folded profiles with the Box filter.
 DCT_PROFILES = ('fold-500', 'mono-fold-500', 'mono-colour-500',
-                'aspect-fold-500')
+                'aspect-fold-500', 'aspect-mono-500')
 BOOL_FIELDS = ('video_live', 'video_preview', 'image_preview', 'dct_encode')
 MONO_VIDEO_SIDE_CHOICES = (
     ('Left output · right stays clear', 'left'),
@@ -156,8 +159,8 @@ FIELD_HELP = {
     'dct_sharpen_strength': 'Sharpen strength, from 0 to 1. Try 0.25 or 0.5.',
     'dct_clarity': 'Large-radius local contrast, from 0 to 1. Try 0.15 or 0.3.',
     'dct_chroma_gain': 'Saturation boost around neutral, from 1.0 to 1.3.',
-    'aspect_layout': ('Which coefficients Aspect Fold 500 sends: matched to '
-                      'this picture shape. Not signalled; set the receiver '
+    'aspect_layout': ('Which coefficients the aspect profiles send: matched '
+                      'to this picture shape. Not signalled; set the receiver '
                       'to the same layout.'),
     'aspect_tail': ('What the 96 tail slots carry. Not signalled; set the '
                     'receiver to the same tail.'),
@@ -967,7 +970,8 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
     aspect_layout, aspect_tail = 'auto', 'chroma'
     if profile in ASPECT_PROFILES:
         aspect_layout = settings.get('aspect_layout', 'auto')
-        aspect_tail = settings.get('aspect_tail', 'chroma')
+        if profile in ASPECT_TAIL_PROFILES:
+            aspect_tail = settings.get('aspect_tail', 'chroma')
         if aspect_layout not in dict(ASPECT_LAYOUT_CHOICES).values():
             raise ValueError('Choose a supported aspect layout.')
         if aspect_tail not in dict(ASPECT_TAIL_CHOICES).values():
@@ -1692,8 +1696,10 @@ class SenderGui:
             self.settings['profile'] not in DCT_PROFILES or
             dest in ('dct_sharpen', 'dct_clarity', 'dct_chroma_gain') and
             not self.settings['dct_encode'] or
-            dest in ('aspect_layout', 'aspect_tail') and
+            dest == 'aspect_layout' and
             self.settings['profile'] not in ASPECT_PROFILES or
+            dest == 'aspect_tail' and
+            self.settings['profile'] not in ASPECT_TAIL_PROFILES or
             dest == 'dct_sharpen_strength' and not (
                 self.settings['dct_encode'] and
                 self.settings['dct_sharpen'] != 'off') or
@@ -2286,6 +2292,9 @@ class SenderGui:
             *((('Aspect layout / tail', (
                 f"{self.settings.get('aspect_layout', 'auto')} / "
                 f"{self.settings.get('aspect_tail', 'chroma')} · match receiver")),)
+              if self.settings.get('profile') in ASPECT_TAIL_PROFILES else
+              (('Aspect layout', (
+                  f"{self.settings.get('aspect_layout', 'auto')} · match receiver")),)
               if self.settings.get('profile') in ASPECT_PROFILES else ()),
             ('Speed', f"{self.settings['speed']}×"),
         )

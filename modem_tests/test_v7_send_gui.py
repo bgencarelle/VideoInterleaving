@@ -537,6 +537,28 @@ class SenderGuiTests(unittest.TestCase):
         gui.advanced = False
         self.assertNotIn('aspect_tail', gui._visible_fields())
 
+    def test_aspect_mono_profile_forwards_layout_and_mono_routing_only(self):
+        self.settings.update(profile='aspect-mono-500', aspect_layout='4:3',
+                             aspect_tail='luma')
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+        self.assertEqual(args.profile, 'aspect-mono-500')
+        self.assertEqual(args.aspect_layout, '4:3')
+        self.assertNotIn('--aspect-tail', command)
+        self.assertIn('--mono-video-side', command)
+        v7_live._apply_profile_option(args)
+        self.assertTrue(args.aspect_mono and args.experimental_mono_fold)
+
+        gui = SenderGui(self.devices)
+        gui.settings['device'] = 3
+        gui.advanced = True
+        gui._assign('profile', 'aspect-mono-500')
+        visible = gui._visible_fields()
+        self.assertIn('aspect_layout', visible)
+        self.assertNotIn('aspect_tail', visible)
+        self.assertIn('mono_video_side', visible)
+        self.assertIn('dct_encode', visible)
+
     def test_ffmpeg_screen_input_is_forwarded_only_for_ffmpeg_capture(self):
         self.settings.update(source='screen', screen_backend='ffmpeg',
                              ffmpeg_input='x11grab::0.0')

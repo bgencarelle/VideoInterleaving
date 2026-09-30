@@ -237,6 +237,15 @@ receiver GUI shows them under advanced options. Tables are frozen in
 `test_modem_v7/aspect_tables.npz` (hash-pinned; rebuild with
 `python test_modem_v7/aspect_fold.py build`, then update `TABLES_SHA256`).
 
+`--profile aspect-mono-500` is the mono-video counterpart: mono colour Fold 500
+(the same 1,264 M-only slots in every packet on one output leg, chroma ranked
+×4, a luma-only 500-slot fold, the other leg free for source audio) over the
+same aspect layouts. It is signalled with profile code 3 (the rotating mono
+fold-off word, which only the hidden `--experimental-mono` sender emits; the
+default receiver now reads code 3 as aspect-mono-500). `--aspect-layout`
+applies and must match; there is no tail setting because mono packets carry
+no tail.
+
 List available device names with `.venv/bin/python -m sounddevice`. On separate
 machines, use the actual output-device name for sending and input-device name
 for receiving; they do not need to match.

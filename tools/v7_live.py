@@ -631,6 +631,9 @@ def _apply_profile_option(args):
         args.experimental_fold = 1000
     elif profile == 'aspect-fold-500':
         args.aspect_fold = True
+    elif profile == 'aspect-mono-500':
+        args.experimental_mono_fold = True
+        args.aspect_mono = True
 
 
 def run_send(args):
@@ -747,11 +750,18 @@ def _run_send_session(args):
     if mono_fold_profile:
         _ensure_test_modem_path()
         from mono_video import MonoColourFoldWire, MonoFreshFoldWire
-        wire_class = (MonoColourFoldWire
-                      if getattr(args, 'experimental_mono_colour', False)
-                      else MonoFreshFoldWire)
-        mono_wire = wire_class(
-            model, side=getattr(args, 'mono_video_side', 'right'))
+        if getattr(args, 'aspect_mono', False):
+            from aspect_mono import AspectMonoWire
+            # Builds every layout model the sender may need before audio.
+            mono_wire = AspectMonoWire(
+                model, side=getattr(args, 'mono_video_side', 'right'),
+                layout=getattr(args, 'aspect_layout', 'auto'))
+        else:
+            wire_class = (MonoColourFoldWire
+                          if getattr(args, 'experimental_mono_colour', False)
+                          else MonoFreshFoldWire)
+            mono_wire = wire_class(
+                model, side=getattr(args, 'mono_video_side', 'right'))
         from tone_code import warmup_status_templates
         warmup_status_templates(mono_wire.status_mode)
     elif mono_profile:
@@ -1212,6 +1222,8 @@ def _run_send_session(args):
                 if aspect_wire is not None:
                     wire_mode += (f' aspect-fold-500 layout={aspect_wire.layout} '
                                   f'tail={aspect_wire.tail}')
+                if getattr(mono_wire, 'wire_profile', None) == 'aspect-mono-500':
+                    wire_mode += f' layout={mono_wire.layout}'
                 if mono_fold_profile:
                     audio_side = 'right' if mono_wire.side == 'left' else 'left'
                     audio_label = source_audio_mode
@@ -1517,6 +1529,7 @@ class _AdaptiveProfileDecoder:
         _ensure_test_modem_path()
         from live_fold import LiveFold
         from aspect_fold import AspectFoldWire
+        from aspect_mono import AspectMonoWire
         from mono_video import (MonoColourFoldWire, MonoFreshFoldWire,
                                 mono_channel_profile)
         from tone_code import FOLD_500, MONO_500, MONO_1000
@@ -1526,9 +1539,15 @@ class _AdaptiveProfileDecoder:
         self.base_model = base_model
         self.preferred_side = preferred_side
         self.input_channels = 2
+        # Mono colour Fold 500 over an aspect layout; its layout is the
+        # same receiver setting as the stereo aspect profile's.
+        self.aspect_mono_wire = AspectMonoWire(base_model, side='both',
+                                               layout=aspect_layout)
+        self.aspect_mono_mode = self.aspect_mono_wire.status_mode
         self.mono_wires = {
             MONO_500: MonoFreshFoldWire(base_model, side='both'),
             MONO_1000: MonoColourFoldWire(base_model, side='both'),
+            self.aspect_mono_mode: self.aspect_mono_wire,
         }
         self.mono_channel_profile = mono_channel_profile
         self.mono_status_modes = frozenset(self.mono_wires)
@@ -1543,6 +1562,7 @@ class _AdaptiveProfileDecoder:
             self.aspect_mode: 'aspect-fold-500',
             MONO_500: 'mono-fold-500',
             MONO_1000: 'mono-colour-500',
+            self.aspect_mono_mode: 'aspect-mono-500',
         }
         self.active_mode = FOLD_500
         self.active_side = None
@@ -1803,9 +1823,17 @@ class _AdaptiveProfileDecoder:
             # The shared tail store follows the base model's ranks; this
             # layout keeps its own.
             prev_tail = self.aspect_wire.tail_prior(profile_model, aspect_layout)
+        if mode == getattr(self, 'aspect_mono_mode', None):
+            aspect_layout = self.aspect_mono_wire.layout_for(
+                hint.get('aspect_code'))
+            if aspect_layout is None:
+                return held('aspect_layout_unknown', observed_mode)
         if mode in self.mono_status_modes:
             try:
-                profile_model = self.mono_wires[mode].model_for(model)
+                profile_model = (
+                    self.mono_wires[mode].model_for(model, aspect_layout)
+                    if aspect_layout is not None else
+                    self.mono_wires[mode].model_for(model))
             except ValueError:
                 return held('unsupported_model_for_profile', observed_mode)
             # Mono layouts have no cross-packet tail memory. The outer pulse
@@ -1826,7 +1854,8 @@ class _AdaptiveProfileDecoder:
             result.diag['wire_profile'] = self._mode_names[mode]
             if aspect_layout is not None:
                 result.diag['aspect_layout'] = aspect_layout
-                result.diag['aspect_tail'] = self.aspect_wire.tail
+                if mode == self.aspect_mode:
+                    result.diag['aspect_tail'] = self.aspect_wire.tail
             if mode in self.mono_status_modes and self._local.equalized is not None:
                 result.diag['mono_fold_eq'] = self._local.equalized
         return result
@@ -1840,6 +1869,12 @@ class _AdaptiveProfileDecoder:
             profile_model = self.aspect_wire.model_for(model, layout)
             self.aspect_wire.remember(profile_model, layout, result)
             return self.aspect_wire.values(profile_model, result)
+        if mode == getattr(self, 'aspect_mono_mode', None):
+            layout = result.diag.get('aspect_layout')
+            if layout is None:
+                return self.v7.values_from(model, result.coeffs)
+            wire = self.aspect_mono_wire
+            return wire.values(wire.model_for(model, layout), result)
         if mode in self.mono_status_modes:
             wire = self.mono_wires[mode]
             return wire.values(wire.model_for(model), result)
@@ -2169,8 +2204,8 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
     if adaptive_profile is not None:
         _ensure_test_modem_path()
         from tone_code import warmup_status_templates
-        from tone_code import FOLD_500, FOLD_OFF, MONO_500, MONO_1000
-        for mode in (FOLD_500, FOLD_OFF, MONO_500, MONO_1000):
+        from tone_code import FOLD_500, FOLD_OFF, MONO_500, MONO_1000, MONO_OFF
+        for mode in (FOLD_500, FOLD_OFF, MONO_500, MONO_1000, MONO_OFF):
             warmup_status_templates(mode)
     if stop.is_set():
         return
@@ -2255,11 +2290,14 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
     else:
         input_mode = 'mono-input' if input_channels == 1 else 'M/S'
     _ensure_test_modem_path()
-    from tone_code import FOLD_500, FOLD_1000, FOLD_OFF, MONO_500, MONO_1000
-    mono_status = ((MONO_500, MONO_1000) if adaptive_profile is not None else
+    from tone_code import (FOLD_500, FOLD_1000, FOLD_OFF, MONO_500, MONO_1000,
+                           MONO_OFF)
+    # MONO_OFF is aspect-mono-500 under packet-profile dispatch.
+    mono_status = ((MONO_500, MONO_1000, MONO_OFF)
+                   if adaptive_profile is not None else
                    MONO_1000 if getattr(mono_wire, 'wire_profile', None) ==
                    'mono-colour-500' else MONO_500)
-    mono_status_name = ('MONO_500 / MONO_1000'
+    mono_status_name = ('MONO_500 / MONO_1000 / MONO_OFF'
                         if adaptive_profile is not None else
                         'MONO_1000' if mono_status == MONO_1000 else
                         'MONO_500')
@@ -3329,9 +3367,9 @@ ASPECT_TAIL_CHOICES = ('chroma', 'split', 'luma')
 def _add_aspect_arguments(sub):
     sub.add_argument(
         '--aspect-layout', choices=ASPECT_LAYOUT_CHOICES, default='auto',
-        help=('aspect-fold-500: coefficient layout aspect (default auto: the '
-              'source aspect sent in each packet). Sender and receiver must '
-              'agree.'))
+        help=('aspect-fold-500 and aspect-mono-500: coefficient layout aspect '
+              '(default auto: the source aspect sent in each packet). Sender '
+              'and receiver must agree.'))
     sub.add_argument(
         '--aspect-tail', choices=ASPECT_TAIL_CHOICES, default='chroma',
         help=('aspect-fold-500: what the 96 tail slots carry: chroma (rotating '
@@ -3406,14 +3444,17 @@ def parser():
     send_profile = send.add_mutually_exclusive_group()
     send_profile.add_argument(
         '--profile', choices=('mono-fold-500', 'fold-500', 'mono-colour-500',
-                              'fold-1000', 'aspect-fold-500'),
+                              'fold-1000', 'aspect-fold-500',
+                              'aspect-mono-500'),
         default=None,
         help=('wire profile: mono video with Fold 500 (recommended), '
               'stereo Fold 500 (default), or advanced Fold 1000, '
               'mono video with colour-weighted Fold 500 (experimental), '
               'stereo Fold 500 with an aspect-matched coefficient layout '
               '(experimental; set the receiver\'s --aspect-layout and '
-              '--aspect-tail to match)'))
+              '--aspect-tail to match), or mono video colour Fold 500 with '
+              'an aspect-matched layout (experimental; set the receiver\'s '
+              '--aspect-layout to match)'))
     send_profile.add_argument('--baseline', action='store_true',
                               help=argparse.SUPPRESS)
     send_profile.add_argument('--experimental-mono', action='store_true',
