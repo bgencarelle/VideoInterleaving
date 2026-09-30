@@ -1070,8 +1070,15 @@ class ReceiverGui:
             audio_volume=args.audio_volume)
         args.runtime_options = self.runtime_options
         # The receiver's ordinary output is captured for the GUI's message
-        # view. Send audio snapshots to the launch terminal separately.
+        # view. Send audio snapshots to the launch terminal separately unless
+        # explicitly disabled for a quiet GUI launch.
+        audio_diagnostics_env = os.environ.get('V7_AUDIO_DIAGNOSTICS')
+        audio_diagnostics_enabled = (
+            audio_diagnostics_env is None or
+            audio_diagnostics_env.strip().lower() not in
+            ('0', 'false', 'no', 'off'))
         args.audio_diagnostics = (
+            audio_diagnostics_enabled and
             args.audio_output_device is not None and sys.stdout is not None)
         args.audio_diagnostics_stream = sys.stdout
         start_image_only = any(
