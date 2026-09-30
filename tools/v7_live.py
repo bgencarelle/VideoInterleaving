@@ -87,6 +87,31 @@ GUI_PROFILE_PROBE_TIMEOUT = 8.0
 # Start after one packet is ready and allow only one pending encoded batch; the
 # modem packet itself is the unavoidable serialization buffer for each image.
 SENDER_STARTUP_BUFFER_SECONDS = P.PULSE_FRAME / P.RATE
+DEVICE_RECOVERY_POLL_SECONDS = 1/P.PULSE_FPS
+
+
+class SenderDeviceLost(RuntimeError):
+    """The selected transmitter output stopped or changed its sample rate."""
+
+
+def _wait_for_stable_send_device(sd, preferred, identity, stop):
+    from tools.v7_device_recovery import (
+        DEVICE_RATE_FRAME_INTERVAL, DeviceRateDebouncer,
+        query_device_snapshot)
+
+    stable = DeviceRateDebouncer()
+    while not stop.is_set():
+        try:
+            snapshot = query_device_snapshot(
+                sd, preferred, identity, 'output')
+        except Exception:
+            stable.reset()
+        else:
+            index, _info, observed_identity, rate = snapshot
+            if stable.observe(observed_identity, rate):
+                return index, rate
+        stop.wait(DEVICE_RATE_FRAME_INTERVAL)
+    return None
 
 
 def _sender_queue_batches(startup_seconds, output_rate, packet_samples):
@@ -216,6 +241,8 @@ def _resolve_send_source(args, interactive=None, input_fn=None):
             raise ValueError('video file path or stream URL cannot be empty')
     elif args.video_source:
         raise ValueError('--video-source can only be used with --source video')
+    if getattr(args, 'preview', False) and args.source != 'video':
+        raise ValueError('--preview can only be used with --source video')
     return args
 
 
@@ -553,7 +580,62 @@ def _apply_profile_option(args):
 
 def run_send(args):
     import sounddevice as sd
+    from tools.v7_device_recovery import device_identity
+
+    try:
+        identity = device_identity(sd, args.device, 'output')
+        if not identity.get('name'):
+            identity = None
+    except Exception:
+        identity = None
+    args._sender_device_identity = identity
+    args._sender_started_at = None
+    args._sender_counter = 1
+    args._sender_total = 0
+    stop = threading.Event()
+    try:
+        while not stop.is_set():
+            try:
+                _run_send_session(args)
+                return
+            except SenderDeviceLost as exc:
+                if identity is None:
+                    raise RuntimeError(
+                        f'Transmitter device was lost and its identity cannot '
+                        f'be resolved for recovery: {exc}') from exc
+                print(json.dumps({
+                    'status': 'sender_device_lost',
+                    'device': identity.get('name'),
+                    'message': str(exc),
+                }), flush=True)
+                recovered = _wait_for_stable_send_device(
+                    sd, args.device, identity, stop)
+                if recovered is None:
+                    return
+                args.device, recovered_rate = recovered
+                print(json.dumps({
+                    'status': 'sender_device_reconnected',
+                    'device': identity.get('name'),
+                    'sample_rate': recovered_rate,
+                }), flush=True)
+    except KeyboardInterrupt:
+        stop.set()
+        if not args.no_log:
+            print(f'V7 send stopped after interruption', flush=True)
+    finally:
+        stop.set()
+        video_preview = getattr(args, '_video_preview', None)
+        if video_preview is not None:
+            video_preview.close()
+            args._video_preview = None
+
+
+def _run_send_session(args):
+    import sounddevice as sd
     from tools.v7_capture import Throttled
+    from tools.v7_device_recovery import (
+        DEVICE_RATE_FRAME_INTERVAL, DeviceRateDebouncer,
+        query_device_snapshot)
 
     _apply_profile_option(args)
     slots = _fold_slots(args)
@@ -635,16 +717,24 @@ def run_send(args):
     grab = None
     source_audio = None
     audio_delay = None
+    video_preview = getattr(args, '_video_preview', None)
     batches = None
     stop = threading.Event()
+    device_monitor_stop = threading.Event()
+    device_monitor_thread = None
+    device_lost = threading.Event()
+    device_lost_reason = ['selected output device stopped']
     producer_done = threading.Event()
     prebuffer_ready = threading.Event()
     buffered_audio_seconds = 0.0
     sentinel = object()
     producer_errors = []
     batch_size = max(1, args.batch_frames)
-    total = 0
-    started = time.monotonic()
+    total = getattr(args, '_sender_total', 0)
+    started = getattr(args, '_sender_started_at', None)
+    if started is None:
+        started = time.monotonic()
+        args._sender_started_at = started
 
     def encode_batch(frames, aspects, counter):
         values = np.asarray(frames)
@@ -737,7 +827,7 @@ def run_send(args):
         nonlocal total, buffered_audio_seconds
         frames = []
         aspects = []
-        counter = 1
+        counter = getattr(args, '_sender_counter', 1)
         first_audio_video_frame = (
             getattr(grab, 'first_frame', None) if source_audio is not None
             else None)
@@ -779,6 +869,8 @@ def run_send(args):
                     prebuffer_ready.set()
                 total += len(frames)
                 counter += len(frames)
+                args._sender_counter = counter
+                args._sender_total = total
                 frames = []
                 aspects = []
         except Exception as exc:
@@ -792,6 +884,8 @@ def run_send(args):
                 if buffered_audio_seconds >= startup_buffer_seconds:
                     prebuffer_ready.set()
                 total += len(frames)
+                args._sender_counter = counter+len(frames)
+                args._sender_total = total
             except Exception as exc:
                 failure = exc
 
@@ -823,6 +917,15 @@ def run_send(args):
             # The producer must wait until that clock is known so its packet
             # resampling preserves 1x playback speed on any supported device.
             output_rate = float(stream.samplerate)
+            if getattr(args, 'preview', False) and video_preview is None:
+                from tools.v7_video_preview import launch_video_preview
+                video_preview = launch_video_preview(
+                    args.video_source,
+                    live=True if getattr(args, 'video_live', False) else None)
+                args._video_preview = video_preview
+                if video_preview.warning:
+                    print({'status': 'video_preview_note',
+                           'message': video_preview.warning}, flush=True)
             if (not np.isfinite(args.speed) or
                     not P.MIN_PLAYBACK_SPEED <= args.speed <= P.MAX_PLAYBACK_SPEED):
                 raise ValueError(
@@ -837,6 +940,47 @@ def run_send(args):
             queue_batches = _sender_queue_batches(
                 startup_buffer_seconds, output_rate, first_packet_samples)
             batches = queue.Queue(maxsize=queue_batches)
+
+            if getattr(args, '_sender_device_identity', None) is not None:
+                def monitor_output_device():
+                    rate_stability = DeviceRateDebouncer()
+                    while not device_monitor_stop.wait(
+                            DEVICE_RATE_FRAME_INTERVAL):
+                        try:
+                            if not getattr(stream, 'active', True):
+                                device_lost_reason[0] = (
+                                    'PortAudio output stream stopped')
+                                device_lost.set()
+                                return
+                            snapshot = query_device_snapshot(
+                                sd, args.device, args._sender_device_identity,
+                                'output')
+                        except Exception as exc:
+                            device_lost_reason[0] = str(exc)
+                            device_lost.set()
+                            return
+                        resolved_index, _info, observed_identity, rate = snapshot
+                        if (isinstance(args.device, int) and
+                                resolved_index != args.device):
+                            device_lost_reason[0] = (
+                                'PortAudio device index changed')
+                            device_lost.set()
+                            return
+                        if (requested_rate is None and
+                                abs(rate-output_rate) > .5):
+                            if rate_stability.observe(observed_identity, rate):
+                                device_lost_reason[0] = (
+                                    f'output sample rate changed from '
+                                    f'{output_rate:g}Hz to {rate:g}Hz')
+                                device_lost.set()
+                                return
+                        else:
+                            rate_stability.reset()
+
+                device_monitor_thread = threading.Thread(
+                    target=monitor_output_device, daemon=True,
+                    name='v7-send-output-monitor')
+                device_monitor_thread.start()
             # Compile the per-frame image and pulse encoder path before the
             # first real packet. Numba's first-call work must not become a gap
             # in the recorded modem waveform.
@@ -876,10 +1020,25 @@ def run_send(args):
                     target_samples=first_packet_samples)
             elif mono_fold_profile and source_audio_mode == 'device':
                 from tools.v7_source_audio import DeviceSourceAudio
-                source_audio = DeviceSourceAudio(
-                    args.source_audio_device, output_rate,
-                    input_side=getattr(args, 'source_audio_input_side', 'mix'),
-                    target_samples=first_packet_samples)
+
+                def source_audio_status(error):
+                    print(json.dumps({
+                        'status': ('sender_source_audio_lost' if error else
+                                   'sender_source_audio_restored'),
+                        'device': str(args.source_audio_device),
+                        'message': error,
+                    }), flush=True)
+
+                try:
+                    source_audio = DeviceSourceAudio(
+                        args.source_audio_device, output_rate,
+                        input_side=getattr(
+                            args, 'source_audio_input_side', 'mix'),
+                        target_samples=first_packet_samples,
+                        status_callback=source_audio_status)
+                except Exception as exc:
+                    source_audio = None
+                    source_audio_status(str(exc))
             if mono_fold_profile:
                 from tools.v7_source_audio import PacketAudioDelay
                 audio_delay = PacketAudioDelay(extra_audio_delay_ms)
@@ -937,9 +1096,24 @@ def run_send(args):
                         f'pilot-tones={"on" if getattr(args, "pilot_tones", False) else "off"} '
                          f'capture={capture_text} '
                          f'encode={args.encode_filter} mode={wire_mode}',
-                       flush=True)
+                        flush=True)
+
+            def write_output(audio):
+                if device_lost.is_set():
+                    raise SenderDeviceLost(device_lost_reason[0])
+                try:
+                    stream.write(np.ascontiguousarray(audio, dtype=np.float32))
+                except Exception as exc:
+                    raise SenderDeviceLost(
+                        f'output write failed: {exc}') from exc
+
             while True:
-                item = batches.get()
+                if device_lost.is_set():
+                    raise SenderDeviceLost(device_lost_reason[0])
+                try:
+                    item = batches.get(timeout=DEVICE_RECOVERY_POLL_SECONDS)
+                except queue.Empty:
+                    continue
                 if item is sentinel:
                     break
                 counter, audio, stats = item
@@ -955,13 +1129,12 @@ def run_send(args):
                             audio_gain)
                         # One packet per blocking write lets paced soundtrack
                         # capture advance while the DAC plays this video frame.
-                        stream.write(np.ascontiguousarray(
-                            packet, dtype=np.float32))
+                        write_output(packet)
                         offset += count
                 else:
                     # sounddevice requires a C-contiguous interleaved buffer;
                     # filtering/resampling can return a strided view here.
-                    stream.write(np.ascontiguousarray(audio, dtype=np.float32))
+                    write_output(audio)
                 if args.log and not args.no_log:
                     print({
                         'sent_through_frame': (
@@ -970,12 +1143,21 @@ def run_send(args):
                            if key != 'frames_encoded'},
                     }, flush=True)
     except KeyboardInterrupt:
-        stop.set()
+        raise
     finally:
+        device_monitor_stop.set()
+        if device_monitor_thread is not None:
+            device_monitor_thread.join(timeout=1)
         control_stop.set()
         stop.set()
         if worker_started:
-            worker.join(timeout=2)
+            deadline = time.monotonic()+2
+            while worker.is_alive() and time.monotonic() < deadline:
+                try:
+                    batches.get_nowait()
+                except queue.Empty:
+                    pass
+                worker.join(timeout=.02)
         else:
             close = getattr(grab, 'close', None)
             if close is None:
@@ -1711,14 +1893,47 @@ def run_receive(args):
 
 def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
     import sounddevice as sd
+    from tools.v7_device_recovery import device_identity
+
+    user_stop = getattr(args, 'stop_event', None) or threading.Event()
+    runtime_options = getattr(args, 'runtime_options', None)
+    identity = (runtime_options.snapshot().get('audio_input_identity')
+                if runtime_options is not None else None)
+    if identity is None:
+        identity = device_identity(sd, args.device)
+
+    while not user_stop.is_set():
+        recovery = _run_receive_session(
+            args, fold, mono_wire, adaptive_profile,
+            user_stop=user_stop, input_identity=identity)
+        if recovery is None or user_stop.is_set():
+            return
+        device, rate, reason = recovery
+        args.device = device
+        if adaptive_profile is not None:
+            adaptive_profile.reset_candidate()
+        print(json.dumps({
+            'status': 'receiver_input_reconnected',
+            'device': identity.get('name'),
+            'sample_rate': rate,
+            'after': reason,
+        }), flush=True)
+
+
+def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
+                          user_stop=None, input_identity=None):
+    import sounddevice as sd
     from tools.v7_receiver_audio import (AudioPassthrough,
                                          ReceiverChannelRouter,
                                          ReceiverRuntimeOptions)
+    from tools.v7_device_recovery import (
+        DEVICE_RATE_FRAME_INTERVAL, DeviceRateDebouncer,
+        query_device_snapshot)
 
     RECEIVER_GUI_STATUS.clear()
     # The standalone configuration GUI can cancel setup before the capture
     # stream is opened. The CLI keeps the original self-owned lifecycle.
-    stop = getattr(args, 'stop_event', None) or threading.Event()
+    stop = threading.Event()
     # Metadata is decoded with the common bootstrap model; the body model is
     # selected from the protected encoding ID carried by each frame.
     base_model = _model(
@@ -1789,6 +2004,10 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
     blocks = queue.Queue(maxsize=INPUT_AUDIO_QUEUE_BLOCKS)
     input_gap = threading.Event()
     input_ready = threading.Event()
+    input_paused = threading.Event()
+    input_stream = [None]
+    recovery = [None]
+    last_input_device_error = [None]
     capture_sample_cursor = [0]
     live_input = LiveInput(
         args.decode_history, args.decode_batch, rate=capture_rate,
@@ -1902,7 +2121,8 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                    'audio_output_device'),
                 'audio_output_identity': runtime_options.snapshot().get(
                     'audio_output_identity'),
-                'audio_device_error': None,
+                 'audio_device_error': None,
+                 'input_device_error': None,
                 'audio_runtime': {
                     'buffered_ms': 0.0,
                     'underflow_events': 0,
@@ -1917,6 +2137,8 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
              'input_channels': input_channels}
 
     def callback(indata, frames, timing, status):
+        if input_paused.is_set():
+            return
         values = np.asarray(indata, float)
         if status and passthrough is not None:
             passthrough.note_input_status(status)
@@ -1946,6 +2168,88 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
             meter['dropped'] += 1
             input_gap.set()
         input_ready.set()
+
+    def report_input_device_error(message):
+        if message == last_input_device_error[0]:
+            return
+        last_input_device_error[0] = message
+        meter['input_device_error'] = message
+        meter['status'] = 'input device lost'
+        print(json.dumps({
+            'status': 'receiver_input_device_lost',
+            'device': (input_identity or {}).get('name'),
+            'message': message,
+        }), flush=True)
+
+    def clear_input_device_error():
+        if last_input_device_error[0] is None:
+            return
+        previous = last_input_device_error[0]
+        last_input_device_error[0] = None
+        meter['input_device_error'] = None
+        meter['status'] = 'reacquiring'
+        if not args.no_log:
+            print(json.dumps({
+                'status': 'receiver_input_device_restored',
+                'device': (input_identity or {}).get('name'),
+                'previous_error': previous,
+            }), flush=True)
+
+    def monitor_input_device():
+        stable = DeviceRateDebouncer()
+        temporarily_unavailable = False
+        while not stop.wait(DEVICE_RATE_FRAME_INTERVAL):
+            stream = input_stream[0]
+            try:
+                stream_active = bool(stream is not None and stream.active)
+            except Exception:
+                stream_active = False
+            try:
+                index, info, observed_identity, _reported_rate = (
+                    query_device_snapshot(
+                        sd, args.device, input_identity, 'input'))
+            except Exception as exc:
+                input_paused.set()
+                temporarily_unavailable = True
+                stable.reset()
+                report_input_device_error(str(exc))
+                continue
+
+            next_rate = capture_rate_for(info)
+            index_changed = (isinstance(args.device, int) and
+                             index != args.device)
+            rate_changed = abs(next_rate-capture_rate) > .5
+            needs_reopen = not stream_active or index_changed or rate_changed
+            if needs_reopen:
+                input_paused.set()
+                if not stream_active:
+                    reason = 'input stream stopped'
+                elif index_changed:
+                    reason = 'input device index changed'
+                else:
+                    reason = (f'input sample rate changed from '
+                              f'{capture_rate:g}Hz to {next_rate:g}Hz')
+                report_input_device_error(reason)
+                if stable.observe(observed_identity, next_rate):
+                    recovery[0] = (index, next_rate, reason)
+                    input_ready.set()
+                    stop.set()
+                    return
+                continue
+
+            if temporarily_unavailable:
+                input_paused.set()
+                if stable.observe(observed_identity, next_rate):
+                    temporarily_unavailable = False
+                    input_paused.clear()
+                    stable.reset()
+                    clear_input_device_error()
+                continue
+
+            stable.reset()
+            if input_paused.is_set():
+                input_paused.clear()
+            clear_input_device_error()
 
     def live_loop_position():
         """(calculated index now, its direction, picture index minus it).
@@ -2040,6 +2344,9 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
             'input': (*channel_levels,
                       f'auto gain {meter["auto_gain"]:5.2f}×',
                       f'right leg {"inverted" if meter["polarity"] < 0 else "normal"}'),
+            'device': ((meter['input_device_error'] or
+                        f'input {meter["device"]} · '
+                        f'{meter["capture_rate"]:g}Hz'),),
             'audio': (
                 f'q{meter["audio_runtime"]["buffered_ms"]:.0f}ms · '
                 f'under {meter["audio_runtime"]["underflow_events"]}',
@@ -2144,35 +2451,99 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
 
     def audio_output_monitor():
         current_device = object()
-        last_attempt = 0.0
         last_health_check = 0.0
         last_audio_report = 0.0
         last_audio_error_signature = None
+        rate_stability = DeviceRateDebouncer()
+        last_device_error = None
+        last_passthrough_error = None
         while not stop.is_set():
             options = runtime_options.snapshot()
             device = options['audio_output_device']
             identity = options['audio_output_identity']
             selection = (device, identity)
             now = time.monotonic()
-            reopen = selection != current_device
-            retry = (passthrough is not None and
-                     (device is not None or identity is not None) and
-                     not passthrough.is_open and now-last_attempt >= 3.0)
-            if (passthrough is not None and selection == current_device and
-                    passthrough.is_open and now-last_health_check >= 2.0):
-                last_health_check = now
-                if not passthrough.check_device(identity):
-                    reopen = True
-            if passthrough is not None and (reopen or retry):
+            selection_changed = selection != current_device
+            reopen = False
+            if passthrough is not None and selection_changed:
                 passthrough.close()
+                current_device = selection
+                rate_stability.reset()
                 if device is not None or identity is not None:
                     passthrough.open(device, identity)
-                current_device = selection
-                last_attempt = now
+                    reopen = passthrough.is_open
+            elif (passthrough is not None and
+                  (device is not None or identity is not None) and
+                  now-last_health_check >= DEVICE_RATE_FRAME_INTERVAL):
+                last_health_check = now
+                if passthrough.is_open:
+                    if not passthrough.check_device(identity):
+                        passthrough.close()
+                        rate_stability.reset()
+                    else:
+                        try:
+                            index, _info, observed_identity, reported_rate = (
+                                query_device_snapshot(
+                                    sd, device, identity, 'output'))
+                        except Exception as exc:
+                            if str(exc) != last_device_error:
+                                passthrough._report(
+                                    f'Audio output unavailable; waiting to '
+                                    f'reconnect: {exc}')
+                                last_device_error = str(exc)
+                            passthrough.close()
+                            rate_stability.reset()
+                        else:
+                            current_rate = passthrough.device_default_rate
+                            if (current_rate is not None and
+                                    abs(reported_rate-current_rate) > 0.5):
+                                if rate_stability.observe(
+                                        observed_identity, reported_rate):
+                                    passthrough.close()
+                                    passthrough.open(index, identity)
+                                    rate_stability.reset()
+                                    reopen = passthrough.is_open
+                            else:
+                                rate_stability.reset()
+                else:
+                    try:
+                        index, _info, observed_identity, reported_rate = (
+                            query_device_snapshot(
+                                sd, device, identity, 'output'))
+                    except Exception as exc:
+                        if str(exc) != last_device_error:
+                            passthrough._report(
+                                f'Audio output unavailable; waiting to '
+                                f'reconnect: {exc}')
+                            last_device_error = str(exc)
+                        rate_stability.reset()
+                    else:
+                        if rate_stability.observe(observed_identity,
+                                                  reported_rate):
+                            passthrough.open(index, identity)
+                            rate_stability.reset()
+                            reopen = passthrough.is_open
+            if reopen:
+                last_device_error = None
+                print(json.dumps({
+                    'status': 'audio_output_reconnected',
+                    'device': (identity or {}).get('name', device),
+                    'sample_rate': passthrough.output_rate,
+                }), flush=True)
             if passthrough is not None:
                 passthrough.set_muted(options['audio_muted'])
                 audio_stats = passthrough.stats_snapshot()
                 meter['audio_runtime'] = audio_stats
+                current_error = passthrough.error
+                if current_error != last_passthrough_error:
+                    print(json.dumps({
+                        'status': ('receiver_passthrough_unavailable'
+                                   if current_error else
+                                   'receiver_passthrough_restored'),
+                        'message': current_error,
+                        'device': (identity or {}).get('name', device),
+                    }), flush=True)
+                    last_passthrough_error = current_error
                 signature = (
                     audio_stats['underflow_events'],
                     tuple(sorted(audio_stats['input_status'].items())),
@@ -2199,7 +2570,7 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                     last_audio_report = now
                 last_audio_error_signature = signature
             refresh_runtime_state(now)
-            stop.wait(.1)
+            stop.wait(DEVICE_RATE_FRAME_INTERVAL)
 
     audio_threads = [threading.Thread(
         target=audio_output_monitor, daemon=True,
@@ -2668,6 +3039,7 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                                 dtype='float32',
                                 device=args.device, blocksize=1024,
                                 callback=callback)
+        input_stream[0] = stream
         if passthrough is not None:
             passthrough.set_input_rate(float(stream.samplerate))
         stream.start()
@@ -2697,6 +3069,20 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                            'error': repr(exc)}, flush=True)
 
     decoder_thread = threading.Thread(target=decode_worker, daemon=True)
+    audio_threads.append(threading.Thread(
+        target=monitor_input_device, daemon=True,
+        name='v7-receiver-input-monitor'))
+
+    def watch_user_stop():
+        while not stop.wait(.05):
+            if user_stop is not None and user_stop.is_set():
+                input_ready.set()
+                stop.set()
+                return
+
+    audio_threads.append(threading.Thread(
+        target=watch_user_stop, daemon=True,
+        name='v7-receiver-stop-monitor'))
     for thread in audio_threads:
         thread.start()
     decoder_thread.start()
@@ -2713,7 +3099,8 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                 show_diagnostics=args.show_diagnostics,
                 diagnostics_source=display_diagnostics,
                 profile_cpu=args.profile_ui,
-                image_only=getattr(args, 'image_only', False))
+                image_only=getattr(args, 'image_only', False),
+                stop_event=stop)
     except KeyboardInterrupt:
         pass
     finally:
@@ -2724,8 +3111,17 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
             thread.join(timeout=2)
         if passthrough is not None:
             passthrough.close()
-        stream.stop()
-        stream.close()
+        stream = input_stream[0]
+        if stream is not None:
+            try:
+                stream.stop()
+            except Exception:
+                pass
+            try:
+                stream.close()
+            except Exception:
+                pass
+    return recovery[0]
 
 
 def parser():
@@ -2812,6 +3208,8 @@ def parser():
                       help='local video file or FFmpeg-supported live stream URL')
     send.add_argument('--video-live', action='store_true',
                       help='treat an HTTP(S) source as live instead of looping it')
+    send.add_argument('--preview', action='store_true',
+                      help='open video sources in a desktop player while sending')
     send.add_argument('--display', type=int)
     send.add_argument('--ffmpeg-input')
     send.add_argument('--screen-backend', choices=('mss', 'ffmpeg'), default='mss',
@@ -2951,6 +3349,8 @@ if __name__ == '__main__':
             _resolve_send_source(args)
         except ValueError as exc:
             ap.error(str(exc))
+        if args.preview and args.source != 'video':
+            ap.error('--preview requires --source video')
         if args.rate is not None and args.rate <= 0:
             ap.error('--rate must be positive')
         if (not np.isfinite(args.speed) or

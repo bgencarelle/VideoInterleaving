@@ -4,6 +4,8 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -175,6 +177,60 @@ class SourceAudioTests(unittest.TestCase):
                     4, None, None)
                 np.testing.assert_array_equal(source.read(2), expected)
                 source.close()
+
+    def test_device_source_audio_reopens_after_a_stable_native_rate_change(self):
+        class SoundDevice:
+            devices = [{
+                'name': 'Source input', 'hostapi': 0,
+                'max_input_channels': 2, 'max_output_channels': 0,
+                'default_samplerate': 48000,
+            }]
+            streams = []
+
+            @classmethod
+            def query_devices(cls, device=None, _kind=None):
+                if device is None:
+                    return list(cls.devices)
+                return cls.devices[int(device)]
+
+            @staticmethod
+            def query_hostapis():
+                return [{'name': 'Test API'}]
+
+            class InputStream:
+                def __init__(self, **kwargs):
+                    self.kwargs = kwargs
+                    self.samplerate = float(kwargs['samplerate'])
+                    self.active = True
+                    SoundDevice.streams.append(self)
+
+                def start(self):
+                    self.active = True
+
+                def stop(self):
+                    self.active = False
+
+                def close(self):
+                    self.active = False
+
+        statuses = []
+        source = DeviceSourceAudio(
+            0, 48000, sounddevice_module=SoundDevice,
+            status_callback=statuses.append)
+        initial = source.stream
+        SoundDevice.devices[0]['default_samplerate'] = 96000
+        deadline = time.monotonic()+2
+        while ((source.stream is initial or source.stream is None) and
+               time.monotonic() < deadline):
+            threading.Event().wait(.01)
+
+        try:
+            self.assertIsNot(source.stream, initial)
+            self.assertIsNone(source.error)
+            self.assertIn('sample rate changed', ' '.join(
+                str(status) for status in statuses))
+        finally:
+            source.close()
 
     def test_embedded_audio_command_requests_optional_mono_f32le(self):
         class Process:

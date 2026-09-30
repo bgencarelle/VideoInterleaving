@@ -136,7 +136,7 @@ class SenderGuiTests(unittest.TestCase):
 
     def test_selected_sample_rate_profile_and_video_path_reach_cli(self):
         self.settings.update(source='video', video_source='a clip with spaces.mp4',
-                             video_live=True, rate='96000',
+                             video_live=True, video_preview=True, rate='96000',
                              profile='fold-1000', speed='1.5')
 
         command = build_command(self.settings, self.devices, self.sd)
@@ -146,7 +146,14 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(args.rate, 96000)
         self.assertEqual(args.video_source, 'a clip with spaces.mp4')
         self.assertTrue(args.video_live)
+        self.assertTrue(args.preview)
+        self.assertIn('--preview', command)
         self.assertEqual(args.speed, 1.5)
+
+    def test_preview_is_not_forwarded_for_non_video_sources(self):
+        self.settings.update(source='screen', video_preview=True)
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertNotIn('--preview', command)
 
     def test_mono_video_fold_profile_reaches_cli_and_uses_box_model(self):
         self.settings.update(profile='mono-fold-500', mono_video_side='right')
@@ -863,6 +870,7 @@ class SenderGuiTests(unittest.TestCase):
         self.assertIn('screen_backend', gui.ADVANCED_FIELDS)
         self.assertIn('screen_target', visible)
         self.assertNotIn('video_source', visible)
+        self.assertNotIn('video_preview', visible)
         self.assertNotIn('camera', visible)
         self.assertNotIn('screen_backend', visible)
 
@@ -874,6 +882,7 @@ class SenderGuiTests(unittest.TestCase):
                             video_source='clip.mp4')
         gui.page = 'setup'
         self.assertIn('video_source', gui._visible_fields())
+        self.assertIn('video_preview', gui._visible_fields())
         self.assertNotIn('camera', gui._visible_fields())
         self.assertNotIn('screen_target', gui._visible_fields())
         gui._canvas((960, 720))
@@ -881,6 +890,109 @@ class SenderGuiTests(unittest.TestCase):
         gui.page = 'live'
         self.assertEqual(gui._canvas((960, 720)).size, (960, 720))
         self.assertEqual(gui._canvas((720, 480)).size, (720, 480))
+
+    def test_live_change_source_stops_then_opens_source_picker(self):
+        gui = SenderGui(self.devices)
+        gui.page = 'live'
+        gui.process = object()
+        gui.settings.update(source='video', video_source='clip.mp4',
+                            video_preview=True, camera='camera-one')
+        gui._canvas((960, 720))
+        rect = gui.hits['change_source']
+        position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
+        glfw = SimpleNamespace(
+            MOUSE_BUTTON_LEFT=1, PRESS=1,
+            get_cursor_pos=lambda _window: position)
+
+        with patch.object(gui, '_stop') as stop:
+            gui._on_mouse(glfw, None, 1, 1, 0)
+
+        stop.assert_called_once()
+        self.assertTrue(gui.change_source_after_stop)
+        gui.events.put(('exit', 0))
+        gui._drain_events()
+
+        self.assertEqual(gui.page, 'setup')
+        self.assertEqual(gui.selected, 'source')
+        self.assertEqual(gui.dropdown, 'source')
+        gui._assign('source', 'screen')
+        self.assertEqual(gui.settings['video_source'], 'clip.mp4')
+        self.assertTrue(gui.settings['video_preview'])
+        self.assertEqual(gui.settings['camera'], 'camera-one')
+
+    def test_sender_preferences_restore_last_settings_and_stable_devices(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary)/'sender.json'
+            output = OutputDevice(3, 'Stable output', 2, 48000, 'Test API')
+            audio = InputDevice(8, 'Stable input', 2, 44100, 'Test API')
+            gui = SenderGui((output,), audio_devices=(audio,),
+                            preference_path=path)
+            gui.settings.update(
+                device=3, source='video', video_source='clip with spaces.mp4',
+                video_preview=True, video_live=False, profile='fold-500',
+                source_audio='device', source_audio_device=8,
+                source_audio_input_side='right')
+            gui._persist_preferences()
+
+            restored = SenderGui(
+                (OutputDevice(17, 'Stable output', 2, 96000, 'Test API'),),
+                audio_devices=(InputDevice(
+                    23, 'Stable input', 2, 48000, 'Test API'),),
+                preference_path=path, restore_preferences=True)
+
+        self.assertEqual(restored.settings['device'], 17)
+        self.assertEqual(restored.settings['source_audio_device'], 23)
+        self.assertEqual(restored.settings['source'], 'video')
+        self.assertEqual(restored.settings['video_source'],
+                         'clip with spaces.mp4')
+        self.assertTrue(restored.settings['video_preview'])
+        self.assertFalse(restored.settings['video_live'])
+        self.assertIsNone(restored.process)
+
+    def test_unavailable_saved_output_is_not_replaced_by_a_default(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary)/'sender.json'
+            path.write_text(json.dumps({
+                'version': 1,
+                'settings': {'source': 'video',
+                             'video_source': 'clip.mp4'},
+                'output_device': {'name': 'Missing output',
+                                  'hostapi': 'Missing API'},
+                'source_audio_device': None,
+            }), encoding='utf-8')
+            gui = SenderGui(self.devices, preference_path=path,
+                            restore_preferences=True)
+
+        self.assertIsNone(gui.settings['device'])
+        self.assertIn('Missing output', gui.notice)
+        self.assertEqual(gui.settings['source'], 'video')
+        self.assertEqual(gui.settings['video_source'], 'clip.mp4')
+        self.assertIsNone(gui.process)
+
+    def test_malformed_saved_device_identity_is_ignored(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary)/'sender.json'
+            path.write_text(json.dumps({
+                'version': 1, 'settings': {'source': 'test'},
+                'output_device': 'not-a-device-identity',
+            }), encoding='utf-8')
+            gui = SenderGui(self.devices, preference_path=path,
+                            restore_preferences=True)
+
+        self.assertIsNone(gui.settings['device'])
+        self.assertEqual(gui.settings['source'], 'test')
+        self.assertIsNone(gui.process)
+
+    def test_corrupt_sender_preferences_fall_back_to_setup_defaults(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary)/'sender.json'
+            path.write_text('{broken', encoding='utf-8')
+            gui = SenderGui(self.devices, preference_path=path,
+                            restore_preferences=True)
+
+        self.assertIsNone(gui.settings['source'])
+        self.assertFalse(gui.settings['video_preview'])
+        self.assertIsNone(gui.process)
 
     def test_start_runs_cli_as_child_and_stop_requests_graceful_interrupt(self):
         gui = SenderGui(self.devices)

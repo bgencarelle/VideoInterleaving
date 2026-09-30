@@ -5,6 +5,8 @@ import time
 
 import numpy as np
 
+from tools.v7_device_recovery import device_identity, resolve_device_index
+
 DEFAULT_AUDIO_VOLUME = 1.0  # VLC's default 100% volume (unity gain).
 
 
@@ -13,49 +15,6 @@ def _checked_audio_volume(value):
     if not np.isfinite(volume) or not 0.0 <= volume <= 1.0:
         raise ValueError('Passthrough volume must be between 0 and 1.')
     return volume
-
-
-def device_identity(sounddevice_module, index):
-    """Return a stable name/backend identity for a PortAudio device index."""
-    device = sounddevice_module.query_devices(index)
-    hostapis = sounddevice_module.query_hostapis()
-    hostapi_index = device.get('hostapi')
-    hostapi = (hostapis[int(hostapi_index)].get('name')
-               if hostapi_index is not None and
-               0 <= int(hostapi_index) < len(hostapis) else '')
-    return {'name': str(device.get('name', '')),
-            'hostapi': str(hostapi)}
-
-
-def resolve_device_index(sounddevice_module, preferred, identity, kind):
-    """Resolve a persisted device identity without falling back to defaults."""
-    if identity is None:
-        return preferred
-    devices = sounddevice_module.query_devices()
-    channel_key = ('max_input_channels' if kind == 'input' else
-                   'max_output_channels')
-    if preferred is not None:
-        try:
-            candidate = sounddevice_module.query_devices(preferred)
-            current = device_identity(sounddevice_module, preferred)
-            if (int(candidate.get(channel_key) or 0) > 0 and
-                    current.get('name') == identity.get('name') and
-                    current.get('hostapi') == identity.get('hostapi')):
-                return preferred
-        except Exception:
-            pass
-    for index, candidate in enumerate(devices):
-        if int(candidate.get(channel_key) or 0) < 1:
-            continue
-        try:
-            current = device_identity(sounddevice_module, index)
-            if (current.get('name') == identity.get('name') and
-                    current.get('hostapi') == identity.get('hostapi')):
-                return index
-        except Exception:
-            continue
-    expected = identity.get('name') or f'the selected {kind} device'
-    raise ValueError(f'{expected} is unavailable; reselect the {kind} device')
 
 
 class ReceiverRuntimeOptions:
@@ -401,6 +360,7 @@ class AudioPassthrough:
         if not np.isfinite(self.target_seconds) or self.target_seconds <= 0:
             raise ValueError('audio target buffer must be positive')
         self.output_rate = None
+        self.device_default_rate = None
         self.channels = 0
         self.device = None
         self.buffer = SampleBuffer(round(self.input_rate*self.BUFFER_SECONDS))
@@ -580,6 +540,8 @@ class AudioPassthrough:
             device = self._resolve_device(
                 self.sd, device, expected_identity)
             info = self.sd.query_devices(device, 'output')
+            device_default_rate = float(
+                info.get('default_samplerate') or self.input_rate)
             channels = min(2, int(info.get('max_output_channels') or 0))
             if channels < 1:
                 raise ValueError('selected audio output has no output channels')
@@ -623,6 +585,7 @@ class AudioPassthrough:
         with self._lock:
             self.device = device
             self.output_rate = rate
+            self.device_default_rate = device_default_rate
             self.channels = channels
             self.reader = reader
             self._fade_in_after_underflow = False
@@ -1043,6 +1006,20 @@ class AudioPassthrough:
                 return False
         return True
 
+    def native_device_sample_rate(self, expected_identity=None):
+        """Read the selected output device's currently reported native rate."""
+        with self._lock:
+            current_device = self.device
+        if current_device is None:
+            return None
+        resolved = self._resolve_device(
+            self.sd, current_device, expected_identity)
+        info = self.sd.query_devices(resolved, 'output')
+        rate = float(info.get('default_samplerate') or 0.0)
+        if not np.isfinite(rate) or rate <= 0:
+            raise ValueError('audio output reported an invalid native sample rate')
+        return rate
+
     def close(self):
         if self._probe_stop is not None:
             self._probe_stop.set()
@@ -1059,6 +1036,7 @@ class AudioPassthrough:
             self._fade_in_after_underflow = False
             self._audio_primed = False
             self.output_rate = None
+            self.device_default_rate = None
             self.channels = 0
             self.device = None
         if stream is None:

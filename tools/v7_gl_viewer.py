@@ -758,7 +758,8 @@ def _fit_diagnostic_text(text, font, width):
 
 def run(frame_source, status_source, aspect_ratios, fullscreen=False,
         show_diagnostics=True, diagnostics_source=None,
-        profile_cpu=False, display_mode=None, image_only=False):
+        profile_cpu=False, display_mode=None, image_only=False,
+        stop_event=None):
     """Display new frames on a vsynced GL window, sleeping between events.
 
     GLFW and ModernGL are imported here so headless receive stays independent
@@ -1024,7 +1025,8 @@ def run(frame_source, status_source, aspect_ratios, fullscreen=False,
             dirty = True
 
         glfw.set_window_refresh_callback(window, on_refresh)
-        while not glfw.window_should_close(window):
+        while (not glfw.window_should_close(window) and
+               not (stop_event is not None and stop_event.is_set())):
             # Wait for input/resize events; this caps polling at 60 Hz without
             # consuming a CPU core while the decoder has no new picture.
             glfw.wait_events_timeout(1/60)

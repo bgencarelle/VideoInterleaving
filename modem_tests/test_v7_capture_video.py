@@ -14,7 +14,8 @@ import numpy as np
 from animation_modem import v7
 from tools.v7_capture import (CapturedFrame, _showinfo_source_size,
                               CaptureEndOfStream, Throttled, ffmpeg_source,
-                              video_source)
+                              video_source, video_source_loops)
+from tools.v7_video_preview import ffplay_command, launch_video_preview
 from tools.v7_live import (_capture, _resolve_send_source,
                            SENDER_STARTUP_BUFFER_SECONDS,
                            _sender_queue_batches, _values, run_send)
@@ -44,6 +45,11 @@ class VideoSourceSelectionTests(unittest.TestCase):
         args = Namespace(source=None, video_source='clip.mp4')
         _resolve_send_source(args, interactive=False)
         self.assertEqual(args.source, 'video')
+
+    def test_preview_is_restricted_to_video_sources(self):
+        args = Namespace(source='screen', video_source=None, preview=True)
+        with self.assertRaisesRegex(ValueError, '--preview.*--source video'):
+            _resolve_send_source(args, interactive=False)
 
     def test_missing_video_argument_requires_interaction(self):
         args = Namespace(source='video', video_source=None)
@@ -108,6 +114,51 @@ class VideoSourceCommandTests(unittest.TestCase):
             self.assertIn('-rw_timeout', cmd)
             self.assertIn('rtsp://camera.example/live', cmd)
             grab.close()
+
+    def test_preview_loop_policy_matches_the_sender_source_policy(self):
+        self.assertTrue(video_source_loops('clip.mp4'))
+        self.assertTrue(video_source_loops(
+            'https://media.example/clip.mp4?token=x'))
+        self.assertFalse(video_source_loops('rtsp://camera.example/live'))
+        self.assertFalse(video_source_loops(
+            'https://camera.example/live', live=True))
+        self.assertEqual(
+            ffplay_command('clip.mp4', True, '/usr/bin/ffplay'),
+            ['/usr/bin/ffplay', '-hide_banner', '-loglevel', 'error', '-an',
+             '-loop', '0', 'clip.mp4'])
+        self.assertNotIn('-loop', ffplay_command(
+            'rtsp://camera.example/live', False))
+
+    def test_preview_launch_owns_ffplay_and_uses_muted_infinite_loop(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        with mock.patch('tools.v7_video_preview.shutil.which',
+                        return_value='/usr/bin/ffplay'), \
+                mock.patch('tools.v7_video_preview.subprocess.Popen',
+                           return_value=process) as popen:
+            preview = launch_video_preview('clip.mp4')
+
+        command = popen.call_args.args[0]
+        self.assertIn('-an', command)
+        self.assertEqual(command[command.index('-loop')+1], '0')
+        self.assertIs(preview.process, process)
+        preview.close()
+        process.terminate.assert_called_once()
+        process.wait.assert_called_once_with(timeout=2)
+
+    def test_preview_falls_back_to_system_player_with_loop_notice(self):
+        with mock.patch('tools.v7_video_preview.shutil.which',
+                        side_effect=lambda name: {
+                            'ffplay': None, 'xdg-open': '/usr/bin/xdg-open'
+                        }.get(name)), \
+                mock.patch('tools.v7_video_preview.subprocess.Popen') as popen:
+            preview = launch_video_preview(
+                'clip.mp4', platform='linux')
+
+        self.assertEqual(popen.call_args.args[0],
+                         ['/usr/bin/xdg-open', 'clip.mp4'])
+        self.assertIn('repeat', preview.warning)
+        self.assertIsNone(preview.process)
 
     def test_avfoundation_camera_opens_the_selected_device_name(self):
         process = self.Process()
@@ -425,6 +476,74 @@ class SenderFailureTests(unittest.TestCase):
                 mock.patch('tools.v7_live.P.speed_pulse_stream',
                            return_value=audio):
             run_send(args)
+
+    def test_sender_reopens_selected_device_after_sample_rate_change(self):
+        class SoundDevice:
+            devices = [{
+                'name': 'Recoverable loopback', 'hostapi': 0,
+                'max_output_channels': 2, 'max_input_channels': 0,
+                'default_samplerate': 48000,
+            }]
+            opened_rates = []
+            writes = []
+            lost_once = False
+
+            @classmethod
+            def query_devices(cls, device=None, _kind=None):
+                if device is None:
+                    return list(cls.devices)
+                return cls.devices[int(device)]
+
+            @staticmethod
+            def query_hostapis():
+                return [{'name': 'Test API'}]
+
+            class OutputStream:
+                def __init__(self, **_kwargs):
+                    self.samplerate = float(
+                        SoundDevice.devices[0]['default_samplerate'])
+                    self.active = True
+                    SoundDevice.opened_rates.append(self.samplerate)
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_exc):
+                    self.active = False
+
+                def write(self, samples):
+                    if not SoundDevice.lost_once:
+                        SoundDevice.lost_once = True
+                        SoundDevice.devices[0]['default_samplerate'] = 96000
+                        raise RuntimeError('simulated output unplug')
+                    SoundDevice.writes.append(samples.copy())
+
+        args = Namespace(
+            fixture=None, encode_filter='nearest', rate=None, source='test',
+            video_source=None, video_live=False, preview=False,
+            capture_fps=30, screen_backend='mss', speed=1.0,
+            batch_frames=1, seconds=.65, mono_sum=False, device=0,
+            no_log=True, log=False, brightness=1.0, gamma=1.0,
+            camera=0, capture_width=160, capture_filter='neighbor',
+            ffmpeg_input=None, region=None, display=None, baseline=True,
+        )
+        audio = np.zeros((v7.PULSE_FRAME, 2), dtype=np.float32)
+
+        with mock.patch.dict(sys.modules, {'sounddevice': SoundDevice}), \
+                mock.patch('tools.v7_live._model', return_value=object()), \
+                mock.patch('tools.v7_live._capture',
+                           return_value=lambda: object()), \
+                mock.patch('tools.v7_live._values',
+                           return_value=(np.zeros(1), 0)), \
+                mock.patch('tools.v7_live.P.encode_pulse_stream',
+                           return_value=audio), \
+                mock.patch('tools.v7_live.P.speed_pulse_stream',
+                           return_value=audio):
+            run_send(args)
+
+        self.assertGreaterEqual(len(SoundDevice.opened_rates), 2)
+        self.assertEqual(SoundDevice.opened_rates[:2], [48000.0, 96000.0])
+        self.assertTrue(SoundDevice.writes)
 
 
 class SenderSchedulingTests(unittest.TestCase):

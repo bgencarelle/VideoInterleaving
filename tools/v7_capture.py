@@ -412,6 +412,16 @@ def _realtime_input_options(source, live):
     return []
 
 
+def video_source_loops(source, live=None):
+    """Whether the live sender's video-source policy repeats this source."""
+    is_stream = _is_stream_url(source)
+    is_live = (urlsplit(str(source)).scheme.lower() in _LIVE_SCHEMES
+               if live is None else bool(live))
+    if is_live and not is_stream:
+        raise ValueError('--video-live requires a stream URL')
+    return not is_live
+
+
 def video_source(source, loop=None, realtime=None, width=320,
                  scale_flags='bicubic', live=None, preserve_size=False):
     """Read a local video file in a real-time loop or a live stream URL.
@@ -433,10 +443,7 @@ def video_source(source, loop=None, realtime=None, width=320,
     if scale_flags not in ('neighbor', 'area', 'bilinear', 'bicubic', 'lanczos'):
         raise ValueError(f'Unsupported FFmpeg scale flags: {scale_flags}')
 
-    is_live = (urlsplit(source).scheme.lower() in _LIVE_SCHEMES
-               if live is None else bool(live))
-    if is_live and not is_stream:
-        raise ValueError('--video-live requires a stream URL')
+    is_live = not video_source_loops(source, live)
     parsed_source = urlsplit(source)
     finite_http_media = (
         parsed_source.scheme.lower() in ('http', 'https') and

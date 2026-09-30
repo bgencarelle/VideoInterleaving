@@ -23,6 +23,22 @@ and audio output. `tools/v7_live.py` provides a standalone capture sender and
 receiver. Synthetic decode tests are available; real tape and deck validation
 remains pending.
 
+### Standalone audio-device recovery
+
+The standalone sender and receiver bind to explicit PortAudio device
+identities. A stopped or unavailable sender output pauses packet transmission;
+a stopped receiver input pauses decode while its last good picture remains
+displayed. Recovery never silently selects an unrelated default device. Device
+identity and reported sample rate must be stable for five 30-fps intervals
+(about 167 ms) before reopening. The reopened stream's negotiated sample rate
+is authoritative: the sender rebuilds rate-dependent packet conversion, and
+the receiver clears samples and pulse/decode state across the discontinuity
+before reacquiring. The receiver keeps the prior image until a new valid frame
+is decoded. A lost optional sender source-audio input is replaced with silence
+while video continues; passthrough-output recovery is independent of receiver
+video capture and decode. These runtime recovery paths are software behavior,
+not real-tape validation.
+
 ### Validation priority
 
 After the relevant synthetic/unit tests pass, prioritize real-time audio

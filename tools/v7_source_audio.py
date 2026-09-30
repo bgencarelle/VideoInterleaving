@@ -537,63 +537,203 @@ class SharedVideoAudioSource:
 
 
 class DeviceSourceAudio:
-    """Selected sounddevice input resampled by its device clock at open time."""
+    """Selected sounddevice input with silence and reconnect on device loss."""
 
     def __init__(self, device, sample_rate, input_side='mix',
                  buffer_seconds=2.0, target_samples=None,
-                 sounddevice_module=None):
+                 sounddevice_module=None, status_callback=None):
         if sounddevice_module is None:
             import sounddevice as sounddevice_module
+        from tools.v7_device_recovery import (
+            device_identity, DEVICE_RATE_FRAME_INTERVAL)
+
         self.sd = sounddevice_module
         self.device = device
         self.sample_rate = int(sample_rate)
         self.input_side = input_side
+        self.buffer_seconds = float(buffer_seconds)
+        self.target_seconds = (float(target_samples)/self.sample_rate
+                               if target_samples else .08)
+        self.identity = device_identity(self.sd, device, 'input')
+        self.status_callback = status_callback
+        self.error = None
+        self._lock = threading.RLock()
+        self._closed = threading.Event()
+        self.stream = None
+        self.channels = 0
+        self.input_rate = self.sample_rate
+        self.device_default_rate = None
+        self.buffer = SampleBuffer(round(self.sample_rate*self.buffer_seconds))
+        self.clock_match = ClockMatchedReader(
+            self.buffer, round(self.sample_rate*self.target_seconds))
+        try:
+            self._open_stream(device)
+        except Exception as exc:
+            raise ValueError(f'cannot open source-audio input: {exc}') from exc
+        self._monitor_interval = DEVICE_RATE_FRAME_INTERVAL
+        self._monitor_thread = threading.Thread(
+            target=self._monitor_device,
+            name='v7-source-audio-device-monitor', daemon=True)
+        if callable(getattr(self.sd, 'query_hostapis', None)):
+            self._monitor_thread.start()
+        else:
+            self._monitor_thread = None
+
+    def _report(self, error):
+        error = None if error is None else str(error)
+        with self._lock:
+            if error == self.error:
+                return
+            self.error = error
+        if self.status_callback is not None:
+            try:
+                self.status_callback(error)
+            except Exception:
+                pass
+
+    def _callback(self, indata, _frames, _timing, _status):
+        if self._closed.is_set() or self.error is not None:
+            return
+        values = np.asarray(indata, dtype=np.float32)
+        if values.ndim == 1:
+            mono = values
+        elif self.channels == 1:
+            mono = values[:, 0]
+        elif self.input_side == 'left':
+            mono = values[:, 0]
+        elif self.input_side == 'right':
+            mono = values[:, 1]
+        else:
+            mono = (values[:, 0]+values[:, 1])*0.5
+        self.buffer.push(mono)
+
+    def _close_stream(self):
+        with self._lock:
+            stream, self.stream = self.stream, None
+        if stream is None:
+            return
+        try:
+            stream.stop()
+        except Exception:
+            pass
+        try:
+            stream.close()
+        except Exception:
+            pass
+
+    def _open_stream(self, device):
         info = self.sd.query_devices(device, 'input')
         maximum = int(info.get('max_input_channels') or 0)
         if maximum < 1:
             raise ValueError('selected source-audio device has no input channels')
-        self.channels = min(maximum, 2)
-        if input_side == 'right' and self.channels < 2:
+        channels = min(maximum, 2)
+        if self.input_side == 'right' and channels < 2:
             raise ValueError('right input selection requires a stereo audio device')
-        self.buffer = SampleBuffer(round(self.sample_rate*buffer_seconds))
-        self.clock_match = ClockMatchedReader(
-            self.buffer, target_samples or round(self.sample_rate*.08))
+        native_rate = float(info.get('default_samplerate') or self.sample_rate)
+        rates = [self.sample_rate]
+        if abs(native_rate-self.sample_rate) > .5:
+            rates.append(native_rate)
+        last_error = None
+        for rate in rates:
+            stream = None
+            try:
+                stream = self.sd.InputStream(
+                    device=device, channels=channels,
+                    samplerate=rate, dtype='float32', callback=self._callback)
+                stream.start()
+                actual_rate = float(getattr(stream, 'samplerate', rate) or rate)
+                if not np.isfinite(actual_rate) or actual_rate <= 0:
+                    raise ValueError('input device reported an invalid sample rate')
+            except Exception as exc:
+                last_error = exc
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+                continue
+            with self._lock:
+                self.device = device
+                self.channels = channels
+                self.input_rate = actual_rate
+                self.device_default_rate = native_rate
+                self.buffer.max_samples = max(
+                    1, int(round(actual_rate*self.buffer_seconds)))
+                self.buffer.clear()
+                self.clock_match = ClockMatchedReader(
+                    self.buffer,
+                    round(actual_rate*self.target_seconds),
+                    nominal_ratio=actual_rate/self.sample_rate)
+                self.stream = stream
+            self._report(None)
+            return
+        raise ValueError(f'cannot open source-audio input at '
+                         f'{self.sample_rate} Hz: {last_error}')
 
-        def callback(indata, _frames, _timing, _status):
-            values = np.asarray(indata, dtype=np.float32)
-            if values.ndim == 1:
-                mono = values
-            elif self.channels == 1:
-                mono = values[:, 0]
-            elif input_side == 'left':
-                mono = values[:, 0]
-            elif input_side == 'right':
-                mono = values[:, 1]
-            else:
-                mono = (values[:, 0]+values[:, 1])*0.5
-            self.buffer.push(mono)
+    def _monitor_device(self):
+        from tools.v7_device_recovery import (
+            DeviceRateDebouncer, query_device_snapshot)
 
-        try:
-            self.stream = self.sd.InputStream(
-                device=device, channels=self.channels,
-                samplerate=self.sample_rate, dtype='float32', callback=callback)
-            self.stream.start()
-        except Exception as exc:
-            stream = getattr(self, 'stream', None)
-            if stream is not None:
+        stable = DeviceRateDebouncer()
+        while not self._closed.wait(self._monitor_interval):
+            with self._lock:
+                stream = self.stream
+                device = self.device
+                old_rate = self.device_default_rate
+            try:
+                index, _info, identity, rate = query_device_snapshot(
+                    self.sd, device, self.identity, 'input')
+            except Exception as exc:
+                self._close_stream()
+                self.buffer.clear()
+                stable.reset()
+                self._report(f'source-audio input unavailable: {exc}')
+                continue
+            try:
+                active = bool(stream is not None and stream.active)
+            except Exception:
+                active = False
+            changed_rate = (old_rate is not None and
+                            abs(rate-old_rate) > .5)
+            if active and not changed_rate and index == device:
+                stable.reset()
+                continue
+            if changed_rate:
+                self._close_stream()
+                self.buffer.clear()
+                self._report(
+                    f'source-audio sample rate changed to {rate:g}Hz; '
+                    'waiting to reconnect')
+            elif not active:
+                self._close_stream()
+                self.buffer.clear()
+                self._report('source-audio input stopped; waiting to reconnect')
+            elif index != device:
+                self._close_stream()
+                self.buffer.clear()
+                self._report('source-audio device index changed; reconnecting')
+            if stable.observe(identity, rate):
+                if self._closed.is_set():
+                    return
                 try:
-                    stream.close()
-                except Exception:
-                    pass
-            raise ValueError(
-                f'cannot open source-audio input at {self.sample_rate} Hz: {exc}') from exc
+                    self._open_stream(index)
+                except Exception as exc:
+                    self._report(f'source-audio input reconnect failed: {exc}')
+                stable.reset()
 
     def read(self, count):
-        return self.clock_match.read(count)
+        with self._lock:
+            reader = self.clock_match
+        return reader.read(count)
 
     def wait_for_samples(self, count, timeout):
         return self.buffer.wait_for(count, timeout)
 
     def close(self):
-        self.stream.stop()
-        self.stream.close()
+        if self._closed.is_set():
+            return
+        self._closed.set()
+        self._close_stream()
+        monitor = getattr(self, '_monitor_thread', None)
+        if monitor is not None and monitor is not threading.current_thread():
+            monitor.join(timeout=1)

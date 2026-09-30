@@ -1771,6 +1771,7 @@ class ReceiverGui:
             audio_error = meter.get('audio_device_error')
             if audio_error:
                 audio = f'RESELECT · {audio_error}'
+            input_error = meter.get('input_device_error')
             sync = meter.get('sync_state', 'acquiring')
             if width < 720:
                 if self.current_frame is not None:
@@ -1791,8 +1792,12 @@ class ReceiverGui:
             else:
                 detail = (f'{state} · {self.notice} · {routing} · '
                           f'audio {audio} · sync {sync}')
+            if input_error:
+                detail = (f'INPUT DEVICE LOST · {input_error} · '
+                          'holding last good picture')
             draw.text((14, footer_top+11), _fit_text(detail, small, width-28),
-                      fill=(147, 206, 169) if self.started else
+                      fill=(255, 182, 132) if input_error else
+                      (147, 206, 169) if self.started else
                       (189, 203, 214), font=small)
 
     def _render_display_menu(self, image, draw, small):

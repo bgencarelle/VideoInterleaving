@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Small, event-driven GUI controller for the standalone V7 sender.
 
-The sender runs unchanged in its own process. The GUI has no capture preview,
-per-frame polling, or verbose sender logging; it wakes on user input and the
-sender's occasional startup/shutdown messages.
+The sender runs in its own process. Optional source-video preview is handled by
+the sender's desktop media player, not by a GUI capture-frame render loop.
 """
 import json
 import math
@@ -87,6 +86,8 @@ FIELD_HELP = {
     'gamma': 'Live source gamma; 1.0 is neutral.',
     'capture_fps': 'Choose a frame rate reported by the capture source, or leave it at Source default.',
     'video_source': 'Choose a video with Browse, type a path or URL, or drop a file on the window.',
+    'video_preview': ('Open the same file or URL in a desktop player. Finite media '
+                      'requests looping where the player supports it.'),
     'video_live': 'Treat an HTTP(S) video URL as a live stream rather than a looping clip.',
     'camera': 'Choose a camera discovered from the host capture devices.',
     'screen_target': 'Choose the monitor or screen capture device. Discovery runs only when you open this picker.',
@@ -121,6 +122,7 @@ FIELD_LABELS = {
     'brightness': 'Brightness · live',
     'gamma': 'Gamma · live',
     'screen_target': 'Screen / display',
+    'video_preview': 'Open source in player',
     'video_live': 'Treat URL as live',
     'camera': 'Camera',
     'ffmpeg_input': 'FFmpeg input',
@@ -136,14 +138,126 @@ FIELD_LABELS = {
 VIDEO_FILE_GLOB = '*.mp4 *.m4v *.mov *.mkv *.webm *.avi *.mpeg *.mpg *.wmv *.ts'
 DEVICE_REFRESH_SECONDS = 3.0
 GUI_EVENT_WAIT_SECONDS = 0.5
+SENDER_PREFERENCES_VERSION = 1
+
+
+def sender_preferences_path():
+    """Return the per-user V7 sender GUI preferences path."""
+    root = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home()/'.config')
+    return root/'modemTest'/'v7_send_gui.json'
+
+
+def _load_sender_preferences(path):
+    try:
+        values = json.loads(Path(path).read_text(encoding='utf-8'))
+    except (OSError, ValueError, TypeError):
+        return {}
+    if (not isinstance(values, dict) or
+            values.get('version') != SENDER_PREFERENCES_VERSION):
+        return {}
+    settings = values.get('settings')
+
+    def clean_identity(value):
+        if (not isinstance(value, dict) or
+                not isinstance(value.get('name'), str)):
+            return None
+        hostapi = value.get('hostapi', '')
+        if not isinstance(hostapi, str):
+            hostapi = ''
+        return {'name': value['name'], 'hostapi': hostapi}
+
+    return {'settings': settings if isinstance(settings, dict) else {},
+            'output_device': clean_identity(values.get('output_device')),
+            'source_audio_device': clean_identity(
+                values.get('source_audio_device'))}
+
+
+def _save_sender_preferences(values, path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name+'.tmp')
+    temporary.write_text(json.dumps(
+        values, indent=2, sort_keys=True)+'\n', encoding='utf-8')
+    try:
+        temporary.chmod(0o600)
+    except OSError:
+        pass
+    temporary.replace(path)
+
+
+def _device_identity(device):
+    if device is None:
+        return None
+    return {'name': device.name, 'hostapi': device.hostapi}
+
+
+def _match_device(devices, identity):
+    if not isinstance(identity, dict) or not isinstance(identity.get('name'), str):
+        return None
+    matches = [device for device in devices
+               if device.name == identity['name'] and
+               (not identity.get('hostapi') or
+                device.hostapi == identity.get('hostapi'))]
+    return matches[0] if len(matches) == 1 else None
+
+
+SAVED_SETTING_FIELDS = (
+    'source', 'rate', 'profile', 'mono_video_side', 'source_audio',
+    'source_audio_input_side', 'source_audio_gain',
+    'source_audio_delay_ms', 'speed', 'encode_filter', 'brightness', 'gamma',
+    'capture_fps', 'video_source', 'video_preview', 'video_live', 'camera',
+    'ffmpeg_input', 'screen_backend', 'screen_target', 'region',
+    'capture_width', 'capture_filter', 'perceptual_resize',
+    'perceptual_detail_strength',
+)
+
+
+def _serialize_sender_settings(settings):
+    saved = {}
+    for key in SAVED_SETTING_FIELDS:
+        value = settings.get(key)
+        if isinstance(value, ScreenTarget):
+            value = {'label': value.label, 'region': value.region,
+                     'display': value.display}
+        if value is None or isinstance(value, (str, int, float, bool, dict)):
+            saved[key] = value
+    return saved
+
+
+def _restore_sender_settings(target, saved):
+    if not isinstance(saved, dict):
+        return
+    for key in SAVED_SETTING_FIELDS:
+        if key not in saved:
+            continue
+        value = saved[key]
+        if key == 'screen_target':
+            if isinstance(value, dict):
+                try:
+                    target[key] = ScreenTarget(
+                        str(value.get('label', 'Saved display')),
+                        str(value.get('region', '')),
+                        (None if value.get('display') is None else
+                         int(value['display'])))
+                except (TypeError, ValueError):
+                    continue
+            elif value is None:
+                target[key] = None
+            continue
+        if key in ('video_preview', 'video_live'):
+            if isinstance(value, bool):
+                target[key] = value
+        elif value is None or isinstance(value, (str, int, float, bool)):
+            target[key] = value
 
 
 class OutputDevice:
-    def __init__(self, index, name, channels, default_rate):
+    def __init__(self, index, name, channels, default_rate, hostapi=''):
         self.index = int(index)
         self.name = str(name)
         self.channels = int(channels)
         self.default_rate = int(round(float(default_rate or 0)))
+        self.hostapi = str(hostapi or '')
 
     @property
     def label(self):
@@ -153,11 +267,12 @@ class OutputDevice:
 
 
 class InputDevice:
-    def __init__(self, index, name, channels, default_rate):
+    def __init__(self, index, name, channels, default_rate, hostapi=''):
         self.index = int(index)
         self.name = str(name)
         self.channels = int(channels)
         self.default_rate = int(round(float(default_rate or 0)))
+        self.hostapi = str(hostapi or '')
 
     @property
     def label(self):
@@ -486,13 +601,21 @@ def output_devices(sd_module=None):
     if sd_module is None:
         import sounddevice as sd_module
     devices = sd_module.query_devices()
+    try:
+        hostapis = sd_module.query_hostapis()
+    except Exception:
+        hostapis = ()
     result = []
     for index, device in enumerate(devices):
         channels = int(device.get('max_output_channels') or 0)
         if channels:
+            hostapi_index = device.get('hostapi')
+            hostapi = (hostapis[int(hostapi_index)].get('name', '')
+                       if hostapi_index is not None and
+                       0 <= int(hostapi_index) < len(hostapis) else '')
             result.append(OutputDevice(
                 index, device.get('name', f'Audio device {index}'), channels,
-                device.get('default_samplerate')))
+                device.get('default_samplerate'), hostapi))
     return tuple(result)
 
 
@@ -501,13 +624,21 @@ def input_devices(sd_module=None):
     if sd_module is None:
         import sounddevice as sd_module
     devices = sd_module.query_devices()
+    try:
+        hostapis = sd_module.query_hostapis()
+    except Exception:
+        hostapis = ()
     result = []
     for index, device in enumerate(devices):
         channels = int(device.get('max_input_channels') or 0)
         if channels:
+            hostapi_index = device.get('hostapi')
+            hostapi = (hostapis[int(hostapi_index)].get('name', '')
+                       if hostapi_index is not None and
+                       0 <= int(hostapi_index) < len(hostapis) else '')
             result.append(InputDevice(
                 index, device.get('name', f'Audio device {index}'), channels,
-                device.get('default_samplerate')))
+                device.get('default_samplerate'), hostapi))
     return tuple(result)
 
 
@@ -933,6 +1064,8 @@ def build_command(settings, devices, sd_module=None, python=None,
         command.extend(('--video-source', checked['video_source']))
         if settings.get('video_live'):
             command.append('--video-live')
+        if settings.get('video_preview'):
+            command.append('--preview')
     elif checked['source'] == 'camera':
         if checked['camera_spec']:
             command.extend(('--ffmpeg-input', checked['camera_spec']))
@@ -994,9 +1127,9 @@ def _wrapped(text, font, width):
 class SenderGui:
     WINDOW_SIZE = (960, 720)
     TOOLBAR = 54
-    ROW_HEIGHT = 39
+    ROW_HEIGHT = 36
     BASIC_FIELDS = (
-        'device', 'source', 'video_source', 'video_live', 'camera',
+        'device', 'source', 'video_source', 'video_preview', 'video_live', 'camera',
         'screen_target', 'source_audio', 'source_audio_device',
         'source_audio_input_side', 'source_audio_gain',
         'source_audio_delay_ms', 'rate', 'capture_fps', 'profile',
@@ -1015,11 +1148,16 @@ class SenderGui:
     )
 
     def __init__(self, devices=(), device_error='', audio_devices=(),
-                 audio_device_error=''):
+                 audio_device_error='', preference_path=None,
+                 restore_preferences=False):
         self.devices = tuple(devices)
         self.device_error = device_error
         self.audio_devices = tuple(audio_devices)
         self.audio_device_error = audio_device_error
+        self.preference_path = (Path(preference_path)
+                                if preference_path is not None else None)
+        self.output_device_identity = None
+        self.source_audio_device_identity = None
         self.settings = {
             'device': None,
             'source': None,
@@ -1037,6 +1175,7 @@ class SenderGui:
             'gamma': '1',
             'capture_fps': '',
             'video_source': '',
+            'video_preview': False,
             'video_live': False,
             'camera': None,
             'ffmpeg_input': '',
@@ -1048,6 +1187,9 @@ class SenderGui:
             'perceptual_resize': 'off',
             'perceptual_detail_strength': '0.25',
         }
+        self.notice = 'Choose an output device, capture source, and profile.'
+        if restore_preferences and self.preference_path is not None:
+            self._restore_preferences()
         self.page = 'setup'
         self.advanced = False
         self.selected = 'device'
@@ -1056,13 +1198,13 @@ class SenderGui:
         self.dropdown_scroll = 0
         self.editing = False
         self.edit_buffer = ''
-        self.notice = 'Choose an output device, capture source, and profile.'
         self.lines = []
         self.events = queue.Queue()
         self.process = None
         self.reader = None
         self.stop_requested = False
         self.close_when_stopped = False
+        self.sender_device_lost = False
         self.dirty = True
         self.hits = {}
         self.width, self.height = self.WINDOW_SIZE
@@ -1073,6 +1215,51 @@ class SenderGui:
         self.capture_choice_cache = {}
         self.device_watch_stop = threading.Event()
         self.device_watch_thread = None
+        self.change_source_after_stop = False
+
+    def _restore_preferences(self):
+        preferences = _load_sender_preferences(self.preference_path)
+        _restore_sender_settings(self.settings, preferences.get('settings'))
+        self.output_device_identity = preferences.get('output_device')
+        self.source_audio_device_identity = preferences.get(
+            'source_audio_device')
+        output = _match_device(self.devices, self.output_device_identity)
+        if output is not None:
+            self.settings['device'] = output.index
+        elif self.output_device_identity is not None:
+            self.settings['device'] = None
+            name = self.output_device_identity.get('name', 'Saved output')
+            self.notice = f'{name} is unavailable; choose an output device.'
+        source_audio = _match_device(
+            self.audio_devices, self.source_audio_device_identity)
+        if source_audio is not None:
+            self.settings['source_audio_device'] = source_audio.index
+        elif self.source_audio_device_identity is not None:
+            self.settings['source_audio_device'] = None
+            name = self.source_audio_device_identity.get(
+                'name', 'Saved audio input')
+            self.notice = f'{name} is unavailable; choose an input device.'
+
+    def _persist_preferences(self):
+        if self.preference_path is None:
+            return
+        output = self._device()
+        if output is not None:
+            self.output_device_identity = _device_identity(output)
+        source_audio = next((device for device in self.audio_devices
+                             if device.index ==
+                             self.settings.get('source_audio_device')), None)
+        if source_audio is not None:
+            self.source_audio_device_identity = _device_identity(source_audio)
+        try:
+            _save_sender_preferences({
+                'version': SENDER_PREFERENCES_VERSION,
+                'settings': _serialize_sender_settings(self.settings),
+                'output_device': self.output_device_identity,
+                'source_audio_device': self.source_audio_device_identity,
+            }, self.preference_path)
+        except OSError as exc:
+            self.notice = f'Could not save sender preferences: {exc}'
 
     def _device(self):
         return next((device for device in self.devices
@@ -1203,23 +1390,25 @@ class SenderGui:
 
     def _set_output_devices(self, devices, error=''):
         previous = self._device()
+        identity = self.output_device_identity or _device_identity(previous)
         old_devices, old_error = self.devices, self.device_error
         changed = (self._audio_device_signature(old_devices) !=
                    self._audio_device_signature(devices))
         self.devices = tuple(devices)
         self.device_error = error
-        current = next((device for device in self.devices
-                        if previous is not None and
-                        device.index == previous.index and
-                        device.name == previous.name), None)
+        current = (_match_device(self.devices, identity)
+                   if identity is not None else None)
         if self.settings['device'] is not None:
             if current is None:
                 self.settings['device'] = None
-                self.settings['rate'] = None
                 self.notice = ('Selected output device is unavailable; '
                                'choose an available device.')
             else:
                 self.settings['device'] = current.index
+                self.output_device_identity = _device_identity(current)
+        elif current is not None and identity is not None:
+            self.settings['device'] = current.index
+            self.output_device_identity = _device_identity(current)
         if changed:
             self.rate_cache.clear()
             self._device_choices_changed('device')
@@ -1232,15 +1421,15 @@ class SenderGui:
         previous = next((device for device in self.audio_devices
                          if device.index == self.settings['source_audio_device']),
                         None)
+        identity = (self.source_audio_device_identity or
+                    _device_identity(previous))
         old_devices, old_error = self.audio_devices, self.audio_device_error
         changed = (self._audio_device_signature(old_devices) !=
                    self._audio_device_signature(devices))
         self.audio_devices = tuple(devices)
         self.audio_device_error = error
-        current = next((device for device in self.audio_devices
-                        if previous is not None and
-                        device.index == previous.index and
-                        device.name == previous.name), None)
+        current = (_match_device(self.audio_devices, identity)
+                   if identity is not None else None)
         if self.settings['source_audio_device'] is not None:
             if current is None:
                 self.settings['source_audio_device'] = None
@@ -1248,6 +1437,10 @@ class SenderGui:
                                'choose an available device.')
             else:
                 self.settings['source_audio_device'] = current.index
+                self.source_audio_device_identity = _device_identity(current)
+        elif current is not None and identity is not None:
+            self.settings['source_audio_device'] = current.index
+            self.source_audio_device_identity = _device_identity(current)
         if changed:
             self._device_choices_changed('source_audio_device')
             if 'unavailable' not in self.notice:
@@ -1266,7 +1459,7 @@ class SenderGui:
 
     @staticmethod
     def _audio_device_signature(devices):
-        return tuple((device.index, device.name, device.channels,
+        return tuple((device.index, device.name, device.hostapi, device.channels,
                       device.default_rate) for device in devices)
 
     def _watch_devices(self, stop):
@@ -1355,6 +1548,7 @@ class SenderGui:
         source = self.settings['source']
         fields = [dest for dest in fields if not (
             dest == 'video_source' and source != 'video' or
+            dest == 'video_preview' and source != 'video' or
             dest == 'video_live' and source != 'video' or
             dest == 'camera' and source != 'camera' or
             dest == 'screen_target' and source != 'screen' or
@@ -1439,6 +1633,11 @@ class SenderGui:
                 self.settings['perceptual_resize'] = 'off'
         elif dest == 'device':
             self.settings['rate'] = None
+            self.output_device_identity = _device_identity(self._device())
+        elif dest == 'source_audio_device':
+            device = next((item for item in self.audio_devices
+                           if item.index == value), None)
+            self.source_audio_device_identity = _device_identity(device)
         elif dest == 'screen_backend':
             self.settings['screen_target'] = None
             self.capture_choice_cache.pop('capture_fps', None)
@@ -1449,6 +1648,7 @@ class SenderGui:
             self.capture_choice_cache.pop('capture_fps', None)
         self.notice = f'{dest.replace("_", " ").capitalize()} updated.'
         self.dirty = True
+        self._persist_preferences()
 
     def _select_option(self, dest, value):
         if dest == 'rate' and value == 'custom':
@@ -1603,14 +1803,27 @@ class SenderGui:
                 self.lines.append(value)
                 self.lines = self.lines[-12:]
                 self.notice = value
+                try:
+                    status = json.loads(value).get('status')
+                except (TypeError, ValueError, AttributeError):
+                    status = None
+                if status == 'sender_device_lost':
+                    self.sender_device_lost = True
+                elif status == 'sender_device_reconnected':
+                    self.sender_device_lost = False
             elif kind == 'exit':
                 return_code = int(value)
                 self.process = None
                 self.stop_requested = False
+                self.sender_device_lost = False
                 if return_code == 0:
                     self.notice = 'Sender stopped.'
                 else:
                     self.notice = f'Sender exited with status {return_code}.'
+                if self.change_source_after_stop:
+                    self.change_source_after_stop = False
+                    if not self.close_when_stopped:
+                        self._open_source_picker()
                 if self.close_when_stopped and self._window is not None:
                     self._glfw.set_window_should_close(self._window, True)
             elif kind == 'devices':
@@ -1629,10 +1842,20 @@ class SenderGui:
                 if self.process is not None and dest in ('brightness', 'gamma'):
                     self._send_live_tone_update()
                 self.notice = f'{dest.replace("_", " ").capitalize()} updated.'
+                self._persist_preferences()
             except (OSError, ValueError, RuntimeError) as exc:
                 self.settings[dest] = previous
                 self.notice = str(exc)
         self.editing = False
+        self.dirty = True
+
+    def _open_source_picker(self):
+        self.page = 'setup'
+        self.dropdown = None
+        self.selected = 'source'
+        self.scroll = 0
+        self.notice = 'Choose a new capture source.'
+        self._open_dropdown('source')
         self.dirty = True
 
     def _send_live_tone_update(self):
@@ -1752,11 +1975,13 @@ class SenderGui:
         draw.text((24, 76), 'Sender status', font=font,
                   fill=(229, 237, 243))
         state = ('STOPPING' if self.stop_requested else
+                 'DEVICE LOST' if self.sender_device_lost else
                  'SENDING' if self.process is not None else 'STOPPED')
         draw.rounded_rectangle((24, 119, width-24, 188), radius=6,
                                fill=(17, 29, 39), outline=(48, 73, 90))
         draw.text((42, 135), state, font=font,
-                  fill=(238, 182, 125) if state == 'STOPPING' else
+                  fill=(238, 140, 110) if state == 'DEVICE LOST' else
+                  (238, 182, 125) if state == 'STOPPING' else
                   (145, 218, 170) if state == 'SENDING' else (188, 202, 213))
         draw.text((42, 165), _fit(self.notice, small, width-84),
                   font=small, fill=(165, 187, 202))
@@ -1808,26 +2033,33 @@ class SenderGui:
         draw.rectangle((0, 0, width, self.TOOLBAR), fill=(10, 18, 25, 255))
         draw.rectangle((0, self.TOOLBAR-1, width, self.TOOLBAR),
                        fill=(47, 68, 83, 255))
-        controls = (
+        controls = [
             ('setup', 'Setup', 14, 100),
             ('live', 'Live', 108, 180),
+        ]
+        if self.page == 'live':
+            controls.append(('change_source', 'Change source', 190, 310))
+        controls.extend((
             ('start_stop', 'Stop' if self.process is not None else 'Start',
              width-202, width-108),
             ('close', 'Close', width-98, width-12),
-        )
+        ))
         for key, label, left, right in controls:
             rect = (left, 9, right, 45)
             self.hits[key] = rect
             active = ((key == 'setup' and self.page == 'setup') or
                       (key == 'live' and self.page == 'live'))
             color = ((39, 67, 86) if active else
+                     (100, 51, 41) if key == 'start_stop' and
+                     self.sender_device_lost else
                      (82, 55, 40) if key == 'start_stop' and self.process else
+                     (99, 65, 34) if key == 'change_source' else
                      (43, 94, 123) if key == 'start_stop' else (22, 35, 46))
             draw.rounded_rectangle(rect, radius=5, fill=color,
                                    outline=(67, 100, 122), width=1)
             draw.text((left+10, 19), label, font=small,
-                      fill=(246, 240, 235) if key == 'start_stop' and self.process
-                      else (236, 242, 247))
+                       fill=(246, 240, 235) if key == 'start_stop' and self.process
+                       else (236, 242, 247))
 
         if self.page == 'setup':
             self._render_setup(image, draw, font, small)
@@ -1860,7 +2092,8 @@ class SenderGui:
                 return
             dest = hit.split(':', 1)[1]
             if (dest not in self._visible_fields() or
-                    dest in self.DROPDOWN_FIELDS or dest == 'video_live'):
+                    dest in self.DROPDOWN_FIELDS or
+                    dest in ('video_live', 'video_preview')):
                 return
             if (self.process is not None and
                     dest not in ('brightness', 'gamma')):
@@ -1890,6 +2123,13 @@ class SenderGui:
                 glfw.set_window_should_close(window, True)
         elif hit == 'start_stop':
             self._stop() if self.process is not None else self._start()
+        elif hit == 'change_source':
+            if self.process is not None:
+                self.change_source_after_stop = True
+                self.notice = 'Stopping sender before changing source…'
+                self._stop()
+            else:
+                self._open_source_picker()
         elif hit == 'advanced':
             if self.process is not None:
                 self.notice = 'Settings are locked while the sender is running.'
@@ -1911,6 +2151,7 @@ class SenderGui:
                         self.capture_choice_cache.pop('capture_fps', None)
                         self.selected = 'video_source'
                         self.notice = f'Selected video: {Path(path).name}'
+                        self._persist_preferences()
                     else:
                         self.notice = 'Video selection cancelled.'
         elif hit and hit.startswith('option:') and self.dropdown is not None:
@@ -1925,7 +2166,7 @@ class SenderGui:
             if (self.process is not None and
                     dest not in ('brightness', 'gamma')):
                 self.notice = 'Settings are locked while the sender is running.'
-            elif dest == 'video_live':
+            elif dest in ('video_live', 'video_preview'):
                 self._assign(dest, not self.settings[dest])
             elif dest in self.DROPDOWN_FIELDS:
                 self._open_dropdown(dest)
@@ -2010,7 +2251,7 @@ class SenderGui:
                     self.scroll = position-visible_count+1
             elif key in (glfw.KEY_LEFT, glfw.KEY_RIGHT) and self.selected in fields:
                 dest = self.selected
-                if dest == 'video_live':
+                if dest in ('video_live', 'video_preview'):
                     self._assign(dest, not self.settings[dest])
                 elif dest in self.DROPDOWN_FIELDS:
                     self._open_dropdown(dest)
@@ -2021,7 +2262,7 @@ class SenderGui:
                 dest = self.selected
                 if dest in self.DROPDOWN_FIELDS:
                     self._open_dropdown(dest)
-                elif dest == 'video_live':
+                elif dest in ('video_live', 'video_preview'):
                     self._assign(dest, not self.settings[dest])
                 else:
                     self.editing = True
@@ -2056,6 +2297,7 @@ class SenderGui:
             self.selected = 'video_source'
             self.notice = f'Video path selected: {Path(paths[0]).name}'
             self.dirty = True
+            self._persist_preferences()
 
     def run(self):
         import glfw
@@ -2157,6 +2399,7 @@ class SenderGui:
             pass
         finally:
             self.device_watch_stop.set()
+            self._persist_preferences()
             if self.process is not None:
                 self.close_when_stopped = True
                 self._stop()
@@ -2205,8 +2448,9 @@ def main():
     except Exception as exc:
         audio_devices = ()
         audio_device_error = f'Audio input enumeration failed: {exc}'
-    SenderGui(devices, device_error, audio_devices,
-              audio_device_error).run()
+    SenderGui(devices, device_error, audio_devices, audio_device_error,
+              preference_path=sender_preferences_path(),
+              restore_preferences=True).run()
 
 
 if __name__ == '__main__':

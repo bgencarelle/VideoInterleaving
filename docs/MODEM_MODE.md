@@ -144,14 +144,29 @@ needed for the default M=500 coded profile:
 
 To configure the standalone sender with a small event-driven GUI instead, run
 `./vi.modem-send-gui`. It launches the same `vi.modem-send` path in a separate
-process, uses no capture preview or per-frame logging, and stops it with a
-graceful interrupt. The output sample rate defaults to the device-native clock;
-capture FPS is a separate setting. For video, use **Browse**, type a file path
-or URL, or drop a file onto the window. Camera and screen/display options are
-discovered when their pickers open. **Advanced → Pre-encode downscaler** exposes
-the experimental preprocessing modes and strength; they work with Mono video,
-Fold 500, or Fold 1000 using the Box encode filter. Match the selected wire
-profile on the receiver.
+process and stops it with a graceful interrupt. Its **Change source** action
+stops the current send and opens the source picker; select the next source and
+press **Start**. Source-specific settings are retained while switching. The GUI
+restores the last configuration on launch but does not auto-start the sender.
+For video, use **Browse**, type a file path or URL, or drop a file onto the
+window. **Open source in player** opens a separate desktop player; when `ffplay`
+is available, finite file/VOD preview requests infinite looping and mutes its
+audio. Live sources are not looped. The player has its own playback clock and
+is not frame-synchronized with the sender. A system-associated player fallback
+may control repeat and audio behavior itself. Camera and screen/display options
+are discovered when their pickers open. **Advanced → Pre-encode downscaler**
+exposes the experimental preprocessing modes and strength; they work with Mono
+video, Fold 500, or Fold 1000 using the Box encode filter. Match the selected
+wire profile on the receiver.
+
+During a live send or receive, a lost primary audio device pauses transmission
+or decoding and reports the selected device; the receiver retains its last good
+picture. Recovery targets the same device identity, without switching silently
+to the system default. A device/rate pair must remain stable for five 30-fps
+intervals (about 167 ms) before reconnecting. The reopened stream's negotiated
+sample rate is used to rebuild rate-dependent state. Loss of an optional sender
+source-audio input leaves video sending active with silence on that audio leg;
+loss of receiver passthrough output does not stop video decoding.
 
 For file/stream video and FFmpeg-based screen capture, **Capture width** is an
 intermediate FFmpeg downscale that limits raw-frame pipe bandwidth and CPU. The
