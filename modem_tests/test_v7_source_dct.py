@@ -13,7 +13,8 @@ if str(ROOT) not in sys.path:
 
 from animation_modem.v7_source_dct import (
     FoldBlockDCTProjector, _aggregate, _axis_frequency_gain,
-    _frequency_weights, source_dct_values,
+    _frequency_weights, direct_dct_coefficients, direct_dct_values,
+    source_dct_values,
     source_fold_block_dct_coefficients, source_fold_dct_coefficients)
 from animation_modem import v7
 from animation_modem.v7_fold import Fold500
@@ -295,6 +296,156 @@ class SourceDCTTests(unittest.TestCase):
         self.assertTrue(np.isfinite(values).all())
         self.assertGreater(float(values.std()), 0.1)
         self.assertEqual(aspect, v7.aspect_wire_code((160, 120)))
+
+
+def _direct_reference(rgb, grids, shapes, brightness=1.0, gamma=1.0,
+                      sharpen='off', strength=.25, clarity=0.0,
+                      chroma_gain=1.0):
+    """The direct-encode spec written out with dctn/idctn, for comparison."""
+    from scipy.fft import idctn
+    from scipy.ndimage import gaussian_filter
+    x = np.clip(np.asarray(rgb, float)/255.0*brightness, 0, 1)**(1/gamma)
+    height, width = x.shape[:2]
+    luma_rows, luma_cols = grids[0]
+    block_y = max(1, height//(2*luma_rows))
+    block_x = max(1, width//(2*luma_cols))
+    rows, cols = height//block_y, width//block_x
+    x = x[:rows*block_y, :cols*block_x].reshape(
+        rows, block_y, cols, block_x, 3).mean(axis=(1, 3))
+    red, green, blue = x[..., 0], x[..., 1], x[..., 2]
+    y = .299*red+.587*green+.114*blue
+    cb = np.clip(.5+chroma_gain*(-.168736*red-.331264*green+.5*blue), 0, 1)
+    cr = np.clip(.5+chroma_gain*(.5*red-.418688*green-.081312*blue), 0, 1)
+    unit = (rows/luma_rows, cols/luma_cols)
+    if clarity:
+        y = y+clarity*(y-gaussian_filter(
+            y, (6*unit[0], 6*unit[1]), mode='reflect'))
+    if sharpen == 'usm':
+        y = y+strength*(y-gaussian_filter(
+            y, (.8*unit[0], .8*unit[1]), mode='reflect'))
+    out = []
+    for index, (plane, (grid_rows, grid_cols), (sent_rows, sent_cols)) in \
+            enumerate(zip((y, cb, cr), grids, shapes)):
+        coeff = dctn(plane, norm='ortho')[:grid_rows, :grid_cols]
+        coeff *= np.sqrt(grid_rows*grid_cols/(rows*cols))
+        if index == 0 and sharpen == 'taper':
+            radius = np.hypot(np.arange(sent_rows)[:, None]/sent_rows,
+                              np.arange(sent_cols)[None, :]/sent_cols)
+            coeff[:sent_rows, :sent_cols] *= 1+strength*np.where(
+                radius < 1, 27/4*radius**2*(1-radius), 0)
+        out.append(idctn(coeff, norm='ortho').ravel())
+    return np.clip(np.concatenate(out)*2-1, -1, 1)
+
+
+def _textured_frame(width, height, seed=0):
+    with Image.open(v7.REFERENCE_FIXTURE) as image:
+        base = np.asarray(image.convert('RGB').resize(
+            (width, height), Image.Resampling.BILINEAR), float)
+    noise = np.random.default_rng(seed).normal(0, 6, base.shape)
+    return np.clip(base+noise, 0, 255).astype(np.uint8)
+
+
+class DirectDCTEncodeTests(unittest.TestCase):
+    grids, shapes = v7.V7_GRIDS, v7.V7_SHAPES
+
+    def test_matches_the_spec_pipeline_for_every_option(self):
+        cases = ({}, {'brightness': 1.05, 'gamma': 1.2},
+                 {'sharpen': 'taper', 'strength': .5},
+                 {'sharpen': 'usm', 'strength': .5},
+                 {'clarity': .3, 'chroma_gain': 1.2},
+                 {'sharpen': 'usm', 'strength': .5, 'clarity': .3})
+        for width, height in ((160, 96), (400, 480), (641, 333)):
+            rgb = _textured_frame(width, height)
+            for case in cases:
+                with self.subTest(size=(width, height), **case):
+                    actual = direct_dct_values(
+                        rgb, self.grids, self.shapes,
+                        brightness=case.get('brightness', 1.0),
+                        gamma=case.get('gamma', 1.0),
+                        sharpen=case.get('sharpen', 'off'),
+                        sharpen_strength=case.get('strength', .25),
+                        clarity=case.get('clarity', 0.0),
+                        chroma_gain=case.get('chroma_gain', 1.0))
+                    expected = _direct_reference(
+                        rgb, self.grids, self.shapes, **case)
+                    np.testing.assert_allclose(actual, expected, atol=1e-9)
+
+    def test_flat_colour_encodes_to_exact_constants_with_any_option(self):
+        rgb = np.full((300, 410, 3), (92, 132, 177), dtype=np.uint8)
+        red, green, blue = np.array((92, 132, 177))/255.0
+        y = .299*red+.587*green+.114*blue
+        for options in ({}, {'sharpen': 'taper', 'sharpen_strength': 1.0},
+                        {'sharpen': 'usm', 'sharpen_strength': 1.0},
+                        {'clarity': 1.0}):
+            values = direct_dct_values(rgb, self.grids, self.shapes, **options)
+            luma = values[:96*80]
+            np.testing.assert_allclose(luma, 2*y-1, atol=1e-12)
+        grey = np.full((300, 410, 3), 128, dtype=np.uint8)
+        values = direct_dct_values(grey, self.grids, self.shapes,
+                                   chroma_gain=1.3)
+        np.testing.assert_allclose(values[96*80:], 0.0, atol=1e-12)
+
+    def test_source_at_grid_size_passes_through(self):
+        y, x = np.mgrid[:96, :80]
+        rgb = np.stack((x/79, y/95, .5*(x/79+y/95)), axis=-1)
+        values = direct_dct_values(rgb, ((96, 80),), ((48, 40),))
+        luma = .299*rgb[..., 0]+.587*rgb[..., 1]+.114*rgb[..., 2]
+        np.testing.assert_allclose(values, (2*luma-1).ravel(), atol=1e-12)
+
+    def test_taper_changes_only_the_sent_luma_corner(self):
+        rgb = _textured_frame(400, 480, seed=2)
+        plain = direct_dct_coefficients(rgb, self.grids, self.shapes)
+        taper = direct_dct_coefficients(rgb, self.grids, self.shapes,
+                                        sharpen='taper', sharpen_strength=.5)
+        outside = np.ones((96, 80), bool)
+        outside[:48, :40] = False
+        np.testing.assert_array_equal(taper[0][outside], plain[0][outside])
+        self.assertFalse(np.allclose(taper[0][:48, :40], plain[0][:48, :40]))
+        self.assertEqual(taper[0][0, 0], plain[0][0, 0])
+        for plane in (1, 2):
+            np.testing.assert_array_equal(taper[plane], plain[plane])
+
+    def test_coefficients_are_the_coders_transform_and_feed_the_fold(self):
+        model = v7.load_model(.1521/np.sqrt(1+10**(v7.CLOCK_REL_DB/10)), 'box')
+        rgb = _textured_frame(720, 960, seed=4)
+        values = direct_dct_values(rgb, self.grids, self.shapes)
+        self.assertLess(float(np.abs(values).max()), 1.0)  # nothing clipped
+        coefficients = direct_dct_coefficients(rgb, self.grids, self.shapes)
+        offset = 0
+        for plane, (rows, cols) in zip(coefficients, self.grids):
+            grid = values[offset:offset+rows*cols].reshape(rows, cols)
+            np.testing.assert_allclose(plane, dctn(grid, norm='ortho'),
+                                       atol=1e-10)
+            offset += rows*cols
+        fold = Fold500(model)
+        np.testing.assert_allclose(
+            fold.encode_dct_coefficients(np.concatenate(
+                [plane.ravel() for plane in coefficients])),
+            fold.encode_coefficients(values), atol=1e-9)
+
+    def test_uint8_and_float_frames_agree(self):
+        rgb = _textured_frame(400, 480, seed=6)
+        np.testing.assert_allclose(
+            direct_dct_values(rgb, self.grids, self.shapes, gamma=1.3),
+            direct_dct_values(rgb/255.0, self.grids, self.shapes, gamma=1.3),
+            atol=1e-12)
+
+    def test_live_sender_uses_the_direct_encoder_by_default(self):
+        model = v7.load_model(.1521/np.sqrt(1+10**(v7.CLOCK_REL_DB/10)), 'box')
+        rgb = _textured_frame(400, 480, seed=8)
+        values, _aspect = v7_live._values(
+            model, rgb, 'box', brightness=1.05, dct_encode=True,
+            dct_options={'sharpen': 'taper', 'sharpen_strength': .25,
+                         'clarity': 0.0, 'chroma_gain': 1.0,
+                         'aggregation': 'off', 'band_profile': 'off'})
+        np.testing.assert_array_equal(values, direct_dct_values(
+            rgb, model.coder.grids, model.coder.shapes, brightness=1.05,
+            sharpen='taper', sharpen_strength=.25))
+
+    def test_small_source_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'smaller than'):
+            direct_dct_values(np.zeros((95, 200, 3), np.uint8),
+                              self.grids, self.shapes)
 
 
 if __name__ == '__main__':

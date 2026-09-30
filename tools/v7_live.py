@@ -323,13 +323,24 @@ def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0,
             raise ValueError('--dct-encode cannot be combined with --perceptual-resize')
         if capture_prepared:
             raise ValueError('--dct-encode requires an unprepared source frame')
-        from animation_modem.v7_source_dct import source_dct_values
+        from animation_modem.v7_source_dct import (direct_dct_values,
+                                                   source_dct_values)
         rgb = np.asarray(frame.convert('RGB') if isinstance(frame, Image.Image)
                          else frame)
-        values, _stats = source_dct_values(
-            rgb, model.coder.grids, model.coder.shapes,
-            brightness=brightness, gamma=gamma,
-            **(dct_options or {}))
+        options = dict(dct_options or {})
+        if (options.pop('aggregation', 'off') == 'off' and
+                options.pop('band_profile', 'off') == 'off'):
+            # The specified direct encode: tone + block pre-shrink fused in
+            # one pass, then small cached DCT products per plane.
+            values = direct_dct_values(
+                rgb, model.coder.grids, model.coder.shapes,
+                brightness=brightness, gamma=gamma, **options)
+        else:
+            # Research reducers keep the full-resolution analysis path.
+            values, _stats = source_dct_values(
+                rgb, model.coder.grids, model.coder.shapes,
+                brightness=brightness, gamma=gamma,
+                **(dct_options or {}))
         size = source_size or (rgb.shape[1], rgb.shape[0])
         aspect = P.aspect_wire_code(size)
         if return_resized:

@@ -456,6 +456,283 @@ def _frequency_weights(shape, plane, profile, display_size,
     return weights
 
 
+@lru_cache(maxsize=64)
+def _dct_matrix(source_count, mode_count):
+    """Leading orthonormal DCT-II basis vectors (source x modes), float64."""
+    samples = np.arange(int(source_count), dtype=np.float64)[:, None]
+    modes = np.arange(int(mode_count), dtype=np.float64)[None, :]
+    basis = np.cos(np.pi*(2*samples+1)*modes/(2*int(source_count)))
+    basis *= np.sqrt(2.0/int(source_count))
+    basis[:, 0] /= np.sqrt(2.0)
+    basis.setflags(write=False)
+    return basis
+
+
+@lru_cache(maxsize=32)
+def _direct_plan(height, width, rows, cols):
+    """Cached matrices for DCT truncation of an h×w plane to an r×c grid.
+
+    ``C = analysis_y @ plane @ analysis_x`` is the plane's leading r×c
+    orthonormal DCT, amplitude-normalized to the grid (the coder's own
+    ``sqrt(rc/hw)``). ``synthesis_y @ C @ synthesis_x`` is the grid's inverse
+    DCT, and ``left @ plane @ right`` is both steps folded together.
+    """
+    norm = (rows*cols/(height*width))**.25
+    analysis_y = np.ascontiguousarray(_dct_matrix(height, rows).T*norm)
+    analysis_x = np.ascontiguousarray(_dct_matrix(width, cols)*norm)
+    synthesis_y = np.ascontiguousarray(_dct_matrix(rows, rows))
+    synthesis_x = np.ascontiguousarray(_dct_matrix(cols, cols).T)
+    left = np.ascontiguousarray(synthesis_y @ analysis_y)
+    right = np.ascontiguousarray(analysis_x @ synthesis_x)
+    plan = (analysis_y, analysis_x, synthesis_y, synthesis_x, left, right)
+    for array in plan:
+        array.setflags(write=False)
+    return plan
+
+
+@lru_cache(maxsize=16)
+def _tone_lut(brightness, gamma):
+    """uint8 code -> toned [0, 1] value: brightness, clip, then gamma."""
+    lut = np.clip(np.arange(256, dtype=np.float64)/255.0*brightness, 0.0, 1.0)
+    if gamma != 1.0:
+        lut = lut**(1.0/gamma)
+    lut.setflags(write=False)
+    return lut
+
+
+@lru_cache(maxsize=16)
+def _taper_gain(rows, cols, sent_rows, sent_cols, strength):
+    """1 + s*b(f) inside the sent corner, 1 elsewhere (see the spec)."""
+    u = np.arange(sent_rows, dtype=np.float64)[:, None]/sent_rows
+    v = np.arange(sent_cols, dtype=np.float64)[None, :]/sent_cols
+    radius = np.hypot(u, v)
+    boost = np.where(radius < 1, (27.0/4.0)*radius**2*(1.0-radius), 0.0)
+    gain = np.ones((rows, cols), dtype=np.float64)
+    gain[:sent_rows, :sent_cols] += strength*boost
+    gain.setflags(write=False)
+    return gain
+
+
+@njit(cache=True, nogil=True)
+def _toned_block_means_u8(data, lut, block_y, block_x, out_rows, out_cols):
+    """Tone uint8 RGB through ``lut`` and average block_y×block_x blocks.
+
+    One pass over the frame; returns contiguous R, G, B mean planes.
+    """
+    result = np.zeros((3, out_rows, out_cols), dtype=np.float64)
+    scale = 1.0/(block_y*block_x)
+    for by in range(out_rows):
+        for dy in range(block_y):
+            y = by*block_y+dy
+            for bx in range(out_cols):
+                red = 0.0
+                green = 0.0
+                blue = 0.0
+                x0 = bx*block_x
+                for dx in range(block_x):
+                    red += lut[data[y, x0+dx, 0]]
+                    green += lut[data[y, x0+dx, 1]]
+                    blue += lut[data[y, x0+dx, 2]]
+                result[0, by, bx] += red
+                result[1, by, bx] += green
+                result[2, by, bx] += blue
+        for channel in range(3):
+            for bx in range(out_cols):
+                result[channel, by, bx] *= scale
+    return result
+
+
+@njit(cache=True, nogil=True)
+def _block_means_f64(data, block_y, block_x, out_rows, out_cols):
+    result = np.zeros((3, out_rows, out_cols), dtype=np.float64)
+    scale = 1.0/(block_y*block_x)
+    for by in range(out_rows):
+        for dy in range(block_y):
+            y = by*block_y+dy
+            for bx in range(out_cols):
+                x0 = bx*block_x
+                for dx in range(block_x):
+                    for channel in range(3):
+                        result[channel, by, bx] += data[y, x0+dx, channel]
+        for channel in range(3):
+            for bx in range(out_cols):
+                result[channel, by, bx] *= scale
+    return result
+
+
+@njit(cache=True, fastmath=True, nogil=True)
+def _separable(left, plane, right):
+    """``left @ plane @ right`` in one thread, without BLAS.
+
+    The products are small (a few million multiply-adds per frame). OpenBLAS
+    and a parallel Numba pool are faster per call, but both leave worker
+    threads spinning after it: at the sender's 12 frames/s that cost 3-4x the
+    useful CPU (11-14 ms per frame instead of 3-4 ms, 2-core host), taken
+    from capture, audio and a receiver on the same machine.
+    """
+    height, width = plane.shape
+    rows = left.shape[0]
+    cols = right.shape[1]
+    partial = np.zeros((height, cols))
+    for i in range(height):
+        for k in range(width):
+            value = plane[i, k]
+            for j in range(cols):
+                partial[i, j] += value*right[k, j]
+    out = np.zeros((rows, cols))
+    for i in range(rows):
+        for k in range(height):
+            value = left[i, k]
+            for j in range(cols):
+                out[i, j] += value*partial[k, j]
+    return out
+
+
+def _direct_planes(rgb, grids, shapes, brightness, gamma, sharpen,
+                   sharpen_strength, clarity, chroma_gain):
+    """Validated, pre-shrunk and pixel-enhanced Y[/Cb/Cr] planes in [0, 1]."""
+    if sharpen not in SHARPEN_MODES:
+        raise ValueError(f'unknown DCT sharpen mode {sharpen!r}')
+    brightness, gamma = float(brightness), float(gamma)
+    sharpen_strength, clarity = float(sharpen_strength), float(clarity)
+    chroma_gain = float(chroma_gain)
+    if not np.isfinite(brightness) or brightness <= 0:
+        raise ValueError('brightness must be finite and positive')
+    if not np.isfinite(gamma) or gamma <= 0:
+        raise ValueError('gamma must be finite and positive')
+    if not 0 <= sharpen_strength <= 1 or not 0 <= clarity <= 1:
+        raise ValueError('DCT enhancement strengths must be in [0, 1]')
+    if not 1 <= chroma_gain <= 1.3:
+        raise ValueError('chroma gain must be in [1, 1.3]')
+    grids = tuple(tuple(map(int, shape)) for shape in grids)
+    shapes = tuple(tuple(map(int, shape)) for shape in shapes)
+    if len(grids) != len(shapes) or len(grids) not in (1, 3):
+        raise ValueError('V7 source DCT expects one or three matching plane grids')
+    if any(g[0] < s[0] or g[1] < s[1] for g, s in zip(grids, shapes)):
+        raise ValueError('each transmitted shape must fit its coder grid')
+
+    data = np.asarray(rgb)
+    if data.ndim != 3 or data.shape[2] != 3:
+        raise ValueError('source DCT expects an HxWx3 RGB frame')
+    height, width = data.shape[:2]
+    if height < max(shape[0] for shape in grids) or \
+            width < max(shape[1] for shape in grids):
+        raise ValueError('source frame is smaller than the V7 coder grid')
+    # Pre-shrink by division: the largest whole blocks that keep the plane
+    # at least twice the luma grid on each axis (1 = no shrink).
+    luma_rows, luma_cols = grids[0]
+    block_y = max(1, height//(2*luma_rows))
+    block_x = max(1, width//(2*luma_cols))
+    rows, cols = height//block_y, width//block_x
+
+    if data.dtype == np.uint8:
+        # One compiled signature for every capture layout (mss hands over
+        # strided BGRA->RGB views); the sender's warm-up compiles this one.
+        data = np.ascontiguousarray(data)
+        means = _toned_block_means_u8(
+            data, _tone_lut(brightness, gamma), block_y, block_x, rows, cols)
+    else:
+        toned = np.clip(_rgb_float(data)*brightness, 0.0, 1.0)
+        if gamma != 1.0:
+            toned = toned**(1.0/gamma)
+        means = _block_means_f64(toned, block_y, block_x, rows, cols)
+
+    # YCbCr is linear, so converting block means equals averaging the
+    # per-pixel conversion.
+    red, green, blue = means
+    y = .299000*red + .587000*green + .114000*blue
+    planes = [y]
+    if len(grids) == 3:
+        cb = .5-.168736*red-.331264*green+.5*blue
+        cr = .5+.5*red-.418688*green-.081312*blue
+        if chroma_gain != 1.0:
+            cb = np.clip(.5+chroma_gain*(cb-.5), 0.0, 1.0)
+            cr = np.clip(.5+chroma_gain*(cr-.5), 0.0, 1.0)
+        planes += [cb, cr]
+    # Pixel-domain radii are in luma grid pixels at any source size. Spec
+    # order: chroma gain (above), clarity, then usm.
+    unit = (rows/luma_rows, cols/luma_cols)
+    if clarity:
+        blurred = gaussian_filter(y, sigma=(6*unit[0], 6*unit[1]),
+                                  mode='reflect')
+        y = y+clarity*(y-blurred)
+    if sharpen == 'usm' and sharpen_strength:
+        blurred = gaussian_filter(y, sigma=(.8*unit[0], .8*unit[1]),
+                                  mode='reflect')
+        y = y+sharpen_strength*(y-blurred)
+    planes[0] = np.ascontiguousarray(y)
+    taper = sharpen_strength if sharpen == 'taper' else 0.0
+    return planes, grids, shapes, taper
+
+
+def direct_dct_coefficients(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
+                            sharpen='off', sharpen_strength=.25, clarity=0.0,
+                            chroma_gain=1.0):
+    """Direct DCT encode to full-grid coefficients, one array per plane.
+
+    Each array is the orthonormal DCT of that plane's coder-grid values
+    (``2*x - 1``), i.e. what ``SourceCoder.forward`` computes from the values
+    before keeping its corner; concatenated and flattened it is the vector
+    ``Fold500.encode_dct_coefficients`` accepts. This is the entry point for
+    coefficient-domain folding: nothing here resamples pixels, and values are
+    not clipped (clipping is a pixel-domain operation).
+    """
+    planes, grids, shapes, taper = _direct_planes(
+        rgb, grids, shapes, brightness, gamma, sharpen, sharpen_strength,
+        clarity, chroma_gain)
+    rows, cols = planes[0].shape
+    result = []
+    for index, (plane, (grid_rows, grid_cols), sent) in enumerate(
+            zip(planes, grids, shapes)):
+        analysis_y, analysis_x, *_ = _direct_plan(
+            rows, cols, grid_rows, grid_cols)
+        coefficients = 2.0*_separable(analysis_y, plane, analysis_x)
+        coefficients[0, 0] -= np.sqrt(grid_rows*grid_cols)
+        if index == 0 and taper:
+            coefficients *= _taper_gain(grid_rows, grid_cols, sent[0],
+                                        sent[1], taper)
+        result.append(coefficients)
+    return result
+
+
+def direct_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
+                      sharpen='off', sharpen_strength=.25, clarity=0.0,
+                      chroma_gain=1.0):
+    """Direct DCT encode: native RGB frame to the sender's coder-grid values.
+
+    Stages (see the direct-encode spec): tone per pixel at full resolution
+    through a 256-entry table, fused with a block average that leaves the
+    plane at least twice the luma grid; YCbCr on the block means; pixel-
+    domain enhancement; DCT truncation to each grid; optional taper on the
+    luma coefficients; inverse grid DCT; ``clip(2x - 1)``. Returns the
+    concatenated Y/Cb/Cr values in [-1, 1].
+    """
+    planes, grids, shapes, taper = _direct_planes(
+        rgb, grids, shapes, brightness, gamma, sharpen, sharpen_strength,
+        clarity, chroma_gain)
+    rows, cols = planes[0].shape
+    result = np.empty(sum(r*c for r, c in grids), dtype=np.float64)
+    offset = 0
+    for index, (plane, (grid_rows, grid_cols), sent) in enumerate(
+            zip(planes, grids, shapes)):
+        (analysis_y, analysis_x, synthesis_y, synthesis_x,
+         left, right) = _direct_plan(rows, cols, grid_rows, grid_cols)
+        if index == 0 and taper:
+            coefficients = _separable(analysis_y, plane, analysis_x)
+            coefficients *= _taper_gain(grid_rows, grid_cols, sent[0],
+                                        sent[1], taper)
+            grid = _separable(synthesis_y, coefficients, synthesis_x)
+        else:
+            grid = _separable(left, plane, right)
+        count = grid_rows*grid_cols
+        result[offset:offset+count] = grid.ravel()
+        offset += count
+    result *= 2.0
+    result -= 1.0
+    np.clip(result, -1.0, 1.0, out=result)
+    return result
+
+
 def source_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
                       clip_values=True, sharpen='off', sharpen_strength=.25,
                       clarity=0.0, chroma_gain=1.0, aggregation='off',
