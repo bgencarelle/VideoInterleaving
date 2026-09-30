@@ -2971,6 +2971,27 @@ The useful next geometry constraint is therefore matching the DCT analysis
 canvas to the fixed coder grid and the decoded viewport—not assuming metadata
 will reverse zoom, crop, or translation.
 
+#### Direct-DCT outcome and decision (2026-09-30)
+
+The direct-DCT experiment in `animation_modem/v7_source_dct.py` analyzes source
+pixels before the ordinary 80×96 resize, projects the retained spectrum onto
+the existing coder-grid value-vector contract, and exercises the unchanged
+Fold-500 packet/decode path. I compared native 720×960 analysis with rasters
+mapped to integer multiples of the 80×96 coder grid, and separately tested an
+exact Fold-support projection that bypasses the grid reconstruction round trip.
+
+Matching the analysis raster to the coder-grid aspect cut the full-DCT median
+from 37.57 ms to 22.58 ms at 480×576 (40% faster than native DCT; P90 improved
+from 55.45 to 24.15 ms), with effectively unchanged decoded quality. The exact
+Fold-support projection measured 4.93 ms on the native raster and 6.95 ms at
+the smallest aligned raster. Both remain substantially slower than the current
+resize-first preparation path at about 0.7 ms. Small zoom-and-crop experiments
+reduced decoded Y-PSNR rather than improving it. The conclusion is to retain
+direct DCT as an explicit, measured experiment—not to use it as the sender
+preparation optimization or change the default path. The size-gated Pillow BOX
+reducer is the measured sender improvement; its dispatch is independent of
+aspect metadata.
+
 A shared three-plane Numba kernel was also evaluated in a randomized 100-frame
 comparison (`tmp/v7-source-dct-numba-fused3-100frame-20260930.json`). Despite a
 small isolated-kernel improvement, its complete preparation was 1.899/4.448 ms
