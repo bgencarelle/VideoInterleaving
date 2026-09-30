@@ -24,6 +24,9 @@ from scipy.signal import savgol_filter
 
 from common import RATE as CAPTURE_RATE, v7
 
+# Code 0 ("fold off") is no longer emitted by a live sender; live V7 now
+# uses it for the experimental aspect-fold-500 profile (aspect_fold.py).
+# Offline benches still use it for unfolded V7 packets.
 FOLD_OFF = 0
 FOLD_500 = 1
 FOLD_1000 = 2

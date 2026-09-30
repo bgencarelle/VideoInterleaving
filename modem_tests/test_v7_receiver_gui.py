@@ -472,6 +472,29 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertFalse(args.show_diagnostics)
         self.assertFalse(args.no_tail_memory)
 
+    def test_aspect_fold_options_are_advanced_and_default_to_auto_chroma(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser,
+                          (('test input device', 3),))
+        fields = {field.dest: field for field in gui.fields
+                  if field.action is not None}
+        basic = {gui.fields[index].dest
+                 for index in gui._config_field_indexes()}
+        self.assertNotIn('aspect_layout', basic)
+        gui.advanced_options = True
+        advanced = {gui.fields[index].dest
+                    for index in gui._config_field_indexes()}
+        self.assertIn('aspect_layout', advanced)
+        self.assertIn('aspect_tail', advanced)
+        self.assertIn(('Luma · 96 luma every packet', 'luma'),
+                      fields['aspect_tail'].options)
+        fields['device'].value = 3
+        args = gui._build_arguments()
+        self.assertEqual((args.aspect_layout, args.aspect_tail), ('auto', 'chroma'))
+        fields['aspect_layout'].value = '4:3'
+        fields['aspect_tail'].value = 'luma'
+        args = gui._build_arguments()
+        self.assertEqual((args.aspect_layout, args.aspect_tail), ('4:3', 'luma'))
+
     def test_save_directory_is_used_only_when_explicit(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser,
                           (('test input device', 3),))

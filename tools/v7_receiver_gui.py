@@ -174,6 +174,16 @@ BASIC_OPTION_DESTS = frozenset((
 LIVE_RUNTIME_DESTS = frozenset((
     'audio_output_device', 'audio_muted', 'audio_volume', 'freewheel_seconds',
     'show_sync_warning'))
+# The aspect-fold-500 profile's layout and tail are not signalled on the
+# wire; the receiver's settings must match the sender's.
+ASPECT_OPTION_LABELS = {
+    'aspect_layout': {'auto': 'Auto · source aspect in each packet'},
+    'aspect_tail': {
+        'chroma': 'Chroma · rotating colour detail (V7)',
+        'split': 'Split · 48 luma + 48 rotating chroma',
+        'luma': 'Luma · 96 luma every packet',
+    },
+}
 HIDDEN_DECODE_OPTIONS = frozenset((
     'direction', 'fixture', 'experimental_fold', 'baseline',
     'experimental_mono', 'experimental_mono_fold', 'experimental_mono_colour',
@@ -421,6 +431,8 @@ def _field_label(action):
         'experimental_fold': 'Fold profile',
         'experimental_mono_fold': 'Experimental mono video fold',
         'mono_video_side': 'Mono video input side',
+        'aspect_layout': 'Aspect Fold 500 layout · match sender',
+        'aspect_tail': 'Aspect Fold 500 tail · match sender',
     }
     return friendly.get(action.dest,
                         action.dest.replace('_', ' ').capitalize())
@@ -476,6 +488,10 @@ def _make_fields(receive_parser, device_choices, audio_output_choices=()):
             options = tuple((str(option), option) for option in action.choices)
             if action.dest == 'experimental_fold':
                 options = (('Default (500)', None),) + options
+            elif action.dest in ASPECT_OPTION_LABELS:
+                labels = ASPECT_OPTION_LABELS[action.dest]
+                options = tuple((labels.get(option, str(option)), option)
+                                for option in action.choices)
             fields.append(OptionField(action, value, _field_label(action),
                                       'choice', options))
         else:

@@ -24,7 +24,7 @@ EDGE_HYSTERESIS = 0.12
 # the historical V7 word (Fold-500), preserving its existing pulse signature.
 # Words have minimum Hamming distance six after short/long interval parsing.
 PROFILE_PREAMBLE_BITS = {
-    0: (0, 1, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0),  # Fold-off
+    0: (0, 1, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0),  # Fold-off / aspect-fold-500
     1: PREAMBLE_BITS,                                        # Fold-500
     2: (0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0),  # Fold-1000
     3: (0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0),  # Mono-off

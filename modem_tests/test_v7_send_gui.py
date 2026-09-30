@@ -505,6 +505,38 @@ class SenderGuiTests(unittest.TestCase):
                     'dct_clarity', 'dct_chroma_gain'):
             self.assertEqual(restored.settings[key], gui.settings[key])
 
+    def test_aspect_fold_options_reach_the_sender_cli_only_when_changed(self):
+        self.settings['profile'] = 'aspect-fold-500'
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertEqual(command[command.index('--profile')+1], 'aspect-fold-500')
+        self.assertNotIn('--aspect-layout', command)
+        self.assertNotIn('--aspect-tail', command)
+        self.settings.update(aspect_layout='16:9', aspect_tail='split')
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+        self.assertEqual((args.aspect_layout, args.aspect_tail), ('16:9', 'split'))
+        # Other profiles never forward the aspect options.
+        self.settings['profile'] = 'fold-500'
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertNotIn('--aspect-layout', command)
+        with self.assertRaisesRegex(ValueError, 'aspect tail'):
+            validate_settings(dict(self.settings, profile='aspect-fold-500',
+                                   aspect_tail='fresh'), self.devices, self.sd)
+
+    def test_aspect_fold_fields_are_advanced_and_profile_specific(self):
+        gui = SenderGui(self.devices)
+        gui.settings['device'] = 3
+        gui.advanced = True
+        self.assertNotIn('aspect_layout', gui._visible_fields())
+        gui._assign('profile', 'aspect-fold-500')
+        visible = gui._visible_fields()
+        self.assertIn('aspect_layout', visible)
+        self.assertIn('aspect_tail', visible)
+        self.assertIn('dct_encode', visible)
+        self.assertEqual(gui._value_label('aspect_layout'), 'Auto · source aspect')
+        gui.advanced = False
+        self.assertNotIn('aspect_tail', gui._visible_fields())
+
     def test_ffmpeg_screen_input_is_forwarded_only_for_ffmpeg_capture(self):
         self.settings.update(source='screen', screen_backend='ffmpeg',
                              ffmpeg_input='x11grab::0.0')

@@ -33,11 +33,23 @@ PROFILE_CHOICES = (
     ('Mono video · Fold 500', 'mono-fold-500'),
     ('Mono video · colour Fold 500 · experimental', 'mono-colour-500'),
     ('Fold 1000 · advanced', 'fold-1000'),
+    ('Aspect Fold 500 · experimental', 'aspect-fold-500'),
     ('Baseline · legacy', 'baseline'),
 )
 MONO_PROFILES = ('mono-fold-500', 'mono-colour-500')
 FOLDED_PROFILES = ('fold-500', 'fold-1000', 'mono-fold-500',
-                   'mono-colour-500')
+                   'mono-colour-500', 'aspect-fold-500')
+ASPECT_PROFILES = ('aspect-fold-500',)
+ASPECT_LAYOUT_CHOICES = (
+    ('Auto · source aspect', 'auto'),
+    ('1:1', '1:1'), ('4:3', '4:3'), ('3:2', '3:2'), ('16:9', '16:9'),
+    ('3:4', '3:4'), ('2:3', '2:3'), ('9:16', '9:16'),
+)
+ASPECT_TAIL_CHOICES = (
+    ('Chroma · rotating colour detail (V7)', 'chroma'),
+    ('Split · 48 luma + 48 rotating chroma', 'split'),
+    ('Luma · 96 luma every packet', 'luma'),
+)
 PRIMARY_PROFILE_CHOICES = PROFILE_CHOICES[:3]
 SOURCE_AUDIO_CHOICES = (
     ('Video soundtrack · default', 'source'),
@@ -83,7 +95,8 @@ DCT_SHARPEN_CHOICES = (
     ('Unsharp mask', 'usm'),
 )
 # Direct DCT encode runs the 500-slot folded profiles with the Box filter.
-DCT_PROFILES = ('fold-500', 'mono-fold-500', 'mono-colour-500')
+DCT_PROFILES = ('fold-500', 'mono-fold-500', 'mono-colour-500',
+                'aspect-fold-500')
 BOOL_FIELDS = ('video_live', 'video_preview', 'image_preview', 'dct_encode')
 MONO_VIDEO_SIDE_CHOICES = (
     ('Left output · right stays clear', 'left'),
@@ -143,6 +156,11 @@ FIELD_HELP = {
     'dct_sharpen_strength': 'Sharpen strength, from 0 to 1. Try 0.25 or 0.5.',
     'dct_clarity': 'Large-radius local contrast, from 0 to 1. Try 0.15 or 0.3.',
     'dct_chroma_gain': 'Saturation boost around neutral, from 1.0 to 1.3.',
+    'aspect_layout': ('Which coefficients Aspect Fold 500 sends: matched to '
+                      'this picture shape. Not signalled; set the receiver '
+                      'to the same layout.'),
+    'aspect_tail': ('What the 96 tail slots carry. Not signalled; set the '
+                    'receiver to the same tail.'),
 }
 FIELD_LABELS = {
     'device': 'Audio output device',
@@ -171,6 +189,8 @@ FIELD_LABELS = {
     'dct_sharpen_strength': 'DCT sharpen strength',
     'dct_clarity': 'DCT clarity',
     'dct_chroma_gain': 'DCT chroma gain',
+    'aspect_layout': 'Aspect layout · set receiver to match',
+    'aspect_tail': 'Aspect tail · set receiver to match',
 }
 VIDEO_FILE_GLOB = '*.mp4 *.m4v *.mov *.mkv *.webm *.avi *.mpeg *.mpg *.wmv *.ts'
 DEVICE_REFRESH_SECONDS = 3.0
@@ -254,6 +274,7 @@ SAVED_SETTING_FIELDS = (
     'capture_width', 'capture_filter', 'perceptual_resize',
     'perceptual_detail_strength', 'dct_encode', 'dct_sharpen',
     'dct_sharpen_strength', 'dct_clarity', 'dct_chroma_gain',
+    'aspect_layout', 'aspect_tail',
 )
 
 
@@ -943,6 +964,14 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
             raise ValueError('DCT chroma gain must be between 1.0 and 1.3.')
     else:
         dct_sharpen = 'off'
+    aspect_layout, aspect_tail = 'auto', 'chroma'
+    if profile in ASPECT_PROFILES:
+        aspect_layout = settings.get('aspect_layout', 'auto')
+        aspect_tail = settings.get('aspect_tail', 'chroma')
+        if aspect_layout not in dict(ASPECT_LAYOUT_CHOICES).values():
+            raise ValueError('Choose a supported aspect layout.')
+        if aspect_tail not in dict(ASPECT_TAIL_CHOICES).values():
+            raise ValueError('Choose a supported aspect tail.')
 
     speed = _float_setting(settings.get('speed', '1'), 'Speed')
     if not .25 <= speed <= 4.0:
@@ -1044,6 +1073,8 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
         'perceptual_resize': perceptual_resize,
         'perceptual_detail_strength': perceptual_strength,
         'dct_encode': dct_encode,
+        'aspect_layout': aspect_layout,
+        'aspect_tail': aspect_tail,
         'dct_sharpen': dct_sharpen,
         'dct_sharpen_strength': dct_strength,
         'dct_clarity': dct_clarity,
@@ -1079,6 +1110,11 @@ def build_command(settings, devices, sd_module=None, python=None,
         command.append('--baseline')
     else:
         command.extend(('--profile', checked['profile']))
+    if checked['profile'] in ASPECT_PROFILES:
+        if checked['aspect_layout'] != 'auto':
+            command.extend(('--aspect-layout', checked['aspect_layout']))
+        if checked['aspect_tail'] != 'chroma':
+            command.extend(('--aspect-tail', checked['aspect_tail']))
     if checked['profile'] in MONO_PROFILES:
         command.extend(('--mono-video-side',
                         checked['mono_video_side'], '--source-audio',
@@ -1207,9 +1243,11 @@ class SenderGui:
         'mono_video_side', 'source_audio', 'source_audio_device',
         'source_audio_input_side', 'screen_backend', 'capture_filter',
         'camera', 'screen_target', 'perceptual_resize', 'dct_sharpen',
+        'aspect_layout', 'aspect_tail',
     )
     ADVANCED_FIELDS = (
         'encode_filter', 'perceptual_resize', 'perceptual_detail_strength',
+        'aspect_layout', 'aspect_tail',
         'dct_encode', 'dct_sharpen', 'dct_sharpen_strength', 'dct_clarity',
         'dct_chroma_gain',
         'screen_backend', 'region', 'ffmpeg_input', 'capture_width',
@@ -1261,6 +1299,8 @@ class SenderGui:
             'dct_sharpen_strength': '0.25',
             'dct_clarity': '0',
             'dct_chroma_gain': '1',
+            'aspect_layout': 'auto',
+            'aspect_tail': 'chroma',
         }
         self.notice = 'Choose an output device, capture source, and profile.'
         if restore_preferences and self.preference_path is not None:
@@ -1387,6 +1427,10 @@ class SenderGui:
             return CAPTURE_FILTER_CHOICES
         if dest == 'perceptual_resize':
             return DOWNSCALER_CHOICES
+        if dest == 'aspect_layout':
+            return ASPECT_LAYOUT_CHOICES
+        if dest == 'aspect_tail':
+            return ASPECT_TAIL_CHOICES
         if dest == 'dct_sharpen':
             return DCT_SHARPEN_CHOICES
         if dest == 'camera':
@@ -1648,6 +1692,8 @@ class SenderGui:
             self.settings['profile'] not in DCT_PROFILES or
             dest in ('dct_sharpen', 'dct_clarity', 'dct_chroma_gain') and
             not self.settings['dct_encode'] or
+            dest in ('aspect_layout', 'aspect_tail') and
+            self.settings['profile'] not in ASPECT_PROFILES or
             dest == 'dct_sharpen_strength' and not (
                 self.settings['dct_encode'] and
                 self.settings['dct_sharpen'] != 'off') or
@@ -1688,7 +1734,8 @@ class SenderGui:
                          if candidate == value), str(value))
         if dest in ('source', 'profile', 'screen_backend',
                     'encode_filter', 'capture_filter', 'perceptual_resize',
-                    'dct_sharpen', 'mono_video_side',
+                    'dct_sharpen', 'aspect_layout', 'aspect_tail',
+                    'mono_video_side',
                     'source_audio', 'source_audio_input_side', 'capture_fps'):
             choices = self._choices(dest)
             label = next((label for label, candidate in choices
@@ -2236,6 +2283,10 @@ class SenderGui:
             ('Wire profile', profile_label),
             ('Image encode', 'Direct DCT' if self.settings.get('dct_encode')
              else 'Resize'),
+            *((('Aspect layout / tail', (
+                f"{self.settings.get('aspect_layout', 'auto')} / "
+                f"{self.settings.get('aspect_tail', 'chroma')} · match receiver")),)
+              if self.settings.get('profile') in ASPECT_PROFILES else ()),
             ('Speed', f"{self.settings['speed']}×"),
         )
         y = 220

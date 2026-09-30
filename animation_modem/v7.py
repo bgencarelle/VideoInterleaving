@@ -3417,7 +3417,10 @@ def _gate_floor(model, force_float32=False):
 def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
                  diagnostics=None, direct_body=None, force_float32=False,
                  pilot_timing='baseline', pilot_counter=None,
-                 tone_equalization='off'):
+                 tone_equalization='off', profile_hint=None):
+    # ``profile_hint`` (the packet's verified metadata, e.g. its aspect code)
+    # is for profile hooks that choose a model before decoding; the base
+    # decoder does not use it.
     if tone_equalization not in ('off', 'm-reference'):
         raise ValueError(f'unknown tone equalization mode {tone_equalization!r}')
     started = perf_counter()
@@ -4727,7 +4730,9 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                                   force_float32=force_float32,
                                   pilot_timing=pilot_timing,
                                   pilot_counter=counter,
-                                  tone_equalization=tone_equalization)
+                                  tone_equalization=tone_equalization,
+                                  profile_hint={'aspect_code': (
+                                      aspect_code if metadata_valid else None)})
         except (FloatingPointError, np.linalg.LinAlgError, ValueError,
                 IndexError):
             result = None

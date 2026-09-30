@@ -453,6 +453,11 @@ def _fold_slots(args):
         raise ValueError('experimental mono profiles must be selected on their own')
     if mono_off or mono_fold:
         return 0
+    if getattr(args, 'aspect_fold', False):
+        if requested is not None or baseline:
+            raise ValueError('aspect-fold-500 must be selected on its own')
+        # The aspect profile folds with its own layout tables, not LiveFold.
+        return 0
     if baseline:
         if requested is not None:
             raise ValueError('--baseline cannot be combined with --experimental-fold')
@@ -556,13 +561,15 @@ def _encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
         pulse_profile_code=pulse_profile_code)
 
 
-def _add_coded_pilots(audio, start_counter, fold_slots):
+def _add_coded_pilots(audio, start_counter, fold_slots, mode=None):
     """Overlay each packet's fold-mode status and coded reference tones."""
     _ensure_test_modem_path()
     from tone_code import (FOLD_500, FOLD_1000, add_tone_code,
                            encode_status)
 
     modes = {500: FOLD_500, 1000: FOLD_1000}
+    if mode is not None:
+        modes = {fold_slots: int(mode)}
     if fold_slots not in modes:
         raise ValueError(f'coded pilots support fold sizes {sorted(modes)}')
     audio = np.asarray(audio)
@@ -622,6 +629,8 @@ def _apply_profile_option(args):
         args.experimental_fold = 500
     elif profile == 'fold-1000':
         args.experimental_fold = 1000
+    elif profile == 'aspect-fold-500':
+        args.aspect_fold = True
 
 
 def run_send(args):
@@ -712,7 +721,13 @@ def _run_send_session(args):
         raise ValueError('--source-audio-gain must be between 0 and 4')
     if not np.isfinite(extra_audio_delay_ms) or extra_audio_delay_ms < 0:
         raise ValueError('--source-audio-delay-ms must be finite and non-negative')
-    profile_slots = 500 if mono_fold_profile else slots
+    aspect_profile = bool(getattr(args, 'aspect_fold', False))
+    if aspect_profile:
+        if not getattr(args, 'pilot_tones', True):
+            raise ValueError('aspect-fold-500 requires coded pilot tones')
+        if not getattr(args, 'eof_marker', True):
+            raise ValueError('aspect-fold-500 requires the EOF marker')
+    profile_slots = 500 if (mono_fold_profile or aspect_profile) else slots
     args.encode_filter, args.brightness = _send_profile(args, profile_slots)
     dct_options = _dct_encode_options(args)
     tone_controls = LiveToneControls(args.brightness, args.gamma)
@@ -745,6 +760,20 @@ def _run_send_session(args):
         mono_wire = MonoWire(model)
         from tone_code import warmup_status_templates, MONO_OFF
         warmup_status_templates(MONO_OFF)
+    aspect_wire = None
+    if aspect_profile:
+        _ensure_test_modem_path()
+        from aspect_fold import AspectFoldWire
+        from tone_code import warmup_status_templates
+        aspect_wire = AspectFoldWire(getattr(args, 'aspect_layout', 'auto'),
+                                     getattr(args, 'aspect_tail', 'chroma'))
+        # Build every layout model the sender may need before audio starts.
+        layouts = ((aspect_wire.layout,) if aspect_wire.layout != 'auto' else
+                   tuple(dict.fromkeys(
+                       aspect_wire.layout_for(code) for code in range(8))))
+        for layout in layouts:
+            aspect_wire.model_for(model, layout)
+        warmup_status_templates(aspect_wire.status_mode)
     if fold is not None:
         # Fail before any audio: the table folds only the model it was built
         # for (the canonical box profile).
@@ -795,6 +824,19 @@ def _run_send_session(args):
                 aspect_codes=aspects,
                 source_indices=[counter+i-1 for i in range(len(values))],
                 eof_marker=True)
+        elif aspect_wire is not None:
+            packets = []
+            for index, value in enumerate(values):
+                packet_model, coeffs = aspect_wire.encode_coefficients(
+                    model, value, aspects[index])
+                packets.append(_encode_pulse_frame_coeffs(
+                    packet_model, coeffs, counter+index,
+                    aspect_code=aspects[index], source_index=counter+index-1,
+                    eof_marker=getattr(args, 'eof_marker', True),
+                    pulse_profile_code=aspect_wire.pulse_profile_code))
+            audio = _add_coded_pilots(np.concatenate(packets), counter,
+                                      aspect_wire.fold_slots,
+                                      mode=aspect_wire.status_mode)
         elif fold is not None:
             from tone_code import FOLD_500, FOLD_1000
             pulse_profile_code = {500: FOLD_500, 1000: FOLD_1000}[fold.slots]
@@ -854,11 +896,15 @@ def _run_send_session(args):
                 'limiter_gain': limiter_gain,
                 'samples_limited': limiter_samples,
                 'fold_slots': (fold.slots if fold is not None else
-                               getattr(mono_wire, 'fold_slots', 0)),
-                'coded_pilot': fold is not None or mono_wire is not None,
+                               aspect_wire.fold_slots if aspect_wire is not None
+                               else getattr(mono_wire, 'fold_slots', 0)),
+                'coded_pilot': (fold is not None or mono_wire is not None or
+                                aspect_wire is not None),
                 'wire_profile': (getattr(mono_wire, 'wire_profile',
                                          'mono-fold-off')
                                  if mono_wire is not None else
+                                 aspect_wire.wire_profile
+                                 if aspect_wire is not None else
                                  'folded' if fold is not None else 'baseline'),
                 'mono_video_side': getattr(mono_wire, 'side', None),
             }
@@ -1163,6 +1209,9 @@ def _run_send_session(args):
                                      'mono-fold-off')
                              if mono_wire is not None else
                              'mono-sum' if args.mono_sum else 'M/S')
+                if aspect_wire is not None:
+                    wire_mode += (f' aspect-fold-500 layout={aspect_wire.layout} '
+                                  f'tail={aspect_wire.tail}')
                 if mono_fold_profile:
                     audio_side = 'right' if mono_wire.side == 'left' else 'left'
                     audio_label = source_audio_mode
@@ -1462,10 +1511,12 @@ class _AdaptiveProfileDecoder:
 
     REQUIRED_STREAK = 3
 
-    def __init__(self, fold, base_model, preferred_side='auto'):
+    def __init__(self, fold, base_model, preferred_side='auto',
+                 aspect_layout='auto', aspect_tail='chroma'):
         from animation_modem import v7
         _ensure_test_modem_path()
         from live_fold import LiveFold
+        from aspect_fold import AspectFoldWire
         from mono_video import (MonoColourFoldWire, MonoFreshFoldWire,
                                 mono_channel_profile)
         from tone_code import FOLD_500, MONO_500, MONO_1000
@@ -1481,9 +1532,15 @@ class _AdaptiveProfileDecoder:
         }
         self.mono_channel_profile = mono_channel_profile
         self.mono_status_modes = frozenset(self.mono_wires)
-        self.supported_modes = frozenset((FOLD_500, *self.mono_wires))
+        # Stereo Fold 500 with an aspect-matched coefficient layout; its
+        # layout and tail are receiver settings matching the sender's.
+        self.aspect_wire = AspectFoldWire(aspect_layout, aspect_tail)
+        self.aspect_mode = self.aspect_wire.status_mode
+        self.supported_modes = frozenset(
+            (FOLD_500, self.aspect_mode, *self.mono_wires))
         self._mode_names = {
             FOLD_500: 'fold-500',
+            self.aspect_mode: 'aspect-fold-500',
             MONO_500: 'mono-fold-500',
             MONO_1000: 'mono-colour-500',
         }
@@ -1531,6 +1588,12 @@ class _AdaptiveProfileDecoder:
         self.candidate_scale = None
 
     def reset_capture_timeline(self):
+        wire = getattr(self, 'aspect_wire', None)
+        if wire is not None:
+            wire.reset()
+        self._reset_capture_positions()
+
+    def _reset_capture_positions(self):
         """Forget capture-sample positions after the input stream reopens.
 
         Packet positions count samples from the start of one input stream. A
@@ -1630,6 +1693,8 @@ class _AdaptiveProfileDecoder:
                 if self.streak >= self.REQUIRED_STREAK:
                     self.active_mode, self.active_side = key
                     self.reset_candidate()
+                    if getattr(self, 'aspect_wire', None) is not None:
+                        self.aspect_wire.reset()
                     self.generation += 1
                     changed = confirmed = True
                     if self.state is not None:
@@ -1725,6 +1790,19 @@ class _AdaptiveProfileDecoder:
                         observed_mode)
 
         profile_model = model
+        aspect_layout = None
+        hint = kwargs.get('profile_hint') or {}
+        if mode == self.aspect_mode:
+            aspect_layout = self.aspect_wire.layout_for(hint.get('aspect_code'))
+            if aspect_layout is None:
+                return held('aspect_layout_unknown', observed_mode)
+            try:
+                profile_model = self.aspect_wire.model_for(model, aspect_layout)
+            except ValueError:
+                return held('unsupported_model_for_profile', observed_mode)
+            # The shared tail store follows the base model's ranks; this
+            # layout keeps its own.
+            prev_tail = self.aspect_wire.tail_prior(profile_model, aspect_layout)
         if mode in self.mono_status_modes:
             try:
                 profile_model = self.mono_wires[mode].model_for(model)
@@ -1746,6 +1824,9 @@ class _AdaptiveProfileDecoder:
             result.diag['coded_status_mode'] = mode
             result.diag['profile_mode'] = mode
             result.diag['wire_profile'] = self._mode_names[mode]
+            if aspect_layout is not None:
+                result.diag['aspect_layout'] = aspect_layout
+                result.diag['aspect_tail'] = self.aspect_wire.tail
             if mode in self.mono_status_modes and self._local.equalized is not None:
                 result.diag['mono_fold_eq'] = self._local.equalized
         return result
@@ -1754,6 +1835,11 @@ class _AdaptiveProfileDecoder:
         mode = result.diag.get('profile_mode')
         if mode == 1:
             return self.fold.values(model, result, metadata_confirmed=True)
+        if mode == self.aspect_mode and result.diag.get('aspect_layout'):
+            layout = result.diag['aspect_layout']
+            profile_model = self.aspect_wire.model_for(model, layout)
+            self.aspect_wire.remember(profile_model, layout, result)
+            return self.aspect_wire.values(profile_model, result)
         if mode in self.mono_status_modes:
             wire = self.mono_wires[mode]
             return wire.values(wire.model_for(model), result)
@@ -1912,7 +1998,9 @@ def _make_auto_profile_decoder(args, fold):
     """Build the default status-driven Fold-500/mono-video receiver."""
     return _AdaptiveProfileDecoder(
         fold, _model(args.fixture, 'box'),
-        preferred_side=getattr(args, 'mono_video_side', 'auto'))
+        preferred_side=getattr(args, 'mono_video_side', 'auto'),
+        aspect_layout=getattr(args, 'aspect_layout', 'auto'),
+        aspect_tail=getattr(args, 'aspect_tail', 'chroma'))
 
 
 def run_receive(args):
@@ -2081,8 +2169,8 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
     if adaptive_profile is not None:
         _ensure_test_modem_path()
         from tone_code import warmup_status_templates
-        from tone_code import FOLD_500, MONO_500, MONO_1000
-        for mode in (FOLD_500, MONO_500, MONO_1000):
+        from tone_code import FOLD_500, FOLD_OFF, MONO_500, MONO_1000
+        for mode in (FOLD_500, FOLD_OFF, MONO_500, MONO_1000):
             warmup_status_templates(mode)
     if stop.is_set():
         return
@@ -3233,6 +3321,25 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
     return recovery[0]
 
 
+ASPECT_LAYOUT_CHOICES = ('auto', '1:1', '4:3', '3:2', '16:9', '3:4', '2:3',
+                         '9:16')
+ASPECT_TAIL_CHOICES = ('chroma', 'split', 'luma')
+
+
+def _add_aspect_arguments(sub):
+    sub.add_argument(
+        '--aspect-layout', choices=ASPECT_LAYOUT_CHOICES, default='auto',
+        help=('aspect-fold-500: coefficient layout aspect (default auto: the '
+              'source aspect sent in each packet). Sender and receiver must '
+              'agree.'))
+    sub.add_argument(
+        '--aspect-tail', choices=ASPECT_TAIL_CHOICES, default='chroma',
+        help=('aspect-fold-500: what the 96 tail slots carry: chroma (rotating '
+              'fine colour, V7 default), split (48 luma every packet + 48 '
+              'rotating chroma) or luma (96 luma every packet). Sender and '
+              'receiver must agree.'))
+
+
 def parser():
     ap = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -3295,14 +3402,18 @@ def parser():
     # These wire essentials remain explicit internal defaults, not user-facing
     # toggles. The GUI and CLI always emit the current reference/pilot/EOF wire.
     send.set_defaults(mono_sum=False, pilot_tones=True, eof_marker=True)
+    _add_aspect_arguments(send)
     send_profile = send.add_mutually_exclusive_group()
     send_profile.add_argument(
         '--profile', choices=('mono-fold-500', 'fold-500', 'mono-colour-500',
-                              'fold-1000'),
+                              'fold-1000', 'aspect-fold-500'),
         default=None,
         help=('wire profile: mono video with Fold 500 (recommended), '
               'stereo Fold 500 (default), or advanced Fold 1000, '
-              'mono video with colour-weighted Fold 500 (experimental)'))
+              'mono video with colour-weighted Fold 500 (experimental), '
+              'stereo Fold 500 with an aspect-matched coefficient layout '
+              '(experimental; set the receiver\'s --aspect-layout and '
+              '--aspect-tail to match)'))
     send_profile.add_argument('--baseline', action='store_true',
                               help=argparse.SUPPRESS)
     send_profile.add_argument('--experimental-mono', action='store_true',
@@ -3387,6 +3498,7 @@ def parser():
                       default='auto',
                       help=('all-fresh mono video input leg (default: auto; '
                             'validates the mono status and prefers right if both work)'))
+    _add_aspect_arguments(recv)
     recv.set_defaults(show_diagnostics=True)
     recv.add_argument('--no-log', dest='no_log', action='store_true',
                       default=False, help=argparse.SUPPRESS)

@@ -209,6 +209,34 @@ the sender uses box/brightness 1.0 by default. Folded profiles require the
 default fixture and the canonical box model. See `test_modem_v7/HOWTO.md` for
 fold tables, coded-pilot behavior, loopback instructions, and regression tests.
 
+### Aspect Fold 500 (experimental)
+
+`--profile aspect-fold-500` keeps the V7 wire unchanged (2,320 slots, the same
+2,880 coefficients, 500 folded guests, metadata and CRC) but chooses which DCT
+coefficients to send from the picture's shape instead of the fixed 5:6
+48×40 corner. For a 16:9 frame, luma reaches 66 horizontal and 37 vertical
+frequencies instead of 40 and 48. It is signalled with profile code 0
+(the former fold-off word, which live senders no longer emit), so a receiver
+that follows packet profiles picks it up automatically. It needs pilots and
+EOF markers.
+
+Two settings are not signalled and must match on both ends:
+
+- `--aspect-layout` (default `auto`): `auto` follows the source aspect carried
+  in each packet's metadata; `1:1`, `4:3`, `3:2`, `16:9`, `3:4`, `2:3` and
+  `9:16` force a layout for testing a projected-frame shape. With `auto`, the
+  receiver holds the last good picture until it has valid metadata.
+- `--aspect-tail` (default `chroma`): what the 96 tail slots carry. `chroma`
+  is V7's rotating chroma tail (the lowest-ranked 656 coefficients are all
+  chroma); `split` sends 48 extra luma frequencies in every packet plus 48
+  rotating chroma; `luma` sends 96 extra luma frequencies in every packet and
+  drops the 96 weakest chroma ones.
+
+The sender GUI shows both under **Advanced** when the profile is selected; the
+receiver GUI shows them under advanced options. Tables are frozen in
+`test_modem_v7/aspect_tables.npz` (hash-pinned; rebuild with
+`python test_modem_v7/aspect_fold.py build`, then update `TABLES_SHA256`).
+
 List available device names with `.venv/bin/python -m sounddevice`. On separate
 machines, use the actual output-device name for sending and input-device name
 for receiving; they do not need to match.
