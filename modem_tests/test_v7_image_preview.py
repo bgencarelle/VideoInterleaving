@@ -20,7 +20,7 @@ from animation_modem import v7                                      # noqa: E402
 from tools import v7_live                                            # noqa: E402
 from tools import v7_image_preview                                    # noqa: E402
 from tools.v7_image_preview import ImagePreviewWorker                # noqa: E402
-from tools.v7_preview_protocol import (pack_preview_datagram,         # noqa: E402
+from tools.v7_preview_protocol import (HEADER, pack_preview_datagram,  # noqa: E402
                                        parse_preview_datagram)
 
 
@@ -63,6 +63,16 @@ class ImagePreviewTests(unittest.TestCase):
         self.assertIsNone(parse_preview_datagram(b'invalid'))
         with self.assertRaisesRegex(ValueError, 'unknown image preview stage'):
             pack_preview_datagram(1, 0, 1, 'encoded', b'jpeg-data')
+
+    def test_high_detail_preview_datagram_stays_under_the_hard_size_limit(self):
+        noisy = np.random.default_rng(73).integers(
+            0, 256, (320, 256, 3), dtype=np.uint8)
+        jpeg = v7_image_preview._preview_jpeg(Image.fromarray(noisy))
+        packet = pack_preview_datagram(1, 0, 1, 'source', jpeg)
+
+        self.assertLessEqual(len(jpeg), v7_image_preview._MAX_JPEG_BYTES)
+        self.assertLessEqual(len(packet), v7_image_preview._MAX_DATAGRAM_BYTES)
+        self.assertEqual(len(packet), len(jpeg)+HEADER.size)
 
     def test_worker_publishes_latest_stage_image_over_loopback(self):
         source = Image.new('RGB', (640, 480), (90, 120, 150))

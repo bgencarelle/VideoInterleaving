@@ -10,10 +10,11 @@ from io import BytesIO
 import numpy as np
 from PIL import Image, ImageOps
 
-from tools.v7_preview_protocol import pack_preview_datagram
+from tools.v7_preview_protocol import HEADER, pack_preview_datagram
 
 
-_MAX_JPEG_BYTES = 60_000
+_MAX_DATAGRAM_BYTES = 32*1024
+_MAX_JPEG_BYTES = _MAX_DATAGRAM_BYTES-HEADER.size
 _THUMBNAIL_SIZE = (256, 320)
 
 
@@ -24,16 +25,19 @@ def _preview_jpeg(frame):
         image = Image.fromarray(np.asarray(frame)).convert('RGB')
     image = ImageOps.contain(
         image, _THUMBNAIL_SIZE, method=Image.Resampling.LANCZOS)
-    for quality in (80, 68):
-        output = BytesIO()
-        image.save(output, format='JPEG', quality=quality, optimize=False)
-        jpeg = output.getvalue()
-        if len(jpeg) <= _MAX_JPEG_BYTES:
+    while True:
+        for quality in (80, 68, 56, 44, 32):
+            output = BytesIO()
+            image.save(output, format='JPEG', quality=quality, optimize=False)
+            jpeg = output.getvalue()
+            if len(jpeg) <= _MAX_JPEG_BYTES:
+                return jpeg
+        if image.width == 1 and image.height == 1:
+            # Even this minimal JPEG is far below the production datagram cap.
             return jpeg
-    image.thumbnail((192, 240), Image.Resampling.BILINEAR)
-    output = BytesIO()
-    image.save(output, format='JPEG', quality=60, optimize=False)
-    return output.getvalue()
+        reduced_size = (max(1, int(image.width*.75)),
+                        max(1, int(image.height*.75)))
+        image = image.resize(reduced_size, Image.Resampling.BILINEAR)
 
 
 class ImagePreviewWorker:
