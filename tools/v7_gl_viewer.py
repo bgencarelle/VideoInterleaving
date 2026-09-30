@@ -237,20 +237,16 @@ def dct_reconstruct_planes(planes, mode, viewport_size=None):
     if mode == 'viewport':
         if viewport_size is None or len(viewport_size) != 2:
             raise ValueError('viewport-size DCT reconstruction needs a size')
-        target_width, target_height = (int(value) for value in viewport_size)
-        if target_width <= 0 or target_height <= 0:
-            raise ValueError('viewport dimensions must be positive')
-        luma_height, luma_width = planes[0].shape
-        scale_x = target_width/luma_width
-        scale_y = target_height/luma_height
-        target_shapes = tuple((max(1, round(plane.shape[0]*scale_y)),
-                               max(1, round(plane.shape[1]*scale_x)))
-                              for plane in planes)
-        target_shapes = ((target_height, target_width), *target_shapes[1:])
-    else:
-        scale = int(mode[:-1])
-        target_shapes = tuple((plane.shape[0]*scale,
-                               plane.shape[1]*scale) for plane in planes)
+        # Evaluate the decoded spectrum directly on the display grid (only
+        # its occupied part, separable, one thread): same result as the
+        # padded full-size inverse DCT below, several times faster.
+        from animation_modem.v7_dct_display import reconstruct_planes
+        return reconstruct_planes(planes, viewport_size)
+
+    # Fixed 2x/4x/8x modes (4x is the receiver default) are unchanged.
+    scale = int(mode[:-1])
+    target_shapes = tuple((plane.shape[0]*scale,
+                           plane.shape[1]*scale) for plane in planes)
 
     from scipy.fft import dctn, idctn
 
