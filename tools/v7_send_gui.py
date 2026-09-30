@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Small, event-driven GUI controller for the standalone V7 sender.
+"""Event-driven GUI controller for the standalone V7 sender.
 
-The sender runs in its own process. Optional source-video preview is handled by
-the sender's desktop media player, not by a GUI capture-frame render loop.
+The sender runs in its own process. Optional source-video playback uses a
+desktop media player; encoded-image preview arrives on a separate bounded
+loopback channel.
 """
 import json
 import math
@@ -12,14 +13,18 @@ import queue
 import re
 import signal
 import shutil
+import socket
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from tools.v7_preview_protocol import parse_preview_datagram
 
 
 PROFILE_CHOICES = (
@@ -86,6 +91,9 @@ FIELD_HELP = {
     'video_source': 'Choose a video with Browse, type a path or URL, or drop a file on the window.',
     'video_preview': ('Open the same file or URL in a desktop player. Finite media '
                       'requests looping where the player supports it.'),
+    'encoded_preview': ('Show the clean-link reconstruction of each encoded '
+                        'packet near its output handoff. Preview work is '
+                        'bounded and never holds up sending.'),
     'video_live': 'Treat an HTTP(S) video URL as a live stream rather than a looping clip.',
     'camera': 'Choose a camera discovered from the host capture devices.',
     'screen_target': 'Choose the monitor or screen capture device. Discovery runs only when you open this picker.',
@@ -120,6 +128,7 @@ FIELD_LABELS = {
     'gamma': 'Gamma · live',
     'screen_target': 'Screen / display',
     'video_preview': 'Open source in player',
+    'encoded_preview': 'Encoded preview',
     'video_live': 'Treat URL as live',
     'camera': 'Camera',
     'ffmpeg_input': 'FFmpeg input',
@@ -203,6 +212,7 @@ SAVED_SETTING_FIELDS = (
     'source_audio_input_side', 'source_audio_gain',
     'source_audio_delay_ms', 'speed', 'encode_filter', 'brightness', 'gamma',
     'capture_fps', 'video_source', 'video_preview', 'video_live', 'camera',
+    'encoded_preview',
     'ffmpeg_input', 'screen_backend', 'screen_target', 'region',
     'capture_width', 'capture_filter', 'perceptual_resize',
     'perceptual_detail_strength',
@@ -241,7 +251,7 @@ def _restore_sender_settings(target, saved):
             elif value is None:
                 target[key] = None
             continue
-        if key in ('video_preview', 'video_live'):
+        if key in ('video_preview', 'video_live', 'encoded_preview'):
             if isinstance(value, bool):
                 target[key] = value
         elif value is None or isinstance(value, (str, int, float, bool)):
@@ -979,7 +989,7 @@ def _integer_setting(value, label, minimum, optional=False):
 
 
 def build_command(settings, devices, sd_module=None, python=None,
-                  audio_devices=()):
+                  audio_devices=(), encoded_preview_port=None):
     """Build an argv list for the existing V7 CLI; never invokes a shell."""
     checked = validate_settings(settings, devices, sd_module, audio_devices)
     command = [
@@ -1051,6 +1061,8 @@ def build_command(settings, devices, sd_module=None, python=None,
     if capture_filter != 'auto':
         command.extend(('--capture-filter', capture_filter))
     command.append('--gui-control')
+    if encoded_preview_port is not None:
+        command.extend(('--encoded-preview-port', str(int(encoded_preview_port))))
     return command
 
 
@@ -1094,7 +1106,8 @@ class SenderGui:
     TOOLBAR = 54
     ROW_HEIGHT = 36
     BASIC_FIELDS = (
-        'device', 'source', 'video_source', 'video_preview', 'video_live', 'camera',
+        'device', 'source', 'video_source', 'video_preview', 'encoded_preview',
+        'video_live', 'camera',
         'screen_target', 'source_audio', 'source_audio_device',
         'source_audio_input_side', 'source_audio_gain',
         'source_audio_delay_ms', 'capture_fps', 'profile',
@@ -1140,6 +1153,7 @@ class SenderGui:
             'capture_fps': '',
             'video_source': '',
             'video_preview': False,
+            'encoded_preview': False,
             'video_live': False,
             'camera': None,
             'ffmpeg_input': '',
@@ -1166,6 +1180,12 @@ class SenderGui:
         self.events = queue.Queue()
         self.process = None
         self.reader = None
+        self.preview_reader = None
+        self._preview_socket = None
+        self.preview_image = None
+        self.preview_counter = None
+        self.preview_aspect = None
+        self.preview_handoff_ns = None
         self.stop_requested = False
         self.close_when_stopped = False
         self.sender_device_lost = False
@@ -1590,9 +1610,10 @@ class SenderGui:
     def _select_option(self, dest, value):
         self._assign(dest, value)
 
-    def _build_command(self):
+    def _build_command(self, encoded_preview_port=None):
         return build_command(self.settings, self.devices, self._sounddevice(),
-                             audio_devices=self.audio_devices)
+                             audio_devices=self.audio_devices,
+                             encoded_preview_port=encoded_preview_port)
 
     def _start(self):
         if self.editing:
@@ -1616,7 +1637,27 @@ class SenderGui:
                 self.dirty = True
                 return
         try:
-            command = self._build_command()
+            preview_socket = None
+            preview_warning = None
+            if self.settings.get('encoded_preview'):
+                try:
+                    preview_socket = socket.socket(socket.AF_INET,
+                                                   socket.SOCK_DGRAM)
+                    preview_socket.setsockopt(socket.SOL_SOCKET,
+                                              socket.SO_RCVBUF, 256*1024)
+                    preview_socket.bind(('127.0.0.1', 0))
+                    preview_socket.settimeout(.2)
+                except OSError as exc:
+                    if preview_socket is not None:
+                        preview_socket.close()
+                    preview_socket = None
+                    preview_warning = (
+                        f'Encoded preview unavailable; sending without it: {exc}')
+            if preview_socket is not None:
+                command = self._build_command(
+                    encoded_preview_port=preview_socket.getsockname()[1])
+            else:
+                command = self._build_command()
             kwargs = {
                 'cwd': str(ROOT),
                 'stdin': subprocess.PIPE,
@@ -1633,20 +1674,97 @@ class SenderGui:
                 kwargs['start_new_session'] = True
             process = subprocess.Popen(command, **kwargs)
         except (ImportError, ValueError, OSError, RuntimeError) as exc:
+            if 'preview_socket' in locals() and preview_socket is not None:
+                preview_socket.close()
             self.notice = str(exc)
             self.dirty = True
             return
 
         self.process = process
+        self._preview_socket = preview_socket
+        self.preview_image = None
+        self.preview_counter = None
+        self.preview_aspect = None
+        self.preview_handoff_ns = None
         self.stop_requested = False
         self.page = 'live'
-        self.notice = 'Starting sender…'
+        self.notice = preview_warning or 'Starting sender…'
         self.lines.clear()
         self.reader = threading.Thread(
             target=self._read_sender, args=(process,),
             name='v7-send-gui-output', daemon=True)
         self.reader.start()
+        if preview_socket is not None:
+            self.preview_reader = threading.Thread(
+                target=self._read_encoded_preview,
+                args=(process, preview_socket),
+                name='v7-send-gui-preview', daemon=True)
+            self.preview_reader.start()
         self.dirty = True
+
+    def _read_encoded_preview(self, process, preview_socket):
+        while (self.process is process and
+               self._preview_socket is preview_socket):
+            try:
+                packet, _address = preview_socket.recvfrom(65507)
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            newest = packet
+            newest_time = -1
+            parsed = parse_preview_datagram(packet)
+            if parsed is not None:
+                newest_time = parsed[2]
+            try:
+                preview_socket.setblocking(False)
+            except OSError:
+                return
+            while True:
+                try:
+                    candidate, _address = preview_socket.recvfrom(65507)
+                except BlockingIOError:
+                    break
+                except OSError:
+                    return
+                parsed = parse_preview_datagram(candidate)
+                if parsed is not None and parsed[2] >= newest_time:
+                    newest, newest_time = candidate, parsed[2]
+            try:
+                preview_socket.settimeout(.2)
+            except OSError:
+                return
+            parsed = parse_preview_datagram(newest)
+            if parsed is None:
+                continue
+            counter, aspect, handoff_ns, jpeg = parsed
+            try:
+                from PIL import Image
+                import io
+                with Image.open(io.BytesIO(jpeg)) as image:
+                    image.load()
+                    decoded = image.convert('RGB')
+            except (OSError, ValueError):
+                continue
+            if (self.process is not process or
+                    self._preview_socket is not preview_socket or
+                    (self.preview_handoff_ns is not None and
+                     handoff_ns < self.preview_handoff_ns)):
+                continue
+            self.preview_image = decoded
+            self.preview_counter = int(counter)
+            self.preview_aspect = int(aspect)
+            self.preview_handoff_ns = int(handoff_ns)
+            self.dirty = True
+            self._wake()
+
+    def _close_preview_socket(self):
+        preview_socket, self._preview_socket = self._preview_socket, None
+        if preview_socket is not None:
+            try:
+                preview_socket.close()
+            except OSError:
+                pass
 
     def _read_sender(self, process):
         try:
@@ -1742,6 +1860,7 @@ class SenderGui:
             elif kind == 'exit':
                 return_code = int(value)
                 self.process = None
+                self._close_preview_socket()
                 self.stop_requested = False
                 self.sender_device_lost = False
                 if return_code == 0:
@@ -1898,6 +2017,8 @@ class SenderGui:
 
     def _render_live(self, image, draw, font, small):
         width, height = image.size
+        preview_enabled = bool(self.settings.get('encoded_preview'))
+        detail_right = int(width*.47) if preview_enabled else width-24
         draw.text((24, 76), 'Sender status', font=font,
                   fill=(229, 237, 243))
         state = ('STOPPING' if self.stop_requested else
@@ -1928,7 +2049,9 @@ class SenderGui:
         y = 220
         for label, value in details:
             draw.text((32, y), label, font=small, fill=(132, 158, 176))
-            draw.text((235, y), _fit(value, small, width-265),
+            value_x = 148 if preview_enabled else 235
+            draw.text((value_x, y), _fit(value, small,
+                                         max(70, detail_right-value_x-8)),
                       font=small, fill=(218, 229, 237))
             y += 32
 
@@ -1938,9 +2061,44 @@ class SenderGui:
         first_line = log_top+24
         line_count = max(0, min(10, (height-34-first_line)//22))
         for index, line in enumerate(self.lines[-line_count:] if line_count else ()):
-            shown = _fit(line, small, width-48)
+            shown = _fit(line, small,
+                         max(80, detail_right-52) if preview_enabled
+                         else width-48)
             draw.text((28, first_line+index*22), shown,
                       font=small, fill=(183, 201, 214))
+
+        if preview_enabled:
+            from PIL import ImageOps
+            panel_left = int(width*.51)
+            panel = (panel_left, 248, width-24, height-48)
+            draw.text((panel_left, 220), 'Encoded preview', font=small,
+                      fill=(132, 158, 176))
+            draw.text((panel_left+114, 220), 'clean-link estimate',
+                      font=small, fill=(132, 158, 176))
+            draw.rounded_rectangle(panel, radius=6, fill=(12, 21, 29),
+                                   outline=(48, 73, 90))
+            if self.preview_image is None:
+                message = ('Starting preview…' if self.process else
+                           'Start sending to see the encoded image.')
+                draw.text((panel_left+16, panel[1]+16), message, font=small,
+                          fill=(165, 187, 202))
+            else:
+                inner = (max(1, panel[2]-panel[0]-20),
+                         max(1, panel[3]-panel[1]-58))
+                thumbnail = ImageOps.contain(self.preview_image, inner)
+                x = panel_left+(panel[2]-panel_left-thumbnail.width)//2
+                y_image = panel[1]+8+(inner[1]-thumbnail.height)//2
+                image.paste(thumbnail.convert('RGBA'), (x, y_image))
+                age_ms = max(0.0, (time.monotonic_ns()-
+                                   int(self.preview_handoff_ns or 0))/1e6)
+                caption = (f'Packet {self.preview_counter} · aspect '
+                           f'{self.preview_aspect} · {age_ms:.0f} ms after '
+                           'output handoff')
+                draw.text((panel_left+10, panel[3]-27),
+                          _fit(caption, small, panel[2]-panel_left-20),
+                          font=small,
+                          fill=(145, 218, 170) if age_ms < 500 else
+                          (238, 182, 125))
 
     def _canvas(self, size):
         from PIL import Image, ImageDraw
@@ -2012,7 +2170,8 @@ class SenderGui:
             dest = hit.split(':', 1)[1]
             if (dest not in self._visible_fields() or
                     dest in self.DROPDOWN_FIELDS or
-                    dest in ('video_live', 'video_preview')):
+                    dest in ('video_live', 'video_preview',
+                             'encoded_preview')):
                 return
             if (self.process is not None and
                     dest not in ('brightness', 'gamma')):
@@ -2085,7 +2244,7 @@ class SenderGui:
             if (self.process is not None and
                     dest not in ('brightness', 'gamma')):
                 self.notice = 'Settings are locked while the sender is running.'
-            elif dest in ('video_live', 'video_preview'):
+            elif dest in ('video_live', 'video_preview', 'encoded_preview'):
                 self._assign(dest, not self.settings[dest])
             elif dest in self.DROPDOWN_FIELDS:
                 self._open_dropdown(dest)
@@ -2170,7 +2329,7 @@ class SenderGui:
                     self.scroll = position-visible_count+1
             elif key in (glfw.KEY_LEFT, glfw.KEY_RIGHT) and self.selected in fields:
                 dest = self.selected
-                if dest in ('video_live', 'video_preview'):
+                if dest in ('video_live', 'video_preview', 'encoded_preview'):
                     self._assign(dest, not self.settings[dest])
                 elif dest in self.DROPDOWN_FIELDS:
                     self._open_dropdown(dest)
@@ -2181,7 +2340,7 @@ class SenderGui:
                 dest = self.selected
                 if dest in self.DROPDOWN_FIELDS:
                     self._open_dropdown(dest)
-                elif dest in ('video_live', 'video_preview'):
+                elif dest in ('video_live', 'video_preview', 'encoded_preview'):
                     self._assign(dest, not self.settings[dest])
                 else:
                     self.editing = True
@@ -2339,6 +2498,9 @@ class SenderGui:
                         self.process.wait()
             if self.reader is not None:
                 self.reader.join(timeout=1)
+            self._close_preview_socket()
+            if self.preview_reader is not None:
+                self.preview_reader.join(timeout=1)
             self._glfw = None
             self._window = None
             if texture is not None:

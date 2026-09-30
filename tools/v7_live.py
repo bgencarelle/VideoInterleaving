@@ -729,6 +729,11 @@ def _run_send_session(args):
     buffered_audio_seconds = 0.0
     sentinel = object()
     producer_errors = []
+    encoded_preview_port = getattr(args, 'encoded_preview_port', None)
+    if (encoded_preview_port is not None and
+            not 1 <= int(encoded_preview_port) <= 65535):
+        raise ValueError('--encoded-preview-port must be between 1 and 65535')
+    preview_worker = None
     batch_size = max(1, args.batch_frames)
     total = getattr(args, '_sender_total', 0)
     started = getattr(args, '_sender_started_at', None)
@@ -863,7 +868,11 @@ def _run_send_session(args):
                 if len(frames) < batch_size:
                     continue
                 audio, stats = encode_batch(frames, aspects, counter)
-                batches.put((counter, audio, stats))
+                preview_frames = (
+                    tuple((counter+index, aspects[index], frame)
+                          for index, frame in enumerate(frames))
+                    if encoded_preview_port is not None else ())
+                batches.put((counter, audio, stats, preview_frames))
                 buffered_audio_seconds += len(audio)/output_rate
                 if buffered_audio_seconds >= startup_buffer_seconds:
                     prebuffer_ready.set()
@@ -879,7 +888,11 @@ def _run_send_session(args):
         if failure is None and frames and not stop.is_set():
             try:
                 audio, stats = encode_batch(frames, aspects, counter)
-                batches.put((counter, audio, stats))
+                preview_frames = (
+                    tuple((counter+index, aspects[index], frame)
+                          for index, frame in enumerate(frames))
+                    if encoded_preview_port is not None else ())
+                batches.put((counter, audio, stats, preview_frames))
                 buffered_audio_seconds += len(audio)/output_rate
                 if buffered_audio_seconds >= startup_buffer_seconds:
                     prebuffer_ready.set()
@@ -940,6 +953,20 @@ def _run_send_session(args):
             queue_batches = _sender_queue_batches(
                 startup_buffer_seconds, output_rate, first_packet_samples)
             batches = queue.Queue(maxsize=queue_batches)
+            if encoded_preview_port is not None:
+                try:
+                    from tools.v7_encoded_preview import EncodedPreviewWorker
+                    preview_worker = EncodedPreviewWorker(
+                        model, encoded_preview_port, fold=fold,
+                        mono_wire=mono_wire,
+                        history=getattr(args, '_encoded_preview_history', ()))
+                    preview_worker.start()
+                except Exception as exc:
+                    preview_worker = None
+                    print(json.dumps({
+                        'status': 'encoded_preview_unavailable',
+                        'message': str(exc),
+                    }), flush=True)
 
             if getattr(args, '_sender_device_identity', None) is not None:
                 def monitor_output_device():
@@ -1116,7 +1143,7 @@ def _run_send_session(args):
                     continue
                 if item is sentinel:
                     break
-                counter, audio, stats = item
+                counter, audio, stats, preview_frames = item
                 if mono_fold_profile:
                     frames = max(1, int(stats['frames_encoded']))
                     base, extra = divmod(len(audio), frames)
@@ -1130,11 +1157,25 @@ def _run_send_session(args):
                         # One packet per blocking write lets paced soundtrack
                         # capture advance while the DAC plays this video frame.
                         write_output(packet)
+                        if preview_worker is not None:
+                            handoff_ns = time.monotonic_ns()
+                            frame_counter, aspect, values = preview_frames[index]
+                            preview_worker.submit(
+                                frame_counter, aspect, values, handoff_ns)
+                            args._encoded_preview_history = tuple(
+                                preview_worker.history)
                         offset += count
                 else:
                     # sounddevice requires a C-contiguous interleaved buffer;
                     # filtering/resampling can return a strided view here.
                     write_output(audio)
+                    if preview_worker is not None:
+                        handoff_ns = time.monotonic_ns()
+                        for frame_counter, aspect, values in preview_frames:
+                            preview_worker.submit(
+                                frame_counter, aspect, values, handoff_ns)
+                        args._encoded_preview_history = tuple(
+                            preview_worker.history)
                 if args.log and not args.no_log:
                     print({
                         'sent_through_frame': (
@@ -1164,6 +1205,8 @@ def _run_send_session(args):
                 close = getattr(raw_grab, 'close', None)
             if close is not None:
                 close()
+        if preview_worker is not None:
+            preview_worker.close()
         if source_audio is not None:
             source_audio.close()
             if args.log and not args.no_log:
@@ -3221,6 +3264,8 @@ def parser():
                       help='treat an HTTP(S) source as live instead of looping it')
     send.add_argument('--preview', action='store_true',
                       help='open video sources in a desktop player while sending')
+    send.add_argument('--encoded-preview-port', type=int, metavar='PORT',
+                      help=argparse.SUPPRESS)
     send.add_argument('--display', type=int)
     send.add_argument('--ffmpeg-input')
     send.add_argument('--screen-backend', choices=('mss', 'ffmpeg'), default='mss',

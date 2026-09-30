@@ -7,6 +7,8 @@ import tempfile
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from PIL import Image
+
 from tools import v7_live
 from tools.v7_send_gui import (InputDevice, OutputDevice,
                                 PRIMARY_PROFILE_CHOICES, ScreenTarget, SenderGui,
@@ -139,6 +141,14 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(args.encode_filter, None)
         self.assertFalse(args.log)
         self.assertNotIn('--rate', command)
+
+    def test_encoded_preview_port_is_forwarded_to_sender_cli(self):
+        command = build_command(
+            self.settings, self.devices, self.sd,
+            encoded_preview_port=54321)
+
+        position = command.index('--encoded-preview-port')
+        self.assertEqual(command[position+1], '54321')
 
     def test_selected_sample_rate_profile_and_video_path_reach_cli(self):
         self.settings.update(source='video', video_source='a clip with spaces.mp4',
@@ -896,6 +906,39 @@ class SenderGuiTests(unittest.TestCase):
         gui.page = 'live'
         self.assertEqual(gui._canvas((960, 720)).size, (960, 720))
         self.assertEqual(gui._canvas((720, 480)).size, (720, 480))
+
+    def test_live_canvas_renders_the_clean_encoded_preview(self):
+        gui = SenderGui(self.devices)
+        gui.page = 'live'
+        gui.settings['encoded_preview'] = True
+        gui.preview_image = Image.new('RGB', (80, 96), (90, 120, 150))
+        gui.preview_counter = 18
+        gui.preview_aspect = 5
+        gui.preview_handoff_ns = 1
+
+        self.assertEqual(gui._canvas((960, 720)).size, (960, 720))
+
+    def test_encoded_preview_receiver_lifecycle_follows_sender_process(self):
+        gui = SenderGui(self.devices)
+        gui.settings.update(device=3, source='screen', encoded_preview=True)
+        child = Mock()
+        child.poll.return_value = None
+
+        with patch.object(gui, '_build_command',
+                          return_value=['python', 'send']) as build_command, \
+                patch('tools.v7_send_gui.subprocess.Popen',
+                      return_value=child), \
+                patch('tools.v7_send_gui.threading.Thread'):
+            gui._start()
+
+        build_command.assert_called_once()
+        port = build_command.call_args.kwargs['encoded_preview_port']
+        self.assertIsNotNone(gui._preview_socket)
+        self.assertEqual(gui._preview_socket.getsockname(),
+                         ('127.0.0.1', port))
+        gui.events.put(('exit', 0))
+        gui._drain_events()
+        self.assertIsNone(gui._preview_socket)
 
     def test_live_change_source_stops_then_opens_source_picker(self):
         gui = SenderGui(self.devices)
