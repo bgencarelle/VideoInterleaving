@@ -98,6 +98,33 @@ class ImagePreviewTests(unittest.TestCase):
             worker.close()
             receiver.close()
 
+    def test_worker_close_drains_latest_frame_for_short_sends(self):
+        frame = Image.new('RGB', (80, 96), (50, 70, 90))
+        receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        receiver.bind(('127.0.0.1', 0))
+        receiver.settimeout(.1)
+        worker = ImagePreviewWorker(receiver.getsockname()[1])
+        try:
+            worker.start()
+            worker.submit(73, 2, frame, frame)
+            worker.close()
+
+            stages = set()
+            deadline = time.monotonic()+2
+            while time.monotonic() < deadline and stages != {
+                    'source', 'resized'}:
+                try:
+                    packet, _address = receiver.recvfrom(65507)
+                except socket.timeout:
+                    continue
+                parsed = parse_preview_datagram(packet)
+                if parsed is not None and parsed[0] == 73:
+                    stages.add(parsed[3])
+            self.assertEqual(stages, {'source', 'resized'})
+        finally:
+            worker.close()
+            receiver.close()
+
     def test_slow_image_renderer_keeps_only_the_latest_bounded_job(self):
         entered = threading.Event()
         release = threading.Event()

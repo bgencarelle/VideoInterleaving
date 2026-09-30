@@ -57,7 +57,7 @@ class SenderGuiTests(unittest.TestCase):
             'rate': None,
             'profile': 'fold-500',
             'mono_video_side': 'right',
-            'source_audio': 'source',
+            'source_audio': 'off',
             'source_audio_device': None,
             'source_audio_input_side': 'mix',
             'source_audio_gain': '1',
@@ -190,6 +190,11 @@ class SenderGuiTests(unittest.TestCase):
         self.assertIsNone(args.encode_filter)
         self.assertIn('--profile', command)
         self.assertNotIn('--experimental-mono-fold', command)
+        self.assertEqual(args.source_audio, 'off')
+
+        self.settings['source_audio'] = 'source'
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
         self.assertEqual(args.source_audio, 'source')
 
     def test_mono_colour_profile_reaches_sender_cli_as_a_profile_choice(self):
@@ -986,6 +991,17 @@ class SenderGuiTests(unittest.TestCase):
             reader.join(timeout=1)
             sender.close()
 
+    def test_preview_worker_error_is_propagated_to_the_live_panel(self):
+        gui = SenderGui(self.devices)
+        gui.events.put(('line', json.dumps({
+            'status': 'image_preview_error',
+            'message': 'ValueError: invalid frame',
+        })))
+
+        gui._drain_events()
+
+        self.assertEqual(gui.preview_error, 'ValueError: invalid frame')
+
     def test_image_preview_receiver_lifecycle_follows_sender_process(self):
         gui = SenderGui(self.devices)
         gui.settings.update(device=3, source='screen', image_preview=True,
@@ -1070,18 +1086,20 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(restored.settings['preview_stage'], 'source')
         self.assertIsNone(restored.process)
 
-    def test_old_encoded_preview_preference_migrates_to_resized_stage(self):
+    def test_v1_preferences_mute_default_soundtrack_and_migrate_preview(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary)/'sender.json'
             path.write_text(json.dumps({
                 'version': 1,
-                'settings': {'encoded_preview': True},
+                'settings': {'encoded_preview': True,
+                             'source_audio': 'source'},
             }), encoding='utf-8')
             gui = SenderGui(self.devices, preference_path=path,
                             restore_preferences=True)
 
         self.assertTrue(gui.settings['image_preview'])
         self.assertEqual(gui.settings['preview_stage'], 'resized')
+        self.assertEqual(gui.settings['source_audio'], 'off')
 
     def test_unavailable_saved_output_is_not_replaced_by_a_default(self):
         with tempfile.TemporaryDirectory() as temporary:

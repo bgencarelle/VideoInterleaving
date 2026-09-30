@@ -862,7 +862,7 @@ class MonoVideoWireTests(unittest.TestCase):
             args = v7_live.parser().parse_args([
                 'send', '--device', 'memory', '--source', 'video',
                 '--video-source', 'clip.mkv', '--seconds', '.24', '--no-log',
-                '--experimental-mono-fold'])
+                '--experimental-mono-fold', '--source-audio', 'source'])
             v7_live.run_send(args)
 
         self.assertEqual(captures[0][0], 'clip.mkv')
@@ -908,7 +908,7 @@ class MonoVideoWireTests(unittest.TestCase):
         self.assertTrue(recv.experimental_mono_fold)
         self.assertEqual(send.mono_video_side, 'right')
         self.assertEqual(recv.mono_video_side, 'auto')
-        self.assertIsNone(send.source_audio)
+        self.assertEqual(send.source_audio, 'off')
         self.assertIsNone(send.source_audio_device)
         self.assertEqual(v7_live._fold_slots(send), 0)
         self.assertEqual(v7_live._fold_slots(recv), 0)

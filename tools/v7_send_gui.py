@@ -36,7 +36,7 @@ PROFILE_CHOICES = (
 MONO_PROFILES = ('mono-fold-500', 'mono-colour-500')
 PRIMARY_PROFILE_CHOICES = PROFILE_CHOICES[:3]
 SOURCE_AUDIO_CHOICES = (
-    ('Video soundtrack (if present)', 'source'),
+    ('Video soundtrack · opt-in', 'source'),
     ('Input device', 'device'),
     ('Off · silence', 'off'),
 )
@@ -107,8 +107,8 @@ FIELD_HELP = {
     'capture_filter': 'Optional FFmpeg capture scaler. Automatic follows the sender defaults.',
     'mono_video_side': ('For the mono video profile, carry the modem on one '
                         'leg and leave the other free for separate audio.'),
-    'source_audio': ('In mono-video mode, route the source soundtrack or an '
-                     'input device to the free output leg, or choose Off. '
+    'source_audio': ('In mono-video mode, optionally route the source soundtrack '
+                     'or an input device to the free output leg. Defaults to Off. '
                      'This is separate from the muted source-player preview.'),
     'source_audio_device': 'Choose an explicit microphone, line, or loopback input device.',
     'source_audio_input_side': 'Select one input leg or downmix stereo input to mono.',
@@ -144,7 +144,7 @@ FIELD_LABELS = {
 VIDEO_FILE_GLOB = '*.mp4 *.m4v *.mov *.mkv *.webm *.avi *.mpeg *.mpg *.wmv *.ts'
 DEVICE_REFRESH_SECONDS = 3.0
 GUI_EVENT_WAIT_SECONDS = 0.5
-SENDER_PREFERENCES_VERSION = 1
+SENDER_PREFERENCES_VERSION = 2
 
 
 def sender_preferences_path():
@@ -159,9 +159,15 @@ def _load_sender_preferences(path):
     except (OSError, ValueError, TypeError):
         return {}
     if (not isinstance(values, dict) or
-            values.get('version') != SENDER_PREFERENCES_VERSION):
+            values.get('version') not in (1, SENDER_PREFERENCES_VERSION)):
         return {}
     settings = values.get('settings')
+    if isinstance(settings, dict):
+        settings = dict(settings)
+        if (values.get('version') == 1 and
+                settings.get('source_audio') == 'source'):
+            # V1 defaulted the soundtrack on for mono video. Make it opt-in.
+            settings['source_audio'] = 'off'
 
     def clean_identity(value):
         if (not isinstance(value, dict) or
@@ -806,7 +812,7 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
     if (mono_profile and
             mono_video_side not in dict(MONO_VIDEO_SIDE_CHOICES).values()):
         raise ValueError('Choose the left or right mono-video output side.')
-    source_audio = (settings.get('source_audio', 'source')
+    source_audio = (settings.get('source_audio', 'off')
                     if mono_profile else 'off')
     if (mono_profile and
             source_audio not in dict(SOURCE_AUDIO_CHOICES).values()):
@@ -1146,7 +1152,7 @@ class SenderGui:
             'source': None,
             'profile': 'fold-500',
             'mono_video_side': 'right',
-            'source_audio': 'source',
+            'source_audio': 'off',
             'source_audio_device': None,
             'source_audio_input_side': 'mix',
             'source_audio_gain': '1',
@@ -1194,6 +1200,7 @@ class SenderGui:
         self.preview_stage = None
         self.preview_handoff_ns = None
         self.preview_stage_frames = {}
+        self.preview_error = None
         self.stop_requested = False
         self.close_when_stopped = False
         self.sender_device_lost = False
@@ -1707,6 +1714,7 @@ class SenderGui:
         self.preview_stage = None
         self.preview_handoff_ns = None
         self.preview_stage_frames = {}
+        self.preview_error = preview_warning
         self.stop_requested = False
         self.page = 'live'
         self.notice = preview_warning or 'Starting sender…'
@@ -1783,6 +1791,7 @@ class SenderGui:
                 image_state = (decoded, int(counter), int(aspect),
                                int(handoff_ns))
                 self.preview_stage_frames[stage] = image_state
+                self.preview_error = None
                 if stage == self.settings.get('preview_stage', 'resized'):
                     (self.preview_image, self.preview_counter,
                      self.preview_aspect, self.preview_handoff_ns) = image_state
@@ -1882,13 +1891,19 @@ class SenderGui:
                 self.lines = self.lines[-12:]
                 self.notice = value
                 try:
-                    status = json.loads(value).get('status')
+                    status_record = json.loads(value)
+                    status = status_record.get('status')
                 except (TypeError, ValueError, AttributeError):
+                    status_record = {}
                     status = None
                 if status == 'sender_device_lost':
                     self.sender_device_lost = True
                 elif status == 'sender_device_reconnected':
                     self.sender_device_lost = False
+                elif status in ('image_preview_error',
+                                'image_preview_unavailable'):
+                    self.preview_error = status_record.get(
+                        'message', 'Image preview failed.')
             elif kind == 'exit':
                 return_code = int(value)
                 self.process = None
@@ -2120,8 +2135,12 @@ class SenderGui:
             draw.rounded_rectangle(panel, radius=6, fill=(12, 21, 29),
                                    outline=(48, 73, 90))
             if self.preview_image is None:
-                message = ('Starting preview…' if self.process else
-                           'Start sending to see source and resized images.')
+                if self.preview_error:
+                    message = self.preview_error
+                elif self.process:
+                    message = 'Waiting for the first handed-off frame…'
+                else:
+                    message = 'Start sending to see source and resized images.'
                 draw.text((panel_left+16, panel[1]+16), message, font=small,
                           fill=(165, 187, 202))
             else:

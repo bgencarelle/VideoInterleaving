@@ -1,5 +1,6 @@
 """Non-blocking source/resized-frame preview for the V7 sender GUI."""
 from io import BytesIO
+import json
 import queue
 import socket
 import threading
@@ -44,6 +45,7 @@ class ImagePreviewWorker:
         self.lock = threading.Lock()
         self.generation = 0
         self.closed = False
+        self.error_reported = False
         self.thread = threading.Thread(
             target=self._run, name='v7-image-preview', daemon=True)
 
@@ -52,38 +54,51 @@ class ImagePreviewWorker:
 
     def submit(self, counter, aspect, source, resized, handoff_ns=None):
         """Queue both image stages after handoff without waiting for rendering."""
-        if self.closed:
-            return
         try:
             item = (int(counter), int(aspect), source, resized,
                     time.monotonic_ns() if handoff_ns is None else int(handoff_ns))
             with self.lock:
+                if self.closed:
+                    return
                 self.generation += 1
                 generation = self.generation
-            job = (generation, item)
-            try:
-                self.jobs.put_nowait(job)
-            except queue.Full:
                 try:
-                    self.jobs.get_nowait()
-                except queue.Empty:
-                    pass
-                try:
-                    self.jobs.put_nowait(job)
+                    self.jobs.put_nowait((generation, item))
                 except queue.Full:
-                    pass
+                    try:
+                        self.jobs.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        self.jobs.put_nowait((generation, item))
+                    except queue.Full:
+                        pass
         except Exception:
             return
+
+    def _report_error(self, exc):
+        if self.error_reported:
+            return
+        self.error_reported = True
+        try:
+            print(json.dumps({
+                'status': 'image_preview_error',
+                'message': f'{type(exc).__name__}: {exc}',
+            }), flush=True)
+        except Exception:
+            pass
 
     def _run(self):
         publisher = None
         try:
             publisher = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             publisher.setblocking(False)
-            while not self.stop.is_set():
+            while True:
                 try:
                     generation, item = self.jobs.get(timeout=.1)
                 except queue.Empty:
+                    if self.stop.is_set():
+                        break
                     continue
                 try:
                     counter, aspect, source, resized, handoff_ns = item
@@ -96,20 +111,21 @@ class ImagePreviewWorker:
                         message = pack_preview_datagram(
                             counter, aspect, handoff_ns, stage, jpeg)
                         publisher.sendto(message, self.destination)
-                except Exception:
+                except Exception as exc:
+                    self._report_error(exc)
                     continue
-        except OSError:
+        except OSError as exc:
+            self._report_error(exc)
             return
         finally:
             if publisher is not None:
                 publisher.close()
 
     def close(self, timeout=1.0):
-        if self.closed:
-            return
-        self.closed = True
-        self.stop.set()
         with self.lock:
-            self.generation += 1
+            if self.closed:
+                return
+            self.closed = True
+            self.stop.set()
         if self.thread.is_alive():
             self.thread.join(timeout=max(0.0, float(timeout)))
