@@ -57,7 +57,7 @@ class SenderGuiTests(unittest.TestCase):
             'rate': None,
             'profile': 'fold-500',
             'mono_video_side': 'right',
-            'source_audio': 'off',
+            'source_audio': 'source',
             'source_audio_device': None,
             'source_audio_input_side': 'mix',
             'source_audio_gain': '1',
@@ -190,12 +190,12 @@ class SenderGuiTests(unittest.TestCase):
         self.assertIsNone(args.encode_filter)
         self.assertIn('--profile', command)
         self.assertNotIn('--experimental-mono-fold', command)
-        self.assertEqual(args.source_audio, 'off')
+        self.assertEqual(args.source_audio, 'source')
 
-        self.settings['source_audio'] = 'source'
+        self.settings['source_audio'] = 'off'
         command = build_command(self.settings, self.devices, self.sd)
         args = v7_live.parser().parse_args(command[2:])
-        self.assertEqual(args.source_audio, 'source')
+        self.assertEqual(args.source_audio, 'off')
 
     def test_mono_colour_profile_reaches_sender_cli_as_a_profile_choice(self):
         self.settings.update(profile='mono-colour-500', mono_video_side='left')
@@ -1002,6 +1002,34 @@ class SenderGuiTests(unittest.TestCase):
 
         self.assertEqual(gui.preview_error, 'ValueError: invalid frame')
 
+    def test_invalid_preview_jpeg_reports_decode_error_to_live_panel(self):
+        gui = SenderGui(self.devices)
+        process = object()
+        receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        receiver.bind(('127.0.0.1', 0))
+        receiver.settimeout(.1)
+        sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        gui.process = process
+        gui._preview_socket = receiver
+        reader = threading.Thread(
+            target=gui._read_image_preview, args=(process, receiver),
+            daemon=True)
+        reader.start()
+        try:
+            sender.sendto(pack_preview_datagram(
+                43, 2, time.monotonic_ns(), 'source', b'invalid jpeg'),
+                receiver.getsockname())
+            deadline = time.monotonic()+2
+            while time.monotonic() < deadline and gui.events.empty():
+                time.sleep(.01)
+            gui._drain_events()
+            self.assertIn('decoding source preview image', gui.preview_error)
+        finally:
+            gui.process = None
+            gui._close_preview_socket()
+            reader.join(timeout=1)
+            sender.close()
+
     def test_image_preview_receiver_lifecycle_follows_sender_process(self):
         gui = SenderGui(self.devices)
         gui.settings.update(device=3, source='screen', image_preview=True,
@@ -1086,7 +1114,7 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(restored.settings['preview_stage'], 'source')
         self.assertIsNone(restored.process)
 
-    def test_v1_preferences_mute_default_soundtrack_and_migrate_preview(self):
+    def test_v1_preferences_keep_soundtrack_default_and_migrate_preview(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary)/'sender.json'
             path.write_text(json.dumps({
@@ -1099,7 +1127,21 @@ class SenderGuiTests(unittest.TestCase):
 
         self.assertTrue(gui.settings['image_preview'])
         self.assertEqual(gui.settings['preview_stage'], 'resized')
-        self.assertEqual(gui.settings['source_audio'], 'off')
+        self.assertEqual(gui.settings['source_audio'], 'source')
+
+    def test_v2_off_soundtrack_default_migrates_to_enabled(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary)/'sender.json'
+            path.write_text(json.dumps({
+                'version': 2,
+                'settings': {'profile': 'mono-fold-500',
+                             'source_audio': 'off'},
+            }), encoding='utf-8')
+            gui = SenderGui(self.devices, preference_path=path,
+                            restore_preferences=True)
+
+        self.assertEqual(gui.settings['profile'], 'mono-fold-500')
+        self.assertEqual(gui.settings['source_audio'], 'source')
 
     def test_unavailable_saved_output_is_not_replaced_by_a_default(self):
         with tempfile.TemporaryDirectory() as temporary:

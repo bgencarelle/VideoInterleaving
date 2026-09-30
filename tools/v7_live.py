@@ -670,7 +670,7 @@ def _run_send_session(args):
                          'channels; do not combine it with --mono-sum')
     source_audio_mode = getattr(args, 'source_audio', None)
     if mono_fold_profile:
-        source_audio_mode = source_audio_mode or 'off'
+        source_audio_mode = source_audio_mode or 'source'
         if (source_audio_mode == 'device' and
                 getattr(args, 'source_audio_device', None) is None):
             raise ValueError('--source-audio device requires '
@@ -3249,9 +3249,9 @@ def parser():
                       help=('all-fresh mono video: send on this output leg and '
                             'leave the other leg for audio (default: right)'))
     send.add_argument('--source-audio', choices=('source', 'device', 'off'),
-                      default='off',
+                      default=None,
                       help=('mono-video channel audio: embedded video soundtrack '
-                            '(opt-in), selected input device, or off (default)'))
+                            '(mono default), selected input device, or off'))
     send.add_argument('--source-audio-device', type=_device_arg,
                       help='explicit input device for --source-audio device')
     send.add_argument('--source-audio-input-side',

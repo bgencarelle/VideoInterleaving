@@ -1,10 +1,11 @@
 """Non-blocking source/resized-frame preview for the V7 sender GUI."""
-from io import BytesIO
+import errno
 import json
 import queue
 import socket
 import threading
 import time
+from io import BytesIO
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -76,14 +77,19 @@ class ImagePreviewWorker:
         except Exception:
             return
 
-    def _report_error(self, exc):
+    def _report_error(self, exc, context='preview worker'):
         if self.error_reported:
             return
         self.error_reported = True
+        code = getattr(exc, 'errno', None)
+        code_name = errno.errorcode.get(code, '') if code is not None else ''
+        detail = f'{context}: {type(exc).__name__}: {exc}'
+        if code is not None:
+            detail += f' (errno {code}{": "+code_name if code_name else ""})'
         try:
             print(json.dumps({
                 'status': 'image_preview_error',
-                'message': f'{type(exc).__name__}: {exc}',
+                'message': detail,
             }), flush=True)
         except Exception:
             pass
@@ -104,18 +110,25 @@ class ImagePreviewWorker:
                     counter, aspect, source, resized, handoff_ns = item
                     for stage, frame in (('source', source),
                                          ('resized', resized)):
-                        jpeg = _preview_jpeg(frame)
+                        try:
+                            jpeg = _preview_jpeg(frame)
+                        except Exception as exc:
+                            self._report_error(exc, f'rendering {stage} image')
+                            continue
                         with self.lock:
                             if generation != self.generation:
                                 break
                         message = pack_preview_datagram(
                             counter, aspect, handoff_ns, stage, jpeg)
-                        publisher.sendto(message, self.destination)
+                        try:
+                            publisher.sendto(message, self.destination)
+                        except OSError as exc:
+                            self._report_error(exc, f'sending {stage} datagram')
                 except Exception as exc:
-                    self._report_error(exc)
+                    self._report_error(exc, 'building preview datagram')
                     continue
         except OSError as exc:
-            self._report_error(exc)
+            self._report_error(exc, 'opening preview socket')
             return
         finally:
             if publisher is not None:

@@ -908,7 +908,7 @@ class MonoVideoWireTests(unittest.TestCase):
         self.assertTrue(recv.experimental_mono_fold)
         self.assertEqual(send.mono_video_side, 'right')
         self.assertEqual(recv.mono_video_side, 'auto')
-        self.assertEqual(send.source_audio, 'off')
+        self.assertIsNone(send.source_audio)
         self.assertIsNone(send.source_audio_device)
         self.assertEqual(v7_live._fold_slots(send), 0)
         self.assertEqual(v7_live._fold_slots(recv), 0)

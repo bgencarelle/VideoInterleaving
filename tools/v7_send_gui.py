@@ -5,6 +5,7 @@ The sender runs in its own process. Optional source-video playback uses a
 desktop media player; encoded-image preview arrives on a separate bounded
 loopback channel.
 """
+import errno
 import json
 import math
 import os
@@ -36,7 +37,7 @@ PROFILE_CHOICES = (
 MONO_PROFILES = ('mono-fold-500', 'mono-colour-500')
 PRIMARY_PROFILE_CHOICES = PROFILE_CHOICES[:3]
 SOURCE_AUDIO_CHOICES = (
-    ('Video soundtrack · opt-in', 'source'),
+    ('Video soundtrack · default', 'source'),
     ('Input device', 'device'),
     ('Off · silence', 'off'),
 )
@@ -107,8 +108,8 @@ FIELD_HELP = {
     'capture_filter': 'Optional FFmpeg capture scaler. Automatic follows the sender defaults.',
     'mono_video_side': ('For the mono video profile, carry the modem on one '
                         'leg and leave the other free for separate audio.'),
-    'source_audio': ('In mono-video mode, optionally route the source soundtrack '
-                     'or an input device to the free output leg. Defaults to Off. '
+    'source_audio': ('In mono-video mode, route the source soundtrack by '
+                     'default, or select an input device or Off. '
                      'This is separate from the muted source-player preview.'),
     'source_audio_device': 'Choose an explicit microphone, line, or loopback input device.',
     'source_audio_input_side': 'Select one input leg or downmix stereo input to mono.',
@@ -144,7 +145,7 @@ FIELD_LABELS = {
 VIDEO_FILE_GLOB = '*.mp4 *.m4v *.mov *.mkv *.webm *.avi *.mpeg *.mpg *.wmv *.ts'
 DEVICE_REFRESH_SECONDS = 3.0
 GUI_EVENT_WAIT_SECONDS = 0.5
-SENDER_PREFERENCES_VERSION = 2
+SENDER_PREFERENCES_VERSION = 3
 
 
 def sender_preferences_path():
@@ -158,16 +159,16 @@ def _load_sender_preferences(path):
         values = json.loads(Path(path).read_text(encoding='utf-8'))
     except (OSError, ValueError, TypeError):
         return {}
-    if (not isinstance(values, dict) or
-            values.get('version') not in (1, SENDER_PREFERENCES_VERSION)):
+    version = values.get('version') if isinstance(values, dict) else None
+    if version not in (1, 2, SENDER_PREFERENCES_VERSION):
         return {}
     settings = values.get('settings')
     if isinstance(settings, dict):
         settings = dict(settings)
-        if (values.get('version') == 1 and
-                settings.get('source_audio') == 'source'):
-            # V1 defaulted the soundtrack on for mono video. Make it opt-in.
-            settings['source_audio'] = 'off'
+        if version == 2 and settings.get('source_audio') == 'off':
+            # V2 changed the default to Off; restore the requested soundtrack
+            # default unless the user had selected another audio source.
+            settings['source_audio'] = 'source'
 
     def clean_identity(value):
         if (not isinstance(value, dict) or
@@ -812,7 +813,7 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
     if (mono_profile and
             mono_video_side not in dict(MONO_VIDEO_SIDE_CHOICES).values()):
         raise ValueError('Choose the left or right mono-video output side.')
-    source_audio = (settings.get('source_audio', 'off')
+    source_audio = (settings.get('source_audio', 'source')
                     if mono_profile else 'off')
     if (mono_profile and
             source_audio not in dict(SOURCE_AUDIO_CHOICES).values()):
@@ -1152,7 +1153,7 @@ class SenderGui:
             'source': None,
             'profile': 'fold-500',
             'mono_video_side': 'right',
-            'source_audio': 'off',
+            'source_audio': 'source',
             'source_audio_device': None,
             'source_audio_input_side': 'mix',
             'source_audio_gain': '1',
@@ -1201,6 +1202,7 @@ class SenderGui:
         self.preview_handoff_ns = None
         self.preview_stage_frames = {}
         self.preview_error = None
+        self.preview_reader_error_reported = False
         self.stop_requested = False
         self.close_when_stopped = False
         self.sender_device_lost = False
@@ -1715,6 +1717,7 @@ class SenderGui:
         self.preview_handoff_ns = None
         self.preview_stage_frames = {}
         self.preview_error = preview_warning
+        self.preview_reader_error_reported = False
         self.stop_requested = False
         self.page = 'live'
         self.notice = preview_warning or 'Starting sender…'
@@ -1732,13 +1735,35 @@ class SenderGui:
         self.dirty = True
 
     def _read_image_preview(self, process, preview_socket):
+        def report_error(context, exc):
+            if (self.preview_reader_error_reported or
+                    self.process is not process or
+                    self._preview_socket is not preview_socket):
+                return
+            self.preview_reader_error_reported = True
+            detail = f'{context}: {type(exc).__name__}: {exc}'
+            code = getattr(exc, 'errno', None)
+            winerror = getattr(exc, 'winerror', None)
+            if code is not None:
+                code_name = errno.errorcode.get(code, '')
+                detail += (f' (errno {code}'
+                           f'{": "+code_name if code_name else ""})')
+            if winerror is not None:
+                detail += f' (Windows error {winerror})'
+            self.events.put(('line', json.dumps({
+                'status': 'image_preview_error',
+                'message': detail,
+            })))
+            self._wake()
+
         while (self.process is process and
                self._preview_socket is preview_socket):
             try:
                 packet, _address = preview_socket.recvfrom(65507)
             except socket.timeout:
                 continue
-            except OSError:
+            except OSError as exc:
+                report_error('receiving preview datagram', exc)
                 return
             newest_by_stage = {}
 
@@ -1755,19 +1780,22 @@ class SenderGui:
             remember(packet)
             try:
                 preview_socket.setblocking(False)
-            except OSError:
+            except OSError as exc:
+                report_error('draining preview datagrams', exc)
                 return
             while True:
                 try:
                     candidate, _address = preview_socket.recvfrom(65507)
                 except BlockingIOError:
                     break
-                except OSError:
+                except OSError as exc:
+                    report_error('draining preview datagrams', exc)
                     return
                 remember(candidate)
             try:
                 preview_socket.settimeout(.2)
-            except OSError:
+            except OSError as exc:
+                report_error('restoring preview socket timeout', exc)
                 return
             for _handoff_ns, newest in newest_by_stage.values():
                 parsed = parse_preview_datagram(newest)
@@ -1780,7 +1808,8 @@ class SenderGui:
                     with Image.open(io.BytesIO(jpeg)) as image:
                         image.load()
                         decoded = image.convert('RGB')
-                except (OSError, ValueError):
+                except (OSError, ValueError) as exc:
+                    report_error(f'decoding {stage} preview image', exc)
                     continue
                 if (self.process is not process or
                         self._preview_socket is not preview_socket):
