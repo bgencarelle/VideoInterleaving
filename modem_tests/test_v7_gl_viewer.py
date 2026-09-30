@@ -92,7 +92,7 @@ class GLViewerHelperTests(unittest.TestCase):
         for actual, value in zip(enlarged, (.25, -.5, .75)):
             np.testing.assert_allclose(actual, value, atol=1e-6)
         self.assertEqual(DCT_RECONSTRUCTION_MODES,
-                         ('off', '2x', '4x', '8x', 'viewport'))
+                         ('off', '2x', '4x', '8x', '16x', 'viewport'))
 
     def test_dct_reconstruction_rejects_invalid_viewport_size(self):
         with self.assertRaisesRegex(ValueError, 'needs a size'):

@@ -88,6 +88,18 @@ class DirectDCTDisplayTests(unittest.TestCase):
                 result, _padded_idct(plane, shape).astype(np.float32),
                 rtol=0, atol=0)
 
+    def test_16x_mode_matches_the_padded_inverse_dct(self):
+        values, grids = _decoded_face_values()
+        planes = float_planes(values, grids)
+        enlarged = dct_reconstruct_planes(planes, '16x')
+        for plane, result in zip(planes, enlarged):
+            shape = (plane.shape[0]*16, plane.shape[1]*16)
+            self.assertEqual(result.shape, shape)
+            self.assertEqual(result.dtype, np.float32)
+            self.assertTrue(result.flags.c_contiguous)
+            np.testing.assert_allclose(result, _padded_idct(plane, shape),
+                                       rtol=0, atol=2e-5)
+
     def test_flat_and_empty_planes(self):
         flat = np.full((48, 40), -.3, np.float32)
         np.testing.assert_allclose(reconstruct_plane(flat, (7, 1000)), -.3,

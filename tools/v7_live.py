@@ -310,6 +310,32 @@ def _model(fixture, encode_filter='nearest'):
     return model
 
 
+# The GUI preview is a thumbnail; a toned preview built at full source size
+# cost ~30 ms per 1080p frame in the encode thread (8x the encode itself).
+DCT_PREVIEW_SIZE = (256, 320)
+
+
+def _dct_preview_image(rgb, brightness, gamma):
+    """Toned source preview for --dct-encode, reduced before toning."""
+    data = np.asarray(rgb)
+    if data.dtype != np.uint8:
+        data = np.asarray(data, dtype=np.float32)
+        if data.size and data.max() <= 1.0:
+            data = data*255.0
+        data = np.uint8(np.clip(np.rint(data), 0, 255))
+    image = Image.fromarray(np.ascontiguousarray(data), 'RGB')
+    factor = max(1, min(image.width//DCT_PREVIEW_SIZE[0],
+                        image.height//DCT_PREVIEW_SIZE[1]))
+    if factor > 1:
+        image = image.reduce(factor)
+    codes = np.arange(256, dtype=np.float64)/255.0
+    toned = np.clip(codes*brightness, 0.0, 1.0)
+    if gamma != 1.0:
+        toned = toned**(1.0/gamma)
+    table = np.uint8(np.rint(toned*255.0)).tolist()
+    return image.point(table*3)
+
+
 def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0,
             perceptual_resize='off', perceptual_detail_strength=0.25,
             dct_encode=False, dct_options=None, return_resized=False):
@@ -347,15 +373,7 @@ def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0,
             # Direct source-DCT encoding has no resized RGB intermediate.
             # Show the toned source entering its color/DCT conversion rather
             # than reconstructing pixels from encoded coefficients.
-            preview_rgb = np.asarray(rgb, dtype=np.float32)
-            if preview_rgb.size and preview_rgb.max() > 1.0:
-                preview_rgb = preview_rgb/255.0
-            preview_rgb = np.clip(preview_rgb*brightness, 0.0, 1.0)
-            if gamma != 1.0:
-                preview_rgb = preview_rgb**(1.0/gamma)
-            preview = Image.fromarray(
-                np.uint8(np.rint(preview_rgb*255.0)), 'RGB')
-            return values, aspect, preview
+            return values, aspect, _dct_preview_image(rgb, brightness, gamma)
         return values, aspect
     rgb_frame = (isinstance(frame, np.ndarray) and frame.dtype == np.uint8 and
                  frame.ndim == 3 and frame.shape[2] == 3)
@@ -1057,6 +1075,9 @@ def _run_send_session(args):
                 dct_encode=getattr(args, 'dct_encode', False),
                 dct_options=dct_options)
             encode_batch([warm_values], [0], 1)
+            if getattr(args, 'dct_encode', False):
+                from animation_modem.v7_source_dct import warmup_direct_dct
+                warmup_direct_dct(model.coder.grids, model.coder.shapes)
             # Start picture and soundtrack capture only after the output clock
             # is known, and close together so file/stream timelines begin near
             # the same source time.

@@ -665,6 +665,24 @@ def _direct_planes(rgb, grids, shapes, brightness, gamma, sharpen,
     return planes, grids, shapes, taper
 
 
+def warmup_direct_dct(grids, shapes):
+    """Compile the direct encoder for writable and read-only frames.
+
+    Numba compiles one specialization per array writability. FFmpeg frames
+    wrapped from ``bytes`` and ``np.asarray`` of a Pillow image are read-only,
+    a warm-up frame from ``np.zeros`` is not; a specialization first met on
+    a live frame compiles there (about 2 s, a visible stall).
+    """
+    rows = max(shape[0] for shape in grids)
+    cols = max(shape[1] for shape in grids)
+    frame = np.zeros((rows, cols, 3), dtype=np.uint8)
+    read_only = frame.copy()
+    read_only.setflags(write=False)
+    for data in (frame, read_only):
+        direct_dct_values(data, grids, shapes)
+        direct_dct_values(data, grids, shapes, sharpen='taper')
+
+
 def direct_dct_coefficients(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
                             sharpen='off', sharpen_strength=.25, clarity=0.0,
                             chroma_gain=1.0):

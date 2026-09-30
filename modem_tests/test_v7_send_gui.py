@@ -425,6 +425,86 @@ class SenderGuiTests(unittest.TestCase):
         self.assertNotIn('--no-pilot-tones', command)
         self.assertNotIn('--no-eof-marker', command)
 
+    def test_direct_dct_encode_options_reach_the_sender_cli(self):
+        self.settings.update(profile='mono-colour-500', dct_encode=True,
+                             dct_sharpen='taper', dct_sharpen_strength='0.5',
+                             dct_clarity='0.15', dct_chroma_gain='1.1')
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+
+        self.assertTrue(args.dct_encode)
+        self.assertEqual(v7_live._dct_encode_options(args), {
+            'sharpen': 'taper', 'sharpen_strength': .5, 'clarity': .15,
+            'chroma_gain': 1.1, 'aggregation': 'off', 'band_profile': 'off'})
+        v7_live._send_profile(args, 500)
+
+    def test_direct_dct_defaults_add_only_the_opt_in_flag(self):
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertFalse(any(word.startswith('--dct') for word in command))
+        self.settings['dct_encode'] = True
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertEqual([word for word in command if word.startswith('--dct')],
+                         ['--dct-encode'])
+        # Strength is sent only with a sharpen mode.
+        self.settings.update(dct_sharpen='off', dct_sharpen_strength='0.9')
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertNotIn('--dct-sharpen-strength', command)
+
+    def test_direct_dct_rejects_unsupported_combinations(self):
+        cases = (
+            ({'profile': 'fold-1000'}, 'requires Fold 500'),
+            ({'perceptual_resize': 'linear-box'}, 'pre-encode downscaler'),
+            ({'dct_sharpen': 'usm', 'dct_sharpen_strength': '1.5'},
+             'between 0 and 1'),
+            ({'dct_clarity': '-0.1'}, 'between 0 and 1'),
+            ({'dct_chroma_gain': '1.5'}, 'between 1.0 and 1.3'),
+        )
+        for update, message in cases:
+            settings = dict(self.settings, dct_encode=True, **update)
+            with self.subTest(update=update):
+                with self.assertRaisesRegex(ValueError, message):
+                    validate_settings(settings, self.devices, self.sd)
+
+    def test_direct_dct_fields_are_advanced_and_exclusive_with_downscaler(self):
+        gui = SenderGui(self.devices)
+        gui.settings['device'] = 3
+        self.assertNotIn('dct_encode', gui._visible_fields())
+        gui.advanced = True
+        visible = gui._visible_fields()
+        self.assertIn('dct_encode', visible)
+        self.assertNotIn('dct_sharpen', visible)
+
+        gui._assign('perceptual_resize', 'linear-box')
+        gui._assign('dct_encode', True)
+        self.assertEqual(gui.settings['perceptual_resize'], 'off')
+        visible = gui._visible_fields()
+        for dest in ('dct_sharpen', 'dct_clarity', 'dct_chroma_gain'):
+            self.assertIn(dest, visible)
+        self.assertNotIn('dct_sharpen_strength', visible)
+        self.assertNotIn('perceptual_resize', visible)
+        gui._assign('dct_sharpen', 'taper')
+        self.assertIn('dct_sharpen_strength', gui._visible_fields())
+        self.assertEqual(gui._value_label('dct_sharpen'),
+                         'Taper · sent band only')
+
+        gui._assign('profile', 'fold-1000')
+        self.assertFalse(gui.settings['dct_encode'])
+        self.assertNotIn('dct_encode', gui._visible_fields())
+
+    def test_direct_dct_settings_are_saved_and_restored(self):
+        from tools.v7_send_gui import (_restore_sender_settings,
+                                       _serialize_sender_settings)
+        gui = SenderGui(self.devices)
+        gui.settings.update(dct_encode=True, dct_sharpen='usm',
+                            dct_sharpen_strength='0.4', dct_clarity='0.3',
+                            dct_chroma_gain='1.2')
+        saved = json.loads(json.dumps(_serialize_sender_settings(gui.settings)))
+        restored = SenderGui(self.devices)
+        _restore_sender_settings(restored.settings, saved)
+        for key in ('dct_encode', 'dct_sharpen', 'dct_sharpen_strength',
+                    'dct_clarity', 'dct_chroma_gain'):
+            self.assertEqual(restored.settings[key], gui.settings[key])
+
     def test_ffmpeg_screen_input_is_forwarded_only_for_ffmpeg_capture(self):
         self.settings.update(source='screen', screen_backend='ffmpeg',
                              ffmpeg_input='x11grab::0.0')

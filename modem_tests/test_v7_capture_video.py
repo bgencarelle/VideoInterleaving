@@ -681,5 +681,51 @@ class SenderSchedulingTests(unittest.TestCase):
         self.assertGreaterEqual(writes[0], 2)
 
 
+class _TrickleStream(io.RawIOBase):
+    """A raw pipe that returns at most ``chunk`` bytes per read."""
+
+    def __init__(self, data, chunk):
+        self.data, self.chunk, self.position = data, chunk, 0
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        piece = self.data[self.position:self.position+min(len(buffer),
+                                                            self.chunk)]
+        buffer[:len(piece)] = piece
+        self.position += len(piece)
+        return len(piece)
+
+
+class PipeFrameReadTests(unittest.TestCase):
+    def test_short_pipe_reads_assemble_one_writable_frame(self):
+        from tools.v7_capture import _read_ppm
+        pixels = np.arange(640*360*3, dtype=np.uint32).astype(np.uint8)
+        stream = _TrickleStream(b'P6\n640 360\n255\n'+pixels.tobytes(),
+                                65536)
+        frame = _read_ppm(stream)
+        self.assertEqual(frame.shape, (360, 640, 3))
+        np.testing.assert_array_equal(frame.ravel(), pixels)
+        self.assertTrue(frame.flags.writeable)
+
+    def test_truncated_frame_is_an_error_not_zeros(self):
+        from tools.v7_capture import _read_ppm
+        stream = _TrickleStream(b'P6\n4 4\n255\n'+bytes(20), 7)
+        with self.assertRaisesRegex(RuntimeError, 'partway'):
+            _read_ppm(stream)
+
+    def test_dct_preview_is_a_toned_thumbnail(self):
+        from tools.v7_live import _dct_preview_image
+        rgb = np.random.default_rng(0).integers(
+            0, 256, (1080, 1920, 3), dtype=np.uint8)
+        preview = _dct_preview_image(rgb, 1.05, 1.2)
+        self.assertLessEqual(preview.width, 1920//3)
+        self.assertEqual(preview.mode, 'RGB')
+        corner = np.asarray(_dct_preview_image(rgb[:320, :256], 1.05, 1.2))
+        expected = np.rint(np.clip(rgb[:320, :256]/255*1.05, 0, 1)**(1/1.2)*255)
+        np.testing.assert_array_equal(corner, expected.astype(np.uint8))
+
+
 if __name__ == '__main__':
     unittest.main()

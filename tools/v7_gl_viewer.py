@@ -54,12 +54,13 @@ EWA_JINC_RADIUS = 3.2383154841662362
 KAISER_SINC_RADIUS = 3.0
 KAISER_SINC_BETA = 8.6
 HANN_SINC_RADIUS = 3.0
-DCT_RECONSTRUCTION_MODES = ('off', '2x', '4x', '8x', 'viewport')
+DCT_RECONSTRUCTION_MODES = ('off', '2x', '4x', '8x', '16x', 'viewport')
 DCT_RECONSTRUCTION_LABELS = {
     'off': 'Off',
     '2x': '2×',
     '4x': '4×',
     '8x': '8×',
+    '16x': '16× · fast PCs',
     'viewport': 'Viewport size',
 }
 
@@ -243,10 +244,17 @@ def dct_reconstruct_planes(planes, mode, viewport_size=None):
         from animation_modem.v7_dct_display import reconstruct_planes
         return reconstruct_planes(planes, viewport_size)
 
-    # Fixed 2x/4x/8x modes (4x is the receiver default) are unchanged.
     scale = int(mode[:-1])
     target_shapes = tuple((plane.shape[0]*scale,
                            plane.shape[1]*scale) for plane in planes)
+    if scale > 8:
+        # 16x (1,536x1,280 luma) evaluates the decoded spectrum directly: the
+        # padded inverse DCT below costs about twice as much at this size.
+        from animation_modem.v7_dct_display import reconstruct_plane
+        return tuple(reconstruct_plane(plane, shape)
+                     for plane, shape in zip(planes, target_shapes))
+
+    # Fixed 2x/4x/8x modes (4x is the receiver default) are unchanged.
 
     from scipy.fft import dctn, idctn
 

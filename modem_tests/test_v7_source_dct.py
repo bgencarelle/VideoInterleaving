@@ -442,6 +442,18 @@ class DirectDCTEncodeTests(unittest.TestCase):
             rgb, model.coder.grids, model.coder.shapes, brightness=1.05,
             sharpen='taper', sharpen_strength=.25))
 
+    def test_warmup_compiles_read_only_and_writable_frames(self):
+        from animation_modem import v7_source_dct
+        from animation_modem.v7_source_dct import warmup_direct_dct
+        warmup_direct_dct(self.grids, self.shapes)
+        kernel = v7_source_dct._toned_block_means_u8
+        compiled = len(kernel.signatures)
+        frame = _textured_frame(400, 480)
+        frame.setflags(write=False)
+        direct_dct_values(frame, self.grids, self.shapes)
+        direct_dct_values(frame.copy(), self.grids, self.shapes)
+        self.assertEqual(len(kernel.signatures), compiled)
+
     def test_small_source_is_rejected(self):
         with self.assertRaisesRegex(ValueError, 'smaller than'):
             direct_dct_values(np.zeros((95, 200, 3), np.uint8),

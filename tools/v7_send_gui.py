@@ -77,6 +77,14 @@ DOWNSCALER_CHOICES = (
     ('Gamma detail', 'gamma-detail'),
     ('Linear detail', 'linear-detail'),
 )
+DCT_SHARPEN_CHOICES = (
+    ('Off', 'off'),
+    ('Taper · sent band only', 'taper'),
+    ('Unsharp mask', 'usm'),
+)
+# Direct DCT encode runs the 500-slot folded profiles with the Box filter.
+DCT_PROFILES = ('fold-500', 'mono-fold-500', 'mono-colour-500')
+BOOL_FIELDS = ('video_live', 'video_preview', 'image_preview', 'dct_encode')
 MONO_VIDEO_SIDE_CHOICES = (
     ('Left output · right stays clear', 'left'),
     ('Right output · left stays clear', 'right'),
@@ -127,6 +135,14 @@ FIELD_HELP = {
                           'Fold 500, Fold 1000, or Mono video with the Box '
                           'encode filter.'),
     'perceptual_detail_strength': 'Strength for the selected pre-encode downscaler, from 0 to 1.',
+    'dct_encode': ('Encode straight from the full-size source frame to DCT '
+                   'coefficients instead of resizing to 80×96 first. Fold 500 '
+                   'and mono 500 profiles; not with the pre-encode downscaler.'),
+    'dct_sharpen': ('Taper boosts the upper-middle of the sent band and '
+                    'leaves the cutoff alone; unsharp mask boosts everything.'),
+    'dct_sharpen_strength': 'Sharpen strength, from 0 to 1. Try 0.25 or 0.5.',
+    'dct_clarity': 'Large-radius local contrast, from 0 to 1. Try 0.15 or 0.3.',
+    'dct_chroma_gain': 'Saturation boost around neutral, from 1.0 to 1.3.',
 }
 FIELD_LABELS = {
     'device': 'Audio output device',
@@ -150,6 +166,11 @@ FIELD_LABELS = {
     'source_audio_delay_ms': 'Additional audio delay (ms)',
     'perceptual_resize': 'Pre-encode downscaler',
     'perceptual_detail_strength': 'Downscaler strength',
+    'dct_encode': 'Direct DCT encode',
+    'dct_sharpen': 'DCT sharpen',
+    'dct_sharpen_strength': 'DCT sharpen strength',
+    'dct_clarity': 'DCT clarity',
+    'dct_chroma_gain': 'DCT chroma gain',
 }
 VIDEO_FILE_GLOB = '*.mp4 *.m4v *.mov *.mkv *.webm *.avi *.mpeg *.mpg *.wmv *.ts'
 DEVICE_REFRESH_SECONDS = 3.0
@@ -231,7 +252,8 @@ SAVED_SETTING_FIELDS = (
     'image_preview', 'preview_stage',
     'ffmpeg_input', 'screen_backend', 'screen_target', 'region',
     'capture_width', 'capture_filter', 'perceptual_resize',
-    'perceptual_detail_strength',
+    'perceptual_detail_strength', 'dct_encode', 'dct_sharpen',
+    'dct_sharpen_strength', 'dct_clarity', 'dct_chroma_gain',
 )
 
 
@@ -267,7 +289,7 @@ def _restore_sender_settings(target, saved):
             elif value is None:
                 target[key] = None
             continue
-        if key in ('video_preview', 'video_live', 'image_preview'):
+        if key in BOOL_FIELDS:
             if isinstance(value, bool):
                 target[key] = value
         elif value is None or isinstance(value, (str, int, float, bool)):
@@ -891,6 +913,36 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
             raise ValueError('Downscaler strength must be between 0 and 1.')
     else:
         perceptual_strength = 0.25
+    dct_encode = bool(settings.get('dct_encode', False))
+    dct_sharpen = settings.get('dct_sharpen', 'off')
+    dct_strength, dct_clarity, dct_chroma_gain = .25, 0.0, 1.0
+    if dct_encode:
+        if profile not in DCT_PROFILES:
+            raise ValueError('Direct DCT encode requires Fold 500, Mono Fold '
+                             '500, or Mono Colour 500.')
+        if encode_filter != 'box':
+            raise ValueError('Direct DCT encode requires the Box encode filter.')
+        if perceptual_resize != 'off':
+            raise ValueError('Direct DCT encode cannot be combined with the '
+                             'pre-encode downscaler.')
+        if dct_sharpen not in dict(DCT_SHARPEN_CHOICES).values():
+            raise ValueError('Choose a supported DCT sharpen mode.')
+        if dct_sharpen != 'off':
+            dct_strength = _float_setting(
+                settings.get('dct_sharpen_strength', '0.25'),
+                'DCT sharpen strength')
+            if not 0.0 <= dct_strength <= 1.0:
+                raise ValueError('DCT sharpen strength must be between 0 and 1.')
+        dct_clarity = _float_setting(settings.get('dct_clarity', '0'),
+                                     'DCT clarity')
+        if not 0.0 <= dct_clarity <= 1.0:
+            raise ValueError('DCT clarity must be between 0 and 1.')
+        dct_chroma_gain = _float_setting(settings.get('dct_chroma_gain', '1'),
+                                         'DCT chroma gain')
+        if not 1.0 <= dct_chroma_gain <= 1.3:
+            raise ValueError('DCT chroma gain must be between 1.0 and 1.3.')
+    else:
+        dct_sharpen = 'off'
 
     speed = _float_setting(settings.get('speed', '1'), 'Speed')
     if not .25 <= speed <= 4.0:
@@ -991,6 +1043,11 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
         'region': region,
         'perceptual_resize': perceptual_resize,
         'perceptual_detail_strength': perceptual_strength,
+        'dct_encode': dct_encode,
+        'dct_sharpen': dct_sharpen,
+        'dct_sharpen_strength': dct_strength,
+        'dct_clarity': dct_clarity,
+        'dct_chroma_gain': dct_chroma_gain,
     }
 
 
@@ -1052,6 +1109,18 @@ def build_command(settings, devices, sd_module=None, python=None,
         if checked['perceptual_detail_strength'] != 0.25:
             command.extend(('--perceptual-detail-strength',
                             str(checked['perceptual_detail_strength'])))
+    if checked['dct_encode']:
+        command.append('--dct-encode')
+        if checked['dct_sharpen'] != 'off':
+            command.extend(('--dct-sharpen', checked['dct_sharpen']))
+            if checked['dct_sharpen_strength'] != .25:
+                command.extend(('--dct-sharpen-strength',
+                                str(checked['dct_sharpen_strength'])))
+        if checked['dct_clarity'] != 0.0:
+            command.extend(('--dct-clarity', str(checked['dct_clarity'])))
+        if checked['dct_chroma_gain'] != 1.0:
+            command.extend(('--dct-chroma-gain',
+                            str(checked['dct_chroma_gain'])))
     if checked['capture_fps'] is not None:
         command.extend(('--capture-fps', str(checked['capture_fps'])))
 
@@ -1137,10 +1206,12 @@ class SenderGui:
         'device', 'source', 'capture_fps', 'profile', 'encode_filter',
         'mono_video_side', 'source_audio', 'source_audio_device',
         'source_audio_input_side', 'screen_backend', 'capture_filter',
-        'camera', 'screen_target', 'perceptual_resize',
+        'camera', 'screen_target', 'perceptual_resize', 'dct_sharpen',
     )
     ADVANCED_FIELDS = (
         'encode_filter', 'perceptual_resize', 'perceptual_detail_strength',
+        'dct_encode', 'dct_sharpen', 'dct_sharpen_strength', 'dct_clarity',
+        'dct_chroma_gain',
         'screen_backend', 'region', 'ffmpeg_input', 'capture_width',
         'capture_filter',
     )
@@ -1185,13 +1256,19 @@ class SenderGui:
             'capture_filter': 'auto',
             'perceptual_resize': 'off',
             'perceptual_detail_strength': '0.25',
+            'dct_encode': False,
+            'dct_sharpen': 'off',
+            'dct_sharpen_strength': '0.25',
+            'dct_clarity': '0',
+            'dct_chroma_gain': '1',
         }
         self.notice = 'Choose an output device, capture source, and profile.'
         if restore_preferences and self.preference_path is not None:
             self._restore_preferences()
         self.page = 'setup'
-        self.advanced = self.settings.get('profile') in {
-            value for _label, value in PROFILE_CHOICES[3:]}
+        self.advanced = (self.settings.get('profile') in {
+            value for _label, value in PROFILE_CHOICES[3:]} or
+            bool(self.settings.get('dct_encode')))
         self.selected = 'device'
         self.scroll = 0
         self.dropdown = None
@@ -1310,6 +1387,8 @@ class SenderGui:
             return CAPTURE_FILTER_CHOICES
         if dest == 'perceptual_resize':
             return DOWNSCALER_CHOICES
+        if dest == 'dct_sharpen':
+            return DCT_SHARPEN_CHOICES
         if dest == 'camera':
             return self.capture_choice_cache.get(dest, ())
         if dest == 'screen_target':
@@ -1564,6 +1643,14 @@ class SenderGui:
             dest in ('screen_backend', 'region') and source != 'screen' or
             dest == 'perceptual_detail_strength' and
             self.settings['perceptual_resize'] == 'off' or
+            dest == 'perceptual_resize' and self.settings['dct_encode'] or
+            dest == 'dct_encode' and
+            self.settings['profile'] not in DCT_PROFILES or
+            dest in ('dct_sharpen', 'dct_clarity', 'dct_chroma_gain') and
+            not self.settings['dct_encode'] or
+            dest == 'dct_sharpen_strength' and not (
+                self.settings['dct_encode'] and
+                self.settings['dct_sharpen'] != 'off') or
             dest == 'mono_video_side' and
             self.settings['profile'] not in MONO_PROFILES or
             dest == 'source_audio' and
@@ -1601,7 +1688,7 @@ class SenderGui:
                          if candidate == value), str(value))
         if dest in ('source', 'profile', 'screen_backend',
                     'encode_filter', 'capture_filter', 'perceptual_resize',
-                    'mono_video_side',
+                    'dct_sharpen', 'mono_video_side',
                     'source_audio', 'source_audio_input_side', 'capture_fps'):
             choices = self._choices(dest)
             label = next((label for label, candidate in choices
@@ -1637,6 +1724,13 @@ class SenderGui:
             self._profile_changed(value)
             if value not in FOLDED_PROFILES:
                 self.settings['perceptual_resize'] = 'off'
+            if value not in DCT_PROFILES:
+                self.settings['dct_encode'] = False
+        elif dest == 'dct_encode' and value:
+            # The direct encode replaces the resize the downscaler shapes.
+            self.settings['perceptual_resize'] = 'off'
+        elif dest == 'perceptual_resize' and value != 'off':
+            self.settings['dct_encode'] = False
         elif dest == 'device':
             self.output_device_identity = _device_identity(self._device())
         elif dest == 'source_audio_device':
@@ -2140,6 +2234,8 @@ class SenderGui:
             ('Output device', device.name if device else 'Not selected'),
             ('Sample rate', rate_text),
             ('Wire profile', profile_label),
+            ('Image encode', 'Direct DCT' if self.settings.get('dct_encode')
+             else 'Resize'),
             ('Speed', f"{self.settings['speed']}×"),
         )
         y = 220
@@ -2281,8 +2377,7 @@ class SenderGui:
             dest = hit.split(':', 1)[1]
             if (dest not in self._visible_fields() or
                     dest in self.DROPDOWN_FIELDS or
-                    dest in ('video_live', 'video_preview',
-                             'image_preview')):
+                    dest in BOOL_FIELDS):
                 return
             if (self.process is not None and
                     dest not in ('brightness', 'gamma')):
@@ -2357,7 +2452,7 @@ class SenderGui:
             if (self.process is not None and
                     dest not in ('brightness', 'gamma')):
                 self.notice = 'Settings are locked while the sender is running.'
-            elif dest in ('video_live', 'video_preview', 'image_preview'):
+            elif dest in BOOL_FIELDS:
                 self._assign(dest, not self.settings[dest])
             elif dest in self.DROPDOWN_FIELDS:
                 self._open_dropdown(dest)
@@ -2442,7 +2537,7 @@ class SenderGui:
                     self.scroll = position-visible_count+1
             elif key in (glfw.KEY_LEFT, glfw.KEY_RIGHT) and self.selected in fields:
                 dest = self.selected
-                if dest in ('video_live', 'video_preview', 'image_preview'):
+                if dest in BOOL_FIELDS:
                     self._assign(dest, not self.settings[dest])
                 elif dest in self.DROPDOWN_FIELDS:
                     self._open_dropdown(dest)
@@ -2453,7 +2548,7 @@ class SenderGui:
                 dest = self.selected
                 if dest in self.DROPDOWN_FIELDS:
                     self._open_dropdown(dest)
-                elif dest in ('video_live', 'video_preview', 'image_preview'):
+                elif dest in BOOL_FIELDS:
                     self._assign(dest, not self.settings[dest])
                 else:
                     self.editing = True

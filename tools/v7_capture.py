@@ -60,15 +60,30 @@ def _read_exact(stream, count):
     zeros. scope_screen gets away with the single read because its grey frames
     are ~16 kB.
     """
-    chunks = []
+    readinto = getattr(stream, 'readinto', None)
+    if readinto is None:
+        chunks = []
+        have = 0
+        while have < count:
+            piece = stream.read(count-have)
+            if not piece:
+                return None
+            chunks.append(piece)
+            have += len(piece)
+        return b''.join(chunks)
+    # Read straight into one buffer. A full-size frame (6 MB at 1080p, as
+    # --dct-encode captures it) arrives in ~100 pipe-sized pieces; the join
+    # above would allocate a large bytes object per piece and copy the frame
+    # again. A bytearray also gives the caller a writable array.
+    buffer = bytearray(count)
+    view = memoryview(buffer)
     have = 0
     while have < count:
-        piece = stream.read(count-have)
-        if not piece:
+        got = readinto(view[have:])
+        if not got:
             return None
-        chunks.append(piece)
-        have += len(piece)
-    return b''.join(chunks)
+        have += got
+    return buffer
 
 
 def _region(text):
