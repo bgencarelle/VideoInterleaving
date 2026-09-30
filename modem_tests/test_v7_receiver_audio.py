@@ -127,7 +127,8 @@ class ReceiverRuntimeOptionsTests(unittest.TestCase):
     def test_live_preferences_are_thread_safe_snapshots(self):
         options = ReceiverRuntimeOptions(audio_output_device=3)
         options.update(audio_muted=True, freewheel_seconds=4.5,
-                       show_sync_warning=False, audio_volume=.35)
+                       show_sync_warning=False, audio_volume=.35,
+                       audio_diagnostics=True)
         self.assertEqual(options.snapshot(), {
             'audio_output_device': 3,
             'audio_output_identity': None,
@@ -136,6 +137,7 @@ class ReceiverRuntimeOptionsTests(unittest.TestCase):
             'audio_volume': .35,
             'freewheel_seconds': 4.5,
             'show_sync_warning': False,
+            'audio_diagnostics': True,
         })
 
     def test_passthrough_volume_rejects_values_outside_safe_range(self):

@@ -1067,19 +1067,13 @@ class ReceiverGui:
             audio_muted=args.audio_muted,
             freewheel_seconds=args.freewheel_seconds,
             show_sync_warning=args.show_sync_warning,
-            audio_volume=args.audio_volume)
+            audio_volume=args.audio_volume,
+            audio_diagnostics=(args.show_diagnostics and
+                               args.audio_output_device is not None and
+                               sys.stdout is not None))
         args.runtime_options = self.runtime_options
         # The receiver's ordinary output is captured for the GUI's message
-        # view. Send audio snapshots to the launch terminal separately unless
-        # explicitly disabled for a quiet GUI launch.
-        audio_diagnostics_env = os.environ.get('V7_AUDIO_DIAGNOSTICS')
-        audio_diagnostics_enabled = (
-            audio_diagnostics_env is None or
-            audio_diagnostics_env.strip().lower() not in
-            ('0', 'false', 'no', 'off'))
-        args.audio_diagnostics = (
-            audio_diagnostics_enabled and
-            args.audio_output_device is not None and sys.stdout is not None)
+        # view. The Show diagnostics button controls terminal audio snapshots.
         args.audio_diagnostics_stream = sys.stdout
         start_image_only = any(
             field.value for field in self.fields
@@ -1328,6 +1322,7 @@ class ReceiverGui:
                 self.runtime_options.update(
                     audio_output_device=field.value,
                     audio_output_identity=self.audio_output_identity)
+                self._sync_audio_diagnostics()
             elif field.dest == 'audio_muted':
                 self.runtime_options.update(audio_muted=field.value)
             elif field.dest == 'audio_volume':
@@ -1346,6 +1341,25 @@ class ReceiverGui:
                 self.runtime_options.update(show_sync_warning=field.value)
         except (TypeError, ValueError) as exc:
             self.notice = str(exc)
+
+    def _sync_audio_diagnostics(self):
+        """Mirror the diagnostics drawer and selected output into live logs."""
+        if self.runtime_options is None:
+            return
+        show_diagnostics = any(
+            field.value for field in self.fields
+            if field.dest == 'show_diagnostics')
+        options = self.runtime_options.snapshot()
+        self.runtime_options.update(audio_diagnostics=bool(
+            show_diagnostics and options['audio_output_device'] is not None and
+            sys.stdout is not None))
+
+    def _set_show_diagnostics(self, enabled):
+        field = next(field for field in self.fields
+                     if field.dest == 'show_diagnostics')
+        field.value = bool(enabled)
+        self._sync_audio_diagnostics()
+        self.dirty = True
 
     def _process_output(self):
         other_output = False
@@ -1941,8 +1955,7 @@ class ReceiverGui:
         elif hit == 'details_button':
             field = next(field for field in self.fields
                          if field.dest == 'show_diagnostics')
-            field.value = not field.value
-            self.dirty = True
+            self._set_show_diagnostics(not field.value)
         elif hit == 'start_stop':
             if self.started:
                 self._stop_receiver()

@@ -64,7 +64,8 @@ class ReceiverRuntimeOptions:
     def __init__(self, audio_output_device=None, audio_muted=False,
                  audio_output_identity=None, audio_input_identity=None,
                  freewheel_seconds=2.0, show_sync_warning=True,
-                 audio_volume=DEFAULT_AUDIO_VOLUME):
+                 audio_volume=DEFAULT_AUDIO_VOLUME,
+                 audio_diagnostics=False):
         self._values = {
             'audio_output_device': audio_output_device,
             'audio_output_identity': audio_output_identity,
@@ -73,6 +74,7 @@ class ReceiverRuntimeOptions:
             'audio_volume': _checked_audio_volume(audio_volume),
             'freewheel_seconds': max(0.0, float(freewheel_seconds)),
             'show_sync_warning': bool(show_sync_warning),
+            'audio_diagnostics': bool(audio_diagnostics),
         }
         self._lock = threading.Lock()
 
@@ -86,7 +88,8 @@ class ReceiverRuntimeOptions:
                     value = max(0.0, float(value))
                 elif key == 'audio_volume':
                     value = _checked_audio_volume(value)
-                elif key in ('audio_muted', 'show_sync_warning'):
+                elif key in ('audio_muted', 'show_sync_warning',
+                             'audio_diagnostics'):
                     value = bool(value)
                 self._values[key] = value
 

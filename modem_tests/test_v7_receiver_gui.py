@@ -208,6 +208,9 @@ class ReceiverGuiOptionTests(unittest.TestCase):
                       if field.action is not None and
                       field.action.dest == 'audio_output_device')
         output.value = 4
+        diagnostics = next(field for field in gui.fields
+                           if field.dest == 'show_diagnostics')
+        diagnostics.value = True
         gui.v7_live = SimpleNamespace(run_receive=Mock())
         gui._prepare_input_device = Mock(return_value=True)
         terminal = io.StringIO()
@@ -217,11 +220,11 @@ class ReceiverGuiOptionTests(unittest.TestCase):
             gui.receiver_thread.join(timeout=2)
 
         args = gui.v7_live.run_receive.call_args.args[0]
-        self.assertTrue(args.audio_diagnostics)
+        self.assertTrue(args.runtime_options.snapshot()['audio_diagnostics'])
         self.assertIs(args.audio_diagnostics_stream, terminal)
         gui.receiver_stop.set()
 
-    def test_audio_diagnostics_can_be_disabled_for_a_quiet_gui_launch(self):
+    def test_audio_diagnostics_are_off_until_the_details_button_is_enabled(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser,
                           (('test input device', 3),),
                           audio_output_choices=(('test output device', 4),))
@@ -233,14 +236,17 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         gui._prepare_input_device = Mock(return_value=True)
         terminal = io.StringIO()
 
-        with patch.dict('os.environ', {'V7_AUDIO_DIAGNOSTICS': '0'}), \
-                patch('tools.v7_receiver_gui.sys.stdout', terminal):
+        with patch('tools.v7_receiver_gui.sys.stdout', terminal):
             gui._start_receiver()
             gui.receiver_thread.join(timeout=2)
 
         args = gui.v7_live.run_receive.call_args.args[0]
-        self.assertFalse(args.audio_diagnostics)
+        self.assertFalse(args.runtime_options.snapshot()['audio_diagnostics'])
         self.assertIs(args.audio_diagnostics_stream, terminal)
+        gui._set_show_diagnostics(True)
+        self.assertTrue(args.runtime_options.snapshot()['audio_diagnostics'])
+        gui._set_show_diagnostics(False)
+        self.assertFalse(args.runtime_options.snapshot()['audio_diagnostics'])
         gui.receiver_stop.set()
 
     def test_cli_passthrough_volume_defaults_to_vlc_level_and_is_bounded(self):

@@ -1858,7 +1858,8 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
             audio_muted=getattr(args, 'audio_muted', False),
             freewheel_seconds=getattr(args, 'freewheel_seconds', 2.0),
             show_sync_warning=getattr(args, 'show_sync_warning', True),
-            audio_volume=getattr(args, 'audio_volume', 1.0))
+            audio_volume=getattr(args, 'audio_volume', 1.0),
+            audio_diagnostics=getattr(args, 'audio_diagnostics', False))
     audio_bridge_enabled = bool(
         getattr(args, 'runtime_options', None) is not None or
         runtime_options.snapshot()['audio_output_device'] is not None)
@@ -2179,8 +2180,8 @@ def _run_receive(args, fold, mono_wire=None, adaptive_profile=None):
                     audio_stats['dropped_samples'])
                 has_audio_errors = any((
                     signature[0], signature[1], signature[2], signature[3]))
-                audio_diagnostics = bool(getattr(
-                    args, 'audio_diagnostics', False))
+                audio_diagnostics = bool(options.get(
+                    'audio_diagnostics', False))
                 error_changed = (
                     signature != last_audio_error_signature and
                     has_audio_errors and
