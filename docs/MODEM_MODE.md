@@ -214,8 +214,7 @@ luma adjustment plus edge reconstruction gives clean +6.0 / +10.8 / +4.0
 (cartoon / robot and test card / photos), hiss −40 +2.3 / +7.9 / +1.8,
 fast flutter +3.4 / +5.5 / +2.2 and MP3 320 +1.5 / +3.7 / +1.5. 4× plus the
 shader's bicubic matches the exact viewport evaluation to 77 dB PSNR at 1,080
-lines (nearest: 43 dB) for about a fifth of the CPU time (12.5 against
-22 ms with edge reconstruction). Sender DCT chroma gain 1.05 or 1.1 measured
+lines (nearest: 43 dB) for a fraction of the CPU time. Sender DCT chroma gain 1.05 or 1.1 measured
 no better than 1.0.
 
 The standalone V7 receiver GUI can be launched with
@@ -225,13 +224,15 @@ is flat. That breaks up the regular ringing ripple of the band-limited picture
 without touching edges or texture. The flat-area mask is computed on the
 decoded 96×80 luma grid and the grain in the shader, so it adds no meaningful
 decode time; the pattern changes with each new picture. **Edge reconstruction**
-(on by default) rebuilds luma at twice the coder grid as the sharpest,
-flattest picture whose DCT still equals every coefficient received: rounds of
+(on by default) rebuilds luma as the sharpest, flattest picture whose DCT still equals every coefficient received: rounds of
 a short total-variation (Chambolle) denoise, the black/white clip and putting
 the received coefficients back (consistent reconstruction, Gerchberg–Papoulis
 style). It removes the ringing ripple and sharpens edges without any wire or
-sender change; natural texture can look slightly smoothed. Numba, one thread,
-about 10 ms per new picture. Through the real modem with sender luma
+sender change; natural texture can look slightly smoothed. Numba, one thread:
+**On** works on the coder grid with four rounds (about 2 ms per new picture),
+**High** at twice the grid (about 7 ms). Real modem with luma adjustment,
+clean channel, SSIMULACRA2 over no reconstruction (cartoon / robot and test
+card / photos): On +2.7 / +1.2 / +1.6, High +3.1 / +1.4 / +2.7. Through the real modem with sender luma
 adjustment, SSIMULACRA2 against no processing: clean cartoon +6.0, robot/test
 card +10.8, photos +4.0; edge reconstruction alone adds 0.4–2.3. It selects an explicit input and
 can optionally pass the non-video channel to an explicitly selected output

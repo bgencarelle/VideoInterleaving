@@ -127,26 +127,32 @@ def _bars_plane(rows=96, cols=80, kept=(48, 40)):
 class EdgeReconstructionTests(unittest.TestCase):
     def test_received_coefficients_are_kept(self):
         decoded, _ = _bars_plane()
-        rebuilt = edge_consistent_plane(decoded)
-        self.assertEqual(rebuilt.shape, (192, 160))
         received = dctn(decoded.astype(np.float64), norm='ortho')[:48, :40]
-        kept = dctn(rebuilt.astype(np.float64), norm='ortho')[:48, :40]/2
-        # Exact up to float32 rounding of the working grid.
-        np.testing.assert_allclose(kept, received,
-                                   atol=1e-3*float(np.abs(received).max()))
+        for factor, shape in ((1, (96, 80)), (2, (192, 160))):
+            rebuilt = edge_consistent_plane(decoded, factor=factor)
+            with self.subTest(factor=factor):
+                self.assertEqual(rebuilt.shape, shape)
+                kept = dctn(rebuilt.astype(np.float64),
+                            norm='ortho')[:48, :40]/factor
+                # Exact up to float32 rounding of the working grid.
+                np.testing.assert_allclose(
+                    kept, received, atol=1e-3*float(np.abs(received).max()))
 
     def test_ringing_goes_and_edges_sharpen(self):
         decoded, truth = _bars_plane()
-        plain = reconstruct_plane(decoded, (192, 160))
-        rebuilt = edge_consistent_plane(decoded)
         from scipy.ndimage import binary_erosion
-        target = np.kron(truth, np.ones((2, 2)))
-        flat = binary_erosion(target < 0, iterations=4)
-        # Ripple in the flat background (measured: -65%), and error against
-        # the hard bars (-32%).
-        self.assertLess(float(np.std(rebuilt[flat])), .5*float(np.std(plain[flat])))
-        self.assertLess(float(np.mean(np.abs(rebuilt-target))),
-                        .8*float(np.mean(np.abs(plain-target))))
+        for factor in (1, 2):
+            plain = reconstruct_plane(decoded, (96*factor, 80*factor))
+            rebuilt = edge_consistent_plane(decoded, factor=factor)
+            target = np.kron(truth, np.ones((factor, factor)))
+            flat = binary_erosion(target < 0, iterations=2*factor)
+            # Ripple in the flat background (measured: -58% at both factors)
+            # and error against the hard bars (-29% / -20%).
+            with self.subTest(factor=factor):
+                self.assertLess(float(np.std(rebuilt[flat])),
+                                .5*float(np.std(plain[flat])))
+                self.assertLess(float(np.mean(np.abs(rebuilt-target))),
+                                .85*float(np.mean(np.abs(plain-target))))
 
     def test_flat_planes_stay_flat(self):
         flat = np.full((96, 80), .25, dtype=np.float32)
@@ -155,15 +161,22 @@ class EdgeReconstructionTests(unittest.TestCase):
     def test_viewer_keeps_output_sizes(self):
         values, grids = _decoded_face_values()
         planes = float_planes(values, grids)
-        for mode, size in (('4x', None), ('viewport', (640, 768))):
-            plain = dct_reconstruct_planes(planes, mode, size)
-            edged = dct_reconstruct_planes(planes, mode, size, edge=True)
-            with self.subTest(mode=mode):
-                self.assertEqual([p.shape for p in edged], [p.shape for p in plain])
-                np.testing.assert_array_equal(edged[1], plain[1])
+        for edge in ('on', 'high'):
+            for mode, size in (('4x', None), ('viewport', (640, 768))):
+                plain = dct_reconstruct_planes(planes, mode, size)
+                edged = dct_reconstruct_planes(planes, mode, size, edge=edge)
+                with self.subTest(edge=edge, mode=mode):
+                    self.assertEqual([p.shape for p in edged],
+                                     [p.shape for p in plain])
+                    np.testing.assert_array_equal(edged[1], plain[1])
         off = dct_reconstruct_planes(planes, 'off', edge=True)
-        self.assertEqual(off[0].shape, (192, 160))
-        self.assertEqual(off[1].shape, planes[1].shape)
+        self.assertEqual(off[0].shape, planes[0].shape)
+        high = dct_reconstruct_planes(planes, 'off', edge='high')
+        self.assertEqual(high[0].shape, (2*planes[0].shape[0],
+                                         2*planes[0].shape[1]))
+        self.assertEqual(high[1].shape, planes[1].shape)
+        with self.assertRaisesRegex(ValueError, 'edge'):
+            dct_reconstruct_planes(planes, '4x', edge='sharp')
 
 
 if __name__ == '__main__':

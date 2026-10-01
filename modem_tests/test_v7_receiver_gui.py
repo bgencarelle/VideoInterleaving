@@ -522,8 +522,10 @@ class ReceiverGuiOptionTests(unittest.TestCase):
                  for index in gui._config_field_indexes()}
         self.assertIn('Edge reconstruction', basic)
         gui._adjust_field(field, 1)
-        self.assertEqual(gui.edge_mode, 'off')
+        self.assertEqual(gui.edge_mode, 'high')
         self.assertTrue(gui.picture_dirty)
+        gui._adjust_field(field, 1)
+        self.assertEqual(gui.edge_mode, 'off')
 
     def test_save_directory_is_used_only_when_explicit(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser,

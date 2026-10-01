@@ -751,6 +751,8 @@ def _luma_adjust_kernel(luma, cb, cr, target, iterations, table):
                 lg, sg = _linear_and_slope(y+green_shift, table)
                 lb, sb = _linear_and_slope(y+blue_shift, table)
                 error = .2126*lr+.7152*lg+.0722*lb-goal
+                if abs(error) < 1e-6:
+                    break
                 if error > 0:
                     high = value
                 else:

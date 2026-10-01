@@ -60,15 +60,17 @@ DCT_RECONSTRUCTION_MODES = ('off', '2x', '4x', '8x', '16x', 'viewport')
 # are left alone. Amplitude: about 2.5/255 standard deviation in luma.
 GRAIN_MODES = ('off', 'flat')
 GRAIN_LABELS = {'off': 'Off', 'flat': 'Flat areas · masks ringing'}
-# Edge reconstruction: rebuild luma at twice the coder grid as the sharpest,
-# flattest picture that still matches every received coefficient (see
+# Edge reconstruction: rebuild luma as the sharpest, flattest picture that
+# still matches every received coefficient (see
 # animation_modem.v7_dct_display.edge_consistent_plane). Removes the ringing
-# ripple and sharpens edges; about 10 ms per new picture on one core.
-EDGE_MODES = ('on', 'off')
+# ripple and sharpens edges. 'on' works on the coder grid (about 2 ms per new
+# picture on one core); 'high' works at twice the grid (about 7 ms).
+EDGE_MODES = ('on', 'high', 'off')
 EDGE_LABELS = {'on': 'Consistent · sharp edges, no ripple · recommended',
+               'high': 'Consistent, high · twice the grid, more CPU',
                'off': 'Off'}
 # Recommended receiver display (measured; see docs/MODEM_MODE.md): edge
-# reconstruction at twice the coder grid, 4x DCT reconstruction, then the
+# reconstruction on the coder grid, 4x DCT reconstruction, then the
 # shader's bicubic to the window. 4x + bicubic matches the exact viewport
 # evaluation to 77 dB PSNR at 1080 lines (nearest: 43 dB) for about a fifth of
 # the CPU time.
@@ -265,9 +267,10 @@ def dct_reconstruct_planes(planes, mode, viewport_size=None, edge=False):
     cosine reconstruction on a larger or smaller display grid. The coefficient
     scale preserves pixel amplitude across the changed orthonormal grid size.
 
-    With ``edge`` the luma plane is first rebuilt at twice its grid by
-    consistent reconstruction (EDGE_MODES); output sizes are unchanged except
-    that with ``mode`` 'off' the luma comes back at twice its grid.
+    With ``edge`` ('on', 'high' or True for 'on') the luma plane is first
+    rebuilt by consistent reconstruction (EDGE_MODES); output sizes are
+    unchanged except that with ``mode`` 'off' and 'high' the luma comes back at
+    twice its grid.
     """
     if mode not in DCT_RECONSTRUCTION_MODES:
         raise ValueError(f'unknown DCT reconstruction mode {mode!r}')
@@ -275,11 +278,17 @@ def dct_reconstruct_planes(planes, mode, viewport_size=None, edge=False):
     if not planes or any(plane.ndim != 2 or min(plane.shape) <= 0
                          for plane in planes):
         raise ValueError('DCT reconstruction needs non-empty 2-D planes')
-    if edge:
-        from animation_modem.v7_dct_display import (edge_consistent_plane,
+    if edge is True:
+        edge = 'on'
+    if edge not in (False, None, 'off') and edge not in EDGE_MODES:
+        raise ValueError(f'unknown edge reconstruction mode {edge!r}')
+    if edge not in (False, None, 'off'):
+        from animation_modem.v7_dct_display import (EDGE_HIGH,
+                                                    edge_consistent_plane,
                                                     reconstruct_plane,
                                                     viewport_shapes)
-        luma = edge_consistent_plane(planes[0])
+        luma = edge_consistent_plane(
+            planes[0], **(EDGE_HIGH if edge == 'high' else {}))
         if mode == 'off':
             return (luma,) + planes[1:]
         if mode == 'viewport':

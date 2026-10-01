@@ -2399,7 +2399,7 @@ class ReceiverGui:
                     return
                 use_float_display = (self.display_mode != 'nearest' or
                                      self.dct_reconstruction != 'off' or
-                                     self.edge_mode == 'on')
+                                     self.edge_mode != 'off')
                 if not use_float_display:
                     if self.latest_values_image is None:
                         try:
@@ -2447,10 +2447,10 @@ class ReceiverGui:
                             grain_texture.write(mask.tobytes())
                         self.grain_seed = (self.grain_seed+1) % 65536
                     if (self.dct_reconstruction != 'off' or
-                            self.edge_mode == 'on'):
+                            self.edge_mode != 'off'):
                         planes = dct_reconstruct_planes(
                             planes, self.dct_reconstruction, viewport_size,
-                            edge=self.edge_mode == 'on')
+                            edge=self.edge_mode)
                     if (self.display_mode in FILTER_PRECOMPUTE_MODES and
                             self.dct_reconstruction == 'off'):
                         planes = resample_filter_planes(
@@ -2482,7 +2482,7 @@ class ReceiverGui:
             def picture_uploaded():
                 use_float_display = (self.display_mode != 'nearest' or
                                      self.dct_reconstruction != 'off' or
-                                     self.edge_mode == 'on')
+                                     self.edge_mode != 'off')
                 return (len(plane_textures) == 3 if use_float_display else
                         picture_texture is not None)
 
@@ -2517,7 +2517,7 @@ class ReceiverGui:
                 context.viewport = viewport
                 use_float_display = (self.display_mode != 'nearest' or
                                      self.dct_reconstruction != 'off' or
-                                     self.edge_mode == 'on')
+                                     self.edge_mode != 'off')
                 if not use_float_display:
                     picture_texture.use(location=0)
                     vertex_array.render(mode=moderngl.TRIANGLES, vertices=3)
