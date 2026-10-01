@@ -52,7 +52,7 @@ class V7LoopClockTests(unittest.TestCase):
 
     def test_direction_rides_in_the_index_field(self):
         for direction in (1, -1):
-            raw = v7.metadata_word(3, 2, 4, source_index=12345, direction=direction)
+            raw = v7.metadata_word(3, 1, 4, source_index=12345, direction=direction)
             meta = v7.parse_metadata_word(raw)
             with self.subTest(direction=direction):
                 self.assertEqual(meta.source_index, 12345)

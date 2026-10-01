@@ -29,17 +29,15 @@ from tools.v7_preview_protocol import parse_preview_datagram
 
 
 PROFILE_CHOICES = (
-    ('Fold 500 stereo · recommended', 'fold-500'),
-    ('Mono video · Fold 500', 'mono-fold-500'),
-    ('Mono video · colour Fold 500 · experimental', 'mono-colour-500'),
-    ('Fold 1000 · advanced', 'fold-1000'),
-    ('Aspect Fold 500 · experimental', 'aspect-fold-500'),
-    ('Mono video · aspect colour Fold 500 · experimental', 'aspect-mono-500'),
-    ('Baseline · legacy', 'baseline'),
+    ('Aspect Fold 500 · stereo · recommended', 'aspect-fold-500'),
+    ('Fold 500 · stereo', 'fold-500'),
+    ('Mono video · aspect colour Fold 500', 'aspect-mono-500'),
+    ('Mono video · colour Fold 500', 'mono-colour-500'),
 )
-MONO_PROFILES = ('mono-fold-500', 'mono-colour-500', 'aspect-mono-500')
-FOLDED_PROFILES = ('fold-500', 'fold-1000', 'mono-fold-500',
-                   'mono-colour-500', 'aspect-fold-500', 'aspect-mono-500')
+DEFAULT_PROFILE = 'aspect-fold-500'
+MONO_PROFILES = ('mono-colour-500', 'aspect-mono-500')
+FOLDED_PROFILES = ('fold-500', 'mono-colour-500', 'aspect-fold-500',
+                   'aspect-mono-500')
 ASPECT_PROFILES = ('aspect-fold-500', 'aspect-mono-500')
 # Only the stereo aspect profile has a V7 tail (mono packets carry none).
 ASPECT_TAIL_PROFILES = ('aspect-fold-500',)
@@ -53,7 +51,7 @@ ASPECT_TAIL_CHOICES = (
     ('Split · 48 luma + 48 rotating chroma', 'split'),
     ('Luma · 96 luma every packet', 'luma'),
 )
-PRIMARY_PROFILE_CHOICES = PROFILE_CHOICES[:3]
+PRIMARY_PROFILE_CHOICES = PROFILE_CHOICES
 SOURCE_AUDIO_CHOICES = (
     ('Video soundtrack · default', 'source'),
     ('Input device', 'device'),
@@ -75,8 +73,6 @@ FILTER_CHOICES = (
     ('Profile default', 'auto'),
     ('Box · Pillow', 'box'),
     ('Nearest · Pillow', 'nearest'),
-    ('Lanczos · Pillow', 'lanczos'),
-    ('Bicubic · Pillow', 'bicubic'),
 )
 CAPTURE_FILTER_CHOICES = (
     ('Automatic', 'auto'),
@@ -98,9 +94,9 @@ DCT_SHARPEN_CHOICES = (
     ('Unsharp mask', 'usm'),
 )
 # Direct DCT encode runs the 500-slot folded profiles with the Box filter.
-DCT_PROFILES = ('fold-500', 'mono-fold-500', 'mono-colour-500',
-                'aspect-fold-500', 'aspect-mono-500')
-BOOL_FIELDS = ('video_live', 'video_preview', 'image_preview', 'dct_encode')
+DCT_PROFILES = FOLDED_PROFILES
+BOOL_FIELDS = ('video_live', 'video_preview', 'image_preview', 'dct_encode',
+               'clip_aware')
 MONO_VIDEO_SIDE_CHOICES = (
     ('Left output · right stays clear', 'left'),
     ('Right output · left stays clear', 'right'),
@@ -109,13 +105,12 @@ MONO_VIDEO_SIDE_CHOICES = (
 FIELD_HELP = {
     'device': 'Choose the explicit audio output device that feeds the receiver or recording path.',
     'source': 'Choose what the sender captures. Capture starts only after Start.',
-    'profile': ('Fold 500 stereo is recommended. Baseline is the legacy '
-                'non-folded profile for alternate Pillow filters; the receiver '
-                'must use the same profile.'),
+    'profile': ('Aspect Fold 500 stereo is recommended. Mono video profiles '
+                'leave one output free for audio. The receiver follows the '
+                'profile from each packet.'),
     'speed': 'Playback speed from 0.25× to 4×. Faster playback raises the transmitted carrier frequencies.',
-    'encode_filter': ('Pillow encoder resize to the fixed 80×96 image. Profile '
-                      'default uses Box for Fold and Nearest for Baseline. '
-                      'Folded profiles require Box; Baseline supports all Pillow filters.'),
+    'encode_filter': ('Pillow encoder resize to the fixed 80×96 image when '
+                      'Direct DCT encode is off. Every profile uses Box.'),
     'brightness': 'Live source brightness multiplier. 1.0 is neutral.',
     'gamma': 'Live source gamma; 1.0 is neutral.',
     'capture_fps': 'Choose a frame rate reported by the capture source, or leave it at Source default.',
@@ -147,13 +142,15 @@ FIELD_HELP = {
     'source_audio_gain': 'Gain applied only to source audio on the free output leg.',
     'source_audio_delay_ms': ('Additional sync delay beyond one emitted video '
                               'packet; zero is the low-latency starting point.'),
-    'perceptual_resize': ('Experimental pre-encode downscaler. Requires '
-                          'Fold 500, Fold 1000, or Mono video with the Box '
-                          'encode filter.'),
+    'perceptual_resize': ('Experimental pre-encode downscaler for the resize '
+                          'path (Direct DCT encode off).'),
     'perceptual_detail_strength': 'Strength for the selected pre-encode downscaler, from 0 to 1.',
     'dct_encode': ('Encode straight from the full-size source frame to DCT '
-                   'coefficients instead of resizing to 80×96 first. Fold 500 '
-                   'and mono 500 profiles; not with the pre-encode downscaler.'),
+                   'coefficients instead of resizing to 80×96 first (default). '
+                   'Not with the pre-encode downscaler.'),
+    'clip_aware': ('Re-fit the sent brightness detail so edge ringing falls '
+                   'into the receiver\'s black/white clip. Sender only; '
+                   'about 2 ms per frame.'),
     'dct_sharpen': ('Taper boosts the upper-middle of the sent band and '
                     'leaves the cutoff alone; unsharp mask boosts everything.'),
     'dct_sharpen_strength': 'Sharpen strength, from 0 to 1. Try 0.25 or 0.5.',
@@ -188,6 +185,7 @@ FIELD_LABELS = {
     'perceptual_resize': 'Pre-encode downscaler',
     'perceptual_detail_strength': 'Downscaler strength',
     'dct_encode': 'Direct DCT encode',
+    'clip_aware': 'Clip-aware encode',
     'dct_sharpen': 'DCT sharpen',
     'dct_sharpen_strength': 'DCT sharpen strength',
     'dct_clarity': 'DCT clarity',
@@ -198,7 +196,11 @@ FIELD_LABELS = {
 VIDEO_FILE_GLOB = '*.mp4 *.m4v *.mov *.mkv *.webm *.avi *.mpeg *.mpg *.wmv *.ts'
 DEVICE_REFRESH_SECONDS = 3.0
 GUI_EVENT_WAIT_SECONDS = 0.5
-SENDER_PREFERENCES_VERSION = 3
+SENDER_PREFERENCES_VERSION = 4
+# Settings whose defaults changed in version 4 (four folded profiles, Aspect
+# Fold 500 and Direct DCT encode by default; every profile encodes with Box):
+# earlier saved values are dropped.
+V4_RESET_SETTINGS = ('profile', 'dct_encode', 'encode_filter')
 
 
 def sender_preferences_path():
@@ -213,7 +215,7 @@ def _load_sender_preferences(path):
     except (OSError, ValueError, TypeError):
         return {}
     version = values.get('version') if isinstance(values, dict) else None
-    if version not in (1, 2, SENDER_PREFERENCES_VERSION):
+    if version not in (1, 2, 3, SENDER_PREFERENCES_VERSION):
         return {}
     settings = values.get('settings')
     if isinstance(settings, dict):
@@ -222,6 +224,13 @@ def _load_sender_preferences(path):
             # V2 changed the default to Off; restore the requested soundtrack
             # default unless the user had selected another audio source.
             settings['source_audio'] = 'source'
+        if version < 4:
+            for key in V4_RESET_SETTINGS:
+                settings.pop(key, None)
+        if settings.get('encode_filter') not in (
+                None, *dict(FILTER_CHOICES).values()):
+            # Lanczos and bicubic are no longer wire models.
+            settings.pop('encode_filter')
 
     def clean_identity(value):
         if (not isinstance(value, dict) or
@@ -277,7 +286,7 @@ SAVED_SETTING_FIELDS = (
     'capture_width', 'capture_filter', 'perceptual_resize',
     'perceptual_detail_strength', 'dct_encode', 'dct_sharpen',
     'dct_sharpen_strength', 'dct_clarity', 'dct_chroma_gain',
-    'aspect_layout', 'aspect_tail',
+    'aspect_layout', 'aspect_tail', 'clip_aware',
 )
 
 
@@ -313,6 +322,8 @@ def _restore_sender_settings(target, saved):
             elif value is None:
                 target[key] = None
             continue
+        if key == 'profile' and value not in dict(PROFILE_CHOICES).values():
+            continue                    # a removed profile: keep the default
         if key in BOOL_FIELDS:
             if isinstance(value, bool):
                 target[key] = value
@@ -942,8 +953,7 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
     dct_strength, dct_clarity, dct_chroma_gain = .25, 0.0, 1.0
     if dct_encode:
         if profile not in DCT_PROFILES:
-            raise ValueError('Direct DCT encode requires Fold 500, Mono Fold '
-                             '500, or Mono Colour 500.')
+            raise ValueError('Direct DCT encode requires a folded profile.')
         if encode_filter != 'box':
             raise ValueError('Direct DCT encode requires the Box encode filter.')
         if perceptual_resize != 'off':
@@ -1077,6 +1087,7 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
         'perceptual_resize': perceptual_resize,
         'perceptual_detail_strength': perceptual_strength,
         'dct_encode': dct_encode,
+        'clip_aware': bool(settings.get('clip_aware', False)),
         'aspect_layout': aspect_layout,
         'aspect_tail': aspect_tail,
         'dct_sharpen': dct_sharpen,
@@ -1110,10 +1121,7 @@ def build_command(settings, devices, sd_module=None, python=None,
         '--source', checked['source'],
     ]
 
-    if checked['profile'] == 'baseline':
-        command.append('--baseline')
-    else:
-        command.extend(('--profile', checked['profile']))
+    command.extend(('--profile', checked['profile']))
     if checked['profile'] in ASPECT_PROFILES:
         if checked['aspect_layout'] != 'auto':
             command.extend(('--aspect-layout', checked['aspect_layout']))
@@ -1161,6 +1169,8 @@ def build_command(settings, devices, sd_module=None, python=None,
         if checked['dct_chroma_gain'] != 1.0:
             command.extend(('--dct-chroma-gain',
                             str(checked['dct_chroma_gain'])))
+    if checked['clip_aware']:
+        command.append('--clip-aware-encode')
     if checked['capture_fps'] is not None:
         command.extend(('--capture-fps', str(checked['capture_fps'])))
 
@@ -1253,7 +1263,7 @@ class SenderGui:
         'encode_filter', 'perceptual_resize', 'perceptual_detail_strength',
         'aspect_layout', 'aspect_tail',
         'dct_encode', 'dct_sharpen', 'dct_sharpen_strength', 'dct_clarity',
-        'dct_chroma_gain',
+        'dct_chroma_gain', 'clip_aware',
         'screen_backend', 'region', 'ffmpeg_input', 'capture_width',
         'capture_filter',
     )
@@ -1272,7 +1282,7 @@ class SenderGui:
         self.settings = {
             'device': None,
             'source': None,
-            'profile': 'fold-500',
+            'profile': DEFAULT_PROFILE,
             'mono_video_side': 'right',
             'source_audio': 'source',
             'source_audio_device': None,
@@ -1298,7 +1308,8 @@ class SenderGui:
             'capture_filter': 'auto',
             'perceptual_resize': 'off',
             'perceptual_detail_strength': '0.25',
-            'dct_encode': False,
+            'dct_encode': True,
+            'clip_aware': False,
             'dct_sharpen': 'off',
             'dct_sharpen_strength': '0.25',
             'dct_clarity': '0',
@@ -1310,9 +1321,14 @@ class SenderGui:
         if restore_preferences and self.preference_path is not None:
             self._restore_preferences()
         self.page = 'setup'
-        self.advanced = (self.settings.get('profile') in {
-            value for _label, value in PROFILE_CHOICES[3:]} or
-            bool(self.settings.get('dct_encode')))
+        # Open on the advanced page only when a non-default advanced
+        # option is in use.
+        self.advanced = bool(
+            self.settings.get('perceptual_resize', 'off') != 'off' or
+            self.settings.get('dct_sharpen', 'off') != 'off' or
+            self.settings.get('clip_aware') or
+            self.settings.get('aspect_layout', 'auto') != 'auto' or
+            self.settings.get('aspect_tail', 'chroma') != 'chroma')
         self.selected = 'device'
         self.scroll = 0
         self.dropdown = None

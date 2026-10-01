@@ -15,8 +15,8 @@ horizontal and fewer vertical frequencies.
 Signalling: coded status and pulse preamble ID 3 (MONO_OFF, the rotating
 mono fold-off word). Only the hidden ``--experimental-mono`` sender still
 emits it, and the default receiver never dispatches that layout. The layout
-is a receiver setting that must match the sender (``auto`` follows the
-source aspect code in each packet's metadata).
+is signalled: ``auto`` follows the aspect code in each packet's metadata,
+and a fixed sender layout is sent as its code with the metadata screen bit.
 """
 from dataclasses import replace
 
@@ -48,7 +48,8 @@ class AspectMonoCodec(FoldCodec):
         self.signature, self.noise_max = SIGNATURE_SLOTS, .3
         self.grid = Grids(v7.V7_GRIDS)
         self.kept = np.asarray(model.coder.positions, dtype=np.int64)
-        _, hosts, guests = colour_fold_sets(model)
+        order, hosts, guests = colour_fold_sets(model)
+        self.sent_model_indices = np.asarray(order[:FRESH_SLOTS], dtype=int)
         self.hosts = np.asarray(hosts, dtype=int)
         self.guest_model_indices = np.asarray(guests, dtype=int)
         self.guests = self.kept[self.guest_model_indices]

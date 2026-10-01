@@ -195,7 +195,10 @@ for each chroma plane, for 2,880 coefficients total. The image values use
 Pillow YCbCr conversion; the source coder performs the DCT once and reconstructs
 omitted coefficients as zero/model mean.
 
-The canonical profiles are `nearest`, `box`, `lanczos`, and `bicubic`. Their
+The canonical profiles are `nearest`, `box`, `lanczos`, and `bicubic`; only
+`nearest` and `box` are named on the wire (the metadata's former second
+encode-filter bit is the screen bit, section 5), so live senders encode with
+those two. Their
 variance, mean, rank, gain, level, and phase data are stored in
 `animation_modem/v7_model_tables.npz`; the expected SHA-256 is
 `2392943a287fdf1cd2ac773c2fc065179006bfab4646726e72e023f3921ffb1c`. The
@@ -231,11 +234,22 @@ data cells for a five-byte word. Its payload and check field are:
 | Bits | Meaning |
 |---|---|
 | Byte 0, bits 7–5 | Aspect code |
-| Byte 0, bits 4–3 | Source encoding: nearest, box, lanczos, or bicubic |
+| Byte 0, bit 4 | Screen bit: 0 the aspect code is the picture's own; 1 it is the sender's fixed aspect layout, the picture pillar- or letterboxed inside it |
+| Byte 0, bit 3 | Source model: 0 nearest, 1 box |
 | Byte 0, bits 2–0 | Tail slice, 0–6; 7 is invalid |
 | Bytes 1–2, bit 15 | Playback direction (0 up, 1 down) |
 | Bytes 1–2, bits 14–0 | One-based source index; zero is invalid |
 | Bytes 3–4 | CRC-16/CCITT-FALSE of bytes 0–2 XOR a rotating mask |
+
+The aspect code (V7_ASPECT_RATIOS) is what the receiver letterboxes or
+pillarboxes the picture to, and with `--aspect-layout auto` it also names the
+packet's aspect layout. A sender with a fixed layout boxes each picture into
+that layout's ratio and sends the layout's code with the screen bit set, so a
+receiver on `auto` decodes and displays it without matching settings. Packets
+with the screen bit clear keep the earlier byte layout bit for bit. Bit 4 was
+the high bit of the encode filter: an older receiver reads a screen-bit packet
+as lanczos or bicubic. The live sender's source index wraps at 32,767
+(about 44.6 minutes of packets) instead of stopping.
 
 CRC uses polynomial `0x1021`, initial value `0xFFFF`, and no final XOR. Source
 indices are zero-based in application APIs and encoded one-based, with a
@@ -299,6 +313,125 @@ This is not a transmit limit; above it, resampling filters or aliasing remove
 high-frequency detail. The application sender uses the output device's rate;
 the standalone sender follows its DAC's native rate unless `--rate` is given.
 Standalone receive capture is capped at 96 kHz.
+
+### Splices: digital time-stretch and pitch-shift
+
+Resampled speed changes (tape, varispeed, a clock offset) scale time and
+pitch together and are followed by the pulse scale. Digital time-stretchers
+of the WSOLA family (ffmpeg `atempo`, most players' speed controls) and the
+pitch shifters built on them do not: they keep the local waveform scale and
+change the duration by cutting or repeating chunks of a few hundred samples.
+The header edges then measure the pitch, while a packet that contains a
+splice is shorter or longer than that scale predicts by the chunk.
+
+The EOF decoder treats this as information:
+
+- **Endpoint.** If the EOF mark is not where the header predicts, the next
+  header is searched from 40% to 205% of the predicted packet length (the
+  splices of a ×0.5..×2 pitch shift) and the mark is looked for just before
+  it (their spacing is fixed); an endpoint shorter than 36% of a packet is
+  never accepted. If a splice took the mark itself, the
+  next header is the witness: the mark's end is the next packet's origin.
+  When the body does not fit an EOF found at the predicted place (cyclic-
+  prefix correlation below 0.95 per symbol), or the metadata fails there,
+  the next-header endpoint is tried too and kept if it fits better.
+- **Per-symbol offsets.** The body is read at the header (pitch) scale. Each
+  OFDM symbol's cyclic-prefix correlation is evaluated for every offset
+  between 0 (header-anchored) and the measured jump (EOF-anchored) in 2-sample
+  steps; a dynamic program picks the monotone staircase with the fewest
+  steps (2.5 correlation units per step; offsets a whole number of symbols
+  from either anchor are penalised as aliases). Any number of splices per
+  packet are allowed. The map is used only when it beats the packet-wide
+  affine map, and is refused when the path never reaches the endpoint's
+  offset (within 25% of a packet): that endpoint belongs to a later packet.
+- **Pilot identity.** The cyclic prefix says where a symbol starts, not
+  which symbol it is; with many splices another symbol's intact copy is
+  often nearby. Symbols on the path at either anchor (correlation ≥ 0.95,
+  at least 3) give a flat 2×2 channel from their pilots. Each chosen symbol's
+  pilots, after its own cell rotation, must match that channel (gain, phase
+  and a ±2-sample ramp free; residual 0 = match, a neighbour scores
+  0.4–1.0). If an intact chosen symbol fails (residual > 0.5), every
+  correlation peak (≥ 0.75) is checked, the residual is subtracted from the
+  correlation and the staircase is found again; symbols still failing are
+  erased.
+- **Erasures.** Symbols the splice falls in (correlation below 0.9) are
+  erased: zero weight in the channel and timing fits, their fitted pilots in
+  the fade/noise refit, both legs erased in the equalizer. Head gates scale
+  with the fraction of symbols present. Their coefficients are missing for
+  that frame (shown as decoded, per the partial-frame rule).
+- **Metadata.** If the EOF-anchored metadata symbol fails its CRC, the
+  header-anchored one is tried. In a recording (not the live latest-only
+  path), a spliced packet whose metadata is still lost takes its
+  neighbour's encode and aspect with the slice and index advanced; it must
+  pass every quality gate and is marked `metadata_predicted`.
+- **Resync.** A recording decode no longer stops at a packet without any
+  endpoint: it is held as lost and decoding continues at the next header.
+
+Cost: about 0.1 ms per clean packet for the cyclic-prefix check, about
+2.4 ms per packet under heavy splicing. Phase-vocoder processing (Rubber
+Band) rebuilds every phase and is not supported.
+
+`tools/v7_timing_bench.py` measures packets decoded and mean luma PSNR of the
+decoded pictures against a clean decode, for a recording (`stream`) and the
+live latest-only path (`live`), 12 packets each; `--ffmpeg` adds ffmpeg
+stretch/pitch cases. Before → after this change (stream / live packets; the
+earlier recording decode also stopped at the first packet without an
+endpoint):
+
+| Condition | Before | After |
+|---|---|---|
+| clean, speed 1.02/0.97, flutter 0.1%, noise 24 dB | 12 / 12 | 12 / 12 |
+| flutter 0.3% | 4 / 4 | 4 / 4 |
+| tempo +3% (splices) | 8 / 8 | 10 / 9 |
+| tempo +10% (splices) | 0 / 3 | 7 / 4 |
+| tempo −10% (repeats) | 3 / 5 | 7 / 6 |
+| pitch +6% / −6% (tempo kept) | 7 / 7, 1 / 5 | 9 / 9, 7 / 6 |
+| ffmpeg atempo 1.05 / 1.10 / 0.90 | 4 / 8, 4 / 4, 3 / 4 | 12 / 9, 10 / 6, 7 / 7 |
+| ffmpeg pitch +6% / −6% | 9 / 9, 4 / 6 | 11 / 12, 11 / 10 |
+
+Decoded spliced packets score 35–55 dB against the clean decode on
+average. Remaining losses: a splice through a header (the packet is not
+found), several splices in one packet, metadata lost to a splice on the live
+path, and flutter at 0.3% RMS, which is a pilot-noise gate result (noise
+0.09–0.15 against the 0.08 live limit) rather than a timing failure.
+
+#### Large pitch shifts (×0.5 to ×2, tempo kept)
+
+Varispeed (time and pitch together) decodes 12/12 from ×0.5 to ×2 at a
+96 kHz capture. A pitch shift with the tempo kept is a resample followed by
+a time-stretch, and the stretcher overlap-adds windows every 10–20 ms: most
+symbols land in a crossfade of two source positions. An oracle over the
+bench's WSOLA (Hann overlap at half-window hops) counts the body symbols
+that survive anywhere in the output as one clean copy (≥ 90% from one
+source position):
+
+| Shift | 1024 window | 2048 window | 4096 window |
+|---|---|---|---|
+| ×2.0 | 38% | 59% | 68% |
+| ×1.5 | 20% | 41% | 51% |
+| ×1.25 | 7% | 32% | 42% |
+| ×0.8 | 0% | 11% | 24% |
+| ×0.67 | 0% | 7% | 19% |
+| ×0.5 | 0% | 1% | 11% |
+
+Pitch-down discards material and crossfades what is left, so a decoder
+alone cannot reach ×0.5. Erasing every symbol that is not a clean copy (an
+oracle) decodes worse than keeping the mixtures, because too few remain.
+Measured at 96 kHz, 24 packets (received / displayed partial frames, mean
+luma PSNR against the clean decode):
+
+| Shift | WSOLA 2048 | ffmpeg asetrate+atempo |
+|---|---|---|
+| ×2.0 | 0 / 11 at 15 dB | 5 at 36 dB / 28 at 19 dB |
+| ×1.5 | 6 at 21 dB / 16 at 21 dB | 9 at 29 dB / 13 at 20 dB |
+| ×1.25 | 9 at 25 dB / 13 at 16 dB | 18 at 34 dB / 5 at 21 dB |
+| ×0.8 | 1 at 15 dB / 19 at 13 dB | 8 at 18 dB / 14 at 14 dB |
+| ×0.67, ×0.5 | 0–4 at 10–12 dB | 0–1 at 10–12 dB |
+
+Cost: clean packets unchanged (about 1.04 ms); spliced packets about 2.1 ms
+(pitch +6%) and 2.9 ms (tempo +10%), 5.8 ms under a ×1.25 WSOLA shift. The
+cyclic-prefix scores are computed from running sums, which paid for the
+pilot check.
 
 ## 7. Decoder behavior and live input
 

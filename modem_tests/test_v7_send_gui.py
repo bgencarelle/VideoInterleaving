@@ -86,7 +86,8 @@ class SenderGuiTests(unittest.TestCase):
     def test_colour_mono_profile_is_available_in_primary_picker(self):
         self.assertEqual(
             tuple(value for _label, value in PRIMARY_PROFILE_CHOICES),
-            ('fold-500', 'mono-fold-500', 'mono-colour-500'))
+            ('aspect-fold-500', 'fold-500', 'aspect-mono-500',
+             'mono-colour-500'))
 
     def test_device_list_contains_only_output_devices_and_does_not_default(self):
         sd = Mock()
@@ -160,12 +161,12 @@ class SenderGuiTests(unittest.TestCase):
     def test_selected_sample_rate_profile_and_video_path_reach_cli(self):
         self.settings.update(source='video', video_source='a clip with spaces.mp4',
                              video_live=True, video_preview=True,
-                             profile='fold-1000', speed='1.5')
+                             profile='aspect-fold-500', speed='1.5')
 
         command = build_command(self.settings, self.devices, self.sd)
         args = v7_live.parser().parse_args(command[2:])
 
-        self.assertEqual(args.profile, 'fold-1000')
+        self.assertEqual(args.profile, 'aspect-fold-500')
         self.assertIsNone(args.rate)
         self.assertEqual(args.video_source, 'a clip with spaces.mp4')
         self.assertTrue(args.video_live)
@@ -179,11 +180,11 @@ class SenderGuiTests(unittest.TestCase):
         self.assertNotIn('--preview', command)
 
     def test_mono_video_fold_profile_reaches_cli_and_uses_box_model(self):
-        self.settings.update(profile='mono-fold-500', mono_video_side='right')
+        self.settings.update(profile='mono-colour-500', mono_video_side='right')
         command = build_command(self.settings, self.devices, self.sd)
         args = v7_live.parser().parse_args(command[2:])
 
-        self.assertEqual(args.profile, 'mono-fold-500')
+        self.assertEqual(args.profile, 'mono-colour-500')
         self.assertFalse(args.experimental_mono_fold)
         self.assertEqual(args.mono_video_side, 'right')
         self.assertIsNone(args.experimental_fold)
@@ -216,7 +217,7 @@ class SenderGuiTests(unittest.TestCase):
     def test_mono_video_can_route_an_explicit_audio_input_device(self):
         audio_device = InputDevice(8, 'Loopback', 2, 48000)
         self.settings.update(
-            profile='mono-fold-500', source='video',
+            profile='mono-colour-500', source='video',
             video_source='clip.mp4', source_audio='device',
             source_audio_device=8, source_audio_input_side='left',
             source_audio_gain='0.7', source_audio_delay_ms='12')
@@ -236,7 +237,7 @@ class SenderGuiTests(unittest.TestCase):
 
     def test_mono_video_audio_device_is_available_for_every_capture_source(self):
         gui = SenderGui(self.devices)
-        gui.settings.update(profile='mono-fold-500', source_audio='device')
+        gui.settings.update(profile='mono-colour-500', source_audio='device')
         for _label, source in (
                 ('Camera', 'camera'), ('Screen', 'screen'),
                 ('Video', 'video'), ('Test', 'test'),
@@ -250,7 +251,7 @@ class SenderGuiTests(unittest.TestCase):
         audio_device = InputDevice(8, 'Loopback', 2, 48000)
         gui = SenderGui(self.devices, audio_devices=(audio_device,))
         gui.settings.update(source='video', video_source='clip.mp4',
-                            profile='mono-fold-500')
+                            profile='mono-colour-500')
 
         def click(key):
             rect = gui.hits[key]
@@ -324,7 +325,8 @@ class SenderGuiTests(unittest.TestCase):
 
     def test_advanced_downscaler_picker_is_visible_and_selectable(self):
         gui = SenderGui(self.devices)
-        gui.settings.update(source='video', profile='fold-500')
+        gui.settings.update(source='video', profile='fold-500',
+                            dct_encode=False)
         gui.advanced = True
         visible_count = ((gui.WINDOW_SIZE[1]-131-137)//gui.ROW_HEIGHT)
         fields = gui._visible_fields()
@@ -350,59 +352,31 @@ class SenderGuiTests(unittest.TestCase):
         gui._on_mouse(glfw, None, 1, 1, 0)
         self.assertEqual(gui.settings['perceptual_resize'], 'gamma-detail')
 
-    def test_pillow_encoder_filter_is_distinct_from_ffmpeg_capture_filter(self):
+    def test_pillow_encoder_filter_is_box_for_every_profile(self):
         gui = SenderGui(self.devices)
         gui.advanced = True
         self.assertIn('encode_filter', gui.ADVANCED_FIELDS)
         self.assertIn('encode_filter', gui._visible_fields())
-        self.assertIn('baseline', tuple(value for _label, value in
-                                        gui._choices('profile')))
-        self.assertEqual(tuple(value for _label, value in
-                               gui._choices('encode_filter')),
-                         ('auto', 'box'))
-
-        gui.settings.update(profile='baseline', encode_filter='auto')
-        fields = gui._visible_fields()
-        visible_count = ((gui.WINDOW_SIZE[1]-131-137)//gui.ROW_HEIGHT)
-        gui.scroll = max(0, fields.index('encode_filter')-
-                         visible_count+1)
-        gui._canvas(gui.WINDOW_SIZE)
-        rect = gui.hits['field:encode_filter']
-        position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
-        glfw = SimpleNamespace(
-            MOUSE_BUTTON_LEFT=1, PRESS=1,
-            get_cursor_pos=lambda _window: position)
-        gui._on_mouse(glfw, None, 1, 1, 0)
-        gui._canvas(gui.WINDOW_SIZE)
-        option_index = next(index for index, item in
-                            enumerate(gui._choices('encode_filter'))
-                            if item[1] == 'bicubic')
-        rect = gui.hits[f'option:{option_index}']
-        position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
-        gui._on_mouse(glfw, None, 1, 1, 0)
-        self.assertEqual(gui.settings['encode_filter'], 'bicubic')
-        self.assertEqual(tuple(value for _label, value in
-                               gui._choices('encode_filter')),
-                         ('auto', 'box', 'nearest', 'lanczos', 'bicubic'))
-        gui.advanced = False
-        self.assertEqual(gui._value_label('profile'), 'Baseline · legacy')
-        self.settings.update(
-            source='video', video_source='clip.mp4', profile='baseline',
-            encode_filter='bicubic', capture_filter='lanczos')
+        self.assertNotIn('baseline', tuple(value for _label, value in
+                                           gui._choices('profile')))
+        for profile in ('aspect-fold-500', 'fold-500', 'aspect-mono-500',
+                        'mono-colour-500'):
+            gui.settings['profile'] = profile
+            self.assertEqual(tuple(value for _label, value in
+                                   gui._choices('encode_filter')),
+                             ('auto', 'box'))
+        self.settings.update(source='video', video_source='clip.mp4',
+                             capture_filter='lanczos')
         command = build_command(self.settings, self.devices, self.sd)
         args = v7_live.parser().parse_args(command[2:])
-
-        self.assertIn('--baseline', command)
-        self.assertNotIn('--profile', command)
-        self.assertEqual(args.encode_filter, 'bicubic')
+        self.assertNotIn('--baseline', command)
         self.assertEqual(args.capture_filter, 'lanczos')
-        self.assertEqual(v7_live._send_profile(args, 0)[0], 'bicubic')
 
     def test_mono_video_side_selector_is_visible_only_for_that_profile(self):
         gui = SenderGui(self.devices)
         self.assertNotIn('mono_video_side', gui._visible_fields())
 
-        gui.settings.update(profile='mono-fold-500', mono_video_side='right')
+        gui.settings.update(profile='mono-colour-500', mono_video_side='right')
         self.assertIn('mono_video_side', gui._visible_fields())
         self.assertIn('source_audio', gui._visible_fields())
         self.assertNotIn('source_audio_device', gui._visible_fields())
@@ -411,12 +385,12 @@ class SenderGuiTests(unittest.TestCase):
 
         gui.settings['profile'] = 'fold-500'
         self.assertNotIn('mono_video_side', gui._visible_fields())
-        gui.settings['profile'] = 'mono-fold-500'
+        gui.settings['profile'] = 'mono-colour-500'
         gui.settings['source_audio'] = 'device'
         self.assertIn('source_audio_device', gui._visible_fields())
 
     def test_mono_video_keeps_wire_defaults_and_allows_pre_resize(self):
-        self.settings.update(profile='mono-fold-500', perceptual_resize='linear-box')
+        self.settings.update(profile='mono-colour-500', perceptual_resize='linear-box')
         command = build_command(self.settings, self.devices, self.sd)
         self.assertEqual(command[command.index('--perceptual-resize')+1],
                          'linear-box')
@@ -452,7 +426,7 @@ class SenderGuiTests(unittest.TestCase):
 
     def test_direct_dct_rejects_unsupported_combinations(self):
         cases = (
-            ({'profile': 'fold-1000'}, 'requires Fold 500'),
+            ({'profile': 'fold-1000'}, 'supported wire profile'),
             ({'perceptual_resize': 'linear-box'}, 'pre-encode downscaler'),
             ({'dct_sharpen': 'usm', 'dct_sharpen_strength': '1.5'},
              'between 0 and 1'),
@@ -468,8 +442,10 @@ class SenderGuiTests(unittest.TestCase):
     def test_direct_dct_fields_are_advanced_and_exclusive_with_downscaler(self):
         gui = SenderGui(self.devices)
         gui.settings['device'] = 3
+        self.assertTrue(gui.settings['dct_encode'])     # the default
         self.assertNotIn('dct_encode', gui._visible_fields())
         gui.advanced = True
+        gui._assign('dct_encode', False)
         visible = gui._visible_fields()
         self.assertIn('dct_encode', visible)
         self.assertNotIn('dct_sharpen', visible)
@@ -487,9 +463,10 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(gui._value_label('dct_sharpen'),
                          'Taper · sent band only')
 
-        gui._assign('profile', 'fold-1000')
-        self.assertFalse(gui.settings['dct_encode'])
-        self.assertNotIn('dct_encode', gui._visible_fields())
+        for profile in ('fold-500', 'aspect-mono-500', 'mono-colour-500'):
+            gui._assign('profile', profile)
+            self.assertTrue(gui.settings['dct_encode'])
+            self.assertIn('dct_encode', gui._visible_fields())
 
     def test_direct_dct_settings_are_saved_and_restored(self):
         from tools.v7_send_gui import (_restore_sender_settings,
@@ -527,6 +504,7 @@ class SenderGuiTests(unittest.TestCase):
         gui = SenderGui(self.devices)
         gui.settings['device'] = 3
         gui.advanced = True
+        gui._assign('profile', 'fold-500')
         self.assertNotIn('aspect_layout', gui._visible_fields())
         gui._assign('profile', 'aspect-fold-500')
         visible = gui._visible_fields()
@@ -558,6 +536,19 @@ class SenderGuiTests(unittest.TestCase):
         self.assertNotIn('aspect_tail', visible)
         self.assertIn('mono_video_side', visible)
         self.assertIn('dct_encode', visible)
+
+    def test_clip_aware_encode_is_advanced_opt_in_and_reaches_the_cli(self):
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertNotIn('--clip-aware-encode', command)
+        self.settings['clip_aware'] = True
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertTrue(v7_live.parser().parse_args(command[2:]).clip_aware_encode)
+        gui = SenderGui(self.devices)
+        gui.settings['device'] = 3
+        self.assertFalse(gui.settings['clip_aware'])
+        self.assertNotIn('clip_aware', gui._visible_fields())
+        gui.advanced = True
+        self.assertIn('clip_aware', gui._visible_fields())
 
     def test_ffmpeg_screen_input_is_forwarded_only_for_ffmpeg_capture(self):
         self.settings.update(source='screen', screen_backend='ffmpeg',
@@ -627,7 +618,7 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(args.perceptual_resize, 'gamma-detail')
         self.assertEqual(args.perceptual_detail_strength, 0.6)
 
-        self.settings.update(profile='mono-fold-500')
+        self.settings.update(profile='mono-colour-500')
         command = build_command(self.settings, self.devices, self.sd)
         self.assertEqual(command[command.index('--perceptual-resize')+1],
                          'gamma-detail')
@@ -991,7 +982,7 @@ class SenderGuiTests(unittest.TestCase):
                             run=cancel)
 
     def test_profile_default_and_explicit_filter_are_validated(self):
-        self.settings['profile'] = 'mono-fold-500'
+        self.settings['profile'] = 'mono-colour-500'
         self.settings['encode_filter'] = 'auto'
         result = validate_settings(self.settings, self.devices, self.sd)
         self.assertEqual(result['encode_filter'], 'box')
@@ -1016,7 +1007,7 @@ class SenderGuiTests(unittest.TestCase):
 
     def test_disabled_mono_audio_ignores_its_hidden_tuning_fields(self):
         self.settings.update(
-            source='test', profile='mono-fold-500', source_audio='off',
+            source='test', profile='mono-colour-500', source_audio='off',
             source_audio_input_side='invalid', source_audio_gain='invalid',
             source_audio_delay_ms='invalid')
 
@@ -1051,15 +1042,18 @@ class SenderGuiTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Screen region'):
             validate_settings(self.settings, self.devices, self.sd)
 
-    def test_basic_profile_picker_defaults_to_fold500_stereo(self):
+    def test_profile_picker_has_four_profiles_and_aspect_fold_default(self):
         gui = SenderGui(self.devices)
-        self.assertEqual(gui.settings['profile'], 'fold-500')
+        self.assertEqual(gui.settings['profile'], 'aspect-fold-500')
+        self.assertTrue(gui.settings['dct_encode'])
+        self.assertFalse(gui.advanced)
+        expected = ('aspect-fold-500', 'fold-500', 'aspect-mono-500',
+                    'mono-colour-500')
         self.assertEqual(tuple(value for _label, value in
-                               gui._choices('profile')),
-                         ('fold-500', 'mono-fold-500', 'mono-colour-500'))
+                               gui._choices('profile')), expected)
         gui.advanced = True
-        self.assertIn('fold-1000', [value for _label, value in
-                                    gui._choices('profile')])
+        self.assertEqual(tuple(value for _label, value in
+                               gui._choices('profile')), expected)
         parser = v7_live.parser()
         send = parser._subparsers._group_actions[0].choices['send']
         option_strings = {option for action in send._actions
@@ -1320,13 +1314,18 @@ class SenderGuiTests(unittest.TestCase):
             path = Path(temporary)/'sender.json'
             path.write_text(json.dumps({
                 'version': 2,
-                'settings': {'profile': 'mono-fold-500',
+                'settings': {'profile': 'mono-colour-500',
+                             'encode_filter': 'nearest',
                              'source_audio': 'off'},
             }), encoding='utf-8')
             gui = SenderGui(self.devices, preference_path=path,
                             restore_preferences=True)
 
-        self.assertEqual(gui.settings['profile'], 'mono-fold-500')
+        # Version 4 reset the profile and Direct DCT encode to the new
+        # defaults; other saved settings are kept.
+        self.assertEqual(gui.settings['profile'], 'aspect-fold-500')
+        self.assertTrue(gui.settings['dct_encode'])
+        self.assertEqual(gui.settings['encode_filter'], 'auto')
         self.assertEqual(gui.settings['source_audio'], 'source')
 
     def test_unavailable_saved_output_is_not_replaced_by_a_default(self):

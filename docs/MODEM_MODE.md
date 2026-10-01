@@ -156,10 +156,25 @@ is available, finite file/VOD preview requests infinite looping and mutes its
 audio. Live sources are not looped. The player has its own playback clock and
 is not frame-synchronized with the sender. A system-associated player fallback
 may control repeat and audio behavior itself. Camera and screen/display options
-are discovered when their pickers open. **Advanced → Pre-encode downscaler**
-exposes the experimental preprocessing modes and strength; they work with Mono
-video, Fold 500, or Fold 1000 using the Box encode filter. Match the selected
-wire profile on the receiver.
+are discovered when their pickers open.
+
+The GUI offers four wire profiles: **Aspect Fold 500** (stereo, the default),
+**Fold 500** (stereo), and the mono-video **aspect colour Fold 500** and
+**colour Fold 500**. The receiver follows the profile carried by each packet.
+**Direct DCT encode** is on by default (it encodes from the full-size frame;
+frames smaller than the coder grid fall back to the Box resize). Saved
+settings from earlier GUI versions keep everything except the profile, Direct
+DCT encode and the encoder filter, which start at the new defaults once. Under **Advanced**:
+
+- **Clip-aware encode** (`--clip-aware-encode`, opt-in) re-fits the sent luma
+  coefficients so ringing around bright and dark edges falls into the
+  receiver's black/white clip, where it is invisible (about 2 ms per frame at
+  the sender; no receiver change).
+- **Pre-encode downscaler** applies to the resize path only (Direct DCT encode
+  off).
+
+The CLI keeps its previous defaults; the other profiles and `--baseline`
+remain CLI options.
 
 During a live send or receive, a lost primary audio device pauses transmission
 or decoding and reports the selected device; the receiver retains its last good
@@ -179,7 +194,12 @@ twice. It is not the wire resolution. The camera's normal path can prepare
 describes which sources use this setting.
 
 The standalone V7 receiver GUI can be launched with
-`.venv/bin/python -m tools.v7_receiver_gui`. It selects an explicit input and
+`.venv/bin/python -m tools.v7_receiver_gui`. Its **Display grain** choice
+(off by default) adds fine noise, about 2.5/255, only where the decoded picture
+is flat. That breaks up the regular ringing ripple of the band-limited picture
+without touching edges or texture. The flat-area mask is computed on the
+decoded 96×80 luma grid and the grain in the shader, so it adds no meaningful
+decode time; the pattern changes with each new picture. It selects an explicit input and
 can optionally pass the non-video channel to an explicitly selected output
 device. Passthrough starts at 1.0 volume (VLC's default 100%, unity gain);
 adjust its live, persisted 0–1 volume control or mute it as needed. The CLI
@@ -220,12 +240,17 @@ frequencies instead of 40 and 48. It is signalled with profile code 0
 that follows packet profiles picks it up automatically. It needs pilots and
 EOF markers.
 
-Two settings are not signalled and must match on both ends:
-
 - `--aspect-layout` (default `auto`): `auto` follows the source aspect carried
   in each packet's metadata; `1:1`, `4:3`, `3:2`, `16:9`, `3:4`, `2:3` and
-  `9:16` force a layout for testing a projected-frame shape. With `auto`, the
-  receiver holds the last good picture until it has valid metadata.
+  `9:16` fix a layout (a projected-frame shape). A sender with a fixed layout
+  pillar- or letterboxes each picture into it and signals the layout in the
+  metadata (aspect code plus the screen bit), so the receiver's `auto`
+  follows it; forcing a layout on the receiver is only for tests. With
+  `auto`, the receiver holds the last good picture until it has valid
+  metadata.
+
+One setting is not signalled and must match on both ends:
+
 - `--aspect-tail` (default `chroma`): what the 96 tail slots carry. `chroma`
   is V7's rotating chroma tail (the lowest-ranked 656 coefficients are all
   chroma); `split` sends 48 extra luma frequencies in every packet plus 48

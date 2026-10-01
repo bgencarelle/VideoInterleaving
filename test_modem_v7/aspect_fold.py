@@ -24,9 +24,10 @@ follow derive_tables(). All of it is frozen in aspect_tables.npz, whose
 SHA-256 is pinned below, so both ends hold identical tables.
 
 Signalling: coded status and pulse preamble ID 0 (the fold-off code, which
-the live senders no longer emit). The layout aspect and the tail mode are
-receiver settings that must match the sender: layout ``auto`` follows the
-source aspect code in each packet's metadata.
+the live senders no longer emit). The tail mode is a receiver setting that
+must match the sender. The layout is signalled: layout ``auto`` follows the
+aspect code in each packet's metadata, and a sender with a fixed layout sends
+that layout's code with the metadata screen bit (the picture boxed into it).
 
 Tail modes (the 96 tail slots of each packet):
 - chroma: V7's tail. The 656 lowest-ranked coefficients, all fine chroma,

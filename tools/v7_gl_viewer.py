@@ -55,6 +55,14 @@ KAISER_SINC_RADIUS = 3.0
 KAISER_SINC_BETA = 8.6
 HANN_SINC_RADIUS = 3.0
 DCT_RECONSTRUCTION_MODES = ('off', '2x', '4x', '8x', '16x', 'viewport')
+# Display grain: fine noise in flat picture areas only, where it breaks up the
+# regular ringing ripple of a band-limited picture. Textured areas and edges
+# are left alone. Amplitude: about 2.5/255 standard deviation in luma.
+GRAIN_MODES = ('off', 'flat')
+GRAIN_LABELS = {'off': 'Off', 'flat': 'Flat areas · masks ringing'}
+GRAIN_AMOUNT = 0.024            # triangular +-amount; sigma = amount/sqrt(6)
+GRAIN_FLAT_SIGMA = 1.2          # luma grid samples
+GRAIN_FLAT_CONTRAST = 0.06      # local luma s.d. (code units) that stops grain
 DCT_RECONSTRUCTION_LABELS = {
     'off': 'Off',
     '2x': '2×',
@@ -215,6 +223,22 @@ def float_planes(values, shapes):
         neutral_chroma = np.full((1, 1), 1.0/255.0, np.float32)
         planes.extend((neutral_chroma.copy(), neutral_chroma))
     return tuple(planes)
+
+
+def flat_area_mask(luma):
+    """0..1 per luma grid sample: 1 where the decoded picture is flat.
+
+    Local standard deviation over about one grid sample, mapped linearly to
+    zero at GRAIN_FLAT_CONTRAST. Evaluated on the decoded grid (96x80), not at
+    display size, so it costs well under a millisecond per frame.
+    """
+    from scipy.ndimage import gaussian_filter
+    plane = np.asarray(luma, dtype=np.float32)
+    mean = gaussian_filter(plane, GRAIN_FLAT_SIGMA, mode='nearest')
+    square = gaussian_filter(plane*plane, GRAIN_FLAT_SIGMA, mode='nearest')
+    deviation = np.sqrt(np.maximum(square-mean*mean, 0.0))
+    return np.ascontiguousarray(
+        np.clip(1.0-deviation/GRAIN_FLAT_CONTRAST, 0.0, 1.0), dtype=np.float32)
 
 
 def dct_reconstruct_planes(planes, mode, viewport_size=None):
@@ -447,6 +471,9 @@ uniform sampler2D plane_y;
 uniform sampler2D plane_cb;
 uniform sampler2D plane_cr;
 uniform sampler2D kernel_lut;
+uniform sampler2D grain_mask;
+uniform float grain_amount;
+uniform int grain_seed;
 uniform int reconstruction;
 uniform int filtered_intermediate;
 uniform vec2 output_size;
@@ -617,6 +644,15 @@ float sample_plane(sampler2D plane, vec2 coord) {
     return texture(plane, coord).r;
 }
 
+float grain_hash(ivec2 pixel, int salt) {
+    uint h = uint(pixel.x)*1973u + uint(pixel.y)*9277u +
+             uint(grain_seed)*26699u + uint(salt)*104729u;
+    h = (h ^ (h >> 16u))*0x45d9f3bu;
+    h = (h ^ (h >> 16u))*0x45d9f3bu;
+    h = h ^ (h >> 16u);
+    return float(h & 0xffffffu)/16777216.0;
+}
+
 void main() {
     float y_code = sample_plane(plane_y, uv);
     float cb_code = sample_plane(plane_cb, uv);
@@ -624,6 +660,11 @@ void main() {
     // Values are code/127.5 - 1. Recover full-range Y and 8-bit BT.601 chroma
     // centered at code 128, matching Pillow's YCbCr conversion convention.
     float y = (y_code + 1.0)*0.5;
+    if (grain_amount > 0.0) {
+        ivec2 pixel = ivec2(gl_FragCoord.xy);
+        float noise = grain_hash(pixel, 0) + grain_hash(pixel, 1) - 1.0;
+        y += grain_amount*texture(grain_mask, uv).r*noise;
+    }
     float cb = cb_code*0.5 - 0.5/255.0;
     float cr = cr_code*0.5 - 0.5/255.0;
     vec3 rgb = vec3(y + 1.402*cr,

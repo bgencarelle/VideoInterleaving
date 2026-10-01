@@ -253,6 +253,11 @@ def run_modem(args):
         encode_filter = 'nearest' if baseline else 'box'
     if not baseline and encode_filter != 'box':
         raise ValueError('stereo Fold 500 requires --modem-encode-filter box')
+    if encode_filter not in ('nearest', 'box'):
+        # The metadata names only these two models (its second encode-filter
+        # bit is the aspect screen bit).
+        raise ValueError('the V7 wire carries only the nearest and box '
+                         'encodes; use --modem-encode-filter nearest or box')
     pilot_tones = bool(getattr(args, 'modem_pilot_tones', True))
     eof_marker = bool(getattr(args, 'modem_eof_marker', True))
     if not baseline and not pilot_tones:

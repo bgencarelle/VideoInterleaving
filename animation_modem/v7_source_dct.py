@@ -665,6 +665,49 @@ def _direct_planes(rgb, grids, shapes, brightness, gamma, sharpen,
     return planes, grids, shapes, taper
 
 
+# Ten alternating projections hold ~90% of the converged gain at ~3 ms.
+CLIP_AWARE_ITERATIONS = 10
+_CLIP_EDGE = 1e-6
+
+
+def clip_aware_luma(values, luma_shape, sent, iterations=CLIP_AWARE_ITERATIONS):
+    """Re-fit the sent luma coefficients for a receiver that clips to [-1, 1].
+
+    The receiver shows only the sent coefficients, and the display clips at
+    black and white. Ringing past those limits is invisible, so it costs
+    nothing; ringing inside them is the halo around edges. Alternating
+    projections between "only these coefficients" and "matches the target
+    where it is inside the range, at or beyond the limit where the target
+    sits on it" move the ringing into the clipped region. ``values`` is the
+    concatenated grid vector (luma first); ``sent`` marks the luma grid
+    coefficients the wire carries. Only those coefficients change, so the
+    result encodes exactly like any other values vector (it may leave
+    [-1, 1] where that is invisible). Zero iterations returns the input.
+    """
+    values = np.asarray(values, dtype=np.float64)
+    iterations = int(iterations)
+    if iterations <= 0:
+        return values
+    rows, cols = (int(value) for value in luma_shape)
+    count = rows*cols
+    sent = np.asarray(sent, dtype=bool).reshape(rows, cols)
+    luma = values[:count].reshape(rows, cols)
+    full = dctn(luma, norm='ortho')
+    target = np.clip(luma, -1.0, 1.0)
+    upper = target >= 1.0-_CLIP_EDGE
+    lower = target <= -1.0+_CLIP_EDGE
+    coefficients = np.where(sent, full, 0.0)
+    for _ in range(iterations):
+        shown = idctn(coefficients, norm='ortho')
+        goal = np.where(upper, np.maximum(shown, 1.0),
+                        np.where(lower, np.minimum(shown, -1.0), target))
+        coefficients = np.where(sent, dctn(goal, norm='ortho'), 0.0)
+    result = values.copy()
+    result[:count] = idctn(np.where(sent, coefficients, full),
+                           norm='ortho').ravel()
+    return result
+
+
 def warmup_direct_dct(grids, shapes):
     """Compile the direct encoder for writable and read-only frames.
 

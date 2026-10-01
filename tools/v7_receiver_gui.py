@@ -32,10 +32,11 @@ from tools.v7_gl_viewer import (DISPLAY_LABELS, DISPLAY_MODES,
                                 DCT_RECONSTRUCTION_MODES,
                                 FILTER_PRECOMPUTE_MODES,
                                 FLOAT_FRAGMENT_SHADER, FLOAT_MODE_IDS,
-                                FRAGMENT_SHADER, VERTEX_SHADER,
+                                FRAGMENT_SHADER, GRAIN_AMOUNT, GRAIN_LABELS,
+                                GRAIN_MODES, VERTEX_SHADER,
                                 _diagnostic_image, _float_texture_filter,
                                 build_filter_lut, dct_reconstruct_planes,
-                                fit_viewport, float_planes,
+                                fit_viewport, flat_area_mask, float_planes,
                                 resample_filter_planes)
 
 
@@ -174,10 +175,11 @@ BASIC_OPTION_DESTS = frozenset((
 LIVE_RUNTIME_DESTS = frozenset((
     'audio_output_device', 'audio_muted', 'audio_volume', 'freewheel_seconds',
     'show_sync_warning'))
-# The aspect profiles' layout (and aspect-fold-500's tail) are not signalled
-# on the wire; the receiver's settings must match the sender's.
+# Each packet's aspect code names its layout (the sender's fixed layout sets
+# the metadata screen bit), so Auto follows the sender. aspect-fold-500's
+# tail is not signalled; that setting must still match the sender's.
 ASPECT_OPTION_LABELS = {
-    'aspect_layout': {'auto': 'Auto · source aspect in each packet'},
+    'aspect_layout': {'auto': 'Auto · sender layout in each packet'},
     'aspect_tail': {
         'chroma': 'Chroma · rotating colour detail (V7)',
         'split': 'Split · 48 luma + 48 rotating chroma',
@@ -506,6 +508,9 @@ def _make_fields(receive_parser, device_choices, audio_output_choices=()):
         None, '4x', 'DCT reconstruction', 'choice',
         tuple((DCT_RECONSTRUCTION_LABELS[name], name)
               for name in DCT_RECONSTRUCTION_MODES)))
+    fields.append(OptionField(
+        None, 'off', 'Display grain', 'choice',
+        tuple((GRAIN_LABELS[name], name) for name in GRAIN_MODES)))
     return fields
 
 
@@ -676,6 +681,8 @@ class ReceiverGui:
         self.last_display_latency_label = None
         self.display_mode = 'nearest'
         self.dct_reconstruction = '4x'
+        self.grain_mode = 'off'
+        self.grain_seed = 0
         self.last_dct_viewport_size = None
         self.image_only = False
         self.image_only_previous_page = 'info'
@@ -1021,6 +1028,8 @@ class ReceiverGui:
                     self.display_mode = field.value
                 elif field.label == 'DCT reconstruction':
                     self.dct_reconstruction = field.value
+                elif field.label == 'Display grain':
+                    self.grain_mode = field.value
                 continue
             dest = action.dest
             if dest in ('help', 'mode', 'headless', 'fullscreen',
@@ -1191,6 +1200,9 @@ class ReceiverGui:
         elif field.label == 'DCT reconstruction':
             self.dct_reconstruction = value
             self.picture_dirty = True
+        elif field.label == 'Display grain':
+            self.grain_mode = value
+            self.picture_dirty = True
         self.notice = f'{field.label}: {self._field_value_label(field)}'
         self._update_runtime_option(field)
         if field.dest in ('device', 'audio_output_device', 'audio_muted',
@@ -1238,6 +1250,9 @@ class ReceiverGui:
                 self.display_menu_open = False
             elif field.label == 'DCT reconstruction':
                 self.dct_reconstruction = field.value
+                self.picture_dirty = True
+            elif field.label == 'Display grain':
+                self.grain_mode = field.value
                 self.picture_dirty = True
         self.notice = f'{field.label}: {self._field_value_label(field)}'
         self._update_runtime_option(field)
@@ -1925,7 +1940,8 @@ class ReceiverGui:
         for index, field in enumerate(self.fields):
             if (self.advanced_options or field.dest in BASIC_OPTION_DESTS or
                     field.label in ('Display upscaler',
-                                    'DCT reconstruction')):
+                                    'DCT reconstruction',
+                                    'Display grain')):
                 indexes.append(index)
         return indexes
 
@@ -2321,6 +2337,7 @@ class ReceiverGui:
         ui_texture = picture_texture = None
         plane_textures = []
         plane_texture_shapes = None
+        grain_texture = None
         kernel_textures = {}
         picture_texture_size = None
         picture_texture_mode = None
@@ -2359,7 +2376,7 @@ class ReceiverGui:
 
             def upload_picture(viewport_size=None):
                 nonlocal picture_texture, picture_texture_size
-                nonlocal plane_textures, plane_texture_shapes
+                nonlocal plane_textures, plane_texture_shapes, grain_texture
                 frame = self.current_frame
                 if frame is None:
                     return
@@ -2393,6 +2410,24 @@ class ReceiverGui:
                 else:
                     planes = float_planes(
                         frame.values, frame.shapes)
+                    if self.grain_mode != 'off':
+                        # Flat-area mask on the decoded luma grid; a new
+                        # grain pattern for each uploaded picture.
+                        mask = flat_area_mask(planes[0])
+                        mask_size = (mask.shape[1], mask.shape[0])
+                        if (grain_texture is None or
+                                grain_texture.size != mask_size):
+                            if grain_texture is not None:
+                                grain_texture.release()
+                            grain_texture = context.texture(
+                                mask_size, 1, mask.tobytes(), dtype='f4')
+                            grain_texture.filter = (moderngl.LINEAR,
+                                                    moderngl.LINEAR)
+                            grain_texture.repeat_x = False
+                            grain_texture.repeat_y = False
+                        else:
+                            grain_texture.write(mask.tobytes())
+                        self.grain_seed = (self.grain_seed+1) % 65536
                     if self.dct_reconstruction != 'off':
                         planes = dct_reconstruct_planes(
                             planes, self.dct_reconstruction, viewport_size)
@@ -2441,6 +2476,7 @@ class ReceiverGui:
                 float_program['plane_cb'].value = 1
                 float_program['plane_cr'].value = 2
                 float_program['kernel_lut'].value = 3
+                float_program['grain_mask'].value = 4
                 float_array = context.vertex_array(float_program, [])
 
             def kernel_texture_for(mode):
@@ -2475,6 +2511,12 @@ class ReceiverGui:
                 float_program['filtered_intermediate'].value = int(
                     self.display_mode in FILTER_PRECOMPUTE_MODES and
                     self.dct_reconstruction == 'off')
+                grain = self.grain_mode != 'off' and grain_texture is not None
+                if grain:
+                    grain_texture.use(location=4)
+                float_program['grain_amount'].value = (
+                    GRAIN_AMOUNT if grain else 0.0)
+                float_program['grain_seed'].value = int(self.grain_seed)
                 float_array.render(mode=moderngl.TRIANGLES, vertices=3)
 
             def next_event_timeout(now):
@@ -2700,6 +2742,8 @@ class ReceiverGui:
                 plane_texture.release()
             for kernel_texture in kernel_textures.values():
                 kernel_texture.release()
+            if grain_texture is not None:
+                grain_texture.release()
             if vertex_array is not None:
                 vertex_array.release()
             if float_array is not None:

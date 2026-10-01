@@ -138,6 +138,26 @@ class FoldCodec:
             raise ValueError('fold table does not round-trip')          # pragma: no cover
         return codec
 
+    # Model indices of the kept coefficients every packet carries; None means
+    # all of them. Profiles that send a fixed subset (mono) override it.
+    sent_model_indices = None
+
+    def sent_luma_mask(self):
+        """Luma-grid mask of the coefficients this table carries (kept + guests)."""
+        cached = getattr(self, '_sent_luma_mask', None)
+        if cached is not None:
+            return cached
+        luma = int(self.grid.off[1])
+        kept = (self.kept if self.sent_model_indices is None else
+                self.kept[np.asarray(self.sent_model_indices, dtype=int)])
+        mask = np.zeros(luma, dtype=bool)
+        mask[kept[kept < luma]] = True
+        guests = np.asarray(self.guests)
+        mask[guests[guests < luma]] = True
+        mask.setflags(write=False)
+        self._sent_luma_mask = mask
+        return mask
+
     def set_step(self, D):
         self.D = float(D)
         self.beta = .8*self.D/(2*U_CLIP)

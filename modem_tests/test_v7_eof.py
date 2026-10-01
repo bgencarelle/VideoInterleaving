@@ -135,15 +135,37 @@ class V7EOFTests(unittest.TestCase):
         self.assertEqual(len(results), FRAME_COUNT-1)
         self.assertEqual(info['eof_markers_validated'], FRAME_COUNT-1)
 
-    def test_eof_receiver_stops_at_a_damaged_interior_marker(self):
+    def test_damaged_interior_marker_falls_back_to_the_next_header(self):
         damaged = self.eof_wire.copy()
         second_end = 2*v7.PULSE_FRAME
         damaged[second_end-v7.EOF_MARKER_LENGTH:second_end] = 0
         results, info = v7.decode_pulse_stream(
             self.model, damaged, frame_boundary='eof')
 
-        self.assertEqual([result.counter for result in results], [1])
-        self.assertEqual(info['eof_markers_validated'], 1)
+        # The mark's end is the next packet's origin, so the intact next
+        # header witnesses the second packet instead.
+        self.assertEqual([result.counter for result in results],
+                         list(range(1, FRAME_COUNT+1)))
+        self.assertEqual(info['eof_markers_validated'], FRAME_COUNT-1)
+        self.assertEqual(info['next_header_witnesses'], 1)
+        decoded = v7.values_from(self.model, results[1].coeffs)
+        self.assertLess(float(np.sqrt(np.mean(
+            np.square(decoded-self.values)))), .10)
+
+    def test_packet_without_any_endpoint_is_held_and_decoding_resumes(self):
+        damaged = self.eof_wire.copy()
+        second_end = 2*v7.PULSE_FRAME
+        # The second packet's mark and the third packet's header are gone.
+        damaged[second_end-v7.EOF_MARKER_LENGTH:second_end+300] = 0
+        results, _info = v7.decode_pulse_stream(
+            self.model, damaged, frame_boundary='eof')
+
+        self.assertEqual(results[0].status, 'received')
+        # Either no endpoint is found, or the only one is a later packet's,
+        # which the body never reaches; the packet is held either way.
+        self.assertEqual(results[1].status, 'lost')
+        self.assertTrue(results[1].diag['held'])
+        self.assertEqual(results[-1].status, 'received')
 
     def test_truncated_marker_does_not_commit_final_packet(self):
         truncated = self.eof_wire[:-16]

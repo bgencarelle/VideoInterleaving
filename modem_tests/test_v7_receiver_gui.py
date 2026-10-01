@@ -495,6 +495,22 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         args = gui._build_arguments()
         self.assertEqual((args.aspect_layout, args.aspect_tail), ('4:3', 'luma'))
 
+    def test_display_grain_is_a_basic_display_choice_off_by_default(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser,
+                          (('test input device', 3),))
+        field = next(item for item in gui.fields
+                     if item.label == 'Display grain')
+        self.assertEqual(field.value, 'off')
+        self.assertEqual(gui.grain_mode, 'off')
+        basic = {gui.fields[index].label
+                 for index in gui._config_field_indexes()}
+        self.assertIn('Display grain', basic)
+        self.assertEqual([value for _label, value in field.options],
+                         ['off', 'flat'])
+        gui._adjust_field(field, 1)
+        self.assertEqual(gui.grain_mode, 'flat')
+        self.assertTrue(gui.picture_dirty)
+
     def test_save_directory_is_used_only_when_explicit(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser,
                           (('test input device', 3),))

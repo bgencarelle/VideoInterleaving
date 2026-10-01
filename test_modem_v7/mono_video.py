@@ -103,6 +103,7 @@ class MonoFreshFoldCodec(FoldCodec):
         # still in the fixed fresh prefix embed the next 500 corner ranks.
         host_rank = np.arange(*_HOST_RANKS, dtype=int)
         guest_rank = np.arange(*_GUEST_RANKS, dtype=int)
+        self.sent_model_indices = np.asarray(model.order[:FRESH_SLOTS], dtype=int)
         self.hosts = np.asarray(model.order[host_rank], dtype=int)
         self.guest_model_indices = np.asarray(model.order[guest_rank], dtype=int)
         self.guests = self.kept[self.guest_model_indices]
@@ -344,7 +345,8 @@ class MonoColourFoldCodec(FoldCodec):
         self.noise_max = .3
         self.grid = Grids(v7.V7_GRIDS)
         self.kept = self.grid.corner_positions(v7.V7_SHAPES)
-        _, hosts, guests = colour_fold_sets(model)
+        order, hosts, guests = colour_fold_sets(model)
+        self.sent_model_indices = np.asarray(order[:FRESH_SLOTS], dtype=int)
         self.hosts = np.asarray(hosts, dtype=int)
         self.guest_model_indices = np.asarray(guests, dtype=int)
         self.guests = self.kept[self.guest_model_indices]

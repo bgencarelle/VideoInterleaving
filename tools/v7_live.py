@@ -336,14 +336,81 @@ def _dct_preview_image(rgb, brightness, gamma):
     return image.point(table*3)
 
 
+def _wire_index(counter):
+    """Live source index for packet ``counter`` (1-based), wrapping at the
+    metadata's 15-bit field instead of failing after about 44 minutes."""
+    return (int(counter)-1) % (P.MAX_SOURCE_INDEX+1)
+
+
+def _fit_to_aspect(frame, aspect_code):
+    """Pillar- or letterbox ``frame`` into V7 aspect ``aspect_code``.
+
+    The result keeps the frame's pixel size (and capture metadata) but now
+    stands for the target ratio: the picture keeps its own ratio inside a
+    black frame. Used when the sender fixes the aspect layout, so the packet's
+    aspect code can name the layout (the metadata screen bit) and the receiver
+    still shows an undistorted picture.
+    """
+    source_size = getattr(frame, 'source_size', None)
+    rgb = frame.rgb if source_size is not None else frame
+    image = (rgb.convert('RGB') if isinstance(rgb, Image.Image) else
+             Image.fromarray(np.ascontiguousarray(np.asarray(rgb, np.uint8)),
+                             'RGB'))
+    width, height = image.size
+    ratio = (source_size[0]/source_size[1] if source_size else width/height)
+    target = float(P.V7_ASPECT_RATIOS[int(aspect_code) & 7])
+    box = (max(1, round(width*min(1.0, ratio/target))),
+           max(1, round(height*min(1.0, target/ratio))))
+    fitted = Image.new('RGB', (width, height))
+    if box != (width, height):
+        image = image.resize(box, Image.Resampling.BOX)
+    fitted.paste(image, ((width-box[0])//2, (height-box[1])//2))
+    out = fitted if isinstance(rgb, Image.Image) else np.asarray(fitted)
+    if source_size is None:
+        return out
+    from dataclasses import replace
+    return replace(frame, rgb=out)
+
+
 def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0,
             perceptual_resize='off', perceptual_detail_strength=0.25,
-            dct_encode=False, dct_options=None, return_resized=False):
+            dct_encode=False, dct_options=None, return_resized=False,
+            fit_aspect=None):
+    """(values, aspect code[, preview]) for one source frame.
+
+    With ``fit_aspect`` (a V7 aspect code: the sender's fixed aspect layout)
+    the picture is boxed into that ratio first and the returned code carries
+    P.ASPECT_SCREEN, which sets the metadata screen bit.
+    """
+    if fit_aspect is None:
+        return _picture_values(model, frame, encode_filter, brightness, gamma,
+                               perceptual_resize, perceptual_detail_strength,
+                               dct_encode, dct_options, return_resized)
+    out = _picture_values(model, _fit_to_aspect(frame, fit_aspect),
+                          encode_filter, brightness, gamma, perceptual_resize,
+                          perceptual_detail_strength, dct_encode, dct_options,
+                          return_resized)
+    return (out[0], (int(fit_aspect) & 7) | P.ASPECT_SCREEN) + tuple(out[2:])
+
+
+def _picture_values(model, frame, encode_filter='nearest', brightness=1.05,
+                    gamma=1.0, perceptual_resize='off',
+                    perceptual_detail_strength=0.25, dct_encode=False,
+                    dct_options=None, return_resized=False):
     _validate_tone_controls(brightness, gamma)
     source_size = getattr(frame, 'source_size', None)
     capture_prepared = bool(getattr(frame, 'prepared', False))
     if source_size is not None:
         frame = frame.rgb
+    if dct_encode and not capture_prepared and perceptual_resize == 'off':
+        # The direct encode needs at least the coder grid; a smaller frame
+        # (a zoomed-in mouse-follow crop) is prepared by Box resize instead.
+        frame_size = (frame.size if isinstance(frame, Image.Image) else
+                      np.shape(frame)[1::-1])
+        rows, cols = (max(axis) for axis in zip(*model.coder.grids))
+        if frame_size[0] < cols or frame_size[1] < rows:
+            dct_encode = False
+            encode_filter = 'box'
     if dct_encode:
         if perceptual_resize != 'off':
             raise ValueError('--dct-encode cannot be combined with --perceptual-resize')
@@ -731,6 +798,10 @@ def _run_send_session(args):
         if not getattr(args, 'eof_marker', True):
             raise ValueError('aspect-fold-500 requires the EOF marker')
     profile_slots = 500 if (mono_fold_profile or aspect_profile) else slots
+    clip_aware = bool(getattr(args, 'clip_aware_encode', False))
+    if clip_aware and not (fold is not None or mono_fold_profile or
+                           aspect_profile):
+        raise ValueError('--clip-aware-encode requires a folded profile')
     args.encode_filter, args.brightness = _send_profile(args, profile_slots)
     dct_options = _dct_encode_options(args)
     tone_controls = LiveToneControls(args.brightness, args.gamma)
@@ -826,13 +897,40 @@ def _run_send_session(args):
         started = time.monotonic()
         args._sender_started_at = started
 
+    # A fixed aspect layout is signalled, not matched by hand: its code goes
+    # in every packet with the screen bit and the picture is boxed into it.
+    fit_aspect = None
+    for layout_wire in (aspect_wire, mono_wire):
+        layout = getattr(layout_wire, 'layout', None)
+        if layout not in (None, 'auto'):
+            fit_aspect = P.V7_ASPECT_NAMES.index(layout)
+
+    def clip_aware_values(value, aspect_code):
+        """Fit one frame's sent luma to the receiver's clip (see v7_source_dct)."""
+        from animation_modem.v7_source_dct import clip_aware_luma
+        if mono_wire is not None:
+            codec = mono_wire._codec(mono_wire._packet_model(model, aspect_code))
+        elif aspect_wire is not None:
+            layout = aspect_wire.layout_for(aspect_code)
+            if layout is None:
+                return value
+            codec = aspect_wire.codec(aspect_wire.model_for(model, layout))
+        else:
+            codec = fold.codec(model)
+        return clip_aware_luma(value, codec.grid.grids[0],
+                               codec.sent_luma_mask())
+
     def encode_batch(frames, aspects, counter):
         values = np.asarray(frames)
+        if clip_aware:
+            values = np.asarray([clip_aware_values(value, aspects[index])
+                                 for index, value in enumerate(values)])
         if mono_wire is not None:
             audio = mono_wire.encode(
                 model, values, start_counter=counter,
                 aspect_codes=aspects,
-                source_indices=[counter+i-1 for i in range(len(values))],
+                source_indices=[_wire_index(counter+i)
+                                for i in range(len(values))],
                 eof_marker=True)
         elif aspect_wire is not None:
             packets = []
@@ -841,7 +939,8 @@ def _run_send_session(args):
                     model, value, aspects[index])
                 packets.append(_encode_pulse_frame_coeffs(
                     packet_model, coeffs, counter+index,
-                    aspect_code=aspects[index], source_index=counter+index-1,
+                    aspect_code=aspects[index],
+                    source_index=_wire_index(counter+index),
                     eof_marker=getattr(args, 'eof_marker', True),
                     pulse_profile_code=aspect_wire.pulse_profile_code))
             audio = _add_coded_pilots(np.concatenate(packets), counter,
@@ -854,7 +953,7 @@ def _run_send_session(args):
                 _encode_pulse_frame_coeffs(
                     model, fold.encode_coefficients(model, value),
                     counter+index, aspect_code=aspects[index],
-                    source_index=counter+index-1,
+                    source_index=_wire_index(counter+index),
                     eof_marker=getattr(args, 'eof_marker', True),
                     pulse_profile_code=pulse_profile_code)
                 for index, value in enumerate(values)])
@@ -862,6 +961,8 @@ def _run_send_session(args):
         else:
             audio = P.encode_pulse_stream(
                 model, values, start_counter=counter, aspect_codes=aspects,
+                source_indices=[_wire_index(counter+i)
+                                for i in range(len(values))],
                 pilot_tones=getattr(args, 'pilot_tones', True),
                 eof_marker=getattr(args, 'eof_marker', True))
         report_stats = args.log and not args.no_log
@@ -963,7 +1064,8 @@ def _run_send_session(args):
                     getattr(args, 'perceptual_detail_strength', 0.25),
                     dct_encode=getattr(args, 'dct_encode', False),
                     dct_options=dct_options,
-                    return_resized=image_preview_port is not None)
+                    return_resized=image_preview_port is not None,
+                    fit_aspect=fit_aspect)
                 if image_preview_port is not None:
                     value, aspect, resized_preview = processed
                     preview_images.append((source_preview, resized_preview))
@@ -2334,6 +2436,7 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
              'playback_direction': None, 'direction_candidate': None,
              'direction_streak': 0,
              'pulse': None, 'aspect': 0, 'aspect_candidate': 0,
+             'aspect_screen': False,
               'aspect_streak': 0, 'input_samples': 0, 'started': time.monotonic(),
               'wire_profile': (adaptive_profile.profile_name
                                if adaptive_profile is not None else None),
@@ -2596,7 +2699,9 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
                 f'{meter["audio_output_device"] or "output off"} · '
                 f'volume {meter["audio_volume"]:.2f}'),
             'signal': (
-                f'aspect {aspect}  ·  candidate {candidate} ×{meter["aspect_streak"]}',
+                f'aspect {aspect}'
+                f'{" (sender layout)" if meter.get("aspect_screen") else ""}'
+                f'  ·  candidate {candidate} ×{meter["aspect_streak"]}',
                 (f'wire {meter["wire_profile"] or "--"}' +
                  (f' · candidate {meter["profile_candidate"]} '
                   f'×{meter["profile_streak"]}/3'
@@ -3158,6 +3263,9 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
                 meter['max_index'] = loop.frames - 1
                 meter['loop'] = loop
             candidate = result.diag.get('aspect_code', meter['aspect'])
+            if result.diag.get('metadata_valid'):
+                meter['aspect_screen'] = bool(
+                    result.diag.get('aspect_screen', False))
             if (result.status in ('received', 'verified') and
                     (result.diag.get('pulse_confidence') or 0) >= .45):
                 if candidate == meter['aspect']:
@@ -3390,9 +3498,13 @@ def parser():
                       help='explicit sounddevice output, e.g. BlackHole 2ch')
     send.add_argument('--fixture', type=Path, default=DEFAULT_FIXTURE,
                       help=argparse.SUPPRESS)
-    send.add_argument('--encode-filter', choices=('nearest', 'box', 'lanczos', 'bicubic'),
+    send.add_argument('--encode-filter', choices=('nearest', 'box'),
                       default=None,
                       help=argparse.SUPPRESS)
+    send.add_argument(
+        '--clip-aware-encode', action='store_true',
+        help=('re-fit the sent luma coefficients so ringing falls into the '
+              'receiver\'s black/white clip (sender only; folded profiles)'))
     source_path = send.add_mutually_exclusive_group()
     source_path.add_argument('--dct-encode', action='store_true',
                              help='analyze the unprepared RGB source in the V7 DCT domain')
