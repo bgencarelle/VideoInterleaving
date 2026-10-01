@@ -178,6 +178,42 @@ class AspectLayoutTests(unittest.TestCase):
                                       reference.lam[sent])
         np.testing.assert_array_equal(wire.tail_prior(model, '16:9'), model.mu)
 
+    def test_live_receiver_decodes_every_tail_mode_as_a_stream(self):
+        import tone_code
+        base = v7.load_model(TARGET, 'box')
+        values = v7_live._values(base, _text_frame(), 'box', brightness=1.0)[0]
+        for tail in TAIL_MODES:
+            wire = AspectFoldWire('auto', tail)
+            model, coeffs = wire.encode_coefficients(base, values, 3)
+            audio = np.concatenate([tone_code.add_tone_code(
+                v7.encode_pulse_frame_coeffs(
+                    model, coeffs, counter, aspect_code=3,
+                    source_index=counter-1, pilot_tones=False, eof_marker=True,
+                    pulse_profile_code=wire.pulse_profile_code),
+                counter, tone_code.encode_status(wire.status_mode))
+                for counter in range(1, 6)]).astype(np.float32)
+            profile = v7_live._AdaptiveProfileDecoder(
+                v7_live._experimental_fold(500), base, aspect_tail=tail)
+            profile.install()
+            try:
+                with tone_code.coded_pilot_timing():
+                    profile.active_mode = profile.dispatch_mode = (
+                        profile.aspect_mode)
+                    # The receiver's own state: shared tail memory on.
+                    results = v7.decode_pulse_stream(
+                        base, audio, state=v7.PulseState(),
+                        sample_rate=v7.RATE, pilot_timing='tone-seeded',
+                        frame_boundary='eof')[0]
+            finally:
+                profile.uninstall()
+            good = [result for result in results if result.status != 'lost']
+            with self.subTest(tail=tail):
+                self.assertGreaterEqual(len(good), 3)
+                self.assertEqual(good[-1].diag['aspect_tail'], tail)
+                shown = profile.values(base, good[-1])
+                self.assertEqual(shown.shape, values.shape)
+                self.assertLess(float(np.mean((shown-values)[:96*80]**2)), .02)
+
     def test_mismatched_layouts_have_distinct_fold_signatures(self):
         base = v7.load_model(TARGET, 'box')
         identities = set()

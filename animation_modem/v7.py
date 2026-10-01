@@ -556,6 +556,11 @@ class TailStore:
         return np.where(self._age <= self.max_age, self._values, model.mu)
 
     def update(self, model, coeffs, tail_slice):
+        if len(coeffs) != len(model.mu):
+            # A wire profile decoded this packet with its own coefficient
+            # layout (and keeps its own tail memory); they are not this
+            # model's coefficients.
+            return
         if self._values is None or self._encoding != model.encoding_type:
             self._encoding = model.encoding_type
             self._values = model.mu.astype(float).copy()
