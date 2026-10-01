@@ -154,6 +154,20 @@ class EdgeReconstructionTests(unittest.TestCase):
                 self.assertLess(float(np.mean(np.abs(rebuilt-target))),
                                 .85*float(np.mean(np.abs(plain-target))))
 
+    def test_strength_mixes_with_the_plain_picture_and_keeps_coefficients(self):
+        decoded, _ = _bars_plane()
+        full = edge_consistent_plane(decoded)
+        np.testing.assert_allclose(edge_consistent_plane(decoded, strength=0),
+                                   decoded, atol=1e-5)
+        half = edge_consistent_plane(decoded, strength=.5)
+        np.testing.assert_allclose(half, .5*full+.5*decoded, atol=1e-5)
+        received = dctn(decoded.astype(np.float64), norm='ortho')[:48, :40]
+        kept = dctn(half.astype(np.float64), norm='ortho')[:48, :40]
+        np.testing.assert_allclose(kept, received,
+                                   atol=1e-3*float(np.abs(received).max()))
+        with self.assertRaisesRegex(ValueError, 'strength'):
+            edge_consistent_plane(decoded, strength=1.5)
+
     def test_flat_planes_stay_flat(self):
         flat = np.full((96, 80), .25, dtype=np.float32)
         np.testing.assert_allclose(edge_consistent_plane(flat), .25, atol=1e-4)

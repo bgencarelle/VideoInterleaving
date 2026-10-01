@@ -34,6 +34,8 @@ from tools.v7_gl_viewer import (DISPLAY_LABELS, DISPLAY_MODES,
                                 FLOAT_FRAGMENT_SHADER, FLOAT_MODE_IDS,
                                 FRAGMENT_SHADER, GRAIN_AMOUNT, GRAIN_LABELS,
                                 GRAIN_MODES, EDGE_LABELS, EDGE_MODES,
+                                EDGE_STRENGTHS, EDGE_STRENGTH_LABELS,
+                                RECOMMENDED_EDGE_STRENGTH,
                                 RECOMMENDED_DCT_RECONSTRUCTION,
                                 RECOMMENDED_DISPLAY_MODE,
                                 RECOMMENDED_EDGE_MODE, VERTEX_SHADER,
@@ -187,6 +189,7 @@ ASPECT_OPTION_LABELS = {
         'chroma': 'Chroma · rotating colour detail (V7)',
         'split': 'Split · 48 luma + 48 rotating chroma',
         'luma': 'Luma · 96 luma every packet',
+        'fixed': 'Fixed · 96 colour every packet, no rotation · best for motion',
     },
 }
 HIDDEN_DECODE_OPTIONS = frozenset((
@@ -518,6 +521,10 @@ def _make_fields(receive_parser, device_choices, audio_output_choices=()):
     fields.append(OptionField(
         None, RECOMMENDED_EDGE_MODE, 'Edge reconstruction', 'choice',
         tuple((EDGE_LABELS[name], name) for name in EDGE_MODES)))
+    fields.append(OptionField(
+        None, RECOMMENDED_EDGE_STRENGTH, 'Edge strength', 'choice',
+        tuple((EDGE_STRENGTH_LABELS[value], value)
+              for value in EDGE_STRENGTHS)))
     return fields
 
 
@@ -690,6 +697,7 @@ class ReceiverGui:
         self.dct_reconstruction = RECOMMENDED_DCT_RECONSTRUCTION
         self.grain_mode = 'off'
         self.edge_mode = RECOMMENDED_EDGE_MODE
+        self.edge_strength = RECOMMENDED_EDGE_STRENGTH
         self.grain_seed = 0
         self.last_dct_viewport_size = None
         self.image_only = False
@@ -1040,6 +1048,8 @@ class ReceiverGui:
                     self.grain_mode = field.value
                 elif field.label == 'Edge reconstruction':
                     self.edge_mode = field.value
+                elif field.label == 'Edge strength':
+                    self.edge_strength = field.value
                 continue
             dest = action.dest
             if dest in ('help', 'mode', 'headless', 'fullscreen',
@@ -1216,6 +1226,9 @@ class ReceiverGui:
         elif field.label == 'Edge reconstruction':
             self.edge_mode = value
             self.picture_dirty = True
+        elif field.label == 'Edge strength':
+            self.edge_strength = value
+            self.picture_dirty = True
         self.notice = f'{field.label}: {self._field_value_label(field)}'
         self._update_runtime_option(field)
         if field.dest in ('device', 'audio_output_device', 'audio_muted',
@@ -1269,6 +1282,9 @@ class ReceiverGui:
                 self.picture_dirty = True
             elif field.label == 'Edge reconstruction':
                 self.edge_mode = field.value
+                self.picture_dirty = True
+            elif field.label == 'Edge strength':
+                self.edge_strength = field.value
                 self.picture_dirty = True
         self.notice = f'{field.label}: {self._field_value_label(field)}'
         self._update_runtime_option(field)
@@ -1958,7 +1974,8 @@ class ReceiverGui:
                     field.label in ('Display upscaler',
                                     'DCT reconstruction',
                                     'Display grain',
-                                    'Edge reconstruction')):
+                                    'Edge reconstruction',
+                                    'Edge strength')):
                 indexes.append(index)
         return indexes
 
@@ -2450,7 +2467,8 @@ class ReceiverGui:
                             self.edge_mode != 'off'):
                         planes = dct_reconstruct_planes(
                             planes, self.dct_reconstruction, viewport_size,
-                            edge=self.edge_mode)
+                            edge=self.edge_mode,
+                            edge_strength=self.edge_strength)
                     if (self.display_mode in FILTER_PRECOMPUTE_MODES and
                             self.dct_reconstruction == 'off'):
                         planes = resample_filter_planes(

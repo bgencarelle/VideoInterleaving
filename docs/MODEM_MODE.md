@@ -232,7 +232,10 @@ sender change; natural texture can look slightly smoothed. Numba, one thread:
 **On** works on the coder grid with four rounds (about 2 ms per new picture),
 **High** at twice the grid (about 7 ms). Real modem with luma adjustment,
 clean channel, SSIMULACRA2 over no reconstruction (cartoon / robot and test
-card / photos): On +2.7 / +1.2 / +1.6, High +3.1 / +1.4 / +2.7. Through the real modem with sender luma
+card / photos): On +2.7 / +1.2 / +1.6, High +3.1 / +1.4 / +2.7. **Edge
+strength** (75% by default) mixes the rebuild with the plain picture; lower
+it if pictures look painted, raise it to 100% for flat-shaded animation
+(photos score best at 50–75%, cartoons at 100%). Through the real modem with sender luma
 adjustment, SSIMULACRA2 against no processing: clean cartoon +6.0, robot/test
 card +10.8, photos +4.0; edge reconstruction alone adds 0.4–2.3. It selects an explicit input and
 can optionally pass the non-video channel to an explicitly selected output
@@ -290,7 +293,13 @@ One setting is not signalled and must match on both ends:
   is V7's rotating chroma tail (the lowest-ranked 656 coefficients are all
   chroma); `split` sends 48 extra luma frequencies in every packet plus 48
   rotating chroma; `luma` sends 96 extra luma frequencies in every packet and
-  drops the 96 weakest chroma ones.
+  drops the 96 weakest chroma ones; `fixed` sends the 96 strongest tail
+  colour values in every packet with no rotation, so nothing shown is older
+  than the current packet. Use `fixed` for moving pictures: with one new
+  picture per packet through the real modem it scores +1 to +16 SSIMULACRA2
+  over `chroma` (whose rotating colour is up to 7 packets old and shows as
+  dark ghost bands in saturated areas); a held still on a clean channel loses
+  2–4.
 
 The sender GUI shows both under **Advanced** when the profile is selected; the
 receiver GUI shows them under advanced options. Tables are frozen in

@@ -50,6 +50,7 @@ ASPECT_TAIL_CHOICES = (
     ('Chroma · rotating colour detail (V7)', 'chroma'),
     ('Split · 48 luma + 48 rotating chroma', 'split'),
     ('Luma · 96 luma every packet', 'luma'),
+    ('Fixed · 96 colour every packet, no rotation · best for motion', 'fixed'),
 )
 PRIMARY_PROFILE_CHOICES = PROFILE_CHOICES
 SOURCE_AUDIO_CHOICES = (

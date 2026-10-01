@@ -526,6 +526,13 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertTrue(gui.picture_dirty)
         gui._adjust_field(field, 1)
         self.assertEqual(gui.edge_mode, 'off')
+        strength = next(item for item in gui.fields
+                        if item.label == 'Edge strength')
+        self.assertEqual((strength.value, gui.edge_strength), (.75, .75))
+        self.assertIn('Edge strength', {gui.fields[index].label for index
+                                        in gui._config_field_indexes()})
+        gui._adjust_field(strength, 1)
+        self.assertEqual(gui.edge_strength, .5)
 
     def test_save_directory_is_used_only_when_explicit(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser,

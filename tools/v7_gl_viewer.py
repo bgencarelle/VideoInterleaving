@@ -77,6 +77,17 @@ EDGE_LABELS = {'on': 'Consistent · sharp edges, no ripple · recommended',
 RECOMMENDED_DISPLAY_MODE = 'bicubic'
 RECOMMENDED_DCT_RECONSTRUCTION = '4x'
 RECOMMENDED_EDGE_MODE = 'on'
+# Edge strength: how much of the edge reconstruction is mixed into the plain
+# picture. Full strength suits flat-shaded pictures and looks painted on
+# natural texture. Real modem, SSIMULACRA2 over no reconstruction at 25 / 50 /
+# 75 / 100 %: clean cartoon +0.8 / +1.6 / +2.2 / +2.7, photos +1.1 / +1.7 /
+# +1.9 / +1.6; MP3 320 cartoon +0.3 / +0.5 / +0.7 / +0.9, photos +0.3 / +0.4
+# / +0.3 / -0.2.
+EDGE_STRENGTHS = (1.0, .75, .5, .25)
+EDGE_STRENGTH_LABELS = {1.0: '100% · flattest, sharpest',
+                        .75: '75% · recommended',
+                        .5: '50%', .25: '25% · most natural texture'}
+RECOMMENDED_EDGE_STRENGTH = .75
 GRAIN_AMOUNT = 0.024            # triangular +-amount; sigma = amount/sqrt(6)
 GRAIN_FLAT_SIGMA = 1.2          # luma grid samples
 GRAIN_FLAT_CONTRAST = 0.06      # local luma s.d. (code units) that stops grain
@@ -258,7 +269,8 @@ def flat_area_mask(luma):
         np.clip(1.0-deviation/GRAIN_FLAT_CONTRAST, 0.0, 1.0), dtype=np.float32)
 
 
-def dct_reconstruct_planes(planes, mode, viewport_size=None, edge=False):
+def dct_reconstruct_planes(planes, mode, viewport_size=None, edge=False,
+                           edge_strength=1.0):
     """Resample decoded planes by evaluating their retained DCT spectrum.
 
     The input planes are already spatial-domain inverse-DCT output. Transforming
@@ -270,7 +282,8 @@ def dct_reconstruct_planes(planes, mode, viewport_size=None, edge=False):
     With ``edge`` ('on', 'high' or True for 'on') the luma plane is first
     rebuilt by consistent reconstruction (EDGE_MODES); output sizes are
     unchanged except that with ``mode`` 'off' and 'high' the luma comes back at
-    twice its grid.
+    twice its grid. ``edge_strength`` (0 to 1) mixes that rebuild with the
+    plain picture.
     """
     if mode not in DCT_RECONSTRUCTION_MODES:
         raise ValueError(f'unknown DCT reconstruction mode {mode!r}')
@@ -288,7 +301,8 @@ def dct_reconstruct_planes(planes, mode, viewport_size=None, edge=False):
                                                     reconstruct_plane,
                                                     viewport_shapes)
         luma = edge_consistent_plane(
-            planes[0], **(EDGE_HIGH if edge == 'high' else {}))
+            planes[0], strength=edge_strength,
+            **(EDGE_HIGH if edge == 'high' else {}))
         if mode == 'off':
             return (luma,) + planes[1:]
         if mode == 'viewport':

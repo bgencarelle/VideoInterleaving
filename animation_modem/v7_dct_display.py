@@ -260,11 +260,15 @@ def _edge_rounds(x, values, known, analysis, synthesis_rows, rounds, inner,
 
 
 def edge_consistent_plane(plane, factor=EDGE_FACTOR, rounds=EDGE_ROUNDS,
-                          inner=EDGE_INNER, weight=EDGE_WEIGHT, trust=1.0):
+                          inner=EDGE_INNER, weight=EDGE_WEIGHT, trust=1.0,
+                          strength=1.0):
     """A decoded plane rebuilt ``factor`` times larger by consistent
     reconstruction (see above). The received coefficients are those of the
     plane's spectral support above the rounding floor; their values are kept
-    exactly. Returns float32, ``factor`` x the plane's shape."""
+    exactly. ``strength`` (0 to 1) mixes the result with the plain
+    reconstruction: both hold the received coefficients, so every mix does
+    too; lower values keep more of the natural texture and more of the
+    ripple. Returns float32, ``factor`` x the plane's shape."""
     plane = np.asarray(plane, dtype=np.float64)
     if plane.ndim != 2 or min(plane.shape) <= 0:
         raise ValueError('edge reconstruction needs a non-empty 2-D plane')
@@ -281,9 +285,20 @@ def edge_consistent_plane(plane, factor=EDGE_FACTOR, rounds=EDGE_ROUNDS,
     values = np.ascontiguousarray(block*factor, dtype=np.float32)
     analysis = _basis(height, rows)
     synthesis_rows = _basis_rows(width, cols)
+    strength = float(strength)
+    if not 0.0 <= strength <= 1.0:
+        raise ValueError('edge reconstruction strength must be from 0 to 1')
     x = _synthesize(analysis, np.where(known, values, 0).astype(np.float32),
                     synthesis_rows)
-    return _edge_rounds(x, values, np.ascontiguousarray(known), analysis,
-                        synthesis_rows, int(rounds), int(inner), float(weight),
-                        float(trust))
+    if strength == 0.0:
+        return x
+    plain = x.copy() if strength < 1.0 else None
+    x = _edge_rounds(x, values, np.ascontiguousarray(known), analysis,
+                     synthesis_rows, int(rounds), int(inner), float(weight),
+                     float(trust))
+    if plain is not None:
+        x *= np.float32(strength)
+        plain *= np.float32(1.0-strength)
+        x += plain
+    return x
 

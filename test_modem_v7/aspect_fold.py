@@ -37,6 +37,11 @@ Tail modes (the 96 tail slots of each packet):
   48 chroma slots rotating (336 over 7 packets).
 - luma: 96 extra luma frequencies in every packet; chroma is only what the
   head and body carry (~304 in all).
+- fixed: the 96 strongest of the chroma tail's 656 coefficients in every
+  packet, no rotation; the other 560 are not sent. Everything shown is from
+  the current packet, so moving pictures have no stale colour (real modem,
+  one new picture per packet, SSIMULACRA2 against chroma: +1 to +16; a held
+  still on a clean channel loses 2-4). Derived from the frozen chroma tables.
 
     python test_modem_v7/aspect_fold.py build     # rebuild and print the pin
 """
@@ -63,8 +68,11 @@ FOLD_SLOTS = 500
 SIGNATURE_SLOTS = 16
 TABLE_FORMAT = 'v7-aspect-fold-1'
 # Tail mode -> luma slots fixed in every packet's 96 tail slots.
-TAIL_LUMA_SLOTS = {'chroma': 0, 'split': 48, 'luma': 96}
+TAIL_LUMA_SLOTS = {'chroma': 0, 'split': 48, 'luma': 96, 'fixed': 0}
 TAIL_MODES = tuple(TAIL_LUMA_SLOTS)
+FROZEN_TAIL_MODES = ('chroma', 'split', 'luma')
+# Tail mode -> tail slots that carry the same coefficients in every packet.
+TAIL_FIXED_SLOTS = {'chroma': 0, 'split': 48, 'luma': 96, 'fixed': 96}
 EXTRA_LUMA = max(TAIL_LUMA_SLOTS.values())
 # (name, width, height). Names are the CLI/GUI values.
 LAYOUTS = (('1:1', 1, 1), ('4:3', 4, 3), ('3:2', 3, 2), ('16:9', 16, 9),
@@ -222,7 +230,7 @@ def build(_args=None):
     phase = v7._frozen_tables()['phase']
     arrays = {}
     for layout in LAYOUT_NAMES:
-        for tail in TAIL_MODES:
+        for tail in FROZEN_TAIL_MODES:
             for key, value in _mode_tables(layout, tail, curves, phase).items():
                 arrays[f'{_slug(layout)}/{tail}/{key}'] = np.asarray(value)
     buffer = io.BytesIO()
@@ -230,7 +238,7 @@ def build(_args=None):
     blob = buffer.getvalue()
     TABLES.write_bytes(blob)
     digest = hashlib.sha256(blob).hexdigest()
-    print(f"{TABLES.name}: {len(LAYOUT_NAMES)} layouts x {len(TAIL_MODES)} tails; pin TABLES_SHA256 = '{digest}'")
+    print(f"{TABLES.name}: {len(LAYOUT_NAMES)} layouts x {len(FROZEN_TAIL_MODES)} tails; pin TABLES_SHA256 = '{digest}'")
     return digest
 
 
@@ -246,7 +254,26 @@ def _frozen():
         return {key: data[key].copy() for key in data.files}
 
 
+def _fixed_tail_tables(tables):
+    """The chroma-tail tables cut to what one packet carries: head, body and
+    the 96 strongest tail coefficients, which then ride in every packet."""
+    order = np.asarray(tables['order'])
+    sent = order[:v7.BODY_END+v7.TAIL_PER]
+    keep = np.sort(sent)
+    index = np.full(len(order), -1, dtype=np.int64)
+    index[keep] = np.arange(len(keep))
+    out = {key: np.asarray(tables[key])[keep]
+           for key in ('positions', 'mu', 'lam', 'gain')}
+    out.update(order=index[sent], guests=tables['guests'],
+               guest_lam=tables['guest_lam'],
+               tail_luma_slots=np.int64(v7.TAIL_PER),
+               unit_rms=tables['unit_rms'])
+    return out
+
+
 def layout_tables(layout, tail):
+    if tail == 'fixed':
+        return _fixed_tail_tables(layout_tables(layout, 'chroma'))
     frozen = _frozen()
     prefix = f'{_slug(layout)}/{tail}/'
     tables = {key[len(prefix):]: value for key, value in frozen.items()
@@ -425,7 +452,7 @@ class AspectFoldWire:
     # -------------------------------------------------------------- receiver
     @property
     def rotates(self):
-        return TAIL_LUMA_SLOTS[self.tail] < v7.TAIL_PER
+        return TAIL_FIXED_SLOTS[self.tail] < v7.TAIL_PER
 
     def tail_prior(self, model, layout):
         """Previous-packet coefficients for the rotating tail (own store)."""

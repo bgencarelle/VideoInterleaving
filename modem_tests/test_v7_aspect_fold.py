@@ -129,7 +129,9 @@ class AspectLayoutTests(unittest.TestCase):
         for layout in LAYOUT_NAMES:
             for tail in TAIL_MODES:
                 tables = layout_tables(layout, tail)
-                self.assertEqual(len(tables['positions']), sum(PLANE_COUNTS))
+                self.assertEqual(len(tables['positions']),
+                                 v7.BODY_END+v7.TAIL_PER if tail == 'fixed'
+                                 else sum(PLANE_COUNTS))
 
     def test_tail_modes_keep_head_and_body_and_fill_the_tail(self):
         base = v7.load_model(TARGET, 'box')
@@ -155,6 +157,26 @@ class AspectLayoutTests(unittest.TestCase):
                 self.assertEqual(len(seen), expected)
                 codec = wire.codec(model)
                 self.assertTrue(np.all(plane[codec.hosts] == 0))
+
+    def test_fixed_tail_sends_the_same_coefficients_in_every_packet(self):
+        base = v7.load_model(TARGET, 'box')
+        wire = AspectFoldWire('16:9', 'fixed')
+        model = wire.model_for(base, '16:9')
+        chroma = AspectFoldWire('16:9', 'chroma')
+        reference = chroma.model_for(base, '16:9')
+        self.assertFalse(wire.rotates)
+        self.assertTrue(chroma.rotates)
+        self.assertEqual(len(model.order), v7.BODY_END+v7.TAIL_PER)
+        for ranks in model.rank_tables[1:]:
+            np.testing.assert_array_equal(ranks, model.rank_tables[0])
+        # Exactly what the chroma tail's first packet carries, same statistics.
+        sent = reference.order[:v7.BODY_END+v7.TAIL_PER]
+        positions = np.asarray(reference.coder.positions)[sent]
+        np.testing.assert_array_equal(
+            np.asarray(model.coder.positions)[model.order], positions)
+        np.testing.assert_array_equal(model.lam[model.order],
+                                      reference.lam[sent])
+        np.testing.assert_array_equal(wire.tail_prior(model, '16:9'), model.mu)
 
     def test_mismatched_layouts_have_distinct_fold_signatures(self):
         base = v7.load_model(TARGET, 'box')

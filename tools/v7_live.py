@@ -3513,7 +3513,7 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
 
 ASPECT_LAYOUT_CHOICES = ('auto', '1:1', '4:3', '3:2', '16:9', '3:4', '2:3',
                          '9:16')
-ASPECT_TAIL_CHOICES = ('chroma', 'split', 'luma')
+ASPECT_TAIL_CHOICES = ('chroma', 'split', 'luma', 'fixed')
 
 
 def _add_aspect_arguments(sub):
@@ -3526,8 +3526,9 @@ def _add_aspect_arguments(sub):
         '--aspect-tail', choices=ASPECT_TAIL_CHOICES, default='chroma',
         help=('aspect-fold-500: what the 96 tail slots carry: chroma (rotating '
               'fine colour, V7 default), split (48 luma every packet + 48 '
-              'rotating chroma) or luma (96 luma every packet). Sender and '
-              'receiver must agree.'))
+              'rotating chroma), luma (96 luma every packet) or fixed (the 96 '
+              'strongest tail colour values every packet, no rotation: best '
+              'for moving pictures). Sender and receiver must agree.'))
 
 
 def parser():
