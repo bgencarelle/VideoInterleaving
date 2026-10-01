@@ -137,3 +137,293 @@ def reconstruct_planes(planes, viewport_size):
     shapes = tuple(np.shape(plane) for plane in planes)
     return tuple(reconstruct_plane(plane, shape) for plane, shape in zip(
         planes, viewport_shapes(shapes, viewport_size)))
+
+
+# ------------------------------------------------------------- edge-consistent
+# Consistent reconstruction (Gerchberg-Papoulis with a total-variation prior):
+# the receiver looks for the picture with the sharpest, flattest regions whose
+# DCT still equals exactly the coefficients it received. It alternates a short
+# Chambolle TV (ROF) denoise, the black/white clip, and putting the received
+# coefficients back, on a working grid EDGE_FACTOR times the coder grid. The
+# transmitted information is unchanged; the missing high frequencies are filled
+# in to suit flat-shaded pictures (ringing and the dotted ripple go away, edges
+# sharpen). Clean-channel simulation, today's budget, SSIMULACRA2: cartoon
+# +4.6, robot/test card +6.4, photos +4.6.
+EDGE_FACTOR = 2
+EDGE_ROUNDS = 8
+EDGE_INNER = 10                 # Chambolle iterations per round (warm-started)
+EDGE_WEIGHT = .05               # TV strength (code units; values span [-1, 1])
+
+
+@njit(cache=True, fastmath=True, nogil=True)
+def _divergence(px, py, out):
+    """out = div p (backward differences; Chambolle's discretisation)."""
+    height, width = px.shape
+    for i in range(height):
+        out[i, 0] = -px[i, 0]
+        for j in range(1, width):
+            out[i, j] = px[i, j-1]-px[i, j]
+    for j in range(width):
+        out[0, j] -= py[0, j]
+    for i in range(1, height):
+        for j in range(width):
+            out[i, j] += py[i-1, j]-py[i, j]
+
+
+@njit(cache=True, fastmath=True, nogil=True)
+def _edge_rounds(x, values, known, analysis, synthesis_rows, rounds, inner,
+                 weight, trust=1.0):
+    """In place: ``rounds`` of TV prox + clip + data consistency on ``x``.
+
+    ``analysis`` is H x r (orthonormal DCT basis columns), ``synthesis_rows``
+    c x W; ``values``/``known`` are the r x c received block (scaled to the
+    working grid) and its mask. Single thread; inner loops run over
+    contiguous rows so they vectorise.
+    """
+    height, width = x.shape
+    rows, cols = values.shape
+    px = np.zeros((height, width), dtype=np.float32)
+    py = np.zeros((height, width), dtype=np.float32)
+    out = np.empty((height, width), dtype=np.float32)
+    gx = np.empty(width, dtype=np.float32)
+    gy = np.empty(width, dtype=np.float32)
+    partial = np.empty((height, cols), dtype=np.float32)
+    coefficients = np.empty((rows, cols), dtype=np.float32)
+    tau = np.float32(.25)
+    scale = tau/np.float32(weight)
+    one = np.float32(1)
+    for _ in range(rounds):
+        # Chambolle's dual iteration for min |grad u| + |u - x|^2/(2 weight).
+        for _ in range(inner):
+            _divergence(px, py, out)
+            for i in range(height):
+                for j in range(width):
+                    out[i, j] += x[i, j]
+            for i in range(height):
+                for j in range(width-1):
+                    gx[j] = out[i, j+1]-out[i, j]
+                gx[width-1] = 0
+                if i < height-1:
+                    for j in range(width):
+                        gy[j] = out[i+1, j]-out[i, j]
+                else:
+                    for j in range(width):
+                        gy[j] = 0
+                for j in range(width):
+                    norm = one+scale*np.sqrt(gx[j]*gx[j]+gy[j]*gy[j])
+                    px[i, j] = (px[i, j]-tau*gx[j])/norm
+                    py[i, j] = (py[i, j]-tau*gy[j])/norm
+        # The TV result, clipped to the displayable range.
+        _divergence(px, py, out)
+        for i in range(height):
+            for j in range(width):
+                x[i, j] = min(one, max(-one, x[i, j]+out[i, j]))
+        # Put the received coefficients back: x += synthesis(known * (values -
+        # analysis(x))).
+        for i in range(height):
+            row = x[i]
+            for v in range(cols):
+                basis_row = synthesis_rows[v]
+                total = np.float32(0)
+                for j in range(width):
+                    total += row[j]*basis_row[j]
+                partial[i, v] = total
+        coefficients[:, :] = 0
+        for i in range(height):
+            for u in range(rows):
+                a = analysis[i, u]
+                for v in range(cols):
+                    coefficients[u, v] += a*partial[i, v]
+        for u in range(rows):
+            for v in range(cols):
+                coefficients[u, v] = np.float32(trust)*(
+                    values[u, v]-coefficients[u, v]) if known[u, v] \
+                    else np.float32(0)
+        partial[:, :] = 0
+        for i in range(height):
+            for u in range(rows):
+                a = analysis[i, u]
+                for v in range(cols):
+                    partial[i, v] += a*coefficients[u, v]
+        for i in range(height):
+            row = x[i]
+            for v in range(cols):
+                weight_v = partial[i, v]
+                basis_row = synthesis_rows[v]
+                for j in range(width):
+                    row[j] += weight_v*basis_row[j]
+    return x
+
+
+def edge_consistent_plane(plane, factor=EDGE_FACTOR, rounds=EDGE_ROUNDS,
+                          inner=EDGE_INNER, weight=EDGE_WEIGHT, trust=1.0):
+    """A decoded plane rebuilt ``factor`` times larger by consistent
+    reconstruction (see above). The received coefficients are those of the
+    plane's spectral support above the rounding floor; their values are kept
+    exactly. Returns float32, ``factor`` x the plane's shape."""
+    plane = np.asarray(plane, dtype=np.float64)
+    if plane.ndim != 2 or min(plane.shape) <= 0:
+        raise ValueError('edge reconstruction needs a non-empty 2-D plane')
+    factor = int(factor)
+    if factor < 1:
+        raise ValueError('edge reconstruction factor must be at least 1')
+    source_height, source_width = plane.shape
+    height, width = source_height*factor, source_width*factor
+    coefficients = dctn(plane, norm='ortho')
+    rows, cols = spectral_support(coefficients)
+    block = coefficients[:rows, :cols]
+    peak = float(np.abs(coefficients).max(initial=0.0))
+    known = np.abs(block) > peak*SUPPORT_RELATIVE_FLOOR
+    values = np.ascontiguousarray(block*factor, dtype=np.float32)
+    analysis = _basis(height, rows)
+    synthesis_rows = _basis_rows(width, cols)
+    x = _synthesize(analysis, np.where(known, values, 0).astype(np.float32),
+                    synthesis_rows)
+    return _edge_rounds(x, values, np.ascontiguousarray(known), analysis,
+                        synthesis_rows, int(rounds), int(inner), float(weight),
+                        float(trust))
+
+
+# ------------------------------------------------------------- edge-consistent
+# Consistent reconstruction (Gerchberg-Papoulis with a total-variation prior):
+# the receiver looks for the picture with the sharpest, flattest regions whose
+# DCT still equals exactly the coefficients it received. It alternates a short
+# Chambolle TV (ROF) denoise, the black/white clip, and putting the received
+# coefficients back, on a working grid EDGE_FACTOR times the coder grid. The
+# transmitted information is unchanged; the missing high frequencies are filled
+# in to suit flat-shaded pictures (ringing and the dotted ripple go away, edges
+# sharpen). Clean-channel simulation, today's budget, SSIMULACRA2: cartoon
+# +4.6, robot/test card +6.4, photos +4.6.
+EDGE_FACTOR = 2
+EDGE_ROUNDS = 8
+EDGE_INNER = 10                 # Chambolle iterations per round (warm-started)
+EDGE_WEIGHT = .05               # TV strength (code units; values span [-1, 1])
+
+
+@njit(cache=True, fastmath=True, nogil=True)
+def _divergence(px, py, out):
+    """out = div p (backward differences; Chambolle's discretisation)."""
+    height, width = px.shape
+    for i in range(height):
+        out[i, 0] = -px[i, 0]
+        for j in range(1, width):
+            out[i, j] = px[i, j-1]-px[i, j]
+    for j in range(width):
+        out[0, j] -= py[0, j]
+    for i in range(1, height):
+        for j in range(width):
+            out[i, j] += py[i-1, j]-py[i, j]
+
+
+@njit(cache=True, fastmath=True, nogil=True)
+def _edge_rounds(x, values, known, analysis, synthesis_rows, rounds, inner,
+                 weight, trust=1.0):
+    """In place: ``rounds`` of TV prox + clip + data consistency on ``x``.
+
+    ``analysis`` is H x r (orthonormal DCT basis columns), ``synthesis_rows``
+    c x W; ``values``/``known`` are the r x c received block (scaled to the
+    working grid) and its mask. Single thread; inner loops run over
+    contiguous rows so they vectorise.
+    """
+    height, width = x.shape
+    rows, cols = values.shape
+    px = np.zeros((height, width), dtype=np.float32)
+    py = np.zeros((height, width), dtype=np.float32)
+    out = np.empty((height, width), dtype=np.float32)
+    gx = np.empty(width, dtype=np.float32)
+    gy = np.empty(width, dtype=np.float32)
+    partial = np.empty((height, cols), dtype=np.float32)
+    coefficients = np.empty((rows, cols), dtype=np.float32)
+    tau = np.float32(.25)
+    scale = tau/np.float32(weight)
+    one = np.float32(1)
+    for _ in range(rounds):
+        # Chambolle's dual iteration for min |grad u| + |u - x|^2/(2 weight).
+        for _ in range(inner):
+            _divergence(px, py, out)
+            for i in range(height):
+                for j in range(width):
+                    out[i, j] += x[i, j]
+            for i in range(height):
+                for j in range(width-1):
+                    gx[j] = out[i, j+1]-out[i, j]
+                gx[width-1] = 0
+                if i < height-1:
+                    for j in range(width):
+                        gy[j] = out[i+1, j]-out[i, j]
+                else:
+                    for j in range(width):
+                        gy[j] = 0
+                for j in range(width):
+                    norm = one+scale*np.sqrt(gx[j]*gx[j]+gy[j]*gy[j])
+                    px[i, j] = (px[i, j]-tau*gx[j])/norm
+                    py[i, j] = (py[i, j]-tau*gy[j])/norm
+        # The TV result, clipped to the displayable range.
+        _divergence(px, py, out)
+        for i in range(height):
+            for j in range(width):
+                x[i, j] = min(one, max(-one, x[i, j]+out[i, j]))
+        # Put the received coefficients back: x += synthesis(known * (values -
+        # analysis(x))).
+        for i in range(height):
+            row = x[i]
+            for v in range(cols):
+                basis_row = synthesis_rows[v]
+                total = np.float32(0)
+                for j in range(width):
+                    total += row[j]*basis_row[j]
+                partial[i, v] = total
+        coefficients[:, :] = 0
+        for i in range(height):
+            for u in range(rows):
+                a = analysis[i, u]
+                for v in range(cols):
+                    coefficients[u, v] += a*partial[i, v]
+        for u in range(rows):
+            for v in range(cols):
+                coefficients[u, v] = np.float32(trust)*(
+                    values[u, v]-coefficients[u, v]) if known[u, v] \
+                    else np.float32(0)
+        partial[:, :] = 0
+        for i in range(height):
+            for u in range(rows):
+                a = analysis[i, u]
+                for v in range(cols):
+                    partial[i, v] += a*coefficients[u, v]
+        for i in range(height):
+            row = x[i]
+            for v in range(cols):
+                weight_v = partial[i, v]
+                basis_row = synthesis_rows[v]
+                for j in range(width):
+                    row[j] += weight_v*basis_row[j]
+    return x
+
+
+def edge_consistent_plane(plane, factor=EDGE_FACTOR, rounds=EDGE_ROUNDS,
+                          inner=EDGE_INNER, weight=EDGE_WEIGHT, trust=1.0):
+    """A decoded plane rebuilt ``factor`` times larger by consistent
+    reconstruction (see above). The received coefficients are those of the
+    plane's spectral support above the rounding floor; their values are kept
+    exactly. Returns float32, ``factor`` x the plane's shape."""
+    plane = np.asarray(plane, dtype=np.float64)
+    if plane.ndim != 2 or min(plane.shape) <= 0:
+        raise ValueError('edge reconstruction needs a non-empty 2-D plane')
+    factor = int(factor)
+    if factor < 1:
+        raise ValueError('edge reconstruction factor must be at least 1')
+    source_height, source_width = plane.shape
+    height, width = source_height*factor, source_width*factor
+    coefficients = dctn(plane, norm='ortho')
+    rows, cols = spectral_support(coefficients)
+    block = coefficients[:rows, :cols]
+    peak = float(np.abs(coefficients).max(initial=0.0))
+    known = np.abs(block) > peak*SUPPORT_RELATIVE_FLOOR
+    values = np.ascontiguousarray(block*factor, dtype=np.float32)
+    analysis = _basis(height, rows)
+    synthesis_rows = _basis_rows(width, cols)
+    x = _synthesize(analysis, np.where(known, values, 0).astype(np.float32),
+                    synthesis_rows)
+    return _edge_rounds(x, values, np.ascontiguousarray(known), analysis,
+                        synthesis_rows, int(rounds), int(inner), float(weight),
+                        float(trust))

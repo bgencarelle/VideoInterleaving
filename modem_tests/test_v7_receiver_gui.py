@@ -511,6 +511,20 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertEqual(gui.grain_mode, 'flat')
         self.assertTrue(gui.picture_dirty)
 
+    def test_edge_reconstruction_is_a_basic_display_choice_on_by_default(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser,
+                          (('test input device', 3),))
+        field = next(item for item in gui.fields
+                     if item.label == 'Edge reconstruction')
+        self.assertEqual(field.value, 'on')
+        self.assertEqual(gui.edge_mode, 'on')
+        basic = {gui.fields[index].label
+                 for index in gui._config_field_indexes()}
+        self.assertIn('Edge reconstruction', basic)
+        gui._adjust_field(field, 1)
+        self.assertEqual(gui.edge_mode, 'off')
+        self.assertTrue(gui.picture_dirty)
+
     def test_save_directory_is_used_only_when_explicit(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser,
                           (('test input device', 3),))
@@ -631,7 +645,8 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         field = next(field for field in gui.fields
                      if field.label == 'DCT reconstruction')
         self.assertIn(gui.fields.index(field), gui._config_field_indexes())
-        self.assertEqual(gui.display_mode, 'nearest')
+        # Recommended display: 4x DCT reconstruction, shader bicubic.
+        self.assertEqual(gui.display_mode, 'bicubic')
         self.assertEqual(field.value, '4x')
         self.assertEqual(gui.dct_reconstruction, '4x')
         self.assertEqual(tuple(value for _label, value in field.options),
@@ -648,7 +663,7 @@ class ReceiverGuiOptionTests(unittest.TestCase):
 
         self.assertEqual(gui.dct_reconstruction, '4x')
         self.assertTrue(gui.picture_dirty)
-        self.assertEqual(gui.notice, 'DCT reconstruction: 4×')
+        self.assertEqual(gui.notice, 'DCT reconstruction: 4× · recommended')
 
         gui._build_arguments()
         self.assertEqual(gui.dct_reconstruction, '4x')

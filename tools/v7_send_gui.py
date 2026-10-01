@@ -146,12 +146,12 @@ FIELD_HELP = {
                           'path (Direct DCT encode off).'),
     'perceptual_detail_strength': 'Strength for the selected pre-encode downscaler, from 0 to 1.',
     'dct_encode': ('Encode straight from the full-size source frame to DCT '
-                   'coefficients instead of resizing to 80×96 first (default). '
-                   'Not with the pre-encode downscaler.'),
+                   'coefficients instead of resizing to 80×96 first. '
+                   'Recommended (default). Not with the pre-encode downscaler.'),
     'luma_adjust': ('Re-fit brightness so each pixel keeps the source\'s '
                     'luminance with the colour the receiver will show. Keeps '
-                    'saturated edges from darkening or ringing. Sender only '
-                    '(default).'),
+                    'saturated edges from darkening or ringing. Sender only. '
+                    'Recommended (default).'),
     'clip_aware': ('Re-fit the sent brightness detail so edge ringing falls '
                    'into the receiver\'s black/white clip. Sender only; '
                    'about 2 ms per frame.'),
@@ -159,7 +159,8 @@ FIELD_HELP = {
                     'leaves the cutoff alone; unsharp mask boosts everything.'),
     'dct_sharpen_strength': 'Sharpen strength, from 0 to 1. Try 0.25 or 0.5.',
     'dct_clarity': 'Large-radius local contrast, from 0 to 1. Try 0.15 or 0.3.',
-    'dct_chroma_gain': 'Saturation boost around neutral, from 1.0 to 1.3.',
+    'dct_chroma_gain': ('Saturation boost around neutral, from 1.0 to 1.3. '
+                        '1.0 recommended: 1.05 and 1.1 measured no better.'),
     'aspect_layout': ('Which coefficients the aspect profiles send: matched '
                       'to this picture shape. Not signalled; set the receiver '
                       'to the same layout.'),

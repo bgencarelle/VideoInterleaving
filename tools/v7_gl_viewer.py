@@ -22,7 +22,7 @@ DISPLAY_LABELS = {
     'nearest': 'Nearest',
     'bilinear': 'Bilinear',
     'sharp-bilinear': 'Sharp bilinear',
-    'bicubic': 'Bicubic · Mitchell',
+    'bicubic': 'Bicubic · Mitchell · recommended',
     'spline36': 'Spline36',
     'robidoux': 'Robidoux',
     'robidoux-sharp': 'Robidoux Sharp',
@@ -60,13 +60,28 @@ DCT_RECONSTRUCTION_MODES = ('off', '2x', '4x', '8x', '16x', 'viewport')
 # are left alone. Amplitude: about 2.5/255 standard deviation in luma.
 GRAIN_MODES = ('off', 'flat')
 GRAIN_LABELS = {'off': 'Off', 'flat': 'Flat areas · masks ringing'}
+# Edge reconstruction: rebuild luma at twice the coder grid as the sharpest,
+# flattest picture that still matches every received coefficient (see
+# animation_modem.v7_dct_display.edge_consistent_plane). Removes the ringing
+# ripple and sharpens edges; about 10 ms per new picture on one core.
+EDGE_MODES = ('on', 'off')
+EDGE_LABELS = {'on': 'Consistent · sharp edges, no ripple · recommended',
+               'off': 'Off'}
+# Recommended receiver display (measured; see docs/MODEM_MODE.md): edge
+# reconstruction at twice the coder grid, 4x DCT reconstruction, then the
+# shader's bicubic to the window. 4x + bicubic matches the exact viewport
+# evaluation to 77 dB PSNR at 1080 lines (nearest: 43 dB) for about a fifth of
+# the CPU time.
+RECOMMENDED_DISPLAY_MODE = 'bicubic'
+RECOMMENDED_DCT_RECONSTRUCTION = '4x'
+RECOMMENDED_EDGE_MODE = 'on'
 GRAIN_AMOUNT = 0.024            # triangular +-amount; sigma = amount/sqrt(6)
 GRAIN_FLAT_SIGMA = 1.2          # luma grid samples
 GRAIN_FLAT_CONTRAST = 0.06      # local luma s.d. (code units) that stops grain
 DCT_RECONSTRUCTION_LABELS = {
     'off': 'Off',
     '2x': '2×',
-    '4x': '4×',
+    '4x': '4× · recommended',
     '8x': '8×',
     '16x': '16× · fast PCs',
     'viewport': 'Viewport size',
@@ -241,7 +256,7 @@ def flat_area_mask(luma):
         np.clip(1.0-deviation/GRAIN_FLAT_CONTRAST, 0.0, 1.0), dtype=np.float32)
 
 
-def dct_reconstruct_planes(planes, mode, viewport_size=None):
+def dct_reconstruct_planes(planes, mode, viewport_size=None, edge=False):
     """Resample decoded planes by evaluating their retained DCT spectrum.
 
     The input planes are already spatial-domain inverse-DCT output. Transforming
@@ -249,6 +264,10 @@ def dct_reconstruct_planes(planes, mode, viewport_size=None):
     truncating that corner before the inverse transform evaluates the same
     cosine reconstruction on a larger or smaller display grid. The coefficient
     scale preserves pixel amplitude across the changed orthonormal grid size.
+
+    With ``edge`` the luma plane is first rebuilt at twice its grid by
+    consistent reconstruction (EDGE_MODES); output sizes are unchanged except
+    that with ``mode`` 'off' the luma comes back at twice its grid.
     """
     if mode not in DCT_RECONSTRUCTION_MODES:
         raise ValueError(f'unknown DCT reconstruction mode {mode!r}')
@@ -256,6 +275,27 @@ def dct_reconstruct_planes(planes, mode, viewport_size=None):
     if not planes or any(plane.ndim != 2 or min(plane.shape) <= 0
                          for plane in planes):
         raise ValueError('DCT reconstruction needs non-empty 2-D planes')
+    if edge:
+        from animation_modem.v7_dct_display import (edge_consistent_plane,
+                                                    reconstruct_plane,
+                                                    viewport_shapes)
+        luma = edge_consistent_plane(planes[0])
+        if mode == 'off':
+            return (luma,) + planes[1:]
+        if mode == 'viewport':
+            if viewport_size is None or len(viewport_size) != 2:
+                raise ValueError('viewport-size DCT reconstruction needs a size')
+            shapes = viewport_shapes(tuple(plane.shape for plane in planes),
+                                     viewport_size)
+        else:
+            scale = int(mode[:-1])
+            shapes = tuple((plane.shape[0]*scale, plane.shape[1]*scale)
+                           for plane in planes)
+        rest = dct_reconstruct_planes(planes[1:], mode, viewport_size) \
+            if mode != 'viewport' else tuple(
+                reconstruct_plane(plane, shape)
+                for plane, shape in zip(planes[1:], shapes[1:]))
+        return (reconstruct_plane(luma, shapes[0]),) + tuple(rest)
     if mode == 'off':
         return planes
 

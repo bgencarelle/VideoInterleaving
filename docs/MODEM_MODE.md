@@ -174,9 +174,10 @@ DCT encode and the encoder filter, which start at the new defaults once. Under *
   much of the dotted ringing near them. The sender knows which colour
   coefficients the receiver will show, so it re-fits each luma grid value
   until the pixel's linear luminance matches the source (six safeguarded
-  Newton steps, about 3.5 ms per frame including the luminance target; no
-  receiver change). It assumes the receiver holds the profile's full colour
-  set, including the rotating tail. Grey content is unchanged.
+  Newton steps per pixel in numba, with an sRGB lookup table; about 3 ms per
+  1080p frame including the luminance target; no receiver change). It
+  assumes the receiver holds the profile's full colour set, including the
+  rotating tail. Grey content is unchanged.
 - **Clip-aware encode** (`--clip-aware-encode`, opt-in) re-fits the sent luma
   coefficients so ringing around bright and dark edges falls into the
   receiver's black/white clip, where it is invisible (about 2 ms per frame at
@@ -204,13 +205,35 @@ twice. It is not the wire resolution. The camera's normal path can prepare
 (160 pixels wide by default), not the source's full resolution. The GUI help
 describes which sources use this setting.
 
+**Recommended settings** (the GUI defaults, marked "recommended"): sender
+**Aspect Fold 500**, **Direct DCT encode**, **Luma adjustment**, DCT chroma
+gain 1.0, the enhancements off; receiver **Edge reconstruction** on, **DCT
+reconstruction 4×** and **Display upscaler Bicubic**. Through the real modem
+(Aspect Fold 500, SSIMULACRA2 against Direct DCT alone with nearest display),
+luma adjustment plus edge reconstruction gives clean +6.0 / +10.8 / +4.0
+(cartoon / robot and test card / photos), hiss −40 +2.3 / +7.9 / +1.8,
+fast flutter +3.4 / +5.5 / +2.2 and MP3 320 +1.5 / +3.7 / +1.5. 4× plus the
+shader's bicubic matches the exact viewport evaluation to 77 dB PSNR at 1,080
+lines (nearest: 43 dB) for about a fifth of the CPU time (12.5 against
+22 ms with edge reconstruction). Sender DCT chroma gain 1.05 or 1.1 measured
+no better than 1.0.
+
 The standalone V7 receiver GUI can be launched with
 `.venv/bin/python -m tools.v7_receiver_gui`. Its **Display grain** choice
 (off by default) adds fine noise, about 2.5/255, only where the decoded picture
 is flat. That breaks up the regular ringing ripple of the band-limited picture
 without touching edges or texture. The flat-area mask is computed on the
 decoded 96×80 luma grid and the grain in the shader, so it adds no meaningful
-decode time; the pattern changes with each new picture. It selects an explicit input and
+decode time; the pattern changes with each new picture. **Edge reconstruction**
+(on by default) rebuilds luma at twice the coder grid as the sharpest,
+flattest picture whose DCT still equals every coefficient received: rounds of
+a short total-variation (Chambolle) denoise, the black/white clip and putting
+the received coefficients back (consistent reconstruction, Gerchberg–Papoulis
+style). It removes the ringing ripple and sharpens edges without any wire or
+sender change; natural texture can look slightly smoothed. Numba, one thread,
+about 10 ms per new picture. Through the real modem with sender luma
+adjustment, SSIMULACRA2 against no processing: clean cartoon +6.0, robot/test
+card +10.8, photos +4.0; edge reconstruction alone adds 0.4–2.3. It selects an explicit input and
 can optionally pass the non-video channel to an explicitly selected output
 device. Passthrough starts at 1.0 volume (VLC's default 100%, unity gain);
 adjust its live, persisted 0–1 volume control or mute it as needed. The CLI

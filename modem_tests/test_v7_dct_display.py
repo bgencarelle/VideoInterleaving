@@ -14,7 +14,8 @@ if str(ROOT) not in sys.path:
 
 from animation_modem import v7
 from animation_modem.v7_dct_display import (
-    reconstruct_plane, reconstruct_planes, spectral_support, viewport_shapes)
+    edge_consistent_plane, reconstruct_plane, reconstruct_planes,
+    spectral_support, viewport_shapes)
 from tools.v7_gl_viewer import dct_reconstruct_planes, float_planes
 
 
@@ -108,6 +109,61 @@ class DirectDCTDisplayTests(unittest.TestCase):
         np.testing.assert_array_equal(reconstruct_plane(zero, (5, 6)), 0.0)
         with self.assertRaisesRegex(ValueError, 'positive'):
             reconstruct_plane(flat, (0, 4))
+
+
+def _bars_plane(rows=96, cols=80, kept=(48, 40)):
+    """A band-limited plane of hard bars: what the decoder hands the display
+    for flat-shaded content (rings along every edge)."""
+    plane = np.full((rows, cols), -.8)
+    plane[20:76, 10:18] = .8
+    plane[20:76, 30:34] = .8
+    plane[40:44, :] = .8
+    coefficients = dctn(plane, norm='ortho')
+    coefficients[kept[0]:, :] = 0
+    coefficients[:, kept[1]:] = 0
+    return idctn(coefficients, norm='ortho').astype(np.float32), plane
+
+
+class EdgeReconstructionTests(unittest.TestCase):
+    def test_received_coefficients_are_kept(self):
+        decoded, _ = _bars_plane()
+        rebuilt = edge_consistent_plane(decoded)
+        self.assertEqual(rebuilt.shape, (192, 160))
+        received = dctn(decoded.astype(np.float64), norm='ortho')[:48, :40]
+        kept = dctn(rebuilt.astype(np.float64), norm='ortho')[:48, :40]/2
+        # Exact up to float32 rounding of the working grid.
+        np.testing.assert_allclose(kept, received,
+                                   atol=1e-3*float(np.abs(received).max()))
+
+    def test_ringing_goes_and_edges_sharpen(self):
+        decoded, truth = _bars_plane()
+        plain = reconstruct_plane(decoded, (192, 160))
+        rebuilt = edge_consistent_plane(decoded)
+        from scipy.ndimage import binary_erosion
+        target = np.kron(truth, np.ones((2, 2)))
+        flat = binary_erosion(target < 0, iterations=4)
+        # Ripple in the flat background (measured: -65%), and error against
+        # the hard bars (-32%).
+        self.assertLess(float(np.std(rebuilt[flat])), .5*float(np.std(plain[flat])))
+        self.assertLess(float(np.mean(np.abs(rebuilt-target))),
+                        .8*float(np.mean(np.abs(plain-target))))
+
+    def test_flat_planes_stay_flat(self):
+        flat = np.full((96, 80), .25, dtype=np.float32)
+        np.testing.assert_allclose(edge_consistent_plane(flat), .25, atol=1e-4)
+
+    def test_viewer_keeps_output_sizes(self):
+        values, grids = _decoded_face_values()
+        planes = float_planes(values, grids)
+        for mode, size in (('4x', None), ('viewport', (640, 768))):
+            plain = dct_reconstruct_planes(planes, mode, size)
+            edged = dct_reconstruct_planes(planes, mode, size, edge=True)
+            with self.subTest(mode=mode):
+                self.assertEqual([p.shape for p in edged], [p.shape for p in plain])
+                np.testing.assert_array_equal(edged[1], plain[1])
+        off = dct_reconstruct_planes(planes, 'off', edge=True)
+        self.assertEqual(off[0].shape, (192, 160))
+        self.assertEqual(off[1].shape, planes[1].shape)
 
 
 if __name__ == '__main__':

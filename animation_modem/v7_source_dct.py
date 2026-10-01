@@ -689,13 +689,77 @@ def _srgb_to_linear(values):
                     ((values+.055)/1.055)**2.4)
 
 
-def _srgb_slope(values):
-    """d(linear)/d(code) of the sRGB curve; 0 where the display clips."""
-    inside = (values > 0.0) & (values < 1.0)
-    values = np.clip(values, 0.0, 1.0)
-    slope = np.where(values <= .04045, 1/12.92,
-                     2.4/1.055*((values+.055)/1.055)**1.4)
-    return np.where(inside, slope, 0.0)
+SRGB_LUT_SIZE = 4096
+
+
+def _srgb_table():
+    codes = np.linspace(0.0, 1.0, SRGB_LUT_SIZE+1)
+    table = np.where(codes <= .04045, codes/12.92,
+                     ((codes+.055)/1.055)**2.4)
+    table.setflags(write=False)
+    return table
+
+
+SRGB_LUT = _srgb_table()
+
+
+@njit(cache=True, fastmath=True, nogil=True, inline='always')
+def _linear_and_slope(value, table):
+    """sRGB code -> (linear light, d linear/d code), by linear interpolation
+    in a 4,097-entry table (error below 1e-7); slope 0 where the display
+    clips."""
+    if value <= 0.0:
+        return 0.0, 0.0
+    if value >= 1.0:
+        return 1.0, 0.0
+    position = value*(table.shape[0]-1)
+    index = int(position)
+    fraction = position-index
+    low = table[index]
+    step = table[index+1]-low
+    return low+fraction*step, step*(table.shape[0]-1)
+
+
+@njit(cache=True, fastmath=True, nogil=True)
+def _luminance_of_means(red, green, blue, table, out):
+    rows, cols = red.shape
+    for i in range(rows):
+        for j in range(cols):
+            lr, _ = _linear_and_slope(red[i, j], table)
+            lg, _ = _linear_and_slope(green[i, j], table)
+            lb, _ = _linear_and_slope(blue[i, j], table)
+            out[i, j] = .2126*lr+.7152*lg+.0722*lb
+    return out
+
+
+@njit(cache=True, fastmath=True, nogil=True)
+def _luma_adjust_kernel(luma, cb, cr, target, iterations, table):
+    """In place: safeguarded Newton per pixel (see luma_adjust)."""
+    rows, cols = luma.shape
+    for i in range(rows):
+        for j in range(cols):
+            low, high, value = -1.0, 1.0, luma[i, j]
+            blue_shift = cb[i, j]*.5-.5/255.0
+            red_shift = cr[i, j]*.5-.5/255.0
+            green_shift = -.344136*blue_shift-.714136*red_shift
+            red_shift *= 1.402
+            blue_shift *= 1.772
+            goal = target[i, j]
+            for _ in range(iterations):
+                y = (value+1.0)*.5
+                lr, sr = _linear_and_slope(y+red_shift, table)
+                lg, sg = _linear_and_slope(y+green_shift, table)
+                lb, sb = _linear_and_slope(y+blue_shift, table)
+                error = .2126*lr+.7152*lg+.0722*lb-goal
+                if error > 0:
+                    high = value
+                else:
+                    low = value
+                slope = .5*(.2126*sr+.7152*sg+.0722*sb)
+                step = value-error/slope if slope > 1e-6 else 2.0
+                value = step if low <= step <= high else (low+high)*.5
+            luma[i, j] = value
+    return luma
 
 
 def source_luminance(means, luma_grid):
@@ -704,10 +768,10 @@ def source_luminance(means, luma_grid):
     ``means`` are the encoder's R, G, B block means (at least twice the luma
     grid); each is linearised before the exact area average to the grid.
     """
-    red, green, blue = (np.asarray(plane, np.float64) for plane in means)
-    luminance = (LUMINANCE_WEIGHTS[0]*_srgb_to_linear(red) +
-                 LUMINANCE_WEIGHTS[1]*_srgb_to_linear(green) +
-                 LUMINANCE_WEIGHTS[2]*_srgb_to_linear(blue))
+    red, green, blue = (np.ascontiguousarray(plane, dtype=np.float64)
+                        for plane in means)
+    luminance = _luminance_of_means(red, green, blue, SRGB_LUT,
+                                    np.empty(red.shape, np.float64))
     rows, cols = (int(value) for value in luma_grid)
     if luminance.shape == (rows, cols):
         return luminance
@@ -763,24 +827,14 @@ def luma_adjust(values, grids, chroma_sent, target,
     rows, cols = grids[0]
     target = np.asarray(target, np.float64).reshape(rows, cols)
     cb, cr = received_chroma(values, grids, chroma_sent)
-    luma = values[:rows*cols].reshape(rows, cols).copy()
-    # Safeguarded Newton on the luma value: shown luminance never falls as
-    # luma rises (each RGB channel moves by half a luma step until the display
-    # clips it), so the root is kept bracketed; a Newton step that leaves the
-    # bracket, or a clipped pixel with no slope, bisects instead.
-    low = np.full_like(luma, -1.0)
-    high = np.full_like(luma, 1.0)
-    for _ in range(int(iterations)):
-        rgb = _shown_rgb(luma, cb, cr)
-        error = _srgb_to_linear(rgb) @ LUMINANCE_WEIGHTS - target
-        above = error > 0
-        high = np.where(above, luma, high)
-        low = np.where(above, low, luma)
-        slope = .5*(_srgb_slope(rgb) @ LUMINANCE_WEIGHTS)
-        newton = luma - np.divide(error, slope, out=np.zeros_like(error),
-                                  where=slope > 1e-6)
-        inside = (slope > 1e-6) & (newton >= low) & (newton <= high)
-        luma = np.where(inside, newton, (low+high)*.5)
+    luma = np.ascontiguousarray(values[:rows*cols].reshape(rows, cols))
+    # Safeguarded Newton on the luma value (numba, per pixel): shown luminance
+    # never falls as luma rises (each RGB channel moves by half a luma step
+    # until the display clips it), so the root is kept bracketed; a Newton
+    # step that leaves the bracket, or a clipped pixel with no slope, bisects.
+    _luma_adjust_kernel(luma, np.ascontiguousarray(cb),
+                        np.ascontiguousarray(cr), np.ascontiguousarray(target),
+                        int(iterations), SRGB_LUT)
     values[:rows*cols] = luma.ravel()
     return values
 

@@ -33,7 +33,10 @@ from tools.v7_gl_viewer import (DISPLAY_LABELS, DISPLAY_MODES,
                                 FILTER_PRECOMPUTE_MODES,
                                 FLOAT_FRAGMENT_SHADER, FLOAT_MODE_IDS,
                                 FRAGMENT_SHADER, GRAIN_AMOUNT, GRAIN_LABELS,
-                                GRAIN_MODES, VERTEX_SHADER,
+                                GRAIN_MODES, EDGE_LABELS, EDGE_MODES,
+                                RECOMMENDED_DCT_RECONSTRUCTION,
+                                RECOMMENDED_DISPLAY_MODE,
+                                RECOMMENDED_EDGE_MODE, VERTEX_SHADER,
                                 _diagnostic_image, _float_texture_filter,
                                 build_filter_lut, dct_reconstruct_planes,
                                 fit_viewport, flat_area_mask, float_planes,
@@ -501,16 +504,20 @@ def _make_fields(receive_parser, device_choices, audio_output_choices=()):
                 value = str(value)
             fields.append(OptionField(action, value, _field_label(action),
                                       'text'))
-    fields.append(OptionField(None, 'nearest', 'Display upscaler', 'choice',
+    fields.append(OptionField(None, RECOMMENDED_DISPLAY_MODE,
+                              'Display upscaler', 'choice',
                               tuple((DISPLAY_LABELS[name], name)
                                     for name in DISPLAY_MODES)))
     fields.append(OptionField(
-        None, '4x', 'DCT reconstruction', 'choice',
+        None, RECOMMENDED_DCT_RECONSTRUCTION, 'DCT reconstruction', 'choice',
         tuple((DCT_RECONSTRUCTION_LABELS[name], name)
               for name in DCT_RECONSTRUCTION_MODES)))
     fields.append(OptionField(
         None, 'off', 'Display grain', 'choice',
         tuple((GRAIN_LABELS[name], name) for name in GRAIN_MODES)))
+    fields.append(OptionField(
+        None, RECOMMENDED_EDGE_MODE, 'Edge reconstruction', 'choice',
+        tuple((EDGE_LABELS[name], name) for name in EDGE_MODES)))
     return fields
 
 
@@ -679,9 +686,10 @@ class ReceiverGui:
         self.latest_values_image = None
         self.display_latency_ms = None
         self.last_display_latency_label = None
-        self.display_mode = 'nearest'
-        self.dct_reconstruction = '4x'
+        self.display_mode = RECOMMENDED_DISPLAY_MODE
+        self.dct_reconstruction = RECOMMENDED_DCT_RECONSTRUCTION
         self.grain_mode = 'off'
+        self.edge_mode = RECOMMENDED_EDGE_MODE
         self.grain_seed = 0
         self.last_dct_viewport_size = None
         self.image_only = False
@@ -1030,6 +1038,8 @@ class ReceiverGui:
                     self.dct_reconstruction = field.value
                 elif field.label == 'Display grain':
                     self.grain_mode = field.value
+                elif field.label == 'Edge reconstruction':
+                    self.edge_mode = field.value
                 continue
             dest = action.dest
             if dest in ('help', 'mode', 'headless', 'fullscreen',
@@ -1203,6 +1213,9 @@ class ReceiverGui:
         elif field.label == 'Display grain':
             self.grain_mode = value
             self.picture_dirty = True
+        elif field.label == 'Edge reconstruction':
+            self.edge_mode = value
+            self.picture_dirty = True
         self.notice = f'{field.label}: {self._field_value_label(field)}'
         self._update_runtime_option(field)
         if field.dest in ('device', 'audio_output_device', 'audio_muted',
@@ -1253,6 +1266,9 @@ class ReceiverGui:
                 self.picture_dirty = True
             elif field.label == 'Display grain':
                 self.grain_mode = field.value
+                self.picture_dirty = True
+            elif field.label == 'Edge reconstruction':
+                self.edge_mode = field.value
                 self.picture_dirty = True
         self.notice = f'{field.label}: {self._field_value_label(field)}'
         self._update_runtime_option(field)
@@ -1941,7 +1957,8 @@ class ReceiverGui:
             if (self.advanced_options or field.dest in BASIC_OPTION_DESTS or
                     field.label in ('Display upscaler',
                                     'DCT reconstruction',
-                                    'Display grain')):
+                                    'Display grain',
+                                    'Edge reconstruction')):
                 indexes.append(index)
         return indexes
 
@@ -2381,7 +2398,8 @@ class ReceiverGui:
                 if frame is None:
                     return
                 use_float_display = (self.display_mode != 'nearest' or
-                                     self.dct_reconstruction != 'off')
+                                     self.dct_reconstruction != 'off' or
+                                     self.edge_mode == 'on')
                 if not use_float_display:
                     if self.latest_values_image is None:
                         try:
@@ -2428,9 +2446,11 @@ class ReceiverGui:
                         else:
                             grain_texture.write(mask.tobytes())
                         self.grain_seed = (self.grain_seed+1) % 65536
-                    if self.dct_reconstruction != 'off':
+                    if (self.dct_reconstruction != 'off' or
+                            self.edge_mode == 'on'):
                         planes = dct_reconstruct_planes(
-                            planes, self.dct_reconstruction, viewport_size)
+                            planes, self.dct_reconstruction, viewport_size,
+                            edge=self.edge_mode == 'on')
                     if (self.display_mode in FILTER_PRECOMPUTE_MODES and
                             self.dct_reconstruction == 'off'):
                         planes = resample_filter_planes(
@@ -2461,7 +2481,8 @@ class ReceiverGui:
 
             def picture_uploaded():
                 use_float_display = (self.display_mode != 'nearest' or
-                                     self.dct_reconstruction != 'off')
+                                     self.dct_reconstruction != 'off' or
+                                     self.edge_mode == 'on')
                 return (len(plane_textures) == 3 if use_float_display else
                         picture_texture is not None)
 
@@ -2495,7 +2516,8 @@ class ReceiverGui:
             def render_picture(viewport):
                 context.viewport = viewport
                 use_float_display = (self.display_mode != 'nearest' or
-                                     self.dct_reconstruction != 'off')
+                                     self.dct_reconstruction != 'off' or
+                                     self.edge_mode == 'on')
                 if not use_float_display:
                     picture_texture.use(location=0)
                     vertex_array.render(mode=moderngl.TRIANGLES, vertices=3)
