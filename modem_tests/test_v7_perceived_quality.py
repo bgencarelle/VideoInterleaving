@@ -13,7 +13,9 @@ for extra in (ROOT/'test_modem_v7', ROOT/'tools'):
 
 from animation_modem import v7                                           # noqa: E402
 from animation_modem.v7_source_dct import (CLIP_AWARE_ITERATIONS,        # noqa: E402
-                                           clip_aware_luma)
+                                           _shown_luminance, clip_aware_luma,
+                                           direct_dct_values, luma_adjust,
+                                           received_chroma)
 from common import TARGET                                                # noqa: E402
 from aspect_fold import AspectFoldWire                                   # noqa: E402
 from aspect_mono import AspectMonoWire                                   # noqa: E402
@@ -101,6 +103,75 @@ class ClipAwareEncodeTests(unittest.TestCase):
             ['send', '--device', 'null', '--source', 'test',
              '--clip-aware-encode'])
         self.assertTrue(args.clip_aware_encode)
+
+
+def _colour_edge_frame():
+    """Saturated red and blue bars on green: the brightness of each colour
+    edge lives partly in chroma."""
+    frame = np.zeros((480, 400, 3), np.uint8)
+    frame[:] = (40, 170, 60)
+    for x in range(20, 380, 48):
+        frame[60:420, x:x+14] = (230, 30, 40)
+        frame[60:420, x+24:x+30] = (40, 60, 230)
+    return frame
+
+
+class LumaAdjustTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.base = v7.load_model(TARGET, 'box')
+        wire = AspectFoldWire('1:1', 'chroma')
+        cls.codec = wire.codec(wire.model_for(cls.base, '1:1'))
+        cls.masks = v7_live._chroma_sent_masks(cls.codec)
+        cls.grids = v7.V7_GRIDS
+
+    def _encode(self, frame):
+        target = []
+        values = direct_dct_values(frame, self.grids, v7.V7_SHAPES,
+                                   luminance_out=target)
+        return values, target[0]
+
+    def _luminance_error(self, values, target):
+        rows, cols = self.grids[0]
+        cb, cr = received_chroma(values, self.grids, self.masks)
+        luma = values[:rows*cols].reshape(rows, cols)
+        return float(np.sqrt(np.mean((_shown_luminance(luma, cb, cr)-target)**2)))
+
+    def test_chroma_masks_are_the_layouts_sent_colour(self):
+        self.assertEqual([int(mask.sum()) for mask in self.masks], [480, 480])
+
+    def test_coloured_edges_keep_the_source_luminance(self):
+        values, target = self._encode(_colour_edge_frame())
+        self.assertEqual(target.shape, self.grids[0])
+        adjusted = luma_adjust(values, self.grids, self.masks, target)
+        count = int(np.prod(self.grids[0]))
+        np.testing.assert_array_equal(adjusted[count:], values[count:])
+        before = self._luminance_error(values, target)
+        after = self._luminance_error(adjusted, target)
+        self.assertLess(after, .25*before)
+        self.assertTrue(np.all(np.abs(adjusted) <= 1.0))
+
+    def test_smooth_grey_pictures_are_left_alone(self):
+        ramp = np.linspace(20, 235, 400)[None, :, None]*np.ones((480, 1, 3))
+        values, target = self._encode(np.uint8(np.rint(ramp)))
+        adjusted = luma_adjust(values, self.grids, self.masks, target)
+        self.assertLess(float(np.max(np.abs(adjusted-values))), .01)
+
+    def test_sender_value_path_applies_it_only_when_asked(self):
+        frame = _colour_edge_frame()
+        plain = v7_live._values(self.base, frame, 'box', 1.0, dct_encode=True)[0]
+        adjusted = v7_live._values(self.base, frame, 'box', 1.0, dct_encode=True,
+                                   chroma_sent_for=lambda code: self.masks)[0]
+        count = int(np.prod(self.grids[0]))
+        self.assertGreater(float(np.max(np.abs(adjusted[:count]-plain[:count]))), .02)
+        np.testing.assert_array_equal(adjusted[count:], plain[count:])
+
+    def test_cli_flag_requires_direct_dct(self):
+        args = v7_live.parser().parse_args(
+            ['send', '--device', 'null', '--source', 'test', '--luma-adjust'])
+        self.assertTrue(args.luma_adjust)
+        with self.assertRaises(ValueError):
+            v7_live.run_send(args)
 
 
 class DirectEncodeFallbackTests(unittest.TestCase):

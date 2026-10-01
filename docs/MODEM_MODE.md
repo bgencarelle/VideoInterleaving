@@ -166,6 +166,17 @@ frames smaller than the coder grid fall back to the Box resize). Saved
 settings from earlier GUI versions keep everything except the profile, Direct
 DCT encode and the encoder filter, which start at the new defaults once. Under **Advanced**:
 
+- **Luma adjustment** (`--luma-adjust`; on by default in the GUI with Direct
+  DCT encode, opt-in on the CLI) is the constant-luminance repair from HDR
+  video (Ström et al., DCC 2016). Y'CbCr leaves part of a saturated pixel's
+  brightness in Cb/Cr, and the wire sends colour at a fraction of luma's
+  resolution, so coloured edges lose brightness: dark or bright fringes and
+  much of the dotted ringing near them. The sender knows which colour
+  coefficients the receiver will show, so it re-fits each luma grid value
+  until the pixel's linear luminance matches the source (six safeguarded
+  Newton steps, about 3.5 ms per frame including the luminance target; no
+  receiver change). It assumes the receiver holds the profile's full colour
+  set, including the rotating tail. Grey content is unchanged.
 - **Clip-aware encode** (`--clip-aware-encode`, opt-in) re-fits the sent luma
   coefficients so ringing around bright and dark edges falls into the
   receiver's black/white clip, where it is invisible (about 2 ms per frame at

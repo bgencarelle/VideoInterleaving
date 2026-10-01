@@ -342,6 +342,24 @@ def _wire_index(counter):
     return (int(counter)-1) % (P.MAX_SOURCE_INDEX+1)
 
 
+def _chroma_sent_masks(codec):
+    """Per chroma grid: the coefficients a fold codec's packets carry."""
+    kept = np.asarray(codec.kept, dtype=np.int64)
+    sent = getattr(codec, 'sent_model_indices', None)
+    if sent is not None:
+        kept = kept[np.asarray(sent, dtype=np.int64)]
+    offsets = codec.grid.off
+    if len(offsets) < 4:
+        return None
+    masks = []
+    for plane in (1, 2):
+        mask = np.zeros(int(offsets[plane+1]-offsets[plane]), dtype=bool)
+        inside = kept[(kept >= offsets[plane]) & (kept < offsets[plane+1])]
+        mask[inside-offsets[plane]] = True
+        masks.append(mask)
+    return masks
+
+
 def _fit_to_aspect(frame, aspect_code):
     """Pillar- or letterbox ``frame`` into V7 aspect ``aspect_code``.
 
@@ -375,28 +393,40 @@ def _fit_to_aspect(frame, aspect_code):
 def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0,
             perceptual_resize='off', perceptual_detail_strength=0.25,
             dct_encode=False, dct_options=None, return_resized=False,
-            fit_aspect=None):
+            fit_aspect=None, chroma_sent_for=None):
     """(values, aspect code[, preview]) for one source frame.
 
     With ``fit_aspect`` (a V7 aspect code: the sender's fixed aspect layout)
     the picture is boxed into that ratio first and the returned code carries
     P.ASPECT_SCREEN, which sets the metadata screen bit.
+
+    With ``chroma_sent_for`` (aspect code -> the wire's chroma masks) a
+    direct-DCT frame gets luma adjustment: its luma is re-fitted so that, with
+    the chroma the receiver will have, each pixel keeps the source's
+    luminance (v7_source_dct.luma_adjust).
     """
-    if fit_aspect is None:
-        return _picture_values(model, frame, encode_filter, brightness, gamma,
-                               perceptual_resize, perceptual_detail_strength,
-                               dct_encode, dct_options, return_resized)
-    out = _picture_values(model, _fit_to_aspect(frame, fit_aspect),
-                          encode_filter, brightness, gamma, perceptual_resize,
-                          perceptual_detail_strength, dct_encode, dct_options,
-                          return_resized)
-    return (out[0], (int(fit_aspect) & 7) | P.ASPECT_SCREEN) + tuple(out[2:])
+    luminance = [] if chroma_sent_for is not None and dct_encode else None
+    if fit_aspect is not None:
+        frame = _fit_to_aspect(frame, fit_aspect)
+    out = _picture_values(model, frame, encode_filter, brightness, gamma,
+                          perceptual_resize, perceptual_detail_strength,
+                          dct_encode, dct_options, return_resized,
+                          luminance_out=luminance)
+    aspect = (out[1] if fit_aspect is None else
+              (int(fit_aspect) & 7) | P.ASPECT_SCREEN)
+    values = out[0]
+    if luminance and luminance[0] is not None:
+        from animation_modem.v7_source_dct import luma_adjust
+        masks = chroma_sent_for(aspect)
+        if masks is not None:
+            values = luma_adjust(values, model.coder.grids, masks, luminance[0])
+    return (values, aspect) + tuple(out[2:])
 
 
 def _picture_values(model, frame, encode_filter='nearest', brightness=1.05,
                     gamma=1.0, perceptual_resize='off',
                     perceptual_detail_strength=0.25, dct_encode=False,
-                    dct_options=None, return_resized=False):
+                    dct_options=None, return_resized=False, luminance_out=None):
     _validate_tone_controls(brightness, gamma)
     source_size = getattr(frame, 'source_size', None)
     capture_prepared = bool(getattr(frame, 'prepared', False))
@@ -427,7 +457,8 @@ def _picture_values(model, frame, encode_filter='nearest', brightness=1.05,
             # one pass, then small cached DCT products per plane.
             values = direct_dct_values(
                 rgb, model.coder.grids, model.coder.shapes,
-                brightness=brightness, gamma=gamma, **options)
+                brightness=brightness, gamma=gamma,
+                luminance_out=luminance_out, **options)
         else:
             # Research reducers keep the full-resolution analysis path.
             values, _stats = source_dct_values(
@@ -802,6 +833,9 @@ def _run_send_session(args):
     if clip_aware and not (fold is not None or mono_fold_profile or
                            aspect_profile):
         raise ValueError('--clip-aware-encode requires a folded profile')
+    luma_adjusted = bool(getattr(args, 'luma_adjust', False))
+    if luma_adjusted and not getattr(args, 'dct_encode', False):
+        raise ValueError('--luma-adjust requires --dct-encode')
     args.encode_filter, args.brightness = _send_profile(args, profile_slots)
     dct_options = _dct_encode_options(args)
     tone_controls = LiveToneControls(args.brightness, args.gamma)
@@ -905,18 +939,27 @@ def _run_send_session(args):
         if layout not in (None, 'auto'):
             fit_aspect = P.V7_ASPECT_NAMES.index(layout)
 
+    def codec_for(aspect_code):
+        """The fold codec this packet will be sent with, or None."""
+        if mono_wire is not None:
+            return mono_wire._codec(mono_wire._packet_model(model, aspect_code))
+        if aspect_wire is not None:
+            layout = aspect_wire.layout_for(aspect_code)
+            if layout is None:
+                return None
+            return aspect_wire.codec(aspect_wire.model_for(model, layout))
+        return fold.codec(model) if fold is not None else None
+
+    def chroma_sent_for(aspect_code):
+        codec = codec_for(aspect_code)
+        return None if codec is None else _chroma_sent_masks(codec)
+
     def clip_aware_values(value, aspect_code):
         """Fit one frame's sent luma to the receiver's clip (see v7_source_dct)."""
         from animation_modem.v7_source_dct import clip_aware_luma
-        if mono_wire is not None:
-            codec = mono_wire._codec(mono_wire._packet_model(model, aspect_code))
-        elif aspect_wire is not None:
-            layout = aspect_wire.layout_for(aspect_code)
-            if layout is None:
-                return value
-            codec = aspect_wire.codec(aspect_wire.model_for(model, layout))
-        else:
-            codec = fold.codec(model)
+        codec = codec_for(aspect_code)
+        if codec is None:
+            return value
         return clip_aware_luma(value, codec.grid.grids[0],
                                codec.sent_luma_mask())
 
@@ -1065,7 +1108,8 @@ def _run_send_session(args):
                     dct_encode=getattr(args, 'dct_encode', False),
                     dct_options=dct_options,
                     return_resized=image_preview_port is not None,
-                    fit_aspect=fit_aspect)
+                    fit_aspect=fit_aspect,
+                    chroma_sent_for=chroma_sent_for if luma_adjusted else None)
                 if image_preview_port is not None:
                     value, aspect, resized_preview = processed
                     preview_images.append((source_preview, resized_preview))
@@ -3501,6 +3545,11 @@ def parser():
     send.add_argument('--encode-filter', choices=('nearest', 'box'),
                       default=None,
                       help=argparse.SUPPRESS)
+    send.add_argument(
+        '--luma-adjust', action='store_true',
+        help=('with --dct-encode: re-fit luma so each pixel keeps the source '
+              'brightness with the chroma the receiver will have (keeps '
+              'coloured edges from darkening or ringing; sender only)'))
     send.add_argument(
         '--clip-aware-encode', action='store_true',
         help=('re-fit the sent luma coefficients so ringing falls into the '

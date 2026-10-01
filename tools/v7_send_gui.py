@@ -96,7 +96,7 @@ DCT_SHARPEN_CHOICES = (
 # Direct DCT encode runs the 500-slot folded profiles with the Box filter.
 DCT_PROFILES = FOLDED_PROFILES
 BOOL_FIELDS = ('video_live', 'video_preview', 'image_preview', 'dct_encode',
-               'clip_aware')
+               'luma_adjust', 'clip_aware')
 MONO_VIDEO_SIDE_CHOICES = (
     ('Left output · right stays clear', 'left'),
     ('Right output · left stays clear', 'right'),
@@ -148,6 +148,10 @@ FIELD_HELP = {
     'dct_encode': ('Encode straight from the full-size source frame to DCT '
                    'coefficients instead of resizing to 80×96 first (default). '
                    'Not with the pre-encode downscaler.'),
+    'luma_adjust': ('Re-fit brightness so each pixel keeps the source\'s '
+                    'luminance with the colour the receiver will show. Keeps '
+                    'saturated edges from darkening or ringing. Sender only '
+                    '(default).'),
     'clip_aware': ('Re-fit the sent brightness detail so edge ringing falls '
                    'into the receiver\'s black/white clip. Sender only; '
                    'about 2 ms per frame.'),
@@ -185,6 +189,7 @@ FIELD_LABELS = {
     'perceptual_resize': 'Pre-encode downscaler',
     'perceptual_detail_strength': 'Downscaler strength',
     'dct_encode': 'Direct DCT encode',
+    'luma_adjust': 'Luma adjustment',
     'clip_aware': 'Clip-aware encode',
     'dct_sharpen': 'DCT sharpen',
     'dct_sharpen_strength': 'DCT sharpen strength',
@@ -286,7 +291,7 @@ SAVED_SETTING_FIELDS = (
     'capture_width', 'capture_filter', 'perceptual_resize',
     'perceptual_detail_strength', 'dct_encode', 'dct_sharpen',
     'dct_sharpen_strength', 'dct_clarity', 'dct_chroma_gain',
-    'aspect_layout', 'aspect_tail', 'clip_aware',
+    'aspect_layout', 'aspect_tail', 'clip_aware', 'luma_adjust',
 )
 
 
@@ -1088,6 +1093,7 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
         'perceptual_detail_strength': perceptual_strength,
         'dct_encode': dct_encode,
         'clip_aware': bool(settings.get('clip_aware', False)),
+        'luma_adjust': bool(settings.get('luma_adjust', True)),
         'aspect_layout': aspect_layout,
         'aspect_tail': aspect_tail,
         'dct_sharpen': dct_sharpen,
@@ -1169,6 +1175,8 @@ def build_command(settings, devices, sd_module=None, python=None,
         if checked['dct_chroma_gain'] != 1.0:
             command.extend(('--dct-chroma-gain',
                             str(checked['dct_chroma_gain'])))
+        if checked['luma_adjust']:
+            command.append('--luma-adjust')
     if checked['clip_aware']:
         command.append('--clip-aware-encode')
     if checked['capture_fps'] is not None:
@@ -1262,8 +1270,8 @@ class SenderGui:
     ADVANCED_FIELDS = (
         'encode_filter', 'perceptual_resize', 'perceptual_detail_strength',
         'aspect_layout', 'aspect_tail',
-        'dct_encode', 'dct_sharpen', 'dct_sharpen_strength', 'dct_clarity',
-        'dct_chroma_gain', 'clip_aware',
+        'dct_encode', 'luma_adjust', 'dct_sharpen', 'dct_sharpen_strength',
+        'dct_clarity', 'dct_chroma_gain', 'clip_aware',
         'screen_backend', 'region', 'ffmpeg_input', 'capture_width',
         'capture_filter',
     )
@@ -1310,6 +1318,7 @@ class SenderGui:
             'perceptual_detail_strength': '0.25',
             'dct_encode': True,
             'clip_aware': False,
+            'luma_adjust': True,
             'dct_sharpen': 'off',
             'dct_sharpen_strength': '0.25',
             'dct_clarity': '0',
@@ -1710,7 +1719,8 @@ class SenderGui:
             dest == 'perceptual_resize' and self.settings['dct_encode'] or
             dest == 'dct_encode' and
             self.settings['profile'] not in DCT_PROFILES or
-            dest in ('dct_sharpen', 'dct_clarity', 'dct_chroma_gain') and
+            dest in ('dct_sharpen', 'dct_clarity', 'dct_chroma_gain',
+                     'luma_adjust') and
             not self.settings['dct_encode'] or
             dest == 'aspect_layout' and
             self.settings['profile'] not in ASPECT_PROFILES or

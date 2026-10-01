@@ -589,8 +589,12 @@ def _separable(left, plane, right):
 
 
 def _direct_planes(rgb, grids, shapes, brightness, gamma, sharpen,
-                   sharpen_strength, clarity, chroma_gain):
-    """Validated, pre-shrunk and pixel-enhanced Y[/Cb/Cr] planes in [0, 1]."""
+                   sharpen_strength, clarity, chroma_gain, luminance=False):
+    """Validated, pre-shrunk and pixel-enhanced Y[/Cb/Cr] planes in [0, 1].
+
+    With ``luminance`` the result also carries the source's linear luminance
+    on the luma grid (see source_luminance), else None.
+    """
     if sharpen not in SHARPEN_MODES:
         raise ValueError(f'unknown DCT sharpen mode {sharpen!r}')
     brightness, gamma = float(brightness), float(gamma)
@@ -640,6 +644,8 @@ def _direct_planes(rgb, grids, shapes, brightness, gamma, sharpen,
     # YCbCr is linear, so converting block means equals averaging the
     # per-pixel conversion.
     red, green, blue = means
+    target = (source_luminance(means, grids[0])
+              if luminance and len(grids) == 3 else None)
     y = .299000*red + .587000*green + .114000*blue
     planes = [y]
     if len(grids) == 3:
@@ -662,7 +668,121 @@ def _direct_planes(rgb, grids, shapes, brightness, gamma, sharpen,
         y = y+sharpen_strength*(y-blurred)
     planes[0] = np.ascontiguousarray(y)
     taper = sharpen_strength if sharpen == 'taper' else 0.0
-    return planes, grids, shapes, taper
+    return planes, grids, shapes, taper, target
+
+
+# ------------------------------------------------------------ luma adjustment
+# Constant-luminance repair (luma adjustment, Strom et al., DCC 2016; the
+# HDR chroma-subsampling fix). Y'CbCr from gamma-coded RGB leaves part of a
+# saturated pixel's brightness in Cb/Cr; the wire sends chroma at a fraction
+# of luma's resolution, so coloured edges lose brightness (dark or bright
+# fringes, and much of the ringing at colour edges). The sender knows exactly
+# which chroma coefficients the receiver will have, so it picks each luma
+# grid value to make the pixel's linear luminance match the source.
+LUMINANCE_WEIGHTS = np.array([.2126, .7152, .0722])            # sRGB / BT.709
+LUMA_ADJUST_ITERATIONS = 6                                      # safeguarded Newton steps
+
+
+def _srgb_to_linear(values):
+    values = np.clip(values, 0.0, 1.0)
+    return np.where(values <= .04045, values/12.92,
+                    ((values+.055)/1.055)**2.4)
+
+
+def _srgb_slope(values):
+    """d(linear)/d(code) of the sRGB curve; 0 where the display clips."""
+    inside = (values > 0.0) & (values < 1.0)
+    values = np.clip(values, 0.0, 1.0)
+    slope = np.where(values <= .04045, 1/12.92,
+                     2.4/1.055*((values+.055)/1.055)**1.4)
+    return np.where(inside, slope, 0.0)
+
+
+def source_luminance(means, luma_grid):
+    """Linear luminance of the toned source on the luma grid.
+
+    ``means`` are the encoder's R, G, B block means (at least twice the luma
+    grid); each is linearised before the exact area average to the grid.
+    """
+    red, green, blue = (np.asarray(plane, np.float64) for plane in means)
+    luminance = (LUMINANCE_WEIGHTS[0]*_srgb_to_linear(red) +
+                 LUMINANCE_WEIGHTS[1]*_srgb_to_linear(green) +
+                 LUMINANCE_WEIGHTS[2]*_srgb_to_linear(blue))
+    rows, cols = (int(value) for value in luma_grid)
+    if luminance.shape == (rows, cols):
+        return luminance
+    return _area_box_resample(luminance, (rows, cols))
+
+
+def _shown_rgb(luma, cb, cr):
+    """The receiver shader's RGB (before its clip) for grid values."""
+    y = (luma+1.0)*.5
+    cb = cb*.5-.5/255.0
+    cr = cr*.5-.5/255.0
+    return np.stack((y+1.402*cr, y-.344136*cb-.714136*cr, y+1.772*cb), -1)
+
+
+def _shown_luminance(luma, cb, cr):
+    """Linear luminance the receiver shows for grid values."""
+    return _srgb_to_linear(_shown_rgb(luma, cb, cr)) @ LUMINANCE_WEIGHTS
+
+
+def received_chroma(values, grids, chroma_sent):
+    """The receiver's Cb, Cr on the luma grid: only the sent coefficients,
+    evaluated by DCT zero-padding (what DCT reconstruction displays)."""
+    offsets = np.cumsum([0] + [rows*cols for rows, cols in grids])
+    luma_rows, luma_cols = grids[0]
+    out = []
+    for plane, sent in zip((1, 2), chroma_sent):
+        rows, cols = grids[plane]
+        grid = np.asarray(values[offsets[plane]:offsets[plane+1]],
+                          np.float64).reshape(rows, cols)
+        coefficients = np.where(np.asarray(sent, bool).reshape(rows, cols),
+                                dctn(grid, norm='ortho'), 0.0)
+        padded = np.zeros((luma_rows, luma_cols))
+        padded[:rows, :cols] = coefficients
+        out.append(idctn(padded, norm='ortho') *
+                   np.sqrt(luma_rows*luma_cols/(rows*cols)))
+    return out
+
+
+def luma_adjust(values, grids, chroma_sent, target,
+                iterations=LUMA_ADJUST_ITERATIONS):
+    """Re-fit the luma grid for the chroma the receiver will actually show.
+
+    ``values`` is the concatenated Y/Cb/Cr grid vector; ``chroma_sent`` one
+    mask per chroma grid of the coefficients the wire carries; ``target`` the
+    source's linear luminance on the luma grid (source_luminance). Each luma
+    value becomes the one, in [-1, 1], whose shown luminance matches the
+    target (a few Newton steps from the plain value). Chroma is unchanged, so
+    the result encodes like any other values vector.
+    """
+    values = np.array(values, dtype=np.float64)
+    if target is None or len(grids) != 3:
+        return values
+    rows, cols = grids[0]
+    target = np.asarray(target, np.float64).reshape(rows, cols)
+    cb, cr = received_chroma(values, grids, chroma_sent)
+    luma = values[:rows*cols].reshape(rows, cols).copy()
+    # Safeguarded Newton on the luma value: shown luminance never falls as
+    # luma rises (each RGB channel moves by half a luma step until the display
+    # clips it), so the root is kept bracketed; a Newton step that leaves the
+    # bracket, or a clipped pixel with no slope, bisects instead.
+    low = np.full_like(luma, -1.0)
+    high = np.full_like(luma, 1.0)
+    for _ in range(int(iterations)):
+        rgb = _shown_rgb(luma, cb, cr)
+        error = _srgb_to_linear(rgb) @ LUMINANCE_WEIGHTS - target
+        above = error > 0
+        high = np.where(above, luma, high)
+        low = np.where(above, low, luma)
+        slope = .5*(_srgb_slope(rgb) @ LUMINANCE_WEIGHTS)
+        newton = luma - np.divide(error, slope, out=np.zeros_like(error),
+                                  where=slope > 1e-6)
+        inside = (slope > 1e-6) & (newton >= low) & (newton <= high)
+        luma = np.where(inside, newton, (low+high)*.5)
+    values[:rows*cols] = luma.ravel()
+    return values
 
 
 # Ten alternating projections hold ~90% of the converged gain at ~3 ms.
@@ -738,7 +858,7 @@ def direct_dct_coefficients(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
     coefficient-domain folding: nothing here resamples pixels, and values are
     not clipped (clipping is a pixel-domain operation).
     """
-    planes, grids, shapes, taper = _direct_planes(
+    planes, grids, shapes, taper, _ = _direct_planes(
         rgb, grids, shapes, brightness, gamma, sharpen, sharpen_strength,
         clarity, chroma_gain)
     rows, cols = planes[0].shape
@@ -758,7 +878,7 @@ def direct_dct_coefficients(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
 
 def direct_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
                       sharpen='off', sharpen_strength=.25, clarity=0.0,
-                      chroma_gain=1.0):
+                      chroma_gain=1.0, luminance_out=None):
     """Direct DCT encode: native RGB frame to the sender's coder-grid values.
 
     Stages (see the direct-encode spec): tone per pixel at full resolution
@@ -766,11 +886,15 @@ def direct_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
     plane at least twice the luma grid; YCbCr on the block means; pixel-
     domain enhancement; DCT truncation to each grid; optional taper on the
     luma coefficients; inverse grid DCT; ``clip(2x - 1)``. Returns the
-    concatenated Y/Cb/Cr values in [-1, 1].
+    concatenated Y/Cb/Cr values in [-1, 1]. A list passed as
+    ``luminance_out`` receives the source's linear luminance on the luma grid
+    (the target for luma_adjust).
     """
-    planes, grids, shapes, taper = _direct_planes(
+    planes, grids, shapes, taper, target = _direct_planes(
         rgb, grids, shapes, brightness, gamma, sharpen, sharpen_strength,
-        clarity, chroma_gain)
+        clarity, chroma_gain, luminance=luminance_out is not None)
+    if luminance_out is not None:
+        luminance_out.append(target)
     rows, cols = planes[0].shape
     result = np.empty(sum(r*c for r, c in grids), dtype=np.float64)
     offset = 0

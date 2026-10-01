@@ -550,6 +550,20 @@ class SenderGuiTests(unittest.TestCase):
         gui.advanced = True
         self.assertIn('clip_aware', gui._visible_fields())
 
+    def test_luma_adjustment_is_on_with_direct_dct_and_reaches_the_cli(self):
+        gui = SenderGui(self.devices)
+        self.assertTrue(gui.settings['luma_adjust'])
+        gui.advanced = True
+        self.assertIn('luma_adjust', gui._visible_fields())
+        gui.settings['dct_encode'] = False
+        self.assertNotIn('luma_adjust', gui._visible_fields())
+        self.settings.update(dct_encode=True, luma_adjust=True)
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertTrue(v7_live.parser().parse_args(command[2:]).luma_adjust)
+        self.settings['luma_adjust'] = False
+        self.assertNotIn('--luma-adjust',
+                         build_command(self.settings, self.devices, self.sd))
+
     def test_ffmpeg_screen_input_is_forwarded_only_for_ffmpeg_capture(self):
         self.settings.update(source='screen', screen_backend='ffmpeg',
                              ffmpeg_input='x11grab::0.0')
