@@ -741,7 +741,14 @@ HEAD_MIN_CONFIDENCE = .70
 HEAD_MIN_COVERAGE = .50
 LIVE_VALID_HEAD_CONFIDENCE = .85
 LIVE_VALID_HEAD_COVERAGE = .75
-LIVE_MAX_PILOT_NOISE = .08
+# Pilot-noise limits are relative: the pilot residual's power over the power
+# a unit cell is received at (_pilot_reference_power), so they do not move
+# with the input level. The model's data cells have power about 2, so 2.0 is
+# noise as strong as the picture signal the model expects.
+LIVE_MAX_PILOT_NOISE = 2.0
+# A symbol whose residual is past this (and well past its channel's median
+# or the paired channel) is a local erasure, not packet-wide noise.
+ERASURE_PILOT_NOISE = .08
 DISPLAY_MIN_HEAD_CONFIDENCE = .60
 DISPLAY_MIN_HEAD_COVERAGE = .50
 DISPLAY_MAX_PILOT_NOISE = 2.0
@@ -3049,7 +3056,7 @@ def _stereo_erasure_mask(noise):
     values = np.asarray(noise)
     if values.ndim != 2 or values.shape[1] != 2:
         raise ValueError('stereo pilot noise must have shape (symbols, 2)')
-    limit = float(LIVE_MAX_PILOT_NOISE)
+    limit = float(ERASURE_PILOT_NOISE)
     ratio = 8.0
     local_limit = np.maximum(limit, ratio*np.median(values, axis=0))
     local_outlier = values > local_limit[None, :]
@@ -3062,6 +3069,14 @@ def _stereo_erasure_mask(noise):
               ratio*np.maximum(values[:, paired], NOISE_FLOOR)) &
              (values[:, paired] <= limit)))
     return erase
+
+
+def _pilot_reference_power(H):
+    """Per input channel: the mean received power of a unit cell on the
+    pilot bins (1.0 for a unity-gain link at the sender's level)."""
+    power = np.abs(H[:, _PILOT_BINS_ARRAY])**2
+    reference = power.sum(axis=3).mean(axis=(0, 1))
+    return np.maximum(reference, NOISE_FLOOR).astype(H.real.dtype)
 
 
 def _effective_pilot_noise(noise, erased):
@@ -3547,7 +3562,11 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
         fade_input, H, force_float32=force_float32,
         tone_reference=(tone_equalization == 'm-reference'),
         return_tone_diag=True)
-    pilot_noise = noise.copy()
+    # The quality gates judge the pilot residual against the pilots' own
+    # received power, so they do not depend on the input level. (The
+    # equaliser below keeps the absolute residual, which it weighs against H
+    # in the same units.)
+    pilot_noise = noise/_pilot_reference_power(H)[None, :]
     stereo_erasures = _stereo_erasure_mask(pilot_noise)
     if erased is not None:
         stereo_erasures[erased, :] = True
@@ -3555,7 +3574,7 @@ def decode_frame(model, x, tmap, counter, prev_tail, cancel=True,
     # The affected observation is absent only for these OFDM symbols. Keep the
     # other channel and the rest of this leg's packet in the joint solve.
     noise[stereo_erasures] = np.maximum(
-        1.0, np.max(pilot_noise)*1e6)
+        1.0, np.max(noise)*1e6)
     if tone_equalization != 'off':
         timing_metrics['tone_equalization'] = tone_eq_diag
     if diagnostics is not None:

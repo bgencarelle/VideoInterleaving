@@ -284,24 +284,11 @@ with Direct DCT encode) area-averages the frame to the wire's own pixel grid
 (half of it per axis for colour) and sends exactly that small picture's
 coefficients; a source that is a whole multiple of the grid (pixel art)
 passes without any resampling. It turns off the enhancements and luma
-adjustment. On **Aspect Fold 500** the grid follows the picture shape and
-**Pixel grid** (`--pixel-grid`) chooses its size (width×height):
-
-| Layout | Robust | Large |
-|---|---|---|
-| 1:1 | 42×42 | 48×48 |
-| 4:3 | 50×38 | 56×42 |
-| 3:2 | 52×36 | 60×40 |
-| 16:9 | 58×32 | 64×36 |
-
-(portrait layouts are the mirrors). **Robust** (default) fits the ordinary
-slots; nothing rides as a fold guest, so it is exact on every link the
-picture survives. **Large** has the layout's exact aspect; its finest 384 to
-496 coefficients ride as fold guests, which only a clean link delivers
-exactly: elsewhere the guests drop and fine diagonal detail rings. A pixel
-grid is signalled by the metadata model bit and the receiver tells the two
-grids apart by their fold signature, so it follows either without a setting.
-Tails: Fixed or Chroma. On **Fold 500** the grid is 40×48 for every picture
+adjustment. The pixel grids of
+**Aspect Fold 500** (`--pixel-grid robust|large`: their sizes, what they carry,
+how they are signalled and how the receiver tells them apart) are part of the
+V7 live wire and are specified in `docs/transport_v7_spec.md`, section 14.4.
+On **Fold 500** the grid is 40×48 for every picture
 shape. **Pixel
 downscale** (`--pixel-detail`) chooses how the frame comes down to that grid:
 **Average** is the area average of the pixels (exact for block art); **Soft**,
@@ -435,51 +422,11 @@ for receiving; they do not need to match.
 
 ### Stereo slices (experimental)
 
-`--profile stereo-slices` (sender GUI: **Stereo slices**) makes each output
-channel a complete picture by itself. Each channel is its own mono wire: the
-mono profiles' packet (own sync, pilots, metadata, 1,264 slots, no tail
-rotation), and nothing in one channel is needed to read the other. Aspect
-Fold 500 instead sends the sum and the difference of the channels, so there
-one channel alone hears two unrelated coefficients in every slot.
-
-Per plane the coefficients nearest DC for the layout are cut into a *base*
-(1,020 luma, 110 per colour plane) and, for luma, as many *detail*
-coefficients beyond it. Each luma slot carries one of each, the strongest
-base with the weakest detail:
-
-    left slot  = base + 0.35 × detail
-    right slot = base − 0.35 × detail
-
-Colour is the base alone, the same on both channels. The receiver needs no
-setting:
-
-- **both channels**: the sum gives the base, the difference the detail: the
-  whole picture (2,040 luma coefficients);
-- **a mono sum**: the detail cancels, leaving the base exactly;
-- **one channel**: the base, with the detail as a small disturbance on the
-  slots that can best afford it.
-
-Eight marker slots per channel carry a fixed pattern, positive on the left
-and negative on the right, so a sum reads zero; the receiver averages it per
-input channel, so swapped cables do not matter and one bad packet does not
-change what a channel is taken for. The markers also measure crosstalk
-between the channels, which is then removed. A channel whose packet is
-damaged (symbols lost to a dropout) is not joined with a clean one; equally
-noisy channels are joined. The profile needs two output channels and has no
-pixel grid. The layout follows the packet's aspect code; signalling is the
-aspect mono profile's coded status with the metadata model bit set to
-nearest.
-
-Real modem, four test pictures, sender with luma adjustment. Change in
-picture error (100 − SSIMULACRA2) against Aspect Fold 500 with the fixed
-tail; negative is better: clean +0.7 %; left channel only −29 %; right only
-−31 %; mono sum −1.9 %; hiss −40 dB +0.1 %; hiss −35 +0.6 %; type I tape
-−0.3 %; type II +0.6 %; soft saturation −2.9 %; wow and flutter +0.3 %;
-12 kHz lowpass +1.1 %; MP3 320 −2.5 %; MP3 192 −24 % (31 of 32 frames
-against 27). One channel alone is 2.3 % worse than aspect-mono-500 on its
-one channel, which folds 500 more coefficients. Folding on this wire as well
-closes that (250 guests +1.1 %, 500 guests −0.4 %) but costs the two-channel
-picture more (clean +2.7 % and +4.3 %), so it is built without.
+`--profile stereo-slices` (sender GUI: **Stereo slices**) is a profile of the
+standalone V7 live wire, not of the baked application modem mode this file
+covers. What each channel carries, how the profile is signalled and how the
+receiver joins the channels are specified in `docs/transport_v7_spec.md`,
+section 14.8; its known limits are in section 15 there.
 
 ## Live output from the application
 
