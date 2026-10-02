@@ -633,30 +633,31 @@ sharpness. The contracts for any preparation stage:
 
 ### 11.3 Plans (not built)
 
-Each item is a plan carried over from earlier revisions. None is implemented.
+The plans the owner kept. Plans struck on review: deciding whether the
+`box` tables are adequate (answered: they are not; see roadmap item 1),
+guest soft knee, luma-guided chroma, change-adaptive softening, bake
+integration, and faster full-resolution preparation for `--dct-encode`.
 
-1. Decide from coefficient statistics on held-out frames whether the canonical
-   `box` tables are adequate. The statistics report exists
-   (`test_modem_v7/perceptual_resize.py`); the decision does not.
-2. Band shaping: a fixed luma gain array applied to the full DCT before
-   folding, with DC at gain 1.
-3. Guest soft knee: compress large normalized guests before the linear clip.
-   Fold 500 has since moved to companded guests; this would apply to linear
-   tables only.
-4. Luma-guided chroma: reduce chroma guided by luma edges, evaluated after
-   the chroma cut.
-5. Change-adaptive softening for live sources: soften changing regions, keep
-   static regions, reset on cuts.
-6. Bake integration: an opt-in preparation option in
-   `utilities/convert_to_modem_dct.py`, alpha-aware, recorded in the manifest.
-7. Promotion rule: no stage becomes a default without a measured comparison
+1. Promotion rule: no stage becomes a default without a measured comparison
    against `box`, a viewer preference, and at most 25% added send-path time.
-8. Other coefficient budgets: use the source-DCT analysis to feed profiles
-   with a different coefficient map. Each needs its own profile and tables.
-9. Faster full-resolution preparation for `--dct-encode`. The measured
-   candidates were slower than the resize path and none was accepted.
-10. Block-averaged Fold 500 projection kept as an opt-in research
-    approximation, separate from item 9.
+2. Other coefficient budgets: profiles that carry a different selection of
+   coefficients, each with its own profile and tables. The aspect layouts,
+   pixel grids and stereo-slices (section 14) are built instances and are no
+   longer part of this plan. Still open under it:
+   - band shaping, a fixed luma gain array applied to the full DCT before
+     folding, with DC at gain 1. For mean-square error the gains are already
+     optimal: a coefficient of variance λ sent as an analogue value over a
+     noisy channel under a power limit wants gain proportional to λ^(−1/4),
+     which is what the model tables use, and the coefficients too weak to
+     be worth their power are the ones left out (reverse water-filling).
+     Band shaping is therefore only a question of perceptual weights: with a
+     weight w per coefficient the gain becomes proportional to (w/λ)^(1/4).
+     Candidate weights are a contrast-sensitivity curve or a JPEG-style
+     table; which looks best is an A/B question, not a formula.
+3. Block-averaged Fold 500 projection, kept as an opt-in research
+   approximation (`v7_source_dct.py::FoldBlockDCTProjector`). The 8×8 box
+   average gave no visible benefit; other kinds of averaging and other
+   kernels are to be tried.
 
 ## 12. Receiver display
 
