@@ -577,7 +577,7 @@ def _fold_slots(args):
             raise ValueError('aspect-fold-500 must be selected on its own')
         # The aspect profile folds with its own layout tables, not LiveFold.
         return 0
-    if getattr(args, 'slices', None) == 'stereo':
+    if getattr(args, 'slices', None):
         if requested is not None or baseline:
             raise ValueError('stereo-slices must be selected on its own')
         return 0
@@ -762,10 +762,6 @@ def _apply_profile_option(args):
         args.aspect_mono = True
     elif profile == 'stereo-slices':
         args.slices = 'stereo'
-    elif profile == 'mono-slices':
-        # One picture channel and a soundtrack: the mono-video plumbing.
-        args.slices = 'mono'
-        args.experimental_mono_fold = True
 
 
 def run_send(args):
@@ -894,11 +890,11 @@ def _run_send_session(args):
             raise ValueError('the slices profiles require coded pilot tones')
         if not getattr(args, 'eof_marker', True):
             raise ValueError('the slices profiles require the EOF marker')
-        if slices_profile == 'stereo' and getattr(args, 'mono_sum', False):
-            raise ValueError('stereo-slices needs two output channels; use '
-                             'mono-slices for one')
+        if getattr(args, 'mono_sum', False):
+            raise ValueError('stereo-slices needs two output channels; use a '
+                             'mono video profile for one')
         _ensure_test_modem_path()
-        from slice_wire import SliceMonoWire, SliceWire
+        from slice_wire import SliceWire
         from tone_code import warmup_status_templates
         slice_wire = SliceWire(getattr(args, 'aspect_layout', 'auto'))
         # Build every layout model the sender may need before audio starts.
@@ -907,18 +903,10 @@ def _run_send_session(args):
                            slice_wire.layout_for(code) for code in range(8)))):
             slice_wire.model_for(model, layout)
         warmup_status_templates(slice_wire.status_mode)
-        if slices_profile == 'mono':
-            mono_wire = SliceMonoWire(
-                slice_wire, getattr(args, 'mono_video_side', 'right'))
         if getattr(args, 'dct_encode', False) and dct_options.get('pixel'):
-            # Pixel encode: the whole picture's own rectangles.
-            from slice_wire import slice_shapes
-            dct_options = dict(dct_options, pixel_shapes=tuple(
-                slice_shapes(slice_wire.layout_for(code))
-                for code in range(8)))
-    if mono_fold_profile and slice_wire is not None:
-        pass
-    elif mono_fold_profile:
+            raise ValueError('stereo-slices carries no pixel grid; use Pixel '
+                             'encode with Aspect Fold 500 or Fold 500')
+    if mono_fold_profile:
         _ensure_test_modem_path()
         from mono_video import MonoColourFoldWire, MonoFreshFoldWire
         if getattr(args, 'aspect_mono', False):
@@ -2242,14 +2230,12 @@ class _AdaptiveProfileDecoder:
 
     def slice_values(self, halves, result=None):
         """Grid values from one or two stereo-slices channels; notes on
-        ``result`` what was shown and the pixel grid it stands on."""
-        from slice_wire import slice_shapes
+        ``result`` what was shown."""
         wire = self.slice_wire
         used = wire.choose(halves)
         if result is not None:
             result.diag['slices_shown'] = '+'.join(sorted(
                 half.kind for half in used))
-            result.diag['pixel_shapes'] = slice_shapes(used[0].layout)
         return wire.values(halves)
 
     def values(self, model, result):
@@ -3957,8 +3943,7 @@ def parser():
     send_profile.add_argument(
         '--profile', choices=('mono-fold-500', 'fold-500', 'mono-colour-500',
                               'fold-1000', 'aspect-fold-500',
-                              'aspect-mono-500', 'stereo-slices',
-                              'mono-slices'),
+                              'aspect-mono-500', 'stereo-slices'),
         default=None,
         help=('wire profile: mono video with Fold 500 (recommended), '
               'stereo Fold 500 (default), or advanced Fold 1000, '

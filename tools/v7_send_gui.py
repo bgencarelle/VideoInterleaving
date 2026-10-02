@@ -34,14 +34,12 @@ PROFILE_CHOICES = (
     ('Mono video · aspect colour Fold 500', 'aspect-mono-500'),
     ('Mono video · colour Fold 500', 'mono-colour-500'),
     ('Stereo slices · each channel a whole picture · new', 'stereo-slices'),
-    ('Mono slices · one channel + audio · new', 'mono-slices'),
 )
 DEFAULT_PROFILE = 'aspect-fold-500'
-MONO_PROFILES = ('mono-colour-500', 'aspect-mono-500', 'mono-slices')
+MONO_PROFILES = ('mono-colour-500', 'aspect-mono-500')
 FOLDED_PROFILES = ('fold-500', 'mono-colour-500', 'aspect-fold-500',
-                   'aspect-mono-500', 'stereo-slices', 'mono-slices')
-ASPECT_PROFILES = ('aspect-fold-500', 'aspect-mono-500', 'stereo-slices',
-                   'mono-slices')
+                   'aspect-mono-500', 'stereo-slices')
+ASPECT_PROFILES = ('aspect-fold-500', 'aspect-mono-500', 'stereo-slices')
 # Only the stereo aspect profile has a V7 tail (mono packets carry none).
 ASPECT_TAIL_PROFILES = ('aspect-fold-500',)
 ASPECT_LAYOUT_CHOICES = (
@@ -124,10 +122,8 @@ FIELD_HELP = {
                 'leave one output free for audio. Stereo slices (new) makes '
                 'each channel a whole picture by itself: either channel '
                 'alone, or a mono sum, still shows the picture, and both '
-                'together show it in full; a little softer than Aspect Fold '
-                '500 on a clean link. Mono slices is the same wire on one '
-                'channel, with the other free for audio. The receiver '
-                'follows the profile from each packet.'),
+                'together show it in full. The receiver follows the profile '
+                'from each packet.'),
     'speed': 'Playback speed from 0.25× to 4×. Faster playback raises the transmitted carrier frequencies.',
     'encode_filter': ('Pillow encoder resize to the fixed 80×96 image when '
                       'Direct DCT encode is off. Every profile uses Box.'),

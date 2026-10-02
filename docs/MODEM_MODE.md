@@ -438,32 +438,26 @@ for receiving; they do not need to match.
 `--profile stereo-slices` (sender GUI: **Stereo slices**) makes each output
 channel a complete picture by itself. Each channel is its own mono wire: the
 mono profiles' packet (own sync, pilots, metadata, 1,264 slots, no tail
-rotation), every slot sent plainly with no fold, and nothing in one channel
-is needed to read the other. Aspect Fold 500 instead sends the sum and the
-difference of the channels, so there one channel alone hears two unrelated
-coefficients in every slot.
+rotation), and nothing in one channel is needed to read the other. Aspect
+Fold 500 instead sends the sum and the difference of the channels, so there
+one channel alone hears two unrelated coefficients in every slot.
 
-The picture is a luma rectangle shaped to the layout, with a smaller
-rectangle per colour plane (width×height):
+Per plane the coefficients nearest DC for the layout are cut into a *base*
+(1,020 luma, 110 per colour plane) and, for luma, as many *detail*
+coefficients beyond it. Each luma slot carries one of each, the strongest
+base with the weakest detail:
 
-| Layout | Luma | Colour |
-|---|---|---|
-| 1:1 | 44×44 | 16×16 |
-| 4:3 | 52×38 | 18×14 |
-| 3:2 | 56×36 | 20×12 |
-| 16:9 | 60×34 | 20×10 |
+    left slot  = base + 0.35 × detail
+    right slot = base − 0.35 × detail
 
-(portrait layouts are the mirrors). The left channel carries one
-checkerboard half of each rectangle (the samples whose row and column sum to
-an even number), the right channel the other half. The receiver needs no
+Colour is the base alone, the same on both channels. The receiver needs no
 setting:
 
-- **both channels**: the halves interleave into the whole picture;
-- **one channel**: each missing sample is filled from its four neighbours, a
-  complete picture that has lost a little in every direction (slicing by
-  rows or columns instead loses everything in one direction);
-- **a mono sum**: the halves add, which is the picture averaged over
-  horizontal pairs.
+- **both channels**: the sum gives the base, the difference the detail: the
+  whole picture (2,040 luma coefficients);
+- **a mono sum**: the detail cancels, leaving the base exactly;
+- **one channel**: the base, with the detail as a small disturbance on the
+  slots that can best afford it.
 
 Eight marker slots per channel carry a fixed pattern, positive on the left
 and negative on the right, so a sum reads zero; the receiver averages it per
@@ -471,30 +465,21 @@ input channel, so swapped cables do not matter and one bad packet does not
 change what a channel is taken for. The markers also measure crosstalk
 between the channels, which is then removed. A channel whose packet is
 damaged (symbols lost to a dropout) is not joined with a clean one; equally
-noisy channels are joined. Pixel display shows the rectangle; Pixel encode
-sends it exactly. The layout follows the packet's aspect code; signalling is
-the aspect mono profile's coded status with the metadata model bit set to
+noisy channels are joined. The profile needs two output channels and has no
+pixel grid. The layout follows the packet's aspect code; signalling is the
+aspect mono profile's coded status with the metadata model bit set to
 nearest.
 
-`--profile mono-slices` (**Mono slices**) is the same wire on one channel
-(`--mono-video-side`), carrying the first half, with the other channel free
-for a soundtrack as with the mono profiles.
-
-Real modem, four test pictures, sender with luma adjustment, SSIMULACRA2
-against the source (higher is better), Aspect Fold 500 with the fixed tail
-first, stereo slices second: clean −48.7 / −51.3; left channel only −129 /
-−65; right only −136 / −64; mono sum −65.8 / −66.8; random 20–120 ms
-dropouts on either channel −114 / −88; hiss −40 dB −52.2 / −53.1; hiss −35
-−54.0 / −56.2; type I tape −59.4 / −59.6; type II −55.1 / −58.0; wow and
-flutter −51.2 / −51.7; 10 % crosstalk −48.8 / −51.2; MP3 320 −56.0 / −55.6;
-MP3 192 −113 (27 of 32 frames) / −75 (31 frames); soft saturation −65 / −76;
-MP3 160 −102 (16 frames) / −200 (22 frames). Mono slices with a soundtrack
-on the other channel, against aspect-mono-500: clean −63.7 / −65.1; hiss
-−40 −66.3 / −65.3; type I −68.6 / −68.6; type II −67.8 / −66.4; soft
-saturation −96 / −80; MP3 320 −67.4 / −65.8 (28 frames each); MP3 192 and
-160 show almost nothing on either. Decoding both channels costs less than
-one Aspect Fold 500 packet (2.5 ms against 3.8 ms here); the sender's packet
-build is 1.3 ms against 0.9 ms.
+Real modem, four test pictures, sender with luma adjustment. Change in
+picture error (100 − SSIMULACRA2) against Aspect Fold 500 with the fixed
+tail; negative is better: clean +0.7 %; left channel only −29 %; right only
+−31 %; mono sum −1.9 %; hiss −40 dB +0.1 %; hiss −35 +0.6 %; type I tape
+−0.3 %; type II +0.6 %; soft saturation −2.9 %; wow and flutter +0.3 %;
+12 kHz lowpass +1.1 %; MP3 320 −2.5 %; MP3 192 −24 % (31 of 32 frames
+against 27). One channel alone is 2.3 % worse than aspect-mono-500 on its
+one channel, which folds 500 more coefficients. Folding on this wire as well
+closes that (250 guests +1.1 %, 500 guests −0.4 %) but costs the two-channel
+picture more (clean +2.7 % and +4.3 %), so it is built without.
 
 ## Live output from the application
 

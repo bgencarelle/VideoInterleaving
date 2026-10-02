@@ -87,7 +87,7 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(
             tuple(value for _label, value in PRIMARY_PROFILE_CHOICES),
             ('aspect-fold-500', 'fold-500', 'aspect-mono-500',
-             'mono-colour-500', 'stereo-slices', 'mono-slices'))
+             'mono-colour-500', 'stereo-slices'))
 
     def test_device_list_contains_only_output_devices_and_does_not_default(self):
         sd = Mock()
@@ -1147,14 +1147,9 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(args.aspect_layout, '16:9')
         self.assertNotIn('--mono-video-side', command)
         self.assertNotIn('--aspect-tail', command)
-        self.settings.update(profile='mono-slices', mono_video_side='left',
-                             source_audio='off')
-        command = build_command(self.settings, self.devices, self.sd)
-        args = v7_live.parser().parse_args(command[2:])
-        v7_live._apply_profile_option(args)
-        self.assertEqual(args.slices, 'mono')
-        self.assertTrue(args.experimental_mono_fold)
-        self.assertEqual(args.mono_video_side, 'left')
+        with self.assertRaises(SystemExit):
+            v7_live.parser().parse_args(
+                ['send', '--profile', 'mono-slices'])
 
     def test_profile_picker_lists_every_profile_and_aspect_fold_default(self):
         gui = SenderGui(self.devices)
@@ -1162,7 +1157,7 @@ class SenderGuiTests(unittest.TestCase):
         self.assertTrue(gui.settings['dct_encode'])
         self.assertFalse(gui.advanced)
         expected = ('aspect-fold-500', 'fold-500', 'aspect-mono-500',
-                    'mono-colour-500', 'stereo-slices', 'mono-slices')
+                    'mono-colour-500', 'stereo-slices')
         self.assertEqual(tuple(value for _label, value in
                                gui._choices('profile')), expected)
         gui.advanced = True

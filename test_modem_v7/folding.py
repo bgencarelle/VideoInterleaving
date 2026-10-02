@@ -222,10 +222,13 @@ class FoldCodec:
         u = np.clip(full[self.guests]/self.sd_guest, -U_CLIP, U_CLIP)
         return full, coeffs, h, u
 
-    def encode_coefficients(self, values):
-        """Return folded source coefficients, before the inverse DCT to pixels."""
+    def encode_coefficients(self, values, full=None):
+        """Return folded source coefficients, before the inverse DCT to pixels.
+        ``full``: the grid's forward transform of ``values``, when the caller
+        already has it."""
         if self.compand is not None:
-            full = self.grid.forward(values)
+            if full is None:
+                full = self.grid.forward(values)
             coeffs = full[self.kept].copy()
             h = (coeffs[self.hosts] - self.model.mu[self.hosts])/self.sd_host
             symbol = (self.D*np.round(h/self.D) +
