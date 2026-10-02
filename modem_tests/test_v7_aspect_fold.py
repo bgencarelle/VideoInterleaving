@@ -356,6 +356,35 @@ class AspectWireTests(unittest.TestCase):
                 profile_hint={'aspect_code': None})
             self.assertEqual(held.diag['profile_rejected'], 'aspect_layout_unknown')
 
+            # With the fold signature of the last confirmed layout in the
+            # equaliser output, a packet without metadata is decoded on that
+            # layout and marked predicted; another layout's signature is not
+            # accepted.
+            def with_signature(layout):
+                wire = decoder.aspect_wire
+                model = wire.model_for(self.base, layout)
+                codec = wire.codec(model)
+                coeffs = codec.encode_coefficients(self.values)
+
+                def decode(model_, x, tmap, counter, prev_tail, *a, **k):
+                    return v7.Result(counter, 'received', coeffs.copy(), {
+                        'fold_eq': (coeffs-model.mu, np.ones(len(model.mu)))})
+                return decode
+
+            decoder._real_decode = with_signature('16:9')
+            predicted = decoder._decode_frame(
+                self.base, None, None, 4, self.base.mu, direct_body=body,
+                profile_hint={'aspect_code': None})
+            self.assertEqual(predicted.status, 'received')
+            self.assertEqual(predicted.diag['aspect_layout'], '16:9')
+            self.assertTrue(predicted.diag['aspect_layout_predicted'])
+            decoder._real_decode = with_signature('4:3')
+            other = decoder._decode_frame(
+                self.base, None, None, 5, self.base.mu, direct_body=body,
+                profile_hint={'aspect_code': None})
+            self.assertEqual(other.diag['profile_rejected'],
+                             'aspect_layout_unknown')
+
 
 if __name__ == '__main__':
     import unittest.mock  # noqa: F401

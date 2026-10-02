@@ -247,8 +247,36 @@ flutter 8.2 → 5.9, MP3 320 6.8 → 6.9; SSIMULACRA2 (cartoon / robot and test
 card / photos): clean +0.5 / +1.5 / +0.6, hiss +1.6 / +3.3 / +1.4, fast
 flutter +0.3 / 0.0 / +0.6, MP3 320 0.0 / +0.2 / +1.8. This changes the wire:
 sender and receiver must both run this version (a mismatched pair decodes
-the picture with wrong fine luma detail). Fold 500 and the mono profiles are
-unchanged.
+the picture with wrong fine luma detail).
+
+Fold 500 (stereo), mono-colour-500 and aspect-mono-500 now carry companded
+guests as well: step 1.0, limit 12, μ = 4, guests dropped past symbol noise
+0.15 (`TABLE_COMPAND` in `test_modem_v7/live_fold.py`, `MONO_COLOUR_COMPAND`
+in `test_modem_v7/mono_video.py`; the mono profiles' step was 0.6). **This
+is a wire change for these three profiles**: `fold_table_500.json` (and the
+application sender's copy, `animation_modem/v7_fold_table_500.json`) and the
+mono colour table identity are re-pinned, the fold signature changes with
+them, and sender and receiver must both run this version. The 1,000-slot
+table and mono-fold-500 are unchanged. They had the same fault: on real
+frames the guests are 1.2 to 4.9 times the model's standard deviation, 2 %
+to 45 % of them passed the ±2.5 clip, and guest accuracy on a clean channel
+was 3.0 / 2.0 / 1.5 dB (Fold 500 / mono-colour / aspect-mono, four test
+pictures, all packets); it is now 7.7 / 4.5 / 3.1 dB. Real modem,
+SSIMULACRA2 with edge reconstruction, mean of four pictures (Fold 500 /
+mono-colour / aspect-mono): clean +1.3 / +0.8 / +0.8, hiss −40 +0.6 / +1.2 /
++1.5, wow and flutter +0.1 / +0.7 / +0.2, fast flutter +0.7 / +0.2 / −0.1,
+type I 0.1 / 0.0 / −0.2, type II +1.1 / +0.2 / +0.3, MP3 320 −0.2 / +1.1 /
++1.2; the same number of packets is shown in every case except MP3 320
+(mono-colour 28 → 27 of 32, aspect-mono 25 → 28). Black-panel ripple of the
+counting frame with edge reconstruction at 75 % (s.d. in 8-bit codes, Fold
+500 / mono-colour / aspect-mono): clean 6.3 → 5.4 / 7.0 → 6.3 / 6.6 → 6.8,
+hiss −40 7.6 → 5.9 / 8.2 → 6.4 / 8.6 → 7.1, fast flutter 7.9 → 6.3 / 6.6 →
+6.7 / 6.7 → 6.7, MP3 320 6.5 → 6.9 / 6.4 → 6.5 / 8.9 → 8.0. On the noisy
+channels hardly any guest survives in either version (guest accuracy 0 to
+1 dB); the gain there comes from dropping the guests so that edge
+reconstruction fills them in, instead of showing noisy ones. The mono
+profiles' larger step makes their hosts coarser, which costs about 0.2 on
+type I, where no guest survives.
 
 **Pixel mode** is for pictures that should arrive as hard pixels, not as a
 smooth picture. Sender: **Pixel encode** (`--pixel-encode`, under Advanced
@@ -347,7 +375,8 @@ EOF markers.
 
 One setting is not signalled and must match on both ends:
 
-- `--aspect-tail` (default `chroma`): what the 96 tail slots carry. `chroma`
+- `--aspect-tail` (default `fixed`; the sender GUI resets an earlier saved
+  tail to it once): what the 96 tail slots carry. `chroma`
   is V7's rotating chroma tail (the lowest-ranked 656 coefficients are all
   chroma); `split` sends 48 extra luma frequencies in every packet plus 48
   rotating chroma; `luma` sends 96 extra luma frequencies in every packet and

@@ -980,8 +980,22 @@ s = D·round(h / D) + β·clip(u, −2.5, 2.5)        β = 0.8·D / 5
     training frames. On the reference run that gave 0.97 for both M; the
     10.2 results use it.
   - Live prototype: the frozen tables are the authority, fitted on the
-    reference fixture. D = 0.970 in `fold_table_500.json` and 0.8247 in
-    `fold_table_1000.json`; the 10.7 results use these.
+    reference fixture. D = 0.970 in the linear `fold_table_500.json` and
+    0.8247 in `fold_table_1000.json`; the 10.7 results use these.
+- **Companded guests (current `fold_table_500.json`, WIRE CHANGE):** the
+  shipped M = 500 table now carries `compand: [12, 4]`,
+  `guest_noise_max: 0.15` and D = 1.0 (`TABLE_COMPAND` in `live_fold.py`;
+  `live_fold.py build` writes it). The guest then rides as
+  `A·sign(u)·ln(1 + μ·min(|u|, U)/U)/ln(1 + μ)` with U = 12, μ = 4 and
+  A = 0.4·D instead of `β·clip(u, −2.5, 2.5)`, and `s` is scaled by
+  `1/sqrt(1 + D²/12 + 0.12·A²)`. The receiver shrinks the residual by its
+  MMSE weight at the symbol noise measured on the signature slots, expands
+  it, and drops the guests (hosts still read as steps) when that noise
+  passes 0.15. The table's SHA-256 pin and identity changed, so both ends
+  must run this version. `fold_table_1000.json` keeps linear guests.
+  Real pictures' guests are 1.6 to 4.9 times the model's standard
+  deviation and 4 % to 45 % of them exceed the old clip (see
+  `docs/MODEM_MODE.md`).
 
 The receiver:
 1. takes the equaliser's per-coefficient estimate and confidence for the host
@@ -2063,7 +2077,8 @@ endpoint clamp (at most 1/(2×255) per saturated source sample).
 
 The resulting sparse full-grid vector is passed to
 `Fold500.encode_dct_coefficients`, which performs the pinned host quantization,
-guest clipping, and reserved signature-slot replacement. The folded result then
+guest companding (as the pinned table specifies), and reserved signature-slot
+replacement. The folded result then
 uses the same `encode_folded_coefficients_packet` pulse, coded-pilot, metadata,
 and EOF path as the application sender. No receiver, model, table, or wire
 changes are made. This candidate is an explicit still-image benchmark option
@@ -4168,7 +4183,8 @@ The profile-specific changes are:
 | Coefficient order | `model.order` | `colour_order(model)` below |
 | Fold hosts | ranks 764–1,263 of `model.order`, any plane | 500 weakest luma coefficients among the 1,264 fresh slots |
 | Fold guests | ranks 1,264–1,763 of `model.order`, any plane | first 500 luma coefficients after the fresh 1,264 |
-| Fold step D | 1.1409647181002305 | 0.6 |
+| Fold step D | 1.1409647181002305 | 1.0 |
+| Guests | linear, clipped at ±2.5 | companded: limit 12, μ = 4, dropped past symbol noise 0.15 (`MONO_COLOUR_COMPAND`; earlier wire: linear, D = 0.6) |
 
 The coefficient order is constructed deterministically:
 
@@ -4193,7 +4209,7 @@ For the pinned box model, the resulting allocations are:
 No host is in the protected head, and no guest is in the fresh set. As in the
 base codec, the final 16 hosts carry the fold-table signature. The complete
 colour fold-table SHA-256 is
-`76e6f7b3592fcc2d657197d86ab189a320ca16b1f3bf73ed0fc3a5bed24989f6`.
+`883b56bc5f759c3ed0a05e45d9d8f78d5649b819294282d0e87c537fa6cd5262`.
 The byte-identity baseline for three `mono-fold-500` packets on this machine is
 `ba74e9ff3426cf8fa58f7a8fa5562adc9c7b3b1cabc389eba8213a6f1e659036`.
 

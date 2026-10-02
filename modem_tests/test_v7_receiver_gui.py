@@ -489,7 +489,7 @@ class ReceiverGuiOptionTests(unittest.TestCase):
                       fields['aspect_tail'].options)
         fields['device'].value = 3
         args = gui._build_arguments()
-        self.assertEqual((args.aspect_layout, args.aspect_tail), ('auto', 'chroma'))
+        self.assertEqual((args.aspect_layout, args.aspect_tail), ('auto', 'fixed'))
         fields['aspect_layout'].value = '4:3'
         fields['aspect_tail'].value = 'luma'
         args = gui._build_arguments()

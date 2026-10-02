@@ -897,7 +897,7 @@ def _run_send_session(args):
         from aspect_fold import AspectFoldWire
         from tone_code import warmup_status_templates
         aspect_wire = AspectFoldWire(getattr(args, 'aspect_layout', 'auto'),
-                                     getattr(args, 'aspect_tail', 'chroma'))
+                                     getattr(args, 'aspect_tail', DEFAULT_ASPECT_TAIL))
         # Build every layout model the sender may need before audio starts.
         layouts = ((aspect_wire.layout,) if aspect_wire.layout != 'auto' else
                    tuple(dict.fromkeys(
@@ -1686,7 +1686,7 @@ class _AdaptiveProfileDecoder:
     REQUIRED_STREAK = 3
 
     def __init__(self, fold, base_model, preferred_side='auto',
-                 aspect_layout='auto', aspect_tail='chroma'):
+                 aspect_layout='auto', aspect_tail=None):
         from animation_modem import v7
         _ensure_test_modem_path()
         from live_fold import LiveFold
@@ -1715,7 +1715,8 @@ class _AdaptiveProfileDecoder:
         self.mono_status_modes = frozenset(self.mono_wires)
         # Stereo Fold 500 with an aspect-matched coefficient layout; its
         # layout and tail are receiver settings matching the sender's.
-        self.aspect_wire = AspectFoldWire(aspect_layout, aspect_tail)
+        self.aspect_wire = AspectFoldWire(
+            aspect_layout, aspect_tail or DEFAULT_ASPECT_TAIL)
         self.aspect_mode = self.aspect_wire.status_mode
         self.supported_modes = frozenset(
             (FOLD_500, self.aspect_mode, *self.mono_wires))
@@ -1742,6 +1743,8 @@ class _AdaptiveProfileDecoder:
         self.dispatch_side = None
         self._local = threading.local()
         self._installed = None
+        # Last layout confirmed by packet metadata, per aspect profile mode.
+        self._last_layouts = {}
         # LiveFold is also the equalizer-output capture hook used by mono
         # profiles; the selected table is applied later, after status dispatch.
         if not isinstance(fold, LiveFold):
@@ -1974,8 +1977,16 @@ class _AdaptiveProfileDecoder:
         profile_model = model
         aspect_layout = None
         hint = kwargs.get('profile_hint') or {}
+        # A packet whose metadata failed carries no aspect code. Its picture
+        # data may still be good, so try the last layout the metadata
+        # confirmed; the fold signature (different for every layout) must then
+        # confirm it, or the packet is held as before.
+        predicted_layout = False
         if mode == self.aspect_mode:
             aspect_layout = self.aspect_wire.layout_for(hint.get('aspect_code'))
+            if aspect_layout is None:
+                aspect_layout = self._last_layouts.get(mode)
+                predicted_layout = aspect_layout is not None
             if aspect_layout is None:
                 return held('aspect_layout_unknown', observed_mode)
             try:
@@ -1988,6 +1999,9 @@ class _AdaptiveProfileDecoder:
         if mode == getattr(self, 'aspect_mono_mode', None):
             aspect_layout = self.aspect_mono_wire.layout_for(
                 hint.get('aspect_code'))
+            if aspect_layout is None:
+                aspect_layout = self._last_layouts.get(mode)
+                predicted_layout = aspect_layout is not None
             if aspect_layout is None:
                 return held('aspect_layout_unknown', observed_mode)
         if mode in self.mono_status_modes:
@@ -2010,6 +2024,20 @@ class _AdaptiveProfileDecoder:
         else:
             result = self._real_decode(
                 profile_model, x, tmap, counter, prev_tail, *args, **kwargs)
+        if result is not None and predicted_layout:
+            if mode == self.aspect_mode:
+                codec = self.aspect_wire.codec(profile_model)
+                equalized = result.diag.get('fold_eq')
+            else:
+                codec = self.aspect_mono_wire._codec(profile_model)
+                equalized = self._local.equalized
+            score = (codec.signature_score(*equalized[:2])
+                     if equalized is not None else None)
+            if score is None or score < .5:
+                return held('aspect_layout_unknown', observed_mode)
+            result.diag['aspect_layout_predicted'] = True
+        elif result is not None and aspect_layout is not None:
+            self._last_layouts[mode] = aspect_layout
         if result is not None:
             result.diag['coded_status_mode'] = mode
             result.diag['profile_mode'] = mode
@@ -2197,7 +2225,7 @@ def _make_auto_profile_decoder(args, fold):
         fold, _model(args.fixture, 'box'),
         preferred_side=getattr(args, 'mono_video_side', 'auto'),
         aspect_layout=getattr(args, 'aspect_layout', 'auto'),
-        aspect_tail=getattr(args, 'aspect_tail', 'chroma'))
+        aspect_tail=getattr(args, 'aspect_tail', DEFAULT_ASPECT_TAIL))
 
 
 def run_receive(args):
@@ -3530,6 +3558,10 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
 ASPECT_LAYOUT_CHOICES = ('auto', '1:1', '4:3', '3:2', '16:9', '3:4', '2:3',
                          '9:16')
 ASPECT_TAIL_CHOICES = ('chroma', 'split', 'luma', 'fixed')
+# Fixed: everything shown comes from the current packet. At 12 pictures a
+# second the eye does not blend successive packets, so the rotating tails'
+# older detail shows as stale colour on anything that moves.
+DEFAULT_ASPECT_TAIL = 'fixed'
 
 
 def _add_aspect_arguments(sub):
@@ -3539,9 +3571,11 @@ def _add_aspect_arguments(sub):
               '(default auto: the source aspect sent in each packet). Sender '
               'and receiver must agree.'))
     sub.add_argument(
-        '--aspect-tail', choices=ASPECT_TAIL_CHOICES, default='chroma',
-        help=('aspect-fold-500: what the 96 tail slots carry: chroma (rotating '
-              'fine colour, V7 default), split (48 luma every packet + 48 '
+        '--aspect-tail', choices=ASPECT_TAIL_CHOICES,
+        default=DEFAULT_ASPECT_TAIL,
+        help=('aspect-fold-500: what the 96 tail slots carry (default fixed): '
+              "chroma (rotating fine colour, V7's tail), "
+              'split (48 luma every packet + 48 '
               'rotating chroma), luma (96 luma every packet) or fixed (the 96 '
               'strongest tail colour values every packet, no rotation: best '
               'for moving pictures). Sender and receiver must agree.'))

@@ -9,9 +9,10 @@ from scipy.fft import dctn
 from animation_modem import v7
 
 
-TABLE_SHA256 = '1b3ef13f3457a4e4c02a92e149b3bb0eac3c0e233ed1f18eefb84459e24d8ded'
+TABLE_SHA256 = 'a1fa8c8ef5f77b079d3bf713f0dd5b8cd60bfbf2c9ed98226cb43273de34e86e'
 U_CLIP = 2.5
 SIGNATURE_STEPS = 3
+COMPAND_POWER = .12             # E c(u)^2 for real guests, as in the receiver
 
 
 def _table_text(table):
@@ -77,8 +78,18 @@ class Fold500:
         self.source_positions = np.unique(
             np.concatenate((self.kept, self.guests))).astype(np.int64)
         self.D = float(table['D'])
-        self.beta = .8*self.D/(2*U_CLIP)
-        self.power = 1 + self.D**2/12 + self.beta**2
+        # Companded guests (mu-law up to `limit` model standard deviations,
+        # amplitude 0.4*D) when the pinned table says so; else linear guests
+        # clipped at +-U_CLIP. Must match test_modem_v7/folding.py exactly.
+        compand = table.get('compand')
+        self.compand = None if compand is None else (
+            float(compand[0]), float(compand[1]))
+        if self.compand is not None:
+            self.amp = .4*self.D
+            self.power = 1 + self.D**2/12 + self.amp**2*COMPAND_POWER
+        else:
+            self.beta = .8*self.D/(2*U_CLIP)
+            self.power = 1 + self.D**2/12 + self.beta**2
         self.signature = int(table['signature'])
         rng = np.random.default_rng(int(self.identity[:16], 16))
         self.pattern = rng.choice([-1.0, 1.0], self.signature)
@@ -101,8 +112,15 @@ class Fold500:
                 f'Fold 500 expects {expected} finite full-grid DCT values')
         coeffs = full[self.kept].copy()
         host = (coeffs[self.hosts] - self.model.mu[self.hosts])/self.sd_host
-        guest = np.clip(full[self.guests]/self.sd_guest, -U_CLIP, U_CLIP)
-        symbol = self.D*np.round(host/self.D) + self.beta*guest
+        guest = full[self.guests]/self.sd_guest
+        if self.compand is not None:
+            limit, mu = self.compand
+            residual = self.amp*(
+                np.sign(guest)*np.log1p(mu*np.minimum(np.abs(guest), limit)/limit) /
+                np.log1p(mu))
+        else:
+            residual = self.beta*np.clip(guest, -U_CLIP, U_CLIP)
+        symbol = self.D*np.round(host/self.D) + residual
         if self.signature:
             symbol[-self.signature:] = (
                 SIGNATURE_STEPS*self.D*self.pattern)

@@ -42,8 +42,15 @@ from folding import FoldCodec, table_identity, table_text
 TABLE_DIR = Path(__file__).resolve().parent
 # The shipped tables. Both ends must hold byte-identical tables, so a table
 # whose SHA-256 is not pinned here is refused. `build` prints the new values.
+# Companded guests (see folding.py): step, guest limit (model standard
+# deviations), mu, and the symbol noise past which the guests are dropped.
+# `build` applies these to the listed table sizes; a size not listed keeps
+# linear guests. Changing them changes the table, its pin and the wire.
+TABLE_COMPAND = {
+    500: {'step': 1.0, 'limit': 12.0, 'mu': 4.0, 'guest_noise_max': .15},
+}
 TABLE_SHA256 = {
-    500: '1b3ef13f3457a4e4c02a92e149b3bb0eac3c0e233ed1f18eefb84459e24d8ded',
+    500: 'a1fa8c8ef5f77b079d3bf713f0dd5b8cd60bfbf2c9ed98226cb43273de34e86e',
     1000: '9f48877e5f6b9f6d3e52e04f9e3f611a3d3ca3296cc9f05453491bd8c53710a2',
 }
 
@@ -159,9 +166,14 @@ def build(args):
     for slots in args.folds:
         codec = FoldCodec(model, frames, slots, design_db=args.design_db,
                           signature=args.signature, fitted_on=fitted_on)
+        compand = None if args.linear else TABLE_COMPAND.get(slots)
+        if compand is not None:
+            codec.use_compand(compand['limit'], compand['mu'], compand['step'],
+                              compand['guest_noise_max'])
         text = table_text(codec.table())
         table_path(slots).write_text(text)
         print(f'{table_path(slots).name}: M={slots} D={codec.D:.4f} '
+              f"{'companded' if compand else 'linear'} guests "
               f"pin: {slots}: '{hashlib.sha256(text.encode()).hexdigest()}'")
     print('update TABLE_SHA256 in test_modem_v7/live_fold.py to pin these tables')
 
@@ -273,6 +285,8 @@ def main(argv=None):
     b.add_argument('--design-db', type=float, default=30.0)
     b.add_argument('--signature', type=int, default=16,
                    help='host slots given to the folded-packet signature')
+    b.add_argument('--linear', action='store_true',
+                   help='linear clipped guests for every size (ignore TABLE_COMPAND)')
     t = sub.add_parser('selftest', help='live receive path offline, fold on/off')
     t.add_argument('frames', nargs='+', type=Path)
     t.add_argument('--folds', type=int, nargs='+', default=[500])

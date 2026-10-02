@@ -3,7 +3,8 @@
 The mono wire is mono-colour-500's: every packet carries the same 1,264
 M-only slots (no tail rotation, no cross-packet memory), ranked with chroma
 variance weighted x4, and the weakest 500 luma slots of that fresh set fold
-the next 500 luma coefficients (16 of them signature slots, D = 0.6). The
+the next 500 luma coefficients (16 of them signature slots; companded
+guests with step D = 1.0, as mono-colour-500). The
 packet framing, pilots, metadata and EOF marker are unchanged.
 
 What changes is which coefficients those ranks refer to: the 2,880 positions
@@ -28,7 +29,7 @@ import tone_code
 from aspect_fold import (LAYOUT_CHOICES, TABLES_SHA256, AspectFoldWire,
                          layout_for_aspect_code)
 from mono_video import (CHROMA_RANK_WEIGHT, FOLD_SLOTS, FRESH_SLOTS,
-                        MONO_COLOUR_FOLD_D, SIGNATURE_SLOTS, MonoFreshFoldWire,
+                        MONO_COLOUR_COMPAND, MONO_COLOUR_FOLD_D, SIGNATURE_SLOTS, MonoFreshFoldWire,
                         colour_fold_sets, colour_order, fresh_rank_tables)
 
 PROFILE = 'aspect-mono-500'
@@ -57,6 +58,10 @@ class AspectMonoCodec(FoldCodec):
         self.sd_guest = np.sqrt(model.lam[self.guest_model_indices])
         self.train = []
         self.set_step(D)
+        if MONO_COLOUR_COMPAND is not None:
+            self.use_compand(MONO_COLOUR_COMPAND['limit'],
+                             MONO_COLOUR_COMPAND['mu'], D,
+                             MONO_COLOUR_COMPAND['guest_noise_max'])
         self._set_identity()
 
     def table(self):

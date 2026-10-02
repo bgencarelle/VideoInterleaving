@@ -234,8 +234,9 @@ cannot know the tape's noise in advance.
 
 Rebuilding with `live_fold.py build --folds 500 1000` prints new pins. Paste
 them into `TABLE_SHA256` in `live_fold.py`; until you do, the prototype
-refuses the new tables. The step D belongs to each table: 0.970 for M=500 and
-0.8247 for M=1000. These can differ from what `fold_modem.py` picks, because
+refuses the new tables. The step D belongs to each table: 1.0 for M=500
+(companded guests, `TABLE_COMPAND` in `live_fold.py`; `build --linear` gives
+the earlier linear table with D = 0.970) and 0.8247 for M=1000 (linear). These can differ from what `fold_modem.py` picks, because
 that script refits D on its own training frames.
 
 Regression tests for the prototype are in the modem suite:

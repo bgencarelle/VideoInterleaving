@@ -328,6 +328,17 @@ class FoldCodec:
         self.last_unfolded_slots = int(np.count_nonzero(ok))
         return full
 
+    def signature_score(self, xhat, conf):
+        """About 1 when the equaliser output carries this table's signature,
+        about 0 otherwise (None without a signature). Lets a receiver confirm
+        a layout it could not read from the packet's metadata."""
+        if not self.signature:
+            return None
+        hosts = self.hosts[-self.signature:]
+        symbol = (np.asarray(xhat)[hosts]/np.maximum(np.asarray(conf)[hosts], 1e-3) /
+                  self.sd_host[-self.signature:]*np.sqrt(self.power))
+        return float(np.mean(symbol*self.pattern)/(SIGNATURE_STEPS*self.D))
+
     def plain(self, coeffs):
         """Full DCT vector of an unfolded (normal) decode."""
         full = np.zeros(self.grid.off[-1])

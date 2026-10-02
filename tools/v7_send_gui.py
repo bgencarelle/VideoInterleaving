@@ -47,10 +47,10 @@ ASPECT_LAYOUT_CHOICES = (
     ('3:4', '3:4'), ('2:3', '2:3'), ('9:16', '9:16'),
 )
 ASPECT_TAIL_CHOICES = (
-    ('Chroma · rotating colour detail (V7)', 'chroma'),
+    ('Fixed · 96 colour every packet, no rotation · recommended', 'fixed'),
+    ('Chroma · rotating colour detail (V7) · best for held stills', 'chroma'),
     ('Split · 48 luma + 48 rotating chroma', 'split'),
     ('Luma · 96 luma every packet', 'luma'),
-    ('Fixed · 96 colour every packet, no rotation · best for motion', 'fixed'),
 )
 PRIMARY_PROFILE_CHOICES = PROFILE_CHOICES
 SOURCE_AUDIO_CHOICES = (
@@ -228,7 +228,11 @@ FIELD_LABELS = {
 VIDEO_FILE_GLOB = '*.mp4 *.m4v *.mov *.mkv *.webm *.avi *.mpeg *.mpg *.wmv *.ts'
 DEVICE_REFRESH_SECONDS = 3.0
 GUI_EVENT_WAIT_SECONDS = 0.5
-SENDER_PREFERENCES_VERSION = 4
+SENDER_PREFERENCES_VERSION = 5
+DEFAULT_ASPECT_TAIL = 'fixed'
+# Version 5 made the fixed tail the default (the rotating tails show stale
+# colour on moving pictures): an earlier saved tail starts at it once.
+V5_RESET_SETTINGS = ('aspect_tail',)
 # Settings whose defaults changed in version 4 (four folded profiles, Aspect
 # Fold 500 and Direct DCT encode by default; every profile encodes with Box):
 # earlier saved values are dropped.
@@ -247,7 +251,7 @@ def _load_sender_preferences(path):
     except (OSError, ValueError, TypeError):
         return {}
     version = values.get('version') if isinstance(values, dict) else None
-    if version not in (1, 2, 3, SENDER_PREFERENCES_VERSION):
+    if version not in (1, 2, 3, 4, SENDER_PREFERENCES_VERSION):
         return {}
     settings = values.get('settings')
     if isinstance(settings, dict):
@@ -258,6 +262,9 @@ def _load_sender_preferences(path):
             settings['source_audio'] = 'source'
         if version < 4:
             for key in V4_RESET_SETTINGS:
+                settings.pop(key, None)
+        if version < 5:
+            for key in V5_RESET_SETTINGS:
                 settings.pop(key, None)
         if settings.get('encode_filter') not in (
                 None, *dict(FILTER_CHOICES).values()):
@@ -1013,11 +1020,11 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
             raise ValueError('DCT chroma gain must be between 1.0 and 1.3.')
     else:
         dct_sharpen = 'off'
-    aspect_layout, aspect_tail = 'auto', 'chroma'
+    aspect_layout, aspect_tail = 'auto', DEFAULT_ASPECT_TAIL
     if profile in ASPECT_PROFILES:
         aspect_layout = settings.get('aspect_layout', 'auto')
         if profile in ASPECT_TAIL_PROFILES:
-            aspect_tail = settings.get('aspect_tail', 'chroma')
+            aspect_tail = settings.get('aspect_tail', DEFAULT_ASPECT_TAIL)
         if aspect_layout not in dict(ASPECT_LAYOUT_CHOICES).values():
             raise ValueError('Choose a supported aspect layout.')
         if aspect_tail not in dict(ASPECT_TAIL_CHOICES).values():
@@ -1165,7 +1172,7 @@ def build_command(settings, devices, sd_module=None, python=None,
     if checked['profile'] in ASPECT_PROFILES:
         if checked['aspect_layout'] != 'auto':
             command.extend(('--aspect-layout', checked['aspect_layout']))
-        if checked['aspect_tail'] != 'chroma':
+        if checked['aspect_tail'] != DEFAULT_ASPECT_TAIL:
             command.extend(('--aspect-tail', checked['aspect_tail']))
     if checked['profile'] in MONO_PROFILES:
         command.extend(('--mono-video-side',
@@ -1373,7 +1380,7 @@ class SenderGui:
             'dct_clarity': '0',
             'dct_chroma_gain': '1',
             'aspect_layout': 'auto',
-            'aspect_tail': 'chroma',
+            'aspect_tail': DEFAULT_ASPECT_TAIL,
         }
         self.notice = 'Choose an output device, capture source, and profile.'
         if restore_preferences and self.preference_path is not None:
@@ -1386,7 +1393,8 @@ class SenderGui:
             self.settings.get('dct_sharpen', 'off') != 'off' or
             self.settings.get('clip_aware') or
             self.settings.get('aspect_layout', 'auto') != 'auto' or
-            self.settings.get('aspect_tail', 'chroma') != 'chroma')
+            self.settings.get('aspect_tail', DEFAULT_ASPECT_TAIL) !=
+            DEFAULT_ASPECT_TAIL)
         self.selected = 'device'
         self.scroll = 0
         self.dropdown = None
@@ -2384,7 +2392,8 @@ class SenderGui:
              else 'Resize'),
             *((('Aspect layout / tail', (
                 f"{self.settings.get('aspect_layout', 'auto')} / "
-                f"{self.settings.get('aspect_tail', 'chroma')} · match receiver")),)
+                f"{self.settings.get('aspect_tail', DEFAULT_ASPECT_TAIL)}"
+                ' · match receiver')),)
               if self.settings.get('profile') in ASPECT_TAIL_PROFILES else
               (('Aspect layout', (
                   f"{self.settings.get('aspect_layout', 'auto')} · match receiver")),)

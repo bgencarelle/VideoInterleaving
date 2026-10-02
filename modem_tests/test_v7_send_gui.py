@@ -416,6 +416,25 @@ class SenderGuiTests(unittest.TestCase):
         self.assertNotIn('--no-pilot-tones', command)
         self.assertNotIn('--no-eof-marker', command)
 
+    def test_fixed_tail_is_the_default_and_older_saved_tails_reset_once(self):
+        import json
+        from tools.v7_send_gui import (DEFAULT_ASPECT_TAIL,
+                                       _load_sender_preferences)
+        self.assertEqual(DEFAULT_ASPECT_TAIL, 'fixed')
+        self.assertEqual(v7_live.parser().parse_args(
+            ['send', '--device', 'null', '--source', 'test']).aspect_tail,
+            'fixed')
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)/'prefs.json'
+            for version, expected in ((4, None), (5, 'chroma')):
+                path.write_text(json.dumps({
+                    'version': version,
+                    'settings': {'aspect_tail': 'chroma', 'source': 'test'}}))
+                loaded = _load_sender_preferences(path)
+                settings = loaded.get('settings', loaded)
+                self.assertEqual(settings.get('aspect_tail'), expected)
+                self.assertEqual(settings.get('source'), 'test')
+
     def test_direct_dct_encode_options_reach_the_sender_cli(self):
         self.settings.update(profile='mono-colour-500', dct_encode=True,
                              dct_sharpen='taper', dct_sharpen_strength='0.5',

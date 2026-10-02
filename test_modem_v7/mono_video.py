@@ -31,9 +31,15 @@ MONO_FOLD_TABLE_SHA256 = (
 CHROMA_RANK_WEIGHT = 4.0
 MONO_COLOUR_MODE = tone_code.MONO_1000
 COLOUR_WIRE_PROFILE = 'mono-colour-500'
-MONO_COLOUR_FOLD_D = 0.6
+# Companded guests for the mono colour profiles (see folding.py): step, guest
+# limit (model standard deviations), mu, and the symbol noise past which the
+# guests are dropped. aspect-mono-500 uses the same settings. None restores
+# linear guests clipped at +-2.5 (the earlier wire used those with D = 0.6).
+MONO_COLOUR_COMPAND = {'step': 1.0, 'limit': 12.0, 'mu': 4.0,
+                       'guest_noise_max': .15}
+MONO_COLOUR_FOLD_D = MONO_COLOUR_COMPAND['step']
 MONO_COLOUR_FOLD_TABLE_SHA256 = (
-    '76e6f7b3592fcc2d657197d86ab189a320ca16b1f3bf73ed0fc3a5bed24989f6')
+    '883b56bc5f759c3ed0a05e45d9d8f78d5649b819294282d0e87c537fa6cd5262')
 _HOST_RANKS = (FRESH_SLOTS-FOLD_SLOTS, FRESH_SLOTS)
 _GUEST_RANKS = (FRESH_SLOTS, FRESH_SLOTS+FOLD_SLOTS)
 
@@ -354,6 +360,10 @@ class MonoColourFoldCodec(FoldCodec):
         self.sd_guest = np.sqrt(model.lam[self.guest_model_indices])
         self.train = list(train_frames or ())
         self.set_step(D)
+        if MONO_COLOUR_COMPAND is not None:
+            self.use_compand(MONO_COLOUR_COMPAND['limit'],
+                             MONO_COLOUR_COMPAND['mu'], D,
+                             MONO_COLOUR_COMPAND['guest_noise_max'])
         self._set_identity()
         if check_identity and self.identity != MONO_COLOUR_FOLD_TABLE_SHA256:
             raise ValueError('mono colour fold table identity is not pinned')
@@ -371,7 +381,8 @@ class MonoColourFoldCodec(FoldCodec):
 
 
 class MonoColourFoldWire(MonoFreshFoldWire):
-    """mono-fold-500 with colour-weighted ranks, luma-only fold, D=0.6."""
+    """mono-fold-500 with colour-weighted ranks and a luma-only fold with
+    companded guests (MONO_COLOUR_COMPAND)."""
 
     wire_profile = COLOUR_WIRE_PROFILE
     status_mode = MONO_COLOUR_MODE

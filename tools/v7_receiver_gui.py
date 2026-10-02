@@ -186,10 +186,10 @@ LIVE_RUNTIME_DESTS = frozenset((
 ASPECT_OPTION_LABELS = {
     'aspect_layout': {'auto': 'Auto · sender layout in each packet'},
     'aspect_tail': {
-        'chroma': 'Chroma · rotating colour detail (V7)',
+        'chroma': 'Chroma · rotating colour detail (V7) · best for held stills',
         'split': 'Split · 48 luma + 48 rotating chroma',
         'luma': 'Luma · 96 luma every packet',
-        'fixed': 'Fixed · 96 colour every packet, no rotation · best for motion',
+        'fixed': 'Fixed · 96 colour every packet, no rotation · recommended',
     },
 }
 HIDDEN_DECODE_OPTIONS = frozenset((
