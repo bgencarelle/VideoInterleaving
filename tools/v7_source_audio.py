@@ -335,6 +335,32 @@ class FFmpegSourceAudio:
         self.errors.close()
 
 
+def _probe_stream_types(text):
+    """Stream types named in ffprobe's JSON (or older csv) output, or None
+    when nothing recognisable is there."""
+    import json
+    try:
+        data = json.loads(text)
+    except ValueError:
+        data = None
+    found = set()
+    if isinstance(data, dict):
+        streams = list(data.get('streams') or [])
+        for program in data.get('programs') or []:
+            streams += list(program.get('streams') or [])
+        for stream in streams:
+            kind = str((stream or {}).get('codec_type') or '').strip().lower()
+            if kind:
+                found.add(kind)
+        return found
+    for line in str(text).replace('|', ',').splitlines():
+        for field in line.split(','):
+            field = field.strip().lower()
+            if field in ('video', 'audio', 'subtitle', 'data', 'attachment'):
+                found.add(field)
+    return found or None
+
+
 class SharedVideoAudioSource:
     """One FFmpeg demux/clock feeding the video and embedded-audio paths."""
 
@@ -361,8 +387,11 @@ class SharedVideoAudioSource:
         if not ffmpeg or not ffprobe:
             raise RuntimeError('FFmpeg and ffprobe are required for embedded '
                                'video audio capture.')
+        # JSON, not csv: csv output varies between FFmpeg versions and with
+        # stream side data ("video," for a rotated or HDR clip, extra lines
+        # for programs), and a misread list refuses a good file.
         probe = [ffprobe, '-v', 'error', '-show_entries',
-                 'stream=codec_type', '-of', 'csv=p=0']
+                 'stream=codec_type', '-of', 'json']
         if is_stream:
             probe += ['-rw_timeout', '10000000']
         probe.append(source)
@@ -376,10 +405,15 @@ class SharedVideoAudioSource:
             detail = (result.stderr or '').strip()
             raise RuntimeError('Could not inspect the video soundtrack.'+
                                (f'\n{detail}' if detail else ''))
-        stream_types = {line.strip() for line in
-                        (result.stdout or '').splitlines() if line.strip()}
+        stream_types = _probe_stream_types(result.stdout or '')
+        if stream_types is None:
+            # The list could not be read at all: do not refuse the file on
+            # that; FFmpeg itself reports a source it cannot play.
+            stream_types = {'video', 'audio'}
         if 'video' not in stream_types:
-            raise ValueError('video source contains no video stream')
+            found = ', '.join(sorted(stream_types)) or 'none'
+            raise ValueError('video source contains no video stream '
+                             f'(streams found: {found})')
         self.has_audio = 'audio' in stream_types
 
         scheme = source.split(':', 1)[0].lower() if is_stream else ''

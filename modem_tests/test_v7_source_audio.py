@@ -339,6 +339,52 @@ class SourceAudioTests(unittest.TestCase):
             finally:
                 source.close()
 
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe') and
+                         hasattr(os, 'mkfifo'),
+                         'shared A/V smoke test needs POSIX FFmpeg and ffprobe')
+    def test_probe_output_is_read_in_every_form(self):
+        from tools.v7_source_audio import _probe_stream_types
+        self.assertEqual(_probe_stream_types(
+            '{"programs": [], "streams": [{"codec_type": "video", '
+            '"side_data_list": [{}]}, {"codec_type": "audio"}]}'),
+            {'video', 'audio'})
+        self.assertEqual(_probe_stream_types(
+            '{"programs": [{"streams": [{"codec_type": "video"}]}], '
+            '"streams": []}'), {'video'})
+        self.assertEqual(_probe_stream_types('{"streams": []}'), set())
+        for text in ('video\naudio\n', 'video,\naudio,\n',
+                     'stream|video\nstream|audio', 'Video\r\nAudio\r\n'):
+            self.assertEqual(_probe_stream_types(text), {'video', 'audio'})
+        self.assertIsNone(_probe_stream_types('something else'))
+        self.assertIsNone(_probe_stream_types(''))
+
+    def test_video_with_side_data_is_still_a_video(self):
+        # ffprobe lists a stream that carries side data (a phone clip's
+        # rotation) as "video," -- that must not read as "no video stream".
+        with tempfile.TemporaryDirectory(dir=ROOT/'tmp',
+                                         prefix='v7-shared-av-test-') as folder:
+            folder = Path(folder)
+            plain, rotated = folder/'plain.mp4', folder/'rotated.mp4'
+            subprocess.run([
+                'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+                '-f', 'lavfi', '-i', 'color=c=black:s=64x48:r=10:d=0.5',
+                '-c:v', 'mpeg4', str(plain),
+            ], check=True)
+            made = subprocess.run([
+                'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+                '-display_rotation', '90', '-i', str(plain), '-c', 'copy',
+                str(rotated),
+            ], check=False)
+            if made.returncode:
+                self.skipTest('this FFmpeg cannot write a rotation tag')
+            source = SharedVideoAudioSource(
+                str(rotated), 48_000, width=64, target_samples=1024)
+            try:
+                self.assertFalse(source.has_audio)
+                self.assertEqual(source.video_grab().ndim, 3)
+            finally:
+                source.close()
+
 
 if __name__ == '__main__':
     unittest.main()
