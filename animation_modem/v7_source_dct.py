@@ -468,18 +468,57 @@ def _dct_matrix(source_count, mode_count):
     return basis
 
 
-@lru_cache(maxsize=32)
-def _direct_plan(height, width, rows, cols):
-    """Cached matrices for DCT truncation of an h×w plane to an r×c grid.
+def _axis_blocks(size, block):
+    """Widths of the pre-shrink blocks along one axis: whole ``block``-pixel
+    blocks, then the remainder (if any) as a last, narrower block."""
+    size, block = int(size), int(block)
+    widths = np.full(-(-size//block), block, dtype=np.int64)
+    if size % block:
+        widths[-1] = size % block
+    return widths
 
-    ``C = analysis_y @ plane @ analysis_x`` is the plane's leading r×c
-    orthonormal DCT, amplitude-normalized to the grid (the coder's own
-    ``sqrt(rc/hw)``). ``synthesis_y @ C @ synthesis_x`` is the grid's inverse
-    DCT, and ``left @ plane @ right`` is both steps folded together.
+
+@lru_cache(maxsize=64)
+def _axis_analysis(size, block, modes, grid):
+    """(blocks x modes) analysis of block means along one ``size``-pixel axis.
+
+    Column k estimates the axis's orthonormal DCT coefficient k, scaled to a
+    ``grid``-sample axis (the coder's ``sqrt(grid/size)``), from the means of
+    its pre-shrink blocks. A block of w pixels centred at c holds the mean of
+    cos(t*(n+.5)), t = pi*k/size, which is cos(t*c)*sin(w*t/2)/(w*sin(t/2));
+    the block's weight is w and the droop factor is divided out, so in-band
+    amplitudes equal the full-resolution transform's (the droop is up to 4 %
+    at the highest sent frequency) and a remainder block keeps the picture's
+    true geometry instead of being cropped. Detail finer than the blocks
+    still aliases; that part cannot be undone here.
     """
-    norm = (rows*cols/(height*width))**.25
-    analysis_y = np.ascontiguousarray(_dct_matrix(height, rows).T*norm)
-    analysis_x = np.ascontiguousarray(_dct_matrix(width, cols)*norm)
+    widths = _axis_blocks(size, block).astype(np.float64)
+    centres = np.cumsum(widths)-widths/2
+    theta = np.pi*np.arange(1, int(modes), dtype=np.float64)/int(size)
+    matrix = np.empty((len(widths), int(modes)), dtype=np.float64)
+    matrix[:, 0] = widths*np.sqrt(float(grid))/int(size)
+    half = theta[None, :]/2
+    droop = np.sin(widths[:, None]*half)/(widths[:, None]*np.sin(half))
+    matrix[:, 1:] = (widths[:, None]*np.cos(centres[:, None]*theta[None, :]) /
+                     droop*np.sqrt(2.0*float(grid))/int(size))
+    matrix.setflags(write=False)
+    return matrix
+
+
+@lru_cache(maxsize=32)
+def _direct_plan(height, width, rows, cols, block_y=1, block_x=1):
+    """Cached matrices for DCT truncation of an h×w source to an r×c grid.
+
+    The plane is the source's block means (``block_y``×``block_x`` pixels, 1 =
+    the source itself). ``C = analysis_y @ plane @ analysis_x`` is the
+    source's leading r×c orthonormal DCT, amplitude-normalized to the grid
+    (see _axis_analysis). ``synthesis_y @ C @ synthesis_x`` is the grid's
+    inverse DCT, and ``left @ plane @ right`` is both steps folded together.
+    """
+    analysis_y = np.ascontiguousarray(
+        _axis_analysis(height, block_y, rows, rows).T)
+    analysis_x = np.ascontiguousarray(
+        _axis_analysis(width, block_x, cols, cols))
     synthesis_y = np.ascontiguousarray(_dct_matrix(rows, rows))
     synthesis_x = np.ascontiguousarray(_dct_matrix(cols, cols).T)
     left = np.ascontiguousarray(synthesis_y @ analysis_y)
@@ -515,47 +554,106 @@ def _taper_gain(rows, cols, sent_rows, sent_cols, strength):
 
 @njit(cache=True, nogil=True)
 def _toned_block_means_u8(data, lut, block_y, block_x, out_rows, out_cols):
-    """Tone uint8 RGB through ``lut`` and average block_y×block_x blocks.
+    """Tone uint8 RGB through ``lut`` and average block_y×block_x blocks
+    (the last block on each axis is the remainder, if any).
 
     One pass over the frame; returns contiguous R, G, B mean planes.
     """
+    height, width = data.shape[0], data.shape[1]
     result = np.zeros((3, out_rows, out_cols), dtype=np.float64)
-    scale = 1.0/(block_y*block_x)
     for by in range(out_rows):
-        for dy in range(block_y):
-            y = by*block_y+dy
+        y0 = by*block_y
+        y1 = min(y0+block_y, height)
+        for y in range(y0, y1):
             for bx in range(out_cols):
                 red = 0.0
                 green = 0.0
                 blue = 0.0
                 x0 = bx*block_x
-                for dx in range(block_x):
-                    red += lut[data[y, x0+dx, 0]]
-                    green += lut[data[y, x0+dx, 1]]
-                    blue += lut[data[y, x0+dx, 2]]
+                for x in range(x0, min(x0+block_x, width)):
+                    red += lut[data[y, x, 0]]
+                    green += lut[data[y, x, 1]]
+                    blue += lut[data[y, x, 2]]
                 result[0, by, bx] += red
                 result[1, by, bx] += green
                 result[2, by, bx] += blue
-        for channel in range(3):
-            for bx in range(out_cols):
+        for bx in range(out_cols):
+            x0 = bx*block_x
+            scale = 1.0/((y1-y0)*(min(x0+block_x, width)-x0))
+            for channel in range(3):
                 result[channel, by, bx] *= scale
     return result
 
 
+@lru_cache(maxsize=16)
+def _luminance_luts(brightness, gamma):
+    """uint8 code -> weighted linear light of the toned value, per channel."""
+    linear = _srgb_to_linear(_tone_lut(brightness, gamma))
+    luts = np.ascontiguousarray(LUMINANCE_WEIGHTS[:, None]*linear[None, :])
+    luts.setflags(write=False)
+    return luts
+
+
+@njit(cache=True, nogil=True)
+def _toned_block_means_luminance_u8(data, lut, linear, block_y, block_x,
+                                    out_rows, out_cols):
+    """_toned_block_means_u8 plus each block's mean linear luminance.
+
+    The luminance is averaged in linear light per pixel. Linearising the
+    block's mean code instead reads any block with detail inside it too dark
+    (a one-pixel black/white pattern: 0.21 instead of 0.50).
+    """
+    height, width = data.shape[0], data.shape[1]
+    result = np.zeros((3, out_rows, out_cols), dtype=np.float64)
+    luminance = np.zeros((out_rows, out_cols), dtype=np.float64)
+    for by in range(out_rows):
+        y0 = by*block_y
+        y1 = min(y0+block_y, height)
+        for y in range(y0, y1):
+            for bx in range(out_cols):
+                red = 0.0
+                green = 0.0
+                blue = 0.0
+                light = 0.0
+                x0 = bx*block_x
+                for x in range(x0, min(x0+block_x, width)):
+                    r = data[y, x, 0]
+                    g = data[y, x, 1]
+                    b = data[y, x, 2]
+                    red += lut[r]
+                    green += lut[g]
+                    blue += lut[b]
+                    light += linear[0, r]+linear[1, g]+linear[2, b]
+                result[0, by, bx] += red
+                result[1, by, bx] += green
+                result[2, by, bx] += blue
+                luminance[by, bx] += light
+        for bx in range(out_cols):
+            x0 = bx*block_x
+            scale = 1.0/((y1-y0)*(min(x0+block_x, width)-x0))
+            luminance[by, bx] *= scale
+            for channel in range(3):
+                result[channel, by, bx] *= scale
+    return result, luminance
+
+
 @njit(cache=True, nogil=True)
 def _block_means_f64(data, block_y, block_x, out_rows, out_cols):
+    height, width = data.shape[0], data.shape[1]
     result = np.zeros((3, out_rows, out_cols), dtype=np.float64)
-    scale = 1.0/(block_y*block_x)
     for by in range(out_rows):
-        for dy in range(block_y):
-            y = by*block_y+dy
+        y0 = by*block_y
+        y1 = min(y0+block_y, height)
+        for y in range(y0, y1):
             for bx in range(out_cols):
                 x0 = bx*block_x
-                for dx in range(block_x):
+                for x in range(x0, min(x0+block_x, width)):
                     for channel in range(3):
-                        result[channel, by, bx] += data[y, x0+dx, channel]
-        for channel in range(3):
-            for bx in range(out_cols):
+                        result[channel, by, bx] += data[y, x, channel]
+        for bx in range(out_cols):
+            x0 = bx*block_x
+            scale = 1.0/((y1-y0)*(min(x0+block_x, width)-x0))
+            for channel in range(3):
                 result[channel, by, bx] *= scale
     return result
 
@@ -585,6 +683,25 @@ def _separable(left, plane, right):
             value = left[i, k]
             for j in range(cols):
                 out[i, j] += value*partial[k, j]
+    return out
+
+
+PRESHRINK_FACTOR = 4
+
+
+@njit(cache=True, nogil=True)
+def _halve(plane, step_y, step_x):
+    """Mean of step_y×step_x blocks (steps of 1 or 2)."""
+    rows, cols = plane.shape[0]//step_y, plane.shape[1]//step_x
+    out = np.zeros((rows, cols))
+    scale = 1.0/(step_y*step_x)
+    for i in range(rows):
+        for dy in range(step_y):
+            for j in range(cols):
+                for dx in range(step_x):
+                    out[i, j] += plane[i*step_y+dy, j*step_x+dx]
+        for j in range(cols):
+            out[i, j] *= scale
     return out
 
 
@@ -618,23 +735,35 @@ def _direct_planes(rgb, grids, shapes, brightness, gamma, sharpen,
     data = np.asarray(rgb)
     if data.ndim != 3 or data.shape[2] != 3:
         raise ValueError('source DCT expects an HxWx3 RGB frame')
+    light = None
     height, width = data.shape[:2]
     if height < max(shape[0] for shape in grids) or \
             width < max(shape[1] for shape in grids):
         raise ValueError('source frame is smaller than the V7 coder grid')
-    # Pre-shrink by division: the largest whole blocks that keep the plane
-    # at least twice the luma grid on each axis (1 = no shrink).
+    # Pre-shrink by division: blocks that leave the plane near
+    # PRESHRINK_FACTOR times the luma grid on each axis (never under 3x unless
+    # the source is; 1 = no shrink); a remainder is one narrower last block. Detail finer than this plane aliases
+    # into the sent band; at 4x that is 54-56 dB below the picture (2x: 39-43)
+    # and 35-42 dB below the detail in the top half of the sent band (2x:
+    # 21-26), measured against the full-resolution transform.
     luma_rows, luma_cols = grids[0]
-    block_y = max(1, height//(2*luma_rows))
-    block_x = max(1, width//(2*luma_cols))
-    rows, cols = height//block_y, width//block_x
+    block_y = max(1, int(height/(PRESHRINK_FACTOR*luma_rows)+.5))
+    block_x = max(1, int(width/(PRESHRINK_FACTOR*luma_cols)+.5))
+    rows, cols = -(-height//block_y), -(-width//block_x)
 
     if data.dtype == np.uint8:
         # One compiled signature for every capture layout (mss hands over
         # strided BGRA->RGB views); the sender's warm-up compiles this one.
         data = np.ascontiguousarray(data)
-        means = _toned_block_means_u8(
-            data, _tone_lut(brightness, gamma), block_y, block_x, rows, cols)
+        if luminance and len(grids) == 3:
+            means, light = _toned_block_means_luminance_u8(
+                data, _tone_lut(brightness, gamma),
+                _luminance_luts(brightness, gamma), block_y, block_x,
+                rows, cols)
+        else:
+            means = _toned_block_means_u8(
+                data, _tone_lut(brightness, gamma), block_y, block_x,
+                rows, cols)
     else:
         toned = np.clip(_rgb_float(data)*brightness, 0.0, 1.0)
         if gamma != 1.0:
@@ -644,17 +773,28 @@ def _direct_planes(rgb, grids, shapes, brightness, gamma, sharpen,
     # YCbCr is linear, so converting block means equals averaging the
     # per-pixel conversion.
     red, green, blue = means
-    target = (source_luminance(means, grids[0])
+    target = (source_luminance(means, grids[0], light)
               if luminance and len(grids) == 3 else None)
     y = .299000*red + .587000*green + .114000*blue
     planes = [y]
+    blocks = [(block_y, block_x)]
     if len(grids) == 3:
         cb = .5-.168736*red-.331264*green+.5*blue
         cr = .5+.5*red-.418688*green-.081312*blue
         if chroma_gain != 1.0:
             cb = np.clip(.5+chroma_gain*(cb-.5), 0.0, 1.0)
             cr = np.clip(.5+chroma_gain*(cr-.5), 0.0, 1.0)
+        # Chroma needs half the luma plane: halve each axis that has whole
+        # block pairs and stays at least twice the chroma grid.
+        step_y = (2 if height % (2*block_y) == 0 and
+                  rows//2 >= 2*grids[1][0] else 1)
+        step_x = (2 if width % (2*block_x) == 0 and
+                  cols//2 >= 2*grids[1][1] else 1)
+        if step_y*step_x > 1:
+            cb = _halve(np.ascontiguousarray(cb), step_y, step_x)
+            cr = _halve(np.ascontiguousarray(cr), step_y, step_x)
         planes += [cb, cr]
+        blocks += [(block_y*step_y, block_x*step_x)]*2
     # Pixel-domain radii are in luma grid pixels at any source size. Spec
     # order: chroma gain (above), clarity, then usm.
     unit = (rows/luma_rows, cols/luma_cols)
@@ -668,7 +808,7 @@ def _direct_planes(rgb, grids, shapes, brightness, gamma, sharpen,
         y = y+sharpen_strength*(y-blurred)
     planes[0] = np.ascontiguousarray(y)
     taper = sharpen_strength if sharpen == 'taper' else 0.0
-    return planes, grids, shapes, taper, target
+    return planes, grids, shapes, taper, target, blocks, (height, width)
 
 
 # ------------------------------------------------------------ luma adjustment
@@ -764,16 +904,20 @@ def _luma_adjust_kernel(luma, cb, cr, target, iterations, table):
     return luma
 
 
-def source_luminance(means, luma_grid):
+def source_luminance(means, luma_grid, luminance=None):
     """Linear luminance of the toned source on the luma grid.
 
-    ``means`` are the encoder's R, G, B block means (at least twice the luma
-    grid); each is linearised before the exact area average to the grid.
+    ``luminance`` is the per-block mean of the source pixels' linear
+    luminance (the uint8 encoder's own pass). Without it, the encoder's R, G,
+    B block ``means`` (at least twice the luma grid) are linearised instead,
+    which is exact only where a block is flat. Either is then area-averaged
+    exactly to the grid.
     """
-    red, green, blue = (np.ascontiguousarray(plane, dtype=np.float64)
-                        for plane in means)
-    luminance = _luminance_of_means(red, green, blue, SRGB_LUT,
-                                    np.empty(red.shape, np.float64))
+    if luminance is None:
+        red, green, blue = (np.ascontiguousarray(plane, dtype=np.float64)
+                            for plane in means)
+        luminance = _luminance_of_means(red, green, blue, SRGB_LUT,
+                                        np.empty(red.shape, np.float64))
     rows, cols = (int(value) for value in luma_grid)
     if luminance.shape == (rows, cols):
         return luminance
@@ -900,6 +1044,7 @@ def warmup_direct_dct(grids, shapes):
     for data in (frame, read_only):
         direct_dct_values(data, grids, shapes)
         direct_dct_values(data, grids, shapes, sharpen='taper')
+        direct_dct_values(data, grids, shapes, luminance_out=[])
 
 
 def direct_dct_coefficients(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
@@ -914,15 +1059,14 @@ def direct_dct_coefficients(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
     coefficient-domain folding: nothing here resamples pixels, and values are
     not clipped (clipping is a pixel-domain operation).
     """
-    planes, grids, shapes, taper, _ = _direct_planes(
+    planes, grids, shapes, taper, _, blocks, source = _direct_planes(
         rgb, grids, shapes, brightness, gamma, sharpen, sharpen_strength,
         clarity, chroma_gain)
-    rows, cols = planes[0].shape
     result = []
     for index, (plane, (grid_rows, grid_cols), sent) in enumerate(
             zip(planes, grids, shapes)):
         analysis_y, analysis_x, *_ = _direct_plan(
-            rows, cols, grid_rows, grid_cols)
+            *source, grid_rows, grid_cols, *blocks[index])
         coefficients = 2.0*_separable(analysis_y, plane, analysis_x)
         coefficients[0, 0] -= np.sqrt(grid_rows*grid_cols)
         if index == 0 and taper:
@@ -946,18 +1090,18 @@ def direct_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
     ``luminance_out`` receives the source's linear luminance on the luma grid
     (the target for luma_adjust).
     """
-    planes, grids, shapes, taper, target = _direct_planes(
+    planes, grids, shapes, taper, target, blocks, source = _direct_planes(
         rgb, grids, shapes, brightness, gamma, sharpen, sharpen_strength,
         clarity, chroma_gain, luminance=luminance_out is not None)
     if luminance_out is not None:
         luminance_out.append(target)
-    rows, cols = planes[0].shape
     result = np.empty(sum(r*c for r, c in grids), dtype=np.float64)
     offset = 0
     for index, (plane, (grid_rows, grid_cols), sent) in enumerate(
             zip(planes, grids, shapes)):
         (analysis_y, analysis_x, synthesis_y, synthesis_x,
-         left, right) = _direct_plan(rows, cols, grid_rows, grid_cols)
+         left, right) = _direct_plan(*source, grid_rows, grid_cols,
+                                     *blocks[index])
         if index == 0 and taper:
             coefficients = _separable(analysis_y, plane, analysis_x)
             coefficients *= _taper_gain(grid_rows, grid_cols, sent[0],

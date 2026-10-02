@@ -1,6 +1,7 @@
 """Tests for opt-in source-resolution V7 DCT preparation."""
 import sys
 import unittest
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -298,20 +299,48 @@ class SourceDCTTests(unittest.TestCase):
         self.assertEqual(aspect, v7.aspect_wire_code((160, 120)))
 
 
+@lru_cache(maxsize=None)
+def _reference_axis(size, block, modes, grid):
+    """Per-block weights that estimate DCT coefficient k of a size-pixel axis
+    (scaled to a grid-sample axis) from its block means, written out."""
+    edges = list(range(0, size, block))+[size]
+    out = np.zeros((len(edges)-1, modes))
+    for m, (start, stop) in enumerate(zip(edges[:-1], edges[1:])):
+        width = stop-start
+        for k in range(modes):
+            theta = np.pi*k/size
+            # the block mean of the basis cosine, relative to its centre value
+            pixels = np.arange(start, stop)+.5
+            centre = np.cos(theta*(start+stop)/2)
+            mean = np.mean(np.cos(theta*pixels))
+            droop = mean/centre if abs(centre) > 1e-9 else (
+                np.sin(width*theta/2)/(width*np.sin(theta/2)))
+            scale = np.sqrt((1 if k == 0 else 2)*grid)/size
+            out[m, k] = width*centre/droop*scale
+    return out
+
+
+def _block_means(x, block_y, block_x):
+    height, width = x.shape[:2]
+    rows = [x[y:y+block_y].mean(axis=0) for y in range(0, height, block_y)]
+    x = np.stack(rows)
+    cols = [x[:, c:c+block_x].mean(axis=1) for c in range(0, width, block_x)]
+    return np.stack(cols, axis=1)
+
+
 def _direct_reference(rgb, grids, shapes, brightness=1.0, gamma=1.0,
                       sharpen='off', strength=.25, clarity=0.0,
                       chroma_gain=1.0):
-    """The direct-encode spec written out with dctn/idctn, for comparison."""
+    """The direct-encode spec written out, for comparison."""
     from scipy.fft import idctn
     from scipy.ndimage import gaussian_filter
     x = np.clip(np.asarray(rgb, float)/255.0*brightness, 0, 1)**(1/gamma)
     height, width = x.shape[:2]
     luma_rows, luma_cols = grids[0]
-    block_y = max(1, height//(2*luma_rows))
-    block_x = max(1, width//(2*luma_cols))
-    rows, cols = height//block_y, width//block_x
-    x = x[:rows*block_y, :cols*block_x].reshape(
-        rows, block_y, cols, block_x, 3).mean(axis=(1, 3))
+    block_y = max(1, int(height/(4*luma_rows)+.5))
+    block_x = max(1, int(width/(4*luma_cols)+.5))
+    x = _block_means(x, block_y, block_x)
+    rows, cols = x.shape[:2]
     red, green, blue = x[..., 0], x[..., 1], x[..., 2]
     y = .299*red+.587*green+.114*blue
     cb = np.clip(.5+chroma_gain*(-.168736*red-.331264*green+.5*blue), 0, 1)
@@ -323,11 +352,18 @@ def _direct_reference(rgb, grids, shapes, brightness=1.0, gamma=1.0,
     if sharpen == 'usm':
         y = y+strength*(y-gaussian_filter(
             y, (.8*unit[0], .8*unit[1]), mode='reflect'))
+    step_y = 2 if height % (2*block_y) == 0 and rows//2 >= 2*grids[1][0] else 1
+    step_x = 2 if width % (2*block_x) == 0 and cols//2 >= 2*grids[1][1] else 1
+    cb, cr = (plane.reshape(rows//step_y, step_y, cols//step_x,
+                            step_x).mean(axis=(1, 3)) for plane in (cb, cr))
+    blocks = ((block_y, block_x),)+((block_y*step_y, block_x*step_x),)*2
     out = []
     for index, (plane, (grid_rows, grid_cols), (sent_rows, sent_cols)) in \
             enumerate(zip((y, cb, cr), grids, shapes)):
-        coeff = dctn(plane, norm='ortho')[:grid_rows, :grid_cols]
-        coeff *= np.sqrt(grid_rows*grid_cols/(rows*cols))
+        coeff = (_reference_axis(height, blocks[index][0], grid_rows,
+                                 grid_rows).T @ plane @
+                 _reference_axis(width, blocks[index][1], grid_cols,
+                                 grid_cols))
         if index == 0 and sharpen == 'taper':
             radius = np.hypot(np.arange(sent_rows)[:, None]/sent_rows,
                               np.arange(sent_cols)[None, :]/sent_cols)
@@ -354,7 +390,7 @@ class DirectDCTEncodeTests(unittest.TestCase):
                  {'sharpen': 'usm', 'strength': .5},
                  {'clarity': .3, 'chroma_gain': 1.2},
                  {'sharpen': 'usm', 'strength': .5, 'clarity': .3})
-        for width, height in ((160, 96), (400, 480), (641, 333)):
+        for width, height in ((160, 96), (400, 480), (641, 333), (1366, 768)):
             rgb = _textured_frame(width, height)
             for case in cases:
                 with self.subTest(size=(width, height), **case):
@@ -407,7 +443,8 @@ class DirectDCTEncodeTests(unittest.TestCase):
 
     def test_coefficients_are_the_coders_transform_and_feed_the_fold(self):
         model = v7.load_model(.1521/np.sqrt(1+10**(v7.CLOCK_REL_DB/10)), 'box')
-        rgb = _textured_frame(720, 960, seed=4)
+        # Reduced contrast: band-limiting overshoot must stay inside the clip.
+        rgb = np.uint8(_textured_frame(720, 960, seed=4)*.8+25)
         values = direct_dct_values(rgb, self.grids, self.shapes)
         self.assertLess(float(np.abs(values).max()), 1.0)  # nothing clipped
         coefficients = direct_dct_coefficients(rgb, self.grids, self.shapes)
@@ -422,6 +459,45 @@ class DirectDCTEncodeTests(unittest.TestCase):
             fold.encode_dct_coefficients(np.concatenate(
                 [plane.ravel() for plane in coefficients])),
             fold.encode_coefficients(values), atol=1e-9)
+
+    def test_block_mean_droop_is_undone_and_aliasing_is_small(self):
+        from animation_modem.v7_source_dct import source_dct_values
+        # A sent-band cosine keeps its full-resolution amplitude exactly.
+        for width, height, index in ((1920, 1080, 40), (640, 480, 50)):
+            wave = np.cos(np.pi*(np.arange(width)+.5)*index/width)
+            rgb = np.repeat(np.uint8(np.rint(127.5+100*np.tile(
+                wave, (height, 1))))[..., None], 3, axis=2)
+            fast = dctn(direct_dct_values(rgb, self.grids, self.shapes)
+                        [:96*80].reshape(96, 80), norm='ortho')[0, index]
+            exact = dctn(source_dct_values(rgb, self.grids, self.shapes)[0]
+                         [:96*80].reshape(96, 80), norm='ortho')[0, index]
+            with self.subTest(size=(width, height)):
+                self.assertAlmostEqual(fast/exact, 1.0, delta=2e-3)
+        # A detailed frame stays within 45 dB of the full-resolution transform
+        # over the sent band.
+        rgb = _textured_frame(1280, 960, seed=3)
+        fast = dctn(direct_dct_values(rgb, self.grids, self.shapes)
+                    [:96*80].reshape(96, 80), norm='ortho')[:60, :50]
+        exact = dctn(source_dct_values(rgb, self.grids, self.shapes)[0]
+                     [:96*80].reshape(96, 80), norm='ortho')[:60, :50]
+        error = 10*np.log10(np.sum(exact**2)/np.sum((fast-exact)**2))
+        self.assertGreater(error, 45.0)
+
+    def test_luminance_target_is_averaged_in_linear_light(self):
+        from animation_modem.v7_source_dct import _srgb_to_linear
+        # One-pixel black/white columns: half the light, not the light of
+        # mid-grey code (0.21).
+        rgb = np.zeros((480, 640, 3), dtype=np.uint8)
+        rgb[:, ::2] = 255
+        target = []
+        direct_dct_values(rgb, self.grids, self.shapes, luminance_out=target)
+        np.testing.assert_allclose(target[0], .5, atol=1e-9)
+        flat = np.full((480, 640, 3), (40, 120, 200), dtype=np.uint8)
+        target = []
+        direct_dct_values(flat, self.grids, self.shapes, luminance_out=target)
+        expected = float(_srgb_to_linear(np.array((40, 120, 200))/255.0) @
+                         np.array([.2126, .7152, .0722]))
+        np.testing.assert_allclose(target[0], expected, atol=1e-9)
 
     def test_uint8_and_float_frames_agree(self):
         rgb = _textured_frame(400, 480, seed=6)

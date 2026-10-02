@@ -162,7 +162,16 @@ The GUI offers four wire profiles: **Aspect Fold 500** (stereo, the default),
 **Fold 500** (stereo), and the mono-video **aspect colour Fold 500** and
 **colour Fold 500**. The receiver follows the profile carried by each packet.
 **Direct DCT encode** is on by default (it encodes from the full-size frame;
-frames smaller than the coder grid fall back to the Box resize). Saved
+frames smaller than the coder grid fall back to the Box resize). For speed it
+is not the full-resolution transform itself: the frame is first averaged in
+pixel blocks to about four times the coder grid (a remainder becomes one
+narrower last block, so nothing is cropped), and the transform of those means
+is corrected for the averaging's known droop. Against the full-resolution
+transform the sent band is 54–56 dB below the picture (the earlier
+two-times, uncorrected version: 39–43 dB, and it cropped up to a block of
+pixels on sizes that did not divide); what remains is aliasing of detail finer
+than the averaged plane. Sender cost at 1080p with luma adjustment: about
+9 ms per frame (was 4.5); the exact transform takes about 185 ms. Saved
 settings from earlier GUI versions keep everything except the profile, Direct
 DCT encode and the encoder filter, which start at the new defaults once. Under **Advanced**:
 
