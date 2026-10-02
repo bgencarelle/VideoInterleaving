@@ -511,6 +511,51 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertEqual(gui.grain_mode, 'flat')
         self.assertTrue(gui.picture_dirty)
 
+    def test_pixel_display_is_a_toggle_that_locks_the_other_display_choices(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser,
+                          (('test input device', 3),))
+        by_label = {field.label: field for field in gui.fields}
+        pixel = by_label['Pixel display']
+        smooth = [by_label[label] for label in (
+            'Display upscaler', 'DCT reconstruction', 'Display grain',
+            'Edge reconstruction', 'Edge strength')]
+        self.assertEqual((pixel.kind, pixel.value, gui.pixel_display),
+                         ('bool', False, False))
+        self.assertIn(gui.fields.index(pixel), gui._config_field_indexes())
+        self.assertLess(gui.fields.index(pixel), gui.fields.index(smooth[0]))
+        before = [field.value for field in smooth]
+
+        gui.picture_dirty = False
+        gui._adjust_field(pixel, 1)
+        self.assertTrue(gui.pixel_display and gui.picture_dirty)
+        self.assertEqual((gui.dct_reconstruction, gui.display_mode,
+                          gui.edge_mode, gui.grain_mode),
+                         ('pixel', 'nearest', 'off', 'off'))
+        self.assertTrue(all(field.locked for field in smooth))
+        self.assertEqual(gui._field_value_label(smooth[0]),
+                         'Off while Pixel display is on')
+        # Locked: neither stepping nor choosing changes them.
+        for field in smooth:
+            gui._adjust_field(field, 1)
+        gui._select_choice(smooth[1], '8x')
+        self.assertEqual([field.value for field in smooth], before)
+        self.assertEqual(gui.dct_reconstruction, 'pixel')
+        # Starting the receiver keeps the pixel display.
+        by_label_dest = {field.dest: field for field in gui.fields}
+        by_label_dest['device'].value = 3
+        gui._build_arguments()
+        self.assertEqual((gui.dct_reconstruction, gui.display_mode),
+                         ('pixel', 'nearest'))
+
+        gui._adjust_field(pixel, 1)
+        self.assertFalse(gui.pixel_display)
+        self.assertFalse(any(field.locked for field in smooth))
+        self.assertEqual((gui.display_mode, gui.dct_reconstruction,
+                          gui.edge_mode, gui.grain_mode),
+                         ('bicubic', '4x', 'on', 'off'))
+        gui._select_choice(smooth[1], '8x')
+        self.assertEqual(gui.dct_reconstruction, '8x')
+
     def test_edge_reconstruction_is_a_basic_display_choice_on_by_default(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser,
                           (('test input device', 3),))
@@ -658,8 +703,10 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertEqual(gui.display_mode, 'bicubic')
         self.assertEqual(field.value, '4x')
         self.assertEqual(gui.dct_reconstruction, '4x')
+        # Pixel is its own toggle, not a reconstruction choice.
         self.assertEqual(tuple(value for _label, value in field.options),
-                         DCT_RECONSTRUCTION_MODES)
+                         tuple(mode for mode in DCT_RECONSTRUCTION_MODES
+                               if mode != 'pixel'))
 
         gui.picture_dirty = False
         gui._select_choice(field, 'off')

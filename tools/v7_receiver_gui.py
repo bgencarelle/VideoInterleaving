@@ -202,6 +202,15 @@ HIDDEN_DECODE_OPTIONS = frozenset((
     'tone_equalization'))
 
 
+# Pixel display: the sent grid as hard pixels (for the sender's Pixel encode).
+# It replaces the whole smooth display chain, so while it is on the other
+# display choices are locked and have no effect.
+PIXEL_DISPLAY_LABEL = 'Pixel display'
+SMOOTH_DISPLAY_LABELS = ('Display upscaler', 'DCT reconstruction',
+                         'Display grain', 'Edge reconstruction',
+                         'Edge strength')
+
+
 @dataclass
 class OptionField:
     action: object
@@ -507,6 +516,7 @@ def _make_fields(receive_parser, device_choices, audio_output_choices=()):
                 value = str(value)
             fields.append(OptionField(action, value, _field_label(action),
                                       'text'))
+    fields.append(OptionField(None, False, PIXEL_DISPLAY_LABEL, 'bool'))
     fields.append(OptionField(None, RECOMMENDED_DISPLAY_MODE,
                               'Display upscaler', 'choice',
                               tuple((DISPLAY_LABELS[name], name)
@@ -514,7 +524,7 @@ def _make_fields(receive_parser, device_choices, audio_output_choices=()):
     fields.append(OptionField(
         None, RECOMMENDED_DCT_RECONSTRUCTION, 'DCT reconstruction', 'choice',
         tuple((DCT_RECONSTRUCTION_LABELS[name], name)
-              for name in DCT_RECONSTRUCTION_MODES)))
+              for name in DCT_RECONSTRUCTION_MODES if name != 'pixel')))
     fields.append(OptionField(
         None, 'off', 'Display grain', 'choice',
         tuple((GRAIN_LABELS[name], name) for name in GRAIN_MODES)))
@@ -698,6 +708,7 @@ class ReceiverGui:
         self.grain_mode = 'off'
         self.edge_mode = RECOMMENDED_EDGE_MODE
         self.edge_strength = RECOMMENDED_EDGE_STRENGTH
+        self.pixel_display = False
         self.grain_seed = 0
         self.last_dct_viewport_size = None
         self.image_only = False
@@ -739,9 +750,14 @@ class ReceiverGui:
         if field.kind == 'folder':
             return (str(field.value) if field.value else
                     'Choose a folder…')
+        if field.locked and field.label in SMOOTH_DISPLAY_LABELS:
+            return 'Off while Pixel display is on'
         if field.kind == 'bool':
             if field.locked:
                 return 'On · required for this integrated viewer'
+            if field.label == PIXEL_DISPLAY_LABEL:
+                return ('On · hard pixels on the sent grid' if field.value
+                        else 'Off')
             return 'On' if field.value else 'Off'
         if field.kind == 'choice':
             return next((label for label, value in field.options
@@ -1031,25 +1047,39 @@ class ReceiverGui:
         self.picture_dirty = True
         self.dirty = True
 
+    def _apply_display_fields(self):
+        """Set the display state from the display fields. With Pixel display
+        on, the smooth-display fields keep their values but are locked and
+        the picture is the sent grid as hard pixels."""
+        values = {field.label: field for field in self.fields
+                  if field.action is None}
+        self.pixel_display = bool(values[PIXEL_DISPLAY_LABEL].value)
+        for label in SMOOTH_DISPLAY_LABELS:
+            values[label].locked = self.pixel_display
+        if self.pixel_display:
+            self.display_mode = 'nearest'
+            self.dct_reconstruction = 'pixel'
+            self.grain_mode = 'off'
+            self.edge_mode = 'off'
+            self.display_menu_open = False
+        else:
+            self.display_mode = values['Display upscaler'].value
+            self.dct_reconstruction = values['DCT reconstruction'].value
+            self.grain_mode = values['Display grain'].value
+            self.edge_mode = values['Edge reconstruction'].value
+        self.edge_strength = values['Edge strength'].value
+        self.picture_dirty = True
+
     def _video_fullscreen(self):
         """Live fullscreen is an image-on-black view, with optional info panel."""
         return self.fullscreen and self.page == 'info' and not self.image_only
 
     def _build_arguments(self):
         words = ['receive', '--headless']
+        self._apply_display_fields()
         for field in self.fields:
             action = field.action
             if action is None:
-                if field.label == 'Display upscaler':
-                    self.display_mode = field.value
-                elif field.label == 'DCT reconstruction':
-                    self.dct_reconstruction = field.value
-                elif field.label == 'Display grain':
-                    self.grain_mode = field.value
-                elif field.label == 'Edge reconstruction':
-                    self.edge_mode = field.value
-                elif field.label == 'Edge strength':
-                    self.edge_strength = field.value
                 continue
             dest = action.dest
             if dest in ('help', 'mode', 'headless', 'fullscreen',
@@ -1196,6 +1226,10 @@ class ReceiverGui:
                            'close and relaunch to change them.')
             self.dirty = True
             return
+        if field.locked:
+            self.dropdown = None
+            self.dirty = True
+            return
         field.value = value
         if field.dest == 'device':
             self.unavailable_input_identity = None
@@ -1213,22 +1247,10 @@ class ReceiverGui:
             self._clear_other_profiles(field.dest)
         self.dropdown = None
         self.dropdown_scroll = 0
-        if field.label == 'Display upscaler':
-            self.display_mode = value
-            self.picture_dirty = True
-            self.display_menu_open = False
-        elif field.label == 'DCT reconstruction':
-            self.dct_reconstruction = value
-            self.picture_dirty = True
-        elif field.label == 'Display grain':
-            self.grain_mode = value
-            self.picture_dirty = True
-        elif field.label == 'Edge reconstruction':
-            self.edge_mode = value
-            self.picture_dirty = True
-        elif field.label == 'Edge strength':
-            self.edge_strength = value
-            self.picture_dirty = True
+        if field.action is None:
+            self._apply_display_fields()
+            if field.label == 'Display upscaler':
+                self.display_menu_open = False
         self.notice = f'{field.label}: {self._field_value_label(field)}'
         self._update_runtime_option(field)
         if field.dest in ('device', 'audio_output_device', 'audio_muted',
@@ -1271,22 +1293,13 @@ class ReceiverGui:
             if field.dest == 'experimental_fold':
                 self._clear_other_profiles(field.dest)
             if field.label == 'Display upscaler':
-                self.display_mode = field.value
-                self.picture_dirty = True
                 self.display_menu_open = False
-            elif field.label == 'DCT reconstruction':
-                self.dct_reconstruction = field.value
-                self.picture_dirty = True
-            elif field.label == 'Display grain':
-                self.grain_mode = field.value
-                self.picture_dirty = True
-            elif field.label == 'Edge reconstruction':
-                self.edge_mode = field.value
-                self.picture_dirty = True
-            elif field.label == 'Edge strength':
-                self.edge_strength = field.value
-                self.picture_dirty = True
+        if field.action is None:
+            self._apply_display_fields()
         self.notice = f'{field.label}: {self._field_value_label(field)}'
+        if field.label == PIXEL_DISPLAY_LABEL and field.value:
+            self.notice = ('Pixel display: on · the other display choices '
+                           'are off while it is on')
         self._update_runtime_option(field)
         if field.dest in ('audio_muted', 'audio_volume', 'freewheel_seconds',
                           'show_sync_warning'):
@@ -1917,7 +1930,8 @@ class ReceiverGui:
                 ('config_tab', 'Setup', 12, 104),
                 ('info_tab', 'Live', 112, 184),
                 ('start_stop', 'Stop' if self.started else 'Start', 192, 284),
-                ('mode_button', f'{DISPLAY_LABELS[self.display_mode]}  ▾',
+                ('mode_button', 'Pixel display' if self.pixel_display else
+                 f'{DISPLAY_LABELS[self.display_mode]}  ▾',
                  width-414, width-300),
                 ('details_button', 'Info On' if diagnostics_visible else
                  'Info Off', width-292, width-220),
@@ -1971,7 +1985,8 @@ class ReceiverGui:
         indexes = []
         for index, field in enumerate(self.fields):
             if (self.advanced_options or field.dest in BASIC_OPTION_DESTS or
-                    field.label in ('Display upscaler',
+                    field.label in (PIXEL_DISPLAY_LABEL,
+                                    'Display upscaler',
                                     'DCT reconstruction',
                                     'Display grain',
                                     'Edge reconstruction',
@@ -2032,6 +2047,10 @@ class ReceiverGui:
                 self._stop_receiver()
             elif edit_valid:
                 self._start_receiver()
+        elif hit == 'mode_button' and self.pixel_display:
+            self.notice = ('Pixel display is on; turn it off to choose a '
+                           'display upscaler.')
+            self.dirty = True
         elif hit == 'mode_button':
             self.dropdown = None
             self.display_menu_open = not self.display_menu_open
@@ -2219,6 +2238,9 @@ class ReceiverGui:
                 field = self.fields[self.selected]
                 if field.kind == 'bool':
                     self._adjust_field(field, 1)
+                elif field.kind == 'choice' and field.locked:
+                    self.notice = ('Pixel display is on; turn it off to '
+                                   'change this.')
                 elif field.kind == 'choice':
                     if field.dest == 'device':
                         self._refresh_input_choices()

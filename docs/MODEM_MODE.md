@@ -292,8 +292,11 @@ source's own leading coefficients weighted from an area average's roll-off
 repetition and so also returns block art exactly). They hold more detail per
 pixel, and because nothing aliases, hard edges ring: flat areas beside edges
 show a faint mesh that grows from Soft to Crisp. Receiver:
-**DCT reconstruction → Pixel** shows the sent grid as hard pixels (edge
-reconstruction does not apply). Use the **Fold 500** profile: its sent luma
+**Pixel display** (its own On/Off setting above the display choices) shows
+the sent grid as hard pixels; while it is on, Display upscaler, DCT
+reconstruction, Display grain, Edge reconstruction and Edge strength are
+locked and have no effect, and they return to their previous values when it
+is turned off. Use the **Fold 500** profile: its sent luma
 is exactly the 40×48 rectangle, so brightness arrives pixel for pixel; the
 aspect profiles send an elliptical set and miss the rectangle's corner
 detail. Colour has half the resolution (one colour sample per 2×2 pixels),
