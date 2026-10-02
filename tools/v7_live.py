@@ -577,10 +577,6 @@ def _fold_slots(args):
             raise ValueError('aspect-fold-500 must be selected on its own')
         # The aspect profile folds with its own layout tables, not LiveFold.
         return 0
-    if getattr(args, 'slices', None) == 'stereo':
-        if requested is not None or baseline:
-            raise ValueError('stereo-slices must be selected on its own')
-        return 0
     if baseline:
         if requested is not None:
             raise ValueError('--baseline cannot be combined with --experimental-fold')
@@ -760,12 +756,6 @@ def _apply_profile_option(args):
     elif profile == 'aspect-mono-500':
         args.experimental_mono_fold = True
         args.aspect_mono = True
-    elif profile == 'stereo-slices':
-        args.slices = 'stereo'
-    elif profile == 'mono-slices':
-        # One picture channel and a soundtrack: the mono-video plumbing.
-        args.slices = 'mono'
-        args.experimental_mono_fold = True
 
 
 def run_send(args):
@@ -862,11 +852,10 @@ def _run_send_session(args):
             raise ValueError('aspect-fold-500 requires coded pilot tones')
         if not getattr(args, 'eof_marker', True):
             raise ValueError('aspect-fold-500 requires the EOF marker')
-    profile_slots = 500 if (mono_fold_profile or aspect_profile or
-                            getattr(args, 'slices', None)) else slots
+    profile_slots = 500 if (mono_fold_profile or aspect_profile) else slots
     clip_aware = bool(getattr(args, 'clip_aware_encode', False))
     if clip_aware and not (fold is not None or mono_fold_profile or
-                           aspect_profile or getattr(args, 'slices', None)):
+                           aspect_profile):
         raise ValueError('--clip-aware-encode requires a folded profile')
     luma_adjusted = bool(getattr(args, 'luma_adjust', False))
     if luma_adjusted and not getattr(args, 'dct_encode', False):
@@ -887,38 +876,7 @@ def _run_send_session(args):
         warmup_resize((2, 2), args.perceptual_resize,
                       args.perceptual_detail_strength)
     model = _model(args.fixture, args.encode_filter)
-    slices_profile = getattr(args, 'slices', None)
-    slice_wire = None
-    if slices_profile:
-        if not getattr(args, 'pilot_tones', True):
-            raise ValueError('the slices profiles require coded pilot tones')
-        if not getattr(args, 'eof_marker', True):
-            raise ValueError('the slices profiles require the EOF marker')
-        if slices_profile == 'stereo' and getattr(args, 'mono_sum', False):
-            raise ValueError('stereo-slices needs two output channels; use '
-                             'mono-slices for one')
-        _ensure_test_modem_path()
-        from slice_wire import SliceMonoWire, SliceWire
-        from tone_code import warmup_status_templates
-        slice_wire = SliceWire(getattr(args, 'aspect_layout', 'auto'))
-        # Build every layout model the sender may need before audio starts.
-        for layout in ((slice_wire.layout,) if slice_wire.layout != 'auto' else
-                       tuple(dict.fromkeys(
-                           slice_wire.layout_for(code) for code in range(8)))):
-            slice_wire.model_for(model, layout)
-        warmup_status_templates(slice_wire.status_mode)
-        if slices_profile == 'mono':
-            mono_wire = SliceMonoWire(
-                slice_wire, getattr(args, 'mono_video_side', 'right'))
-        if getattr(args, 'dct_encode', False) and dct_options.get('pixel'):
-            # Pixel encode: the whole picture's own rectangles.
-            from slice_wire import slice_shapes
-            dct_options = dict(dct_options, pixel_shapes=tuple(
-                slice_shapes(slice_wire.layout_for(code))
-                for code in range(8)))
-    if mono_fold_profile and slice_wire is not None:
-        pass
-    elif mono_fold_profile:
+    if mono_fold_profile:
         _ensure_test_modem_path()
         from mono_video import MonoColourFoldWire, MonoFreshFoldWire
         if getattr(args, 'aspect_mono', False):
@@ -1009,15 +967,13 @@ def _run_send_session(args):
     # A fixed aspect layout is signalled, not matched by hand: its code goes
     # in every packet with the screen bit and the picture is boxed into it.
     fit_aspect = None
-    for layout_wire in (aspect_wire, mono_wire, slice_wire):
+    for layout_wire in (aspect_wire, mono_wire):
         layout = getattr(layout_wire, 'layout', None)
         if layout not in (None, 'auto'):
             fit_aspect = P.V7_ASPECT_NAMES.index(layout)
 
     def codec_for(aspect_code):
         """The fold codec this packet will be sent with, or None."""
-        if slice_wire is not None:
-            return None                                 # no fold on slices
         if mono_wire is not None:
             return mono_wire._codec(mono_wire._packet_model(model, aspect_code))
         if aspect_wire is not None:
@@ -1028,20 +984,12 @@ def _run_send_session(args):
         return fold.codec(model) if fold is not None else None
 
     def chroma_sent_for(aspect_code):
-        if slice_wire is not None:
-            layout = slice_wire.layout_for(aspect_code)
-            return (None if layout is None else
-                    slice_wire.chroma_sent_masks(layout))
         codec = codec_for(aspect_code)
         return None if codec is None else _chroma_sent_masks(codec)
 
     def clip_aware_values(value, aspect_code):
         """Fit one frame's sent luma to the receiver's clip (see v7_source_dct)."""
         from animation_modem.v7_source_dct import clip_aware_luma
-        if slice_wire is not None:
-            layout = slice_wire.layout_for(aspect_code)
-            return (value if layout is None else clip_aware_luma(
-                value, model.coder.grids[0], slice_wire.luma_sent_mask(layout)))
         codec = codec_for(aspect_code)
         if codec is None:
             return value
@@ -1057,12 +1005,6 @@ def _run_send_session(args):
             audio = mono_wire.encode(
                 model, values, start_counter=counter,
                 aspect_codes=aspects,
-                source_indices=[_wire_index(counter+i)
-                                for i in range(len(values))],
-                eof_marker=True)
-        elif slice_wire is not None:
-            audio = slice_wire.encode(
-                model, values, start_counter=counter, aspect_codes=aspects,
                 source_indices=[_wire_index(counter+i)
                                 for i in range(len(values))],
                 eof_marker=True)
@@ -1144,13 +1086,10 @@ def _run_send_session(args):
                                aspect_wire.fold_slots if aspect_wire is not None
                                else getattr(mono_wire, 'fold_slots', 0)),
                 'coded_pilot': (fold is not None or mono_wire is not None or
-                                aspect_wire is not None or
-                                slice_wire is not None),
+                                aspect_wire is not None),
                 'wire_profile': (getattr(mono_wire, 'wire_profile',
                                          'mono-fold-off')
                                  if mono_wire is not None else
-                                 slice_wire.wire_profile
-                                 if slice_wire is not None else
                                  aspect_wire.wire_profile
                                  if aspect_wire is not None else
                                  'folded' if fold is not None else 'baseline'),
@@ -1458,11 +1397,7 @@ def _run_send_session(args):
                 wire_mode = (getattr(mono_wire, 'wire_profile',
                                      'mono-fold-off')
                              if mono_wire is not None else
-                             f'{slice_wire.wire_profile} L/R'
-                             if slice_wire is not None else
                              'mono-sum' if args.mono_sum else 'M/S')
-                if slice_wire is not None:
-                    wire_mode += f' layout={slice_wire.layout}'
                 if aspect_wire is not None:
                     wire_mode += (f' aspect-fold-500 layout={aspect_wire.layout} '
                                   f'tail={aspect_wire.tail}')
@@ -1821,11 +1756,6 @@ class _AdaptiveProfileDecoder:
         # its signature was last seen.
         self._last_pixel = None
         self._pixel_unconfirmed = 0
-        # Stereo slices: each channel its own mono wire, under the aspect
-        # mono status with the metadata model bit set to nearest.
-        from slice_wire import SliceWire
-        self.slice_wire = SliceWire(aspect_layout)
-        self._last_slices = False
         self.supported_modes = frozenset(
             (FOLD_500, self.aspect_mode, *self.mono_wires))
         self._mode_names = {
@@ -1860,9 +1790,6 @@ class _AdaptiveProfileDecoder:
 
     @property
     def profile_name(self):
-        if (self.active_mode == getattr(self, 'aspect_mono_mode', None) and
-                getattr(self, '_last_slices', False)):
-            return self.slice_wire.wire_profile
         return self._mode_names[self.active_mode]
 
     @property
@@ -1889,7 +1816,6 @@ class _AdaptiveProfileDecoder:
 
     def _reset_aspect_wires(self):
         for wire in (getattr(self, 'aspect_wire', None),
-                     getattr(self, 'slice_wire', None),
                      *getattr(self, 'pixel_wires', {}).values()):
             if wire is not None:
                 wire.reset()
@@ -2126,11 +2052,7 @@ class _AdaptiveProfileDecoder:
             # The shared tail store follows the base model's ranks; this
             # layout keeps its own.
             prev_tail = aspect_wire.tail_prior(profile_model, aspect_layout)
-        slices = False
         if mode == getattr(self, 'aspect_mono_mode', None):
-            slices = hint.get('encoding_type')
-            slices = (self._last_slices if slices is None else
-                      int(slices) == self.pixel_encoding_type)
             aspect_layout = self.aspect_mono_wire.layout_for(
                 hint.get('aspect_code'))
             if aspect_layout is None:
@@ -2141,8 +2063,6 @@ class _AdaptiveProfileDecoder:
         if mode in self.mono_status_modes:
             try:
                 profile_model = (
-                    self.slice_wire.model_for(model, aspect_layout)
-                    if slices else
                     self.mono_wires[mode].model_for(model, aspect_layout)
                     if aspect_layout is not None else
                     self.mono_wires[mode].model_for(model))
@@ -2194,10 +2114,7 @@ class _AdaptiveProfileDecoder:
                     else:
                         if self._last_pixel is None:
                             return held('pixel_grid_unknown', observed_mode)
-        if result is not None and predicted_layout and slices:
-            # No fold signature on this wire: the last layout is kept.
-            result.diag['aspect_layout_predicted'] = True
-        elif result is not None and predicted_layout:
+        if result is not None and predicted_layout:
             if mode == self.aspect_mode:
                 codec = aspect_wire.codec(profile_model)
                 equalized = result.diag.get('fold_eq')
@@ -2214,14 +2131,10 @@ class _AdaptiveProfileDecoder:
             if aspect_wire is not None and (
                     not aspect_wire.pixel or pixel_signed):
                 self._last_pixel = aspect_wire.pixel
-            if mode == getattr(self, 'aspect_mono_mode', None):
-                self._last_slices = slices
         if result is not None:
             result.diag['coded_status_mode'] = mode
             result.diag['profile_mode'] = mode
-            result.diag['wire_profile'] = (self.slice_wire.wire_profile
-                                           if slices else self._mode_names[mode])
-            result.diag['slices'] = slices
+            result.diag['wire_profile'] = self._mode_names[mode]
             if aspect_layout is not None:
                 result.diag['aspect_layout'] = aspect_layout
                 if mode == self.aspect_mode:
@@ -2230,27 +2143,6 @@ class _AdaptiveProfileDecoder:
             if mode in self.mono_status_modes and self._local.equalized is not None:
                 result.diag['mono_fold_eq'] = self._local.equalized
         return result
-
-    def slice_half(self, model, result, channel=None):
-        """One decoded stereo-slices channel (slice_wire.Half), or None.
-        ``channel`` is the input channel it was heard on."""
-        layout = result.diag.get('aspect_layout')
-        if not result.diag.get('slices') or layout is None:
-            return None
-        wire = self.slice_wire
-        return wire.half(wire.model_for(model, layout), result, channel)
-
-    def slice_values(self, halves, result=None):
-        """Grid values from one or two stereo-slices channels; notes on
-        ``result`` what was shown and the pixel grid it stands on."""
-        from slice_wire import slice_shapes
-        wire = self.slice_wire
-        used = wire.choose(halves)
-        if result is not None:
-            result.diag['slices_shown'] = '+'.join(sorted(
-                half.kind for half in used))
-            result.diag['pixel_shapes'] = slice_shapes(used[0].layout)
-        return wire.values(halves)
 
     def values(self, model, result):
         mode = result.diag.get('profile_mode')
@@ -2263,8 +2155,6 @@ class _AdaptiveProfileDecoder:
             profile_model = wire.model_for(model, layout)
             wire.remember(profile_model, layout, result)
             return wire.values(profile_model, result)
-        if result.diag.get('slices') and result.diag.get('aspect_layout'):
-            return self.slice_values([self.slice_half(model, result)], result)
         if mode == getattr(self, 'aspect_mono_mode', None):
             layout = result.diag.get('aspect_layout')
             if layout is None:
@@ -2667,8 +2557,6 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
                      not getattr(mono_wire, 'disable_tail_memory', False)))
     if adaptive_profile is not None:
         adaptive_profile.bind_state(pulse_state)
-    # Stereo slices: the second input channel is a wire of its own.
-    slice_state = P.PulseState(tail_memory=False)
     profile_generation_seen = (adaptive_profile.generation
                                if adaptive_profile is not None else 0)
     lag_ticks = deque(maxlen=32)        # recent picture lags, loop ticks
@@ -3491,50 +3379,6 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
             # reacquire.  A single bad frame must not stop the live receiver.
             results, info = [], {'words': 0,
                                  'recovery_error': type(exc).__name__}
-        # Stereo slices: the other input channel carries the other half of
-        # the picture as an independent wire. Decode it too; if the channel
-        # just decoded gave nothing usable, the other one stands in for it.
-        slice_side = slice_other = None
-        if (adaptive_profile is not None and profile_probes is not None and
-                len(profile_probes) > 1 and packet_direction >= 0 and
-                adaptive_profile.dispatch_mode ==
-                adaptive_profile.aspect_mono_mode and
-                adaptive_profile.dispatch_side in (0, 1) and
-                (adaptive_profile._last_slices or
-                 any(result.diag.get('slices') for result in results))):
-            slice_side = adaptive_profile.dispatch_side
-            other_probe = profile_probes[1-slice_side]
-            other_audio = other_probe.audio
-            if (other_audio is not None and
-                    other_probe.input is not decode_input and
-                    other_probe.input.pulse_hits(other_audio)):
-                try:
-                    other_results, _ = P.decode_pulse_stream(
-                        model, other_audio, latest_only=True,
-                        pulse_starts=other_probe.input.pulse_starts(other_audio),
-                        frame_boundary=args.frame_boundary,
-                        input_gain=other_probe.input.gain, models=models,
-                        model_factory=model_factory,
-                        force_float32=args.force_float32, state=slice_state,
-                        sample_rate=capture_rate,
-                        pilot_timing=args.pilot_timing,
-                        pulse_timing=args.pulse_timing,
-                        tone_equalization=args.tone_equalization)
-                except Exception:
-                    other_results = []
-                if other_results and other_results[-1].diag.get('slices'):
-                    slice_other = other_results[-1]
-                    slice_other.diag['playback_direction'] = 1
-
-            def usable(candidate):
-                return candidate is not None and (
-                    candidate.status in ('received', 'verified') or
-                    candidate.diag.get('displayable'))
-
-            if slice_other is not None and usable(slice_other) and not (
-                    results and usable(results[-1])):
-                results, slice_other = [slice_other], None
-                slice_side = 1-slice_side
         decode_cpu_seconds = time.thread_time()-decode_cpu_start
         decode_cpu_times.append((time.monotonic(), decode_cpu_seconds))
         meter['decode_cpu_ms'] = decode_cpu_seconds*1000.0
@@ -3621,20 +3465,7 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
             meter['decode_ms'] = (info.get('diagnostics') or {}).get(
                 'last_elapsed_ms')
             if result.status in ('received', 'verified') or displayable:
-                if adaptive_profile is not None and result.diag.get('slices'):
-                    base = models.get(result.diag.get('encoding_type'), model)
-                    halves = [adaptive_profile.slice_half(
-                        base, result, slice_side)]
-                    if (slice_other is not None and
-                            slice_other.diag.get('source_index') ==
-                            result.diag.get('source_index')):
-                        halves.append(adaptive_profile.slice_half(
-                            models.get(slice_other.diag.get('encoding_type'),
-                                       model), slice_other, 1-slice_side))
-                    values = adaptive_profile.slice_values(
-                        [half for half in halves if half is not None], result)
-                    meter['slices_shown'] = result.diag.get('slices_shown')
-                elif adaptive_profile is not None:
+                if adaptive_profile is not None:
                     values = adaptive_profile.values(
                         models.get(result.diag.get('encoding_type'), model),
                         result)
@@ -3957,8 +3788,7 @@ def parser():
     send_profile.add_argument(
         '--profile', choices=('mono-fold-500', 'fold-500', 'mono-colour-500',
                               'fold-1000', 'aspect-fold-500',
-                              'aspect-mono-500', 'stereo-slices',
-                              'mono-slices'),
+                              'aspect-mono-500'),
         default=None,
         help=('wire profile: mono video with Fold 500 (recommended), '
               'stereo Fold 500 (default), or advanced Fold 1000, '

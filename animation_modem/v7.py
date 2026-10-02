@@ -988,37 +988,18 @@ def encode_frame(model, values, counter):
 
 
 def encode_frame_coeffs(model, coeffs, counter, return_X=False,
-                        pilot_values=None, right_coeffs=None):
-    """One frame's OFDM body. With ``right_coeffs`` the model must be an
-    M-only (mono) wire: ``coeffs`` then goes out on the left channel alone
-    and ``right_coeffs`` on the right, each with the pilots, as two
-    independent mono wires built in one pass."""
+                        pilot_values=None):
+    c = coeffs - model.mu
     idx = model.rank_tables[counter % TAIL_PHASES]
+    X = np.zeros((F, 65, 2), complex)                        # symbol, bin, M/S
     ranks = np.maximum(idx, 0)
-
-    def data_cells(values):
-        cells = np.zeros((F, 65, 2), complex)                # symbol, bin, M/S
-        vals = model.gain[ranks]*(values - model.mu)[ranks]
-        vals[idx < 0] = 0
-        tx = _hadamard8(vals)
-        flat = cells.reshape(-1)
-        flat.real[CELLS_I] = tx[GROUP_IS_I].ravel()
-        flat.imag[CELLS_Q] = tx[~GROUP_IS_I].ravel()
-        return cells
-
-    X = data_cells(coeffs)
-    pilots = SCATTERED_PILOTS if pilot_values is None else pilot_values
-    if right_coeffs is None:
-        X += pilots
-    else:
-        other = data_cells(right_coeffs)
-        if np.any(X[..., 1]) or np.any(other[..., 1]) or np.any(pilots[..., 1]):
-            raise ValueError('two-channel encoding needs an M-only wire')
-        # Left = (M+S)/sqrt(2) and right = (M-S)/sqrt(2) must equal each
-        # wire's own M/sqrt(2): M is their mean, S half their difference.
-        left, right = X[..., 0]+pilots[..., 0], other[..., 0]+pilots[..., 0]
-        X[..., 0] = (left+right)/2
-        X[..., 1] = (left-right)/2
+    vals = model.gain[ranks]*c[ranks]
+    vals[idx < 0] = 0
+    tx = _hadamard8(vals)
+    cells = X.reshape(-1)
+    cells.real[CELLS_I] = tx[GROUP_IS_I].ravel()
+    cells.imag[CELLS_Q] = tx[~GROUP_IS_I].ravel()
+    X += SCATTERED_PILOTS if pilot_values is None else pilot_values
     if return_X:
         return X
     XL = (X[..., 0]+X[..., 1])/np.sqrt(2)*model.phase
@@ -1098,12 +1079,10 @@ def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
                                pilot_tones=False,
                                pilot_tone_gate_preamble=False,
                                eof_marker=False, pilot_values=None,
-                               pulse_profile_code=1, right_coeffs=None):
-    """Pulse-frame transformed source coefficients without another DCT pass.
-    ``right_coeffs``: see encode_frame_coeffs (two mono wires, one packet)."""
+                               pulse_profile_code=1):
+    """Pulse-frame transformed source coefficients without another DCT pass."""
     body = encode_frame_coeffs(model, coeffs, counter,
-                               pilot_values=pilot_values,
-                               right_coeffs=right_coeffs)
+                               pilot_values=pilot_values)
     out = np.zeros((PULSE_FRAME, 2), np.float32)
     out[PULSE.SYNC_LEN:PULSE.SYNC_LEN+FRAME] = body
     preamble = PULSE.profile_preamble(pulse_profile_code)
