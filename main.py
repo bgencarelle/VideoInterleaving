@@ -349,17 +349,15 @@ def configure_runtime():
                              "Above the output Nyquist limit, high-frequency detail is lost")
     parser.add_argument("--modem-pilot-tones",
                         action=argparse.BooleanOptionalAction, default=True,
-                        help="V7 bin-1/bin-3 timing references (required for Fold 500; baseline only can disable)")
+                        help="V7 bin-1/bin-3 timing references (required for Fold 500)")
     parser.add_argument("--modem-eof-marker",
                         action=argparse.BooleanOptionalAction, default=True,
-                        help="V7 packet EOF marker (required for Fold 500; baseline only can disable)")
-    parser.add_argument("--modem-baseline", action="store_true",
-                        help="use the previous fold-off modem wire (nearest resize by default)")
+                        help="V7 packet EOF marker (required for Fold 500)")
     parser.add_argument("--modem-encode-filter",
-                        choices=("nearest", "box", "lanczos", "bicubic"),
+                        choices=("nearest", "box"),
                         default=None,
-                        help="V7 source resize filter (default: box for stereo Fold 500; "
-                             "nearest with --modem-baseline)")
+                        help="V7 source resize filter (default: box; stereo Fold 500 "
+                             "requires box)")
     modem_length = parser.add_mutually_exclusive_group()
     modem_length.add_argument(
         "--modem-frames", type=int, default=0,
@@ -382,17 +380,13 @@ def configure_runtime():
 
     if args.mode == "modem":
         if args.modem_encode_filter is None:
-            args.modem_encode_filter = (
-                "nearest" if args.modem_baseline else "box")
-        if not args.modem_baseline:
-            if args.modem_encode_filter != "box":
-                parser.error("stereo Fold 500 requires --modem-encode-filter box; "
-                             "use --modem-baseline for fold-off encoding")
-            if not args.modem_pilot_tones:
-                parser.error("stereo Fold 500 requires coded pilot tones")
-            if not args.modem_eof_marker:
-                parser.error("stereo Fold 500 requires EOF markers; "
-                             "use --modem-baseline for fold-off legacy wire")
+            args.modem_encode_filter = "box"
+        if args.modem_encode_filter != "box":
+            parser.error("stereo Fold 500 requires --modem-encode-filter box")
+        if not args.modem_pilot_tones:
+            parser.error("stereo Fold 500 requires coded pilot tones")
+        if not args.modem_eof_marker:
+            parser.error("stereo Fold 500 requires EOF markers")
         if args.modem_frames < 0:
             parser.error("Modem frame count must be nonnegative")
         if args.modem_cycles is not None and args.modem_cycles <= 0:

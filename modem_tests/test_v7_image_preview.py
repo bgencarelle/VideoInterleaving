@@ -222,7 +222,7 @@ class ImagePreviewTests(unittest.TestCase):
                 source='test', capture_fps=None, screen_backend='mss',
                 speed=1.0, batch_frames=1, seconds=0, mono_sum=False,
                 device=0, no_log=True, log=False, brightness=1.0,
-                gamma=1.0, baseline=False, profile='fold-500', preview=False,
+                gamma=1.0, profile='fold-500', preview=False,
                 image_preview_port=port if with_preview else None,
                 preview_stage='resized')
             with mock.patch.dict(sys.modules, {'sounddevice': sounddevice}), \

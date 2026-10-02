@@ -13,9 +13,8 @@ tables, with V7's 1,920 / 480 / 480 plane split) instead of the fixed 5:6
 48x40 / 24x20 corners. A 16:9 source therefore spends its luma on more
 horizontal and fewer vertical frequencies.
 
-Signalling: coded status and pulse preamble ID 3 (MONO_OFF, the rotating
-mono fold-off word). Only the hidden ``--experimental-mono`` sender still
-emits it, and the default receiver never dispatches that layout. The layout
+Signalling: coded status and pulse preamble ID 3 (MONO_OFF; the rotating
+mono wire that first used it is retired). The layout
 is signalled: ``auto`` follows the aspect code in each packet's metadata,
 and a fixed sender layout is sent as its code with the metadata screen bit.
 """

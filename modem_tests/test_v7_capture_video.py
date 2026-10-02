@@ -463,7 +463,7 @@ class SenderFailureTests(unittest.TestCase):
             capture_fps=None, screen_backend='mss', speed=1.0,
             batch_frames=1, seconds=0, mono_sum=False, device=0,
             no_log=True, log=False, brightness=1.0, gamma=1.0,
-            baseline=True,
+            experimental_fold=0,
         )
         fake_sounddevice = type('SoundDevice', (), {'OutputStream': OutputStream})
         with mock.patch.dict(sys.modules, {'sounddevice': fake_sounddevice}), \
@@ -510,7 +510,7 @@ class SenderFailureTests(unittest.TestCase):
             capture_fps=None, screen_backend='mss', speed=1.0,
             batch_frames=1, seconds=0, mono_sum=False, device=0,
             no_log=True, log=False, brightness=1.0, gamma=1.0,
-            baseline=True)
+            experimental_fold=0)
         audio = np.zeros((v7.PULSE_FRAME, 2), dtype=np.float32)
         fake_sounddevice = type('SoundDevice', (), {
             'OutputStream': OutputStream})
@@ -575,7 +575,7 @@ class SenderFailureTests(unittest.TestCase):
             batch_frames=1, seconds=.65, mono_sum=False, device=0,
             no_log=True, log=False, brightness=1.0, gamma=1.0,
             camera=0, capture_width=160, capture_filter='neighbor',
-            ffmpeg_input=None, region=None, display=None, baseline=True,
+            ffmpeg_input=None, region=None, display=None, experimental_fold=0,
         )
         audio = np.zeros((v7.PULSE_FRAME, 2), dtype=np.float32)
 
@@ -643,7 +643,7 @@ class SenderSchedulingTests(unittest.TestCase):
             batch_frames=1, seconds=.4, mono_sum=False, device=0,
             no_log=True, log=False, brightness=1.0, gamma=1.0, camera=0,
             capture_width=160, capture_filter='neighbor', ffmpeg_input=None,
-            region=None, display=None, baseline=True,
+            region=None, display=None, experimental_fold=0,
         )
         fake_sounddevice = type(
             'SoundDevice', (), {'OutputStream': self.OutputStream})
@@ -701,7 +701,7 @@ class SenderSchedulingTests(unittest.TestCase):
             batch_frames=1, seconds=.35, mono_sum=False, device=0,
             no_log=True, log=False, brightness=1.0, gamma=1.0,
             camera=0, capture_width=160, capture_filter='neighbor',
-            ffmpeg_input=None, region=None, display=None, baseline=True,
+            ffmpeg_input=None, region=None, display=None, experimental_fold=0,
         )
         fake_sounddevice = type(
             'SoundDevice', (), {'OutputStream': RecordingOutputStream})

@@ -84,7 +84,17 @@ class ExperimentalFoldTests(unittest.TestCase):
         self.assertLess(c.last_score, .5)
 
     def test_packet_folded_with_another_table_passes_through(self):
-        other = LiveFold(1000).codec(self.model)
+        # Another table: the shipped one with a different step, pinned in a
+        # scratch directory. Its identity, and so its signature, differ.
+        (ROOT/'tmp').mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ROOT/'tmp') as scratch:
+            table = dict(self.fold.table, D=self.fold.table['D']*1.25)
+            path = live_fold.table_path(500, scratch)
+            path.write_text(table_text(table))
+            pins = {500: live_fold.hashlib.sha256(path.read_bytes()).hexdigest()}
+            other_fold = LiveFold(500, table_dir=scratch, pins=pins)
+        self.assertNotEqual(other_fold.identity, self.fold.identity)
+        other = other_fold.codec(self.model)
         coeffs, xhat, conf = self.received(other.encode(self.values))
         full = self.codec.decode(coeffs, xhat, conf)
         np.testing.assert_array_equal(full, self.codec.plain(coeffs))
@@ -236,8 +246,12 @@ class ExperimentalFoldTests(unittest.TestCase):
         class Result:
             diag = {'pilot_timing': {'coded_status_mode': 1}}
         self.assertTrue(v7_live._coded_mode_matches_fold(Result, self.fold))
+
+        # Any other status, here the reserved code 2, authorizes nothing.
+        class OtherResult:
+            diag = {'pilot_timing': {'coded_status_mode': 2}}
         self.assertFalse(v7_live._coded_mode_matches_fold(
-            Result, LiveFold(1000)))
+            OtherResult, self.fold))
 
     def test_default_live_profile_decodes_status_and_unfolds(self):
         packets = [v7.encode_pulse_frame(
@@ -270,7 +284,7 @@ class ExperimentalFoldTests(unittest.TestCase):
 
     # ------------------------------------------------------------ fail closed
     def test_shipped_tables_are_pinned_and_describe_themselves(self):
-        for slots in (500, 1000):
+        for slots in (500,):
             fold = LiveFold(slots)
             with self.subTest(M=slots):
                 self.assertEqual(fold.table['M'], slots)

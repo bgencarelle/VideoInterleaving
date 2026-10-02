@@ -234,7 +234,7 @@ class ToneCodeTests(unittest.TestCase):
         self.assertIn(missing_symbol, result['erasure_symbols'])
 
     def test_coded_tones_leave_pinned_fold_signature_and_noise_measurement(self):
-        for slots, mode in ((500, FOLD_500), (1000, FOLD_1000)):
+        for slots, mode in ((500, FOLD_500),):
             with self.subTest(fold=slots):
                 fold = LiveFold(slots)
                 folded = fold.encode(self.model, self.values)

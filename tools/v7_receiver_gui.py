@@ -193,11 +193,11 @@ ASPECT_OPTION_LABELS = {
     },
 }
 HIDDEN_DECODE_OPTIONS = frozenset((
-    'direction', 'fixture', 'experimental_fold', 'baseline',
-    'experimental_mono', 'experimental_mono_fold', 'experimental_mono_colour',
+    'direction', 'fixture', 'experimental_fold',
+    'experimental_mono_fold', 'experimental_mono_colour',
     'mono_compatible',
     'mono_video_side', 'profile_ui', 'decode_batch', 'decode_history',
-    'refine', 'no_tail_memory', 'force_float32', 'pilot_timing',
+    'no_tail_memory', 'force_float32', 'pilot_timing',
     'frame_boundary', 'pilot_speed_diagnostics', 'pulse_timing',
     'tone_equalization'))
 
@@ -436,7 +436,6 @@ def _field_label(action):
         'diagnostics': 'Detailed decoder diagnostics',
         'decode_batch': 'Decode batch',
         'decode_history': 'Decode history',
-        'refine': 'Clock refinement',
         'no_tail_memory': 'Disable tail memory',
         'force_float32': 'Experimental float32 decoder',
         'pilot_timing': 'Pilot timing',
@@ -444,7 +443,6 @@ def _field_label(action):
         'pilot_speed_diagnostics': 'Pilot speed diagnostics',
         'pulse_timing': 'Pulse timing',
         'tone_equalization': 'Tone equalization',
-        'baseline': 'Use baseline profile',
         'experimental_fold': 'Fold profile',
         'experimental_mono_fold': 'Experimental mono video fold',
         'mono_video_side': 'Mono video input side',
@@ -1265,8 +1263,7 @@ class ReceiverGui:
                 continue
             if item.dest == 'experimental_fold':
                 item.value = None
-            elif item.dest in ('baseline', 'experimental_mono',
-                               'experimental_mono_fold'):
+            elif item.dest == 'experimental_mono_fold':
                 item.value = False
 
     def _adjust_field(self, field, direction):
@@ -1280,8 +1277,7 @@ class ReceiverGui:
             return
         if field.kind == 'bool':
             field.value = not field.value
-            if field.dest in ('baseline', 'experimental_mono',
-                              'experimental_mono_fold') and field.value:
+            if field.dest == 'experimental_mono_fold' and field.value:
                 self._clear_other_profiles(field.dest)
         elif field.kind == 'choice' and field.options:
             values = [value for _label, value in field.options]

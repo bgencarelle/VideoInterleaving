@@ -322,7 +322,7 @@ class V7PilotToneTests(unittest.TestCase):
         default_send = v7_live.parser().parse_args([
             'send', '--source', 'test', '--device', 'null'])
         baseline_send = v7_live.parser().parse_args([
-            'send', '--source', 'test', '--device', 'null', '--baseline'])
+            'send', '--source', 'test', '--device', 'null', '--experimental-fold', '0'])
         self.assertTrue(default_send.pilot_tones)
         self.assertTrue(default_send.eof_marker)
         with mock.patch('sys.stderr', io.StringIO()):
@@ -338,7 +338,7 @@ class V7PilotToneTests(unittest.TestCase):
         receive = v7_live.parser().parse_args([
             'receive', '--device', 'null'])
         baseline_receive = v7_live.parser().parse_args([
-            'receive', '--device', 'null', '--baseline'])
+            'receive', '--device', 'null', '--experimental-fold', '0'])
         self.assertEqual(v7_live._fold_slots(receive), 500)
         self.assertEqual(v7_live._fold_slots(baseline_receive), 0)
         self.assertEqual(receive.pilot_timing, 'tone-seeded')

@@ -379,7 +379,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--frames', nargs='+', required=True, type=Path,
                         help='real held-out source images, all beneath images_sbs/')
-    parser.add_argument('--fold', choices=(500, 1000), type=int, default=500)
+    parser.add_argument('--fold', choices=(500,), type=int, default=500)
     parser.add_argument('--capture-width', type=int, default=160,
                         help='fixed simulated live-capture width (default: 160 px)')
     parser.add_argument('--strengths', nargs='+', type=float,

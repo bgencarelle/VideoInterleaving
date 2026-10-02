@@ -130,35 +130,6 @@ runpy.run_path(target, run_name='__main__')
             self.assertTrue(all(item.diag['aspect_code'] == 3
                                 for item in decoded[:4]))
 
-    def test_main_baseline_flag_retains_the_fold_off_wire(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            source = root/'images'
-            source_tree(source)
-            bake = root/'images_modem'
-            with contextlib.redirect_stdout(io.StringIO()):
-                bake_tree(source, bake)
-            wav = root/'baseline.wav'
-            result = subprocess.run(
-                [sys.executable, str(REPO/'main.py'), '--mode', 'modem',
-                 '--modem-dir', str(bake), '--modem-pair', '1,0',
-                 '--modem-wav', str(wav), '--modem-frames', '3',
-                 '--modem-baseline'],
-                cwd=REPO, text=True, capture_output=True, timeout=30)
-            self.assertEqual(result.returncode, 0,
-                             result.stdout+result.stderr)
-            self.assertIn('profile=baseline fold-off', result.stdout)
-            with wave.open(str(wav), 'rb') as source_wav:
-                samples = np.frombuffer(
-                    source_wav.readframes(source_wav.getnframes()),
-                    dtype='<i2').reshape(-1, 2).astype(float)/32767
-            model = v7.load_model(
-                .1521/np.sqrt(1+10**(v7.CLOCK_REL_DB/10)), 'nearest')
-            decoded, info = v7.decode_pulse_stream(
-                model, samples, pilot_timing='tone-seeded', frame_boundary='eof')
-            self.assertEqual(len(decoded), 3, info)
-            self.assertEqual(info['eof_markers_validated'], 3)
-
     def test_main_runtime_images_use_fifo_and_v7(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

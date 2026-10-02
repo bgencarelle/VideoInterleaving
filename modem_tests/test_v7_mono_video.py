@@ -28,7 +28,7 @@ from mono_video import (CHROMA_RANK_WEIGHT, COLOUR_WIRE_PROFILE, FRESH_SLOTS,
                         MonoColourFoldWire, MonoFreshFoldWire,
                         colour_fold_sets, colour_order,
                         fresh_rank_tables)                                  # noqa: E402
-from mono_wire import MonoWire                                            # noqa: E402
+from aspect_mono import AspectMonoWire                                    # noqa: E402
 from tools import v7_live                                                  # noqa: E402
 from tools.v7_source_audio import PacketAudioDelay                          # noqa: E402
 
@@ -282,10 +282,11 @@ class MonoVideoWireTests(unittest.TestCase):
         self.assertEqual(values.shape, (self.mono_model.coder.source_count,))
         self.assertTrue(np.all(np.isfinite(values)))
 
-    def test_receiver_rejects_previous_rotating_mono_layout(self):
-        previous = MonoWire(self.model)
-        old_audio = previous.encode(self.model, [self.values]*3)
-        results, _info = self._decode(old_audio)
+    def test_receiver_rejects_another_mono_status(self):
+        # aspect-mono-500 carries status 3, which this receiver does not read.
+        other = AspectMonoWire(self.model, side='both')
+        other_audio = other.encode(self.model, [self.values]*3)
+        results, _info = self._decode(other_audio)
 
         self.assertEqual(len(results), 3)
         self.assertTrue(all(result.status == 'lost' for result in results))
@@ -912,13 +913,6 @@ class MonoVideoWireTests(unittest.TestCase):
         self.assertIsNone(send.source_audio_device)
         self.assertEqual(v7_live._fold_slots(send), 0)
         self.assertEqual(v7_live._fold_slots(recv), 0)
-        with self.assertRaisesRegex(ValueError, 'mutually exclusive'):
-            v7_live._fold_slots(type('Args', (), {
-                'experimental_mono': True,
-                'experimental_mono_fold': True,
-                'experimental_fold': None,
-                'baseline': False,
-            })())
 
 
 if __name__ == '__main__':

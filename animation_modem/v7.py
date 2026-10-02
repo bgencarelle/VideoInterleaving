@@ -23,7 +23,7 @@ from numba import njit
 from PIL import Image
 from scipy.linalg import hadamard
 from scipy.optimize import curve_fit
-from scipy.signal import butter, filtfilt, firwin, savgol_filter, sosfiltfilt
+from scipy.signal import filtfilt, firwin, savgol_filter
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -199,7 +199,6 @@ WIN = CP-4                                      # FFT window offset in a symbol
 PILOT_AMP = 1.5*np.sqrt(2)                      # complex, vs data E|x|^2 ~ 2
 H8 = hadamard(8)/np.sqrt(8)
 NOISE_FLOOR = 1e-6
-REFINE = True
 DEBUG = {}
 
 
@@ -262,8 +261,8 @@ def _bits(value, width):
 
 def clock_word(counter, profile=0, aspect=6, folders=0, source_index=None):
     # ``source_index`` is not part of the pulse header; the live pulse wire
-    # carries it in metadata_symbols().  The longer clock-only bench wire
-    # retains its historical identity fields for now.
+    # carries it in metadata_symbols().  The word's historical identity
+    # fields remain; it now serves only decode_frame's cancellation template.
     payload = (_bits(counter % (1 << 20), 20) + _bits(profile, 4) + _bits(aspect, 3) +
                _bits(folders, 8) + [0]*4)                        # 39 bits
     padded = [0] + payload
@@ -664,18 +663,6 @@ def aspect_wire_code(size):
     return family | (4 if ratio < 1 and family else 0)
 
 
-def parse_word(bits):
-    if bits[:16] != SYNC or sum(bits) % 2:
-        return None
-    payload = bits[16:55]
-    data = bytes(int(''.join(map(str, ([0]+payload)[i:i+8])), 2) for i in range(0, 40, 8))
-    if int(''.join(map(str, bits[55:71])), 2) != crc16(data):
-        return None
-    val = lambda a, b: int(''.join(map(str, payload[a:b])), 2)
-    return {'counter': val(0, 20), 'profile': val(20, 24), 'aspect': val(24, 27),
-            'folders': val(27, 35)}
-
-
 _CLOCK_LP = firwin(255, 1250, fs=RATE, window=('kaiser', 8))
 
 
@@ -990,10 +977,6 @@ def build_model_from_image(source, target_rms, encode_filter='lanczos'):
 
 
 # ------------------------------------------------------------------ encoder
-def encode_frame(model, values, counter):
-    return encode_frame_coeffs(model, model.coder.forward(values)/model.coder.gains, counter)
-
-
 def encode_frame_coeffs(model, coeffs, counter, return_X=False,
                         pilot_values=None, right_coeffs=None):
     """One frame's OFDM body. With ``right_coeffs`` the model must be an
@@ -1036,7 +1019,6 @@ def encode_frame_coeffs(model, coeffs, counter, return_X=False,
     return out
 
 
-_EMIT = firwin(63, 13500, fs=RATE, window=('kaiser', 6))
 # Pulse packets are band-limited here (bound_emission in encode_pulse_frame).
 EMISSION_EDGE_HZ = 14000
 
@@ -1050,34 +1032,6 @@ def max_wire_speed(rate):
     aliases high carriers and can reduce decode quality.
     """
     return float(rate)/(2*EMISSION_EDGE_HZ)
-
-
-def encode_stream(model, values, frames, lead=0.25, tail=0.25,
-                  start_counter=1):
-    """Encode a finite stream, optionally continuing the clock counter.
-
-    Bench callers retain the original default. Live callers use
-    ``start_counter`` so successive batches form one logical frame sequence;
-    the batch boundary still remains a prototype limitation because the
-    current shaping path is offline rather than stateful.
-    """
-    if np.asarray(values).ndim == 1:
-        frames_values = [values]*frames
-    else:
-        frames_values = list(values)
-        if len(frames_values) != frames:
-            raise ValueError('values must contain exactly one vector per frame')
-    body = np.concatenate([encode_frame(model, frame, start_counter+i)
-                           for i, frame in enumerate(frames_values)])
-    body = filtfilt(_EMIT, [1.0], body, axis=0)               # 14 kHz bound, no renorm
-    words = [clock_word(start_counter+i) for i in range(frames)]
-    clk = clock_wave(words)
-    ofdm_rms = np.sqrt(np.mean(body**2))
-    clk *= ofdm_rms*10**(CLOCK_REL_DB/20)/np.sqrt(np.mean(clk**2))
-    sig = body + clk[:, None]
-    sig = np.clip(sig, -0.89, 0.89)                           # -1 dBFS safety limiter
-    pad = lambda s: np.zeros((int(s*RATE), 2))
-    return np.concatenate([pad(lead), sig, pad(tail)]).astype(np.float32)
 
 
 def encode_pulse_frame(model, values, counter, aspect_code=0, source_index=None,
@@ -1201,225 +1155,6 @@ def encode_pulse_stream(model, values, start_counter=1, aspect_codes=None,
                             pulse_profile_code)
         for i, (value, code, source_index, way) in
         enumerate(zip(values, codes, indexes, ways))])
-
-
-# ------------------------------------------------------------------ receiver: clock
-_CLK_BP = butter(4, [300, 1300], btype='bandpass', fs=RATE, output='sos')
-
-
-def clock_signal(x):
-    return sosfiltfilt(_CLK_BP, np.asarray(x, float))
-
-
-def clock_edges(y):
-    """Zero crossings confirmed by a Schmitt trigger (floor stops idle noise)."""
-    env = np.sqrt(np.convolve(y*y, np.ones(480)/480, mode='same'))*np.sqrt(2)
-    th = np.maximum(0.4*env, 0.1*np.percentile(env, 90))
-    edges, state = [], 0
-    for i in range(1, len(y)):
-        if state <= 0 and y[i] > th[i] or state >= 0 and y[i] < -th[i]:
-            sign = 1 if y[i] > 0 else -1
-            j = i
-            while j > 0 and np.sign(y[j-1]) == sign:
-                j -= 1
-            if j > 0:
-                edges.append(j-1 + y[j-1]/(y[j-1]-y[j]))
-            state = sign
-    return np.asarray(edges)
-
-
-def biphase_bits(y, edges):
-    """Clock-recovery decoder: lock to bit boundaries, read bits by polarity.
-
-    A boundary always has a transition; a `1` adds one mid-bit. The loop
-    predicts the next boundary, snaps to the nearest edge within +-U/4 (else
-    coasts), and reads the bit as sign(y at U/4) != sign(y at 3U/4). A run of
-    boundaries without edges means we locked to mid-bits: shift half a bit.
-    """
-    out = []
-    if len(edges) < 16:
-        return out
-    gaps = np.diff(edges)
-    unit = 2*np.percentile(gaps, 25)
-    t, k, misses = edges[0], 0, []
-    while t + unit < len(y)-2 and k < len(edges):
-        lo, hi = t - unit/3, t + unit/3
-        while k < len(edges) and edges[k] < lo:
-            k += 1
-        hit = k < len(edges) and edges[k] <= hi
-        if hit:
-            err = edges[k]-t
-            t += 0.25*err; unit += 0.02*err
-        misses.append(not hit)
-        if len(misses) > 8 and sum(misses[-8:]) >= 3:
-            t += unit/2; misses = []; out.append((None, t)); continue
-        if t+unit >= len(y):
-            break
-        # A `1` has an edge in the middle half of the bit; a `0` has none.
-        # Tolerates +-U/4 of pattern-dependent edge shift (tape phase error).
-        j = np.searchsorted(edges, t+unit/4)
-        bit = int(j < len(edges) and edges[j] < t+3*unit/4)
-        out.append((bit if hit else None, t))
-        t += unit
-    return out
-
-
-def find_words(bitstream, max_sync_errors=3):
-    """Frame words from a bit stream, tolerant of bit errors (§5.3 steps 5, 7).
-
-    Frame starts are sync matches with <= max_sync_errors differences that are
-    confirmed by another near-sync 72 bits before or after. CRC-valid words
-    carry a verified counter; the rest inherit counters from the nearest
-    verified word by position, or get relative counters if none verified.
-    """
-    bits = [b for b, _ in bitstream]
-    pos = [p for _, p in bitstream]
-    n = len(bits)
-
-    def dist(i):
-        if i < 0 or i+16 > n:
-            return 99
-        return sum(1 if b is None else int(b != s_) for b, s_ in zip(bits[i:i+16], SYNC))
-
-    d = [dist(i) for i in range(n)]
-    starts = []
-    for i in range(n-72):
-        if d[i] > max_sync_errors:
-            continue
-        if min(d[i-72] if i >= 72 else 99, d[i+72] if i+72 < n else 99) > max_sync_errors+1 and d[i] > 0:
-            continue
-        if starts and i - starts[-1] < 60:                 # keep the better of overlapping hits
-            if d[i] < d[starts[-1]]:
-                starts[-1] = i
-            continue
-        starts.append(i)
-    frames = []
-    for i in starts:
-        if i+72 >= n:
-            continue
-        chunk = bits[i:i+72]
-        w = parse_word([0 if b is None else b for b in chunk]) if None not in chunk else None
-        frames.append({'start': i, 'bounds': pos[i:i+73], 'counter': w['counter'] if w else None,
-                       'verified': bool(w)})
-    verified = [f for f in frames if f['verified']]
-    period = FRAME
-    if len(verified) >= 2:
-        span = verified[-1]['bounds'][0]-verified[0]['bounds'][0]
-        count = verified[-1]['counter']-verified[0]['counter']
-        if count > 0:
-            period = span/count
-    for f in frames:
-        if f['verified']:
-            continue
-        if verified:
-            ref = min(verified, key=lambda v: abs(v['bounds'][0]-f['bounds'][0]))
-            f['counter'] = ref['counter'] + int(round((f['bounds'][0]-ref['bounds'][0])/period))
-        elif frames:
-            f['counter'] = 1 + int(round((f['bounds'][0]-frames[0]['bounds'][0])/period))
-    # One frame per counter: prefer verified, then the lower sync distance.
-    best = {}
-    for f in frames:
-        c = f['counter']
-        if c is None:
-            continue
-        if c not in best or (f['verified'] and not best[c]['verified']):
-            best[c] = f
-    out = [best[c] for c in sorted(best)]
-    # Timing trust (flywheel through slips): a frame's bit boundaries enter the
-    # time map only if its start agrees with its neighbours' prediction, and
-    # only up to the first internal slip.
-    starts = {f['counter']: f['bounds'][0] for f in out}
-    anchors = [f for f in out if f['verified']] or out
-    for f in out:
-        c = f['counter']
-        others = [a for a in anchors if a['counter'] != c]
-        if not others:
-            f['timing'] = f['verified']; continue
-        near = sorted(others, key=lambda a: abs(a['counter']-c))[:2]
-        preds = [a['bounds'][0] + (c-a['counter'])*period for a in near]
-        f['timing'] = f['verified'] or min(abs(f['bounds'][0]-q) for q in preds) <= 8
-        b = np.asarray(f['bounds']); d = np.diff(b); unit = period/72
-        bad = np.flatnonzero((d < .75*unit) | (d > 1.25*unit))
-        f['good'] = int(bad[0]) + 1 if len(bad) else len(b)
-    return out
-
-
-def time_map(words):
-    """Nominal-sample -> received-position map from verified bit boundaries."""
-    if not words:
-        return None
-    c0 = words[0]['counter']
-    nom, rec = [], []
-    for w in words:
-        if not w.get('timing', True):
-            continue
-        base = (w['counter']-c0)*FRAME
-        for k, p in enumerate(w['bounds'][:w.get('good', len(w['bounds']))]):
-            nom.append(base+k*BIT); rec.append(p)
-    nom, idx = np.unique(np.asarray(nom, float), return_index=True)
-    rec = np.asarray(rec)[idx]
-    d = rec-nom
-    # Smooth per contiguous run (PLL stand-in, §5.3 step 4).
-    runs = np.split(np.arange(len(nom)), np.flatnonzero(np.diff(nom) > BIT*1.5)+1)
-    for r in runs:
-        if len(r) >= 31:
-            d[r] = savgol_filter(d[r], 31, 2)
-    return c0, nom, d
-
-
-def refine_time_map(y, tm, words, win=960, hop=240, iters=4):
-    """Least-squares alignment of the regenerated clock to the received band.
-
-    Pulse counting gives lock and identity; this gives precision. The template
-    is the clock the decoded words imply, passed through the same band-pass,
-    so pattern-dependent edge shifts are in both and cancel.
-    """
-    c0, nom, d = tm
-    counters = sorted({w['counter'] for w in words})
-    first, last = counters[0], counters[-1]
-    have = {w['counter'] for w in words if w.get('verified', True) and w.get('timing', True)}
-    wave = clock_wave([clock_word(c) if c in have else [0]*72 for c in range(first-1, last+2)])
-    tpl = clock_signal(wave)                       # nominal time, starts at frame first-1
-    origin = (first-1-c0)*FRAME
-    dtpl = np.gradient(tpl)
-    pts_n, pts_r = [], []
-    for start in range(FRAME, len(tpl)-FRAME-win, hop):
-        n0 = origin + start
-        if n0 < nom[0] or n0+win > nom[-1]:
-            continue
-        k = np.arange(win)
-        seg_t, seg_d = tpl[start:start+win], dtpl[start:start+win]
-        if np.dot(seg_t, seg_t) < 1e-9:
-            continue
-        r0 = n0 + k + np.interp(n0 + k, nom, d)        # coarse received positions
-        delta = 0.0
-        for _ in range(iters):
-            r = np.interp(r0 + delta, np.arange(len(y)), y)
-            a = np.dot(r, seg_t)/np.dot(seg_t, seg_t)
-            # r(t+delta) ~ a*tpl(t)  =>  dr/ddelta ~ a*dtpl
-            resid = r - a*seg_t
-            step = np.dot(resid, a*seg_d)/max(np.dot(a*seg_d, a*seg_d), 1e-12)
-            delta -= step
-            if abs(step) < 1e-3:
-                break
-        r = np.interp(r0 + delta, np.arange(len(y)), y)
-        quality = np.dot(r, seg_t)/np.sqrt(max(np.dot(r, r)*np.dot(seg_t, seg_t), 1e-24))
-        if abs(delta) > 3 or quality < 0.6:
-            continue                                   # keep the coarse map here
-        pts_n.append(n0 + win/2); pts_r.append(r0[win//2] + delta)
-    if len(pts_n) < 8:
-        return tm
-    pts_n, pts_r = np.asarray(pts_n), np.asarray(pts_r)
-    # Coarse points far (> 2 windows) from any refined point fill the gaps.
-    far = np.min(np.abs(nom[:, None]-pts_n[None, :]), axis=1) > 2*win
-    pts_n = np.concatenate([pts_n, nom[far]]); pts_r = np.concatenate([pts_r, nom[far]+d[far]])
-    order = np.argsort(pts_n); pts_n, pts_r = pts_n[order], pts_r[order]
-    dd = pts_r - pts_n
-    runs = np.split(np.arange(len(pts_n)), np.flatnonzero(np.diff(pts_n) > hop*1.5)+1)
-    for r in runs:
-        if len(r) >= 9 and np.all(np.diff(pts_n[r]) <= hop*1.01):
-            dd[r] = savgol_filter(dd[r], 9, 2)
-    return c0, pts_n, dd
 
 
 # ------------------------------------------------------------------ receiver: OFDM
@@ -3738,73 +3473,6 @@ def _diagnostic_summary(diag, elapsed_ms):
     }
     diag['stage_ms'] = {}
     return diag
-
-
-def decode_stream(model, x, verbose=False, diagnostics=None,
-                  force_float32=False):
-    started = perf_counter()
-    x = np.asarray(x, np.float32 if force_float32 else float)
-    def read(sig):
-        y = clock_signal(sig)
-        return y, find_words(biphase_bits(y, clock_edges(y)))
-    y, words = read(x.mean(axis=1))
-    # Per-channel fallback (§5.3 step 1) when M yields few words.
-    for ch in range(min(2, x.shape[1])):
-        if len(words) >= 2:
-            break
-        y, words = read(x[:, ch])
-    if not words:
-        info = {'words': 0}
-        if diagnostics is not None:
-            info['diagnostics'] = _diagnostic_summary(
-                diagnostics, (perf_counter()-started)*1000)
-        return [], info
-    # Keep words consistent with a monotone counter/time relation.
-    words.sort(key=lambda w: w['bounds'][0])
-    tm = time_map(words)
-    if REFINE:
-        tm = refine_time_map(y, tm, words)
-    verified = {w['counter'] for w in words if w['verified']}
-    allc = {w['counter'] for w in words}
-    lo, hi = min(allc), max(allc)
-    results, tail = [], (model.mu32.copy() if force_float32
-                         else model.mu.copy())
-    skipped = []
-    for counter in range(lo, hi+1):
-        try:
-            r = decode_frame(model, x, tm, counter, tail,
-                             cancel=bool(verified), diagnostics=diagnostics,
-                             force_float32=force_float32)
-        except (FloatingPointError, np.linalg.LinAlgError, ValueError,
-                IndexError) as exc:
-            # A damaged frame is an ordinary transport event.  Do not abort
-            # the whole buffered run: later clock words may provide a clean
-            # re-lock point and a fresh frame.
-            skipped.append({'counter': counter, 'error': type(exc).__name__})
-            if diagnostics is not None:
-                diagnostics['decode_errors'] = diagnostics.get('decode_errors', 0)+1
-            continue
-        if r is None:
-            skipped.append({'counter': counter, 'error': 'out_of_window'})
-            continue
-        if r.status == 'lost':
-            results.append(r)
-            continue
-        r.status = 'verified' if counter in verified else 'picture_only'
-        tail = r.coeffs.copy()
-        results.append(r)
-    info = {'words': len(words), 'crc_ok': len(verified),
-            'frames': len(results), 'skipped_frames': skipped,
-            'recovered': bool(results and skipped)}
-    if diagnostics is not None:
-        diagnostics['frames'] = diagnostics.get('frames', 0) + len(results)
-        counts = diagnostics.setdefault('status_counts', {})
-        for result in results:
-            counts[result.status] = counts.get(result.status, 0) + 1
-        diagnostics['input_samples'] = int(len(x))
-        info['diagnostics'] = _diagnostic_summary(
-            diagnostics, (perf_counter()-started)*1000)
-    return results, info
 
 
 POLARITY_THRESHOLD = .3

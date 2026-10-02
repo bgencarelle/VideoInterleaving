@@ -200,8 +200,7 @@ DCT encode and the encoder filter, which start at the new defaults once. Under *
 - **Pre-encode downscaler** applies to the resize path only (Direct DCT encode
   off).
 
-The CLI keeps its previous defaults; the other profiles and `--baseline`
-remain CLI options.
+The CLI keeps its previous defaults; the other profiles remain CLI options.
 
 During a live send or receive, a lost primary audio device pauses transmission
 or decoding and reports the selected device; the receiver retains its last good
@@ -360,10 +359,8 @@ the proposed recording extension and its overhead gate are documented in
 The device argument is required on both sides. Route the sender's output to the
 receiver's input; on a same-machine loopback, select the loopback device for
 both. The sender runs until Ctrl-C (or `--seconds N`); stop the receiver with
-Ctrl-C. Use `--baseline` on **both** commands to restore the previous live
-profile (nearest resize, brightness 1.05, and steady pilot tones). To select
-another experimental table, pass `--experimental-fold 1000` on both commands;
-the sender uses box/brightness 1.0 by default. Folded profiles require the
+Ctrl-C. The sender uses box/brightness 1.0 by default. The `--baseline`
+option and the Fold 1000 table were removed. Folded profiles require the
 default fixture and the canonical box model. See `test_modem_v7/HOWTO.md` for
 fold tables, coded-pilot behavior, loopback instructions, and regression tests.
 
@@ -410,9 +407,9 @@ receiver GUI shows them under advanced options. Tables are frozen in
 `--profile aspect-mono-500` is the mono-video counterpart: mono colour Fold 500
 (the same 1,264 M-only slots in every packet on one output leg, chroma ranked
 ×4, a luma-only 500-slot fold, the other leg free for source audio) over the
-same aspect layouts. It is signalled with profile code 3 (the rotating mono
-fold-off word, which only the hidden `--experimental-mono` sender emits; the
-default receiver now reads code 3 as aspect-mono-500). `--aspect-layout`
+same aspect layouts. It is signalled with profile code 3, which the default
+receiver reads as aspect-mono-500 (the rotating mono wire that first used
+that code is retired). `--aspect-layout`
 applies and must match; there is no tail setting because mono packets carry
 no tail.
 
@@ -434,11 +431,10 @@ The remaining instructions here are for the application path through
 `main.py --mode modem`, not the standalone `vi.modem-*` V7 capture tools above.
 
 This path sends the **stereo Fold 500** V7 profile by default, using the pinned
-Box model, coded pilot status, and the EOF marker. To send the previous fold-off
-wire, use `--modem-baseline`; that mode defaults to nearest resize and steady
-pilot tones. Fold 500 requires the Box model, coded pilot tones, and the EOF
-marker, so other `--modem-encode-filter` values and `--no-modem-pilot-tones` or
-`--no-modem-eof-marker` are rejected unless baseline mode is selected. The
+Box model, coded pilot status, and the EOF marker. Fold 500 requires the Box
+model, coded pilot tones, and the EOF marker, so `--modem-encode-filter nearest`,
+`--no-modem-pilot-tones` and `--no-modem-eof-marker` are rejected. The earlier
+`--modem-baseline` fold-off option was removed. The
 standalone tools and application sender now use the same stereo Fold 500
 profile.
 

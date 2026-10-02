@@ -25,13 +25,13 @@ from common import (CASES as CHANNEL_CASES, DISPLAY, RATE, REPO, STEADY_FROM,
 from animation_modem.imaging import values_image
 from fold_modem import IMPAIRMENTS
 from live_fold import LiveFold
-from tone_code import (FOLD_500, FOLD_1000, acquire_packet_starts,
+from tone_code import (FOLD_500, acquire_packet_starts,
                        add_tone_code, coded_pilot_timing, decode_status,
                        decode_tone_code, encode_status,
                        match_tone_results_to_frames)
 
 TONE_VARIANTS = ('no-tone', 'steady', 'coded')
-MODE_FOR_SLOTS = {500: FOLD_500, 1000: FOLD_1000}
+MODE_FOR_SLOTS = {500: FOLD_500}
 STEADY_VARIANTS = ('steady', 'current-v7', 'box-v7')
 DEFAULT_CASES = ('clean', 'dropouts', 'wow-flutter', 'fast-flutter',
                  'jitter 0.1%', 'jitter 0.3%', 'lowpass-10k',
@@ -50,7 +50,7 @@ IMPAIRMENTS['hiss-30'] = lambda wire: impair(wire, _hiss_30, seed=2026)
 
 def _encode(model, values, fold, slots, variant, packets, aspect_code):
     transmit_values = fold.encode(model, values) if fold is not None else values
-    mode = FOLD_500 if slots == 500 else FOLD_1000 if slots == 1000 else None
+    mode = FOLD_500 if slots == 500 else None
     wire = []
     for index in range(packets):
         counter = index+1
@@ -314,8 +314,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--frames', nargs='+', type=Path,
                         help='images to score (defaults to V7 reference fixture)')
-    parser.add_argument('--folds', nargs='+', type=int, choices=(500, 1000),
-                        default=[500, 1000])
+    parser.add_argument('--folds', nargs='+', type=int, choices=(500,),
+                        default=[500])
     parser.add_argument('--packets', type=int, default=12)
     parser.add_argument('--cases', nargs='+', choices=tuple(IMPAIRMENTS),
                         default=list(DEFAULT_CASES))

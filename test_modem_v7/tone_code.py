@@ -29,10 +29,12 @@ from common import RATE as CAPTURE_RATE, v7
 # Offline benches still use it for unfolded V7 packets.
 FOLD_OFF = 0
 FOLD_500 = 1
+# Code 2 is reserved and unused: the Fold 1000 profile was removed. The ID
+# and its status word stay defined so the code is never reused.
 FOLD_1000 = 2
-# Code 3 ("mono fold off") is emitted live only by the hidden
-# --experimental-mono sender; the default receiver dispatches it as the
-# experimental aspect-mono-500 profile (aspect_mono.py).
+# Code 3 was the retired rotating-tail mono wire's "mono fold off". The
+# receiver dispatches it as aspect-mono-500 (aspect_mono.py) or, with the
+# metadata model bit "nearest", stereo-slices (slice_wire.py).
 MONO_OFF = 3
 MONO_500 = 4
 MONO_1000 = 5

@@ -136,7 +136,8 @@ Reading:
 ## Live prototype: send/receive with folding
 
 `tools/v7_live.py` (`vi.modem-send` / `vi.modem-receive`) takes
-`--experimental-fold M`, with `M` = 500 (recommended) or 1000. Both ends load
+`--experimental-fold M`, with `M` = 500 (0 selects no fold). Fold 1000 was
+removed; its figures below are kept as history. Both ends load
 the same frozen table, `test_modem_v7/fold_table_<M>.json`. It is built from
 the repository's reference fixture, so neither machine's own frames are
 involved.
@@ -232,11 +233,11 @@ The folded host is sent coarsely. The receiver can drop the extra detail on a
 noisy packet, but it cannot restore the host's precision, and the sender
 cannot know the tape's noise in advance.
 
-Rebuilding with `live_fold.py build --folds 500 1000` prints new pins. Paste
+Rebuilding with `live_fold.py build --folds 500` prints new pins. Paste
 them into `TABLE_SHA256` in `live_fold.py`; until you do, the prototype
 refuses the new tables. The step D belongs to each table: 1.0 for M=500
 (companded guests, `TABLE_COMPAND` in `live_fold.py`; `build --linear` gives
-the earlier linear table with D = 0.970) and 0.8247 for M=1000 (linear). These can differ from what `fold_modem.py` picks, because
+the earlier linear table with D = 0.970); the removed M=1000 table was linear with D = 0.8247. These can differ from what `fold_modem.py` picks, because
 that script refits D on its own training frames.
 
 Regression tests for the prototype are in the modem suite:
@@ -248,9 +249,10 @@ Regression tests for the prototype are in the modem suite:
 ## Experimental coded pilot (tone_code.py)
 
 The standalone V7 live tools now default to this profile with the pinned M=500
-fold; `--baseline` on both sender and receiver restores the previous nearest /
-1.05-brightness path with steady pilot tones. M=1000 remains available as an
-explicit experimental profile. The coded pilot implementation stays outside
+fold; `--experimental-fold 0` on both sender and receiver selects the previous
+nearest / 1.05-brightness path with steady pilot tones (the `--baseline`
+option was removed). The M=1000 profile was removed and its status code is
+reserved. The coded pilot implementation stays outside
 `animation_modem/`.
 
 On the 24 image symbols, bin 1 remains a steady reference and bin 3 carries 12

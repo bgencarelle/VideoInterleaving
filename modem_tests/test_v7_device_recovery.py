@@ -140,7 +140,7 @@ class ReceiverReconnectTests(unittest.TestCase):
                     self.active = False
 
         args = v7_live.parser().parse_args([
-            'receive', '--device', '0', '--headless', '--baseline', '--no-log'])
+            'receive', '--device', '0', '--headless', '--experimental-fold', '0', '--no-log'])
         args.stop_event = stop_event
         model = SimpleNamespace(
             encoding_type=0,
@@ -207,7 +207,7 @@ class ReceiverReconnectTests(unittest.TestCase):
                     self.active = False
 
         args = v7_live.parser().parse_args([
-            'receive', '--device', '0', '--headless', '--baseline', '--no-log'])
+            'receive', '--device', '0', '--headless', '--experimental-fold', '0', '--no-log'])
         args.stop_event = stop_event
         model = SimpleNamespace(
             encoding_type=0,
@@ -336,7 +336,7 @@ class ReceiverReconnectTests(unittest.TestCase):
             audio_input_identity=input_identity)
         args = v7_live.parser().parse_args([
             'receive', '--device', '0', '--audio-output-device', '1',
-            '--headless', '--baseline', '--no-log'])
+            '--headless', '--experimental-fold', '0', '--no-log'])
         args.stop_event = stop_event
         args.runtime_options = options
         model = SimpleNamespace(

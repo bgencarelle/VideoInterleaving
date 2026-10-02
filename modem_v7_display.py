@@ -247,22 +247,16 @@ def run_modem(args):
     rotation = rotation if rotation is not None else getattr(settings, 'INITIAL_ROTATION', 0)
     mirror = getattr(args, 'mirror', None)
     mirror = mirror if mirror is not None else bool(getattr(settings, 'INITIAL_MIRROR', 0))
-    baseline = bool(getattr(args, 'modem_baseline', False))
     encode_filter = getattr(args, 'modem_encode_filter', None)
     if encode_filter is None:
-        encode_filter = 'nearest' if baseline else 'box'
-    if not baseline and encode_filter != 'box':
+        encode_filter = 'box'
+    if encode_filter != 'box':
         raise ValueError('stereo Fold 500 requires --modem-encode-filter box')
-    if encode_filter not in ('nearest', 'box'):
-        # The metadata names only these two models (its second encode-filter
-        # bit is the aspect screen bit).
-        raise ValueError('the V7 wire carries only the nearest and box '
-                         'encodes; use --modem-encode-filter nearest or box')
     pilot_tones = bool(getattr(args, 'modem_pilot_tones', True))
     eof_marker = bool(getattr(args, 'modem_eof_marker', True))
-    if not baseline and not pilot_tones:
+    if not pilot_tones:
         raise ValueError('stereo Fold 500 requires coded pilot tones')
-    if not baseline and not eof_marker:
+    if not eof_marker:
         raise ValueError('stereo Fold 500 requires EOF markers')
 
     # The V7 statistics are a wire profile, not a property of whichever frame
@@ -273,7 +267,7 @@ def run_modem(args):
     model = _v7.load_model(
         TARGET_RMS / math.sqrt(1 + 10**(_v7.CLOCK_REL_DB/10)),
         encode_filter=encode_filter)
-    fold = None if baseline else Fold500(model)
+    fold = Fold500(model)
 
     channels = pair(args.modem_channels)
     output_latency = latency(args.modem_latency)
@@ -309,9 +303,9 @@ def run_modem(args):
           f'source {settings.IPS:g} IPS, '
           f'loop N={loop.frames} p='
           f'{"none (MIDI clock)" if not loop.clocked else loop.phase} in CRC metadata; '
-          f'profile={"baseline fold-off" if baseline else "stereo Fold 500"}; '
+          f'profile=stereo Fold 500; '
           f'EOF marker={"on" if eof_marker else "off"}; '
-          f'pilot tones={"steady" if baseline and pilot_tones else "coded" if fold else "off"}')
+          f'pilot tones=coded')
 
     def make_packet(absolute, index, folders, at_time_ns=None):
         started = time.perf_counter()

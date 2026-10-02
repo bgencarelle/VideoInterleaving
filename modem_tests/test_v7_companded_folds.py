@@ -107,10 +107,6 @@ class CompandedFoldTests(unittest.TestCase):
             Fold500(self.base).encode_coefficients(values),
             codec.encode_coefficients(values))
 
-    def test_fold_1000_table_keeps_linear_guests(self):
-        self.assertNotIn(1000, live_fold.TABLE_COMPAND)
-        self.assertIsNone(LiveFold(1000).codec(self.base).compand)
-
     def test_mono_colour_500_carries_companded_guests(self):
         wire = MonoColourFoldWire(self.base)
         codec = wire._codec(wire.model_for(self.base))

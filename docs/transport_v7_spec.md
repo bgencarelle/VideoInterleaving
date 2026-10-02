@@ -15,7 +15,7 @@ today. The code is the reference:
 
 Earlier revisions of this file held proposals, measurement diaries and plans.
 They were removed; git history keeps them. Sections 15 and 16 list known
-limits and open questions.
+limits and open questions; section 17 is the roadmap.
 
 ## 1. Scope and status
 
@@ -56,7 +56,8 @@ identically to both channels.
 ### 2.1 Preamble word and profile ID
 
 The preamble is a 16-bit biphase-mark word with 8-sample half-bits at
-amplitude 0.55. There are six words (`transport3.PROFILE_PREAMBLE_BITS`). All
+amplitude 0.55. There are six words (`transport3.PROFILE_PREAMBLE_BITS`), five
+in use and one reserved. All
 have the same first edge, last edge and edge count, so timing is the same for
 every word; the pattern of short and long intervals carries a profile ID
 (section 14). The words have minimum Hamming distance six. ID 1 is the
@@ -87,15 +88,14 @@ The decoder has two endpoint modes (`frame_boundary`):
   expected spacing and scale. The last packet of a finite stream is not
   committed.
 
-Both senders always emit the marker with their default profile, and the
-standalone receiver defaults to `eof`. The low-level functions
-`encode_pulse_frame()`, `encode_pulse_stream()` and `decode_pulse_stream()`
-default to no marker, no tones and `baseline`. Bench tools that should model
-the sent wire use `tools/v7_wire_profile.py`.
+Both senders always emit the marker, and the standalone receiver defaults to
+`eof`. The low-level functions `encode_pulse_frame()`, `encode_pulse_stream()`
+and `decode_pulse_stream()` default to no marker, no tones and `baseline`.
+Bench tools that should model the sent wire use `tools/v7_wire_profile.py`.
 
-The application sender accepts `--no-modem-eof-marker` only together with
-`--modem-baseline`. The standalone sender has no option to omit the marker.
-The standalone receiver has `--frame-boundary baseline|eof`.
+Neither sender has an option to omit the marker: the application sender
+rejects `--no-modem-eof-marker`. The standalone receiver has
+`--frame-boundary baseline|eof`.
 
 ### 2.3 Reverse playback
 
@@ -304,7 +304,7 @@ default.
 
 ### 6.2 Coded status
 
-Every profile except baseline keys the bin-3 tone with a 12-chip status
+Every profile keys the bin-3 tone with a 12-chip status
 (`test_modem_v7/tone_code.py`; the application sender's copy for Fold 500 is
 `animation_modem/v7_coded_pilot.py`):
 
@@ -315,7 +315,8 @@ Every profile except baseline keys the bin-3 tone with a 12-chip status
 - A chip change is an 8-sample raised-cosine ramp inside the cyclic prefix.
   Outside the body bin 3 is steady.
 - The six status words are a four-chip pattern repeated three times: `0011`,
-  `0101`, `0110`, `1100`, `1010`, `1001` for codes 0 to 5. Their pairwise
+  `0101`, `0110`, `1100`, `1010`, `1001` for codes 0 to 5 (code 2 is
+  reserved, section 14.1). Their pairwise
   distance is six. A word is accepted when `2 × errors + erasures < 6`.
 
 The receiver decodes the chips, removes them and then uses the tones for
@@ -427,26 +428,26 @@ stays.
 
 Standalone sender (`tools/v7_live.py send`): profile `fold-500`, `box` model,
 brightness 1.0, gamma 1.0, speed 1×, coded status, EOF marker. `--profile`
-selects another profile (section 14). `--baseline` selects the earlier wire:
-`nearest` model, brightness 1.05, steady tones, no fold. The sender starts
-output after one packet is buffered and queues at most one encoded batch. It
-uses the output device's native rate unless `--rate` is given.
+selects another profile (section 14). The hidden `--experimental-fold 0`
+sends the unfolded wire: `nearest` model, brightness 1.05, steady tones. The
+sender starts output after one packet is buffered and queues at most one
+encoded batch. It uses the output device's native rate unless `--rate` is
+given.
 
 Standalone receiver (`tools/v7_live.py receive`): automatic profile dispatch
 (section 14.1), `eof` endpoints, `tone-seeded` timing, forward and reverse
 detection, one packet per decode, one packet of history, tail memory on.
-Automatic dispatch requires `eof` and a tone timing mode. `--baseline`,
-`--experimental-fold M`, `--experimental-mono`, `--experimental-mono-fold` and
+Automatic dispatch requires `eof` and a tone timing mode. The hidden
+`--experimental-fold M` (0 or 500), `--experimental-mono-fold` and
 `--experimental-mono-colour` fix one profile instead.
 
 Both need an explicit `--device`.
 
 Application sender (`main.py --mode modem`): stereo Fold 500 with the `box`
-model, coded status and EOF marker, speed 1×. `--modem-baseline` selects the
-unfolded wire with the `nearest` model and steady tones; only then may
-`--no-modem-pilot-tones` and `--no-modem-eof-marker` be used. Its parser lists
-`lanczos` and `bicubic` for `--modem-encode-filter`, and `modem_v7_display.py`
-rejects them.
+model, coded status and EOF marker, speed 1×. It has no other profile:
+`--no-modem-pilot-tones` and `--no-modem-eof-marker` are rejected.
+`--modem-encode-filter` offers `nearest` and `box`, the two models the wire
+can name; Fold 500 accepts only `box`.
 
 Numba is a hard dependency of the transport. The receiver compiles the pulse,
 polarity, equalizer and status kernels before it opens its audio stream.
@@ -475,6 +476,9 @@ Run from the repository root:
 Do not blanket-discover `tests/`; see `AGENTS.md`. Never send test output to
 physical speakers.
 
+`modem_tests/fixtures/v7_pixel_motion_{4x3,16x9,3x4,5x6}.mp4`, built by
+`tools/generate_v7_pixel_motion_test.py`, are a reference picture for the sender at each picture shape: a zone plate, line pairs, checkerboards, moving edges, colour patches, ramps, stepped text and a binary picture-index strip, all pitched in reduced samples, to show and measure lost resolution, aliasing, flicker, ringing, colour error and skipped pictures.
+
 ### Required tests
 
 A change to the wire, a wire profile, the sender's levels or the receiver
@@ -502,6 +506,9 @@ regression. Report luma error, colour error (CIEDE2000), flicker on stills
 and motion error on a moving source, as change against the shipped profile.
 Noisy situations are run with several seeds and a difference counts only when
 it clears their spread. SSIMULACRA2 is for gross ranking only.
+
+Hiss situations are named by noise level in dB below full scale, so `hiss-35`
+is louder noise than `hiss-45`.
 
 All evidence for this wire is synthetic: unit tests, in-memory loopback and
 simulated impairments (`tools/v7_torture_matrix.py`,
@@ -549,9 +556,8 @@ hash, or one built for another model, is refused.
 | Table | Guests | D | Other |
 |---|---|---:|---|
 | `fold_table_500.json` (Fold 500; identical copy `animation_modem/v7_fold_table_500.json`) | companded, U = 12, μ = 4 | 1.0 | guest noise limit 0.15 |
-| `fold_table_1000.json` (Fold 1000) | linear | ≈ 0.825 | |
 
-Both were fitted on the reference fixture for the canonical `box` model, with
+It was fitted on the reference fixture for the canonical `box` model, with
 host confidence limit 0.9, slot noise limit 0.3 and 16 signature slots. The
 other profiles build their fold from frozen layout tables with constants in
 their modules (section 14).
@@ -610,10 +616,10 @@ sharpness. The contracts for any preparation stage:
   `--perceptual-detail-strength` (0 to 1, default 0.25): area or
   detail-weighted area reduction to the prepared picture, in linear or
   gamma-encoded RGB (`animation_modem/perceptual_resize.py`). Not available
-  on baseline.
+  on the unfolded wire.
 - `--dct-encode`: computes the wire's coefficients from the unprepared source
   frame instead of from the 80 × 96 resize (`animation_modem/v7_source_dct.py`).
-  Not available on `fold-1000` or baseline. Mutually exclusive with
+  Not available on the unfolded wire. Mutually exclusive with
   `--perceptual-resize`. A frame smaller than the coder grid falls back to a
   box resize.
 - With `--dct-encode`: `--luma-adjust` (re-fits luma to the chroma the
@@ -731,10 +737,6 @@ A mono wire keeps the packet format of section 2 and changes the body:
   (`--source-audio source|device|off`), delayed by one packet plus
   `--source-audio-delay-ms`.
 
-`mono_wire.py` also holds an earlier rotating layout (992 fixed slots plus
-272 rotating over seven packets) sent only by the hidden `--experimental-mono`
-option (section 16).
-
 ### 13.3 Signalling and reception
 
 A mono profile is named by its preamble word and the equal coded status
@@ -757,14 +759,16 @@ receiver holds the last picture for an unknown or unconfirmed status.
 |---:|---|---|
 | 0 | `FOLD_OFF` | `aspect-fold-500`; with the metadata model bit `nearest`, a pixel grid |
 | 1 | `FOLD_500` | `fold-500` |
-| 2 | `FOLD_1000` | `fold-1000` |
+| 2 | `FOLD_1000` | Reserved, unused (was `fold-1000`, removed) |
 | 3 | `MONO_OFF` | `aspect-mono-500`; with the metadata model bit `nearest`, `stereo-slices` |
 | 4 | `MONO_500` | `mono-fold-500` |
 | 5 | `MONO_1000` | `mono-colour-500` |
 
 The standalone sender selects one with `--profile`. All of them require the
-canonical fixture, coded status and the EOF marker. The baseline wire uses
-preamble ID 1 with steady tones and no status.
+canonical fixture, coded status and the EOF marker. IDs are not renumbered or
+reused. The unfolded wire (`--experimental-fold 0`, and
+`tools/v7_wire_profile.py` `baseline` for benches) uses preamble ID 1 with
+steady tones and no status.
 
 The default receiver (`_AdaptiveProfileDecoder`) works as follows.
 
@@ -774,18 +778,17 @@ The default receiver (`_AdaptiveProfileDecoder`) works as follows.
    consecutive packets that show it; those packets are held. An unreadable ID
    clears the count. A switch resets the tail memory and the last verified
    metadata.
-3. It dispatches IDs 0, 1, 3, 4 and 5. ID 2 and the baseline wire are not
-   dispatched (section 15).
+3. It dispatches IDs 0, 1, 3, 4 and 5. The reserved ID 2 and the unfolded
+   wire are not dispatched.
 4. Before the body is interpreted, the decoded tone status must equal the
    dispatched ID and the active profile. Otherwise the packet is held.
 
-### 14.2 Fold 500 and Fold 1000
+### 14.2 Fold 500
 
 The base wire of sections 3 and 4: the 48 × 40 luma and 24 × 20 chroma corners,
 head, body and a tail rotating over seven packets, on M and S. The fold of
-section 10 is applied with the pinned table: 500 or 1,000 luma hosts, guests
-from outside the luma corner, 16 signature slots. Model `box`. Fold 500 uses
-companded guests, Fold 1000 linear guests.
+section 10 is applied with the pinned table: 500 luma hosts, companded guests
+from outside the luma corner, 16 signature slots. Model `box`.
 
 ### 14.3 Aspect Fold 500
 
@@ -944,8 +947,8 @@ Receiver:
   forward playback of the same recording.
 - **Sender level calibration comes from a statistical model.** `unit_rms` is
   measured on coefficients drawn from the model; real pictures exceed it.
-- **Fold 1000 and baseline are not dispatched automatically.** They need
-  `receive --experimental-fold 1000` or `receive --baseline`.
+- **The unfolded wire is not dispatched automatically.** It needs
+  `receive --experimental-fold 0`.
 - **The aspect tail mode is not signalled** (section 14.3).
 - **The loop lock can learn from one packet.** `LoopLock` counts matching
   observations, not distinct packets, and the decoder may submit one packet's
@@ -955,23 +958,54 @@ Receiver:
 
 ## 16. Open questions
 
-Places where the code and the earlier text disagreed, or where the code's
-intent is not clear. The sections above describe what the code does.
+Questions about the code's intent, with the owner's answers. Answered
+questions whose work is done were removed from this list.
 
 1. The receiver-side fold and every profile except the application sender's
    Fold 500 live in `test_modem_v7/` and are installed by replacing functions
-   of `animation_modem.v7` at run time. The earlier text called this a
-   prototype outside the transport package. Is `test_modem_v7/` the intended
-   home?
-2. Status 3 with model bit `nearest` is `stereo-slices`. The hidden
-   `send --experimental-mono` option (rotating mono, `nearest` model) sends the
-   same combination. Should that option be removed?
-3. The baseline wire is sent with preamble ID 1, the Fold 500 word, while ID 0
-   is commented as "Fold-off" in `transport3.py`. Is that intended?
-4. Fold 1000 can be sent with `--profile fold-1000` and has its own ID, but
-   the default receiver does not dispatch it. Intended, or an omission?
-5. `v7.py` still contains the earlier continuous clock-word stream
-   (`encode_stream`, `decode_stream`, `clock_word`, `receive --refine`). No
-   sender uses it and this document does not describe it. Keep or delete?
-6. `main.py` offers `lanczos` and `bicubic` for `--modem-encode-filter`; the
-   sender then rejects them. Should the parser stop offering them?
+   of `animation_modem.v7` at run time. **Decided, pending:** move the
+   receiver-side fold and the wire profiles into `animation_modem/` and
+   replace the run-time function replacement with arguments. Not done yet
+   (section 17, item 3).
+
+Decided and done:
+
+- The hidden `send --experimental-mono` option (the rotating mono wire, which
+  sent status 3 with the model bit `nearest`, the signalling of
+  `stereo-slices`) was removed together with its receiver option.
+- The user-facing no-fold options were retired: `send --baseline`,
+  `receive --baseline` and `main.py --modem-baseline`. The transport can still
+  encode and decode a packet without a fold.
+- Fold 1000 was removed for now. Its status and preamble ID 2 stay reserved.
+- The continuous clock-track code (`encode_stream`, `decode_stream`,
+  `receive --refine`) was deleted from `v7.py`. `clock_word` is kept;
+  `decode_frame` uses it for its cancellation template.
+- `main.py --modem-encode-filter` offers only `nearest` and `box`.
+
+## 17. Roadmap
+
+1. Refit the coefficient model on real pictures. Real pictures carry about
+   3.5 to 4 times the energy the model's tables assume, which makes bodies
+   louder than designed and makes the receiver smooth noisy slots too hard.
+   Prior recordings need not stay decodable.
+2. Receiver level checks using the header and end pulses: check the body is
+   in range against the header; compare the end pulse (or the next header)
+   with the header; re-level through the packet when they differ. Also test a
+   very light limiter applied to the body only, against the current
+   whole-body scaling.
+3. Move the receiver-side fold and wire profiles into `animation_modem/` with
+   arguments instead of run-time function replacement (section 16).
+4. Grid and picture-ratio signalling as two separate metadata fields, using
+   the bits a non-rotating tail frees; arbitrary ratios if the bits allow.
+5. Profile comparison on mixed picture shapes (16:9, 4:3, 3:4, 5:6) with the
+   non-rotating tail as the default everywhere. Low priority.
+6. A faster header (about 0.4 more pictures a second), only after playback
+   from 0.25x to 1x and from 2x to 4x is confirmed to lose nothing.
+7. Matched sum/difference pairing on the stereo profile against
+   stereo-slices, to decide whether stereo-slices stays. Delayed.
+8. Sender conveniences, very low priority: resume a movie where it stopped;
+   playback controls on the preview window.
+9. Housekeeping: prune tests that only pin internals; port the stereo-slices
+   sender and join to numba; find the cold-start test flakiness
+   (`test_embedded_video_audio_uses_the_shared_capture_clock` and first-run
+   failures in a fresh checkout).

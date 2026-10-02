@@ -24,7 +24,7 @@ A normal receiver shows folded packets slightly degraded (loopback, one
 frame: -18.7 normal, -22.1 folded but not unfolded, -7.6 folded and
 unfolded).
 
-    python test_modem_v7/live_fold.py build [--folds 500 1000] [--frames F...]
+    python test_modem_v7/live_fold.py build [--folds 500] [--frames F...]
     python test_modem_v7/live_fold.py selftest FRAME... [--folds 500] [--quick]
 """
 import argparse
@@ -51,7 +51,6 @@ TABLE_COMPAND = {
 }
 TABLE_SHA256 = {
     500: 'a1fa8c8ef5f77b079d3bf713f0dd5b8cd60bfbf2c9ed98226cb43273de34e86e',
-    1000: '9f48877e5f6b9f6d3e52e04f9e3f611a3d3ca3296cc9f05453491bd8c53710a2',
 }
 
 
@@ -279,7 +278,7 @@ def main(argv=None):
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest='command', required=True)
     b = sub.add_parser('build', help='freeze fold tables from the reference fixture')
-    b.add_argument('--folds', type=int, nargs='+', default=[500, 1000])
+    b.add_argument('--folds', type=int, nargs='+', default=[500])
     b.add_argument('--frames', type=Path, nargs='*',
                    help='fit guest statistics on these instead of the fixture')
     b.add_argument('--design-db', type=float, default=30.0)
