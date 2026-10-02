@@ -55,8 +55,9 @@ KAISER_SINC_RADIUS = 3.0
 KAISER_SINC_BETA = 8.6
 HANN_SINC_RADIUS = 3.0
 DCT_RECONSTRUCTION_MODES = ('off', '2x', '4x', '8x', '16x', 'viewport', 'pixel')
-# 'pixel' shows the picture on the grid the wire carries in full (half the
-# coder grid per axis: 48x40 luma, 24x20 chroma) as hard pixels, each
+# 'pixel' shows the picture on the grid the wire carries in full (the pixel
+# grid an aspect-fold-500 packet names, else half the coder grid per axis:
+# 48x40 luma, 24x20 chroma) as hard pixels, each
 # repeated PIXEL_REPEAT times so the output has the 4x mode's size. With the
 # sender's pixel encode and Fold 500 (whose sent luma is exactly that
 # rectangle) a 40x48 picture arrives pixel for pixel, up to channel noise and
@@ -278,7 +279,7 @@ def flat_area_mask(luma):
 
 
 def dct_reconstruct_planes(planes, mode, viewport_size=None, edge=False,
-                           edge_strength=1.0):
+                           edge_strength=1.0, pixel_shapes=None):
     """Resample decoded planes by evaluating their retained DCT spectrum.
 
     The input planes are already spatial-domain inverse-DCT output. Transforming
@@ -291,7 +292,8 @@ def dct_reconstruct_planes(planes, mode, viewport_size=None, edge=False,
     rebuilt by consistent reconstruction (EDGE_MODES); output sizes are
     unchanged except that with ``mode`` 'off' and 'high' the luma comes back at
     twice its grid. ``edge_strength`` (0 to 1) mixes that rebuild with the
-    plain picture.
+    plain picture. ``pixel_shapes`` is the pixel grid the picture was sent
+    on, when the wire names one; mode 'pixel' then shows that grid.
     """
     if mode not in DCT_RECONSTRUCTION_MODES:
         raise ValueError(f'unknown DCT reconstruction mode {mode!r}')
@@ -303,11 +305,14 @@ def dct_reconstruct_planes(planes, mode, viewport_size=None, edge=False,
         # The sent grid itself, as hard pixels; edge reconstruction does not
         # apply (nothing is interpolated).
         from animation_modem.v7_dct_display import reconstruct_plane
+        if pixel_shapes is None or len(pixel_shapes) != len(planes):
+            pixel_shapes = tuple((max(1, plane.shape[0]//2),
+                                  max(1, plane.shape[1]//2))
+                                 for plane in planes)
         return tuple(np.ascontiguousarray(np.repeat(np.repeat(
-            reconstruct_plane(plane, (max(1, plane.shape[0]//2),
-                                      max(1, plane.shape[1]//2))),
+            reconstruct_plane(plane, (int(rows), int(cols))),
             PIXEL_REPEAT, axis=0), PIXEL_REPEAT, axis=1))
-            for plane in planes)
+            for plane, (rows, cols) in zip(planes, pixel_shapes))
     if edge is True:
         edge = 'on'
     if edge not in (False, None, 'off') and edge not in EDGE_MODES:

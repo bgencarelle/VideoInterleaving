@@ -454,11 +454,18 @@ def _picture_values(model, frame, encode_filter='nearest', brightness=1.05,
                          else frame)
         options = dict(dct_options or {})
         pixel_detail = options.pop('pixel_detail', 'average')
+        # Aspect code -> the wire's pixel grid for that layout (the aspect
+        # profile); without it the grid is the model's sent rectangle.
+        pixel_shapes = options.pop('pixel_shapes', None)
         if options.pop('pixel', False):
             # Pixel encode: the sent rectangle's own pixels, exactly; no
             # enhancement and no luma adjustment (they would change them).
+            shapes = model.coder.shapes
+            if pixel_shapes is not None:
+                shapes = pixel_shapes[P.aspect_wire_code(
+                    source_size or (rgb.shape[1], rgb.shape[0])) & 7]
             values = pixel_dct_values(
-                rgb, model.coder.grids, model.coder.shapes,
+                rgb, model.coder.grids, shapes,
                 brightness=brightness, gamma=gamma,
                 detail=pixel_detail)
         elif (options.pop('aggregation', 'off') == 'off' and
@@ -475,6 +482,7 @@ def _picture_values(model, frame, encode_filter='nearest', brightness=1.05,
             research.pop('linear_light', None)
             research.pop('pixel', None)
             research.pop('pixel_detail', None)
+            research.pop('pixel_shapes', None)
             values, _stats = source_dct_values(
                 rgb, model.coder.grids, model.coder.shapes,
                 brightness=brightness, gamma=gamma, **research)
@@ -896,8 +904,17 @@ def _run_send_session(args):
         _ensure_test_modem_path()
         from aspect_fold import AspectFoldWire
         from tone_code import warmup_status_templates
+        # With Pixel encode the profile sends each layout's pixel grid.
+        pixel_grid = (getattr(args, 'pixel_grid', None) or DEFAULT_PIXEL_GRID
+                      if getattr(args, 'dct_encode', False) and
+                      dct_options.get('pixel') else None)
         aspect_wire = AspectFoldWire(getattr(args, 'aspect_layout', 'auto'),
-                                     getattr(args, 'aspect_tail', DEFAULT_ASPECT_TAIL))
+                                     getattr(args, 'aspect_tail', DEFAULT_ASPECT_TAIL),
+                                     pixel=pixel_grid)
+        if pixel_grid:
+            dct_options = dict(dct_options, pixel_shapes=tuple(
+                aspect_wire.pixel_shapes(aspect_wire.layout_for(code))
+                for code in range(8)))
         # Build every layout model the sender may need before audio starts.
         layouts = ((aspect_wire.layout,) if aspect_wire.layout != 'auto' else
                    tuple(dict.fromkeys(
@@ -1684,6 +1701,11 @@ class _AdaptiveProfileDecoder:
     """Dispatch coded Fold-500 and mono-video packets after three confirmations."""
 
     REQUIRED_STREAK = 3
+    # A pixel-grid packet without its fold signature is decoded again on the
+    # other grid: the first such packet, then every PIXEL_RETRY_EVERY-th, so a
+    # grid change is followed at once and a noisy link is not decoded twice
+    # per packet.
+    PIXEL_RETRY_EVERY = 4
 
     def __init__(self, fold, base_model, preferred_side='auto',
                  aspect_layout='auto', aspect_tail=None):
@@ -1718,6 +1740,22 @@ class _AdaptiveProfileDecoder:
         self.aspect_wire = AspectFoldWire(
             aspect_layout, aspect_tail or DEFAULT_ASPECT_TAIL)
         self.aspect_mode = self.aspect_wire.status_mode
+        # The same profile on a pixel grid (the sender's Pixel encode); the
+        # packet's metadata model bit says which, so nothing is set here.
+        # Which pixel grid is not in the metadata: the fold signature
+        # (different for every table) tells them apart.
+        from aspect_fold import (PIXEL_ENCODING_TYPE, PIXEL_GRID_NAMES,
+                                 PIXEL_TAIL_MODES)
+        self.pixel_encoding_type = PIXEL_ENCODING_TYPE
+        pixel_tail = (self.aspect_wire.tail
+                      if self.aspect_wire.tail in PIXEL_TAIL_MODES else 'fixed')
+        self.pixel_wires = {
+            grid: AspectFoldWire(aspect_layout, pixel_tail, pixel=grid)
+            for grid in PIXEL_GRID_NAMES}
+        # Last confirmed grid (None: an ordinary layout), and packets since
+        # its signature was last seen.
+        self._last_pixel = None
+        self._pixel_unconfirmed = 0
         self.supported_modes = frozenset(
             (FOLD_500, self.aspect_mode, *self.mono_wires))
         self._mode_names = {
@@ -1773,10 +1811,14 @@ class _AdaptiveProfileDecoder:
         self.candidate_scale = None
 
     def reset_capture_timeline(self):
-        wire = getattr(self, 'aspect_wire', None)
-        if wire is not None:
-            wire.reset()
+        self._reset_aspect_wires()
         self._reset_capture_positions()
+
+    def _reset_aspect_wires(self):
+        for wire in (getattr(self, 'aspect_wire', None),
+                     *getattr(self, 'pixel_wires', {}).values()):
+            if wire is not None:
+                wire.reset()
 
     def _reset_capture_positions(self):
         """Forget capture-sample positions after the input stream reopens.
@@ -1878,8 +1920,7 @@ class _AdaptiveProfileDecoder:
                 if self.streak >= self.REQUIRED_STREAK:
                     self.active_mode, self.active_side = key
                     self.reset_candidate()
-                    if getattr(self, 'aspect_wire', None) is not None:
-                        self.aspect_wire.reset()
+                    self._reset_aspect_wires()
                     self.generation += 1
                     changed = confirmed = True
                     if self.state is not None:
@@ -1982,20 +2023,35 @@ class _AdaptiveProfileDecoder:
         # confirmed; the fold signature (different for every layout) must then
         # confirm it, or the packet is held as before.
         predicted_layout = False
+        aspect_wire = None
+        pixel_grids = ()
+        pixel_signed = False
         if mode == self.aspect_mode:
-            aspect_layout = self.aspect_wire.layout_for(hint.get('aspect_code'))
+            # Metadata names the layout and, by its model bit, a pixel grid;
+            # without metadata both follow the last confirmed packet.
+            pixel = hint.get('encoding_type')
+            pixel = (self._last_pixel is not None if pixel is None else
+                     int(pixel) == self.pixel_encoding_type)
+            if pixel:
+                first = self._last_pixel or next(iter(self.pixel_wires))
+                pixel_grids = (first,) + tuple(
+                    grid for grid in self.pixel_wires if grid != first)
+                aspect_wire = self.pixel_wires[first]
+            else:
+                aspect_wire = self.aspect_wire
+            aspect_layout = aspect_wire.layout_for(hint.get('aspect_code'))
             if aspect_layout is None:
                 aspect_layout = self._last_layouts.get(mode)
                 predicted_layout = aspect_layout is not None
             if aspect_layout is None:
                 return held('aspect_layout_unknown', observed_mode)
             try:
-                profile_model = self.aspect_wire.model_for(model, aspect_layout)
+                profile_model = aspect_wire.model_for(model, aspect_layout)
             except ValueError:
                 return held('unsupported_model_for_profile', observed_mode)
             # The shared tail store follows the base model's ranks; this
             # layout keeps its own.
-            prev_tail = self.aspect_wire.tail_prior(profile_model, aspect_layout)
+            prev_tail = aspect_wire.tail_prior(profile_model, aspect_layout)
         if mode == getattr(self, 'aspect_mono_mode', None):
             aspect_layout = self.aspect_mono_wire.layout_for(
                 hint.get('aspect_code'))
@@ -2024,9 +2080,43 @@ class _AdaptiveProfileDecoder:
         else:
             result = self._real_decode(
                 profile_model, x, tmap, counter, prev_tail, *args, **kwargs)
+        if result is not None and pixel_grids:
+            # Confirm the grid by its fold signature; when it is missing,
+            # see whether the other grid fits (PIXEL_RETRY_EVERY).
+            def signed(wire, candidate, decoded):
+                equalized = decoded.diag.get('fold_eq')
+                if equalized is None:
+                    return False
+                codec = wire.codec(candidate)
+                return (codec.signature_score(*equalized[:2]) >= .5 and
+                        codec.signature_error(*equalized[:2]) <= .7)
+
+            if signed(aspect_wire, profile_model, result):
+                self._pixel_unconfirmed = 0
+                pixel_signed = True
+            else:
+                self._pixel_unconfirmed += 1
+                if (self._pixel_unconfirmed == 1 or self._pixel_unconfirmed %
+                        self.PIXEL_RETRY_EVERY == 0):
+                    for grid in pixel_grids[1:]:
+                        wire = self.pixel_wires[grid]
+                        candidate = wire.model_for(model, aspect_layout)
+                        other = self._real_decode(
+                            candidate, x, tmap, counter,
+                            wire.tail_prior(candidate, aspect_layout),
+                            *args, **kwargs)
+                        if other is not None and signed(wire, candidate, other):
+                            aspect_wire, profile_model, result = (
+                                wire, candidate, other)
+                            self._pixel_unconfirmed = 0
+                            pixel_signed = True
+                            break
+                    else:
+                        if self._last_pixel is None:
+                            return held('pixel_grid_unknown', observed_mode)
         if result is not None and predicted_layout:
             if mode == self.aspect_mode:
-                codec = self.aspect_wire.codec(profile_model)
+                codec = aspect_wire.codec(profile_model)
                 equalized = result.diag.get('fold_eq')
             else:
                 codec = self.aspect_mono_wire._codec(profile_model)
@@ -2038,6 +2128,9 @@ class _AdaptiveProfileDecoder:
             result.diag['aspect_layout_predicted'] = True
         elif result is not None and aspect_layout is not None:
             self._last_layouts[mode] = aspect_layout
+            if aspect_wire is not None and (
+                    not aspect_wire.pixel or pixel_signed):
+                self._last_pixel = aspect_wire.pixel
         if result is not None:
             result.diag['coded_status_mode'] = mode
             result.diag['profile_mode'] = mode
@@ -2045,7 +2138,8 @@ class _AdaptiveProfileDecoder:
             if aspect_layout is not None:
                 result.diag['aspect_layout'] = aspect_layout
                 if mode == self.aspect_mode:
-                    result.diag['aspect_tail'] = self.aspect_wire.tail
+                    result.diag['aspect_tail'] = aspect_wire.tail
+                    result.diag['aspect_pixel'] = aspect_wire.pixel
             if mode in self.mono_status_modes and self._local.equalized is not None:
                 result.diag['mono_fold_eq'] = self._local.equalized
         return result
@@ -2056,9 +2150,11 @@ class _AdaptiveProfileDecoder:
             return self.fold.values(model, result, metadata_confirmed=True)
         if mode == self.aspect_mode and result.diag.get('aspect_layout'):
             layout = result.diag['aspect_layout']
-            profile_model = self.aspect_wire.model_for(model, layout)
-            self.aspect_wire.remember(profile_model, layout, result)
-            return self.aspect_wire.values(profile_model, result)
+            wire = self.pixel_wires.get(result.diag.get('aspect_pixel'),
+                                        self.aspect_wire)
+            profile_model = wire.model_for(model, layout)
+            wire.remember(profile_model, layout, result)
+            return wire.values(profile_model, result)
         if mode == getattr(self, 'aspect_mono_mode', None):
             layout = result.diag.get('aspect_layout')
             if layout is None:
@@ -3391,8 +3487,9 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
                 latest = values
                 if args.mono_compatible:
                     previous_values = latest.copy()
-                display_frames.publish(latest, model.coder.grids,
-                                       meter['aspect'])
+                display_frames.publish(
+                    latest, model.coder.grids, meter['aspect'],
+                    pixel_shapes=result.diag.get('pixel_shapes'))
                 shown_times.append(time.monotonic())
                 meter['shown_index'] = result.diag.get('source_index')
                 meter['shown_direction'] = result.diag.get('direction')
@@ -3562,6 +3659,9 @@ ASPECT_TAIL_CHOICES = ('chroma', 'split', 'luma', 'fixed')
 # second the eye does not blend successive packets, so the rotating tails'
 # older detail shows as stale colour on anything that moves.
 DEFAULT_ASPECT_TAIL = 'fixed'
+# Pixel encode on the aspect profile: 'robust' fits the ordinary slots,
+# 'large' adds fold guests (exact on clean links only).
+DEFAULT_PIXEL_GRID = 'robust'
 
 
 def _add_aspect_arguments(sub):
@@ -3604,10 +3704,19 @@ def parser():
     send.add_argument(
         '--pixel-encode', action='store_true',
         help=('with --dct-encode: send the picture area-averaged to the '
-              "wire's own 40x48 pixel grid, exactly (hard pixels; pixel art "
-              'at a whole multiple of 40x48 passes unchanged). Use the '
-              "fold-500 profile and the receiver's Pixel display. Turns "
-              'off the DCT enhancements and luma adjustment.'))
+              "wire's own pixel grid, exactly (hard pixels; pixel art at a "
+              'whole multiple of the grid passes unchanged). On '
+              'aspect-fold-500 the grid follows the picture shape (see '
+              '--pixel-grid); on fold-500 it is 40x48. Use the receiver\'s '
+              'Pixel display. Turns off the DCT enhancements and luma '
+              'adjustment.'))
+    send.add_argument(
+        '--pixel-grid', choices=('robust', 'large'), default=DEFAULT_PIXEL_GRID,
+        help=('with --pixel-encode on aspect-fold-500: robust (default) fits '
+              'the ordinary slots, e.g. 52x36 for 3:2, 58x32 for 16:9, 50x38 '
+              'for 4:3, 42x42 square; large is 60x40, 64x36, 56x42, 48x48, '
+              'whose finest detail rides as fold guests and is exact only on '
+              'a clean link. The receiver follows either.'))
     send.add_argument(
         '--pixel-detail', choices=('average', 'soft', 'cut', 'crisp'),
         default='average',

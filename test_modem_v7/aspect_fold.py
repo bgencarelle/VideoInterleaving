@@ -44,6 +44,7 @@ Tail modes (the 96 tail slots of each packet):
   still on a clean channel loses 2-4). Derived from the frozen chroma tables.
 
     python test_modem_v7/aspect_fold.py build     # rebuild and print the pin
+    python test_modem_v7/aspect_fold.py build-pixel   # the pixel grids' tables
 """
 import argparse
 import hashlib
@@ -82,6 +83,80 @@ LAYOUT_CHOICES = ('auto',) + LAYOUT_NAMES
 # V7 metadata aspect code (V7_ASPECT_RATIOS) -> layout.
 ASPECT_CODE_LAYOUT = ('1:1', '4:3', '3:2', '16:9', '1:1', '3:4', '2:3', '9:16')
 PLANE_COUNTS = tuple(rows*cols for rows, cols in v7.V7_SHAPES)
+
+# Pixel grids: per layout, a (rows, cols) luma rectangle whose coefficients
+# the profile carries in full, so a picture of that many pixels arrives pixel
+# for pixel (the sender's Pixel encode, the receiver's Pixel display). Chroma
+# is half of it per axis; its 480 lowest picture frequencies per plane are
+# sent.
+#   robust: the rectangle fits the ordinary (host) slots, so it is as sturdy
+#           as the hosts; nothing rides as a fold guest.
+#   large:  the layout's exact aspect; its finest coefficients (384 to 496)
+#           ride as fold guests, which only a clean link delivers exactly.
+# A pixel grid is signalled by the metadata model bit (nearest), which the
+# ordinary layouts never send; robust and large differ in fold signature.
+PIXEL_GRIDS = {
+    'robust': {'1:1': (42, 42), '4:3': (38, 50), '3:2': (36, 52),
+               '16:9': (32, 58), '3:4': (50, 38), '2:3': (52, 36),
+               '9:16': (58, 32)},
+    'large': {'1:1': (48, 48), '4:3': (42, 56), '3:2': (40, 60),
+              '16:9': (36, 64), '3:4': (56, 42), '2:3': (60, 40),
+              '9:16': (64, 36)},
+}
+PIXEL_GRID_NAMES = tuple(PIXEL_GRIDS)
+PIXEL_TABLES = Path(__file__).resolve().with_name('pixel_tables.npz')
+PIXEL_TABLES_SHA256 = 'f5f1f8b76d52e653d477ba1fe2092aa3560ab6354f7a5d116a100e9a7b436f4f'
+PIXEL_TABLE_FORMAT = 'v7-pixel-fold-1'
+PIXEL_TAIL_MODES = ('chroma', 'fixed')
+PIXEL_ENCODING_TYPE = v7.ENCODING_FILTER_CODES['nearest']
+
+
+def pixel_shapes(layout, grid):
+    """((rows, cols) luma, chroma, chroma) of a layout's pixel grid."""
+    layout_size(layout)
+    rows, cols = PIXEL_GRIDS[grid][layout]
+    return ((rows, cols), (rows//2, cols//2), (rows//2, cols//2))
+
+
+def pixel_positions(layout, grid):
+    """(kept, guests): flattened V7_GRIDS indices of a layout's pixel grid.
+
+    The fold's signature takes the last SIGNATURE_SLOTS hosts and their
+    guests, which then carry no picture; those are positions outside the
+    rectangle (finer than all of it), so every pixel coefficient is carried.
+    kept: 1,920 luma (the rectangle's coefficients nearest DC in picture
+    frequency, then outside filler), then per chroma plane the 480 nearest DC
+    inside its rectangle (filler after a smaller rectangle); guests: the rest of the luma rectangle (none for
+    'robust'), then SIGNATURE_SLOTS filler.
+    """
+    width, height = layout_size(layout)
+    offsets = np.cumsum([0] + [rows*cols for rows, cols in v7.V7_GRIDS])
+    kept, guests = [], None
+    for plane, ((rows, cols), count, (rect_rows, rect_cols)) in enumerate(
+            zip(v7.V7_GRIDS, PLANE_COUNTS, pixel_shapes(layout, grid))):
+        u, v = (axis.ravel().astype(np.int64)
+                for axis in np.mgrid[:rows, :cols])
+        key = u*u*width*width + v*v*height*height
+        inside = np.flatnonzero((u < rect_rows) & (v < rect_cols))
+        if rect_rows > rows or rect_cols > cols:
+            raise ValueError(f'pixel grid of {layout} does not fit plane {plane}')
+        ordered = inside[np.lexsort((v[inside], u[inside], key[inside]))]
+        filler = np.flatnonzero(key > key[inside].max())
+        filler = filler[np.lexsort((v[filler], u[filler], key[filler]))]
+        if plane:
+            kept.append(offsets[plane]+np.concatenate(
+                (ordered, filler))[:count])
+            continue
+        hosts = min(len(ordered), count-SIGNATURE_SLOTS)
+        if grid == 'robust' and hosts < len(ordered):
+            raise ValueError(f'robust pixel grid of {layout} exceeds the hosts')
+        spare = count-hosts
+        kept.append(np.concatenate((ordered[:hosts], filler[:spare])))
+        if len(kept[0]) != count:
+            raise ValueError(f'pixel grid of {layout} leaves no filler')
+        guests = np.concatenate((ordered[hosts:],
+                                 filler[spare:spare+SIGNATURE_SLOTS]))
+    return np.concatenate(kept).astype(np.int64), guests.astype(np.int64)
 
 
 def _slug(layout):
@@ -224,6 +299,65 @@ def _mode_tables(layout, tail, curves, phase):
     return tables
 
 
+def _pixel_tables(layout, grid, curves, phase):
+    """Coefficient vector, statistics and ranking of one pixel grid (the
+    chroma tail; the fixed tail is cut from it like the ordinary layouts')."""
+    variance = _variance_fn(curves, layout)
+    positions, guests = pixel_positions(layout, grid)
+    lam = variance(positions)
+    plane = _plane_of(positions)
+    # The luma filler holds the fold signature, which must be sent as
+    # strongly as a real host: give it the weakest real host's variance
+    # (a hair less each, so it still ranks last).
+    rect_rows, rect_cols = PIXEL_GRIDS[grid][layout]
+    u, v = np.divmod(positions, v7.V7_GRIDS[0][1])
+    filler = np.flatnonzero((plane == 0) & ((u >= rect_rows) | (v >= rect_cols)))
+    real = np.flatnonzero((plane == 0) & (u < rect_rows) & (v < rect_cols))
+    lam[filler] = lam[real].min()*(1-1e-6*np.arange(1, len(filler)+1))
+    # Head and body: every luma coefficient (the fold hosts are body slots)
+    # and the strongest chroma; tail: the remaining chroma by variance.
+    luma = np.flatnonzero(plane == 0)
+    chroma = np.flatnonzero(plane != 0)
+    chroma = chroma[np.argsort(-lam[chroma], kind='stable')]
+    body = np.concatenate((luma, chroma[:v7.BODY_END-len(luma)]))
+    body = body[np.argsort(-lam[body], kind='stable')]
+    order = np.concatenate((body, chroma[v7.BODY_END-len(luma):]))
+    mu = np.zeros(len(positions))
+    offsets = np.cumsum([0] + [rows*cols for rows, cols in v7.V7_GRIDS])
+    for index, position in enumerate(positions):
+        if position in offsets[:3]:
+            mu[index] = curves[int(plane[index])][3]
+    gain = lam**-.25
+    gain /= np.sqrt(np.mean((gain*gain*lam)[order[:v7.BODY_END]]))
+    tables = {'positions': positions, 'mu': mu, 'lam': lam, 'order': order,
+              'gain': gain, 'guests': guests, 'guest_lam': variance(guests),
+              'tail_luma_slots': np.int64(0), 'unit_rms': np.float64(1.0)}
+    probe_model = _assemble(tables, phase, 1.0)
+    synth = (np.random.default_rng(v7.LEVEL_SEED).standard_normal(len(lam)) *
+             np.sqrt(lam) + mu)
+    probe = v7.encode_frame_coeffs(probe_model, synth, 1)
+    tables['unit_rms'] = np.float64(np.sqrt(np.mean(probe**2)))
+    return tables
+
+
+def build_pixel(_args=None):
+    import io
+    curves = _canonical_curves()
+    phase = v7._frozen_tables()['phase']
+    arrays = {}
+    for grid in PIXEL_GRID_NAMES:
+        for layout in LAYOUT_NAMES:
+            for key, value in _pixel_tables(layout, grid, curves, phase).items():
+                arrays[f'{grid}/{_slug(layout)}/chroma/{key}'] = np.asarray(value)
+    buffer = io.BytesIO()
+    np.savez(buffer, **arrays)
+    blob = buffer.getvalue()
+    PIXEL_TABLES.write_bytes(blob)
+    digest = hashlib.sha256(blob).hexdigest()
+    print(f"{PIXEL_TABLES.name}: {len(PIXEL_GRID_NAMES)} grids x {len(LAYOUT_NAMES)} layouts; pin PIXEL_TABLES_SHA256 = '{digest}'")
+    return digest
+
+
 def build(_args=None):
     import io
     curves = _canonical_curves()
@@ -243,14 +377,16 @@ def build(_args=None):
 
 
 # ------------------------------------------------------------------- model
-@lru_cache(maxsize=1)
-def _frozen():
-    blob = TABLES.read_bytes()
+@lru_cache(maxsize=2)
+def _frozen(pixel=False):
+    path, pin = ((PIXEL_TABLES, PIXEL_TABLES_SHA256) if pixel else
+                 (TABLES, TABLES_SHA256))
+    blob = path.read_bytes()
     digest = hashlib.sha256(blob).hexdigest()
-    if digest != TABLES_SHA256:
-        raise ValueError(f'{TABLES.name} SHA-256 {digest[:12]}… does not match the '
-                         f'pinned {TABLES_SHA256[:12]}…')
-    with np.load(TABLES, allow_pickle=False) as data:
+    if digest != pin:
+        raise ValueError(f'{path.name} SHA-256 {digest[:12]}… does not match the '
+                         f'pinned {pin[:12]}…')
+    with np.load(path, allow_pickle=False) as data:
         return {key: data[key].copy() for key in data.files}
 
 
@@ -271,11 +407,16 @@ def _fixed_tail_tables(tables):
     return out
 
 
-def layout_tables(layout, tail):
+def layout_tables(layout, tail, pixel=None):
+    """One layout's tables; ``pixel`` names a pixel grid (PIXEL_GRIDS)."""
+    if pixel and pixel not in PIXEL_GRIDS:
+        raise ValueError(f'unknown pixel grid {pixel!r}; choose {PIXEL_GRID_NAMES}')
+    if pixel and tail not in PIXEL_TAIL_MODES:
+        raise ValueError(f'pixel grids have no {tail!r} tail; choose {PIXEL_TAIL_MODES}')
     if tail == 'fixed':
-        return _fixed_tail_tables(layout_tables(layout, 'chroma'))
-    frozen = _frozen()
-    prefix = f'{_slug(layout)}/{tail}/'
+        return _fixed_tail_tables(layout_tables(layout, 'chroma', pixel))
+    frozen = _frozen(bool(pixel))
+    prefix = (f'{pixel}/' if pixel else '')+f'{_slug(layout)}/{tail}/'
     tables = {key[len(prefix):]: value for key, value in frozen.items()
               if key.startswith(prefix)}
     if not tables:
@@ -362,9 +503,9 @@ def _assemble(tables, phase, target_rms, template=None):
 class AspectFoldCodec(FoldCodec):
     """Fold 500's host/guest split over an aspect layout's coefficients."""
 
-    def __init__(self, model, layout, tail, tables, step):
-        self.model, self.M = model, FOLD_SLOTS
-        self.layout, self.tail = layout, tail
+    def __init__(self, model, layout, tail, tables, step, pixel=None):
+        self.model, self.M = model, len(tables['guests'])
+        self.layout, self.tail, self.pixel = layout, tail, pixel
         self.filter, self.conf_min = 'box', .9
         self.design_db, self.fitted_on = 30.0, f'aspect layout {layout} (analytic)'
         self.signature, self.noise_max = SIGNATURE_SLOTS, .3
@@ -386,11 +527,26 @@ class AspectFoldCodec(FoldCodec):
                              ASPECT_COMPAND['step'],
                              ASPECT_COMPAND['guest_noise_max'])
         self._set_identity()
+        if self.pixel:
+            # The two grids of a layout share their signature slots, so
+            # their patterns must not be alike by chance: one pattern per
+            # layout, with every other sign flipped for each later grid
+            # (exactly uncorrelated, so the wrong grid scores zero).
+            seed = int(hashlib.sha256(
+                f'{PIXEL_TABLES_SHA256}/{layout}/{tail}'.encode()).hexdigest()[:16], 16)
+            self.pattern = np.random.default_rng(seed).choice(
+                [-1.0, 1.0], self.signature)
+            flip = PIXEL_GRID_NAMES.index(self.pixel)
+            if flip:
+                self.pattern[np.arange(self.signature) % (2*flip) >= flip] *= -1
 
     def table(self):
         table = super().table()
         table.update({'format': TABLE_FORMAT, 'layout': self.layout,
                       'tail': self.tail, 'aspect_tables_sha256': TABLES_SHA256})
+        if self.pixel:
+            table.update({'format': PIXEL_TABLE_FORMAT, 'pixel': self.pixel,
+                          'aspect_tables_sha256': PIXEL_TABLES_SHA256})
         return table
 
 
@@ -414,12 +570,17 @@ class AspectFoldWire:
     fold_slots = FOLD_SLOTS
     wire_profile = PROFILE
 
-    def __init__(self, layout='auto', tail='chroma'):
+    def __init__(self, layout='auto', tail='chroma', pixel=None):
         if layout not in LAYOUT_CHOICES:
             raise ValueError(f'unknown aspect layout {layout!r}; choose {LAYOUT_CHOICES}')
         if tail not in TAIL_MODES:
             raise ValueError(f'unknown aspect tail mode {tail!r}; choose {TAIL_MODES}')
-        self.layout, self.tail = layout, tail
+        if pixel and pixel not in PIXEL_GRIDS:
+            raise ValueError(f'unknown pixel grid {pixel!r}; choose {PIXEL_GRID_NAMES}')
+        if pixel and tail not in PIXEL_TAIL_MODES:
+            raise ValueError(f'pixel grids have no {tail!r} tail; choose {PIXEL_TAIL_MODES}')
+        self.layout, self.tail, self.pixel = layout, tail, pixel or None
+        self._inside = {}
         self._models = {}
         self._codecs = {}
         self._tails = {}
@@ -432,20 +593,43 @@ class AspectFoldWire:
         return layout_for_aspect_code(aspect_code)
 
     def model_for(self, base_model, layout):
-        if int(base_model.encoding_type) != v7.ENCODING_FILTER_CODES['box']:
+        # Pixel grids ride under the nearest model's metadata bit, so the
+        # receiver's base model for them may be either canonical model.
+        if (not self.pixel and
+                int(base_model.encoding_type) != v7.ENCODING_FILTER_CODES['box']):
             raise ValueError('aspect-fold-500 requires the box model')
         key = (id(base_model), layout)
         with self._lock:
             if key not in self._models:
-                canonical = float(v7._frozen_tables()['box/unit_rms'])
+                name = v7.ENCODING_FILTERS[int(base_model.encoding_type)]
+                canonical = float(v7._frozen_tables()[f'{name}/unit_rms'])
                 target = float(base_model.scale)*canonical
-                tables = layout_tables(layout, self.tail)
+                tables = layout_tables(layout, self.tail, self.pixel)
                 model = _assemble(tables, base_model.phase, target,
                                   template=base_model)
+                if self.pixel:
+                    model = replace(model, encoding_type=PIXEL_ENCODING_TYPE)
                 self._models[key] = model
                 self._codecs[id(model)] = AspectFoldCodec(
-                    model, layout, self.tail, tables, _fold500_step())
+                    model, layout, self.tail, tables, _fold500_step(),
+                    pixel=self.pixel)
             return self._models[key]
+
+    def pixel_shapes(self, layout):
+        """The layout's pixel grid shapes, or None off a pixel grid."""
+        return pixel_shapes(layout, self.pixel) if self.pixel else None
+
+    def _outside(self, layout):
+        """Grid positions outside the layout's pixel rectangles."""
+        if layout not in self._inside:
+            masks = []
+            for (rows, cols), (rect_rows, rect_cols) in zip(
+                    v7.V7_GRIDS, pixel_shapes(layout, self.pixel)):
+                mask = np.ones((rows, cols), bool)
+                mask[:rect_rows, :rect_cols] = False
+                masks.append(mask.ravel())
+            self._inside[layout] = np.flatnonzero(np.concatenate(masks))
+        return self._inside[layout]
 
     def codec(self, model):
         return self._codecs[id(model)]
@@ -496,15 +680,19 @@ class AspectFoldWire:
             full = codec.decode(result.coeffs, eq[0], eq[1], fallback=True,
                                 metadata_confirmed=metadata_confirmed)
             result.diag['aspect_signature_score'] = codec.last_score
+        if self.pixel:
+            # Filler slots carry no picture: only the rectangle is shown.
+            full[self._outside(codec.layout)] = 0.0
+            result.diag['pixel_shapes'] = pixel_shapes(codec.layout, self.pixel)
         return codec.grid.inverse(full)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('command', choices=('build',))
+    parser.add_argument('command', choices=('build', 'build-pixel'))
     args = parser.parse_args(argv)
-    build(args)
+    (build_pixel if args.command == 'build-pixel' else build)(args)
 
 
 if __name__ == '__main__':

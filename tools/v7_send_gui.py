@@ -95,6 +95,10 @@ PIXEL_DETAIL_CHOICES = (
     ('Cut · in the transform, most detail', 'cut'),
     ('Crisp · in the transform, undoes pixel repetition', 'crisp'),
 )
+PIXEL_GRID_CHOICES = (
+    ('Robust · exact on any link (52×36 for 3:2)', 'robust'),
+    ('Large · exact on clean links only (60×40 for 3:2)', 'large'),
+)
 DCT_SHARPEN_CHOICES = (
     ('Off', 'off'),
     ('Taper · sent band only', 'taper'),
@@ -161,10 +165,17 @@ FIELD_HELP = {
                     'saturated edges from darkening or ringing. Sender only. '
                     'Recommended (default).'),
     'pixel_encode': ('Send the picture as hard pixels on the wire\'s own '
-                     '40×48 grid, exactly. Pixel art at a whole multiple of '
-                     '40×48 passes unchanged. Use the Fold 500 profile and '
-                     'the receiver\'s Pixel display. Turns off the DCT '
-                     'enhancements and luma adjustment.'),
+                     'pixel grid, exactly. Pixel art at a whole multiple of '
+                     'the grid passes unchanged. On Aspect Fold 500 the grid '
+                     'follows the picture shape (see Pixel grid); on Fold '
+                     '500 it is 40×48. Use the receiver\'s Pixel display. '
+                     'Turns off the DCT enhancements and luma adjustment.'),
+    'pixel_grid': ('Pixel encode on Aspect Fold 500. Robust fits the '
+                   'ordinary slots and stays exact on tape and MP3: 52×36 '
+                   'for 3:2, 58×32 for 16:9, 50×38 for 4:3, 42×42 square. '
+                   'Large is 60×40, 64×36, 56×42, 48×48: its finest detail '
+                   'rides as fold guests and is exact only on a clean link. '
+                   'The receiver follows either.'),
     'pixel_detail': ('How Pixel encode brings the frame down to the pixel '
                      'grid. Average: area average of the pixels, exact for '
                      'block art. Soft / Cut / Crisp downscale inside the '
@@ -217,6 +228,7 @@ FIELD_LABELS = {
     'luma_adjust_linear': 'Luma adjustment in linear light',
     'pixel_encode': 'Pixel encode · hard pixels',
     'pixel_detail': 'Pixel downscale',
+    'pixel_grid': 'Pixel grid',
     'clip_aware': 'Clip-aware encode',
     'dct_sharpen': 'DCT sharpen',
     'dct_sharpen_strength': 'DCT sharpen strength',
@@ -326,7 +338,7 @@ SAVED_SETTING_FIELDS = (
     'perceptual_detail_strength', 'dct_encode', 'dct_sharpen',
     'dct_sharpen_strength', 'dct_clarity', 'dct_chroma_gain',
     'aspect_layout', 'aspect_tail', 'clip_aware', 'luma_adjust',
-    'luma_adjust_linear', 'pixel_encode', 'pixel_detail',
+    'luma_adjust_linear', 'pixel_encode', 'pixel_detail', 'pixel_grid',
 )
 
 
@@ -993,6 +1005,9 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
     pixel_detail = settings.get('pixel_detail', 'average')
     if pixel_detail not in dict(PIXEL_DETAIL_CHOICES).values():
         raise ValueError('Choose a supported pixel downscale.')
+    pixel_grid = settings.get('pixel_grid', 'robust')
+    if pixel_grid not in dict(PIXEL_GRID_CHOICES).values():
+        raise ValueError('Choose a supported pixel grid.')
     dct_strength, dct_clarity, dct_chroma_gain = .25, 0.0, 1.0
     if dct_encode:
         if profile not in DCT_PROFILES:
@@ -1029,6 +1044,10 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
             raise ValueError('Choose a supported aspect layout.')
         if aspect_tail not in dict(ASPECT_TAIL_CHOICES).values():
             raise ValueError('Choose a supported aspect tail.')
+        if (profile == 'aspect-fold-500' and dct_encode and
+                settings.get('pixel_encode') and
+                aspect_tail not in ('fixed', 'chroma')):
+            raise ValueError('Pixel encode needs the Fixed or Chroma tail.')
 
     speed = _float_setting(settings.get('speed', '1'), 'Speed')
     if not .25 <= speed <= 4.0:
@@ -1135,6 +1154,7 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
         'luma_adjust_linear': bool(settings.get('luma_adjust_linear', False)),
         'pixel_encode': bool(settings.get('pixel_encode', False)),
         'pixel_detail': pixel_detail,
+        'pixel_grid': pixel_grid,
         'aspect_layout': aspect_layout,
         'aspect_tail': aspect_tail,
         'dct_sharpen': dct_sharpen,
@@ -1220,6 +1240,9 @@ def build_command(settings, devices, sd_module=None, python=None,
             command.append('--pixel-encode')
             if checked['pixel_detail'] != 'average':
                 command.extend(('--pixel-detail', checked['pixel_detail']))
+            if (checked['profile'] == 'aspect-fold-500' and
+                    checked['pixel_grid'] != 'robust'):
+                command.extend(('--pixel-grid', checked['pixel_grid']))
         if checked['luma_adjust']:
             command.append('--luma-adjust')
             if checked['luma_adjust_linear']:
@@ -1312,7 +1335,7 @@ class SenderGui:
         'mono_video_side', 'source_audio', 'source_audio_device',
         'source_audio_input_side', 'screen_backend', 'capture_filter',
         'camera', 'screen_target', 'perceptual_resize', 'dct_sharpen',
-        'aspect_layout', 'aspect_tail',
+        'aspect_layout', 'aspect_tail', 'pixel_detail', 'pixel_grid',
     )
     # The encoder resize filter is not offered: every profile is folded and
     # folded profiles only encode with Box ('auto'), so the other choice
@@ -1320,8 +1343,8 @@ class SenderGui:
     ADVANCED_FIELDS = (
         'perceptual_resize', 'perceptual_detail_strength',
         'aspect_layout', 'aspect_tail',
-        'dct_encode', 'pixel_encode', 'pixel_detail', 'luma_adjust',
-        'luma_adjust_linear',
+        'dct_encode', 'pixel_encode', 'pixel_detail', 'pixel_grid',
+        'luma_adjust', 'luma_adjust_linear',
         'dct_sharpen',
         'dct_sharpen_strength',
         'dct_clarity', 'dct_chroma_gain', 'clip_aware',
@@ -1375,6 +1398,7 @@ class SenderGui:
             'luma_adjust_linear': False,
             'pixel_encode': False,
             'pixel_detail': 'average',
+            'pixel_grid': 'robust',
             'dct_sharpen': 'off',
             'dct_sharpen_strength': '0.25',
             'dct_clarity': '0',
@@ -1521,6 +1545,8 @@ class SenderGui:
             return DCT_SHARPEN_CHOICES
         if dest == 'pixel_detail':
             return PIXEL_DETAIL_CHOICES
+        if dest == 'pixel_grid':
+            return PIXEL_GRID_CHOICES
         if dest == 'camera':
             return self.capture_choice_cache.get(dest, ())
         if dest == 'screen_target':
@@ -1784,6 +1810,10 @@ class SenderGui:
             dest == 'pixel_detail' and not (
                 self.settings['dct_encode'] and
                 self.settings.get('pixel_encode')) or
+            dest == 'pixel_grid' and not (
+                self.settings['dct_encode'] and
+                self.settings.get('pixel_encode') and
+                self.settings['profile'] == 'aspect-fold-500') or
             # Pixel encode sends the pixels as they are: no enhancement.
             dest in ('dct_sharpen', 'dct_sharpen_strength', 'dct_clarity',
                      'dct_chroma_gain', 'luma_adjust',
@@ -1842,7 +1872,7 @@ class SenderGui:
         if dest in ('source', 'profile', 'screen_backend',
                     'encode_filter', 'capture_filter', 'perceptual_resize',
                     'dct_sharpen', 'aspect_layout', 'aspect_tail',
-                    'mono_video_side',
+                    'pixel_detail', 'pixel_grid', 'mono_video_side',
                     'source_audio', 'source_audio_input_side', 'capture_fps'):
             choices = self._choices(dest)
             label = next((label for label, candidate in choices

@@ -280,10 +280,29 @@ type I, where no guest survives.
 
 **Pixel mode** is for pictures that should arrive as hard pixels, not as a
 smooth picture. Sender: **Pixel encode** (`--pixel-encode`, under Advanced
-with Direct DCT encode) area-averages the frame to the wire's own 40×48 pixel
-grid (20×24 for colour) and sends exactly that small picture's coefficients;
-a source that is a whole multiple of 40×48 (pixel art) passes without any
-resampling. It turns off the enhancements and luma adjustment. **Pixel
+with Direct DCT encode) area-averages the frame to the wire's own pixel grid
+(half of it per axis for colour) and sends exactly that small picture's
+coefficients; a source that is a whole multiple of the grid (pixel art)
+passes without any resampling. It turns off the enhancements and luma
+adjustment. On **Aspect Fold 500** the grid follows the picture shape and
+**Pixel grid** (`--pixel-grid`) chooses its size (width×height):
+
+| Layout | Robust | Large |
+|---|---|---|
+| 1:1 | 42×42 | 48×48 |
+| 4:3 | 50×38 | 56×42 |
+| 3:2 | 52×36 | 60×40 |
+| 16:9 | 58×32 | 64×36 |
+
+(portrait layouts are the mirrors). **Robust** (default) fits the ordinary
+slots; nothing rides as a fold guest, so it is exact on every link the
+picture survives. **Large** has the layout's exact aspect; its finest 384 to
+496 coefficients ride as fold guests, which only a clean link delivers
+exactly: elsewhere the guests drop and fine diagonal detail rings. A pixel
+grid is signalled by the metadata model bit and the receiver tells the two
+grids apart by their fold signature, so it follows either without a setting.
+Tails: Fixed or Chroma. On **Fold 500** the grid is 40×48 for every picture
+shape. **Pixel
 downscale** (`--pixel-detail`) chooses how the frame comes down to that grid:
 **Average** is the area average of the pixels (exact for block art); **Soft**,
 **Cut** and **Crisp** downscale inside the transform instead, sending the
@@ -296,11 +315,16 @@ show a faint mesh that grows from Soft to Crisp. Receiver:
 the sent grid as hard pixels; while it is on, Display upscaler, DCT
 reconstruction, Display grain, Edge reconstruction and Edge strength are
 locked and have no effect, and they return to their previous values when it
-is turned off. Use the **Fold 500** profile: its sent luma
-is exactly the 40×48 rectangle, so brightness arrives pixel for pixel; the
-aspect profiles send an elliptical set and miss the rectangle's corner
-detail. Colour has half the resolution (one colour sample per 2×2 pixels),
-so single-pixel colour detail bleeds. Real modem, 40×48 pixel art, pixels
+is turned off. It shows the grid the packet names (Aspect Fold 500 pixel
+grids), else 40×48. Colour has half the resolution (one colour sample per
+2×2 pixels), and with the Fixed tail about 200 of its lowest frequencies per
+plane, so single-pixel colour detail bleeds. Real modem, pixel art with
+one-pixel diagonals, luma pixels within 16 of 255 codes of what was sent
+(worst error in codes): Robust clean 100 % (2), hiss −40 100 % (13), tape
+type I 100 % (19), MP3 320 100 % (18); Large clean 100 % (14 to 23),
+low-pass 12 kHz 99–100 %, hiss −40, type I and MP3 320 75–79 % (guests
+dropped); Fold 500 40×48 clean 100 % (9), type I and MP3 320 98–99 %.
+Earlier figures, Fold 500, 40×48 pixel art, pixels
 whose shown brightness is within 16 of 255 codes of the source: clean
 98–99 %, hiss −40 98–99 %, fast flutter 95–98 %, MP3 320 95–97 %; pixels
 whose full RGB is within 16 codes: 62–79 % clean (the colour limit), 30–60 %

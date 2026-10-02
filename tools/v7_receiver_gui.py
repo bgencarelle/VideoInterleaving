@@ -2491,7 +2491,8 @@ class ReceiverGui:
                         planes = dct_reconstruct_planes(
                             planes, self.dct_reconstruction, viewport_size,
                             edge=self.edge_mode,
-                            edge_strength=self.edge_strength)
+                            edge_strength=self.edge_strength,
+                            pixel_shapes=getattr(frame, 'pixel_shapes', None))
                     if (self.display_mode in FILTER_PRECOMPUTE_MODES and
                             self.dct_reconstruction == 'off'):
                         planes = resample_filter_planes(

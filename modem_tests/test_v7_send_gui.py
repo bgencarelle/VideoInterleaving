@@ -461,6 +461,20 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(v7_live._dct_encode_options(args)['pixel_detail'],
                          'crisp')
         self.settings.update(pixel_detail='average')
+        # The pixel grid is an Aspect Fold 500 choice; robust is the default.
+        self.assertNotIn('--pixel-grid', command)
+        profile = self.settings['profile']
+        self.settings.update(profile='aspect-fold-500', pixel_grid='large')
+        command = build_command(self.settings, self.devices, self.sd)
+        self.assertEqual(v7_live.parser().parse_args(command[2:]).pixel_grid,
+                         'large')
+        self.settings.update(aspect_tail='luma')
+        with self.assertRaisesRegex(ValueError, 'Fixed or Chroma tail'):
+            build_command(self.settings, self.devices, self.sd)
+        self.settings.update(aspect_tail='fixed', profile='fold-500')
+        self.assertNotIn(
+            '--pixel-grid', build_command(self.settings, self.devices, self.sd))
+        self.settings.update(profile=profile, pixel_grid='robust')
         self.settings.update(pixel_encode=False)
         self.settings.update(luma_adjust=True, luma_adjust_linear=True)
         command = build_command(self.settings, self.devices, self.sd)
@@ -1013,6 +1027,18 @@ class SenderGuiTests(unittest.TestCase):
             ['/usr/bin/v4l2-ctl', '--list-formats-ext', '--device',
              '/dev/video2'], capture_output=True, text=True,
             encoding='utf-8', errors='replace', timeout=10, check=False)
+
+    def test_pixel_choices_open_as_dropdowns(self):
+        gui = SenderGui(self.devices)
+        gui.settings.update(profile='aspect-fold-500', dct_encode=True,
+                            pixel_encode=True)
+        gui.show_advanced = True
+        for dest in ('pixel_detail', 'pixel_grid'):
+            self.assertIn(dest, gui.DROPDOWN_FIELDS)
+            self.assertGreater(len(gui._choices(dest)), 1)
+            gui._open_dropdown(dest)
+        gui.settings.update(profile='fold-500')
+        self.assertNotIn('pixel_grid', gui._visible_fields())
 
     def test_capture_fps_is_a_basic_gui_dropdown(self):
         gui = SenderGui(self.devices)

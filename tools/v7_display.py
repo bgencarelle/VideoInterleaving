@@ -16,6 +16,9 @@ class DisplayFrame:
     aspect: int
     generation: int
     published_at: float
+    # ((rows, cols) luma, chroma, chroma) when the picture was sent on a
+    # pixel grid: what the Pixel display shows instead of half the planes.
+    pixel_shapes: object = None
 
 
 class LatestFrame:
@@ -32,12 +35,13 @@ class LatestFrame:
         with self._lock:
             self._notifier = notifier
 
-    def publish(self, values, shapes, aspect=0):
+    def publish(self, values, shapes, aspect=0, pixel_shapes=None):
         """Publish a frame reference and discard any older unpublished frame."""
         with self._lock:
             self._generation += 1
             self._frame = DisplayFrame(values, shapes, int(aspect),
-                                       self._generation, time.monotonic())
+                                       self._generation, time.monotonic(),
+                                       pixel_shapes)
             notifier = self._notifier
         if notifier is not None:
             try:

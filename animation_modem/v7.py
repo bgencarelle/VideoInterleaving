@@ -5328,8 +5328,11 @@ def _decode_pulse_samples(model, samples, diagnostics, latest_only, models,
                                   pilot_timing=pilot_timing,
                                   pilot_counter=counter,
                                   tone_equalization=tone_equalization,
-                                  profile_hint={'aspect_code': (
-                                      aspect_code if metadata_valid else None)},
+                                  profile_hint={
+                                      'aspect_code': (aspect_code if
+                                                      metadata_valid else None),
+                                      'encoding_type': (encoding_type if
+                                                        metadata_valid else None)},
                                   **({'erased_symbols': splice_diag['erased']}
                                      if splice_diag is not None else {}))
         except (FloatingPointError, np.linalg.LinAlgError, ValueError,

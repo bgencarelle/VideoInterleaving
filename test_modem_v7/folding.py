@@ -339,6 +339,19 @@ class FoldCodec:
                   self.sd_host[-self.signature:]*np.sqrt(self.power))
         return float(np.mean(symbol*self.pattern)/(SIGNATURE_STEPS*self.D))
 
+    def signature_error(self, xhat, conf):
+        """RMS distance of the signature slots from this table's pattern, in
+        units of the pattern's own size: near 0 when it is there, 1 or more
+        when the slots hold something else (None without a signature). Unlike
+        the score, large unrelated values cannot pass it by chance."""
+        if not self.signature:
+            return None
+        hosts = self.hosts[-self.signature:]
+        symbol = (np.asarray(xhat)[hosts]/np.maximum(np.asarray(conf)[hosts], 1e-3) /
+                  self.sd_host[-self.signature:]*np.sqrt(self.power))
+        size = SIGNATURE_STEPS*self.D
+        return float(np.sqrt(np.mean((symbol-size*self.pattern)**2))/size)
+
     def plain(self, coeffs):
         """Full DCT vector of an unfolded (normal) decode."""
         full = np.zeros(self.grid.off[-1])
