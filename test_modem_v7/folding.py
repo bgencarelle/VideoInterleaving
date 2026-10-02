@@ -17,6 +17,21 @@ removes the MMSE shrink, and splits the symbol back into host and guest.
 Fallback: a host whose equaliser confidence is below conf_min is read as a
 plain noisy host, and its guest is dropped. This bounds the damage when timing
 errors (fast flutter, jitter) push a symbol over a step.
+
+Companded guests (use_compand): real pictures' guests are heavy-tailed and
+several times the model's variance (measured 1.5 to 5 times its standard
+deviation), so the +-2.5 clip above throws most of their energy away (guest
+SDR 1.8 dB on a clean channel for a frame of text on black). With companding
+the guest rides as
+
+    s = D*round(h/D) + A*c(u),   c(u) = sign(u)*ln(1 + mu*|u|/U)/ln(1 + mu),
+
+|u| limited to U and A = 0.4*D, so a guest up to U standard deviations
+survives and small guests keep nearly the same slope. The receiver shrinks
+c by its MMSE weight at the measured symbol noise, then expands. Past
+guest_noise_max (symbol units) the guests are dropped but the hosts are
+still read as quantised steps, which D makes robust; the display's edge
+reconstruction treats dropped guests as unknown and fills them in.
 """
 import hashlib
 import json
@@ -94,7 +109,36 @@ class FoldCodec:
     # ----------------------------------------------------------- fold table
     # Sender and receiver must fold the same slots with the same scales, so a
     # live pair loads one frozen table instead of fitting local frames.
+    compand = None                  # (limit U, mu) or None: linear guests
+    guest_noise_max = None
+    COMPAND_POWER = .12             # E c(u)^2 for real guests (measured .10-.14)
+
+    def use_compand(self, limit, mu, step, guest_noise_max):
+        """Switch to companded guests (changes the table identity and the
+        signature: both ends must hold the same settings)."""
+        self.compand = (float(limit), float(mu))
+        self.guest_noise_max = float(guest_noise_max)
+        self.set_step(step)
+        self._set_identity()
+        return self
+
+    def _compress(self, u):
+        limit, mu = self.compand
+        return (np.sign(u)*np.log1p(mu*np.minimum(np.abs(u), limit)/limit) /
+                np.log1p(mu))
+
+    def _expand(self, c):
+        limit, mu = self.compand
+        return np.sign(c)*limit*np.expm1(np.abs(c)*np.log1p(mu))/mu
+
     def table(self):
+        table = self._table()
+        if self.compand is not None:
+            table.update({'compand': list(self.compand),
+                          'guest_noise_max': self.guest_noise_max})
+        return table
+
+    def _table(self):
         return {'format': TABLE_FORMAT, 'M': self.M, 'D': self.D, 'u_clip': U_CLIP,
                 'conf_min': self.conf_min, 'encode_filter': self.filter,
                 'model_digest': model_digest(self.model),
@@ -133,6 +177,9 @@ class FoldCodec:
         codec.signature = int(table['signature'])
         codec.noise_max = float(table['noise_max'])
         codec.set_step(float(table['D']))
+        if table.get('compand') is not None:
+            codec.use_compand(*table['compand'], float(table['D']),
+                              table['guest_noise_max'])
         codec._set_identity()
         if codec.identity != table_identity(table):
             raise ValueError('fold table does not round-trip')          # pragma: no cover
@@ -160,6 +207,10 @@ class FoldCodec:
 
     def set_step(self, D):
         self.D = float(D)
+        if self.compand is not None:
+            self.amp = .4*self.D
+            self.power = 1 + self.D**2/12 + self.amp**2*self.COMPAND_POWER
+            return
         self.beta = .8*self.D/(2*U_CLIP)
         self.power = 1 + self.D**2/12 + self.beta**2                    # E s^2
 
@@ -173,8 +224,15 @@ class FoldCodec:
 
     def encode_coefficients(self, values):
         """Return folded source coefficients, before the inverse DCT to pixels."""
-        _, coeffs, h, u = self._split(values)
-        symbol = self.D*np.round(h/self.D) + self.beta*u
+        if self.compand is not None:
+            full = self.grid.forward(values)
+            coeffs = full[self.kept].copy()
+            h = (coeffs[self.hosts] - self.model.mu[self.hosts])/self.sd_host
+            symbol = (self.D*np.round(h/self.D) +
+                      self.amp*self._compress(full[self.guests]/self.sd_guest))
+        else:
+            _, coeffs, h, u = self._split(values)
+            symbol = self.D*np.round(h/self.D) + self.beta*u
         if self.signature:
             symbol[-self.signature:] = SIGNATURE_STEPS*self.D*self.pattern
         coeffs[self.hosts] = self.model.mu[self.hosts] + self.sd_host*symbol/np.sqrt(self.power)
@@ -208,6 +266,10 @@ class FoldCodec:
             signature_detected = self.last_score >= .5
             if not signature_detected and not metadata_confirmed:
                 return full                          # a normal packet: show it as is
+        if self.compand is not None:
+            return self._decode_companded(full, coeffs, symbol, c, fallback,
+                                          signature_detected,
+                                          metadata_confirmed)
         h, u = self._unfold(symbol)
         ok = c >= self.conf_min if fallback else np.ones(self.M, bool)
         if self.signature and fallback and signature_detected:
@@ -230,6 +292,37 @@ class FoldCodec:
             # Signature slots are reserved in every folded packet even when
             # mono/noise hides their identity. A valid coded mode can authorize
             # the table while the normal host-confidence fallback remains on.
+            full[self.kept[self.hosts[-self.signature:]]] = mu[-self.signature:]
+            full[self.guests[-self.signature:]] = 0.0
+        self.last_unfolded_slots = int(np.count_nonzero(ok))
+        return full
+
+    def _decode_companded(self, full, coeffs, symbol, c, fallback,
+                          signature_detected, metadata_confirmed):
+        steps = np.round(symbol/self.D)
+        residual = np.clip((symbol-self.D*steps)/self.amp, -1.0, 1.0)
+        ok = c >= self.conf_min if fallback else np.ones(self.M, bool)
+        guests_ok = ok.copy()
+        noise = 0.0
+        if self.signature and fallback and signature_detected:
+            resid = (symbol[-self.signature:] -
+                     SIGNATURE_STEPS*self.D*self.pattern)
+            sigma = float(np.sqrt(np.mean(resid**2)))
+            self.last_noise = sigma/self.D
+            noise = sigma*sigma
+            if self.last_noise > self.noise_max:
+                ok[:] = False                    # steps would slip: plain hosts
+            if sigma > self.guest_noise_max:
+                guests_ok[:] = False             # guests are mostly noise
+        guests_ok &= ok
+        carried = self.amp**2*self.COMPAND_POWER
+        u = self._expand(residual*carried/(carried+noise))
+        mu = self.model.mu[self.hosts]
+        plain = mu + (np.asarray(coeffs)[self.hosts] - mu)*np.sqrt(self.power)
+        full[self.kept[self.hosts]] = np.where(ok, mu + self.sd_host*self.D*steps,
+                                               plain)
+        full[self.guests] = np.where(guests_ok, u*self.sd_guest, 0.0)
+        if self.signature and (signature_detected or metadata_confirmed):
             full[self.kept[self.hosts[-self.signature:]]] = mu[-self.signature:]
             full[self.guests[-self.signature:]] = 0.0
         self.last_unfolded_slots = int(np.count_nonzero(ok))

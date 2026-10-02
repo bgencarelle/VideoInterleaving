@@ -299,33 +299,58 @@ class SourceDCTTests(unittest.TestCase):
         self.assertEqual(aspect, v7.aspect_wire_code((160, 120)))
 
 
+_TAPS = (0.03537128823198011, 0.15996811301904001, 0.3046605987489799)
+
+
+def _reference_decimate(x, axis):
+    """The 2:1 decimation filter written out: reflect two samples, then
+    taps (a, b, c, c, b, a) on each pair's six neighbours."""
+    x = np.moveaxis(np.asarray(x, float), axis, 0)
+    padded = np.concatenate((x[1::-1], x, x[:-3:-1]))
+    taps = _TAPS+_TAPS[::-1]
+    out = sum(tap*padded[offset:offset+len(x):2]
+              for offset, tap in enumerate(taps))
+    return np.moveaxis(out, 0, axis)
+
+
+def _reference_chain(x, block, decimated, axis=0):
+    """Block means along one axis (remainder = a narrower last block), then
+    the decimation filter if used."""
+    x = np.moveaxis(np.asarray(x, float), axis, 0)
+    x = np.stack([x[start:start+block].mean(axis=0)
+                  for start in range(0, len(x), block)])
+    for _ in range(int(decimated)):
+        x = _reference_decimate(x, 0)
+    return np.moveaxis(x, 0, axis)
+
+
 @lru_cache(maxsize=None)
-def _reference_axis(size, block, modes, grid):
-    """Per-block weights that estimate DCT coefficient k of a size-pixel axis
-    (scaled to a grid-sample axis) from its block means, written out."""
+def _reference_axis(size, block, modes, grid, decimated):
+    """Per-sample weights that estimate DCT coefficient k of a size-pixel axis
+    (scaled to a grid-sample axis) from the pre-shrunk samples. The droop is
+    measured by passing each basis cosine through the same chain."""
     edges = list(range(0, size, block))+[size]
-    out = np.zeros((len(edges)-1, modes))
-    for m, (start, stop) in enumerate(zip(edges[:-1], edges[1:])):
-        width = stop-start
-        for k in range(modes):
-            theta = np.pi*k/size
-            # the block mean of the basis cosine, relative to its centre value
-            pixels = np.arange(start, stop)+.5
-            centre = np.cos(theta*(start+stop)/2)
-            mean = np.mean(np.cos(theta*pixels))
-            droop = mean/centre if abs(centre) > 1e-9 else (
-                np.sin(width*theta/2)/(width*np.sin(theta/2)))
-            scale = np.sqrt((1 if k == 0 else 2)*grid)/size
-            out[m, k] = width*centre/droop*scale
+    edges = edges[::1 << int(decimated)]
+    widths = np.diff(edges).astype(float)
+    centres = (np.asarray(edges[:-1])+np.asarray(edges[1:]))/2
+    out = np.zeros((len(widths), modes))
+    pixels = np.arange(size)+.5
+    for k in range(modes):
+        theta = np.pi*k/size
+        ideal = np.cos(theta*centres)
+        through = _reference_chain(np.cos(theta*pixels), block, decimated)
+        if decimated:
+            droop = np.full(len(widths), through @ ideal/(ideal @ ideal))
+        else:
+            droop = np.where(np.abs(ideal) > 1e-6, through /
+                             np.where(np.abs(ideal) > 1e-6, ideal, 1), 1.0)
+            flat = np.abs(ideal) <= 1e-6
+            if k:
+                droop[flat] = (np.sin(widths[flat]*theta/2) /
+                               (widths[flat]*np.sin(theta/2)))
+        scale = np.sqrt((1 if k == 0 else 2)*grid)/size
+        out[:, k] = widths*ideal/droop*scale
     return out
-
-
-def _block_means(x, block_y, block_x):
-    height, width = x.shape[:2]
-    rows = [x[y:y+block_y].mean(axis=0) for y in range(0, height, block_y)]
-    x = np.stack(rows)
-    cols = [x[:, c:c+block_x].mean(axis=1) for c in range(0, width, block_x)]
-    return np.stack(cols, axis=1)
 
 
 def _direct_reference(rgb, grids, shapes, brightness=1.0, gamma=1.0,
@@ -339,7 +364,12 @@ def _direct_reference(rgb, grids, shapes, brightness=1.0, gamma=1.0,
     luma_rows, luma_cols = grids[0]
     block_y = max(1, int(height/(4*luma_rows)+.5))
     block_x = max(1, int(width/(4*luma_cols)+.5))
-    x = _block_means(x, block_y, block_x)
+    decimate_y = (height % (2*block_y) == 0 and
+                  -(-height//block_y)//2 >= 1.75*luma_rows)
+    decimate_x = (width % (2*block_x) == 0 and
+                  -(-width//block_x)//2 >= 1.75*luma_cols)
+    x = _reference_chain(x, block_y, decimate_y, axis=0)
+    x = _reference_chain(x, block_x, decimate_x, axis=1)
     rows, cols = x.shape[:2]
     red, green, blue = x[..., 0], x[..., 1], x[..., 2]
     y = .299*red+.587*green+.114*blue
@@ -352,18 +382,23 @@ def _direct_reference(rgb, grids, shapes, brightness=1.0, gamma=1.0,
     if sharpen == 'usm':
         y = y+strength*(y-gaussian_filter(
             y, (.8*unit[0], .8*unit[1]), mode='reflect'))
-    step_y = 2 if height % (2*block_y) == 0 and rows//2 >= 2*grids[1][0] else 1
-    step_x = 2 if width % (2*block_x) == 0 and cols//2 >= 2*grids[1][1] else 1
-    cb, cr = (plane.reshape(rows//step_y, step_y, cols//step_x,
-                            step_x).mean(axis=(1, 3)) for plane in (cb, cr))
-    blocks = ((block_y, block_x),)+((block_y*step_y, block_x*step_x),)*2
+    again_y = (decimate_y and height % (4*block_y) == 0 and
+               rows//2 >= 1.75*grids[1][0])
+    again_x = (decimate_x and width % (4*block_x) == 0 and
+               cols//2 >= 1.75*grids[1][1])
+    if again_y:
+        cb, cr = (_reference_decimate(plane, 0) for plane in (cb, cr))
+    if again_x:
+        cb, cr = (_reference_decimate(plane, 1) for plane in (cb, cr))
+    stages = ((int(decimate_y), int(decimate_x)),) + (
+        (decimate_y+again_y, decimate_x+again_x),)*2
     out = []
     for index, (plane, (grid_rows, grid_cols), (sent_rows, sent_cols)) in \
             enumerate(zip((y, cb, cr), grids, shapes)):
-        coeff = (_reference_axis(height, blocks[index][0], grid_rows,
-                                 grid_rows).T @ plane @
-                 _reference_axis(width, blocks[index][1], grid_cols,
-                                 grid_cols))
+        coeff = (_reference_axis(height, block_y, grid_rows, grid_rows,
+                                 stages[index][0]).T @ plane @
+                 _reference_axis(width, block_x, grid_cols, grid_cols,
+                                 stages[index][1]))
         if index == 0 and sharpen == 'taper':
             radius = np.hypot(np.arange(sent_rows)[:, None]/sent_rows,
                               np.arange(sent_cols)[None, :]/sent_cols)
@@ -390,7 +425,8 @@ class DirectDCTEncodeTests(unittest.TestCase):
                  {'sharpen': 'usm', 'strength': .5},
                  {'clarity': .3, 'chroma_gain': 1.2},
                  {'sharpen': 'usm', 'strength': .5, 'clarity': .3})
-        for width, height in ((160, 96), (400, 480), (641, 333), (1366, 768)):
+        for width, height in ((160, 96), (400, 480), (641, 333), (1366, 768),
+                              (1280, 720)):
             rgb = _textured_frame(width, height)
             for case in cases:
                 with self.subTest(size=(width, height), **case):
@@ -490,14 +526,84 @@ class DirectDCTEncodeTests(unittest.TestCase):
         rgb = np.zeros((480, 640, 3), dtype=np.uint8)
         rgb[:, ::2] = 255
         target = []
-        direct_dct_values(rgb, self.grids, self.shapes, luminance_out=target)
+        direct_dct_values(rgb, self.grids, self.shapes, luminance_out=target,
+                          linear_light=True)
         np.testing.assert_allclose(target[0], .5, atol=1e-9)
+        # The default target linearises the averaged picture instead.
+        target = []
+        direct_dct_values(rgb, self.grids, self.shapes, luminance_out=target)
+        np.testing.assert_allclose(target[0], _srgb_to_linear(.5), atol=1e-9)
         flat = np.full((480, 640, 3), (40, 120, 200), dtype=np.uint8)
+        for linear_light in (False, True):
+            target = []
+            direct_dct_values(flat, self.grids, self.shapes,
+                              luminance_out=target, linear_light=linear_light)
+            np.testing.assert_allclose(
+                target[0], float(_srgb_to_linear(np.array((40, 120, 200))/255.0)
+                                 @ np.array([.2126, .7152, .0722])), atol=1e-9)
         target = []
         direct_dct_values(flat, self.grids, self.shapes, luminance_out=target)
         expected = float(_srgb_to_linear(np.array((40, 120, 200))/255.0) @
                          np.array([.2126, .7152, .0722]))
         np.testing.assert_allclose(target[0], expected, atol=1e-9)
+
+    def test_pixel_encode_sends_the_small_pictures_own_pixels(self):
+        from animation_modem.v7_source_dct import pixel_dct_values
+        from tools.v7_gl_viewer import dct_reconstruct_planes, float_planes
+        rng = np.random.default_rng(5)
+        art = rng.integers(0, 256, (48, 40, 3), dtype=np.uint8)
+        y = art @ np.array([.299, .587, .114])/255.0
+        for source in (art, np.repeat(np.repeat(art, 10, 0), 10, 1),
+                       np.repeat(np.repeat(art, 22, 0), 48, 1)):
+            values = pixel_dct_values(source, self.grids, self.shapes)
+            luma, cb, cr = dct_reconstruct_planes(
+                float_planes(values, self.grids), 'pixel')
+            with self.subTest(source=source.shape):
+                self.assertEqual((luma.shape, cb.shape),
+                                 ((384, 320), (192, 160)))
+                # Hard pixels: every 8x8 block is one value, the art's own.
+                np.testing.assert_allclose(
+                    luma.reshape(48, 8, 40, 8).std(axis=(1, 3)), 0, atol=1e-6)
+                np.testing.assert_allclose((luma[::8, ::8]+1)/2, y, atol=1e-5)
+                blue = art[..., 2].reshape(24, 2, 20, 2).mean((1, 3))
+                red = art[..., 0].reshape(24, 2, 20, 2).mean((1, 3))
+                green = art[..., 1].reshape(24, 2, 20, 2).mean((1, 3))
+                expected = (-.168736*red-.331264*green+.5*blue)/255.0
+                np.testing.assert_allclose(cb[::8, ::8]/2, expected,
+                                           atol=1e-5)
+        # Downscaling inside the transform: 'crisp' undoes pixel repetition,
+        # so block art still arrives exactly; 'cut' is the source's own
+        # leading coefficients; 'soft' those times an area average's roll-off.
+        blocky = np.repeat(np.repeat(art, 10, 0), 10, 1)
+        crisp = pixel_dct_values(blocky, self.grids, self.shapes,
+                                 detail='crisp')
+        luma = dct_reconstruct_planes(float_planes(crisp, self.grids),
+                                      'pixel')[0]
+        np.testing.assert_allclose((luma[::8, ::8]+1)/2, y, atol=2e-3)
+        photo = _textured_frame(640, 480, seed=9)
+        cut = pixel_dct_values(photo, self.grids, self.shapes, detail='cut')
+        exact = dctn(photo @ np.array([.299, .587, .114])/255.0,
+                     norm='ortho')[:48, :40]*np.sqrt(96*80/(480*640))
+        got = dctn((cut[:96*80].reshape(96, 80)+1)/2, norm='ortho')
+        self.assertGreater(10*np.log10(np.sum(exact**2) /
+                                       np.sum((got[:48, :40]-exact)**2)), 40)
+        np.testing.assert_allclose(got[48:], 0, atol=1e-9)
+        np.testing.assert_allclose(got[:, 40:], 0, atol=1e-9)
+        soft = pixel_dct_values(photo, self.grids, self.shapes, detail='soft')
+        soft = dctn((soft[:96*80].reshape(96, 80)+1)/2, norm='ortho')
+        self.assertLess(abs(soft[47, 1]), abs(got[47, 1]))
+        with self.assertRaisesRegex(ValueError, 'pixel detail'):
+            pixel_dct_values(photo, self.grids, self.shapes, detail='sharp')
+        # The live sender takes the pixel path even for a frame smaller than
+        # the coder grid, and does not clip or luma-adjust it.
+        model = v7.load_model(.1521/np.sqrt(1+10**(v7.CLOCK_REL_DB/10)), 'box')
+        live, _aspect = v7_live._values(
+            model, art, 'box', brightness=1.0, dct_encode=True,
+            dct_options={'pixel': True},
+            chroma_sent_for=lambda code: self.fail('no luma adjustment'))
+        np.testing.assert_array_equal(
+            live, pixel_dct_values(art, self.grids, self.shapes))
+        self.assertGreater(float(np.abs(live).max()), 1.0)
 
     def test_uint8_and_float_frames_agree(self):
         rgb = _textured_frame(400, 480, seed=6)

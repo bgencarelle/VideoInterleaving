@@ -355,8 +355,25 @@ class SenderGuiTests(unittest.TestCase):
     def test_pillow_encoder_filter_is_box_for_every_profile(self):
         gui = SenderGui(self.devices)
         gui.advanced = True
-        self.assertIn('encode_filter', gui.ADVANCED_FIELDS)
-        self.assertIn('encode_filter', gui._visible_fields())
+        # Both choices are Box, so the field is not shown at all.
+        self.assertNotIn('encode_filter', gui._visible_fields())
+        # Direct DCT encode ignores the capture scaler and width.
+        gui.settings.update(source='video', dct_encode=True)
+        self.assertNotIn('capture_filter', gui._visible_fields())
+        self.assertNotIn('capture_width', gui._visible_fields())
+        gui.settings.update(source='mouse-follow')
+        self.assertIn('capture_width', gui._visible_fields())
+        gui.settings.update(source='video', dct_encode=False)
+        self.assertIn('capture_filter', gui._visible_fields())
+        self.assertIn('capture_width', gui._visible_fields())
+        # Pixel encode hides the enhancements it turns off.
+        gui.settings.update(dct_encode=True, pixel_encode=True)
+        visible = gui._visible_fields()
+        self.assertIn('pixel_encode', visible)
+        for dest in ('luma_adjust', 'luma_adjust_linear', 'dct_sharpen',
+                     'dct_clarity', 'dct_chroma_gain'):
+            self.assertNotIn(dest, visible)
+        gui.settings.update(pixel_encode=False, source='camera')
         self.assertNotIn('baseline', tuple(value for _label, value in
                                            gui._choices('profile')))
         for profile in ('aspect-fold-500', 'fold-500', 'aspect-mono-500',
@@ -409,7 +426,27 @@ class SenderGuiTests(unittest.TestCase):
         self.assertTrue(args.dct_encode)
         self.assertEqual(v7_live._dct_encode_options(args), {
             'sharpen': 'taper', 'sharpen_strength': .5, 'clarity': .15,
-            'chroma_gain': 1.1, 'aggregation': 'off', 'band_profile': 'off'})
+            'chroma_gain': 1.1, 'aggregation': 'off', 'band_profile': 'off',
+            'linear_light': False, 'pixel': False,
+            'pixel_detail': 'average'})
+        self.assertNotIn('--luma-adjust-linear', command)
+        self.assertNotIn('--pixel-encode', command)
+        self.settings.update(pixel_encode=True)
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+        self.assertTrue(v7_live._dct_encode_options(args)['pixel'])
+        self.assertNotIn('--pixel-detail', command)
+        self.settings.update(pixel_detail='crisp')
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+        self.assertEqual(v7_live._dct_encode_options(args)['pixel_detail'],
+                         'crisp')
+        self.settings.update(pixel_detail='average')
+        self.settings.update(pixel_encode=False)
+        self.settings.update(luma_adjust=True, luma_adjust_linear=True)
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+        self.assertTrue(v7_live._dct_encode_options(args)['linear_light'])
         v7_live._send_profile(args, 500)
 
     def test_direct_dct_defaults_add_only_the_opt_in_flag(self):

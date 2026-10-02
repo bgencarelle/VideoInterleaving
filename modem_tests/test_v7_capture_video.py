@@ -102,6 +102,56 @@ class VideoSourceCommandTests(unittest.TestCase):
                 self.assertEqual(command[command.index('-i')+1], str(path))
                 grab.close()
 
+    def test_untagged_hd_files_are_read_with_the_hd_colour_matrix(self):
+        import shutil
+        import subprocess
+        import numpy as np
+        from tools.v7_capture import untagged_hd_matrix, video_scale_filter
+        if shutil.which('ffmpeg') is None or shutil.which('ffprobe') is None:
+            self.skipTest('ffmpeg/ffprobe not installed')
+        colours = np.array([[255, 0, 0], [0, 255, 0], [0, 0, 255],
+                            [255, 255, 0]], np.uint8)
+
+        def encode(path, size, extra):
+            frame = np.repeat(np.repeat(colours[None], size[1], 0),
+                              size[0]//4, 1)
+            made = subprocess.run(
+                ['ffmpeg', '-v', 'error', '-y', '-f', 'rawvideo',
+                 '-pixel_format', 'rgb24', '-video_size',
+                 f'{size[0]}x{size[1]}', '-framerate', '30', '-i', 'pipe:0',
+                 '-vf', 'scale=out_color_matrix=bt709', '-pix_fmt', 'yuv420p',
+                 '-c:v', 'libx264', '-crf', '10', *extra, str(path)],
+                input=np.tile(frame[None], (3, 1, 1, 1)).tobytes())
+            if made.returncode:
+                self.skipTest('this ffmpeg cannot encode the test clip')
+
+        with tempfile.TemporaryDirectory(dir=ROOT/'tmp') as tmp:
+            hd, tagged, sd = (Path(tmp)/name for name in
+                              ('hd.mp4', 'tagged.mp4', 'sd.mp4'))
+            encode(hd, (1280, 720), [])
+            encode(tagged, (1280, 720), ['-colorspace', 'bt709'])
+            encode(sd, (640, 480), [])
+            self.assertEqual(untagged_hd_matrix(hd), 'bt709')
+            self.assertIsNone(untagged_hd_matrix(tagged))
+            self.assertIsNone(untagged_hd_matrix(sd))
+            self.assertIsNone(untagged_hd_matrix('rtsp://camera.example/live'))
+            self.assertEqual(video_scale_filter(hd, 160, 'bicubic', True),
+                             'scale=in_color_matrix=bt709')
+            self.assertEqual(video_scale_filter(hd, 160, 'bicubic', False),
+                             'scale=160:-2:flags=bicubic:in_color_matrix=bt709')
+            self.assertIsNone(video_scale_filter(sd, 160, 'bicubic', True))
+            grab = video_source(hd, preserve_size=True, realtime=False,
+                                loop=False)
+            try:
+                frame = np.asarray(grab())
+            finally:
+                grab.close()
+            self.assertEqual(frame.shape, (720, 1280, 3))
+            patches = np.array([frame[360, 160+320*i] for i in range(4)], int)
+            # Within compression error of the source colours (the SD matrix
+            # reads green as about (19, 255, 8)).
+            self.assertLess(np.abs(patches-colours).max(), 8)
+
     def test_stream_url_is_neither_looped_nor_file_paced(self):
         process = self.Process()
         with mock.patch('tools.v7_capture.shutil.which', return_value='ffmpeg'), \

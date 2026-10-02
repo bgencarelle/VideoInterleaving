@@ -165,13 +165,19 @@ The GUI offers four wire profiles: **Aspect Fold 500** (stereo, the default),
 frames smaller than the coder grid fall back to the Box resize). For speed it
 is not the full-resolution transform itself: the frame is first averaged in
 pixel blocks to about four times the coder grid (a remainder becomes one
-narrower last block, so nothing is cropped), and the transform of those means
-is corrected for the averaging's known droop. Against the full-resolution
-transform the sent band is 54–56 dB below the picture (the earlier
-two-times, uncorrected version: 39–43 dB, and it cropped up to a block of
+narrower last block, so nothing is cropped), a six-tap filter halves that
+(74 dB rejection of what would alias into the sent band), and the transform
+of the result is corrected for the known droop of both steps. Against the
+full-resolution transform the sent band is 54–56 dB below the picture (the
+earlier two-times block means: 39–43 dB, and they cropped up to a block of
 pixels on sizes that did not divide); what remains is aliasing of detail finer
-than the averaged plane. Sender cost at 1080p with luma adjustment: about
-9 ms per frame (was 4.5); the exact transform takes about 185 ms. Saved
+than the block means. Sender cost per frame, encode / with luma adjustment:
+1080p 3.9 / 4.9 ms, 720p 2.5 / 3.8 ms, 640×480 2.2 / 3.3 ms (the exact
+transform takes about 185 ms at 1080p). **Luma adjustment in linear light**
+(`--luma-adjust-linear`, off by default) aims luma adjustment at the light of
+every source pixel instead of the light of the averaged picture: fine
+patterns keep their true brightness and thin dark outlines get lighter, for
+about 2 ms more at 1080p. Saved
 settings from earlier GUI versions keep everything except the profile, Direct
 DCT encode and the encoder filter, which start at the new defaults once. Under **Advanced**:
 
@@ -226,6 +232,49 @@ shader's bicubic matches the exact viewport evaluation to 77 dB PSNR at 1,080
 lines (nearest: 43 dB) for a fraction of the CPU time. Sender DCT chroma gain 1.05 or 1.1 measured
 no better than 1.0.
 
+Aspect Fold 500's fold carries its 500 guest coefficients companded (μ-law,
+μ = 4, up to 12 model standard deviations; step 1.0). Real pictures' guests
+are heavy-tailed and 1.5 to 5 times the model's standard deviation, and the
+earlier ±2.5 clip lost most of their energy: on the counting video's text on
+black, guest accuracy on a clean channel was 1.8 dB, the decoded picture
+kept a dotted mesh in the black areas, and edge reconstruction could not
+remove it because it keeps every received coefficient. When the packet's
+measured symbol noise passes 0.1 the guests are dropped (the hosts are still
+read as steps) and the display's edge reconstruction fills them in. Real
+modem, black-panel ripple of the counting frame with edge reconstruction at
+75 % (s.d. in 8-bit codes): clean 6.7 → 3.9, hiss −40 8.2 → 6.0, fast
+flutter 8.2 → 5.9, MP3 320 6.8 → 6.9; SSIMULACRA2 (cartoon / robot and test
+card / photos): clean +0.5 / +1.5 / +0.6, hiss +1.6 / +3.3 / +1.4, fast
+flutter +0.3 / 0.0 / +0.6, MP3 320 0.0 / +0.2 / +1.8. This changes the wire:
+sender and receiver must both run this version (a mismatched pair decodes
+the picture with wrong fine luma detail). Fold 500 and the mono profiles are
+unchanged.
+
+**Pixel mode** is for pictures that should arrive as hard pixels, not as a
+smooth picture. Sender: **Pixel encode** (`--pixel-encode`, under Advanced
+with Direct DCT encode) area-averages the frame to the wire's own 40×48 pixel
+grid (20×24 for colour) and sends exactly that small picture's coefficients;
+a source that is a whole multiple of 40×48 (pixel art) passes without any
+resampling. It turns off the enhancements and luma adjustment. **Pixel
+downscale** (`--pixel-detail`) chooses how the frame comes down to that grid:
+**Average** is the area average of the pixels (exact for block art); **Soft**,
+**Cut** and **Crisp** downscale inside the transform instead, sending the
+source's own leading coefficients weighted from an area average's roll-off
+(Soft) through unweighted (Cut) to its inverse (Crisp, which undoes pixel
+repetition and so also returns block art exactly). They hold more detail per
+pixel, and because nothing aliases, hard edges ring: flat areas beside edges
+show a faint mesh that grows from Soft to Crisp. Receiver:
+**DCT reconstruction → Pixel** shows the sent grid as hard pixels (edge
+reconstruction does not apply). Use the **Fold 500** profile: its sent luma
+is exactly the 40×48 rectangle, so brightness arrives pixel for pixel; the
+aspect profiles send an elliptical set and miss the rectangle's corner
+detail. Colour has half the resolution (one colour sample per 2×2 pixels),
+so single-pixel colour detail bleeds. Real modem, 40×48 pixel art, pixels
+whose shown brightness is within 16 of 255 codes of the source: clean
+98–99 %, hiss −40 98–99 %, fast flutter 95–98 %, MP3 320 95–97 %; pixels
+whose full RGB is within 16 codes: 62–79 % clean (the colour limit), 30–60 %
+on MP3 320.
+
 The standalone V7 receiver GUI can be launched with
 `.venv/bin/python -m tools.v7_receiver_gui`. Its **Display grain** choice
 (off by default) adds fine noise, about 2.5/255, only where the decoded picture
@@ -238,8 +287,8 @@ a short total-variation (Chambolle) denoise, the black/white clip and putting
 the received coefficients back (consistent reconstruction, Gerchberg–Papoulis
 style). It removes the ringing ripple and sharpens edges without any wire or
 sender change; natural texture can look slightly smoothed. Numba, one thread:
-**On** works on the coder grid with four rounds (about 2 ms per new picture),
-**High** at twice the grid (about 7 ms). Real modem with luma adjustment,
+**On** works on the coder grid with four rounds (about 1.4 ms per new
+picture), **High** at twice the grid (about 4 ms). Real modem with luma adjustment,
 clean channel, SSIMULACRA2 over no reconstruction (cartoon / robot and test
 card / photos): On +2.7 / +1.2 / +1.6, High +3.1 / +1.4 / +2.7. **Edge
 strength** (75% by default) mixes the rebuild with the plain picture; lower

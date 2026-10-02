@@ -419,9 +419,11 @@ class SharedVideoAudioSource:
                 command += ['-rw_timeout', '10000000']
             command += _realtime_input_options(source, is_live)
             command += ['-i', source, '-map', '0:v:0']
-            if not preserve_size:
-                command += ['-vf',
-                            f'scale={int(width)}:-2:flags={scale_flags}']
+            from tools.v7_capture import video_scale_filter
+            video_filter = video_scale_filter(source, width, scale_flags,
+                                              preserve_size)
+            if video_filter is not None:
+                command += ['-vf', video_filter]
             command += ['-fps_mode', 'passthrough', '-pix_fmt', 'rgb24',
                         '-c:v', 'ppm', '-f', 'image2pipe',
                         str(self.video_path)]

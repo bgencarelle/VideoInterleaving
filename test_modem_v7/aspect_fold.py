@@ -381,6 +381,10 @@ class AspectFoldCodec(FoldCodec):
         self.sd_guest = np.sqrt(np.asarray(tables['guest_lam'], float))
         self.train = []
         self.set_step(step)
+        if ASPECT_COMPAND is not None:
+            self.use_compand(ASPECT_COMPAND['limit'], ASPECT_COMPAND['mu'],
+                             ASPECT_COMPAND['step'],
+                             ASPECT_COMPAND['guest_noise_max'])
         self._set_identity()
 
     def table(self):
@@ -388,6 +392,12 @@ class AspectFoldCodec(FoldCodec):
         table.update({'format': TABLE_FORMAT, 'layout': self.layout,
                       'tail': self.tail, 'aspect_tables_sha256': TABLES_SHA256})
         return table
+
+
+# Companded guests for the aspect profile (see folding.py): step, guest
+# limit (model standard deviations), mu, and the symbol noise past which the
+# guests are dropped. None restores the linear guests of Fold 500.
+ASPECT_COMPAND = {'step': 1.0, 'limit': 12.0, 'mu': 4.0, 'guest_noise_max': .1}
 
 
 @lru_cache(maxsize=1)

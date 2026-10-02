@@ -432,7 +432,8 @@ def _picture_values(model, frame, encode_filter='nearest', brightness=1.05,
     capture_prepared = bool(getattr(frame, 'prepared', False))
     if source_size is not None:
         frame = frame.rgb
-    if dct_encode and not capture_prepared and perceptual_resize == 'off':
+    if (dct_encode and not capture_prepared and perceptual_resize == 'off'
+            and not (dct_options or {}).get('pixel')):
         # The direct encode needs at least the coder grid; a smaller frame
         # (a zoomed-in mouse-follow crop) is prepared by Box resize instead.
         frame_size = (frame.size if isinstance(frame, Image.Image) else
@@ -447,11 +448,20 @@ def _picture_values(model, frame, encode_filter='nearest', brightness=1.05,
         if capture_prepared:
             raise ValueError('--dct-encode requires an unprepared source frame')
         from animation_modem.v7_source_dct import (direct_dct_values,
+                                                   pixel_dct_values,
                                                    source_dct_values)
         rgb = np.asarray(frame.convert('RGB') if isinstance(frame, Image.Image)
                          else frame)
         options = dict(dct_options or {})
-        if (options.pop('aggregation', 'off') == 'off' and
+        pixel_detail = options.pop('pixel_detail', 'average')
+        if options.pop('pixel', False):
+            # Pixel encode: the sent rectangle's own pixels, exactly; no
+            # enhancement and no luma adjustment (they would change them).
+            values = pixel_dct_values(
+                rgb, model.coder.grids, model.coder.shapes,
+                brightness=brightness, gamma=gamma,
+                detail=pixel_detail)
+        elif (options.pop('aggregation', 'off') == 'off' and
                 options.pop('band_profile', 'off') == 'off'):
             # The specified direct encode: tone + block pre-shrink fused in
             # one pass, then small cached DCT products per plane.
@@ -461,10 +471,13 @@ def _picture_values(model, frame, encode_filter='nearest', brightness=1.05,
                 luminance_out=luminance_out, **options)
         else:
             # Research reducers keep the full-resolution analysis path.
+            research = dict(dct_options or {})
+            research.pop('linear_light', None)
+            research.pop('pixel', None)
+            research.pop('pixel_detail', None)
             values, _stats = source_dct_values(
                 rgb, model.coder.grids, model.coder.shapes,
-                brightness=brightness, gamma=gamma,
-                **(dct_options or {}))
+                brightness=brightness, gamma=gamma, **research)
         size = source_size or (rgb.shape[1], rgb.shape[0])
         aspect = P.aspect_wire_code(size)
         if return_resized:
@@ -629,6 +642,9 @@ def _dct_encode_options(args):
         'chroma_gain': float(option('dct_chroma_gain', 1.0)),
         'aggregation': option('dct_aggregation', 'off'),
         'band_profile': option('dct_band_profile', 'off'),
+        'linear_light': bool(option('luma_adjust_linear', False)),
+        'pixel': bool(option('pixel_encode', False)),
+        'pixel_detail': option('pixel_detail', 'average'),
     }
 
 
@@ -3551,6 +3567,28 @@ def parser():
         help=('with --dct-encode: re-fit luma so each pixel keeps the source '
               'brightness with the chroma the receiver will have (keeps '
               'coloured edges from darkening or ringing; sender only)'))
+    send.add_argument(
+        '--pixel-encode', action='store_true',
+        help=('with --dct-encode: send the picture area-averaged to the '
+              "wire's own 40x48 pixel grid, exactly (hard pixels; pixel art "
+              'at a whole multiple of 40x48 passes unchanged). Use the '
+              "fold-500 profile and the receiver's Pixel display. Turns "
+              'off the DCT enhancements and luma adjustment.'))
+    send.add_argument(
+        '--pixel-detail', choices=('average', 'soft', 'cut', 'crisp'),
+        default='average',
+        help=('with --pixel-encode: how the frame is brought down to the '
+              'pixel grid. average: area average of the pixels (exact for '
+              'block art). soft / cut / crisp downscale inside the transform '
+              '(the source\'s own leading coefficients, weighted from an '
+              'area average\'s roll-off to its inverse): more detail per '
+              'pixel, with a faint ringing mesh next to hard edges.'))
+    send.add_argument(
+        '--luma-adjust-linear', action='store_true',
+        help=('with --luma-adjust: aim at the linear light of every source '
+              'pixel instead of the light of the block means (fine patterns '
+              'keep their brightness, thin dark outlines get lighter; about '
+              '2 ms more per 1080p frame)'))
     send.add_argument(
         '--clip-aware-encode', action='store_true',
         help=('re-fit the sent luma coefficients so ringing falls into the '

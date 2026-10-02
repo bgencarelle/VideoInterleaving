@@ -214,6 +214,61 @@ class AspectLayoutTests(unittest.TestCase):
                 self.assertEqual(shown.shape, values.shape)
                 self.assertLess(float(np.mean((shown-values)[:96*80]**2)), .02)
 
+    def _fold_round_trip(self, codec, model, values, sigma, seed=3):
+        """Decode `values` after noise of `sigma` (symbol units) on the hosts."""
+        coeffs = codec.encode_coefficients(values)
+        rng = np.random.default_rng(seed)
+        symbol = (coeffs[codec.hosts]-model.mu[codec.hosts])/codec.sd_host
+        conf = np.ones(len(model.mu))
+        xhat = np.zeros(len(model.mu))
+        xhat[codec.hosts] = codec.sd_host*(
+            symbol+sigma/np.sqrt(codec.power)*rng.standard_normal(codec.M))
+        return codec.decode(coeffs, xhat, conf, fallback=True,
+                            metadata_confirmed=True)
+
+    def test_companded_guests_survive_far_past_the_old_clip(self):
+        base = v7.load_model(TARGET, 'box')
+        wire = AspectFoldWire('3:4', 'chroma')
+        model = wire.model_for(base, '3:4')
+        codec = wire.codec(model)
+        self.assertEqual(codec.compand, (12.0, 4.0))
+        self.assertEqual(codec.table()['compand'], [12.0, 4.0])
+        # Guests of 0.5 to 10 model standard deviations, hosts on the steps.
+        full = np.zeros(codec.grid.off[-1])
+        full[codec.kept] = model.mu
+        data = slice(0, codec.M-codec.signature)
+        sizes = np.linspace(.5, 10, codec.M)*np.where(
+            np.arange(codec.M) % 2, 1, -1)
+        full[codec.guests] = sizes*codec.sd_guest
+        full[codec.kept[codec.hosts]] += codec.sd_host*codec.D*(
+            np.arange(codec.M) % 5-2)
+        values = codec.grid.inverse(full)
+        clean = self._fold_round_trip(codec, model, values, 0.0)
+        np.testing.assert_allclose(clean[codec.guests][data],
+                                   full[codec.guests][data], atol=1e-6)
+        np.testing.assert_allclose(clean[codec.kept[codec.hosts]][data],
+                                   full[codec.kept[codec.hosts]][data],
+                                   atol=1e-6)
+        # A little noise: guests shrink slightly and stay close.
+        noisy = self._fold_round_trip(codec, model, values, .03)
+        error = (noisy[codec.guests][data]-full[codec.guests][data]) / \
+            codec.sd_guest[data]
+        self.assertLess(float(np.sqrt(np.mean(error**2))), 1.0)
+        self.assertLess(codec.last_noise*codec.D, codec.guest_noise_max)
+        # Past guest_noise_max the guests are dropped (the display fills them
+        # in) while the hosts are still read as steps; only a host under a
+        # large guest can slip one.
+        rough = self._fold_round_trip(codec, model, values, .12)
+        self.assertGreater(codec.last_noise*codec.D, codec.guest_noise_max)
+        np.testing.assert_array_equal(rough[codec.guests], 0.0)
+        exact = np.isclose(rough[codec.kept[codec.hosts]][data],
+                           full[codec.kept[codec.hosts]][data], atol=1e-6)
+        self.assertGreater(float(np.mean(exact)), .95)
+        self.assertEqual(codec.last_unfolded_slots, codec.M)
+        # Past noise_max (in steps) the hosts are read plainly as well.
+        self._fold_round_trip(codec, model, values, .45)
+        self.assertEqual(codec.last_unfolded_slots, 0)
+
     def test_mismatched_layouts_have_distinct_fold_signatures(self):
         base = v7.load_model(TARGET, 'box')
         identities = set()

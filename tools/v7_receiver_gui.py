@@ -2372,6 +2372,7 @@ class ReceiverGui:
         plane_textures = []
         plane_texture_shapes = None
         grain_texture = None
+        grain_blank = None
         kernel_textures = {}
         picture_texture_size = None
         picture_texture_mode = None
@@ -2554,6 +2555,16 @@ class ReceiverGui:
                 grain = self.grain_mode != 'off' and grain_texture is not None
                 if grain:
                     grain_texture.use(location=4)
+                else:
+                    # The shader always declares the grain sampler; a driver
+                    # (macOS) warns when its unit holds no texture, so keep a
+                    # one-texel blank there while grain is off.
+                    nonlocal grain_blank
+                    if grain_blank is None:
+                        grain_blank = context.texture(
+                            (1, 1), 1, np.zeros(1, np.float32).tobytes(),
+                            dtype='f4')
+                    grain_blank.use(location=4)
                 float_program['grain_amount'].value = (
                     GRAIN_AMOUNT if grain else 0.0)
                 float_program['grain_seed'].value = int(self.grain_seed)
@@ -2784,6 +2795,8 @@ class ReceiverGui:
                 kernel_texture.release()
             if grain_texture is not None:
                 grain_texture.release()
+            if grain_blank is not None:
+                grain_blank.release()
             if vertex_array is not None:
                 vertex_array.release()
             if float_array is not None:

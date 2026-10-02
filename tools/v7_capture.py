@@ -437,6 +437,53 @@ def video_source_loops(source, live=None):
     return not is_live
 
 
+HD_HEIGHT = 720
+
+
+def untagged_hd_matrix(source):
+    """'bt709' for a local video file whose stream carries no colour-matrix
+    tag and is HD (720 lines or more), else None.
+
+    FFmpeg converts an untagged stream to RGB with the SD (BT.601) matrix at
+    any size; HD material is BT.709 by convention, and reading it as BT.601
+    shifts saturated colours by up to 25 of 255. Tagged streams are converted
+    correctly already. One ffprobe call when the source opens; any failure
+    (no ffprobe, a stream URL, an unreadable file) leaves FFmpeg's default.
+    """
+    source = str(source)
+    if _is_stream_url(source) or shutil.which('ffprobe') is None:
+        return None
+    try:
+        probe = subprocess.run(
+            ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+             '-show_entries', 'stream=height,color_space',
+             '-of', 'default=nw=1', source],
+            capture_output=True, text=True, timeout=5)
+    except Exception:                     # no probe: keep FFmpeg's default
+        return None
+    if probe.returncode != 0:
+        return None
+    fields = dict(line.split('=', 1) for line in probe.stdout.splitlines()
+                  if '=' in line)
+    try:
+        height = int(fields.get('height', ''))
+    except ValueError:
+        return None
+    tagged = fields.get('color_space', 'unknown') not in ('unknown', '')
+    return 'bt709' if height >= HD_HEIGHT and not tagged else None
+
+
+def video_scale_filter(source, width, scale_flags, preserve_size):
+    """The -vf value for a video file or stream (None: no filter needed)."""
+    matrix = untagged_hd_matrix(source)
+    options = []
+    if not preserve_size:
+        options += [f'{int(width)}:-2', f'flags={scale_flags}']
+    if matrix:
+        options.append(f'in_color_matrix={matrix}')
+    return 'scale='+':'.join(options) if options else None
+
+
 def video_source(source, loop=None, realtime=None, width=320,
                  scale_flags='bicubic', live=None, preserve_size=False):
     """Read a local video file in a real-time loop or a live stream URL.
@@ -445,7 +492,8 @@ def video_source(source, loop=None, realtime=None, width=320,
     default. Native live protocols are read as delivered. Set ``live=True``
     for live HLS/HTTP URLs; HLS manifests and direct finite HTTP media remain
     paced to their media timestamps, play once, and end cleanly. PPM carries
-    each output frame's dimensions, so no ffprobe pass is needed.
+    each output frame's dimensions. A local file is probed once for its colour
+    matrix tag (see untagged_hd_matrix).
     """
     if shutil.which('ffmpeg') is None:
         raise SystemExit('ffmpeg not found. brew install ffmpeg / apt install ffmpeg')
@@ -479,8 +527,10 @@ def video_source(source, loop=None, realtime=None, width=320,
         # blocked forever during shutdown or source loss.
         cmd += ['-rw_timeout', '10000000']
     cmd += ['-i', source]
-    if not preserve_size:
-        cmd += ['-vf', f'scale={int(width)}:-2:flags={scale_flags}']
+    video_filter = video_scale_filter(source, width, scale_flags,
+                                      preserve_size)
+    if video_filter is not None:
+        cmd += ['-vf', video_filter]
     cmd += ['-fps_mode', 'passthrough', '-pix_fmt', 'rgb24',
             '-c:v', 'ppm', '-f', 'image2pipe', '-an', '-sn', '-']
 

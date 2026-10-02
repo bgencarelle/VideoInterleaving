@@ -478,47 +478,158 @@ def _axis_blocks(size, block):
     return widths
 
 
+# 2:1 decimation filter between the block means and the transform: six
+# symmetric taps (a, b, c, c, b, a), designed so what would alias into the
+# sent band (above 0.8 of the input's Nyquist) is 74 dB down. Its passband
+# droop (to 0.79 at the top of the sent band) is divided out in the analysis.
+DECIMATE_TAPS = (0.03537128823198011, 0.15996811301904001, 0.3046605987489799)
+
+
+def _decimate_gain(omega):
+    """The decimation filter's gain at ``omega`` radians per input sample."""
+    a, b, c = DECIMATE_TAPS
+    return 2*(a*np.cos(2.5*omega)+b*np.cos(1.5*omega)+c*np.cos(.5*omega))
+
+
 @lru_cache(maxsize=64)
-def _axis_analysis(size, block, modes, grid):
-    """(blocks x modes) analysis of block means along one ``size``-pixel axis.
+def _axis_analysis(size, block, modes, grid, decimated=0):
+    """(samples x modes) analysis of a pre-shrunk plane along one
+    ``size``-pixel axis.
 
     Column k estimates the axis's orthonormal DCT coefficient k, scaled to a
-    ``grid``-sample axis (the coder's ``sqrt(grid/size)``), from the means of
-    its pre-shrink blocks. A block of w pixels centred at c holds the mean of
+    ``grid``-sample axis (the coder's ``sqrt(grid/size)``). The plane's
+    samples are means of ``block``-pixel blocks (a remainder is one narrower
+    last block, so nothing is cropped), then ``decimated`` passes (0, 1 or 2)
+    of the 2:1 decimation filter. A block of w pixels centred at c holds the mean of
     cos(t*(n+.5)), t = pi*k/size, which is cos(t*c)*sin(w*t/2)/(w*sin(t/2));
-    the block's weight is w and the droop factor is divided out, so in-band
-    amplitudes equal the full-resolution transform's (the droop is up to 4 %
-    at the highest sent frequency) and a remainder block keeps the picture's
-    true geometry instead of being cropped. Detail finer than the blocks
-    still aliases; that part cannot be undone here.
+    the filter (edges reflected, as the cosines are) multiplies that by its
+    gain at t*block (a second pass: at 2*t*block). Each sample's weight is its width and both factors are
+    divided out, so in-band amplitudes equal the full-resolution transform's.
+    Detail finer than the block means still aliases; that part cannot be
+    undone here.
     """
+    size, block = int(size), int(block)
     widths = _axis_blocks(size, block).astype(np.float64)
-    centres = np.cumsum(widths)-widths/2
-    theta = np.pi*np.arange(1, int(modes), dtype=np.float64)/int(size)
-    matrix = np.empty((len(widths), int(modes)), dtype=np.float64)
-    matrix[:, 0] = widths*np.sqrt(float(grid))/int(size)
+    theta = np.pi*np.arange(1, int(modes), dtype=np.float64)/size
     half = theta[None, :]/2
-    droop = np.sin(widths[:, None]*half)/(widths[:, None]*np.sin(half))
+    decimated = int(decimated)
+    if decimated:
+        if size % (block << decimated):
+            raise ValueError('decimation needs whole block groups')
+        droop = np.sin(block*half)/(block*np.sin(half))
+        for stage in range(decimated):
+            droop = droop*_decimate_gain(theta*(block << stage))[None, :]
+        widths = np.full(len(widths) >> decimated, float(block << decimated))
+    else:
+        droop = np.sin(widths[:, None]*half)/(widths[:, None]*np.sin(half))
+    centres = np.cumsum(widths)-widths/2
+    matrix = np.empty((len(widths), int(modes)), dtype=np.float64)
+    matrix[:, 0] = widths*np.sqrt(float(grid))/size
     matrix[:, 1:] = (widths[:, None]*np.cos(centres[:, None]*theta[None, :]) /
-                     droop*np.sqrt(2.0*float(grid))/int(size))
+                     droop*np.sqrt(2.0*float(grid))/size)
     matrix.setflags(write=False)
     return matrix
 
 
+@njit(cache=True, fastmath=True, nogil=True)
+def _decimate_axis0(plane, a, b, c):
+    """2:1 along axis 0 with taps (a, b, c, c, b, a), edges reflected."""
+    rows, cols = plane.shape[0]//2, plane.shape[1]
+    last = plane.shape[0]-1
+    out = np.empty((rows, cols))
+    for i in range(rows):
+        i0, i1 = 2*i-2, 2*i-1
+        i4, i5 = 2*i+2, 2*i+3
+        if i0 < 0:
+            i0 = -1-i0
+        if i1 < 0:
+            i1 = -1-i1
+        if i4 > last:
+            i4 = 2*last+1-i4
+        if i5 > last:
+            i5 = 2*last+1-i5
+        for j in range(cols):
+            out[i, j] = (a*(plane[i0, j]+plane[i5, j]) +
+                         b*(plane[i1, j]+plane[i4, j]) +
+                         c*(plane[2*i, j]+plane[2*i+1, j]))
+    return out
+
+
+@njit(cache=True, fastmath=True, nogil=True)
+def _decimate_axis1(plane, a, b, c):
+    """2:1 along axis 1 with taps (a, b, c, c, b, a), edges reflected."""
+    rows, cols = plane.shape[0], plane.shape[1]//2
+    last = plane.shape[1]-1
+    out = np.empty((rows, cols))
+    for i in range(rows):
+        row = plane[i]
+        for j in range(1, cols-1):                 # no edge: vectorises
+            out[i, j] = (a*(row[2*j-2]+row[2*j+3]) +
+                         b*(row[2*j-1]+row[2*j+2]) +
+                         c*(row[2*j]+row[2*j+1]))
+        for j in (0, cols-1):
+            j0, j1 = 2*j-2, 2*j-1
+            j4, j5 = 2*j+2, 2*j+3
+            if j0 < 0:
+                j0 = -1-j0
+            if j1 < 0:
+                j1 = -1-j1
+            if j4 > last:
+                j4 = 2*last+1-j4
+            if j5 > last:
+                j5 = 2*last+1-j5
+            out[i, j] = (a*(row[j0]+row[j5])+b*(row[j1]+row[j4]) +
+                         c*(row[2*j]+row[2*j+1]))
+    return out
+
+
+@njit(cache=True, fastmath=True, nogil=True)
+def _ycbcr_kernel(red, green, blue, chroma_gain):
+    """Y, Cb, Cr planes (JFIF weights) of R, G, B planes in [0, 1]."""
+    rows, cols = red.shape
+    y = np.empty((rows, cols))
+    cb = np.empty((rows, cols))
+    cr = np.empty((rows, cols))
+    for i in range(rows):
+        for j in range(cols):
+            r, g, b = red[i, j], green[i, j], blue[i, j]
+            y[i, j] = .299000*r+.587000*g+.114000*b
+            u = -.168736*r-.331264*g+.5*b
+            v = .5*r-.418688*g-.081312*b
+            if chroma_gain != 1.0:
+                u = min(max(chroma_gain*u, -.5), .5)
+                v = min(max(chroma_gain*v, -.5), .5)
+            cb[i, j] = .5+u
+            cr[i, j] = .5+v
+    return y, cb, cr
+
+
+def _decimate(plane, axis_y, axis_x):
+    """The 2:1 decimation filter on the flagged axes."""
+    plane = np.ascontiguousarray(plane)
+    if axis_x:
+        plane = _decimate_axis1(plane, *DECIMATE_TAPS)
+    if axis_y:
+        plane = _decimate_axis0(plane, *DECIMATE_TAPS)
+    return plane
+
+
 @lru_cache(maxsize=32)
-def _direct_plan(height, width, rows, cols, block_y=1, block_x=1):
+def _direct_plan(height, width, rows, cols, block_y=1, block_x=1,
+                 decimated_y=0, decimated_x=0):
     """Cached matrices for DCT truncation of an h×w source to an r×c grid.
 
     The plane is the source's block means (``block_y``×``block_x`` pixels, 1 =
-    the source itself). ``C = analysis_y @ plane @ analysis_x`` is the
+    the source itself), 2:1 decimated ``decimated_y``/``decimated_x`` times.
+    ``C = analysis_y @ plane @ analysis_x`` is the
     source's leading r×c orthonormal DCT, amplitude-normalized to the grid
     (see _axis_analysis). ``synthesis_y @ C @ synthesis_x`` is the grid's
     inverse DCT, and ``left @ plane @ right`` is both steps folded together.
     """
     analysis_y = np.ascontiguousarray(
-        _axis_analysis(height, block_y, rows, rows).T)
+        _axis_analysis(height, block_y, rows, rows, decimated_y).T)
     analysis_x = np.ascontiguousarray(
-        _axis_analysis(width, block_x, cols, cols))
+        _axis_analysis(width, block_x, cols, cols, decimated_x))
     synthesis_y = np.ascontiguousarray(_dct_matrix(rows, rows))
     synthesis_x = np.ascontiguousarray(_dct_matrix(cols, cols).T)
     left = np.ascontiguousarray(synthesis_y @ analysis_y)
@@ -552,36 +663,102 @@ def _taper_gain(rows, cols, sent_rows, sent_cols, strength):
     return gain
 
 
+# Block sums are accumulated as integers (table values times 2**44): integer
+# adds have no multi-cycle dependency chain, which is what bounds a float
+# running sum. Rounding is 3e-14 per table value; a block may hold 4,096
+# pixels before the sum could overflow.
+FIXED_ONE = float(2**44)
+
+
+@lru_cache(maxsize=16)
+def _tone_lut_fixed(brightness, gamma):
+    table = np.rint(_tone_lut(brightness, gamma)*FIXED_ONE).astype(np.int64)
+    table.setflags(write=False)
+    return table
+
+
 @njit(cache=True, nogil=True)
 def _toned_block_means_u8(data, lut, block_y, block_x, out_rows, out_cols):
-    """Tone uint8 RGB through ``lut`` and average block_y×block_x blocks
-    (the last block on each axis is the remainder, if any).
+    """Tone uint8 RGB through the fixed-point ``lut`` and average
+    block_y×block_x blocks (the last block on each axis is the remainder, if
+    any).
 
     One pass over the frame; returns contiguous R, G, B mean planes.
     """
     height, width = data.shape[0], data.shape[1]
-    result = np.zeros((3, out_rows, out_cols), dtype=np.float64)
+    full_cols = width//block_x
+    tail = width-full_cols*block_x
+    sums = np.zeros((3, out_cols), dtype=np.int64)
+    result = np.empty((3, out_rows, out_cols), dtype=np.float64)
     for by in range(out_rows):
         y0 = by*block_y
-        y1 = min(y0+block_y, height)
-        for y in range(y0, y1):
-            for bx in range(out_cols):
-                red = 0.0
-                green = 0.0
-                blue = 0.0
+        count_y = min(block_y, height-y0)
+        sums[:, :] = 0
+        for dy in range(count_y):
+            y = y0+dy
+            for bx in range(full_cols):
+                red = 0
+                green = 0
+                blue = 0
                 x0 = bx*block_x
-                for x in range(x0, min(x0+block_x, width)):
-                    red += lut[data[y, x, 0]]
-                    green += lut[data[y, x, 1]]
-                    blue += lut[data[y, x, 2]]
-                result[0, by, bx] += red
-                result[1, by, bx] += green
-                result[2, by, bx] += blue
-        for bx in range(out_cols):
-            x0 = bx*block_x
-            scale = 1.0/((y1-y0)*(min(x0+block_x, width)-x0))
-            for channel in range(3):
-                result[channel, by, bx] *= scale
+                for dx in range(block_x):
+                    red += lut[data[y, x0+dx, 0]]
+                    green += lut[data[y, x0+dx, 1]]
+                    blue += lut[data[y, x0+dx, 2]]
+                sums[0, bx] += red
+                sums[1, bx] += green
+                sums[2, bx] += blue
+            for x in range(full_cols*block_x, width):
+                sums[0, full_cols] += lut[data[y, x, 0]]
+                sums[1, full_cols] += lut[data[y, x, 1]]
+                sums[2, full_cols] += lut[data[y, x, 2]]
+        scale = 1.0/(count_y*block_x*FIXED_ONE)
+        for channel in range(3):
+            for bx in range(full_cols):
+                result[channel, by, bx] = sums[channel, bx]*scale
+            if tail:
+                result[channel, by, full_cols] = (
+                    sums[channel, full_cols]/(count_y*tail*FIXED_ONE))
+    return result
+
+
+@njit(cache=True, nogil=True)
+def _block_means_u8(data, gain, block_y, block_x, out_rows, out_cols):
+    """_toned_block_means_u8 for a tone that is a plain gain (no clip, no
+    gamma): the codes themselves are summed, which needs no table."""
+    height, width = data.shape[0], data.shape[1]
+    full_cols = width//block_x
+    tail = width-full_cols*block_x
+    sums = np.zeros((out_cols, 3), dtype=np.int64)
+    result = np.empty((3, out_rows, out_cols), dtype=np.float64)
+    for by in range(out_rows):
+        y0 = by*block_y
+        count_y = min(block_y, height-y0)
+        sums[:, :] = 0
+        for dy in range(count_y):
+            row = data[y0+dy]
+            for bx in range(full_cols):
+                red = 0
+                green = 0
+                blue = 0
+                x0 = bx*block_x
+                for dx in range(block_x):
+                    red += row[x0+dx, 0]
+                    green += row[x0+dx, 1]
+                    blue += row[x0+dx, 2]
+                sums[bx, 0] += red
+                sums[bx, 1] += green
+                sums[bx, 2] += blue
+            for x in range(full_cols*block_x, width):
+                for channel in range(3):
+                    sums[full_cols, channel] += row[x, channel]
+        scale = gain/(count_y*block_x)
+        for channel in range(3):
+            for bx in range(full_cols):
+                result[channel, by, bx] = sums[bx, channel]*scale
+            if tail:
+                result[channel, by, full_cols] = (
+                    sums[full_cols, channel]*gain/(count_y*tail))
     return result
 
 
@@ -604,22 +781,25 @@ def _toned_block_means_luminance_u8(data, lut, linear, block_y, block_x,
     (a one-pixel black/white pattern: 0.21 instead of 0.50).
     """
     height, width = data.shape[0], data.shape[1]
+    full_cols = width//block_x
+    tail = width-full_cols*block_x
     result = np.zeros((3, out_rows, out_cols), dtype=np.float64)
     luminance = np.zeros((out_rows, out_cols), dtype=np.float64)
     for by in range(out_rows):
         y0 = by*block_y
-        y1 = min(y0+block_y, height)
-        for y in range(y0, y1):
+        count_y = min(block_y, height-y0)
+        for dy in range(count_y):
+            y = y0+dy
             for bx in range(out_cols):
                 red = 0.0
                 green = 0.0
                 blue = 0.0
                 light = 0.0
                 x0 = bx*block_x
-                for x in range(x0, min(x0+block_x, width)):
-                    r = data[y, x, 0]
-                    g = data[y, x, 1]
-                    b = data[y, x, 2]
+                for dx in range(block_x if bx < full_cols else tail):
+                    r = data[y, x0+dx, 0]
+                    g = data[y, x0+dx, 1]
+                    b = data[y, x0+dx, 2]
                     red += lut[r]
                     green += lut[g]
                     blue += lut[b]
@@ -629,8 +809,7 @@ def _toned_block_means_luminance_u8(data, lut, linear, block_y, block_x,
                 result[2, by, bx] += blue
                 luminance[by, bx] += light
         for bx in range(out_cols):
-            x0 = bx*block_x
-            scale = 1.0/((y1-y0)*(min(x0+block_x, width)-x0))
+            scale = 1.0/(count_y*(block_x if bx < full_cols else tail))
             luminance[by, bx] *= scale
             for channel in range(3):
                 result[channel, by, bx] *= scale
@@ -640,19 +819,21 @@ def _toned_block_means_luminance_u8(data, lut, linear, block_y, block_x,
 @njit(cache=True, nogil=True)
 def _block_means_f64(data, block_y, block_x, out_rows, out_cols):
     height, width = data.shape[0], data.shape[1]
+    full_cols = width//block_x
+    tail = width-full_cols*block_x
     result = np.zeros((3, out_rows, out_cols), dtype=np.float64)
     for by in range(out_rows):
         y0 = by*block_y
-        y1 = min(y0+block_y, height)
-        for y in range(y0, y1):
+        count_y = min(block_y, height-y0)
+        for dy in range(count_y):
+            y = y0+dy
             for bx in range(out_cols):
                 x0 = bx*block_x
-                for x in range(x0, min(x0+block_x, width)):
+                for dx in range(block_x if bx < full_cols else tail):
                     for channel in range(3):
-                        result[channel, by, bx] += data[y, x, channel]
+                        result[channel, by, bx] += data[y, x0+dx, channel]
         for bx in range(out_cols):
-            x0 = bx*block_x
-            scale = 1.0/((y1-y0)*(min(x0+block_x, width)-x0))
+            scale = 1.0/(count_y*(block_x if bx < full_cols else tail))
             for channel in range(3):
                 result[channel, by, bx] *= scale
     return result
@@ -687,22 +868,6 @@ def _separable(left, plane, right):
 
 
 PRESHRINK_FACTOR = 4
-
-
-@njit(cache=True, nogil=True)
-def _halve(plane, step_y, step_x):
-    """Mean of step_y×step_x blocks (steps of 1 or 2)."""
-    rows, cols = plane.shape[0]//step_y, plane.shape[1]//step_x
-    out = np.zeros((rows, cols))
-    scale = 1.0/(step_y*step_x)
-    for i in range(rows):
-        for dy in range(step_y):
-            for j in range(cols):
-                for dx in range(step_x):
-                    out[i, j] += plane[i*step_y+dy, j*step_x+dx]
-        for j in range(cols):
-            out[i, j] *= scale
-    return out
 
 
 def _direct_planes(rgb, grids, shapes, brightness, gamma, sharpen,
@@ -740,29 +905,41 @@ def _direct_planes(rgb, grids, shapes, brightness, gamma, sharpen,
     if height < max(shape[0] for shape in grids) or \
             width < max(shape[1] for shape in grids):
         raise ValueError('source frame is smaller than the V7 coder grid')
-    # Pre-shrink by division: blocks that leave the plane near
+    # Pre-shrink by division: blocks that leave the means near
     # PRESHRINK_FACTOR times the luma grid on each axis (never under 3x unless
-    # the source is; 1 = no shrink); a remainder is one narrower last block. Detail finer than this plane aliases
-    # into the sent band; at 4x that is 54-56 dB below the picture (2x: 39-43)
-    # and 35-42 dB below the detail in the top half of the sent band (2x:
-    # 21-26), measured against the full-resolution transform.
+    # the source is; 1 = no shrink); a remainder is one narrower last block.
+    # An axis with whole block pairs is then decimated 2:1 by DECIMATE_TAPS,
+    # so the transform runs on a plane near twice the grid. Detail finer than
+    # the block means aliases into the sent band: 54-56 dB below the picture
+    # (plain 2x block means: 39-43) and 35-42 dB below the detail in the top
+    # half of the sent band (2x: 21-26), against the full-resolution
+    # transform.
     luma_rows, luma_cols = grids[0]
+    if max(height, width) > 4096*min(luma_rows, luma_cols):
+        raise ValueError('source frame is too large for the direct encode')
     block_y = max(1, int(height/(PRESHRINK_FACTOR*luma_rows)+.5))
     block_x = max(1, int(width/(PRESHRINK_FACTOR*luma_cols)+.5))
     rows, cols = -(-height//block_y), -(-width//block_x)
+    # (the filter's stopband covers the sent band while the decimated plane
+    # is at least 1.75 times the grid)
+    decimate_y = height % (2*block_y) == 0 and rows//2 >= 1.75*luma_rows
+    decimate_x = width % (2*block_x) == 0 and cols//2 >= 1.75*luma_cols
 
     if data.dtype == np.uint8:
         # One compiled signature for every capture layout (mss hands over
         # strided BGRA->RGB views); the sender's warm-up compiles this one.
         data = np.ascontiguousarray(data)
-        if luminance and len(grids) == 3:
+        if luminance == 'linear' and len(grids) == 3:
             means, light = _toned_block_means_luminance_u8(
                 data, _tone_lut(brightness, gamma),
                 _luminance_luts(brightness, gamma), block_y, block_x,
                 rows, cols)
+        elif gamma == 1.0 and brightness <= 1.0:
+            means = _block_means_u8(data, brightness/255.0, block_y, block_x,
+                                    rows, cols)
         else:
             means = _toned_block_means_u8(
-                data, _tone_lut(brightness, gamma), block_y, block_x,
+                data, _tone_lut_fixed(brightness, gamma), block_y, block_x,
                 rows, cols)
     else:
         toned = np.clip(_rgb_float(data)*brightness, 0.0, 1.0)
@@ -772,29 +949,28 @@ def _direct_planes(rgb, grids, shapes, brightness, gamma, sharpen,
 
     # YCbCr is linear, so converting block means equals averaging the
     # per-pixel conversion.
-    red, green, blue = means
+    if decimate_y or decimate_x:
+        means = [_decimate(plane, decimate_y, decimate_x) for plane in means]
+        rows, cols = means[0].shape
+    red, green, blue = (np.ascontiguousarray(plane) for plane in means)
     target = (source_luminance(means, grids[0], light)
               if luminance and len(grids) == 3 else None)
-    y = .299000*red + .587000*green + .114000*blue
+    y, cb, cr = _ycbcr_kernel(red, green, blue, chroma_gain)
     planes = [y]
-    blocks = [(block_y, block_x)]
+    blocks = [(block_y, block_x, int(decimate_y), int(decimate_x))]
     if len(grids) == 3:
-        cb = .5-.168736*red-.331264*green+.5*blue
-        cr = .5+.5*red-.418688*green-.081312*blue
-        if chroma_gain != 1.0:
-            cb = np.clip(.5+chroma_gain*(cb-.5), 0.0, 1.0)
-            cr = np.clip(.5+chroma_gain*(cr-.5), 0.0, 1.0)
-        # Chroma needs half the luma plane: halve each axis that has whole
-        # block pairs and stays at least twice the chroma grid.
-        step_y = (2 if height % (2*block_y) == 0 and
-                  rows//2 >= 2*grids[1][0] else 1)
-        step_x = (2 if width % (2*block_x) == 0 and
-                  cols//2 >= 2*grids[1][1] else 1)
-        if step_y*step_x > 1:
-            cb = _halve(np.ascontiguousarray(cb), step_y, step_x)
-            cr = _halve(np.ascontiguousarray(cr), step_y, step_x)
+        # Chroma's grid is half luma's: one more decimation where the plane
+        # has whole pairs and stays at least 1.75 times the chroma grid.
+        again_y = (decimate_y and height % (4*block_y) == 0 and
+                   rows//2 >= 1.75*grids[1][0])
+        again_x = (decimate_x and width % (4*block_x) == 0 and
+                   cols//2 >= 1.75*grids[1][1])
+        if again_y or again_x:
+            cb = _decimate(cb, again_y, again_x)
+            cr = _decimate(cr, again_y, again_x)
         planes += [cb, cr]
-        blocks += [(block_y*step_y, block_x*step_x)]*2
+        blocks += [(block_y, block_x, decimate_y+again_y,
+                    decimate_x+again_x)]*2
     # Pixel-domain radii are in luma grid pixels at any source size. Spec
     # order: chroma gain (above), clarity, then usm.
     unit = (rows/luma_rows, cols/luma_cols)
@@ -937,6 +1113,19 @@ def _shown_luminance(luma, cb, cr):
     return _srgb_to_linear(_shown_rgb(luma, cb, cr)) @ LUMINANCE_WEIGHTS
 
 
+@lru_cache(maxsize=8)
+def _received_chroma_plan(rows, cols, luma_rows, luma_cols):
+    """Chroma grid -> its DCT, and that DCT zero-padded -> the luma grid."""
+    scale = (luma_rows*luma_cols/(rows*cols))**.25
+    plan = (np.ascontiguousarray(_dct_matrix(rows, rows).T),
+            np.ascontiguousarray(_dct_matrix(cols, cols)),
+            np.ascontiguousarray(_dct_matrix(luma_rows, rows)*scale),
+            np.ascontiguousarray(_dct_matrix(luma_cols, cols).T*scale))
+    for array in plan:
+        array.setflags(write=False)
+    return plan
+
+
 def received_chroma(values, grids, chroma_sent):
     """The receiver's Cb, Cr on the luma grid: only the sent coefficients,
     evaluated by DCT zero-padding (what DCT reconstruction displays)."""
@@ -945,14 +1134,14 @@ def received_chroma(values, grids, chroma_sent):
     out = []
     for plane, sent in zip((1, 2), chroma_sent):
         rows, cols = grids[plane]
-        grid = np.asarray(values[offsets[plane]:offsets[plane+1]],
-                          np.float64).reshape(rows, cols)
-        coefficients = np.where(np.asarray(sent, bool).reshape(rows, cols),
-                                dctn(grid, norm='ortho'), 0.0)
-        padded = np.zeros((luma_rows, luma_cols))
-        padded[:rows, :cols] = coefficients
-        out.append(idctn(padded, norm='ortho') *
-                   np.sqrt(luma_rows*luma_cols/(rows*cols)))
+        analysis_y, analysis_x, synthesis_y, synthesis_x = \
+            _received_chroma_plan(rows, cols, luma_rows, luma_cols)
+        grid = np.ascontiguousarray(
+            values[offsets[plane]:offsets[plane+1]],
+            dtype=np.float64).reshape(rows, cols)
+        coefficients = _separable(analysis_y, grid, analysis_x)
+        coefficients[~np.asarray(sent, bool).reshape(rows, cols)] = 0.0
+        out.append(_separable(synthesis_y, coefficients, synthesis_x))
     return out
 
 
@@ -1045,6 +1234,149 @@ def warmup_direct_dct(grids, shapes):
         direct_dct_values(data, grids, shapes)
         direct_dct_values(data, grids, shapes, sharpen='taper')
         direct_dct_values(data, grids, shapes, luminance_out=[])
+        direct_dct_values(data, grids, shapes, luminance_out=[],
+                          linear_light=True)
+        direct_dct_values(data, grids, shapes, brightness=1.05)
+
+
+@lru_cache(maxsize=8)
+def _pixel_plan(rows, cols, grid_rows, grid_cols):
+    """rows×cols picture -> the grid values whose DCT is that picture's own
+    DCT, zero-padded (the coder's amplitude scale)."""
+    scale = (grid_rows*grid_cols/(rows*cols))**.25
+    left = np.ascontiguousarray(
+        _dct_matrix(grid_rows, rows) @ _dct_matrix(rows, rows).T*scale)
+    right = np.ascontiguousarray(
+        _dct_matrix(cols, cols) @ _dct_matrix(grid_cols, cols).T*scale)
+    for array in (left, right):
+        array.setflags(write=False)
+    return left, right
+
+
+# Pixel encode downscales. 'average' is the pixel-domain area average. The
+# others downscale inside the transform: the sent rectangle is the source's
+# own leading DCT coefficients, each weighted by droop**p, where droop is the
+# gain an area average has at that frequency. p = +1 ('soft') is the area
+# average without its aliasing; p = 0 ('cut') keeps the coefficients as they
+# are, the most detail the rectangle can hold; p = -1 ('crisp') undoes pixel
+# repetition, which returns block art (a whole multiple of the rectangle)
+# exactly. Without aliasing to mask it, a hard edge rings: flat areas next to
+# edges show a faint mesh that grows from soft to crisp.
+PIXEL_DETAILS = {'average': None, 'soft': 1.0, 'cut': 0.0, 'crisp': -1.0}
+
+
+def _area_gain(count, block):
+    """Gain of a ``block``-pixel area average (any real block >= 1) on the
+    first ``count`` DCT indexes of a count*block-pixel axis."""
+    gain = np.ones(int(count), dtype=np.float64)
+    if block > 1:
+        theta = np.pi*np.arange(1, int(count))/(int(count)*float(block))
+        gain[1:] = np.sin(block*theta/2)/(block*np.sin(theta/2))
+    return gain
+
+
+def _pixel_values_in_dct(rgb, grids, shapes, brightness, gamma, power):
+    data = np.asarray(rgb)
+    height, width = data.shape[:2]
+    planes = direct_dct_coefficients(rgb, grids, shapes,
+                                     brightness=brightness, gamma=gamma)
+    result = np.empty(sum(r*c for r, c in grids), dtype=np.float64)
+    offset = 0
+    for coefficients, (grid_rows, grid_cols), (rows, cols) in zip(
+            planes, grids, shapes):
+        kept = np.zeros((grid_rows, grid_cols))
+        kept[:rows, :cols] = coefficients[:rows, :cols]*np.outer(
+            _area_gain(rows, height/rows)**power,
+            _area_gain(cols, width/cols)**power)
+        grid = _separable(np.ascontiguousarray(_dct_matrix(grid_rows, grid_rows)),
+                          kept,
+                          np.ascontiguousarray(_dct_matrix(grid_cols, grid_cols).T))
+        result[offset:offset+grid.size] = grid.ravel()
+        offset += grid.size
+    return result
+
+
+def pixel_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
+                     detail='average'):
+    """Pixel encode: the frame area-averaged to the sent rectangles
+    (``shapes``: 48x40 luma, 24x20 chroma) and returned as the grid values
+    whose DCT is exactly those small pictures' own DCT.
+
+    A wire that carries each plane's full ``shapes`` rectangle (Fold 500)
+    then delivers the small picture pixel for pixel: a receiver that
+    evaluates the coefficients on that rectangle (the 'pixel' display) gets
+    the sender's pixels back, up to channel noise. A source that is a whole
+    multiple of the luma rectangle passes without any resampling blur.
+    Values are not clipped: the zero-padded picture overshoots at hard edges
+    on the coder grid, and clipping that would change the sent pixels.
+
+    ``detail`` other than 'average' downscales inside the transform instead
+    (PIXEL_DETAILS); a source smaller than the coder grid always uses the
+    average.
+    """
+    if detail not in PIXEL_DETAILS:
+        raise ValueError(f'unknown pixel detail {detail!r}')
+    grids = tuple(tuple(map(int, shape)) for shape in grids)
+    shapes = tuple(tuple(map(int, shape)) for shape in shapes)
+    data = np.asarray(rgb)
+    if data.ndim != 3 or data.shape[2] != 3:
+        raise ValueError('pixel encode expects an HxWx3 RGB frame')
+    if (PIXEL_DETAILS[detail] is not None and
+            data.shape[0] >= max(shape[0] for shape in grids) and
+            data.shape[1] >= max(shape[1] for shape in grids)):
+        return _pixel_values_in_dct(data, grids, shapes, brightness, gamma,
+                                    PIXEL_DETAILS[detail])
+    rows, cols = shapes[0]
+    height, width = data.shape[:2]
+    if height < rows or width < cols:
+        # Smaller than the sent rectangle: repeat pixels up to it.
+        data = np.repeat(np.repeat(data, -(-rows//height), axis=0),
+                         -(-cols//width), axis=1)
+        height, width = data.shape[:2]
+    # Whole blocks that never straddle a sent pixel: the largest block that
+    # divides the source pixels per sent pixel (or, when that is not a whole
+    # number, the source size) and leaves at least four samples per sent pixel.
+    def block_for(size, sent):
+        span = size//sent if size % sent == 0 else size
+        return next(block for block in range(max(1, size//(4*sent)), 0, -1)
+                    if span % block == 0)
+
+    block_y, block_x = block_for(height, rows), block_for(width, cols)
+    mean_rows, mean_cols = height//block_y, width//block_x
+    if data.dtype == np.uint8:
+        data = np.ascontiguousarray(data)
+        if gamma == 1.0 and brightness <= 1.0:
+            means = _block_means_u8(data, brightness/255.0, block_y, block_x,
+                                    mean_rows, mean_cols)
+        else:
+            means = _toned_block_means_u8(
+                data, _tone_lut_fixed(brightness, gamma), block_y, block_x,
+                mean_rows, mean_cols)
+    else:
+        toned = np.clip(_rgb_float(data)*brightness, 0.0, 1.0)
+        if gamma != 1.0:
+            toned = toned**(1.0/gamma)
+        means = _block_means_f64(toned, block_y, block_x, mean_rows,
+                                 mean_cols)
+    red, green, blue = (plane if plane.shape == (rows, cols) else
+                        _area_box_resample(plane, (rows, cols))
+                        for plane in means)
+    planes = _ycbcr_kernel(np.ascontiguousarray(red),
+                           np.ascontiguousarray(green),
+                           np.ascontiguousarray(blue), 1.0)[:len(grids)]
+    result = np.empty(sum(r*c for r, c in grids), dtype=np.float64)
+    offset = 0
+    for plane, (grid_rows, grid_cols), (sent_rows, sent_cols) in zip(
+            planes, grids, shapes):
+        if plane.shape != (sent_rows, sent_cols):
+            plane = _area_box_resample(plane, (sent_rows, sent_cols))
+        left, right = _pixel_plan(sent_rows, sent_cols, grid_rows, grid_cols)
+        grid = _separable(left, np.ascontiguousarray(plane), right)
+        result[offset:offset+grid.size] = grid.ravel()
+        offset += grid.size
+    result *= 2.0
+    result -= 1.0
+    return result
 
 
 def direct_dct_coefficients(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
@@ -1078,21 +1410,25 @@ def direct_dct_coefficients(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
 
 def direct_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
                       sharpen='off', sharpen_strength=.25, clarity=0.0,
-                      chroma_gain=1.0, luminance_out=None):
+                      chroma_gain=1.0, luminance_out=None,
+                      linear_light=False):
     """Direct DCT encode: native RGB frame to the sender's coder-grid values.
 
-    Stages (see the direct-encode spec): tone per pixel at full resolution
-    through a 256-entry table, fused with a block average that leaves the
-    plane at least twice the luma grid; YCbCr on the block means; pixel-
-    domain enhancement; DCT truncation to each grid; optional taper on the
-    luma coefficients; inverse grid DCT; ``clip(2x - 1)``. Returns the
-    concatenated Y/Cb/Cr values in [-1, 1]. A list passed as
+    Stages (see the direct-encode spec): tone per pixel at full resolution,
+    fused with a block average to about four times the luma grid; 2:1
+    decimation filter; YCbCr on the result; pixel-domain enhancement; DCT
+    truncation to each grid with the pre-shrink's droop divided out; optional
+    taper on the luma coefficients; inverse grid DCT; ``clip(2x - 1)``.
+    Returns the concatenated Y/Cb/Cr values in [-1, 1]. A list passed as
     ``luminance_out`` receives the source's linear luminance on the luma grid
-    (the target for luma_adjust).
+    (the target for luma_adjust): the linearised pre-shrunk means, or with
+    ``linear_light`` the mean of every source pixel's linear luminance.
     """
     planes, grids, shapes, taper, target, blocks, source = _direct_planes(
         rgb, grids, shapes, brightness, gamma, sharpen, sharpen_strength,
-        clarity, chroma_gain, luminance=luminance_out is not None)
+        clarity, chroma_gain,
+        luminance=(luminance_out is not None and
+                   ('linear' if linear_light else True)))
     if luminance_out is not None:
         luminance_out.append(target)
     result = np.empty(sum(r*c for r, c in grids), dtype=np.float64)

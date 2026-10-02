@@ -148,14 +148,17 @@ def reconstruct_planes(planes, viewport_size):
 # transmitted information is unchanged; the missing high frequencies are filled
 # in to suit flat-shaded pictures (ringing and the dotted ripple go away, edges
 # sharpen). The default works on the coder grid itself with four rounds (about
-# 2 ms per picture); EDGE_HIGH works at twice the grid (about 7 ms) for a
+# 1.4 ms per picture); EDGE_HIGH works at twice the grid (about 4 ms) for a
 # little more. Real modem with luma adjustment, clean channel, SSIMULACRA2 over
 # no reconstruction (cartoon / robot+test card / photos): default +2.7 / +1.2
 # / +1.6, high +3.1 / +1.4 / +2.7.
 EDGE_FACTOR = 1
 EDGE_ROUNDS = 4
 EDGE_HIGH = {'factor': 2, 'rounds': 4}
-EDGE_INNER = 10                 # Chambolle iterations per round (warm-started)
+# Chambolle iterations per round (warm-started). Two measure the same as ten
+# through the real modem (clean cartoon / robot+card / photos +2.2 / +1.2 /
+# +2.3 against +2.2 / +1.2 / +1.9 at 75 % strength) for a third less time.
+EDGE_INNER = 2
 EDGE_WEIGHT = .05               # TV strength (code units; values span [-1, 1])
 
 

@@ -4361,7 +4361,9 @@ SPLICE_MIN_JUMP = 24            # samples at scale 1: below this, affine map
 SPLICE_MAX_FRACTION = 1.05      # largest lengthening, of PULSE_FRAME
 SPLICE_MIN_LENGTH = .40         # shortest spliced packet, of PULSE_FRAME
 SPLICE_MIN_GAIN = 1.5           # summed CP correlation the cut must add
-SPLICE_INTACT_CP = .9           # below this a symbol is erased
+# Below this a symbol is erased. Clean symbols measure down to 0.90 (their
+# cyclic prefix can hold little energy), so the limit sits clear of that.
+SPLICE_INTACT_CP = .85
 SPLICE_SUSPECT_CP = .95         # body fit this poor: question the EOF
 
 

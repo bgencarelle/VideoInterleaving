@@ -54,7 +54,14 @@ EWA_JINC_RADIUS = 3.2383154841662362
 KAISER_SINC_RADIUS = 3.0
 KAISER_SINC_BETA = 8.6
 HANN_SINC_RADIUS = 3.0
-DCT_RECONSTRUCTION_MODES = ('off', '2x', '4x', '8x', '16x', 'viewport')
+DCT_RECONSTRUCTION_MODES = ('off', '2x', '4x', '8x', '16x', 'viewport', 'pixel')
+# 'pixel' shows the picture on the grid the wire carries in full (half the
+# coder grid per axis: 48x40 luma, 24x20 chroma) as hard pixels, each
+# repeated PIXEL_REPEAT times so the output has the 4x mode's size. With the
+# sender's pixel encode and Fold 500 (whose sent luma is exactly that
+# rectangle) a 40x48 picture arrives pixel for pixel, up to channel noise and
+# half-resolution colour.
+PIXEL_REPEAT = 8
 # Display grain: fine noise in flat picture areas only, where it breaks up the
 # regular ringing ripple of a band-limited picture. Textured areas and edges
 # are left alone. Amplitude: about 2.5/255 standard deviation in luma.
@@ -63,8 +70,8 @@ GRAIN_LABELS = {'off': 'Off', 'flat': 'Flat areas · masks ringing'}
 # Edge reconstruction: rebuild luma as the sharpest, flattest picture that
 # still matches every received coefficient (see
 # animation_modem.v7_dct_display.edge_consistent_plane). Removes the ringing
-# ripple and sharpens edges. 'on' works on the coder grid (about 2 ms per new
-# picture on one core); 'high' works at twice the grid (about 7 ms).
+# ripple and sharpens edges. 'on' works on the coder grid (about 1.4 ms per
+# new picture on one core); 'high' works at twice the grid (about 4 ms).
 EDGE_MODES = ('on', 'high', 'off')
 EDGE_LABELS = {'on': 'Consistent · sharp edges, no ripple · recommended',
                'high': 'Consistent, high · twice the grid, more CPU',
@@ -98,6 +105,7 @@ DCT_RECONSTRUCTION_LABELS = {
     '8x': '8×',
     '16x': '16× · fast PCs',
     'viewport': 'Viewport size',
+    'pixel': 'Pixel · hard pixels on the sent grid',
 }
 
 
@@ -291,6 +299,15 @@ def dct_reconstruct_planes(planes, mode, viewport_size=None, edge=False,
     if not planes or any(plane.ndim != 2 or min(plane.shape) <= 0
                          for plane in planes):
         raise ValueError('DCT reconstruction needs non-empty 2-D planes')
+    if mode == 'pixel':
+        # The sent grid itself, as hard pixels; edge reconstruction does not
+        # apply (nothing is interpolated).
+        from animation_modem.v7_dct_display import reconstruct_plane
+        return tuple(np.ascontiguousarray(np.repeat(np.repeat(
+            reconstruct_plane(plane, (max(1, plane.shape[0]//2),
+                                      max(1, plane.shape[1]//2))),
+            PIXEL_REPEAT, axis=0), PIXEL_REPEAT, axis=1))
+            for plane in planes)
     if edge is True:
         edge = 'on'
     if edge not in (False, None, 'off') and edge not in EDGE_MODES:

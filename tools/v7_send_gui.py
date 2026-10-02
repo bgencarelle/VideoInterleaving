@@ -89,6 +89,12 @@ DOWNSCALER_CHOICES = (
     ('Gamma detail', 'gamma-detail'),
     ('Linear detail', 'linear-detail'),
 )
+PIXEL_DETAIL_CHOICES = (
+    ('Average · exact for block art', 'average'),
+    ('Soft · in the transform', 'soft'),
+    ('Cut · in the transform, most detail', 'cut'),
+    ('Crisp · in the transform, undoes pixel repetition', 'crisp'),
+)
 DCT_SHARPEN_CHOICES = (
     ('Off', 'off'),
     ('Taper · sent band only', 'taper'),
@@ -97,7 +103,8 @@ DCT_SHARPEN_CHOICES = (
 # Direct DCT encode runs the 500-slot folded profiles with the Box filter.
 DCT_PROFILES = FOLDED_PROFILES
 BOOL_FIELDS = ('video_live', 'video_preview', 'image_preview', 'dct_encode',
-               'luma_adjust', 'clip_aware')
+               'luma_adjust', 'luma_adjust_linear', 'pixel_encode',
+               'clip_aware')
 MONO_VIDEO_SIDE_CHOICES = (
     ('Left output · right stays clear', 'left'),
     ('Right output · left stays clear', 'right'),
@@ -153,6 +160,21 @@ FIELD_HELP = {
                     'luminance with the colour the receiver will show. Keeps '
                     'saturated edges from darkening or ringing. Sender only. '
                     'Recommended (default).'),
+    'pixel_encode': ('Send the picture as hard pixels on the wire\'s own '
+                     '40×48 grid, exactly. Pixel art at a whole multiple of '
+                     '40×48 passes unchanged. Use the Fold 500 profile and '
+                     'the receiver\'s Pixel display. Turns off the DCT '
+                     'enhancements and luma adjustment.'),
+    'pixel_detail': ('How Pixel encode brings the frame down to the pixel '
+                     'grid. Average: area average of the pixels, exact for '
+                     'block art. Soft / Cut / Crisp downscale inside the '
+                     'transform: more detail per pixel, with a faint mesh '
+                     'next to hard edges that grows from Soft to Crisp.'),
+    'luma_adjust_linear': ('Luma adjustment aims at the light of every source '
+                           'pixel instead of the light of the averaged '
+                           'picture. Fine patterns keep their true brightness; '
+                           'thin dark outlines get lighter. About 2 ms more '
+                           'per 1080p frame. Off by default.'),
     'clip_aware': ('Re-fit the sent brightness detail so edge ringing falls '
                    'into the receiver\'s black/white clip. Sender only; '
                    'about 2 ms per frame.'),
@@ -192,6 +214,9 @@ FIELD_LABELS = {
     'perceptual_detail_strength': 'Downscaler strength',
     'dct_encode': 'Direct DCT encode',
     'luma_adjust': 'Luma adjustment',
+    'luma_adjust_linear': 'Luma adjustment in linear light',
+    'pixel_encode': 'Pixel encode · hard pixels',
+    'pixel_detail': 'Pixel downscale',
     'clip_aware': 'Clip-aware encode',
     'dct_sharpen': 'DCT sharpen',
     'dct_sharpen_strength': 'DCT sharpen strength',
@@ -294,6 +319,7 @@ SAVED_SETTING_FIELDS = (
     'perceptual_detail_strength', 'dct_encode', 'dct_sharpen',
     'dct_sharpen_strength', 'dct_clarity', 'dct_chroma_gain',
     'aspect_layout', 'aspect_tail', 'clip_aware', 'luma_adjust',
+    'luma_adjust_linear', 'pixel_encode', 'pixel_detail',
 )
 
 
@@ -957,6 +983,9 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
         perceptual_strength = 0.25
     dct_encode = bool(settings.get('dct_encode', False))
     dct_sharpen = settings.get('dct_sharpen', 'off')
+    pixel_detail = settings.get('pixel_detail', 'average')
+    if pixel_detail not in dict(PIXEL_DETAIL_CHOICES).values():
+        raise ValueError('Choose a supported pixel downscale.')
     dct_strength, dct_clarity, dct_chroma_gain = .25, 0.0, 1.0
     if dct_encode:
         if profile not in DCT_PROFILES:
@@ -1096,6 +1125,9 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
         'dct_encode': dct_encode,
         'clip_aware': bool(settings.get('clip_aware', False)),
         'luma_adjust': bool(settings.get('luma_adjust', True)),
+        'luma_adjust_linear': bool(settings.get('luma_adjust_linear', False)),
+        'pixel_encode': bool(settings.get('pixel_encode', False)),
+        'pixel_detail': pixel_detail,
         'aspect_layout': aspect_layout,
         'aspect_tail': aspect_tail,
         'dct_sharpen': dct_sharpen,
@@ -1177,8 +1209,14 @@ def build_command(settings, devices, sd_module=None, python=None,
         if checked['dct_chroma_gain'] != 1.0:
             command.extend(('--dct-chroma-gain',
                             str(checked['dct_chroma_gain'])))
+        if checked['pixel_encode']:
+            command.append('--pixel-encode')
+            if checked['pixel_detail'] != 'average':
+                command.extend(('--pixel-detail', checked['pixel_detail']))
         if checked['luma_adjust']:
             command.append('--luma-adjust')
+            if checked['luma_adjust_linear']:
+                command.append('--luma-adjust-linear')
     if checked['clip_aware']:
         command.append('--clip-aware-encode')
     if checked['capture_fps'] is not None:
@@ -1269,10 +1307,16 @@ class SenderGui:
         'camera', 'screen_target', 'perceptual_resize', 'dct_sharpen',
         'aspect_layout', 'aspect_tail',
     )
+    # The encoder resize filter is not offered: every profile is folded and
+    # folded profiles only encode with Box ('auto'), so the other choice
+    # could only fail validation. --encode-filter remains on the CLI.
     ADVANCED_FIELDS = (
-        'encode_filter', 'perceptual_resize', 'perceptual_detail_strength',
+        'perceptual_resize', 'perceptual_detail_strength',
         'aspect_layout', 'aspect_tail',
-        'dct_encode', 'luma_adjust', 'dct_sharpen', 'dct_sharpen_strength',
+        'dct_encode', 'pixel_encode', 'pixel_detail', 'luma_adjust',
+        'luma_adjust_linear',
+        'dct_sharpen',
+        'dct_sharpen_strength',
         'dct_clarity', 'dct_chroma_gain', 'clip_aware',
         'screen_backend', 'region', 'ffmpeg_input', 'capture_width',
         'capture_filter',
@@ -1321,6 +1365,9 @@ class SenderGui:
             'dct_encode': True,
             'clip_aware': False,
             'luma_adjust': True,
+            'luma_adjust_linear': False,
+            'pixel_encode': False,
+            'pixel_detail': 'average',
             'dct_sharpen': 'off',
             'dct_sharpen_strength': '0.25',
             'dct_clarity': '0',
@@ -1464,6 +1511,8 @@ class SenderGui:
             return ASPECT_TAIL_CHOICES
         if dest == 'dct_sharpen':
             return DCT_SHARPEN_CHOICES
+        if dest == 'pixel_detail':
+            return PIXEL_DETAIL_CHOICES
         if dest == 'camera':
             return self.capture_choice_cache.get(dest, ())
         if dest == 'screen_target':
@@ -1722,8 +1771,24 @@ class SenderGui:
             dest == 'dct_encode' and
             self.settings['profile'] not in DCT_PROFILES or
             dest in ('dct_sharpen', 'dct_clarity', 'dct_chroma_gain',
-                     'luma_adjust') and
+                     'luma_adjust', 'pixel_encode') and
             not self.settings['dct_encode'] or
+            dest == 'pixel_detail' and not (
+                self.settings['dct_encode'] and
+                self.settings.get('pixel_encode')) or
+            # Pixel encode sends the pixels as they are: no enhancement.
+            dest in ('dct_sharpen', 'dct_sharpen_strength', 'dct_clarity',
+                     'dct_chroma_gain', 'luma_adjust',
+                     'luma_adjust_linear') and
+            self.settings.get('pixel_encode') or
+            # Direct DCT encode takes the frame at its own size: the capture
+            # scaler and width do nothing (mouse-follow still uses the width).
+            dest == 'capture_filter' and self.settings['dct_encode'] or
+            dest == 'capture_width' and self.settings['dct_encode'] and
+            source != 'mouse-follow' or
+            dest == 'luma_adjust_linear' and not (
+                self.settings['dct_encode'] and
+                self.settings.get('luma_adjust', True)) or
             dest == 'aspect_layout' and
             self.settings['profile'] not in ASPECT_PROFILES or
             dest == 'aspect_tail' and
