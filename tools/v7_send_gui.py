@@ -1258,8 +1258,13 @@ def build_command(settings, devices, sd_module=None, python=None,
 
     if checked['source'] == 'video':
         command.extend(('--video-source', checked['video_source']))
+        # 'Treat URL as live' is a saved toggle about stream URLs.  Left on,
+        # it must not turn a chosen movie file into live capture, which the
+        # sender refuses ('live capture requires a stream URL').
         if settings.get('video_live'):
-            command.append('--video-live')
+            from tools.v7_capture import _is_stream_url
+            if _is_stream_url(checked['video_source']):
+                command.append('--video-live')
         if settings.get('video_preview'):
             command.append('--preview')
     elif checked['source'] == 'camera':

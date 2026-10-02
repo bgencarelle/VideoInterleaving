@@ -158,8 +158,34 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(command[position+1], '54321')
         self.assertNotIn('--image-preview-stage', command)
 
+    def test_chosen_movie_file_is_not_live_capture(self):
+        from tools.v7_capture import video_source_loops
+        movie = str(Path(__file__).parent/'fixtures'/
+                    'v7_robot_count_sync_test.mp4')
+        # The 'Treat URL as live' toggle is saved; it may still be on.
+        self.settings.update(source='video', video_source=movie,
+                             video_live=True)
+
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+
+        self.assertEqual(args.video_source, movie)
+        self.assertNotIn('--video-live', command)
+        self.assertFalse(args.video_live)
+        # The sender's own check accepts it as a looping file.
+        self.assertTrue(video_source_loops(
+            args.video_source, live=True if args.video_live else None))
+
+        # A stream URL keeps live capture; asking for it on a file still fails.
+        self.settings.update(video_source='rtsp://camera.example/stream')
+        self.assertIn('--video-live',
+                      build_command(self.settings, self.devices, self.sd))
+        with self.assertRaisesRegex(ValueError, 'requires a stream URL'):
+            video_source_loops(movie, live=True)
+
     def test_selected_sample_rate_profile_and_video_path_reach_cli(self):
-        self.settings.update(source='video', video_source='a clip with spaces.mp4',
+        self.settings.update(source='video',
+                             video_source='https://media.example/a clip.mp4',
                              video_live=True, video_preview=True,
                              profile='aspect-fold-500', speed='1.5')
 
@@ -168,7 +194,8 @@ class SenderGuiTests(unittest.TestCase):
 
         self.assertEqual(args.profile, 'aspect-fold-500')
         self.assertIsNone(args.rate)
-        self.assertEqual(args.video_source, 'a clip with spaces.mp4')
+        self.assertEqual(args.video_source,
+                         'https://media.example/a clip.mp4')
         self.assertTrue(args.video_live)
         self.assertTrue(args.preview)
         self.assertIn('--preview', command)
