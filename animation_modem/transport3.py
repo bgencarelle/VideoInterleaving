@@ -16,7 +16,7 @@ HALF = 8
 PREAMBLE_BITS = (0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1, 0, 0)
 PREAMBLE_AMPLITUDE = 0.55
 SHORT, LONG = HALF, 2 * HALF
-EDGE_HYSTERESIS = 0.12
+EDGE_HYSTERESIS = 0.2
 
 # The six current coded-profile IDs use constant-weight biphase words.  Every
 # word keeps the same first/last edge and the same edge count, so pulse timing

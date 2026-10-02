@@ -87,7 +87,7 @@ class MonoVideoWireTests(unittest.TestCase):
             np.ascontiguousarray(audio, dtype='<f4').tobytes()).hexdigest()
         self.assertEqual(
             digest,
-            'e4005e4875c7d3197ef8be865e95bc3fd296fc8c6436fe8dc75d7e2edd1193ce')
+            '3e99e3eadcac6c1ee1b4cd5f01fcadb490bf4e75dcee1be292218e842fa17a0a')
 
     def test_colour_order_keeps_head_and_is_a_permutation(self):
         order = colour_order(self.model)

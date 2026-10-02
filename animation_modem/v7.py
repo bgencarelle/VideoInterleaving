@@ -30,7 +30,7 @@ sys.path.insert(0, str(ROOT))
 from animation_modem import transport3 as PULSE                             # noqa: E402
 from animation_modem.v7_core import (SourceCoder, _sample_at, speed_length,
                                   speed_resample)                  # noqa: E402
-from animation_modem.v7_core import bound_emission                         # noqa: E402
+from animation_modem.v7_core import bound_emission, shape_emission         # noqa: E402
 from animation_modem.v7_input_kernels import (                               # noqa: E402
     _leg_correlation_sums, _mono_gain)
 from animation_modem.v7_metadata_kernels import (                            # noqa: E402
@@ -1100,6 +1100,36 @@ def encode_pulse_frame(model, values, counter, aspect_code=0, source_index=None,
         eof_marker=eof_marker, pulse_profile_code=pulse_profile_code)
 
 
+# Emitted levels. The header's pulses peak HEADER_PEAK_DB below full scale,
+# the same in every packet, and the end marker's pulses are at the header's
+# pulse level. The picture body is scaled down wherever its peak would come
+# within BODY_BELOW_HEADER_DB of the header's peak. The timing tones are
+# added afterwards at a level that follows the body (up to about .06), which
+# puts the header's final peak between .5 and 1 dB below full scale.
+HEADER_PEAK_DB = 1.1
+BODY_BELOW_HEADER_DB = 1.5
+HEADER_PEAK = 10**(-HEADER_PEAK_DB/20)
+BODY_PEAK = HEADER_PEAK*10**(-BODY_BELOW_HEADER_DB/20)
+
+
+@lru_cache(maxsize=16)
+def _shaped_preamble(profile_code):
+    """The band-limited header of one profile, alone in an empty packet."""
+    out = np.zeros((PULSE_FRAME, 2), np.float32)
+    preamble = PULSE.profile_preamble(profile_code)
+    out[16:16+len(preamble), :] = preamble[:, None]
+    shaped = shape_emission(out, EMISSION_EDGE_HZ, RATE)
+    gain = HEADER_PEAK/float(np.max(np.abs(shaped)))
+    shaped = (shaped*np.float32(gain)).astype(np.float32)
+    shaped.setflags(write=False)
+    return shaped, float(PULSE.PREAMBLE_AMPLITUDE*gain)
+
+
+def emitted_pulse_level(profile_code=1):
+    """The level the header's and the end marker's pulses are sent at."""
+    return _shaped_preamble(int(profile_code))[1]
+
+
 def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
                               source_index=None, loop=None, direction=1,
                                pilot_tones=False,
@@ -1113,8 +1143,6 @@ def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
                                right_coeffs=right_coeffs)
     out = np.zeros((PULSE_FRAME, 2), np.float32)
     out[PULSE.SYNC_LEN:PULSE.SYNC_LEN+FRAME] = body
-    preamble = PULSE.profile_preamble(pulse_profile_code)
-    out[16:16+len(preamble), :] = preamble[:, None]
     meta = np.zeros((N//2+1, 2), complex)
     if source_index is None:
         source_index = counter - 1
@@ -1129,7 +1157,16 @@ def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
     # Shape the ordinary pulse/body packet first.  The metadata symbol has its
     # own cyclic prefix and is inserted afterward so the long packet shaper
     # cannot smear the preceding image symbol across its pilots/data.
-    shaped = bound_emission(out, EMISSION_EDGE_HZ, RATE)
+    # The header goes out at one fixed level, the same in every packet, and
+    # the picture body is scaled down wherever its peak would pass
+    # BODY_PEAK: the header is then always the loudest part, so it clips
+    # first. The pilots are in the body and carry its scale to the receiver.
+    shaped = shape_emission(out, EMISSION_EDGE_HZ, RATE)
+    peak = float(np.max(np.abs(shaped)))
+    if peak > BODY_PEAK:
+        shaped *= np.float32(BODY_PEAK/peak)
+    header, pulse_level = _shaped_preamble(int(pulse_profile_code))
+    shaped += header
     shaped[meta_start:meta_start+META_SYMBOL, :] += meta_pcm[:, None]
     if pilot_tones:
         # Add after the per-packet shaper so phase is exact across packets.
@@ -1141,7 +1178,7 @@ def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
         marker = np.concatenate([
             np.full(run, level, np.float32)
             for run, level in zip(EOF_MARKER_RUNS, EOF_MARKER_LEVELS)
-        ])*EOF_MARKER_LEVEL
+        ])*np.float32(pulse_level)
         shaped[EOF_MARKER_OFFSET:PULSE_FRAME, :] += marker[:, None]
     return shaped
 

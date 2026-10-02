@@ -353,6 +353,18 @@ def _fir_filtfilt(b, zi, x):
     return out[edge:-edge]
 
 
+def shape_emission(packet, ceiling_hz, rate=REFERENCE_RATE, taps=EMIT_TAPS):
+    """bound_emission's filter alone: the level is left as the filter gives
+    it, so parts shaped separately keep their levels relative to each other."""
+    packet = np.asarray(packet, np.float32)
+    if not ceiling_hz or ceiling_hz >= rate/2:
+        return packet
+    window, zi = _emission_design(int(taps), float(ceiling_hz), float(rate))
+    if packet.ndim == 2 and len(packet) > 3*len(window):
+        return np.asarray(_fir_filtfilt(window, zi, packet), np.float32)
+    return np.asarray(filtfilt(window, [1.0], packet, axis=0), np.float32)
+
+
 def bound_emission(packet, ceiling_hz, rate=REFERENCE_RATE, taps=EMIT_TAPS):
     """Hold the EMITTED spectrum under `ceiling_hz`, not just the carriers.
 

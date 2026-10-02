@@ -124,6 +124,25 @@ Turn-arounds on a packet boundary:
 - Forward to reverse: the last forward packet is not decoded. The receiver
   next wakes on the reversed packet's trailing preamble and shows that packet.
 
+### 2.4 Emitted levels
+
+The header and the end marker are pulses and serve as the packet's level
+reference, so they are the loudest part of every packet and the picture body
+stays below them:
+
+- The band-limited header's peak is 1.1 dB below full scale, the same in
+  every packet (`HEADER_PEAK_DB`). The end marker's pulses are at the
+  header's pulse level (`emitted_pulse_level`).
+- The body is band-limited separately. If its peak would come within 1.5 dB
+  of the header's peak (`BODY_BELOW_HEADER_DB`) the whole body of that packet
+  is scaled down to that ceiling; otherwise it is sent as coded. The pilots
+  are in the body and carry its scale, so the receiver needs no signal.
+- The timing tones are added afterwards at a level that follows the body.
+  With them the header's peak is between 0.5 and 1 dB below full scale.
+
+The preamble's edge detector uses a Schmitt band of ±0.2 of the nominal
+header amplitude (`EDGE_HYSTERESIS`).
+
 ## 3. OFDM body and stereo mapping
 
 | Parameter | Value |
@@ -371,12 +390,16 @@ Gates (`v7.py`):
 |---|---|
 | Decoded | Head confidence ≥ 0.70 and head coverage ≥ 0.50 |
 | Displayable when not decoded | Head confidence ≥ 0.60 and coverage ≥ 0.50; pilot noise ≤ 2.0 |
-| Accepted (live) | Metadata accepted, head confidence ≥ 0.85, coverage ≥ 0.75, pilot noise ≤ 0.08 |
+| Accepted (live) | Metadata accepted, head confidence ≥ 0.85, coverage ≥ 0.75, pilot noise ≤ 2.0 |
 
 Head confidence is the mean confidence of the 208 head coefficients. Coverage
 is the share of them with confidence at least 0.15. Pilot noise is the larger
 of the two channels' mean pilot residuals, with locally erased symbols
-excluded; it is an absolute number (section 15). A packet that is not accepted
+excluded. It is relative: the residual's power over the power a unit cell
+is received at on the pilot bins, so it does not move with the input level;
+2.0 is noise as strong as the picture signal the model expects. A symbol is
+locally erased when its residual passes 0.08 on that scale and stands well
+above its channel's median or the other channel. A packet that is not accepted
 but is displayable is shown and labelled degraded. A packet that is neither
 leaves the previous picture on screen.
 
@@ -387,7 +410,8 @@ The live input (`v7_live_input.LiveInput`):
 - levels the input before the header search: once per packet it moves a gain
   towards putting the 99.5th percentile of the newest packet at 0.55, limited
   to 0.5× to 32×, rising by at most 1.5× per packet and falling at once. The
-  decoder uses the same gain;
+  loudest samples of a packet are its header's pulses (section 2.4), so the
+  gain is steady whatever the picture. The decoder uses the same gain;
 - scans only audio it has not scanned and keeps one packet of history plus
   one packet and a quarter-packet guard;
 - hands audio to the decoder only when a new header has arrived. In `eof`
@@ -451,10 +475,40 @@ Run from the repository root:
 Do not blanket-discover `tests/`; see `AGENTS.md`. Never send test output to
 physical speakers.
 
+### Required tests
+
+A change to the wire, a wire profile, the sender's levels or the receiver
+must keep these passing, and a new profile must be added to each:
+
+| Requirement | Test |
+|---|---|
+| Reverse torture: every live profile, played backwards through the channel models, shows the same picture as forwards, in descending order | `modem_tests/test_v7_reverse_torture.py` |
+| Speed: every live profile at 0.5×, 1.5× and 2×, forwards and backwards, shows the same picture as at 1× | `modem_tests/test_v7_reverse_torture.py` |
+| Speed acquisition from 0.25× to 4× on the base wire | `modem_tests/test_v7_speed.py` |
+| Reverse acquisition, turn-arounds, slow reverse, tape rocking | `modem_tests/test_v7_reverse.py` |
+| Level independence: the same recording at a quarter and at four times the level decodes to the same statuses | `modem_tests/test_v7_level_independence.py` |
+| Emitted levels: header peak 0.5 to 1 dB under full scale in every packet, body at least 1 dB under the header, nothing over full scale | `modem_tests/test_v7_levels.py` |
+
+The profiles under reverse and speed test are Fold 500, Aspect Fold 500,
+aspect-mono-500 and one channel of stereo-slices; the channel models are
+clean, hiss, wow and flutter, the Type I model and dropouts.
+
+### Comparing designs
+
+A comparison of two designs runs every situation of
+`tools/v7_torture_matrix.py` plus one channel alone, channel dropouts and MP3,
+reports every situation, and treats a situation that gets worse as a
+regression. Report luma error, colour error (CIEDE2000), flicker on stills
+and motion error on a moving source, as change against the shipped profile.
+Noisy situations are run with several seeds and a difference counts only when
+it clears their spread. SSIMULACRA2 is for gross ranking only.
+
 All evidence for this wire is synthetic: unit tests, in-memory loopback and
 simulated impairments (`tools/v7_torture_matrix.py`,
 `tools/v7_timing_bench.py`, `test_modem_v7/`). None of it is tape validation.
-Real tape and deck playback is unvalidated.
+Real tape and deck playback is unvalidated. The `type-i` and `type-ii`
+situations are not faithful tape models: their saturation is the same at all
+frequencies and is driven far harder than a recording level anyone would use.
 
 ## 10. The fold
 
@@ -881,12 +935,15 @@ Receiver:
   channel is decoded only for forward packets.
 - **A partly damaged slices channel is not mixed per slot.** It is dropped
   whole in favour of the clean channel.
-- **The pilot-noise gate depends on input level.** `LIVE_MAX_PILOT_NOISE`
-  (0.08) is a fixed absolute level compared with the pilot residual, and the
-  same constant is the floor of the per-symbol erasure test.
+- **The body is sent quieter when the picture is loud.** A packet whose
+  body would come within 1.5 dB of the header is scaled down (section 2.4),
+  which costs it signal-to-noise on a noisy link.
+- **The receiver does not yet check the body against the header**, nor the
+  end marker's level against the header's.
+- **Reverse playback through a 4 kHz low-pass** shows far fewer pictures than
+  forward playback of the same recording.
 - **Sender level calibration comes from a statistical model.** `unit_rms` is
-  measured on coefficients drawn from the model; real pictures exceed it. Only
-  the `--mono-sum` path has a limiter (0.89).
+  measured on coefficients drawn from the model; real pictures exceed it.
 - **Fold 1000 and baseline are not dispatched automatically.** They need
   `receive --experimental-fold 1000` or `receive --baseline`.
 - **The aspect tail mode is not signalled** (section 14.3).

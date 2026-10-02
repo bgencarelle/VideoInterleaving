@@ -96,7 +96,7 @@ class V7EOFTests(unittest.TestCase):
         expected = np.concatenate([
             np.full(run, level, np.float32)
             for run, level in zip(v7.EOF_MARKER_RUNS, v7.EOF_MARKER_LEVELS)
-        ])*v7.EOF_MARKER_LEVEL
+        ])*np.float32(v7.emitted_pulse_level())
         np.testing.assert_array_equal(
             self.eof_wire[-v7.EOF_MARKER_LENGTH:, 0], expected)
         np.testing.assert_array_equal(
