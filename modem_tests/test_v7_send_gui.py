@@ -354,11 +354,7 @@ class SenderGuiTests(unittest.TestCase):
         gui = SenderGui(self.devices)
         gui.settings.update(source='video', profile='fold-500',
                             dct_encode=False)
-        gui.advanced = True
-        visible_count = ((gui.WINDOW_SIZE[1]-131-137)//gui.ROW_HEIGHT)
-        fields = gui._visible_fields()
-        gui.scroll = max(0, fields.index('perceptual_resize')-
-                         visible_count+1)
+        gui._scroll_to('perceptual_resize')
         gui._canvas((960, 720))
         self.assertIn('field:perceptual_resize', gui.hits)
 
@@ -381,7 +377,6 @@ class SenderGuiTests(unittest.TestCase):
 
     def test_pillow_encoder_filter_is_box_for_every_profile(self):
         gui = SenderGui(self.devices)
-        gui.advanced = True
         # Both choices are Box, so the field is not shown at all.
         self.assertNotIn('encode_filter', gui._visible_fields())
         # Direct DCT encode ignores the capture scaler and width.
@@ -540,8 +535,8 @@ class SenderGuiTests(unittest.TestCase):
         gui = SenderGui(self.devices)
         gui.settings['device'] = 3
         self.assertTrue(gui.settings['dct_encode'])     # the default
-        self.assertNotIn('dct_encode', gui._visible_fields())
-        gui.advanced = True
+        self.assertIn('dct_encode', gui.ADVANCED_FIELDS)
+        self.assertIn('dct_encode', gui._visible_fields())
         gui._assign('dct_encode', False)
         visible = gui._visible_fields()
         self.assertIn('dct_encode', visible)
@@ -600,17 +595,17 @@ class SenderGuiTests(unittest.TestCase):
     def test_aspect_fold_fields_are_advanced_and_profile_specific(self):
         gui = SenderGui(self.devices)
         gui.settings['device'] = 3
-        gui.advanced = True
         gui._assign('profile', 'fold-500')
         self.assertNotIn('aspect_layout', gui._visible_fields())
+        self.assertNotIn('aspect_tail', gui._visible_fields())
         gui._assign('profile', 'aspect-fold-500')
         visible = gui._visible_fields()
         self.assertIn('aspect_layout', visible)
         self.assertIn('aspect_tail', visible)
         self.assertIn('dct_encode', visible)
         self.assertEqual(gui._value_label('aspect_layout'), 'Auto · source aspect')
-        gui.advanced = False
-        self.assertNotIn('aspect_tail', gui._visible_fields())
+        self.assertIn('aspect_layout', gui.BASIC_FIELDS)
+        self.assertIn('aspect_tail', gui.ADVANCED_FIELDS)
 
     def test_aspect_mono_profile_forwards_layout_and_mono_routing_only(self):
         self.settings.update(profile='aspect-mono-500', aspect_layout='4:3',
@@ -626,7 +621,6 @@ class SenderGuiTests(unittest.TestCase):
 
         gui = SenderGui(self.devices)
         gui.settings['device'] = 3
-        gui.advanced = True
         gui._assign('profile', 'aspect-mono-500')
         visible = gui._visible_fields()
         self.assertIn('aspect_layout', visible)
@@ -643,14 +637,12 @@ class SenderGuiTests(unittest.TestCase):
         gui = SenderGui(self.devices)
         gui.settings['device'] = 3
         self.assertFalse(gui.settings['clip_aware'])
-        self.assertNotIn('clip_aware', gui._visible_fields())
-        gui.advanced = True
+        self.assertIn('clip_aware', gui.ADVANCED_FIELDS)
         self.assertIn('clip_aware', gui._visible_fields())
 
     def test_luma_adjustment_is_on_with_direct_dct_and_reaches_the_cli(self):
         gui = SenderGui(self.devices)
         self.assertTrue(gui.settings['luma_adjust'])
-        gui.advanced = True
         self.assertIn('luma_adjust', gui._visible_fields())
         gui.settings['dct_encode'] = False
         self.assertNotIn('luma_adjust', gui._visible_fields())
@@ -1059,7 +1051,6 @@ class SenderGuiTests(unittest.TestCase):
         gui = SenderGui(self.devices)
         gui.settings.update(profile='aspect-fold-500', dct_encode=True,
                             pixel_encode=True)
-        gui.show_advanced = True
         for dest in ('pixel_detail', 'pixel_grid'):
             self.assertIn(dest, gui.DROPDOWN_FIELDS)
             self.assertGreater(len(gui._choices(dest)), 1)
@@ -1182,12 +1173,9 @@ class SenderGuiTests(unittest.TestCase):
         gui = SenderGui(self.devices)
         self.assertEqual(gui.settings['profile'], 'aspect-fold-500')
         self.assertTrue(gui.settings['dct_encode'])
-        self.assertFalse(gui.advanced)
+        self.assertFalse(hasattr(gui, 'advanced'))
         expected = ('aspect-fold-500', 'fold-500', 'aspect-mono-500',
                     'mono-colour-500', 'stereo-slices')
-        self.assertEqual(tuple(value for _label, value in
-                               gui._choices('profile')), expected)
-        gui.advanced = True
         self.assertEqual(tuple(value for _label, value in
                                gui._choices('profile')), expected)
         parser = v7_live.parser()
@@ -1216,7 +1204,10 @@ class SenderGuiTests(unittest.TestCase):
         self.assertNotIn('video_source', visible)
         self.assertNotIn('video_preview', visible)
         self.assertNotIn('camera', visible)
-        self.assertNotIn('screen_backend', visible)
+        self.assertIn('screen_backend', visible)        # advanced section
+        gui.settings['source'] = 'camera'
+        self.assertNotIn('screen_backend', gui._visible_fields())
+        gui.settings['source'] = 'screen'
 
         image = gui._canvas((960, 720))
         self.assertEqual(image.size, (960, 720))
@@ -1567,6 +1558,259 @@ class SenderGuiTests(unittest.TestCase):
         self.assertFalse(controls.update('not json'))
         self.assertEqual(controls.snapshot(),
                          {'brightness': 1.3, 'gamma': 0.9})
+
+
+class SenderGuiButtonLayoutTests(unittest.TestCase):
+    """On/off settings are buttons; Advanced is a section of the page."""
+
+    SIZE = (960, 720)
+
+    def setUp(self):
+        self.devices = (OutputDevice(3, 'Test output', 2, 48000),)
+
+    def _gui(self, **settings):
+        gui = SenderGui(self.devices)
+        gui.settings.update(device=3, source='video',
+                            video_source='clip.mp4', **settings)
+        return gui
+
+    def _click(self, gui, key):
+        rect = gui.hits[key]
+        position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
+        glfw = SimpleNamespace(
+            MOUSE_BUTTON_LEFT=1, PRESS=1,
+            get_cursor_pos=lambda _window: position)
+        gui._on_mouse(glfw, None, 1, 1, 0)
+
+    def _all_hits(self, gui):
+        """Every setting's hit rectangle, gathered by scrolling the page."""
+        found = {}
+        for scroll in range(len(gui._setup_items(self.SIZE[0]))):
+            gui.scroll = scroll
+            gui._canvas(self.SIZE)
+            found.update((key, rect) for key, rect in gui.hits.items()
+                         if key.startswith('field:'))
+        gui.scroll = 0
+        return found
+
+    def test_every_boolean_setting_is_a_button_and_a_click_flips_only_it(self):
+        from tools.v7_send_gui import BOOL_FIELDS
+        seen = set()
+        # Some switches hide others, so cover them over two states.
+        for state in ({}, {'luma_adjust': False, 'pixel_encode': False}):
+            for dest in BOOL_FIELDS:
+                gui = self._gui(**state)
+                if dest not in gui._visible_fields():
+                    continue
+                seen.add(dest)
+                gui._scroll_to(dest, self.SIZE)
+                gui._canvas(self.SIZE)
+                rect = gui.hits[f'field:{dest}']
+                # A button, not a full-width row: several share a line.
+                self.assertLess(rect[2]-rect[0], self.SIZE[0]//2)
+                self.assertGreaterEqual(rect[0], 0)
+                self.assertLessEqual(rect[2], self.SIZE[0])
+                before = dict(gui.settings)
+                self._click(gui, f'field:{dest}')
+                changed = {key for key in before
+                           if gui.settings[key] != before[key]}
+                self.assertEqual(changed, {dest}, dest)
+                self.assertEqual(gui.settings[dest], not before[dest])
+                self.assertIsNone(gui.dropdown)
+                self.assertFalse(gui.editing)
+                gui._canvas(self.SIZE)
+                self._click(gui, f'field:{dest}')
+                self.assertEqual(gui.settings, before)
+        self.assertEqual(seen, set(BOOL_FIELDS))
+
+    def test_buttons_share_lines_and_do_not_overlap(self):
+        gui = self._gui()
+        items = gui._setup_items(self.SIZE[0])
+        button_lines = [payload for kind, payload in items
+                        if kind == 'buttons']
+        self.assertTrue(any(len(line) > 1 for line in button_lines))
+        hits = self._all_hits(gui)
+        gui._scroll_to('clip_aware', self.SIZE)
+        gui._canvas(self.SIZE)
+        rects = [rect for key, rect in gui.hits.items()
+                 if key.startswith('field:')]
+        for index, first in enumerate(rects):
+            for second in rects[index+1:]:
+                self.assertFalse(
+                    first[0] < second[2] and second[0] < first[2] and
+                    first[1] < second[3] and second[1] < first[3],
+                    (first, second))
+        self.assertEqual({key.split(':', 1)[1] for key in hits},
+                         set(gui._visible_fields()))
+        # A narrower window wraps to fewer buttons per line.
+        self.assertLess(gui._button_columns(640), gui._button_columns(960))
+
+    def test_keyboard_still_reaches_and_flips_a_button(self):
+        gui = self._gui()
+        gui.selected = 'dct_encode'
+        gui._on_key(SenderKeyStub, None, SenderKeyStub.KEY_ENTER, 0,
+                    SenderKeyStub.PRESS, 0)
+        self.assertFalse(gui.settings['dct_encode'])
+        gui._on_key(SenderKeyStub, None, SenderKeyStub.KEY_RIGHT, 0,
+                    SenderKeyStub.PRESS, 0)
+        self.assertTrue(gui.settings['dct_encode'])
+        # Down walks every setting in page order and keeps it on the page.
+        gui.selected = gui._visible_fields()[0]
+        for expected in gui._visible_fields()[1:]:
+            gui._on_key(SenderKeyStub, None, SenderKeyStub.KEY_DOWN, 0,
+                        SenderKeyStub.PRESS, 0)
+            self.assertEqual(gui.selected, expected)
+            gui._canvas(self.SIZE)
+            self.assertIn(f'field:{expected}', gui.hits)
+
+    def test_advanced_settings_are_a_section_without_a_toggle(self):
+        gui = self._gui()
+        gui._canvas(self.SIZE)
+        self.assertNotIn('advanced', gui.hits)
+        items = gui._setup_items(self.SIZE[0])
+        self.assertEqual([payload for kind, payload in items
+                          if kind == 'header'], ['Advanced'])
+        header = items.index(('header', 'Advanced'))
+        below = set()
+        for kind, payload in items[header+1:]:
+            below.update(payload if kind == 'buttons' else (payload,))
+        self.assertTrue(below)
+        self.assertLessEqual(below, set(gui.ADVANCED_FIELDS))
+        self.assertEqual(
+            below, set(gui._visible_fields()) & set(gui.ADVANCED_FIELDS))
+        for dest in ('dct_encode', 'clip_aware', 'dct_sharpen',
+                     'aspect_tail', 'dct_clarity'):
+            self.assertIn(dest, below)
+        hits = self._all_hits(gui)
+        for dest in below:
+            self.assertIn(f'field:{dest}', hits)
+        # Non-boolean advanced settings keep their control type.
+        gui._scroll_to('dct_sharpen', self.SIZE)
+        gui._canvas(self.SIZE)
+        self._click(gui, 'field:dct_sharpen')
+        self.assertEqual(gui.dropdown, 'dct_sharpen')
+        gui.dropdown = None
+        gui._scroll_to('dct_clarity', self.SIZE)
+        gui._canvas(self.SIZE)
+        self._click(gui, 'field:dct_clarity')
+        self.assertTrue(gui.editing)
+
+    def test_setup_page_scrolls_by_line_when_it_does_not_fit(self):
+        gui = self._gui()
+        items = gui._setup_items(self.SIZE[0])
+        capacity = gui._setup_capacity(self.SIZE[1])
+        self.assertGreater(len(items), capacity)
+        gui._on_scroll(None, 0, -1)
+        self.assertEqual(gui.scroll, 1)
+        for _ in range(len(items)):
+            gui._on_scroll(None, 0, -1)
+        self.assertEqual(gui.scroll, len(items)-capacity)
+        gui._canvas(self.SIZE)
+        bottom = self.SIZE[1]-gui.SETUP_BOTTOM_MARGIN
+        for key, rect in gui.hits.items():
+            if key.startswith('field:'):
+                self.assertLessEqual(rect[3], bottom)
+
+    def test_aspect_layout_is_basic_for_aspect_profiles_and_reaches_cli(self):
+        sd = Mock()
+        sd.check_output_settings.return_value = None
+        for profile in ('aspect-fold-500', 'aspect-mono-500',
+                        'stereo-slices'):
+            with self.subTest(profile=profile):
+                gui = self._gui(profile=profile)
+                items = gui._setup_items(self.SIZE[0])
+                self.assertLess(items.index(('row', 'aspect_layout')),
+                                items.index(('header', 'Advanced')))
+                gui._scroll_to('aspect_layout', self.SIZE)
+                gui._canvas(self.SIZE)
+                self._click(gui, 'field:aspect_layout')
+                self.assertEqual(gui.dropdown, 'aspect_layout')
+                choices = gui._choices('aspect_layout')
+                self.assertEqual(
+                    tuple(value for _label, value in choices),
+                    ('auto', '1:1', '4:3', '3:2', '16:9', '3:4', '2:3',
+                     '9:16'))
+                gui._canvas(self.SIZE)
+                index = next(index for index, item in enumerate(choices)
+                             if item[1] == '16:9')
+                self._click(gui, f'option:{index}')
+                self.assertEqual(gui.settings['aspect_layout'], '16:9')
+                command = build_command(gui.settings, self.devices, sd)
+                self.assertEqual(
+                    command[command.index('--aspect-layout')+1], '16:9')
+        for profile in ('fold-500', 'mono-colour-500'):
+            with self.subTest(profile=profile):
+                gui = self._gui(profile=profile)
+                self.assertNotIn('aspect_layout', gui._visible_fields())
+                gui._canvas(self.SIZE)
+                self.assertNotIn('field:aspect_layout',
+                                 self._all_hits(gui))
+
+    def test_build_command_is_unchanged_for_a_fixed_settings_dict(self):
+        # Captured from build_command at 3c18b3bad, before the layout change.
+        settings = {
+            'device': 3, 'source': 'screen', 'rate': None,
+            'profile': 'aspect-fold-500', 'mono_video_side': 'right',
+            'source_audio': 'source', 'source_audio_device': None,
+            'source_audio_input_side': 'mix', 'source_audio_gain': '1',
+            'source_audio_delay_ms': '0', 'speed': '1.25',
+            'encode_filter': 'auto', 'brightness': '1.1', 'gamma': '0.9',
+            'capture_fps': '30', 'video_source': '', 'video_preview': False,
+            'image_preview': True, 'video_live': False, 'camera': None,
+            'ffmpeg_input': '', 'screen_backend': 'mss',
+            'screen_target': ScreenTarget(
+                'Display 1 · 1920×1080 · (0,0)', '0,0,1920,1080'),
+            'region': '', 'capture_width': '160', 'capture_filter': 'auto',
+            'perceptual_resize': 'off', 'perceptual_detail_strength': '0.25',
+            'dct_encode': True, 'clip_aware': True, 'luma_adjust': True,
+            'luma_adjust_linear': True, 'pixel_encode': False,
+            'pixel_detail': 'average', 'pixel_grid': 'robust',
+            'dct_sharpen': 'taper', 'dct_sharpen_strength': '0.5',
+            'dct_clarity': '0.15', 'dct_chroma_gain': '1',
+            'aspect_layout': '16:9', 'aspect_tail': 'chroma',
+        }
+        sd = Mock()
+        sd.check_output_settings.return_value = None
+        command = build_command(settings, self.devices, sd, python='python',
+                                image_preview_port=5005)
+        self.assertEqual(command[0], 'python')
+        self.assertEqual(Path(command[1]).parts[-2:], ('tools', 'v7_live.py'))
+        self.assertEqual(command[2:], [
+            'send', '--device', '3', '--source', 'screen', '--profile',
+            'aspect-fold-500', '--aspect-layout', '16:9', '--aspect-tail',
+            'chroma', '--speed', '1.25', '--brightness', '1.1', '--gamma',
+            '0.9', '--dct-encode', '--dct-sharpen', 'taper',
+            '--dct-sharpen-strength', '0.5', '--dct-clarity', '0.15',
+            '--luma-adjust', '--luma-adjust-linear', '--clip-aware-encode',
+            '--capture-fps', '30.0', '--screen-backend', 'mss',
+            '--region=0,0,1920,1080', '--capture-width', '160',
+            '--gui-control', '--image-preview-port', '5005'])
+
+    def test_old_preferences_with_an_advanced_flag_still_load(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary)/'sender.json'
+            path.write_text(json.dumps({
+                'version': 5,
+                'advanced': True,
+                'settings': {'advanced': True, 'source': 'video',
+                             'profile': 'aspect-mono-500',
+                             'aspect_layout': '4:3', 'clip_aware': True,
+                             'video_source': 'clip.mp4'},
+                'output_device': {'name': 'Test output', 'hostapi': ''},
+            }), encoding='utf-8')
+            gui = SenderGui(self.devices, preference_path=path,
+                            restore_preferences=True)
+            self.assertEqual(gui.settings['device'], 3)
+            self.assertEqual(gui.settings['profile'], 'aspect-mono-500')
+            self.assertEqual(gui.settings['aspect_layout'], '4:3')
+            self.assertTrue(gui.settings['clip_aware'])
+            self.assertNotIn('advanced', gui.settings)
+            self.assertEqual(gui._canvas(self.SIZE).size, self.SIZE)
+            gui._persist_preferences()
+            saved = json.loads(path.read_text(encoding='utf-8'))
+        self.assertEqual(saved['version'], 5)
+        self.assertNotIn('advanced', saved['settings'])
+        self.assertEqual(saved['settings']['aspect_layout'], '4:3')
 
 
 if __name__ == '__main__':

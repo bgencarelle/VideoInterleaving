@@ -46,6 +46,9 @@ from tools.v7_gl_viewer import (DISPLAY_LABELS, DISPLAY_MODES,
 
 
 ROW_HEIGHT = 36
+# On/off buttons share a setup line; a line holds as many as fit this width.
+BUTTON_MIN_WIDTH = 290
+BUTTON_GAP = 8
 TOOLBAR_HEIGHT = 54
 INFO_PANEL_FRACTION = 0.40
 COMPACT_INFO_PANEL_FRACTION = 0.46
@@ -672,7 +675,6 @@ class ReceiverGui:
         self.display_menu_index = 0
         self.editing = False
         self.edit_buffer = ''
-        self.advanced_options = False
         self.notice = 'Review the selected input and settings, then start receiving.'
         self.info_scroll = 0
         self.info_follow = True
@@ -1618,73 +1620,48 @@ class ReceiverGui:
         width, height = image.size
         draw.text((24, 70), 'Receiver setup',
                   fill=(240, 245, 249), font=font)
-        intro = ('First available input is selected; change it or review advanced controls.'
+        intro = ('First available input is selected; change it or review '
+                 'the Advanced section below.'
                  if width >= 760 else
                  'Input auto-selected · advanced settings optional')
-        draw.text((24, 98), _fit_text(intro, small, max(80, width-290)),
+        draw.text((24, 98), _fit_text(intro, small, max(80, width-48)),
                   fill=(151, 174, 192), font=small)
         order = self._config_field_indexes()
         top = 140
         bottom = height-(110 if height < 560 else 126)
+        items = self._config_items(width)
         visible = max(1, (bottom-top)//ROW_HEIGHT)
-        self.scroll = max(0, min(self.scroll, max(0, len(order)-visible)))
+        self.scroll = max(0, min(self.scroll, max(0, len(items)-visible)))
         if order and self.selected not in order:
             self.selected = order[0]
-        self.hits['advanced_toggle'] = (width-256, 94, width-14, 124)
-        advanced_label = ('Hide advanced settings' if self.advanced_options else
-                          f'Show advanced settings · {len(self.fields)-len(order)}')
-        draw.rounded_rectangle(self.hits['advanced_toggle'], radius=5,
-                               fill=(22, 35, 46), outline=(67, 100, 122),
-                               width=1)
-        draw.text((width-244, 101), advanced_label,
-                  fill=(196, 216, 229), font=small)
-        for row in range(visible):
-            order_index = self.scroll+row
-            if order_index >= len(order):
-                break
-            index = order[order_index]
-            field = self.fields[index]
+        columns = self._button_columns(width)
+        button_width = (width-28-(columns-1)*BUTTON_GAP)//columns
+        for row, (kind, payload) in enumerate(
+                items[self.scroll:self.scroll+visible]):
             y = top+row*ROW_HEIGHT
-            selected = index == self.selected
-            if selected:
-                draw.rounded_rectangle((14, y, width-14, y+32), radius=4,
-                                       fill=(31, 53, 69),
-                                       outline=(85, 131, 159), width=1)
+            if kind == 'header':
+                draw.text((24, y+10), payload, fill=(240, 245, 249),
+                          font=small)
+                label_right = 24+int(small.getlength(payload))+12
+                draw.line((label_right, y+18, width-14, y+18),
+                          fill=(47, 68, 83), width=1)
+            elif kind == 'buttons':
+                for column, index in enumerate(payload):
+                    left = 14+column*(button_width+BUTTON_GAP)
+                    self._render_button(draw, small, index,
+                                        (left, y, left+button_width, y+32))
             else:
-                draw.rounded_rectangle((14, y, width-14, y+32), radius=4,
-                                       fill=(17, 28, 38),
-                                       outline=(38, 55, 69), width=1)
-            label_color = (220, 231, 239) if not field.locked else (135, 153, 166)
-            draw.text((26, y+8), field.label, fill=label_color, font=small)
-            value_box = (330, y+4, width-28, y+29)
-            if field.kind == 'bool':
-                draw.rounded_rectangle(value_box, radius=4,
-                                       fill=(38, 63, 78) if field.value else (28, 38, 47),
-                                       outline=(65, 91, 108), width=1)
-                value = self._field_value_label(field)
-            elif field.kind == 'choice':
-                draw.rounded_rectangle(value_box, radius=4,
-                                       fill=(21, 35, 47),
-                                       outline=(65, 91, 108), width=1)
-                value = self._field_value_label(field)+'  ▾'
-            elif field.kind == 'folder':
-                draw.rounded_rectangle(value_box, radius=4,
-                                       fill=(21, 35, 47),
-                                       outline=(65, 91, 108), width=1)
-                value = self._field_value_label(field)+'   Browse…'
-            else:
-                draw.rounded_rectangle(value_box, radius=4,
-                                       fill=(21, 35, 47),
-                                       outline=(65, 91, 108), width=1)
-                value = self.edit_buffer if self.editing and index == self.selected else self._field_value_label(field)
-            available = max(8, value_box[2]-value_box[0]-14)
-            while value and small.getlength(value) > available:
-                value = value[:-2]+'…'
-            draw.text((value_box[0]+8, y+8), value,
-                      fill=(236, 242, 247) if not field.locked else (135, 153, 166),
-                      font=small)
-            self.hits[f'row:{index}'] = (14, y, width-14, y+32)
-            self.hits[f'value:{index}'] = value_box
+                self._render_row(draw, small, payload, y, width)
+        if len(items) > visible:
+            # Position marker: the page scrolls by line like the menus.
+            track_top, track_bottom = top, top+visible*ROW_HEIGHT-4
+            span = track_bottom-track_top
+            thumb = max(18, span*visible//len(items))
+            offset = (span-thumb)*self.scroll//max(1, len(items)-visible)
+            draw.rectangle((width-9, track_top, width-6, track_bottom),
+                           fill=(17, 28, 38))
+            draw.rectangle((width-9, track_top+offset, width-6,
+                            track_top+offset+thumb), fill=(85, 131, 159))
 
         if self.dropdown is not None:
             field = self.fields[self.dropdown]
@@ -1695,11 +1672,8 @@ class ReceiverGui:
             first_option = max(
                 0, min(self.dropdown_scroll-max_items+1,
                        max(0, len(menu_items)-max_items)))
-            try:
-                field_position = order.index(self.dropdown)
-            except ValueError:
-                field_position = self.scroll
-            yrow = top+(field_position-self.scroll)*ROW_HEIGHT
+            anchor = self.hits.get(f'row:{self.dropdown}')
+            yrow = anchor[1] if anchor is not None else top
             menu_top = yrow+ROW_HEIGHT
             if menu_top+max_items*29 > bottom:
                 menu_top = max(top, yrow-max_items*29)
@@ -1741,6 +1715,67 @@ class ReceiverGui:
                 if lines:
                     draw.text((24, height-118), lines[0][:150],
                               fill=(123, 148, 168), font=small)
+
+    def _render_button(self, draw, small, index, rect):
+        """One on/off setting: filled when on, outlined and dim when off."""
+        field = self.fields[index]
+        left, top, right, _bottom = rect
+        value = bool(field.value)
+        selected = index == self.selected
+        if field.locked:
+            fill, outline = (28, 38, 47), (65, 91, 108)
+            text = state_text = (135, 153, 166)
+        elif value:
+            fill, outline = (43, 94, 123), (117, 174, 199)
+            text = state_text = (246, 250, 252)
+        else:
+            fill, outline = (12, 21, 29), (47, 68, 83)
+            text, state_text = (151, 174, 192), (110, 132, 148)
+        draw.rounded_rectangle(
+            rect, radius=4, fill=fill,
+            outline=(160, 205, 226) if selected else outline,
+            width=2 if selected else 1)
+        state_left = right-38
+        draw.text((left+12, top+8),
+                  _fit_text(field.label, small, state_left-left-22),
+                  fill=text, font=small)
+        draw.text((state_left, top+8), 'On' if value else 'Off',
+                  fill=state_text, font=small)
+        self.hits[f'row:{index}'] = rect
+
+    def _render_row(self, draw, small, index, y, width):
+        field = self.fields[index]
+        selected = index == self.selected
+        if selected:
+            draw.rounded_rectangle((14, y, width-14, y+32), radius=4,
+                                   fill=(31, 53, 69),
+                                   outline=(85, 131, 159), width=1)
+        else:
+            draw.rounded_rectangle((14, y, width-14, y+32), radius=4,
+                                   fill=(17, 28, 38),
+                                   outline=(38, 55, 69), width=1)
+        label_color = (220, 231, 239) if not field.locked else (135, 153, 166)
+        draw.text((26, y+8), _fit_text(field.label, small, 296),
+                  fill=label_color, font=small)
+        value_box = (330, y+4, width-28, y+29)
+        draw.rounded_rectangle(value_box, radius=4, fill=(21, 35, 47),
+                               outline=(65, 91, 108), width=1)
+        if field.kind == 'choice':
+            value = self._field_value_label(field)+'  ▾'
+        elif field.kind == 'folder':
+            value = self._field_value_label(field)+'   Browse…'
+        else:
+            value = (self.edit_buffer if self.editing and
+                     index == self.selected else
+                     self._field_value_label(field))
+        available = max(8, value_box[2]-value_box[0]-14)
+        while value and small.getlength(value) > available:
+            value = value[:-2]+'…'
+        draw.text((value_box[0]+8, y+8), value,
+                  fill=(236, 242, 247) if not field.locked else (135, 153, 166),
+                  font=small)
+        self.hits[f'row:{index}'] = (14, y, width-14, y+32)
+        self.hits[f'value:{index}'] = value_box
 
     def _diagnostics_visible(self):
         enabled = any(field.value for field in self.fields
@@ -1977,21 +2012,75 @@ class ReceiverGui:
                 self._render_display_menu(image, draw, small)
         return np.ascontiguousarray(np.asarray(image, dtype=np.uint8))
 
-    def _config_field_indexes(self):
-        indexes = []
+    def _config_sections(self):
+        """(title, row indexes, on/off button indexes): basic, advanced."""
+        basic, advanced = [], []
         for index, field in enumerate(self.fields):
-            if (self.advanced_options or field.dest in BASIC_OPTION_DESTS or
+            if (field.dest in BASIC_OPTION_DESTS or
                     field.label in (PIXEL_DISPLAY_LABEL,
                                     'Display upscaler',
                                     'DCT reconstruction',
                                     'Display grain',
                                     'Edge reconstruction',
                                     'Edge strength')):
-                indexes.append(index)
+                basic.append(index)
+            else:
+                advanced.append(index)
+        return tuple(
+            (title,
+             [index for index in group if self.fields[index].kind != 'bool'],
+             [index for index in group if self.fields[index].kind == 'bool'])
+            for title, group in ((None, basic), ('Advanced', advanced)))
+
+    def _config_field_indexes(self):
+        """Every setting in page order (also the keyboard order)."""
+        indexes = []
+        for title, rows, buttons in self._config_sections():
+            indexes.extend(rows+buttons if title is None else buttons+rows)
         return indexes
 
+    def _button_columns(self, width):
+        return max(1, (width-28+BUTTON_GAP)//(BUTTON_MIN_WIDTH+BUTTON_GAP))
+
+    def _config_items(self, width):
+        """Page lines, each ROW_HEIGHT tall: a row, a button row, a header."""
+        columns = self._button_columns(width)
+        items = []
+        for title, rows, buttons in self._config_sections():
+            if not rows and not buttons:
+                continue
+            button_rows = [('buttons', tuple(buttons[start:start+columns]))
+                           for start in range(0, len(buttons), columns)]
+            field_rows = [('row', index) for index in rows]
+            if title is None:
+                items.extend(field_rows+button_rows)
+            else:
+                items.append(('header', title))
+                items.extend(button_rows+field_rows)
+        return items
+
+    def _scroll_to(self, index, size=None):
+        """Scroll the setup page so the line holding a field is in view."""
+        width, height = size or (self.width, self.height)
+        items = self._config_items(width)
+        _top, visible = self._visible_fields(height)
+        position = next((line for line, (kind, payload) in enumerate(items)
+                         if kind == 'row' and payload == index or
+                         kind == 'buttons' and index in payload), None)
+        if position is None:
+            return
+        if position < self.scroll:
+            self.scroll = position
+            # Keep a section header in view above its first line.
+            if position and items[position-1][0] == 'header':
+                self.scroll = position-1
+        elif position >= self.scroll+visible:
+            self.scroll = position-visible+1
+        self.scroll = max(0, min(self.scroll, max(0, len(items)-visible)))
+
     def _visible_fields(self, height):
-        top, bottom = 140, height-126
+        top = 140
+        bottom = height-(110 if height < 560 else 126)
         return top, max(1, (bottom-top)//ROW_HEIGHT)
 
     def _change_page(self):
@@ -2104,14 +2193,6 @@ class ReceiverGui:
                 else:
                     self.editing = True
                     self.edit_buffer = '' if field.value is None else str(field.value)
-            self.dirty = True
-        elif hit == 'advanced_toggle':
-            self.advanced_options = not self.advanced_options
-            self.dropdown = None
-            self.scroll = 0
-            order = self._config_field_indexes()
-            if order and self.selected not in order:
-                self.selected = order[0]
             self.dirty = True
         elif self.dropdown is not None or self.display_menu_open:
             self.dropdown = None
@@ -2282,11 +2363,7 @@ class ReceiverGui:
                 position = max(0, min(len(order)-1, position+delta))
                 if order:
                     self.selected = order[position]
-                top, visible = self._visible_fields(self.height)
-                if position < self.scroll:
-                    self.scroll = position
-                elif position >= self.scroll+visible:
-                    self.scroll = position-visible+1
+                    self._scroll_to(self.selected)
             self.dirty = True
         elif key in (glfw.KEY_UP, glfw.KEY_DOWN) and self.page == 'info':
             if key == glfw.KEY_DOWN:
@@ -2367,7 +2444,7 @@ class ReceiverGui:
                        self.dropdown_scroll+delta))
         elif self.page == 'config':
             _top, visible = self._visible_fields(self.height)
-            self.scroll = max(0, min(max(0, len(self._config_field_indexes())-visible),
+            self.scroll = max(0, min(max(0, len(self._config_items(self.width))-visible),
                                      self.scroll+delta))
         else:
             if delta > 0:

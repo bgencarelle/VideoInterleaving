@@ -1331,12 +1331,17 @@ class SenderGui:
     WINDOW_SIZE = (960, 720)
     TOOLBAR = 54
     ROW_HEIGHT = 36
+    # On/off buttons share a row; a row holds as many as fit this width.
+    BUTTON_MIN_WIDTH = 290
+    BUTTON_GAP = 8
+    SETUP_TOP = 137
+    SETUP_BOTTOM_MARGIN = 95
     BASIC_FIELDS = (
         'device', 'source', 'video_source', 'video_preview', 'image_preview',
         'video_live', 'camera',
         'screen_target', 'source_audio', 'source_audio_device',
         'source_audio_input_side', 'source_audio_gain',
-        'source_audio_delay_ms', 'capture_fps', 'profile',
+        'source_audio_delay_ms', 'capture_fps', 'profile', 'aspect_layout',
         'mono_video_side', 'brightness', 'gamma', 'speed',
     )
     DROPDOWN_FIELDS = (
@@ -1349,9 +1354,10 @@ class SenderGui:
     # The encoder resize filter is not offered: every profile is folded and
     # folded profiles only encode with Box ('auto'), so the other choice
     # could only fail validation. --encode-filter remains on the CLI.
+    # The advanced settings are a labelled section of the same page.
     ADVANCED_FIELDS = (
         'perceptual_resize', 'perceptual_detail_strength',
-        'aspect_layout', 'aspect_tail',
+        'aspect_tail',
         'dct_encode', 'pixel_encode', 'pixel_detail', 'pixel_grid',
         'luma_adjust', 'luma_adjust_linear',
         'dct_sharpen',
@@ -1419,15 +1425,6 @@ class SenderGui:
         if restore_preferences and self.preference_path is not None:
             self._restore_preferences()
         self.page = 'setup'
-        # Open on the advanced page only when a non-default advanced
-        # option is in use.
-        self.advanced = bool(
-            self.settings.get('perceptual_resize', 'off') != 'off' or
-            self.settings.get('dct_sharpen', 'off') != 'off' or
-            self.settings.get('clip_aware') or
-            self.settings.get('aspect_layout', 'auto') != 'auto' or
-            self.settings.get('aspect_tail', DEFAULT_ASPECT_TAIL) !=
-            DEFAULT_ASPECT_TAIL)
         self.selected = 'device'
         self.scroll = 0
         self.dropdown = None
@@ -1522,14 +1519,7 @@ class SenderGui:
             return self.capture_choice_cache.get(
                 dest, _fps_choices(()))
         if dest == 'profile':
-            choices = (PROFILE_CHOICES if self.advanced else
-                       PRIMARY_PROFILE_CHOICES)
-            selected = self.settings.get('profile')
-            if (selected not in {value for _label, value in choices} and
-                    selected in {value for _label, value in PROFILE_CHOICES}):
-                choices += tuple(item for item in PROFILE_CHOICES
-                                 if item[1] == selected)
-            return choices
+            return PROFILE_CHOICES
         if dest == 'encode_filter':
             if self.settings.get('profile') in FOLDED_PROFILES:
                 return FILTER_CHOICES[:2]
@@ -1794,9 +1784,70 @@ class SenderGui:
         return self._sd
 
     def _visible_fields(self):
-        fields = list(self.BASIC_FIELDS)
-        if self.advanced:
-            fields.extend(self.ADVANCED_FIELDS)
+        """Shown settings in page order (also the keyboard order)."""
+        fields = []
+        for title, rows, buttons in self._setup_sections():
+            # Advanced leads with its switches: they decide which rows show.
+            fields.extend(rows+buttons if title is None else buttons+rows)
+        return fields
+
+    def _setup_sections(self):
+        """(title, rows, on/off buttons) for the basic and advanced parts."""
+        sections = []
+        for title, group in ((None, self.BASIC_FIELDS),
+                             ('Advanced', self.ADVANCED_FIELDS)):
+            shown = self._shown_fields(group)
+            sections.append((
+                title,
+                [dest for dest in shown if dest not in BOOL_FIELDS],
+                [dest for dest in shown if dest in BOOL_FIELDS]))
+        return sections
+
+    def _button_columns(self, width):
+        return max(1, (width-36+self.BUTTON_GAP)//
+                   (self.BUTTON_MIN_WIDTH+self.BUTTON_GAP))
+
+    def _setup_items(self, width):
+        """Page lines, each ROW_HEIGHT tall: a row, a button row, a header."""
+        columns = self._button_columns(width)
+        items = []
+        for title, rows, buttons in self._setup_sections():
+            if not rows and not buttons:
+                continue
+            button_rows = [('buttons', tuple(buttons[start:start+columns]))
+                           for start in range(0, len(buttons), columns)]
+            field_rows = [('row', dest) for dest in rows]
+            if title is None:
+                items.extend(field_rows+button_rows)
+            else:
+                items.append(('header', title))
+                items.extend(button_rows+field_rows)
+        return items
+
+    def _setup_capacity(self, height):
+        return max(1, (height-self.SETUP_BOTTOM_MARGIN-self.SETUP_TOP)//
+                   self.ROW_HEIGHT)
+
+    def _scroll_to(self, dest, size=None):
+        """Scroll the setup page so the line holding dest is in view."""
+        width, height = size or (self.width, self.height)
+        items = self._setup_items(width)
+        capacity = self._setup_capacity(height)
+        position = next((index for index, (kind, payload) in enumerate(items)
+                         if kind == 'row' and payload == dest or
+                         kind == 'buttons' and dest in payload), None)
+        if position is None:
+            return
+        if position < self.scroll:
+            self.scroll = position
+            # Keep a section header in view above its first line.
+            if position and items[position-1][0] == 'header':
+                self.scroll = position-1
+        elif position >= self.scroll+capacity:
+            self.scroll = position-capacity+1
+        self.scroll = max(0, min(self.scroll, max(0, len(items)-capacity)))
+
+    def _shown_fields(self, fields):
         source = self.settings['source']
         fields = [dest for dest in fields if not (
             dest == 'video_source' and source != 'video' or
@@ -1858,6 +1909,9 @@ class SenderGui:
                 self.settings['source_audio'] != 'off') or
             dest == 'capture_width' and source not in ('screen', 'video', 'mouse-follow'))]
         return fields
+
+    def _button_label(self, dest):
+        return FIELD_LABELS.get(dest, dest.replace('_', ' ').capitalize())
 
     def _value_label(self, dest):
         value = self.settings[dest]
@@ -2308,52 +2362,42 @@ class SenderGui:
         draw.text((24, 101), 'No capture or audio stream opens until Start.',
                   font=small, fill=(133, 159, 177))
         fields = self._visible_fields()
-        row_top, row_bottom = 137, height-131
-        visible_count = max(1, (row_bottom-row_top)//self.ROW_HEIGHT)
-        self.scroll = max(0, min(self.scroll, max(0, len(fields)-visible_count)))
+        items = self._setup_items(width)
+        row_top = self.SETUP_TOP
+        visible_count = self._setup_capacity(height)
+        self.scroll = max(0, min(self.scroll, max(0, len(items)-visible_count)))
         if self.selected not in fields and fields:
             self.selected = fields[0]
-        shown_fields = fields[self.scroll:self.scroll+visible_count]
-        for visible_index, dest in enumerate(shown_fields):
+        columns = self._button_columns(width)
+        button_width = (width-36-(columns-1)*self.BUTTON_GAP)//columns
+        shown_items = items[self.scroll:self.scroll+visible_count]
+        for visible_index, (kind, payload) in enumerate(shown_items):
             y = row_top+visible_index*self.ROW_HEIGHT
-            selected = dest == self.selected
-            fill = (35, 60, 77) if selected else (17, 29, 39)
-            draw.rounded_rectangle((18, y, width-18, y+self.ROW_HEIGHT-3),
-                                   radius=4, fill=fill,
-                                   outline=(74, 111, 134) if selected else (32, 48, 60),
-                                   width=1)
-            label = FIELD_LABELS.get(
-                dest, dest.replace('_', ' ').capitalize())
-            value_left = max(300, int(width*.37))
-            draw.text((30, y+10), label, font=small, fill=(205, 218, 228))
-            value = self.edit_buffer if self.editing and dest == self.selected else self._value_label(dest)
-            if dest == 'video_source':
-                browse_left = width-104
-                value = _fit(value, small, browse_left-value_left-14)
-                browse_rect = (browse_left, y+4, width-26, y+self.ROW_HEIGHT-7)
-                draw.rounded_rectangle(browse_rect, radius=4, fill=(30, 58, 76),
-                                       outline=(75, 111, 132), width=1)
-                draw.text((browse_left+10, y+10), 'Browse', font=small,
-                          fill=(229, 239, 246))
-                self.hits['browse:video_source'] = browse_rect
-                field_right = browse_left-8
+            if kind == 'header':
+                draw.text((24, y+12), payload, font=small,
+                          fill=(229, 237, 243))
+                label_right = 24+int(small.getlength(payload))+12
+                draw.line((label_right, y+20, width-18, y+20),
+                          fill=(47, 68, 83), width=1)
+            elif kind == 'buttons':
+                for column, dest in enumerate(payload):
+                    left = 18+column*(button_width+self.BUTTON_GAP)
+                    self._render_button(
+                        draw, small, dest,
+                        (left, y, left+button_width, y+self.ROW_HEIGHT-3))
             else:
-                value = _fit(value, small, width-value_left-45)
-                field_right = width-18
-            draw.text((value_left, y+10), value,
-                      font=small, fill=(237, 242, 246))
-            draw.text((width-40, y+9), '▾' if dest in self.DROPDOWN_FIELDS else '',
-                font=small, fill=(134, 169, 188))
-            self.hits[f'field:{dest}'] = (
-                18, y, field_right, y+self.ROW_HEIGHT-3)
-
-        toggle_y = height-123
-        draw.rounded_rectangle((22, toggle_y, 154, toggle_y+28), radius=4,
-                               fill=(24, 41, 54), outline=(63, 91, 108))
-        draw.text((34, toggle_y+6),
-                  'Advanced  On' if self.advanced else 'Advanced  Off',
-                  font=small, fill=(205, 218, 228))
-        self.hits['advanced'] = (22, toggle_y, 154, toggle_y+28)
+                self._render_row(draw, small, payload, y, width)
+        if len(items) > visible_count:
+            # Position marker: the page scrolls by line like the dropdowns.
+            track_top = row_top
+            track_bottom = row_top+visible_count*self.ROW_HEIGHT-3
+            span = track_bottom-track_top
+            thumb = max(18, span*visible_count//len(items))
+            offset = (span-thumb)*self.scroll//max(1, len(items)-visible_count)
+            draw.rectangle((width-11, track_top, width-8, track_bottom),
+                           fill=(17, 29, 39))
+            draw.rectangle((width-11, track_top+offset, width-8,
+                            track_top+offset+thumb), fill=(74, 111, 134))
 
         help_text = FIELD_HELP.get(self.selected, '')
         help_top = height-87
@@ -2364,6 +2408,60 @@ class SenderGui:
 
         if self.dropdown is not None:
             self._render_dropdown(draw, small, width, height)
+
+    def _render_button(self, draw, small, dest, rect):
+        """One on/off setting: filled when on, outlined and dim when off."""
+        left, top, right, _bottom = rect
+        value = bool(self.settings[dest])
+        selected = dest == self.selected
+        draw.rounded_rectangle(
+            rect, radius=4,
+            fill=(43, 94, 123) if value else (12, 21, 29),
+            outline=(160, 205, 226) if selected else
+            (98, 145, 169) if value else (47, 68, 83),
+            width=2 if selected else 1)
+        state = 'On' if value else 'Off'
+        state_left = right-38
+        draw.text((left+12, top+10),
+                  _fit(self._button_label(dest), small, state_left-left-22),
+                  font=small,
+                  fill=(246, 250, 252) if value else (133, 159, 177))
+        draw.text((state_left, top+10), state, font=small,
+                  fill=(246, 250, 252) if value else (110, 132, 148))
+        self.hits[f'field:{dest}'] = rect
+
+    def _render_row(self, draw, small, dest, y, width):
+        selected = dest == self.selected
+        fill = (35, 60, 77) if selected else (17, 29, 39)
+        draw.rounded_rectangle((18, y, width-18, y+self.ROW_HEIGHT-3),
+                               radius=4, fill=fill,
+                               outline=(74, 111, 134) if selected else (32, 48, 60),
+                               width=1)
+        label = FIELD_LABELS.get(
+            dest, dest.replace('_', ' ').capitalize())
+        value_left = max(300, int(width*.37))
+        draw.text((30, y+10), _fit(label, small, value_left-42), font=small,
+                  fill=(205, 218, 228))
+        value = self.edit_buffer if self.editing and dest == self.selected else self._value_label(dest)
+        if dest == 'video_source':
+            browse_left = width-104
+            value = _fit(value, small, browse_left-value_left-14)
+            browse_rect = (browse_left, y+4, width-26, y+self.ROW_HEIGHT-7)
+            draw.rounded_rectangle(browse_rect, radius=4, fill=(30, 58, 76),
+                                   outline=(75, 111, 132), width=1)
+            draw.text((browse_left+10, y+10), 'Browse', font=small,
+                      fill=(229, 239, 246))
+            self.hits['browse:video_source'] = browse_rect
+            field_right = browse_left-8
+        else:
+            value = _fit(value, small, width-value_left-45)
+            field_right = width-18
+        draw.text((value_left, y+10), value,
+                  font=small, fill=(237, 242, 246))
+        draw.text((width-40, y+9), '▾' if dest in self.DROPDOWN_FIELDS else '',
+                  font=small, fill=(134, 169, 188))
+        self.hits[f'field:{dest}'] = (
+            18, y, field_right, y+self.ROW_HEIGHT-3)
 
     def _render_dropdown(self, draw, small, width, height):
         dest = self.dropdown
@@ -2617,13 +2715,6 @@ class SenderGui:
                 self._open_source_picker()
         elif hit in ('preview_stage:source', 'preview_stage:resized'):
             self._assign('preview_stage', hit.rsplit(':', 1)[1])
-        elif hit == 'advanced':
-            if self.process is not None:
-                self.notice = 'Settings are locked while the sender is running.'
-            else:
-                self.advanced = not self.advanced
-                self.scroll = 0
-                self.dropdown = None
         elif hit == 'browse:video_source':
             if self.process is not None:
                 self.notice = 'Settings are locked while the sender is running.'
@@ -2730,12 +2821,7 @@ class SenderGui:
                 position = max(0, min(len(fields)-1, position+
                                        (1 if key == glfw.KEY_DOWN else -1)))
                 self.selected = fields[position]
-                row_top, row_bottom = 137, self.height-131
-                visible_count = max(1, (row_bottom-row_top)//self.ROW_HEIGHT)
-                if position < self.scroll:
-                    self.scroll = position
-                elif position >= self.scroll+visible_count:
-                    self.scroll = position-visible_count+1
+                self._scroll_to(self.selected)
             elif key in (glfw.KEY_LEFT, glfw.KEY_RIGHT) and self.selected in fields:
                 dest = self.selected
                 if dest in BOOL_FIELDS:
@@ -2770,10 +2856,10 @@ class SenderGui:
             self.dropdown_scroll = max(
                 0, min(max(0, len(options)-1), self.dropdown_scroll+delta))
         elif self.page == 'setup':
-            visible_count = max(
-                1, (self.height-131-137)//self.ROW_HEIGHT)
+            visible_count = self._setup_capacity(self.height)
             self.scroll = max(
-                0, min(max(0, len(self._visible_fields())-visible_count),
+                0, min(max(0, len(self._setup_items(self.width))-
+                           visible_count),
                        self.scroll+delta))
         self.dirty = True
 

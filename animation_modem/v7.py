@@ -1059,8 +1059,9 @@ def encode_pulse_frame(model, values, counter, aspect_code=0, source_index=None,
 # pulse level. The picture body is scaled down wherever its peak would come
 # within BODY_BELOW_HEADER_DB of the header's peak. The timing tones are
 # added afterwards at a level that follows the body (up to about .06), which
-# puts the header's final peak between .5 and 1 dB below full scale.
-HEADER_PEAK_DB = 1.1
+# puts the header's final peak about 2.5 dB below full scale. A header
+# nearer full scale costs lossy codecs frames (MP3 192 and below).
+HEADER_PEAK_DB = 3.0
 BODY_BELOW_HEADER_DB = 1.5
 HEADER_PEAK = 10**(-HEADER_PEAK_DB/20)
 BODY_PEAK = HEADER_PEAK*10**(-BODY_BELOW_HEADER_DB/20)

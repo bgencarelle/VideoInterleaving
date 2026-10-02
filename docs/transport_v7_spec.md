@@ -130,7 +130,7 @@ The header and the end marker are pulses and serve as the packet's level
 reference, so they are the loudest part of every packet and the picture body
 stays below them:
 
-- The band-limited header's peak is 1.1 dB below full scale, the same in
+- The band-limited header's peak is 3 dB below full scale, the same in
   every packet (`HEADER_PEAK_DB`). The end marker's pulses are at the
   header's pulse level (`emitted_pulse_level`).
 - The body is band-limited separately. If its peak would come within 1.5 dB
@@ -138,7 +138,8 @@ stays below them:
   is scaled down to that ceiling; otherwise it is sent as coded. The pilots
   are in the body and carry its scale, so the receiver needs no signal.
 - The timing tones are added afterwards at a level that follows the body.
-  With them the header's peak is between 0.5 and 1 dB below full scale.
+  With them the header's peak is about 2.5 dB below full scale. A header
+  nearer full scale costs lossy codecs frames (MP3 at 192 kbit/s and below).
 
 The preamble's edge detector uses a Schmitt band of ±0.2 of the nominal
 header amplitude (`EDGE_HYSTERESIS`).
@@ -491,7 +492,7 @@ must keep these passing, and a new profile must be added to each:
 | Speed acquisition from 0.25× to 4× on the base wire | `modem_tests/test_v7_speed.py` |
 | Reverse acquisition, turn-arounds, slow reverse, tape rocking | `modem_tests/test_v7_reverse.py` |
 | Level independence: the same recording at a quarter and at four times the level decodes to the same statuses | `modem_tests/test_v7_level_independence.py` |
-| Emitted levels: header peak 0.5 to 1 dB under full scale in every packet, body at least 1 dB under the header, nothing over full scale | `modem_tests/test_v7_levels.py` |
+| Emitted levels: header peak 2 to 3.2 dB under full scale in every packet, body at least 1 dB under the header, nothing over full scale | `modem_tests/test_v7_levels.py` |
 
 The profiles under reverse and speed test are Fold 500, Aspect Fold 500,
 aspect-mono-500 and one channel of stereo-slices; the channel models are

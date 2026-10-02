@@ -477,12 +477,13 @@ class ReceiverGuiOptionTests(unittest.TestCase):
                           (('test input device', 3),))
         fields = {field.dest: field for field in gui.fields
                   if field.action is not None}
+        basic_rows, basic_buttons = gui._config_sections()[0][1:]
         basic = {gui.fields[index].dest
-                 for index in gui._config_field_indexes()}
+                 for index in basic_rows+basic_buttons}
         self.assertNotIn('aspect_layout', basic)
-        gui.advanced_options = True
+        advanced_rows, advanced_buttons = gui._config_sections()[1][1:]
         advanced = {gui.fields[index].dest
-                    for index in gui._config_field_indexes()}
+                    for index in advanced_rows+advanced_buttons}
         self.assertIn('aspect_layout', advanced)
         self.assertIn('aspect_tail', advanced)
         self.assertIn(('Luma · 96 luma every packet', 'luma'),
@@ -677,21 +678,26 @@ class ReceiverGuiOptionTests(unittest.TestCase):
             gui._picture_viewport((960, 720), (1920, 1440), 4/3),
             (144, 92, 1632, 1224))
 
-    def test_basic_setup_hides_advanced_options_until_requested(self):
+    def test_setup_lists_basic_then_advanced_but_never_hidden_options(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        self.assertFalse(hasattr(gui, 'advanced_options'))
+        basic_rows, basic_buttons = gui._config_sections()[0][1:]
         basic = {gui.fields[index].dest
-                 for index in gui._config_field_indexes()}
+                 for index in basic_rows+basic_buttons}
         self.assertIn('device', basic)
         self.assertIn('DCT reconstruction', basic)
-        self.assertNotIn('experimental_fold', basic)
-        self.assertNotIn('direction', basic)
-        self.assertNotIn('decode_history', basic)
+        self.assertNotIn('aspect_tail', basic)
 
-        gui.advanced_options = True
-        advanced = {gui.fields[index].dest
-                    for index in gui._config_field_indexes()}
-        self.assertTrue(HIDDEN_DECODE_OPTIONS.isdisjoint(advanced))
-        self.assertIn('DCT reconstruction', advanced)
+        shown = {gui.fields[index].dest
+                 for index in gui._config_field_indexes()}
+        self.assertTrue(HIDDEN_DECODE_OPTIONS.isdisjoint(shown))
+        self.assertNotIn('experimental_fold', shown)
+        self.assertNotIn('direction', shown)
+        self.assertNotIn('decode_history', shown)
+        self.assertIn('DCT reconstruction', shown)
+        self.assertIn('aspect_tail', shown)
+        self.assertEqual(sorted(gui._config_field_indexes()),
+                         list(range(len(gui.fields))))
 
     def test_dct_reconstruction_is_a_display_only_basic_choice(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser,
@@ -1267,6 +1273,160 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertEqual(snapshot['audio_volume'], .25)
         self.assertEqual(json.loads(path.read_text())['audio_volume'], .25)
         path.unlink(missing_ok=True)
+
+
+class ReceiverGuiButtonLayoutTests(unittest.TestCase):
+    """On/off settings are buttons; Advanced is a section of the page."""
+
+    SIZE = (960, 720)
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root_parser, cls.receive_parser = _receive_parser(v7_live)
+
+    def _gui(self, preferences=None):
+        with patch('tools.v7_receiver_gui._load_preferences',
+                   return_value=dict(preferences or {})):
+            return ReceiverGui(
+                self, self.root_parser, self.receive_parser,
+                (('test input device', 3),),
+                preference_path='unused-preferences.json')
+
+    def _show(self, gui, index):
+        gui._scroll_to(index, self.SIZE)
+        gui._canvas(self.SIZE)
+        return gui.hits[f'row:{index}']
+
+    def _click(self, gui, rect):
+        gui._on_mouse(MouseStub(((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)),
+                      None, 0, 1, 0)
+
+    def _values(self, gui):
+        return [field.value for field in gui.fields]
+
+    def test_every_boolean_setting_is_a_button_and_a_click_flips_only_it(self):
+        gui = self._gui()
+        booleans = [index for index, field in enumerate(gui.fields)
+                    if field.kind == 'bool']
+        self.assertGreaterEqual(len(booleans), 8)
+        # Every argparse on/off flag the page offers is among them.
+        for index, field in enumerate(gui.fields):
+            if field.action is not None and field.action.nargs == 0:
+                self.assertIn(index, booleans, field.dest)
+        for index in booleans:
+            gui = self._gui()
+            field = gui.fields[index]
+            rect = self._show(gui, index)
+            self.assertLess(rect[2]-rect[0], self.SIZE[0]//2, field.label)
+            self.assertNotIn(f'value:{index}', gui.hits)
+            before = self._values(gui)
+            with patch('tools.v7_receiver_gui._save_preferences'):
+                self._click(gui, rect)
+                after = self._values(gui)
+                changed = [position for position, value in enumerate(after)
+                           if value != before[position]]
+                if field.locked:
+                    # The integrated viewer's own switch stays on.
+                    self.assertEqual(changed, [], field.label)
+                    continue
+                self.assertEqual(changed, [index], field.label)
+                self.assertIs(field.value, not before[index])
+                self.assertIsNone(gui.dropdown)
+                self.assertFalse(gui.editing)
+                self._click(gui, self._show(gui, index))
+            self.assertEqual(self._values(gui), before, field.label)
+
+    def test_buttons_share_lines_and_do_not_overlap(self):
+        gui = self._gui()
+        items = gui._config_items(self.SIZE[0])
+        self.assertTrue(any(kind == 'buttons' and len(payload) > 1
+                            for kind, payload in items))
+        gui.scroll = len(items)
+        gui._canvas(self.SIZE)
+        rects = [rect for key, rect in gui.hits.items()
+                 if key.startswith('row:')]
+        self.assertGreater(len(rects), 6)
+        for index, first in enumerate(rects):
+            self.assertGreaterEqual(first[0], 0)
+            self.assertLessEqual(first[2], self.SIZE[0])
+            for second in rects[index+1:]:
+                self.assertFalse(
+                    first[0] < second[2] and second[0] < first[2] and
+                    first[1] < second[3] and second[1] < first[3],
+                    (first, second))
+        self.assertLess(gui._button_columns(640), gui._button_columns(960))
+
+    def test_advanced_settings_are_a_section_without_a_toggle(self):
+        gui = self._gui()
+        gui._canvas(self.SIZE)
+        self.assertNotIn('advanced_toggle', gui.hits)
+        items = gui._config_items(self.SIZE[0])
+        self.assertEqual([payload for kind, payload in items
+                          if kind == 'header'], ['Advanced'])
+        header = items.index(('header', 'Advanced'))
+        below = set()
+        for kind, payload in items[header+1:]:
+            below.update(payload if kind == 'buttons' else (payload,))
+        dests = {gui.fields[index].dest for index in below}
+        for dest in ('aspect_layout', 'aspect_tail', 'log', 'no_log',
+                     'diagnostics'):
+            self.assertIn(dest, dests)
+        self.assertNotIn('device', dests)
+        # Each is reachable on the page by scrolling alone.
+        for index in below:
+            gui.scroll = 0
+            self.assertEqual(len(self._show(gui, index)), 4)
+        # Non-boolean advanced settings keep their control type.
+        layout = next(index for index, field in enumerate(gui.fields)
+                      if field.dest == 'aspect_layout')
+        self.assertEqual(gui.fields[layout].kind, 'choice')
+        self._click(gui, self._show(gui, layout))
+        self.assertEqual(gui.dropdown, layout)
+        gui._canvas(self.SIZE)
+        self.assertIn('option:0', gui.hits)
+
+    def test_keyboard_walks_every_setting_and_flips_a_button(self):
+        gui = self._gui()
+        order = gui._config_field_indexes()
+        gui.selected = order[0]
+        for expected in order[1:]:
+            gui._on_key(KeyStub, None, KeyStub.KEY_DOWN, 0, KeyStub.PRESS, 0)
+            self.assertEqual(gui.selected, expected)
+            gui._canvas(self.SIZE)
+            self.assertIn(f'row:{expected}', gui.hits)
+        log = next(index for index, field in enumerate(gui.fields)
+                   if field.dest == 'log')
+        gui.selected = log
+        gui._on_key(KeyStub, None, KeyStub.KEY_ENTER, 0, KeyStub.PRESS, 0)
+        self.assertTrue(gui.fields[log].value)
+
+    def test_setup_page_scrolls_by_line_when_it_does_not_fit(self):
+        gui = self._gui()
+        items = gui._config_items(self.SIZE[0])
+        _top, visible = gui._visible_fields(self.SIZE[1])
+        self.assertGreater(len(items), visible)
+        for _ in range(len(items)):
+            gui._on_scroll(None, 0, -1)
+        self.assertEqual(gui.scroll, len(items)-visible)
+        gui._canvas(self.SIZE)
+        for key, rect in gui.hits.items():
+            if key.startswith('row:'):
+                self.assertLessEqual(rect[3], self.SIZE[1]-126)
+
+    def test_old_preferences_with_an_advanced_flag_still_load(self):
+        gui = self._gui({'advanced': True, 'advanced_options': True,
+                         'audio_muted': True, 'freewheel_seconds': 3.5,
+                         'input_device': None, 'output_device': None})
+        by_dest = {field.dest: field for field in gui.fields}
+        self.assertTrue(by_dest['audio_muted'].value)
+        self.assertEqual(by_dest['freewheel_seconds'].value, 3.5)
+        self.assertFalse(hasattr(gui, 'advanced_options'))
+        self.assertEqual(gui._canvas(self.SIZE).shape[:2],
+                         (self.SIZE[1], self.SIZE[0]))
+        with patch('tools.v7_receiver_gui._save_preferences') as save:
+            gui._persist_preferences()
+        self.assertNotIn('advanced', save.call_args.args[0])
+        self.assertNotIn('advanced_options', save.call_args.args[0])
 
 
 if __name__ == '__main__':

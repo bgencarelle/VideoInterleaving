@@ -1,5 +1,5 @@
 """Emitted levels: the header's pulses are the loudest part of every packet,
-close to full scale, and the picture body stays below them."""
+a few dB under full scale, and the picture body stays below them."""
 import unittest
 
 import numpy as np
@@ -32,8 +32,8 @@ class EmittedLevelTests(unittest.TestCase):
         peaks = [float(np.max(np.abs(packet[:v7.PULSE.SYNC_LEN])))
                  for packet in self.packets]
         for peak in peaks:
-            self.assertLess(_db(peak), -.5)
-            self.assertGreater(_db(peak), -1.3)
+            self.assertLess(_db(peak), -2.0)
+            self.assertGreater(_db(peak), -3.2)
         self.assertLess(_db(max(peaks))-_db(min(peaks)), .5)
 
     def test_body_stays_below_the_header_and_nothing_passes_full_scale(self):
