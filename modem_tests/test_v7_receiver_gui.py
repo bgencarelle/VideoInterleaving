@@ -14,7 +14,7 @@ from tools import v7_live
 from tools.v7_gl_viewer import (DISPLAY_MODES, FLOAT_FRAGMENT_SHADER,
                                 DCT_RECONSTRUCTION_MODES,
                                 FRAGMENT_SHADER, VERTEX_SHADER)
-from tools.v7_receiver_gui import (ROOT, ReceiverGui, _make_fields,
+from tools.v7_receiver_gui import (ROOT, OptionField, ReceiverGui, _make_fields,
                                    FULLSCREEN_TOOLBAR_EDGE,
                                    FULLSCREEN_TOOLBAR_HIDE_SECONDS,
                                    HIDDEN_DECODE_OPTIONS,
@@ -472,20 +472,16 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertFalse(args.show_diagnostics)
         self.assertFalse(args.no_tail_memory)
 
-    def test_aspect_fold_options_are_advanced_and_default_to_auto_chroma(self):
+    def test_aspect_fold_options_are_in_wire_and_default_to_auto_chroma(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser,
                           (('test input device', 3),))
         fields = {field.dest: field for field in gui.fields
                   if field.action is not None}
-        basic_rows, basic_buttons = gui._config_sections()[0][1:]
-        basic = {gui.fields[index].dest
-                 for index in basic_rows+basic_buttons}
-        self.assertNotIn('aspect_layout', basic)
-        advanced_rows, advanced_buttons = gui._config_sections()[1][1:]
-        advanced = {gui.fields[index].dest
-                    for index in advanced_rows+advanced_buttons}
-        self.assertIn('aspect_layout', advanced)
-        self.assertIn('aspect_tail', advanced)
+        sections = dict(gui._config_sections())
+        live = {gui.fields[index].dest for index in sections['Live controls']}
+        wire = {gui.fields[index].dest for index in sections['Wire']}
+        self.assertNotIn('aspect_layout', live)
+        self.assertEqual(wire, {'aspect_layout', 'aspect_tail'})
         self.assertIn(('Luma · 96 luma every packet', 'luma'),
                       fields['aspect_tail'].options)
         fields['device'].value = 3
@@ -678,15 +674,15 @@ class ReceiverGuiOptionTests(unittest.TestCase):
             gui._picture_viewport((960, 720), (1920, 1440), 4/3),
             (144, 92, 1632, 1224))
 
-    def test_setup_lists_basic_then_advanced_but_never_hidden_options(self):
+    def test_setup_lists_every_option_in_sections_but_never_hidden_ones(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
         self.assertFalse(hasattr(gui, 'advanced_options'))
-        basic_rows, basic_buttons = gui._config_sections()[0][1:]
-        basic = {gui.fields[index].dest
-                 for index in basic_rows+basic_buttons}
-        self.assertIn('device', basic)
-        self.assertIn('DCT reconstruction', basic)
-        self.assertNotIn('aspect_tail', basic)
+        sections = dict(gui._config_sections())
+        live = {gui.fields[index].dest for index in sections['Live controls']}
+        self.assertIn('device', {gui.fields[index].dest
+                                 for index in sections['Input']})
+        self.assertIn('DCT reconstruction', live)
+        self.assertNotIn('aspect_tail', live)
 
         shown = {gui.fields[index].dest
                  for index in gui._config_field_indexes()}
@@ -865,7 +861,6 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
         gui.image_only = True
         gui.image_only_previous_page = 'info'
-        gui.image_only_previous_fullscreen = True
         gui.fullscreen = True
 
         gui._on_key(FullscreenKeyStub(), object(), KeyStub.KEY_C, 0,
@@ -909,7 +904,11 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         gui._canvas((520, 400))
 
         visible_rows = sum(key.startswith('row:') for key in gui.hits)
-        self.assertEqual(visible_rows, 4)
+        self.assertGreaterEqual(visible_rows, 6)
+        footer_top = 400-gui._footer_height(520)
+        for key, rect in gui.hits.items():
+            if key.startswith('row:'):
+                self.assertLessEqual(rect[3], footer_top)
 
     def test_compact_info_panel_gets_more_height_for_readability(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
@@ -934,35 +933,55 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertTrue(field.value)
         self.assertTrue(gui._diagnostics_visible())
 
-    def test_image_only_f_exits_fullscreen_once_when_entered_from_windowed(self):
-        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
-        gui.image_only = True
-        gui.image_only_previous_page = 'info'
-        gui.image_only_previous_fullscreen = False
-        gui.fullscreen = True
-        gui._glfw = SimpleNamespace(
+    def test_image_only_does_not_change_fullscreen(self):
+        # Image only hides the interface; fullscreen is a separate switch.
+        for fullscreen in (False, True):
+            with self.subTest(fullscreen=fullscreen):
+                gui = ReceiverGui(self, self.root_parser, self.receive_parser,
+                                  ())
+                gui.page = 'info'
+                gui.fullscreen = fullscreen
+                gui._glfw = SimpleNamespace(
+                    CURSOR=1, CURSOR_NORMAL=0, CURSOR_HIDDEN=2,
+                    set_input_mode=lambda *_args: None)
+                gui._window = object()
+                toggles = []
+                gui._toggle_fullscreen = lambda *_args: toggles.append(True)
+                gui._set_image_only(True)
+                self.assertTrue(gui.image_only)
+                self.assertEqual(gui.fullscreen, fullscreen)
+                gui._set_image_only(False)
+                self.assertFalse(gui.image_only)
+                self.assertEqual(gui.fullscreen, fullscreen)
+                self.assertEqual(toggles, [])
+
+    def test_image_only_keeps_the_pointer_unless_fullscreen(self):
+        modes = []
+        glfw = SimpleNamespace(
             CURSOR=1, CURSOR_NORMAL=0, CURSOR_HIDDEN=2,
-            set_input_mode=lambda *_args: None)
-        gui._window = object()
-        toggles = []
+            set_input_mode=lambda _window, _what, mode: modes.append(mode))
+        for fullscreen, hidden in ((False, False), (True, True)):
+            gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+            gui._glfw, gui._window = glfw, object()
+            gui.fullscreen = fullscreen
+            del modes[:]
+            gui._set_image_only(True)
+            self.assertEqual(modes, [2 if hidden else 0])
 
-        def toggle(*_args):
-            toggles.append(True)
-            gui.fullscreen = False
-
-        gui._toggle_fullscreen = toggle
-        gui._on_key(KeyStub(), gui._window, KeyStub.KEY_F, 0,
-                    KeyStub.PRESS, 0)
-
+    def test_clicking_the_image_only_window_returns_to_the_live_view(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        gui.page = 'info'
+        gui._set_image_only(True)
+        gui.hits = {'config_tab': (0, 0, 400, 400)}   # stale: nothing is drawn
+        gui._on_mouse(MouseStub((10, 10)), None, 0, 1, 0)
         self.assertFalse(gui.image_only)
-        self.assertFalse(gui.fullscreen)
-        self.assertEqual(toggles, [True])
+        self.assertEqual(gui.page, 'info')
+        self.assertTrue(gui.dirty)
 
-    def test_image_only_f_exits_fullscreen_once_when_already_fullscreen(self):
+    def test_image_only_f_toggles_fullscreen_and_stays_image_only(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
         gui.image_only = True
         gui.image_only_previous_page = 'info'
-        gui.image_only_previous_fullscreen = True
         gui.fullscreen = True
         toggles = []
         gui._toggle_fullscreen = lambda *_args: (
@@ -971,7 +990,7 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         gui._on_key(KeyStub(), object(), KeyStub.KEY_F, 0,
                     KeyStub.PRESS, 0)
 
-        self.assertFalse(gui.image_only)
+        self.assertTrue(gui.image_only)
         self.assertFalse(gui.fullscreen)
         self.assertEqual(toggles, [True])
 
@@ -979,7 +998,6 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
         gui.image_only = True
         gui.image_only_previous_page = 'info'
-        gui.image_only_previous_fullscreen = True
         gui.fullscreen = True
         gui.toolbar_visible = False
 
@@ -1276,7 +1294,7 @@ class ReceiverGuiOptionTests(unittest.TestCase):
 
 
 class ReceiverGuiButtonLayoutTests(unittest.TestCase):
-    """On/off settings are buttons; Advanced is a section of the page."""
+    """On/off settings are buttons on a grid; the page is named sections."""
 
     SIZE = (960, 720)
 
@@ -1336,12 +1354,11 @@ class ReceiverGuiButtonLayoutTests(unittest.TestCase):
                 self._click(gui, self._show(gui, index))
             self.assertEqual(self._values(gui), before, field.label)
 
-    def test_buttons_share_lines_and_do_not_overlap(self):
+    def test_cells_share_lines_and_do_not_overlap(self):
         gui = self._gui()
         items = gui._config_items(self.SIZE[0])
-        self.assertTrue(any(kind == 'buttons' and len(payload) > 1
+        self.assertTrue(any(kind == 'line' and len(payload) > 1
                             for kind, payload in items))
-        gui.scroll = len(items)
         gui._canvas(self.SIZE)
         rects = [rect for key, rect in gui.hits.items()
                  if key.startswith('row:')]
@@ -1354,29 +1371,28 @@ class ReceiverGuiButtonLayoutTests(unittest.TestCase):
                     first[0] < second[2] and second[0] < first[2] and
                     first[1] < second[3] and second[1] < first[3],
                     (first, second))
-        self.assertLess(gui._button_columns(640), gui._button_columns(960))
+        self.assertLess(gui._columns(640), gui._columns(960))
 
-    def test_advanced_settings_are_a_section_without_a_toggle(self):
+    def test_settings_are_named_sections_without_a_toggle(self):
         gui = self._gui()
         gui._canvas(self.SIZE)
         self.assertNotIn('advanced_toggle', gui.hits)
         items = gui._config_items(self.SIZE[0])
-        self.assertEqual([payload for kind, payload in items
-                          if kind == 'header'], ['Advanced'])
-        header = items.index(('header', 'Advanced'))
-        below = set()
-        for kind, payload in items[header+1:]:
-            below.update(payload if kind == 'buttons' else (payload,))
-        dests = {gui.fields[index].dest for index in below}
+        headers = [payload for kind, payload in items if kind == 'header']
+        self.assertEqual(headers, ['Live controls', 'Input', 'Wire',
+                                   'Startup view', 'Output and logging'])
+        shown = {index for kind, payload in items if kind == 'line'
+                 for index, _column, _span in payload}
+        self.assertEqual(shown, set(range(len(gui.fields))))
+        dests = {gui.fields[index].dest for index in shown}
         for dest in ('aspect_layout', 'aspect_tail', 'log', 'no_log',
-                     'diagnostics'):
+                     'diagnostics', 'device'):
             self.assertIn(dest, dests)
-        self.assertNotIn('device', dests)
         # Each is reachable on the page by scrolling alone.
-        for index in below:
+        for index in shown:
             gui.scroll = 0
             self.assertEqual(len(self._show(gui, index)), 4)
-        # Non-boolean advanced settings keep their control type.
+        # Non-boolean settings keep their control type.
         layout = next(index for index, field in enumerate(gui.fields)
                       if field.dest == 'aspect_layout')
         self.assertEqual(gui.fields[layout].kind, 'choice')
@@ -1401,17 +1417,151 @@ class ReceiverGuiButtonLayoutTests(unittest.TestCase):
         self.assertTrue(gui.fields[log].value)
 
     def test_setup_page_scrolls_by_line_when_it_does_not_fit(self):
+        size = (720, 480)
         gui = self._gui()
-        items = gui._config_items(self.SIZE[0])
-        _top, visible = gui._visible_fields(self.SIZE[1])
-        self.assertGreater(len(items), visible)
+        gui.width, gui.height = size
+        items = gui._config_items(size[0])
+        room = gui._config_room(size)
+        top = gui._max_scroll(items, room)
+        self.assertGreater(top, 0)
         for _ in range(len(items)):
             gui._on_scroll(None, 0, -1)
-        self.assertEqual(gui.scroll, len(items)-visible)
-        gui._canvas(self.SIZE)
+        self.assertEqual(gui.scroll, top)
+        gui._canvas(size)
         for key, rect in gui.hits.items():
             if key.startswith('row:'):
-                self.assertLessEqual(rect[3], self.SIZE[1]-126)
+                self.assertLessEqual(rect[3], size[1]-gui._footer_height(size[0]))
+
+    def test_the_default_window_shows_the_whole_setup_page(self):
+        gui = self._gui()
+        items = gui._config_items(self.SIZE[0])
+        self.assertEqual(gui._max_scroll(items, gui._config_room(self.SIZE)), 0)
+
+    def test_every_setting_is_in_exactly_one_section(self):
+        gui = self._gui()
+        placed = [index for _title, indexes in gui._config_sections()
+                  for index in indexes]
+        self.assertEqual(sorted(placed), list(range(len(gui.fields))))
+
+    def test_a_setting_named_in_no_section_goes_to_the_last_one(self):
+        gui = self._gui()
+        gui.fields.append(OptionField(None, False, 'Something new', 'bool'))
+        title, indexes = gui._config_sections()[-1]
+        self.assertEqual(title, 'Output and logging')
+        self.assertEqual(indexes[-1], len(gui.fields)-1)
+
+    def test_live_section_holds_exactly_what_changes_while_receiving(self):
+        gui = self._gui()
+        title, indexes = gui._config_sections()[0]
+        self.assertEqual(title, 'Live controls')
+        self.assertEqual(
+            {gui.fields[index].dest for index in indexes},
+            {'audio_output_device', 'audio_volume', 'audio_muted',
+             'freewheel_seconds', 'show_sync_warning', 'Pixel display',
+             'Display upscaler', 'DCT reconstruction', 'Display grain',
+             'Edge reconstruction', 'Edge strength'})
+        gui.started = True
+        live = set(indexes)
+        for index, field in enumerate(gui.fields):
+            self.assertEqual(gui._runtime_locked(field), index not in live,
+                             field.dest)
+        notes = [payload for kind, payload in gui._config_items(self.SIZE[0])
+                 if kind == 'note']
+        self.assertEqual(notes, ['Stop to change the settings below'])
+        gui.started = False
+        self.assertFalse(any(gui._runtime_locked(field)
+                             for field in gui.fields))
+
+    def test_grid_collapses_to_one_column_in_a_narrow_window(self):
+        gui = self._gui()
+        self.assertEqual(gui._columns(960), 3)
+        self.assertEqual(gui._columns(400), 1)
+        for kind, payload in gui._config_items(400):
+            if kind == 'line':
+                self.assertEqual(len(payload), 1)
+
+    def test_locked_setting_reports_while_receiving_and_live_ones_edit(self):
+        gui = self._gui()
+        gui.started = True
+        device = next(index for index, field in enumerate(gui.fields)
+                      if field.dest == 'device')
+        self._click(gui, self._show(gui, device))
+        self.assertIsNone(gui.dropdown)
+        self.assertIn('locked', gui.notice)
+        mute = next(index for index, field in enumerate(gui.fields)
+                    if field.dest == 'audio_muted')
+        with patch('tools.v7_receiver_gui._save_preferences'):
+            self._click(gui, self._show(gui, mute))
+        self.assertTrue(gui.fields[mute].value)
+
+    def test_a_tab_click_repaints_at_once(self):
+        # The page used to change only on the next click in the window.
+        gui = self._gui()
+        gui.page = 'info'
+        for key, page in (('config_tab', 'config'), ('info_tab', 'info')):
+            gui._canvas(self.SIZE)
+            gui.dirty = False
+            self._click(gui, gui.hits[key])
+            self.assertEqual(gui.page, page)
+            self.assertTrue(gui.dirty, key)
+
+    def test_toolbar_has_start_beside_the_tabs(self):
+        gui = self._gui()
+        gui._canvas(self.SIZE)
+        self.assertEqual(gui.hits['config_tab'][0], 12)
+        self.assertEqual(gui.hits['start_stop'][0],
+                         gui.hits['info_tab'][2]+8)
+
+    def test_live_page_toolbar_mutes_and_steps_the_volume(self):
+        gui = self._gui()
+        gui.page = 'info'
+        gui._canvas(self.SIZE)
+        for key in ('mute_button', 'volume_down', 'volume_up'):
+            self.assertIn(key, gui.hits)
+        by_dest = {field.dest: field for field in gui.fields}
+        with patch('tools.v7_receiver_gui._save_preferences'):
+            self._click(gui, gui.hits['mute_button'])
+            self.assertTrue(by_dest['audio_muted'].value)
+            gui._canvas(self.SIZE)
+            self._click(gui, gui.hits['mute_button'])
+            self.assertFalse(by_dest['audio_muted'].value)
+            by_dest['audio_volume'].value = 1.0
+            gui._canvas(self.SIZE)
+            self._click(gui, gui.hits['volume_down'])
+            self.assertEqual(by_dest['audio_volume'].value, 0.9)
+            gui._canvas(self.SIZE)
+            for _ in range(3):
+                self._click(gui, gui.hits['volume_up'])
+            self.assertEqual(by_dest['audio_volume'].value, 1.0)
+        # They give way before the window gets too narrow for them.
+        gui._canvas((800, 600))
+        self.assertNotIn('mute_button', gui.hits)
+        self.assertIn('mode_button', gui.hits)
+        gui.page = 'config'
+        gui._canvas(self.SIZE)
+        self.assertNotIn('mute_button', gui.hits)
+
+    def test_footer_shows_the_selected_help_until_a_notice_needs_it(self):
+        gui = self._gui()
+        device = next(index for index, field in enumerate(gui.fields)
+                      if field.dest == 'device')
+        gui.selected = device
+        self.assertEqual(gui._footer_content()[0],
+                         gui.fields[device].action.help)
+        gui.notice = 'Receiver options are locked while receiving'
+        self.assertEqual(gui._footer_content()[0], gui.notice)
+        gui.selected = device+1
+        self.assertNotEqual(gui._footer_content()[0], gui.notice)
+        gui.device_error = 'No audio input devices are available.'
+        self.assertEqual(gui._footer_content()[0], gui.device_error)
+
+    def test_settings_that_must_match_the_sender_are_tagged(self):
+        from tools.v7_receiver_gui import MATCH_SETTINGS
+        self.assertEqual(MATCH_SETTINGS, ('aspect_layout', 'aspect_tail'))
+        gui = self._gui()
+        for field in gui.fields:
+            if field.dest in MATCH_SETTINGS:
+                self.assertNotIn('match', field.label.lower())
 
     def test_old_preferences_with_an_advanced_flag_still_load(self):
         gui = self._gui({'advanced': True, 'advanced_options': True,

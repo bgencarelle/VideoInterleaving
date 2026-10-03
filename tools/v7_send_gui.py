@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -112,6 +113,9 @@ DCT_PROFILES = FOLDED_PROFILES
 BOOL_FIELDS = ('video_live', 'dct_encode',
                'luma_adjust', 'luma_adjust_linear', 'pixel_encode',
                'clip_aware')
+# Settings that take effect while the sender runs (the sender reads them
+# from its control pipe); everything else needs a stop and a new Start.
+LIVE_FIELDS = ('brightness', 'gamma')
 # One preview at a time: none, the pane on the Live page, or the same
 # pictures in a separate window.
 PREVIEW_CHOICES = (
@@ -219,36 +223,36 @@ FIELD_LABELS = {
     'device': 'Audio output device',
     'source': 'Capture source',
     'capture_fps': 'Capture FPS',
-    'brightness': 'Brightness · live',
-    'gamma': 'Gamma · live',
+    'brightness': 'Brightness',
+    'gamma': 'Gamma',
     'screen_target': 'Screen / display',
     'preview': 'Preview',
     'video_live': 'Treat URL as live',
     'camera': 'Camera',
     'ffmpeg_input': 'FFmpeg input',
-    'mono_video_side': 'Mono video output side',
+    'mono_video_side': 'Mono video output',
     'encode_filter': 'Encoder resize · Pillow',
     'capture_filter': 'Capture scaler · FFmpeg',
     'source_audio': 'Audio source',
     'source_audio_device': 'Audio input device',
-    'source_audio_input_side': 'Audio input channels',
-    'source_audio_gain': 'Source-audio gain',
-    'source_audio_delay_ms': 'Additional audio delay (ms)',
-    'perceptual_resize': 'Pre-encode downscaler',
-    'perceptual_detail_strength': 'Downscaler strength',
+    'source_audio_input_side': 'Input channels',
+    'source_audio_gain': 'Audio gain',
+    'source_audio_delay_ms': 'Audio delay (ms)',
+    'perceptual_resize': 'Downscaler',
+    'perceptual_detail_strength': 'Downscale amount',
     'dct_encode': 'Direct DCT encode',
     'luma_adjust': 'Luma adjustment',
-    'luma_adjust_linear': 'Luma adjustment in linear light',
-    'pixel_encode': 'Pixel encode · hard pixels',
+    'luma_adjust_linear': 'Luma · linear light',
+    'pixel_encode': 'Pixel encode',
     'pixel_detail': 'Pixel downscale',
     'pixel_grid': 'Pixel grid',
     'clip_aware': 'Clip-aware encode',
     'dct_sharpen': 'DCT sharpen',
-    'dct_sharpen_strength': 'DCT sharpen strength',
+    'dct_sharpen_strength': 'Sharpen strength',
     'dct_clarity': 'DCT clarity',
-    'dct_chroma_gain': 'DCT chroma gain',
-    'aspect_layout': 'Aspect layout · set receiver to match',
-    'aspect_tail': 'Aspect tail · set receiver to match',
+    'dct_chroma_gain': 'Chroma gain',
+    'aspect_layout': 'Aspect layout',
+    'aspect_tail': 'Aspect tail',
 }
 VIDEO_FILE_GLOB = '*.mp4 *.m4v *.mov *.mkv *.webm *.avi *.mpeg *.mpg *.wmv *.ts'
 DEVICE_REFRESH_SECONDS = 3.0
@@ -1395,6 +1399,7 @@ def build_command(settings, devices, sd_module=None, python=None,
     return command
 
 
+@lru_cache(maxsize=16)
 def _font(size):
     from PIL import ImageFont
     for name in ('DejaVuSans.ttf', 'Arial.ttf'):
@@ -1410,7 +1415,7 @@ def _font(size):
 
 def _fit(text, font, width):
     text = str(text)
-    while text and font.getlength(text) > width:
+    while text and text != '…' and font.getlength(text) > width:
         text = text[:-2]+'…'
     return text
 
@@ -1433,20 +1438,52 @@ def _wrapped(text, font, width):
 class SenderGui:
     WINDOW_SIZE = (960, 720)
     TOOLBAR = 54
-    ROW_HEIGHT = 36
-    # On/off buttons share a row; a row holds as many as fit this width.
-    BUTTON_MIN_WIDTH = 290
-    BUTTON_GAP = 8
-    SETUP_TOP = 137
-    SETUP_BOTTOM_MARGIN = 95
-    BASIC_FIELDS = (
-        'device', 'source', 'video_source', 'preview',
-        'video_live', 'camera',
-        'screen_target', 'source_audio', 'source_audio_device',
-        'source_audio_input_side', 'source_audio_gain',
-        'source_audio_delay_ms', 'capture_fps', 'profile', 'aspect_layout',
-        'mono_video_side', 'brightness', 'gamma', 'speed',
+    ROW_HEIGHT = 34
+    HEADER_HEIGHT = 26
+    GUTTER = 18
+    # Settings sit on a grid of equal cells; a line holds as many as fit.
+    CELL_MIN_WIDTH = 300
+    CELL_GAP = 8
+    SETUP_TOP = TOOLBAR+6
+    TRANSPORT_HEIGHT = 36
+    LOG_LINE = 18
+    LIVE_FIELDS = LIVE_FIELDS
+    # Not signalled on the wire: the receiver must be set the same.
+    MATCH_FIELDS = ('aspect_layout', 'aspect_tail')
+    # The setup page: named sections, most used first. A setting appears in
+    # exactly one section; _shown_fields hides what the current choices make
+    # irrelevant. The encoder resize filter is not offered: every profile is
+    # folded and folded profiles only encode with Box ('auto'), so the other
+    # choice could only fail validation. --encode-filter remains on the CLI.
+    SECTIONS = (
+        ('Live controls', LIVE_FIELDS),
+        ('Output', ('device', 'speed')),
+        ('Source', ('source', 'capture_fps', 'preview', 'video_source',
+                    'video_live', 'camera', 'screen_target')),
+        ('Wire profile', ('profile', 'aspect_layout', 'aspect_tail',
+                          'mono_video_side')),
+        ('Source audio', ('source_audio', 'source_audio_device',
+                          'source_audio_input_side', 'source_audio_gain',
+                          'source_audio_delay_ms')),
+        ('Picture encode', ('dct_encode', 'pixel_encode', 'pixel_detail',
+                            'pixel_grid', 'luma_adjust',
+                            'luma_adjust_linear', 'clip_aware',
+                            'dct_sharpen', 'dct_sharpen_strength',
+                            'dct_clarity', 'dct_chroma_gain',
+                            'perceptual_resize',
+                            'perceptual_detail_strength')),
+        ('Capture', ('screen_backend', 'region', 'ffmpeg_input',
+                     'capture_width', 'capture_filter')),
     )
+    # Cell widths in grid columns: long values take the whole line, a few
+    # take two cells, everything else (numbers, short pickers, on/off) one.
+    FULL_WIDTH_FIELDS = (
+        'camera', 'screen_target', 'profile',
+        'aspect_tail', 'source_audio_device', 'ffmpeg_input', 'region',
+        'pixel_detail', 'pixel_grid',
+    )
+    DOUBLE_WIDTH_FIELDS = ('device', 'video_source', 'aspect_layout',
+                           'source_audio', 'mono_video_side')
     DROPDOWN_FIELDS = (
         'device', 'source', 'capture_fps', 'profile', 'encode_filter',
         'mono_video_side', 'source_audio', 'source_audio_device',
@@ -1455,22 +1492,27 @@ class SenderGui:
         'aspect_layout', 'aspect_tail', 'pixel_detail', 'pixel_grid',
         'preview',
     )
-    TRANSPORT_HEIGHT = 36
-    # The encoder resize filter is not offered: every profile is folded and
-    # folded profiles only encode with Box ('auto'), so the other choice
-    # could only fail validation. --encode-filter remains on the CLI.
-    # The advanced settings are a labelled section of the same page.
-    ADVANCED_FIELDS = (
-        'perceptual_resize', 'perceptual_detail_strength',
-        'aspect_tail',
-        'dct_encode', 'pixel_encode', 'pixel_detail', 'pixel_grid',
-        'luma_adjust', 'luma_adjust_linear',
-        'dct_sharpen',
-        'dct_sharpen_strength',
-        'dct_clarity', 'dct_chroma_gain', 'clip_aware',
-        'screen_backend', 'region', 'ffmpeg_input', 'capture_width',
-        'capture_filter',
-    )
+
+    # A new notice replaces the help line in the footer until the selection
+    # moves; moving the selection brings the help back.
+    @property
+    def notice(self):
+        return self._notice
+
+    @notice.setter
+    def notice(self, value):
+        self._notice = value
+        self._notice_fresh = True
+
+    @property
+    def selected(self):
+        return self._selected
+
+    @selected.setter
+    def selected(self, value):
+        if value != getattr(self, '_selected', None):
+            self._notice_fresh = False
+        self._selected = value
 
     def __init__(self, devices=(), device_error='', audio_devices=(),
                  audio_device_error='', preference_path=None,
@@ -1572,6 +1614,7 @@ class SenderGui:
         self.device_watch_stop = threading.Event()
         self.device_watch_thread = None
         self.change_source_after_stop = False
+        self._notice_fresh = True
 
     def _restore_preferences(self):
         preferences = _load_sender_preferences(self.preference_path)
@@ -1903,57 +1946,94 @@ class SenderGui:
 
     def _visible_fields(self):
         """Shown settings in page order (also the keyboard order)."""
-        fields = []
-        for title, rows, buttons in self._setup_sections():
-            # Advanced leads with its switches: they decide which rows show.
-            fields.extend(rows+buttons if title is None else buttons+rows)
-        return fields
+        return [dest for _title, shown in self._setup_sections()
+                for dest in shown]
 
     def _setup_sections(self):
-        """(title, rows, on/off buttons) for the basic and advanced parts."""
+        """(title, shown settings) for every section that has any."""
         sections = []
-        for title, group in ((None, self.BASIC_FIELDS),
-                             ('Advanced', self.ADVANCED_FIELDS)):
+        for title, group in self.SECTIONS:
             shown = self._shown_fields(group)
-            sections.append((
-                title,
-                [dest for dest in shown if dest not in BOOL_FIELDS],
-                [dest for dest in shown if dest in BOOL_FIELDS]))
+            if shown:
+                sections.append((title, shown))
         return sections
 
-    def _button_columns(self, width):
-        return max(1, (width-36+self.BUTTON_GAP)//
-                   (self.BUTTON_MIN_WIDTH+self.BUTTON_GAP))
+    def _columns(self, width):
+        """Grid columns that fit the window width."""
+        return max(1, (width-2*self.GUTTER+self.CELL_GAP)//
+                   (self.CELL_MIN_WIDTH+self.CELL_GAP))
+
+    def _span(self, dest, columns):
+        if dest in self.FULL_WIDTH_FIELDS:
+            span = columns
+        elif dest in self.DOUBLE_WIDTH_FIELDS:
+            span = 2
+        else:
+            span = 1
+        return max(1, min(span, columns))
+
+    def _pack(self, dests, columns):
+        """Lines of (setting, first column, columns spanned), left to right."""
+        lines, line, used = [], [], 0
+        for dest in dests:
+            span = self._span(dest, columns)
+            if used+span > columns:
+                lines.append(tuple(line))
+                line, used = [], 0
+            line.append((dest, used, span))
+            used += span
+        if line:
+            lines.append(tuple(line))
+        return lines
 
     def _setup_items(self, width):
-        """Page lines, each ROW_HEIGHT tall: a row, a button row, a header."""
-        columns = self._button_columns(width)
+        """Page lines: ('header', title), ('line', cells), ('note', text)."""
+        columns = self._columns(width)
         items = []
-        for title, rows, buttons in self._setup_sections():
-            if not rows and not buttons:
-                continue
-            button_rows = [('buttons', tuple(buttons[start:start+columns]))
-                           for start in range(0, len(buttons), columns)]
-            field_rows = [('row', dest) for dest in rows]
-            if title is None:
-                items.extend(field_rows+button_rows)
-            else:
-                items.append(('header', title))
-                items.extend(button_rows+field_rows)
+        for title, shown in self._setup_sections():
+            items.append(('header', title))
+            items.extend(('line', line) for line in self._pack(shown, columns))
+            if title == 'Live controls' and self.process is not None:
+                items.append(('note', 'Stop to change the settings below'))
         return items
 
-    def _setup_capacity(self, height):
-        return max(1, (height-self.SETUP_BOTTOM_MARGIN-self.SETUP_TOP)//
-                   self.ROW_HEIGHT)
+    def _item_height(self, kind):
+        return self.ROW_HEIGHT if kind == 'line' else self.HEADER_HEIGHT
+
+    def _locked(self, dest):
+        """True for a setting that cannot change while the sender runs."""
+        return self.process is not None and dest not in LIVE_FIELDS
+
+    def _setup_room(self, size=None):
+        """Pixels between the toolbar and the footer."""
+        width, height = size or (self.width, self.height)
+        return max(0, height-self.SETUP_TOP-self._footer_height(width)-4)
+
+    def _items_fitting(self, items, first, room):
+        count = used = 0
+        for kind, _payload in items[first:]:
+            used += self._item_height(kind)
+            if used > room:
+                break
+            count += 1
+        return count
+
+    def _max_scroll(self, items, room):
+        used = 0
+        for index in range(len(items)-1, -1, -1):
+            used += self._item_height(items[index][0])
+            if used > room:
+                return min(index+1, len(items)-1)
+        return 0
 
     def _scroll_to(self, dest, size=None):
         """Scroll the setup page so the line holding dest is in view."""
-        width, height = size or (self.width, self.height)
-        items = self._setup_items(width)
-        capacity = self._setup_capacity(height)
+        size = size or (self.width, self.height)
+        items = self._setup_items(size[0])
+        room = self._setup_room(size)
         position = next((index for index, (kind, payload) in enumerate(items)
-                         if kind == 'row' and payload == dest or
-                         kind == 'buttons' and dest in payload), None)
+                         if kind == 'line' and
+                         any(cell[0] == dest for cell in payload)), None)
         if position is None:
             return
         if position < self.scroll:
@@ -1961,9 +2041,41 @@ class SenderGui:
             # Keep a section header in view above its first line.
             if position and items[position-1][0] == 'header':
                 self.scroll = position-1
-        elif position >= self.scroll+capacity:
-            self.scroll = position-capacity+1
-        self.scroll = max(0, min(self.scroll, max(0, len(items)-capacity)))
+        else:
+            while (self.scroll < position and position >= self.scroll+
+                   self._items_fitting(items, self.scroll, room)):
+                self.scroll += 1
+        self.scroll = max(0, min(self.scroll, self._max_scroll(items, room)))
+
+    def _footer_content(self):
+        """(text, colour, wrap) for the one line at the bottom of the window.
+
+        The selected setting's help, unless something needs attention: a
+        fresh notice, a lost device, or a device-discovery error.
+        """
+        if self.device_error:
+            return self.device_error, (255, 182, 132), False
+        alert = self.sender_device_lost
+        help_text = FIELD_HELP.get(self.selected, '')
+        if (self.page == 'setup' and help_text and not alert and
+                not self._notice_fresh):
+            return help_text, (150, 172, 188), True
+        color = ((255, 182, 132) if alert else
+                 (147, 206, 169) if self.process is not None else
+                 (167, 187, 202))
+        return self.notice, color, False
+
+    def _footer_lines(self, width):
+        text, color, wrap = self._footer_content()
+        small = _font(13)
+        if wrap:
+            lines = _wrapped(text, small, width-28)[:2] or ['']
+        else:
+            lines = [_fit(text, small, width-28)]
+        return lines, color
+
+    def _footer_height(self, width):
+        return 13+17*len(self._footer_lines(width)[0])
 
     def _shown_fields(self, fields):
         source = self.settings['source']
@@ -2706,7 +2818,7 @@ class SenderGui:
             if dest == 'video_source':
                 self.capture_choice_cache.pop('capture_fps', None)
             try:
-                if self.process is not None and dest in ('brightness', 'gamma'):
+                if self.process is not None and dest in LIVE_FIELDS:
                     self._send_live_tone_update()
                 self.notice = f'{dest.replace("_", " ").capitalize()} updated.'
                 self._persist_preferences()
@@ -2738,113 +2850,133 @@ class SenderGui:
         control.write(json.dumps({'brightness': brightness, 'gamma': gamma})+'\n')
         control.flush()
 
+    def _cell_rect(self, width, column, span, y):
+        columns = self._columns(width)
+        cell = (width-2*self.GUTTER-(columns-1)*self.CELL_GAP)//columns
+        left = self.GUTTER+column*(cell+self.CELL_GAP)
+        return (left, y, left+span*cell+(span-1)*self.CELL_GAP,
+                y+self.ROW_HEIGHT-3)
+
+    def _render_header(self, draw, small, title, y, width):
+        draw.text((24, y+6), title, font=small, fill=(229, 237, 243))
+        label_right = 24+int(small.getlength(title))+12
+        draw.line((label_right, y+14, width-self.GUTTER, y+14),
+                  fill=(47, 68, 83), width=1)
+
     def _render_setup(self, image, draw, font, small):
         width, height = image.size
-        draw.text((24, 76), 'Configure a sender', font=font,
-                  fill=(229, 237, 243))
-        draw.text((24, 101), 'No capture or audio stream opens until Start.',
-                  font=small, fill=(133, 159, 177))
         fields = self._visible_fields()
         items = self._setup_items(width)
-        row_top = self.SETUP_TOP
-        visible_count = self._setup_capacity(height)
-        self.scroll = max(0, min(self.scroll, max(0, len(items)-visible_count)))
+        room = self._setup_room(image.size)
+        self.scroll = max(0, min(self.scroll, self._max_scroll(items, room)))
         if self.selected not in fields and fields:
             self.selected = fields[0]
-        columns = self._button_columns(width)
-        button_width = (width-36-(columns-1)*self.BUTTON_GAP)//columns
-        shown_items = items[self.scroll:self.scroll+visible_count]
-        for visible_index, (kind, payload) in enumerate(shown_items):
-            y = row_top+visible_index*self.ROW_HEIGHT
+        count = self._items_fitting(items, self.scroll, room)
+        y = self.SETUP_TOP
+        for kind, payload in items[self.scroll:self.scroll+count]:
             if kind == 'header':
-                draw.text((24, y+12), payload, font=small,
-                          fill=(229, 237, 243))
-                label_right = 24+int(small.getlength(payload))+12
-                draw.line((label_right, y+20, width-18, y+20),
-                          fill=(47, 68, 83), width=1)
-            elif kind == 'buttons':
-                for column, dest in enumerate(payload):
-                    left = 18+column*(button_width+self.BUTTON_GAP)
-                    self._render_button(
-                        draw, small, dest,
-                        (left, y, left+button_width, y+self.ROW_HEIGHT-3))
+                self._render_header(draw, small, payload, y, width)
+            elif kind == 'note':
+                draw.text((24, y+5), payload, font=small,
+                          fill=(238, 182, 125))
             else:
-                self._render_row(draw, small, payload, y, width)
-        if len(items) > visible_count:
+                for dest, column, span in payload:
+                    self._render_cell(
+                        draw, small, dest,
+                        self._cell_rect(width, column, span, y))
+            y += self._item_height(kind)
+        if count < len(items):
             # Position marker: the page scrolls by line like the dropdowns.
-            track_top = row_top
-            track_bottom = row_top+visible_count*self.ROW_HEIGHT-3
+            track_top, track_bottom = self.SETUP_TOP, self.SETUP_TOP+room
             span = track_bottom-track_top
-            thumb = max(18, span*visible_count//len(items))
-            offset = (span-thumb)*self.scroll//max(1, len(items)-visible_count)
+            thumb = max(18, span*count//len(items))
+            offset = (span-thumb)*self.scroll//max(1, len(items)-count)
             draw.rectangle((width-11, track_top, width-8, track_bottom),
                            fill=(17, 29, 39))
             draw.rectangle((width-11, track_top+offset, width-8,
                             track_top+offset+thumb), fill=(74, 111, 134))
-
-        help_text = FIELD_HELP.get(self.selected, '')
-        help_top = height-87
-        lines = _wrapped(help_text, small, width-48)
-        for index, line in enumerate(lines[:2]):
-            draw.text((24, help_top+index*17), line, font=small,
-                      fill=(125, 150, 168))
-
         if self.dropdown is not None:
             self._render_dropdown(draw, small, width, height)
 
-    def _render_button(self, draw, small, dest, rect):
+    def _render_cell(self, draw, small, dest, rect):
+        locked = self._locked(dest)
+        if dest in BOOL_FIELDS:
+            self._render_button(draw, small, dest, rect, locked)
+        else:
+            self._render_row(draw, small, dest, rect, locked)
+
+    def _render_button(self, draw, small, dest, rect, locked=False):
         """One on/off setting: filled when on, outlined and dim when off."""
         left, top, right, _bottom = rect
         value = bool(self.settings[dest])
         selected = dest == self.selected
         draw.rounded_rectangle(
             rect, radius=4,
-            fill=(43, 94, 123) if value else (12, 21, 29),
-            outline=(160, 205, 226) if selected else
-            (98, 145, 169) if value else (47, 68, 83),
-            width=2 if selected else 1)
+            fill=(28, 52, 66) if locked and value else
+            (12, 19, 26) if locked else
+            (43, 94, 123) if value else (12, 21, 29),
+            outline=(160, 205, 226) if selected and not locked else
+            (98, 145, 169) if value and not locked else (47, 68, 83),
+            width=2 if selected and not locked else 1)
         state = 'On' if value else 'Off'
         state_left = right-38
-        draw.text((left+12, top+10),
+        on_ink = (246, 250, 252) if not locked else (140, 158, 170)
+        off_ink = (133, 159, 177) if not locked else (96, 114, 126)
+        draw.text((left+12, top+8),
                   _fit(self._button_label(dest), small, state_left-left-22),
-                  font=small,
-                  fill=(246, 250, 252) if value else (133, 159, 177))
-        draw.text((state_left, top+10), state, font=small,
-                  fill=(246, 250, 252) if value else (110, 132, 148))
+                  font=small, fill=on_ink if value else off_ink)
+        draw.text((state_left, top+8), state, font=small,
+                  fill=on_ink if value else off_ink)
         self.hits[f'field:{dest}'] = rect
 
-    def _render_row(self, draw, small, dest, y, width):
-        selected = dest == self.selected
-        fill = (35, 60, 77) if selected else (17, 29, 39)
-        draw.rounded_rectangle((18, y, width-18, y+self.ROW_HEIGHT-3),
-                               radius=4, fill=fill,
-                               outline=(74, 111, 134) if selected else (32, 48, 60),
-                               width=1)
-        label = FIELD_LABELS.get(
-            dest, dest.replace('_', ' ').capitalize())
-        value_left = max(300, int(width*.37))
-        draw.text((30, y+10), _fit(label, small, value_left-42), font=small,
-                  fill=(205, 218, 228))
-        value = self.edit_buffer if self.editing and dest == self.selected else self._value_label(dest)
+    def _render_row(self, draw, small, dest, rect, locked=False):
+        """One setting: label, value, and the picker arrow or Browse."""
+        left, top, right, bottom = rect
+        selected = dest == self.selected and not locked
+        draw.rounded_rectangle(
+            rect, radius=4,
+            fill=(35, 60, 77) if selected else
+            (13, 21, 28) if locked else (17, 29, 39),
+            outline=(74, 111, 134) if selected else
+            (28, 42, 53) if locked else (32, 48, 60), width=1)
+        label_width = (190 if right-left >= 600 else
+                       min(int((right-left)*.55),
+                           int(small.getlength(self._button_label(dest)))+22))
+        draw.text((left+10, top+8),
+                  _fit(self._button_label(dest), small, label_width-16),
+                  font=small,
+                  fill=(100, 118, 131) if locked else (205, 218, 228))
+        edge = right-8
+        field_right = right
+        if dest in self.DROPDOWN_FIELDS:
+            draw.text((right-24, top+7), '▾', font=small,
+                      fill=(80, 100, 114) if locked else (134, 169, 188))
+            edge = right-28
         if dest == 'video_source':
-            browse_left = width-104
-            value = _fit(value, small, browse_left-value_left-14)
-            browse_rect = (browse_left, y+4, width-26, y+self.ROW_HEIGHT-7)
-            draw.rounded_rectangle(browse_rect, radius=4, fill=(30, 58, 76),
-                                   outline=(75, 111, 132), width=1)
-            draw.text((browse_left+10, y+10), 'Browse', font=small,
-                      fill=(229, 239, 246))
-            self.hits['browse:video_source'] = browse_rect
-            field_right = browse_left-8
-        else:
-            value = _fit(value, small, width-value_left-45)
-            field_right = width-18
-        draw.text((value_left, y+10), value,
-                  font=small, fill=(237, 242, 246))
-        draw.text((width-40, y+9), '▾' if dest in self.DROPDOWN_FIELDS else '',
-                  font=small, fill=(134, 169, 188))
-        self.hits[f'field:{dest}'] = (
-            18, y, field_right, y+self.ROW_HEIGHT-3)
+            browse = (right-78, top+4, right-6, bottom-4)
+            draw.rounded_rectangle(
+                browse, radius=4, fill=(20, 36, 46) if locked else (30, 58, 76),
+                outline=(48, 68, 82) if locked else (75, 111, 132), width=1)
+            draw.text((browse[0]+10, top+8), 'Browse', font=small,
+                      fill=(110, 128, 142) if locked else (229, 239, 246))
+            self.hits['browse:video_source'] = browse
+            edge = browse[0]-8
+            field_right = browse[0]-4
+        if dest in self.MATCH_FIELDS:
+            # Not signalled on the wire: the receiver must be set the same.
+            tag_width = int(small.getlength('match'))+14
+            tag = (edge-tag_width, top+5, edge, bottom-5)
+            ink = (92, 120, 136) if locked else (140, 192, 212)
+            draw.rounded_rectangle(tag, radius=4, outline=ink, width=1)
+            draw.text((tag[0]+7, tag[1]+3), 'match', font=small, fill=ink)
+            edge = tag[0]-8
+        value = (self.edit_buffer if self.editing and dest == self.selected
+                 else self._value_label(dest))
+        value_left = left+label_width
+        draw.text((value_left, top+8),
+                  _fit(value, small, max(20, edge-value_left)), font=small,
+                  fill=(120, 136, 148) if locked else (237, 242, 246))
+        self.hits[f'field:{dest}'] = (left, top, field_right, bottom)
 
     def _render_dropdown(self, draw, small, width, height):
         dest = self.dropdown
@@ -2858,11 +2990,12 @@ class SenderGui:
         anchor = self.hits.get(f'field:{dest}')
         if anchor is None:
             return
-        left = max(280, int(width*.37))
-        right = width-25
-        top = anchor[1]+self.ROW_HEIGHT-2
-        if top+max_items*28 > height-100:
-            top = max(60, anchor[1]-max_items*28)
+        menu_width = min(max(anchor[2]-anchor[0], 320), width-2*self.GUTTER)
+        left = max(self.GUTTER, min(anchor[0], width-self.GUTTER-menu_width))
+        right = left+menu_width
+        top = anchor[3]+2
+        if top+max_items*28+4 > height-self._footer_height(width):
+            top = max(self.SETUP_TOP, anchor[1]-max_items*28-4)
         draw.rounded_rectangle((left, top, right, top+max_items*28+4),
                                radius=4, fill=(9, 18, 25),
                                outline=(98, 145, 169), width=1)
@@ -2879,153 +3012,150 @@ class SenderGui:
                       font=small, fill=(235, 241, 246))
             self.hits[f'option:{option_index}'] = (left, y, right, y+26)
 
+    def _status_facts(self):
+        device = self._device()
+        settings = self.settings
+        profile = next((label for label, value in PROFILE_CHOICES
+                        if value == settings['profile']), 'Unknown')
+        source = next((label for label, value in SOURCE_CHOICES
+                       if value == settings['source']), 'Not selected')
+        facts = [source, profile.split(' · ')[0],
+                 (device.name if device else 'No output') + ' · ' +
+                 device_rate_text(device),
+                 'Direct DCT' if settings.get('dct_encode') else 'Resize']
+        if settings.get('profile') in ASPECT_PROFILES:
+            layout = settings.get('aspect_layout', 'auto')
+            if settings.get('profile') in ASPECT_TAIL_PROFILES:
+                layout += ' / '+settings.get('aspect_tail',
+                                             DEFAULT_ASPECT_TAIL)
+            facts.append('aspect '+layout)
+        facts.append(f"{settings['speed']}×")
+        return '  ·  '.join(facts)
+
+    def _render_stage_buttons(self, draw, small, left, top, limit):
+        """The Source / Encoder input switch; returns where it ends."""
+        for stage, label in PREVIEW_STAGE_LABELS:
+            right = left+int(small.getlength(label))+20
+            if right > limit:
+                break
+            rect = (left, top, right, top+24)
+            active = self.settings.get('preview_stage') == stage
+            draw.rounded_rectangle(
+                rect, radius=4, fill=(42, 78, 99) if active else (17, 29, 39),
+                outline=(94, 143, 168) if active else (48, 73, 90))
+            draw.text((left+10, top+5), label, font=small,
+                      fill=(235, 242, 247))
+            self.hits[f'preview_stage:{stage}'] = rect
+            left = right+6
+        return left
+
     def _render_live(self, image, draw, font, small):
         width, height = image.size
+        gutter = self.GUTTER
         preview_enabled = self.settings.get('preview') == 'window'
-        # Transport controls belong to a video file only: under the preview
-        # pane, or across the page when there is no pane.
+        popout = self.settings.get('preview') == 'popout'
         transport = self._file_source()
-        detail_right = int(width*.47) if preview_enabled else width-24
-        draw.text((24, 76), 'Sender status', font=font,
-                  fill=(229, 237, 243))
         held = (transport and self.process is not None and
                 self.playback is not None and self.playback['paused'])
         state = ('STOPPING' if self.stop_requested else
                  'DEVICE LOST' if self.sender_device_lost else
                  'SENDING · PAUSED' if held else
                  'SENDING' if self.process is not None else 'STOPPED')
-        draw.rounded_rectangle((24, 119, width-24, 188), radius=6,
-                               fill=(17, 29, 39), outline=(48, 73, 90))
-        draw.text((42, 135), state, font=font,
+
+        # One status strip: the state, then the facts that used to be a table.
+        strip = (gutter, self.SETUP_TOP, width-gutter, self.SETUP_TOP+34)
+        draw.rounded_rectangle(strip, radius=6, fill=(17, 29, 39),
+                               outline=(48, 73, 90))
+        draw.text((gutter+12, strip[1]+7), state, font=font,
                   fill=(238, 140, 110) if state == 'DEVICE LOST' else
                   (238, 182, 125) if state == 'STOPPING' else
                   (145, 218, 170) if state.startswith('SENDING')
                   else (188, 202, 213))
-        draw.text((42, 165), _fit(self.notice, small, width-84),
-                  font=small, fill=(165, 187, 202))
-        if self.settings.get('preview') == 'popout':
+        facts_left = gutter+12+int(font.getlength(state))+18
+        facts_right = strip[2]-10
+        if popout:
             # The pop-out window shows the stage chosen here.
-            right = width-36
-            for stage, label in reversed(PREVIEW_STAGE_LABELS):
-                left = right-int(small.getlength(label))-20
-                rect = (left, 129, right, 155)
-                active = self.settings.get('preview_stage') == stage
-                draw.rounded_rectangle(
-                    rect, radius=4,
-                    fill=(42, 78, 99) if active else (17, 29, 39),
-                    outline=(94, 143, 168) if active else (48, 73, 90))
-                draw.text((left+10, 135), label, font=small,
-                          fill=(235, 242, 247))
-                self.hits[f'preview_stage:{stage}'] = rect
-                right = left-8
-            label = 'Pop-out'
-            draw.text((right-int(small.getlength(label))-4, 135), label,
-                      font=small, fill=(132, 158, 176))
-
-        device = self._device()
-        profile_label = next((label for label, value in PROFILE_CHOICES
-                              if value == self.settings['profile']), 'Unknown')
-        source_label = next((label for label, value in SOURCE_CHOICES
-                             if value == self.settings['source']), 'Not selected')
-        rate_text = device_rate_text(device)
-        details = (
-            ('Source', source_label),
-            ('Output device', device.name if device else 'Not selected'),
-            ('Sample rate', rate_text),
-            ('Wire profile', profile_label),
-            ('Image encode', 'Direct DCT' if self.settings.get('dct_encode')
-             else 'Resize'),
-            *((('Aspect layout / tail', (
-                f"{self.settings.get('aspect_layout', 'auto')} / "
-                f"{self.settings.get('aspect_tail', DEFAULT_ASPECT_TAIL)}"
-                ' · match receiver')),)
-              if self.settings.get('profile') in ASPECT_TAIL_PROFILES else
-              (('Aspect layout', (
-                  f"{self.settings.get('aspect_layout', 'auto')} · match receiver")),)
-              if self.settings.get('profile') in ASPECT_PROFILES else ()),
-            ('Speed', f"{self.settings['speed']}×"),
-        )
-        y = 220
-        for label, value in details:
-            value_x = 148 if preview_enabled else 235
-            draw.text((32, y), _fit(label, small, value_x-40), font=small,
+            labels = [label for _stage, label in PREVIEW_STAGE_LABELS]
+            switch = sum(int(small.getlength(label))+26 for label in labels)
+            facts_right -= switch+66
+            self._render_stage_buttons(draw, small, facts_right+66,
+                                       strip[1]+5, strip[2]-6)
+            draw.text((facts_right+10, strip[1]+10), 'Pop-out', font=small,
                       fill=(132, 158, 176))
-            draw.text((value_x, y), _fit(value, small,
-                                         max(70, detail_right-value_x-8)),
-                      font=small, fill=(218, 229, 237))
-            y += 32
+        draw.text((facts_left, strip[1]+10),
+                  _fit(self._status_facts(), small,
+                       max(40, facts_right-facts_left)),
+                  font=small, fill=(218, 229, 237))
 
-        log_top = y+12
-        draw.text((24, log_top), 'Sender messages', font=small,
-                  fill=(132, 158, 176))
-        first_line = log_top+24
-        transport_top = height-48-self.TRANSPORT_HEIGHT
-        log_bottom = (transport_top-8 if transport and not preview_enabled
-                      else height-34)
-        line_count = max(0, min(10, (log_bottom-first_line)//22))
-        for index, line in enumerate(self.lines[-line_count:] if line_count else ()):
-            shown = _fit(line, small,
-                         max(80, detail_right-52) if preview_enabled
-                         else width-48)
-            draw.text((28, first_line+index*22), shown,
-                      font=small, fill=(183, 201, 214))
-
+        # From the bottom up: messages, transport, live controls.
+        bottom = height-self._footer_height(width)-6
         if preview_enabled:
-            from PIL import ImageOps
-            panel_left = int(width*.51)
-            panel = (panel_left, 248, width-24,
-                     transport_top-8 if transport else height-48)
-            draw.text((panel_left, 220), 'Preview', font=small,
-                      fill=(132, 158, 176))
-            left = panel_left+int(small.getlength('Preview'))+14
-            for stage, label in PREVIEW_STAGE_LABELS:
-                right = min(width-24, left+int(small.getlength(label))+20)
-                rect = (left, 215, right, 241)
-                active = self.settings.get('preview_stage') == stage
-                draw.rounded_rectangle(
-                    rect, radius=4,
-                    fill=(42, 78, 99) if active else (17, 29, 39),
-                    outline=(94, 143, 168) if active else (48, 73, 90))
-                draw.text((left+10, 221), _fit(label, small, right-left-12),
-                          font=small, fill=(235, 242, 247))
-                self.hits[f'preview_stage:{stage}'] = rect
-                left = right+8
-            draw.rounded_rectangle(panel, radius=6, fill=(12, 21, 29),
-                                   outline=(48, 73, 90))
-            if self.preview_image is None:
-                if self.preview_error:
-                    message = self.preview_error
-                elif self.process:
-                    message = 'Waiting for the first handed-off frame…'
-                else:
-                    message = 'Start sending to see the source or encoder input.'
-                draw.text((panel_left+16, panel[1]+16),
-                          _fit(message, small, panel[2]-panel_left-32),
-                          font=small, fill=(165, 187, 202))
-            else:
-                inner = (max(1, panel[2]-panel[0]-20),
-                         max(1, panel[3]-panel[1]-58))
-                thumbnail = ImageOps.contain(self.preview_image, inner)
-                x = panel_left+(panel[2]-panel_left-thumbnail.width)//2
-                y_image = panel[1]+8+(inner[1]-thumbnail.height)//2
-                image.paste(thumbnail.convert('RGBA'), (x, y_image))
-                age_ms = max(0.0, (time.monotonic_ns()-
-                                   int(self.preview_handoff_ns or 0))/1e6)
-                stage = dict(PREVIEW_STAGE_LABELS).get(
-                    self.preview_stage, 'Image')
-                caption = (f'{stage} · packet {self.preview_counter} · aspect '
-                           f'{self.preview_aspect} · {age_ms:.0f} ms after '
-                           'output handoff')
-                draw.text((panel_left+10, panel[3]-27),
-                          _fit(caption, small, panel[2]-panel_left-20),
-                          font=small,
-                          fill=(145, 218, 170) if age_ms < 500 else
-                          (238, 182, 125))
+            log_top = bottom-3*self.LOG_LINE-2
+            for index, line in enumerate(self.lines[-3:]):
+                draw.text((gutter+6, log_top+index*self.LOG_LINE),
+                          _fit(line, small, width-2*gutter-12), font=small,
+                          fill=(183, 201, 214))
+            bottom = log_top-4
         if transport:
+            transport_top = bottom-self.TRANSPORT_HEIGHT
             self._render_transport(
-                draw, small,
-                (panel_left if preview_enabled else 24, transport_top,
-                 width-24, height-48))
+                draw, small, (gutter, transport_top, width-gutter, bottom))
+            bottom = transport_top-6
+        columns = self._columns(width)
+        live_lines = self._pack(self.LIVE_FIELDS, columns)
+        live_top = bottom-len(live_lines)*self.ROW_HEIGHT
+        for index, line in enumerate(live_lines):
+            for dest, column, span in line:
+                self._render_cell(
+                    draw, small, dest,
+                    self._cell_rect(width, column, span,
+                                    live_top+index*self.ROW_HEIGHT))
+        bottom = live_top-6
+
+        area_top = strip[3]+8
+        if not preview_enabled:
+            lines_fit = max(0, (bottom-area_top)//self.LOG_LINE)
+            for index, line in enumerate(
+                    self.lines[-lines_fit:] if lines_fit else ()):
+                draw.text((gutter+6, area_top+index*self.LOG_LINE),
+                          _fit(line, small, width-2*gutter-12), font=small,
+                          fill=(183, 201, 214))
+            return
+
+        from PIL import ImageOps
+        panel = (gutter, area_top, width-gutter, max(area_top+40, bottom))
+        draw.rounded_rectangle(panel, radius=6, fill=(12, 21, 29),
+                               outline=(48, 73, 90))
+        # The switch and the caption sit along the top edge of the picture.
+        buttons_end = self._render_stage_buttons(
+            draw, small, panel[0]+8, panel[1]+5, panel[2])
+        if self.preview_image is None:
+            if self.preview_error:
+                message = self.preview_error
+            elif self.process:
+                message = 'Waiting for the first handed-off frame…'
+            else:
+                message = 'Start sending to see the frame being encoded.'
+            draw.text((panel[0]+16, panel[1]+38),
+                      _fit(message, small, panel[2]-panel[0]-32),
+                      font=small, fill=(165, 187, 202))
+            return
+        inner = (max(1, panel[2]-panel[0]-16), max(1, panel[3]-panel[1]-36))
+        thumbnail = ImageOps.contain(self.preview_image, inner)
+        x = panel[0]+(panel[2]-panel[0]-thumbnail.width)//2
+        y_image = panel[1]+32+(inner[1]-thumbnail.height)//2
+        image.paste(thumbnail.convert('RGBA'), (x, y_image))
+        age_ms = max(0.0, (time.monotonic_ns()-
+                           int(self.preview_handoff_ns or 0))/1e6)
+        stage = dict(PREVIEW_STAGE_LABELS).get(self.preview_stage, 'Image')
+        caption = (f'{stage} · packet {self.preview_counter} · aspect '
+                   f'{self.preview_aspect} · {age_ms:.0f} ms after '
+                   'output handoff')
+        room = panel[2]-8-buttons_end-8
+        shown = _fit(caption, small, max(40, room))
+        draw.text((panel[2]-8-int(small.getlength(shown)), panel[1]+9),
+                  shown, font=small,
+                  fill=(145, 218, 170) if age_ms < 500 else (238, 182, 125))
 
     def _render_transport(self, draw, small, rect):
         """Play/pause, restart and a seek bar with position and duration."""
@@ -3089,16 +3219,13 @@ class SenderGui:
         draw.rectangle((0, self.TOOLBAR-1, width, self.TOOLBAR),
                        fill=(47, 68, 83, 255))
         controls = [
-            ('setup', 'Setup', 14, 100),
-            ('live', 'Live', 108, 180),
+            ('setup', 'Setup', 12, 104),
+            ('live', 'Live', 112, 184),
+            ('start_stop', 'Stop' if self.process is not None else 'Start',
+             192, 284),
         ]
         if self.page == 'live':
-            controls.append(('change_source', 'Change source', 190, 310))
-        controls.extend((
-            ('start_stop', 'Stop' if self.process is not None else 'Start',
-             width-202, width-108),
-            ('close', 'Close', width-98, width-12),
-        ))
+            controls.append(('change_source', 'Change source', 292, 412))
         for key, label, left, right in controls:
             rect = (left, 9, right, 45)
             self.hits[key] = rect
@@ -3108,7 +3235,6 @@ class SenderGui:
                      (100, 51, 41) if key == 'start_stop' and
                      self.sender_device_lost else
                      (82, 55, 40) if key == 'start_stop' and self.process else
-                     (99, 65, 34) if key == 'change_source' else
                      (43, 94, 123) if key == 'start_stop' else (22, 35, 46))
             draw.rounded_rectangle(rect, radius=5, fill=color,
                                    outline=(67, 100, 122), width=1)
@@ -3121,12 +3247,12 @@ class SenderGui:
         else:
             self._render_live(image, draw, font, small)
 
-        footer_top = height-34
+        lines, color = self._footer_lines(width)
+        footer_top = height-self._footer_height(width)
         draw.rectangle((0, footer_top, width, height), fill=(10, 18, 25))
-        status = self.device_error if self.device_error else self.notice
-        draw.text((14, footer_top+10), _fit(status, small, width-28),
-                  font=small, fill=(255, 182, 132) if self.device_error
-                  else (147, 206, 169) if self.process else (167, 187, 202))
+        for index, line in enumerate(lines):
+            draw.text((14, footer_top+8+index*17), line, font=small,
+                      fill=color)
         return image
 
     def _on_mouse(self, glfw, window, button, action, _mods):
@@ -3146,16 +3272,14 @@ class SenderGui:
                     if self.hits[key][0] <= x < self.hits[key][2] and
                     self.hits[key][1] <= y < self.hits[key][3]), None)
         if button == right_button:
-            if (hit is None or not hit.startswith('field:') or
-                    self.page != 'setup'):
+            if hit is None or not hit.startswith('field:'):
                 return
             dest = hit.split(':', 1)[1]
             if (dest not in self._visible_fields() or
                     dest in self.DROPDOWN_FIELDS or
                     dest in BOOL_FIELDS):
                 return
-            if (self.process is not None and
-                    dest not in ('brightness', 'gamma')):
+            if self._locked(dest):
                 self.notice = 'Settings are locked while the sender is running.'
                 self.dirty = True
                 return
@@ -3174,12 +3298,6 @@ class SenderGui:
             self.page, self.dropdown = 'setup', None
         elif hit == 'live':
             self.page, self.dropdown = 'live', None
-        elif hit == 'close':
-            if self.process is not None:
-                self.close_when_stopped = True
-                self._stop()
-            else:
-                glfw.set_window_should_close(window, True)
         elif hit == 'start_stop':
             self._stop() if self.process is not None else self._start()
         elif hit == 'change_source':
@@ -3218,11 +3336,10 @@ class SenderGui:
             if 0 <= index < len(choices):
                 self._select_option(self.dropdown, choices[index][1])
             self.dropdown = None
-        elif hit and hit.startswith('field:') and self.page == 'setup':
+        elif hit and hit.startswith('field:'):
             dest = hit.split(':', 1)[1]
             self.selected = dest
-            if (self.process is not None and
-                    dest not in ('brightness', 'gamma')):
+            if self._locked(dest):
                 self.notice = 'Settings are locked while the sender is running.'
             elif dest in BOOL_FIELDS:
                 self._assign(dest, not self.settings[dest])
@@ -3290,7 +3407,7 @@ class SenderGui:
                 self.dropdown = None
         elif self.page == 'setup':
             fields = self._visible_fields()
-            live_tone_selected = self.selected in ('brightness', 'gamma')
+            live_tone_selected = self.selected in LIVE_FIELDS
             if (self.process is not None and not live_tone_selected and
                     key not in (glfw.KEY_UP, glfw.KEY_DOWN)):
                 self.notice = 'Settings are locked while the sender is running.'
@@ -3336,11 +3453,10 @@ class SenderGui:
             self.dropdown_scroll = max(
                 0, min(max(0, len(options)-1), self.dropdown_scroll+delta))
         elif self.page == 'setup':
-            visible_count = self._setup_capacity(self.height)
-            self.scroll = max(
-                0, min(max(0, len(self._setup_items(self.width))-
-                           visible_count),
-                       self.scroll+delta))
+            self.scroll = max(0, min(
+                self._max_scroll(self._setup_items(self.width),
+                                 self._setup_room()),
+                self.scroll+delta))
         self.dirty = True
 
     def _on_drop(self, _window, paths):

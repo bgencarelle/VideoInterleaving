@@ -959,7 +959,7 @@ class GuiPreviewSettingTests(unittest.TestCase):
     def test_preview_is_one_dropdown_row_on_the_setup_page(self):
         gui = SenderGui(self.devices)
         gui.settings.update(device=3, source='video', video_source='clip.mp4')
-        self.assertIn('preview', gui.BASIC_FIELDS)
+        self.assertIn('preview', dict(gui.SECTIONS)['Source'])
         self.assertIn('preview', gui.DROPDOWN_FIELDS)
         self.assertEqual(gui._visible_fields().count('preview'), 1)
         gui._canvas((960, 720))
@@ -1314,8 +1314,10 @@ class GuiTransportTests(unittest.TestCase):
                     self.assertEqual(play[1], restart[1])
                     self.assertLess(play[2], restart[0]+1)
                     self.assertLess(restart[2], seek[0])
-                    if preview == 'window':
-                        self.assertGreaterEqual(play[0], int(width*.51))
+                    # The transport bar runs the width of the page, below
+                    # the preview, whichever preview is chosen.
+                    self.assertLess(play[0], int(width*.1))
+                    self.assertGreater(seek[2], int(width*.75))
 
     def test_play_pause_click_sends_pause_then_play(self):
         gui = self.running()

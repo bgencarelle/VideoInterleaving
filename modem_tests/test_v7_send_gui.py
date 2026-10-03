@@ -15,7 +15,7 @@ from PIL import Image
 
 from tools import v7_live
 from tools.v7_preview_protocol import pack_preview_datagram
-from tools.v7_send_gui import (InputDevice, OutputDevice,
+from tools.v7_send_gui import (FIELD_HELP, InputDevice, OutputDevice,
                                 PRIMARY_PROFILE_CHOICES, ScreenTarget, SenderGui,
                                 build_command, enumerate_screen_targets,
                                 enumerate_camera_sources, linux_camera_sources,
@@ -25,6 +25,25 @@ from tools.v7_send_gui import (InputDevice, OutputDevice,
                                 parse_ffmpeg_camera_sources, pick_video_file,
                                 device_rate_text, validate_settings,
                                 _clipboard_text)
+
+
+def section_of(gui, dest):
+    """The title of the setup section that holds a setting."""
+    return next((title for title, group in gui.SECTIONS if dest in group),
+                None)
+
+
+class _Pipe:
+    """A control pipe that remembers what the GUI writes to it."""
+
+    def __init__(self):
+        self.text = ''
+
+    def write(self, text):
+        self.text += text
+
+    def flush(self):
+        pass
 
 
 class SenderKeyStub:
@@ -535,7 +554,7 @@ class SenderGuiTests(unittest.TestCase):
         gui = SenderGui(self.devices)
         gui.settings['device'] = 3
         self.assertTrue(gui.settings['dct_encode'])     # the default
-        self.assertIn('dct_encode', gui.ADVANCED_FIELDS)
+        self.assertEqual(section_of(gui, 'dct_encode'), 'Picture encode')
         self.assertIn('dct_encode', gui._visible_fields())
         gui._assign('dct_encode', False)
         visible = gui._visible_fields()
@@ -604,8 +623,8 @@ class SenderGuiTests(unittest.TestCase):
         self.assertIn('aspect_tail', visible)
         self.assertIn('dct_encode', visible)
         self.assertEqual(gui._value_label('aspect_layout'), 'Auto · source aspect')
-        self.assertIn('aspect_layout', gui.BASIC_FIELDS)
-        self.assertIn('aspect_tail', gui.ADVANCED_FIELDS)
+        self.assertEqual(section_of(gui, 'aspect_layout'), 'Wire profile')
+        self.assertEqual(section_of(gui, 'aspect_tail'), 'Wire profile')
 
     def test_aspect_mono_profile_forwards_layout_and_mono_routing_only(self):
         self.settings.update(profile='aspect-mono-500', aspect_layout='4:3',
@@ -637,7 +656,7 @@ class SenderGuiTests(unittest.TestCase):
         gui = SenderGui(self.devices)
         gui.settings['device'] = 3
         self.assertFalse(gui.settings['clip_aware'])
-        self.assertIn('clip_aware', gui.ADVANCED_FIELDS)
+        self.assertEqual(section_of(gui, 'clip_aware'), 'Picture encode')
         self.assertIn('clip_aware', gui._visible_fields())
 
     def test_luma_adjustment_is_on_with_direct_dct_and_reaches_the_cli(self):
@@ -1199,7 +1218,7 @@ class SenderGuiTests(unittest.TestCase):
         gui = SenderGui(self.devices)
         gui.settings.update(device=3, source='screen')
         visible = gui._visible_fields()
-        self.assertIn('screen_backend', gui.ADVANCED_FIELDS)
+        self.assertEqual(section_of(gui, 'screen_backend'), 'Capture')
         self.assertIn('screen_target', visible)
         self.assertNotIn('video_source', visible)
         self.assertIn('preview', visible)
@@ -1562,7 +1581,7 @@ class SenderGuiTests(unittest.TestCase):
 
 
 class SenderGuiButtonLayoutTests(unittest.TestCase):
-    """On/off settings are buttons; Advanced is a section of the page."""
+    """On/off settings are buttons on a grid; the page is named sections."""
 
     SIZE = (960, 720)
 
@@ -1624,14 +1643,12 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
                 self.assertEqual(gui.settings, before)
         self.assertEqual(seen, set(BOOL_FIELDS))
 
-    def test_buttons_share_lines_and_do_not_overlap(self):
+    def test_cells_share_lines_and_do_not_overlap(self):
         gui = self._gui()
         items = gui._setup_items(self.SIZE[0])
-        button_lines = [payload for kind, payload in items
-                        if kind == 'buttons']
-        self.assertTrue(any(len(line) > 1 for line in button_lines))
+        lines = [payload for kind, payload in items if kind == 'line']
+        self.assertTrue(any(len(line) > 1 for line in lines))
         hits = self._all_hits(gui)
-        gui._scroll_to('clip_aware', self.SIZE)
         gui._canvas(self.SIZE)
         rects = [rect for key, rect in gui.hits.items()
                  if key.startswith('field:')]
@@ -1643,8 +1660,8 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
                     (first, second))
         self.assertEqual({key.split(':', 1)[1] for key in hits},
                          set(gui._visible_fields()))
-        # A narrower window wraps to fewer buttons per line.
-        self.assertLess(gui._button_columns(640), gui._button_columns(960))
+        # A narrower window wraps to fewer cells per line.
+        self.assertLess(gui._columns(640), gui._columns(960))
 
     def test_keyboard_still_reaches_and_flips_a_button(self):
         gui = self._gui()
@@ -1664,28 +1681,26 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
             gui._canvas(self.SIZE)
             self.assertIn(f'field:{expected}', gui.hits)
 
-    def test_advanced_settings_are_a_section_without_a_toggle(self):
+    def test_settings_are_named_sections_without_a_toggle(self):
         gui = self._gui()
         gui._canvas(self.SIZE)
         self.assertNotIn('advanced', gui.hits)
         items = gui._setup_items(self.SIZE[0])
-        self.assertEqual([payload for kind, payload in items
-                          if kind == 'header'], ['Advanced'])
-        header = items.index(('header', 'Advanced'))
-        below = set()
-        for kind, payload in items[header+1:]:
-            below.update(payload if kind == 'buttons' else (payload,))
-        self.assertTrue(below)
-        self.assertLessEqual(below, set(gui.ADVANCED_FIELDS))
-        self.assertEqual(
-            below, set(gui._visible_fields()) & set(gui.ADVANCED_FIELDS))
+        headers = [payload for kind, payload in items if kind == 'header']
+        self.assertEqual(headers[0], 'Live controls')
+        self.assertNotIn('Advanced', headers)
+        self.assertEqual(headers, [title for title, _shown in
+                                   gui._setup_sections()])
+        shown = {dest for kind, payload in items if kind == 'line'
+                 for dest, _column, _span in payload}
+        self.assertEqual(shown, set(gui._visible_fields()))
         for dest in ('dct_encode', 'clip_aware', 'dct_sharpen',
                      'aspect_tail', 'dct_clarity'):
-            self.assertIn(dest, below)
+            self.assertIn(dest, shown)
         hits = self._all_hits(gui)
-        for dest in below:
+        for dest in shown:
             self.assertIn(f'field:{dest}', hits)
-        # Non-boolean advanced settings keep their control type.
+        # Non-boolean settings keep their control type.
         gui._scroll_to('dct_sharpen', self.SIZE)
         gui._canvas(self.SIZE)
         self._click(gui, 'field:dct_sharpen')
@@ -1697,31 +1712,163 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
         self.assertTrue(gui.editing)
 
     def test_setup_page_scrolls_by_line_when_it_does_not_fit(self):
+        size = (720, 480)
         gui = self._gui()
-        items = gui._setup_items(self.SIZE[0])
-        capacity = gui._setup_capacity(self.SIZE[1])
-        self.assertGreater(len(items), capacity)
+        gui.width, gui.height = size
+        items = gui._setup_items(size[0])
+        room = gui._setup_room(size)
+        top = gui._max_scroll(items, room)
+        self.assertGreater(top, 0)
         gui._on_scroll(None, 0, -1)
         self.assertEqual(gui.scroll, 1)
         for _ in range(len(items)):
             gui._on_scroll(None, 0, -1)
-        self.assertEqual(gui.scroll, len(items)-capacity)
-        gui._canvas(self.SIZE)
-        bottom = self.SIZE[1]-gui.SETUP_BOTTOM_MARGIN
+        self.assertEqual(gui.scroll, top)
+        gui._canvas(size)
+        bottom = size[1]-gui._footer_height(size[0])
         for key, rect in gui.hits.items():
             if key.startswith('field:'):
                 self.assertLessEqual(rect[3], bottom)
 
-    def test_aspect_layout_is_basic_for_aspect_profiles_and_reaches_cli(self):
+    def test_typical_setups_fit_the_default_window_without_scrolling(self):
+        for source in ('video', 'camera', 'screen', 'test'):
+            for profile in ('aspect-fold-500', 'fold-500'):
+                with self.subTest(source=source, profile=profile):
+                    gui = self._gui(profile=profile)
+                    gui.settings['source'] = source
+                    items = gui._setup_items(self.SIZE[0])
+                    self.assertEqual(
+                        gui._max_scroll(items, gui._setup_room(self.SIZE)), 0)
+
+    def test_every_setting_is_in_exactly_one_section(self):
+        names = [dest for _title, group in SenderGui.SECTIONS
+                 for dest in group]
+        self.assertEqual(len(names), len(set(names)))
+        # Everything the page offered before the sections still has a place.
+        before = (
+            'device', 'source', 'video_source', 'preview', 'video_live',
+            'camera', 'screen_target', 'source_audio', 'source_audio_device',
+            'source_audio_input_side', 'source_audio_gain',
+            'source_audio_delay_ms', 'capture_fps', 'profile',
+            'aspect_layout', 'mono_video_side', 'brightness', 'gamma',
+            'speed', 'perceptual_resize', 'perceptual_detail_strength',
+            'aspect_tail', 'dct_encode', 'pixel_encode', 'pixel_detail',
+            'pixel_grid', 'luma_adjust', 'luma_adjust_linear', 'dct_sharpen',
+            'dct_sharpen_strength', 'dct_clarity', 'dct_chroma_gain',
+            'clip_aware', 'screen_backend', 'region', 'ffmpeg_input',
+            'capture_width', 'capture_filter')
+        self.assertEqual(set(names), set(before))
+
+    def test_grid_collapses_to_one_column_in_a_narrow_window(self):
+        gui = self._gui()
+        self.assertEqual(gui._columns(960), 3)
+        self.assertEqual(gui._columns(720), 2)
+        self.assertEqual(gui._columns(400), 1)
+        for kind, payload in gui._setup_items(400):
+            if kind == 'line':
+                self.assertEqual(len(payload), 1)
+                self.assertEqual(payload[0][2], 1)
+
+    def test_live_section_holds_only_what_changes_while_sending(self):
+        self.assertEqual(SenderGui.LIVE_FIELDS, ('brightness', 'gamma'))
+        self.assertEqual(dict(SenderGui.SECTIONS)['Live controls'],
+                         ('brightness', 'gamma'))
+        gui = self._gui()
+        self.assertEqual(gui._setup_sections()[0][0], 'Live controls')
+        self.assertFalse(any(gui._locked(dest)
+                             for dest in gui._visible_fields()))
+        gui.process = SimpleNamespace(stdin=_Pipe())
+        for dest in gui._visible_fields():
+            self.assertEqual(gui._locked(dest),
+                             dest not in ('brightness', 'gamma'))
+        notes = [payload for kind, payload in gui._setup_items(self.SIZE[0])
+                 if kind == 'note']
+        self.assertEqual(notes, ['Stop to change the settings below'])
+
+    def test_locked_settings_only_report_while_sending_and_live_ones_edit(self):
+        gui = self._gui()
+        gui.process = SimpleNamespace(stdin=_Pipe())
+        gui._canvas(self.SIZE)
+        self._click(gui, 'field:source')
+        self.assertIsNone(gui.dropdown)
+        self.assertIn('locked', gui.notice)
+        gui._canvas(self.SIZE)
+        self._click(gui, 'field:dct_encode')
+        self.assertTrue(gui.settings['dct_encode'])
+        self._click(gui, 'field:gamma')
+        self.assertTrue(gui.editing)
+        self.assertEqual(gui.selected, 'gamma')
+
+    def test_live_page_edits_brightness_and_gamma_next_to_the_picture(self):
+        pipe = _Pipe()
+        gui = self._gui()
+        gui.process = SimpleNamespace(stdin=pipe)
+        gui.page = 'live'
+        gui._canvas(self.SIZE)
+        self.assertIn('field:brightness', gui.hits)
+        self.assertIn('field:gamma', gui.hits)
+        self._click(gui, 'field:gamma')
+        self.assertTrue(gui.editing)
+        gui.edit_buffer = ''
+        for character in '1.2':
+            gui._on_char(None, ord(character))
+        gui._on_key(SenderKeyStub, None, SenderKeyStub.KEY_ENTER, 0,
+                    SenderKeyStub.PRESS, 0)
+        self.assertEqual(json.loads(pipe.text.splitlines()[-1]),
+                         {'brightness': 1.0, 'gamma': 1.2})
+        self.assertFalse(gui.editing)
+
+    def test_footer_shows_the_selected_help_until_a_notice_needs_it(self):
+        gui = self._gui()
+        gui.selected = 'speed'
+        self.assertEqual(gui._footer_content()[0], FIELD_HELP['speed'])
+        gui.notice = 'Camera discovery failed'
+        self.assertEqual(gui._footer_content()[0], 'Camera discovery failed')
+        gui.selected = 'gamma'
+        self.assertEqual(gui._footer_content()[0], FIELD_HELP['gamma'])
+        gui.sender_device_lost = True
+        self.assertEqual(gui._footer_content()[0], gui.notice)
+        gui.sender_device_lost = False
+        gui.device_error = 'No audio output devices are available.'
+        self.assertEqual(gui._footer_content()[0], gui.device_error)
+
+    def test_a_tab_click_repaints_at_once(self):
+        gui = self._gui()
+        gui.page = 'live'
+        for key, page in (('setup', 'setup'), ('live', 'live')):
+            gui._canvas(self.SIZE)
+            gui.dirty = False
+            self._click(gui, key)
+            self.assertEqual(gui.page, page)
+            self.assertTrue(gui.dirty, key)
+
+    def test_toolbar_has_start_beside_the_tabs_and_no_close_button(self):
+        gui = self._gui()
+        gui._canvas(self.SIZE)
+        self.assertNotIn('close', gui.hits)
+        self.assertEqual(gui.hits['setup'][0], 12)
+        self.assertEqual(gui.hits['start_stop'][0], gui.hits['live'][2]+8)
+        gui.page = 'live'
+        gui._canvas(self.SIZE)
+        self.assertIn('change_source', gui.hits)
+
+    def test_settings_that_must_match_the_receiver_are_tagged(self):
+        self.assertEqual(SenderGui.MATCH_FIELDS,
+                         ('aspect_layout', 'aspect_tail'))
+        for dest in SenderGui.MATCH_FIELDS:
+            self.assertNotIn('match', SenderGui._button_label(
+                self._gui(), dest).lower())
+
+    def test_aspect_layout_is_in_wire_profile_for_aspect_profiles_and_reaches_cli(self):
         sd = Mock()
         sd.check_output_settings.return_value = None
         for profile in ('aspect-fold-500', 'aspect-mono-500',
                         'stereo-slices'):
             with self.subTest(profile=profile):
                 gui = self._gui(profile=profile)
-                items = gui._setup_items(self.SIZE[0])
-                self.assertLess(items.index(('row', 'aspect_layout')),
-                                items.index(('header', 'Advanced')))
+                self.assertEqual(section_of(gui, 'aspect_layout'),
+                                 'Wire profile')
+                self.assertIn('aspect_layout', gui._visible_fields())
                 gui._scroll_to('aspect_layout', self.SIZE)
                 gui._canvas(self.SIZE)
                 self._click(gui, 'field:aspect_layout')

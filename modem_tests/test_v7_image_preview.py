@@ -74,6 +74,22 @@ class ImagePreviewTests(unittest.TestCase):
         self.assertLessEqual(len(packet), v7_image_preview._MAX_DATAGRAM_BYTES)
         self.assertEqual(len(packet), len(jpeg)+HEADER.size)
 
+    def test_preview_datagrams_fit_the_macos_udp_limit(self):
+        # macOS rejects a UDP datagram over net.inet.udp.maxdgram (9216 by
+        # default) with EMSGSIZE; the sender GUI showed "Errno 40".
+        macos_default_limit = 9216
+        self.assertLessEqual(v7_image_preview._MAX_DATAGRAM_BYTES,
+                             macos_default_limit)
+        rng = np.random.default_rng(5)
+        for width, height in ((256, 144), (256, 192), (240, 320), (320, 240)):
+            # Pixel-level detail: the worst case for a JPEG of this size.
+            blocks = rng.integers(0, 256, (height//2, width//2, 3),
+                                  dtype=np.uint8).repeat(2, 0).repeat(2, 1)
+            with self.subTest(size=(width, height)):
+                jpeg = v7_image_preview._preview_jpeg(Image.fromarray(blocks))
+                packet = pack_preview_datagram(1, 0, 1, 'source', jpeg)
+                self.assertLessEqual(len(packet), macos_default_limit)
+
     def test_worker_publishes_latest_stage_image_over_loopback(self):
         source = Image.new('RGB', (640, 480), (90, 120, 150))
         receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

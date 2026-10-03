@@ -13,7 +13,11 @@ from PIL import Image, ImageOps
 from tools.v7_preview_protocol import HEADER, pack_preview_datagram
 
 
-_MAX_DATAGRAM_BYTES = 32*1024
+# One preview picture is one loopback UDP datagram. macOS limits a UDP
+# datagram to net.inet.udp.maxdgram, 9216 bytes by default, and rejects a
+# larger one with EMSGSIZE ("Message too long", errno 40); Linux allows far
+# more, which hid this. Stay under the macOS limit, header included.
+_MAX_DATAGRAM_BYTES = 8*1024
 _MAX_JPEG_BYTES = _MAX_DATAGRAM_BYTES-HEADER.size
 _THUMBNAIL_SIZE = (256, 320)
 

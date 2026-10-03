@@ -45,10 +45,12 @@ from tools.v7_gl_viewer import (DISPLAY_LABELS, DISPLAY_MODES,
                                 resample_filter_planes)
 
 
-ROW_HEIGHT = 36
-# On/off buttons share a setup line; a line holds as many as fit this width.
-BUTTON_MIN_WIDTH = 290
-BUTTON_GAP = 8
+ROW_HEIGHT = 34
+HEADER_HEIGHT = 26
+GUTTER = 14
+# Settings sit on a grid of equal cells; a line holds as many as fit.
+CELL_MIN_WIDTH = 300
+CELL_GAP = 8
 TOOLBAR_HEIGHT = 54
 INFO_PANEL_FRACTION = 0.40
 COMPACT_INFO_PANEL_FRACTION = 0.46
@@ -195,6 +197,31 @@ ASPECT_OPTION_LABELS = {
         'fixed': 'Fixed · 96 colour every packet, no rotation · recommended',
     },
 }
+# The setup page: named sections, most used first. The first holds exactly
+# what takes effect while receiving; the rest are locked then. A setting is
+# placed by its dest (label for the display options, which have no parser
+# action); one that is named nowhere goes to the last section.
+LIVE_CONTROLS = (
+    'audio_output_device', 'audio_volume', 'audio_muted', 'freewheel_seconds',
+    'show_sync_warning', 'Pixel display', 'Display upscaler',
+    'DCT reconstruction', 'Edge reconstruction', 'Edge strength',
+    'Display grain')
+CONFIG_SECTIONS = (
+    ('Live controls', LIVE_CONTROLS),
+    ('Input', ('device',)),
+    ('Wire', ('aspect_layout', 'aspect_tail')),
+    ('Startup view', ('fullscreen', 'image_only', 'show_diagnostics')),
+    ('Output and logging', ('save_dir', 'no_log', 'log', 'diagnostics',
+                            'headless')),
+)
+# Cell widths in grid columns: long values take the whole line, a few take
+# two cells, everything else (numbers, short pickers, on/off) one.
+FULL_WIDTH_SETTINGS = ('device', 'audio_output_device', 'save_dir',
+                       'aspect_tail')
+DOUBLE_WIDTH_SETTINGS = ('Display upscaler', 'Edge reconstruction',
+                         'Display grain', 'aspect_layout')
+# Not signalled on the wire: the sender must be set the same.
+MATCH_SETTINGS = ('aspect_layout', 'aspect_tail')
 HIDDEN_DECODE_OPTIONS = frozenset((
     'direction', 'fixture', 'experimental_fold',
     'experimental_mono_fold', 'experimental_mono_colour',
@@ -421,10 +448,10 @@ def _process_memory_mib():
 def _field_label(action):
     friendly = {
         'device': 'Input audio device',
-        'audio_output_device': 'Passthrough output device',
+        'audio_output_device': 'Passthrough output',
         'audio_muted': 'Mute passthrough audio',
-        'audio_volume': 'Passthrough volume (0–1)',
-        'freewheel_seconds': 'Freewheel before sync warning (s)',
+        'audio_volume': 'Passthrough volume',
+        'freewheel_seconds': 'Freewheel (s)',
         'show_sync_warning': 'Show sync-loss warning',
         'direction': 'Playback direction',
         'fixture': 'Model fixture',
@@ -449,8 +476,8 @@ def _field_label(action):
         'experimental_fold': 'Fold profile',
         'experimental_mono_fold': 'Experimental mono video fold',
         'mono_video_side': 'Mono video input side',
-        'aspect_layout': 'Aspect layout (stereo + mono) · match sender',
-        'aspect_tail': 'Aspect Fold 500 tail · match sender',
+        'aspect_layout': 'Aspect layout',
+        'aspect_tail': 'Aspect tail',
     }
     return friendly.get(action.dest,
                         action.dest.replace('_', ' ').capitalize())
@@ -582,7 +609,7 @@ def _info_panel_height(size):
 
 def _fit_text(text, font, width):
     text = str(text)
-    while text and font.getlength(text) > width:
+    while text and text != '…' and font.getlength(text) > width:
         text = text[:-2]+'…'
     return text
 
@@ -644,6 +671,27 @@ def _scissors_outside_viewport(framebuffer_size, viewport):
 
 
 class ReceiverGui:
+    # A new notice replaces the help line in the footer until the selection
+    # moves; moving the selection brings the help back.
+    @property
+    def notice(self):
+        return self._notice
+
+    @notice.setter
+    def notice(self, value):
+        self._notice = value
+        self._notice_fresh = True
+
+    @property
+    def selected(self):
+        return self._selected
+
+    @selected.setter
+    def selected(self, value):
+        if value != getattr(self, '_selected', None):
+            self._notice_fresh = False
+        self._selected = value
+
     def __init__(self, v7_live, root_parser, receive_parser, device_choices,
                  device_error='', audio_output_choices=(),
                  audio_output_error='',
@@ -713,7 +761,6 @@ class ReceiverGui:
         self.last_dct_viewport_size = None
         self.image_only = False
         self.image_only_previous_page = 'info'
-        self.image_only_previous_fullscreen = False
         self._glfw = None
         self._window = None
         self.last_title = None
@@ -729,7 +776,11 @@ class ReceiverGui:
         self.gui_resource_thread = None
         self.gui_resource_next_sample = 0.0
         self.gui_resource_lines = ('thread -- · proc --', 'RSS --')
+        first_notice = self.notice
         self._restore_preferences(device_choices, audio_output_choices)
+        # The footer starts on the selected setting's help; only a notice
+        # from restoring preferences (an unavailable device) replaces it.
+        self._notice_fresh = self.notice != first_notice
 
     def _field_value_label(self, field):
         if field.dest == 'device':
@@ -1015,31 +1066,27 @@ class ReceiverGui:
             self.dirty = True
 
     def _set_image_only(self, enabled):
+        """The picture alone, with no toolbar, footer or panels.
+
+        Independent of fullscreen: the window stays as it is, a floating
+        window or a fullscreen one. A click or Esc brings the Live view back.
+        """
         enabled = bool(enabled)
         if enabled == self.image_only:
             return
         self.display_menu_open = False
         if enabled:
             self.image_only_previous_page = self.page
-            self.image_only_previous_fullscreen = self.fullscreen
             self.image_only = True
-            if self._glfw is not None and self._window is not None:
-                self._glfw.set_input_mode(
-                    self._window, self._glfw.CURSOR,
-                    self._glfw.CURSOR_HIDDEN)
-            if not self.fullscreen and self._glfw is not None:
-                self._toggle_fullscreen(self._glfw, self._window)
         else:
             self.image_only = False
             self.page = self.image_only_previous_page
-            if self._glfw is not None and self._window is not None:
-                self._glfw.set_input_mode(
-                    self._window, self._glfw.CURSOR,
-                    self._glfw.CURSOR_HIDDEN if self.fullscreen else
-                    self._glfw.CURSOR_NORMAL)
-            if (self.fullscreen and not self.image_only_previous_fullscreen and
-                    self._glfw is not None):
-                self._toggle_fullscreen(self._glfw, self._window)
+        if self._glfw is not None and self._window is not None:
+            # The pointer hides only over a fullscreen picture.
+            self._glfw.set_input_mode(
+                self._window, self._glfw.CURSOR,
+                self._glfw.CURSOR_HIDDEN if self.fullscreen else
+                self._glfw.CURSOR_NORMAL)
         for field in self.fields:
             if field.dest == 'image_only':
                 field.value = enabled
@@ -1217,6 +1264,22 @@ class ReceiverGui:
               self.notice.startswith('Stopping receiver')):
             self.notice = 'Receiver stopped.'
             self.dirty = True
+
+    def _field(self, dest):
+        return next(field for field in self.fields if field.dest == dest)
+
+    def _step_volume(self, delta):
+        """Passthrough volume in tenths, from the Live page toolbar."""
+        field = self._field('audio_volume')
+        try:
+            current = float(field.value)
+        except (TypeError, ValueError):
+            current = 1.0
+        field.value = round(min(1.0, max(0.0, current+delta)), 2)
+        self.notice = f'{field.label}: {self._field_value_label(field)}'
+        self._update_runtime_option(field)
+        self._persist_preferences()
+        self.dirty = True
 
     def _select_choice(self, field, value):
         if (self.started and field.action is not None and
@@ -1616,48 +1679,45 @@ class ReceiverGui:
                 (self.live_meter or {}).get('sync_warning'))
             self.dirty = True
 
+    def _cell_rect(self, width, column, span, y):
+        columns = self._columns(width)
+        cell = (width-2*GUTTER-(columns-1)*CELL_GAP)//columns
+        left = GUTTER+column*(cell+CELL_GAP)
+        return left, y, left+span*cell+(span-1)*CELL_GAP, y+ROW_HEIGHT-3
+
     def _render_config(self, image, draw, font, small, mono):
         width, height = image.size
-        draw.text((24, 70), 'Receiver setup',
-                  fill=(240, 245, 249), font=font)
-        intro = ('First available input is selected; change it or review '
-                 'the Advanced section below.'
-                 if width >= 760 else
-                 'Input auto-selected · advanced settings optional')
-        draw.text((24, 98), _fit_text(intro, small, max(80, width-48)),
-                  fill=(151, 174, 192), font=small)
+        top = TOOLBAR_HEIGHT+6
         order = self._config_field_indexes()
-        top = 140
-        bottom = height-(110 if height < 560 else 126)
         items = self._config_items(width)
-        visible = max(1, (bottom-top)//ROW_HEIGHT)
-        self.scroll = max(0, min(self.scroll, max(0, len(items)-visible)))
+        room = self._config_room(image.size)
+        self.scroll = max(0, min(self.scroll, self._max_scroll(items, room)))
         if order and self.selected not in order:
             self.selected = order[0]
-        columns = self._button_columns(width)
-        button_width = (width-28-(columns-1)*BUTTON_GAP)//columns
-        for row, (kind, payload) in enumerate(
-                items[self.scroll:self.scroll+visible]):
-            y = top+row*ROW_HEIGHT
+        count = self._items_fitting(items, self.scroll, room)
+        y = top
+        for kind, payload in items[self.scroll:self.scroll+count]:
             if kind == 'header':
-                draw.text((24, y+10), payload, fill=(240, 245, 249),
+                draw.text((24, y+6), payload, fill=(240, 245, 249),
                           font=small)
                 label_right = 24+int(small.getlength(payload))+12
-                draw.line((label_right, y+18, width-14, y+18),
+                draw.line((label_right, y+14, width-GUTTER, y+14),
                           fill=(47, 68, 83), width=1)
-            elif kind == 'buttons':
-                for column, index in enumerate(payload):
-                    left = 14+column*(button_width+BUTTON_GAP)
-                    self._render_button(draw, small, index,
-                                        (left, y, left+button_width, y+32))
+            elif kind == 'note':
+                draw.text((24, y+5), payload, fill=(238, 182, 125),
+                          font=small)
             else:
-                self._render_row(draw, small, payload, y, width)
-        if len(items) > visible:
+                for index, column, span in payload:
+                    self._render_cell(
+                        draw, small, index,
+                        self._cell_rect(width, column, span, y))
+            y += self._item_height(kind)
+        if count < len(items):
             # Position marker: the page scrolls by line like the menus.
-            track_top, track_bottom = top, top+visible*ROW_HEIGHT-4
+            track_top, track_bottom = top, top+room
             span = track_bottom-track_top
-            thumb = max(18, span*visible//len(items))
-            offset = (span-thumb)*self.scroll//max(1, len(items)-visible)
+            thumb = max(18, span*count//len(items))
+            offset = (span-thumb)*self.scroll//max(1, len(items)-count)
             draw.rectangle((width-9, track_top, width-6, track_bottom),
                            fill=(17, 28, 38))
             draw.rectangle((width-9, track_top+offset, width-6,
@@ -1673,48 +1733,48 @@ class ReceiverGui:
                 0, min(self.dropdown_scroll-max_items+1,
                        max(0, len(menu_items)-max_items)))
             anchor = self.hits.get(f'row:{self.dropdown}')
-            yrow = anchor[1] if anchor is not None else top
-            menu_top = yrow+ROW_HEIGHT
-            if menu_top+max_items*29 > bottom:
-                menu_top = max(top, yrow-max_items*29)
-            left, right = 330, width-28
-            draw.rounded_rectangle((left, menu_top, right,
-                                    menu_top+max_items*29+4), radius=4,
-                                   fill=(12, 22, 31),
-                                   outline=(93, 132, 155), width=1)
-            for menu_index in range(max_items):
-                option_index = first_option+menu_index
-                label, value = menu_items[option_index]
-                option_y = menu_top+2+menu_index*29
-                if value == field.value:
-                    draw.rectangle((left+1, option_y, right-1, option_y+28),
-                                   fill=(42, 75, 96))
-                if option_index == self.dropdown_scroll:
-                    draw.rectangle((left+1, option_y, right-1, option_y+28),
-                                   outline=(117, 174, 199), width=1)
-                shown = label
-                while shown and small.getlength(shown) > right-left-20:
-                    shown = shown[:-2]+'…'
-                draw.text((left+9, option_y+6), shown,
-                          fill=(235, 241, 246), font=small)
-                self.hits[f'option:{option_index}'] = (
-                    left, option_y, right, option_y+28)
+            if anchor is not None:
+                menu_width = min(max(anchor[2]-anchor[0], 320),
+                                 width-2*GUTTER)
+                left = max(GUTTER, min(anchor[0],
+                                       width-GUTTER-menu_width))
+                right = left+menu_width
+                menu_top = anchor[3]+2
+                if menu_top+max_items*29+4 > height-self._footer_height(width):
+                    menu_top = max(top, anchor[1]-max_items*29-4)
+                draw.rounded_rectangle((left, menu_top, right,
+                                        menu_top+max_items*29+4), radius=4,
+                                       fill=(12, 22, 31),
+                                       outline=(93, 132, 155), width=1)
+                for menu_index in range(max_items):
+                    option_index = first_option+menu_index
+                    label, value = menu_items[option_index]
+                    option_y = menu_top+2+menu_index*29
+                    if value == field.value:
+                        draw.rectangle((left+1, option_y, right-1,
+                                        option_y+28), fill=(42, 75, 96))
+                    if option_index == self.dropdown_scroll:
+                        draw.rectangle((left+1, option_y, right-1,
+                                        option_y+28),
+                                       outline=(117, 174, 199), width=1)
+                    draw.text((left+9, option_y+6),
+                              _fit_text(label, small, right-left-20),
+                              fill=(235, 241, 246), font=small)
+                    self.hits[f'option:{option_index}'] = (
+                        left, option_y, right, option_y+28)
 
-        if self.device_error:
-            draw.text((24, height-88), self.device_error[:120],
-                      fill=(255, 182, 132), font=small)
-        if self.notice:
-            draw.text((24, height-60), self.notice[:150],
-                      fill=(165, 190, 207), font=small)
-        if 0 <= self.selected < len(self.fields):
-            field = self.fields[self.selected]
-            help_text = getattr(field.action, 'help', '') if field.action else (
-                'Display-only option; does not affect the decoded values.')
-            if help_text and help_text != argparse.SUPPRESS:
-                lines = _text_lines(help_text, width-48, small)
-                if lines:
-                    draw.text((24, height-118), lines[0][:150],
-                              fill=(123, 148, 168), font=small)
+        lines, color = self._footer_lines(width)
+        footer_top = height-self._footer_height(width)
+        draw.rectangle((0, footer_top, width, height), fill=(10, 18, 25))
+        for line_index, line in enumerate(lines):
+            draw.text((14, footer_top+8+line_index*17), line, fill=color,
+                      font=small)
+
+    def _render_cell(self, draw, small, index, rect):
+        if self.fields[index].kind == 'bool':
+            self._render_button(draw, small, index, rect)
+        else:
+            self._render_row(draw, small, index, rect)
 
     def _render_button(self, draw, small, index, rect):
         """One on/off setting: filled when on, outlined and dim when off."""
@@ -1725,16 +1785,21 @@ class ReceiverGui:
         if field.locked:
             fill, outline = (28, 38, 47), (65, 91, 108)
             text = state_text = (135, 153, 166)
+        elif self._runtime_locked(field):
+            fill = (28, 52, 66) if value else (12, 19, 26)
+            outline = (47, 68, 83)
+            text = state_text = (140, 158, 170) if value else (96, 114, 126)
         elif value:
             fill, outline = (43, 94, 123), (117, 174, 199)
             text = state_text = (246, 250, 252)
         else:
             fill, outline = (12, 21, 29), (47, 68, 83)
             text, state_text = (151, 174, 192), (110, 132, 148)
+        dimmed = field.locked or self._runtime_locked(field)
         draw.rounded_rectangle(
             rect, radius=4, fill=fill,
-            outline=(160, 205, 226) if selected else outline,
-            width=2 if selected else 1)
+            outline=(160, 205, 226) if selected and not dimmed else outline,
+            width=2 if selected and not dimmed else 1)
         state_left = right-38
         draw.text((left+12, top+8),
                   _fit_text(field.label, small, state_left-left-22),
@@ -1743,39 +1808,61 @@ class ReceiverGui:
                   fill=state_text, font=small)
         self.hits[f'row:{index}'] = rect
 
-    def _render_row(self, draw, small, index, y, width):
+    def _render_row(self, draw, small, index, rect):
+        """One setting: label, value, and the picker arrow or Browse."""
         field = self.fields[index]
-        selected = index == self.selected
-        if selected:
-            draw.rounded_rectangle((14, y, width-14, y+32), radius=4,
-                                   fill=(31, 53, 69),
-                                   outline=(85, 131, 159), width=1)
-        else:
-            draw.rounded_rectangle((14, y, width-14, y+32), radius=4,
-                                   fill=(17, 28, 38),
-                                   outline=(38, 55, 69), width=1)
-        label_color = (220, 231, 239) if not field.locked else (135, 153, 166)
-        draw.text((26, y+8), _fit_text(field.label, small, 296),
-                  fill=label_color, font=small)
-        value_box = (330, y+4, width-28, y+29)
-        draw.rounded_rectangle(value_box, radius=4, fill=(21, 35, 47),
-                               outline=(65, 91, 108), width=1)
+        left, top, right, bottom = rect
+        dimmed = field.locked or self._runtime_locked(field)
+        selected = index == self.selected and not dimmed
+        draw.rounded_rectangle(
+            rect, radius=4,
+            fill=(31, 53, 69) if selected else
+            (13, 21, 28) if self._runtime_locked(field) else (17, 28, 38),
+            outline=(85, 131, 159) if selected else
+            (28, 42, 53) if self._runtime_locked(field) else (38, 55, 69),
+            width=1)
+        label_width = (190 if right-left >= 600 else
+                       min(int((right-left)*.55),
+                           int(small.getlength(field.label))+22))
+        draw.text((left+10, top+8),
+                  _fit_text(field.label, small, label_width-16),
+                  fill=(135, 153, 166) if dimmed else (220, 231, 239),
+                  font=small)
+        edge = right-8
         if field.kind == 'choice':
-            value = self._field_value_label(field)+'  ▾'
+            draw.text((right-24, top+7), '▾', font=small,
+                      fill=(80, 100, 114) if dimmed else (134, 169, 188))
+            edge = right-28
         elif field.kind == 'folder':
-            value = self._field_value_label(field)+'   Browse…'
+            browse = (right-84, top+4, right-6, bottom-4)
+            draw.rounded_rectangle(
+                browse, radius=4,
+                fill=(20, 36, 46) if dimmed else (30, 58, 76),
+                outline=(48, 68, 82) if dimmed else (75, 111, 132), width=1)
+            draw.text((browse[0]+10, top+8), 'Browse…', font=small,
+                      fill=(110, 128, 142) if dimmed else (229, 239, 246))
+            edge = browse[0]-8
+        if self._field_key(field) in MATCH_SETTINGS:
+            # Not signalled on the wire: the sender must be set the same.
+            tag_width = int(small.getlength('match'))+14
+            tag = (edge-tag_width, top+5, edge, bottom-5)
+            ink = (92, 120, 136) if dimmed else (140, 192, 212)
+            draw.rounded_rectangle(tag, radius=4, outline=ink, width=1)
+            draw.text((tag[0]+7, tag[1]+3), 'match', font=small, fill=ink)
+            edge = tag[0]-8
+        if field.kind in ('choice', 'folder'):
+            value = self._field_value_label(field)
         else:
             value = (self.edit_buffer if self.editing and
                      index == self.selected else
                      self._field_value_label(field))
-        available = max(8, value_box[2]-value_box[0]-14)
-        while value and small.getlength(value) > available:
-            value = value[:-2]+'…'
-        draw.text((value_box[0]+8, y+8), value,
-                  fill=(236, 242, 247) if not field.locked else (135, 153, 166),
+        value_left = left+label_width
+        draw.text((value_left, top+8),
+                  _fit_text(value, small, max(20, edge-value_left)),
+                  fill=(135, 153, 166) if dimmed else (236, 242, 247),
                   font=small)
-        self.hits[f'row:{index}'] = (14, y, width-14, y+32)
-        self.hits[f'value:{index}'] = value_box
+        self.hits[f'row:{index}'] = rect
+        self.hits[f'value:{index}'] = (value_left-4, top+2, edge, bottom-2)
 
     def _diagnostics_visible(self):
         enabled = any(field.value for field in self.fields
@@ -1882,8 +1969,8 @@ class ReceiverGui:
             sync = meter.get('sync_state', 'acquiring')
             if width < 720:
                 if self.current_frame is not None:
-                    detail = (f'{state} · {count} pictures · '
-                              f'input {input_fps:.1f} fps · sync {sync}')
+                    detail = (f'{state} · sync {sync} · {count} pictures · '
+                              f'input {input_fps:.1f} fps')
                 elif self.started:
                     detail = f'{state} · sync {sync}'
                 else:
@@ -1893,12 +1980,13 @@ class ReceiverGui:
                     'status', 'picture decoded')
                 display = ('' if self.display_latency_ms is None else
                            f' · GUI handoff {self.display_latency_ms:.1f} ms')
-                detail = (f'{state}{display} · {status} · {count} pictures · '
+                # Sync and the picture rate first: the end gets cut first.
+                detail = (f'{state} · sync {sync} · {count} pictures · '
                           f'input {input_fps:.1f} fps · {routing} · '
-                          f'audio {audio} · sync {sync}')
+                          f'audio {audio}{display} · {status}')
             else:
-                detail = (f'{state} · {self.notice} · {routing} · '
-                          f'audio {audio} · sync {sync}')
+                detail = (f'{state} · sync {sync} · {self.notice} · '
+                          f'{routing} · audio {audio}')
             if input_error:
                 detail = (f'INPUT DEVICE LOST · {input_error} · '
                           'holding last good picture')
@@ -1969,6 +2057,16 @@ class ReceiverGui:
                 ('image_only', 'Image only', width-212, width-112),
                 ('fullscreen', 'Fullscreen', width-104, width-12),
             )
+            if width >= 930:
+                # Passthrough mute and volume, reachable beside the picture.
+                muted = any(field.value for field in self.fields
+                            if field.dest == 'audio_muted')
+                controls = (
+                    ('mute_button', 'Muted' if muted else 'Mute',
+                     width-628, width-556),
+                    ('volume_down', '−', width-552, width-524),
+                    ('volume_up', '+', width-452, width-424),
+                )+controls
             if width < 720:
                 compact = (
                     ('config_tab', 'Setup', 84),
@@ -1987,13 +2085,16 @@ class ReceiverGui:
                     x += button_width+4
                 controls = tuple(compact_controls)
             for key, label, x1, x2 in controls:
-                if (key in ('mode_button', 'details_button', 'image_only') and
+                if (key in ('mode_button', 'details_button', 'image_only',
+                            'mute_button', 'volume_down', 'volume_up') and
                         self.page != 'info'):
                     continue
                 self.hits[key] = (x1, 9, x2, 46)
                 active = ((key == 'config_tab' and self.page == 'config') or
                           (key == 'info_tab' and self.page == 'info'))
                 fill = ((39, 67, 86) if active else
+                        (99, 65, 34) if key == 'mute_button' and
+                        label == 'Muted' else
                         (82, 55, 40) if key == 'start_stop' and self.started else
                         (43, 94, 123) if key == 'start_stop' else
                         (22, 35, 46))
@@ -2004,6 +2105,19 @@ class ReceiverGui:
                 draw.text((x1+8, 18), shown,
                           fill=(246, 240, 235) if key == 'start_stop' and self.started
                           else (236, 242, 247), font=small)
+        if 'volume_down' in self.hits and 'volume_up' in self.hits:
+            volume = next(field.value for field in self.fields
+                          if field.dest == 'audio_volume')
+            try:
+                readout = f'Vol {float(volume):.0%}'
+            except (TypeError, ValueError):
+                readout = 'Vol --'
+            box = (self.hits['volume_down'][2]+2, 9,
+                   self.hits['volume_up'][0]-2, 46)
+            draw.rounded_rectangle(box, radius=5, fill=(14, 24, 33),
+                                   outline=(47, 68, 83), width=1)
+            draw.text((box[0]+(box[2]-box[0]-int(small.getlength(readout)))//2,
+                       18), readout, fill=(205, 218, 228), font=small)
         if self.page == 'config':
             self._render_config(image, draw, font, small, mono)
         else:
@@ -2012,61 +2126,112 @@ class ReceiverGui:
                 self._render_display_menu(image, draw, small)
         return np.ascontiguousarray(np.asarray(image, dtype=np.uint8))
 
+    def _field_key(self, field):
+        return field.dest
+
     def _config_sections(self):
-        """(title, row indexes, on/off button indexes): basic, advanced."""
-        basic, advanced = [], []
+        """(title, field indexes) for every section that has any setting."""
+        placed = {}
+        for title, keys in CONFIG_SECTIONS:
+            for position, key in enumerate(keys):
+                placed[key] = (title, position)
+        groups = {title: [] for title, _keys in CONFIG_SECTIONS}
         for index, field in enumerate(self.fields):
-            if (field.dest in BASIC_OPTION_DESTS or
-                    field.label in (PIXEL_DISPLAY_LABEL,
-                                    'Display upscaler',
-                                    'DCT reconstruction',
-                                    'Display grain',
-                                    'Edge reconstruction',
-                                    'Edge strength')):
-                basic.append(index)
-            else:
-                advanced.append(index)
-        return tuple(
-            (title,
-             [index for index in group if self.fields[index].kind != 'bool'],
-             [index for index in group if self.fields[index].kind == 'bool'])
-            for title, group in ((None, basic), ('Advanced', advanced)))
+            title, position = placed.get(
+                self._field_key(field),
+                (CONFIG_SECTIONS[-1][0], len(placed)+index))
+            groups[title].append((position, index))
+        sections = []
+        for title, _keys in CONFIG_SECTIONS:
+            indexes = [index for _position, index in sorted(groups[title])]
+            if indexes:
+                sections.append((title, indexes))
+        return tuple(sections)
 
     def _config_field_indexes(self):
         """Every setting in page order (also the keyboard order)."""
-        indexes = []
-        for title, rows, buttons in self._config_sections():
-            indexes.extend(rows+buttons if title is None else buttons+rows)
-        return indexes
+        return [index for _title, indexes in self._config_sections()
+                for index in indexes]
 
-    def _button_columns(self, width):
-        return max(1, (width-28+BUTTON_GAP)//(BUTTON_MIN_WIDTH+BUTTON_GAP))
+    def _columns(self, width):
+        """Grid columns that fit the window width."""
+        return max(1, (width-2*GUTTER+CELL_GAP)//(CELL_MIN_WIDTH+CELL_GAP))
+
+    def _span(self, index, columns):
+        key = self._field_key(self.fields[index])
+        if key in FULL_WIDTH_SETTINGS:
+            span = columns
+        elif key in DOUBLE_WIDTH_SETTINGS:
+            span = 2
+        else:
+            span = 1
+        return max(1, min(span, columns))
+
+    def _pack(self, indexes, columns):
+        """Lines of (field, first column, columns spanned), left to right."""
+        lines, line, used = [], [], 0
+        for index in indexes:
+            span = self._span(index, columns)
+            if used+span > columns:
+                lines.append(tuple(line))
+                line, used = [], 0
+            line.append((index, used, span))
+            used += span
+        if line:
+            lines.append(tuple(line))
+        return lines
 
     def _config_items(self, width):
-        """Page lines, each ROW_HEIGHT tall: a row, a button row, a header."""
-        columns = self._button_columns(width)
+        """Page lines: ('header', title), ('line', cells), ('note', text)."""
+        columns = self._columns(width)
         items = []
-        for title, rows, buttons in self._config_sections():
-            if not rows and not buttons:
-                continue
-            button_rows = [('buttons', tuple(buttons[start:start+columns]))
-                           for start in range(0, len(buttons), columns)]
-            field_rows = [('row', index) for index in rows]
-            if title is None:
-                items.extend(field_rows+button_rows)
-            else:
-                items.append(('header', title))
-                items.extend(button_rows+field_rows)
+        for title, indexes in self._config_sections():
+            items.append(('header', title))
+            items.extend(('line', line)
+                         for line in self._pack(indexes, columns))
+            if title == CONFIG_SECTIONS[0][0] and self.started:
+                items.append(('note', 'Stop to change the settings below'))
         return items
+
+    @staticmethod
+    def _item_height(kind):
+        return ROW_HEIGHT if kind == 'line' else HEADER_HEIGHT
+
+    def _runtime_locked(self, field):
+        """True for an option that cannot change while receiving."""
+        return (self.started and field.action is not None and
+                field.dest not in LIVE_RUNTIME_DESTS)
+
+    def _config_room(self, size=None):
+        """Pixels between the toolbar and the footer."""
+        width, height = size or (self.width, self.height)
+        return max(0, height-TOOLBAR_HEIGHT-6-self._footer_height(width)-4)
+
+    def _items_fitting(self, items, first, room):
+        count = used = 0
+        for kind, _payload in items[first:]:
+            used += self._item_height(kind)
+            if used > room:
+                break
+            count += 1
+        return count
+
+    def _max_scroll(self, items, room):
+        used = 0
+        for position in range(len(items)-1, -1, -1):
+            used += self._item_height(items[position][0])
+            if used > room:
+                return min(position+1, len(items)-1)
+        return 0
 
     def _scroll_to(self, index, size=None):
         """Scroll the setup page so the line holding a field is in view."""
-        width, height = size or (self.width, self.height)
-        items = self._config_items(width)
-        _top, visible = self._visible_fields(height)
+        size = size or (self.width, self.height)
+        items = self._config_items(size[0])
+        room = self._config_room(size)
         position = next((line for line, (kind, payload) in enumerate(items)
-                         if kind == 'row' and payload == index or
-                         kind == 'buttons' and index in payload), None)
+                         if kind == 'line' and
+                         any(cell[0] == index for cell in payload)), None)
         if position is None:
             return
         if position < self.scroll:
@@ -2074,14 +2239,48 @@ class ReceiverGui:
             # Keep a section header in view above its first line.
             if position and items[position-1][0] == 'header':
                 self.scroll = position-1
-        elif position >= self.scroll+visible:
-            self.scroll = position-visible+1
-        self.scroll = max(0, min(self.scroll, max(0, len(items)-visible)))
+        else:
+            while (self.scroll < position and position >= self.scroll+
+                   self._items_fitting(items, self.scroll, room)):
+                self.scroll += 1
+        self.scroll = max(0, min(self.scroll, self._max_scroll(items, room)))
 
-    def _visible_fields(self, height):
-        top = 140
-        bottom = height-(110 if height < 560 else 126)
-        return top, max(1, (bottom-top)//ROW_HEIGHT)
+    @staticmethod
+    def _help_text(field):
+        if field is None:
+            return ''
+        help_text = (getattr(field.action, 'help', '') if field.action
+                     else 'Display-only option; does not affect the decoded '
+                     'values.')
+        return '' if help_text == argparse.SUPPRESS else (help_text or '')
+
+    def _footer_content(self):
+        """(text, colour, wrap) for the one line at the bottom of Setup.
+
+        The selected setting's help, unless something needs attention: a
+        fresh notice or a device-discovery error.
+        """
+        if self.page == 'config' and not self._notice_fresh:
+            if self.device_error:
+                return self.device_error, (255, 182, 132), False
+            field = (self.fields[self.selected]
+                     if 0 <= self.selected < len(self.fields) else None)
+            help_text = self._help_text(field)
+            if help_text:
+                return help_text, (150, 172, 188), True
+        return self.notice, (165, 190, 207), False
+
+    def _footer_lines(self, width):
+        text, color, wrap = self._footer_content()
+        small = _font(13)
+        if wrap:
+            lines = _text_lines(text, width-28, small)[:2] or ['']
+        else:
+            lines = [_fit_text(text, small, width-28)]
+        return lines, color
+
+    def _footer_height(self, width):
+        return 13+17*len(self._footer_lines(width)[0])
 
     def _change_page(self):
         if self.editing:
@@ -2095,6 +2294,11 @@ class ReceiverGui:
     def _on_mouse(self, glfw, window, button, action, _mods):
         if button != glfw.MOUSE_BUTTON_LEFT or action != glfw.PRESS:
             return
+        if self.image_only:
+            # No controls are drawn: any click brings the Live view back.
+            self._set_image_only(False)
+            self._reveal_toolbar()
+            return
         self._reveal_toolbar()
         x, y = glfw.get_cursor_pos(window)
         keys = list(self.hits)
@@ -2105,6 +2309,11 @@ class ReceiverGui:
         hit = next((key for key in keys
                     if self.hits[key][0] <= x < self.hits[key][2] and
                     self.hits[key][1] <= y < self.hits[key][3]), None)
+        # A click on a control always repaints: switching tabs changes the
+        # page without any other handler asking for it, which left the old
+        # page on screen until the next click.
+        if hit is not None:
+            self.dirty = True
         is_display_choice = (hit is not None and
                              hit.startswith('display_mode:'))
         if (self.display_menu_open and not is_display_choice and
@@ -2132,6 +2341,10 @@ class ReceiverGui:
                 self._stop_receiver()
             elif edit_valid:
                 self._start_receiver()
+        elif hit == 'mute_button':
+            self._adjust_field(self._field('audio_muted'), 1)
+        elif hit in ('volume_down', 'volume_up'):
+            self._step_volume(-0.1 if hit == 'volume_down' else 0.1)
         elif hit == 'mode_button' and self.pixel_display:
             self.notice = ('Pixel display is on; turn it off to choose a '
                            'display upscaler.')
@@ -2159,8 +2372,7 @@ class ReceiverGui:
             index = int(hit.split(':', 1)[1])
             self.selected = index
             field = self.fields[index]
-            if (self.started and field.action is not None and
-                    field.dest not in LIVE_RUNTIME_DESTS):
+            if self._runtime_locked(field):
                 self.notice = ('Receiver options are locked while receiving; '
                                'close and relaunch to change them.')
             elif not field.locked:
@@ -2204,18 +2416,14 @@ class ReceiverGui:
     def _on_key(self, glfw, window, key, _scancode, action, mods):
         if action not in (glfw.PRESS, glfw.REPEAT):
             return
-        if self.image_only and key in (glfw.KEY_F, glfw.KEY_I):
-            was_fullscreen = self.image_only_previous_fullscreen
+        if self.image_only and key == glfw.KEY_F:
+            # Fullscreen is its own switch: the picture stays image-only.
+            self._toggle_fullscreen(glfw, window)
+            return
+        if self.image_only and key == glfw.KEY_I:
             self._set_image_only(False)
-            if key == glfw.KEY_F:
-                # Image-only may have entered fullscreen on its own, or may
-                # have been enabled from an already-fullscreen Live view.
-                # In both cases F must leave fullscreen exactly once.
-                if was_fullscreen and self.fullscreen:
-                    self._toggle_fullscreen(glfw, window)
-            else:
-                self._reveal_toolbar()
-                self._toggle_details()
+            self._reveal_toolbar()
+            self._toggle_details()
             return
         if self.image_only and key == glfw.KEY_C:
             self._set_image_only(False)
@@ -2443,9 +2651,10 @@ class ReceiverGui:
                 0, min(max(0, len(field.options)-1),
                        self.dropdown_scroll+delta))
         elif self.page == 'config':
-            _top, visible = self._visible_fields(self.height)
-            self.scroll = max(0, min(max(0, len(self._config_items(self.width))-visible),
-                                     self.scroll+delta))
+            self.scroll = max(0, min(
+                self._max_scroll(self._config_items(self.width),
+                                 self._config_room()),
+                self.scroll+delta))
         else:
             if delta > 0:
                 self.info_follow = True
