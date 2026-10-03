@@ -7,6 +7,7 @@ the same picture in a pop-out window (tools/v7_preview_popout.py, a small
 process this GUI forwards the pictures to). For a video file the Live page
 also has transport controls, sent to the sender over its control pipe.
 """
+import copy
 import errno
 import json
 import math
@@ -29,6 +30,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tools.v7_preview_protocol import parse_preview_datagram
+from animation_modem import v7_kernels
 
 
 PROFILE_CHOICES = (
@@ -207,6 +209,10 @@ FIELD_HELP = {
     'clip_aware': ('Re-fit the sent brightness detail so edge ringing falls '
                    'into the receiver\'s black/white clip. Sender only; '
                    'about 2 ms per frame.'),
+    'dct_kernel': ('The filter that brings the picture down to what the wire '
+                   'holds. Files in dct_kernels/; add or remove one and press '
+                   'R. Left/Right switches kernel, also while sending. The '
+                   'wire is unchanged.'),
     'dct_sharpen': ('Taper boosts the upper-middle of the sent band and '
                     'leaves the cutoff alone; unsharp mask boosts everything.'),
     'dct_sharpen_strength': 'Sharpen strength, from 0 to 1. Try 0.25 or 0.5.',
@@ -247,6 +253,7 @@ FIELD_LABELS = {
     'pixel_detail': 'Pixel downscale',
     'pixel_grid': 'Pixel grid',
     'clip_aware': 'Clip-aware encode',
+    'dct_kernel': 'DCT downscale kernel · live',
     'dct_sharpen': 'DCT sharpen',
     'dct_sharpen_strength': 'Sharpen strength',
     'dct_clarity': 'DCT clarity',
@@ -254,6 +261,45 @@ FIELD_LABELS = {
     'aspect_layout': 'Aspect layout',
     'aspect_tail': 'Aspect tail',
 }
+# DCT downscale kernels: one file each in dct_kernels/ (see the README there),
+# read when the GUI starts and again on R. The kernel's own parameters are
+# rows named kp:<parameter>; they, the kernel choice and the DCT strengths
+# are live: they reach a running sender through its control pipe.
+KERNEL_PARAM_PREFIX = 'kp:'
+KERNEL_DIRS = []                  # extra folders: --dct-kernel-dir
+KERNEL_LIVE_FIELDS = ('dct_kernel', 'dct_sharpen', 'dct_sharpen_strength',
+                      'dct_clarity', 'dct_chroma_gain')
+# (low, high, step) of the plain numbers that step with Left/Right.
+NUMERIC_STEPS = {'dct_sharpen_strength': (0.0, 1.0, 0.05),
+                 'dct_clarity': (0.0, 1.0, 0.05),
+                 'dct_chroma_gain': (1.0, 1.3, 0.01)}
+_KERNELS = None
+
+
+def kernel_registry(refresh=False):
+    """The GUI's kernel registry (scanned on first use, or when asked)."""
+    global _KERNELS
+    if _KERNELS is None:
+        _KERNELS = v7_kernels.KernelRegistry(v7_kernels.kernel_dirs(KERNEL_DIRS))
+        refresh = True
+    if refresh:
+        _KERNELS.scan()
+    return _KERNELS
+
+
+def _is_live_field(dest):
+    """Settings that may change while the sender runs."""
+    return (dest in LIVE_FIELDS or dest in KERNEL_LIVE_FIELDS or
+            dest.startswith(KERNEL_PARAM_PREFIX))
+
+
+def _kernel_values(settings, kernel):
+    """The saved values for ``kernel``, limited to parameters it still has."""
+    saved = (settings.get('dct_kernel_params') or {}).get(kernel.name, {})
+    return kernel.resolve({key: value for key, value in saved.items()
+                           if key in kernel.params})
+
+
 VIDEO_FILE_GLOB = '*.mp4 *.m4v *.mov *.mkv *.webm *.avi *.mpeg *.mpg *.wmv *.ts'
 DEVICE_REFRESH_SECONDS = 3.0
 GUI_EVENT_WAIT_SECONDS = 0.5
@@ -437,6 +483,7 @@ SAVED_SETTING_FIELDS = (
     'dct_sharpen_strength', 'dct_clarity', 'dct_chroma_gain',
     'aspect_layout', 'aspect_tail', 'clip_aware', 'luma_adjust',
     'luma_adjust_linear', 'pixel_encode', 'pixel_detail', 'pixel_grid',
+    'dct_kernel', 'dct_kernel_params',
 )
 
 
@@ -474,7 +521,15 @@ def _restore_sender_settings(target, saved):
             continue
         if key == 'profile' and value not in dict(PROFILE_CHOICES).values():
             continue                    # a removed profile: keep the default
-        if key in BOOL_FIELDS:
+        if key == 'dct_kernel_params':
+            if isinstance(value, dict):
+                target[key] = {
+                    str(name): {str(k): float(v) for k, v in values.items()
+                                if isinstance(v, (int, float)) and
+                                not isinstance(v, bool) and math.isfinite(v)}
+                    for name, values in value.items()
+                    if isinstance(values, dict)}
+        elif key in BOOL_FIELDS:
             if isinstance(value, bool):
                 target[key] = value
         elif value is None or isinstance(value, (str, int, float, bool)):
@@ -1143,6 +1198,15 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
             raise ValueError('DCT chroma gain must be between 1.0 and 1.3.')
     else:
         dct_sharpen = 'off'
+    dct_kernel, kernel_values = 'reference', {}
+    if dct_encode and not settings.get('pixel_encode'):
+        dct_kernel = settings.get('dct_kernel', 'reference') or 'reference'
+        if dct_kernel != 'reference':
+            try:
+                kernel_values = _kernel_values(
+                    settings, kernel_registry().get(dct_kernel))
+            except v7_kernels.KernelError as exc:
+                raise ValueError(f'DCT kernel: {exc}.') from exc
     aspect_layout, aspect_tail = 'auto', DEFAULT_ASPECT_TAIL
     if profile in ASPECT_PROFILES:
         aspect_layout = settings.get('aspect_layout', 'auto')
@@ -1269,6 +1333,8 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
         'dct_sharpen_strength': dct_strength,
         'dct_clarity': dct_clarity,
         'dct_chroma_gain': dct_chroma_gain,
+        'dct_kernel': dct_kernel,
+        'dct_kernel_values': kernel_values,
     }
 
 
@@ -1344,6 +1410,14 @@ def build_command(settings, devices, sd_module=None, python=None,
         if checked['dct_chroma_gain'] != 1.0:
             command.extend(('--dct-chroma-gain',
                             str(checked['dct_chroma_gain'])))
+        if checked['dct_kernel'] != 'reference':
+            kernel = kernel_registry().get(checked['dct_kernel'])
+            command.extend(('--dct-kernel', checked['dct_kernel']))
+            for key, value in sorted(checked['dct_kernel_values'].items()):
+                if value != kernel.params[key].default:
+                    command.extend(('--dct-kernel-param', f'{key}={value:g}'))
+        for folder in KERNEL_DIRS:
+            command.extend(('--dct-kernel-dir', str(folder)))
         if checked['pixel_encode']:
             command.append('--pixel-encode')
             if checked['pixel_detail'] != 'average':
@@ -1468,7 +1542,7 @@ class SenderGui:
         ('Picture encode', ('dct_encode', 'pixel_encode', 'pixel_detail',
                             'pixel_grid', 'luma_adjust',
                             'luma_adjust_linear', 'clip_aware',
-                            'dct_sharpen', 'dct_sharpen_strength',
+                            'dct_kernel', 'dct_sharpen', 'dct_sharpen_strength',
                             'dct_clarity', 'dct_chroma_gain',
                             'perceptual_resize',
                             'perceptual_detail_strength')),
@@ -1483,14 +1557,14 @@ class SenderGui:
         'pixel_detail', 'pixel_grid',
     )
     DOUBLE_WIDTH_FIELDS = ('device', 'video_source', 'aspect_layout',
-                           'source_audio', 'mono_video_side')
+                           'source_audio', 'mono_video_side', 'dct_kernel')
     DROPDOWN_FIELDS = (
         'device', 'source', 'capture_fps', 'profile', 'encode_filter',
         'mono_video_side', 'source_audio', 'source_audio_device',
         'source_audio_input_side', 'screen_backend', 'capture_filter',
         'camera', 'screen_target', 'perceptual_resize', 'dct_sharpen',
         'aspect_layout', 'aspect_tail', 'pixel_detail', 'pixel_grid',
-        'preview',
+        'preview', 'dct_kernel',
     )
 
     # A new notice replaces the help line in the footer until the selection
@@ -1564,6 +1638,8 @@ class SenderGui:
             'dct_sharpen_strength': '0.25',
             'dct_clarity': '0',
             'dct_chroma_gain': '1',
+            'dct_kernel': 'reference',
+            'dct_kernel_params': {},
             'aspect_layout': 'auto',
             'aspect_tail': DEFAULT_ASPECT_TAIL,
         }
@@ -1623,6 +1699,11 @@ class SenderGui:
         self.output_device_identity = preferences.get('output_device')
         self.source_audio_device_identity = preferences.get(
             'source_audio_device')
+        if self.settings.get('dct_kernel', 'reference') not in \
+                kernel_registry().names():
+            self.notice = (f"DCT kernel {self.settings['dct_kernel']!r} is "
+                           'no longer in the kernel folder; using Reference.')
+            self.settings['dct_kernel'] = 'reference'
         output = _match_device(self.devices, self.output_device_identity)
         if output is not None:
             self.settings['device'] = output.index
@@ -1701,6 +1782,9 @@ class SenderGui:
             return ASPECT_LAYOUT_CHOICES
         if dest == 'aspect_tail':
             return ASPECT_TAIL_CHOICES
+        if dest == 'dct_kernel':
+            return tuple((label, name) for name, label, _help, _params in
+                         kernel_registry().describe())
         if dest == 'dct_sharpen':
             return DCT_SHARPEN_CHOICES
         if dest == 'pixel_detail':
@@ -1715,9 +1799,15 @@ class SenderGui:
         return ()
 
     def _open_dropdown(self, dest):
-        if self.process is not None:
+        if self.process is not None and not _is_live_field(dest):
             self.notice = 'Settings are locked while the sender is running.'
             return
+        if dest == 'dct_kernel' and self.process is None:
+            registry = kernel_registry(refresh=True)
+            if registry.errors:
+                self.notice = ''.join(
+                    f'Kernel {Path(path).name} skipped: {message}  '
+                    for path, message in registry.errors)
         if dest in ('device', 'source_audio_device'):
             choices_available = self._refresh_audio_device_choices(dest)
             if not choices_available:
@@ -2002,7 +2092,7 @@ class SenderGui:
 
     def _locked(self, dest):
         """True for a setting that cannot change while the sender runs."""
-        return self.process is not None and dest not in LIVE_FIELDS
+        return self.process is not None and not _is_live_field(dest)
 
     def _setup_room(self, size=None):
         """Pixels between the toolbar and the footer."""
@@ -2056,7 +2146,7 @@ class SenderGui:
         if self.device_error:
             return self.device_error, (255, 182, 132), False
         alert = self.sender_device_lost
-        help_text = FIELD_HELP.get(self.selected, '')
+        help_text = self._help_text(self.selected)
         if (self.page == 'setup' and help_text and not alert and
                 not self._notice_fresh):
             return help_text, (150, 172, 188), True
@@ -2094,7 +2184,7 @@ class SenderGui:
             dest == 'dct_encode' and
             self.settings['profile'] not in DCT_PROFILES or
             dest in ('dct_sharpen', 'dct_clarity', 'dct_chroma_gain',
-                     'luma_adjust', 'pixel_encode') and
+                     'luma_adjust', 'pixel_encode', 'dct_kernel') and
             not self.settings['dct_encode'] or
             dest == 'pixel_detail' and not (
                 self.settings['dct_encode'] and
@@ -2105,7 +2195,7 @@ class SenderGui:
                 self.settings['profile'] == 'aspect-fold-500') or
             # Pixel encode sends the pixels as they are: no enhancement.
             dest in ('dct_sharpen', 'dct_sharpen_strength', 'dct_clarity',
-                     'dct_chroma_gain', 'luma_adjust',
+                     'dct_chroma_gain', 'luma_adjust', 'dct_kernel',
                      'luma_adjust_linear') and
             self.settings.get('pixel_encode') or
             # Direct DCT encode takes the frame at its own size: the capture
@@ -2137,12 +2227,167 @@ class SenderGui:
                 self.settings['profile'] in MONO_PROFILES and
                 self.settings['source_audio'] != 'off') or
             dest == 'capture_width' and source not in ('screen', 'video', 'mouse-follow'))]
-        return fields
+        # The chosen kernel's own parameters follow its row.
+        return [shown for dest in fields for shown in (
+            [dest, *self._kernel_param_fields()] if dest == 'dct_kernel'
+            else [dest])]
 
     def _button_label(self, dest):
+        if dest.startswith(KERNEL_PARAM_PREFIX):
+            return '    ' + dest[len(KERNEL_PARAM_PREFIX):].replace('_', ' ') + ' · live'
         return FIELD_LABELS.get(dest, dest.replace('_', ' ').capitalize())
 
+    # ---- DCT kernel rows --------------------------------------------------
+    def _selected_kernel(self):
+        """The chosen kernel, or None (reference, or one no longer on disk)."""
+        name = self.settings.get('dct_kernel', 'reference')
+        if name in (None, '', 'reference'):
+            return None
+        try:
+            return kernel_registry().get(name)
+        except v7_kernels.KernelError:
+            return None
+
+    def _kernel_param_fields(self):
+        kernel = self._selected_kernel()
+        if kernel is None:
+            return []
+        return [KERNEL_PARAM_PREFIX+name for name in kernel.params]
+
+    def _kernel_param(self, dest):
+        """(kernel, parameter name, Param) of a kp: row, or None."""
+        kernel = self._selected_kernel()
+        name = dest[len(KERNEL_PARAM_PREFIX):]
+        if kernel is None or name not in kernel.params:
+            return None
+        return kernel, name, kernel.params[name]
+
+    def _field_value(self, dest):
+        """A setting's value; a kernel parameter's lives in a nested dict."""
+        if dest.startswith(KERNEL_PARAM_PREFIX):
+            found = self._kernel_param(dest)
+            if found is None:
+                return ''
+            kernel, name, param = found
+            saved = (self.settings.get('dct_kernel_params') or {}).get(
+                kernel.name, {})
+            return saved.get(name, param.default)
+        return self.settings.get(dest)
+
+    def _edit_text(self, dest):
+        if dest.startswith(KERNEL_PARAM_PREFIX):
+            return f'{float(self._field_value(dest) or 0):g}'
+        return str(self.settings.get(dest) or '')
+
+    def _set_kernel_param(self, dest, value):
+        """Store a kernel parameter (clamped); returns the stored number."""
+        kernel, name, param = self._kernel_param(dest)
+        try:
+            value = param.clamp(_float_setting(value, name))
+        except ValueError as exc:
+            raise ValueError(f'{name} must be a number.') from exc
+        params = self.settings.setdefault('dct_kernel_params', {})
+        params.setdefault(kernel.name, {})[name] = value
+        return value
+
+    def _help_text(self, dest):
+        if dest.startswith(KERNEL_PARAM_PREFIX):
+            found = self._kernel_param(dest)
+            if found is None:
+                return ''
+            _kernel, name, param = found
+            return (f'{param.help or name} · {param.low:g} to {param.high:g}, '
+                    f'default {param.default:g}. Left/Right steps by '
+                    f'{param.step:g} (Shift: five times) and is heard on the '
+                    f'next frame; Enter types a value.')
+        if dest == 'dct_kernel':
+            kernel = self._selected_kernel()
+            return (FIELD_HELP['dct_kernel'] if kernel is None else
+                    f'{kernel.help or kernel.label} (file: {kernel.path.name})')
+        return FIELD_HELP.get(dest, '')
+
+    def _numeric_step(self, dest):
+        """(low, high, step) for a number Left/Right can step, else None."""
+        if dest.startswith(KERNEL_PARAM_PREFIX):
+            found = self._kernel_param(dest)
+            return None if found is None else (
+                found[2].low, found[2].high, found[2].step)
+        return NUMERIC_STEPS.get(dest)
+
+    def _step_field(self, dest, direction, fast=False):
+        low, high, step = self._numeric_step(dest)
+        step *= 5 if fast else 1
+        current = _float_setting(self._field_value(dest), dest)
+        value = round(min(max(current+direction*step, low), high), 6)
+        if dest.startswith(KERNEL_PARAM_PREFIX):
+            value = self._set_kernel_param(dest, value)
+        else:
+            self.settings[dest] = f'{value:g}'
+        self.notice = f'{self._button_label(dest).strip()}: {value:g}'
+        self._persist_preferences()
+        if self.process is not None:
+            self._send_live_kernel_update()
+        self.dirty = True
+
+    def _cycle_kernel(self, direction):
+        names = [name for _label, name in self._choices('dct_kernel')]
+        current = self.settings.get('dct_kernel', 'reference')
+        index = names.index(current) if current in names else 0
+        self._assign('dct_kernel', names[(index+direction) % len(names)])
+
+    def _reload_kernels(self):
+        """Rescan the kernel folders (here, and in a running sender)."""
+        registry = kernel_registry()
+        added, removed = registry.scan()
+        if self.settings.get('dct_kernel', 'reference') not in registry.names():
+            self.settings['dct_kernel'] = 'reference'
+        text = ', '.join([f'+{name}' for name in added] +
+                         [f'-{name}' for name in removed]) or 'no change'
+        skipped = ''.join(f'; skipped {Path(path).name}: {message}'
+                          for path, message in registry.errors)
+        self.notice = f'DCT kernels rescanned: {text}{skipped}'
+        if self.process is not None:
+            try:
+                self._write_control({'kernels': 'reload'})
+                self._send_live_kernel_update()
+            except (OSError, ValueError, RuntimeError) as exc:
+                self.notice = str(exc)
+        self.dirty = True
+
+    def _write_control(self, message):
+        control = getattr(self.process, 'stdin', None)
+        if control is None:
+            raise RuntimeError('Live sender controls are unavailable.')
+        control.write(json.dumps(message)+'\n')
+        control.flush()
+
+    def _send_live_kernel_update(self):
+        """Send the whole kernel state (kernel, its values, DCT strengths)."""
+        strength = _float_setting(self.settings.get('dct_sharpen_strength', '0.25'),
+                                  'DCT sharpen strength')
+        clarity = _float_setting(self.settings.get('dct_clarity', '0'), 'DCT clarity')
+        chroma = _float_setting(self.settings.get('dct_chroma_gain', '1'),
+                                'DCT chroma gain')
+        if not (0 <= strength <= 1 and 0 <= clarity <= 1 and 1 <= chroma <= 1.3):
+            raise ValueError('DCT sharpen and clarity are 0 to 1; chroma gain '
+                             'is 1.0 to 1.3.')
+        message = {'dct': {'sharpen': self.settings.get('dct_sharpen', 'off'),
+                           'sharpen_strength': strength, 'clarity': clarity,
+                           'chroma_gain': chroma}}
+        kernel = self._selected_kernel()
+        message['kernel'] = 'reference' if kernel is None else kernel.name
+        if kernel is not None:
+            message['kernel_params'] = _kernel_values(self.settings, kernel)
+        self._write_control(message)
+
     def _value_label(self, dest):
+        if dest.startswith(KERNEL_PARAM_PREFIX):
+            found = self._kernel_param(dest)
+            if found is None:
+                return '—'
+            value = self._field_value(dest)
+            param = found[2]
+            return f'{float(value):g}   ({param.low:g} to {param.high:g})'
         value = self.settings[dest]
         if dest == 'brightness' and not str(value).strip():
             return '1.0 · profile default'
@@ -2165,7 +2410,8 @@ class SenderGui:
                     'encode_filter', 'capture_filter', 'perceptual_resize',
                     'dct_sharpen', 'aspect_layout', 'aspect_tail',
                     'pixel_detail', 'pixel_grid', 'mono_video_side',
-                    'source_audio', 'source_audio_input_side', 'capture_fps'):
+                    'source_audio', 'source_audio_input_side', 'capture_fps',
+                    'dct_kernel'):
             choices = self._choices(dest)
             label = next((label for label, candidate in choices
                           if candidate == value), None)
@@ -2222,7 +2468,13 @@ class SenderGui:
             self.capture_choice_cache.pop('capture_fps', None)
         elif dest == 'camera':
             self.capture_choice_cache.pop('capture_fps', None)
-        self.notice = f'{dest.replace("_", " ").capitalize()} updated.'
+        message = f'{dest.replace("_", " ").capitalize()} updated.'
+        if self.process is not None and dest in ('dct_kernel', 'dct_sharpen'):
+            try:
+                self._send_live_kernel_update()
+            except (OSError, ValueError, RuntimeError) as exc:
+                message = str(exc)
+        self.notice = message
         self.dirty = True
         self._persist_preferences()
 
@@ -2762,6 +3014,13 @@ class SenderGui:
                     # Several a second: the transport bar, not the log.
                     self._playback_report(status_record)
                     continue
+                if status == 'kernel':
+                    message = str(status_record.get('message') or '')
+                    if message:
+                        self.lines.append(message)
+                        self.lines = self.lines[-12:]
+                        self.notice = message
+                    continue
                 self.lines.append(value)
                 self.lines = self.lines[-12:]
                 self.notice = value
@@ -2812,6 +3071,20 @@ class SenderGui:
 
     def _finish_edit(self, commit=True):
         dest = self.selected
+        if commit and dest.startswith(KERNEL_PARAM_PREFIX):
+            previous = copy.deepcopy(self.settings.get('dct_kernel_params'))
+            try:
+                value = self._set_kernel_param(dest, self.edit_buffer)
+                if self.process is not None:
+                    self._send_live_kernel_update()
+                self.notice = f'{self._button_label(dest).strip()}: {value:g}'
+                self._persist_preferences()
+            except (OSError, ValueError, RuntimeError, TypeError) as exc:
+                self.settings['dct_kernel_params'] = previous
+                self.notice = str(exc)
+            self.editing = False
+            self.dirty = True
+            return
         if commit:
             previous = self.settings.get(dest)
             self.settings[dest] = self.edit_buffer
@@ -2820,6 +3093,8 @@ class SenderGui:
             try:
                 if self.process is not None and dest in LIVE_FIELDS:
                     self._send_live_tone_update()
+                elif self.process is not None and dest in NUMERIC_STEPS:
+                    self._send_live_kernel_update()
                 self.notice = f'{dest.replace("_", " ").capitalize()} updated.'
                 self._persist_preferences()
             except (OSError, ValueError, RuntimeError) as exc:
@@ -3288,7 +3563,7 @@ class SenderGui:
             if not self.editing:
                 self.selected = dest
                 self.editing = True
-                current = self.settings[dest]
+                current = self._field_value(dest)
                 self.edit_buffer = '' if current is None else str(current)
             self._paste_clipboard(glfw, window)
             return
@@ -3347,7 +3622,7 @@ class SenderGui:
                 self._open_dropdown(dest)
             elif dest in self._visible_fields():
                 self.editing = True
-                current = self.settings[dest]
+                current = self._field_value(dest)
                 self.edit_buffer = '' if current is None else str(current)
         else:
             self.dropdown = None
@@ -3391,6 +3666,8 @@ class SenderGui:
         elif key == glfw.KEY_I:
             self.page = 'live'
             self.dropdown = None
+        elif key == getattr(glfw, 'KEY_R', -1) and self.page == 'setup':
+            self._reload_kernels()
         elif key == glfw.KEY_SPACE:
             self._stop() if self.process is not None else self._start()
         elif self.dropdown is not None:
@@ -3407,7 +3684,7 @@ class SenderGui:
                 self.dropdown = None
         elif self.page == 'setup':
             fields = self._visible_fields()
-            live_tone_selected = self.selected in LIVE_FIELDS
+            live_tone_selected = _is_live_field(self.selected)
             if (self.process is not None and not live_tone_selected and
                     key not in (glfw.KEY_UP, glfw.KEY_DOWN)):
                 self.notice = 'Settings are locked while the sender is running.'
@@ -3421,13 +3698,21 @@ class SenderGui:
                 self._scroll_to(self.selected)
             elif key in (glfw.KEY_LEFT, glfw.KEY_RIGHT) and self.selected in fields:
                 dest = self.selected
+                direction = 1 if key == glfw.KEY_RIGHT else -1
                 if dest in BOOL_FIELDS:
                     self._assign(dest, not self.settings[dest])
+                elif dest == 'dct_kernel':
+                    self._cycle_kernel(direction)         # also while sending
+                elif self._numeric_step(dest) is not None:
+                    try:
+                        self._step_field(dest, direction, bool(mods & getattr(glfw, 'MOD_SHIFT', 1)))
+                    except (OSError, ValueError, RuntimeError) as exc:
+                        self.notice = str(exc)
                 elif dest in self.DROPDOWN_FIELDS:
                     self._open_dropdown(dest)
                 else:
                     self.editing = True
-                    self.edit_buffer = str(self.settings.get(dest) or '')
+                    self.edit_buffer = self._edit_text(dest)
             elif key in (glfw.KEY_ENTER, glfw.KEY_KP_ENTER) and self.selected in fields:
                 dest = self.selected
                 if dest in self.DROPDOWN_FIELDS:
@@ -3436,7 +3721,7 @@ class SenderGui:
                     self._assign(dest, not self.settings[dest])
                 else:
                     self.editing = True
-                    self.edit_buffer = str(self.settings.get(dest) or '')
+                    self.edit_buffer = self._edit_text(dest)
         self.dirty = True
 
     def _on_char(self, _window, codepoint):
@@ -3610,6 +3895,13 @@ class SenderGui:
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description='V7 sender GUI')
+    parser.add_argument(
+        '--dct-kernel-dir', action='append', default=[], metavar='DIR',
+        help=('another folder of DCT downscale kernels, besides dct_kernels/ '
+              'and $V7_KERNEL_DIR (repeatable)'))
+    KERNEL_DIRS.extend(parser.parse_args().dct_kernel_dir)
     try:
         devices = output_devices()
         device_error = '' if devices else 'No audio output devices are available.'

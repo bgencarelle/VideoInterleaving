@@ -666,6 +666,9 @@ sharpness. The contracts for any preparation stage:
   clarity, chroma-gain, aggregation and band-profile options.
 - `--clip-aware-encode` (folded profiles): re-fits sent luma so ringing falls
   into the receiver's black and white clip.
+- With `--dct-encode`: `--dct-kernel NAME` (with `--dct-kernel-param
+  NAME=VALUE`, `--dct-kernel-dir DIR`), a pluggable downscale kernel read from
+  `dct_kernels/` at launch (section 11.4).
 - The default resize path uses Pillow's integer `reduce` for a box resize when
   the source is a whole multiple of 80 × 96.
 
@@ -696,6 +699,60 @@ integration, and faster full-resolution preparation for `--dct-encode`.
    approximation (`v7_source_dct.py::FoldBlockDCTProjector`). The 8×8 box
    average gave no visible benefit; other kinds of averaging and other
    kernels are to be tried.
+
+### 11.4 DCT downscale kernels
+
+The direct encode brings the source down in three stages: a block mean and a
+fixed 2:1 decimation (aliasing 54 dB or more below the picture), then a
+truncation of the DCT to the coder grid. The truncation is a brick wall at the
+edge of the sent band, which is why a hard edge overshoots by about 9% and
+flat areas next to it show a faint mesh. A kernel decides what is handed to
+that last step; it changes nothing on the wire, in the fold tables or in the
+receiver.
+
+One kernel is one Python file in `dct_kernels/` (more folders: `--dct-kernel-dir`,
+`$V7_KERNEL_DIR`). Files are read when the sender or the GUI starts, and again
+on `R` in the GUI (which also tells a running sender). A file that fails to
+import or to run on a test picture is reported and skipped; a kernel that
+fails on a live frame is bypassed for that frame. The contract is the docstring
+of `animation_modem/v7_kernels.py`; `dct_kernels/README.md` has the short form.
+
+A kernel supplies any of:
+
+- a linear window over the DCT, written as a 1-D resampling `kernel(x)` in
+  sent-pixel units (the host derives its frequency response), a
+  `response(nu)`, or a full 2-D `gain(ctx)`. Its gain at DC is forced to 1.
+  With luma adjustment on, the same window is applied to the luminance the
+  adjustment aims at, in the coded (gamma) domain, so the window and the
+  adjustment agree; filtering that goal in linear light instead made a gentle
+  window harsh on dark edges (Lanczos overshoot 15% against 7%);
+- a non-linear `post(grid, ctx)`, run on the final values after luma
+  adjustment, with `ctx.project` (keep only the coefficients the wire carries)
+  and `ctx.reduce` (local min/max of the source).
+
+`luma_mix` and `chroma_mix` are added to every kernel (0 off, 1 as written).
+In the GUI the kernel, its parameters, DCT sharpen strength, clarity and
+chroma gain are live: Left/Right steps a value (Shift: five times) or
+switches kernel, and the next frame uses it.
+
+`tools/v7_kernel_bench.py` ranks kernels on synthetic pictures with no audio
+in the loop (edge overshoot and width, ripple, retained amplitude of fine
+gratings, time per frame; `--guests` includes the fold's guest coefficients,
+`--sheet` and `--image` write a contact sheet). Measured on the reference
+encode and the shipped kernels with luma adjustment on and guests present:
+the reference overshoots 6.4% with a 0.88-pixel edge; Anti-ringing refit
+2.0% and 1.00 pixel with the same retained detail (a window cannot do this:
+every linear window that removes the overshoot also lowers the amplitude of
+fine detail); the Lanczos, Mitchell and Gaussian windows trade detail for
+less ringing. The refit costs about 4 ms per 1080p frame, windows under 1 ms
+(a kernel that takes more than 25 ms per frame is reported in the GUI).
+Scored with SSIMULACRA2 against the full-detail picture on four natural
+pictures (ideal channel, guests present), the unwindowed reference and the
+refit rank together (mean -14.4 and -15.4) and every window lower (-23 to
+-41): that metric rewards retained detail and does not see halos, so it does
+not choose between them. Which looks best is a question for the eye.
+This ranks kernels; it is not tape validation, and by section 11.3's rule none
+is the default until it has a viewer preference.
 
 ## 12. Receiver display
 

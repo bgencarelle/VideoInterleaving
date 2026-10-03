@@ -11,6 +11,8 @@ from numba import njit, prange
 from scipy.fft import dctn, idctn
 from scipy.ndimage import gaussian_filter
 
+from animation_modem.v7_kernels import KernelContext
+
 
 NEUTRAL_CHROMA = 128.0/255.0
 WEIGHTED_AGGREGATIONS = ('weighted-tent', 'weighted-cosine',
@@ -1005,6 +1007,22 @@ def _srgb_to_linear(values):
                     ((values+.055)/1.055)**2.4)
 
 
+def _linear_to_srgb(values):
+    values = np.clip(values, 0.0, 1.0)
+    return np.where(values <= .0031308, values*12.92,
+                    1.055*np.maximum(values, 0.0)**(1/2.4)-.055)
+
+
+def _srgb_to_linear_extended(values):
+    """sRGB decoding continued past [0, 1]: odd below black, straight above
+    white (so a window's overshoot survives the round trip)."""
+    values = np.asarray(values, dtype=np.float64)
+    inside = _srgb_to_linear(values)
+    below = -_srgb_to_linear(-values)
+    above = 1.0+(values-1.0)*(2.4/1.055)
+    return np.where(values < 0.0, below, np.where(values > 1.0, above, inside))
+
+
 SRGB_LUT_SIZE = 4096
 
 
@@ -1408,10 +1426,85 @@ def direct_dct_coefficients(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
     return result
 
 
+class KernelFrame:
+    """One frame's dealings with a pluggable kernel (animation_modem.v7_kernels).
+
+    Built by ``direct_dct_values`` from the pre-shrunk planes. ``gain`` is the
+    kernel's window for a plane; ``filter_target`` puts the same window on the
+    luminance luma adjustment aims at; ``post`` is the non-linear refit that
+    runs on the final values. A kernel that raises is bypassed for the frame
+    and its message kept for the sender to report.
+    """
+
+    def __init__(self, selection, grids, shapes, masks, planes):
+        self.selection = selection
+        self.kernel = selection.kernel
+        self.params = selection.params
+        self.contexts = []
+        masks = list(masks) if masks is not None else [None]*len(grids)
+        masks += [None]*(len(grids)-len(masks))
+        for index, (grid, sent, mask, plane) in enumerate(
+                zip(grids, shapes, masks, planes)):
+            if mask is not None:
+                mask = np.asarray(mask, bool)
+                if mask.size != grid[0]*grid[1]:
+                    mask = None
+            self.contexts.append(KernelContext(index, grid, sent, mask, plane))
+
+    def gain(self, index):
+        try:
+            return self.kernel.gain(self.contexts[index], self.params)
+        except Exception as exc:
+            self.kernel.note_failure(exc)
+            return None
+
+    def filter_target(self, target):
+        """The luminance goal seen through the luma window.
+
+        The goal is linear light, the window is designed on the picture as the
+        wire and the receiver show it (gamma coded), where halos and sharpness
+        are judged. So the goal goes to that domain, through the window, and
+        back; filtering linear light directly would turn a window that is
+        gentle on a dark edge into a harsh one.
+        """
+        gain = self.gain(0)
+        if gain is None or target is None:
+            return target
+        rows, cols = target.shape
+        if (rows, cols) != gain.shape:
+            return target
+        basis_y = _dct_matrix(rows, rows)
+        basis_x = _dct_matrix(cols, cols)
+        coded = _linear_to_srgb(target)
+        coefficients = basis_y.T @ coded @ basis_x
+        return _srgb_to_linear_extended(
+            basis_y @ (coefficients*gain) @ basis_x.T)
+
+    def post(self, values, grids):
+        """Run the kernel's refit on each plane of a concatenated value vector."""
+        if not self.kernel.has_post:
+            return values
+        values = np.array(values, dtype=np.float64)
+        offset = 0
+        for index, (rows, cols) in enumerate(grids):
+            count = rows*cols
+            plane = values[offset:offset+count].reshape(rows, cols)
+            try:
+                refit = self.kernel.post((plane+1.0)*.5, self.contexts[index],
+                                         self.params)
+            except Exception as exc:
+                self.kernel.note_failure(exc)
+            else:
+                values[offset:offset+count] = (refit*2.0-1.0).ravel()
+            offset += count
+        return values
+
+
 def direct_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
                       sharpen='off', sharpen_strength=.25, clarity=0.0,
                       chroma_gain=1.0, luminance_out=None,
-                      linear_light=False):
+                      linear_light=False, kernel=None, kernel_masks=None,
+                      kernel_frame_out=None):
     """Direct DCT encode: native RGB frame to the sender's coder-grid values.
 
     Stages (see the direct-encode spec): tone per pixel at full resolution,
@@ -1423,14 +1516,26 @@ def direct_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
     ``luminance_out`` receives the source's linear luminance on the luma grid
     (the target for luma_adjust): the linearised pre-shrunk means, or with
     ``linear_light`` the mean of every source pixel's linear luminance.
+
+    ``kernel`` (a ``v7_kernels.KernelSelection``) puts a pluggable window on
+    each plane's coefficients; ``kernel_masks`` names, per plane, the
+    coefficients the wire carries (the transmitted rectangle when absent). A
+    list passed as ``kernel_frame_out`` receives the frame's KernelFrame, whose
+    ``post`` the caller runs after luma adjustment.
     """
     planes, grids, shapes, taper, target, blocks, source = _direct_planes(
         rgb, grids, shapes, brightness, gamma, sharpen, sharpen_strength,
         clarity, chroma_gain,
         luminance=(luminance_out is not None and
                    ('linear' if linear_light else True)))
+    frame = None
+    if kernel is not None:
+        frame = KernelFrame(kernel, grids, shapes, kernel_masks, planes)
+        if kernel_frame_out is not None:
+            kernel_frame_out.append(frame)
     if luminance_out is not None:
-        luminance_out.append(target)
+        luminance_out.append(frame.filter_target(target)
+                             if frame is not None else target)
     result = np.empty(sum(r*c for r, c in grids), dtype=np.float64)
     offset = 0
     for index, (plane, (grid_rows, grid_cols), sent) in enumerate(
@@ -1438,10 +1543,14 @@ def direct_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
         (analysis_y, analysis_x, synthesis_y, synthesis_x,
          left, right) = _direct_plan(*source, grid_rows, grid_cols,
                                      *blocks[index])
-        if index == 0 and taper:
+        window = _taper_gain(grid_rows, grid_cols, sent[0], sent[1],
+                             taper) if index == 0 and taper else None
+        shaped = frame.gain(index) if frame is not None else None
+        if shaped is not None:
+            window = shaped if window is None else window*shaped
+        if window is not None:
             coefficients = _separable(analysis_y, plane, analysis_x)
-            coefficients *= _taper_gain(grid_rows, grid_cols, sent[0],
-                                        sent[1], taper)
+            coefficients *= window
             grid = _separable(synthesis_y, coefficients, synthesis_x)
         else:
             grid = _separable(left, plane, right)

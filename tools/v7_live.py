@@ -41,6 +41,7 @@ sys.path.insert(0, str(ROOT))
 
 from animation_modem.imaging import values_image                         # noqa: E402
 from animation_modem import v7 as P                                       # noqa: E402
+from animation_modem import v7_kernels as K                               # noqa: E402
 from animation_modem.v7_live_input import (DirectionStreak, LiveInput,
                                            select_packet_hit,
                                            windowed_rate)                 # noqa: E402
@@ -168,6 +169,130 @@ class LiveToneControls:
             return dict(self._values)
 
 
+class LiveKernelControls:
+    """The DCT kernel, its parameters and the DCT enhancement values, live.
+
+    The same newline-delimited JSON as LiveToneControls carries
+    {"kernel": "lanczos", "kernel_params": {"width": 0.9}} (the name may be
+    omitted to adjust the current kernel; each kernel remembers its own
+    values while the send runs), {"dct": {"sharpen": "taper",
+    "sharpen_strength": .3, "clarity": 0, "chroma_gain": 1}} and
+    {"kernels": "reload"}, which rescans the kernel folders so an edited or
+    added file can be tried without stopping. Anything invalid is ignored with
+    a notice; the frame loop only ever sees a ready, valid selection.
+    """
+
+    DCT_LIMITS = {'sharpen_strength': (0.0, 1.0), 'clarity': (0.0, 1.0),
+                  'chroma_gain': (1.0, 1.3)}
+
+    def __init__(self, registry, name=None, params=None):
+        self.registry = registry
+        self._lock = threading.Lock()
+        self._values = {}
+        self._dct = {}
+        self._notices = []
+        self._name = name or K.REFERENCE
+        self._params = {self._name: dict(params or {})}
+        self._selection = None
+        try:
+            self._select()
+        except K.KernelError as exc:
+            self._notices.append(f'DCT kernel: {exc}')
+            self._name, self._selection = K.REFERENCE, None
+
+    def _select(self):
+        """Make the selection from the current name and values."""
+        self._selection = self.registry.select(
+            self._name, self._params.get(self._name))
+
+    def update(self, line):
+        try:
+            update = json.loads(line)
+        except (TypeError, ValueError):
+            return False
+        if not isinstance(update, dict):
+            return False
+        touched = False
+        with self._lock:
+            if update.get('kernels') == 'reload':
+                added, removed = self.registry.scan()
+                self._notices.append(
+                    'DCT kernels rescanned: ' + (', '.join(
+                        [f'+{n}' for n in added] + [f'-{n}' for n in removed])
+                        or 'no change') + ''.join(
+                        f'; skipped {Path(path).name}: {message}'
+                        for path, message in self.registry.errors))
+                touched = True
+            name, values = self._name, update.get('kernel_params')
+            if isinstance(update.get('kernel'), str):
+                name = update['kernel']
+            if (touched or name != self._name or isinstance(values, dict)):
+                candidate = {k: dict(v) for k, v in self._params.items()}
+                if isinstance(values, dict):
+                    candidate.setdefault(name, {}).update(values)
+                try:
+                    selection = self.registry.select(name, candidate.get(name))
+                except K.KernelError as exc:
+                    # A refused change leaves the running kernel as it was
+                    # (unless a rescan just removed it from under us).
+                    self._notices.append(f'DCT kernel: {exc}')
+                    name = self._name
+                    try:
+                        selection = self.registry.select(
+                            name, self._params.get(name))
+                    except K.KernelError:
+                        name, selection = K.REFERENCE, None
+                        self._notices.append('DCT kernel: back to reference')
+                else:
+                    self._params = candidate
+                self._name, self._selection = name, selection
+                touched = True
+            dct = update.get('dct')
+            if isinstance(dct, dict):
+                for key, value in dct.items():
+                    if key == 'sharpen' and value in ('off', 'taper', 'usm'):
+                        self._dct[key] = value
+                    elif key in self.DCT_LIMITS:
+                        try:
+                            value = float(value)
+                        except (TypeError, ValueError):
+                            continue
+                        low, high = self.DCT_LIMITS[key]
+                        if np.isfinite(value) and low <= value <= high:
+                            self._dct[key] = value
+                touched = True
+        return touched
+
+    def options(self, base):
+        """``base`` (the sender's dct options) with the live values applied."""
+        with self._lock:
+            merged = dict(base)
+            merged.update(self._dct)
+            merged['kernel'] = self._selection
+        return merged
+
+    def take_notices(self):
+        """Messages for the GUI, plus any kernel that failed on a frame."""
+        with self._lock:
+            notices, self._notices = self._notices, []
+            selection = self._selection
+        if selection is not None:
+            error = selection.kernel.take_error()
+            if error:
+                notices.append(f'DCT kernel bypassed this frame: {error}')
+            slow = selection.kernel.take_slow_warning()
+            if slow:
+                notices.append(slow)
+        return notices
+
+    def listing(self):
+        """What the GUI needs to show: names, errors, current choice."""
+        with self._lock:
+            return {'names': self.registry.names(), 'selected': self._name,
+                    'errors': [[Path(p).name, m]
+                               for p, m in self.registry.errors]}
+
+
 class LiveTransportControls:
     """Pause/play/seek/restart of a file source, from the sender GUI pipe.
 
@@ -218,7 +343,8 @@ class LiveTransportControls:
         return True
 
 
-def _read_live_tone_controls(stream, controls, stop, transport=None):
+def _read_live_tone_controls(stream, controls, stop, transport=None,
+                             kernels=None):
     """Consume newline-delimited GUI updates until EOF or shutdown."""
     while not stop.is_set():
         line = stream.readline()
@@ -227,6 +353,8 @@ def _read_live_tone_controls(stream, controls, stop, transport=None):
         controls.update(line)
         if transport is not None:
             transport.update(line)
+        if kernels is not None:
+            kernels.update(line)
 
 
 def _file_playback(args, start, open_reader, reader=None, on_close=None):
@@ -458,7 +586,7 @@ def _fit_to_aspect(frame, aspect_code):
 def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0,
             perceptual_resize='off', perceptual_detail_strength=0.25,
             dct_encode=False, dct_options=None, return_resized=False,
-            fit_aspect=None, chroma_sent_for=None):
+            fit_aspect=None, chroma_sent_for=None, kernel_masks_for=None):
     """(values, aspect code[, preview]) for one source frame.
 
     With ``fit_aspect`` (a V7 aspect code: the sender's fixed aspect layout)
@@ -473,10 +601,17 @@ def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0,
     luminance = [] if chroma_sent_for is not None and dct_encode else None
     if fit_aspect is not None:
         frame = _fit_to_aspect(frame, fit_aspect)
+    kernel_frame, kernel_masks = [], None
+    if (dct_encode and dct_options and dct_options.get('kernel') is not None
+            and kernel_masks_for is not None):
+        kernel_masks = kernel_masks_for(
+            (int(fit_aspect) & 7) | P.ASPECT_SCREEN if fit_aspect is not None
+            else P.aspect_wire_code(_frame_size(frame)))
     out = _picture_values(model, frame, encode_filter, brightness, gamma,
                           perceptual_resize, perceptual_detail_strength,
                           dct_encode, dct_options, return_resized,
-                          luminance_out=luminance)
+                          luminance_out=luminance, kernel_masks=kernel_masks,
+                          kernel_frame_out=kernel_frame)
     aspect = (out[1] if fit_aspect is None else
               (int(fit_aspect) & 7) | P.ASPECT_SCREEN)
     values = out[0]
@@ -485,13 +620,62 @@ def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0,
         masks = chroma_sent_for(aspect)
         if masks is not None:
             values = luma_adjust(values, model.coder.grids, masks, luminance[0])
+    if kernel_frame:
+        # The kernel's non-linear refit goes last, after luma adjustment, so
+        # nothing re-fits the luma it just cleaned.
+        values = kernel_frame[0].post(values, model.coder.grids)
     return (values, aspect) + tuple(out[2:])
+
+
+def _kernel_cli_values(items):
+    """``--dct-kernel-param name=value`` entries as a dict."""
+    values = {}
+    for item in items or ():
+        name, separator, value = str(item).partition('=')
+        if not separator:
+            raise ValueError('--dct-kernel-param is NAME=VALUE')
+        try:
+            values[name.strip()] = float(value)
+        except ValueError:
+            raise ValueError(f'--dct-kernel-param {name}: {value!r} is not a number')
+    return values
+
+
+def _warm_kernels(model, registry, masks_for, dct_options):
+    """Encode a small test frame through every kernel (all hooks, default
+    parameters) before the output stream is live."""
+    frame = np.zeros((model.coder.grids[0][0]*4, model.coder.grids[0][1]*4, 3),
+                     np.uint8)
+    frame[::7] = 200
+    for name in registry.names():
+        try:
+            selection = registry.select(name)
+        except K.KernelError:
+            continue
+        masks = masks_for(0) if selection is not None else None
+        frames = []
+        from animation_modem.v7_source_dct import direct_dct_values
+        values = direct_dct_values(
+            frame, model.coder.grids, model.coder.shapes,
+            kernel=selection, kernel_masks=masks, kernel_frame_out=frames)
+        if frames:
+            frames[0].post(values, model.coder.grids)
+
+
+def _frame_size(frame):
+    """(width, height) the aspect code is named from, for any frame type."""
+    size = getattr(frame, 'source_size', None)
+    if size is not None:
+        return size
+    frame = getattr(frame, 'rgb', frame)
+    return frame.size if isinstance(frame, Image.Image) else np.shape(frame)[1::-1]
 
 
 def _picture_values(model, frame, encode_filter='nearest', brightness=1.05,
                     gamma=1.0, perceptual_resize='off',
                     perceptual_detail_strength=0.25, dct_encode=False,
-                    dct_options=None, return_resized=False, luminance_out=None):
+                    dct_options=None, return_resized=False, luminance_out=None,
+                    kernel_masks=None, kernel_frame_out=None):
     _validate_tone_controls(brightness, gamma)
     source_size = getattr(frame, 'source_size', None)
     capture_prepared = bool(getattr(frame, 'prepared', False))
@@ -540,10 +724,12 @@ def _picture_values(model, frame, encode_filter='nearest', brightness=1.05,
             values = direct_dct_values(
                 rgb, model.coder.grids, model.coder.shapes,
                 brightness=brightness, gamma=gamma,
-                luminance_out=luminance_out, **options)
+                luminance_out=luminance_out, kernel_masks=kernel_masks,
+                kernel_frame_out=kernel_frame_out, **options)
         else:
             # Research reducers keep the full-resolution analysis path.
             research = dict(dct_options or {})
+            research.pop('kernel', None)
             research.pop('linear_light', None)
             research.pop('pixel', None)
             research.pop('pixel_detail', None)
@@ -720,7 +906,8 @@ def _dct_encode_options(args):
 def _dct_options_explicit(args):
     return any(getattr(args, name, None) is not None for name in (
         'dct_sharpen', 'dct_sharpen_strength', 'dct_clarity',
-        'dct_chroma_gain', 'dct_aggregation', 'dct_band_profile'))
+        'dct_chroma_gain', 'dct_aggregation', 'dct_band_profile')) or (
+        getattr(args, 'dct_kernel', None) not in (None, K.REFERENCE))
 
 
 def _validate_tone_controls(brightness, gamma):
@@ -921,6 +1108,34 @@ def _run_send_session(args):
     args.encode_filter, args.brightness = _send_profile(args, profile_slots)
     dct_options = _dct_encode_options(args)
     tone_controls = LiveToneControls(args.brightness, args.gamma)
+    # DCT kernels: found in the kernel folders at launch; a bad file is
+    # reported and skipped, an unknown choice is refused before any audio.
+    kernel_registry = K.open_registry(getattr(args, 'dct_kernel_dir', None) or ())
+    try:
+        kernel_controls = LiveKernelControls(
+            kernel_registry, getattr(args, 'dct_kernel', None),
+            _kernel_cli_values(getattr(args, 'dct_kernel_param', None)))
+        refused = kernel_controls.take_notices()
+        if refused:
+            raise K.KernelError(refused[0])
+    except K.KernelError as exc:
+        raise ValueError(str(exc))
+    if (kernel_controls.listing()['selected'] != K.REFERENCE and
+            dct_options.get('pixel')):
+        raise ValueError('a DCT kernel cannot be combined with --pixel-encode '
+                         '(it sends the pixels as they are)')
+    def say_kernel(message, **extra):
+        """A line for the GUI (JSON) or, on the command line, plain text."""
+        if getattr(args, 'gui_control', False):
+            print(json.dumps({'status': 'kernel', 'message': message, **extra}),
+                  flush=True)
+        else:
+            print(message, flush=True)
+    for path, message in kernel_registry.errors:
+        say_kernel(f'DCT kernel {Path(path).name} skipped: {message}')
+    if getattr(args, 'dct_encode', False):
+        say_kernel('DCT kernels: ' + ', '.join(kernel_registry.names()),
+                   **kernel_controls.listing())
     # One transport for the whole send: a control reader left over from a
     # session before a device reconnect still reaches the current playback.
     transport = getattr(args, '_sender_transport', None)
@@ -930,7 +1145,8 @@ def _run_send_session(args):
     if getattr(args, 'gui_control', False):
         threading.Thread(
             target=_read_live_tone_controls,
-            args=(sys.stdin, tone_controls, control_stop, transport),
+            args=(sys.stdin, tone_controls, control_stop, transport,
+                  kernel_controls),
             name='v7-live-tone-controls', daemon=True).start()
     # A file resumes where the GUI last left it, or where this send was when
     # its output device was lost.
@@ -1118,6 +1334,26 @@ def _run_send_session(args):
         return clip_aware_luma(value, codec.grid.grids[0],
                                codec.sent_luma_mask())
 
+    kernel_mask_cache = {}
+
+    def kernel_masks_for(aspect_code):
+        """Per plane, the coefficients this packet's wire carries, or None."""
+        key = int(aspect_code) & 0xff
+        if key not in kernel_mask_cache:
+            if slice_wire is not None:
+                layout = slice_wire.layout_for(aspect_code)
+                luma = None if layout is None else slice_wire.luma_sent_mask(layout)
+            else:
+                codec = codec_for(aspect_code)
+                luma = None if codec is None else codec.sent_luma_mask()
+            chroma = chroma_sent_for(aspect_code) or [None, None]
+            kernel_mask_cache[key] = [luma, *chroma]
+        return kernel_mask_cache[key]
+
+    def report_kernel():
+        for message in kernel_controls.take_notices():
+            say_kernel(message, **kernel_controls.listing())
+
     def encode_batch(frames, aspects, counter):
         values = np.asarray(frames)
         if clip_aware:
@@ -1270,10 +1506,12 @@ def _run_send_session(args):
                     getattr(args, 'perceptual_resize', 'off'),
                     getattr(args, 'perceptual_detail_strength', 0.25),
                     dct_encode=getattr(args, 'dct_encode', False),
-                    dct_options=dct_options,
+                    dct_options=kernel_controls.options(dct_options),
                     return_resized=image_preview_port is not None,
                     fit_aspect=fit_aspect,
-                    chroma_sent_for=chroma_sent_for if luma_adjusted else None)
+                    chroma_sent_for=chroma_sent_for if luma_adjusted else None,
+                    kernel_masks_for=kernel_masks_for)
+                report_kernel()
                 if image_preview_port is not None:
                     value, aspect, resized_preview = processed
                     preview_images.append((source_preview, resized_preview))
@@ -1435,6 +1673,9 @@ def _run_send_session(args):
             if getattr(args, 'dct_encode', False):
                 from animation_modem.v7_source_dct import warmup_direct_dct
                 warmup_direct_dct(model.coder.grids, model.coder.shapes)
+                # Run every kernel once so a live switch never meets a first
+                # call (imports, caches) on the frame thread.
+                _warm_kernels(model, kernel_registry, kernel_masks_for, dct_options)
             # Start picture and soundtrack capture only after the output clock
             # is known, and close together so file/stream timelines begin near
             # the same source time.
@@ -4009,6 +4250,19 @@ def parser():
                       help=argparse.SUPPRESS)
     send.add_argument('--dct-chroma-gain', type=float, default=None,
                       help=argparse.SUPPRESS)
+    send.add_argument(
+        '--dct-kernel', default=None, metavar='NAME',
+        help=('with --dct-encode: the downscale kernel, a file in dct_kernels/ '
+              '(or another --dct-kernel-dir); "reference" is the shipped '
+              'encode. Also adjustable while sending from the GUI.'))
+    send.add_argument(
+        '--dct-kernel-param', action='append', default=None,
+        metavar='NAME=VALUE',
+        help='a parameter of the chosen kernel (repeatable)')
+    send.add_argument(
+        '--dct-kernel-dir', action='append', default=None, metavar='DIR',
+        help=('another folder of kernel files (repeatable; also '
+              '$V7_KERNEL_DIR, path-separated)'))
     send.add_argument('--dct-aggregation', choices=(
         'off', 'area-box', 'weighted-tent', 'weighted-cosine',
         'weighted-gaussian'), default=None, help=argparse.SUPPRESS)

@@ -59,11 +59,13 @@ class SenderKeyStub:
     KEY_UP = 265
     KEY_C = 67
     KEY_I = 73
+    KEY_R = 82
     KEY_SPACE = 32
     KEY_A = 65
     KEY_V = 86
     KEY_KP_ENTER = 335
     MOD_CONTROL = 2
+    MOD_SHIFT = 1
 
 
 class SenderGuiTests(unittest.TestCase):
@@ -1755,7 +1757,7 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
             'aspect_tail', 'dct_encode', 'pixel_encode', 'pixel_detail',
             'pixel_grid', 'luma_adjust', 'luma_adjust_linear', 'dct_sharpen',
             'dct_sharpen_strength', 'dct_clarity', 'dct_chroma_gain',
-            'clip_aware', 'screen_backend', 'region', 'ffmpeg_input',
+            'dct_kernel', 'clip_aware', 'screen_backend', 'region', 'ffmpeg_input',
             'capture_width', 'capture_filter')
         self.assertEqual(set(names), set(before))
 
@@ -1779,8 +1781,11 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
                              for dest in gui._visible_fields()))
         gui.process = SimpleNamespace(stdin=_Pipe())
         for dest in gui._visible_fields():
-            self.assertEqual(gui._locked(dest),
-                             dest not in ('brightness', 'gamma'))
+            # The DCT kernel, its parameters and the DCT strengths are live too.
+            live = (dest in ('brightness', 'gamma', 'dct_kernel', 'dct_sharpen',
+                             'dct_sharpen_strength', 'dct_clarity',
+                             'dct_chroma_gain') or dest.startswith('kp:'))
+            self.assertEqual(gui._locked(dest), not live)
         notes = [payload for kind, payload in gui._setup_items(self.SIZE[0])
                  if kind == 'note']
         self.assertEqual(notes, ['Stop to change the settings below'])
