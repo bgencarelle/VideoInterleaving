@@ -12,6 +12,7 @@ Usage from another module (e.g. image_loader.py):
     if _libwebp is None:
         raise RuntimeError("libwebp not loaded.")
 
+
     # _libwebp is now ready with WebPGetInfo / WebPDecodeRGBAInto signatures set.
 """
 

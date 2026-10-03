@@ -786,20 +786,6 @@ taken from the channel that shows its word. When both channels show it, the
 right channel is used, unless `--mono-video-side left|right` fixes the
 channel. The receiver decodes that one channel as a one-channel input. Its
 audio passthrough (`--audio-output-device`) plays the other input channel.
-The passthrough fails silent: an input channel that shows a valid picture
-status on `ReceiverChannelRouter.DATA_CONFIRM_PACKETS` (2) consecutive packets
-is a data channel and is muted, before any profile is confirmed, and stays
-muted until it has been clear for `ReceiverChannelRouter.DATA_HOLD_SECONDS`
-(10 s of captured audio). A stereo status marks both channels. A single
-status between packets without one marks nothing. When both channels show a
-status on the same packet and one header is more than 12 dB below the other
-(`CROSSTALK_RATIO`), the lower one is leakage of the picture into the
-soundtrack: it is ignored for the route, for the data mark and for the choice
-of the decoded channel. When the
-signal is lost only the channel that was confirmed as the soundtrack while the
-picture was present keeps playing; nothing falls back to the former data
-channel or to a mix, and a stereo profile passes nothing. Before any picture
-status has been seen the configured side is used unchanged.
 
 A receiver that does not know a profile must not interpret its body. This
 receiver holds the last picture for an unknown or unconfirmed status.
