@@ -1874,7 +1874,9 @@ class ReceiverGui:
             volume = meter.get('audio_volume', 1.0)
             audio = (f'{"muted" if meter.get("audio_muted") else "live"} '
                      f'{volume:.0%} → {output}'
-                     if meter.get('audio_side') else 'off')
+                     if meter.get('audio_side') else
+                     'muted: data channel'
+                     if meter.get('audio_data_muted') else 'off')
             audio_error = meter.get('audio_device_error')
             if audio_error:
                 audio = f'RESELECT · {audio_error}'

@@ -2736,6 +2736,8 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
             passthrough.note_input_status(status)
         capture_start = capture_sample_cursor[0]
         capture_sample_cursor[0] += len(values)
+        # Data-channel holds are timed in captured audio, not wall time.
+        receiver_router.audio_time = capture_sample_cursor[0]/capture_rate
         if passthrough is not None:
             # Queue the selected leg on every device callback, including
             # silence. Audio delivery must not depend on frame decoding.
@@ -2965,7 +2967,10 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
                 f'route {meter["route_state"]} · '
                 f'video {meter["video_side"] or "--"} · '
                 f'audio {meter["audio_side"] or "--"}',
-                f'passthrough {"muted" if meter["audio_muted"] else "live"} · '
+                'passthrough ' + (
+                    'muted' if meter['audio_muted'] else
+                    'muted: data channel' if meter.get('audio_data_muted')
+                    else 'live') + ' · '
                 f'output {meter["audio_output_device"] or "not selected"} · '
                 f'volume {meter["audio_volume"]:.2f}' +
                 ('' if not meter['audio_device_error'] else
@@ -2996,6 +3001,7 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
         previous_audio_side = (passthrough.route
                                if passthrough is not None else None)
         meter['audio_side'] = passthrough_audio_side(route, input_channels)
+        meter['audio_data_muted'] = route['data_muted']
         meter['sync_age'] = (None if route['last_packet'] is None else
                              max(0.0, now-route['last_packet']))
         meter['sync_warning'] = bool(
@@ -3235,6 +3241,12 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
             channel_modes[opposite_input_index] = opposite_probe.status_mode
             channel_times[opposite_input_index] = opposite_probe.last_valid
             channel_confirmed[opposite_input_index] = True
+        if (opposite_probe is not None and opposite_input_index is not None and
+                opposite_probe.status_candidate is not None):
+            # One valid status on the other leg already marks it as data.
+            sighting = [None, None]
+            sighting[opposite_input_index] = opposite_probe.status_candidate
+            receiver_router.note_data(*sighting, now=now)
         route = receiver_router.observe(
             channel_modes[0], channel_modes[1], now=now,
             left_seen_at=channel_times[0], right_seen_at=channel_times[1],
@@ -3243,6 +3255,8 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
         meter['route_state'] = route['state']
         meter['video_side'] = route['video_side']
         meter['audio_side'] = route['audio_side']
+        # Apply the route now: a new data leg must not wait for the monitor.
+        refresh_runtime_state()
         if auto_mono_side and route['state'] in ('mono-left', 'mono-right'):
             desired = {'mono-left': 0, 'mono-right': 1}[route['state']]
             if desired != video_input_index and route['channel_active'][desired]:
@@ -3350,6 +3364,7 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
                 profile_events, now=now)
             for decision in profile_decisions:
                 receiver_router.observe_profile_decision(decision, now=now)
+                refresh_runtime_state()
                 if decision['switched'] and not args.no_log:
                     print({'status': 'wire_profile_switch',
                            'profile': adaptive_profile.profile_name,

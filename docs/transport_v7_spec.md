@@ -749,6 +749,14 @@ taken from the channel that shows its word. When both channels show it, the
 right channel is used, unless `--mono-video-side left|right` fixes the
 channel. The receiver decodes that one channel as a one-channel input. Its
 audio passthrough (`--audio-output-device`) plays the other input channel.
+The passthrough fails silent: an input channel on which a valid picture status
+has been seen is a data channel and is muted at once, before any profile is
+confirmed, and stays muted until it has been clear for
+`ReceiverChannelRouter.DATA_HOLD_SECONDS` (10 s of captured audio). When the
+signal is lost only the channel that was confirmed as the soundtrack while the
+picture was present keeps playing; nothing falls back to the former data
+channel or to a mix, and a stereo profile passes nothing. Before any picture
+status has been seen the configured side is used unchanged.
 
 A receiver that does not know a profile must not interpret its body. This
 receiver holds the last picture for an unknown or unconfirmed status.

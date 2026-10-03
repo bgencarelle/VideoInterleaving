@@ -101,6 +101,11 @@ class ReceiverChannelRouter:
     """Metadata-driven video/audio assignment with loss-tolerant side changes."""
 
     LOSS_SECONDS = 0.75
+    # A leg on which picture data was seen is never passed to the speakers
+    # until it has been clear for this long (seconds of audio time when the
+    # receiver supplies audio_time). Far longer than any dropout: on signal
+    # loss silence is preferred to modem noise.
+    DATA_HOLD_SECONDS = 10.0
 
     def __init__(self, mono_mode, stereo_modes=(), loss_seconds=LOSS_SECONDS,
                  initial_video_side=None):
@@ -124,6 +129,12 @@ class ReceiverChannelRouter:
         self.audio_side = (self._opposite(initial_video_side)
                            if initial_video_side in ('left', 'right') else None)
         self.last_packet = None
+        # Clock for the data hold: captured audio seconds, set by the live
+        # receiver. None falls back to the caller's `now`.
+        self.audio_time = None
+        self.data_seen = [None, None]
+        # True once audio_side came from packet evidence, not the initial guess.
+        self.audio_confirmed = False
         if initial_video_side is not None:
             self.state = ('dual-mono' if initial_video_side == 'both' else
                           f'mono-{initial_video_side}')
@@ -132,10 +143,54 @@ class ReceiverChannelRouter:
     def _opposite(side):
         return {'left': 'right', 'right': 'left'}.get(side)
 
+    def _hold_clock(self, now):
+        if self.audio_time is not None:
+            return float(self.audio_time)
+        return time.monotonic() if now is None else float(now)
+
+    def note_data(self, left_mode=None, right_mode=None, now=None):
+        """Mark each leg that showed a valid picture status as a data leg.
+
+        One sighting is enough and needs no confirmation: muting a soundtrack
+        by mistake is harmless next to playing modem signal.
+        """
+        clock = self._hold_clock(now)
+        modes = (left_mode, right_mode)
+        stereo = any(mode is not None and int(mode) in self.stereo_modes
+                     for mode in modes)
+        for index, mode in enumerate(modes):
+            if mode is not None or stereo:
+                self.data_seen[index] = clock
+
+    def data_held(self, now=None):
+        """Per leg: picture data seen within DATA_HOLD_SECONDS."""
+        clock = self._hold_clock(now)
+        # A clock that moved backwards cannot prove the leg has been clear.
+        return tuple(seen is not None and
+                     not 0.0 <= clock-seen-self.DATA_HOLD_SECONDS
+                     for seen in self.data_seen)
+
+    def passthrough_side(self, now=None):
+        """The leg allowed to reach the speakers, or None.
+
+        Before any picture data is seen this is the configured audio side.
+        Afterwards only a leg confirmed as the soundtrack while a picture was
+        present passes, and never while it is held as a data leg.
+        """
+        side = self.audio_side
+        if self.data_seen == [None, None]:
+            return side
+        if side not in ('left', 'right') or not self.audio_confirmed:
+            return None
+        if self.data_held(now)[0 if side == 'left' else 1]:
+            return None
+        return side
+
     def observe(self, left_mode=None, right_mode=None, now=None,
                 left_seen_at=None, right_seen_at=None,
                 left_confirmed=False, right_confirmed=False):
         now = time.monotonic() if now is None else float(now)
+        self.note_data(left_mode, right_mode, now=now)
         self.channels[0].observe(
             left_mode, now if left_seen_at is None else left_seen_at,
             already_confirmed=left_confirmed)
@@ -187,6 +242,7 @@ class ReceiverChannelRouter:
                 return self.snapshot(now)
             self.state, self.video_side, self.audio_side = (
                 f'mono-{side}', side, self._opposite(side))
+            self.audio_confirmed = True
         else:
             # Unknown profile codes are never treated as audio eligibility.
             self.state, self.audio_side = 'unresolved', None
@@ -210,9 +266,11 @@ class ReceiverChannelRouter:
         route. Even for the active profile, one status hit on the soundtrack
         must not identify that leg as a second modem channel.
         """
+        left, right = decision['channel_modes']
+        # Data is muted at first sight, before any profile is confirmed.
+        self.note_data(left, right, now=now)
         if not decision['confirmed']:
             return self.snapshot(now)
-        left, right = decision['channel_modes']
         for evidence, mode in zip(self.channels, (left, right)):
             if mode is None:
                 # Absence on this packet breaks a candidate streak, without
@@ -223,10 +281,15 @@ class ReceiverChannelRouter:
 
     def snapshot(self, now=None):
         now = time.monotonic() if now is None else float(now)
+        audio_side = self.passthrough_side(now)
         return {
             'state': self.state,
             'video_side': self.video_side,
-            'audio_side': self.audio_side,
+            'audio_side': audio_side,
+            'data_channels': self.data_held(now),
+            # Silent because of picture data, not because nothing is routed.
+            'data_muted': (audio_side is None and
+                           self.data_seen != [None, None]),
             'channel_modes': tuple(item.mode for item in self.channels),
             'channel_active': tuple(item.active(now, self.loss_seconds)
                                     for item in self.channels),
