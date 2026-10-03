@@ -624,7 +624,50 @@ def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0,
         # The kernel's non-linear refit goes last, after luma adjustment, so
         # nothing re-fits the luma it just cleaned.
         values = kernel_frame[0].post(values, model.coder.grids)
-    return (values, aspect) + tuple(out[2:])
+    extra = tuple(out[2:])
+    if kernel_frame and return_resized and extra:
+        # With a kernel chosen the "Encoder input" picture is what the wire
+        # carries (an ideal receiver's picture), so the kernel can be judged.
+        sent = _sent_preview_image(values, model.coder.grids,
+                                   model.coder.shapes, kernel_masks)
+        # The wire squeezes the picture into its grid; draw it at the
+        # source's own proportions, as the receiver does.
+        width, height = _frame_size(frame)
+        if width > 0 and height > 0:
+            sent = sent.resize((max(1, round(sent.height*width/height)),
+                                sent.height), Image.Resampling.BILINEAR)
+        extra = (sent,) + extra[1:]
+    return (values, aspect) + extra
+
+
+def _sent_preview_image(values, grids, shapes, masks=None, up=2):
+    """The picture an ideal receiver draws from the sent DCT coefficients.
+
+    Every plane is inverted at ``up`` times its own grid (zero-padded
+    coefficients), chroma is then repeated up to the luma size: small
+    transforms, cheap enough to run on every preview frame."""
+    from scipy.fft import dctn, idctn
+    height, width = grids[0][0]*up, grids[0][1]*up
+    planes, offset = [], 0
+    for index, (rows, cols) in enumerate(grids):
+        block = np.asarray(values[offset:offset+rows*cols], np.float32)
+        offset += rows*cols
+        coefficients = dctn(block.reshape(rows, cols), norm='ortho')
+        mask = None if masks is None else masks[index]
+        if mask is None or np.shape(mask) != (rows, cols):
+            mask = np.zeros((rows, cols), bool)
+            mask[:shapes[index][0], :shapes[index][1]] = True
+        coefficients[~np.asarray(mask, bool)] = 0
+        big = np.zeros((rows*up, cols*up), np.float32)
+        big[:rows, :cols] = coefficients*up
+        plane = idctn(big, norm='ortho')*.5 + .5
+        for axis, size in ((0, height), (1, width)):
+            if plane.shape[axis] != size:
+                plane = np.repeat(plane, size//plane.shape[axis], axis=axis)
+        planes.append(plane)
+    y, cb, cr = planes[0], planes[1]-.5, planes[2]-.5
+    rgb = np.stack((y+1.402*cr, y-.344136*cb-.714136*cr, y+1.772*cb), -1)
+    return Image.fromarray(np.uint8(np.clip(rgb, 0, 1)*255+.5), 'RGB')
 
 
 def _kernel_cli_values(items):
@@ -1005,6 +1048,9 @@ def _apply_profile_option(args):
         args.slices = 'stereo'
 
 
+HOST_PARAM_NAMES = ('luma_mix', 'chroma_mix')
+
+
 def run_send(args):
     import sounddevice as sd
     from tools.v7_device_recovery import device_identity
@@ -1350,9 +1396,24 @@ def _run_send_session(args):
             kernel_mask_cache[key] = [luma, *chroma]
         return kernel_mask_cache[key]
 
-    def report_kernel():
+    unset = object()
+    applied_kernel = [unset]
+
+    def report_kernel(selection=None):
         for message in kernel_controls.take_notices():
             say_kernel(message, **kernel_controls.listing())
+        # Say when a changed kernel (or value) starts shaping the frames, so
+        # the GUI can show that the change arrived. Audio already queued
+        # ahead of it is still playing: the change is heard a moment later.
+        key = None if selection is None else (selection.kernel.name,
+                                              selection.values)
+        previous, applied_kernel[0] = applied_kernel[0], key
+        if key == previous or (previous is unset and key is None):
+            return
+        label = ('reference' if key is None else key[0] + ' ' + ' '.join(
+            f'{name}={value:g}' for name, value in key[1]
+            if name not in HOST_PARAM_NAMES or value != 1.0))
+        say_kernel(f'DCT kernel in use: {label}', applied=label)
 
     def encode_batch(frames, aspects, counter):
         values = np.asarray(frames)
@@ -1500,18 +1561,19 @@ def _run_send_session(args):
                 current_tones = tone_controls.snapshot()
                 source_preview = (getattr(frame, 'rgb', frame)
                                   if image_preview_port is not None else None)
+                frame_options = kernel_controls.options(dct_options)
                 processed = _values(
                     model, frame, args.encode_filter,
                     current_tones['brightness'], current_tones['gamma'],
                     getattr(args, 'perceptual_resize', 'off'),
                     getattr(args, 'perceptual_detail_strength', 0.25),
                     dct_encode=getattr(args, 'dct_encode', False),
-                    dct_options=kernel_controls.options(dct_options),
+                    dct_options=frame_options,
                     return_resized=image_preview_port is not None,
                     fit_aspect=fit_aspect,
                     chroma_sent_for=chroma_sent_for if luma_adjusted else None,
                     kernel_masks_for=kernel_masks_for)
-                report_kernel()
+                report_kernel(frame_options.get('kernel'))
                 if image_preview_port is not None:
                     value, aspect, resized_preview = processed
                     preview_images.append((source_preview, resized_preview))

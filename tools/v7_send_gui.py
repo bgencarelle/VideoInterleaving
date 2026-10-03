@@ -253,7 +253,7 @@ FIELD_LABELS = {
     'pixel_detail': 'Pixel downscale',
     'pixel_grid': 'Pixel grid',
     'clip_aware': 'Clip-aware encode',
-    'dct_kernel': 'DCT downscale kernel · live',
+    'dct_kernel': 'DCT kernel · live',
     'dct_sharpen': 'DCT sharpen',
     'dct_sharpen_strength': 'Sharpen strength',
     'dct_clarity': 'DCT clarity',
@@ -2232,6 +2232,16 @@ class SenderGui:
             [dest, *self._kernel_param_fields()] if dest == 'dct_kernel'
             else [dest])]
 
+    def _page_fields(self):
+        """Settings shown on the page being displayed."""
+        return (self._live_fields() if self.page == 'live'
+                else self._visible_fields())
+
+    def _live_fields(self):
+        """The settings the sending page offers: tone, then the DCT kernel,
+        its parameters and the DCT strengths when the encode uses them."""
+        return list(self.LIVE_FIELDS) + self._shown_fields(KERNEL_LIVE_FIELDS)
+
     def _button_label(self, dest):
         if dest.startswith(KERNEL_PARAM_PREFIX):
             return '    ' + dest[len(KERNEL_PARAM_PREFIX):].replace('_', ' ') + ' · live'
@@ -3377,7 +3387,7 @@ class SenderGui:
                 draw, small, (gutter, transport_top, width-gutter, bottom))
             bottom = transport_top-6
         columns = self._columns(width)
-        live_lines = self._pack(self.LIVE_FIELDS, columns)
+        live_lines = self._pack(self._live_fields(), columns)
         live_top = bottom-len(live_lines)*self.ROW_HEIGHT
         for index, line in enumerate(live_lines):
             for dest, column, span in line:
@@ -3521,6 +3531,8 @@ class SenderGui:
             self._render_setup(image, draw, font, small)
         else:
             self._render_live(image, draw, font, small)
+            if self.dropdown is not None:
+                self._render_dropdown(draw, small, width, height)
 
         lines, color = self._footer_lines(width)
         footer_top = height-self._footer_height(width)
@@ -3550,7 +3562,7 @@ class SenderGui:
             if hit is None or not hit.startswith('field:'):
                 return
             dest = hit.split(':', 1)[1]
-            if (dest not in self._visible_fields() or
+            if (dest not in self._page_fields() or
                     dest in self.DROPDOWN_FIELDS or
                     dest in BOOL_FIELDS):
                 return
@@ -3620,7 +3632,7 @@ class SenderGui:
                 self._assign(dest, not self.settings[dest])
             elif dest in self.DROPDOWN_FIELDS:
                 self._open_dropdown(dest)
-            elif dest in self._visible_fields():
+            elif dest in self._page_fields():
                 self.editing = True
                 current = self._field_value(dest)
                 self.edit_buffer = '' if current is None else str(current)
@@ -3666,7 +3678,7 @@ class SenderGui:
         elif key == glfw.KEY_I:
             self.page = 'live'
             self.dropdown = None
-        elif key == getattr(glfw, 'KEY_R', -1) and self.page == 'setup':
+        elif key == getattr(glfw, 'KEY_R', -1):
             self._reload_kernels()
         elif key == glfw.KEY_SPACE:
             self._stop() if self.process is not None else self._start()
@@ -3682,8 +3694,8 @@ class SenderGui:
                 self.dropdown = None
             elif key == glfw.KEY_ESCAPE:
                 self.dropdown = None
-        elif self.page == 'setup':
-            fields = self._visible_fields()
+        elif self.page in ('setup', 'live'):
+            fields = self._page_fields()
             live_tone_selected = _is_live_field(self.selected)
             if (self.process is not None and not live_tone_selected and
                     key not in (glfw.KEY_UP, glfw.KEY_DOWN)):
@@ -3695,7 +3707,8 @@ class SenderGui:
                 position = max(0, min(len(fields)-1, position+
                                        (1 if key == glfw.KEY_DOWN else -1)))
                 self.selected = fields[position]
-                self._scroll_to(self.selected)
+                if self.page == 'setup':
+                    self._scroll_to(self.selected)
             elif key in (glfw.KEY_LEFT, glfw.KEY_RIGHT) and self.selected in fields:
                 dest = self.selected
                 direction = 1 if key == glfw.KEY_RIGHT else -1

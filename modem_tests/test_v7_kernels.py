@@ -460,6 +460,25 @@ class LiveControlTests(unittest.TestCase):
             dct_options=self.controls.options(base))
         self.assertGreater(np.abs(shaped-reference).max(), 1e-3)
 
+    def test_the_preview_shows_what_is_sent_once_a_kernel_is_chosen(self):
+        model = v7.load_model(.1521/np.sqrt(1+10**(v7.CLOCK_REL_DB/10)), 'box')
+        frame = _frame()
+        base = {'sharpen': 'off', 'sharpen_strength': .25, 'clarity': 0.0,
+                'chroma_gain': 1.0, 'aggregation': 'off', 'band_profile': 'off'}
+        masks_for = lambda aspect: [None, None, None]
+        shots = []
+        for name in ('reference', 'gaussian'):
+            self.send(kernel=name)
+            _values, _aspect, preview = v7_live._values(
+                model, frame, 'box', 1.0, 1.0, dct_encode=True,
+                dct_options=self.controls.options(base), return_resized=True,
+                kernel_masks_for=masks_for)
+            shots.append(np.asarray(preview, float))
+        # the reference keeps the toned-source preview; a kernel shows the
+        # reconstruction, which is a different (and smaller-detail) picture.
+        self.assertNotEqual(shots[0].shape, shots[1].shape)
+        self.assertEqual(shots[1].shape[2], 3)
+
     def test_post_runs_after_luma_adjust_with_the_wire_masks(self):
         model = v7.load_model(.1521/np.sqrt(1+10**(v7.CLOCK_REL_DB/10)), 'box')
         frame = _frame()

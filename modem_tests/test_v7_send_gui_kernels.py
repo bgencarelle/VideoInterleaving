@@ -217,6 +217,56 @@ class KernelGuiTests(unittest.TestCase):
         self.assertEqual(gui.notice, 'DCT kernel antiring skipped: boom')
         self.assertEqual(gui.lines, ['DCT kernel antiring skipped: boom'])
 
+    def test_the_sending_page_offers_the_kernel_and_steps_it_by_key(self):
+        gui = _gui(self.devices)
+        gui._assign('dct_kernel', 'lanczos')
+        control = Mock()
+        gui.process = SimpleNamespace(stdin=control)
+        gui.page, gui.selected = 'live', 'dct_kernel'
+        live = gui._live_fields()
+        self.assertEqual(live[:2], ['brightness', 'gamma'])
+        for dest in ('dct_kernel', 'kp:width', 'dct_sharpen_strength'
+                     if gui.settings['dct_sharpen'] != 'off' else 'dct_clarity'):
+            self.assertIn(dest, live)
+        gui._on_key(KeyStub, None, KeyStub.KEY_DOWN, 0, KeyStub.PRESS, 0)
+        self.assertEqual(gui.selected, live[live.index('dct_kernel')+1])
+        gui.selected = 'kp:width'
+        gui._on_key(KeyStub, None, KeyStub.KEY_LEFT, 0, KeyStub.PRESS, 0)
+        self.assertEqual(json.loads(control.write.call_args.args[0])
+                         ['kernel_params']['width'], 0.95)
+        gui._on_key(KeyStub, None, KeyStub.KEY_R, 0, KeyStub.PRESS, 0)
+        sent = [json.loads(c.args[0]) for c in control.write.call_args_list]
+        self.assertIn({'kernels': 'reload'}, sent)
+
+    def test_the_kernel_can_be_picked_with_the_mouse_on_the_live_page(self):
+        from PIL import Image, ImageDraw
+        gui = _gui(self.devices)
+        gui.page = 'live'
+        image = Image.new('RGB', (1100, 800))
+        gui._render_live(image, ImageDraw.Draw(image), gui_module._font(16),
+                         gui_module._font(13))
+        left, top, right, bottom = gui.hits['field:dct_kernel']
+        glfw = SimpleNamespace(
+            PRESS=1, MOUSE_BUTTON_LEFT=0, MOUSE_BUTTON_RIGHT=1,
+            get_cursor_pos=lambda _w: ((left+right)/2, (top+bottom)/2))
+        gui._on_mouse(glfw, None, 0, 1, 0)
+        self.assertEqual(gui.dropdown, 'dct_kernel')
+        image = Image.new('RGB', (1100, 800))
+        draw = ImageDraw.Draw(image)
+        gui._render_dropdown(draw, gui_module._font(13), 1100, 800)
+        option = gui.hits['option:2']
+        glfw.get_cursor_pos = lambda _w: ((option[0]+option[2])/2,
+                                          (option[1]+option[3])/2)
+        gui._on_mouse(glfw, None, 0, 1, 0)
+        names = [name for _label, name in gui._choices('dct_kernel')]
+        self.assertEqual(gui.settings['dct_kernel'], names[2])
+        self.assertIsNone(gui.dropdown)
+
+    def test_the_sending_page_hides_the_kernel_when_pixel_encode_is_on(self):
+        gui = _gui(self.devices)
+        gui.settings['pixel_encode'] = True
+        self.assertEqual(gui._live_fields(), ['brightness', 'gamma'])
+
     def test_the_help_line_describes_the_selected_row(self):
         gui = _gui(self.devices)
         gui._assign('dct_kernel', 'lanczos')

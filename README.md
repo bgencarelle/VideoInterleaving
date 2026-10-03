@@ -228,6 +228,45 @@ frame uses it. The wire is unchanged. See `dct_kernels/README.md` and
 `docs/transport_v7_spec.md` section 11.4; `tools/v7_kernel_bench.py` ranks
 kernels without any audio.
 
+**Advanced → DCT downscale kernel** (Direct DCT encode) chooses how the
+picture is brought down to what the wire holds. Each kernel is one file in
+`dct_kernels/`: drop one in, or delete one, and press **R** (or restart) to
+see the change. The kernel's parameters appear under it and, like the DCT
+sharpen, clarity and chroma-gain strengths, can be changed while sending:
+Left/Right steps a value (Shift: five times) or switches kernel, and the next
+frame uses it. The sender's preview normally shows the toned source; with a
+kernel chosen, its **Encoder input** view instead shows the picture an ideal
+receiver draws from the sent coefficients, so a kernel change is visible
+there. The wire is unchanged. See `dct_kernels/README.md` and
+`docs/transport_v7_spec.md` section 11.4; `tools/v7_kernel_bench.py` ranks
+kernels without any audio.
+
+**Advanced → DCT downscale kernel** (Direct DCT encode) chooses how the
+picture is brought down to what the wire holds. Each kernel is one file in
+`dct_kernels/`: drop one in, or delete one, and press **R** (or restart) to
+see the change. The kernel's parameters appear under it and, like the DCT
+sharpen, clarity and chroma-gain strengths, can be changed while sending:
+Left/Right steps a value (Shift: five times) or switches kernel, and the next
+frame uses it. The sender's preview normally shows the toned source; with a
+kernel chosen, its **Encoder input** view instead shows the picture an ideal
+receiver draws from the sent coefficients, so a kernel change is visible
+there. The wire is unchanged. See `dct_kernels/README.md` and
+`docs/transport_v7_spec.md` section 11.4; `tools/v7_kernel_bench.py` ranks
+kernels without any audio.
+
+**Advanced → DCT downscale kernel** (Direct DCT encode) chooses how the
+picture is brought down to what the wire holds. Each kernel is one file in
+`dct_kernels/`: drop one in, or delete one, and press **R** (or restart) to
+see the change. The kernel's parameters appear under it and, like the DCT
+sharpen, clarity and chroma-gain strengths, can be changed while sending:
+Left/Right steps a value (Shift: five times) or switches kernel, and the next
+frame uses it. The sender's preview normally shows the toned source; with a
+kernel chosen, its **Encoder input** view instead shows the picture an ideal
+receiver draws from the sent coefficients, so a kernel change is visible
+there. The wire is unchanged. See `dct_kernels/README.md` and
+`docs/transport_v7_spec.md` section 11.4; `tools/v7_kernel_bench.py` ranks
+kernels without any audio.
+
 For a live decoded image with no controls or diagnostics, use the regular
 receiver with `--image-only`:
 
