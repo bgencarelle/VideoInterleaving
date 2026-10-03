@@ -15,6 +15,7 @@ from tools.v7_gl_viewer import (DISPLAY_MODES, FLOAT_FRAGMENT_SHADER,
                                 DCT_RECONSTRUCTION_MODES,
                                 FRAGMENT_SHADER, VERTEX_SHADER)
 from tools.v7_receiver_gui import (ROOT, OptionField, ReceiverGui, _make_fields,
+                                   _image_only_viewport,
                                    FULLSCREEN_TOOLBAR_EDGE,
                                    FULLSCREEN_TOOLBAR_HIDE_SECONDS,
                                    HIDDEN_DECODE_OPTIONS,
@@ -977,6 +978,76 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertFalse(gui.image_only)
         self.assertEqual(gui.page, 'info')
         self.assertTrue(gui.dirty)
+
+    def _window_glfw(self, size=(1000, 600), screen=(1920, 1080)):
+        calls = []
+        state = {'size': size}
+        glfw = SimpleNamespace(
+            DONT_CARE=-1,
+            get_window_size=lambda _window: state['size'],
+            set_window_size=lambda _window, width, height: (
+                calls.append(('size', width, height)),
+                state.update(size=(width, height))),
+            set_window_aspect_ratio=lambda _window, num, den: calls.append(
+                ('aspect', num, den)),
+            set_window_size_limits=lambda _window, *limits: calls.append(
+                ('limits',)+limits),
+            get_primary_monitor=lambda: object(),
+            get_video_mode=lambda _monitor: SimpleNamespace(
+                size=SimpleNamespace(width=screen[0], height=screen[1])),
+            CURSOR=1, CURSOR_NORMAL=0, CURSOR_HIDDEN=2,
+            set_input_mode=lambda *_args: None)
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())
+        gui._glfw, gui._window = glfw, object()
+        gui._window_limits = (520, 400)
+        gui.image_only = True
+        return gui, calls
+
+    def test_image_only_window_takes_the_pictures_shape_and_keeps_it(self):
+        gui, calls = self._window_glfw(size=(1000, 600))
+        gui._fit_window_to_picture(16/9)
+        self.assertIn(('aspect', 16, 9), calls)
+        self.assertIn(('size', 1000, 562), calls)        # width kept
+        # The setup window's minimum size is lifted so it cannot fight it.
+        self.assertIn(('limits', -1, -1, -1, -1), calls)
+        del calls[:]
+        gui._fit_window_to_picture(16/9)                  # nothing to redo
+        self.assertEqual(calls, [])
+        gui._fit_window_to_picture(4/3)                   # sender changed shape
+        self.assertIn(('aspect', 4, 3), calls)
+        self.assertIn(('size', 1000, 750), calls)
+
+    def test_image_only_window_never_outgrows_the_screen(self):
+        gui, calls = self._window_glfw(size=(1000, 600), screen=(1920, 1080))
+        gui._fit_window_to_picture(9/16)
+        self.assertIn(('aspect', 9, 16), calls)
+        size = next(call for call in calls if call[0] == 'size')
+        self.assertLessEqual(size[2], 1080-80)
+        self.assertAlmostEqual(size[1]/size[2], 9/16, delta=.002)
+
+    def test_leaving_image_only_or_going_fullscreen_frees_the_window(self):
+        gui, calls = self._window_glfw()
+        gui._fit_window_to_picture(16/9)
+        del calls[:]
+        gui._set_image_only(False)
+        self.assertIn(('aspect', -1, -1), calls)
+        self.assertIn(('limits', 520, 400, -1, -1), calls)  # setup minimum back
+        self.assertIsNone(gui._window_aspect)
+        # Fullscreen has the screen's shape: no lock is applied to it.
+        gui, calls = self._window_glfw()
+        gui.fullscreen = True
+        gui._fit_window_to_picture(16/9)
+        self.assertEqual(calls, [])
+
+    def test_a_window_with_the_pictures_shape_has_no_bars(self):
+        # Rounding to whole pixels must not leave a hairline of black.
+        self.assertEqual(_image_only_viewport((1920, 1081), 16/9),
+                         (0, 0, 1920, 1081))
+        self.assertEqual(_image_only_viewport((1000, 562), 16/9),
+                         (0, 0, 1000, 562))
+        # A window of another shape is still letterboxed, not stretched.
+        self.assertEqual(_image_only_viewport((1920, 1200), 16/9),
+                         (0, 60, 1920, 1080))
 
     def test_image_only_f_toggles_fullscreen_and_stays_image_only(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser, ())

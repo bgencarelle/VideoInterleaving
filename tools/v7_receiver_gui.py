@@ -5,6 +5,7 @@ parser and `run_receive` path. It does not open an input stream until Start is
 pressed, and it reads decoded pictures from the receiver's latest-frame mailbox.
 """
 import argparse
+from fractions import Fraction
 import ast
 import contextlib
 from dataclasses import dataclass
@@ -63,6 +64,9 @@ DEVICE_REFRESH_SECONDS = 3.0
 FULLSCREEN_TOOLBAR_HIDE_SECONDS = 2.0
 FULLSCREEN_TOOLBAR_EDGE = 14
 DISPLAY_MENU_ROW_HEIGHT = 29
+# Image only fills the window when it is within this much of the picture's
+# shape (the operating system rounds a locked window to whole pixels).
+IMAGE_ONLY_SNAP = 0.02
 DISPLAY_MENU_WIDTH = 250
 RECEIVER_PREFERENCES_PATH = (
     Path.home()/'.config'/'modemTest'/'v7_receiver_gui.json')
@@ -670,6 +674,16 @@ def _scissors_outside_viewport(framebuffer_size, viewport):
                  if region[2] > 0 and region[3] > 0)
 
 
+def _image_only_viewport(framebuffer_size, aspect):
+    """The picture's viewport in an image-only window: all of it when the
+    window already has the picture's shape, so no hairline bars remain."""
+    width, height = (max(0, int(value)) for value in framebuffer_size)
+    if (width and height and aspect > 0 and
+            abs((width/height)/aspect-1) <= IMAGE_ONLY_SNAP):
+        return 0, 0, width, height
+    return fit_viewport(framebuffer_size, aspect)
+
+
 class ReceiverGui:
     # A new notice replaces the help line in the footer until the selection
     # moves; moving the selection brings the help back.
@@ -761,6 +775,8 @@ class ReceiverGui:
         self.last_dct_viewport_size = None
         self.image_only = False
         self.image_only_previous_page = 'info'
+        self._window_aspect = None
+        self._window_limits = None
         self._glfw = None
         self._window = None
         self.last_title = None
@@ -993,6 +1009,7 @@ class ReceiverGui:
         if primary is None:
             return
         self.display_menu_open = False
+        self._release_window_aspect(glfw, window)
         if self.fullscreen:
             x, y = self.windowed_bounds['position']
             width, height = self.windowed_bounds['size']
@@ -1065,6 +1082,60 @@ class ReceiverGui:
         if self.toolbar_visible != was_visible:
             self.dirty = True
 
+    def _fit_window_to_picture(self, aspect):
+        """Image only in a floating window: give the window the picture's
+        shape and keep it while the window is resized, so there are no bars.
+
+        A fullscreen window has the screen's shape and cannot.
+        """
+        glfw, window = self._glfw, self._window
+        if glfw is None or window is None:
+            return
+        if not self.image_only or self.fullscreen or not aspect > 0:
+            self._release_window_aspect()
+            return
+        if self._window_aspect == aspect:
+            return
+        ratio = Fraction(aspect).limit_denominator(100)
+        width, height = glfw.get_window_size(window)
+        # Keep the width unless the new shape would not fit the screen.
+        new_width, new_height = int(width), max(1, round(width/aspect))
+        try:
+            mode = glfw.get_video_mode(glfw.get_primary_monitor())
+            limit_width = int(mode.size.width)-32
+            limit_height = int(mode.size.height)-80
+        except Exception:
+            limit_width = limit_height = None
+        if limit_height is not None and new_height > limit_height:
+            new_height = limit_height
+            new_width = max(1, round(new_height*aspect))
+        if limit_width is not None and new_width > limit_width:
+            new_width = limit_width
+            new_height = max(1, round(new_width/aspect))
+        # The setup window's minimum size would fight the picture's shape.
+        glfw.set_window_size_limits(window, glfw.DONT_CARE, glfw.DONT_CARE,
+                                    glfw.DONT_CARE, glfw.DONT_CARE)
+        try:
+            glfw.set_window_aspect_ratio(window, ratio.numerator,
+                                         ratio.denominator)
+            if (new_width, new_height) != (int(width), int(height)):
+                glfw.set_window_size(window, new_width, new_height)
+        except Exception:
+            pass                 # a platform without window aspect locking
+        self._window_aspect = aspect
+        self.dirty = True
+
+    def _release_window_aspect(self, glfw=None, window=None):
+        glfw = glfw or self._glfw
+        window = window or self._window
+        if self._window_aspect is None or glfw is None or window is None:
+            return
+        glfw.set_window_aspect_ratio(window, glfw.DONT_CARE, glfw.DONT_CARE)
+        if self._window_limits is not None:
+            glfw.set_window_size_limits(window, *self._window_limits,
+                                        glfw.DONT_CARE, glfw.DONT_CARE)
+        self._window_aspect = None
+
     def _set_image_only(self, enabled):
         """The picture alone, with no toolbar, footer or panels.
 
@@ -1081,6 +1152,7 @@ class ReceiverGui:
         else:
             self.image_only = False
             self.page = self.image_only_previous_page
+            self._release_window_aspect()
         if self._glfw is not None and self._window is not None:
             # The pointer hides only over a fullscreen picture.
             self._glfw.set_input_mode(
@@ -2692,6 +2764,7 @@ class ReceiverGui:
             initial_width, initial_height = glfw.get_window_size(window)
             minimum_width = max(320, min(520, int(initial_width)))
             minimum_height = max(240, min(400, int(initial_height)))
+            self._window_limits = (minimum_width, minimum_height)
             glfw.set_window_size_limits(window, minimum_width, minimum_height,
                                         glfw.DONT_CARE, glfw.DONT_CARE)
             glfw.swap_interval(1)
@@ -2967,7 +3040,8 @@ class ReceiverGui:
                     aspect = self.v7_live.P.V7_ASPECT_RATIOS[
                         self.current_frame.aspect & 7]
                     if self.image_only:
-                        picture_viewport = fit_viewport(
+                        self._fit_window_to_picture(aspect)
+                        picture_viewport = _image_only_viewport(
                             framebuffer_size, aspect)
                     elif self.page == 'info':
                         picture_viewport = self._picture_viewport(
