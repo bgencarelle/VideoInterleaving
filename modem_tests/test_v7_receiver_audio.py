@@ -9,6 +9,7 @@ from tools.v7_receiver_audio import (AudioPassthrough,
                                      ReceiverChannelRouter,
                                      ReceiverRuntimeOptions,
                                      passthrough_audio_side,
+                                     reject_crosstalk,
                                      resolve_device_index)
 
 
@@ -24,16 +25,19 @@ class ReceiverChannelRouterTests(unittest.TestCase):
         router.observe_profile_decision(good, now=1.1)
         candidate = {'confirmed': False,
                      'channel_modes': (self.FOLD_500, None)}
-        for now in (1.2, 1.3):
+        # One candidate status is not yet a data leg.
+        state = router.observe_profile_decision(candidate, now=1.2)
+        self.assertEqual(state['audio_side'], 'left')
+        for now in (1.3, 1.4):
             state = router.observe_profile_decision(candidate, now=now)
-            # The assignment is kept; the leg that showed a status is muted.
+            # The assignment is kept; the leg that repeated a status is muted.
             self.assertEqual(router.audio_side, 'left')
             self.assertIsNone(state['audio_side'])
             self.assertTrue(state['data_muted'])
             self.assertEqual(state['state'], 'mono-right')
         self.assertEqual(router.last_packet, 1.1)
 
-    def test_single_soundtrack_status_mutes_without_reassigning_the_leg(self):
+    def test_single_soundtrack_status_neither_mutes_nor_reassigns_the_leg(self):
         router = ReceiverChannelRouter(self.MONO_500)
         good = {'confirmed': True, 'channel_modes': (None, self.MONO_500)}
         router.observe_profile_decision(good, now=1.0)
@@ -41,13 +45,14 @@ class ReceiverChannelRouterTests(unittest.TestCase):
         stray = {'confirmed': True,
                  'channel_modes': (self.MONO_500, self.MONO_500)}
         state = router.observe_profile_decision(stray, now=1.2)
-        self.assertEqual(router.audio_side, 'left')
         self.assertEqual(state['state'], 'mono-right')
-        self.assertIsNone(state['audio_side'])
+        self.assertEqual(state['audio_side'], 'left')
+        self.assertFalse(state['data_muted'])
         router.observe_profile_decision(good, now=1.3)
         state = router.observe_profile_decision(stray, now=1.4)
-        self.assertEqual(router.audio_side, 'left')
-        self.assertIsNone(state['audio_side'])
+        self.assertEqual(state['audio_side'], 'left')
+        self.assertEqual(state['data_channels'], (False, True))
+        # Two consecutive packets with a status: the leg carries data.
         state = router.observe_profile_decision(stray, now=1.5)
         self.assertIsNone(state['audio_side'])
         self.assertEqual(state['state'], 'dual-mono')
@@ -174,24 +179,62 @@ class DataChannelNeverPassesTests(unittest.TestCase):
         self.assertTrue(route['data_muted'])
         self.assertEqual(route['data_channels'], (True, True))
 
-    def test_new_data_leg_is_silenced_at_first_sight(self):
+    def test_new_data_leg_is_silenced_at_the_second_status(self):
         # The picture appears on the soundtrack leg while the old leg is still
-        # inside its loss window: one status, no confirmation.
+        # inside its loss window: two statuses, no profile confirmation.
         router = self._mono_right()
         route = router.observe(self.MONO_500, None, now=1.2)
-        self.assertEqual(route['state'], 'mono-right')
+        self.assertEqual(passthrough_audio_side(route, 2), 'left')
+        route = router.observe(self.MONO_500, None, now=1.3)
         self.assertIsNone(passthrough_audio_side(route, 2))
+        self.assertTrue(route['data_muted'])
 
-    def test_unconfirmed_profile_status_silences_its_leg(self):
+    def test_repeated_unconfirmed_profile_status_silences_its_leg(self):
         router = self._mono_right()
         candidate = {'confirmed': False,
                      'channel_modes': (self.MONO_500, None)}
         route = router.observe_profile_decision(candidate, now=1.2)
+        self.assertEqual(passthrough_audio_side(route, 2), 'left')
+        route = router.observe_profile_decision(candidate, now=1.3)
         self.assertIsNone(passthrough_audio_side(route, 2))
+
+    def test_stray_statuses_never_mute_an_established_soundtrack(self):
+        # Header-like hits in the soundtrack, each followed by a packet
+        # without one, over a long stretch of picture.
+        for confirmed in (False, True):
+            router = self._mono_right()
+            for index in range(200):
+                stray = self.MONO_500 if index % 2 else None
+                route = router.observe_profile_decision(
+                    {'confirmed': confirmed,
+                     'channel_modes': (stray, self.MONO_500)},
+                    now=1.2+.08*index)
+                self.assertEqual(passthrough_audio_side(route, 2), 'left')
+                self.assertFalse(route['data_muted'])
+                self.assertEqual(route['data_channels'], (False, True))
+
+    def test_crosstalk_status_is_dropped_by_header_level(self):
+        mono = self.MONO_500
+        # The soundtrack leg shows the picture leg's status 20 dB down.
+        self.assertEqual(reject_crosstalk((mono, mono), (.5, .05)),
+                         (mono, None))
+        self.assertEqual(reject_crosstalk((mono, mono), (.02, .5)),
+                         (None, mono))
+        # Two legs at comparable levels both carry data.
+        self.assertEqual(reject_crosstalk((mono, mono), (.5, .3)),
+                         (mono, mono))
+        self.assertEqual(reject_crosstalk((self.FOLD_500,)*2, (.4, .4)),
+                         (self.FOLD_500,)*2)
+        # A lone status, or one without a level, is kept.
+        self.assertEqual(reject_crosstalk((None, mono), (.5, .01)),
+                         (None, mono))
+        self.assertEqual(reject_crosstalk((mono, mono), (None, .01)),
+                         (mono, mono))
 
     def test_swap_passes_old_leg_only_after_the_hold(self):
         router = self._mono_right()
         hold = router.DATA_HOLD_SECONDS
+        router.observe(self.MONO_500, None, now=1.9)
         now = 2.0
         while now < 1.1+hold+1.0:
             route = router.observe(self.MONO_500, None, now=now)
@@ -205,6 +248,7 @@ class DataChannelNeverPassesTests(unittest.TestCase):
 
     def test_short_dropout_never_unmutes_a_data_leg(self):
         router = self._mono_right()
+        router.observe(self.MONO_500, None, now=1.15)
         router.observe(self.MONO_500, None, now=1.2)
         for now in (2.0, 5.0, 11.0):
             self.assertIsNone(
@@ -231,7 +275,10 @@ class DataChannelNeverPassesTests(unittest.TestCase):
                                        initial_video_side='right')
         self.assertEqual(passthrough_audio_side(router.snapshot(0.5), 2),
                          'left')
-        router.observe(self.MONO_500, None, now=1.0)
+        router.note_packet(self.MONO_500, None, now=0.9)
+        self.assertEqual(passthrough_audio_side(router.snapshot(0.9), 2),
+                         'left')
+        router.note_packet(self.MONO_500, None, now=1.0)
         for now in (1.0, 5.0, 60.0):
             route = router.snapshot(now)
             self.assertIsNone(passthrough_audio_side(route, 2), now)
@@ -241,7 +288,8 @@ class DataChannelNeverPassesTests(unittest.TestCase):
         router = ReceiverChannelRouter(self.MONO_500,
                                        stereo_modes=(self.FOLD_500,),
                                        initial_video_side='right')
-        # One stereo status on one leg marks both legs as data.
+        # A repeated stereo status on one leg marks both legs as data.
+        router.observe(self.FOLD_500, None, now=0.9)
         route = router.observe(self.FOLD_500, None, now=1.0)
         self.assertEqual(route['data_channels'], (True, True))
         self.assertIsNone(passthrough_audio_side(route, 2))
@@ -271,7 +319,8 @@ class DataChannelNeverPassesTests(unittest.TestCase):
         router.audio_time = 0.0
         router.observe(None, self.MONO_500, now=1.0)
         router.observe(None, self.MONO_500, now=1.1)
-        router.observe(self.MONO_500, None, now=1.2)
+        router.note_packet(self.MONO_500, None, now=1.15)
+        router.note_packet(self.MONO_500, None, now=1.2)
         # Wall time passes with the input stopped: the leg is not cleared.
         self.assertIsNone(
             passthrough_audio_side(router.snapshot(1000.0), 2))

@@ -1809,6 +1809,16 @@ class _MonoChannelProbe:
         return self.streak
 
 
+def _header_level(audio, position, scale, direction):
+    """RMS of one packet's pulse header in captured (ungained) units."""
+    length = P.PULSE.SYNC_LEN*scale
+    start = position if direction > 0 else position+P.PULSE_FRAME*scale-length
+    span = audio[max(0, int(start)):max(0, int(start+length))]
+    if not len(span):
+        return None
+    return float(np.sqrt(np.mean(np.square(span, dtype=np.float64))))
+
+
 class _ProfileStatusProbe:
     """Find complete coded-profile packets independently on one input leg."""
 
@@ -1858,7 +1868,9 @@ class _ProfileStatusProbe:
             mode = profile_by_position.get(int(round(position)))
             self.last_position = absolute
             events.append({'position': absolute, 'scale': scale,
-                           'side_index': self.side_index, 'mode': mode})
+                           'side_index': self.side_index, 'mode': mode,
+                           'level': _header_level(
+                               self.audio, position, scale, direction)})
         self.input.decoded()
         return tuple(events)
 
@@ -2042,6 +2054,14 @@ class _AdaptiveProfileDecoder:
                     .5*P.PULSE_FRAME*scale):
                 continue
             self.last_packet = position
+            # A leg that only carries the other leg's leakage shows the same
+            # status far lower: it is neither a picture leg nor a data leg.
+            from tools.v7_receiver_audio import reject_crosstalk
+            kept = reject_crosstalk(
+                [event['mode'] for event in group['events']],
+                [event.get('level') for event in group['events']])
+            group['events'] = [dict(event, mode=mode) for event, mode
+                               in zip(group['events'], kept)]
             channel_modes = [None, None]
             observed = {int(event['mode']) for event in group['events']
                         if event['mode'] is not None}
@@ -3374,12 +3394,6 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
             channel_modes[opposite_input_index] = opposite_probe.status_mode
             channel_times[opposite_input_index] = opposite_probe.last_valid
             channel_confirmed[opposite_input_index] = True
-        if (opposite_probe is not None and opposite_input_index is not None and
-                opposite_probe.status_candidate is not None):
-            # One valid status on the other leg already marks it as data.
-            sighting = [None, None]
-            sighting[opposite_input_index] = opposite_probe.status_candidate
-            receiver_router.note_data(*sighting, now=now)
         route = receiver_router.observe(
             channel_modes[0], channel_modes[1], now=now,
             left_seen_at=channel_times[0], right_seen_at=channel_times[1],

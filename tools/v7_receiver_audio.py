@@ -97,6 +97,22 @@ class _ChannelEvidence:
                 float(now)-self.last_valid <= loss_seconds)
 
 
+# A status on one leg whose header is this far below the header on the other
+# leg at the same packet is that leg's signal leaking across, not data.
+CROSSTALK_RATIO = 0.25
+
+
+def reject_crosstalk(modes, levels):
+    """Drop the status of a leg whose header level is crosstalk-low."""
+    known = [level for mode, level in zip(modes, levels)
+             if mode is not None and level is not None]
+    if len(known) < 2:
+        return tuple(modes)
+    floor = CROSSTALK_RATIO*max(known)
+    return tuple(None if level is not None and level < floor else mode
+                 for mode, level in zip(modes, levels))
+
+
 class ReceiverChannelRouter:
     """Metadata-driven video/audio assignment with loss-tolerant side changes."""
 
@@ -106,6 +122,9 @@ class ReceiverChannelRouter:
     # receiver supplies audio_time). Far longer than any dropout: on signal
     # loss silence is preferred to modem noise.
     DATA_HOLD_SECONDS = 10.0
+    # Consecutive packets that must show a status on a leg before it is a
+    # data leg: one stray header-like hit in a soundtrack does not mute it.
+    DATA_CONFIRM_PACKETS = 2
 
     def __init__(self, mono_mode, stereo_modes=(), loss_seconds=LOSS_SECONDS,
                  initial_video_side=None):
@@ -133,6 +152,7 @@ class ReceiverChannelRouter:
         # receiver. None falls back to the caller's `now`.
         self.audio_time = None
         self.data_seen = [None, None]
+        self.data_streak = [0, 0]
         # True once audio_side came from packet evidence, not the initial guess.
         self.audio_confirmed = False
         if initial_video_side is not None:
@@ -148,19 +168,28 @@ class ReceiverChannelRouter:
             return float(self.audio_time)
         return time.monotonic() if now is None else float(now)
 
-    def note_data(self, left_mode=None, right_mode=None, now=None):
-        """Mark each leg that showed a valid picture status as a data leg.
-
-        One sighting is enough and needs no confirmation: muting a soundtrack
-        by mistake is harmless next to playing modem signal.
-        """
+    def _mark_data(self, modes, now):
+        """Mark the legs of confirmed statuses (both, for a stereo one)."""
         clock = self._hold_clock(now)
-        modes = (left_mode, right_mode)
         stereo = any(mode is not None and int(mode) in self.stereo_modes
                      for mode in modes)
         for index, mode in enumerate(modes):
             if mode is not None or stereo:
                 self.data_seen[index] = clock
+
+    def note_packet(self, left_mode=None, right_mode=None, now=None):
+        """Count one packet's statuses per leg, before any profile is confirmed.
+
+        A leg becomes a data leg after DATA_CONFIRM_PACKETS consecutive
+        packets with a status; a packet without one restarts the count.
+        """
+        modes = (left_mode, right_mode)
+        for index, mode in enumerate(modes):
+            self.data_streak[index] = (
+                0 if mode is None else self.data_streak[index]+1)
+        self._mark_data(
+            [mode if streak >= self.DATA_CONFIRM_PACKETS else None
+             for mode, streak in zip(modes, self.data_streak)], now)
 
     def data_held(self, now=None):
         """Per leg: picture data seen within DATA_HOLD_SECONDS."""
@@ -190,13 +219,17 @@ class ReceiverChannelRouter:
                 left_seen_at=None, right_seen_at=None,
                 left_confirmed=False, right_confirmed=False):
         now = time.monotonic() if now is None else float(now)
-        self.note_data(left_mode, right_mode, now=now)
+        before = [item.last_valid for item in self.channels]
         self.channels[0].observe(
             left_mode, now if left_seen_at is None else left_seen_at,
             already_confirmed=left_confirmed)
         self.channels[1].observe(
             right_mode, now if right_seen_at is None else right_seen_at,
             already_confirmed=right_confirmed)
+        # Only a status the leg's evidence accepted marks it as data.
+        self._mark_data(
+            [item.mode if item.last_valid != seen else None
+             for item, seen in zip(self.channels, before)], now)
         active = [item.active(now, self.loss_seconds)
                   for item in self.channels]
         modes = [item.mode if is_active else None
@@ -267,8 +300,8 @@ class ReceiverChannelRouter:
         must not identify that leg as a second modem channel.
         """
         left, right = decision['channel_modes']
-        # Data is muted at first sight, before any profile is confirmed.
-        self.note_data(left, right, now=now)
+        # Data is muted on repeated statuses, before any profile is confirmed.
+        self.note_packet(left, right, now=now)
         if not decision['confirmed']:
             return self.snapshot(now)
         for evidence, mode in zip(self.channels, (left, right)):

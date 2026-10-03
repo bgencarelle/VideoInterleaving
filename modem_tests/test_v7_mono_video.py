@@ -465,6 +465,95 @@ class MonoVideoWireTests(unittest.TestCase):
         self.assertIs(run.call_args.args[1], fold)
         self.assertIs(run.call_args.kwargs['adaptive_profile'], profiles)
 
+    def _route_stream(self, audio):
+        """Run a two-channel capture through the probes, dispatcher, router."""
+        from tools.v7_receiver_audio import ReceiverChannelRouter
+        from tone_code import FOLD_500
+
+        probes = [v7_live._ProfileStatusProbe(v7.RATE, index)
+                  for index in range(2)]
+        profile = v7_live._AdaptiveProfileDecoder(
+            v7_live._experimental_fold(500), self.model)
+        router = ReceiverChannelRouter(
+            profile.mono_status_modes, stereo_modes=(FOLD_500,),
+            initial_video_side='right')
+        routes, sides = [], []
+        for start in range(0, len(audio), 1024):
+            block = audio[start:start+1024]
+            now = (start+len(block))/v7.RATE
+            events = []
+            for index, probe in enumerate(probes):
+                probe.add(block[:, index:index+1].copy())
+                events.extend(probe.scan(now))
+            for decision in profile.observe_packets(events, now=now):
+                router.observe_profile_decision(decision, now=now)
+                sides.append(decision['side_index'])
+            routes.append(router.snapshot(now))
+        return routes, sides
+
+    def test_crosstalk_into_the_soundtrack_does_not_mute_it(self):
+        # Reported failure: the picture on one leg leaks into a quiet
+        # soundtrack leg, whose probe then reads valid statuses. The leg was
+        # marked a data channel, the route became dual-mono and the
+        # soundtrack was muted as "data channel".
+        wire = MonoFreshFoldWire(self.model, side='left')
+        picture = wire.encode(self.model, [self.values]*16)[:, 0]
+        seconds = np.arange(len(picture))/v7.RATE
+        music = (np.sin(2*np.pi*220*seconds)+.5*np.sin(2*np.pi*557*seconds))
+        noise = np.random.default_rng(7).standard_normal(len(picture))
+        for crosstalk_db in (-20, -25, -30):
+            for name, soundtrack in (('silence', 0*music),
+                                     ('music', .005*music),
+                                     ('noise', .003*noise)):
+                audio = np.zeros((len(picture), 2), np.float32)
+                audio[:, 0] = picture
+                audio[:, 1] = soundtrack+picture*10**(crosstalk_db/20)
+                routes, sides = self._route_stream(audio)
+                final = routes[-1]
+                case = (crosstalk_db, name)
+                self.assertEqual(final['state'], 'mono-left', case)
+                self.assertEqual(final['audio_side'], 'right', case)
+                self.assertEqual(final['data_channels'], (True, False), case)
+                # A confirmed profile is not dispatched to the leaked copy.
+                self.assertNotIn(1, sides[3:], case)
+                # Once the soundtrack plays it is never muted again.
+                playing = [route['audio_side'] == 'right' for route in routes]
+                self.assertTrue(all(playing[playing.index(True):]), case)
+
+    def test_soundtrack_without_a_picture_is_never_a_data_channel(self):
+        rng = np.random.default_rng(11)
+        seconds = np.arange(12*v7.PULSE_FRAME)/v7.RATE
+        audio = np.zeros((len(seconds), 2), np.float32)
+        audio[:, 0] = .5*np.sin(2*np.pi*330*seconds)*np.sin(2*np.pi*3*seconds)
+        audio[:, 1] = .2*rng.standard_normal(len(seconds))
+        routes, _ = self._route_stream(audio)
+        for route in routes:
+            self.assertEqual(route['data_channels'], (False, False))
+            self.assertFalse(route['data_muted'])
+            self.assertEqual(route['audio_side'], 'left')
+
+    def test_true_data_on_both_legs_is_still_muted(self):
+        from tone_code import FOLD_500, encode_packet
+
+        stereo = np.concatenate([
+            encode_packet(self.model, self.values, counter, mode=FOLD_500,
+                          eof_marker=True) for counter in range(1, 9)])
+        duplicated = np.repeat(self.audio[:, 1:2], 2, axis=1)
+        unbalanced = duplicated*np.array([.5, 1.0], np.float32)
+        for name, audio, state in (('stereo', stereo, 'stereo'),
+                                   ('dual mono', duplicated, 'dual-mono'),
+                                   ('unbalanced', unbalanced, 'dual-mono')):
+            routes, _ = self._route_stream(audio.astype(np.float32))
+            final = routes[-1]
+            self.assertEqual(final['state'], state, name)
+            self.assertEqual(final['data_channels'], (True, True), name)
+            self.assertIsNone(final['audio_side'], name)
+            self.assertTrue(final['data_muted'], name)
+            # Nothing passes from the second status on.
+            muted = [route['data_muted'] for route in routes]
+            self.assertTrue(all(muted[muted.index(True):]), name)
+            self.assertLess(muted.index(True)*1024, 3*v7.PULSE_FRAME, name)
+
     def test_profile_changes_need_three_distinct_valid_status_packets(self):
         from tone_code import FOLD_500, MONO_500, MONO_1000
 
