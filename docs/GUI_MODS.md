@@ -33,6 +33,10 @@ Worktree: `~/modemTest/tmp/v7-live-preview-recovery`
 
 ### 2. Optional native video preview
 
+Superseded: `--preview` and the `ffplay` launcher were removed. The sender
+GUI's "Pop-out window" preview shows the sender's own frames instead (see
+`docs/transport_v7_spec.md`, section 8).
+
 - [x] Add `--preview` to `tools/v7_live.py send`; default off and only valid for
   `--source video`.
 - [x] When enabled, open the selected file/URL in an ordinary desktop video

@@ -32,7 +32,10 @@ if str(ROOT) not in sys.path:
 from tools import v7_live                                              # noqa: E402
 from tools.v7_capture import (CaptureEndOfStream, FilePlayback,       # noqa: E402
                               Throttled, is_file_video_source,
-                              probe_duration, video_source)
+                              probe_duration, probe_frames, video_source)
+from tools.v7_preview_popout import PopoutFrames                       # noqa: E402
+from tools import v7_preview_popout                                    # noqa: E402
+from tools.v7_preview_protocol import pack_preview_datagram            # noqa: E402
 from tools.v7_send_gui import (OutputDevice, SenderGui, build_command, # noqa: E402
                                _restore_sender_settings, resume_position)
 from tools.v7_source_audio import (FFmpegSourceAudio,                  # noqa: E402
@@ -79,28 +82,38 @@ class FakeReaders:
 
 
 class FilePlaybackTests(unittest.TestCase):
+    FPS = 10.0
+
     def setUp(self):
         self.clock = FakeClock()
         self.readers = FakeReaders()
         self.playback = FilePlayback(self.readers, duration=60.0,
-                                     clock=self.clock, idle=.001)
+                                     clock=self.clock, idle=.001,
+                                     fps=self.FPS)
 
-    def test_playing_reads_the_looping_reader_and_follows_the_clock(self):
+    def read(self, count, playback=None):
+        frame = None
+        for _ in range(count):
+            frame = (playback or self.playback)()
+        return frame
+
+    def test_playing_reads_the_looping_reader_and_counts_its_frames(self):
         self.assertEqual(self.readers.opened, [0.0])
+        self.assertEqual(self.playback.position, 0.0)
         self.assertEqual(self.playback(), (0.0, 1))
-        self.clock.now += 2.5
+        self.clock.now += 2.5                    # wall time is not position
         self.assertEqual(self.playback(), (0.0, 2))
-        self.assertAlmostEqual(self.playback.position, 2.5)
+        self.assertAlmostEqual(self.playback.position, .2)
         self.assertEqual(self.playback.status(), {
-            'position': 2.5, 'duration': 60.0, 'paused': False})
+            'position': .2, 'duration': 60.0, 'paused': False})
+        self.read(23)
+        self.assertAlmostEqual(self.playback.position, 2.5)
         # The looping reader wraps at the end of the file.
-        self.clock.now += 60.0
+        self.read(600)
         self.assertAlmostEqual(self.playback.position, 2.5)
 
     def test_pause_repeats_the_held_frame_and_freezes_the_position(self):
-        self.playback()
-        self.clock.now += 4.0
-        held = self.playback()
+        held = self.read(40)
         self.playback.pause()
         self.assertEqual(self.readers.closed, [0])
         self.clock.now += 30.0
@@ -113,15 +126,15 @@ class FilePlaybackTests(unittest.TestCase):
         self.assertEqual(self.readers.released, [0])
 
     def test_play_resumes_from_the_paused_position(self):
-        self.playback()
-        self.clock.now += 4.0
+        self.read(40)
         self.playback.pause()
         self.playback()
         self.clock.now += 30.0
         self.playback.play()
         self.assertEqual(self.playback(), (4.0, 1))
         self.assertEqual(self.readers.opened, [0.0, 4.0])
-        self.clock.now += 1.5
+        self.readers.tail_frames = 100
+        self.read(14)
         self.assertAlmostEqual(self.playback.position, 5.5)
         self.assertFalse(self.playback.paused)
 
@@ -130,6 +143,7 @@ class FilePlaybackTests(unittest.TestCase):
         self.playback.seek(42.0)
         self.assertAlmostEqual(self.playback.position, 42.0)
         self.assertEqual(self.playback(), (42.0, 1))
+        self.assertAlmostEqual(self.playback.position, 42.1)
         self.assertEqual(self.readers.opened, [0.0, 42.0])
         self.assertEqual(set(self.readers.closed), {0})
 
@@ -152,19 +166,116 @@ class FilePlaybackTests(unittest.TestCase):
         self.playback.seek(30.0)
         self.playback()
         self.playback.restart()
+        self.assertAlmostEqual(self.playback.position, 0.0)
         self.assertEqual(self.playback(), (0.0, 1))
         self.assertEqual(self.readers.opened, [0.0, 30.0, 0.0])
-        self.assertAlmostEqual(self.playback.position, 0.0)
+        self.assertAlmostEqual(self.playback.position, .1)
 
     def test_end_of_a_seek_pass_repeats_from_the_beginning(self):
         self.playback.seek(58.0)
         for index in range(1, 4):
             self.assertEqual(self.playback(), (58.0, index))
+        self.assertAlmostEqual(self.playback.position, 58.3)
         # The pass from 58 s ended: the looping reader opens at 0.
         self.assertEqual(self.playback(), (0.0, 1))
         self.assertEqual(self.readers.opened, [0.0, 58.0, 0.0])
         self.clock.now += 1.0
-        self.assertAlmostEqual(self.playback.position, 1.0)
+        self.assertAlmostEqual(self.playback.position, .1)
+
+    def test_position_never_follows_a_slow_or_jittery_clock(self):
+        # One script of play, pause, seek, restart and a loop wrap, run
+        # against clocks that stand still, crawl, race and jump backwards:
+        # the positions are the same, start + frames/fps, every time.
+        def stopped():
+            return 5.0
+
+        def crawling(state=[0.0]):
+            state[0] += 1e-6
+            return state[0]
+
+        def racing(state=[0.0]):
+            state[0] += 977.0
+            return state[0]
+
+        def jittery(state=[0]):
+            state[0] += 1
+            return (state[0]*7919) % 613-300.0
+
+        expected = [('start', 0.0), ('played 30', 1.2), ('paused', 1.2),
+                    ('held', 1.2), ('resumed 10', 1.6), ('seek', 30.0),
+                    ('played 5', 30.2), ('restart', 0.0),
+                    ('played 100', 4.0), ('wrapped', 10.0),
+                    ('seek near end', 59.9), ('tail', 59.98),
+                    ('repeat from 0', .04), ('paused seek', 7.0),
+                    ('still', 7.0), ('resumed 3', 7.12)]
+        for clock in (stopped, crawling, racing, jittery):
+            with self.subTest(clock=clock.__name__):
+                readers = FakeReaders(tail_frames=1000)
+                playback = FilePlayback(readers, duration=60.0, clock=clock,
+                                        idle=.001, fps=25.0, loop_frames=1500)
+                seen = [('start', playback.position)]
+                self.read(30, playback)
+                seen.append(('played 30', playback.position))
+                playback.pause()
+                seen.append(('paused', playback.position))
+                self.read(4, playback)
+                seen.append(('held', playback.position))
+                playback.play()
+                self.read(10, playback)
+                seen.append(('resumed 10', playback.position))
+                playback.seek(30.0)
+                seen.append(('seek', playback.position))
+                self.read(5, playback)
+                seen.append(('played 5', playback.position))
+                playback.restart()
+                seen.append(('restart', playback.position))
+                self.read(100, playback)
+                seen.append(('played 100', playback.position))
+                self.read(1650, playback)        # 1750 frames: a second pass
+                seen.append(('wrapped', playback.position))
+                readers.tail_frames = 2
+                playback.seek(59.9)
+                seen.append(('seek near end', playback.position))
+                self.read(2, playback)
+                seen.append(('tail', playback.position))
+                self.read(1, playback)           # the pass ended: from 0
+                seen.append(('repeat from 0', playback.position))
+                playback.pause()
+                playback.seek(7.0)
+                seen.append(('paused seek', playback.position))
+                self.read(3, playback)
+                seen.append(('still', playback.position))
+                readers.tail_frames = 1000
+                playback.play()
+                self.read(3, playback)
+                seen.append(('resumed 3', playback.position))
+                playback.close()
+                self.assertEqual([name for name, _value in seen],
+                                 [name for name, _value in expected])
+                for (name, value), (_name, wanted) in zip(seen, expected):
+                    self.assertAlmostEqual(value, wanted, places=9, msg=name)
+
+    def test_loop_wrap_uses_the_frame_count_or_else_the_duration(self):
+        # 250 frames a pass at 25 fps: after 260 frames the picture is the
+        # tenth of the second pass, whatever the container says its length is.
+        counted = FilePlayback(FakeReaders(), duration=10.4, fps=25.0,
+                               loop_frames=250, clock=self.clock)
+        self.read(260, counted)
+        self.assertAlmostEqual(counted.position, .4)
+        # No frame count (Matroska): wrap on the probed duration.
+        timed = FilePlayback(FakeReaders(), duration=10.0, fps=25.0,
+                             clock=self.clock)
+        self.read(260, timed)
+        self.assertAlmostEqual(timed.position, .4)
+
+    def test_without_a_frame_rate_the_position_falls_back_to_wall_time(self):
+        playback = FilePlayback(self.readers, duration=60.0,
+                                clock=self.clock, idle=.001)
+        self.assertIsNone(playback.fps)
+        playback()
+        self.clock.now += 2.5
+        playback()
+        self.assertAlmostEqual(playback.position, 2.5)
 
     def test_a_start_or_seek_past_the_end_begins_at_the_beginning(self):
         readers = FakeReaders()
@@ -280,6 +391,34 @@ class VideoSourceStartTests(unittest.TestCase):
             self.assertIsNone(probe_duration(clip.name+'.missing', run=good))
         self.assertIsNone(probe_duration('rtsp://camera.example/live'))
 
+    def test_frame_probe_reads_the_rate_and_count_and_tolerates_failure(self):
+        def result(stdout, code=0):
+            return mock.Mock(return_value=SimpleNamespace(
+                returncode=code, stdout=stdout))
+
+        with tempfile.NamedTemporaryFile() as clip, \
+                mock.patch('tools.v7_capture.shutil.which',
+                           return_value='/usr/bin/ffprobe'):
+            for stdout, expected in (
+                    ('avg_frame_rate=30000/1001\nnb_frames=1798\n',
+                     (30000/1001, 1798)),
+                    ('avg_frame_rate=25/1\nnb_frames=N/A\n', (25.0, None)),
+                    ('avg_frame_rate=24\n', (24.0, None)),
+                    ('avg_frame_rate=0/0\nnb_frames=0\n', (None, None)),
+                    ('', (None, None))):
+                self.assertEqual(probe_frames(clip.name, run=result(stdout)),
+                                 expected, stdout)
+            self.assertEqual(
+                probe_frames(clip.name, run=result('avg_frame_rate=25/1', 1)),
+                (None, None))
+            self.assertEqual(probe_frames(clip.name, run=mock.Mock(
+                side_effect=OSError('no ffprobe'))), (None, None))
+            self.assertEqual(
+                probe_frames(clip.name+'.missing', run=result('x')),
+                (None, None))
+        self.assertEqual(probe_frames('rtsp://camera.example/live'),
+                         (None, None))
+
 
 class SoundtrackTransportTests(unittest.TestCase):
     class Process:
@@ -337,9 +476,11 @@ class SoundtrackTransportTests(unittest.TestCase):
             self.assertAlmostEqual(probe_duration(clip), 3.0, delta=.2)
             source = SharedVideoAudioSource(
                 clip, 48_000, width=32, target_samples=2400)
+            fps, _frame_count = probe_frames(clip)
             playback = FilePlayback(
                 source.reopen, duration=probe_duration(clip),
-                reader=source.playback_reader(), on_close=source.close)
+                reader=source.playback_reader(), on_close=source.close,
+                fps=fps)
             capture = Throttled(playback, 20)
 
             def level(count=2400):
@@ -372,6 +513,11 @@ class SoundtrackTransportTests(unittest.TestCase):
                 self.assertIsNone(source.proc.poll())
                 self.assertGreaterEqual(playback.position, position)
                 self.assertEqual(np.asarray(capture()).shape, (32, 32, 3))
+                # The real file's rate and frame count are read (10 fps,
+                # 3 s), and the position is a whole number of its frames.
+                self.assertEqual(playback.fps, 10.0)
+                frames = playback.position*10.0
+                self.assertAlmostEqual(frames, round(frames), places=6)
             finally:
                 capture.close()
             self.assertTrue(source._closed)
@@ -579,6 +725,17 @@ class SenderPauseTests(unittest.TestCase):
         playback = v7_live._file_playback(args, 0.0, None, reader=reader)
         self.assertIsInstance(playback, FilePlayback)
         self.assertIsNone(playback.duration)     # no such file to probe
+        self.assertIsNone(playback.fps)
+        # The file's frame rate and count drive the position.
+        with mock.patch('tools.v7_capture.probe_frames',
+                        return_value=(25.0, 250)), \
+                mock.patch('tools.v7_capture.probe_duration',
+                           return_value=10.0):
+            playback = v7_live._file_playback(args, 0.0, None, reader=reader)
+        self.assertEqual((playback.fps, playback.duration), (25.0, 10.0))
+        for _ in range(260):
+            playback()
+        self.assertAlmostEqual(playback.position, .4)
 
 
 class GuiPreviewSettingTests(unittest.TestCase):
@@ -599,18 +756,22 @@ class GuiPreviewSettingTests(unittest.TestCase):
         for saved, expected in (
                 ({'image_preview': True, 'video_preview': True}, 'window'),
                 ({'image_preview': True, 'video_preview': False}, 'window'),
-                ({'image_preview': False, 'video_preview': True}, 'external'),
-                ({'video_preview': True}, 'external'),
+                ({'image_preview': False, 'video_preview': True}, 'popout'),
+                ({'video_preview': True}, 'popout'),
                 ({'image_preview': False, 'video_preview': False}, 'off'),
                 ({'encoded_preview': True}, 'window'),
                 ({'encoded_preview': True, 'video_preview': True}, 'window'),
                 ({'encoded_preview': False, 'video_preview': True},
-                 'external'),
+                 'popout'),
                 ({'image_preview': 'yes', 'video_preview': 1}, 'off'),
                 ({}, 'off'),
-                ({'preview': 'external', 'image_preview': True}, 'external'),
+                # The old External player value is the pop-out now.
+                ({'preview': 'external'}, 'popout'),
+                ({'preview': 'external', 'image_preview': True}, 'popout'),
+                ({'preview': 'external', 'video_preview': False}, 'popout'),
+                ({'preview': 'popout'}, 'popout'),
                 ({'preview': 'window'}, 'window'),
-                ({'preview': 'sideways', 'video_preview': True}, 'external')):
+                ({'preview': 'sideways', 'video_preview': True}, 'popout')):
             with self.subTest(saved=saved):
                 gui = self._restored(saved)
                 self.assertEqual(gui.settings['preview'], expected)
@@ -624,70 +785,176 @@ class GuiPreviewSettingTests(unittest.TestCase):
     def test_migration_also_applies_to_a_plain_settings_dict(self):
         target = {'preview': 'off', 'preview_stage': 'resized'}
         _restore_sender_settings(target, {'video_preview': True})
-        self.assertEqual(target['preview'], 'external')
+        self.assertEqual(target['preview'], 'popout')
+        _restore_sender_settings(target, {'preview': 'external'})
+        self.assertEqual(target['preview'], 'popout')
 
     def test_the_setting_is_saved_and_restored(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary)/'sender.json'
             gui = SenderGui(self.devices, preference_path=path)
-            gui._assign('preview', 'external')
+            gui._assign('preview', 'popout')
             saved = json.loads(path.read_text(encoding='utf-8'))['settings']
-            self.assertEqual(saved['preview'], 'external')
+            self.assertEqual(saved['preview'], 'popout')
             self.assertNotIn('image_preview', saved)
             self.assertNotIn('video_preview', saved)
             restored = SenderGui(self.devices, preference_path=path,
                                  restore_preferences=True)
-        self.assertEqual(restored.settings['preview'], 'external')
+        self.assertEqual(restored.settings['preview'], 'popout')
 
-    def test_each_choice_builds_at_most_one_preview(self):
+    def test_each_choice_builds_the_one_preview_channel_or_none(self):
         gui = SenderGui(self.devices)
-        gui.settings.update(device=3, source='video', profile='fold-500',
-                            video_source='clip.mp4')
-        expected = {'off': (False, False), 'window': (False, True),
-                    'external': (True, False)}
+        expected = {'off': False, 'window': True, 'popout': True}
         self.assertEqual({value for _label, value in gui._choices('preview')},
                          set(expected))
-        for choice, (player, pane) in expected.items():
-            with self.subTest(choice=choice):
-                gui.settings['preview'] = choice
-                # Even when a preview port is offered.
-                command = build_command(gui.settings, self.devices, self.sd,
-                                        image_preview_port=5005)
-                self.assertEqual('--preview' in command, player)
-                self.assertEqual('--image-preview-port' in command, pane)
-                self.assertFalse('--preview' in command and
-                                 '--image-preview-port' in command)
-                args = v7_live.parser().parse_args(command[2:])
-                self.assertEqual(bool(args.preview), player)
-                self.assertEqual(args.image_preview_port,
-                                 5005 if pane else None)
+        self.assertEqual(dict((value, label) for label, value in
+                              gui._choices('preview'))['popout'],
+                         'Pop-out window')
+        for source in ('video', 'test'):
+            gui.settings.update(device=3, source=source, profile='fold-500',
+                                video_source='clip.mp4')
+            for choice, channel in expected.items():
+                with self.subTest(source=source, choice=choice):
+                    gui.settings['preview'] = choice
+                    command = build_command(gui.settings, self.devices,
+                                            self.sd, image_preview_port=5005)
+                    # The separate player is gone for every choice.
+                    self.assertNotIn('--preview', command)
+                    self.assertFalse(any('ffplay' in str(part)
+                                         for part in command))
+                    self.assertEqual('--image-preview-port' in command,
+                                     channel)
+                    args = v7_live.parser().parse_args(command[2:])
+                    self.assertEqual(args.image_preview_port,
+                                     5005 if channel else None)
+                    self.assertFalse(hasattr(args, 'preview'))
 
-    def test_external_player_is_for_video_sources_only(self):
+    def test_the_sender_no_longer_has_a_player_flag(self):
+        with contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaises(SystemExit):
+            v7_live.parser().parse_args(
+                ['send', '--device', '3', '--source', 'video',
+                 '--video-source', 'clip.mp4', '--preview'])
+        self.assertFalse((ROOT/'tools'/'v7_video_preview.py').exists())
+
+    def _started(self, choice, popen):
         gui = SenderGui(self.devices)
-        gui.settings.update(device=3, source='test', preview='external')
-        command = build_command(gui.settings, self.devices, self.sd,
-                                image_preview_port=5005)
-        self.assertNotIn('--preview', command)
-        self.assertNotIn('--image-preview-port', command)
+        gui.settings.update(device=3, source='test', preview=choice)
+        with mock.patch.object(gui, '_build_command',
+                               return_value=['python', 'send']) as build, \
+                mock.patch('tools.v7_send_gui.subprocess.Popen', popen), \
+                mock.patch('tools.v7_send_gui.threading.Thread'):
+            gui._start()
+        self.addCleanup(gui._close_preview_socket)
+        return gui, build
 
-    def test_start_opens_the_preview_socket_only_for_the_window_choice(self):
-        for choice, has_socket in (('off', False), ('window', True),
-                                   ('external', False)):
+    def test_start_launches_one_window_at_most_and_never_a_player(self):
+        for choice, has_socket, popout in (('off', False, False),
+                                           ('window', True, False),
+                                           ('popout', True, True)):
             with self.subTest(choice=choice):
-                gui = SenderGui(self.devices)
-                gui.settings.update(device=3, source='test', preview=choice)
-                child = mock.Mock()
-                child.poll.return_value = None
-                with mock.patch.object(gui, '_build_command',
-                                       return_value=['python', 'send']) as build, \
-                        mock.patch('tools.v7_send_gui.subprocess.Popen',
-                                   return_value=child), \
-                        mock.patch('tools.v7_send_gui.threading.Thread'):
-                    gui._start()
+                children = [mock.Mock(name='sender'), mock.Mock(name='popout')]
+                popen = mock.Mock(side_effect=list(children))
+                gui, build = self._started(choice, popen)
                 self.assertEqual('image_preview_port' in build.call_args.kwargs,
                                  has_socket)
                 self.assertEqual(gui._preview_socket is not None, has_socket)
-                gui._close_preview_socket()
+                commands = [call.args[0] for call in popen.call_args_list]
+                self.assertEqual(commands[0], ['python', 'send'])
+                self.assertEqual(len(commands), 2 if popout else 1)
+                self.assertIs(gui.process, children[0])
+                self.assertFalse(any('ffplay' in str(part)
+                                     for command in commands
+                                     for part in command))
+                if popout:
+                    self.assertEqual(commands[1], [
+                        sys.executable,
+                        str(ROOT/'tools'/'v7_preview_popout.py')])
+                    self.assertIs(gui.popout, children[1])
+                    # Never the pane as well.
+                    gui.page = 'live'
+                    with mock.patch('PIL.ImageDraw.ImageDraw.text') as text:
+                        gui._canvas((960, 720))
+                    self.assertNotIn('Preview', [call.args[1] for call in
+                                                 text.call_args_list])
+                else:
+                    self.assertIsNone(gui.popout)
+
+    def test_a_popout_that_cannot_start_does_not_stop_the_send(self):
+        sender = mock.Mock(name='sender')
+        popen = mock.Mock(side_effect=[sender, OSError('no interpreter')])
+        gui, _build = self._started('popout', popen)
+        self.assertIs(gui.process, sender)
+        self.assertIsNone(gui.popout)
+        self.assertIn('Pop-out window unavailable', gui.notice)
+        self.assertIn('sending without a preview', gui.notice)
+        sender.send_signal.assert_not_called()
+        sender.terminate.assert_not_called()
+
+    def test_a_popout_without_a_display_reports_and_sending_goes_on(self):
+        sender, window = mock.Mock(name='sender'), mock.Mock(name='popout')
+        gui, _build = self._started('popout',
+                                    mock.Mock(side_effect=[sender, window]))
+        window.stdout = [json.dumps({
+            'status': 'popout_error',
+            'message': 'Pop-out window unavailable: no display'})+'\n']
+        gui._read_popout(window)             # the reader thread's work
+        gui._drain_events()
+        self.assertIsNone(gui.popout)
+        self.assertIsNone(gui._popout_address)
+        self.assertIs(gui.process, sender)
+        self.assertEqual(gui.notice, 'Pop-out window unavailable: no display')
+        sender.send_signal.assert_not_called()
+        # Pictures that still arrive are dropped quietly.
+        gui.preview_datagrams['resized'] = (1, b'datagram')
+        gui._forward_popout()
+        gui.page = 'live'
+        gui._canvas((960, 720))
+
+    def test_closing_the_popout_window_leaves_the_sender_running(self):
+        sender, window = mock.Mock(name='sender'), mock.Mock(name='popout')
+        gui, _build = self._started('popout',
+                                    mock.Mock(side_effect=[sender, window]))
+        window.stdout = [json.dumps({'status': 'popout_ready',
+                                     'port': 5006})+'\n']
+        gui._read_popout(window)             # ready, then the window closed
+        self.assertEqual(gui._popout_address, ('127.0.0.1', 5006))
+        gui._drain_events()
+        self.assertIsNone(gui.popout)
+        self.assertIs(gui.process, sender)
+        self.assertEqual(gui.notice, 'Pop-out window closed; still sending.')
+
+    def test_the_popout_closes_with_the_sender_and_reopens_on_start(self):
+        first = [mock.Mock(name='sender'), mock.Mock(name='popout')]
+        second = [mock.Mock(name='sender 2'), mock.Mock(name='popout 2')]
+        popen = mock.Mock(side_effect=first+second)
+        gui, _build = self._started('popout', popen)
+        with mock.patch('tools.v7_send_gui.threading.Thread') as thread:
+            gui.events.put(('exit', 0))
+            gui._drain_events()
+        first[1].stdin.close.assert_called_once()    # it ends on end of file
+        self.assertEqual(thread.call_args.kwargs['args'], (first[1],))
+        self.assertIsNone(gui.popout)
+        self.assertIsNone(gui._preview_socket)
+        # Its own exit report afterwards changes nothing.
+        gui.events.put(('popout_exit', (first[1], None)))
+        gui._drain_events()
+        self.assertEqual(gui.notice, 'Sender stopped.')
+        with mock.patch.object(gui, '_build_command',
+                               return_value=['python', 'send']), \
+                mock.patch('tools.v7_send_gui.subprocess.Popen', popen), \
+                mock.patch('tools.v7_send_gui.threading.Thread'):
+            gui._start()
+        self.assertIs(gui.popout, second[1])
+        self.assertIs(gui.process, second[0])
+
+    def test_end_popout_waits_then_terminates_a_stuck_window(self):
+        window = mock.Mock()
+        SenderGui._end_popout(window)
+        window.terminate.assert_not_called()
+        window.wait.side_effect = subprocess.TimeoutExpired('popout', 2)
+        SenderGui._end_popout(window)
+        window.terminate.assert_called_once()
 
     def test_preview_is_one_dropdown_row_on_the_setup_page(self):
         gui = SenderGui(self.devices)
@@ -706,6 +973,195 @@ class GuiPreviewSettingTests(unittest.TestCase):
             len([key for key in gui.hits if key.startswith('option:')]), 3)
         gui._select_option('preview', 'window')
         self.assertEqual(gui._value_label('preview'), 'In the window')
+        gui._select_option('preview', 'popout')
+        self.assertEqual(gui._value_label('preview'), 'Pop-out window')
+
+
+def jpeg_of(color, size=(64, 80)):
+    from PIL import Image
+    output = io.BytesIO()
+    Image.new('RGB', size, color).save(output, format='JPEG', quality=90)
+    return output.getvalue()
+
+
+class PopoutFramesTests(unittest.TestCase):
+    """The pop-out's picture handling, with no window."""
+
+    def test_it_shows_the_newest_datagram_and_keeps_it_over_bad_ones(self):
+        frames = PopoutFrames()
+        self.assertIn('waiting', frames.title())
+        self.assertFalse(frames.feed(b'not a preview datagram'))
+        self.assertIsNone(frames.image)
+        red = pack_preview_datagram(7, 3, 1000, 'source', jpeg_of((200, 0, 0)))
+        self.assertTrue(frames.feed(red))
+        self.assertEqual((frames.counter, frames.aspect, frames.stage),
+                         (7, 3, 'source'))
+        self.assertEqual(frames.image.size, (64, 80))
+        self.assertIn('Source', frames.title())
+        self.assertIn('packet 7', frames.title())
+        self.assertFalse(frames.feed(
+            pack_preview_datagram(8, 3, 2000, 'resized', b'broken jpeg')))
+        self.assertEqual(frames.counter, 7)
+        self.assertEqual(frames.received, 1)
+
+    def test_the_picture_is_scaled_to_fit_and_centred(self):
+        frames = PopoutFrames()
+        empty = frames.compose((300, 200))
+        self.assertEqual(empty.size, (300, 200))
+        self.assertEqual(empty.getpixel((150, 100)),
+                         v7_preview_popout.BACKGROUND)
+        frames.feed(pack_preview_datagram(1, 0, 1, 'resized',
+                                          jpeg_of((0, 180, 0))))
+        for size, picture in (((300, 200), (160, 200)),   # bars at the sides
+                              ((160, 400), (160, 200)),   # bars above, below
+                              ((640, 800), (640, 800))):  # ten times larger
+            with self.subTest(size=size):
+                canvas = frames.compose(size)
+                self.assertEqual(canvas.size, size)
+                pixels = np.asarray(canvas)
+                green = (pixels[..., 1] > 150) & (pixels[..., 0] < 40)
+                rows = np.flatnonzero(green.any(axis=1))
+                columns = np.flatnonzero(green.any(axis=0))
+                self.assertEqual((len(columns), len(rows)), picture)
+                # Centred: the bars on both sides are equal (within 1).
+                self.assertLessEqual(
+                    abs(columns[0]-(size[0]-1-columns[-1])), 1)
+                self.assertLessEqual(abs(rows[0]-(size[1]-1-rows[-1])), 1)
+
+    def test_no_display_is_reported_and_the_process_ends(self):
+        for glfw in (SimpleNamespace(init=lambda: False,
+                                     terminate=lambda: None),
+                     SimpleNamespace(
+                         init=mock.Mock(side_effect=RuntimeError('X11'))),
+                     None):                    # the import itself fails
+            output = io.StringIO()
+            with mock.patch.dict(sys.modules, {'glfw': glfw,
+                                               'moderngl': mock.Mock()}):
+                code = v7_preview_popout.run(control=io.StringIO(''),
+                                             output=output)
+            self.assertEqual(code, 2)
+            report = json.loads(output.getvalue())
+            self.assertEqual(report['status'], 'popout_error')
+            self.assertIn('Pop-out window unavailable', report['message'])
+
+
+class PopoutProtocolTests(unittest.TestCase):
+    """The pop-out is sent the datagrams the pane would decode."""
+
+    def setUp(self):
+        self.devices = (OutputDevice(3, 'Test output', 2, 48000),)
+        self.sockets = []
+        self.sender = self.socket()
+        self.window = self.socket()          # stands in for the pop-out
+        self.window.settimeout(2.0)
+
+    def socket(self):
+        import socket
+        opened = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        opened.bind(('127.0.0.1', 0))
+        self.sockets.append(opened)
+        self.addCleanup(opened.close)
+        return opened
+
+    def gui(self, preview):
+        gui = SenderGui(self.devices)
+        gui.settings.update(device=3, source='test', preview=preview,
+                            preview_stage='resized')
+        gui.process = SimpleNamespace(stdin=mock.Mock(), poll=lambda: None)
+        channel = self.socket()
+        channel.settimeout(.05)
+        gui._preview_socket = channel
+        thread = threading.Thread(target=gui._read_image_preview,
+                                  args=(gui.process, channel), daemon=True)
+        thread.start()
+
+        def stop():
+            gui.process = None
+            thread.join(timeout=2)
+
+        self.addCleanup(stop)
+        return gui, channel.getsockname()
+
+    def wait(self, condition):
+        deadline = time.monotonic()+2.0
+        while not condition() and time.monotonic() < deadline:
+            time.sleep(.005)
+        self.assertTrue(condition())
+
+    def test_the_popout_gets_the_same_pictures_as_the_pane(self):
+        pane, pane_port = self.gui('window')
+        popout, popout_port = self.gui('popout')
+        popout._popout_address = self.window.getsockname()
+        frames = PopoutFrames()
+        colours = {1: (200, 30, 30), 2: (30, 200, 30), 3: (30, 30, 200)}
+        for counter, colour in colours.items():
+            wanted = pack_preview_datagram(counter, 2, counter*1000,
+                                           'resized', jpeg_of(colour))
+            other = pack_preview_datagram(counter, 2, counter*1000,
+                                          'source', jpeg_of((9, 9, 9)))
+            for port in (pane_port, popout_port):
+                self.sender.sendto(other, port)
+                self.sender.sendto(wanted, port)
+            # Only the selected stage is forwarded, byte for byte.
+            received = self.window.recv(65507)
+            self.assertEqual(received, wanted)
+            self.assertTrue(frames.feed(received))
+            self.wait(lambda: pane.preview_counter == counter)
+            self.assertEqual(frames.counter, pane.preview_counter)
+            self.assertEqual(frames.aspect, pane.preview_aspect)
+            self.assertEqual(frames.stage, pane.preview_stage)
+            self.assertEqual(frames.image.tobytes(),
+                             pane.preview_image.tobytes())
+        # The pop-out GUI decodes nothing for a pane it does not show.
+        self.assertIsNone(popout.preview_image)
+        # The stage switch sends the other stage's newest picture at once.
+        self.wait(lambda: 'source' in popout.preview_datagrams)
+        popout._assign('preview_stage', 'source')
+        received = self.window.recv(65507)
+        self.assertEqual(received, other)
+        frames.feed(received)
+        self.assertEqual((frames.stage, frames.counter), ('source', 3))
+        # An older picture arriving late does not replace a newer one.
+        self.sender.sendto(pack_preview_datagram(
+            2, 2, 2000, 'source', jpeg_of((1, 1, 1))), popout_port)
+        newest = pack_preview_datagram(4, 2, 4000, 'source',
+                                       jpeg_of((250, 250, 0)))
+        time.sleep(.1)
+        self.sender.sendto(newest, popout_port)
+        self.assertEqual(self.window.recv(65507), newest)
+
+    def test_the_held_picture_keeps_arriving_while_paused(self):
+        # Paused, the sender repeats one picture under rising packet
+        # numbers: the pop-out shows each of them, as the pane does.
+        popout, port = self.gui('popout')
+        popout._popout_address = self.window.getsockname()
+        frames = PopoutFrames()
+        held = jpeg_of((120, 120, 120))
+        for counter in (10, 11, 12):
+            self.sender.sendto(pack_preview_datagram(
+                counter, 2, counter*1000, 'resized', held), port)
+            frames.feed(self.window.recv(65507))
+            self.assertEqual(frames.counter, counter)
+        self.assertEqual(frames.received, 3)
+
+    def test_nothing_is_forwarded_before_the_window_reports_its_port(self):
+        popout, port = self.gui('popout')
+        first = pack_preview_datagram(1, 2, 1000, 'resized',
+                                      jpeg_of((5, 5, 5)))
+        self.sender.sendto(first, port)
+        self.wait(lambda: 'resized' in popout.preview_datagrams)
+        self.window.settimeout(.1)
+        with self.assertRaises(OSError):
+            self.window.recv(65507)
+        # Once it is ready it gets the newest picture straight away.
+        window = mock.Mock()
+        window.stdout = [json.dumps({
+            'status': 'popout_ready',
+            'port': self.window.getsockname()[1]})+'\n']
+        popout.popout = window
+        popout._read_popout(window)
+        self.window.settimeout(2.0)
+        self.assertEqual(self.window.recv(65507), first)
 
 
 def overlap(first, second):
@@ -742,9 +1198,22 @@ class GuiTransportTests(unittest.TestCase):
     def click(self, gui, key, fraction=.5):
         rect = gui.hits[key]
         position = (rect[0]+(rect[2]-rect[0])*fraction, (rect[1]+rect[3])/2)
-        glfw = SimpleNamespace(MOUSE_BUTTON_LEFT=1, PRESS=1,
+        glfw = SimpleNamespace(MOUSE_BUTTON_LEFT=1, PRESS=1, RELEASE=0,
                                get_cursor_pos=lambda _window: position)
         gui._on_mouse(glfw, None, 1, 1, 0)
+        gui._on_mouse(glfw, None, 1, 0, 0)
+
+    def mouse(self, gui, action, fraction):
+        """Press (1) or release (0) on the seek bar's last drawn track."""
+        rect = self.track
+        position = (rect[0]+(rect[2]-rect[0])*fraction, (rect[1]+rect[3])/2)
+        glfw = SimpleNamespace(MOUSE_BUTTON_LEFT=1, PRESS=1, RELEASE=0,
+                               get_cursor_pos=lambda _window: position)
+        gui._on_mouse(glfw, None, 1, action, 0)
+
+    def drag(self, gui, fraction):
+        rect = self.track
+        gui._on_cursor(None, rect[0]+(rect[2]-rect[0])*fraction, rect[1]+3)
 
     def sent(self, gui):
         return [json.loads(call.args[0])
@@ -769,7 +1238,7 @@ class GuiTransportTests(unittest.TestCase):
             dict(source='video', video_source='https://media.example/a.mp4'),
             dict(source='video', video_source=''),
         )
-        for preview in ('window', 'off', 'external'):
+        for preview in ('window', 'off', 'popout'):
             for settings in hidden:
                 with self.subTest(preview=preview, **settings):
                     gui = self.gui(preview=preview, **settings)
@@ -794,21 +1263,37 @@ class GuiTransportTests(unittest.TestCase):
         self.assertIn('preview_stage:resized', gui.hits)
         self.click(gui, 'preview_stage:source')
         self.assertEqual(gui.settings['preview_stage'], 'source')
-        for preview in ('off', 'external'):
-            gui = self.gui(preview=preview)
-            gui._canvas((960, 720))
-            self.assertNotIn('preview_stage:source', gui.hits)
+        gui = self.gui(preview='off')
+        gui._canvas((960, 720))
+        self.assertNotIn('preview_stage:source', gui.hits)
+
+    def test_the_popout_has_the_same_stage_switch_on_the_live_page(self):
+        gui = self.running(preview='popout')
+        gui._popout_address = ('127.0.0.1', 5006)
+        gui._preview_socket = mock.Mock()
+        gui.preview_datagrams = {'source': (5, b'source picture'),
+                                 'resized': (5, b'encoder input')}
+        gui._canvas((960, 720))
+        self.click(gui, 'preview_stage:source')
+        self.assertEqual(gui.settings['preview_stage'], 'source')
+        gui._preview_socket.sendto.assert_called_once_with(
+            b'source picture', ('127.0.0.1', 5006))
+        gui._canvas((960, 720))
+        self.click(gui, 'preview_stage:resized')
+        self.assertEqual(gui._preview_socket.sendto.call_args.args[0],
+                         b'encoder input')
+        gui._preview_socket = None
 
     def test_hit_rectangles_fit_the_window_and_do_not_overlap(self):
         for size in self.SIZES:
-            for preview in ('window', 'off'):
+            for preview in ('window', 'off', 'popout'):
                 with self.subTest(size=size, preview=preview):
                     gui = self.running(preview=preview)
                     self.report(gui, 20.0)
                     image = gui._canvas(size)
                     width, height = image.size
                     keys = list(self.TRANSPORT)
-                    if preview == 'window':
+                    if preview != 'off':
                         keys += ['preview_stage:source',
                                  'preview_stage:resized']
                     rects = [gui.hits[key] for key in keys]
@@ -869,6 +1354,69 @@ class GuiTransportTests(unittest.TestCase):
         gui._canvas((960, 720))
         self.click(gui, 'transport:seek', .5)
         self.assertEqual(len(self.sent(gui)), 2)
+
+    def test_dragging_the_seek_bar_sends_one_seek_on_release(self):
+        gui = self.running()
+        self.report(gui, 8.0, duration=80.0)
+        gui._canvas((960, 720))
+        self.track = gui.hits['transport:seek']
+        self.mouse(gui, 1, .25)                  # press
+        self.assertEqual(self.sent(gui), [])
+        self.assertAlmostEqual(gui._transport_state()[0], 20.0, delta=.2)
+        for fraction, position in ((.5, 40.0), (.9, 72.0), (.75, 60.0)):
+            gui.dirty = False
+            self.drag(gui, fraction)
+            self.assertTrue(gui.dirty)           # the bar is redrawn
+            self.assertAlmostEqual(gui._transport_state()[0], position,
+                                   delta=.2)
+            # The sender's reports do not pull the bar away from the pointer.
+            self.report(gui, 9.0, duration=80.0)
+            self.assertAlmostEqual(gui._transport_state()[0], position,
+                                   delta=.2)
+            with mock.patch('PIL.ImageDraw.ImageDraw.text') as text:
+                gui._canvas((960, 720))
+            from tools.v7_send_gui import _clock_text
+            shown = _clock_text(gui._transport_state()[0])+' / 1:20'
+            self.assertIn(shown,
+                          [call.args[1] for call in text.call_args_list])
+        self.assertEqual(self.sent(gui), [])
+        self.mouse(gui, 0, .75)                  # release
+        sent = self.sent(gui)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]['transport'], 'seek')
+        self.assertAlmostEqual(sent[0]['position'], 60.0, delta=.2)
+        self.assertIsNone(gui._seek_drag)
+        # Afterwards the bar follows the sender again, and moving the
+        # pointer or releasing again does nothing.
+        self.report(gui, 61.0, duration=80.0)
+        self.drag(gui, .1)
+        self.mouse(gui, 0, .1)
+        self.assertEqual(gui._transport_state()[0], 61.0)
+        self.assertEqual(len(self.sent(gui)), 1)
+
+    def test_a_drag_past_the_ends_of_the_bar_is_clamped(self):
+        gui = self.running()
+        self.report(gui, 8.0, duration=80.0)
+        gui._canvas((960, 720))
+        self.track = gui.hits['transport:seek']
+        self.mouse(gui, 1, .5)
+        self.drag(gui, -3.0)
+        self.assertEqual(gui._transport_state()[0], 0.0)
+        self.drag(gui, 4.0)
+        self.assertEqual(gui._transport_state()[0], 80.0)
+        self.mouse(gui, 0, 4.0)
+        self.assertEqual(self.sent(gui),
+                         [{'transport': 'seek', 'position': 79.75}])
+
+    def test_a_drag_ends_when_the_sender_stops(self):
+        gui = self.running()
+        self.report(gui, 8.0, duration=80.0)
+        gui._canvas((960, 720))
+        self.track = gui.hits['transport:seek']
+        self.mouse(gui, 1, .5)
+        gui.events.put(('exit', 0))
+        gui._drain_events()
+        self.assertIsNone(gui._seek_drag)
 
     def test_controls_send_nothing_when_the_sender_is_not_running(self):
         gui = self.gui()

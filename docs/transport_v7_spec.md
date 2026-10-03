@@ -443,8 +443,14 @@ is silent until play. The index in the packets is the packet count, so it
 keeps counting through pause, seek and restart. The GUI saves the position of
 each file and Start resumes there (`--video-start SECONDS`); a changed or
 missing file, or a position past the end, starts from the beginning, and the
-file still repeats from the beginning when it ends. The GUI has one preview at
-a time: off, the picture in its window, or the source in an external player.
+file still repeats from the beginning when it ends. The position is counted
+from the frames read: the reader's start plus frames delivered divided by the
+file's frame rate (the readers pass every source frame through once), reset
+on seek, restart and repeat; wall time is used only for a file whose frame
+rate cannot be probed. The GUI has one preview at a time: off, the picture in
+its window, or the same picture in a pop-out window. The pop-out is a small
+separate process the GUI forwards the sender's preview pictures to, so it
+follows pause and seek; sending does not depend on it.
 
 Standalone receiver (`tools/v7_live.py receive`): automatic profile dispatch
 (section 14.1), `eof` endpoints, `tone-seeded` timing, forward and reverse
@@ -521,6 +527,26 @@ it clears their spread. SSIMULACRA2 is for gross ranking only.
 
 Hiss situations are named by noise level in dB below full scale, so `hiss-35`
 is louder noise than `hiss-45`.
+
+A difference counts only when the measurement can resolve it. One run on a
+few pictures cannot resolve a change of a few percent: score per picture and
+report each change with a range from resampling the pictures (and the noise
+seeds); a change whose range includes zero is "no measurable difference".
+
+### Sender and receiver stay in step
+
+The sender and the receiver are one version. A change to what the sender
+encodes (levels, tables, coefficient selection, fold, signalling) comes with
+the matching receiver change, or with a test showing the unchanged receiver
+decodes it, in the same patch. Prior recordings need not stay decodable.
+
+### Stability rule for a new combination
+
+A new combination of settings, tables or profile is accepted only if its
+stability is within 5% of the current one, or better, in every situation.
+Stability is counted, not scored: the packets received as valid and the
+pictures shown, out of those sent, in each situation, and no picture skipped
+between the first two and the last on a clean link.
 
 All evidence for this wire is synthetic: unit tests, in-memory loopback and
 simulated impairments (`tools/v7_torture_matrix.py`,
@@ -1025,8 +1051,10 @@ Decided and done:
 7. Matched sum/difference pairing on the stereo profile against
    stereo-slices, to decide whether stereo-slices stays. Delayed.
 8. Sender conveniences: resume a movie where it stopped and playback
-   controls on the preview window are built (section 8). Open: reading the
-   position from the stream's timestamps instead of the reader's wall time.
+   controls on the preview window are built (section 8); the position is
+   counted from the frames read. Open: a variable-frame-rate file is placed
+   by its average rate, and a file with no stored frame count repeats on its
+   probed duration.
 9. Housekeeping: prune tests that only pin internals; port the stereo-slices
    sender and join to numba; find the cold-start test flakiness
    (`test_embedded_video_audio_uses_the_shared_capture_clock` and first-run

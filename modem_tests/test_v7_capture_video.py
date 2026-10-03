@@ -15,7 +15,6 @@ from animation_modem import v7
 from tools.v7_capture import (CapturedFrame, _showinfo_source_size,
                               CaptureEndOfStream, Throttled, ffmpeg_source,
                               video_source, video_source_loops)
-from tools.v7_video_preview import ffplay_command, launch_video_preview
 from tools.v7_live import (_capture, _resolve_send_source,
                            SENDER_STARTUP_BUFFER_SECONDS,
                            _sender_queue_batches, _values, run_send)
@@ -45,11 +44,6 @@ class VideoSourceSelectionTests(unittest.TestCase):
         args = Namespace(source=None, video_source='clip.mp4')
         _resolve_send_source(args, interactive=False)
         self.assertEqual(args.source, 'video')
-
-    def test_preview_is_restricted_to_video_sources(self):
-        args = Namespace(source='screen', video_source=None, preview=True)
-        with self.assertRaisesRegex(ValueError, '--preview.*--source video'):
-            _resolve_send_source(args, interactive=False)
 
     def test_missing_video_argument_requires_interaction(self):
         args = Namespace(source='video', video_source=None)
@@ -165,50 +159,13 @@ class VideoSourceCommandTests(unittest.TestCase):
             self.assertIn('rtsp://camera.example/live', cmd)
             grab.close()
 
-    def test_preview_loop_policy_matches_the_sender_source_policy(self):
+    def test_loop_policy_of_the_sender_source(self):
         self.assertTrue(video_source_loops('clip.mp4'))
         self.assertTrue(video_source_loops(
             'https://media.example/clip.mp4?token=x'))
         self.assertFalse(video_source_loops('rtsp://camera.example/live'))
         self.assertFalse(video_source_loops(
             'https://camera.example/live', live=True))
-        self.assertEqual(
-            ffplay_command('clip.mp4', True, '/usr/bin/ffplay'),
-            ['/usr/bin/ffplay', '-hide_banner', '-loglevel', 'error', '-an',
-             '-loop', '0', 'clip.mp4'])
-        self.assertNotIn('-loop', ffplay_command(
-            'rtsp://camera.example/live', False))
-
-    def test_preview_launch_owns_ffplay_and_uses_muted_infinite_loop(self):
-        process = mock.Mock()
-        process.poll.return_value = None
-        with mock.patch('tools.v7_video_preview.shutil.which',
-                        return_value='/usr/bin/ffplay'), \
-                mock.patch('tools.v7_video_preview.subprocess.Popen',
-                           return_value=process) as popen:
-            preview = launch_video_preview('clip.mp4')
-
-        command = popen.call_args.args[0]
-        self.assertIn('-an', command)
-        self.assertEqual(command[command.index('-loop')+1], '0')
-        self.assertIs(preview.process, process)
-        preview.close()
-        process.terminate.assert_called_once()
-        process.wait.assert_called_once_with(timeout=2)
-
-    def test_preview_does_not_open_uncontrolled_system_player(self):
-        with mock.patch('tools.v7_video_preview.shutil.which',
-                        side_effect=lambda name: {
-                            'ffplay': None, 'xdg-open': '/usr/bin/xdg-open'
-                        }.get(name)), \
-                mock.patch('tools.v7_video_preview.subprocess.Popen') as popen:
-            preview = launch_video_preview(
-                'clip.mp4', platform='linux')
-
-        popen.assert_not_called()
-        self.assertIn('ffplay was not found', preview.warning)
-        self.assertIn('no player was opened', preview.warning)
-        self.assertIsNone(preview.process)
 
     def test_avfoundation_camera_opens_the_selected_device_name(self):
         process = self.Process()

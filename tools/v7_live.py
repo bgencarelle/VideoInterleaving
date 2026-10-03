@@ -232,13 +232,15 @@ def _read_live_tone_controls(stream, controls, stop, transport=None):
 def _file_playback(args, start, open_reader, reader=None, on_close=None):
     """Transport wrapper for a local video file, or None for other sources."""
     from tools.v7_capture import (FilePlayback, is_file_video_source,
-                                  probe_duration)
+                                  probe_duration, probe_frames)
 
     if (args.source != 'video' or getattr(args, 'video_live', False) or
             not is_file_video_source(args.video_source)):
         return None
+    fps, frames = probe_frames(args.video_source)
     return FilePlayback(open_reader, duration=probe_duration(args.video_source),
-                        start=start, reader=reader, on_close=on_close)
+                        start=start, reader=reader, on_close=on_close,
+                        fps=fps, loop_frames=frames)
 
 
 def _device_arg(value):
@@ -305,8 +307,6 @@ def _resolve_send_source(args, interactive=None, input_fn=None):
             raise ValueError('video file path or stream URL cannot be empty')
     elif args.video_source:
         raise ValueError('--video-source can only be used with --source video')
-    if getattr(args, 'preview', False) and args.source != 'video':
-        raise ValueError('--preview can only be used with --source video')
     return args
 
 
@@ -866,10 +866,6 @@ def run_send(args):
             print(f'V7 send stopped after interruption', flush=True)
     finally:
         stop.set()
-        video_preview = getattr(args, '_video_preview', None)
-        if video_preview is not None:
-            video_preview.close()
-            args._video_preview = None
 
 
 def _run_send_session(args):
@@ -1057,7 +1053,6 @@ def _run_send_session(args):
     grab = None
     source_audio = None
     audio_delay = None
-    video_preview = getattr(args, '_video_preview', None)
     batches = None
     stop = threading.Event()
     device_monitor_stop = threading.Event()
@@ -1357,15 +1352,6 @@ def _run_send_session(args):
             # The producer must wait until that clock is known so its packet
             # resampling preserves 1x playback speed on any supported device.
             output_rate = float(stream.samplerate)
-            if getattr(args, 'preview', False) and video_preview is None:
-                from tools.v7_video_preview import launch_video_preview
-                video_preview = launch_video_preview(
-                    args.video_source,
-                    live=True if getattr(args, 'video_live', False) else None)
-                args._video_preview = video_preview
-                if video_preview.warning:
-                    print({'status': 'video_preview_note',
-                           'message': video_preview.warning}, flush=True)
             if (not np.isfinite(args.speed) or
                     not P.MIN_PLAYBACK_SPEED <= args.speed <= P.MAX_PLAYBACK_SPEED):
                 raise ValueError(
@@ -4093,8 +4079,6 @@ def parser():
                       help='local video file or FFmpeg-supported live stream URL')
     send.add_argument('--video-live', action='store_true',
                       help='treat an HTTP(S) source as live instead of looping it')
-    send.add_argument('--preview', action='store_true',
-                      help='open video sources in a desktop player while sending')
     send.add_argument('--video-start', type=float, default=0.0,
                       metavar='SECONDS',
                       help='start a video file at this position (default: 0); '
@@ -4235,8 +4219,6 @@ if __name__ == '__main__':
             _resolve_send_source(args)
         except ValueError as exc:
             ap.error(str(exc))
-        if args.preview and args.source != 'video':
-            ap.error('--preview requires --source video')
         if args.rate is not None and args.rate <= 0:
             ap.error('--rate must be positive')
         if (not np.isfinite(args.speed) or

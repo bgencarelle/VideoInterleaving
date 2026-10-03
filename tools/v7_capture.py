@@ -634,6 +634,46 @@ def probe_duration(source, run=None):
     return duration
 
 
+def probe_frames(source, run=None):
+    """(frame rate, frame count) of a local file's first video stream.
+
+    Either is None when ffprobe does not report it (Matroska, for one, stores
+    no frame count). The rate is the stream's average frame rate.
+    """
+    if (_is_stream_url(source) or
+            not os.path.isfile(os.path.expanduser(str(source))) or
+            shutil.which('ffprobe') is None):
+        return None, None
+    try:
+        probe = (run or subprocess.run)(
+            ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+             '-show_entries', 'stream=avg_frame_rate,nb_frames',
+             '-of', 'default=nw=1', os.path.expanduser(str(source))],
+            capture_output=True, text=True, timeout=5)
+        if probe.returncode != 0:
+            return None, None
+        fields = dict(line.split('=', 1)
+                      for line in (probe.stdout or '').splitlines()
+                      if '=' in line)
+    except Exception:                    # no probe: position from wall time
+        return None, None
+    rate = count = None
+    try:
+        top, _slash, bottom = fields.get('avg_frame_rate', '').partition('/')
+        rate = float(top)/float(bottom or 1)
+        if not np.isfinite(rate) or rate <= 0:
+            rate = None
+    except (ValueError, ZeroDivisionError):
+        rate = None
+    try:
+        count = int(fields.get('nb_frames', ''))
+        if count <= 0:
+            count = None
+    except ValueError:
+        count = None
+    return rate, count
+
+
 class FilePlayback:
     """Pause, seek and restart for a looping local video file.
 
@@ -650,9 +690,18 @@ class FilePlayback:
     packets of it. A seek made while paused reads one picture at the new
     position and holds that.
 
-    Position is the start of the current reader plus the wall time it has
-    been delivering frames (the readers are real-time paced); it is not read
-    from the stream's timestamps.
+    Position is counted from the pictures actually read: the start of the
+    current reader plus (frames it has delivered)/``fps``. The readers pass
+    every decoded source frame through once (``-fps_mode passthrough``) and
+    the capture thread reads them all, so the count is exact in source
+    frames, and ``fps`` is the file's frame rate. It is reset by a seek, a
+    restart and the end of a pass from a seek position. The looping reader
+    repeats the file without a mark in the pipe, so its count wraps every
+    ``loop_frames`` (the file's frame count) when that is known, and
+    otherwise every ``duration``. Wall time is not used.
+
+    Only when ``fps`` is unknown (no ffprobe, or no rate in the file) does
+    the position fall back to the wall time the reader has been delivering.
 
     A reader's ``close()`` must be safe from another thread and make a blocked
     read fail; its optional ``release()`` is called on the reading thread once
@@ -662,8 +711,14 @@ class FilePlayback:
     paced = True
 
     def __init__(self, open_reader, duration=None, start=0.0, reader=None,
-                 clock=time.monotonic, idle=0.05, on_close=None):
+                 clock=time.monotonic, idle=0.05, on_close=None, fps=None,
+                 loop_frames=None):
         self._open_reader = open_reader
+        self.fps = (float(fps) if fps and np.isfinite(fps) and fps > 0
+                    else None)
+        self._loop_frames = (int(loop_frames) if loop_frames and
+                             loop_frames > 0 else None)
+        self._frames = 0
         self.duration = (float(duration) if duration and
                          np.isfinite(duration) and duration > 0 else None)
         self._clock = clock
@@ -700,11 +755,18 @@ class FilePlayback:
     def _position_locked(self):
         if self._first_frame_at is None:
             return self._position
-        position = self._reader_start+max(
-            0.0, self._clock()-self._first_frame_at)
+        looping = self._reader_start == 0
+        if self.fps is not None:
+            frames = self._frames
+            if looping and self._loop_frames:
+                return (frames % self._loop_frames)/self.fps
+            position = self._reader_start+frames/self.fps
+        else:
+            position = self._reader_start+max(
+                0.0, self._clock()-self._first_frame_at)
         if self.duration is not None:
-            if self._reader_start == 0:
-                position %= self.duration      # the looping reader
+            if looping:
+                position %= self.duration
             else:
                 position = min(position, self.duration)
         return position
@@ -814,6 +876,7 @@ class FilePlayback:
                         self._reader_generation = generation
                         self._reader_start = start
                         self._first_frame_at = None
+                        self._frames = 0
                 if stale is not None:
                     self._close_reader(stale)
                     self._release_reader(stale)
@@ -853,6 +916,7 @@ class FilePlayback:
                 elif current:
                     if self._first_frame_at is None:
                         self._first_frame_at = self._clock()
+                    self._frames += 1
                     self._held = frame
                     if still:
                         # One picture at the new position, then hold it.

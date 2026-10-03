@@ -151,14 +151,15 @@ stops the current send and opens the source picker; select the next source and
 press **Start**. Source-specific settings are retained while switching. The GUI
 restores the last configuration on launch but does not auto-start the sender.
 For video, use **Browse**, type a file path or URL, or drop a file onto the
-window. **Preview** is one setting: off, the picture in the window (with
-play/pause, restart and a seek bar for a video file; pause keeps transmitting
-the held picture), or **External player**, a separate desktop player; when `ffplay`
-is available, finite file/VOD preview requests infinite looping and mutes its
-audio. Live sources are not looped. The player has its own playback clock and
-is not frame-synchronized with the sender. A system-associated player fallback
-may control repeat and audio behavior itself. Camera and screen/display options
-are discovered when their pickers open.
+window. **Preview** is one setting: off, the picture in the window, or
+**Pop-out window**, the same picture in a separate window that can be moved
+and resized. Both show the sender's own frames (the captured source or the
+encoder input), so both follow pause and seek; they are never open together.
+For a video file the Live page has play/pause, restart and a seek bar that
+can be clicked or dragged; pause keeps transmitting the held picture. If the
+pop-out window cannot be opened (no display), the GUI says so and sends
+without a preview. Camera and screen/display options are discovered when
+their pickers open.
 
 The GUI offers four wire profiles: **Aspect Fold 500** (stereo, the default),
 **Fold 500** (stereo), and the mono-video **aspect colour Fold 500** and

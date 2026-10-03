@@ -186,7 +186,7 @@ class SenderGuiTests(unittest.TestCase):
     def test_selected_sample_rate_profile_and_video_path_reach_cli(self):
         self.settings.update(source='video',
                              video_source='https://media.example/a clip.mp4',
-                             video_live=True, preview='external',
+                             video_live=True, preview='popout',
                              profile='aspect-fold-500', speed='1.5')
 
         command = build_command(self.settings, self.devices, self.sd)
@@ -197,14 +197,14 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(args.video_source,
                          'https://media.example/a clip.mp4')
         self.assertTrue(args.video_live)
-        self.assertTrue(args.preview)
-        self.assertIn('--preview', command)
+        self.assertNotIn('--preview', command)     # no separate player
         self.assertEqual(args.speed, 1.5)
 
-    def test_preview_is_not_forwarded_for_non_video_sources(self):
-        self.settings.update(source='screen', preview='external')
+    def test_no_preview_choice_adds_a_player_flag(self):
+        self.settings.update(source='screen', preview='popout')
         command = build_command(self.settings, self.devices, self.sd)
         self.assertNotIn('--preview', command)
+        self.assertNotIn('--image-preview-port', command)   # no port given
 
     def test_mono_video_fold_profile_reaches_cli_and_uses_box_model(self):
         self.settings.update(profile='mono-colour-500', mono_video_side='right')
@@ -1367,7 +1367,7 @@ class SenderGuiTests(unittest.TestCase):
         gui.page = 'live'
         gui.process = object()
         gui.settings.update(source='video', video_source='clip.mp4',
-                            preview='external', camera='camera-one')
+                            preview='popout', camera='camera-one')
         gui._canvas((960, 720))
         rect = gui.hits['change_source']
         position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
@@ -1388,7 +1388,7 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(gui.dropdown, 'source')
         gui._assign('source', 'screen')
         self.assertEqual(gui.settings['video_source'], 'clip.mp4')
-        self.assertEqual(gui.settings['preview'], 'external')
+        self.assertEqual(gui.settings['preview'], 'popout')
         self.assertEqual(gui.settings['camera'], 'camera-one')
 
     def test_sender_preferences_restore_last_settings_and_stable_devices(self):

@@ -3,8 +3,9 @@
 
 The sender runs in its own process. There is one preview setting: off, the
 picture in this window (it arrives on a separate bounded loopback channel), or
-the source in a desktop media player. For a video file the Live page also has
-transport controls, sent to the sender over its control pipe.
+the same picture in a pop-out window (tools/v7_preview_popout.py, a small
+process this GUI forwards the pictures to). For a video file the Live page
+also has transport controls, sent to the sender over its control pipe.
 """
 import errno
 import json
@@ -111,11 +112,12 @@ DCT_PROFILES = FOLDED_PROFILES
 BOOL_FIELDS = ('video_live', 'dct_encode',
                'luma_adjust', 'luma_adjust_linear', 'pixel_encode',
                'clip_aware')
-# One preview at a time: none, the pane on the Live page, or muted ffplay.
+# One preview at a time: none, the pane on the Live page, or the same
+# pictures in a separate window.
 PREVIEW_CHOICES = (
     ('Off', 'off'),
     ('In the window', 'window'),
-    ('External player · video file or URL', 'external'),
+    ('Pop-out window', 'popout'),
 )
 PREVIEW_STAGE_LABELS = (('source', 'Source'), ('resized', 'Encoder input'))
 MONO_VIDEO_SIDE_CHOICES = (
@@ -140,9 +142,10 @@ FIELD_HELP = {
     'capture_fps': 'Choose a frame rate reported by the capture source, or leave it at Source default.',
     'video_source': 'Choose a video with Browse, type a path or URL, or drop a file on the window.',
     'preview': ('In the window: the Live page shows the captured source or '
-                'the encoder input. External player: the same file or URL in '
-                'muted ffplay, on its own clock (it does not follow pause or '
-                'seek). Use the receiver to inspect the decoded output.'),
+                'the encoder input. Pop-out window: the same picture in a '
+                'separate window that can be moved and resized; it follows '
+                'pause and seek. Use the receiver to inspect the decoded '
+                'output.'),
     'video_live': 'Treat an HTTP(S) video URL as a live stream rather than a looping clip.',
     'camera': 'Choose a camera discovered from the host capture devices.',
     'screen_target': 'Choose the monitor or screen capture device. Discovery runs only when you open this picker.',
@@ -159,8 +162,7 @@ FIELD_HELP = {
     'mono_video_side': ('For the mono video profile, carry the modem on one '
                         'leg and leave the other free for separate audio.'),
     'source_audio': ('In mono-video mode, route the source soundtrack by '
-                     'default, or select an input device or Off. '
-                     'This is separate from the muted source-player preview.'),
+                     'default, or select an input device or Off.'),
     'source_audio_device': 'Choose an explicit microphone, line, or loopback input device.',
     'source_audio_input_side': 'Select one input leg or downmix stereo input to mono.',
     'source_audio_gain': 'Gain applied only to source audio on the free output leg.',
@@ -473,14 +475,18 @@ def _restore_sender_settings(target, saved):
                 target[key] = value
         elif value is None or isinstance(value, (str, int, float, bool)):
             target[key] = value
-    if saved.get('preview') not in dict(PREVIEW_CHOICES).values():
+    if saved.get('preview') == 'external':
+        # The external player became the pop-out window.
+        target['preview'] = 'popout'
+    elif saved.get('preview') not in dict(PREVIEW_CHOICES).values():
         # Earlier versions had two switches (and, before that,
-        # 'encoded_preview' for the pane). The pane wins over the player.
+        # 'encoded_preview' for the pane). The pane wins over the separate
+        # player, which is now the pop-out window.
         image = saved.get('image_preview')
         if not isinstance(image, bool):
             image = saved.get('encoded_preview') is True
         target['preview'] = ('window' if image else
-                             'external' if saved.get('video_preview') is True
+                             'popout' if saved.get('video_preview') is True
                              else 'off')
     if target.get('preview_stage') not in ('source', 'resized'):
         target['preview_stage'] = 'resized'
@@ -1359,8 +1365,6 @@ def build_command(settings, devices, sd_module=None, python=None,
         if settings.get('video_live'):
             if _is_stream_url(checked['video_source']):
                 command.append('--video-live')
-        if settings.get('preview') == 'external':
-            command.append('--preview')
         if (video_start and video_start > 0 and
                 not _is_stream_url(checked['video_source'])):
             command.extend(('--video-start', f'{float(video_start):.3f}'))
@@ -1384,9 +1388,9 @@ def build_command(settings, devices, sd_module=None, python=None,
     if capture_filter != 'auto':
         command.extend(('--capture-filter', capture_filter))
     command.append('--gui-control')
-    # Either the pane or the player, never both.
+    # The pane and the pop-out show the same pictures from one channel.
     if (image_preview_port is not None and
-            settings.get('preview', 'window') == 'window'):
+            settings.get('preview', 'window') in ('window', 'popout')):
         command.extend(('--image-preview-port', str(int(image_preview_port)),))
     return command
 
@@ -1548,6 +1552,11 @@ class SenderGui:
         self.preview_stage = None
         self.preview_handoff_ns = None
         self.preview_stage_frames = {}
+        self.preview_datagrams = {}
+        self.popout = None
+        self._popout_address = None
+        self._seek_drag = None
+        self._seek_track = None
         self.preview_error = None
         self.preview_reader_error_reported = False
         self.stop_requested = False
@@ -2065,6 +2074,7 @@ class SenderGui:
     def _assign(self, dest, value):
         self.settings[dest] = value
         if dest == 'preview_stage':
+            self._forward_popout()
             frame = self.preview_stage_frames.get(value)
             self.preview_stage = value
             if frame is None:
@@ -2146,14 +2156,130 @@ class SenderGui:
             self._resume_saved_at = time.monotonic()
             self._persist_preferences()
 
-    def _transport_state(self):
-        """(position, duration, paused) shown by the transport controls."""
+    def _transport_state(self, dragging=True):
+        """(position, duration, paused) shown by the transport controls.
+
+        While the seek bar is dragged the position is the one under the
+        pointer, whatever the sender reports meanwhile.
+        """
         if self.process is not None and self.playback is not None:
-            return (self.playback['position'], self.playback['duration'],
-                    self.playback['paused'])
-        entry = self.resume_positions.get(
-            _resume_key(self.settings.get('video_source', ''))) or {}
-        return self._resume_position(), _number(entry.get('duration')), False
+            state = (self.playback['position'], self.playback['duration'],
+                     self.playback['paused'])
+        else:
+            entry = self.resume_positions.get(
+                _resume_key(self.settings.get('video_source', ''))) or {}
+            state = (self._resume_position(), _number(entry.get('duration')),
+                     False)
+        if dragging and self._seek_drag is not None and state[1]:
+            state = (self._seek_drag*state[1],)+state[1:]
+        return state
+
+    # ---- seek bar: press, drag, release ---------------------------------
+    def _seek_fraction(self, x):
+        left, _top, right, _bottom = self._seek_track
+        return max(0.0, min(1.0, (x-left)/max(1, right-left)))
+
+    def _seek_press(self, x):
+        """The bar follows the pointer; one seek is sent on release."""
+        self._seek_track = self.hits['transport:seek']
+        fraction = self._seek_fraction(x)
+        if not self._transport_state()[1]:
+            self._transport('seek', fraction)   # says the length is unknown
+            return
+        self._seek_drag = fraction
+        self.dirty = True
+
+    def _on_cursor(self, _window, x, _y):
+        if self._seek_drag is not None:
+            self._seek_drag = self._seek_fraction(x)
+            self.dirty = True
+
+    def _seek_release(self, x):
+        if self._seek_drag is None:
+            return
+        fraction = self._seek_fraction(x)
+        self._seek_drag = None
+        self._transport('seek', fraction)
+
+    # ---- pop-out preview window -----------------------------------------
+    def _open_popout(self):
+        """Start the pop-out window process; sending never depends on it.
+
+        Returns a message when it could not be started.
+        """
+        try:
+            process = subprocess.Popen(
+                [sys.executable, str(ROOT/'tools'/'v7_preview_popout.py')],
+                cwd=str(ROOT), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, text=True, encoding='utf-8',
+                errors='replace', bufsize=1)
+        except (OSError, ValueError) as exc:
+            return ('Pop-out window unavailable; sending without a preview: '
+                    f'{exc}')
+        self.popout = process
+        self._popout_address = None
+        threading.Thread(target=self._read_popout, args=(process,),
+                         name='v7-send-gui-popout', daemon=True).start()
+        return None
+
+    def _read_popout(self, process):
+        """Learn the window's port; report when the window is gone."""
+        message = None
+        try:
+            for line in process.stdout:
+                try:
+                    record = json.loads(line)
+                    status = record.get('status')
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                if status == 'popout_ready' and self.popout is process:
+                    self._popout_address = ('127.0.0.1', int(record['port']))
+                    self._forward_popout()
+                elif status == 'popout_error':
+                    message = str(record.get('message') or
+                                  'Pop-out window unavailable.')
+        except Exception as exc:
+            message = f'Pop-out window failed: {exc}'
+        self.events.put(('popout_exit', (process, message)))
+        self._wake()
+
+    def _forward_popout(self, stage=None):
+        """Send the newest picture of the selected stage to the pop-out."""
+        selected = self.settings.get('preview_stage', 'resized')
+        address, channel = self._popout_address, self._preview_socket
+        newest = self.preview_datagrams.get(selected)
+        if (stage not in (None, selected) or address is None or
+                channel is None or newest is None):
+            return
+        try:
+            channel.sendto(newest[1], address)
+        except OSError:
+            pass                          # the next picture follows shortly
+
+    @staticmethod
+    def _end_popout(process):
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            try:
+                process.terminate()
+            except OSError:
+                pass
+        except OSError:
+            pass
+
+    def _close_popout(self):
+        """Close the window: it ends when its control pipe closes."""
+        process, self.popout = self.popout, None
+        self._popout_address = None
+        if process is None:
+            return
+        try:
+            process.stdin.close()
+        except (OSError, ValueError, AttributeError):
+            pass
+        threading.Thread(target=self._end_popout, args=(process,),
+                         name='v7-send-gui-popout-close', daemon=True).start()
 
     def _send_transport(self, command, position=None):
         control = getattr(self.process, 'stdin', None)
@@ -2169,7 +2295,7 @@ class SenderGui:
         """A click on play/pause, restart or the seek bar."""
         if not self._file_source():
             return
-        position, duration, paused = self._transport_state()
+        position, duration, paused = self._transport_state(dragging=False)
         running = self.process is not None and not self.stop_requested
         try:
             if action == 'play_pause':
@@ -2245,7 +2371,7 @@ class SenderGui:
         try:
             preview_socket = None
             preview_warning = None
-            if self.settings.get('preview') == 'window':
+            if self.settings.get('preview') in ('window', 'popout'):
                 try:
                     preview_socket = socket.socket(socket.AF_INET,
                                                    socket.SOCK_DGRAM)
@@ -2292,7 +2418,12 @@ class SenderGui:
 
         self.process = process
         self.playback = None
+        self._seek_drag = None
         self._preview_socket = preview_socket
+        self.preview_datagrams = {}
+        if (preview_socket is not None and
+                self.settings.get('preview') == 'popout'):
+            preview_warning = self._open_popout()
         self.preview_image = None
         self.preview_counter = None
         self.preview_aspect = None
@@ -2385,6 +2516,16 @@ class SenderGui:
                 if parsed is None:
                     continue
                 counter, aspect, handoff_ns, stage, jpeg = parsed
+                if (self.process is not process or
+                        self._preview_socket is not preview_socket):
+                    continue
+                earlier = self.preview_datagrams.get(stage)
+                if earlier is None or handoff_ns >= earlier[0]:
+                    self.preview_datagrams[stage] = (handoff_ns, newest)
+                    # The pop-out gets the datagram the pane would decode.
+                    self._forward_popout(stage)
+                if self.settings.get('preview') == 'popout':
+                    continue             # nothing is drawn in this window
                 try:
                     from PIL import Image
                     import io
@@ -2529,6 +2670,8 @@ class SenderGui:
                     self.playback = None
                     self._persist_preferences()
                 self._close_preview_socket()
+                self._close_popout()
+                self._seek_drag = None
                 self.stop_requested = False
                 self.sender_device_lost = False
                 if return_code == 0:
@@ -2541,6 +2684,15 @@ class SenderGui:
                         self._open_source_picker()
                 if self.close_when_stopped and self._window is not None:
                     self._glfw.set_window_should_close(self._window, True)
+            elif kind == 'popout_exit':
+                process, message = value
+                if process is self.popout:      # not closed by this GUI
+                    self.popout = None
+                    self._popout_address = None
+                    self.preview_error = self.notice = message or (
+                        'Pop-out window closed; still sending.'
+                        if self.process is not None else
+                        'Pop-out window closed.')
             elif kind == 'devices':
                 self._apply_device_snapshot(value)
         if changed:
@@ -2751,6 +2903,24 @@ class SenderGui:
                   else (188, 202, 213))
         draw.text((42, 165), _fit(self.notice, small, width-84),
                   font=small, fill=(165, 187, 202))
+        if self.settings.get('preview') == 'popout':
+            # The pop-out window shows the stage chosen here.
+            right = width-36
+            for stage, label in reversed(PREVIEW_STAGE_LABELS):
+                left = right-int(small.getlength(label))-20
+                rect = (left, 129, right, 155)
+                active = self.settings.get('preview_stage') == stage
+                draw.rounded_rectangle(
+                    rect, radius=4,
+                    fill=(42, 78, 99) if active else (17, 29, 39),
+                    outline=(94, 143, 168) if active else (48, 73, 90))
+                draw.text((left+10, 135), label, font=small,
+                          fill=(235, 242, 247))
+                self.hits[f'preview_stage:{stage}'] = rect
+                right = left-8
+            label = 'Pop-out'
+            draw.text((right-int(small.getlength(label))-4, 135), label,
+                      font=small, fill=(132, 158, 176))
 
         device = self._device()
         profile_label = next((label for label, value in PROFILE_CHOICES
@@ -2961,6 +3131,10 @@ class SenderGui:
 
     def _on_mouse(self, glfw, window, button, action, _mods):
         right_button = getattr(glfw, 'MOUSE_BUTTON_RIGHT', None)
+        if (self._seek_drag is not None and action != glfw.PRESS and
+                button == glfw.MOUSE_BUTTON_LEFT):
+            self._seek_release(glfw.get_cursor_pos(window)[0])
+            return
         if (action != glfw.PRESS or
                 button not in (glfw.MOUSE_BUTTON_LEFT, right_button)):
             return
@@ -3020,8 +3194,7 @@ class SenderGui:
         elif hit in ('transport:play_pause', 'transport:restart'):
             self._transport(hit.split(':', 1)[1])
         elif hit == 'transport:seek':
-            track = self.hits[hit]
-            self._transport('seek', (x-track[0])/max(1, track[2]-track[0]))
+            self._seek_press(x)
         elif hit == 'browse:video_source':
             if self.process is not None:
                 self.notice = 'Settings are locked while the sender is running.'
@@ -3226,6 +3399,7 @@ class SenderGui:
                 window, lambda w, b, a, m: self._on_mouse(glfw, w, b, a, m))
             glfw.set_key_callback(
                 window, lambda w, k, s, a, m: self._on_key(glfw, w, k, s, a, m))
+            glfw.set_cursor_pos_callback(window, self._on_cursor)
             glfw.set_char_callback(window, self._on_char)
             glfw.set_drop_callback(window, self._on_drop)
             glfw.set_scroll_callback(window, self._on_scroll)
@@ -3301,6 +3475,7 @@ class SenderGui:
             if self.reader is not None:
                 self.reader.join(timeout=1)
             self._close_preview_socket()
+            self._close_popout()
             if self.preview_reader is not None:
                 self.preview_reader.join(timeout=1)
             self._glfw = None
