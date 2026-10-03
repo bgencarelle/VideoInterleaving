@@ -873,7 +873,8 @@ PRESHRINK_FACTOR = 4
 
 
 def _direct_planes(rgb, grids, shapes, brightness, gamma, sharpen,
-                   sharpen_strength, clarity, chroma_gain, luminance=False):
+                   sharpen_strength, clarity, chroma_gain, luminance=False,
+                   preshrink=None):
     """Validated, pre-shrunk and pixel-enhanced Y[/Cb/Cr] planes in [0, 1].
 
     With ``luminance`` the result also carries the source's linear luminance
@@ -919,8 +920,9 @@ def _direct_planes(rgb, grids, shapes, brightness, gamma, sharpen,
     luma_rows, luma_cols = grids[0]
     if max(height, width) > 4096*min(luma_rows, luma_cols):
         raise ValueError('source frame is too large for the direct encode')
-    block_y = max(1, int(height/(PRESHRINK_FACTOR*luma_rows)+.5))
-    block_x = max(1, int(width/(PRESHRINK_FACTOR*luma_cols)+.5))
+    factor = PRESHRINK_FACTOR if preshrink is None else float(preshrink)
+    block_y = max(1, int(height/(factor*luma_rows)+.5))
+    block_x = max(1, int(width/(factor*luma_cols)+.5))
     rows, cols = -(-height//block_y), -(-width//block_x)
     # (the filter's stopband covers the sent band while the decimated plane
     # is at least 1.75 times the grid)
@@ -1523,11 +1525,19 @@ def direct_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
     list passed as ``kernel_frame_out`` receives the frame's KernelFrame, whose
     ``post`` the caller runs after luma adjustment.
     """
+    preshrink = None
+    if kernel is not None and kernel.kernel.has_prefilter:
+        try:
+            preshrink = (kernel.kernel.prefilter(kernel.params) or {}).get(
+                'preshrink')
+        except Exception as exc:
+            kernel.kernel.note_failure(exc)
     planes, grids, shapes, taper, target, blocks, source = _direct_planes(
         rgb, grids, shapes, brightness, gamma, sharpen, sharpen_strength,
         clarity, chroma_gain,
         luminance=(luminance_out is not None and
-                   ('linear' if linear_light else True)))
+                   ('linear' if linear_light else True)),
+        preshrink=preshrink)
     frame = None
     if kernel is not None:
         frame = KernelFrame(kernel, grids, shapes, kernel_masks, planes)

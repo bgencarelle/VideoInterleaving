@@ -728,7 +728,16 @@ A kernel supplies any of:
   window harsh on dark edges (Lanczos overshoot 15% against 7%);
 - a non-linear `post(grid, ctx)`, run on the final values after luma
   adjustment, with `ctx.project` (keep only the coefficients the wire carries)
-  and `ctx.reduce` (local min/max of the source).
+  and `ctx.reduce` (local min/max of the source);
+- a `prefilter()` that chooses the pre-shrink factor (1.75 to 8 times the
+  luma grid; 4 is the shipped encoder) of the block-average stage before the
+  transform. The 2:1 decimation taps after it were measured and do not matter
+  (all designs tried within 0.1 dB on natural pictures), the block size does:
+  on dense texture factor 8 is 8 dB closer to the full-resolution transform
+  in the top half of the band than 4, on smooth pictures nothing changes.
+
+`tools/v7_kernel_bench.py --display bilinear|bicubic|nearest` judges a
+kernel through the viewer's upscaler instead of an ideal enlargement.
 
 `luma_mix` and `chroma_mix` are added to every kernel (0 off, 1 as written).
 In the GUI the kernel, its parameters, DCT sharpen strength, clarity and

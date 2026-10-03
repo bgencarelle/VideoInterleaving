@@ -62,6 +62,7 @@ ENV_DIRS = 'V7_KERNEL_DIR'
 HOST_PARAMS = ('luma_mix', 'chroma_mix')
 RESERVED = frozenset(HOST_PARAMS) | {'ctx', 'plane', 'grid', 'nu', 'x'}
 GAIN_LIMITS = (-2.0, 8.0)
+PRESHRINK_LIMITS = (1.75, 8.0)
 SLOW_POST_MS = 25.0           # a refit this slow eats a third of a 12 fps frame
 SLOW_BUILD_MS = 100.0         # a window this slow to build stalls a slider drag
 CACHE_LIMIT = 256
@@ -194,10 +195,10 @@ def _reduce_axis(array, axis, count, how):
     return reduced
 
 
-def _accepted(function):
+def _accepted(function, skip=1):
     """Parameter names a hook takes, or None when it takes any (**kwargs)."""
     names = []
-    for parameter in list(inspect.signature(function).parameters.values())[1:]:
+    for parameter in list(inspect.signature(function).parameters.values())[skip:]:
         if parameter.kind is inspect.Parameter.VAR_KEYWORD:
             return None
         if parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD,
@@ -231,15 +232,17 @@ class Kernel:
             self.params[key] = Param.coerce(key, spec)
         self.params.update(HOST_PARAM_SPECS)
         self._hooks = {}
-        for hook in ('gain', 'response', 'kernel', 'post'):
+        for hook in ('gain', 'response', 'kernel', 'post', 'prefilter'):
             function = getattr(module, hook, None)
             if function is None:
                 continue
             if not callable(function):
                 raise KernelError(f'{hook} is not callable')
-            self._hooks[hook] = (function, _accepted(function))
+            self._hooks[hook] = (function, _accepted(
+                function, 0 if hook == 'prefilter' else 1))
         if not self._hooks:
-            raise KernelError('defines none of gain, response, kernel or post')
+            raise KernelError('defines none of gain, response, kernel, post '
+                              'or prefilter')
         if not 0.25 <= self.support <= 16:
             raise KernelError('SUPPORT must be between 0.25 and 16')
         self._cache = {}
@@ -257,6 +260,37 @@ class Kernel:
     @property
     def has_post(self):
         return 'post' in self._hooks
+
+    @property
+    def has_prefilter(self):
+        return 'prefilter' in self._hooks
+
+    def prefilter(self, params):
+        """Options for the stage before the DCT: ``{'preshrink': factor}``.
+
+        ``factor`` is how many times the luma grid the block-averaged plane
+        is (1.75 to 8; the shipped encoder uses 4). Anything else a kernel
+        returns is ignored. None when the kernel does not choose.
+        """
+        if 'prefilter' not in self._hooks:
+            return None
+        function, accepted = self._hooks['prefilter']
+        arguments = {name: value for name, value in params.items()
+                     if name not in HOST_PARAMS and
+                     (accepted is None or name in accepted)}
+        result = function(**arguments)
+        if result is None:
+            return None
+        if not isinstance(result, dict):
+            raise KernelError('prefilter must return a dict or None')
+        options = {}
+        if 'preshrink' in result:
+            value = float(result['preshrink'])
+            if not np.isfinite(value) or not PRESHRINK_LIMITS[0] <= value <= PRESHRINK_LIMITS[1]:
+                raise KernelError('preshrink must be between '
+                                  f'{PRESHRINK_LIMITS[0]:g} and {PRESHRINK_LIMITS[1]:g}')
+            options['preshrink'] = value
+        return options
 
     def defaults(self):
         return {name: spec.default for name, spec in self.params.items()}
@@ -428,6 +462,7 @@ def _selftest(kernel):
             raise KernelError('gain has the wrong shape')
         values = rng.random(grid)
         kernel.post(values, ctx, params)
+    kernel.prefilter(params)
 
 
 def load_kernel(path):

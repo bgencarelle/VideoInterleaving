@@ -40,12 +40,177 @@ TRIANGLE = '''
 '''
 
 
+class EnlargementKernelTests(unittest.TestCase):
+    """The kernels written for a picture that is enlarged afterwards."""
+
+    NAMES = ('upscale_precomp', 'shock_edge', 'csf_peak', 'slepian', 'tv_cartoon')
+
+    def setUp(self):
+        self.registry = K.open_registry()
+        self.frame = _frame()
+        self.masks = []
+        for index, grid in enumerate(GRIDS):
+            mask = np.zeros(grid, bool)
+            mask[:SHAPES[index][0], :SHAPES[index][1]] = True
+            self.masks.append(mask)
+
+    def encode(self, name, **params):
+        frame = []
+        values = direct_dct_values(
+            self.frame, GRIDS, SHAPES, kernel=self.registry.select(name, params),
+            kernel_masks=self.masks, kernel_frame_out=frame)
+        return frame[0].post(values, GRIDS) if frame else values
+
+    def test_each_one_keeps_flat_pictures_flat_and_stays_finite(self):
+        flat = np.full((480, 400, 3), 120, np.uint8)
+        reference = direct_dct_values(flat, GRIDS, SHAPES)
+        for name in self.NAMES:
+            with self.subTest(kernel=name):
+                frame = []
+                values = direct_dct_values(
+                    flat, GRIDS, SHAPES, kernel=self.registry.select(name, {}),
+                    kernel_masks=self.masks, kernel_frame_out=frame)
+                if frame:
+                    values = frame[0].post(values, GRIDS)
+                self.assertTrue(np.isfinite(values).all())
+                np.testing.assert_allclose(values, reference, atol=2e-3)
+
+    def test_each_one_changes_the_picture(self):
+        reference = direct_dct_values(self.frame, GRIDS, SHAPES)
+        for name in self.NAMES:
+            with self.subTest(kernel=name):
+                self.assertGreater(
+                    np.abs(self.encode(name, **(
+                        {'amount': 0.6} if name == 'csf_peak' else {}))
+                           - reference).max(), 1e-3)
+
+    def test_precompensation_lifts_what_the_upscaler_would_soften(self):
+        kernel = self.registry.get('upscale_precomp')
+        from animation_modem.v7_kernels import KernelContext
+        ctx = KernelContext(0, GRIDS[0], SHAPES[0], self.masks[0], None)
+        gains = {}
+        for upscaler in (0, 1, 2, 3):
+            gain = kernel.gain(ctx, kernel.resolve({'upscaler': upscaler}))
+            gains[upscaler] = gain[0, SHAPES[0][1]*3//4]        # nu = 0.375
+        self.assertGreater(gains[0], gains[1])          # bilinear needs most
+        self.assertGreater(gains[1], 1.0)
+        self.assertAlmostEqual(gains[3], 1.0, places=6)  # ideal: nothing to undo
+        self.assertLessEqual(max(gains.values()), 6.0)
+
+    def test_the_shock_filter_does_not_leave_the_source_range(self):
+        step = np.zeros((480, 400, 3), np.uint8)
+        step[:, 200:] = 255
+        frame = []
+        values = direct_dct_values(
+            step, GRIDS, SHAPES, kernel=self.registry.select('shock_edge', {}),
+            kernel_masks=self.masks, kernel_frame_out=frame)
+        values = frame[0].post(values, GRIDS)
+        luma = values[:GRIDS[0][0]*GRIDS[0][1]].reshape(GRIDS[0])
+        self.assertTrue(np.isfinite(luma).all())
+        self.assertLess(np.abs(luma).max(), 1.15)
+
+    def test_tv_cartoon_flattens_texture(self):
+        rng = np.random.default_rng(5)
+        noisy = np.clip(128 + rng.normal(0, 20, (480, 400, 3)), 0, 255).astype(np.uint8)
+        frame = []
+        values = direct_dct_values(
+            noisy, GRIDS, SHAPES,
+            kernel=self.registry.select('tv_cartoon', {'keep': 0.0, 'weight': 0.08}),
+            kernel_masks=self.masks, kernel_frame_out=frame)
+        values = frame[0].post(values, GRIDS)
+        plain = []
+        untouched = direct_dct_values(
+            noisy, GRIDS, SHAPES,
+            kernel=self.registry.select('tv_cartoon', {'weight': 0.0}),
+            kernel_masks=self.masks, kernel_frame_out=plain)
+        untouched = plain[0].post(untouched, GRIDS)
+
+        def variation(vector):
+            luma = vector[:GRIDS[0][0]*GRIDS[0][1]].reshape(GRIDS[0])
+            return np.abs(np.diff(luma, axis=0)).sum() + np.abs(np.diff(luma, axis=1)).sum()
+        self.assertLess(variation(values), 0.8*variation(untouched))
+
+
+class ViewerAndPrefilterTests(unittest.TestCase):
+    def setUp(self):
+        self.registry = K.open_registry()
+
+    def test_the_shipped_pre_shrink_factor_is_the_default(self):
+        frame = _frame(rows=1080, cols=1920)
+        plain = direct_dct_values(frame, GRIDS, SHAPES)
+        four = direct_dct_values(
+            frame, GRIDS, SHAPES,
+            kernel=self.registry.select('fine_detail', {'factor': 4.0}))
+        np.testing.assert_array_equal(plain, four)
+
+    def test_a_finer_pre_shrink_changes_a_detailed_picture(self):
+        rng = np.random.default_rng(4)
+        stripes = np.zeros((1080, 1920, 3), np.uint8)
+        stripes[:, ::2] = 200
+        stripes += rng.integers(0, 40, stripes.shape, dtype=np.uint8)
+        plain = direct_dct_values(stripes, GRIDS, SHAPES)
+        fine = direct_dct_values(
+            stripes, GRIDS, SHAPES,
+            kernel=self.registry.select('fine_detail', {'factor': 8.0}))
+        self.assertGreater(np.abs(plain - fine).max(), 1e-3)
+        self.assertTrue(np.isfinite(fine).all())
+
+    def test_a_prefilter_outside_the_limits_is_refused_and_bypassed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder)/'wild.py').write_text(textwrap.dedent('''
+                def prefilter():
+                    return {'preshrink': 50}
+            '''))
+            registry = K.KernelRegistry([folder])
+            registry.scan()
+            # refused at load: the self-test runs the hook
+            self.assertTrue(registry.errors)
+            self.assertIn('preshrink', registry.errors[0][1])
+
+    def test_the_viewer_solve_gets_closer_to_the_ideal_enlargement(self):
+        module = self.registry.get('viewer_solve').module
+        grid, sent, up = (96, 80), (48, 40), 4
+        mask = np.zeros(grid, bool)
+        mask[:sent[0], :sent[1]] = True
+        rng = np.random.default_rng(9)
+        plane = np.clip(np.cumsum(np.cumsum(rng.normal(0, .3, grid), 0), 1)/40
+                        + .5, 0, 1)
+        ctx = K.KernelContext(0, grid, sent, mask, None)
+        from scipy.fft import dctn, idctn
+        solved = module.post(plane, ctx, viewer=0, iterations=14, lam=0.02,
+                             up=up, tame=0)
+        my, mx = module._model(0, *grid, *sent, up)
+        iy, ix = module._ideal(*grid, *sent, up)
+        base = dctn(plane, norm='ortho')*mask
+        ideal = iy @ base @ ix.T
+        seen = lambda x: my @ (dctn(x, norm='ortho')*mask) @ mx.T
+        plain_error = np.linalg.norm(seen(plane) - ideal)
+        solved_error = np.linalg.norm(seen(solved) - ideal)
+        self.assertLess(solved_error, 0.6*plain_error)
+        self.assertTrue(np.isfinite(solved).all())
+
+    def test_the_viewer_solve_leaves_flat_and_chroma_planes_alone(self):
+        module = self.registry.get('viewer_solve').module
+        grid, sent = (96, 80), (48, 40)
+        flat = np.full(grid, .4)
+        ctx = K.KernelContext(0, grid, sent, None, None)
+        out = module.post(flat, ctx, viewer=1, iterations=10, lam=.02, up=4, tame=0)
+        np.testing.assert_allclose(out, flat, atol=1e-6)
+        chroma = K.KernelContext(1, (48, 40), (24, 20), None, None)
+        plane = np.random.default_rng(1).random((48, 40))
+        np.testing.assert_array_equal(
+            module.post(plane, chroma, viewer=1, iterations=10, lam=.02,
+                        up=4, tame=0), plane)
+
+
 class RegistryTests(unittest.TestCase):
     def test_shipped_kernels_all_load(self):
         registry = K.open_registry()
         self.assertEqual(registry.errors, [])
         for name in ('lanczos', 'mitchell', 'magic_kernel_sharp', 'gaussian',
-                     'band_taper', 'antiring'):
+                     'band_taper', 'antiring', 'upscale_precomp', 'shock_edge',
+                     'csf_peak', 'slepian', 'tv_cartoon', 'viewer_solve',
+                     'fine_detail'):
             self.assertIn(name, registry.names())
         self.assertEqual(registry.names()[0], K.REFERENCE)
 

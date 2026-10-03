@@ -72,11 +72,29 @@ def encode(rgb, selection, mask_set, post=True, adjust=True):
     return values
 
 
+DISPLAY = 'ideal'             # how the viewer enlarges the picture (--display)
+FILTERS = {'bilinear': Image.Resampling.BILINEAR,
+           'bicubic': Image.Resampling.BICUBIC,
+           'nearest': Image.Resampling.NEAREST}
+
+
+def enlarge(plane01, up):
+    """A native-grid plane as the viewer shows it: reduced to the sent
+    pixel (the receiver's own shape) and enlarged with its upscaler."""
+    rows, cols = plane01.shape
+    sent = plane01.reshape(rows//2, 2, cols//2, 2).mean((1, 3))
+    image = Image.fromarray(sent.astype(np.float32), 'F')
+    big = image.resize((cols*up, rows*up), FILTERS[DISPLAY])
+    return np.asarray(big, float)
+
+
 def shown(values, mask, up=UP):
     """What the receiver draws from the luma it was sent (at up x the grid)."""
     rows, cols = GRIDS[0]
     coefficients = dctn(values[:rows*cols].reshape(rows, cols), norm='ortho')
     coefficients[~mask] = 0
+    if DISPLAY != 'ideal':
+        return enlarge(idctn(coefficients, norm='ortho')*.5 + .5, up)
     big = np.zeros((rows*up, cols*up))
     big[:rows, :cols] = coefficients*up
     return idctn(big, norm='ortho')*.5 + .5
@@ -92,6 +110,14 @@ def shown_rgb(values, mask_set, up=4):
         coefficients[~mask] = 0
         # every plane is drawn at the luma grid's size times `up`
         height, width = GRIDS[0][0]*up, GRIDS[0][1]*up
+        if DISPLAY != 'ideal':
+            native = idctn(coefficients, norm='ortho')*.5 + .5
+            if native.shape != GRIDS[0]:          # chroma: to the luma grid
+                native = np.asarray(Image.fromarray(
+                    native.astype(np.float32), 'F').resize(
+                        (GRIDS[0][1], GRIDS[0][0]), Image.Resampling.BILINEAR))
+            planes.append(enlarge(native, up))
+            continue
         big = np.zeros((height, width))
         big[:rows, :cols] = coefficients*np.sqrt(height*width/(rows*cols))
         planes.append(idctn(big, norm='ortho')*.5+.5)
@@ -233,6 +259,9 @@ def main():
     parser.add_argument('--dct-kernel-dir', action='append', default=[])
     parser.add_argument('--param', action='append', default=[], metavar='KERNEL.NAME=VALUE')
     parser.add_argument('--guests', action='store_true')
+    parser.add_argument('--display', choices=('ideal', *FILTERS), default='ideal',
+                        help='how the viewer enlarges the picture (default: an '
+                             'ideal band-limited enlargement)')
     parser.add_argument('--no-luma-adjust', action='store_true',
                         help='measure without luma adjustment (the GUI default is on)')
     parser.add_argument('--sheet', metavar='FILE')
@@ -241,6 +270,8 @@ def main():
     parser.add_argument('--image', metavar='FILE',
                         help='picture for the contact sheet (default: synthetic)')
     args = parser.parse_args()
+    global DISPLAY
+    DISPLAY = args.display
     registry = open_registry(args.dct_kernel_dir)
     for path, message in registry.errors:
         print(f'skipped {path}: {message}', file=sys.stderr)
