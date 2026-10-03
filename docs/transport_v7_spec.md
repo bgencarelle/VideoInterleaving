@@ -435,6 +435,17 @@ sender starts output after one packet is buffered and queues at most one
 encoded batch. It uses the output device's native rate unless `--rate` is
 given.
 
+A local video file can be paused, restarted and seeked from the sender GUI
+(commands on the same control pipe as live brightness and gamma). Pause does
+not stop transmission: the sender goes on emitting packets of the held picture
+at the normal rate, so the receiver keeps its lock, and the file's soundtrack
+is silent until play. The index in the packets is the packet count, so it
+keeps counting through pause, seek and restart. The GUI saves the position of
+each file and Start resumes there (`--video-start SECONDS`); a changed or
+missing file, or a position past the end, starts from the beginning, and the
+file still repeats from the beginning when it ends. The GUI has one preview at
+a time: off, the picture in its window, or the source in an external player.
+
 Standalone receiver (`tools/v7_live.py receive`): automatic profile dispatch
 (section 14.1), `eof` endpoints, `tone-seeded` timing, forward and reverse
 detection, one packet per decode, one packet of history, tail memory on.
@@ -1013,8 +1024,9 @@ Decided and done:
    from 0.25x to 1x and from 2x to 4x is confirmed to lose nothing.
 7. Matched sum/difference pairing on the stereo profile against
    stereo-slices, to decide whether stereo-slices stays. Delayed.
-8. Sender conveniences, very low priority: resume a movie where it stopped;
-   playback controls on the preview window.
+8. Sender conveniences: resume a movie where it stopped and playback
+   controls on the preview window are built (section 8). Open: reading the
+   position from the stream's timestamps instead of the reader's wall time.
 9. Housekeeping: prune tests that only pin internals; port the stereo-slices
    sender and join to numba; find the cold-start test flakiness
    (`test_embedded_video_audio_uses_the_shared_capture_clock` and first-run

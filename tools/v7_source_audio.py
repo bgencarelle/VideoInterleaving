@@ -255,9 +255,8 @@ class FFmpegSourceAudio:
     """
 
     def __init__(self, source, sample_rate, live=None, buffer_seconds=2.0,
-                 target_samples=None):
-        from tools.v7_capture import (_LIVE_SCHEMES, _is_stream_url,
-                                      _realtime_input_options)
+                 target_samples=None, start=0.0):
+        from tools.v7_capture import _LIVE_SCHEMES, _is_stream_url
 
         source = os.path.expanduser(str(source))
         is_stream = _is_stream_url(source)
@@ -265,18 +264,9 @@ class FFmpegSourceAudio:
             raise ValueError(f'No such video file: {source}')
         scheme = source.split(':', 1)[0].lower() if is_stream else ''
         is_live = (scheme in _LIVE_SCHEMES if live is None else bool(live))
-        command = ['ffmpeg', '-nostdin', '-loglevel', 'error']
-        if not is_live:
-            command += ['-stream_loop', '-1']
-        elif is_stream:
-            command += ['-rw_timeout', '10000000']
-        command += _realtime_input_options(source, is_live)
-        command += [
-            '-i', source, '-map', '0:a:0?', '-vn', '-sn', '-dn',
-            '-af', 'aresample=async=1:first_pts=0',
-            '-ac', '1', '-ar', str(int(sample_rate)), '-c:a', 'pcm_f32le',
-            '-f', 'f32le', 'pipe:1',
-        ]
+        self._source = source
+        self._is_live = is_live
+        self._is_stream = is_stream
         self.sample_rate = int(sample_rate)
         self.buffer = SampleBuffer(round(self.sample_rate*buffer_seconds))
         self.clock_match = ClockMatchedReader(
@@ -284,23 +274,54 @@ class FFmpegSourceAudio:
         temp_dir = ROOT/'tmp'
         temp_dir.mkdir(parents=True, exist_ok=True)
         self.errors = tempfile.TemporaryFile(dir=temp_dir)
+        self._running = False
+        self._priming = False
+        self._needs_reset = False
         try:
-            self.proc = subprocess.Popen(
-                command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                stderr=self.errors, bufsize=0)
+            self._launch(start)
         except BaseException:
             self.errors.close()
             raise
+
+    def _command(self, start=0.0):
+        from tools.v7_capture import _realtime_input_options
+
+        start = max(0.0, float(start or 0.0))
+        command = ['ffmpeg', '-nostdin', '-loglevel', 'error']
+        if not self._is_live:
+            # A pass from a seek position plays to the end once; see
+            # tools.v7_capture.FilePlayback.
+            if start <= 0:
+                command += ['-stream_loop', '-1']
+        elif self._is_stream:
+            command += ['-rw_timeout', '10000000']
+        command += _realtime_input_options(self._source, self._is_live)
+        if start > 0:
+            command += ['-ss', f'{start:.3f}']
+        command += [
+            '-i', self._source, '-map', '0:a:0?', '-vn', '-sn', '-dn',
+            '-af', 'aresample=async=1:first_pts=0',
+            '-ac', '1', '-ar', str(self.sample_rate), '-c:a', 'pcm_f32le',
+            '-f', 'f32le', 'pipe:1',
+        ]
+        return command
+
+    def _launch(self, start):
+        self.proc = subprocess.Popen(
+            self._command(start), stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=self.errors, bufsize=0)
         self._stop = threading.Event()
         self._ended = False
-        self._thread = threading.Thread(target=self._pump, daemon=True)
+        self._thread = threading.Thread(
+            target=self._pump, args=(self.proc, self._stop), daemon=True)
+        self._running = True
         self._thread.start()
 
-    def _pump(self):
+    def _pump(self, proc, stop):
         remainder = b''
         try:
-            while not self._stop.is_set():
-                data = self.proc.stdout.read(65536)
+            while not stop.is_set():
+                data = proc.stdout.read(65536)
                 if not data:
                     break
                 data = remainder+data
@@ -315,12 +336,14 @@ class FFmpegSourceAudio:
             self.buffer.wake()
 
     def read(self, count):
-        return self.clock_match.read(count)
+        silence = _transport_silence(self, count)
+        return self.clock_match.read(count) if silence is None else silence
 
     def wait_for_samples(self, count, timeout):
         return self.buffer.wait_for(count, timeout, lambda: self._ended)
 
-    def close(self):
+    def _end_process(self):
+        self._running = False
         self._stop.set()
         if self.proc.poll() is None:
             self.proc.terminate()
@@ -332,7 +355,45 @@ class FFmpegSourceAudio:
         self._thread.join(timeout=2)
         if self.proc.stdout is not None:
             self.proc.stdout.close()
+
+    def halt(self):
+        """Stop reading (pause or seek); read() is silent until restart."""
+        if not self._running:
+            return
+        self._end_process()
+        self.buffer.clear()
+        self._needs_reset = True
+
+    def restart(self, start=0.0):
+        """Read again from a position, in step with a reopened video."""
+        self.halt()
+        self._priming = True
+        self._launch(start)
+
+    def close(self):
+        self._end_process()
         self.errors.close()
+
+
+def _transport_silence(source, count):
+    """Zeros while a file soundtrack is halted or refilling, else None.
+
+    Runs on the thread that reads the soundtrack, which is also the only
+    thread that touches the clock-matched reader: a pause or seek only sets
+    flags, and the reader is reset here before its next use.
+    """
+    if not source._running:
+        return np.zeros(max(0, int(count)), dtype=np.float32)
+    if source._priming:
+        # Refill to the usual fill level before reading again, as at start.
+        if (source.buffer.available < source.clock_match.target_samples and
+                not source._ended):
+            return np.zeros(max(0, int(count)), dtype=np.float32)
+        source._priming = False
+    if source._needs_reset:
+        source._needs_reset = False
+        source.clock_match.reset()
+    return None
 
 
 def _probe_stream_types(text):
@@ -366,9 +427,8 @@ class SharedVideoAudioSource:
 
     def __init__(self, source, sample_rate, width=320, scale_flags='bicubic',
                  live=None, target_samples=None, buffer_seconds=2.0,
-                 preserve_size=False):
-        from tools.v7_capture import (_LIVE_SCHEMES, _is_stream_url,
-                                      _realtime_input_options)
+                 preserve_size=False, start=0.0):
+        from tools.v7_capture import _LIVE_SCHEMES, _is_stream_url
 
         if not hasattr(os, 'mkfifo'):
             raise NotImplementedError('shared FFmpeg pipes require POSIX FIFOs')
@@ -436,76 +496,151 @@ class SharedVideoAudioSource:
             self.buffer, target_samples or round(int(sample_rate)*.08))
                            if self.has_audio else None)
         self.sample_rate = int(sample_rate)
+        self._source = source
+        self._ffmpeg = ffmpeg
+        self._is_live = is_live
+        self._is_stream = is_stream
+        self._width = int(width)
+        self._scale_flags = scale_flags
+        self._preserve_size = bool(preserve_size)
         self._stop = threading.Event()
         self._ended = not self.has_audio
         self._closed = False
-        self._close_lock = threading.Lock()
-        opened = []
+        self._close_lock = threading.RLock()
+        self._audio_thread = None
+        self._launch_id = 0
+        self._running = False
+        self._priming = False
+        self._needs_reset = False
+        self._reader = None
         try:
             os.mkfifo(self.video_path)
             if self.has_audio:
                 os.mkfifo(self.audio_path)
+            grab = self._launch(start)
+        except BaseException:
+            self.errors.close()
+            self._temporary.cleanup()
+            raise
+        grab.close = self.close
+        self.video_grab = grab
 
-            command = [ffmpeg, '-nostdin', '-y', '-loglevel', 'error']
-            if not is_live:
+    def _command(self, start=0.0):
+        from tools.v7_capture import (_realtime_input_options,
+                                      video_scale_filter)
+
+        start = max(0.0, float(start or 0.0))
+        command = [self._ffmpeg, '-nostdin', '-y', '-loglevel', 'error']
+        if not self._is_live:
+            # FFmpeg cannot combine an input seek with -stream_loop: a pass
+            # from a seek position plays to the end once, and FilePlayback
+            # then reopens the looping reader from the beginning.
+            if start <= 0:
                 command += ['-stream_loop', '-1']
-            elif is_stream:
-                command += ['-rw_timeout', '10000000']
-            command += _realtime_input_options(source, is_live)
-            command += ['-i', source, '-map', '0:v:0']
-            from tools.v7_capture import video_scale_filter
-            video_filter = video_scale_filter(source, width, scale_flags,
-                                              preserve_size)
-            if video_filter is not None:
-                command += ['-vf', video_filter]
-            command += ['-fps_mode', 'passthrough', '-pix_fmt', 'rgb24',
-                        '-c:v', 'ppm', '-f', 'image2pipe',
-                        str(self.video_path)]
-            if self.has_audio:
-                command += [
-                    '-map', '0:a:0', '-af', 'aresample=async=1:first_pts=0',
-                    '-ac', '1', '-ar', str(self.sample_rate),
-                    '-c:a', 'pcm_f32le', '-f', 'f32le', str(self.audio_path),
-                ]
-            self.proc = subprocess.Popen(
-                command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=self.errors, bufsize=0)
+        elif self._is_stream:
+            command += ['-rw_timeout', '10000000']
+        command += _realtime_input_options(self._source, self._is_live)
+        if start > 0:
+            command += ['-ss', f'{start:.3f}']
+        command += ['-i', self._source, '-map', '0:v:0']
+        video_filter = video_scale_filter(
+            self._source, self._width, self._scale_flags, self._preserve_size)
+        if video_filter is not None:
+            command += ['-vf', video_filter]
+        command += ['-fps_mode', 'passthrough', '-pix_fmt', 'rgb24',
+                    '-c:v', 'ppm', '-f', 'image2pipe',
+                    str(self.video_path)]
+        if self.has_audio:
+            command += [
+                '-map', '0:a:0', '-af', 'aresample=async=1:first_pts=0',
+                '-ac', '1', '-ar', str(self.sample_rate),
+                '-c:a', 'pcm_f32le', '-f', 'f32le', str(self.audio_path),
+            ]
+        return command
+
+    def _launch(self, start=0.0, prime=False):
+        """Start one FFmpeg process for picture and soundtrack at `start`.
+
+        Returns its frame reader. With `prime` (a reopen after a pause or
+        seek) the first picture waits until the soundtrack has refilled to
+        its usual level, so the two resume together as they start together.
+        """
+        from tools.v7_capture import CaptureEndOfStream, _read_ppm
+
+        start = max(0.0, float(start or 0.0))
+        tail = start > 0 and not self._is_live
+        opened = []
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                self._command(start), stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=self.errors, bufsize=0)
             # Each FIFO open rendezvous with FFmpeg's matching output open.
             # Open in command order; FFmpeg opens all outputs before encoding.
-            video_fd = os.open(self.video_path, os.O_RDONLY)
-            opened.append(video_fd)
+            opened.append(os.open(self.video_path, os.O_RDONLY))
             if self.has_audio:
-                audio_fd = os.open(self.audio_path, os.O_RDONLY)
-                opened.append(audio_fd)
-            self.video_pipe = os.fdopen(opened[0], 'rb', buffering=0)
-            if self.has_audio:
-                self.audio_pipe = os.fdopen(opened[1], 'rb', buffering=0)
-            self._audio_thread = None
-            if self.has_audio:
-                self._audio_thread = threading.Thread(
-                    target=self._pump_audio, daemon=True)
-                self._audio_thread.start()
+                opened.append(os.open(self.audio_path, os.O_RDONLY))
+            video_pipe = os.fdopen(opened[0], 'rb', buffering=0)
+            audio_pipe = (os.fdopen(opened[1], 'rb', buffering=0)
+                          if self.has_audio else None)
         except BaseException:
             for descriptor in opened:
                 try:
                     os.close(descriptor)
                 except OSError:
                     pass
-            if self.proc is not None and self.proc.poll() is None:
-                self.proc.terminate()
-                self.proc.wait(timeout=2)
-            self.errors.close()
-            self._temporary.cleanup()
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=2)
             raise
-
-        from tools.v7_capture import _read_ppm
+        stop = threading.Event()
+        with self._close_lock:
+            if self._closed:
+                video_pipe.close()
+                if audio_pipe is not None:
+                    audio_pipe.close()
+                if proc.poll() is None:
+                    proc.terminate()
+                    proc.wait(timeout=2)
+                raise RuntimeError('shared video capture is closed')
+            self._launch_id += 1
+            launch_id = self._launch_id
+            self.proc = proc
+            self.video_pipe = video_pipe
+            self.audio_pipe = audio_pipe
+            self._stop = stop
+            self._ended = not self.has_audio
+            self._priming = bool(prime and self.has_audio)
+            self._audio_thread = None
+            if self.has_audio:
+                self._audio_thread = threading.Thread(
+                    target=self._pump_audio, args=(audio_pipe, stop),
+                    daemon=True)
+                self._audio_thread.start()
+            self._running = True
+        waiting = [bool(prime and self.has_audio)]
 
         def grab():
+            if waiting[0]:
+                waiting[0] = False
+                target = self.clock_match.target_samples
+                self.buffer.wait_for(
+                    target, target/self.sample_rate+.5,
+                    lambda: self._ended or stop.is_set())
             try:
-                return _read_ppm(self.video_pipe)
+                return _read_ppm(video_pipe)
             except RuntimeError as exc:
+                if tail:
+                    code = proc.poll()
+                    if code is None:
+                        try:
+                            code = proc.wait(timeout=1.0)
+                        except subprocess.TimeoutExpired:
+                            pass
+                    if code == 0:
+                        raise CaptureEndOfStream from exc
                 detail = ''
-                if self.proc.poll() is not None:
+                if proc.poll() is not None and not self._closed:
                     self.errors.flush()
                     self.errors.seek(0)
                     detail = self.errors.read().decode(
@@ -515,17 +650,80 @@ class SharedVideoAudioSource:
                     message += f'\n{detail}'
                 raise RuntimeError(message) from exc
 
-        grab.close = self.close
         # The shared FFmpeg input is already paced; drain it continuously like
         # video_source so its output pipe cannot stall the audio stream.
         grab.paced = True
-        self.video_grab = grab
 
-    def _pump_audio(self):
+        def reader():
+            return grab()
+
+        def release():
+            try:
+                video_pipe.close()
+            except OSError:
+                pass
+
+        reader.paced = True
+        reader.close = lambda: self._halt(launch_id)
+        reader.release = release
+        self._reader = reader
+        return grab
+
+    def playback_reader(self):
+        """The running process as a tools.v7_capture.FilePlayback reader:
+        closing it stops this process only, and the source can reopen."""
+        return self._reader
+
+    def reopen(self, start=0.0):
+        """Restart picture and soundtrack together at a position."""
+        with self._close_lock:
+            if self._closed:
+                raise RuntimeError('shared video capture is closed')
+            launch_id = self._launch_id
+            video_pipe = self.video_pipe
+        self._halt(launch_id)
+        if video_pipe is not None:
+            video_pipe.close()
+        # Not under the lock: the FIFO opens wait for FFmpeg.
+        self._launch(start, prime=True)
+        return self._reader
+
+    def _halt(self, launch_id):
+        """Stop one process (pause, seek, end of a pass); read() is silent
+        until the next one runs. A call for an older process does nothing."""
+        with self._close_lock:
+            if launch_id != self._launch_id or not self._running:
+                return
+            self._running = False
+            self._stop.set()
+            proc = self.proc
+            ended_by_itself = proc is None or proc.poll() is not None
+            if not ended_by_itself:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=2)
+            thread, self._audio_thread = self._audio_thread, None
+            pipe, self.audio_pipe = self.audio_pipe, None
+            if thread is not None:
+                thread.join(timeout=2)
+            if pipe is not None:
+                pipe.close()
+            if self.buffer is not None:
+                if not ended_by_itself:
+                    # Interrupted: what is queued belongs to the old position.
+                    # A pass that reached the end of the file keeps its last
+                    # samples; they play before the repeat.
+                    self.buffer.clear()
+                self._needs_reset = True
+
+    def _pump_audio(self, pipe, stop):
         remainder = b''
         try:
-            while not self._stop.is_set():
-                data = self.audio_pipe.read(65536)
+            while not stop.is_set():
+                data = pipe.read(65536)
                 if not data:
                     break
                 data = remainder+data
@@ -543,7 +741,8 @@ class SharedVideoAudioSource:
     def read(self, count):
         if not self.has_audio:
             return np.zeros(max(0, int(count)), dtype=np.float32)
-        return self.clock_match.read(count)
+        silence = _transport_silence(self, count)
+        return self.clock_match.read(count) if silence is None else silence
 
     def wait_for_samples(self, count, timeout):
         if not self.has_audio:
@@ -555,6 +754,7 @@ class SharedVideoAudioSource:
             if self._closed:
                 return
             self._closed = True
+            self._running = False
             self._stop.set()
             if self.proc is not None and self.proc.poll() is None:
                 self.proc.terminate()
@@ -563,8 +763,9 @@ class SharedVideoAudioSource:
                 except subprocess.TimeoutExpired:
                     self.proc.kill()
                     self.proc.wait(timeout=2)
-        if self._audio_thread is not None:
-            self._audio_thread.join(timeout=2)
+            thread = self._audio_thread
+        if thread is not None:
+            thread.join(timeout=2)
         for pipe in (self.video_pipe, self.audio_pipe):
             if pipe is not None:
                 pipe.close()

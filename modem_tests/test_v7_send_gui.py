@@ -149,7 +149,7 @@ class SenderGuiTests(unittest.TestCase):
         self.assertNotIn('--rate', command)
 
     def test_image_preview_port_is_forwarded_to_sender_cli(self):
-        self.settings.update(image_preview=True, preview_stage='source')
+        self.settings.update(preview='window', preview_stage='source')
         command = build_command(
             self.settings, self.devices, self.sd,
             image_preview_port=54321)
@@ -186,7 +186,7 @@ class SenderGuiTests(unittest.TestCase):
     def test_selected_sample_rate_profile_and_video_path_reach_cli(self):
         self.settings.update(source='video',
                              video_source='https://media.example/a clip.mp4',
-                             video_live=True, video_preview=True,
+                             video_live=True, preview='external',
                              profile='aspect-fold-500', speed='1.5')
 
         command = build_command(self.settings, self.devices, self.sd)
@@ -202,7 +202,7 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(args.speed, 1.5)
 
     def test_preview_is_not_forwarded_for_non_video_sources(self):
-        self.settings.update(source='screen', video_preview=True)
+        self.settings.update(source='screen', preview='external')
         command = build_command(self.settings, self.devices, self.sd)
         self.assertNotIn('--preview', command)
 
@@ -1202,7 +1202,9 @@ class SenderGuiTests(unittest.TestCase):
         self.assertIn('screen_backend', gui.ADVANCED_FIELDS)
         self.assertIn('screen_target', visible)
         self.assertNotIn('video_source', visible)
+        self.assertIn('preview', visible)
         self.assertNotIn('video_preview', visible)
+        self.assertNotIn('image_preview', visible)
         self.assertNotIn('camera', visible)
         self.assertIn('screen_backend', visible)        # advanced section
         gui.settings['source'] = 'camera'
@@ -1217,7 +1219,7 @@ class SenderGuiTests(unittest.TestCase):
                             video_source='clip.mp4')
         gui.page = 'setup'
         self.assertIn('video_source', gui._visible_fields())
-        self.assertIn('video_preview', gui._visible_fields())
+        self.assertIn('preview', gui._visible_fields())
         self.assertNotIn('camera', gui._visible_fields())
         self.assertNotIn('screen_target', gui._visible_fields())
         gui._canvas((960, 720))
@@ -1229,7 +1231,7 @@ class SenderGuiTests(unittest.TestCase):
     def test_live_canvas_renders_selected_source_or_resized_preview(self):
         gui = SenderGui(self.devices)
         gui.page = 'live'
-        gui.settings['image_preview'] = True
+        gui.settings['preview'] = 'window'
         gui.settings['preview_stage'] = 'source'
         gui.preview_image = Image.new('RGB', (80, 96), (90, 120, 150))
         gui.preview_counter = 18
@@ -1339,7 +1341,7 @@ class SenderGuiTests(unittest.TestCase):
 
     def test_image_preview_receiver_lifecycle_follows_sender_process(self):
         gui = SenderGui(self.devices)
-        gui.settings.update(device=3, source='screen', image_preview=True,
+        gui.settings.update(device=3, source='screen', preview='window',
                             preview_stage='resized')
         child = Mock()
         child.poll.return_value = None
@@ -1365,7 +1367,7 @@ class SenderGuiTests(unittest.TestCase):
         gui.page = 'live'
         gui.process = object()
         gui.settings.update(source='video', video_source='clip.mp4',
-                            video_preview=True, camera='camera-one')
+                            preview='external', camera='camera-one')
         gui._canvas((960, 720))
         rect = gui.hits['change_source']
         position = ((rect[0]+rect[2])/2, (rect[1]+rect[3])/2)
@@ -1386,7 +1388,7 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(gui.dropdown, 'source')
         gui._assign('source', 'screen')
         self.assertEqual(gui.settings['video_source'], 'clip.mp4')
-        self.assertTrue(gui.settings['video_preview'])
+        self.assertEqual(gui.settings['preview'], 'external')
         self.assertEqual(gui.settings['camera'], 'camera-one')
 
     def test_sender_preferences_restore_last_settings_and_stable_devices(self):
@@ -1398,8 +1400,8 @@ class SenderGuiTests(unittest.TestCase):
                             preference_path=path)
             gui.settings.update(
                 device=3, source='video', video_source='clip with spaces.mp4',
-                video_preview=True, video_live=False, profile='fold-500',
-                image_preview=True, preview_stage='source',
+                preview='window', video_live=False, profile='fold-500',
+                preview_stage='source',
                 source_audio='device', source_audio_device=8,
                 source_audio_input_side='right')
             gui._persist_preferences()
@@ -1415,9 +1417,8 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(restored.settings['source'], 'video')
         self.assertEqual(restored.settings['video_source'],
                          'clip with spaces.mp4')
-        self.assertTrue(restored.settings['video_preview'])
+        self.assertEqual(restored.settings['preview'], 'window')
         self.assertFalse(restored.settings['video_live'])
-        self.assertTrue(restored.settings['image_preview'])
         self.assertEqual(restored.settings['preview_stage'], 'source')
         self.assertIsNone(restored.process)
 
@@ -1432,7 +1433,7 @@ class SenderGuiTests(unittest.TestCase):
             gui = SenderGui(self.devices, preference_path=path,
                             restore_preferences=True)
 
-        self.assertTrue(gui.settings['image_preview'])
+        self.assertEqual(gui.settings['preview'], 'window')
         self.assertEqual(gui.settings['preview_stage'], 'resized')
         self.assertEqual(gui.settings['source_audio'], 'source')
 
@@ -1497,7 +1498,7 @@ class SenderGuiTests(unittest.TestCase):
                             restore_preferences=True)
 
         self.assertIsNone(gui.settings['source'])
-        self.assertFalse(gui.settings['video_preview'])
+        self.assertEqual(gui.settings['preview'], 'off')
         self.assertIsNone(gui.process)
 
     def test_start_runs_cli_as_child_and_stop_requests_graceful_interrupt(self):
@@ -1755,8 +1756,8 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
             'source_audio_input_side': 'mix', 'source_audio_gain': '1',
             'source_audio_delay_ms': '0', 'speed': '1.25',
             'encode_filter': 'auto', 'brightness': '1.1', 'gamma': '0.9',
-            'capture_fps': '30', 'video_source': '', 'video_preview': False,
-            'image_preview': True, 'video_live': False, 'camera': None,
+            'capture_fps': '30', 'video_source': '', 'preview': 'window',
+            'video_live': False, 'camera': None,
             'ffmpeg_input': '', 'screen_backend': 'mss',
             'screen_target': ScreenTarget(
                 'Display 1 · 1920×1080 · (0,0)', '0,0,1920,1080'),

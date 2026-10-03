@@ -168,13 +168,77 @@ class LiveToneControls:
             return dict(self._values)
 
 
-def _read_live_tone_controls(stream, controls, stop):
+class LiveTransportControls:
+    """Pause/play/seek/restart of a file source, from the sender GUI pipe.
+
+    The same newline-delimited JSON channel as the tone controls carries
+    {"transport": "pause" | "play" | "restart"} and
+    {"transport": "seek", "position": seconds}. Commands apply to the attached
+    tools.v7_capture.FilePlayback; with none attached (camera, screen, test or
+    stream sources) they are ignored.
+    """
+
+    COMMANDS = ('pause', 'play', 'restart', 'seek')
+
+    def __init__(self):
+        self._playback = None
+        self._lock = threading.Lock()
+
+    def attach(self, playback):
+        with self._lock:
+            self._playback = playback
+
+    def status(self):
+        with self._lock:
+            playback = self._playback
+        return None if playback is None else playback.status()
+
+    def update(self, line):
+        try:
+            update = json.loads(line)
+        except (TypeError, ValueError):
+            return False
+        command = update.get('transport') if isinstance(update, dict) else None
+        if command not in self.COMMANDS:
+            return False
+        with self._lock:
+            playback = self._playback
+        if playback is None:
+            return False
+        if command == 'seek':
+            try:
+                position = float(update.get('position'))
+            except (TypeError, ValueError):
+                return False
+            if not np.isfinite(position) or position < 0:
+                return False
+            playback.seek(position)
+        else:
+            getattr(playback, command)()
+        return True
+
+
+def _read_live_tone_controls(stream, controls, stop, transport=None):
     """Consume newline-delimited GUI updates until EOF or shutdown."""
     while not stop.is_set():
         line = stream.readline()
         if not line:
             return
         controls.update(line)
+        if transport is not None:
+            transport.update(line)
+
+
+def _file_playback(args, start, open_reader, reader=None, on_close=None):
+    """Transport wrapper for a local video file, or None for other sources."""
+    from tools.v7_capture import (FilePlayback, is_file_video_source,
+                                  probe_duration)
+
+    if (args.source != 'video' or getattr(args, 'video_live', False) or
+            not is_file_video_source(args.video_source)):
+        return None
+    return FilePlayback(open_reader, duration=probe_duration(args.video_source),
+                        start=start, reader=reader, on_close=on_close)
 
 
 def _device_arg(value):
@@ -246,7 +310,7 @@ def _resolve_send_source(args, interactive=None, input_fn=None):
     return args
 
 
-def _capture(args):
+def _capture(args, start=0.0):
     """Build one of the shared RGB capture sources."""
     from tools.v7_capture import (camera_source, mouse_follow_source,
                                   screen_capture_source, screen_source,
@@ -260,7 +324,8 @@ def _capture(args):
         return video_source(args.video_source, width=args.capture_width,
                             scale_flags=capture_filter,
                             live=True if args.video_live else None,
-                            preserve_size=bool(getattr(args, 'dct_encode', False)))
+                            preserve_size=bool(getattr(args, 'dct_encode', False)),
+                            **({'start': start} if start else {}))
     if args.source == 'mouse-follow':
         return mouse_follow_source(initial_width=args.capture_width)
     if args.source == 'camera':
@@ -767,6 +832,8 @@ def run_send(args):
     args._sender_started_at = None
     args._sender_counter = 1
     args._sender_total = 0
+    args._sender_transport = None
+    args._sender_video_position = None
     stop = threading.Event()
     try:
         while not stop.is_set():
@@ -858,12 +925,49 @@ def _run_send_session(args):
     args.encode_filter, args.brightness = _send_profile(args, profile_slots)
     dct_options = _dct_encode_options(args)
     tone_controls = LiveToneControls(args.brightness, args.gamma)
+    # One transport for the whole send: a control reader left over from a
+    # session before a device reconnect still reaches the current playback.
+    transport = getattr(args, '_sender_transport', None)
+    if transport is None:
+        transport = args._sender_transport = LiveTransportControls()
     control_stop = threading.Event()
     if getattr(args, 'gui_control', False):
         threading.Thread(
             target=_read_live_tone_controls,
-            args=(sys.stdin, tone_controls, control_stop),
+            args=(sys.stdin, tone_controls, control_stop, transport),
             name='v7-live-tone-controls', daemon=True).start()
+    # A file resumes where the GUI last left it, or where this send was when
+    # its output device was lost.
+    video_start = getattr(args, '_sender_video_position', None)
+    if video_start is None:
+        video_start = getattr(args, 'video_start', 0.0) or 0.0
+    if not np.isfinite(video_start) or video_start < 0:
+        raise ValueError('--video-start must be finite and non-negative')
+    if video_start:
+        from tools.v7_capture import is_file_video_source
+        if (args.source != 'video' or getattr(args, 'video_live', False) or
+                not is_file_video_source(args.video_source)):
+            video_start = 0.0            # a position only means a file
+    playback_reported = [None, 0.0]
+
+    def report_playback():
+        status = transport.status()
+        if status is None:
+            return
+        args._sender_video_position = status['position']
+        if not getattr(args, 'gui_control', False):
+            return
+        now = time.monotonic()
+        if (status['paused'] == playback_reported[0] and
+                now-playback_reported[1] < .25):
+            return
+        playback_reported[:] = [status['paused'], now]
+        print(json.dumps({
+            'status': 'playback',
+            'position': round(status['position'], 3),
+            'duration': status['duration'],
+            'paused': status['paused'],
+        }), flush=True)
     if getattr(args, 'perceptual_resize', 'off') != 'off':
         # Compile the optional Numba resize before an output stream is open;
         # first-call JIT latency must not stall the live sender.
@@ -949,6 +1053,7 @@ def _run_send_session(args):
                                        sys.platform == 'darwin' else FPS))
     wire_fps = FPS*args.speed
     raw_grab = None
+    playback = None
     grab = None
     source_audio = None
     audio_delay = None
@@ -1160,6 +1265,7 @@ def _run_send_session(args):
                     frame = grab()
                 if frame is None and getattr(grab, 'ended', False):
                     break
+                report_playback()
                 current_tones = tone_controls.snapshot()
                 source_preview = (getattr(frame, 'rgb', frame)
                                   if image_preview_port is not None else None)
@@ -1354,18 +1460,58 @@ def _run_send_session(args):
                     scale_flags=_capture_scale_flags(args),
                     live=True if args.video_live else None,
                     target_samples=first_packet_samples,
-                    preserve_size=getattr(args, 'dct_encode', False))
+                    preserve_size=getattr(args, 'dct_encode', False),
+                    **({'start': video_start} if video_start else {}))
                 raw_grab = capture.video_grab
                 source_audio = capture if capture.has_audio else None
+                # Picture and soundtrack stop and reopen as one process.
+                playback = _file_playback(
+                    args, video_start, lambda start: capture.reopen(start),
+                    reader=getattr(capture, 'playback_reader',
+                                   lambda: raw_grab)(),
+                    on_close=capture.close)
             else:
-                raw_grab = _capture(args)
+                def open_file_reader(start):
+                    reader = _capture(args, start)
+                    if separate_audio[0] is None:
+                        return reader
+                    # No shared process here: stop and restart the separate
+                    # soundtrack reader with the picture.
+                    close_video = reader.close
+
+                    def close_both():
+                        separate_audio[0].halt()
+                        close_video()
+
+                    reader.close = close_both
+                    separate_audio[0].restart(start)
+                    return reader
+
+                separate_audio = [None]
+                raw_grab = (_capture(args, video_start) if video_start
+                            else _capture(args))
+                playback = _file_playback(
+                    args, video_start, open_file_reader, reader=raw_grab)
             if (mono_fold_profile and source_audio_mode == 'source' and
                     args.source == 'video' and not hasattr(os, 'mkfifo')):
                 from tools.v7_source_audio import FFmpegSourceAudio
                 source_audio = FFmpegSourceAudio(
                     args.video_source, output_rate,
                     live=True if args.video_live else None,
-                    target_samples=first_packet_samples)
+                    target_samples=first_packet_samples,
+                    **({'start': video_start} if video_start else {}))
+                if playback is not None:
+                    separate_audio[0] = source_audio
+                    close_first_video = raw_grab.close
+
+                    def close_first_reader():
+                        source_audio.halt()
+                        close_first_video()
+
+                    raw_grab.close = close_first_reader
+            if playback is not None:
+                raw_grab = playback
+                transport.attach(playback)
             elif mono_fold_profile and source_audio_mode == 'device':
                 from tools.v7_source_audio import DeviceSourceAudio
 
@@ -1519,6 +1665,7 @@ def _run_send_session(args):
         if device_monitor_thread is not None:
             device_monitor_thread.join(timeout=1)
         control_stop.set()
+        transport.attach(None)
         stop.set()
         if worker_started:
             deadline = time.monotonic()+2
@@ -3948,6 +4095,10 @@ def parser():
                       help='treat an HTTP(S) source as live instead of looping it')
     send.add_argument('--preview', action='store_true',
                       help='open video sources in a desktop player while sending')
+    send.add_argument('--video-start', type=float, default=0.0,
+                      metavar='SECONDS',
+                      help='start a video file at this position (default: 0); '
+                           'it still repeats from the beginning')
     send.add_argument('--image-preview-port', type=int, metavar='PORT',
                       help=argparse.SUPPRESS)
     send.add_argument('--display', type=int)

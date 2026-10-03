@@ -485,7 +485,8 @@ def video_scale_filter(source, width, scale_flags, preserve_size):
 
 
 def video_source(source, loop=None, realtime=None, width=320,
-                 scale_flags='bicubic', live=None, preserve_size=False):
+                 scale_flags='bicubic', live=None, preserve_size=False,
+                 start=0.0):
     """Read a local video file in a real-time loop or a live stream URL.
 
     Local files and HTTP(S) media URLs loop and are paced with ``-re`` by
@@ -494,7 +495,13 @@ def video_source(source, loop=None, realtime=None, width=320,
     paced to their media timestamps, play once, and end cleanly. PPM carries
     each output frame's dimensions. A local file is probed once for its colour
     matrix tag (see untagged_hd_matrix).
+
+    A positive ``start`` (seconds) reads from that position to the end of the
+    file once and then ends cleanly. FFmpeg cannot combine an input seek with
+    ``-stream_loop`` (the repeat lands at the wrong place with broken
+    timestamps), so FilePlayback reopens a looping reader after that pass.
     """
+    start = max(0.0, float(start or 0.0))
     if shutil.which('ffmpeg') is None:
         raise SystemExit('ffmpeg not found. brew install ffmpeg / apt install ffmpeg')
     source = os.path.expanduser(str(source))
@@ -514,6 +521,8 @@ def video_source(source, loop=None, realtime=None, width=320,
         _FINITE_VIDEO_SUFFIXES)
     if loop is None:
         loop = not is_live
+    if start > 0:
+        loop = False
     if realtime is None:
         realtime = not is_live or finite_http_media
 
@@ -526,6 +535,8 @@ def video_source(source, loop=None, realtime=None, width=320,
         # Fail a stalled network read instead of leaving the capture worker
         # blocked forever during shutdown or source loss.
         cmd += ['-rw_timeout', '10000000']
+    if start > 0:
+        cmd += ['-ss', f'{start:.3f}']
     cmd += ['-i', source]
     video_filter = video_scale_filter(source, width, scale_flags,
                                       preserve_size)
@@ -585,12 +596,295 @@ def video_source(source, loop=None, realtime=None, width=320,
             finally:
                 errors.close()
 
+    def release():
+        # For FilePlayback, on the reading thread once its read has returned.
+        proc.stdout.close()
+
     grab.proc = proc
     grab.close = close
+    grab.release = release
     # File input is paced by -re; a live URL is paced by its own arrival rate.
     # Drain either continuously so the newest-frame mailbox stays current.
     grab.paced = True
     return grab
+
+
+def is_file_video_source(source):
+    """Whether a video source is a local file (pause/seek/resume apply)."""
+    source = str(source or '').strip()
+    return bool(source) and not _is_stream_url(source)
+
+
+def probe_duration(source, run=None):
+    """Duration of a local video file in seconds, or None when unknown."""
+    if (_is_stream_url(source) or
+            not os.path.isfile(os.path.expanduser(str(source))) or
+            shutil.which('ffprobe') is None):
+        return None
+    try:
+        probe = (run or subprocess.run)(
+            ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+             '-of', 'default=nw=1:nk=1', os.path.expanduser(str(source))],
+            capture_output=True, text=True, timeout=5)
+        duration = float((probe.stdout or '').strip().splitlines()[0])
+    except Exception:                    # no duration: position only
+        return None
+    if probe.returncode != 0 or not np.isfinite(duration) or duration <= 0:
+        return None
+    return duration
+
+
+class FilePlayback:
+    """Pause, seek and restart for a looping local video file.
+
+    The readers are FFmpeg processes paced by ``-re`` on their own wall
+    clock, so a reader cannot be held: stopping the pipe would make it race to
+    catch up afterwards. Instead the reader is closed and a new one is opened
+    at the wanted position. ``open_reader(start)`` returns a frame reader: a
+    looping one for ``start == 0``, and for a later start one that plays to
+    the end of the file once and raises CaptureEndOfStream, after which the
+    looping reader is opened from the beginning (the usual repeat).
+
+    While paused the call returns the held picture again at a short interval,
+    so the capture thread keeps a fresh frame and the sender keeps emitting
+    packets of it. A seek made while paused reads one picture at the new
+    position and holds that.
+
+    Position is the start of the current reader plus the wall time it has
+    been delivering frames (the readers are real-time paced); it is not read
+    from the stream's timestamps.
+
+    A reader's ``close()`` must be safe from another thread and make a blocked
+    read fail; its optional ``release()`` is called on the reading thread once
+    the read has returned.
+    """
+
+    paced = True
+
+    def __init__(self, open_reader, duration=None, start=0.0, reader=None,
+                 clock=time.monotonic, idle=0.05, on_close=None):
+        self._open_reader = open_reader
+        self.duration = (float(duration) if duration and
+                         np.isfinite(duration) and duration > 0 else None)
+        self._clock = clock
+        self._idle = float(idle)
+        self._on_close = on_close
+        self._cond = threading.Condition()
+        self._generation = 0
+        self._reader_generation = 0
+        self._reader = None
+        self._reader_start = 0.0
+        self._first_frame_at = None
+        self._paused = False
+        self._still = False
+        self._held = None
+        self._closed = False
+        self._reading = False
+        self._position = self._clamp(start)
+        if reader is None:
+            reader = open_reader(self._position)
+        self._reader = reader
+        self._reader_start = self._position
+
+    def _clamp(self, position):
+        try:
+            position = float(position)
+        except (TypeError, ValueError):
+            return 0.0
+        if not np.isfinite(position) or position <= 0:
+            return 0.0
+        if self.duration is not None and position >= self.duration:
+            return 0.0                   # past the end: from the beginning
+        return position
+
+    def _position_locked(self):
+        if self._first_frame_at is None:
+            return self._position
+        position = self._reader_start+max(
+            0.0, self._clock()-self._first_frame_at)
+        if self.duration is not None:
+            if self._reader_start == 0:
+                position %= self.duration      # the looping reader
+            else:
+                position = min(position, self.duration)
+        return position
+
+    @property
+    def position(self):
+        with self._cond:
+            return self._position_locked()
+
+    @property
+    def paused(self):
+        with self._cond:
+            return self._paused
+
+    def status(self):
+        with self._cond:
+            return {'position': self._position_locked(),
+                    'duration': self.duration, 'paused': self._paused}
+
+    def _interrupt_locked(self, position):
+        """Retire the current reader; the reading thread reopens at position."""
+        self._position = position
+        self._first_frame_at = None
+        self._generation += 1
+        self._cond.notify_all()
+        return self._reader
+
+    @staticmethod
+    def _close_reader(reader):
+        close = getattr(reader, 'close', None)
+        if close is not None:
+            try:
+                close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _release_reader(reader):
+        release = getattr(reader, 'release', None)
+        if release is not None:
+            try:
+                release()
+            except Exception:
+                pass
+
+    def pause(self):
+        with self._cond:
+            if self._paused or self._closed:
+                return
+            self._paused = True
+            reader = self._interrupt_locked(self._position_locked())
+        self._close_reader(reader)
+
+    def play(self):
+        with self._cond:
+            if not self._paused or self._closed:
+                return
+            self._paused = False
+            self._still = False
+            self._cond.notify_all()
+
+    def seek(self, position):
+        with self._cond:
+            if self._closed:
+                return
+            self._still = self._paused
+            reader = self._interrupt_locked(self._clamp(position))
+        self._close_reader(reader)
+
+    def restart(self):
+        self.seek(0.0)
+
+    def __call__(self):
+        while True:
+            stale = None
+            with self._cond:
+                if self._closed:
+                    raise RuntimeError('video playback is closed')
+                generation = self._generation
+                reader = self._reader
+                if (reader is not None and
+                        self._reader_generation != generation):
+                    stale, reader, self._reader = reader, None, None
+                if self._paused and self._held is None:
+                    self._still = True   # paused before any picture: get one
+                still = self._still
+                waiting = self._paused and not still
+                if waiting and stale is None:
+                    self._cond.wait(self._idle)
+                    if (self._generation == generation and self._paused and
+                            not self._still and not self._closed):
+                        return self._held
+                    continue
+                start = self._position
+            if stale is not None:
+                self._close_reader(stale)
+                self._release_reader(stale)
+            if waiting:
+                continue
+            if reader is None:
+                reader = self._open_reader(start)
+                with self._cond:
+                    if self._closed or self._generation != generation:
+                        stale = reader
+                    else:
+                        self._reader = reader
+                        self._reader_generation = generation
+                        self._reader_start = start
+                        self._first_frame_at = None
+                if stale is not None:
+                    self._close_reader(stale)
+                    self._release_reader(stale)
+                    continue
+            ended = False
+            frame = None
+            with self._cond:
+                self._reading = True
+            try:
+                frame = reader()
+            except CaptureEndOfStream:
+                ended = True
+            except Exception:
+                with self._cond:
+                    self._reading = False
+                    interrupted = (self._closed or
+                                   self._generation != generation)
+                    if interrupted and self._reader is reader:
+                        self._reader = None
+                if not interrupted:
+                    raise
+                self._release_reader(reader)
+                continue
+            ended = ended or frame is None
+            with self._cond:
+                self._reading = False
+                current = (not self._closed and
+                           self._generation == generation)
+                if ended:
+                    if self._reader is reader:
+                        self._reader = None
+                    if current and start > 0:
+                        # The pass from a seek position reached the end of
+                        # the file: repeat from the beginning.
+                        self._position = 0.0
+                        self._first_frame_at = None
+                elif current:
+                    if self._first_frame_at is None:
+                        self._first_frame_at = self._clock()
+                    self._held = frame
+                    if still:
+                        # One picture at the new position, then hold it.
+                        self._still = False
+                        self._first_frame_at = None
+                        self._generation += 1
+            if ended:
+                self._close_reader(reader)
+                self._release_reader(reader)
+                if current and start == 0:
+                    # The looping reader does not end by itself.
+                    raise CaptureEndOfStream
+                continue
+            if current:
+                return frame
+
+    def close(self):
+        with self._cond:
+            already = self._closed
+            self._closed = True
+            self._generation += 1
+            reader = self._reader
+            reading = self._reading
+            if not reading:
+                self._reader = None
+            self._cond.notify_all()
+        if reader is not None:
+            self._close_reader(reader)
+            if not reading:
+                self._release_reader(reader)
+        if not already and self._on_close is not None:
+            self._on_close()
 
 
 def test_source():

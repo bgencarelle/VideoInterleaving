@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Event-driven GUI controller for the standalone V7 sender.
 
-The sender runs in its own process. Optional source-video playback uses a
-desktop media player; encoded-image preview arrives on a separate bounded
-loopback channel.
+The sender runs in its own process. There is one preview setting: off, the
+picture in this window (it arrives on a separate bounded loopback channel), or
+the source in a desktop media player. For a video file the Live page also has
+transport controls, sent to the sender over its control pipe.
 """
 import errno
 import json
@@ -107,9 +108,16 @@ DCT_SHARPEN_CHOICES = (
 )
 # Direct DCT encode runs the 500-slot folded profiles with the Box filter.
 DCT_PROFILES = FOLDED_PROFILES
-BOOL_FIELDS = ('video_live', 'video_preview', 'image_preview', 'dct_encode',
+BOOL_FIELDS = ('video_live', 'dct_encode',
                'luma_adjust', 'luma_adjust_linear', 'pixel_encode',
                'clip_aware')
+# One preview at a time: none, the pane on the Live page, or muted ffplay.
+PREVIEW_CHOICES = (
+    ('Off', 'off'),
+    ('In the window', 'window'),
+    ('External player · video file or URL', 'external'),
+)
+PREVIEW_STAGE_LABELS = (('source', 'Source'), ('resized', 'Encoder input'))
 MONO_VIDEO_SIDE_CHOICES = (
     ('Left output · right stays clear', 'left'),
     ('Right output · left stays clear', 'right'),
@@ -131,10 +139,10 @@ FIELD_HELP = {
     'gamma': 'Live source gamma; 1.0 is neutral.',
     'capture_fps': 'Choose a frame rate reported by the capture source, or leave it at Source default.',
     'video_source': 'Choose a video with Browse, type a path or URL, or drop a file on the window.',
-    'video_preview': ('Open the same file or URL in muted ffplay. If ffplay is '
-                      'unavailable, no player is opened.'),
-    'image_preview': ('Show the captured source or resized encoder input. '
-                      'Use the receiver to inspect encoded/decoded output.'),
+    'preview': ('In the window: the Live page shows the captured source or '
+                'the encoder input. External player: the same file or URL in '
+                'muted ffplay, on its own clock (it does not follow pause or '
+                'seek). Use the receiver to inspect the decoded output.'),
     'video_live': 'Treat an HTTP(S) video URL as a live stream rather than a looping clip.',
     'camera': 'Choose a camera discovered from the host capture devices.',
     'screen_target': 'Choose the monitor or screen capture device. Discovery runs only when you open this picker.',
@@ -212,8 +220,7 @@ FIELD_LABELS = {
     'brightness': 'Brightness · live',
     'gamma': 'Gamma · live',
     'screen_target': 'Screen / display',
-    'video_preview': 'Open source in player',
-    'image_preview': 'Show image preview',
+    'preview': 'Preview',
     'video_live': 'Treat URL as live',
     'camera': 'Camera',
     'ffmpeg_input': 'FFmpeg input',
@@ -297,9 +304,90 @@ def _load_sender_preferences(path):
         return {'name': value['name'], 'hostapi': hostapi}
 
     return {'settings': settings if isinstance(settings, dict) else {},
+            'resume': _clean_resume(values.get('resume')),
             'output_device': clean_identity(values.get('output_device')),
             'source_audio_device': clean_identity(
                 values.get('source_audio_device'))}
+
+
+RESUME_ENTRY_LIMIT = 40
+
+
+def _number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if math.isfinite(value) else None
+
+
+def _clean_resume(value):
+    """Saved playback positions: {file path: position, duration, size, mtime}."""
+    cleaned = {}
+    if not isinstance(value, dict):
+        return cleaned
+    for key, entry in value.items():
+        if not isinstance(key, str) or not isinstance(entry, dict):
+            continue
+        position = _number(entry.get('position'))
+        if position is None or position <= 0:
+            continue
+        cleaned[key] = {'position': position,
+                        'duration': _number(entry.get('duration')),
+                        'size': entry.get('size'),
+                        'mtime': entry.get('mtime')}
+    return cleaned
+
+
+def _resume_key(video_source):
+    return os.path.abspath(os.path.expanduser(str(video_source).strip()))
+
+
+def _file_signature(video_source):
+    try:
+        status = os.stat(_resume_key(video_source))
+    except OSError:
+        return None
+    return {'size': int(status.st_size), 'mtime': int(status.st_mtime)}
+
+
+def is_file_source(settings):
+    """A local video file: the source the transport controls apply to."""
+    video_source = str(settings.get('video_source') or '').strip()
+    if settings.get('source') != 'video' or not video_source:
+        return False
+    from tools.v7_capture import _is_stream_url
+    return not _is_stream_url(video_source)
+
+
+def resume_position(resume, video_source):
+    """Where Start resumes this file, or 0 for the beginning.
+
+    A missing or changed file (size or modification time) and a position at
+    or past the known end start from the beginning.
+    """
+    entry = resume.get(_resume_key(video_source)) if isinstance(
+        resume, dict) else None
+    signature = _file_signature(video_source)
+    if not isinstance(entry, dict) or signature is None:
+        return 0.0
+    if (entry.get('size') != signature['size'] or
+            entry.get('mtime') != signature['mtime']):
+        return 0.0
+    position = _number(entry.get('position'))
+    duration = _number(entry.get('duration'))
+    if position is None or position <= 0:
+        return 0.0
+    if duration is not None and position >= duration:
+        return 0.0
+    return position
+
+
+def _clock_text(seconds):
+    seconds = max(0, int(seconds or 0))
+    hours, rest = divmod(seconds, 3600)
+    minutes, seconds = divmod(rest, 60)
+    if hours:
+        return f'{hours}:{minutes:02d}:{seconds:02d}'
+    return f'{minutes}:{seconds:02d}'
 
 
 def _save_sender_preferences(values, path):
@@ -335,8 +423,8 @@ SAVED_SETTING_FIELDS = (
     'source', 'profile', 'mono_video_side', 'source_audio',
     'source_audio_input_side', 'source_audio_gain',
     'source_audio_delay_ms', 'speed', 'encode_filter', 'brightness', 'gamma',
-    'capture_fps', 'video_source', 'video_preview', 'video_live', 'camera',
-    'image_preview', 'preview_stage',
+    'capture_fps', 'video_source', 'preview', 'video_live', 'camera',
+    'preview_stage',
     'ffmpeg_input', 'screen_backend', 'screen_target', 'region',
     'capture_width', 'capture_filter', 'perceptual_resize',
     'perceptual_detail_strength', 'dct_encode', 'dct_sharpen',
@@ -385,9 +473,15 @@ def _restore_sender_settings(target, saved):
                 target[key] = value
         elif value is None or isinstance(value, (str, int, float, bool)):
             target[key] = value
-    if 'image_preview' not in saved and isinstance(
-            saved.get('encoded_preview'), bool):
-        target['image_preview'] = saved['encoded_preview']
+    if saved.get('preview') not in dict(PREVIEW_CHOICES).values():
+        # Earlier versions had two switches (and, before that,
+        # 'encoded_preview' for the pane). The pane wins over the player.
+        image = saved.get('image_preview')
+        if not isinstance(image, bool):
+            image = saved.get('encoded_preview') is True
+        target['preview'] = ('window' if image else
+                             'external' if saved.get('video_preview') is True
+                             else 'off')
     if target.get('preview_stage') not in ('source', 'resized'):
         target['preview_stage'] = 'resized'
 
@@ -1181,7 +1275,7 @@ def _integer_setting(value, label, minimum, optional=False):
 
 
 def build_command(settings, devices, sd_module=None, python=None,
-                  audio_devices=(), image_preview_port=None):
+                  audio_devices=(), image_preview_port=None, video_start=None):
     """Build an argv list for the existing V7 CLI; never invokes a shell."""
     checked = validate_settings(settings, devices, sd_module, audio_devices)
     command = [
@@ -1261,12 +1355,15 @@ def build_command(settings, devices, sd_module=None, python=None,
         # 'Treat URL as live' is a saved toggle about stream URLs.  Left on,
         # it must not turn a chosen movie file into live capture, which the
         # sender refuses ('live capture requires a stream URL').
+        from tools.v7_capture import _is_stream_url
         if settings.get('video_live'):
-            from tools.v7_capture import _is_stream_url
             if _is_stream_url(checked['video_source']):
                 command.append('--video-live')
-        if settings.get('video_preview'):
+        if settings.get('preview') == 'external':
             command.append('--preview')
+        if (video_start and video_start > 0 and
+                not _is_stream_url(checked['video_source'])):
+            command.extend(('--video-start', f'{float(video_start):.3f}'))
     elif checked['source'] == 'camera':
         if checked['camera_spec']:
             command.extend(('--ffmpeg-input', checked['camera_spec']))
@@ -1287,7 +1384,9 @@ def build_command(settings, devices, sd_module=None, python=None,
     if capture_filter != 'auto':
         command.extend(('--capture-filter', capture_filter))
     command.append('--gui-control')
-    if image_preview_port is not None:
+    # Either the pane or the player, never both.
+    if (image_preview_port is not None and
+            settings.get('preview', 'window') == 'window'):
         command.extend(('--image-preview-port', str(int(image_preview_port)),))
     return command
 
@@ -1337,7 +1436,7 @@ class SenderGui:
     SETUP_TOP = 137
     SETUP_BOTTOM_MARGIN = 95
     BASIC_FIELDS = (
-        'device', 'source', 'video_source', 'video_preview', 'image_preview',
+        'device', 'source', 'video_source', 'preview',
         'video_live', 'camera',
         'screen_target', 'source_audio', 'source_audio_device',
         'source_audio_input_side', 'source_audio_gain',
@@ -1350,7 +1449,9 @@ class SenderGui:
         'source_audio_input_side', 'screen_backend', 'capture_filter',
         'camera', 'screen_target', 'perceptual_resize', 'dct_sharpen',
         'aspect_layout', 'aspect_tail', 'pixel_detail', 'pixel_grid',
+        'preview',
     )
+    TRANSPORT_HEIGHT = 36
     # The encoder resize filter is not offered: every profile is folded and
     # folded profiles only encode with Box ('auto'), so the other choice
     # could only fail validation. --encode-filter remains on the CLI.
@@ -1394,8 +1495,7 @@ class SenderGui:
             'gamma': '1',
             'capture_fps': '',
             'video_source': '',
-            'video_preview': False,
-            'image_preview': False,
+            'preview': 'off',
             'preview_stage': 'resized',
             'video_live': False,
             'camera': None,
@@ -1422,6 +1522,11 @@ class SenderGui:
             'aspect_tail': DEFAULT_ASPECT_TAIL,
         }
         self.notice = 'Choose an output device, capture source, and profile.'
+        # Playback of a video file: the sender's last report while it runs,
+        # and the saved positions Start resumes from.
+        self.playback = None
+        self.resume_positions = {}
+        self._resume_saved_at = 0.0
         if restore_preferences and self.preference_path is not None:
             self._restore_preferences()
         self.page = 'setup'
@@ -1462,6 +1567,7 @@ class SenderGui:
     def _restore_preferences(self):
         preferences = _load_sender_preferences(self.preference_path)
         _restore_sender_settings(self.settings, preferences.get('settings'))
+        self.resume_positions = dict(preferences.get('resume') or {})
         self.output_device_identity = preferences.get('output_device')
         self.source_audio_device_identity = preferences.get(
             'source_audio_device')
@@ -1497,6 +1603,7 @@ class SenderGui:
             _save_sender_preferences({
                 'version': SENDER_PREFERENCES_VERSION,
                 'settings': _serialize_sender_settings(self.settings),
+                'resume': self.resume_positions,
                 'output_device': self.output_device_identity,
                 'source_audio_device': self.source_audio_device_identity,
             }, self.preference_path)
@@ -1515,6 +1622,8 @@ class SenderGui:
                          for device in self.audio_devices)
         if dest == 'source':
             return SOURCE_CHOICES
+        if dest == 'preview':
+            return PREVIEW_CHOICES
         if dest == 'capture_fps':
             return self.capture_choice_cache.get(
                 dest, _fps_choices(()))
@@ -1851,7 +1960,6 @@ class SenderGui:
         source = self.settings['source']
         fields = [dest for dest in fields if not (
             dest == 'video_source' and source != 'video' or
-            dest == 'video_preview' and source != 'video' or
             dest == 'video_live' and source != 'video' or
             dest == 'camera' and source != 'camera' or
             dest == 'screen_target' and source != 'screen' or
@@ -1932,7 +2040,7 @@ class SenderGui:
             choices = self._choices(dest)
             return next((label for label, candidate in choices
                          if candidate == value), str(value))
-        if dest in ('source', 'profile', 'screen_backend',
+        if dest in ('source', 'profile', 'screen_backend', 'preview',
                     'encode_filter', 'capture_filter', 'perceptual_resize',
                     'dct_sharpen', 'aspect_layout', 'aspect_tail',
                     'pixel_detail', 'pixel_grid', 'mono_video_side',
@@ -1999,10 +2107,119 @@ class SenderGui:
     def _select_option(self, dest, value):
         self._assign(dest, value)
 
-    def _build_command(self, image_preview_port=None):
+    def _build_command(self, image_preview_port=None, video_start=None):
+        extra = {'video_start': video_start} if video_start else {}
         return build_command(self.settings, self.devices, self._sounddevice(),
                              audio_devices=self.audio_devices,
-                             image_preview_port=image_preview_port)
+                             image_preview_port=image_preview_port, **extra)
+
+    # ---- video-file transport ------------------------------------------
+    def _file_source(self):
+        return is_file_source(self.settings)
+
+    def _resume_position(self):
+        if not self._file_source():
+            return 0.0
+        return resume_position(self.resume_positions,
+                               self.settings['video_source'])
+
+    def _remember_position(self, position, duration=None, persist=False):
+        """Keep where this file is, so Start on it resumes there."""
+        if not self._file_source():
+            return
+        key = _resume_key(self.settings['video_source'])
+        signature = _file_signature(self.settings['video_source'])
+        position = _number(position)
+        if signature is None or position is None or position <= 0:
+            changed = self.resume_positions.pop(key, None) is not None
+        else:
+            previous = self.resume_positions.pop(key, None) or {}
+            if duration is None:
+                duration = previous.get('duration')
+            self.resume_positions[key] = {
+                'position': round(position, 3), 'duration': _number(duration),
+                **signature}
+            while len(self.resume_positions) > RESUME_ENTRY_LIMIT:
+                self.resume_positions.pop(next(iter(self.resume_positions)))
+            changed = True
+        if persist and changed:
+            self._resume_saved_at = time.monotonic()
+            self._persist_preferences()
+
+    def _transport_state(self):
+        """(position, duration, paused) shown by the transport controls."""
+        if self.process is not None and self.playback is not None:
+            return (self.playback['position'], self.playback['duration'],
+                    self.playback['paused'])
+        entry = self.resume_positions.get(
+            _resume_key(self.settings.get('video_source', ''))) or {}
+        return self._resume_position(), _number(entry.get('duration')), False
+
+    def _send_transport(self, command, position=None):
+        control = getattr(self.process, 'stdin', None)
+        if control is None:
+            raise RuntimeError('Live sender controls are unavailable.')
+        message = {'transport': command}
+        if position is not None:
+            message['position'] = round(float(position), 3)
+        control.write(json.dumps(message)+'\n')
+        control.flush()
+
+    def _transport(self, action, fraction=None):
+        """A click on play/pause, restart or the seek bar."""
+        if not self._file_source():
+            return
+        position, duration, paused = self._transport_state()
+        running = self.process is not None and not self.stop_requested
+        try:
+            if action == 'play_pause':
+                if not running:
+                    self.notice = 'Press Start to send this file.'
+                    return
+                self._send_transport('play' if paused else 'pause')
+                if self.playback is not None:
+                    self.playback['paused'] = not paused
+                self.notice = ('Playing.' if paused else
+                               'Paused: still sending the held picture.')
+            elif action == 'restart':
+                if running:
+                    self._send_transport('restart')
+                    if self.playback is not None:
+                        self.playback['position'] = 0.0
+                self._remember_position(0.0, persist=True)
+                self.notice = ('Restarted from the beginning.' if running else
+                               'Start will begin at the beginning.')
+            elif action == 'seek':
+                if not duration:
+                    self.notice = 'The length of this file is not known yet.'
+                    return
+                target = max(0.0, min(1.0, float(fraction)))*duration
+                target = min(target, max(0.0, duration-.25))
+                if running:
+                    self._send_transport('seek', target)
+                    if self.playback is not None:
+                        self.playback['position'] = target
+                self._remember_position(target, duration, persist=True)
+                self.notice = f'Position {_clock_text(target)}.'
+        except (OSError, ValueError, RuntimeError) as exc:
+            self.notice = str(exc)
+        finally:
+            self.dirty = True
+
+    def _playback_report(self, record):
+        """A {"status": "playback"} line from the sender."""
+        position = _number(record.get('position'))
+        if position is None:
+            return
+        paused = bool(record.get('paused'))
+        was_paused = bool(self.playback and self.playback['paused'])
+        self.playback = {'position': position,
+                         'duration': _number(record.get('duration')),
+                         'paused': paused}
+        self._remember_position(
+            position, self.playback['duration'],
+            persist=(paused != was_paused or
+                     time.monotonic()-self._resume_saved_at > 5.0))
 
     def _start(self):
         if self.editing:
@@ -2028,7 +2245,7 @@ class SenderGui:
         try:
             preview_socket = None
             preview_warning = None
-            if self.settings.get('image_preview'):
+            if self.settings.get('preview') == 'window':
                 try:
                     preview_socket = socket.socket(socket.AF_INET,
                                                    socket.SOCK_DGRAM)
@@ -2042,11 +2259,15 @@ class SenderGui:
                     preview_socket = None
                     preview_warning = (
                         f'Image preview unavailable; sending without it: {exc}')
+            # A file resumes where it was; nothing is passed from the start.
+            resume = self._resume_position()
+            extra = {'video_start': resume} if resume > 0 else {}
             if preview_socket is not None:
                 command = self._build_command(
-                    image_preview_port=preview_socket.getsockname()[1])
+                    image_preview_port=preview_socket.getsockname()[1],
+                    **extra)
             else:
-                command = self._build_command()
+                command = self._build_command(**extra)
             kwargs = {
                 'cwd': str(ROOT),
                 'stdin': subprocess.PIPE,
@@ -2070,6 +2291,7 @@ class SenderGui:
             return
 
         self.process = process
+        self.playback = None
         self._preview_socket = preview_socket
         self.preview_image = None
         self.preview_counter = None
@@ -2277,15 +2499,19 @@ class SenderGui:
                 break
             changed = True
             if kind == 'line':
-                self.lines.append(value)
-                self.lines = self.lines[-12:]
-                self.notice = value
                 try:
                     status_record = json.loads(value)
                     status = status_record.get('status')
                 except (TypeError, ValueError, AttributeError):
                     status_record = {}
                     status = None
+                if status == 'playback':
+                    # Several a second: the transport bar, not the log.
+                    self._playback_report(status_record)
+                    continue
+                self.lines.append(value)
+                self.lines = self.lines[-12:]
+                self.notice = value
                 if status == 'sender_device_lost':
                     self.sender_device_lost = True
                 elif status == 'sender_device_reconnected':
@@ -2297,6 +2523,11 @@ class SenderGui:
             elif kind == 'exit':
                 return_code = int(value)
                 self.process = None
+                if self.playback is not None:
+                    self._remember_position(self.playback['position'],
+                                            self.playback['duration'])
+                    self.playback = None
+                    self._persist_preferences()
                 self._close_preview_socket()
                 self.stop_requested = False
                 self.sender_device_lost = False
@@ -2498,19 +2729,26 @@ class SenderGui:
 
     def _render_live(self, image, draw, font, small):
         width, height = image.size
-        preview_enabled = bool(self.settings.get('image_preview'))
+        preview_enabled = self.settings.get('preview') == 'window'
+        # Transport controls belong to a video file only: under the preview
+        # pane, or across the page when there is no pane.
+        transport = self._file_source()
         detail_right = int(width*.47) if preview_enabled else width-24
         draw.text((24, 76), 'Sender status', font=font,
                   fill=(229, 237, 243))
+        held = (transport and self.process is not None and
+                self.playback is not None and self.playback['paused'])
         state = ('STOPPING' if self.stop_requested else
                  'DEVICE LOST' if self.sender_device_lost else
+                 'SENDING · PAUSED' if held else
                  'SENDING' if self.process is not None else 'STOPPED')
         draw.rounded_rectangle((24, 119, width-24, 188), radius=6,
                                fill=(17, 29, 39), outline=(48, 73, 90))
         draw.text((42, 135), state, font=font,
                   fill=(238, 140, 110) if state == 'DEVICE LOST' else
                   (238, 182, 125) if state == 'STOPPING' else
-                  (145, 218, 170) if state == 'SENDING' else (188, 202, 213))
+                  (145, 218, 170) if state.startswith('SENDING')
+                  else (188, 202, 213))
         draw.text((42, 165), _fit(self.notice, small, width-84),
                   font=small, fill=(165, 187, 202))
 
@@ -2539,8 +2777,9 @@ class SenderGui:
         )
         y = 220
         for label, value in details:
-            draw.text((32, y), label, font=small, fill=(132, 158, 176))
             value_x = 148 if preview_enabled else 235
+            draw.text((32, y), _fit(label, small, value_x-40), font=small,
+                      fill=(132, 158, 176))
             draw.text((value_x, y), _fit(value, small,
                                          max(70, detail_right-value_x-8)),
                       font=small, fill=(218, 229, 237))
@@ -2550,7 +2789,10 @@ class SenderGui:
         draw.text((24, log_top), 'Sender messages', font=small,
                   fill=(132, 158, 176))
         first_line = log_top+24
-        line_count = max(0, min(10, (height-34-first_line)//22))
+        transport_top = height-48-self.TRANSPORT_HEIGHT
+        log_bottom = (transport_top-8 if transport and not preview_enabled
+                      else height-34)
+        line_count = max(0, min(10, (log_bottom-first_line)//22))
         for index, line in enumerate(self.lines[-line_count:] if line_count else ()):
             shown = _fit(line, small,
                          max(80, detail_right-52) if preview_enabled
@@ -2561,21 +2803,23 @@ class SenderGui:
         if preview_enabled:
             from PIL import ImageOps
             panel_left = int(width*.51)
-            panel = (panel_left, 248, width-24, height-48)
-            draw.text((panel_left, 220), 'Image preview', font=small,
+            panel = (panel_left, 248, width-24,
+                     transport_top-8 if transport else height-48)
+            draw.text((panel_left, 220), 'Preview', font=small,
                       fill=(132, 158, 176))
-            for index, (stage, label) in enumerate((
-                    ('source', 'Source'), ('resized', 'Resized'))):
-                left = panel_left+118+index*88
-                rect = (left, 215, left+80, 241)
+            left = panel_left+int(small.getlength('Preview'))+14
+            for stage, label in PREVIEW_STAGE_LABELS:
+                right = min(width-24, left+int(small.getlength(label))+20)
+                rect = (left, 215, right, 241)
                 active = self.settings.get('preview_stage') == stage
                 draw.rounded_rectangle(
                     rect, radius=4,
                     fill=(42, 78, 99) if active else (17, 29, 39),
                     outline=(94, 143, 168) if active else (48, 73, 90))
-                draw.text((left+9, 221), label, font=small,
-                          fill=(235, 242, 247))
+                draw.text((left+10, 221), _fit(label, small, right-left-12),
+                          font=small, fill=(235, 242, 247))
                 self.hits[f'preview_stage:{stage}'] = rect
+                left = right+8
             draw.rounded_rectangle(panel, radius=6, fill=(12, 21, 29),
                                    outline=(48, 73, 90))
             if self.preview_image is None:
@@ -2584,9 +2828,10 @@ class SenderGui:
                 elif self.process:
                     message = 'Waiting for the first handed-off frame…'
                 else:
-                    message = 'Start sending to see source and resized images.'
-                draw.text((panel_left+16, panel[1]+16), message, font=small,
-                          fill=(165, 187, 202))
+                    message = 'Start sending to see the source or encoder input.'
+                draw.text((panel_left+16, panel[1]+16),
+                          _fit(message, small, panel[2]-panel_left-32),
+                          font=small, fill=(165, 187, 202))
             else:
                 inner = (max(1, panel[2]-panel[0]-20),
                          max(1, panel[3]-panel[1]-58))
@@ -2596,7 +2841,8 @@ class SenderGui:
                 image.paste(thumbnail.convert('RGBA'), (x, y_image))
                 age_ms = max(0.0, (time.monotonic_ns()-
                                    int(self.preview_handoff_ns or 0))/1e6)
-                stage = (self.preview_stage or 'image').capitalize()
+                stage = dict(PREVIEW_STAGE_LABELS).get(
+                    self.preview_stage, 'Image')
                 caption = (f'{stage} · packet {self.preview_counter} · aspect '
                            f'{self.preview_aspect} · {age_ms:.0f} ms after '
                            'output handoff')
@@ -2605,6 +2851,62 @@ class SenderGui:
                           font=small,
                           fill=(145, 218, 170) if age_ms < 500 else
                           (238, 182, 125))
+        if transport:
+            self._render_transport(
+                draw, small,
+                (panel_left if preview_enabled else 24, transport_top,
+                 width-24, height-48))
+
+    def _render_transport(self, draw, small, rect):
+        """Play/pause, restart and a seek bar with position and duration."""
+        left, top, right, bottom = rect
+        position, duration, paused = self._transport_state()
+        running = self.process is not None and not self.stop_requested
+        ink = (235, 242, 247) if running else (110, 132, 148)
+        size = bottom-top
+        middle = (top+bottom)//2
+        play_rect = (left, top, left+size+6, bottom)
+        restart_rect = (play_rect[2]+6, top, play_rect[2]+6+size+6, bottom)
+        for key, button in (('play_pause', play_rect),
+                            ('restart', restart_rect)):
+            draw.rounded_rectangle(
+                button, radius=4,
+                fill=(43, 94, 123) if running and key == 'play_pause'
+                else (17, 29, 39), outline=(74, 111, 134), width=1)
+            self.hits[f'transport:{key}'] = button
+        x = (play_rect[0]+play_rect[2])//2
+        if running and not paused:              # pause: two bars
+            draw.rectangle((x-7, middle-8, x-3, middle+8), fill=ink)
+            draw.rectangle((x+3, middle-8, x+7, middle+8), fill=ink)
+        else:                                   # play: a triangle
+            draw.polygon(((x-6, middle-9), (x-6, middle+9), (x+9, middle)),
+                         fill=ink)
+        x = (restart_rect[0]+restart_rect[2])//2
+        restart_ink = (235, 242, 247)           # also works when stopped
+        draw.rectangle((x-9, middle-8, x-6, middle+8), fill=restart_ink)
+        draw.polygon(((x+8, middle-9), (x+8, middle+9), (x-5, middle)),
+                     fill=restart_ink)
+        time_text = (f'{_clock_text(position)} / {_clock_text(duration)}'
+                     if duration else _clock_text(position))
+        time_width = int(small.getlength(time_text))
+        draw.text((right-time_width, middle-8), time_text, font=small,
+                  fill=(218, 229, 237))
+        track_left = restart_rect[2]+16
+        track_right = right-time_width-14
+        if track_right-track_left < 24:
+            return
+        draw.rounded_rectangle((track_left, middle-3, track_right, middle+3),
+                               radius=3, fill=(17, 29, 39),
+                               outline=(48, 73, 90))
+        if duration:
+            fraction = max(0.0, min(1.0, position/duration))
+            knob = track_left+int((track_right-track_left)*fraction)
+            draw.rounded_rectangle((track_left, middle-3, knob, middle+3),
+                                   radius=3, fill=(94, 143, 168))
+            draw.ellipse((knob-6, middle-6, knob+6, middle+6),
+                         fill=(160, 205, 226))
+        # The whole height of the row takes the click, not the thin track.
+        self.hits['transport:seek'] = (track_left, top, track_right, bottom)
 
     def _canvas(self, size):
         from PIL import Image, ImageDraw
@@ -2715,6 +3017,11 @@ class SenderGui:
                 self._open_source_picker()
         elif hit in ('preview_stage:source', 'preview_stage:resized'):
             self._assign('preview_stage', hit.rsplit(':', 1)[1])
+        elif hit in ('transport:play_pause', 'transport:restart'):
+            self._transport(hit.split(':', 1)[1])
+        elif hit == 'transport:seek':
+            track = self.hits[hit]
+            self._transport('seek', (x-track[0])/max(1, track[2]-track[0]))
         elif hit == 'browse:video_source':
             if self.process is not None:
                 self.notice = 'Settings are locked while the sender is running.'

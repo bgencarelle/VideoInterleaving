@@ -63,4 +63,4 @@ def launch_video_preview(source, live=None, *, platform=None, which=None,
 
     return VideoPreview(warning=(
         'Muted source preview unavailable: ffplay was not found, so no player '
-        'was opened. Install ffplay to use Open source in player.'))
+        'was opened. Install ffplay to use the External player preview.'))

@@ -151,7 +151,9 @@ stops the current send and opens the source picker; select the next source and
 press **Start**. Source-specific settings are retained while switching. The GUI
 restores the last configuration on launch but does not auto-start the sender.
 For video, use **Browse**, type a file path or URL, or drop a file onto the
-window. **Open source in player** opens a separate desktop player; when `ffplay`
+window. **Preview** is one setting: off, the picture in the window (with
+play/pause, restart and a seek bar for a video file; pause keeps transmitting
+the held picture), or **External player**, a separate desktop player; when `ffplay`
 is available, finite file/VOD preview requests infinite looping and mutes its
 audio. Live sources are not looped. The player has its own playback clock and
 is not frame-synchronized with the sender. A system-associated player fallback
