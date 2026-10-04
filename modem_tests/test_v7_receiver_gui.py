@@ -509,6 +509,20 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertEqual(gui.grain_mode, 'flat')
         self.assertTrue(gui.picture_dirty)
 
+    def test_luma_guided_colour_detail_is_the_recommended_default(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser,
+                          (('test input device', 3),))
+        field = next(item for item in gui.fields
+                     if item.label == 'Colour detail')
+        self.assertEqual(field.value, 'guided')
+        self.assertEqual(gui.chroma_mode, 'guided')
+        labels = {value: label for label, value in field.options}
+        self.assertIn('recommended', labels['guided'])
+        self.assertEqual(labels['off'], 'Off · colour as sent')
+
+        gui._select_choice(field, 'off')
+        self.assertEqual(gui.chroma_mode, 'off')
+
     def test_output_dither_is_a_live_toggle_on_by_default(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser,
                           (('test input device', 3),))
@@ -549,6 +563,7 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertEqual((gui.dct_reconstruction, gui.display_mode,
                           gui.edge_mode, gui.grain_mode),
                          ('pixel', 'nearest', 'off', 'off'))
+        self.assertEqual(gui.chroma_mode, 'off')
         self.assertTrue(all(field.locked for field in smooth))
         self.assertEqual(gui._field_value_label(smooth[0]),
                          'Off while Pixel display is on')
@@ -571,6 +586,7 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertEqual((gui.display_mode, gui.dct_reconstruction,
                           gui.edge_mode, gui.grain_mode),
                          ('bicubic', '4x', 'on', 'off'))
+        self.assertEqual(gui.chroma_mode, 'guided')
         gui._select_choice(smooth[1], '8x')
         self.assertEqual(gui.dct_reconstruction, '8x')
 

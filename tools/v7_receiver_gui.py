@@ -38,6 +38,7 @@ from tools.v7_gl_viewer import (CHROMA_LABELS, CHROMA_MODES,
                                 GRAIN_DETAIL_AMOUNT, GRAIN_DETAIL_CYCLES,
                                 GRAIN_LABELS, GRAIN_MODES, EDGE_LABELS, EDGE_MODES,
                                 EDGE_STRENGTHS, EDGE_STRENGTH_LABELS,
+                                RECOMMENDED_CHROMA_MODE,
                                 RECOMMENDED_EDGE_STRENGTH,
                                 RECOMMENDED_DCT_RECONSTRUCTION,
                                 RECOMMENDED_DISPLAY_MODE,
@@ -575,7 +576,7 @@ def _make_fields(receive_parser, device_choices, audio_output_choices=()):
               for value in EDGE_STRENGTHS)))
     fields.append(OptionField(None, True, 'Output dither', 'bool'))
     fields.append(OptionField(
-        None, 'off', 'Colour detail', 'choice',
+        None, RECOMMENDED_CHROMA_MODE, 'Colour detail', 'choice',
         tuple((CHROMA_LABELS[name], name) for name in CHROMA_MODES)))
     return fields
 
@@ -780,7 +781,7 @@ class ReceiverGui:
         self.grain_mode = 'off'
         self.edge_mode = RECOMMENDED_EDGE_MODE
         self.edge_strength = RECOMMENDED_EDGE_STRENGTH
-        self.chroma_mode = 'off'
+        self.chroma_mode = RECOMMENDED_CHROMA_MODE
         self.dither = True
         self.pixel_display = False
         self.grain_seed = 0

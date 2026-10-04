@@ -119,7 +119,8 @@ RECOMMENDED_EDGE_STRENGTH = .75
 # (animation_modem.v7_dct_display.guided_chroma_plane). About 2 ms a picture.
 CHROMA_MODES = ('off', 'guided')
 CHROMA_LABELS = {'off': 'Off · colour as sent',
-                 'guided': 'Luma-guided'}
+                 'guided': 'Luma-guided · recommended'}
+RECOMMENDED_CHROMA_MODE = 'guided'
 GRAIN_AMOUNT = 0.024            # triangular +-amount; sigma = amount/sqrt(6)
 GRAIN_FLAT_SIGMA = 1.2          # luma grid samples
 GRAIN_FLAT_CONTRAST = 0.06      # local luma s.d. (code units) that stops grain

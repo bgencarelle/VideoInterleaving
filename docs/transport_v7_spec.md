@@ -830,11 +830,12 @@ Further display stages (receiver GUI settings):
   measured in the band both planes were sent in; that slope times the luma
   detail outside the band fills the chroma coefficients the wire did not
   carry. Received chroma coefficients are unchanged
-  (`v7_dct_display.guided_chroma_plane`). Off by default.
+  (`v7_dct_display.guided_chroma_plane`). The receiver GUI defaults to
+  `guided`; this is inferred display detail, not additional received data.
 
 Defaults: the receiver GUI starts with `bicubic`, DCT reconstruction `4x`,
-edge reconstruction `on` at 75% and grain off. The plain viewer starts with
-the saved mode or `nearest`. The saved mode is
+edge reconstruction `on` at 75%, luma-guided colour detail and grain off. The
+plain viewer starts with the saved mode or `nearest`. The saved mode is
 `$XDG_CONFIG_HOME/modemTest/v7_display.json` (else `~/.config/...`),
 `{"version": 1, "mode": NAME}`.
 
