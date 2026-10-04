@@ -209,10 +209,11 @@ FIELD_HELP = {
     'clip_aware': ('Re-fit the sent brightness detail so edge ringing falls '
                    'into the receiver\'s black/white clip. Sender only; '
                    'about 2 ms per frame.'),
-    'dct_kernel': ('The filter that brings the picture down to what the wire '
-                   'holds. Files in dct_kernels/; add or remove one and press '
-                   'R. Left/Right switches kernel, also while sending. The '
-                   'wire is unchanged.'),
+    'dct_kernel': ('How the source is analyzed for what the wire holds. A '
+                   'kernel can shape the DCT or project directly from the '
+                   'source-resolution image. Files in dct_kernels/; add or '
+                   'remove one and press R. Left/Right switches kernel, also '
+                   'while sending. The wire is unchanged.'),
     'dct_sharpen': ('Taper boosts the upper-middle of the sent band and '
                     'leaves the cutoff alone; unsharp mask boosts everything.'),
     'dct_sharpen_strength': 'Sharpen strength, from 0 to 1. Try 0.25 or 0.5.',
@@ -221,8 +222,8 @@ FIELD_HELP = {
                       'as a multiple of the grid, from 1.75 to 8 (4 is the '
                       'shipped encoder). Higher aliases less on dense texture '
                       '(+3 ms per 1080p frame at 6, +14 ms at 8); smooth '
-                      'pictures do not change. Left/Right steps it, also '
-                      'while sending.'),
+                      'pictures do not change. Ignored by a full-source '
+                      'kernel. Left/Right steps it, also while sending.'),
     'dct_chroma_gain': ('Saturation boost around neutral, from 1.0 to 1.3. '
                         '1.0 recommended: 1.05 and 1.1 measured no better.'),
     'aspect_layout': ('Which coefficients the aspect profiles send: matched '
@@ -268,7 +269,7 @@ FIELD_LABELS = {
     'aspect_layout': 'Aspect layout',
     'aspect_tail': 'Aspect tail',
 }
-# DCT downscale kernels: one file each in dct_kernels/ (see the README there),
+# DCT kernels: one file each in dct_kernels/ (see the README there),
 # read when the GUI starts and again on R. The kernel's own parameters are
 # rows named kp:<parameter>; they, the kernel choice and the DCT strengths
 # are live: they reach a running sender through its control pipe.

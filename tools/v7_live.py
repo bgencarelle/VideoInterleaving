@@ -718,9 +718,24 @@ def _warm_kernels(model, registry, masks_for, dct_options, profile=None):
         masks = masks_for(0) if selection is not None else None
         frames = []
         from animation_modem.v7_source_dct import direct_dct_values
+        warm_options = {}
+        native_source = False
+        if selection is not None:
+            if selection.kernel.has_prefilter:
+                try:
+                    native_source = bool(
+                        (selection.kernel.prefilter(selection.params) or {})
+                        .get('full_source', False))
+                except Exception:
+                    native_source = False
+            if native_source or selection.kernel.has_gain:
+                # Compile the optional source-luminance reduction and the
+                # kernel-target transforms before live frames arrive.
+                warm_options['luminance_out'] = []
         values = direct_dct_values(
             frame, model.coder.grids, model.coder.shapes,
-            kernel=selection, kernel_masks=masks, kernel_frame_out=frames)
+            kernel=selection, kernel_masks=masks, kernel_frame_out=frames,
+            **warm_options)
         if frames:
             frames[0].post(values, model.coder.grids)
 
@@ -782,7 +797,7 @@ def _picture_values(model, frame, encode_filter='nearest', brightness=1.05,
                 brightness=brightness, gamma=gamma,
                 detail=pixel_detail)
         elif (options.pop('aggregation', 'off') == 'off' and
-                options.pop('band_profile', 'off') == 'off'):
+              options.pop('band_profile', 'off') == 'off'):
             # The specified direct encode: tone + block pre-shrink fused in
             # one pass, then small cached DCT products per plane.
             values = direct_dct_values(
@@ -794,15 +809,37 @@ def _picture_values(model, frame, encode_filter='nearest', brightness=1.05,
         else:
             # Research reducers keep the full-resolution analysis path.
             research = dict(dct_options or {})
-            research.pop('kernel', None)
+            source_kernel = research.pop('kernel', None)
             research.pop('preshrink', None)
-            research.pop('linear_light', None)
+            linear_light = bool(research.pop('linear_light', False))
             research.pop('pixel', None)
             research.pop('pixel_detail', None)
             research.pop('pixel_shapes', None)
-            values, _stats = source_dct_values(
-                rgb, model.coder.grids, model.coder.shapes,
-                brightness=brightness, gamma=gamma, **research)
+            full_source = False
+            if source_kernel is not None and source_kernel.kernel.has_prefilter:
+                try:
+                    full_source = bool(
+                        (source_kernel.kernel.prefilter(source_kernel.params) or {})
+                        .get('full_source', False))
+                except Exception as exc:
+                    source_kernel.kernel.note_failure(exc)
+            if full_source:
+                # Area-box is itself a spatial reduction, so the native-source
+                # mode keeps the source's actual DCT coefficients instead.
+                if research.get('aggregation') == 'area-box':
+                    research['aggregation'] = 'off'
+                values, _stats = source_dct_values(
+                    rgb, model.coder.grids, model.coder.shapes,
+                    brightness=brightness, gamma=gamma,
+                    linear_light=linear_light, luminance_out=luminance_out,
+                    neutral_chroma=.5,
+                    numba_projection=True,
+                    kernel=source_kernel, kernel_masks=kernel_masks,
+                    kernel_frame_out=kernel_frame_out, **research)
+            else:
+                values, _stats = source_dct_values(
+                    rgb, model.coder.grids, model.coder.shapes,
+                    brightness=brightness, gamma=gamma, **research)
         size = source_size or (rgb.shape[1], rgb.shape[0])
         aspect = P.aspect_wire_code(size)
         if return_resized:
@@ -4403,7 +4440,7 @@ def parser():
                             '(1.75 to 8; default 4). Live in the GUI.'))
     send.add_argument(
         '--dct-kernel', default=None, metavar='NAME',
-        help=('with --dct-encode: the downscale kernel, a file in dct_kernels/ '
+        help=('with --dct-encode: the DCT kernel, a file in dct_kernels/ '
               '(or another --dct-kernel-dir); "reference" is the shipped '
               'encode. Also adjustable while sending from the GUI.'))
     send.add_argument(

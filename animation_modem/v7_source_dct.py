@@ -101,6 +101,177 @@ def _block_average_rgb(data, block_size, scale):
     return result
 
 
+@njit(cache=True, nogil=True, parallel=True)
+def _native_source_planes(data, scale, brightness, gamma, chroma_gain,
+                          neutral_chroma, keep_toned):
+    """Tone RGB and form Y/Cb/Cr in compiled source-pixel loops."""
+    height, width = data.shape[:2]
+    toned = (np.empty((height, width, 3), np.float32) if keep_toned else
+             np.empty((0, 0, 3), np.float32))
+    y_plane = np.empty((height, width), np.float64)
+    cb_plane = np.empty((height, width), np.float64)
+    cr_plane = np.empty((height, width), np.float64)
+    rgb_clipped = np.zeros(height, np.int64)
+    chroma_clipped = np.zeros(height, np.int64)
+    inverse_gamma = 1.0/gamma
+    for row in prange(height):
+        row_rgb_clipped = 0
+        row_chroma_clipped = 0
+        for col in range(width):
+            red = float(data[row, col, 0])*scale*brightness
+            green = float(data[row, col, 1])*scale*brightness
+            blue = float(data[row, col, 2])*scale*brightness
+            r = min(max(red, 0.0), 1.0)
+            g = min(max(green, 0.0), 1.0)
+            b = min(max(blue, 0.0), 1.0)
+            row_rgb_clipped += (r != red)+(g != green)+(b != blue)
+            if gamma != 1.0:
+                r = r**inverse_gamma
+                g = g**inverse_gamma
+                b = b**inverse_gamma
+            if keep_toned:
+                toned[row, col, 0] = r
+                toned[row, col, 1] = g
+                toned[row, col, 2] = b
+
+            y_plane[row, col] = .299000*r+.587000*g+.114000*b
+            cb_raw = neutral_chroma-.168736*r-.331264*g+.5*b
+            cr_raw = neutral_chroma+.5*r-.418688*g-.081312*b
+            cb = min(max(cb_raw, 0.0), 1.0)
+            cr = min(max(cr_raw, 0.0), 1.0)
+            row_chroma_clipped += (cb != cb_raw)+(cr != cr_raw)
+            if chroma_gain != 1.0:
+                cb_raw = NEUTRAL_CHROMA+(cb-NEUTRAL_CHROMA)*chroma_gain
+                cr_raw = NEUTRAL_CHROMA+(cr-NEUTRAL_CHROMA)*chroma_gain
+                cb = min(max(cb_raw, 0.0), 1.0)
+                cr = min(max(cr_raw, 0.0), 1.0)
+                row_chroma_clipped += (cb != cb_raw)+(cr != cr_raw)
+            cb_plane[row, col] = cb
+            cr_plane[row, col] = cr
+        rgb_clipped[row] = row_rgb_clipped
+        chroma_clipped[row] = row_chroma_clipped
+    return (toned, y_plane, cb_plane, cr_plane,
+            rgb_clipped.sum(), chroma_clipped.sum())
+
+
+@njit(cache=True, nogil=True, inline='always')
+def _native_linear_light(code):
+    if code <= .04045:
+        return code/12.92
+    return ((code+.055)/1.055)**2.4
+
+
+@njit(cache=True, nogil=True, parallel=True)
+def _native_luminance_target(toned, target_rows, target_cols, linear_light):
+    """Area-average source luminance to the coder grid without NumPy arrays."""
+    height, width = toned.shape[:2]
+    scale_y, scale_x = height/target_rows, width/target_cols
+    target = np.empty((target_rows, target_cols), np.float64)
+    for out_y in prange(target_rows):
+        y0 = out_y*scale_y
+        y1 = (out_y+1)*scale_y
+        first_y = int(y0)
+        last_y = min(height, int(y1)+(1 if y1 > int(y1) else 0))
+        for out_x in range(target_cols):
+            x0 = out_x*scale_x
+            x1 = (out_x+1)*scale_x
+            first_x = int(x0)
+            last_x = min(width, int(x1)+(1 if x1 > int(x1) else 0))
+            total_r = 0.0
+            total_g = 0.0
+            total_b = 0.0
+            total_luma = 0.0
+            area = 0.0
+            for source_y in range(first_y, last_y):
+                weight_y = min(y1, source_y+1.0)-max(y0, float(source_y))
+                for source_x in range(first_x, last_x):
+                    weight_x = min(x1, source_x+1.0)-max(x0, float(source_x))
+                    weight = weight_y*weight_x
+                    red = float(toned[source_y, source_x, 0])
+                    green = float(toned[source_y, source_x, 1])
+                    blue = float(toned[source_y, source_x, 2])
+                    if linear_light:
+                        total_luma += weight*(
+                            .2126*_native_linear_light(red)+
+                            .7152*_native_linear_light(green)+
+                            .0722*_native_linear_light(blue))
+                    else:
+                        total_r += weight*red
+                        total_g += weight*green
+                        total_b += weight*blue
+                    area += weight
+            if linear_light:
+                target[out_y, out_x] = total_luma/area
+            else:
+                red = _native_linear_light(total_r/area)
+                green = _native_linear_light(total_g/area)
+                blue = _native_linear_light(total_b/area)
+                target[out_y, out_x] = .2126*red+.7152*green+.0722*blue
+    return target
+
+
+@njit(cache=True, nogil=True)
+def _native_dct_basis_kernel(source_count, mode_count):
+    basis = np.empty((source_count, mode_count), np.float64)
+    scale = np.sqrt(2.0/source_count)
+    for sample in range(source_count):
+        for mode in range(mode_count):
+            value = np.cos(np.pi*(2*sample+1)*mode/(2*source_count))*scale
+            if mode == 0:
+                value /= np.sqrt(2.0)
+            basis[sample, mode] = value
+    return basis
+
+
+@lru_cache(maxsize=32)
+def _native_dct_basis(source_count, mode_count):
+    basis = _native_dct_basis_kernel(int(source_count), int(mode_count))
+    basis.setflags(write=False)
+    return basis
+
+
+@njit(cache=True, nogil=True, parallel=True, fastmath=True)
+def _native_dct_project(plane, basis_y, basis_x):
+    """Separable partial orthonormal DCT-II, projected directly from source."""
+    height, width = plane.shape
+    rows, cols = basis_y.shape[1], basis_x.shape[1]
+    vertical = np.zeros((rows, width), np.float64)
+    for mode_y in prange(rows):
+        for source_y in range(height):
+            weight = basis_y[source_y, mode_y]
+            for source_x in range(width):
+                vertical[mode_y, source_x] += plane[source_y, source_x]*weight
+    coefficients = np.empty((rows, cols), np.float64)
+    for mode_y in prange(rows):
+        for mode_x in range(cols):
+            total = 0.0
+            for source_x in range(width):
+                total += vertical[mode_y, source_x]*basis_x[source_x, mode_x]
+            coefficients[mode_y, mode_x] = total
+    return coefficients
+
+
+@njit(cache=True, nogil=True, parallel=True, fastmath=True)
+def _native_dct_inverse(coefficients, basis_y, basis_x):
+    """Inverse orthonormal DCT-II of one coder-grid coefficient plane."""
+    rows, cols = coefficients.shape
+    vertical = np.empty((rows, cols), np.float64)
+    for row in prange(rows):
+        for col in range(cols):
+            total = 0.0
+            for mode_y in range(rows):
+                total += basis_y[row, mode_y]*coefficients[mode_y, col]
+            vertical[row, col] = total
+    grid = np.empty((rows, cols), np.float64)
+    for row in prange(rows):
+        for col in range(cols):
+            total = 0.0
+            for mode_x in range(cols):
+                total += vertical[row, mode_x]*basis_x[col, mode_x]
+            grid[row, col] = total
+    return grid
+
+
 def source_fold_dct_coefficients(rgb, grids, positions):
     """Project native RGB onto the compact DCT support required by a Fold.
 
@@ -1550,9 +1721,11 @@ class KernelFrame:
         if (rows, cols) != gain.shape:
             return target
         coded = _linear_to_srgb_grid(np.asarray(target, dtype=np.float64))
-        coefficients = dctn(coded, norm='ortho')
+        basis_y = _native_dct_basis(rows, rows)
+        basis_x = _native_dct_basis(cols, cols)
+        coefficients = _native_dct_project(coded, basis_y, basis_x)
         coefficients *= gain
-        filtered = idctn(coefficients, norm='ortho')
+        filtered = _native_dct_inverse(coefficients, basis_y, basis_x)
         return _srgb_to_linear_extended_grid(filtered)
 
     def post(self, values, grids):
@@ -1606,12 +1779,26 @@ def direct_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
     inverse transform stays within the clamp range; clipped samples can differ
     from the direct pre-clamp window path.
     """
+    prefilter = None
     if kernel is not None and kernel.kernel.has_prefilter:
         try:
-            preshrink = (kernel.kernel.prefilter(kernel.params) or {}).get(
-                'preshrink', preshrink)
+            prefilter = kernel.kernel.prefilter(kernel.params) or {}
         except Exception as exc:
             kernel.kernel.note_failure(exc)
+        else:
+            if prefilter.get('full_source'):
+                values, _stats = source_dct_values(
+                    rgb, grids, shapes, brightness=brightness, gamma=gamma,
+                    sharpen=sharpen, sharpen_strength=sharpen_strength,
+                    clarity=clarity, chroma_gain=chroma_gain,
+                    aggregation='off', band_profile='off',
+                    luminance_out=luminance_out, linear_light=linear_light,
+                    neutral_chroma=.5,
+                    numba_projection=True,
+                    kernel=kernel, kernel_masks=kernel_masks,
+                    kernel_frame_out=kernel_frame_out)
+                return values
+            preshrink = prefilter.get('preshrink', preshrink)
     planes, grids, shapes, taper, target, blocks, source = _direct_planes(
         rgb, grids, shapes, brightness, gamma, sharpen, sharpen_strength,
         clarity, chroma_gain,
@@ -1667,16 +1854,27 @@ def source_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
                       clip_values=True, sharpen='off', sharpen_strength=.25,
                       clarity=0.0, chroma_gain=1.0, aggregation='off',
                       band_profile='off', display_size=(1080, 900),
-                      viewing_distance_mm=600.0, display_dpi=96.0):
+                      viewing_distance_mm=600.0, display_dpi=96.0,
+                      linear_light=False, luminance_out=None, kernel=None,
+                      kernel_masks=None, kernel_frame_out=None,
+                      neutral_chroma=NEUTRAL_CHROMA,
+                      numba_projection=False):
     """Analyze a native RGB frame and return coder-grid values plus diagnostics.
 
-    Each full-resolution float Y/Cb/Cr plane is orthonormally transformed. The
-    direct candidate retains its low-frequency coder-grid corner. Optional
-    weighted modes apply same-index spectral gain windows; see ``_aggregate``.
-    They never average signed DCT coefficients. The resulting coefficients are
-    amplitude-normalized and inverse transformed to the existing V7 spatial-
-    value interface. The normal sender then performs its ordinary DCT and
-    rank/fold work exactly once.
+    Each full-resolution Y/Cb/Cr plane is orthonormally transformed. The
+    optional ``numba_projection`` path performs source preparation, partial
+    DCT projection and coder-grid inverse transforms in compiled Numba loops.
+    The direct candidate retains its low-frequency coder-grid corner.
+    Optional weighted modes apply same-index spectral gain windows; see
+    ``_aggregate``. They never average signed DCT coefficients. The resulting
+    coefficients are amplitude-normalized and inverse transformed to the
+    existing V7 spatial-value interface. The normal sender then performs its
+    ordinary DCT and rank/fold work exactly once. An optional kernel window
+    can shape those coefficients; ``kernel_frame_out`` receives its
+    post-adjustment context.
+    ``luminance_out`` receives the source's area-averaged linear luminance,
+    optionally filtered by the same luma window. ``neutral_chroma`` controls
+    the neutral code (the direct encoder uses 0.5).
     """
     if sharpen not in SHARPEN_MODES:
         raise ValueError(f'unknown DCT sharpen mode {sharpen!r}')
@@ -1695,9 +1893,26 @@ def source_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
         raise ValueError('DCT enhancement strengths must be in [0, 1]')
     if not 1 <= chroma_gain <= 1.3:
         raise ValueError('chroma gain must be in [1, 1.3]')
+    if numba_projection and aggregation == 'area-box':
+        raise ValueError('Numba source projection does not use area-box reduction')
+    neutral_chroma = float(neutral_chroma)
+    if not np.isfinite(neutral_chroma):
+        raise ValueError('neutral chroma must be finite')
 
-    rgb01 = _rgb_float(rgb)
-    height, width = rgb01.shape[:2]
+    data = np.asarray(rgb)
+    if numba_projection:
+        if data.ndim != 3 or data.shape[2] != 3:
+            raise ValueError('source DCT expects an HxWx3 RGB frame')
+        if data.dtype == np.uint8:
+            data = np.ascontiguousarray(data)
+            source_scale = 1.0/255.0
+        else:
+            data = _rgb_float(data)
+            source_scale = 1.0
+    else:
+        data = _rgb_float(data)
+        source_scale = 1.0
+    height, width = data.shape[:2]
     grids = tuple(tuple(map(int, shape)) for shape in grids)
     shapes = tuple(tuple(map(int, shape)) for shape in shapes)
     if len(grids) != len(shapes) or len(grids) not in (1, 3):
@@ -1709,26 +1924,35 @@ def source_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
            for gr, sh in zip(grids, shapes)):
         raise ValueError('each transmitted shape must fit its coder grid')
 
-    toned = np.clip(rgb01*brightness, 0.0, 1.0)
-    rgb_clip_fraction = float(np.count_nonzero(toned != rgb01*brightness)/toned.size)
-    if gamma != 1.0:
-        toned = toned**(1.0/gamma)
-    red, green, blue = (toned[..., index] for index in range(3))
-    y = .299000*red + .587000*green + .114000*blue
-    cb_unclipped = (NEUTRAL_CHROMA-.168736*red-.331264*green+.5*blue)
-    cr_unclipped = (NEUTRAL_CHROMA+.5*red-.418688*green-.081312*blue)
-    cb = np.clip(cb_unclipped, 0.0, 1.0)
-    cr = np.clip(cr_unclipped, 0.0, 1.0)
-    chroma_clipped = int(np.count_nonzero(cb != cb_unclipped) +
-                         np.count_nonzero(cr != cr_unclipped))
+    if numba_projection:
+        toned, y, cb, cr, rgb_clip_count, chroma_clipped = \
+            _native_source_planes(data, source_scale, brightness, gamma,
+                                  chroma_gain, neutral_chroma,
+                                  luminance_out is not None)
+        rgb_clip_fraction = rgb_clip_count/(3*height*width)
+    else:
+        rgb01 = data
+        toned = np.clip(rgb01*brightness, 0.0, 1.0)
+        rgb_clip_fraction = float(
+            np.count_nonzero(toned != rgb01*brightness)/toned.size)
+        if gamma != 1.0:
+            toned = toned**(1.0/gamma)
+        red, green, blue = (toned[..., index] for index in range(3))
+        y = .299000*red + .587000*green + .114000*blue
+        cb_unclipped = (neutral_chroma-.168736*red-.331264*green+.5*blue)
+        cr_unclipped = (neutral_chroma+.5*red-.418688*green-.081312*blue)
+        cb = np.clip(cb_unclipped, 0.0, 1.0)
+        cr = np.clip(cr_unclipped, 0.0, 1.0)
+        chroma_clipped = int(np.count_nonzero(cb != cb_unclipped) +
+                              np.count_nonzero(cr != cr_unclipped))
+        if chroma_gain != 1.0:
+            cb_raw = NEUTRAL_CHROMA+(cb-NEUTRAL_CHROMA)*chroma_gain
+            cr_raw = NEUTRAL_CHROMA+(cr-NEUTRAL_CHROMA)*chroma_gain
+            chroma_clipped += int(
+                np.count_nonzero(cb_raw != np.clip(cb_raw, 0, 1))+
+                np.count_nonzero(cr_raw != np.clip(cr_raw, 0, 1)))
+            cb, cr = np.clip(cb_raw, 0, 1), np.clip(cr_raw, 0, 1)
     source_chroma_count = 2*height*width
-
-    if chroma_gain != 1.0:
-        cb_raw = NEUTRAL_CHROMA+(cb-NEUTRAL_CHROMA)*chroma_gain
-        cr_raw = NEUTRAL_CHROMA+(cr-NEUTRAL_CHROMA)*chroma_gain
-        chroma_clipped += int(np.count_nonzero(cb_raw != np.clip(cb_raw, 0, 1))+
-                              np.count_nonzero(cr_raw != np.clip(cr_raw, 0, 1)))
-        cb, cr = np.clip(cb_raw, 0, 1), np.clip(cr_raw, 0, 1)
 
     if sharpen == 'usm' and sharpen_strength:
         sy = .8*height/grids[0][0]
@@ -1741,6 +1965,25 @@ def source_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
         y = y+clarity*(y-gaussian_filter(y, sigma=(sy, sx), mode='reflect'))
 
     planes = (y,) if len(grids) == 1 else (y, cb, cr)
+    frame = None
+    if kernel is not None:
+        frame = KernelFrame(kernel, grids, shapes, kernel_masks, planes)
+        if kernel_frame_out is not None:
+            kernel_frame_out.append(frame)
+    if luminance_out is not None:
+        if numba_projection:
+            target = _native_luminance_target(
+                toned, grids[0][0], grids[0][1], bool(linear_light))
+        elif linear_light:
+            pixel_luminance = (_srgb_to_linear(toned) @ LUMINANCE_WEIGHTS)
+            target = _area_box_resample(pixel_luminance, grids[0])
+        else:
+            grid_rgb = np.stack([
+                _area_box_resample(toned[..., channel], grids[0])
+                for channel in range(3)], axis=-1)
+            target = _srgb_to_linear(grid_rgb) @ LUMINANCE_WEIGHTS
+        luminance_out.append(frame.filter_target(target)
+                             if frame is not None else target)
     reconstructed = []
     for plane_index, (plane, grid, sent_shape) in enumerate(
             zip(planes, grids, shapes)):
@@ -1751,13 +1994,22 @@ def source_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
             # whole-frame DCT modes or cancel the image's AC energy.
             reduced = _area_box_resample(plane, (grid_rows, grid_cols))
             if band_profile == 'off' and not (
-                    sharpen == 'taper' and sharpen_strength):
+                    sharpen == 'taper' and sharpen_strength) and not (
+                    frame is not None and frame.kernel.has_gain):
                 # The ordinary coder will perform the target-grid DCT. Avoid
                 # an identity DCT/IDCT pair here when no spectral shaping uses
                 # the coefficients in this preparation stage.
                 reconstructed.append(2.0*reduced-1.0)
                 continue
             coefficients = dctn(reduced, norm='ortho')
+        elif numba_projection:
+            basis_y = _native_dct_basis(height, grid_rows)
+            basis_x = _native_dct_basis(width, grid_cols)
+            coefficients = _native_dct_project(plane, basis_y, basis_x)
+            if aggregation != 'off':
+                coefficients = _aggregate(
+                    coefficients, aggregation, (grid_rows, grid_cols)).copy()
+            coefficients *= np.sqrt((grid_rows*grid_cols)/(height*width))
         else:
             coefficients = dctn(plane, norm='ortho')
             coefficients = _aggregate(
@@ -1778,7 +2030,17 @@ def source_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
                 grid, plane_index, band_profile, display_size,
                 viewing_distance_mm, display_dpi,
                 viewport_aspect=width/height)
-        reconstructed.append(2.0*idctn(coefficients, norm='ortho')-1.0)
+        if frame is not None:
+            gain = frame.gain(plane_index)
+            if gain is not None:
+                coefficients *= gain
+        if numba_projection:
+            basis_y = _native_dct_basis(grid_rows, grid_rows)
+            basis_x = _native_dct_basis(grid_cols, grid_cols)
+            grid_values = _native_dct_inverse(coefficients, basis_y, basis_x)
+            reconstructed.append(2.0*grid_values-1.0)
+        else:
+            reconstructed.append(2.0*idctn(coefficients, norm='ortho')-1.0)
 
     raw_values = np.concatenate([plane.ravel() for plane in reconstructed])
     outside = np.maximum(np.abs(raw_values)-1.0, 0.0)

@@ -1,11 +1,12 @@
-"""Pluggable DCT-mode downscale kernels, discovered from folders at launch.
+"""Pluggable DCT-mode kernels, discovered from folders at launch.
 
 A kernel is one ``.py`` file. Drop it in ``dct_kernels/`` (or any folder named
 by ``--dct-kernel-dir`` or ``$V7_KERNEL_DIR``) and it is offered the next time
 the sender or its GUI starts; delete the file and it is gone. Nothing here
 changes the wire: a kernel only decides which picture is handed to the same
-DCT, fold and modem. The picture is prepared as before (block mean, 2:1
-decimation, DCT truncation to the coder grid); a kernel shapes the result in
+DCT, fold and modem. Usually the picture is prepared as before (block mean,
+2:1 decimation, DCT truncation to the coder grid); a prefilter can instead
+select direct source-resolution DCT projection. A kernel shapes the result in
 three places, all optional:
 
 ``gain`` / ``response`` / ``kernel``  (a linear window over the DCT)
@@ -33,6 +34,11 @@ three places, all optional:
     the coefficients the wire carries, ``ctx.project(grid)`` keeps only those
     and ``ctx.reduce(array, 'min' | 'max' | 'mean')`` brings a pixel-domain
     array down to the grid. Return a grid of the same shape.
+
+``prefilter(**params)`` can return ``{'preshrink': factor}`` as before, or
+``{'full_source': True}`` to project the original-resolution frame directly
+onto the coder grid's DCT coefficients, with no intermediate spatial resize or
+decimation. The coder grid and transmitted band remain unchanged.
 
 Optional module attributes: ``LABEL``, ``HELP``, ``NAME`` (default: the file
 name), ``SUPPORT``, ``RADIAL``, ``DEFER_GAIN_TO_CODEC``, ``HOST_DEFAULTS``,
@@ -318,11 +324,12 @@ class Kernel:
                     not self.has_prefilter)
 
     def prefilter(self, params):
-        """Options for the stage before the DCT: ``{'preshrink': factor}``.
+        """Options for source analysis: a preshrink factor or full-source DCT.
 
-        ``factor`` is how many times the luma grid the block-averaged plane
-        is (1.75 to 8; the shipped encoder uses 4). Anything else a kernel
-        returns is ignored. None when the kernel does not choose.
+        ``preshrink`` is how many times the luma grid the block-averaged plane
+        is (1.75 to 8; the shipped encoder uses 4). ``full_source=True`` asks
+        for direct source-resolution projection instead, with no intermediate
+        spatial resize or decimation. None when the kernel does not choose.
         """
         if 'prefilter' not in self._hooks:
             return None
@@ -336,6 +343,11 @@ class Kernel:
         if not isinstance(result, dict):
             raise KernelError('prefilter must return a dict or None')
         options = {}
+        if 'full_source' in result:
+            value = result['full_source']
+            if not isinstance(value, (bool, np.bool_)):
+                raise KernelError('full_source must be a boolean')
+            options['full_source'] = bool(value)
         if 'preshrink' in result:
             value = float(result['preshrink'])
             if not np.isfinite(value) or not PRESHRINK_LIMITS[0] <= value <= PRESHRINK_LIMITS[1]:

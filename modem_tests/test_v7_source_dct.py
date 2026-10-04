@@ -18,6 +18,7 @@ from animation_modem.v7_source_dct import (
     source_dct_values,
     source_fold_block_dct_coefficients, source_fold_dct_coefficients)
 from animation_modem import v7
+from animation_modem import v7_kernels
 from animation_modem.v7_fold import Fold500
 from tools.v7_capture import CapturedFrame
 from tools import v7_live
@@ -267,6 +268,69 @@ class SourceDCTTests(unittest.TestCase):
             v7_live._values(
                 model, CapturedFrame(rgb, (160, 120), prepared=True), 'box',
                 brightness=1.0, dct_encode=True)
+
+    def test_native_source_kernel_is_used_by_live_sender(self):
+        model = v7.load_model(.1521/np.sqrt(1+10**(v7.CLOCK_REL_DB/10)), 'box')
+        rgb = np.random.default_rng(22).integers(
+            0, 256, (120, 160, 3), dtype=np.uint8)
+        selection = v7_kernels.open_registry().select('native_source', {})
+        expected, _ = source_dct_values(rgb, model.coder.grids,
+                                        model.coder.shapes,
+                                        neutral_chroma=.5)
+
+        for options in ({'kernel': selection},
+                        {'kernel': selection, 'aggregation': 'area-box'}):
+            with self.subTest(aggregation=options.get('aggregation', 'off')):
+                actual, _aspect = v7_live._values(
+                    model, rgb, 'box', brightness=1.0, dct_encode=True,
+                    dct_options=options)
+                np.testing.assert_allclose(actual, expected, rtol=0.0,
+                                           atol=1e-12)
+
+        weighted_expected, _ = source_dct_values(
+            rgb, model.coder.grids, model.coder.shapes,
+            aggregation='weighted-tent', neutral_chroma=.5)
+        weighted, _aspect = v7_live._values(
+            model, rgb, 'box', brightness=1.0, dct_encode=True,
+            dct_options={'kernel': selection, 'aggregation': 'weighted-tent'})
+        np.testing.assert_allclose(weighted, weighted_expected, rtol=0.0,
+                                   atol=1e-12)
+
+        wire_masks = [np.ones(grid, dtype=bool) for grid in model.coder.grids]
+        luma_adjusted, _aspect = v7_live._values(
+            model, rgb, 'box', brightness=1.0, dct_encode=True,
+            dct_options={'kernel': selection},
+            chroma_sent_for=lambda _aspect: wire_masks[1:],
+            kernel_masks_for=lambda _aspect: wire_masks)
+        self.assertEqual(luma_adjusted.shape, expected.shape)
+        self.assertTrue(np.isfinite(luma_adjusted).all())
+
+    def test_numba_source_projection_matches_numpy_reference_math(self):
+        rgb = np.random.default_rng(81).integers(
+            0, 256, (192, 160, 3), dtype=np.uint8)
+        options = dict(brightness=1.07, gamma=1.13, chroma_gain=1.1,
+                       neutral_chroma=.5)
+
+        for aggregation in ('off', 'weighted-tent'):
+            for linear_light in (False, True):
+                reference_luminance, numba_luminance = [], []
+                expected, _ = source_dct_values(
+                    rgb, v7.V7_GRIDS, v7.V7_SHAPES,
+                    aggregation=aggregation, linear_light=linear_light,
+                    luminance_out=reference_luminance, **options)
+                actual, _ = source_dct_values(
+                    rgb, v7.V7_GRIDS, v7.V7_SHAPES,
+                    aggregation=aggregation, linear_light=linear_light,
+                    luminance_out=numba_luminance, numba_projection=True,
+                    **options)
+
+                with self.subTest(aggregation=aggregation,
+                                  linear_light=linear_light):
+                    np.testing.assert_allclose(actual, expected, rtol=0.0,
+                                               atol=1e-12)
+                    np.testing.assert_allclose(numba_luminance[0],
+                                               reference_luminance[0],
+                                               rtol=0.0, atol=5e-8)
 
     def test_explicit_noop_dct_option_still_requires_opt_in(self):
         args = v7_live.parser().parse_args([

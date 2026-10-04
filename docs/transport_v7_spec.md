@@ -681,7 +681,7 @@ sharpness. The contracts for any preparation stage:
 - `--clip-aware-encode` (folded profiles): re-fits sent luma so ringing falls
   into the receiver's black and white clip.
 - With `--dct-encode`: `--dct-kernel NAME` (with `--dct-kernel-param
-  NAME=VALUE`, `--dct-kernel-dir DIR`), a pluggable downscale kernel read from
+  NAME=VALUE`, `--dct-kernel-dir DIR`), a pluggable DCT kernel read from
   `dct_kernels/` at launch (section 11.4).
 - The default resize path uses Pillow's integer `reduce` for a box resize when
   the source is a whole multiple of 80 × 96.
@@ -691,7 +691,7 @@ sharpness. The contracts for any preparation stage:
 The plans the owner kept. Plans struck on review: deciding whether the
 `box` tables are adequate (answered: they are not; see roadmap item 1),
 guest soft knee, luma-guided chroma, change-adaptive softening, bake
-integration, and faster full-resolution preparation for `--dct-encode`.
+integration.
 
 1. Promotion rule: no stage becomes a default without a measured comparison
    against `box`, a viewer preference, and at most 25% added send-path time.
@@ -745,10 +745,16 @@ A kernel supplies any of:
   and `ctx.reduce` (local min/max of the source);
 - a `prefilter()` that chooses the pre-shrink factor (1.75 to 8 times the
   luma grid; 4 is the shipped encoder) of the block-average stage before the
-  transform. The 2:1 decimation taps after it were measured and do not matter
-  (all designs tried within 0.1 dB on natural pictures), the block size does:
-  on dense texture factor 8 is 8 dB closer to the full-resolution transform
-  in the top half of the band than 4, on smooth pictures nothing changes.
+  transform. It can instead return `{'full_source': True}` to project the
+  original-resolution frame directly onto the coder-grid DCT coefficients,
+  skipping both the block-average and 2:1 decimation stages. The fixed coder
+  grid, transmitted band and wire format are unchanged. The ordinary 2:1
+  decimation filter was measured within 0.1 dB across tested designs on
+  natural pictures; block size matters more: on dense texture factor 8 is 8 dB
+  closer to the full-resolution transform in the top half of the band than 4,
+  while on smooth pictures nothing changes. Native-source color conversion,
+  partial DCT projection and coder-grid inverse transforms run in Numba rather
+  than materializing a full-frame NumPy DCT.
 
 `tools/v7_kernel_bench.py --display bilinear|bicubic|nearest` judges a
 kernel through the viewer's upscaler instead of an ideal enlargement.

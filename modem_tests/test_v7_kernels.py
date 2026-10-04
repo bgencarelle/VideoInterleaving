@@ -17,7 +17,7 @@ from animation_modem import v7_kernels as K
 from animation_modem.v7_source_dct import (
     KernelFrame, _dct_matrix, _direct_plan, _direct_planes,
     _linear_to_srgb, _separable, _srgb_to_linear_extended,
-    direct_dct_values)
+    direct_dct_values, source_dct_values)
 from tools import v7_live
 
 GRIDS, SHAPES = v7.V7_GRIDS, v7.V7_SHAPES
@@ -183,6 +183,53 @@ class ViewerAndPrefilterTests(unittest.TestCase):
             # refused at load: the self-test runs the hook
             self.assertTrue(registry.errors)
             self.assertIn('preshrink', registry.errors[0][1])
+
+    def test_native_source_kernel_skips_spatial_reduction(self):
+        frame = _frame(rows=480, cols=400)
+        selection = self.registry.select('native_source', {})
+        self.assertEqual(selection.kernel.prefilter(selection.params),
+                         {'full_source': True})
+
+        expected, _ = source_dct_values(frame, GRIDS, SHAPES,
+                                        neutral_chroma=.5)
+        actual = direct_dct_values(frame, GRIDS, SHAPES, kernel=selection)
+        reduced = direct_dct_values(frame, GRIDS, SHAPES)
+
+        np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1e-12)
+        self.assertGreater(float(np.max(np.abs(actual-reduced))), 1e-7)
+
+    def test_native_source_kernel_still_applies_dct_windows(self):
+        with tempfile.TemporaryDirectory() as folder:
+            _write(folder, 'native_window', '''
+                import numpy as np
+                def prefilter():
+                    return {'full_source': True}
+                def response(nu):
+                    return np.where(nu < 0.2, 1.0, 0.5)
+            ''')
+            registry = K.KernelRegistry([folder])
+            registry.scan()
+            self.assertEqual(registry.errors, [])
+            frame = _frame(rows=480, cols=400)
+            expected, _ = source_dct_values(frame, GRIDS, SHAPES,
+                                            neutral_chroma=.5)
+            actual = direct_dct_values(
+                frame, GRIDS, SHAPES,
+                kernel=registry.select('native_window', {}))
+
+        self.assertGreater(float(np.max(np.abs(actual-expected))), 1e-3)
+
+    def test_full_source_prefilter_requires_a_boolean(self):
+        with tempfile.TemporaryDirectory() as folder:
+            _write(folder, 'invalid_source_mode', '''
+                def prefilter():
+                    return {'full_source': 1}
+            ''')
+            registry = K.KernelRegistry([folder])
+            registry.scan()
+
+        self.assertTrue(registry.errors)
+        self.assertIn('full_source must be a boolean', registry.errors[0][1])
 
     def test_the_viewer_solve_gets_closer_to_the_ideal_enlargement(self):
         module = self.registry.get('viewer_solve').module

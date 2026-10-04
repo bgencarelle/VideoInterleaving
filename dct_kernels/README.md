@@ -1,4 +1,4 @@
-# DCT downscale kernels
+# DCT kernels
 
 Every `*.py` file in this folder is a kernel, offered by `vi.modem-send-gui`
 (and `vi.modem-send --dct-kernel NAME`) the next time it starts. Add a file to
@@ -49,7 +49,7 @@ other profiles use the general V7 defaults.
 | `response(nu, **p)` | 1-D frequency response; `nu` in cycles per sent pixel, 0.5 = Nyquist of the wire. Both axes; `RADIAL = True` applies it to the radius |
 | `gain(ctx, **p)` | a full 2-D gain over the coder grid (`ctx.grid`) |
 | `post(grid, ctx, **p)` | non-linear refit of the final plane, in [0, 1], after luma adjustment |
-| `prefilter(**p)` | returns `{'preshrink': factor}` (1.75 to 8; the shipped encoder uses 4): how coarsely the frame is averaged before the transform; overrides the GUI's DCT pre-shrink setting, which is the normal way to change it |
+| `prefilter(**p)` | returns `{'preshrink': factor}` (1.75 to 8; shipped default 4), or `{'full_source': True}` to project directly from the source-resolution DCT with no intermediate spatial resize/decimation |
 
 A hook may also take `plane` (0 luma, 1 Cb, 2 Cr) to treat planes differently.
 Gain at DC is forced to 1 (brightness never moves); with luma adjustment on,
@@ -93,6 +93,7 @@ how it looks *after* the viewer's upscaler. Judge them with
 | `csf_peak.py` | a smooth mid-band bump (where an enlarged picture is read) with a fall-off above it. Overshoots more than the others: raise `amount` with care |
 | `viewer_solve.py` | models the viewer's upscaler (`viewer`: 0 bilinear, 1 bicubic, 2 nearest) and solves, by conjugate gradient over only the coefficients the wire carries, for the plane whose *upscaled* picture is closest to the ideal enlargement; then clips halos to the source range. The best of these on the bench: with a bilinear viewer, detail at 0.4 cycles/pixel 0.68 to 0.95 with less overshoot than no kernel. About +12 ms per frame |
 | `slepian.py` | the DPSS window: the least energy leaving the band, hence the least ringing, at the cost of softness |
+| `native_source.py` | skips the intermediate block average and 2:1 decimation; Numba projects source-resolution DCT coefficients onto the same coder grid and transmitted band (higher CPU cost; may lower live FPS) |
 
 Compare them without any audio with `tools/v7_kernel_bench.py`
 (`--guests`, `--sheet out.png --image picture.png`, `--param
