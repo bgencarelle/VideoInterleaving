@@ -66,6 +66,7 @@ def main():
                 frame = read_frame(connection)
             bridge['shape'] = tuple(frame.shape)
             bridge['has_pixels'] = bool(frame.any())
+            bridge['contrast'] = float(frame.std())
         except Exception as exc:
             bridge['error'] = str(exc)
 
@@ -157,6 +158,7 @@ def main():
         "timer_expired": timer_expired,
         "bridge_frame_shape": bridge.get('shape'),
         "bridge_frame_has_pixels": bridge.get('has_pixels', False),
+        "bridge_frame_contrast": bridge.get('contrast', 0.0),
         "bridge_error": bridge.get('error'),
         "app_status": app_status,
         "log_path": str(log_path),
@@ -168,7 +170,7 @@ def main():
     print(json.dumps(report, indent=2), file=sys.__stdout__)
 
     return 0 if (app_status == 0 and gl_ready and timer_expired and
-                  bridge.get('shape') and bridge.get('has_pixels') and
+                  bridge.get('shape') and bridge.get('contrast', 0.0) > 1.0 and
                   counts["gl_composite"] > 0 and
                   counts["cpu_composite"] == 0) else 1
 

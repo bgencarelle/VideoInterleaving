@@ -20,7 +20,7 @@ _GLFW_AVAILABLE = False
 try:
     import glfw
     from OpenGL.GL import (
-        glEnable, glGetError, glGetString,
+        glEnable, glGetError, glGetString, glViewport,
         GL_FRAMEBUFFER_SRGB, GL_INVALID_ENUM, GL_VERSION, GL_RENDERER,
     )
     _GLFW_AVAILABLE = True
@@ -1434,7 +1434,10 @@ def display_init(state: DisplayState):
     fb_w, fb_h = glfw.get_framebuffer_size(window)
     if fb_w <= 0 or fb_h <= 0:
         fb_w, fb_h = glfw.get_window_size(window)
-    renderer.set_viewport_size(fb_w, fb_h)
+    if renderer.using_legacy_gl():
+        glViewport(0, 0, fb_w, fb_h)
+    else:
+        ctx.viewport = (0, 0, fb_w, fb_h)
 
     if state.fullscreen:
         scale_x = fb_w / eff_w

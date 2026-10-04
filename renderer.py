@@ -753,15 +753,19 @@ def read_frame_rgb() -> np.ndarray | None:
     This is intended for explicit frame-output consumers such as the sender
     bridge. Ordinary local display keeps the existing no-readback fast path.
     """
-    width, height = _viewport_size
-    if width < 1 or height < 1:
-        return None
     if _backend == "legacy":
         gl = _lazy_import_gl()
+        x, y, width, height = map(int, gl.glGetIntegerv(gl.GL_VIEWPORT))
+        if width < 1 or height < 1:
+            return None
         gl.glPixelStorei(gl.GL_PACK_ALIGNMENT, 1)
-        raw = gl.glReadPixels(0, 0, width, height, gl.GL_RGB, gl.GL_UNSIGNED_BYTE)
+        raw = gl.glReadPixels(x, y, width, height, gl.GL_RGB,
+                              gl.GL_UNSIGNED_BYTE)
     else:
-        if ctx is None:
+        if ctx is None or ctx.screen is None:
+            return None
+        width, height = ctx.screen.size
+        if width < 1 or height < 1:
             return None
         raw = ctx.screen.read(components=3, alignment=1)
     frame = np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 3)
