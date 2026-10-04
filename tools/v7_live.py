@@ -176,14 +176,14 @@ class LiveKernelControls:
     {"kernel": "lanczos", "kernel_params": {"width": 0.9}} (the name may be
     omitted to adjust the current kernel; each kernel remembers its own
     values while the send runs), {"dct": {"sharpen": "taper",
-    "sharpen_strength": .3, "clarity": 0, "chroma_gain": 1}} and
+    "sharpen_strength": .3, "clarity": 0, "chroma_gain": 1, "preshrink": 4}} and
     {"kernels": "reload"}, which rescans the kernel folders so an edited or
     added file can be tried without stopping. Anything invalid is ignored with
     a notice; the frame loop only ever sees a ready, valid selection.
     """
 
     DCT_LIMITS = {'sharpen_strength': (0.0, 1.0), 'clarity': (0.0, 1.0),
-                  'chroma_gain': (1.0, 1.3)}
+                  'chroma_gain': (1.0, 1.3), 'preshrink': (1.75, 8.0)}
 
     def __init__(self, registry, name=None, params=None):
         self.registry = registry
@@ -773,6 +773,7 @@ def _picture_values(model, frame, encode_filter='nearest', brightness=1.05,
             # Research reducers keep the full-resolution analysis path.
             research = dict(dct_options or {})
             research.pop('kernel', None)
+            research.pop('preshrink', None)
             research.pop('linear_light', None)
             research.pop('pixel', None)
             research.pop('pixel_detail', None)
@@ -915,6 +916,8 @@ def _send_profile(args, slots):
             raise ValueError('--dct-clarity must be in [0, 1]')
         if not 1 <= dct_options['chroma_gain'] <= 1.3:
             raise ValueError('--dct-chroma-gain must be in [1, 1.3]')
+        if not 1.75 <= dct_options['preshrink'] <= 8.0:
+            raise ValueError('--dct-preshrink must be in [1.75, 8]')
     elif _dct_options_explicit(args):
         raise ValueError('DCT enhancement options require --dct-encode')
     if perceptual_resize != 'off':
@@ -938,6 +941,7 @@ def _dct_encode_options(args):
         'sharpen_strength': float(option('dct_sharpen_strength', .25)),
         'clarity': float(option('dct_clarity', 0.0)),
         'chroma_gain': float(option('dct_chroma_gain', 1.0)),
+        'preshrink': float(option('dct_preshrink', 4.0)),
         'aggregation': option('dct_aggregation', 'off'),
         'band_profile': option('dct_band_profile', 'off'),
         'linear_light': bool(option('luma_adjust_linear', False)),
@@ -949,7 +953,8 @@ def _dct_encode_options(args):
 def _dct_options_explicit(args):
     return any(getattr(args, name, None) is not None for name in (
         'dct_sharpen', 'dct_sharpen_strength', 'dct_clarity',
-        'dct_chroma_gain', 'dct_aggregation', 'dct_band_profile')) or (
+        'dct_chroma_gain', 'dct_preshrink', 'dct_aggregation',
+        'dct_band_profile')) or (
         getattr(args, 'dct_kernel', None) not in (None, K.REFERENCE))
 
 
@@ -4312,6 +4317,10 @@ def parser():
                       help=argparse.SUPPRESS)
     send.add_argument('--dct-chroma-gain', type=float, default=None,
                       help=argparse.SUPPRESS)
+    send.add_argument('--dct-preshrink', type=float, default=None,
+                      help=('with --dct-encode: the block-average size before '
+                            'the transform, as a multiple of the luma grid '
+                            '(1.75 to 8; default 4). Live in the GUI.'))
     send.add_argument(
         '--dct-kernel', default=None, metavar='NAME',
         help=('with --dct-encode: the downscale kernel, a file in dct_kernels/ '

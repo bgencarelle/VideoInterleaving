@@ -1506,7 +1506,7 @@ def direct_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
                       sharpen='off', sharpen_strength=.25, clarity=0.0,
                       chroma_gain=1.0, luminance_out=None,
                       linear_light=False, kernel=None, kernel_masks=None,
-                      kernel_frame_out=None):
+                      kernel_frame_out=None, preshrink=None):
     """Direct DCT encode: native RGB frame to the sender's coder-grid values.
 
     Stages (see the direct-encode spec): tone per pixel at full resolution,
@@ -1519,17 +1519,19 @@ def direct_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
     (the target for luma_adjust): the linearised pre-shrunk means, or with
     ``linear_light`` the mean of every source pixel's linear luminance.
 
+    ``preshrink`` is how many times the luma grid the block-averaged plane is
+    (None: the shipped 4; 1.75 to 8). A kernel's own ``prefilter`` overrides it.
+
     ``kernel`` (a ``v7_kernels.KernelSelection``) puts a pluggable window on
     each plane's coefficients; ``kernel_masks`` names, per plane, the
     coefficients the wire carries (the transmitted rectangle when absent). A
     list passed as ``kernel_frame_out`` receives the frame's KernelFrame, whose
     ``post`` the caller runs after luma adjustment.
     """
-    preshrink = None
     if kernel is not None and kernel.kernel.has_prefilter:
         try:
             preshrink = (kernel.kernel.prefilter(kernel.params) or {}).get(
-                'preshrink')
+                'preshrink', preshrink)
         except Exception as exc:
             kernel.kernel.note_failure(exc)
     planes, grids, shapes, taper, target, blocks, source = _direct_planes(

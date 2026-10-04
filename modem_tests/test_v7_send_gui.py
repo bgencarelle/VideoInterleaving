@@ -488,7 +488,7 @@ class SenderGuiTests(unittest.TestCase):
         self.assertTrue(args.dct_encode)
         self.assertEqual(v7_live._dct_encode_options(args), {
             'sharpen': 'taper', 'sharpen_strength': .5, 'clarity': .15,
-            'chroma_gain': 1.1, 'aggregation': 'off', 'band_profile': 'off',
+            'chroma_gain': 1.1, 'preshrink': 4.0, 'aggregation': 'off', 'band_profile': 'off',
             'linear_light': False, 'pixel': False,
             'pixel_detail': 'average'})
         self.assertNotIn('--luma-adjust-linear', command)
@@ -573,8 +573,9 @@ class SenderGuiTests(unittest.TestCase):
         self.assertNotIn('perceptual_resize', visible)
         gui._assign('dct_sharpen', 'taper')
         self.assertIn('dct_sharpen_strength', gui._visible_fields())
+        # (the label also says what the default is)
         self.assertEqual(gui._value_label('dct_sharpen'),
-                         'Taper · sent band only')
+                         'Taper · sent band only  ·  default Off')
 
         for profile in ('fold-500', 'aspect-mono-500', 'mono-colour-500'):
             gui._assign('profile', profile)
@@ -1757,7 +1758,7 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
             'aspect_tail', 'dct_encode', 'pixel_encode', 'pixel_detail',
             'pixel_grid', 'luma_adjust', 'luma_adjust_linear', 'dct_sharpen',
             'dct_sharpen_strength', 'dct_clarity', 'dct_chroma_gain',
-            'dct_kernel', 'clip_aware', 'screen_backend', 'region', 'ffmpeg_input',
+            'dct_kernel', 'dct_preshrink', 'clip_aware', 'screen_backend', 'region', 'ffmpeg_input',
             'capture_width', 'capture_filter')
         self.assertEqual(set(names), set(before))
 
@@ -1784,7 +1785,8 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
             # The DCT kernel, its parameters and the DCT strengths are live too.
             live = (dest in ('brightness', 'gamma', 'dct_kernel', 'dct_sharpen',
                              'dct_sharpen_strength', 'dct_clarity',
-                             'dct_chroma_gain') or dest.startswith('kp:'))
+                             'dct_chroma_gain', 'dct_preshrink')
+                    or dest.startswith('kp:'))
             self.assertEqual(gui._locked(dest), not live)
         notes = [payload for kind, payload in gui._setup_items(self.SIZE[0])
                  if kind == 'note']
@@ -1830,7 +1832,9 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
         gui.notice = 'Camera discovery failed'
         self.assertEqual(gui._footer_content()[0], 'Camera discovery failed')
         gui.selected = 'gamma'
-        self.assertEqual(gui._footer_content()[0], FIELD_HELP['gamma'])
+        # a tweakable setting's help also names its default
+        self.assertEqual(gui._footer_content()[0],
+                         FIELD_HELP['gamma']+' Default: 1. Delete puts it back.')
         gui.sender_device_lost = True
         self.assertEqual(gui._footer_content()[0], gui.notice)
         gui.sender_device_lost = False

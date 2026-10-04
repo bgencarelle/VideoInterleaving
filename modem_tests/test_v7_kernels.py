@@ -140,7 +140,7 @@ class ViewerAndPrefilterTests(unittest.TestCase):
         plain = direct_dct_values(frame, GRIDS, SHAPES)
         four = direct_dct_values(
             frame, GRIDS, SHAPES,
-            kernel=self.registry.select('fine_detail', {'factor': 4.0}))
+            preshrink=4.0)
         np.testing.assert_array_equal(plain, four)
 
     def test_a_finer_pre_shrink_changes_a_detailed_picture(self):
@@ -149,11 +149,25 @@ class ViewerAndPrefilterTests(unittest.TestCase):
         stripes[:, ::2] = 200
         stripes += rng.integers(0, 40, stripes.shape, dtype=np.uint8)
         plain = direct_dct_values(stripes, GRIDS, SHAPES)
-        fine = direct_dct_values(
-            stripes, GRIDS, SHAPES,
-            kernel=self.registry.select('fine_detail', {'factor': 8.0}))
+        fine = direct_dct_values(stripes, GRIDS, SHAPES, preshrink=8.0)
         self.assertGreater(np.abs(plain - fine).max(), 1e-3)
         self.assertTrue(np.isfinite(fine).all())
+
+    def test_a_kernel_prefilter_overrides_the_setting(self):
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder)/'coarse.py').write_text(textwrap.dedent('''
+                def prefilter():
+                    return {'preshrink': 2.0}
+            '''))
+            registry = K.KernelRegistry([folder])
+            registry.scan()
+            self.assertEqual(registry.errors, [])
+            frame = _frame(rows=1080, cols=1920)
+            by_kernel = direct_dct_values(frame, GRIDS, SHAPES,
+                                          kernel=registry.select('coarse', {}),
+                                          preshrink=8.0)
+            by_setting = direct_dct_values(frame, GRIDS, SHAPES, preshrink=2.0)
+            np.testing.assert_array_equal(by_kernel, by_setting)
 
     def test_a_prefilter_outside_the_limits_is_refused_and_bypassed(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -209,8 +223,7 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(registry.errors, [])
         for name in ('lanczos', 'mitchell', 'magic_kernel_sharp', 'gaussian',
                      'band_taper', 'antiring', 'upscale_precomp', 'shock_edge',
-                     'csf_peak', 'slepian', 'tv_cartoon', 'viewer_solve',
-                     'fine_detail'):
+                     'csf_peak', 'slepian', 'tv_cartoon', 'viewer_solve'):
             self.assertIn(name, registry.names())
         self.assertEqual(registry.names()[0], K.REFERENCE)
 

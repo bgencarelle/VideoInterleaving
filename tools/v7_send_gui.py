@@ -217,6 +217,12 @@ FIELD_HELP = {
                     'leaves the cutoff alone; unsharp mask boosts everything.'),
     'dct_sharpen_strength': 'Sharpen strength, from 0 to 1. Try 0.25 or 0.5.',
     'dct_clarity': 'Large-radius local contrast, from 0 to 1. Try 0.15 or 0.3.',
+    'dct_preshrink': ('How finely the frame is averaged before the transform, '
+                      'as a multiple of the grid, from 1.75 to 8 (4 is the '
+                      'shipped encoder). Higher aliases less on dense texture '
+                      '(+3 ms per 1080p frame at 6, +14 ms at 8); smooth '
+                      'pictures do not change. Left/Right steps it, also '
+                      'while sending.'),
     'dct_chroma_gain': ('Saturation boost around neutral, from 1.0 to 1.3. '
                         '1.0 recommended: 1.05 and 1.1 measured no better.'),
     'aspect_layout': ('Which coefficients the aspect profiles send: matched '
@@ -257,6 +263,7 @@ FIELD_LABELS = {
     'dct_sharpen': 'DCT sharpen',
     'dct_sharpen_strength': 'Sharpen strength',
     'dct_clarity': 'DCT clarity',
+    'dct_preshrink': 'DCT pre-shrink',
     'dct_chroma_gain': 'Chroma gain',
     'aspect_layout': 'Aspect layout',
     'aspect_tail': 'Aspect tail',
@@ -268,11 +275,26 @@ FIELD_LABELS = {
 KERNEL_PARAM_PREFIX = 'kp:'
 KERNEL_DIRS = []                  # extra folders: --dct-kernel-dir
 KERNEL_LIVE_FIELDS = ('dct_kernel', 'dct_sharpen', 'dct_sharpen_strength',
-                      'dct_clarity', 'dct_chroma_gain')
+                      'dct_clarity', 'dct_chroma_gain', 'dct_preshrink')
 # (low, high, step) of the plain numbers that step with Left/Right.
 NUMERIC_STEPS = {'dct_sharpen_strength': (0.0, 1.0, 0.05),
                  'dct_clarity': (0.0, 1.0, 0.05),
+                 'dct_preshrink': (1.75, 8.0, 0.25),
                  'dct_chroma_gain': (1.0, 1.3, 0.01)}
+# What each tweakable setting is when untouched (the shipped encode). Rows show
+# it and Delete / the Defaults button put it back.
+ENCODE_DEFAULTS = {'dct_kernel': 'reference', 'dct_preshrink': '4',
+                   'dct_sharpen': 'off', 'dct_sharpen_strength': '0.25',
+                   'dct_clarity': '0', 'dct_chroma_gain': '1'}
+TONE_DEFAULTS = {'brightness': '', 'gamma': '1'}
+TWEAK_FIELDS = tuple(TONE_DEFAULTS) + tuple(ENCODE_DEFAULTS)
+# The sending screen's controls, grouped by what they do.
+LIVE_GROUPS = (
+    ('Tone', ('brightness', 'gamma')),
+    ('Downscale', ('dct_kernel', 'dct_preshrink')),
+    ('Sharpness', ('dct_sharpen', 'dct_sharpen_strength', 'dct_clarity',
+                   'dct_chroma_gain')),
+)
 _KERNELS = None
 
 
@@ -480,10 +502,10 @@ SAVED_SETTING_FIELDS = (
     'ffmpeg_input', 'screen_backend', 'screen_target', 'region',
     'capture_width', 'capture_filter', 'perceptual_resize',
     'perceptual_detail_strength', 'dct_encode', 'dct_sharpen',
-    'dct_sharpen_strength', 'dct_clarity', 'dct_chroma_gain',
+    'dct_sharpen_strength', 'dct_clarity', 'dct_chroma_gain', 'dct_preshrink',
     'aspect_layout', 'aspect_tail', 'clip_aware', 'luma_adjust',
     'luma_adjust_linear', 'pixel_encode', 'pixel_detail', 'pixel_grid',
-    'dct_kernel', 'dct_kernel_params',
+    'dct_kernel', 'dct_kernel_params', 'collapsed_sections',
 )
 
 
@@ -496,6 +518,8 @@ def _serialize_sender_settings(settings):
                      'display': value.display}
         if value is None or isinstance(value, (str, int, float, bool, dict)):
             saved[key] = value
+        elif key == 'collapsed_sections' and isinstance(value, (list, tuple)):
+            saved[key] = [str(item) for item in value]
     return saved
 
 
@@ -529,6 +553,9 @@ def _restore_sender_settings(target, saved):
                                 not isinstance(v, bool) and math.isfinite(v)}
                     for name, values in value.items()
                     if isinstance(values, dict)}
+        elif key == 'collapsed_sections':
+            if isinstance(value, list):
+                target[key] = [item for item in value if isinstance(item, str)]
         elif key in BOOL_FIELDS:
             if isinstance(value, bool):
                 target[key] = value
@@ -1172,6 +1199,7 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
     if pixel_grid not in dict(PIXEL_GRID_CHOICES).values():
         raise ValueError('Choose a supported pixel grid.')
     dct_strength, dct_clarity, dct_chroma_gain = .25, 0.0, 1.0
+    dct_preshrink = 4.0
     if dct_encode:
         if profile not in DCT_PROFILES:
             raise ValueError('Direct DCT encode requires a folded profile.')
@@ -1196,6 +1224,10 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
                                          'DCT chroma gain')
         if not 1.0 <= dct_chroma_gain <= 1.3:
             raise ValueError('DCT chroma gain must be between 1.0 and 1.3.')
+        dct_preshrink = _float_setting(settings.get('dct_preshrink', '4'),
+                                       'DCT pre-shrink')
+        if not 1.75 <= dct_preshrink <= 8.0:
+            raise ValueError('DCT pre-shrink must be between 1.75 and 8.')
     else:
         dct_sharpen = 'off'
     dct_kernel, kernel_values = 'reference', {}
@@ -1333,6 +1365,7 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
         'dct_sharpen_strength': dct_strength,
         'dct_clarity': dct_clarity,
         'dct_chroma_gain': dct_chroma_gain,
+        'dct_preshrink': dct_preshrink,
         'dct_kernel': dct_kernel,
         'dct_kernel_values': kernel_values,
     }
@@ -1410,6 +1443,8 @@ def build_command(settings, devices, sd_module=None, python=None,
         if checked['dct_chroma_gain'] != 1.0:
             command.extend(('--dct-chroma-gain',
                             str(checked['dct_chroma_gain'])))
+        if checked['dct_preshrink'] != 4.0:
+            command.extend(('--dct-preshrink', str(checked['dct_preshrink'])))
         if checked['dct_kernel'] != 'reference':
             kernel = kernel_registry().get(checked['dct_kernel'])
             command.extend(('--dct-kernel', checked['dct_kernel']))
@@ -1487,9 +1522,63 @@ def _font(size):
         return ImageFont.load_default()
 
 
+@lru_cache(maxsize=8192)
+def _width(font, text):
+    """A string's pixel width, remembered: the GUI measures the same labels
+    on every repaint."""
+    return font.getlength(text)
+
+
+class _CachedDraw:
+    """ImageDraw with the text rendering remembered.
+
+    Rasterising a label costs far more than pasting it, and a repaint draws
+    the same few hundred labels again and again; each (text, font, colour) is
+    rasterised once as a coverage mask and then pasted. Everything else is
+    ImageDraw's own. Anything unusual falls back to the normal call.
+    """
+
+    LIMIT = 2048
+
+    def __init__(self, image):
+        from PIL import ImageDraw
+        self._image = image
+        self._draw = ImageDraw.Draw(image)
+        self._masks = _TEXT_MASKS
+
+    def __getattr__(self, name):
+        return getattr(self._draw, name)
+
+    def text(self, xy, text, fill=None, font=None, **options):
+        if (options or font is None or not isinstance(text, str) or
+                not text or '\n' in text or not isinstance(fill, tuple)):
+            return self._draw.text(xy, text, fill=fill, font=font, **options)
+        key = (text, font, fill)
+        mask = self._masks.get(key)
+        if mask is None:
+            try:
+                from PIL import Image, ImageDraw
+                left, top, right, bottom = font.getbbox(text)
+                mask = Image.new('L', (max(1, right+2), max(1, bottom+2)), 0)
+                ImageDraw.Draw(mask).text((0, 0), text, fill=255, font=font)
+            except Exception:
+                return self._draw.text(xy, text, fill=fill, font=font)
+            if len(self._masks) >= self.LIMIT:
+                self._masks.pop(next(iter(self._masks)))
+            self._masks[key] = mask
+        x, y = int(round(xy[0])), int(round(xy[1]))
+        colour = fill if len(fill) >= 3 else (255, 255, 255)
+        self._image.paste(tuple(colour[:3]) + (255,) if self._image.mode ==
+                          'RGBA' else tuple(colour[:3]),
+                          (x, y, x+mask.width, y+mask.height), mask)
+
+
+_TEXT_MASKS = {}
+
+
 def _fit(text, font, width):
     text = str(text)
-    while text and text != '…' and font.getlength(text) > width:
+    while text and text != '…' and _width(font, text) > width:
         text = text[:-2]+'…'
     return text
 
@@ -1499,7 +1588,7 @@ def _wrapped(text, font, width):
     lines, line = [], ''
     for word in words:
         trial = (line+' '+word).strip()
-        if line and font.getlength(trial) > width:
+        if line and _width(font, trial) > width:
             lines.append(line)
             line = word
         else:
@@ -1542,10 +1631,11 @@ class SenderGui:
         ('Picture encode', ('dct_encode', 'pixel_encode', 'pixel_detail',
                             'pixel_grid', 'luma_adjust',
                             'luma_adjust_linear', 'clip_aware',
-                            'dct_kernel', 'dct_sharpen', 'dct_sharpen_strength',
-                            'dct_clarity', 'dct_chroma_gain',
                             'perceptual_resize',
                             'perceptual_detail_strength')),
+        ('Downscale and sharpness', (
+            'dct_kernel', 'dct_preshrink', 'dct_sharpen',
+            'dct_sharpen_strength', 'dct_clarity', 'dct_chroma_gain')),
         ('Capture', ('screen_backend', 'region', 'ffmpeg_input',
                      'capture_width', 'capture_filter')),
     )
@@ -1638,6 +1728,8 @@ class SenderGui:
             'dct_sharpen_strength': '0.25',
             'dct_clarity': '0',
             'dct_chroma_gain': '1',
+            'dct_preshrink': '4',
+            'collapsed_sections': [],
             'dct_kernel': 'reference',
             'dct_kernel_params': {},
             'aspect_layout': 'auto',
@@ -1656,6 +1748,8 @@ class SenderGui:
         self.scroll = 0
         self.dropdown = None
         self.dropdown_scroll = 0
+        self._ab_stash = None          # your tweaks, while the defaults are shown
+        self._readiness_cache = None
         self.editing = False
         self.edit_buffer = ''
         self.lines = []
@@ -1735,7 +1829,10 @@ class SenderGui:
         try:
             _save_sender_preferences({
                 'version': SENDER_PREFERENCES_VERSION,
-                'settings': _serialize_sender_settings(self.settings),
+                # While the defaults are shown for comparison, your own
+                # settings are what is kept.
+                'settings': _serialize_sender_settings(
+                    {**self.settings, **(self._ab_stash or {})}),
                 'resume': self.resume_positions,
                 'output_device': self.output_device_identity,
                 'source_audio_device': self.source_audio_device_identity,
@@ -2034,10 +2131,47 @@ class SenderGui:
             self._sd = sd
         return self._sd
 
+    def _readiness(self):
+        """(ready, text) for the toolbar: what Start would do, or why not.
+        Remembered until a setting changes (the check can ask the sound system)."""
+        try:
+            key = repr(sorted((name, repr(value))
+                              for name, value in self.settings.items()))
+        except Exception:
+            return False, ''
+        if self._readiness_cache is not None and self._readiness_cache[0] == key:
+            return self._readiness_cache[1]
+        try:
+            validate_settings(self.settings, self.devices, self._sounddevice(),
+                              self.audio_devices)
+            result = (True, 'Ready to send')
+        except ValueError as exc:
+            result = (False, str(exc))
+        except Exception:
+            result = (False, '')
+        self._readiness_cache = (key, result)
+        return result
+
+    def _collapsed(self):
+        return {title for title in self.settings.get('collapsed_sections') or ()
+                if title != 'Live controls'}
+
+    def _toggle_section(self, title):
+        if title == 'Live controls':
+            return
+        hidden = self._collapsed()
+        hidden.symmetric_difference_update({title})
+        self.settings['collapsed_sections'] = sorted(hidden)
+        self.scroll = 0 if self.scroll > 0 and title in hidden else self.scroll
+        self._persist_preferences()
+        self.dirty = True
+
     def _visible_fields(self):
-        """Shown settings in page order (also the keyboard order)."""
-        return [dest for _title, shown in self._setup_sections()
-                for dest in shown]
+        """Shown settings in page order (also the keyboard order); a folded
+        section's settings are skipped."""
+        hidden = self._collapsed()
+        return [dest for title, shown in self._setup_sections()
+                if title not in hidden for dest in shown]
 
     def _setup_sections(self):
         """(title, shown settings) for every section that has any."""
@@ -2080,8 +2214,11 @@ class SenderGui:
         """Page lines: ('header', title), ('line', cells), ('note', text)."""
         columns = self._columns(width)
         items = []
+        hidden = self._collapsed()
         for title, shown in self._setup_sections():
             items.append(('header', title))
+            if title in hidden:
+                continue
             items.extend(('line', line) for line in self._pack(shown, columns))
             if title == 'Live controls' and self.process is not None:
                 items.append(('note', 'Stop to change the settings below'))
@@ -2184,6 +2321,7 @@ class SenderGui:
             dest == 'dct_encode' and
             self.settings['profile'] not in DCT_PROFILES or
             dest in ('dct_sharpen', 'dct_clarity', 'dct_chroma_gain',
+                     'dct_preshrink',
                      'luma_adjust', 'pixel_encode', 'dct_kernel') and
             not self.settings['dct_encode'] or
             dest == 'pixel_detail' and not (
@@ -2195,6 +2333,7 @@ class SenderGui:
                 self.settings['profile'] == 'aspect-fold-500') or
             # Pixel encode sends the pixels as they are: no enhancement.
             dest in ('dct_sharpen', 'dct_sharpen_strength', 'dct_clarity',
+                     'dct_preshrink',
                      'dct_chroma_gain', 'luma_adjust', 'dct_kernel',
                      'luma_adjust_linear') and
             self.settings.get('pixel_encode') or
@@ -2237,10 +2376,20 @@ class SenderGui:
         return (self._live_fields() if self.page == 'live'
                 else self._visible_fields())
 
+    def _live_groups(self):
+        """(title, settings) of the sending page: tone, then the downscale
+        (kernel, its parameters, pre-shrink) and the sharpness controls when
+        the encode uses them."""
+        groups = []
+        for title, fields in LIVE_GROUPS:
+            shown = self._shown_fields(fields)
+            if shown:
+                groups.append((title, shown))
+        return groups
+
     def _live_fields(self):
-        """The settings the sending page offers: tone, then the DCT kernel,
-        its parameters and the DCT strengths when the encode uses them."""
-        return list(self.LIVE_FIELDS) + self._shown_fields(KERNEL_LIVE_FIELDS)
+        return [dest for _title, shown in self._live_groups()
+                for dest in shown]
 
     def _button_label(self, dest):
         if dest.startswith(KERNEL_PARAM_PREFIX):
@@ -2301,6 +2450,14 @@ class SenderGui:
         return value
 
     def _help_text(self, dest):
+        text = self._help_body(dest)
+        if (self._is_tweak(dest) and not dest.startswith(KERNEL_PARAM_PREFIX)
+                and self._default_value(dest) is not None):
+            text += (f' Default: {self._default_text(dest)}. Delete puts it '
+                     'back.')
+        return text
+
+    def _help_body(self, dest):
         if dest.startswith(KERNEL_PARAM_PREFIX):
             found = self._kernel_param(dest)
             if found is None:
@@ -2309,12 +2466,131 @@ class SenderGui:
             return (f'{param.help or name} · {param.low:g} to {param.high:g}, '
                     f'default {param.default:g}. Left/Right steps by '
                     f'{param.step:g} (Shift: five times) and is heard on the '
-                    f'next frame; Enter types a value.')
+                    f'next frame; Enter types a value; Delete resets it.')
         if dest == 'dct_kernel':
             kernel = self._selected_kernel()
             return (FIELD_HELP['dct_kernel'] if kernel is None else
                     f'{kernel.help or kernel.label} (file: {kernel.path.name})')
         return FIELD_HELP.get(dest, '')
+
+    # ---- defaults, reset and A/B -----------------------------------------
+    def _is_tweak(self, dest):
+        return dest in TWEAK_FIELDS or dest.startswith(KERNEL_PARAM_PREFIX)
+
+    def _default_value(self, dest):
+        if dest.startswith(KERNEL_PARAM_PREFIX):
+            found = self._kernel_param(dest)
+            return None if found is None else found[2].default
+        if dest in TONE_DEFAULTS:
+            return TONE_DEFAULTS[dest]
+        return ENCODE_DEFAULTS.get(dest)
+
+    def _default_text(self, dest):
+        default = self._default_value(dest)
+        if dest == 'brightness':
+            return '1.0 (profile)'
+        if dest == 'dct_kernel':
+            return 'Reference'
+        if isinstance(default, (int, float)):
+            return f'{default:g}'
+        if dest == 'dct_sharpen':
+            return str(default).capitalize()
+        try:
+            return f'{float(default):g}'
+        except (TypeError, ValueError):
+            return str(default)
+
+    def _is_default(self, dest):
+        """True when a tweakable row holds its default (or is not tweakable)."""
+        default = self._default_value(dest)
+        if default is None:
+            return True
+        value = self._field_value(dest)
+        if dest == 'dct_kernel':
+            return value in (None, '', 'reference')
+        if dest == 'brightness':
+            return not str(value or '').strip()
+        try:
+            return abs(float(value)-float(default)) < 1e-9
+        except (TypeError, ValueError):
+            return value == default
+
+    def _ab_blocks(self, dest):
+        """While the shipped defaults are shown for comparison, the settings
+        underneath are not edited (the comparison would lose them)."""
+        if self._ab_stash is not None and self._is_tweak(dest):
+            self.notice = ('Showing the shipped defaults (A/B). Press B to '
+                           'return to your settings before changing them.')
+            self.dirty = True
+            return True
+        return False
+
+    def _push_live(self):
+        """Tell a running sender the tone and encode tweaks as they stand."""
+        if self.process is None:
+            return
+        try:
+            self._send_live_tone_update()
+            self._send_live_kernel_update()
+        except (OSError, ValueError, RuntimeError) as exc:
+            self.notice = str(exc)
+
+    def _reset_field(self, dest):
+        """Put one tweakable row back to its default."""
+        if not self._is_tweak(dest) or self._ab_blocks(dest):
+            return
+        if self._is_default(dest):
+            self.notice = (f'{self._button_label(dest).strip()} is already at '
+                           f'its default ({self._default_text(dest)}).')
+            self.dirty = True
+            return
+        if dest.startswith(KERNEL_PARAM_PREFIX):
+            kernel, name, _param = self._kernel_param(dest)
+            (self.settings.get('dct_kernel_params') or {}).get(
+                kernel.name, {}).pop(name, None)
+        else:
+            self.settings[dest] = self._default_value(dest)
+        self.notice = (f'{self._button_label(dest).strip()} reset to its '
+                       f'default, {self._default_text(dest)}.')
+        self._push_live()
+        self._persist_preferences()
+        self.dirty = True
+
+    def _tweak_snapshot(self):
+        return {key: copy.deepcopy(self.settings.get(key))
+                for key in (*TWEAK_FIELDS, 'dct_kernel_params')}
+
+    def _reset_tweaks(self):
+        """Brightness, gamma, the kernel (and every kernel's values), the
+        pre-shrink and the sharpness controls, all back to the shipped encode."""
+        if self._ab_stash is not None:
+            self._ab_blocks('dct_kernel')
+            return
+        self.settings.update(TONE_DEFAULTS)
+        self.settings.update(ENCODE_DEFAULTS)
+        self.settings['dct_kernel_params'] = {}
+        self.notice = ('Brightness, gamma, kernel, pre-shrink and sharpness '
+                       'are back at their defaults.')
+        self._push_live()
+        self._persist_preferences()
+        self.dirty = True
+
+    def _toggle_ab(self):
+        """Flip between your settings (A) and the shipped defaults (B) while
+        sending, to judge a change by eye. Nothing is lost: A is kept aside."""
+        if self._ab_stash is None:
+            self._ab_stash = self._tweak_snapshot()
+            self.settings.update(TONE_DEFAULTS)
+            self.settings.update(ENCODE_DEFAULTS)
+            self.settings['dct_kernel_params'] = {}
+            self.notice = ('A/B: now showing the shipped defaults (B). Press B '
+                           'again for your settings.')
+        else:
+            self.settings.update(self._ab_stash)
+            self._ab_stash = None
+            self.notice = 'A/B: back to your settings (A).'
+        self._push_live()
+        self.dirty = True
 
     def _numeric_step(self, dest):
         """(low, high, step) for a number Left/Right can step, else None."""
@@ -2325,6 +2601,8 @@ class SenderGui:
         return NUMERIC_STEPS.get(dest)
 
     def _step_field(self, dest, direction, fast=False):
+        if self._ab_blocks(dest):
+            return
         low, high, step = self._numeric_step(dest)
         step *= 5 if fast else 1
         current = _float_setting(self._field_value(dest), dest)
@@ -2381,9 +2659,13 @@ class SenderGui:
         if not (0 <= strength <= 1 and 0 <= clarity <= 1 and 1 <= chroma <= 1.3):
             raise ValueError('DCT sharpen and clarity are 0 to 1; chroma gain '
                              'is 1.0 to 1.3.')
+        preshrink = _float_setting(self.settings.get('dct_preshrink', '4'),
+                                   'DCT pre-shrink')
+        if not 1.75 <= preshrink <= 8.0:
+            raise ValueError('DCT pre-shrink is 1.75 to 8.')
         message = {'dct': {'sharpen': self.settings.get('dct_sharpen', 'off'),
                            'sharpen_strength': strength, 'clarity': clarity,
-                           'chroma_gain': chroma}}
+                           'chroma_gain': chroma, 'preshrink': preshrink}}
         kernel = self._selected_kernel()
         message['kernel'] = 'reference' if kernel is None else kernel.name
         if kernel is not None:
@@ -2391,13 +2673,22 @@ class SenderGui:
         self._write_control(message)
 
     def _value_label(self, dest):
+        text = self._plain_value_label(dest)
+        if self._is_tweak(dest) and self._default_value(dest) is not None:
+            if dest == 'brightness' and self._is_default(dest):
+                return text                  # already says "profile default"
+            text += ('  ·  default' if self._is_default(dest) else
+                     f'  ·  default {self._default_text(dest)}')
+        return text
+
+    def _plain_value_label(self, dest):
         if dest.startswith(KERNEL_PARAM_PREFIX):
             found = self._kernel_param(dest)
             if found is None:
                 return '—'
             value = self._field_value(dest)
             param = found[2]
-            return f'{float(value):g}   ({param.low:g} to {param.high:g})'
+            return f'{float(value):g}'
         value = self.settings[dest]
         if dest == 'brightness' and not str(value).strip():
             return '1.0 · profile default'
@@ -2440,6 +2731,8 @@ class SenderGui:
             self.settings['encode_filter'] = 'auto'
 
     def _assign(self, dest, value):
+        if self._ab_blocks(dest):
+            return
         self.settings[dest] = value
         if dest == 'preview_stage':
             self._forward_popout()
@@ -3081,6 +3374,8 @@ class SenderGui:
 
     def _finish_edit(self, commit=True):
         dest = self.selected
+        if commit and self._ab_blocks(dest):
+            commit = False
         if commit and dest.startswith(KERNEL_PARAM_PREFIX):
             previous = copy.deepcopy(self.settings.get('dct_kernel_params'))
             try:
@@ -3142,9 +3437,17 @@ class SenderGui:
         return (left, y, left+span*cell+(span-1)*self.CELL_GAP,
                 y+self.ROW_HEIGHT-3)
 
-    def _render_header(self, draw, small, title, y, width):
-        draw.text((24, y+6), title, font=small, fill=(229, 237, 243))
-        label_right = 24+int(small.getlength(title))+12
+    def _render_header(self, draw, small, title, y, width, collapsible=True):
+        left = 24
+        if collapsible and title != 'Live controls':
+            folded = title in self._collapsed()
+            draw.text((left, y+6), '▸' if folded else '▾', font=small,
+                      fill=(134, 169, 188))
+            left += 16
+            self.hits[f'section:{title}'] = (
+                self.GUTTER, y, width-self.GUTTER, y+self.HEADER_HEIGHT)
+        draw.text((left, y+6), title, font=small, fill=(229, 237, 243))
+        label_right = left+int(_width(small, title))+12
         draw.line((label_right, y+14, width-self.GUTTER, y+14),
                   fill=(47, 68, 83), width=1)
 
@@ -3226,7 +3529,7 @@ class SenderGui:
             (28, 42, 53) if locked else (32, 48, 60), width=1)
         label_width = (190 if right-left >= 600 else
                        min(int((right-left)*.55),
-                           int(small.getlength(self._button_label(dest)))+22))
+                           int(_width(small, self._button_label(dest)))+22))
         draw.text((left+10, top+8),
                   _fit(self._button_label(dest), small, label_width-16),
                   font=small,
@@ -3249,7 +3552,7 @@ class SenderGui:
             field_right = browse[0]-4
         if dest in self.MATCH_FIELDS:
             # Not signalled on the wire: the receiver must be set the same.
-            tag_width = int(small.getlength('match'))+14
+            tag_width = int(_width(small, 'match'))+14
             tag = (edge-tag_width, top+5, edge, bottom-5)
             ink = (92, 120, 136) if locked else (140, 192, 212)
             draw.rounded_rectangle(tag, radius=4, outline=ink, width=1)
@@ -3260,7 +3563,11 @@ class SenderGui:
         value_left = left+label_width
         draw.text((value_left, top+8),
                   _fit(value, small, max(20, edge-value_left)), font=small,
-                  fill=(120, 136, 148) if locked else (237, 242, 246))
+                  fill=(120, 136, 148) if locked else
+                  (243, 208, 146) if (self._is_tweak(dest) and
+                                      not self._is_default(dest) and
+                                      not (self.editing and dest == self.selected))
+                  else (237, 242, 246))
         self.hits[f'field:{dest}'] = (left, top, field_right, bottom)
 
     def _render_dropdown(self, draw, small, width, height):
@@ -3315,12 +3622,14 @@ class SenderGui:
                                              DEFAULT_ASPECT_TAIL)
             facts.append('aspect '+layout)
         facts.append(f"{settings['speed']}×")
+        if self._ab_stash is not None:
+            facts.append('A/B: shipped defaults shown')
         return '  ·  '.join(facts)
 
     def _render_stage_buttons(self, draw, small, left, top, limit):
         """The Source / Encoder input switch; returns where it ends."""
         for stage, label in PREVIEW_STAGE_LABELS:
-            right = left+int(small.getlength(label))+20
+            right = left+int(_width(small, label))+20
             if right > limit:
                 break
             rect = (left, top, right, top+24)
@@ -3356,12 +3665,12 @@ class SenderGui:
                   (238, 182, 125) if state == 'STOPPING' else
                   (145, 218, 170) if state.startswith('SENDING')
                   else (188, 202, 213))
-        facts_left = gutter+12+int(font.getlength(state))+18
+        facts_left = gutter+12+int(_width(font, state))+18
         facts_right = strip[2]-10
         if popout:
             # The pop-out window shows the stage chosen here.
             labels = [label for _stage, label in PREVIEW_STAGE_LABELS]
-            switch = sum(int(small.getlength(label))+26 for label in labels)
+            switch = sum(int(_width(small, label))+26 for label in labels)
             facts_right -= switch+66
             self._render_stage_buttons(draw, small, facts_right+66,
                                        strip[1]+5, strip[2]-6)
@@ -3387,14 +3696,23 @@ class SenderGui:
                 draw, small, (gutter, transport_top, width-gutter, bottom))
             bottom = transport_top-6
         columns = self._columns(width)
-        live_lines = self._pack(self._live_fields(), columns)
-        live_top = bottom-len(live_lines)*self.ROW_HEIGHT
-        for index, line in enumerate(live_lines):
-            for dest, column, span in line:
-                self._render_cell(
-                    draw, small, dest,
-                    self._cell_rect(width, column, span,
-                                    live_top+index*self.ROW_HEIGHT))
+        live_items = []
+        for title, shown in self._live_groups():
+            live_items.append(('header', title))
+            live_items.extend(
+                ('line', line) for line in self._pack(shown, columns))
+        live_top = bottom-sum(self._item_height(kind) for kind, _ in live_items)
+        y = live_top
+        for kind, payload in live_items:
+            if kind == 'header':
+                self._render_header(draw, small, payload, y, width,
+                                    collapsible=False)
+            else:
+                for dest, column, span in payload:
+                    self._render_cell(
+                        draw, small, dest,
+                        self._cell_rect(width, column, span, y))
+            y += self._item_height(kind)
         bottom = live_top-6
 
         area_top = strip[3]+8
@@ -3426,10 +3744,19 @@ class SenderGui:
                       font=small, fill=(165, 187, 202))
             return
         inner = (max(1, panel[2]-panel[0]-16), max(1, panel[3]-panel[1]-36))
-        thumbnail = ImageOps.contain(self.preview_image, inner)
+        # Scaling the frame is the dearest step of a repaint and a new frame
+        # arrives only a dozen times a second: keep the last result.
+        cached = getattr(self, '_thumbnail_cache', None)
+        if (cached is None or cached[0] is not self.preview_image or
+                cached[1] != inner):
+            thumbnail = ImageOps.contain(self.preview_image, inner).convert(
+                'RGBA')
+            self._thumbnail_cache = (self.preview_image, inner, thumbnail)
+        else:
+            thumbnail = cached[2]
         x = panel[0]+(panel[2]-panel[0]-thumbnail.width)//2
         y_image = panel[1]+32+(inner[1]-thumbnail.height)//2
-        image.paste(thumbnail.convert('RGBA'), (x, y_image))
+        image.paste(thumbnail, (x, y_image))
         age_ms = max(0.0, (time.monotonic_ns()-
                            int(self.preview_handoff_ns or 0))/1e6)
         stage = dict(PREVIEW_STAGE_LABELS).get(self.preview_stage, 'Image')
@@ -3438,7 +3765,7 @@ class SenderGui:
                    'output handoff')
         room = panel[2]-8-buttons_end-8
         shown = _fit(caption, small, max(40, room))
-        draw.text((panel[2]-8-int(small.getlength(shown)), panel[1]+9),
+        draw.text((panel[2]-8-int(_width(small, shown)), panel[1]+9),
                   shown, font=small,
                   fill=(145, 218, 170) if age_ms < 500 else (238, 182, 125))
 
@@ -3473,7 +3800,7 @@ class SenderGui:
                      fill=restart_ink)
         time_text = (f'{_clock_text(position)} / {_clock_text(duration)}'
                      if duration else _clock_text(position))
-        time_width = int(small.getlength(time_text))
+        time_width = int(_width(small, time_text))
         draw.text((right-time_width, middle-8), time_text, font=small,
                   fill=(218, 229, 237))
         track_left = restart_rect[2]+16
@@ -3497,7 +3824,7 @@ class SenderGui:
         from PIL import Image, ImageDraw
         width, height = size
         image = Image.new('RGBA', (width, height), (8, 14, 20, 255))
-        draw = ImageDraw.Draw(image)
+        draw = _CachedDraw(image)
         font, small = _font(18), _font(13)
         self.hits = {}
         draw.rectangle((0, 0, width, self.TOOLBAR), fill=(10, 18, 25, 255))
@@ -3509,14 +3836,27 @@ class SenderGui:
             ('start_stop', 'Stop' if self.process is not None else 'Start',
              192, 284),
         ]
+        left = 292
         if self.page == 'live':
             controls.append(('change_source', 'Change source', 292, 412))
+            left = 420
+        extra = [('reset_tweaks', 'Defaults')]
+        if self.page == 'live':
+            extra.append(('ab_compare', 'A/B: shipped defaults'
+                          if self._ab_stash is not None else 'A/B'))
+        for key, label in extra:
+            right = left+int(_width(small, label))+26
+            controls.append((key, label, left, right))
+            left = right+8
+        toolbar_end = left
         for key, label, left, right in controls:
             rect = (left, 9, right, 45)
             self.hits[key] = rect
             active = ((key == 'setup' and self.page == 'setup') or
                       (key == 'live' and self.page == 'live'))
             color = ((39, 67, 86) if active else
+                     (112, 82, 40) if key == 'ab_compare' and self._ab_stash
+                     is not None else
                      (100, 51, 41) if key == 'start_stop' and
                      self.sender_device_lost else
                      (82, 55, 40) if key == 'start_stop' and self.process else
@@ -3526,6 +3866,16 @@ class SenderGui:
             draw.text((left+10, 19), label, font=small,
                        fill=(246, 240, 235) if key == 'start_stop' and self.process
                        else (236, 242, 247))
+
+        if self.process is None:
+            ready, why = self._readiness()
+            if why:
+                room = width-toolbar_end-16
+                if room > 80:
+                    shown = _fit(why, small, room)
+                    draw.text((width-12-int(_width(small, shown)), 19), shown,
+                              font=small,
+                              fill=(145, 218, 170) if ready else (238, 182, 125))
 
         if self.page == 'setup':
             self._render_setup(image, draw, font, small)
@@ -3587,6 +3937,12 @@ class SenderGui:
             self.page, self.dropdown = 'live', None
         elif hit == 'start_stop':
             self._stop() if self.process is not None else self._start()
+        elif hit == 'reset_tweaks':
+            self._reset_tweaks()
+        elif hit == 'ab_compare':
+            self._toggle_ab()
+        elif hit and hit.startswith('section:'):
+            self._toggle_section(hit.split(':', 1)[1])
         elif hit == 'change_source':
             if self.process is not None:
                 self.change_source_after_stop = True
@@ -3680,6 +4036,14 @@ class SenderGui:
             self.dropdown = None
         elif key == getattr(glfw, 'KEY_R', -1):
             self._reload_kernels()
+        elif key == getattr(glfw, 'KEY_B', -1) and self.dropdown is None:
+            self._toggle_ab()
+        elif key == getattr(glfw, 'KEY_D', -1) and self.dropdown is None:
+            self._reset_tweaks()
+        elif (key in (getattr(glfw, 'KEY_DELETE', -1),
+                      getattr(glfw, 'KEY_BACKSPACE', -1)) and
+              self.dropdown is None):
+            self._reset_field(self.selected)
         elif key == glfw.KEY_SPACE:
             self._stop() if self.process is not None else self._start()
         elif self.dropdown is not None:
