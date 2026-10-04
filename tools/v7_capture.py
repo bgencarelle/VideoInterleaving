@@ -5,7 +5,9 @@ This module contains no modem encoder or decoder.
 import argparse
 import os
 import re
+import signal
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -16,6 +18,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import numpy as np
+
+from local_frame_bridge import read_frame
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -157,6 +161,125 @@ def test_source():
         return np.uint8(np.clip(rgb, 0, 1)*255)
 
     return grab
+
+
+class LocalModeSource:
+    """Launch local mode and receive its newest rendered RGB frame."""
+
+    STARTUP_TIMEOUT = 30.0
+
+    def __init__(self, capture_fps=None):
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listener.bind(('127.0.0.1', 0))
+        self._listener.listen(1)
+        self._listener.settimeout(.2)
+        self._condition = threading.Condition()
+        self._connection = None
+        self._latest = None
+        self._closed = False
+        self._receiver = threading.Thread(
+            target=self._receive, name='v7-local-mode-frames', daemon=True)
+        self._receiver.start()
+        command = [
+            sys.executable, str(ROOT/'main.py'), '--mode', 'local',
+            '--local-frame-port', str(self._listener.getsockname()[1]),
+            '--local-frame-fps', str(float(capture_fps or 15.0)),
+        ]
+        try:
+            self.process = subprocess.Popen(
+                command, cwd=str(ROOT), stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except BaseException:
+            self.close()
+            raise
+
+    def _receive(self):
+        while True:
+            with self._condition:
+                if self._closed:
+                    return
+            try:
+                connection, _address = self._listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            connection.settimeout(2.0)
+            with self._condition:
+                if self._closed:
+                    connection.close()
+                    return
+                self._connection = connection
+            try:
+                while True:
+                    frame = read_frame(connection)
+                    if frame is None:
+                        break
+                    with self._condition:
+                        self._latest = frame
+                        self._condition.notify_all()
+            except (ConnectionError, OSError, ValueError):
+                pass
+            finally:
+                with self._condition:
+                    if self._connection is connection:
+                        self._connection = None
+                try:
+                    connection.close()
+                except OSError:
+                    pass
+
+    def __call__(self):
+        deadline = time.monotonic() + self.STARTUP_TIMEOUT
+        with self._condition:
+            while self._latest is None and not self._closed:
+                if self.process.poll() is not None:
+                    raise RuntimeError(
+                        'main.py --mode local exited before publishing a frame')
+                remaining = deadline-time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        'Timed out waiting for the local-mode video frame')
+                self._condition.wait(min(.1, remaining))
+            if self._latest is None:
+                raise RuntimeError('Local-mode video source has stopped')
+            return self._latest.copy()
+
+    def close(self):
+        with self._condition:
+            if self._closed:
+                return
+            self._closed = True
+            connection = self._connection
+            self._condition.notify_all()
+        for sock in (connection, self._listener):
+            if sock is None:
+                continue
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
+        process = getattr(self, 'process', None)
+        if process is not None and process.poll() is None:
+            try:
+                process.send_signal(signal.SIGINT)
+            except OSError:
+                process.terminate()
+            try:
+                process.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                try:
+                    process.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=2.0)
+        self._receiver.join(timeout=1.0)
 
 
 def mouse_follow_source(initial_width=400, aspect_ratio=4/3):

@@ -14,7 +14,10 @@ import io
 import json
 from pathlib import Path
 import signal
+import socket
 import sys
+import threading
+import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,10 +42,41 @@ def main():
     log_path = logs_dir / f"runtime_{source_name}_local_None.log"
     result_path = Path(args.result).resolve() if args.result else None
 
+    # Receive one real rendered frame through the same bridge used by the
+    # sender source, while main.py runs its ordinary local display loop.
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(('127.0.0.1', 0))
+    listener.listen(1)
+    listener.settimeout(.2)
+    bridge = {}
+
+    def receive_bridge_frame():
+        try:
+            from local_frame_bridge import read_frame
+            deadline = time.monotonic()+args.seconds+10
+            while True:
+                try:
+                    connection, _address = listener.accept()
+                    break
+                except socket.timeout:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError('local display did not connect to bridge')
+            with connection:
+                connection.settimeout(3.0)
+                frame = read_frame(connection)
+            bridge['shape'] = tuple(frame.shape)
+            bridge['has_pixels'] = bool(frame.any())
+        except Exception as exc:
+            bridge['error'] = str(exc)
+
+    receiver = threading.Thread(target=receive_bridge_frame, daemon=True)
+    receiver.start()
+
     # main.py parses argv at module execution and initializes its log stream
     # there. Redirect only its log directory in this in-memory copy, leaving
     # the application source untouched.
-    sys.argv = [str(MAIN), "--mode", "local", "--dir", str(source_root)]
+    sys.argv = [str(MAIN), "--mode", "local", "--dir", str(source_root),
+                "--local-frame-port", str(listener.getsockname()[1])]
     source = MAIN.read_text(encoding="utf-8")
     original_log_setting = 'LOGS_DIR = "logs"'
     if source.count(original_log_setting) != 1:
@@ -57,9 +91,11 @@ def main():
     exec(compile(source, str(MAIN), "exec"), namespace)
 
     renderer = importlib.import_module("renderer")
-    counts = {"gl_composite": 0, "cpu_composite": 0}
+    counts = {"gl_composite": 0, "cpu_composite": 0,
+              "frame_readback": 0}
     gl_composite = renderer.overlay_images_single_pass
     cpu_composite = renderer.composite_cpu
+    read_frame_rgb = renderer.read_frame_rgb
 
     def counted_gl(*call_args, **call_kwargs):
         counts["gl_composite"] += 1
@@ -69,8 +105,13 @@ def main():
         counts["cpu_composite"] += 1
         return cpu_composite(*call_args, **call_kwargs)
 
+    def counted_readback(*call_args, **call_kwargs):
+        counts['frame_readback'] += 1
+        return read_frame_rgb(*call_args, **call_kwargs)
+
     renderer.overlay_images_single_pass = counted_gl
     renderer.composite_cpu = counted_cpu
+    renderer.read_frame_rgb = counted_readback
 
     # This is an X11 smoke run, so avoid the optional Wayland pointer utility.
     display_manager = importlib.import_module("display_manager")
@@ -99,6 +140,8 @@ def main():
         app_status = exc.code if isinstance(exc.code, int) else 1
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
+        receiver.join(timeout=3.0)
+        listener.close()
 
     log_text = log_path.read_text(encoding="utf-8", errors="replace") \
         if log_path.exists() else ""
@@ -112,6 +155,9 @@ def main():
         "gl_ready": gl_ready,
         "renderer": renderer_line,
         "timer_expired": timer_expired,
+        "bridge_frame_shape": bridge.get('shape'),
+        "bridge_frame_has_pixels": bridge.get('has_pixels', False),
+        "bridge_error": bridge.get('error'),
         "app_status": app_status,
         "log_path": str(log_path),
     }
@@ -122,6 +168,7 @@ def main():
     print(json.dumps(report, indent=2), file=sys.__stdout__)
 
     return 0 if (app_status == 0 and gl_ready and timer_expired and
+                  bridge.get('shape') and bridge.get('has_pixels') and
                   counts["gl_composite"] > 0 and
                   counts["cpu_composite"] == 0) else 1
 

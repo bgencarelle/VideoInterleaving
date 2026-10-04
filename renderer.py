@@ -747,6 +747,29 @@ def overlay_images_single_pass(main_texture, float_texture, background_color=(0,
     vao.render(mode=moderngl.TRIANGLE_FAN)
 
 
+def read_frame_rgb() -> np.ndarray | None:
+    """Read the just-rendered viewport as top-down RGB pixels.
+
+    This is intended for explicit frame-output consumers such as the sender
+    bridge. Ordinary local display keeps the existing no-readback fast path.
+    """
+    width, height = _viewport_size
+    if width < 1 or height < 1:
+        return None
+    if _backend == "legacy":
+        gl = _lazy_import_gl()
+        gl.glPixelStorei(gl.GL_PACK_ALIGNMENT, 1)
+        raw = gl.glReadPixels(0, 0, width, height, gl.GL_RGB, gl.GL_UNSIGNED_BYTE)
+    else:
+        if ctx is None:
+            return None
+        raw = ctx.screen.read(components=3, alignment=1)
+    frame = np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 3)
+    # OpenGL's framebuffer origin is bottom-left; sender image sources are
+    # top-down RGB arrays.
+    return frame[::-1].copy()
+
+
 # --- CPU COMPOSITOR (Fixed Aspect Ratio & Alpha) ---
 def composite_cpu(main_img, float_img, main_is_sbs=False, float_is_sbs=False, target_size=None):
     """

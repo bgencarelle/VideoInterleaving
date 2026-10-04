@@ -154,6 +154,10 @@ def configure_runtime():
         help="Path to image source folder (overrides settings.py)"
     )
 
+    # Private handoff used only when the sender GUI owns a local-mode process.
+    parser.add_argument("--local-frame-port", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--local-frame-fps", type=float, help=argparse.SUPPRESS)
+
     # --- Options for --mode scope (scope signal output on the sound card) ---
     parser.add_argument("--xy-dir", help="Baked XY libraries (default: settings.XY_DIR)")
     parser.add_argument("--scope-source", choices=("bake", "images"),
@@ -401,6 +405,20 @@ def configure_runtime():
     parser.add_argument("--modem-frame-duration", type=float, default=1.0,
                         help="Existing MIDI clock's frame scaling factor")
     args = parser.parse_args()
+    if args.local_frame_port is not None:
+        if args.mode != "local":
+            parser.error("--local-frame-port can only be used with --mode local")
+        if not 1 <= args.local_frame_port <= 65535:
+            parser.error("--local-frame-port must be between 1 and 65535")
+    if args.local_frame_fps is not None:
+        if args.local_frame_port is None:
+            parser.error("--local-frame-fps requires --local-frame-port")
+        if (not math.isfinite(args.local_frame_fps) or
+                not 0 < args.local_frame_fps <= 1000):
+            parser.error("--local-frame-fps must be greater than 0 and at most 1000")
+    settings.LOCAL_FRAME_PORT = args.local_frame_port
+    settings.LOCAL_FRAME_FPS = (args.local_frame_fps or
+                                getattr(settings, "FPS", 30))
     _set_process_title(args.mode)
 
     if args.mode == "modem":
@@ -635,8 +653,11 @@ def configure_runtime():
         settings.SERVER_MODE = False
         config.set_mode(MODE_LOCAL)
         ports = config.get_ports()
-        print(f">> PORTS: Monitor={ports.monitor}")
-        require_ports(ports.get_all_ports())
+        if args.local_frame_port is None:
+            print(f">> PORTS: Monitor={ports.monitor}")
+            require_ports(ports.get_all_ports())
+        else:
+            print(">> LOCAL VIDEO SOURCE: HTTP monitor disabled")
         # Update settings for backward compatibility
         settings.WEB_PORT = ports.monitor
         # Local mode always uses --test flag for network monitoring
@@ -1082,8 +1103,9 @@ def main(clock=CLOCK_MODE):
         web_service.start_server(monitor=True, stream=True)
 
     elif mode == "local":
-        import web_service
-        web_service.start_server(monitor=True, stream=False)
+        if cli_args.local_frame_port is None:
+            import web_service
+            web_service.start_server(monitor=True, stream=False)
 
     elif mode == "scope":
         # Keep the web monitor available whether the optional native scope

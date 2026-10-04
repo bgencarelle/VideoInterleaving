@@ -15,7 +15,8 @@ from PIL import Image
 
 from tools import v7_live
 from tools.v7_preview_protocol import pack_preview_datagram
-from tools.v7_send_gui import (FIELD_HELP, InputDevice, OutputDevice,
+from tools.v7_send_gui import (FIELD_HELP, SOURCE_CHOICES, InputDevice,
+                                OutputDevice,
                                 PRIMARY_PROFILE_CHOICES, ScreenTarget, SenderGui,
                                 build_command, enumerate_screen_targets,
                                 enumerate_camera_sources, linux_camera_sources,
@@ -168,6 +169,15 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(args.encode_filter, None)
         self.assertFalse(args.log)
         self.assertNotIn('--rate', command)
+
+    def test_local_app_output_is_a_sender_capture_source(self):
+        self.settings['source'] = 'local'
+        command = build_command(self.settings, self.devices, self.sd)
+        args = v7_live.parser().parse_args(command[2:])
+
+        self.assertEqual(args.source, 'local')
+        self.assertIn(('VideoInterleaving local output', 'local'),
+                      SOURCE_CHOICES)
 
     def test_image_preview_port_is_forwarded_to_sender_cli(self):
         self.settings.update(preview='window', preview_stage='source')

@@ -115,12 +115,12 @@ The WAV path does not invoke the project's stochastic folder selector.
 
 ## Standalone V7 live sender and receiver (experimental)
 
-For direct camera, screen, or video-file transmission, use the standalone
-`vi.modem-send` and `vi.modem-receive` wrappers. This path is separate from
-`main.py --mode modem`. The application path defaults to the baked image slabs,
-but `--modem-source images` loads ordinary source images and encodes them at
-runtime. Both paths use V7 pulse framing; the standalone live tools default to
-the pinned M=500 fold with coded pilot status, while that fold is not the
+For direct local-app, camera, screen, or video-file transmission, use the
+standalone `vi.modem-send` and `vi.modem-receive` wrappers. This path is
+separate from `main.py --mode modem`. The application path defaults to the
+baked image slabs, but `--modem-source images` loads ordinary source images and
+encodes them at runtime. Both paths use V7 pulse framing; the standalone live
+tools default to the pinned M=500 fold with coded pilot status, which is not the
 application mode's default. From the repository root, start the standalone
 receiver first. The sender selects the matching box profile and the receiver
 despreads the chips before tone-assisted timing.
@@ -141,6 +141,11 @@ needed for the default M=500 coded profile:
 ./vi.modem-send --device "BlackHole 2ch" --source video \
   --video-source clip.mp4
 ```
+
+The sender GUI also offers **VideoInterleaving local output**. Starting the
+sender launches its own `main.py --mode local` window and feeds the rendered
+RGB frames directly to the V7 encoder; stopping the sender closes that window.
+The handoff is loopback-only and does not capture unrelated desktop windows.
 
 To configure the standalone sender with a small event-driven GUI instead, run
 `./vi.modem-send-gui`. It launches the same `vi.modem-send` path in a separate

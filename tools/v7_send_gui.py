@@ -70,6 +70,7 @@ SOURCE_AUDIO_SIDE_CHOICES = (
     ('Right input', 'right'),
 )
 SOURCE_CHOICES = (
+    ('VideoInterleaving local output', 'local'),
     ('Camera', 'camera'),
     ('Screen', 'screen'),
     ('Video file / stream', 'video'),
@@ -133,7 +134,8 @@ MONO_VIDEO_SIDE_CHOICES = (
 
 FIELD_HELP = {
     'device': 'Choose the explicit audio output device that feeds the receiver or recording path.',
-    'source': 'Choose what the sender captures. Capture starts only after Start.',
+    'source': ('Choose what the sender captures. Capture begins after Start; '
+               'Local output launches its own main.py --mode local window.'),
     'profile': ('Aspect Fold 500 stereo is recommended. Mono video profiles '
                 'leave one output free for audio. Stereo slices (new) makes '
                 'each channel a whole picture by itself: either channel '

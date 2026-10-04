@@ -4,6 +4,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 import threading
+import atexit
 
 import numpy as np
 from turbojpeg import TJPF_RGB
@@ -211,6 +212,25 @@ def run_display(clock_source=CLOCK_MODE):
     # Identify Modes
     is_ascii = getattr(settings, 'ASCII_MODE', False)
     server_mode = getattr(settings, 'SERVER_MODE', False)
+    frame_publisher = None
+    local_frame_port = getattr(settings, 'LOCAL_FRAME_PORT', None)
+    if local_frame_port is not None:
+        from local_frame_bridge import LatestFramePublisher
+        frame_publisher = LatestFramePublisher(local_frame_port)
+        atexit.register(frame_publisher.close)
+    local_frame_rate = float(getattr(settings, 'LOCAL_FRAME_FPS', FPS) or 15)
+    local_frame_period = 1.0 / max(local_frame_rate, .1)
+    next_local_frame = 0.0
+
+    def publish_local_frame(frame):
+        nonlocal next_local_frame
+        if frame_publisher is None:
+            return
+        now = time.monotonic()
+        if now < next_local_frame:
+            return
+        frame_publisher.publish(frame)
+        next_local_frame = now + local_frame_period
     
     # Warn if both modes are set (configuration conflict)
     if server_mode and is_ascii:
@@ -561,6 +581,11 @@ def run_display(clock_source=CLOCK_MODE):
                     main_texture, float_texture, BACKGROUND_COLOR,
                     main_is_sbs=cur_m_sbs, float_is_sbs=cur_f_sbs
                 )
+                if (frame_publisher is not None and not is_headless and
+                        time.monotonic() >= next_local_frame):
+                    rendered_frame = renderer.read_frame_rgb()
+                    if rendered_frame is not None:
+                        publish_local_frame(rendered_frame)
 
             # Capture (Only for Images/Headless Web)
             should_capture = False
@@ -619,6 +644,7 @@ def run_display(clock_source=CLOCK_MODE):
                             )
 
                         if frame is not None:
+                            publish_local_frame(frame)
                             if is_web:
                                 # Web only: use web exchange (and legacy for backward compat)
                                 enc = jpeg.encode(frame, quality=JPEG_QUALITY, pixel_format=TJPF_RGB)
@@ -694,3 +720,5 @@ def run_display(clock_source=CLOCK_MODE):
                 window.close()
             except Exception as e:
                 print(f"[DISPLAY] Headless window cleanup failed: {e}")
+        if frame_publisher is not None:
+            frame_publisher.close()

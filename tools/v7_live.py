@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Bench-only live V7 camera/screen/video sender and receiver.
+"""Live V7 local-app/camera/screen/video sender and receiver.
 
-This deliberately does not enter ``main.py`` or the production modem engine.
-It uses the V7 prototype's fixed 48 kHz reference geometry and follows the
-selected DAC's native output clock by default, intended for an explicit audio
-loopback device, normally BlackHole 2ch.
+The sender uses the V7 prototype's fixed 48 kHz reference geometry and follows
+the selected DAC's native output clock by default, intended for an explicit
+audio loopback device, normally BlackHole 2ch. Its local-app source launches
+``main.py --mode local`` and receives that process's rendered frames over a
+private loopback connection.
 
 Examples::
 
+    .venv/bin/python tools/v7_live.py send --source local --device 'BlackHole 2ch'
     .venv/bin/python tools/v7_live.py send --source camera --device 'BlackHole 2ch'
     .venv/bin/python tools/v7_live.py send --source screen --device 'BlackHole 2ch'
     .venv/bin/python tools/v7_live.py send --source video \\
@@ -413,13 +415,15 @@ def _resolve_send_source(args, interactive=None, input_fn=None):
         if not interactive:
             raise ValueError(
                 'specify --source, or run interactively to choose one')
-        print('Capture source: camera, screen, video, test, or mouse-follow')
+        print('Capture source: local, camera, screen, video, test, or '
+              'mouse-follow')
         while True:
             selected = ask('Source: ').strip().lower()
-            if selected in ('camera', 'screen', 'video', 'test', 'mouse-follow'):
+            if selected in ('local', 'camera', 'screen', 'video', 'test',
+                            'mouse-follow'):
                 args.source = selected
                 break
-            print('Choose camera, screen, video, test, or mouse-follow.')
+            print('Choose local, camera, screen, video, test, or mouse-follow.')
 
     if args.source == 'video':
         if not args.video_source:
@@ -442,12 +446,15 @@ def _resolve_send_source(args, interactive=None, input_fn=None):
 
 def _capture(args, start=0.0):
     """Build one of the shared RGB capture sources."""
-    from tools.v7_capture import (camera_source, mouse_follow_source,
-                                  screen_capture_source, screen_source,
-                                  test_source, video_source, Throttled, _region)
+    from tools.v7_capture import (LocalModeSource, camera_source,
+                                  mouse_follow_source, screen_capture_source,
+                                  screen_source, test_source, video_source,
+                                  Throttled, _region)
 
     region = _region(args.region)
     capture_filter = _capture_scale_flags(args)
+    if args.source == 'local':
+        return LocalModeSource(getattr(args, 'capture_fps', None) or FPS)
     if args.source == 'test':
         return test_source()
     if args.source == 'video':
@@ -1958,6 +1965,8 @@ def _run_send_session(args):
                 if (args.source == 'camera' and
                         getattr(args, 'perceptual_resize', 'off') == 'off'):
                     capture_text = f'80x96/{_capture_scale_flags(args)}'
+                elif args.source == 'local':
+                    capture_text = 'local-mode RGB'
                 elif (args.source == 'screen' and
                       args.screen_backend == 'mss') or args.source in (
                           'mouse-follow', 'test'):
@@ -4367,8 +4376,8 @@ def parser():
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest='mode', required=True)
     send = sub.add_parser('send', help='capture camera/screen and transmit V7')
-    send.add_argument('--source', choices=('camera', 'screen', 'video', 'test',
-                                           'mouse-follow'),
+    send.add_argument('--source', choices=('local', 'camera', 'screen', 'video',
+                                           'test', 'mouse-follow'),
                       help='capture source; omitted interactively prompts for one')
     send.add_argument('--device', type=_device_arg, required=True,
                       help='explicit sounddevice output, e.g. BlackHole 2ch')
