@@ -213,7 +213,7 @@ LIVE_CONTROLS = (
     'audio_output_device', 'audio_volume', 'audio_muted', 'freewheel_seconds',
     'show_sync_warning', 'Pixel display', 'Display upscaler',
     'DCT reconstruction', 'Edge reconstruction', 'Edge strength',
-    'Colour detail', 'Display grain')
+    'Colour detail', 'Display grain', 'Output dither')
 CONFIG_SECTIONS = (
     ('Live controls', LIVE_CONTROLS),
     ('Input', ('device', 'temporal_fusion')),
@@ -227,7 +227,7 @@ CONFIG_SECTIONS = (
 FULL_WIDTH_SETTINGS = ('device', 'audio_output_device', 'save_dir',
                        'aspect_tail')
 DOUBLE_WIDTH_SETTINGS = ('Display upscaler', 'Edge reconstruction',
-                         'Display grain', 'aspect_layout')
+                         'aspect_layout')
 # Not signalled on the wire: the sender must be set the same.
 MATCH_SETTINGS = ('aspect_layout', 'aspect_tail')
 HIDDEN_DECODE_OPTIONS = frozenset((
@@ -246,7 +246,8 @@ HIDDEN_DECODE_OPTIONS = frozenset((
 PIXEL_DISPLAY_LABEL = 'Pixel display'
 SMOOTH_DISPLAY_LABELS = ('Display upscaler', 'DCT reconstruction',
                          'Display grain', 'Edge reconstruction',
-                         'Edge strength', 'Colour detail')
+                         'Edge strength', 'Colour detail',
+                         'Output dither')
 
 
 @dataclass
@@ -572,6 +573,7 @@ def _make_fields(receive_parser, device_choices, audio_output_choices=()):
         None, RECOMMENDED_EDGE_STRENGTH, 'Edge strength', 'choice',
         tuple((EDGE_STRENGTH_LABELS[value], value)
               for value in EDGE_STRENGTHS)))
+    fields.append(OptionField(None, True, 'Output dither', 'bool'))
     fields.append(OptionField(
         None, 'off', 'Colour detail', 'choice',
         tuple((CHROMA_LABELS[name], name) for name in CHROMA_MODES)))
@@ -779,6 +781,7 @@ class ReceiverGui:
         self.edge_mode = RECOMMENDED_EDGE_MODE
         self.edge_strength = RECOMMENDED_EDGE_STRENGTH
         self.chroma_mode = 'off'
+        self.dither = True
         self.pixel_display = False
         self.grain_seed = 0
         self.grain_cells = (1.0, 1.0)
@@ -1191,6 +1194,7 @@ class ReceiverGui:
             self.grain_mode = 'off'
             self.edge_mode = 'off'
             self.chroma_mode = 'off'
+            self.dither = False
             self.display_menu_open = False
         else:
             self.display_mode = values['Display upscaler'].value
@@ -1198,6 +1202,7 @@ class ReceiverGui:
             self.grain_mode = values['Display grain'].value
             self.edge_mode = values['Edge reconstruction'].value
             self.chroma_mode = values['Colour detail'].value
+            self.dither = bool(values['Output dither'].value)
         self.edge_strength = values['Edge strength'].value
         self.picture_dirty = True
 
@@ -2973,10 +2978,10 @@ class ReceiverGui:
                 float_program['grain_kind'].value = int(detail_grain)
                 float_program['grain_cells'].value = tuple(
                     float(value) for value in self.grain_cells)
-                # Hard pixels are shown exactly; everything else is dithered
-                # into the 8-bit framebuffer.
+                # Hard pixels are shown exactly; otherwise Output dither
+                # decides (on by default).
                 float_program['dither_amount'].value = (
-                    0.0 if self.pixel_display else DITHER_AMOUNT)
+                    DITHER_AMOUNT if self.dither else 0.0)
                 float_program['grain_seed'].value = int(self.grain_seed)
                 float_array.render(mode=moderngl.TRIANGLES, vertices=3)
 

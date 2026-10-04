@@ -509,6 +509,26 @@ class ReceiverGuiOptionTests(unittest.TestCase):
         self.assertEqual(gui.grain_mode, 'flat')
         self.assertTrue(gui.picture_dirty)
 
+    def test_output_dither_is_a_live_toggle_on_by_default(self):
+        gui = ReceiverGui(self, self.root_parser, self.receive_parser,
+                          (('test input device', 3),))
+        by_label = {field.label: field for field in gui.fields}
+        dither = by_label['Output dither']
+        self.assertEqual((dither.kind, dither.value, gui.dither),
+                         ('bool', True, True))
+        dither.value = False
+        gui._apply_display_fields()
+        self.assertFalse(gui.dither)
+        dither.value = True
+        by_label['Pixel display'].value = True
+        gui._apply_display_fields()
+        self.assertFalse(gui.dither)            # hard pixels are shown exactly
+        self.assertTrue(dither.locked)
+        by_label['Pixel display'].value = False
+        gui._apply_display_fields()
+        self.assertTrue(gui.dither)
+        self.assertFalse(dither.locked)
+
     def test_pixel_display_is_a_toggle_that_locks_the_other_display_choices(self):
         gui = ReceiverGui(self, self.root_parser, self.receive_parser,
                           (('test input device', 3),))
@@ -1530,7 +1550,8 @@ class ReceiverGuiButtonLayoutTests(unittest.TestCase):
             {'audio_output_device', 'audio_volume', 'audio_muted',
              'freewheel_seconds', 'show_sync_warning', 'Pixel display',
              'Display upscaler', 'DCT reconstruction', 'Display grain',
-             'Edge reconstruction', 'Edge strength', 'Colour detail'})
+             'Edge reconstruction', 'Edge strength', 'Colour detail',
+             'Output dither'})
         gui.started = True
         live = set(indexes)
         for index, field in enumerate(gui.fields):

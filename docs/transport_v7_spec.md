@@ -816,9 +816,9 @@ Further display stages (receiver GUI settings):
   coder grid (1.5 cells per luma grid sample), so its energy stays just above
   the band the wire carries at any window size; it is strongest where the
   picture has detail and absent in black. It adds no information.
-- **Output dither**: every display path except Pixel display adds ±1 code of
-  triangular noise per channel before the 8-bit framebuffer rounds, so smooth
-  gradients do not band on a large screen. It has no setting.
+- **Output dither** (on, off): adds ±1 code of triangular noise per channel
+  before the 8-bit framebuffer rounds, so smooth gradients do not band on a
+  large screen. On by default; Pixel display is never dithered.
 - **Colour detail** (`off`, `guided`): rebuilds each chroma plane on the luma
   grid. Within a small neighbourhood the slope of chroma against luma is
   measured in the band both planes were sent in; that slope times the luma

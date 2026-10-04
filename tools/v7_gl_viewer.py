@@ -68,7 +68,7 @@ PIXEL_REPEAT = 8
 # are left alone. Amplitude: about 2.5/255 standard deviation in luma.
 GRAIN_MODES = ('off', 'flat', 'detail')
 GRAIN_LABELS = {'off': 'Off', 'flat': 'Flat areas · masks ringing',
-                'detail': 'Detail · grain sized to the picture'}
+                'detail': 'Detail · sized to picture'}
 # 'detail' grain is not per-pixel noise. It is band-limited noise on a lattice
 # tied to the coder grid, so its size follows the picture: its energy sits
 # just above the highest frequency the wire carries (GRAIN_DETAIL_CYCLES
@@ -83,7 +83,8 @@ GRAIN_DETAIL_FLOOR = 0.25       # share of that amount kept in flat areas
 GRAIN_DETAIL_CONTRAST = 0.12    # local luma s.d. (code units) of full strength
 # Output dither: +-1 code of triangular noise per channel before the 8-bit
 # framebuffer rounds, so a smooth gradient enlarged over a big screen does not
-# band. Set only by the float display path; zero leaves the shader as it was.
+# band. The receiver GUI's Output dither setting (on by default) sets it;
+# zero leaves the shader as it was.
 DITHER_AMOUNT = 1.0/255.0
 # Edge reconstruction: rebuild luma as the sharpest, flattest picture that
 # still matches every received coefficient (see
@@ -118,7 +119,7 @@ RECOMMENDED_EDGE_STRENGTH = .75
 # (animation_modem.v7_dct_display.guided_chroma_plane). About 2 ms a picture.
 CHROMA_MODES = ('off', 'guided')
 CHROMA_LABELS = {'off': 'Off · colour as sent',
-                 'guided': 'Luma-guided · sharper edges'}
+                 'guided': 'Luma-guided'}
 GRAIN_AMOUNT = 0.024            # triangular +-amount; sigma = amount/sqrt(6)
 GRAIN_FLAT_SIGMA = 1.2          # luma grid samples
 GRAIN_FLAT_CONTRAST = 0.06      # local luma s.d. (code units) that stops grain
