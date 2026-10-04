@@ -9,11 +9,47 @@ from unittest.mock import patch
 import numpy as np
 
 import scope_out
-from scope_out import Scope, beam_is_parked
+from scope_out import (Scope, beam_is_parked, parse_channel_pair,
+                       required_output_channels)
 from tests.test_scope_web import _extract_fn
 
 
 class XOnlyNativeOutputTests(unittest.TestCase):
+    def test_scope_can_route_stereo_xy_to_portaudio_outputs_18_and_19(self):
+        opened = {}
+
+        class FakeStream:
+            latency = 0.0
+
+        class FakeAudio:
+            @staticmethod
+            def OutputStream(**kwargs):
+                opened.update(kwargs)
+                return FakeStream()
+
+        with patch.object(scope_out, "sd", FakeAudio):
+            scope = Scope(device=0, samplerate=48000, samples=96,
+                          trigger=False, channel_pair=(18, 19))
+
+        self.assertEqual(opened["channels"], 19)
+        self.assertEqual(scope.channel_pair, (18, 19))
+        self.assertEqual(scope.output_channels, 19)
+        frame = np.column_stack((np.linspace(-0.7, 0.7, 96),
+                                 np.linspace(0.4, -0.4, 96))).astype(np.float32)
+        out = np.ones((len(frame), 19), dtype=np.float32)
+        scope._write_output(out, frame)
+        np.testing.assert_array_equal(out[:, 17], frame[:, 0])
+        np.testing.assert_array_equal(out[:, 18], frame[:, 1])
+        np.testing.assert_array_equal(out[:, :17], 0.0)
+
+    def test_channel_pair_validation_and_x_only_channel_requirement(self):
+        self.assertEqual(parse_channel_pair("18,19"), (18, 19))
+        self.assertEqual(required_output_channels((18, 19)), 19)
+        self.assertEqual(required_output_channels((18, 19), x_only=True), 18)
+        for value in ("18", "0,19", "18,18", "left,right"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_channel_pair(value)
+
     def test_portaudio_stream_is_opened_mono(self):
         opened = {}
 
@@ -83,6 +119,27 @@ class XOnlyNativeOutputTests(unittest.TestCase):
             self.assertEqual(scope_out.resolve_device("Mono DAC", min_channels=1), 0)
             with self.assertRaises(SystemExit):
                 scope_out.resolve_device("Mono DAC")
+
+    def test_high_channel_scope_skips_a_default_output_with_too_few_channels(self):
+        class FakeAudio:
+            class default:
+                device = (None, 0)
+
+            @staticmethod
+            def query_hostapis():
+                return [{"name": "Test API"}]
+
+            @staticmethod
+            def query_devices():
+                return [
+                    {"name": "Default stereo", "max_output_channels": 2,
+                     "hostapi": 0, "default_samplerate": 48000},
+                    {"name": "Multichannel", "max_output_channels": 32,
+                     "hostapi": 0, "default_samplerate": 48000},
+                ]
+
+        with patch.object(scope_out, "sd", FakeAudio):
+            self.assertEqual(scope_out.choose_device(min_channels=19), 1)
 
 
 @unittest.skipUnless(shutil.which("node"), "Node is needed for browser parity")

@@ -20,6 +20,7 @@ import base64
 import gzip
 import hashlib
 import json
+from pathlib import Path
 from itertools import zip_longest
 from collections import defaultdict
 import numpy as np  # [ADDED]
@@ -114,7 +115,7 @@ def check_folder_prefix(folder_path, allowed_type):
 # ------------------------------
 
 def scan_directory_recursive(base_path, script_dir, folder_type,
-                             files_by_folder=None):
+                             files_by_folder=None, *, single_listing=False):
     """
     Recursively scans a directory for image folders matching the strict prefix rules.
     folder_type: 'main' or 'float'
@@ -206,7 +207,8 @@ def scan_directory_recursive(base_path, script_dir, folder_type,
             print(f"Error processing image {first_image} in {subdir}: {e}")
             first_image = None
 
-        file_count = count_image_files(subdir)
+        file_count = (len(image_files) if single_listing
+                      else count_image_files(subdir))
         results.append((subdir, first_image, width, height, has_alpha, file_count))
 
     return results
@@ -252,7 +254,7 @@ def create_folder_csv_files(counts_main, counts_float, processed_dir, script_dir
     write_group_csv(groups_float, 'float_folder_{}.csv')
 
 
-def write_folder_list(files_by_folder=None):
+def write_folder_list(files_by_folder=None, *, single_listing=False):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     processed_dir = os.path.join(script_dir, PROCESSED_DIR_NAME)
 
@@ -266,11 +268,13 @@ def write_folder_list(files_by_folder=None):
     # 1. Scan with STRICT MODE
     print(f"Scanning Main: {main_path} (Allow: 0_-254_)")
     counts_main = scan_directory_recursive(
-        main_path, script_dir, 'main', files_by_folder)
+        main_path, script_dir, 'main', files_by_folder,
+        single_listing=single_listing)
 
     print(f"Scanning Float: {float_path} (Allow: 255_)")
     counts_float = scan_directory_recursive(
-        float_path, script_dir, 'float', files_by_folder)
+        float_path, script_dir, 'float', files_by_folder,
+        single_listing=single_listing)
 
     all_counts = counts_main + counts_float
     total_images = sum(x[5] for x in all_counts)
@@ -412,12 +416,13 @@ def _filesystem_signature(script_dir):
 
 
 def _list_cache_path(generated_dir):
-    # main.py clears the generated-list directories on startup. Keep this
-    # compact source signature and output snapshot adjacent, outside the dirs.
+    # Keep this compact source signature and output snapshot adjacent to, but
+    # outside, the generated directories.
     return os.path.abspath(generated_dir) + ".source-manifest.json.gz"
 
 
-def _restore_list_cache(cache_path, fingerprint, processed_dir, generated_dir):
+def _restore_list_cache(cache_path, fingerprint, processed_dir, generated_dir,
+                        preserve_intact=False):
     try:
         with gzip.open(cache_path, "rt", encoding="utf-8") as f:
             state = json.load(f)
@@ -425,17 +430,44 @@ def _restore_list_cache(cache_path, fingerprint, processed_dir, generated_dir):
                 state.get("fingerprint") != fingerprint):
             return False
         bases = {"processed": processed_dir, "generated": generated_dir}
-        restored = []
+        entries = []
         for entry in state.get("outputs", ()):
             tag, rel_path, encoded = entry
             base = bases.get(tag)
             if (base is None or os.path.isabs(rel_path) or
-                    os.path.normpath(rel_path).startswith("..")):
+                    os.path.normpath(rel_path).startswith("..") or
+                    not isinstance(encoded, str)):
                 return False
-            restored.append((os.path.join(base, rel_path),
-                             base64.b64decode(encoded, validate=True)))
+            entries.append((os.path.join(base, rel_path), encoded))
     except (OSError, ValueError, TypeError, KeyError, AttributeError,
             json.JSONDecodeError):
+        return False
+
+    if preserve_intact and entries:
+        expected = {os.path.abspath(path) for path, _encoded in entries}
+        actual = set()
+        for directory in bases.values():
+            if not os.path.isdir(directory):
+                break
+            for current, _dirs, files in os.walk(directory):
+                actual.update(os.path.abspath(os.path.join(current, name))
+                              for name in files)
+        else:
+            if actual == expected:
+                try:
+                    intact = all(
+                        base64.b64encode(Path(path).read_bytes()).decode("ascii")
+                        == encoded
+                        for path, encoded in entries)
+                except OSError:
+                    intact = False
+                if intact:
+                    return True
+
+    try:
+        restored = [(path, base64.b64decode(encoded, validate=True))
+                    for path, encoded in entries]
+    except (ValueError, TypeError):
         return False
 
     for directory in bases.values():
@@ -476,21 +508,22 @@ def _save_list_cache(cache_path, fingerprint, processed_dir, generated_dir):
     os.replace(tmp_path, cache_path)
 
 
-def process_files():
+def process_files(*, reuse_existing=False):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     processed_dir = os.path.join(script_dir, PROCESSED_DIR_NAME)
     generated_dir = os.path.join(script_dir, GENERATED_DIR_NAME)
 
     fingerprint = _filesystem_signature(script_dir)
     cache_path = _list_cache_path(generated_dir)
-    if _restore_list_cache(cache_path, fingerprint,
-                           processed_dir, generated_dir):
-        print("[FILE LISTS] Source files unchanged; restored cached lists.")
+    if _restore_list_cache(cache_path, fingerprint, processed_dir, generated_dir,
+                           preserve_intact=reuse_existing):
+        verb = "reusing" if reuse_existing else "restored"
+        print(f"[FILE LISTS] Source files unchanged; {verb} cached lists.")
         return
 
     # 1. Generate Metadata
     files_by_folder = {}
-    write_folder_list(files_by_folder)
+    write_folder_list(files_by_folder, single_listing=reuse_existing)
 
     # 2. Find Matches
     csv_paths = find_default_csvs(processed_dir)

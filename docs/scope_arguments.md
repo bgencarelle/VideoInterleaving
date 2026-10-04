@@ -531,11 +531,31 @@ Inert without `--scope-mix`.
 
 The baked libraries. This is the real input to scope mode.
 
+### `--scope-source bake|images` (default `bake`)
+
+`bake` reads the XY libraries and remains the default. `images` decodes the
+normal face/float image tree at runtime, builds small thumbnails lazily, and
+defaults to raster. Live-image scope also supports stochastic and stipple;
+vector, fusion, and mixed rendering require baked geometry. This option is
+separate from `tools/scope_screen.py`, which captures a desktop or video source.
+
+### `--scope-channels X,Y` (default `1,2`)
+
+Selects the 1-based PortAudio output channels that carry X and Y. For example,
+`--scope-channels 18,19` opens a 19-channel output stream and routes the scope
+signals to its 18th and 19th channels. The chosen device must support the
+highest requested channel. X-only output uses X's selected channel.
+
+### `--scope-live-size PX` (default `128`)
+
+Thumbnail width for `--scope-source images`; minimum 16 pixels. Increasing it
+can preserve more detail at the cost of more runtime decode and render work.
+
 ### `--dir DIR`
 
-The *image* source folder. **Inert in scope mode.** Scope reads the manifest from
-the bake and never opens an image. It is a general flag that applies to the other
-four modes; it is listed in the scope docs only because it confused someone once.
+The image source folder. It is used by `--scope-source images`; with the default
+`--scope-source bake`, scope reads the manifest from the bake and does not open
+an image. The same flag supplies the image tree to other modes.
 
 ### `--scope-list-from-images`
 

@@ -820,7 +820,7 @@ def calibrate(main_libs, float_libs, n_samples, density=1.0, trim=0.02,
         F = len(lib.thumbs)
         step = max(1, F // max(frames // max(len(libs[:8]), 1), 1))
         for i in range(0, F, step):
-            t = np.asarray(lib.thumbs[i])
+            t = np.asarray(lib.thumb(i))
             alpha = t[..., 1] / 255.0
             v = (t[..., 0] / 255.0) * alpha
             if invert:
@@ -866,7 +866,7 @@ def content_bbox(libs, samples=24, thresh=0.06, pad=0.01):
         F = len(lib.thumbs)
         step = max(1, F // max(samples, 1))
         for i in range(0, F, step):
-            t = np.asarray(lib.thumbs[i])
+            t = np.asarray(lib.thumb(i))
             v = (t[..., 0] / 255.0) * (t[..., 1] / 255.0)
             ys, xs = np.nonzero(v > thresh)
             if ys.size == 0:

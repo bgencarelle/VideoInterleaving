@@ -151,7 +151,7 @@ def test_device_swap_recalibration_keeps_row_bias_and_autofit():
     original_calibrate = scope_display.calibrate
     try:
         scope_out.Scope = FakeScope
-        scope_out.resolve_device = lambda spec: spec
+        scope_out.resolve_device = lambda spec, **_kwargs: spec
 
         def fake_calibrate(*_args, **kwargs):
             seen.update(kwargs)

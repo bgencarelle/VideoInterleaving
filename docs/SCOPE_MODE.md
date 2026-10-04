@@ -8,7 +8,7 @@ scope using its own Y-T timebase.
 It uses the same image-index clock and folder selector as the other output
 modes. Normal startup currently uses the free-running clock; MIDI/MTC is not
 initialized, and LTC input is not implemented. It never decodes a JPEG, opens a
-GL context, or touches the image loader.
+GL context, or touches the image loader when using the default baked source.
 
 ---
 
@@ -66,11 +66,30 @@ mode's code path is altered.
 python main.py --mode scope --dir images --xy-dir images_xy --scope-raster
 ```
 
+For runtime-decoded images, without creating an XY bake:
+
+```bash
+python main.py --mode scope --dir images --scope-source images \
+  --scope-channels 18,19
+```
+
+Live-image scope defaults to raster and also supports `--scope-stochastic` and
+`--scope-stipple`. It uses the normal image ordering, alpha mattes, and folder
+selector, with a small bounded thumbnail cache and background decode workers.
+Vector, fusion, and mixed passes still need baked contour geometry. The live
+scope-screen tool for arbitrary screen/video sources remains separate at
+`tools/scope_screen.py`.
+
 For a one-channel output and a single-input Y-T scope:
 
 ```
 python main.py --mode scope --dir images --xy-dir images_xy --scope-x-only
 ```
+
+`--scope-channels X,Y` selects two **1-based PortAudio output channel numbers**;
+for example, `--scope-channels 18,19` routes X to channel 18 and Y to channel
+19. The audio device must expose at least as many output channels as the
+highest selected number. X-only output uses X's selected channel.
 
 The X trigger marker is already part of each trace. Connect the mono output to
 the scope input and use a rising-edge trigger near +0.95. Without
@@ -92,6 +111,10 @@ or directly, using the settings.py defaults:
 ```
 python scope_display.py --dir images --xy-dir images_xy
 ```
+
+The standalone entry point also accepts `--scope-source images`,
+`--scope-channels 18,19`, `--scope-live-size 128`, `--scope-fps`, and
+`--scope-samples`.
 
 Configuration flows CLI → `settings.SCOPE_*` → `scope_display`, the same way
 ASCII mode flows through `settings.ASCII_MODE`. An installation can therefore

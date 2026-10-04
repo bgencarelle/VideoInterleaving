@@ -76,6 +76,22 @@ class FileListCacheTests(unittest.TestCase):
         self.assertEqual(len(rows), 3)
         self.assertTrue(rows[-1][1].endswith("20.npy"))
 
+    def test_scope_can_reuse_intact_lists_without_restoring_or_rescanning(self):
+        make_file_lists.process_files()
+        generated_before = (self.generated.stat().st_ino,
+                            self.generated.stat().st_mtime_ns)
+        processed_before = (self.processed.stat().st_ino,
+                            self.processed.stat().st_mtime_ns)
+        with patch.object(make_file_lists, "scan_directory_recursive",
+                          side_effect=AssertionError("unexpected rescan")):
+            make_file_lists.process_files(reuse_existing=True)
+        self.assertEqual(
+            (self.generated.stat().st_ino, self.generated.stat().st_mtime_ns),
+            generated_before)
+        self.assertEqual(
+            (self.processed.stat().st_ino, self.processed.stat().st_mtime_ns),
+            processed_before)
+
 
 if __name__ == "__main__":
     unittest.main()

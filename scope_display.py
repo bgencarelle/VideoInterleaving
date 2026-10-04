@@ -9,9 +9,10 @@ an Osci-style stochastic luminance walk, a stable weighted stipple route, or a
     Normal startup currently uses the free-running clock; it does not initialize
     the retained legacy MIDI clock path.
 
-Needs none of the image machinery: no ImageLoader, no FIFO, no TurboJPEG, no
-GL context.  Geometry comes from libraries baked offline by
-utilities/convert_to_xy.py into settings.XY_DIR.
+Baked playback needs none of the image machinery: no ImageLoader, no FIFO, no
+TurboJPEG, and no GL context. Optional ``--scope-source images`` decodes small
+runtime thumbnails for raster/stochastic/stipple playback. Vector geometry
+still comes from libraries baked offline by utilities/convert_to_xy.py.
 
     python main.py --mode scope --dir images --xy-dir images_xy --scope-raster
 
@@ -26,7 +27,6 @@ import argparse
 import inspect
 import math
 import os
-import shutil
 import threading
 import time
 from pathlib import Path
@@ -36,25 +36,27 @@ import numpy as np
 import settings
 import scope_out as _scope_out
 
-_REQUIRED_SCOPE_OUT_API = 6
+_REQUIRED_SCOPE_OUT_API = 7
 _scope_out_api = getattr(_scope_out, "SCOPE_OUT_API_VERSION", 0)
 _scope_signature = inspect.signature(_scope_out.Scope.__init__)
 if (_scope_out_api != _REQUIRED_SCOPE_OUT_API or
         "rotation" not in _scope_signature.parameters or
         "mirror" not in _scope_signature.parameters or
         "trigger_shape" not in _scope_signature.parameters or
-        "x_only" not in _scope_signature.parameters):
+        "x_only" not in _scope_signature.parameters or
+        "channel_pair" not in _scope_signature.parameters):
     raise RuntimeError(
         "scope_display.py and scope_out.py are from different revisions. "
         f"Loaded scope_out from {_scope_out.__file__!r}; "
         f"API={_scope_out_api}, constructor={_scope_signature}. "
-        "Replace scope_out.py with the rotation/mirror/trigger/X-only file "
+        "Replace scope_out.py with the rotation/mirror/trigger/channel-pair file "
         "from the same runtime bundle as scope_display.py."
     )
 
 from time import monotonic as _time_mono
 from scope_out import (Scope, choose_device, BufferedSource, rasterize,
-                       precompensate_hpf, rotate_frame)
+                       precompensate_hpf, rotate_frame, parse_channel_pair,
+                       required_output_channels)
 from scope_bake import (XYLibrary, merge, SweepSource, calibrate,
                         composite_luma, composite_stipple_candidates,
                         TraceEmitter, StochasticEmitter,
@@ -129,6 +131,18 @@ def _bootstrap():
     ap.add_argument("--dir", help="image source folder. Optional: scope mode "
                     "reads its manifest from the bake and never opens an image.")
     ap.add_argument("--xy-dir", help="baked XY libraries")
+    ap.add_argument("--scope-source", choices=("bake", "images"),
+                    default=None,
+                    help="baked XY or runtime-decoded images (default: bake)")
+    ap.add_argument("--scope-channels", metavar="X,Y",
+                    help="1-based PortAudio output channels, e.g. 18,19")
+    ap.add_argument("--scope-live-size", type=int, metavar="PX")
+    ap.add_argument("--scope-fps", type=int)
+    ap.add_argument("--scope-samples", type=int)
+    ap.add_argument("--device", "--scope-device", dest="scope_device",
+                    help="audio output device name fragment or output index")
+    ap.add_argument("--ask", "--scope-ask", dest="scope_ask",
+                    action="store_true", help="choose an output interactively")
     render = ap.add_mutually_exclusive_group()
     render.add_argument("--scope-mode",
                         choices=("vector", "raster", "stochastic", "stipple",
@@ -197,6 +211,37 @@ def _bootstrap():
         settings.SCOPE_RENDER_MODE = "stochastic"
     elif args.scope_stipple:
         settings.SCOPE_RENDER_MODE = "stipple"
+    if args.scope_source is not None:
+        settings.SCOPE_SOURCE = args.scope_source
+    settings.SCOPE_SOURCE = getattr(settings, "SCOPE_SOURCE", "bake")
+    if args.scope_live_size is not None:
+        if args.scope_live_size < 16:
+            ap.error("--scope-live-size must be at least 16 pixels")
+        settings.SCOPE_LIVE_SIZE = args.scope_live_size
+    if args.scope_fps is not None:
+        settings.SCOPE_FPS = args.scope_fps
+    if args.scope_samples is not None:
+        settings.SCOPE_SAMPLES = args.scope_samples
+    try:
+        settings.SCOPE_CHANNELS = _scope_out.parse_channel_pair(
+            args.scope_channels if args.scope_channels is not None
+            else getattr(settings, "SCOPE_CHANNELS", (1, 2)))
+    except ValueError as exc:
+        ap.error(str(exc))
+    render_was_selected = bool(
+        args.scope_mode or args.scope_raster or args.scope_stochastic
+        or args.scope_stipple)
+    if settings.SCOPE_SOURCE == "images":
+        if not render_was_selected:
+            settings.SCOPE_RENDER_MODE = "raster"
+        if settings.SCOPE_RENDER_MODE not in ("raster", "stochastic", "stipple"):
+            ap.error("--scope-source images supports raster, stochastic, or "
+                     "stipple rendering; vector/fusion require a bake")
+        settings.SCOPE_RASTER = settings.SCOPE_RENDER_MODE == "raster"
+    if args.scope_device is not None:
+        settings.SCOPE_DEVICE = args.scope_device
+    settings.SCOPE_DEVICE_SPEC = args.scope_device
+    settings.SCOPE_ASK = args.scope_ask
     if (args.scope_mode or args.scope_raster or args.scope_stochastic
             or args.scope_stipple):
         settings.SCOPE_RASTER = settings.SCOPE_RENDER_MODE == "raster"
@@ -254,26 +299,11 @@ def _bootstrap():
     # before its own imports.
     import make_file_lists
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    for d in (settings.PROCESSED_DIR, settings.GENERATED_LISTS_DIR):
-        shutil.rmtree(os.path.join(script_dir, d), ignore_errors=True)
-
-    # Match main.py: when a bake contains its folder manifest, scope can start
-    # without scanning source images. Otherwise build fresh lists now.
-    _scope_has_manifest = False
-    if not getattr(settings, "SCOPE_LIST_FROM_IMAGES", False):
-        _xy = getattr(settings, "XY_DIR", None)
-        if _xy and os.path.isdir(_xy):
-            for _root, _dirs, _files in os.walk(_xy):
-                if "frame_starts.npy" in _files:
-                    _scope_has_manifest = True
-                    break
-
-    if _scope_has_manifest:
-        print(">> Skipping image scan: scope mode takes its manifest from the bake")
+    if (settings.SCOPE_SOURCE == "images"
+            or getattr(settings, "SCOPE_LIST_FROM_IMAGES", False)):
+        print(">> Live image lists will be validated by the scope engine")
     else:
-        print(">> Building file lists...")
-        make_file_lists.process_files()
+        print(">> Scope will use the baked manifest when available")
 
 
 # ---------------------------------------------------------------- resolution
@@ -469,7 +499,7 @@ def _dev_name_of(scope):
 
 def _swap_device(old_scope, spec, source, fps, samples, main_libs, float_libs,
                  density, trim, rows, fields, row_bias, autofit, invert=False,
-                 x_only=False):
+                 x_only=False, channel_pair=(1, 2)):
     """Move the running scope to another output device.
 
     Returns (new_scope, new_cal, fresh_sweep_state).
@@ -492,8 +522,8 @@ def _swap_device(old_scope, spec, source, fps, samples, main_libs, float_libs,
     holding both would fail on exactly the devices worth using.
     """
     from scope_out import Scope, resolve_device
-    dev = (resolve_device(spec, min_channels=1) if x_only
-           else resolve_device(spec))
+    dev = resolve_device(
+        spec, min_channels=required_output_channels(channel_pair, x_only))
     try:
         old_scope.stream.stop()
         old_scope.stream.close()
@@ -511,6 +541,7 @@ def _swap_device(old_scope, spec, source, fps, samples, main_libs, float_libs,
         trigger=getattr(old_scope, "trigger", True),
         trigger_shape=getattr(old_scope, "trigger_shape", "ramp"),
         x_only=x_only,
+        channel_pair=channel_pair,
         yt_trigger_us=getattr(old_scope, "yt_trigger_us", 250.0),
         yt_trigger_level=getattr(old_scope, "yt_trigger_level", 0.99))
     new_cal = {}
@@ -561,6 +592,18 @@ def run_scope(clock_source=None):
     if render_mode not in ("vector", "raster", "stochastic", "stipple",
                            "fusion"):
         render_mode = "raster" if getattr(settings, "SCOPE_RASTER", False) else "vector"
+    channel_pair = parse_channel_pair(
+        getattr(settings, "SCOPE_CHANNELS", (1, 2)))
+    scope_source = getattr(settings, "SCOPE_SOURCE", "bake")
+    if scope_source not in ("bake", "images"):
+        raise ValueError("SCOPE_SOURCE must be 'bake' or 'images'")
+    live_size = max(16, int(getattr(settings, "SCOPE_LIVE_SIZE", 128)))
+    if scope_source == "images" and render_mode == "vector":
+        render_mode = "raster"
+    if scope_source == "images" and render_mode not in (
+            "raster", "stochastic", "stipple"):
+        raise ValueError("live scope images support raster, stochastic, "
+                         "or stipple; vector/fusion need an XY bake")
     use_raster = render_mode == "raster"
     use_stochastic = render_mode == "stochastic"
     use_stipple = render_mode == "stipple"
@@ -634,6 +677,10 @@ def run_scope(clock_source=None):
               f"{mix_duty:g}")
     device_spec = getattr(settings, "SCOPE_DEVICE_SPEC", None)
     ask = getattr(settings, "SCOPE_ASK", False)
+    if scope_source == "images":
+        if mix_hz:
+            raise ValueError("live scope images cannot use --scope-mix; "
+                             "it includes baked vector geometry")
 
     if realtime:
         _d = getattr(settings, "SCOPE_BUFFER_BLOCKS", 6)
@@ -746,31 +793,49 @@ def run_scope(clock_source=None):
                   if mix_hz else fields)
 
     # --- libraries ---
-    # Prefer the baked tree: it carries the same folder names in the same
-    # order, so it can supply the manifest without rescanning the images.
-    # Fall back to the image lists when the bake predates this or the tree
-    # cannot be read.
-    xy_root = _xy_root()
-    print(f"[SCOPE] XY libraries: {xy_root}")
-    manifest = None
-    if not getattr(settings, "SCOPE_LIST_FROM_IMAGES", False):
-        manifest = _manifest_from_xy(xy_root)
-
-    if manifest is not None:
-        png_paths_len, main_dirs, float_dirs = manifest
-        main_folder_count = len(main_dirs)
-        float_folder_count = len(float_dirs)
-        print(f"[SCOPE] manifest from the bake (images not read)")
-        main_libs = _open_dirs(main_dirs, "main", png_paths_len)
-        float_libs = _open_dirs(float_dirs, "float", png_paths_len)
+    live_images = None
+    if scope_source == "images":
+        make_file_lists.process_files(reuse_existing=True)
+        _, main_paths, float_paths = make_file_lists.initialize_image_lists(
+            clock_source)
+        from scope_image_source import RuntimeScopeImageSource
+        live_images = RuntimeScopeImageSource(
+            main_paths, float_paths, width=live_size)
+        png_paths_len = live_images.frames
+        main_libs, float_libs = live_images.main_libs, live_images.float_libs
+        main_folder_count, float_folder_count = len(main_libs), len(float_libs)
+        print(f"[SCOPE] live image source: {live_images.width}x"
+              f"{live_images.height} thumbnails, lazy decode")
     else:
-        _, main_paths, float_paths = make_file_lists.initialize_image_lists(clock_source)
-        png_paths_len = len(main_paths)
-        main_folder_count = len(main_paths[0])
-        float_folder_count = len(float_paths[0])
-        main_libs = _open_layer(main_paths, xy_root, "main", png_paths_len)
-        float_libs = _open_layer(float_paths, xy_root, "float", png_paths_len)
+        # Prefer the baked tree: it carries the same folder names in the same
+        # order, so it supplies the manifest without scanning source images.
+        # Fall back to image lists when a bake predates manifests or the tree
+        # cannot be read.
+        xy_root = _xy_root()
+        print(f"[SCOPE] XY libraries: {xy_root}")
+        manifest = None
+        if not getattr(settings, "SCOPE_LIST_FROM_IMAGES", False):
+            manifest = _manifest_from_xy(xy_root)
+
+        if manifest is not None:
+            png_paths_len, main_dirs, float_dirs = manifest
+            main_folder_count = len(main_dirs)
+            float_folder_count = len(float_dirs)
+            print("[SCOPE] manifest from the bake (images not read)")
+            main_libs = _open_dirs(main_dirs, "main", png_paths_len)
+            float_libs = _open_dirs(float_dirs, "float", png_paths_len)
+        else:
+            make_file_lists.process_files(reuse_existing=True)
+            _, main_paths, float_paths = make_file_lists.initialize_image_lists(
+                clock_source)
+            png_paths_len = len(main_paths)
+            main_folder_count = len(main_paths[0])
+            float_folder_count = len(float_paths[0])
+            main_libs = _open_layer(main_paths, xy_root, "main", png_paths_len)
+            float_libs = _open_layer(float_paths, xy_root, "float", png_paths_len)
     if not any(l is not None for l in main_libs + float_libs):
+        if scope_source == "images":
+            raise RuntimeError("No usable face/float folders in the live image lists")
         raise RuntimeError(
             f"No XY libraries found under '{xy_root}'. Run:\n"
             f"  python utilities/convert_to_xy.py -i {settings.IMAGES_DIR} "
@@ -883,11 +948,12 @@ def run_scope(clock_source=None):
         if device_spec is None:
             device_spec = getattr(settings, "SCOPE_DEVICE", None)
         dev = choose_device(ask=ask, device=device_spec,
-                            min_channels=(1 if x_only else 2))
+                            min_channels=required_output_channels(
+                                channel_pair, x_only))
     source = None
     if realtime:
         probe = Scope(fps=fps, samples=samples, device=dev, invert_y=False,
-                      x_only=x_only)
+                      x_only=x_only, channel_pair=channel_pair)
         n_pass = probe.samples_per_frame
         probe.stream.close()
         # Calibrate HERE, before the generator is built: it needs the same
@@ -937,6 +1003,7 @@ def run_scope(clock_source=None):
                   invert_y=False, rotation=0, mirror=mirror,
                   trigger=trigger_on, trigger_shape=trigger_shape,
                   x_only=x_only,
+                  channel_pair=channel_pair,
                   yt_trigger_us=trigger_us)
 
     if trigger_on:
@@ -994,6 +1061,10 @@ def run_scope(clock_source=None):
         except Exception:
             _dev_name = "?"
     print(f"[SCOPE] output: {_dev_name}")
+    if not getattr(scope, "null", False):
+        _active_channels = channel_pair[:1] if x_only else channel_pair
+        print("[SCOPE] PortAudio channels: " +
+              ",".join(map(str, _active_channels)) + " (1-based)")
 
     if (use_raster or mix_hz) and not cal:
         try:
@@ -1270,7 +1341,8 @@ def run_scope(clock_source=None):
                 {"index": i, "name": nm, "api": api, "rate": rate,
                  "default": (i == _dflt)}
                 for (i, nm, api, rate) in list_output_devices(
-                    min_channels=(1 if x_only else 2))]
+                    min_channels=required_output_channels(
+                        channel_pair, x_only))]
         except Exception:
             monitor_data["scope_devices"] = []
         monitor_data["scope_mode"] = mode_name + (" REALTIME" if realtime else "")
@@ -1329,6 +1401,7 @@ def run_scope(clock_source=None):
     tick = 1.0 / max(2 * IPS, 4 * fps)
     prev_index = -1
     prev_key = None
+    prefetched_key = None
     mix_scheduler = TriangleMixScheduler(mix_duty)
     mix_last_mode = None
     # One emitter, shared with scope_screen.py. Tuning and sweep state live on
@@ -1391,7 +1464,8 @@ def run_scope(clock_source=None):
                     scope, cal, sweep = _swap_device(
                         scope, _want, source, fps, samples,
                         main_libs, float_libs, density, trim, rows, fields,
-                        row_bias, autofit, invert, x_only=x_only)
+                        row_bias, autofit, invert, x_only=x_only,
+                        channel_pair=channel_pair)
                     # The emitter owns the chain and the geometry, so it has to
                     # be rebuilt, not just reset: a new device can mean a new
                     # sample rate, which changes samples_per_frame and with it
@@ -1587,6 +1661,10 @@ def run_scope(clock_source=None):
                 prev_index = index
             mf, ff = folder_dictionary["Main_and_Float_Folders"]
             key = (index, mf, ff)
+
+            if live_images is not None and key != prefetched_key:
+                live_images.prefetch(index, mf, ff)
+                prefetched_key = key
 
             now = time.time()
             ml = main_libs[mf % main_folder_count]
@@ -1790,6 +1868,8 @@ def run_scope(clock_source=None):
             term.restore()
         if source is not None and hasattr(source, "close"):
             source.close()
+        if live_images is not None:
+            live_images.close()
         try:
             scope.stream.stop()
             scope.stream.close()

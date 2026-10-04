@@ -177,6 +177,18 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(settings.INITIAL_ROTATION, 90)
         self.assertEqual(settings.INITIAL_MIRROR, 1)
 
+    def test_scope_cli_selects_live_images_and_high_portaudio_channels(self):
+        self.configure("--scope-source", "images", "--scope-channels", "18,19")
+        self.assertEqual(settings.SCOPE_SOURCE, "images")
+        self.assertEqual(settings.SCOPE_CHANNELS, (18, 19))
+        self.assertEqual(settings.SCOPE_RENDER_MODE, "raster")
+
+    def test_live_scope_rejects_bake_only_renderers(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as err:
+                self.configure("--scope-source", "images", "--scope-mode", "vector")
+        self.assertEqual(err.exception.code, 2)
+
     def test_a_non_quarter_turn_is_rejected_at_the_boundary(self):
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit) as err:

@@ -68,6 +68,19 @@ def _set_process_title(mode):
     setproctitle.setproctitle(f"vi.{mode}")
 
 
+def _parse_scope_channels(value):
+    """Parse the scope's user-facing, 1-based X,Y output-channel pair."""
+    try:
+        pair = (tuple(int(part.strip()) for part in value.split(","))
+                if isinstance(value, str)
+                else tuple(int(channel) for channel in value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("scope channels must be two comma-separated integers") from exc
+    if len(pair) != 2 or min(pair) < 1 or pair[0] == pair[1]:
+        raise ValueError("scope channels must be two distinct positive channel numbers")
+    return pair
+
+
 # -----------------------------------------------------------------------------
 # CONFIGURATION OVERRIDE LOGIC
 # -----------------------------------------------------------------------------
@@ -143,6 +156,16 @@ def configure_runtime():
 
     # --- Options for --mode scope (scope signal output on the sound card) ---
     parser.add_argument("--xy-dir", help="Baked XY libraries (default: settings.XY_DIR)")
+    parser.add_argument("--scope-source", choices=("bake", "images"),
+                        default=None,
+                        help="Scope source: baked XY libraries or images decoded "
+                             "at runtime (default: bake)")
+    parser.add_argument("--scope-channels", default=None, metavar="X,Y",
+                        help="1-based PortAudio output channels for XY, e.g. "
+                             "18,19 (default: 1,2)")
+    parser.add_argument("--scope-live-size", type=int, default=None,
+                        metavar="PX",
+                        help="Live-image thumbnail width (default: 128)")
     scope_render = parser.add_mutually_exclusive_group()
     scope_render.add_argument("--scope-mode",
                               choices=("vector", "raster", "stochastic",
@@ -549,12 +572,10 @@ def configure_runtime():
     # 2.5. Clean up existing cache directories for this instance
     # Determine instance identifier pattern
     if args.mode == "scope":
-        # Scope only: key the pattern on source AND mode, so two scope
-        # instances running different image trees never delete each other's
-        # lists.  source_name is computed below, so derive it locally here
-        # rather than moving upstream code around.
-        _src = os.path.basename(os.path.normpath(settings.IMAGES_DIR)).replace(" ", "_")
-        instance_pattern = f"_{_src}_{args.mode}_"
+        # Scope either reads the bake manifest or validates its image-list
+        # cache itself. Deleting those directories here forced a full cache
+        # restore on every launch and made separate scope instances interfere.
+        instance_pattern = None
     elif args.mode in ("web", "local"):
         instance_pattern = f"_{args.mode}_"  # Match any port
     else:
@@ -565,7 +586,7 @@ def configure_runtime():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     cache_base = os.path.join(script_dir, CACHE_DIR)
 
-    if os.path.exists(cache_base):
+    if instance_pattern is not None and os.path.exists(cache_base):
         for item in os.listdir(cache_base):
             if (item.startswith("folders_processed_") or item.startswith(
                     "generated_lists_")) and instance_pattern in item:
@@ -621,6 +642,49 @@ def configure_runtime():
         print(">> Local mode: Enabling --test flag for network monitoring")
 
     elif args.mode == "scope":
+        scope_source = (args.scope_source or
+                        getattr(settings, "SCOPE_SOURCE", "bake"))
+        if scope_source not in ("bake", "images"):
+            parser.error("--scope-source must be bake or images")
+        settings.SCOPE_SOURCE = scope_source
+        if args.scope_live_size is not None:
+            if args.scope_live_size < 16:
+                parser.error("--scope-live-size must be at least 16 pixels")
+            settings.SCOPE_LIVE_SIZE = args.scope_live_size
+        try:
+            settings.SCOPE_CHANNELS = _parse_scope_channels(
+                args.scope_channels if args.scope_channels is not None
+                else getattr(settings, "SCOPE_CHANNELS", (1, 2)))
+        except ValueError as exc:
+            parser.error(str(exc))
+
+        render_was_selected = bool(
+            args.scope_mode or args.scope_raster or args.scope_stochastic
+            or args.scope_stipple)
+        if args.scope_mode:
+            requested_render = args.scope_mode
+        elif args.scope_raster:
+            requested_render = "raster"
+        elif args.scope_stochastic:
+            requested_render = "stochastic"
+        elif args.scope_stipple:
+            requested_render = "stipple"
+        else:
+            requested_render = getattr(settings, "SCOPE_RENDER_MODE", "vector")
+        if scope_source == "images":
+            if args.scope_list_from_images:
+                parser.error("--scope-list-from-images is redundant with "
+                             "--scope-source images")
+            if not render_was_selected:
+                requested_render = "raster"
+            if requested_render not in ("raster", "stochastic", "stipple"):
+                parser.error("--scope-source images supports raster, stochastic, "
+                             "or stipple rendering; vector/fusion require a bake")
+            settings.SCOPE_RENDER_MODE = requested_render
+            if args.scope_mix is not None:
+                parser.error("--scope-mix requires baked vector geometry and "
+                             "cannot be used with --scope-source images")
+
         if (args.scope_mix_duty is not None
                 and (not math.isfinite(args.scope_mix_duty)
                      or not 0.0 <= args.scope_mix_duty <= 1.0)):
@@ -779,9 +843,12 @@ def configure_runtime():
             # argv is decoded with surrogateescape, so a stray byte in shell
             # history arrives as a lone surrogate and breaks any later encode
             _configured_device = _scrub(_configured_device)
+            _minimum_channels = (
+                settings.SCOPE_CHANNELS[0] if settings.SCOPE_X_ONLY else
+                max(settings.SCOPE_CHANNELS))
             settings.SCOPE_DEVICE = _choose(
                 ask=_configured_ask, device=_configured_device,
-                min_channels=(1 if settings.SCOPE_X_ONLY else 2))
+                min_channels=_minimum_channels)
             if settings.SCOPE_DEVICE == "null":
                 _name = "none (browser renders)"
             else:
@@ -800,7 +867,14 @@ def configure_runtime():
             settings.SCOPE_DEVICE_RESOLVED = True
         settings.SCOPE_DEVICE_SPEC = None
         settings.SCOPE_ASK = False
-        print(f">> XY LIBRARIES: {getattr(settings, 'XY_DIR', 'images_xy')}")
+        _scope_axes = (settings.SCOPE_CHANNELS[:1] if settings.SCOPE_X_ONLY
+                       else settings.SCOPE_CHANNELS)
+        print(">> AUDIO CHANNELS: " + ",".join(map(str, _scope_axes)) +
+              " (PortAudio, 1-based)")
+        if scope_source == "images":
+            print(f">> SCOPE SOURCE: live images ({settings.IMAGES_DIR})")
+        else:
+            print(f">> XY LIBRARIES: {getattr(settings, 'XY_DIR', 'images_xy')}")
 
     elif args.mode == "ascii":
         validate_ascii_port(primary_port)
@@ -975,21 +1049,10 @@ def main(clock=CLOCK_MODE):
 
     print(f"[MAIN] Mode={cli_args.mode} | Images={settings.IMAGES_DIR} | Cache={settings.GENERATED_LISTS_DIR}")
 
-    # Scope mode reads its folder manifest from the bake and never opens an
-    # image, so the image scan is pure startup cost for it.  Skipped only when
-    # the bake can actually supply the manifest; every other mode is untouched.
-    _scope_has_manifest = False
-    if cli_args.mode == "scope" and not getattr(settings, "SCOPE_LIST_FROM_IMAGES", False):
-        _xy = getattr(settings, "XY_DIR", None)
-        if _xy and os.path.isdir(_xy):
-            for _root, _dirs, _files in os.walk(_xy):
-                if "frame_starts.npy" in _files:
-                    _scope_has_manifest = True
-                    break
-
-    if _scope_has_manifest:
-        print(">> Skipping image scan: scope mode takes its manifest from the "
-              "bake (--scope-list-from-images to override)")
+    if cli_args.mode == "scope":
+        # The scope engine probes the bake once and initializes image lists
+        # only for a live source or a bake without a usable manifest.
+        print(f">> Scope source: {getattr(settings, 'SCOPE_SOURCE', 'bake')}")
     else:
         print(">> Building file lists...")
         import make_file_lists          # PIL + numpy; not needed off this path

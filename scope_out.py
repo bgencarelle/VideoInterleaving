@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 
-SCOPE_OUT_API_VERSION = 6  # adds native one-channel X-only output
+SCOPE_OUT_API_VERSION = 7  # adds arbitrary physical output channel pairs
 
 try:
     import settings as settings_mod
@@ -377,6 +377,29 @@ def default_output_index():
         return None
 
 
+def parse_channel_pair(value=(1, 2)):
+    """Return a validated pair of distinct, 1-based PortAudio channels."""
+    if isinstance(value, str):
+        try:
+            value = tuple(int(part.strip()) for part in value.split(","))
+        except ValueError as exc:
+            raise ValueError("scope channels must be two comma-separated integers") from exc
+    try:
+        pair = tuple(int(channel) for channel in value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("scope channels must be a pair of positive integers") from exc
+    if (len(pair) != 2 or any(channel < 1 for channel in pair)
+            or pair[0] == pair[1]):
+        raise ValueError("scope channels must be two distinct positive channel numbers")
+    return pair
+
+
+def required_output_channels(channel_pair=(1, 2), x_only=False):
+    """Minimum output-channel count needed by a selected scope channel pair."""
+    pair = parse_channel_pair(channel_pair)
+    return pair[0] if x_only else max(pair)
+
+
 def resolve_device(spec, min_channels=2):
     """
     Accept a name fragment, an index, or None (= system default).
@@ -438,13 +461,20 @@ def choose_device(ask=False, device=None, stream=None, min_channels=2):
     if not devs:
         raise RuntimeError(f"No output with at least {min_channels} channel(s) found. "
                            "On Linux check that libportaudio2 is installed.")
-    if not ask or len(devs) == 1:
-        return None
-    if not sys.stdin.isatty():
-        print("[AUDIO] --ask given but no terminal; using system default")
-        return None
-
     dflt = default_output_index()
+    default_is_suitable = dflt is not None and any(d[0] == dflt for d in devs)
+    if not ask:
+        if default_is_suitable or (dflt is None and min_channels <= 2):
+            return None
+        return devs[0][0]
+    if len(devs) == 1:
+        return None if default_is_suitable else devs[0][0]
+    if not sys.stdin.isatty():
+        print("[AUDIO] --ask given but no terminal; selecting a suitable output")
+        if default_is_suitable or (dflt is None and min_channels <= 2):
+            return None
+        return devs[0][0]
+
     print("\nAudio outputs (rate sets samples/trace -- higher is more detail):")
     for n, (gi, name, api, rate) in enumerate(devs):
         mark = "  <- system default" if gi == dflt else ""
@@ -801,7 +831,8 @@ class Scope:
                  lowpass_hz=None, lowpass_taper=0.0, blocksize=512,
                  yt_mode=None, yt_trigger_us=250.0,
                  yt_trigger_level=0.99, mirror=False,
-                 trigger=True, trigger_shape="ramp", x_only=False):
+                 trigger=True, trigger_shape="ramp", x_only=False,
+                 channel_pair=(1, 2)):
         """
         samples : path length per trace -- the REAL parameter.  Refresh is not
                   set independently; it falls out as rate/samples, because the
@@ -813,11 +844,19 @@ class Scope:
         self.invert_y = invert_y
         self.swap_xy = swap_xy
         self.x_only = bool(x_only)
-        self.output_channels = 1 if self.x_only else 2
+        self.channel_pair = parse_channel_pair(channel_pair)
+        self.channel_indices = tuple(channel - 1 for channel in self.channel_pair)
+        self.output_channels = required_output_channels(
+            self.channel_pair, x_only=self.x_only)
         self.set_rotation(rotation)
         self.set_mirror(mirror)
         _null = (isinstance(device, str) and device.strip().lower()
                  in ("null", "none", "off"))
+        if _null:
+            # The null sink feeds the browser preview, whose channel contract
+            # remains mono X or stereo XY regardless of physical DAC routing.
+            self.output_channels = 1 if self.x_only else 2
+            self.channel_indices = (0, 1)
         if sd is None and not _null:
             raise RuntimeError(
                 f"PortAudio is unavailable ({_SD_IMPORT_ERROR}). On a host with "
@@ -913,10 +952,13 @@ class Scope:
 
     def _write_output(self, outdata, frame):
         """Map XY geometry to the selected physical output layout."""
+        if self.output_channels > (1 if self.x_only else 2):
+            outdata.fill(0.0)
         if self.x_only:
-            outdata[:, 0] = frame[:, 0]
+            outdata[:, self.channel_indices[0]] = frame[:, 0]
         else:
-            outdata[:, :2] = frame[:, :2]
+            outdata[:, self.channel_indices[0]] = frame[:, 0]
+            outdata[:, self.channel_indices[1]] = frame[:, 1]
 
     @property
     def trace_samples(self):
