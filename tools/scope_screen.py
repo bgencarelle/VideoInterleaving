@@ -482,6 +482,9 @@ def build_parser():
                          "is 10.7 ms). 0 lets the driver choose.")
     ap.add_argument("--scope-lowpass", type=float, metavar="HZ",
                     help="low-pass output samples at this corner frequency")
+    ap.add_argument("--scope-gui", action=argparse.BooleanOptionalAction,
+                    default=False,
+                    help="open the native scope preview and tuner")
     ap.add_argument("--scope-channels", default="1,2", metavar="X,Y",
                     help="1-based PortAudio channels carrying X and Y")
     ap.add_argument("--scope-x-only", action=argparse.BooleanOptionalAction,
@@ -534,6 +537,7 @@ def main(argv=None):
     if args.scope_lowpass is not None and (
             not np.isfinite(args.scope_lowpass) or args.scope_lowpass <= 0):
         ap.error("--scope-lowpass must be finite and greater than zero")
+    gui_enabled = bool(args.scope_gui)
 
     region = [int(v) for v in args.region.split(",")] if args.region else None
     if args.source in ("ffmpeg", "camera"):
@@ -577,6 +581,8 @@ def main(argv=None):
         trigger_shape=args.scope_trigger_shape,
         yt_trigger_us=args.scope_trigger_us, rotation=args.rotation,
         mirror=args.mirror)
+    if gui_enabled:
+        scope.set_tap_fields(max(1, args.fields))
     n = scope.samples_per_frame
     stop = threading.Event()
     control_messages = queue.Queue()
@@ -626,6 +632,8 @@ def main(argv=None):
           f"samples/cell)"
           + (f", interlace x{args.fields}" if args.fields > 1 else ""))
 
+    emitter = None
+    gen = None
     if args.stream:
         gen = SweepSource(lum_fn=grab, samples_per_pass=n, gamma=args.gamma,
                           trim=args.trim, density=args.density, rows=args.rows,
@@ -679,11 +687,98 @@ def main(argv=None):
         threading.Thread(target=pump, daemon=True, name="scope-frames").start()
 
     scope.stream.start()
-    print("[SCREEN] running -- Ctrl+C to stop", flush=True)
+    gui = None
     try:
+        if gui_enabled:
+            from scope_gui import ScopeGUI
+
+            live_state = {
+                "trim": args.trim, "density": args.density,
+                "gamma": args.gamma, "rows": args.rows or 0,
+                "lowpass": args.scope_lowpass or 0.0,
+                "mode": "raster", "raster": True, "mode_locked": True,
+                "clock_locked": True, "disabled_sliders": ("density", "rows"),
+                "audio_muted": False, "fps": args.fps, "ips": args.fps,
+                "fields": args.fields, "available_modes": ("raster",),
+            }
+            gui = ScopeGUI(live_state)
+        print("[SCREEN] running -- Ctrl+C to stop", flush=True)
         last_report = 0.0
         while not stop.is_set():
-            time.sleep(0.1)
+            if gui is not None:
+                source = getattr(scope, "source", None)
+                buffered_samples = (
+                    source.buffered_samples
+                    if source is not None and
+                    hasattr(source, "buffered_samples") else
+                    (scope.trace_samples if not scope.ready() else 0))
+                buffer_capacity = (
+                    source.capacity
+                    if source is not None and hasattr(source, "capacity") else
+                    scope.trace_samples)
+                stream_latency = getattr(scope.stream, "latency", 0.0)
+                if isinstance(stream_latency, (tuple, list)):
+                    stream_latency = stream_latency[-1] if stream_latency else 0.0
+                try:
+                    dac_latency_ms = 1000.0 * float(stream_latency)
+                except (TypeError, ValueError):
+                    dac_latency_ms = 0.0
+                metrics = {
+                    "device": str(args.device or "Scope output"),
+                    "sample_rate": int(scope.samplerate),
+                    "trace_hz": scope.samplerate / max(scope.trace_samples, 1),
+                    "picture_hz": (scope.samplerate /
+                                   max(scope.trace_samples *
+                                       max(1, args.fields), 1)),
+                    "samples": int(scope.samples_per_frame),
+                    "fields": int(args.fields),
+                    "grid": f"{_grid_cols}x{_grid_rows}",
+                    "dropouts": int(scope.dac_dropouts),
+                    "underruns": int(getattr(source, "underruns", 0)),
+                    "buffered_ms": 1000.0 * buffered_samples /
+                    max(scope.samplerate, 1),
+                    "buffer_capacity_ms": 1000.0 * buffer_capacity /
+                    max(scope.samplerate, 1),
+                    "buffer_kind": ("source" if source is not None and
+                                    hasattr(source, "buffered_samples") else
+                                    "trace queue"),
+                    "dac_latency_ms": dac_latency_ms,
+                }
+                try:
+                    actions = gui.poll(live_state, metrics)
+                except Exception as exc:
+                    print(f"[SCREEN] GUI update failed: {exc}", flush=True)
+                    gui.close()
+                    gui = None
+                    actions = ()
+                for action in actions:
+                    if action[0] == "slider":
+                        name, value = action[1], action[2]
+                        if name == "gamma":
+                            live_state["gamma"] = float(value)
+                            if emitter is not None:
+                                emitter.gamma = float(value)
+                            if gen is not None:
+                                gen.gamma = float(value)
+                        elif name == "trim":
+                            live_state["trim"] = float(value)
+                            if emitter is not None:
+                                emitter.trim = float(value)
+                            if gen is not None:
+                                gen.trim = float(value)
+                        elif name == "lowpass":
+                            scope.lowpass_hz = float(value) or None
+                            live_state["lowpass"] = float(value)
+                        elif name == "exposure":
+                            gui.set_preview_exposure(value)
+                    elif action[0] == "audio":
+                        audible = bool(action[1])
+                        scope.set_output_audio(muted=not audible)
+                        live_state["audio_muted"] = not audible
+                    elif action[0] == "fullscreen":
+                        gui.set_fullscreen(action[1])
+                if gui is not None and gui.close_requested:
+                    break
             while True:
                 try:
                     message = control_messages.get_nowait()
@@ -698,6 +793,7 @@ def main(argv=None):
                 print(f"[SCREEN] {u} underruns -- raise --buffer-blocks or "
                       "lower --fps", flush=True)
                 scope.source.underruns = 0
+            time.sleep(0.02 if gui is not None else 0.1)
     except KeyboardInterrupt:
         pass
     finally:
@@ -711,6 +807,8 @@ def main(argv=None):
             video.close()
         if hasattr(grab, "proc"):
             grab.proc.terminate()
+        if gui is not None:
+            gui.close()
         if getattr(scope, "source", None) is not None:
             scope.source.close()
         scope.stream.stop()

@@ -480,6 +480,8 @@ class ScopeGUI:
         return True
 
     def _slider_disabled(self, name, state):
+        if name in state.get("disabled_sliders", ()):
+            return True
         if name in ("ips", "fps", "fields") and state.get("mode_locked"):
             return True
         if name == "ips" and state.get("clock_locked"):

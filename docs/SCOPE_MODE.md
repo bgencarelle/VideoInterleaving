@@ -123,7 +123,10 @@ selector, with a small bounded thumbnail cache and background decode workers.
 The live screen/video sources are available from the same GUI and from
 `tools/scope_screen.py`; the CLI accepts `--source video --file clip.mp4`,
 `--source screen`, `--source ffmpeg`, `--source camera --ffmpeg-input FMT:SRC`,
-and `--source test`.
+and `--source test`. Both the baked scope and live-source launcher pipelines
+can open the native phosphor visualizer; for live-source CLI use, add
+`--scope-gui` to `tools/scope_screen.py`. Its tuner applies gamma, trim, output
+low-pass, and preview exposure; the live-source grid and timing stay fixed.
 
 For a one-channel output and a single-input Y-T scope:
 

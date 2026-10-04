@@ -2,11 +2,13 @@ import copy
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
 from tools.scope_launcher_gui import (DEFAULT_SETTINGS, build_command,
                                       load_preferences, save_preferences,
+                                      ScopeLauncher,
                                       validate_settings,
                                       window_size_for_workarea)
 
@@ -53,12 +55,29 @@ class ScopeLauncherCommandTests(unittest.TestCase):
         self.assertEqual(command[command.index("--start-at") + 1], "12.5")
         self.assertIn("--scope-x-only", command)
 
-    def test_camera_source_requires_a_custom_ffmpeg_input(self):
+    def test_live_pipeline_can_open_the_native_scope_visualizer(self):
+        self.settings.update({"run_mode": "live", "live_source": "test",
+                              "scope_gui": True})
+        command = build_command(self.settings, root=self.root, python="python")
+
+        self.assertIn("--scope-gui", command)
+
+    def test_live_scope_parser_accepts_visualizer_option(self):
+        from tools.scope_screen import build_parser
+
+        args = build_parser().parse_args(["--source", "test", "--scope-gui"])
+
+        self.assertTrue(args.scope_gui)
+
+    def test_camera_source_requires_a_selected_device_input(self):
         self.settings.update({"run_mode": "live", "live_source": "camera"})
         with self.assertRaisesRegex(ValueError, "FFmpeg input"):
             validate_settings(self.settings, root=self.root)
         self.settings["ffmpeg_input"] = "v4l2:/dev/video0"
         validate_settings(self.settings, root=self.root)
+        command = build_command(self.settings, root=self.root, python="python")
+        self.assertEqual(command[command.index("--ffmpeg-input") + 1],
+                         "v4l2:/dev/video0")
 
     def test_whole_trace_mix_cannot_be_combined_with_explicit_samples(self):
         self.settings.update({"run_mode": "app", "app_source": "bake",
@@ -103,6 +122,55 @@ class ScopeLauncherCommandTests(unittest.TestCase):
     def test_launcher_window_fits_a_small_monitor_workarea(self):
         self.assertEqual(window_size_for_workarea(800, 600), (768, 520))
         self.assertEqual(window_size_for_workarea(1920, 1080), (1040, 760))
+
+
+class CameraDevicePickerTests(unittest.TestCase):
+    @staticmethod
+    def launcher():
+        gui = ScopeLauncher.__new__(ScopeLauncher)
+        gui.settings = {"live_source": "camera", "ffmpeg_input": ""}
+        gui._camera_cache = None
+        gui.dropdown = None
+        gui.notice = ""
+        gui.dirty = False
+        return gui
+
+    def test_camera_picker_reuses_and_caches_modem_device_discovery(self):
+        gui = self.launcher()
+        devices = (("USB camera · /dev/video0", "v4l2:/dev/video0"),)
+
+        with patch("tools.scope_launcher_gui._enumerate_camera_sources",
+                   return_value=devices) as enumerate_devices:
+            gui._open_dropdown("ffmpeg_input")
+            self.assertEqual(gui.dropdown, "ffmpeg_input")
+            self.assertEqual(gui._choices("ffmpeg_input"), devices)
+            enumerate_devices.assert_called_once_with()
+
+        gui.settings["ffmpeg_input"] = "v4l2:/dev/video0"
+        self.assertEqual(gui._display_value("ffmpeg_input"), devices[0][0])
+
+    def test_empty_camera_picker_explains_the_ffmpeg_fallback(self):
+        gui = self.launcher()
+
+        with patch("tools.scope_launcher_gui._enumerate_camera_sources",
+                   return_value=()):
+            gui._open_dropdown("ffmpeg_input")
+
+        self.assertIsNone(gui.dropdown)
+        self.assertIn("No camera devices found", gui.notice)
+        self.assertIn("Screen / FFmpeg input", gui.notice)
+
+    def test_manual_ffmpeg_input_remains_a_text_field(self):
+        gui = self.launcher()
+        gui.settings["live_source"] = "ffmpeg"
+
+        self.assertFalse(gui._is_dropdown_field("ffmpeg_input"))
+
+    def test_live_pipeline_exposes_the_native_visualizer_controls(self):
+        gui = ScopeLauncher.__new__(ScopeLauncher)
+        gui.settings = {"run_mode": "live", "live_source": "test"}
+
+        self.assertIn("scope_gui", gui._visible_fields())
 
 
 class VideoSourceTransportTests(unittest.TestCase):

@@ -58,6 +58,14 @@ def window_size_for_workarea(width, height, desired=(1040, 760),
     return (min(int(desired[0]), available_width),
             min(int(desired[1]), available_height))
 
+
+def _enumerate_camera_sources():
+    """Reuse the modem sender's platform-specific camera discovery."""
+    from tools.v7_send_gui import enumerate_camera_sources
+
+    return enumerate_camera_sources()
+
+
 SELECT_CHOICES = {
     "run_mode": RUN_CHOICES,
     "app_source": APP_SOURCE_CHOICES,
@@ -182,6 +190,7 @@ FIELD_GROUPS = (
                                  "adapt",
                                  "capture_fps", "downto", "stream",
                                  "buffer_blocks", "live_dc_comp", "blocksize")),
+    ("Live visualizer", ("scope_gui",)),
 )
 
 FIELD_LABELS = {
@@ -354,7 +363,7 @@ def validate_settings(settings, outputs=(), root=ROOT):
     if source == "video" and not str(settings.get("video_file", "")).strip():
         raise ValueError("Choose a video file or URL")
     if source == "camera" and not str(settings.get("ffmpeg_input", "")).strip():
-        raise ValueError("Camera capture needs an FFmpeg input, e.g. v4l2:/dev/video0")
+        raise ValueError("Choose a camera device or FFmpeg input, e.g. v4l2:/dev/video0")
     if source in ("camera", "ffmpeg"):
         input_spec = str(settings.get("ffmpeg_input", "")).strip()
         if input_spec and ":" not in input_spec:
@@ -539,6 +548,8 @@ def build_command(settings, outputs=(), *, python=sys.executable, root=ROOT,
             command.extend((flag, value))
     if settings.get("stream"):
         command.append("--stream")
+    if settings.get("scope_gui"):
+        command.append("--scope-gui")
     return command
 
 
@@ -629,6 +640,7 @@ class ScopeLauncher:
                  restore_preferences=True):
         self.device_error = device_error
         self._device_cache = {}
+        self._camera_cache = None
         self.preference_path = Path(preference_path or preferences_path())
         self.settings = dict(DEFAULT_SETTINGS)
         self.resume = {}
@@ -852,9 +864,50 @@ class ScopeLauncher:
                        for index, (_global, name, api, rate) in enumerate(devices))
         return tuple(choices), devices
 
+    def _camera_choices(self, refresh=False):
+        if refresh or self._camera_cache is None:
+            try:
+                choices = tuple(_enumerate_camera_sources())
+                error = "" if choices else "No camera devices were found."
+            except Exception as exc:
+                choices, error = (), str(exc)
+            self._camera_cache = (choices, error)
+        return self._camera_cache
+
+    def _camera_notice(self):
+        _choices, error = self._camera_choices()
+        if "No camera devices" in error:
+            return ("No camera devices found. Check connection and permissions, "
+                    "or use Screen / FFmpeg input.")
+        if "FFmpeg is required" in error:
+            return ("Camera discovery needs FFmpeg on this platform. Install "
+                    "FFmpeg, or use Screen / FFmpeg input.")
+        return (f"Video device enumeration failed: {error}. "
+                "Try Screen / FFmpeg input.")
+
+    def _is_dropdown_field(self, key):
+        return (key in SELECT_CHOICES or key == "device" or
+                (key == "ffmpeg_input" and
+                 self.settings.get("live_source") == "camera"))
+
+    def _open_dropdown(self, key):
+        if self._is_dropdown_field(key) and not self._choices(key):
+            self.dropdown = None
+            camera_field = (key == "ffmpeg_input" and
+                            self.settings.get("live_source") == "camera")
+            if camera_field:
+                self.notice = self._camera_notice()
+            else:
+                self.notice = "No choices are available for this setting."
+            self.dirty = True
+            return
+        self.dropdown = key
+
     def _choices(self, key):
         if key == "device":
             return self._device_choices()[0]
+        if key == "ffmpeg_input" and self.settings.get("live_source") == "camera":
+            return self._camera_choices()[0]
         if key == "render_mode" and self.settings.get("app_source") == "images":
             return IMAGE_RENDER_CHOICES
         return SELECT_CHOICES.get(key, ())
@@ -867,7 +920,8 @@ class ScopeLauncher:
                          "Stochastic, stipple, fusion", "Output processing"):
                 if run_mode != "app":
                     continue
-            elif title in ("Live source", "Live sweep and capture"):
+            elif title in ("Live source", "Live sweep and capture",
+                           "Live visualizer"):
                 if run_mode != "live":
                     continue
             visible = []
@@ -944,8 +998,11 @@ class ScopeLauncher:
                 self.selected = "app_source" if value == "app" else "live_source"
             elif key == "app_source" and value == "images" and self.settings.get("render_mode") not in dict(IMAGE_RENDER_CHOICES).values():
                 self.settings["render_mode"] = "raster"
-            elif key == "live_source" and value == "video" and not self.settings.get("video_file"):
-                self.selected = "video_file"
+            elif key == "live_source":
+                if value == "video" and not self.settings.get("video_file"):
+                    self.selected = "video_file"
+                elif value == "camera" and not self.settings.get("ffmpeg_input"):
+                    self.selected = "ffmpeg_input"
         self.dropdown = None
         self._ensure_selection()
         if hasattr(self, "_height"):
@@ -1333,7 +1390,9 @@ class ScopeLauncher:
                     rect, radius=unit(4),
                     fill=(35, 60, 77) if selected else (17, 29, 39),
                     outline=(74, 111, 134) if selected else (32, 48, 60))
-                label = FIELD_LABELS.get(value, value)
+                label = ("Camera device" if value == "ffmpeg_input" and
+                         self.settings.get("live_source") == "camera" else
+                         FIELD_LABELS.get(value, value))
                 draw.text((left + unit(10), top + unit(7)),
                           self._fit(label, self.small,
                                     value_left - left - unit(20)),
@@ -1358,7 +1417,7 @@ class ScopeLauncher:
                                     field_right - value_left - unit(18)),
                           font=self.small, fill=(243, 208, 146) if selected else
                           (237, 242, 246))
-                if value in SELECT_CHOICES or value == "device":
+                if self._is_dropdown_field(value):
                     draw.text((field_right - unit(12), top + unit(6)),
                               "▾", font=self.small,
                               fill=(134, 169, 188))
@@ -1476,6 +1535,12 @@ class ScopeLauncher:
             choices = self._choices(key)
             return next((label for label, choice in choices
                          if str(choice) == str(value)), "Choose an output")
+        if key == "ffmpeg_input" and self.settings.get("live_source") == "camera":
+            if not value:
+                return "Choose a camera"
+            choices = self._camera_cache[0] if self._camera_cache else ()
+            return next((label for label, choice in choices
+                         if str(choice) == str(value)), str(value))
         if key in SELECT_CHOICES:
             return next((label for label, choice in self._choices(key)
                          if str(choice) == str(value)), str(value))
@@ -1578,8 +1643,8 @@ class ScopeLauncher:
                     self.dropdown = None
                 if field in BOOL_FIELDS:
                     self._toggle(field)
-                elif field in SELECT_CHOICES or field == "device":
-                    self.dropdown = field
+                elif self._is_dropdown_field(field):
+                    self._open_dropdown(field)
                 else:
                     self._edit_start(field)
             elif key == "setup":
@@ -1600,7 +1665,13 @@ class ScopeLauncher:
                 self.notice = "Settings reset to application defaults."
             elif key == "refresh":
                 self._device_choices(refresh=True)
-                self.notice = "Output device list refreshed."
+                cameras, camera_error = self._camera_choices(refresh=True)
+                if (self.settings.get("run_mode") == "live" and
+                        self.settings.get("live_source") == "camera"):
+                    self.notice = (self._camera_notice() if camera_error else
+                                   f"Refreshed {len(cameras)} camera device(s).")
+                else:
+                    self.notice = "Audio and video device lists refreshed."
             elif key == "play_pause":
                 if self.process is None:
                     self._start()
@@ -1748,7 +1819,7 @@ class ScopeLauncher:
         elif key in (self.glfw.KEY_LEFT, self.glfw.KEY_RIGHT):
             if self.selected in BOOL_FIELDS:
                 self._toggle(self.selected)
-            elif self.selected in SELECT_CHOICES or self.selected == "device":
+            elif self._is_dropdown_field(self.selected):
                 options = self._choices(self.selected)
                 values = [str(value) for _label, value in options]
                 current = str(self.settings.get(self.selected, ""))
@@ -1759,11 +1830,13 @@ class ScopeLauncher:
                 index = (index + (1 if key == self.glfw.KEY_RIGHT else -1)) % max(1, len(options))
                 if options:
                     self._assign(self.selected, options[index][1])
+                else:
+                    self._open_dropdown(self.selected)
         elif key in (self.glfw.KEY_ENTER, self.glfw.KEY_KP_ENTER):
             if self.selected in BOOL_FIELDS:
                 self._toggle(self.selected)
-            elif self.selected in SELECT_CHOICES or self.selected == "device":
-                self.dropdown = self.selected
+            elif self._is_dropdown_field(self.selected):
+                self._open_dropdown(self.selected)
             else:
                 self._edit_start(self.selected)
         elif key == self.glfw.KEY_F11:
