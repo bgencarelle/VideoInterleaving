@@ -767,6 +767,7 @@ class ScopeLauncher:
         self.program = self.context.program(
             vertex_shader=self._shader_version + "out vec2 uv; void main(){"
             "vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);"
+            "// The visible part interpolates p over [0,1], not [0,2].\n"
             "uv=vec2(p.x,1.-p.y);gl_Position=vec4(p*2.-1.,0.,1.);}",
             fragment_shader=self._shader_version + "uniform sampler2D tex;in vec2 uv;"
             "out vec4 color;void main(){color=texture(tex,uv);}")
@@ -1350,6 +1351,7 @@ class ScopeLauncher:
                     self.hits[f"browse:{value}"] = browse
                     field_right = browse[0] - unit(8)
                 display = (self.edit_buffer if self.editing and value == self.selected
+                           else "" if value in BOOL_FIELDS
                            else self._display_value(value))
                 draw.text((value_left, top + unit(7)),
                           self._fit(display, self.small,
@@ -1390,6 +1392,7 @@ class ScopeLauncher:
                 fill=(70, 106, 127))
         if self.dropdown:
             self._draw_dropdown(draw, width, height)
+
     def _draw_dropdown(self, draw, width, height):
         unit = self._u
         key = self.dropdown
