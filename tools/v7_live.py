@@ -3107,6 +3107,10 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
     latest = None
     display_frames = FRAME_BUFFER
     previous_values = None
+    temporal_fusion = None
+    if getattr(args, 'temporal_fusion', 'off') == 'held':
+        from animation_modem.v7_temporal import TemporalFusion
+        temporal_fusion = TemporalFusion()
     diagnostics = {} if args.diagnostics else None
     auto_gain = 1.0
     if auto_mono_side:
@@ -3760,6 +3764,8 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
                 adaptive_profile.reset_candidate()
             pulse_state.tail.reset()
             pulse_state.last_verified = None
+            if temporal_fusion is not None:
+                temporal_fusion.reset()
             direction_streak = DirectionStreak()
             if opposite_probe is not None:
                 opposite_probe.reset()
@@ -4046,6 +4052,13 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
                     meter['aspect_streak'] = 0
             meter['decode_ms'] = (info.get('diagnostics') or {}).get(
                 'last_elapsed_ms')
+            if temporal_fusion is not None:
+                # Only accepted packets are averaged; a damaged or held
+                # packet is shown as decoded and starts the average again.
+                if result.status in ('received', 'verified'):
+                    result.diag['temporal_fusion'] = temporal_fusion
+                else:
+                    temporal_fusion.reset()
             if result.status in ('received', 'verified') or displayable:
                 if adaptive_profile is not None and result.diag.get('slices'):
                     base = models.get(result.diag.get('encoding_type'), model)
@@ -4073,6 +4086,9 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
                         models.get(result.diag.get('encoding_type'), model), result)
                 else:
                     values = P.values_from(model, result.coeffs)
+                result.diag.pop('temporal_fusion', None)
+                if 'fusion_gain' in result.diag:
+                    meter['fusion_gain'] = result.diag['fusion_gain']
                 if args.mono_compatible:
                     noise = result.diag.get('noise') or [0.0]
                     values = stabilize_chroma(
@@ -4509,6 +4525,12 @@ def parser():
                            'plus one frame and a small guard (default: 1)')
     recv.add_argument('--no-tail-memory', action='store_true',
                       help='do not reuse tail coefficients from earlier packets')
+    recv.add_argument('--temporal-fusion', choices=('off', 'held'),
+                      default='off',
+                      help='average successive packets of a held picture '
+                           '(stills, pause, slow scenes) so noise stops '
+                           'softening it; a moving picture is shown as '
+                           'decoded (default: off)')
     recv.add_argument('--force-float32', action='store_true',
                        help='use the experimental float32/complex64 decode path')
     recv.add_argument('--pilot-timing',

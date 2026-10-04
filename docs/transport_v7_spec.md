@@ -420,6 +420,20 @@ The live input (`v7_live_input.LiveInput`):
   mode the decoder then takes the newest packet whose marker validates, which
   is normally the packet before the new header.
 
+`receive --temporal-fusion held` (off by default; GUI: Held-picture
+averaging) averages successive accepted packets of the fold profiles, stereo
+and mono,
+before the fold is undone (`animation_modem/v7_temporal.py`). It is a
+per-coefficient Kalman filter on the equalizer output: an observation is the
+unshrunk estimate with the noise variance its confidence implies; the
+packet-to-packet change beyond that noise, measured in eight groups along the
+model's rank, is added to the state variance before each update. A held
+picture is therefore averaged (at most 24 packets) and a moving one is shown
+as decoded. The claimed noise is calibrated on the second difference of three
+packets and only ever lowered. A packet that is not accepted, an input gap, or
+a change of model, layout or direction starts the average again. Coefficients
+a packet does not carry stay with the tail memory.
+
 Because a wake needs a new header, a finite input that ends right after an
 EOF marker leaves its last forward packet undecoded. An input gap clears the
 buffer, the tail memory and the last verified metadata; the picture on screen
@@ -797,7 +811,20 @@ Further display stages (receiver GUI settings):
 - **Edge reconstruction** (`on`, `high`, `off`) with strength 100, 75, 50 or
   25%: rebuilds luma as a flatter, sharper picture that still matches the
   received coefficients (`animation_modem/v7_dct_display.py`).
-- **Display grain** (`off`, `flat`): fine noise in flat areas only.
+- **Display grain** (`off`, `flat`, `detail`): `flat` is fine per-pixel noise
+  in flat areas only. `detail` is band-limited noise on a lattice tied to the
+  coder grid (1.5 cells per luma grid sample), so its energy stays just above
+  the band the wire carries at any window size; it is strongest where the
+  picture has detail and absent in black. It adds no information.
+- **Output dither**: every display path except Pixel display adds ±1 code of
+  triangular noise per channel before the 8-bit framebuffer rounds, so smooth
+  gradients do not band on a large screen. It has no setting.
+- **Colour detail** (`off`, `guided`): rebuilds each chroma plane on the luma
+  grid. Within a small neighbourhood the slope of chroma against luma is
+  measured in the band both planes were sent in; that slope times the luma
+  detail outside the band fills the chroma coefficients the wire did not
+  carry. Received chroma coefficients are unchanged
+  (`v7_dct_display.guided_chroma_plane`). Off by default.
 
 Defaults: the receiver GUI starts with `bicubic`, DCT reconstruction `4x`,
 edge reconstruction `on` at 75% and grain off. The plain viewer starts with
@@ -1039,6 +1066,10 @@ Receiver:
 ## 15. Known limits
 
 - **Real tape is unvalidated.** All measurements are synthetic.
+- **The equalizer's confidence is pessimistic.** Against the coefficients
+  actually sent, the squared error is 0.2 (clean) to 0.7 (white noise at
+  -40 to -30 dBFS) of what the confidence implies, so noisy slots are shrunk
+  slightly more than they need to be.
 - **Reverse playback joins only one stereo-slices channel.** The second
   channel is decoded only for forward packets.
 - **A partly damaged slices channel is not mixed per slot.** It is dropped

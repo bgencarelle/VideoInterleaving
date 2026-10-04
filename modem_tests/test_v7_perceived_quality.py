@@ -205,5 +205,166 @@ class DisplayGrainTests(unittest.TestCase):
         self.assertIn('if (grain_amount > 0.0)', FLOAT_FRAGMENT_SHADER)
 
 
+def _offscreen_context():
+    """A software or hardware GL context, or None where there is none."""
+    try:
+        import moderngl
+    except ImportError:
+        return None
+    for options in ({'backend': 'egl'}, {}):
+        try:
+            return moderngl.create_standalone_context(**options)
+        except Exception:
+            continue
+    return None
+
+
+class DetailGrainAndDitherTests(unittest.TestCase):
+    """Grain sized to the picture, and dither into the 8-bit framebuffer."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.context = _offscreen_context()
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.context is not None:
+            cls.context.release()
+
+    def _render(self, luma, size, **uniforms):
+        import moderngl
+        from tools.v7_gl_viewer import VERTEX_SHADER
+        context = self.context
+        program = context.program(vertex_shader=VERTEX_SHADER,
+                                  fragment_shader=FLOAT_FRAGMENT_SHADER)
+        array = context.vertex_array(program, [])
+        neutral = np.full((1, 1), 1/255, np.float32)
+        mask = np.ones((1, 1), np.float32)
+        textures = []
+        for unit, plane in enumerate((luma, neutral, neutral, mask, mask)):
+            plane = np.ascontiguousarray(plane, np.float32)
+            texture = context.texture(plane.shape[::-1], 1, plane.tobytes(),
+                                      dtype='f4')
+            texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
+            texture.repeat_x = texture.repeat_y = False
+            texture.use(unit)
+            textures.append(texture)
+        values = {'plane_y': 0, 'plane_cb': 1, 'plane_cr': 2, 'kernel_lut': 3,
+                  'grain_mask': 4, 'reconstruction': 0,
+                  'filtered_intermediate': 0, 'grain_seed': 5,
+                  'output_size': (float(size[0]), float(size[1]))}
+        values.update(uniforms)
+        for name, value in values.items():
+            if name in program:
+                program[name].value = value
+        target = context.framebuffer([context.texture(size, 4)])
+        target.use()
+        context.viewport = (0, 0, *size)
+        array.render(mode=moderngl.TRIANGLES, vertices=3)
+        pixels = np.frombuffer(target.read(components=3), np.uint8).reshape(
+            size[1], size[0], 3)[::-1].astype(float)   # top row first
+        for item in textures+[target, array, program]:
+            item.release()
+        return pixels[..., 1]
+
+    def test_modes_and_shader_declarations(self):
+        from tools.v7_gl_viewer import GRAIN_LABELS
+        self.assertEqual(GRAIN_MODES, ('off', 'flat', 'detail'))
+        self.assertEqual(set(GRAIN_LABELS), set(GRAIN_MODES))
+        for declaration in ('uniform int grain_kind;',
+                            'uniform vec2 grain_cells;',
+                            'uniform float dither_amount;'):
+            self.assertIn(declaration, FLOAT_FRAGMENT_SHADER)
+        self.assertIn('if (dither_amount > 0.0)', FLOAT_FRAGMENT_SHADER)
+
+    def test_detail_mask_follows_picture_detail(self):
+        from tools.v7_gl_viewer import (GRAIN_DETAIL_FLOOR,
+                                        grain_detail_mask)
+        luma = np.zeros((ROWS, COLS), np.float32)
+        luma[:, 40:] = np.random.default_rng(3).uniform(-.5, .5, (ROWS, 40))
+        mask = grain_detail_mask(luma)
+        self.assertEqual((mask.shape, mask.dtype), ((ROWS, COLS), np.float32))
+        np.testing.assert_allclose(mask[:, :30], GRAIN_DETAIL_FLOOR, atol=1e-3)
+        self.assertGreater(float(mask[:, 50:].mean()), .9)
+        self.assertLessEqual(float(mask.max()), 1.0)
+
+    def test_dither_and_grain_default_to_off_in_the_shader(self):
+        if self.context is None:
+            self.skipTest('no offscreen GL context')
+        ramp = np.linspace(-.9, -.7, ROWS, dtype=np.float32)[:, None]*np.ones(
+            (1, COLS), np.float32)
+        plain = self._render(ramp, (160, 384))
+        again = self._render(ramp, (160, 384), grain_seed=9)
+        np.testing.assert_array_equal(plain, again)
+
+    def test_dither_removes_bands_and_keeps_the_local_mean(self):
+        if self.context is None:
+            self.skipTest('no offscreen GL context')
+        from scipy.ndimage import uniform_filter
+        from tools.v7_gl_viewer import DITHER_AMOUNT
+        size = (320, 1536)
+        ramp = np.linspace(-.9, -.7, ROWS, dtype=np.float32)[:, None]*np.ones(
+            (1, COLS), np.float32)
+        truth = np.interp((np.arange(size[1])+.5)/size[1]*ROWS-.5,
+                          np.arange(ROWS), (ramp[:, 0]+1)*127.5)[:, None]
+        truth = np.clip(truth, (ramp.min()+1)*127.5, (ramp.max()+1)*127.5)
+
+        def measure(pixels):
+            column = pixels[:, 7]
+            runs = np.diff(np.flatnonzero(np.diff(column) != 0))
+            error = uniform_filter(pixels-truth, 16)[32:-32]
+            return int(runs.max()), float(np.sqrt(np.mean(error**2)))
+
+        plain_run, plain_error = measure(self._render(ramp, size))
+        dithered = self._render(ramp, size, dither_amount=DITHER_AMOUNT)
+        dither_run, dither_error = measure(dithered)
+        self.assertGreater(plain_run, 40)             # bands tens of pixels tall
+        self.assertLess(dither_run, plain_run//2)
+        self.assertLess(dither_error, .5*plain_error)
+        self.assertLessEqual(float(np.abs(dithered-truth).max()), 2.01)
+
+    def test_detail_grain_keeps_its_size_relative_to_the_picture(self):
+        if self.context is None:
+            self.skipTest('no offscreen GL context')
+        from tools.v7_gl_viewer import (GRAIN_AMOUNT, GRAIN_DETAIL_AMOUNT,
+                                        GRAIN_DETAIL_CYCLES)
+        grey = np.zeros((ROWS, COLS), np.float32)
+        cells = (COLS*GRAIN_DETAIL_CYCLES, ROWS*GRAIN_DETAIL_CYCLES)
+
+        def mean_frequency(size, **uniforms):
+            """Mean frequency of the grain, cycles per luma grid sample."""
+            pixels = self._render(grey, size, **uniforms)
+            power = np.abs(np.fft.fft2(pixels-pixels.mean()))**2
+            radius = np.hypot(
+                np.fft.fftfreq(size[1])[:, None]*size[1]/ROWS,
+                np.fft.fftfreq(size[0])[None, :]*size[0]/COLS)
+            return float((power*radius).sum()/power.sum())
+
+        small, large = (400, 480), (1200, 1440)
+        detail = [mean_frequency(size, grain_kind=1, grain_cells=cells,
+                                 grain_amount=GRAIN_DETAIL_AMOUNT)
+                  for size in (small, large)]
+        pixel = [mean_frequency(size, grain_kind=0, grain_amount=GRAIN_AMOUNT)
+                 for size in (small, large)]
+        # Detail grain: the same place in the picture's spectrum at any size,
+        # just above the band the wire carries. Per-pixel grain: three times
+        # further out on a window three times as large.
+        self.assertAlmostEqual(detail[0], detail[1], delta=.1*detail[0])
+        self.assertGreater(detail[0], .5)
+        self.assertLess(detail[0], 2.5)
+        self.assertGreater(pixel[1], 2.5*pixel[0])
+
+    def test_detail_grain_leaves_black_alone(self):
+        if self.context is None:
+            self.skipTest('no offscreen GL context')
+        from tools.v7_gl_viewer import (GRAIN_DETAIL_AMOUNT,
+                                        GRAIN_DETAIL_CYCLES)
+        black = np.full((ROWS, COLS), -1.0, np.float32)
+        pixels = self._render(
+            black, (240, 288), grain_kind=1, grain_amount=GRAIN_DETAIL_AMOUNT,
+            grain_cells=(COLS*GRAIN_DETAIL_CYCLES, ROWS*GRAIN_DETAIL_CYCLES))
+        self.assertEqual(float(pixels.max()), 0.0)
+
+
 if __name__ == '__main__':
     unittest.main()

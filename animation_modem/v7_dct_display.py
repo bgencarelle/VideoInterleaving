@@ -305,3 +305,74 @@ def edge_consistent_plane(plane, factor=EDGE_FACTOR, rounds=EDGE_ROUNDS,
         x += plain
     return x
 
+
+
+# ---------------------------------------------------------------- guided chroma
+# The wire carries colour at half the luma resolution per axis, so colour
+# edges are twice as soft as the brightness edges they belong to and bleed
+# across them. Within a small neighbourhood colour is close to a linear
+# function of brightness, and that relation can be measured in the band both
+# planes were sent in. Applying it to the full-band luma predicts the chroma
+# detail that was not sent (the guided filter used for joint upsampling; the
+# same idea as a codec's chroma-from-luma, here without side information).
+# Every received chroma coefficient is then put back exactly, so only
+# coefficients the wire did not carry are filled in. The slope is scaled by
+# the local squared correlation of the two planes: where colour does not
+# follow brightness (fabric folds, shading) nothing is carried over, which
+# is what keeps photographs from getting worse. Clean channel, nine pictures
+# at their own layouts, against the source: aspect-fold-500 chroma PSNR
+# +0.43 dB (every picture +0.1 to +1.4), mean CIEDE2000 -0.22;
+# aspect-mono-500 +0.28 dB (+0.03 to +1.2), -0.20. About 2 ms.
+CHROMA_RADIUS = 3               # neighbourhood half-width, luma grid samples
+CHROMA_EPSILON = 3e-3           # luma variance (code units^2) below which
+#                                 the relation is not trusted
+CHROMA_GAIN_LIMIT = .5          # largest |d chroma / d luma|
+
+
+def guided_chroma_plane(luma, chroma, radius=CHROMA_RADIUS,
+                        epsilon=CHROMA_EPSILON, gain_limit=CHROMA_GAIN_LIMIT):
+    """A decoded chroma plane rebuilt on the luma plane's grid with detail
+    predicted from luma. Its DCT equals the received chroma coefficients
+    wherever the wire carried one. Returns float32, the luma plane's shape."""
+    from scipy.fft import idctn
+    from scipy.ndimage import uniform_filter
+    luma = np.asarray(luma, dtype=np.float64)
+    chroma = np.asarray(chroma, dtype=np.float64)
+    if luma.ndim != 2 or chroma.ndim != 2 or min(chroma.shape) <= 0:
+        raise ValueError('guided chroma needs non-empty 2-D planes')
+    height, width = luma.shape
+    if chroma.shape[0] > height or chroma.shape[1] > width:
+        raise ValueError('the chroma plane must not exceed the luma plane')
+    coefficients = dctn(chroma, norm='ortho')
+    rows, cols = spectral_support(coefficients)
+    peak = float(np.abs(coefficients).max(initial=0.0))
+    known = np.zeros((height, width), dtype=bool)
+    known[:rows, :cols] = (np.abs(coefficients[:rows, :cols]) >
+                           peak*SUPPORT_RELATIVE_FLOOR)
+    received = np.zeros((height, width))
+    received[:rows, :cols] = coefficients[:rows, :cols]*math.sqrt(
+        (height*width)/(chroma.shape[0]*chroma.shape[1]))
+    received[~known] = 0.0
+    plain = idctn(received, norm='ortho')
+    # Luma limited to the same coefficients: the band both planes share.
+    luma_band = idctn(np.where(known, dctn(luma, norm='ortho'), 0.0),
+                      norm='ortho')
+    size = 2*int(radius)+1
+
+    def box(values):
+        return uniform_filter(values, size, mode='nearest')
+
+    mean_luma, mean_chroma = box(luma_band), box(plain)
+    variance = box(luma_band*luma_band)-mean_luma*mean_luma
+    chroma_variance = box(plain*plain)-mean_chroma*mean_chroma
+    covariance = box(luma_band*plain)-mean_luma*mean_chroma
+    slope = np.clip(covariance/(variance+epsilon), -gain_limit, gain_limit)
+    slope *= np.clip(covariance*covariance/(
+        (variance+epsilon)*(chroma_variance+.25*epsilon)), 0.0, 1.0)
+    # Only the luma detail outside the shared band is carried over, and only
+    # into coefficients the wire did not carry: flat luma, or a slope of
+    # zero, returns the chroma exactly as sent.
+    detail = dctn(box(slope)*(luma-luma_band), norm='ortho')
+    detail[known] = 0.0
+    return np.ascontiguousarray(plain+idctn(detail, norm='ortho'),
+                                dtype=np.float32)

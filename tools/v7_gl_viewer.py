@@ -66,8 +66,25 @@ PIXEL_REPEAT = 8
 # Display grain: fine noise in flat picture areas only, where it breaks up the
 # regular ringing ripple of a band-limited picture. Textured areas and edges
 # are left alone. Amplitude: about 2.5/255 standard deviation in luma.
-GRAIN_MODES = ('off', 'flat')
-GRAIN_LABELS = {'off': 'Off', 'flat': 'Flat areas · masks ringing'}
+GRAIN_MODES = ('off', 'flat', 'detail')
+GRAIN_LABELS = {'off': 'Off', 'flat': 'Flat areas · masks ringing',
+                'detail': 'Detail · grain sized to the picture'}
+# 'detail' grain is not per-pixel noise. It is band-limited noise on a lattice
+# tied to the coder grid, so its size follows the picture: its energy sits
+# just above the highest frequency the wire carries (GRAIN_DETAIL_CYCLES
+# cycles per luma grid sample, against a sent band of about 0.25 to 0.4),
+# where a band-limited picture is empty, whatever the window size. Per-pixel
+# grain on a large screen lands far above that, at frequencies the eye
+# barely resolves. It is strongest where the picture has detail
+# (grain_detail_mask) and absent in black. It adds no information.
+GRAIN_DETAIL_CYCLES = 1.5       # lattice cells per luma grid sample
+GRAIN_DETAIL_AMOUNT = 0.016     # peak luma amplitude where detail is strongest
+GRAIN_DETAIL_FLOOR = 0.25       # share of that amount kept in flat areas
+GRAIN_DETAIL_CONTRAST = 0.12    # local luma s.d. (code units) of full strength
+# Output dither: +-1 code of triangular noise per channel before the 8-bit
+# framebuffer rounds, so a smooth gradient enlarged over a big screen does not
+# band. Set only by the float display path; zero leaves the shader as it was.
+DITHER_AMOUNT = 1.0/255.0
 # Edge reconstruction: rebuild luma as the sharpest, flattest picture that
 # still matches every received coefficient (see
 # animation_modem.v7_dct_display.edge_consistent_plane). Removes the ringing
@@ -96,6 +113,12 @@ EDGE_STRENGTH_LABELS = {1.0: '100% · flattest, sharpest',
                         .75: '75% · recommended',
                         .5: '50%', .25: '25% · most natural texture'}
 RECOMMENDED_EDGE_STRENGTH = .75
+# Colour detail: rebuild each chroma plane on the luma grid with the detail
+# that brightness predicts locally, keeping every received chroma coefficient
+# (animation_modem.v7_dct_display.guided_chroma_plane). About 2 ms a picture.
+CHROMA_MODES = ('off', 'guided')
+CHROMA_LABELS = {'off': 'Off · colour as sent',
+                 'guided': 'Luma-guided · sharper edges'}
 GRAIN_AMOUNT = 0.024            # triangular +-amount; sigma = amount/sqrt(6)
 GRAIN_FLAT_SIGMA = 1.2          # luma grid samples
 GRAIN_FLAT_CONTRAST = 0.06      # local luma s.d. (code units) that stops grain
@@ -278,8 +301,23 @@ def flat_area_mask(luma):
         np.clip(1.0-deviation/GRAIN_FLAT_CONTRAST, 0.0, 1.0), dtype=np.float32)
 
 
+def grain_detail_mask(luma):
+    """0..1 per luma grid sample for 'detail' grain: GRAIN_DETAIL_FLOOR where
+    the decoded picture is flat, rising to 1 at GRAIN_DETAIL_CONTRAST of
+    local standard deviation."""
+    from scipy.ndimage import gaussian_filter
+    plane = np.asarray(luma, dtype=np.float32)
+    mean = gaussian_filter(plane, GRAIN_FLAT_SIGMA, mode='nearest')
+    square = gaussian_filter(plane*plane, GRAIN_FLAT_SIGMA, mode='nearest')
+    deviation = np.sqrt(np.maximum(square-mean*mean, 0.0))
+    activity = np.clip(deviation/GRAIN_DETAIL_CONTRAST, 0.0, 1.0)
+    return np.ascontiguousarray(
+        GRAIN_DETAIL_FLOOR+(1.0-GRAIN_DETAIL_FLOOR)*activity, dtype=np.float32)
+
+
 def dct_reconstruct_planes(planes, mode, viewport_size=None, edge=False,
-                           edge_strength=1.0, pixel_shapes=None):
+                           edge_strength=1.0, pixel_shapes=None,
+                           chroma='off'):
     """Resample decoded planes by evaluating their retained DCT spectrum.
 
     The input planes are already spatial-domain inverse-DCT output. Transforming
@@ -294,7 +332,14 @@ def dct_reconstruct_planes(planes, mode, viewport_size=None, edge=False,
     twice its grid. ``edge_strength`` (0 to 1) mixes that rebuild with the
     plain picture. ``pixel_shapes`` is the pixel grid the picture was sent
     on, when the wire names one; mode 'pixel' then shows that grid.
+
+    With ``chroma`` 'guided' the chroma planes are first rebuilt on the luma
+    grid with luma-predicted detail (CHROMA_MODES); their output sizes are
+    unchanged except with ``mode`` 'off', where they come back at the luma
+    plane's size.
     """
+    if chroma not in CHROMA_MODES:
+        raise ValueError(f'unknown colour detail mode {chroma!r}')
     if mode not in DCT_RECONSTRUCTION_MODES:
         raise ValueError(f'unknown DCT reconstruction mode {mode!r}')
     planes = tuple(np.asarray(plane, dtype=np.float32) for plane in planes)
@@ -317,29 +362,45 @@ def dct_reconstruct_planes(planes, mode, viewport_size=None, edge=False,
         edge = 'on'
     if edge not in (False, None, 'off') and edge not in EDGE_MODES:
         raise ValueError(f'unknown edge reconstruction mode {edge!r}')
-    if edge not in (False, None, 'off'):
+    edged = edge not in (False, None, 'off')
+    # Guided colour needs real chroma planes below the luma size (not the
+    # neutral one-sample planes of a luma-only picture).
+    guided = (chroma == 'guided' and len(planes) == 3 and all(
+        min(plane.shape) > 1 and plane.shape[0] <= planes[0].shape[0] and
+        plane.shape[1] <= planes[0].shape[1] for plane in planes[1:]))
+    if edged or guided:
         from animation_modem.v7_dct_display import (EDGE_HIGH,
                                                     edge_consistent_plane,
+                                                    guided_chroma_plane,
                                                     reconstruct_plane,
                                                     viewport_shapes)
         luma = edge_consistent_plane(
             planes[0], strength=edge_strength,
-            **(EDGE_HIGH if edge == 'high' else {}))
-        if mode == 'off':
-            return (luma,) + planes[1:]
+            **(EDGE_HIGH if edge == 'high' else {})) if edged else planes[0]
         if mode == 'viewport':
             if viewport_size is None or len(viewport_size) != 2:
                 raise ValueError('viewport-size DCT reconstruction needs a size')
             shapes = viewport_shapes(tuple(plane.shape for plane in planes),
                                      viewport_size)
-        else:
+        elif mode != 'off':
             scale = int(mode[:-1])
             shapes = tuple((plane.shape[0]*scale, plane.shape[1]*scale)
                            for plane in planes)
-        rest = dct_reconstruct_planes(planes[1:], mode, viewport_size) \
-            if mode != 'viewport' else tuple(
-                reconstruct_plane(plane, shape)
-                for plane, shape in zip(planes[1:], shapes[1:]))
+        if guided:
+            # The guide is the luma that will be shown (after the edge step).
+            rest = tuple(guided_chroma_plane(luma, plane)
+                         for plane in planes[1:])
+            if mode == 'off':
+                return (luma,) + rest
+            rest = tuple(reconstruct_plane(plane, shape)
+                         for plane, shape in zip(rest, shapes[1:]))
+        elif mode == 'off':
+            return (luma,) + planes[1:]
+        elif mode != 'viewport':
+            rest = dct_reconstruct_planes(planes[1:], mode, viewport_size)
+        else:
+            rest = tuple(reconstruct_plane(plane, shape)
+                         for plane, shape in zip(planes[1:], shapes[1:]))
         return (reconstruct_plane(luma, shapes[0]),) + tuple(rest)
     if mode == 'off':
         return planes
@@ -559,6 +620,9 @@ uniform sampler2D kernel_lut;
 uniform sampler2D grain_mask;
 uniform float grain_amount;
 uniform int grain_seed;
+uniform int grain_kind;
+uniform vec2 grain_cells;
+uniform float dither_amount;
 uniform int reconstruction;
 uniform int filtered_intermediate;
 uniform vec2 output_size;
@@ -738,6 +802,21 @@ float grain_hash(ivec2 pixel, int salt) {
     return float(h & 0xffffffu)/16777216.0;
 }
 
+float lattice_noise(vec2 position, int salt) {
+    // Gradient noise: band-pass around one cycle per lattice cell.
+    ivec2 cell = ivec2(floor(position));
+    vec2 f = fract(position);
+    vec2 fade = f*f*f*(f*(f*6.0 - 15.0) + 10.0);
+    float corner[4];
+    for (int index = 0; index < 4; ++index) {
+        ivec2 offset = ivec2(index & 1, index >> 1);
+        float angle = 6.28318530718*grain_hash(cell + offset, salt);
+        corner[index] = dot(vec2(cos(angle), sin(angle)), f - vec2(offset));
+    }
+    return mix(mix(corner[0], corner[1], fade.x),
+               mix(corner[2], corner[3], fade.x), fade.y);
+}
+
 void main() {
     float y_code = sample_plane(plane_y, uv);
     float cb_code = sample_plane(plane_cb, uv);
@@ -746,8 +825,19 @@ void main() {
     // centered at code 128, matching Pillow's YCbCr conversion convention.
     float y = (y_code + 1.0)*0.5;
     if (grain_amount > 0.0) {
-        ivec2 pixel = ivec2(gl_FragCoord.xy);
-        float noise = grain_hash(pixel, 0) + grain_hash(pixel, 1) - 1.0;
+        float noise;
+        if (grain_kind == 1) {
+            // Never finer than two output pixels a cell (a small window).
+            vec2 cells = min(grain_cells, 0.5*output_size);
+            vec2 position = uv*cells;
+            noise = 2.2*(lattice_noise(position, 0) +
+                         0.5*lattice_noise(2.0*position + 17.0, 1));
+            // None in black: grain there reads as a raised black level.
+            noise *= smoothstep(0.0, 0.08, y);
+        } else {
+            ivec2 pixel = ivec2(gl_FragCoord.xy);
+            noise = grain_hash(pixel, 0) + grain_hash(pixel, 1) - 1.0;
+        }
         y += grain_amount*texture(grain_mask, uv).r*noise;
     }
     float cb = cb_code*0.5 - 0.5/255.0;
@@ -755,6 +845,14 @@ void main() {
     vec3 rgb = vec3(y + 1.402*cr,
                     y - 0.344136*cb - 0.714136*cr,
                     y + 1.772*cb);
+    if (dither_amount > 0.0) {
+        ivec2 pixel = ivec2(gl_FragCoord.xy);
+        rgb += dither_amount*(
+            vec3(grain_hash(pixel, 2), grain_hash(pixel, 3),
+                 grain_hash(pixel, 4)) +
+            vec3(grain_hash(pixel, 5), grain_hash(pixel, 6),
+                 grain_hash(pixel, 7)) - 1.0);
+    }
     color = vec4(clamp(rgb, 0.0, 1.0), 1.0);
 }
 '''

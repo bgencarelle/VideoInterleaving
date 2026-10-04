@@ -165,8 +165,18 @@ class LiveFold:
         except ValueError as exc:                     # another filter or profile
             self._refused[key] = str(exc)
             return v7.values_from(model, result.coeffs)
+        coeffs, xhat, conf = result.coeffs, eq[0], eq[1]
+        fusion = result.diag.get('temporal_fusion')
+        if fusion is not None:
+            # Held pictures: average the equaliser output over packets
+            # before the fold is undone (animation_modem/v7_temporal.py).
+            from animation_modem.v7_temporal import fused_packet
+            coeffs, xhat, conf = fused_packet(
+                fusion, model, coeffs, xhat, conf,
+                key=('fold', result.diag.get('direction')))
+            result.diag['fusion_gain'] = fusion.last_gain
         return codec.grid.inverse(codec.decode(
-            result.coeffs, eq[0], eq[1], fallback=True,
+            coeffs, xhat, conf, fallback=True,
             metadata_confirmed=metadata_confirmed))
 
 

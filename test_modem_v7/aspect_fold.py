@@ -677,7 +677,16 @@ class AspectFoldWire:
         if eq is None:
             full = codec.plain(result.coeffs)
         else:
-            full = codec.decode(result.coeffs, eq[0], eq[1], fallback=True,
+            coeffs, xhat, conf = result.coeffs, eq[0], eq[1]
+            fusion = result.diag.get('temporal_fusion')
+            if fusion is not None:
+                from animation_modem.v7_temporal import fused_packet
+                coeffs, xhat, conf = fused_packet(
+                    fusion, model, coeffs, xhat, conf,
+                    key=('aspect', codec.layout, self.pixel,
+                         result.diag.get('direction')))
+                result.diag['fusion_gain'] = fusion.last_gain
+            full = codec.decode(coeffs, xhat, conf, fallback=True,
                                 metadata_confirmed=metadata_confirmed)
             result.diag['aspect_signature_score'] = codec.last_score
         if self.pixel:

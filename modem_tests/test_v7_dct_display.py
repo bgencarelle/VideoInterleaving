@@ -14,8 +14,8 @@ if str(ROOT) not in sys.path:
 
 from animation_modem import v7
 from animation_modem.v7_dct_display import (
-    edge_consistent_plane, reconstruct_plane, reconstruct_planes,
-    spectral_support, viewport_shapes)
+    edge_consistent_plane, guided_chroma_plane, reconstruct_plane,
+    reconstruct_planes, spectral_support, viewport_shapes)
 from tools.v7_gl_viewer import dct_reconstruct_planes, float_planes
 
 
@@ -191,6 +191,92 @@ class EdgeReconstructionTests(unittest.TestCase):
         self.assertEqual(high[1].shape, planes[1].shape)
         with self.assertRaisesRegex(ValueError, 'edge'):
             dct_reconstruct_planes(planes, '4x', edge='sharp')
+
+
+def _corner(plane, rows, cols):
+    """The plane with only its rows x cols DCT corner (what the wire sends)."""
+    coefficients = dctn(np.asarray(plane, dtype=np.float64), norm='ortho')
+    kept = np.zeros_like(coefficients)
+    kept[:rows, :cols] = coefficients[:rows, :cols]
+    return idctn(kept, norm='ortho')
+
+
+class GuidedChromaTests(unittest.TestCase):
+    """Chroma detail predicted from luma, received coefficients kept."""
+
+    @classmethod
+    def setUpClass(cls):
+        # A colour edge that is also a brightness edge, on the coder grids.
+        y, x = np.mgrid[0:96, 0:80]
+        inside = (x > 22+.2*y) & (x < 58-.1*y) & (y > 20) & (y < 76)
+        cls.true_luma = np.where(inside, .6, -.4)
+        cls.true_chroma_full = np.where(inside, .5, -.3)        # luma grid
+        cls.luma = _corner(cls.true_luma, 48, 40)
+        box = cls.true_chroma_full.reshape(48, 2, 40, 2).mean(axis=(1, 3))
+        cls.chroma = _corner(box, 24, 20)
+
+    def test_received_coefficients_are_kept_exactly(self):
+        guided = guided_chroma_plane(self.luma, self.chroma)
+        self.assertEqual(guided.shape, self.luma.shape)
+        self.assertEqual(guided.dtype, np.float32)
+        sent = dctn(self.chroma, norm='ortho')[:24, :20]
+        shown = dctn(guided.astype(np.float64), norm='ortho')[:24, :20]/2
+        known = np.abs(sent) > 1e-6*np.abs(sent).max()
+        np.testing.assert_allclose(shown[known], sent[known], atol=2e-5)
+
+    def test_colour_edge_follows_the_brightness_edge(self):
+        plain = reconstruct_plane(self.chroma, self.luma.shape)
+        guided = guided_chroma_plane(self.luma, self.chroma)
+        plain_error = float(np.mean((plain-self.true_chroma_full)**2))
+        guided_error = float(np.mean((guided-self.true_chroma_full)**2))
+        self.assertLess(guided_error, .8*plain_error)
+
+    def test_flat_luma_leaves_chroma_as_sent(self):
+        flat = np.full((96, 80), .1)
+        plain = reconstruct_plane(self.chroma, flat.shape)
+        np.testing.assert_allclose(guided_chroma_plane(flat, self.chroma),
+                                   plain, atol=2e-4)
+
+    def test_rejects_chroma_larger_than_luma(self):
+        with self.assertRaisesRegex(ValueError, 'exceed'):
+            guided_chroma_plane(self.chroma, self.luma)
+
+    def test_viewer_keeps_output_sizes_and_luma(self):
+        values, grids = _decoded_face_values()
+        planes = float_planes(values, grids)
+        for edge in ('off', 'on', 'high'):
+            for mode, size in (('2x', None), ('4x', None), ('16x', None),
+                               ('viewport', (640, 768))):
+                plain = dct_reconstruct_planes(planes, mode, size, edge=edge)
+                guided = dct_reconstruct_planes(planes, mode, size, edge=edge,
+                                                chroma='guided')
+                with self.subTest(edge=edge, mode=mode):
+                    self.assertEqual([p.shape for p in guided],
+                                     [p.shape for p in plain])
+                    np.testing.assert_allclose(guided[0], plain[0], atol=1e-4)
+                    self.assertGreater(
+                        float(np.abs(guided[1]-plain[1]).max()), 1e-4)
+        off = dct_reconstruct_planes(planes, 'off', chroma='guided')
+        self.assertEqual([p.shape for p in off], [planes[0].shape]*3)
+        np.testing.assert_array_equal(off[0], planes[0])
+        unchanged = dct_reconstruct_planes(planes, '4x', chroma='off')
+        np.testing.assert_array_equal(
+            unchanged[1], dct_reconstruct_planes(planes, '4x')[1])
+        with self.assertRaisesRegex(ValueError, 'colour'):
+            dct_reconstruct_planes(planes, '4x', chroma='sharp')
+
+    def test_luma_only_and_pixel_pictures_are_untouched(self):
+        values, grids = _decoded_face_values()
+        luma_only = float_planes(values[:96*80], grids[:1])
+        guided = dct_reconstruct_planes(luma_only, '4x', chroma='guided')
+        plain = dct_reconstruct_planes(luma_only, '4x')
+        for a, b in zip(guided, plain):
+            np.testing.assert_array_equal(a, b)
+        planes = float_planes(values, grids)
+        for a, b in zip(dct_reconstruct_planes(planes, 'pixel',
+                                               chroma='guided'),
+                        dct_reconstruct_planes(planes, 'pixel')):
+            np.testing.assert_array_equal(a, b)
 
 
 if __name__ == '__main__':

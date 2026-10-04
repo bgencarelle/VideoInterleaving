@@ -28,13 +28,15 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tools.v7_gl_viewer import (DISPLAY_LABELS, DISPLAY_MODES,
+from tools.v7_gl_viewer import (CHROMA_LABELS, CHROMA_MODES,
+                                DISPLAY_LABELS, DISPLAY_MODES,
                                 DCT_RECONSTRUCTION_LABELS,
-                                DCT_RECONSTRUCTION_MODES,
+                                DCT_RECONSTRUCTION_MODES, DITHER_AMOUNT,
                                 FILTER_PRECOMPUTE_MODES,
                                 FLOAT_FRAGMENT_SHADER, FLOAT_MODE_IDS,
-                                FRAGMENT_SHADER, GRAIN_AMOUNT, GRAIN_LABELS,
-                                GRAIN_MODES, EDGE_LABELS, EDGE_MODES,
+                                FRAGMENT_SHADER, GRAIN_AMOUNT,
+                                GRAIN_DETAIL_AMOUNT, GRAIN_DETAIL_CYCLES,
+                                GRAIN_LABELS, GRAIN_MODES, EDGE_LABELS, EDGE_MODES,
                                 EDGE_STRENGTHS, EDGE_STRENGTH_LABELS,
                                 RECOMMENDED_EDGE_STRENGTH,
                                 RECOMMENDED_DCT_RECONSTRUCTION,
@@ -43,6 +45,7 @@ from tools.v7_gl_viewer import (DISPLAY_LABELS, DISPLAY_MODES,
                                 _diagnostic_image, _float_texture_filter,
                                 build_filter_lut, dct_reconstruct_planes,
                                 fit_viewport, flat_area_mask, float_planes,
+                                grain_detail_mask,
                                 resample_filter_planes)
 
 
@@ -193,6 +196,7 @@ LIVE_RUNTIME_DESTS = frozenset((
 # the metadata screen bit), so Auto follows the sender. aspect-fold-500's
 # tail is not signalled; that setting must still match the sender's.
 ASPECT_OPTION_LABELS = {
+    'temporal_fusion': {'off': 'Off', 'held': 'On'},
     'aspect_layout': {'auto': 'Auto · sender layout in each packet'},
     'aspect_tail': {
         'chroma': 'Chroma · rotating colour detail (V7) · best for held stills',
@@ -209,10 +213,10 @@ LIVE_CONTROLS = (
     'audio_output_device', 'audio_volume', 'audio_muted', 'freewheel_seconds',
     'show_sync_warning', 'Pixel display', 'Display upscaler',
     'DCT reconstruction', 'Edge reconstruction', 'Edge strength',
-    'Display grain')
+    'Colour detail', 'Display grain')
 CONFIG_SECTIONS = (
     ('Live controls', LIVE_CONTROLS),
-    ('Input', ('device',)),
+    ('Input', ('device', 'temporal_fusion')),
     ('Wire', ('aspect_layout', 'aspect_tail')),
     ('Startup view', ('fullscreen', 'image_only', 'show_diagnostics')),
     ('Output and logging', ('save_dir', 'no_log', 'log', 'diagnostics',
@@ -242,7 +246,7 @@ HIDDEN_DECODE_OPTIONS = frozenset((
 PIXEL_DISPLAY_LABEL = 'Pixel display'
 SMOOTH_DISPLAY_LABELS = ('Display upscaler', 'DCT reconstruction',
                          'Display grain', 'Edge reconstruction',
-                         'Edge strength')
+                         'Edge strength', 'Colour detail')
 
 
 @dataclass
@@ -482,6 +486,7 @@ def _field_label(action):
         'mono_video_side': 'Mono video input side',
         'aspect_layout': 'Aspect layout',
         'aspect_tail': 'Aspect tail',
+        'temporal_fusion': 'Held-picture averaging',
     }
     return friendly.get(action.dest,
                         action.dest.replace('_', ' ').capitalize())
@@ -567,6 +572,9 @@ def _make_fields(receive_parser, device_choices, audio_output_choices=()):
         None, RECOMMENDED_EDGE_STRENGTH, 'Edge strength', 'choice',
         tuple((EDGE_STRENGTH_LABELS[value], value)
               for value in EDGE_STRENGTHS)))
+    fields.append(OptionField(
+        None, 'off', 'Colour detail', 'choice',
+        tuple((CHROMA_LABELS[name], name) for name in CHROMA_MODES)))
     return fields
 
 
@@ -770,8 +778,10 @@ class ReceiverGui:
         self.grain_mode = 'off'
         self.edge_mode = RECOMMENDED_EDGE_MODE
         self.edge_strength = RECOMMENDED_EDGE_STRENGTH
+        self.chroma_mode = 'off'
         self.pixel_display = False
         self.grain_seed = 0
+        self.grain_cells = (1.0, 1.0)
         self.last_dct_viewport_size = None
         self.image_only = False
         self.image_only_previous_page = 'info'
@@ -1180,12 +1190,14 @@ class ReceiverGui:
             self.dct_reconstruction = 'pixel'
             self.grain_mode = 'off'
             self.edge_mode = 'off'
+            self.chroma_mode = 'off'
             self.display_menu_open = False
         else:
             self.display_mode = values['Display upscaler'].value
             self.dct_reconstruction = values['DCT reconstruction'].value
             self.grain_mode = values['Display grain'].value
             self.edge_mode = values['Edge reconstruction'].value
+            self.chroma_mode = values['Colour detail'].value
         self.edge_strength = values['Edge strength'].value
         self.picture_dirty = True
 
@@ -2794,7 +2806,8 @@ class ReceiverGui:
                     return
                 use_float_display = (self.display_mode != 'nearest' or
                                      self.dct_reconstruction != 'off' or
-                                     self.edge_mode != 'off')
+                                     self.edge_mode != 'off' or
+                                     self.chroma_mode != 'off')
                 if not use_float_display:
                     if self.latest_values_image is None:
                         try:
@@ -2824,9 +2837,15 @@ class ReceiverGui:
                     planes = float_planes(
                         frame.values, frame.shapes)
                     if self.grain_mode != 'off':
-                        # Flat-area mask on the decoded luma grid; a new
-                        # grain pattern for each uploaded picture.
-                        mask = flat_area_mask(planes[0])
+                        # Grain mask on the decoded luma grid (flat areas, or
+                        # detail); a new grain pattern for each uploaded
+                        # picture.
+                        mask = (grain_detail_mask(planes[0])
+                                if self.grain_mode == 'detail' else
+                                flat_area_mask(planes[0]))
+                        self.grain_cells = (
+                            planes[0].shape[1]*GRAIN_DETAIL_CYCLES,
+                            planes[0].shape[0]*GRAIN_DETAIL_CYCLES)
                         mask_size = (mask.shape[1], mask.shape[0])
                         if (grain_texture is None or
                                 grain_texture.size != mask_size):
@@ -2842,12 +2861,14 @@ class ReceiverGui:
                             grain_texture.write(mask.tobytes())
                         self.grain_seed = (self.grain_seed+1) % 65536
                     if (self.dct_reconstruction != 'off' or
-                            self.edge_mode != 'off'):
+                            self.edge_mode != 'off' or
+                            self.chroma_mode != 'off'):
                         planes = dct_reconstruct_planes(
                             planes, self.dct_reconstruction, viewport_size,
                             edge=self.edge_mode,
                             edge_strength=self.edge_strength,
-                            pixel_shapes=getattr(frame, 'pixel_shapes', None))
+                            pixel_shapes=getattr(frame, 'pixel_shapes', None),
+                            chroma=self.chroma_mode)
                     if (self.display_mode in FILTER_PRECOMPUTE_MODES and
                             self.dct_reconstruction == 'off'):
                         planes = resample_filter_planes(
@@ -2879,7 +2900,8 @@ class ReceiverGui:
             def picture_uploaded():
                 use_float_display = (self.display_mode != 'nearest' or
                                      self.dct_reconstruction != 'off' or
-                                     self.edge_mode != 'off')
+                                     self.edge_mode != 'off' or
+                                     self.chroma_mode != 'off')
                 return (len(plane_textures) == 3 if use_float_display else
                         picture_texture is not None)
 
@@ -2914,7 +2936,8 @@ class ReceiverGui:
                 context.viewport = viewport
                 use_float_display = (self.display_mode != 'nearest' or
                                      self.dct_reconstruction != 'off' or
-                                     self.edge_mode != 'off')
+                                     self.edge_mode != 'off' or
+                                     self.chroma_mode != 'off')
                 if not use_float_display:
                     picture_texture.use(location=0)
                     vertex_array.render(mode=moderngl.TRIANGLES, vertices=3)
@@ -2943,8 +2966,17 @@ class ReceiverGui:
                             (1, 1), 1, np.zeros(1, np.float32).tobytes(),
                             dtype='f4')
                     grain_blank.use(location=4)
+                detail_grain = grain and self.grain_mode == 'detail'
                 float_program['grain_amount'].value = (
-                    GRAIN_AMOUNT if grain else 0.0)
+                    0.0 if not grain else
+                    GRAIN_DETAIL_AMOUNT if detail_grain else GRAIN_AMOUNT)
+                float_program['grain_kind'].value = int(detail_grain)
+                float_program['grain_cells'].value = tuple(
+                    float(value) for value in self.grain_cells)
+                # Hard pixels are shown exactly; everything else is dithered
+                # into the 8-bit framebuffer.
+                float_program['dither_amount'].value = (
+                    0.0 if self.pixel_display else DITHER_AMOUNT)
                 float_program['grain_seed'].value = int(self.grain_seed)
                 float_array.render(mode=moderngl.TRIANGLES, vertices=3)
 

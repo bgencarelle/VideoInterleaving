@@ -504,7 +504,7 @@ class ReceiverGuiOptionTests(unittest.TestCase):
                  for index in gui._config_field_indexes()}
         self.assertIn('Display grain', basic)
         self.assertEqual([value for _label, value in field.options],
-                         ['off', 'flat'])
+                         ['off', 'flat', 'detail'])
         gui._adjust_field(field, 1)
         self.assertEqual(gui.grain_mode, 'flat')
         self.assertTrue(gui.picture_dirty)
@@ -1530,7 +1530,7 @@ class ReceiverGuiButtonLayoutTests(unittest.TestCase):
             {'audio_output_device', 'audio_volume', 'audio_muted',
              'freewheel_seconds', 'show_sync_warning', 'Pixel display',
              'Display upscaler', 'DCT reconstruction', 'Display grain',
-             'Edge reconstruction', 'Edge strength'})
+             'Edge reconstruction', 'Edge strength', 'Colour detail'})
         gui.started = True
         live = set(indexes)
         for index, field in enumerate(gui.fields):
