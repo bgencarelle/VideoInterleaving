@@ -170,6 +170,24 @@ class CommandLineTests(unittest.TestCase):
         self.configure("--no-mirror")
         self.assertEqual(settings.INITIAL_MIRROR, 0)
 
+    def test_image_only_scope_gui_flag_opens_the_gui_without_controls(self):
+        self.configure("--image-only")
+        self.assertTrue(settings.SCOPE_GUI)
+        self.assertTrue(settings.SCOPE_GUI_IMAGE_ONLY)
+        self.assertFalse(settings.SCOPE_GUI_FULLSCREEN)
+
+    def test_fullscreen_scope_gui_flag_starts_image_only_fullscreen(self):
+        self.configure("--fullscreen")
+        self.assertTrue(settings.SCOPE_GUI)
+        self.assertTrue(settings.SCOPE_GUI_IMAGE_ONLY)
+        self.assertTrue(settings.SCOPE_GUI_FULLSCREEN)
+
+    def test_image_only_cannot_be_combined_with_disabled_scope_gui(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as err:
+                self.configure("--no-scope-gui", "--image-only")
+        self.assertEqual(err.exception.code, 2)
+
     def test_omitting_the_flags_leaves_the_constants_alone(self):
         settings.INITIAL_ROTATION = 90
         settings.INITIAL_MIRROR = 1

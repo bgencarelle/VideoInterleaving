@@ -36,6 +36,15 @@ class ScopeLauncherCommandTests(unittest.TestCase):
         self.assertIn("--scope-gui", command)
         self.assertIn("--no-scope-mix", command)
 
+    def test_launcher_can_start_the_scope_tuner_fullscreen_image_only(self):
+        self.settings.update({"run_mode": "app", "app_source": "images",
+                              "render_mode": "raster",
+                              "scope_gui_fullscreen": True})
+        command = build_command(self.settings, root=self.root, python="python")
+        self.assertIn("--scope-gui", command)
+        self.assertIn("--scope-gui-image-only", command)
+        self.assertIn("--scope-gui-fullscreen", command)
+
     def test_runtime_images_reject_baked_geometry_modes(self):
         self.settings.update({"run_mode": "app", "app_source": "images",
                               "render_mode": "vector"})

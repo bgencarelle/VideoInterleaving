@@ -1,7 +1,8 @@
 import unittest
+from types import SimpleNamespace
 
 from scope_controls import KeyMap
-from scope_gui import (fit_square_image, make_slider_spec,
+from scope_gui import (ScopeGUI, fit_square_image, make_slider_spec,
                        responsive_layout, slider_default_x,
                        slider_fraction, slider_value_at,
                        window_size_for_workarea)
@@ -145,6 +146,56 @@ class ScopeGuiControlTests(unittest.TestCase):
         self.controls.feed("v")
         self.assertEqual(self.state["mode"], "stochastic")
 
+
+class ScopeGuiPresentationTests(unittest.TestCase):
+    def setUp(self):
+        self.cursor_modes = []
+        self.glfw = SimpleNamespace(
+            MOUSE_BUTTON_LEFT=0, PRESS=1, RELEASE=0,
+            KEY_ESCAPE=256, KEY_F10=299, KEY_F11=300,
+            KEY_Q=81, KEY_V=86, KEY_I=73, KEY_R=82, KEY_M=77,
+            CURSOR=0, CURSOR_HIDDEN=1, CURSOR_NORMAL=2,
+            get_cursor_pos=lambda _window: (40, 40),
+            set_input_mode=lambda _window, _mode, value:
+                self.cursor_modes.append(value),
+        )
+        self.gui = ScopeGUI.__new__(ScopeGUI)
+        self.gui.glfw = self.glfw
+        self.gui.window = object()
+        self.gui.image_only = True
+        self.gui.fullscreen = True
+        self.gui._last_draw = 1.0
+        self.gui._actions = []
+        self.gui._dragging = None
+        self.gui._drag_value = None
+        self.gui.close_requested = False
+
+    def test_click_restores_controls_from_image_only(self):
+        self.gui._on_mouse_button(self.gui.window, self.glfw.MOUSE_BUTTON_LEFT,
+                                  self.glfw.PRESS, 0)
+        self.assertFalse(self.gui.image_only)
+        self.assertIsNone(self.gui._dragging)
+        self.assertEqual(self.cursor_modes[-1], self.glfw.CURSOR_NORMAL)
+
+    def test_entering_image_only_cancels_an_active_slider_drag(self):
+        self.gui.image_only = False
+        self.gui._dragging = "gamma"
+        self.gui._drag_value = 1.5
+        self.gui.set_image_only(True)
+        self.assertIsNone(self.gui._dragging)
+        self.assertIsNone(self.gui._drag_value)
+
+    def test_escape_restores_controls_from_image_only(self):
+        self.gui._on_key(self.gui.window, self.glfw.KEY_ESCAPE, 0,
+                         self.glfw.PRESS, 0)
+        self.assertFalse(self.gui.image_only)
+        self.assertFalse(self.gui.close_requested)
+
+    def test_f10_requests_image_only_toggle(self):
+        self.gui.image_only = False
+        self.gui._on_key(self.gui.window, self.glfw.KEY_F10, 0,
+                         self.glfw.PRESS, 0)
+        self.assertEqual(self.gui._actions, [("image_only", True)])
 
 if __name__ == "__main__":
     unittest.main()

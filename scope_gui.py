@@ -180,7 +180,8 @@ class ScopeGUI:
     stream.  Only the expensive phosphor preview is computed by a worker.
     """
 
-    def __init__(self, initial_state, preview_exposure=1.0):
+    def __init__(self, initial_state, preview_exposure=1.0,
+                 start_image_only=False, start_fullscreen=False):
         self._state = dict(initial_state)
         self.preview_exposure = float(preview_exposure)
         self.specs = {
@@ -218,9 +219,14 @@ class ScopeGUI:
         self.program = None
         self.vao = None
         self.fullscreen = False
+        self.image_only = bool(start_image_only or start_fullscreen)
         self._windowed_geometry = None
         try:
             self._init_window()
+            if start_fullscreen:
+                self.set_fullscreen(True)
+            if self.image_only:
+                self.set_image_only(True)
         except Exception:
             self._release_graphics()
             raise
@@ -465,6 +471,7 @@ class ScopeGUI:
                 int(mode.size.width), int(mode.size.height),
                 int(mode.refresh_rate))
             self.fullscreen = True
+            self._update_cursor_visibility()
             return True
 
         if self._windowed_geometry is None:
@@ -477,7 +484,26 @@ class ScopeGUI:
         self.glfw.set_window_monitor(
             self.window, None, x, y, width, height, self.glfw.DONT_CARE)
         self.fullscreen = False
+        self._update_cursor_visibility()
         return True
+
+    def _update_cursor_visibility(self):
+        cursor_mode = (self.glfw.CURSOR_HIDDEN
+                       if self.image_only and self.fullscreen
+                       else self.glfw.CURSOR_NORMAL)
+        self.glfw.set_input_mode(self.window, self.glfw.CURSOR, cursor_mode)
+
+    def set_image_only(self, enabled):
+        """Show just the scope preview; click it to return to the controls."""
+        self.image_only = bool(enabled)
+        if self.image_only:
+            self._dragging = None
+            self._drag_value = None
+        self._last_draw = 0.0
+        try:
+            self._update_cursor_visibility()
+        except Exception:
+            pass
 
     def _slider_disabled(self, name, state):
         if name in state.get("disabled_sliders", ()):
@@ -516,6 +542,11 @@ class ScopeGUI:
         metrics = self._metrics
         self._hits = {}
 
+        if self.image_only:
+            self._draw_image_only(image, draw, width, height)
+            self._present(image)
+            return
+
         header_height = unit(56)
         draw.rectangle((0, 0, width, header_height), fill=(10, 18, 25, 255))
         title_x, title_y = unit(22), unit(15)
@@ -541,12 +572,28 @@ class ScopeGUI:
                   fullscreen_label, fill=(216, 229, 237), font=self.small)
         self._hits["fullscreen:toggle"] = button_rect
 
+        image_only_label = "Image only [F10]"
+        image_only_width = max(
+            unit(112), round(self.small.getlength(image_only_label))
+            + unit(20))
+        image_only_rect = (
+            button_rect[0] - unit(8) - image_only_width,
+            button_rect[1], button_rect[0] - unit(8), button_rect[3])
+        draw.rounded_rectangle(
+            image_only_rect, radius=unit(4), fill=(20, 36, 47),
+            outline=(53, 78, 94), width=max(1, unit(1)))
+        draw.text((image_only_rect[0] + (image_only_width -
+                                        self.small.getlength(image_only_label)) / 2,
+                   image_only_rect[1] + unit(8)),
+                  image_only_label, fill=(216, 229, 237), font=self.small)
+        self._hits["image_only:toggle"] = image_only_rect
+
         header = (f"{metrics.get('device', 'connecting')}   ·   "
                   f"{metrics.get('sample_rate', 0):,} Hz   ·   "
                   f"{str(state.get('mode', 'raster')).upper()}")
         title_end = title_x + self.font.getlength(title)
         header_left = title_end + unit(18)
-        header_right = button_rect[0] - unit(12)
+        header_right = image_only_rect[0] - unit(12)
         header_width = max(0, header_right - header_left)
         if header_width:
             draw.text((header_left, unit(18)),
@@ -745,11 +792,34 @@ class ScopeGUI:
                   "center dot on a physical scope (no Z blanking channel).",
                   fill=(151, 169, 179), font=self.tiny)
         footer_note = ("Gamma/trim tune dwell; scope intensity sets tube brightness. "
-                       "F11 fullscreen · Esc restore/close · Q close.")
+                       "F10 image only · F11 fullscreen · Esc restore/close · Q close.")
         draw.text((unit(20), height - unit(13)),
                   self._fit_text(footer_note, self.tiny, width - unit(40)),
                   fill=(151, 169, 179), font=self.tiny)
 
+        self._present(image)
+
+    def _draw_image_only(self, image, draw, width, height):
+        """Letterbox the square phosphor preview across the whole window."""
+        size = fit_square_image(width, height, MAX_PREVIEW_RENDER_SIZE)
+        x = (width - size) // 2
+        y = (height - size) // 2
+        self._preview_target_size = size
+        with self._preview_lock:
+            rgb = self._preview_rgb
+            error = self._preview_error
+        if rgb is not None:
+            pic = self.Image.fromarray(rgb, mode="RGB")
+            if pic.size != (size, size):
+                pic = pic.resize((size, size), self.Image.Resampling.BILINEAR)
+            image.alpha_composite(pic.convert("RGBA"), (x, y))
+        else:
+            message = error or "Waiting for the first scope trace…"
+            text_width = self.small.getlength(message)
+            draw.text(((width - text_width) / 2, height // 2), message,
+                      fill=(151, 174, 192), font=self.small)
+
+    def _present(self, image):
         framebuffer = self.glfw.get_framebuffer_size(self.window)
         if framebuffer[0] <= 0 or framebuffer[1] <= 0:
             return
@@ -787,6 +857,9 @@ class ScopeGUI:
             return
         x, y = self.glfw.get_cursor_pos(self.window)
         if action == self.glfw.PRESS:
+            if self.image_only:
+                self.set_image_only(False)
+                return
             if self._state.get("mode_locked"):
                 locked = {"ips", "fps", "fields"}
             else:
@@ -808,6 +881,8 @@ class ScopeGUI:
                         self._actions.append(("mode", hit.split(":", 1)[1]))
                     elif hit == "fullscreen:toggle":
                         self._actions.append(("fullscreen", not self.fullscreen))
+                    elif hit == "image_only:toggle":
+                        self._actions.append(("image_only", True))
                     elif hit == "audio:toggle":
                         self._actions.append((
                             "audio", bool(self._state.get("audio_muted", True))))
@@ -839,7 +914,9 @@ class ScopeGUI:
         if action != self.glfw.PRESS:
             return
         if key == self.glfw.KEY_ESCAPE:
-            if self.fullscreen:
+            if self.image_only:
+                self.set_image_only(False)
+            elif self.fullscreen:
                 self.set_fullscreen(False)
             else:
                 self.close_requested = True
@@ -847,6 +924,8 @@ class ScopeGUI:
             self.close_requested = True
         elif key == self.glfw.KEY_F11:
             self._actions.append(("fullscreen", not self.fullscreen))
+        elif key == getattr(self.glfw, "KEY_F10", None):
+            self._actions.append(("image_only", not self.image_only))
         elif key == self.glfw.KEY_V:
             self._actions.append(("key", "v"))
         elif key == self.glfw.KEY_I:

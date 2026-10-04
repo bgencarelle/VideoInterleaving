@@ -140,6 +140,14 @@ def _bootstrap():
     ap.add_argument("--scope-gui", action=argparse.BooleanOptionalAction,
                     default=None,
                     help="open the optional native scope preview and tuner")
+    ap.add_argument("--scope-gui-image-only", "--image-only",
+                    dest="scope_gui_image_only",
+                    action=argparse.BooleanOptionalAction, default=None,
+                    help="start the scope GUI with only the preview; click to restore controls")
+    ap.add_argument("--scope-gui-fullscreen", "--fullscreen",
+                    dest="scope_gui_fullscreen",
+                    action=argparse.BooleanOptionalAction, default=None,
+                    help="start the scope GUI fullscreen in image-only view")
     ap.add_argument("--scope-fps", type=int)
     ap.add_argument("--scope-samples", type=int)
     ap.add_argument("--device", "--scope-device", dest="scope_device",
@@ -218,6 +226,19 @@ def _bootstrap():
         settings.SCOPE_SOURCE = args.scope_source
     if args.scope_gui is not None:
         settings.SCOPE_GUI = args.scope_gui
+    start_image_only = (getattr(settings, "SCOPE_GUI_IMAGE_ONLY", False)
+                        if args.scope_gui_image_only is None else
+                        args.scope_gui_image_only)
+    start_fullscreen = (getattr(settings, "SCOPE_GUI_FULLSCREEN", False)
+                        if args.scope_gui_fullscreen is None else
+                        args.scope_gui_fullscreen)
+    start_image_only = bool(start_image_only or start_fullscreen)
+    if (start_image_only or start_fullscreen) and args.scope_gui is False:
+        ap.error("scope GUI startup views cannot be combined with --no-scope-gui")
+    settings.SCOPE_GUI_IMAGE_ONLY = start_image_only
+    settings.SCOPE_GUI_FULLSCREEN = bool(start_fullscreen)
+    if start_image_only or start_fullscreen:
+        settings.SCOPE_GUI = True
     settings.SCOPE_SOURCE = getattr(settings, "SCOPE_SOURCE", "bake")
     if args.scope_live_size is not None:
         if args.scope_live_size < 16:
@@ -602,7 +623,10 @@ def run_scope(clock_source=None):
     """Caller (main.py, or _bootstrap) must have prepared the generated lists."""
     if clock_source is None:
         clock_source = settings.CLOCK_MODE
-    gui_enabled = bool(getattr(settings, "SCOPE_GUI", False))
+    start_image_only = bool(getattr(settings, "SCOPE_GUI_IMAGE_ONLY", False))
+    start_fullscreen = bool(getattr(settings, "SCOPE_GUI_FULLSCREEN", False))
+    gui_enabled = bool(getattr(settings, "SCOPE_GUI", False)
+                        or start_image_only or start_fullscreen)
 
     from settings import IPS, PINGPONG
 
@@ -1594,7 +1618,8 @@ def run_scope(clock_source=None):
     try:
         if gui_enabled:
             from scope_gui import ScopeGUI
-            gui = ScopeGUI(live_state)
+            gui = ScopeGUI(live_state, start_image_only=start_image_only,
+                           start_fullscreen=start_fullscreen)
         while True:
             if gui is not None:
                 try:
@@ -1677,6 +1702,8 @@ def run_scope(clock_source=None):
                             "XY DAC muted · physical scope holds center dot")
                     elif _action[0] == "fullscreen":
                         gui.set_fullscreen(_action[1])
+                    elif _action[0] == "image_only":
+                        gui.set_image_only(_action[1])
                     elif _action[0] == "key":
                         keys.feed(_action[1])
 

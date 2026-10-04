@@ -173,6 +173,14 @@ def configure_runtime():
     parser.add_argument("--scope-gui", action=argparse.BooleanOptionalAction,
                         default=None,
                         help="Open the optional native live scope preview and tuner")
+    parser.add_argument("--scope-gui-image-only", "--image-only",
+                        dest="scope_gui_image_only",
+                        action=argparse.BooleanOptionalAction, default=None,
+                        help="Start the scope GUI with only the preview; click to restore controls")
+    parser.add_argument("--scope-gui-fullscreen", "--fullscreen",
+                        dest="scope_gui_fullscreen",
+                        action=argparse.BooleanOptionalAction, default=None,
+                        help="Start the scope GUI fullscreen in image-only view")
     scope_render = parser.add_mutually_exclusive_group()
     scope_render.add_argument("--scope-mode",
                               choices=("vector", "raster", "stochastic",
@@ -692,6 +700,19 @@ def configure_runtime():
         settings.SCOPE_SOURCE = scope_source
         if args.scope_gui is not None:
             settings.SCOPE_GUI = args.scope_gui
+        start_image_only = (getattr(settings, "SCOPE_GUI_IMAGE_ONLY", False)
+                            if args.scope_gui_image_only is None else
+                            args.scope_gui_image_only)
+        start_fullscreen = (getattr(settings, "SCOPE_GUI_FULLSCREEN", False)
+                            if args.scope_gui_fullscreen is None else
+                            args.scope_gui_fullscreen)
+        start_image_only = bool(start_image_only or start_fullscreen)
+        if ((start_image_only or start_fullscreen) and args.scope_gui is False):
+            parser.error("scope GUI startup views cannot be combined with --no-scope-gui")
+        settings.SCOPE_GUI_IMAGE_ONLY = start_image_only
+        settings.SCOPE_GUI_FULLSCREEN = bool(start_fullscreen)
+        if start_image_only or start_fullscreen:
+            settings.SCOPE_GUI = True
         if args.scope_live_size is not None:
             if args.scope_live_size < 16:
                 parser.error("--scope-live-size must be at least 16 pixels")

@@ -78,6 +78,7 @@ SELECT_CHOICES = {
 }
 BOOL_FIELDS = {
     "x_only", "trigger", "scope_gui", "invert", "realtime", "autofit",
+    "scope_gui_image_only", "scope_gui_fullscreen",
     "list_from_images", "mirror", "stream",
 }
 PATH_FIELDS = {"image_dir", "xy_dir", "video_file"}
@@ -137,6 +138,8 @@ def _settings_defaults():
         "rotation": str(value("INITIAL_ROTATION", 0)),
         "mirror": bool(value("INITIAL_MIRROR", False)),
         "scope_gui": bool(value("SCOPE_GUI", False)),
+        "scope_gui_image_only": bool(value("SCOPE_GUI_IMAGE_ONLY", False)),
+        "scope_gui_fullscreen": bool(value("SCOPE_GUI_FULLSCREEN", False)),
         "live_source": "video",
         "video_file": "",
         "ffmpeg_input": "",
@@ -181,7 +184,8 @@ FIELD_GROUPS = (
                                      "walk_edge", "walk_hz", "stipple_points",
                                      "fusion")),
     ("Output processing", ("dc_comp", "oversample", "mix", "mix_duty",
-                            "min_feature", "list_from_images", "scope_gui")),
+                            "min_feature", "list_from_images", "scope_gui",
+                            "scope_gui_image_only", "scope_gui_fullscreen")),
     ("Live source", ("live_source", "video_file", "ffmpeg_input", "display",
                       "region")),
     ("Live sweep and capture", ("live_fps", "live_samples", "live_trim",
@@ -215,7 +219,10 @@ FIELD_LABELS = {
     "oversample": "Anti-alias oversampling", "mix": "Whole-trace mix · Hz, blank off",
     "mix_duty": "Mix raster duty", "min_feature": "Vector minimum feature",
     "rotation": "Rotation · degrees", "mirror": "Mirror X",
-    "list_from_images": "Rebuild legacy image manifest", "scope_gui": "Open native live tuner",
+    "list_from_images": "Rebuild legacy image manifest",
+    "scope_gui": "Open native live tuner",
+    "scope_gui_image_only": "Start tuner in image-only view",
+    "scope_gui_fullscreen": "Start fullscreen · image-only",
     "live_source": "Live source", "video_file": "Video file / URL",
     "ffmpeg_input": "FFmpeg input · FMT:SRC", "display": "Capture display index",
     "region": "Capture region · left,top,width,height", "live_fps": "Trace rate · Hz",
@@ -490,8 +497,16 @@ def build_command(settings, outputs=(), *, python=sys.executable, root=ROOT,
                               settings.get("app_source", "bake") == "bake")
         command.append("--scope-list-from-images" if use_image_manifest
                        else "--no-scope-list-from-images")
-        command.append("--scope-gui" if settings.get("scope_gui")
-                       else "--no-scope-gui")
+        start_image_only = bool(settings.get("scope_gui_image_only") or
+                                settings.get("scope_gui_fullscreen"))
+        start_fullscreen = bool(settings.get("scope_gui_fullscreen"))
+        gui_enabled = bool(settings.get("scope_gui") or start_image_only
+                           or start_fullscreen)
+        command.append("--scope-gui" if gui_enabled else "--no-scope-gui")
+        if start_image_only:
+            command.append("--scope-gui-image-only")
+        if start_fullscreen:
+            command.append("--scope-gui-fullscreen")
         return command
 
     command.extend((str(Path(root) / "tools" / "scope_screen.py"),
