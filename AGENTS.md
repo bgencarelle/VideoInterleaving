@@ -18,20 +18,29 @@
   intentional and pinned by `tests/test_lazy_imports.py`.
 - Check the current branch and worktree before editing; preserve existing
   unrelated changes.
+- Scope defaults and CLI parameters live in `settings.py` and `main.py`; the GUI
+  launcher assembles them in `tools/scope_launcher_gui.py`. Before scope changes,
+  read `docs/SCOPE_UPGRADE.md` and start from its latest Handoff. Treat current
+  defaults as D0; keep its charter/stages frozen and append evidence/check-ins,
+  following its Numba, realtime/headless, baseline and stage requirements.
 
 ## Environment and artifacts
 
-- Use `.venv/bin/python` (Python 3.11+); `.venv` is created with
-  `--system-site-packages`. `requirements.txt` includes the modem and scope
-  Python requirements; native libraries such as PortAudio are OS packages.
+- Use the repository `.venv/bin/python` (Python 3.11+); it uses
+  `--system-site-packages`. Device-backed audio uses `sounddevice` over
+  PortAudio; `requirements.txt` includes modem and scope Python requirements.
+  Native libraries such as PortAudio are OS packages.
+- `xvfb-run -a` is available for GUI/GL checks that need an X display. For
+  software-rendered GL, use `xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1 ...`.
 - `./scripts/setup_app.sh` performs system setup and may configure systemd.
   `utilities/check_modem_setup.py` verifies modem imports without opening audio.
 - No `pyproject.toml`, formatter, linter, or type checker is configured.
 - Put generated measurements, screenshots, and temporary scripts in repo-local
   `tmp/`; it is gitignored. Never commit generated bakes (`*_xy/`, `*_modem/`).
-- `main.py --mode scope` requires an XY bake; the baked modem mode requires a
-  modem bake with `modem.json`. Use `utilities/convert_to_xy.py` and
-  `utilities/convert_to_modem_dct.py` respectively.
+- Baked-source `main.py --mode scope` requires an XY bake; `--scope-source images`
+  uses runtime thumbnails instead. The baked modem mode requires a modem bake
+  with `modem.json`. Use `utilities/convert_to_xy.py` and
+  `utilities/convert_to_modem_dct.py` for the respective bakes.
 
 ## Modem invariants
 
@@ -64,8 +73,7 @@ Run a focused modem test, for example:
 
 Do not blanket-discover `tests/`: it also contains interactive scope inspection
 and audio-device-dependent tests. In particular, `tests/test_scope_pair.py` is
-an inspection tool, and some scope tests instantiate the default audio device.
-Run audio tests only with an explicitly verified virtual/loopback route; never
-send test output to physical speakers. `--device null` is the headless scope
-path. `server_config.py` is the source of truth for application port
-assignments.
+an inspection tool. Use `--device null` for headless scope checks; it does not
+verify PortAudio/device behavior. Run device-backed audio tests only through an
+explicitly verified virtual/loopback route, never physical speakers.
+`server_config.py` is the source of truth for application port assignments.
