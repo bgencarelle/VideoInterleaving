@@ -45,15 +45,37 @@ class KernelGuiTests(unittest.TestCase):
         gui = _gui(self.devices)
         self.assertEqual(gui.settings['dct_kernel'], 'reference')
         self.assertNotIn('--dct-kernel', self.command(gui))
+        self.assertIn('default (no kernel)', gui._value_label('dct_kernel'))
         self.assertFalse([d for d in gui._visible_fields() if d.startswith('kp:')])
 
     def test_the_chooser_lists_the_kernel_folder(self):
         gui = _gui(self.devices)
-        names = [name for _label, name in gui._choices('dct_kernel')]
+        labels = dict((name, label) for label, name in
+                      gui._choices('dct_kernel'))
+        names = list(labels)
         self.assertEqual(names[0], 'reference')
+        self.assertIn('default', labels['reference'])
         for expected in ('lanczos', 'mitchell', 'antiring'):
             self.assertIn(expected, names)
         self.assertIn('dct_kernel', gui._visible_fields())
+
+    def test_kernel_choices_mark_best_benchmark_winners_per_profile(self):
+        gui = _gui(self.devices)
+        gui.settings['profile'] = 'aspect-fold-500'
+        labels = dict((name, label) for label, name in
+                      gui._choices('dct_kernel'))
+        self.assertIn('best ideal + bilinear', labels['viewer_solve'])
+
+        gui.settings['profile'] = 'aspect-mono-500'
+        labels = dict((name, label) for label, name in
+                      gui._choices('dct_kernel'))
+        self.assertIn('best ideal', labels['csf_peak'])
+        self.assertIn('best bilinear', labels['viewer_solve'])
+
+        gui.settings['profile'] = 'aspect-fold-500'
+        labels = dict((name, label) for label, name in
+                      gui._choices('dct_kernel'))
+        self.assertIn('best ideal + bilinear', labels['viewer_solve'])
 
     def test_a_chosen_kernel_shows_its_parameters_and_reaches_the_command(self):
         gui = _gui(self.devices)

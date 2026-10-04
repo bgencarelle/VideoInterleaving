@@ -286,6 +286,17 @@ NUMERIC_STEPS = {'dct_sharpen_strength': (0.0, 1.0, 0.05),
 ENCODE_DEFAULTS = {'dct_kernel': 'reference', 'dct_preshrink': '4',
                    'dct_sharpen': 'off', 'dct_sharpen_strength': '0.25',
                    'dct_clarity': '0', 'dct_chroma_gain': '1'}
+# Benchmark winners by modeled display path. These labels are recommendations,
+# not automatic kernel selection: Reference remains the shipped no-kernel
+# default, and the winner changes with the Aspect profile and display mode.
+KERNEL_BENCHMARK_WINNERS = {
+    'aspect-mono-500': {'ideal': 'csf_peak', 'bilinear': 'viewer_solve'},
+    'aspect-fold-500': {'ideal': 'viewer_solve', 'bilinear': 'viewer_solve'},
+}
+DEFAULT_KERNEL_BENCHMARK_WINNERS = {
+    'ideal': 'csf_peak',
+    'bilinear': 'viewer_solve',
+}
 TONE_DEFAULTS = {'brightness': '', 'gamma': '1'}
 TWEAK_FIELDS = tuple(TONE_DEFAULTS) + tuple(ENCODE_DEFAULTS)
 # The sending screen's controls, grouped by what they do.
@@ -1881,8 +1892,21 @@ class SenderGui:
         if dest == 'aspect_tail':
             return ASPECT_TAIL_CHOICES
         if dest == 'dct_kernel':
-            return tuple((label, name) for name, label, _help, _params in
-                         kernel_registry().describe())
+            winners = KERNEL_BENCHMARK_WINNERS.get(
+                self.settings.get('profile'), DEFAULT_KERNEL_BENCHMARK_WINNERS)
+            ideal, bilinear = winners['ideal'], winners['bilinear']
+            choices = []
+            for name, label, _help, _params in kernel_registry().describe():
+                if name == v7_kernels.REFERENCE:
+                    label += ' · default (no kernel)'
+                elif name == ideal == bilinear:
+                    label += ' · best ideal + bilinear'
+                elif name == ideal:
+                    label += ' · best ideal'
+                elif name == bilinear:
+                    label += ' · best bilinear'
+                choices.append((label, name))
+            return tuple(choices)
         if dest == 'dct_sharpen':
             return DCT_SHARPEN_CHOICES
         if dest == 'pixel_detail':
@@ -2679,6 +2703,9 @@ class SenderGui:
 
     def _value_label(self, dest):
         text = self._plain_value_label(dest)
+        if dest == 'dct_kernel':
+            return (text if self._is_default(dest) else
+                    f'{text}  ·  default Reference')
         if self._is_tweak(dest) and self._default_value(dest) is not None:
             if dest == 'brightness' and self._is_default(dest):
                 return text                  # already says "profile default"

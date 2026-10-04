@@ -68,6 +68,26 @@ pair uses the updated defaults.
 | Upscaler pre-compensation | -31.25 | -31.25 | 0.00 | -39.20 | -39.20 | 0.00 |
 | Viewer-model solve | -39.36 | -31.60 | +7.76 | -35.47 | -36.61 | -1.14 |
 
+## Best kernel choice by benchmark mode
+
+The GUI labels `Reference` as the shipped default (no kernel), and marks the
+highest-natural-score kernel separately for each tested display mode. Those
+labels are recommendations, not a claim that one kernel wins for every
+viewer: `ideal` is the ideal-reconstruction test, while `bilinear` is a fixed
+bilinear-resampling simulation. The bilinear test does not detect the receiver
+window size or a runtime resolution threshold. The six-frame hold-out is
+reported separately and does not select the winner.
+
+| Profile | Best ideal-test kernel | Best bilinear-test kernel |
+| --- | --- | --- |
+| General V7 | Mid-band emphasis | Viewer-model solve |
+| Aspect Mono | Mid-band emphasis | Viewer-model solve |
+| Aspect Stereo | Viewer-model solve | Viewer-model solve |
+
+The sender GUI shows the selected kernel's profile-specific parameter defaults
+on its parameter rows. Choosing a marked winner is still explicit; the default
+kernel remains `Reference` unless changed.
+
 The CSF Diamond default moved from the worst ideal-mode and second-worst
 bilinear-mode natural-image mean to within 0.47 points of reference in ideal
 mode and 0.01 points in bilinear mode. On the stress hold-out it scored `-61.39`
@@ -177,6 +197,10 @@ Higher SSIMULACRA2 is better. Parentheses show the delta from the Aspect Mono
 reference (no kernel); natural pictures and the six-frame hold-out are kept as
 separate columns.
 
+The best natural-image score is Mid-band emphasis in ideal mode and
+Viewer-model solve in bilinear mode. The GUI labels both choices for this
+profile; the hold-out scores remain separate from this selection.
+
 | Kernel | Ideal natural | Ideal hold-out | Bilinear natural | Bilinear hold-out |
 | --- | ---: | ---: | ---: | ---: |
 | Reference | -54.93 | -86.65 | -62.54 | -145.98 |
@@ -234,6 +258,10 @@ hold-out as the Mono sweep:
 
 Higher SSIMULACRA2 is better. Parentheses show the change from the Aspect
 Stereo reference; natural-image and hold-out scores remain separate:
+
+Viewer-model solve has the highest natural-image mean in both tested modes for
+Aspect Stereo. The GUI labels it as the best ideal and bilinear benchmark
+choice.
 
 | Kernel | Ideal natural | Ideal hold-out | Bilinear natural | Bilinear hold-out |
 | --- | ---: | ---: | ---: | ---: |
