@@ -4,8 +4,9 @@ Example:
     xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1 \
         .venv/bin/python tools/local_gl_smoke.py --dir images_sbs
 
-The runner counts actual GL composite calls and rejects the CPU compositor
-path. It disables app listeners and the Wayland-only pointer helper so this
+The runner verifies actual GL compositing and checks that the sender bridge
+publishes the source-sized composite rather than the fullscreen framebuffer.
+It disables app listeners and the Wayland-only pointer helper so this
 diagnostic has no network or desktop side effects.
 """
 import argparse
@@ -92,11 +93,9 @@ def main():
     exec(compile(source, str(MAIN), "exec"), namespace)
 
     renderer = importlib.import_module("renderer")
-    counts = {"gl_composite": 0, "cpu_composite": 0,
-              "frame_readback": 0}
+    counts = {"gl_composite": 0, "cpu_composite": 0}
     gl_composite = renderer.overlay_images_single_pass
     cpu_composite = renderer.composite_cpu
-    read_frame_rgb = renderer.read_frame_rgb
 
     def counted_gl(*call_args, **call_kwargs):
         counts["gl_composite"] += 1
@@ -106,13 +105,8 @@ def main():
         counts["cpu_composite"] += 1
         return cpu_composite(*call_args, **call_kwargs)
 
-    def counted_readback(*call_args, **call_kwargs):
-        counts['frame_readback'] += 1
-        return read_frame_rgb(*call_args, **call_kwargs)
-
     renderer.overlay_images_single_pass = counted_gl
     renderer.composite_cpu = counted_cpu
-    renderer.read_frame_rgb = counted_readback
 
     # This is an X11 smoke run, so avoid the optional Wayland pointer utility.
     display_manager = importlib.import_module("display_manager")
@@ -172,7 +166,7 @@ def main():
     return 0 if (app_status == 0 and gl_ready and timer_expired and
                   bridge.get('shape') and bridge.get('contrast', 0.0) > 1.0 and
                   counts["gl_composite"] > 0 and
-                  counts["cpu_composite"] == 0) else 1
+                  counts["cpu_composite"] > 0) else 1
 
 
 if __name__ == "__main__":

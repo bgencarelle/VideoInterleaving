@@ -75,7 +75,9 @@ class LocalGLSmokeTests(unittest.TestCase):
                 self.assertTrue(report["gl_ready"], report)
                 self.assertIn("GL_RENDERER:", report["renderer"])
                 self.assertGreater(report["gl_composite"], 0, report)
-                self.assertEqual(report["cpu_composite"], 0, report)
+                self.assertGreater(report["cpu_composite"], 0, report)
+                self.assertEqual(report["bridge_frame_shape"], [120, 80, 3],
+                                 report)
                 self.assertTrue(report["timer_expired"], report)
             finally:
                 for cache_name in (f"folders_processed_{suffix}",

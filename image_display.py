@@ -395,6 +395,11 @@ def run_display(clock_source=CLOCK_MODE):
         jpeg_min_size=web_jpeg_min_size)
     fifo.update(index, res0)
 
+    # The sender consumes the composed source image, not the fullscreen
+    # framebuffer. Keep this in source dimensions so monitor aspect ratio,
+    # letterboxing, and display scaling never become encoded picture pixels.
+    bridge_main, bridge_float, bridge_main_sbs, bridge_float_sbs = res0
+
     cur_main, cur_float, cur_m_sbs, cur_f_sbs = None, None, False, False
 
     main_texture = None
@@ -492,6 +497,10 @@ def run_display(clock_source=CLOCK_MODE):
                     cur_float = f_img
                     cur_m_sbs = m_sbs
                     cur_f_sbs = f_sbs
+                    bridge_main = m_img
+                    bridge_float = f_img
+                    bridge_main_sbs = m_sbs
+                    bridge_float_sbs = f_sbs
 
                     # --- [OPTIMIZED] PRE-BAKED ASCII PATH ---
                     # Check if the worker thread already returned a String
@@ -581,11 +590,17 @@ def run_display(clock_source=CLOCK_MODE):
                     main_texture, float_texture, BACKGROUND_COLOR,
                     main_is_sbs=cur_m_sbs, float_is_sbs=cur_f_sbs
                 )
-                if (frame_publisher is not None and not is_headless and
+                if (frame_publisher is not None and not is_headless and has_gl and
                         time.monotonic() >= next_local_frame):
-                    rendered_frame = renderer.read_frame_rgb()
-                    if rendered_frame is not None:
-                        publish_local_frame(rendered_frame)
+                    if (bridge_main is not None and
+                            not isinstance(bridge_main, (str, dict))):
+                        rendered_frame = renderer.composite_cpu(
+                            bridge_main, bridge_float,
+                            main_is_sbs=bridge_main_sbs,
+                            float_is_sbs=bridge_float_sbs,
+                            target_size=None)
+                        if rendered_frame is not None:
+                            publish_local_frame(rendered_frame)
 
             # Capture (Only for Images/Headless Web)
             should_capture = False

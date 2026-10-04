@@ -4,8 +4,8 @@
 The sender uses the V7 prototype's fixed 48 kHz reference geometry and follows
 the selected DAC's native output clock by default, intended for an explicit
 audio loopback device, normally BlackHole 2ch. Its local-app source launches
-``main.py --mode local`` and receives that process's rendered frames over a
-private loopback connection.
+``main.py --mode local`` and receives that process's composited source images
+over a private loopback connection, before fullscreen display scaling.
 
 Examples::
 

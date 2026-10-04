@@ -143,9 +143,11 @@ needed for the default M=500 coded profile:
 ```
 
 The sender GUI also offers **VideoInterleaving local output**. Starting the
-sender launches its own `main.py --mode local` window and feeds the rendered
-RGB frames directly to the V7 encoder; stopping the sender closes that window.
-The handoff is loopback-only and does not capture unrelated desktop windows.
+sender launches its own `main.py --mode local` window and feeds its composed
+source image directly to the V7 encoder; monitor resolution and fullscreen
+letterboxing are not encoded into the picture. Stopping the sender closes the
+local window. The handoff is loopback-only and does not capture unrelated
+desktop windows.
 
 To configure the standalone sender with a small event-driven GUI instead, run
 `./vi.modem-send-gui`. It launches the same `vi.modem-send` path in a separate
