@@ -166,6 +166,8 @@ def configure_runtime():
     parser.add_argument("--scope-live-size", type=int, default=None,
                         metavar="PX",
                         help="Live-image thumbnail width (default: 128)")
+    parser.add_argument("--scope-gui", action="store_true", default=None,
+                        help="Open the optional native live scope preview and tuner")
     scope_render = parser.add_mutually_exclusive_group()
     scope_render.add_argument("--scope-mode",
                               choices=("vector", "raster", "stochastic",
@@ -647,6 +649,8 @@ def configure_runtime():
         if scope_source not in ("bake", "images"):
             parser.error("--scope-source must be bake or images")
         settings.SCOPE_SOURCE = scope_source
+        if args.scope_gui is not None:
+            settings.SCOPE_GUI = args.scope_gui
         if args.scope_live_size is not None:
             if args.scope_live_size < 16:
                 parser.error("--scope-live-size must be at least 16 pixels")
@@ -938,7 +942,7 @@ from settings import CLOCK_MODE
 #   ascii_server        ascii                         (stdlib only)
 #   ascii_stats_server  ascii                         (stdlib only)
 #   ascii_web_server    asciiweb                      (SimpleWebSocketServer)
-#   scope_display       scope                         (numpy, sounddevice)
+#   scope_display       scope                         (numpy, sounddevice; optional GL GUI)
 #
 # Python caches modules, so importing inside a branch costs nothing on repeat.
 
@@ -1082,11 +1086,8 @@ def main(clock=CLOCK_MODE):
         web_service.start_server(monitor=True, stream=False)
 
     elif mode == "scope":
-        # Scope is reached the same way every other mode is: over the network.
-        # It has no window and, under systemd, no tty either -- so without this
-        # there is no way to see whether it is running, what device it grabbed,
-        # or whether it is dropping traces.  Monitor only; there is no video
-        # frame to stream.
+        # Keep the web monitor available whether the optional native scope
+        # window is enabled or the process is running headless.
         #
         # NOT gated on require_ports(): run_monitor_server() runs in a daemon
         # thread and its OSError on a busy port dies in that thread.  The audio
@@ -1099,8 +1100,8 @@ def main(clock=CLOCK_MODE):
     failed = False
     try:
         if mode == "scope":
-            # Standalone, like every other mode: audio only. No GL context, no
-            # TurboJPEG, no ImageLoader, no FIFO.
+            # Graphics stay optional and are imported by scope_display only
+            # when --scope-gui is enabled. Scope never loads the video path.
             import scope_display
             scope_display.run_scope(clock)
         else:

@@ -7,8 +7,9 @@ scope using its own Y-T timebase.
 
 It uses the same image-index clock and folder selector as the other output
 modes. Normal startup currently uses the free-running clock; MIDI/MTC is not
-initialized, and LTC input is not implemented. It never decodes a JPEG, opens a
-GL context, or touches the image loader when using the default baked source.
+initialized, and LTC input is not implemented. The default baked-source path
+does not decode a JPEG, open a GL context, or touch the image loader. The
+optional `--scope-gui` window loads graphics dependencies only when requested.
 
 ---
 
@@ -41,6 +42,7 @@ saving, source-detail stipple candidates, and grid-domain raster correction.
 | `scope_bake.py` | Shared library. Format definition, geometry helpers, and the two composite functions. Imported by *both* the baker and the runtime; imports neither. |
 | `utilities/convert_to_xy.py` | The baker. Offline only. Images → library. |
 | `scope_display.py` | The runtime. Clock → index → composite → audio. |
+| `scope_gui.py` | Optional GLFW/ModernGL live trace preview and slider tuner. |
 | `test_scope_pair.py` | Inspection tool. Preview one pair on screen and on the scope simultaneously. |
 
 ### Repo changes
@@ -72,6 +74,19 @@ For runtime-decoded images, without creating an XY bake:
 python main.py --mode scope --dir images --scope-source images \
   --scope-channels 18,19
 ```
+
+Add `--scope-gui` to open the native live scope preview and slider tuner:
+
+```bash
+python main.py --mode scope --dir images --scope-source images --scope-gui
+```
+
+Sliders retain numeric readouts; an amber tick marks each startup value. Picture
+rate, trace refresh, and raster fields reopen the audio stream and recalibrate
+when applied. Other tuning sliders adjust the running renderer. Preview
+exposure affects only the phosphor simulation. XY has no separate intensity
+channel, so use gamma/trim for dwell brightness or the scope's hardware
+intensity control for tube brightness.
 
 Live-image scope defaults to raster and also supports `--scope-stochastic` and
 `--scope-stipple`. It uses the normal image ordering, alpha mattes, and folder
@@ -642,6 +657,7 @@ python main.py --mode scope --xy-dir images_xy [options]
 | `--scope-precondition F` | Optional raster horizontal compensation on the final sweep grid (default 0 for natural facial tone). |
 | `--scope-fps N` | Scope redraw rate. Defaults to `IPS`. Sets `N = rate/fps`. |
 | `--scope-samples N` | Path length per trace directly. Overrides FPS; incompatible with mix. |
+| `--scope-gui` | Open the optional GLFW/ModernGL live trace preview and slider tuner. |
 | `--scope-realtime` | Stream continuously; index changes land within a row (raster only). |
 | `--scope-mix [HZ]` | Vector/raster/stochastic/raster/stipple/raster whole-trace mix (default 120 Hz). |
 | `--scope-mix-duty F` | Raster fraction; remainder splits equally between vector/stochastic/stipple (default 0.5). |

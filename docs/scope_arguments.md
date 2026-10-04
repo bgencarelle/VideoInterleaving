@@ -539,6 +539,23 @@ defaults to raster. Live-image scope also supports stochastic and stipple;
 vector, fusion, and mixed rendering require baked geometry. This option is
 separate from `tools/scope_screen.py`, which captures a desktop or video source.
 
+### `--scope-gui` (default off)
+
+Open a native live trace preview and tuner, following the V7 receiver GUI's
+control-panel style. Numeric readouts remain beside sliders; an amber line on
+each track marks the value at startup. It uses the same tapped XY samples as
+the `/scope` browser preview and renders the phosphor simulation off the audio
+callback.
+
+The picture-rate, trace-rate, and raster-field sliders reopen the output stream
+and recalibrate after release. Other tuning sliders update the current renderer.
+The GUI is optional so headless scope runs do not load GLFW/ModernGL; install the
+normal application graphics dependencies to use it.
+
+XY scope output has no separate intensity channel. Gamma and trim alter beam
+dwell, while the physical scope's intensity control sets tube brightness.
+Preview exposure only changes the simulated window image.
+
 ### `--scope-channels X,Y` (default `1,2`)
 
 Selects the 1-based PortAudio output channels that carry X and Y. For example,

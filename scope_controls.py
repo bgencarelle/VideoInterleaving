@@ -93,6 +93,68 @@ class KeyMap:
             "off" if new is None else (f"{new:g}"))
         self.message = f"{name} = {shown}"
 
+    def set_value(self, name, value):
+        """Set a live tuning value from a GUI control.
+
+        Keep the same dirty/recalibration contract as the keyboard controls:
+        trim, density, and rows rebuild the grid; gamma and low-pass only reshape
+        the current one.
+        """
+        if name not in SPECS:
+            raise ValueError(f"unknown live scope control: {name}")
+        attr, _kind, lo, hi, recal = SPECS[name]
+        if name == "gamma":
+            mode = self.state.get("mode")
+            fusion = self.state.get("fusion_components", "vrs")
+            attr = ("stochastic_gamma"
+                    if mode in ("stochastic", "stipple")
+                    or (mode == "fusion" and "s" in fusion)
+                    else "raster_gamma")
+            value = min(max(float(value), lo), hi)
+            self.state[attr] = value
+            self.state["gamma"] = value
+        elif name == "lowpass":
+            value = None if value is None or float(value) <= 0 else float(value)
+            self.state[attr] = value
+        elif name == "rows":
+            value = None if value is None or int(value) <= 0 else int(value)
+            self.state[attr] = value
+        else:
+            value = min(max(float(value), lo), hi)
+            if name in ("trim", "density"):
+                value = float(value)
+            self.state[attr] = value
+        if recal:
+            self.dirty = True
+        shown = ("auto" if name == "rows" and value is None else
+                 "off" if name == "lowpass" and value is None else
+                 f"{value:g}" if value is not None else "off")
+        self.message = f"{name} = {shown}"
+
+    def set_mode(self, mode):
+        """Select a renderer from a GUI without cycling through the others."""
+        if mode not in ("vector", "raster", "stochastic", "stipple", "fusion"):
+            raise ValueError(f"unknown scope renderer: {mode}")
+        available = self.state.get("available_modes")
+        if available is not None and mode not in available:
+            self.message = f"{mode} requires a baked XY source"
+            return False
+        if self.state.get("mode_locked"):
+            self.message = "mode cycling unavailable in realtime/mix mode"
+            return False
+        self.state["mode"] = mode
+        self.state["raster"] = mode == "raster"
+        gamma_key = ("stochastic_gamma"
+                     if (mode in ("stochastic", "stipple")
+                         or (mode == "fusion"
+                             and "s" in self.state.get("fusion_components", "vrs")))
+                     else "raster_gamma")
+        if gamma_key in self.state:
+            self.state["gamma"] = self.state[gamma_key]
+        self.dirty = True
+        self.message = "mode = " + mode.upper()
+        return True
+
     def feed(self, ch):
         s = self.state
         if ch in ("-", "_"):
@@ -110,23 +172,16 @@ class KeyMap:
         elif ch == "l":
             self._bump("lowpass", +1)
         elif ch == "v":
-            if s.get("mode_locked"):
-                self.message = "mode cycling unavailable in realtime/mix mode"
-                return True
             order = ["vector", "raster", "stochastic", "stipple", "fusion"]
+            available = s.get("available_modes")
+            if available is not None:
+                order = [mode for mode in order if mode in available]
+            if not order:
+                self.message = "no live renderer modes are available"
+                return True
             current = s.get("mode", "raster" if s.get("raster") else "vector")
             i = order.index(current) if current in order else 0
-            s["mode"] = order[(i + 1) % len(order)]
-            s["raster"] = s["mode"] == "raster"  # legacy state readers
-            gamma_key = ("stochastic_gamma"
-                         if (s["mode"] in ("stochastic", "stipple")
-                             or (s["mode"] == "fusion"
-                                 and "s" in s.get("fusion_components", "vrs")))
-                         else "raster_gamma")
-            if gamma_key in s:
-                s["gamma"] = s[gamma_key]
-            self.dirty = True
-            self.message = "mode = " + s["mode"].upper()
+            self.set_mode(order[(i + 1) % len(order)])
         elif ch == "f":
             if s.get("mode") != "fusion":
                 self.message = "fusion combinations are available in FUSION mode"

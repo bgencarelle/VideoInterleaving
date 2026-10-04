@@ -122,6 +122,7 @@ SCOPE_DEVICE_SPEC = None  # transient CLI name/index before it is resolved
 SCOPE_DEVICE_RESOLVED = False
 SCOPE_ASK = False         # interactive device picker; safe only with a tty
 SCOPE_SOURCE = "bake"     # "bake" (offline XY) or "images" (runtime thumbnails)
+SCOPE_GUI = False          # optional native scope trace preview/tuning window
 SCOPE_CHANNELS = (1, 2)   # 1-based PortAudio X,Y outputs; e.g. (18, 19)
 SCOPE_LIVE_SIZE = 128     # live-image thumbnail width; bake format is unchanged
 SCOPE_FPS = None          # None -> follow IPS

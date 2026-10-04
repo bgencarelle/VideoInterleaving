@@ -137,6 +137,8 @@ def _bootstrap():
     ap.add_argument("--scope-channels", metavar="X,Y",
                     help="1-based PortAudio output channels, e.g. 18,19")
     ap.add_argument("--scope-live-size", type=int, metavar="PX")
+    ap.add_argument("--scope-gui", action="store_true", default=None,
+                    help="open the optional native scope preview and tuner")
     ap.add_argument("--scope-fps", type=int)
     ap.add_argument("--scope-samples", type=int)
     ap.add_argument("--device", "--scope-device", dest="scope_device",
@@ -213,6 +215,8 @@ def _bootstrap():
         settings.SCOPE_RENDER_MODE = "stipple"
     if args.scope_source is not None:
         settings.SCOPE_SOURCE = args.scope_source
+    if args.scope_gui is not None:
+        settings.SCOPE_GUI = args.scope_gui
     settings.SCOPE_SOURCE = getattr(settings, "SCOPE_SOURCE", "bake")
     if args.scope_live_size is not None:
         if args.scope_live_size < 16:
@@ -461,6 +465,8 @@ def _open_layer(paths_by_index, xy_root, layer_name, expected_frames):
 # loop, or the callback can fire against a half-closed stream.  So the handler
 # only parks a request here and the loop picks it up.
 _device_request = {"spec": None, "pending": False, "message": ""}
+_timing_request = {"fps": None, "fields": None, "ips": None,
+                   "pending": False, "message": ""}
 _device_lock = threading.Lock()
 
 
@@ -484,6 +490,35 @@ def device_status():
         return dict(_device_request)
 
 
+def request_timing(fps=None, fields=None, ips=None):
+    """Queue a timing update for the scope producer thread to apply safely.
+
+    Trace rate and interlace change the DAC frame size, so their stream is
+    rebuilt by the thread that owns it.  ``ips`` changes the scope's free-running
+    image clock; external MIDI clocks are left to their source.
+    """
+    values = {"fps": fps, "fields": fields, "ips": ips}
+    if all(value is None for value in values.values()):
+        raise ValueError("timing update needs fps, fields, or ips")
+    if fps is not None and (not math.isfinite(float(fps)) or float(fps) <= 0):
+        raise ValueError("trace rate must be finite and positive")
+    if fields is not None and int(fields) not in (1, 2, 3, 4):
+        raise ValueError("raster fields must be between 1 and 4")
+    if ips is not None and (not math.isfinite(float(ips)) or float(ips) <= 0):
+        raise ValueError("picture rate must be finite and positive")
+    with _device_lock:
+        _timing_request.update(values)
+        _timing_request["pending"] = True
+        _timing_request["message"] = "timing update queued"
+    return True
+
+
+def timing_status():
+    """Return the most recent timing request and its apply status."""
+    with _device_lock:
+        return dict(_timing_request)
+
+
 
 def _dev_name_of(scope):
     """Human-readable name of whatever output a Scope ended up on."""
@@ -499,7 +534,7 @@ def _dev_name_of(scope):
 
 def _swap_device(old_scope, spec, source, fps, samples, main_libs, float_libs,
                  density, trim, rows, fields, row_bias, autofit, invert=False,
-                 x_only=False, channel_pair=(1, 2)):
+                 x_only=False, channel_pair=(1, 2), resolved_device=False):
     """Move the running scope to another output device.
 
     Returns (new_scope, new_cal, fresh_sweep_state).
@@ -522,8 +557,8 @@ def _swap_device(old_scope, spec, source, fps, samples, main_libs, float_libs,
     holding both would fail on exactly the devices worth using.
     """
     from scope_out import Scope, resolve_device
-    dev = resolve_device(
-        spec, min_channels=required_output_channels(channel_pair, x_only))
+    dev = (spec if resolved_device else resolve_device(
+        spec, min_channels=required_output_channels(channel_pair, x_only)))
     try:
         old_scope.stream.stop()
         old_scope.stream.close()
@@ -637,7 +672,8 @@ def run_scope(clock_source=None):
               "the picture may drift against it.")
         yt_timing = "dwell"
     import make_file_lists
-    from index_calculator import update_index
+    import index_calculator as _index_calculator
+    update_index = _index_calculator.update_index
     from folder_selector import update_folder_selection, folder_dictionary
 
     min_feature = getattr(settings, "SCOPE_MIN_FEATURE", 0.02)
@@ -1005,6 +1041,10 @@ def run_scope(clock_source=None):
                   x_only=x_only,
                   channel_pair=channel_pair,
                   yt_trigger_us=trigger_us)
+    # An explicit samples/trace budget takes precedence over the requested FPS.
+    # Keep the runtime's time controls and diagnostics anchored to the rate the
+    # DAC will actually emit, not the superseded convenience argument.
+    fps = max(1, int(round(scope.samplerate / max(scope.samples_per_frame, 1))))
 
     if trigger_on:
         marker_us = scope.yt_trigger_us
@@ -1294,6 +1334,7 @@ def run_scope(clock_source=None):
     # --- live controls ---
     # Everything below is adjustable while watching the scope; restarting to
     # try a different trim is useless when the thing you are judging is a beam.
+    gui_enabled = bool(getattr(settings, "SCOPE_GUI", False))
     live_state = dict(trim=trim, density=density,
                       gamma=(walk_gamma
                              if (use_stochastic or use_stipple
@@ -1310,15 +1351,20 @@ def run_scope(clock_source=None):
                       yt_timing=yt_timing,
                       precondition=raster_precondition,
                       mode_locked=bool(realtime or mix_hz),
+                      clock_locked=bool(_index_calculator.midi_mode),
                       mix_hz=mix_hz, mix_duty=mix_duty,
+                      fps=fps, ips=IPS, fields=fields,
+                      available_modes=(
+                          ("raster", "stochastic", "stipple")
+                          if scope_source == "images"
+                          else ("vector", "raster", "stochastic", "stipple",
+                                "fusion")),
                       stipple_points=stipple_points,
                       fusion_components=fusion_components)
     # --- monitoring ---
     # Same two-part contract every other mode uses: main.py starts the server,
-    # the engine feeds lightweight_monitor.  Without this scope is invisible to
-    # /data, to the dashboard and to multimonitor.py -- which matters far more
-    # here than elsewhere, because scope has no window to look at and no tty
-    # under systemd.
+    # the engine feeds lightweight_monitor. This remains useful in headless
+    # runs and alongside the optional native tuner.
     # The web page is the only display many people will have, so its preview
     # must show a whole picture, not one interlaced field.
     try:
@@ -1387,8 +1433,9 @@ def run_scope(clock_source=None):
     try:
         from scope_controls import KeyMap, Terminal, as_flags
         term = Terminal()
-        if term.enabled:
+        if term.enabled or gui_enabled:
             keys = KeyMap(live_state)
+        if term.enabled:
             print("[SCOPE] live controls active -- h for keys, p to print "
                   "flags, q to quit")
     except Exception:
@@ -1435,12 +1482,159 @@ def run_scope(clock_source=None):
     last_report = time.time()
     last_monitor = 0.0
 
+    def apply_timing_request(request):
+        """Reopen the stream and rebuild timing-dependent render state."""
+        nonlocal scope, cal, sweep, fps, samples, fields, tap_traces, IPS
+        nonlocal tick, emitter, stochastic_emitter, stipple_emitter
+        nonlocal fusion_multiplexer, beam_end, field_i, mix_field_i
+        nonlocal mix_last_mode, prev_key, dev, _dev_name
+
+        next_ips = int(round(request["ips"] if request["ips"] is not None
+                             else IPS))
+        next_fields = int(request["fields"] if request["fields"] is not None
+                           else fields)
+        if request["fps"] is not None:
+            next_fps = int(round(request["fps"]))
+        elif request["fields"] is not None and next_fields > 1:
+            next_fps = next_ips * next_fields
+        else:
+            next_fps = fps
+        if next_fields > 1 and next_fps != next_ips * next_fields:
+            # A raster field must land on a stable source-image boundary.
+            next_fields = 1
+        if next_fps < 1 or next_ips < 1 or not 1 <= next_fields <= 4:
+            raise ValueError("invalid picture rate, trace rate, or field count")
+
+        # The timing request is a new sample budget, so an old explicit
+        # --scope-samples value must no longer override the requested rate.
+        next_samples = None
+        new_scope, new_cal, new_sweep = _swap_device(
+            scope, dev, source, next_fps, next_samples,
+            main_libs, float_libs, density, trim, rows, next_fields,
+            row_bias, autofit, invert, x_only=x_only,
+            channel_pair=channel_pair, resolved_device=True)
+        scope, cal, sweep = new_scope, new_cal, new_sweep
+        fps, samples, fields, IPS = next_fps, next_samples, next_fields, next_ips
+        settings.IPS = IPS
+        settings.SCOPE_FPS = fps
+        settings.SCOPE_SAMPLES = None
+        settings.SCOPE_FIELDS = fields
+        settings.SCOPE_FIELDS_EXPLICIT = True
+        try:
+            _index_calculator.IPS = IPS
+        except Exception:
+            pass
+        tap_traces = fields if use_raster else 1
+        scope.set_tap_fields(tap_traces)
+        tick = 1.0 / max(2 * IPS, 4 * fps)
+
+        emitter = TraceEmitter(
+            scope.samplerate, scope.samples_per_frame,
+            gamma=gamma, trim=trim, density=density, rows=rows,
+            fields=fields, border=border, oversample=oversample,
+            sweep=sweep_mode, dc_comp=dc_comp, autofit=autofit,
+            row_bias=row_bias, precondition=raster_precondition,
+            yt_timing=yt_timing, yt_trigger_samples=0,
+            grid=_rotation_grid(cal, rotation),
+            levels=(cal.get("levels") if cal else None))
+        stochastic_emitter = StochasticEmitter(
+            scope.samplerate, scope.samples_per_frame,
+            gamma=walk_gamma, trim=trim, radius=walk_radius,
+            stride=walk_stride, edge_gain=walk_edge,
+            reseed_ms=walk_reseed_ms, walk_hz=walk_hz,
+            dc_comp=dc_comp, border=border)
+        stipple_emitter = StippleEmitter(
+            scope.samplerate, scope.samples_per_frame,
+            points=stipple_points, gamma=walk_gamma, trim=trim,
+            edge_gain=walk_edge, dc_comp=dc_comp, border=border)
+        fusion_multiplexer.reset()
+        beam_end = None
+        field_i = mix_field_i = 0
+        mix_last_mode = None
+        prev_key = None
+        dev = "null" if getattr(scope, "null", False) else scope.stream.device
+        _dev_name = _dev_name_of(scope)
+        live_state.update(fps=fps, ips=IPS, fields=fields)
+        with _device_lock:
+            _timing_request["message"] = (
+                f"applied: {IPS} IPS · {fps} traces/s · {fields} fields")
+        try:
+            from lightweight_monitor import monitor_data as _md_timing
+            _md_timing["scope_device"] = _dev_name
+            _md_timing["scope_samplerate"] = int(scope.samplerate)
+            _md_timing["scope_samples_per_trace"] = int(scope.samples_per_frame)
+            _md_timing["scope_fields"] = int(fields)
+            _md_timing["scope_refresh_hz"] = round(
+                scope.samplerate / max(scope.trace_samples, 1), 1)
+            _md_timing["scope_picture_hz"] = round(
+                scope.samplerate / max(scope.trace_samples * tap_traces, 1), 1)
+            if cal:
+                _md_timing["scope_grid"] = (f"{cal['grid_cols']}x"
+                                             f"{cal['grid_rows']}")
+                _md_timing["scope_samples_per_cell"] = round(
+                    scope.samples_per_frame * fields
+                    / max(cal["grid_rows"] * cal["grid_cols"], 1), 2)
+        except Exception:
+            pass
+
     # NOT `with scope:` -- the device can be changed at runtime, which means
     # rebinding `scope`.  A with-block would call __exit__ on the object it
     # entered, i.e. the already-closed old stream, and raise on the way out.
     scope.stream.start()
+    gui = None
     try:
+        if gui_enabled:
+            from scope_gui import ScopeGUI
+            gui = ScopeGUI(live_state)
         while True:
+            if gui is not None:
+                try:
+                    _scope_gui_metrics = {
+                        "device": _dev_name,
+                        "sample_rate": int(scope.samplerate),
+                        "trace_hz": scope.samplerate / max(scope.trace_samples, 1),
+                        "picture_hz": scope.samplerate / max(
+                            scope.trace_samples * max(tap_traces, 1), 1),
+                        "samples": int(scope.samples_per_frame),
+                        "fields": int(fields),
+                        "grid": (f"{cal['grid_cols']}x{cal['grid_rows']}"
+                                 if cal else "--"),
+                        "dropouts": int(scope.dac_dropouts),
+                        "underruns": int(getattr(source, "underruns", 0)
+                                         if source is not None else 0),
+                        "message": timing_status().get("message", ""),
+                    }
+                    _gui_actions = gui.poll(live_state, _scope_gui_metrics)
+                except Exception as e:
+                    print(f"[SCOPE] GUI update failed: {e}", flush=True)
+                    _gui_actions = []
+                if gui.close_requested:
+                    break
+                for _action in _gui_actions:
+                    if _action[0] == "slider":
+                        _name, _value = _action[1], _action[2]
+                        if _name == "ips":
+                            _ips = int(round(_value))
+                            _fields = fields if use_raster else 1
+                            _fps = (_ips * _fields if _fields > 1 else fps)
+                            request_timing(fps=_fps, fields=_fields, ips=_ips)
+                            gui.message = "Applying image clock / trace timing…"
+                        elif _name == "fps":
+                            request_timing(fps=int(round(_value)),
+                                           fields=None)
+                            gui.message = "Reopening output for the new trace rate…"
+                        elif _name == "fields":
+                            _fields = int(round(_value))
+                            request_timing(fps=int(round(IPS * _fields)),
+                                           fields=_fields)
+                            gui.message = "Reopening output for the new field rate…"
+                        else:
+                            keys.set_value(_name, _value)
+                    elif _action[0] == "mode":
+                        keys.set_mode(_action[1])
+                    elif _action[0] == "key":
+                        keys.feed(_action[1])
+
             # --- pending device change, parked by request_device() ----------
             with _device_lock:
                 _want = (_device_request["spec"]
@@ -1466,6 +1660,8 @@ def run_scope(clock_source=None):
                         main_libs, float_libs, density, trim, rows, fields,
                         row_bias, autofit, invert, x_only=x_only,
                         channel_pair=channel_pair)
+                    dev = ("null" if getattr(scope, "null", False)
+                           else scope.stream.device)
                     # The emitter owns the chain and the geometry, so it has to
                     # be rebuilt, not just reset: a new device can mean a new
                     # sample rate, which changes samples_per_frame and with it
@@ -1523,6 +1719,38 @@ def run_scope(clock_source=None):
                     print(f"[SCOPE] device change failed: {e}", flush=True)
                     with _device_lock:
                         _device_request["message"] = f"failed: {e}"
+            with _device_lock:
+                _timing_want = (dict(_timing_request)
+                                if _timing_request["pending"] else None)
+                if _timing_request["pending"]:
+                    _timing_request["pending"] = False
+            if _timing_want is not None:
+                if realtime or mix_hz:
+                    _reason = ("timing changes are unavailable in realtime/mix "
+                               "mode; restart in frame mode")
+                    with _device_lock:
+                        _timing_request["message"] = f"failed: {_reason}"
+                    if gui is not None:
+                        gui.message = _reason
+                elif (_timing_want.get("ips") is not None
+                      and _index_calculator.midi_mode):
+                    _reason = "picture rate follows the external MIDI clock"
+                    with _device_lock:
+                        _timing_request["message"] = f"failed: {_reason}"
+                    if gui is not None:
+                        gui.message = _reason
+                else:
+                    try:
+                        apply_timing_request(_timing_want)
+                        if gui is not None:
+                            gui.message = timing_status()["message"]
+                    except Exception as e:
+                        _reason = f"timing change failed: {e}"
+                        print(f"[SCOPE] {_reason}", flush=True)
+                        with _device_lock:
+                            _timing_request["message"] = _reason
+                        if gui is not None:
+                            gui.message = _reason
             if keys is not None:
                 for ch in term.read():
                     if keys.feed(ch) and keys.message:
@@ -1592,8 +1820,9 @@ def run_scope(clock_source=None):
                     fusion_components = next_fusion
                     if mode_changed:
                         field_i = 0
+                        tap_traces = fields if use_raster else 1
                         try:
-                            scope.set_tap_fields(fields if use_raster else 1)
+                            scope.set_tap_fields(tap_traces)
                         except Exception:
                             pass
                     if use_raster or mix_hz:
@@ -1864,6 +2093,8 @@ def run_scope(clock_source=None):
                           "SCOPE_BUFFER_BLOCKS or use frame mode")
             time.sleep(tick)
     finally:
+        if gui is not None:
+            gui.close()
         if term is not None:
             term.restore()
         if source is not None and hasattr(source, "close"):
