@@ -20,7 +20,8 @@ three places, all optional:
       cycles per sent pixel (0.5 is the Nyquist of what the wire holds).
       Applied along both axes; set ``RADIAL = True`` to apply it to the
       radius instead.
-    * ``gain(ctx, **params)``: a full 2-D array over the coder grid.
+    * ``gain(ctx, **params)``: a full 2-D array over the coder grid, or
+      ``None`` to leave that plane untouched.
 
     The gain at DC is forced to 1, so brightness never moves. With luma
     adjustment on, the same window is applied to the luminance it aims at, so
@@ -34,10 +35,14 @@ three places, all optional:
     array down to the grid. Return a grid of the same shape.
 
 Optional module attributes: ``LABEL``, ``HELP``, ``NAME`` (default: the file
-name), ``SUPPORT``, ``RADIAL`` and ``PARAMS``, a dict of name to ``Param`` (or
-a ``(default, low, high, step, help, integer)`` tuple, the last two optional). Every kernel also gets
-``luma_mix`` and ``chroma_mix``: 0 switches the kernel off for that plane, 1
-is as written, above 1 pushes further.
+name), ``SUPPORT``, ``RADIAL``, ``DEFER_GAIN_TO_CODEC`` and ``PARAMS``, a dict
+of name to ``Param`` (or a ``(default, low, high, step, help, integer)`` tuple,
+the last two optional). ``DEFER_GAIN_TO_CODEC`` opts into applying a pure gain
+at the folded sender's existing DCT, after the source values are clipped; that
+gain must not depend on the frame-specific ``ctx.reference``. This changes the
+gain/clamp order for samples that clip; without clipping, it is equivalent to
+the direct path. Every kernel also gets ``luma_mix`` and ``chroma_mix``: 0
+switches the kernel off for that plane, 1 is as written, above 1 pushes further.
 
 A kernel that fails to import, or to run on a test picture, is listed in
 ``registry.errors`` and left out; one that fails mid-stream is bypassed so the
@@ -67,6 +72,8 @@ SLOW_POST_MS = 25.0           # a refit this slow eats a third of a 12 fps frame
 SLOW_BUILD_MS = 100.0         # a window this slow to build stalls a slider drag
 CACHE_LIMIT = 256
 _INTEGRAL_POINTS = 2049
+_CACHE_MISS = object()
+_NO_GAIN = object()
 
 
 class KernelError(Exception):
@@ -265,6 +272,13 @@ class Kernel:
     def has_prefilter(self):
         return 'prefilter' in self._hooks
 
+    @property
+    def defer_gain_to_codec(self):
+        """Whether the live Fold sender may apply this gain at its DCT."""
+        return bool(getattr(self.module, 'DEFER_GAIN_TO_CODEC', False) and
+                    self.has_gain and not self.has_post and
+                    not self.has_prefilter)
+
     def prefilter(self, params):
         """Options for the stage before the DCT: ``{'preshrink': factor}``.
 
@@ -358,13 +372,21 @@ class Kernel:
         key = (ctx.plane, ctx.grid, ctx.sent, ctx.mask_key,
                tuple(sorted(params.items())))
         with self._lock:
-            hit = self._cache.get(key)
-        if hit is not None:
+            hit = self._cache.get(key, _CACHE_MISS)
+        if hit is _NO_GAIN:
+            return None
+        if hit is not _CACHE_MISS:
             return hit
         started = time.perf_counter()
-        gain = np.broadcast_to(np.asarray(self._raw_gain(ctx, params),
-                                          np.float64), ctx.grid).copy()
+        raw_gain = self._raw_gain(ctx, params)
         self.build_ms = (time.perf_counter()-started)*1000
+        if raw_gain is None:
+            with self._lock:
+                if len(self._cache) >= CACHE_LIMIT:
+                    self._cache.clear()
+                self._cache[key] = _NO_GAIN
+            return None
+        gain = np.broadcast_to(np.asarray(raw_gain, np.float64), ctx.grid).copy()
         if not np.isfinite(gain).all():
             raise KernelError('gain is not finite')
         gain[0, 0] = 1.0

@@ -4,6 +4,7 @@ This module is independent of the application and live capture stack. It keeps
 the current sender interface: one normalized Y/Cb/Cr value per model-grid
 sample. The caller remains responsible for aspect metadata and modem encoding.
 """
+import threading
 from functools import lru_cache
 
 import numpy as np
@@ -15,6 +16,8 @@ from animation_modem.v7_kernels import KernelContext
 
 
 NEUTRAL_CHROMA = 128.0/255.0
+_DEFERRED_CONTEXT_CACHE = {}
+_DEFERRED_CONTEXT_LOCK = threading.Lock()
 WEIGHTED_AGGREGATIONS = ('weighted-tent', 'weighted-cosine',
                          'weighted-gaussian')
 AGGREGATIONS = ('off', 'area-box', *WEIGHTED_AGGREGATIONS)
@@ -1025,6 +1028,51 @@ def _srgb_to_linear_extended(values):
     return np.where(values < 0.0, below, np.where(values > 1.0, above, inside))
 
 
+@njit(cache=True, nogil=True)
+def _linear_to_srgb_grid(values):
+    """In-place-sized sRGB encoding for a small luminance target grid.
+
+    The array formulation of this transfer function builds several temporary
+    arrays per frame. This compiled loop keeps the same clipping and piecewise
+    curve without that allocation traffic.
+    """
+    rows, cols = values.shape
+    result = np.empty((rows, cols), dtype=np.float64)
+    for i in range(rows):
+        for j in range(cols):
+            value = min(max(float(values[i, j]), 0.0), 1.0)
+            if value <= .0031308:
+                result[i, j] = 12.92*value
+            else:
+                result[i, j] = 1.055*value**(1.0/2.4)-.055
+    return result
+
+
+@njit(cache=True, nogil=True)
+def _srgb_to_linear_extended_grid(values):
+    """Small-grid counterpart of :func:`_srgb_to_linear_extended`."""
+    rows, cols = values.shape
+    result = np.empty((rows, cols), dtype=np.float64)
+    for i in range(rows):
+        for j in range(cols):
+            value = float(values[i, j])
+            if value < 0.0:
+                code = -value
+                if code >= 1.0:
+                    result[i, j] = -1.0
+                elif code <= .04045:
+                    result[i, j] = -code/12.92
+                else:
+                    result[i, j] = -((code+.055)/1.055)**2.4
+            elif value > 1.0:
+                result[i, j] = 1.0+(value-1.0)*(2.4/1.055)
+            elif value <= .04045:
+                result[i, j] = value/12.92
+            else:
+                result[i, j] = ((value+.055)/1.055)**2.4
+    return result
+
+
 SRGB_LUT_SIZE = 4096
 
 
@@ -1438,20 +1486,42 @@ class KernelFrame:
     and its message kept for the sender to report.
     """
 
-    def __init__(self, selection, grids, shapes, masks, planes):
+    def __init__(self, selection, grids, shapes, masks, planes,
+                 cache_contexts=False):
         self.selection = selection
         self.kernel = selection.kernel
         self.params = selection.params
-        self.contexts = []
         masks = list(masks) if masks is not None else [None]*len(grids)
         masks += [None]*(len(grids)-len(masks))
+        specs = []
         for index, (grid, sent, mask, plane) in enumerate(
                 zip(grids, shapes, masks, planes)):
             if mask is not None:
                 mask = np.asarray(mask, bool)
                 if mask.size != grid[0]*grid[1]:
                     mask = None
-            self.contexts.append(KernelContext(index, grid, sent, mask, plane))
+            specs.append((index, grid, sent, mask, plane))
+
+        if cache_contexts and self.kernel.defer_gain_to_codec:
+            geometry = tuple((index, tuple(grid), tuple(sent),
+                              None if mask is None else mask.tobytes())
+                             for index, grid, sent, mask, _plane in specs)
+            key = (self.kernel, selection.values, geometry)
+            with _DEFERRED_CONTEXT_LOCK:
+                contexts = _DEFERRED_CONTEXT_CACHE.get(key)
+            if contexts is None:
+                # Deferred gains promise not to read the frame-specific
+                # ``reference`` plane. Reuse their static geometry contexts.
+                contexts = [KernelContext(index, grid, sent, mask)
+                            for index, grid, sent, mask, _plane in specs]
+                with _DEFERRED_CONTEXT_LOCK:
+                    if len(_DEFERRED_CONTEXT_CACHE) >= 64:
+                        _DEFERRED_CONTEXT_CACHE.clear()
+                    _DEFERRED_CONTEXT_CACHE[key] = contexts
+            self.contexts = contexts
+        else:
+            self.contexts = [KernelContext(index, grid, sent, mask, plane)
+                             for index, grid, sent, mask, plane in specs]
 
     def gain(self, index):
         try:
@@ -1459,6 +1529,10 @@ class KernelFrame:
         except Exception as exc:
             self.kernel.note_failure(exc)
             return None
+
+    def coefficient_gains(self):
+        """Per-plane gains for a sender that already has the DCT coefficients."""
+        return tuple(self.gain(index) for index in range(len(self.contexts)))
 
     def filter_target(self, target):
         """The luminance goal seen through the luma window.
@@ -1475,12 +1549,11 @@ class KernelFrame:
         rows, cols = target.shape
         if (rows, cols) != gain.shape:
             return target
-        basis_y = _dct_matrix(rows, rows)
-        basis_x = _dct_matrix(cols, cols)
-        coded = _linear_to_srgb(target)
-        coefficients = basis_y.T @ coded @ basis_x
-        return _srgb_to_linear_extended(
-            basis_y @ (coefficients*gain) @ basis_x.T)
+        coded = _linear_to_srgb_grid(np.asarray(target, dtype=np.float64))
+        coefficients = dctn(coded, norm='ortho')
+        coefficients *= gain
+        filtered = idctn(coefficients, norm='ortho')
+        return _srgb_to_linear_extended_grid(filtered)
 
     def post(self, values, grids):
         """Run the kernel's refit on each plane of a concatenated value vector."""
@@ -1506,7 +1579,8 @@ def direct_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
                       sharpen='off', sharpen_strength=.25, clarity=0.0,
                       chroma_gain=1.0, luminance_out=None,
                       linear_light=False, kernel=None, kernel_masks=None,
-                      kernel_frame_out=None, preshrink=None):
+                      kernel_frame_out=None, preshrink=None,
+                      defer_kernel_gain=False):
     """Direct DCT encode: native RGB frame to the sender's coder-grid values.
 
     Stages (see the direct-encode spec): tone per pixel at full resolution,
@@ -1526,7 +1600,11 @@ def direct_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
     each plane's coefficients; ``kernel_masks`` names, per plane, the
     coefficients the wire carries (the transmitted rectangle when absent). A
     list passed as ``kernel_frame_out`` receives the frame's KernelFrame, whose
-    ``post`` the caller runs after luma adjustment.
+    ``post`` the caller runs after luma adjustment. ``defer_kernel_gain`` lets
+    a compatible live folded sender apply the gain during its existing DCT,
+    after this function's output clamp. This is equivalent while the gain's
+    inverse transform stays within the clamp range; clipped samples can differ
+    from the direct pre-clamp window path.
     """
     if kernel is not None and kernel.kernel.has_prefilter:
         try:
@@ -1541,8 +1619,12 @@ def direct_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
                    ('linear' if linear_light else True)),
         preshrink=preshrink)
     frame = None
+    defer_kernel_gain = bool(
+        defer_kernel_gain and kernel is not None and
+        kernel.kernel.defer_gain_to_codec)
     if kernel is not None:
-        frame = KernelFrame(kernel, grids, shapes, kernel_masks, planes)
+        frame = KernelFrame(kernel, grids, shapes, kernel_masks, planes,
+                            cache_contexts=defer_kernel_gain)
         if kernel_frame_out is not None:
             kernel_frame_out.append(frame)
     if luminance_out is not None:
@@ -1557,13 +1639,19 @@ def direct_dct_values(rgb, grids, shapes, *, brightness=1.0, gamma=1.0,
                                      *blocks[index])
         window = _taper_gain(grid_rows, grid_cols, sent[0], sent[1],
                              taper) if index == 0 and taper else None
-        shaped = frame.gain(index) if frame is not None else None
+        shaped = (frame.gain(index) if frame is not None and
+                  not defer_kernel_gain else None)
         if shaped is not None:
             window = shaped if window is None else window*shaped
         if window is not None:
-            coefficients = _separable(analysis_y, plane, analysis_x)
+            # Start with the same fused source-to-grid projection as the
+            # unwindowed path, then apply the cached spectral window using the
+            # FFT-backed grid DCT. This avoids a second pair of dense source
+            # matrix products for each selected kernel.
+            grid = _separable(left, plane, right)
+            coefficients = dctn(grid, norm='ortho')
             coefficients *= window
-            grid = _separable(synthesis_y, coefficients, synthesis_x)
+            grid = idctn(coefficients, norm='ortho')
         else:
             grid = _separable(left, plane, right)
         count = grid_rows*grid_cols

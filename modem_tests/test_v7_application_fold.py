@@ -33,6 +33,26 @@ class ApplicationFoldTests(unittest.TestCase):
         expected = LiveFold(500).encode_coefficients(self.model, self.values)
         np.testing.assert_array_equal(actual, expected)
 
+    def test_live_fold_applies_deferred_gain_to_the_existing_dct(self):
+        test_runtime = str(ROOT/'test_modem_v7')
+        if test_runtime not in sys.path:
+            sys.path.insert(0, test_runtime)
+        from live_fold import LiveFold
+
+        fold = LiveFold(500)
+        codec = fold.codec(self.model)
+        gains = [np.ones(grid, dtype=float) for grid in self.model.coder.grids]
+        gains[0][1:, :] = 1.1
+        gains[0][0, 0] = 1.0
+        full = codec.grid.forward(self.values)
+        luma_count = np.prod(self.model.coder.grids[0])
+        luma = full[:luma_count].reshape(self.model.coder.grids[0])
+        luma *= gains[0]
+        expected = codec.encode_coefficients(self.values, full=full)
+        actual = fold.encode_coefficients(
+            self.model, self.values, coefficient_gains=tuple(gains))
+        np.testing.assert_array_equal(actual, expected)
+
     def test_coded_pilot_matches_the_standalone_receiver_wire(self):
         test_runtime = str(ROOT/'test_modem_v7')
         if test_runtime not in sys.path:

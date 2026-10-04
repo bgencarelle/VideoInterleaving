@@ -586,7 +586,8 @@ def _fit_to_aspect(frame, aspect_code):
 def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0,
             perceptual_resize='off', perceptual_detail_strength=0.25,
             dct_encode=False, dct_options=None, return_resized=False,
-            fit_aspect=None, chroma_sent_for=None, kernel_masks_for=None):
+            fit_aspect=None, chroma_sent_for=None, kernel_masks_for=None,
+            defer_kernel_gain=False, deferred_gains_out=None):
     """(values, aspect code[, preview]) for one source frame.
 
     With ``fit_aspect`` (a V7 aspect code: the sender's fixed aspect layout)
@@ -607,11 +608,17 @@ def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0,
         kernel_masks = kernel_masks_for(
             (int(fit_aspect) & 7) | P.ASPECT_SCREEN if fit_aspect is not None
             else P.aspect_wire_code(_frame_size(frame)))
+    selection = (dct_options or {}).get('kernel')
+    defer_kernel_gain = bool(
+        defer_kernel_gain and dct_encode and chroma_sent_for is None and
+        selection is not None and selection.kernel.defer_gain_to_codec and
+        not selection.kernel.has_post and not selection.kernel.has_prefilter)
     out = _picture_values(model, frame, encode_filter, brightness, gamma,
                           perceptual_resize, perceptual_detail_strength,
                           dct_encode, dct_options, return_resized,
                           luminance_out=luminance, kernel_masks=kernel_masks,
-                          kernel_frame_out=kernel_frame)
+                          kernel_frame_out=kernel_frame,
+                          defer_kernel_gain=defer_kernel_gain)
     aspect = (out[1] if fit_aspect is None else
               (int(fit_aspect) & 7) | P.ASPECT_SCREEN)
     values = out[0]
@@ -620,16 +627,22 @@ def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0,
         masks = chroma_sent_for(aspect)
         if masks is not None:
             values = luma_adjust(values, model.coder.grids, masks, luminance[0])
-    if kernel_frame:
+    deferred_gains = None
+    if kernel_frame and defer_kernel_gain:
+        deferred_gains = kernel_frame[0].coefficient_gains()
+    elif kernel_frame:
         # The kernel's non-linear refit goes last, after luma adjustment, so
         # nothing re-fits the luma it just cleaned.
         values = kernel_frame[0].post(values, model.coder.grids)
+    if deferred_gains_out is not None:
+        deferred_gains_out.append(deferred_gains)
     extra = tuple(out[2:])
     if kernel_frame and return_resized and extra:
         # With a kernel chosen the "Encoder input" picture is what the wire
         # carries (an ideal receiver's picture), so the kernel can be judged.
         sent = _sent_preview_image(values, model.coder.grids,
-                                   model.coder.shapes, kernel_masks)
+                                   model.coder.shapes, kernel_masks,
+                                   coefficient_gains=deferred_gains)
         # The wire squeezes the picture into its grid; draw it at the
         # source's own proportions, as the receiver does.
         width, height = _frame_size(frame)
@@ -640,7 +653,8 @@ def _values(model, frame, encode_filter='nearest', brightness=1.05, gamma=1.0,
     return (values, aspect) + extra
 
 
-def _sent_preview_image(values, grids, shapes, masks=None, up=2):
+def _sent_preview_image(values, grids, shapes, masks=None, up=2,
+                        coefficient_gains=None):
     """The picture an ideal receiver draws from the sent DCT coefficients.
 
     Every plane is inverted at ``up`` times its own grid (zero-padded
@@ -653,6 +667,10 @@ def _sent_preview_image(values, grids, shapes, masks=None, up=2):
         block = np.asarray(values[offset:offset+rows*cols], np.float32)
         offset += rows*cols
         coefficients = dctn(block.reshape(rows, cols), norm='ortho')
+        if coefficient_gains is not None:
+            gain = coefficient_gains[index]
+            if gain is not None:
+                coefficients *= np.asarray(gain, dtype=coefficients.dtype)
         mask = None if masks is None else masks[index]
         if mask is None or np.shape(mask) != (rows, cols):
             mask = np.zeros((rows, cols), bool)
@@ -718,7 +736,8 @@ def _picture_values(model, frame, encode_filter='nearest', brightness=1.05,
                     gamma=1.0, perceptual_resize='off',
                     perceptual_detail_strength=0.25, dct_encode=False,
                     dct_options=None, return_resized=False, luminance_out=None,
-                    kernel_masks=None, kernel_frame_out=None):
+                    kernel_masks=None, kernel_frame_out=None,
+                    defer_kernel_gain=False):
     _validate_tone_controls(brightness, gamma)
     source_size = getattr(frame, 'source_size', None)
     capture_prepared = bool(getattr(frame, 'prepared', False))
@@ -768,7 +787,8 @@ def _picture_values(model, frame, encode_filter='nearest', brightness=1.05,
                 rgb, model.coder.grids, model.coder.shapes,
                 brightness=brightness, gamma=gamma,
                 luminance_out=luminance_out, kernel_masks=kernel_masks,
-                kernel_frame_out=kernel_frame_out, **options)
+                kernel_frame_out=kernel_frame_out,
+                defer_kernel_gain=defer_kernel_gain, **options)
         else:
             # Research reducers keep the full-resolution analysis path.
             research = dict(dct_options or {})
@@ -1420,7 +1440,7 @@ def _run_send_session(args):
             if name not in HOST_PARAM_NAMES or value != 1.0))
         say_kernel(f'DCT kernel in use: {label}', applied=label)
 
-    def encode_batch(frames, aspects, counter):
+    def encode_batch(frames, aspects, counter, deferred_gains=None):
         values = np.asarray(frames)
         if clip_aware:
             values = np.asarray([clip_aware_values(value, aspects[index])
@@ -1457,7 +1477,11 @@ def _run_send_session(args):
             pulse_profile_code = FOLD_500
             audio = np.concatenate([
                 _encode_pulse_frame_coeffs(
-                    model, fold.encode_coefficients(model, value),
+                    model, fold.encode_coefficients(
+                        model, value,
+                        coefficient_gains=(
+                            deferred_gains[index]
+                            if deferred_gains is not None else None)),
                     counter+index, aspect_code=aspects[index],
                     source_index=_wire_index(counter+index),
                     eof_marker=getattr(args, 'eof_marker', True),
@@ -1543,6 +1567,7 @@ def _run_send_session(args):
         nonlocal total, buffered_audio_seconds
         frames = []
         aspects = []
+        deferred_gains = []
         preview_images = []
         counter = getattr(args, '_sender_counter', 1)
         first_audio_video_frame = (
@@ -1577,7 +1602,10 @@ def _run_send_session(args):
                     return_resized=image_preview_port is not None,
                     fit_aspect=fit_aspect,
                     chroma_sent_for=chroma_sent_for if luma_adjusted else None,
-                    kernel_masks_for=kernel_masks_for)
+                    kernel_masks_for=kernel_masks_for,
+                    defer_kernel_gain=(fold is not None and
+                                       not luma_adjusted and not clip_aware),
+                    deferred_gains_out=deferred_gains)
                 report_kernel(frame_options.get('kernel'))
                 if image_preview_port is not None:
                     value, aspect, resized_preview = processed
@@ -1593,7 +1621,8 @@ def _run_send_session(args):
                 next_capture += 1/wire_fps
                 if len(frames) < batch_size:
                     continue
-                audio, stats = encode_batch(frames, aspects, counter)
+                audio, stats = encode_batch(frames, aspects, counter,
+                                            deferred_gains)
                 preview_frames = (
                     tuple((counter+index, aspects[index], frame)
                           for index, frame in enumerate(preview_images))
@@ -1608,13 +1637,15 @@ def _run_send_session(args):
                 args._sender_total = total
                 frames = []
                 aspects = []
+                deferred_gains = []
                 preview_images = []
         except Exception as exc:
             failure = exc
 
         if failure is None and frames and not stop.is_set():
             try:
-                audio, stats = encode_batch(frames, aspects, counter)
+                audio, stats = encode_batch(frames, aspects, counter,
+                                            deferred_gains)
                 preview_frames = (
                     tuple((counter+index, aspects[index], frame)
                           for index, frame in enumerate(preview_images))

@@ -100,9 +100,25 @@ class LiveFold:
         """Values whose V7 encode is a folded packet."""
         return self.codec(model).encode(values)
 
-    def encode_coefficients(self, model, values):
+    def encode_coefficients(self, model, values, coefficient_gains=None):
         """Fold directly to DCT coefficients for the live pulse encoder."""
-        return self.codec(model).encode_coefficients(values)
+        codec = self.codec(model)
+        full = None
+        if coefficient_gains is not None:
+            full = codec.grid.forward(values)
+            if len(coefficient_gains) != len(codec.grid.grids):
+                raise ValueError('coefficient gains must match the grid planes')
+            offset = 0
+            for gain, (rows, cols) in zip(coefficient_gains,
+                                          codec.grid.grids):
+                count = rows*cols
+                if gain is not None:
+                    gain = np.asarray(gain, dtype=np.float64)
+                    if gain.shape != (rows, cols):
+                        raise ValueError('a coefficient gain has the wrong grid shape')
+                    full[offset:offset+count] *= gain.ravel()
+                offset += count
+        return codec.encode_coefficients(values, full=full)
 
     # -------------------------------------------------------------- receiver
     def install(self):

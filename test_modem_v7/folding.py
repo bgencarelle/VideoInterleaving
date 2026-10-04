@@ -215,8 +215,9 @@ class FoldCodec:
         self.power = 1 + self.D**2/12 + self.beta**2                    # E s^2
 
     # ---------------------------------------------------------------- sender
-    def _split(self, values):
-        full = self.grid.forward(values)
+    def _split(self, values, full=None):
+        if full is None:
+            full = self.grid.forward(values)
         coeffs = full[self.kept].copy()
         h = (coeffs[self.hosts] - self.model.mu[self.hosts])/self.sd_host
         u = np.clip(full[self.guests]/self.sd_guest, -U_CLIP, U_CLIP)
@@ -234,7 +235,7 @@ class FoldCodec:
             symbol = (self.D*np.round(h/self.D) +
                       self.amp*self._compress(full[self.guests]/self.sd_guest))
         else:
-            _, coeffs, h, u = self._split(values)
+            _, coeffs, h, u = self._split(values, full)
             symbol = self.D*np.round(h/self.D) + self.beta*u
         if self.signature:
             symbol[-self.signature:] = SIGNATURE_STEPS*self.D*self.pattern

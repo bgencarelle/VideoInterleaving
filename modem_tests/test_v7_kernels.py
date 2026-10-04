@@ -14,7 +14,10 @@ if str(ROOT) not in sys.path:
 
 from animation_modem import v7
 from animation_modem import v7_kernels as K
-from animation_modem.v7_source_dct import direct_dct_values
+from animation_modem.v7_source_dct import (
+    KernelFrame, _dct_matrix, _direct_plan, _direct_planes,
+    _linear_to_srgb, _separable, _srgb_to_linear_extended,
+    direct_dct_values)
 from tools import v7_live
 
 GRIDS, SHAPES = v7.V7_GRIDS, v7.V7_SHAPES
@@ -368,6 +371,29 @@ class GainTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             first[1, 1] = 0
 
+    def test_csf_diamond_windows_chroma_by_default_with_opt_out(self):
+        kernel = self.registry.get('csf_diamond')
+        params = kernel.defaults()
+        self.assertIsNotNone(kernel.gain(self.luma, params))
+        self.assertIsNotNone(kernel.gain(self.chroma, params))
+        self.assertIsNone(kernel.gain(
+            self.chroma, dict(params, color_planes=0)))
+
+    def test_csf_luma_target_matches_the_matrix_reference(self):
+        selection = self.registry.select('csf_diamond')
+        planes = [np.zeros(grid) for grid in GRIDS]
+        frame = KernelFrame(selection, GRIDS, SHAPES, None, planes)
+        target = np.random.default_rng(8).random(GRIDS[0])
+        gain = frame.gain(0)
+        basis_y = _dct_matrix(GRIDS[0][0], GRIDS[0][0])
+        basis_x = _dct_matrix(GRIDS[0][1], GRIDS[0][1])
+        coded = _linear_to_srgb(target)
+        coefficients = basis_y.T @ coded @ basis_x
+        expected = _srgb_to_linear_extended(
+            basis_y @ (coefficients*gain) @ basis_x.T)
+        np.testing.assert_allclose(frame.filter_target(target), expected,
+                                   rtol=0.0, atol=3e-13)
+
     def test_a_kernel_may_depend_on_the_plane_it_is_given(self):
         with tempfile.TemporaryDirectory() as folder:
             _write(folder, 'planewise', '''
@@ -404,6 +430,88 @@ class EncoderTests(unittest.TestCase):
         window = direct_dct_values(self.frame, GRIDS, SHAPES, kernel=selection)
         self.assertGreater(np.abs(both-taper).max(), 1e-3)
         self.assertGreater(np.abs(both-window).max(), 1e-3)
+
+    def test_csf_diamond_shapes_chroma_by_default_but_can_skip_it(self):
+        reference = direct_dct_values(self.frame, GRIDS, SHAPES)
+        selection = self.registry.select('csf_diamond')
+        shaped = direct_dct_values(self.frame, GRIDS, SHAPES, kernel=selection)
+        luma_count = GRIDS[0][0]*GRIDS[0][1]
+        self.assertGreater(np.max(np.abs(shaped[luma_count:] -
+                                         reference[luma_count:])), 1e-3)
+        luma_only = self.registry.select('csf_diamond', {'color_planes': 0})
+        unshaped = direct_dct_values(self.frame, GRIDS, SHAPES,
+                                     kernel=luma_only)
+        np.testing.assert_array_equal(unshaped[luma_count:],
+                                      reference[luma_count:])
+
+    def test_live_deferred_csf_returns_reference_values_and_gain_sidecar(self):
+        selection = self.registry.select('csf_diamond')
+        deferred = []
+        model = v7.load_model(.1521, 'box')
+        values, _aspect, preview = v7_live._values(
+            model, self.frame, 'box', 1.0, 1.0, dct_encode=True,
+            dct_options={'kernel': selection}, return_resized=True,
+            defer_kernel_gain=True,
+            deferred_gains_out=deferred)
+        np.testing.assert_array_equal(
+            values, direct_dct_values(self.frame, GRIDS, SHAPES))
+        self.assertEqual(preview.mode, 'RGB')
+        self.assertEqual(len(deferred), 1)
+        self.assertIsNotNone(deferred[0][0])
+        self.assertIsNotNone(deferred[0][1])
+        self.assertIsNotNone(deferred[0][2])
+
+    def test_deferred_gain_matches_exact_path_when_clamping_is_inactive(self):
+        from scipy.fft import dctn, idctn
+
+        yy, xx = np.indices((480, 400))
+        wave = 127.0 + 25.0*np.sin(2*np.pi*xx/31)*np.cos(2*np.pi*yy/37)
+        rgb = np.stack((wave, wave+4.0, wave-3.0), axis=-1).clip(0, 255).astype(
+            np.uint8)
+        selection = self.registry.select('csf_diamond')
+        exact = direct_dct_values(rgb, GRIDS, SHAPES, kernel=selection)
+        frames = []
+        values = direct_dct_values(
+            rgb, GRIDS, SHAPES, kernel=selection, kernel_frame_out=frames,
+            defer_kernel_gain=True)
+        self.assertLess(float(np.max(np.abs(exact))), .9)
+        gained, offset = [], 0
+        for gain, (rows, cols) in zip(frames[0].coefficient_gains(), GRIDS):
+            count = rows*cols
+            plane = values[offset:offset+count].reshape(rows, cols)
+            coefficients = dctn(plane, norm='ortho')
+            if gain is not None:
+                coefficients *= gain
+            filtered = idctn(coefficients, norm='ortho')
+            gained.append(filtered.ravel())
+            offset += count
+        np.testing.assert_allclose(np.concatenate(gained), exact,
+                                   rtol=0.0, atol=3e-13)
+
+    def test_fft_window_path_matches_the_source_dct_reference(self):
+        selection = self.registry.select('csf_diamond')
+        planes, grids, shapes, _taper, _target, blocks, source = _direct_planes(
+            self.frame, GRIDS, SHAPES, 1.0, 1.0, 'off', .25, 0.0, 1.0)
+        kernel_frame = KernelFrame(selection, grids, shapes, None, planes)
+        expected = []
+        for index, (plane, (rows, cols), sent) in enumerate(
+                zip(planes, grids, shapes)):
+            (analysis_y, analysis_x, synthesis_y, synthesis_x,
+             left, right) = _direct_plan(
+                 *source, rows, cols, *blocks[index])
+            gain = kernel_frame.gain(index)
+            if gain is None:
+                grid = _separable(left, plane, right)
+            else:
+                coefficients = _separable(analysis_y, plane, analysis_x)
+                coefficients *= gain
+                grid = _separable(synthesis_y, coefficients, synthesis_x)
+            expected.append(grid.ravel())
+        expected = np.concatenate(expected)*2.0-1.0
+        np.clip(expected, -1.0, 1.0, out=expected)
+        actual = direct_dct_values(self.frame, GRIDS, SHAPES,
+                                   kernel=selection)
+        np.testing.assert_allclose(actual, expected, rtol=0.0, atol=3e-13)
 
     def test_flat_pictures_stay_flat_with_any_kernel(self):
         flat = np.full((240, 200, 3), 97, np.uint8)
