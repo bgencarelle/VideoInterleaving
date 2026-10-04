@@ -728,6 +728,12 @@ class BufferedSource:
                 self._w += len(chunk)
                 self.blocks_made += 1
 
+    @property
+    def buffered_samples(self):
+        """Samples currently queued for the device callback."""
+        with self._lock:
+            return max(0, self._w - self._r)
+
     def __call__(self, n):
         """Called from the audio callback: a copy out of the ring, nothing more."""
         out = np.empty((n, 2), dtype=np.float32)
@@ -939,6 +945,11 @@ class Scope:
         # 512 frames is ~5 ms at 96 kHz -- far below the trace period, and a
         # third the wakeups.
         self.blocksize = int(blocksize or 0)
+        self.output_muted = False
+        self._output_gain = 1.0
+        self._output_gain_indices = np.arange(
+            max(1, self.blocksize or 512), dtype=np.float32)
+        self._output_gain_ramp = np.empty_like(self._output_gain_indices)
         if self.null:
             print(f"[SCOPE] no audio device (--device null): generating at "
                   f"{samplerate:.0f} Hz for the browser to render")
@@ -954,11 +965,57 @@ class Scope:
         """Map XY geometry to the selected physical output layout."""
         if self.output_channels > (1 if self.x_only else 2):
             outdata.fill(0.0)
-        if self.x_only:
-            outdata[:, self.channel_indices[0]] = frame[:, 0]
+        gain = 0.0 if self.output_muted else 1.0
+        if gain == 0.0 and self._output_gain == 0.0:
+            outdata.fill(0.0)
+            return
+
+        count = min(len(frame), len(outdata))
+        ramp_count = 0
+        if self._output_gain != gain:
+            ramp_count = min(count, len(self._output_gain_ramp))
+            if ramp_count > 1:
+                ramp = self._output_gain_ramp[:ramp_count]
+                np.divide(self._output_gain_indices[:ramp_count],
+                          ramp_count - 1, out=ramp)
+                np.multiply(ramp, gain - self._output_gain, out=ramp)
+                np.add(ramp, self._output_gain, out=ramp)
+
+        channels = (0,) if self.x_only else (0, 1)
+        output_channels = (self.channel_indices[0],) if self.x_only else (
+            self.channel_indices[0], self.channel_indices[1])
+        if gain == 1.0 and self._output_gain == 1.0:
+            for source_channel, output_channel in zip(channels, output_channels):
+                outdata[:count, output_channel] = frame[:count, source_channel]
+            self._output_gain = gain
+            return
+        if ramp_count > 1:
+            ramp = self._output_gain_ramp[:ramp_count]
+            for source_channel, output_channel in zip(channels, output_channels):
+                np.multiply(frame[:ramp_count, source_channel], ramp,
+                            out=outdata[:ramp_count, output_channel])
         else:
-            outdata[:, self.channel_indices[0]] = frame[:, 0]
-            outdata[:, self.channel_indices[1]] = frame[:, 1]
+            ramp_count = 0
+        for source_channel, output_channel in zip(channels, output_channels):
+            np.multiply(frame[ramp_count:count, source_channel], gain,
+                        out=outdata[ramp_count:count, output_channel])
+        self._output_gain = gain
+
+    def set_output_audio(self, muted=None):
+        """Mute the DAC output without stopping trace generation.
+
+        The scope tap runs before this output stage, so browser/native previews
+        remain visible when the physical audio/DAC output is muted. No program-
+        audio volume control is applied to the XY coordinates.
+        """
+        if muted is not None:
+            self.output_muted = bool(muted)
+        try:
+            active = bool(self.stream.active)
+        except Exception:
+            active = False
+        if not active:
+            self._output_gain = 0.0 if self.output_muted else 1.0
 
     @property
     def trace_samples(self):
@@ -1050,12 +1107,12 @@ class Scope:
                 if frames:
                     fallback = np.repeat(self._last_out[None, :], frames, axis=0)
                     rendered = unpark_frame(fallback, phase=self.beams_unparked * 7)
-                    self._write_output(outdata, rendered[:frames])
-                    self.beams_unparked += 1
                     if self.trigger:
-                        self._stamp_marker(outdata, self._yt_pos)
+                        self._stamp_marker(rendered, self._yt_pos)
                         self._yt_pos = ((self._yt_pos + frames)
                                         % self.samples_per_frame)
+                    self._write_output(outdata, rendered[:frames])
+                    self.beams_unparked += 1
                     self._last_out = rendered[-1].copy()
                 self.dac_dropouts += 1
             return

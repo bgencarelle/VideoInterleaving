@@ -579,6 +579,9 @@ def _swap_device(old_scope, spec, source, fps, samples, main_libs, float_libs,
         channel_pair=channel_pair,
         yt_trigger_us=getattr(old_scope, "yt_trigger_us", 250.0),
         yt_trigger_level=getattr(old_scope, "yt_trigger_level", 0.99))
+    set_output_audio = getattr(new_scope, "set_output_audio", None)
+    if callable(set_output_audio):
+        set_output_audio(muted=getattr(old_scope, "output_muted", False))
     new_cal = {}
     try:
         new_cal = calibrate(main_libs, float_libs, new_scope.samples_per_frame,
@@ -598,6 +601,7 @@ def run_scope(clock_source=None):
     """Caller (main.py, or _bootstrap) must have prepared the generated lists."""
     if clock_source is None:
         clock_source = settings.CLOCK_MODE
+    gui_enabled = bool(getattr(settings, "SCOPE_GUI", False))
 
     from settings import IPS, PINGPONG
 
@@ -1041,6 +1045,10 @@ def run_scope(clock_source=None):
                   x_only=x_only,
                   channel_pair=channel_pair,
                   yt_trigger_us=trigger_us)
+    if gui_enabled:
+        # Keep the native visualizer quiet on launch. The preview tap remains
+        # upstream of this output-stage mute, so the GUI image is unaffected.
+        scope.set_output_audio(muted=True)
     # An explicit samples/trace budget takes precedence over the requested FPS.
     # Keep the runtime's time controls and diagnostics anchored to the rate the
     # DAC will actually emit, not the superseded convenience argument.
@@ -1334,7 +1342,6 @@ def run_scope(clock_source=None):
     # --- live controls ---
     # Everything below is adjustable while watching the scope; restarting to
     # try a different trim is useless when the thing you are judging is a beam.
-    gui_enabled = bool(getattr(settings, "SCOPE_GUI", False))
     live_state = dict(trim=trim, density=density,
                       gamma=(walk_gamma
                              if (use_stochastic or use_stipple
@@ -1352,6 +1359,7 @@ def run_scope(clock_source=None):
                       precondition=raster_precondition,
                       mode_locked=bool(realtime or mix_hz),
                       clock_locked=bool(_index_calculator.midi_mode),
+                      audio_muted=gui_enabled,
                       mix_hz=mix_hz, mix_duty=mix_duty,
                       fps=fps, ips=IPS, fields=fields,
                       available_modes=(
@@ -1602,8 +1610,34 @@ def run_scope(clock_source=None):
                         "dropouts": int(scope.dac_dropouts),
                         "underruns": int(getattr(source, "underruns", 0)
                                          if source is not None else 0),
-                        "message": timing_status().get("message", ""),
+                        "buffered_samples": (
+                            source.buffered_samples
+                            if source is not None and
+                            hasattr(source, "buffered_samples") else
+                            (scope.trace_samples
+                             if not scope.ready() else 0)),
+                        "buffer_capacity_samples": (
+                            source.capacity
+                            if source is not None and hasattr(source, "capacity")
+                            else scope.trace_samples),
+                        "buffer_kind": ("source" if source is not None
+                                        and hasattr(source, "buffered_samples")
+                                        else "trace queue"),
                     }
+                    _scope_gui_metrics["buffered_ms"] = (
+                        1000.0 * _scope_gui_metrics["buffered_samples"]
+                        / max(scope.samplerate, 1))
+                    _scope_gui_metrics["buffer_capacity_ms"] = (
+                        1000.0 * _scope_gui_metrics["buffer_capacity_samples"]
+                        / max(scope.samplerate, 1))
+                    _stream_latency = getattr(scope.stream, "latency", 0.0)
+                    if isinstance(_stream_latency, (tuple, list)):
+                        _stream_latency = _stream_latency[-1] if _stream_latency else 0.0
+                    try:
+                        _scope_gui_metrics["dac_latency_ms"] = (
+                            1000.0 * float(_stream_latency))
+                    except (TypeError, ValueError):
+                        _scope_gui_metrics["dac_latency_ms"] = 0.0
                     _gui_actions = gui.poll(live_state, _scope_gui_metrics)
                 except Exception as e:
                     print(f"[SCOPE] GUI update failed: {e}", flush=True)
@@ -1632,6 +1666,14 @@ def run_scope(clock_source=None):
                             keys.set_value(_name, _value)
                     elif _action[0] == "mode":
                         keys.set_mode(_action[1])
+                    elif _action[0] == "audio":
+                        audible = bool(_action[1])
+                        scope.set_output_audio(muted=not audible)
+                        live_state["audio_muted"] = not audible
+                        gui.message = (
+                            "XY DAC output enabled"
+                            if audible else
+                            "XY DAC muted · physical scope holds center dot")
                     elif _action[0] == "key":
                         keys.feed(_action[1])
 

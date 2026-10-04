@@ -554,7 +554,12 @@ normal application graphics dependencies to use it.
 
 XY scope output has no separate intensity channel. Gamma and trim alter beam
 dwell, while the physical scope's intensity control sets tube brightness.
-Preview exposure only changes the simulated window image.
+Preview exposure only changes the simulated window image. Native GUI mode
+starts with the DAC muted; “Hear XY” enables the raw XY waveform. The software
+preview remains live while muted. Since XY has no Z/blanking channel, a physical
+scope holds a center dot rather than going blank; use its intensity control to
+dim it. The status panel reports bounded trace/source buffer fill and underruns
+without adding long monitor latency.
 
 ### `--scope-channels X,Y` (default `1,2`)
 

@@ -86,7 +86,13 @@ rate, trace refresh, and raster fields reopen the audio stream and recalibrate
 when applied. Other tuning sliders adjust the running renderer. Preview
 exposure affects only the phosphor simulation. XY has no separate intensity
 channel, so use gamma/trim for dwell brightness or the scope's hardware
-intensity control for tube brightness.
+intensity control for tube brightness. Native GUI mode starts with the physical
+DAC muted; “Hear XY” enables the raw XY waveform again. The software preview
+continues while muted. Because XY has no Z/blanking channel, a muted physical
+scope sees a stationary center dot rather than a blank screen; use its intensity
+control to dim the dot. The status panel shows trace/source buffer fill and
+underruns; the DAC path keeps its low-latency trace-boundary handoff rather than
+adding the decoder's long jitter buffer.
 
 Live-image scope defaults to raster and also supports `--scope-stochastic` and
 `--scope-stipple`. It uses the normal image ordering, alpha mattes, and folder

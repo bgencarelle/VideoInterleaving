@@ -1,7 +1,8 @@
 import unittest
 
 from scope_controls import KeyMap
-from scope_gui import (make_slider_spec, slider_default_x, slider_fraction,
+from scope_gui import (fit_square_image, make_slider_spec,
+                       slider_default_x, slider_fraction,
                        slider_value_at)
 
 
@@ -26,6 +27,10 @@ class ScopeSliderMathTests(unittest.TestCase):
         self.assertEqual(spec.default, 150)
         self.assertGreater(spec.maximum, spec.default)
 
+    def test_preview_scales_to_fit_the_smaller_gui_dimension(self):
+        self.assertEqual(fit_square_image(800, 540), 540)
+        self.assertEqual(fit_square_image(800, 900), 680)
+
 
 class ScopeGuiControlTests(unittest.TestCase):
     def setUp(self):
@@ -37,6 +42,51 @@ class ScopeGuiControlTests(unittest.TestCase):
             "mode_locked": False,
         }
         self.controls = KeyMap(self.state)
+
+    def test_dac_mute_is_applied_at_output_stage(self):
+        import numpy as np
+        from scope_out import Scope
+
+        scope = Scope(device="null", fps=30, trigger=False)
+        frame = np.array(((0.25, -0.5), (0.5, 0.75)), dtype=np.float32)
+        output = np.empty_like(frame)
+        scope.set_output_audio(muted=True)
+        scope._write_output(output, frame)
+        np.testing.assert_array_equal(output, np.zeros_like(frame))
+        scope.set_output_audio(muted=False)
+        scope._write_output(output, frame)
+        np.testing.assert_allclose(output, frame)
+
+    def test_live_dac_mute_fades_over_one_callback_block(self):
+        import numpy as np
+        from scope_out import Scope
+
+        scope = Scope(device="null", fps=30, trigger=False)
+
+        class ActiveStream:
+            active = True
+
+        scope.stream = ActiveStream()
+        frame = np.ones((5, 2), dtype=np.float32)
+        output = np.empty_like(frame)
+        scope.set_output_audio(muted=True)
+        scope._write_output(output, frame)
+        np.testing.assert_allclose(output[:, 0], (1.0, 0.75, 0.5, 0.25, 0.0))
+        np.testing.assert_allclose(output[:, 1], output[:, 0])
+
+    def test_realtime_error_marker_cannot_bypass_dac_mute(self):
+        import numpy as np
+        from scope_out import Scope
+
+        def broken_source(_frames):
+            raise RuntimeError("source failed")
+
+        scope = Scope(device="null", fps=30, source=broken_source,
+                      trigger=True)
+        scope.set_output_audio(muted=True)
+        output = np.empty((16, 2), dtype=np.float32)
+        scope._callback(output, len(output), None, None)
+        np.testing.assert_array_equal(output, np.zeros_like(output))
 
     def test_grid_sliders_request_recalibration(self):
         self.controls.set_value("trim", 0.12)
