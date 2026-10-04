@@ -1925,8 +1925,15 @@ class SenderGui:
             ideal, bilinear = winners['ideal'], winners['bilinear']
             default_kernel = default_kernel_for_profile(
                 self.settings.get('profile'))
+            descriptions = {name: label for name, label, _help, _params in
+                            kernel_registry().describe()}
+            priority = dict.fromkeys((v7_kernels.REFERENCE, default_kernel,
+                                      ideal, bilinear))
+            names = [name for name in priority if name in descriptions]
+            names.extend(name for name in descriptions if name not in priority)
             choices = []
-            for name, label, _help, _params in kernel_registry().describe():
+            for name in names:
+                label = descriptions[name]
                 if name == default_kernel == v7_kernels.REFERENCE:
                     label += ' · default (no kernel)'
                 elif name == default_kernel:

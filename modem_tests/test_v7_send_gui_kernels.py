@@ -58,6 +58,39 @@ class KernelGuiTests(unittest.TestCase):
                                            gui._choices('dct_kernel'))
                       ['viewer_solve'])
 
+    def test_kernel_mouse_chooser_keeps_default_and_winners_in_view(self):
+        from PIL import Image
+
+        gui = SenderGui(self.devices)
+        gui.settings.update(device=3, source='test')
+        gui._assign('profile', 'aspect-mono-500')
+        gui.page = 'live'
+        choices = gui._choices('dct_kernel')
+        names = [name for _label, name in choices]
+        self.assertEqual(names[:3], ['reference', 'viewer_solve', 'csf_peak'])
+
+        def render():
+            image = Image.new('RGB', (1100, 800))
+            gui._canvas(image.size)
+
+        def click(hit):
+            left, top, right, bottom = gui.hits[hit]
+            glfw.get_cursor_pos = lambda _window: (
+                (left+right)/2, (top+bottom)/2)
+            gui._on_mouse(glfw, None, glfw.MOUSE_BUTTON_LEFT,
+                          glfw.PRESS, 0)
+
+        glfw = SimpleNamespace(PRESS=1, MOUSE_BUTTON_LEFT=0,
+                               MOUSE_BUTTON_RIGHT=1, get_cursor_pos=None)
+        render()
+        click('field:dct_kernel')
+        render()
+        self.assertIn('option:2', gui.hits)
+        click('option:2')
+
+        self.assertEqual(gui.settings['dct_kernel'], 'csf_peak')
+        self.assertIsNone(gui.dropdown)
+
     def test_profile_switch_updates_only_an_untouched_kernel_default(self):
         gui = SenderGui(self.devices)
         self.assertEqual(gui.settings['dct_kernel'], 'viewer_solve')
