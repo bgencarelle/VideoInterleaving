@@ -137,7 +137,8 @@ def _bootstrap():
     ap.add_argument("--scope-channels", metavar="X,Y",
                     help="1-based PortAudio output channels, e.g. 18,19")
     ap.add_argument("--scope-live-size", type=int, metavar="PX")
-    ap.add_argument("--scope-gui", action="store_true", default=None,
+    ap.add_argument("--scope-gui", action=argparse.BooleanOptionalAction,
+                    default=None,
                     help="open the optional native scope preview and tuner")
     ap.add_argument("--scope-fps", type=int)
     ap.add_argument("--scope-samples", type=int)

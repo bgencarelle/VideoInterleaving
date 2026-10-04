@@ -64,6 +64,24 @@ mode's code path is altered.
 
 ### Running it
 
+Launch the setup/live controller with `./vi.scope-gui`. It follows the
+event-driven Setup/Live pattern of `vi.modem-send-gui` and starts either the
+regular application scope mode or the live-source runner as a child process.
+Preferences and per-video resume positions are saved under
+`$XDG_CONFIG_HOME/video-interleaving/scope-gui.json` (or
+`~/.config/video-interleaving/scope-gui.json`).
+
+The Application pipeline exposes baked XY and runtime-decoded image sources,
+all applicable scope renderers, audio routing, trigger/mono settings, timing,
+tone, and advanced renderer options. Runtime images support raster, stochastic,
+and stipple; vector, fusion, and mixed traces need baked geometry.
+
+The Live pipeline exposes video files, MSS screen capture, FFmpeg desktop or
+custom inputs, camera inputs, and a test pattern. Browse or drop a video file;
+the Live page includes play/pause, restart, seek, and resume position. For a
+camera, enter the host FFmpeg input string, for example `v4l2:/dev/video0`,
+`avfoundation:0:none`, or `dshow:video=Camera`.
+
 ```
 python main.py --mode scope --dir images --xy-dir images_xy --scope-raster
 ```
@@ -102,9 +120,10 @@ adding the decoder's long jitter buffer.
 Live-image scope defaults to raster and also supports `--scope-stochastic` and
 `--scope-stipple`. It uses the normal image ordering, alpha mattes, and folder
 selector, with a small bounded thumbnail cache and background decode workers.
-Vector, fusion, and mixed passes still need baked contour geometry. The live
-scope-screen tool for arbitrary screen/video sources remains separate at
-`tools/scope_screen.py`.
+The live screen/video sources are available from the same GUI and from
+`tools/scope_screen.py`; the CLI accepts `--source video --file clip.mp4`,
+`--source screen`, `--source ffmpeg`, `--source camera --ffmpeg-input FMT:SRC`,
+and `--source test`.
 
 For a one-channel output and a single-input Y-T scope:
 
@@ -116,10 +135,19 @@ python main.py --mode scope --dir images --xy-dir images_xy --scope-x-only
 for example, `--scope-channels 18,19` routes X to channel 18 and Y to channel
 19. The audio device must expose at least as many output channels as the
 highest selected number. X-only output uses X's selected channel.
+The live-source tool accepts the same `--scope-x-only` and `--scope-channels`
+options.
 
 The X trigger marker is already part of each trace. Connect the mono output to
 the scope input and use a rising-edge trigger near +0.95. Without
 `--scope-x-only`, scope mode keeps its normal two-channel XY output.
+
+For direct CLI use with a live video file:
+
+```bash
+python tools/scope_screen.py --source video --file clip.mp4 \
+  --scope-x-only --device "Your audio output"
+```
 
 With `--device null`, the server-side virtual trace uses a 96 kHz reference
 budget. At 30 traces/s this gives the browser scope display 3200 XY samples per

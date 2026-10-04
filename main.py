@@ -170,7 +170,8 @@ def configure_runtime():
     parser.add_argument("--scope-live-size", type=int, default=None,
                         metavar="PX",
                         help="Live-image thumbnail width (default: 128)")
-    parser.add_argument("--scope-gui", action="store_true", default=None,
+    parser.add_argument("--scope-gui", action=argparse.BooleanOptionalAction,
+                        default=None,
                         help="Open the optional native live scope preview and tuner")
     scope_render = parser.add_mutually_exclusive_group()
     scope_render.add_argument("--scope-mode",
@@ -196,7 +197,8 @@ def configure_runtime():
                         action=argparse.BooleanOptionalAction, default=None,
                         help="Scope: send only the X signal through a one-channel "
                              "output for a single-input Y-T scope")
-    parser.add_argument("--scope-realtime", action="store_true",
+    parser.add_argument("--scope-realtime", action=argparse.BooleanOptionalAction,
+                        default=None,
                         help="Scope: stream continuously so index changes land "
                              "within a row instead of at a trace boundary "
                              "(raster only)")
@@ -314,21 +316,39 @@ def configure_runtime():
                              "bandlimit, decimate. Fixes aliasing when the grid "
                              "is finer than the sample rate; on smooth content "
                              "the difference is small. 4 is plenty.")
-    parser.add_argument("--scope-list-from-images", action="store_true",
+    parser.add_argument("--scope-list-from-images",
+                        action=argparse.BooleanOptionalAction, default=None,
                         help="Build the folder manifest by scanning the images "
                              "instead of reading it from the bake. Only needed "
                              "for a bake made before manifests were supported.")
-    parser.add_argument("--scope-no-autofit", action="store_true",
+    parser.add_argument("--scope-autofit", dest="scope_autofit",
+                        action="store_true", default=None,
+                        help="Scope raster: size the grid against cells that "
+                             "survive trim (default on)")
+    parser.add_argument("--scope-no-autofit", "--no-scope-autofit",
+                        dest="scope_autofit", action="store_false", default=None,
                         help="Scope raster: size the grid to the whole frame "
                              "instead of to the cells that survive trim "
                              "(autofit is on by default and is usually a 2x "
                              "resolution win on a dark background)")
+    parser.add_argument("--no-scope-fps", dest="scope_clear_fps",
+                        action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--no-scope-samples", dest="scope_clear_samples",
+                        action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--no-scope-rows", dest="scope_clear_rows",
+                        action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--no-scope-dc-comp", dest="scope_clear_dc_comp",
+                        action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--no-scope-lowpass", dest="scope_clear_lowpass",
+                        action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--scope-mix", nargs="?", type=float, const=120.0,
                         metavar="HZ",
                         help="Scope: whole-trace mix at this rate (default "
                              "120): vector -> raster -> stochastic -> raster "
                              "-> stipple -> raster. Above flicker fusion the "
                              "phosphor sums all four renderers.")
+    parser.add_argument("--no-scope-mix", action="store_true",
+                        help="Disable a mix rate configured in settings.py")
     parser.add_argument("--scope-mix-duty", type=float, default=None,
                         help="Scope: fraction of mixed passes spent on raster "
                              "(the remainder is split equally between vector, "
@@ -723,6 +743,8 @@ def configure_runtime():
             if args.scope_mode == "fusion":
                 parser.error("--scope-mode fusion and --scope-mix are "
                              "alternative combiners; choose one")
+        if args.scope_mix is not None and args.no_scope_mix:
+            parser.error("--scope-mix and --no-scope-mix cannot be combined")
         if args.port:
             print("⚠️  WARNING: --port ignored in SCOPE mode.")
         if args.scope_x_only is not None:
@@ -782,21 +804,27 @@ def configure_runtime():
             settings.SCOPE_YT_TIMING = "fixed"
             print("[SCOPE] --scope-yt is now --scope-yt-timing fixed; the "
                   "trigger marker is on by default in every mode.")
-        if args.scope_realtime:
-            settings.SCOPE_REALTIME = True
-        if args.scope_fps:
+        if args.scope_realtime is not None:
+            settings.SCOPE_REALTIME = args.scope_realtime
+        if args.scope_fps is not None:
             settings.SCOPE_FPS = args.scope_fps
+        if args.scope_clear_fps:
+            settings.SCOPE_FPS = None
         if getattr(args, "scope_fields", None) is not None:
             settings.SCOPE_FIELDS = args.scope_fields
             settings.SCOPE_FIELDS_EXPLICIT = True
-        if getattr(args, "scope_dc_comp", None):
+        if args.scope_dc_comp is not None:
             settings.SCOPE_DC_COMP = args.scope_dc_comp
+        if args.scope_clear_dc_comp:
+            settings.SCOPE_DC_COMP = None
         if getattr(args, "scope_border", None) is not None:
             settings.SCOPE_BORDER = args.scope_border
         if getattr(args, "scope_row_bias", None):
             settings.SCOPE_ROW_BIAS = args.scope_row_bias
-        if args.scope_samples:
+        if args.scope_samples is not None:
             settings.SCOPE_SAMPLES = args.scope_samples
+        if args.scope_clear_samples:
+            settings.SCOPE_SAMPLES = None
         if args.scope_trim is not None:
             settings.SCOPE_TRIM = args.scope_trim
         if args.scope_gamma is not None:
@@ -835,14 +863,18 @@ def configure_runtime():
             if args.scope_stipple_points < 8:
                 parser.error("--scope-stipple-points must be at least 8")
             settings.SCOPE_STIPPLE_POINTS = args.scope_stipple_points
-        if args.scope_rows:
+        if args.scope_rows is not None:
             settings.SCOPE_ROWS = args.scope_rows
-        if args.scope_no_autofit:
-            settings.SCOPE_AUTOFIT = False
-        if args.scope_list_from_images:
-            settings.SCOPE_LIST_FROM_IMAGES = True
-        if args.scope_lowpass:
+        if args.scope_clear_rows:
+            settings.SCOPE_ROWS = None
+        if args.scope_autofit is not None:
+            settings.SCOPE_AUTOFIT = args.scope_autofit
+        if args.scope_list_from_images is not None:
+            settings.SCOPE_LIST_FROM_IMAGES = args.scope_list_from_images
+        if args.scope_lowpass is not None:
             settings.SCOPE_LOWPASS = args.scope_lowpass
+        if args.scope_clear_lowpass:
+            settings.SCOPE_LOWPASS = None
         if args.scope_oversample:
             settings.SCOPE_OVERSAMPLE = args.scope_oversample
         if args.scope_min_feature is not None:
@@ -851,6 +883,8 @@ def configure_runtime():
             settings.SCOPE_SWEEP = args.scope_sweep
         if args.scope_mix is not None:
             settings.SCOPE_MIX = args.scope_mix
+        elif args.no_scope_mix:
+            settings.SCOPE_MIX = None
         if args.scope_mix_duty is not None:
             settings.SCOPE_MIX_DUTY = args.scope_mix_duty
         # Fixed row timing lives inside render_luma, so it is genuinely raster

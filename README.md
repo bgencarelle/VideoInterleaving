@@ -136,6 +136,19 @@ option lists.
 
 ## Scope output
 
+Launch the graphical scope controller with:
+
+```bash
+./vi.scope-gui
+```
+
+The GUI selects either the regular `main.py --mode scope` image/bake pipeline
+or the live screen/video pipeline. It exposes the scope renderer and tuning
+options, output device/channel routing, and X-only mono output. Live video files
+can be browsed or dropped onto the window, paused, restarted, sought, and resumed
+from the last position. Screen capture supports MSS and FFmpeg; camera inputs
+can be supplied as an FFmpeg `FMT:SRC` string.
+
 Scope mode needs an XY bake generated from the image library:
 
 ```bash
@@ -149,6 +162,14 @@ single-input Y-T scope, connect the X output; the X trigger marker is enabled
 by default. Use `--device null` for the virtual/browser-rendered path without
 opening an audio device. See [`docs/SCOPE_MODE.md`](docs/SCOPE_MODE.md) for
 renderer, connection, and sample-budget details.
+
+The same GUI can run the unbaked live source directly. For example, to drive a
+single-input scope from a video file without opening the GUI:
+
+```bash
+.venv/bin/python tools/scope_screen.py --source video --file clip.mp4 \
+  --scope-x-only --device "Your audio output"
+```
 
 ## V7 modem output
 

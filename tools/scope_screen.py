@@ -25,8 +25,11 @@ Screen capture needs `mss` (pip install mss).  On Wayland mss cannot grab the
 screen; use X11, or feed frames another way with --source video.
 """
 import argparse
+import json
 import os
+import queue
 import sys
+import threading
 import time
 
 import numpy as np
@@ -202,22 +205,123 @@ class Throttled:
         self._t.join(timeout=0.5)
 
 
-def video_source(path, downto=160, loop=True):
-    import cv2
-    cap = cv2.VideoCapture(path)
-    if not cap.isOpened():
-        raise SystemExit(f"cannot open {path}")
+class VideoFileSource:
+    """Thread-safe looping video source with optional transport controls."""
 
-    def grab():
-        ok, frame = cap.read()
-        if not ok:
-            if loop:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                ok, frame = cap.read()
+    def __init__(self, path, downto=160, loop=True, start_at=0.0,
+                 cv2_module=None):
+        if cv2_module is None:
+            import cv2 as cv2_module
+        self.cv2 = cv2_module
+        self.cap = cv2_module.VideoCapture(path)
+        if not self.cap.isOpened():
+            raise SystemExit(f"cannot open {path}")
+        self.downto = max(1, int(downto))
+        self.loop = bool(loop)
+        self.lock = threading.RLock()
+        self.paused = False
+        self.last = None
+        self.position = 0.0
+        fps = float(self.cap.get(cv2_module.CAP_PROP_FPS) or 0.0)
+        count = float(self.cap.get(cv2_module.CAP_PROP_FRAME_COUNT) or 0.0)
+        self.frame_rate = fps if np.isfinite(fps) and fps > 0 else None
+        self.duration = (count / fps if count > 0 and fps > 0 else None)
+        if start_at > 0:
+            self.transport("seek", start_at)
+
+    def __call__(self):
+        with self.lock:
+            if self.paused and self.last is not None:
+                return self.last
+            ok, frame = self.cap.read()
+            if not ok and self.loop:
+                self.cap.set(self.cv2.CAP_PROP_POS_FRAMES, 0)
+                ok, frame = self.cap.read()
+                if ok:
+                    self.position = 0.0
             if not ok:
+                if self.last is not None:
+                    return self.last
                 return np.zeros((64, 64), np.float32)
-        return shrink(frame, downto)
-    return grab
+            self.last = shrink(frame, self.downto)
+            if self.frame_rate:
+                frame_index = float(self.cap.get(self.cv2.CAP_PROP_POS_FRAMES) or 0)
+                self.position = max(0.0, (frame_index - 1.0) / self.frame_rate)
+            else:
+                position = float(self.cap.get(self.cv2.CAP_PROP_POS_MSEC) or 0)
+                self.position = max(0.0, position / 1000.0)
+            return self.last
+
+    def transport(self, command, position=None):
+        """Apply play, pause, restart, or seek without stopping scope output."""
+        command = str(command or "").strip().lower()
+        with self.lock:
+            if command == "pause":
+                self.paused = True
+            elif command == "play":
+                self.paused = False
+            elif command == "restart":
+                was_paused = self.paused
+                self._seek_locked(0.0)
+                self.paused = was_paused
+            elif command == "seek":
+                try:
+                    target = float(position)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("seek position must be a number") from exc
+                if not np.isfinite(target) or target < 0:
+                    raise ValueError("seek position must be finite and non-negative")
+                self._seek_locked(target)
+            elif command == "shutdown":
+                return "shutdown"
+            else:
+                raise ValueError(f"unknown video transport command: {command}")
+        return None
+
+    def _seek_locked(self, seconds):
+        if self.duration is not None:
+            seconds = min(seconds, max(0.0, self.duration - 0.001))
+        self.cap.set(self.cv2.CAP_PROP_POS_MSEC, seconds * 1000.0)
+        self.position = seconds
+        self.last = None
+
+    def playback(self):
+        with self.lock:
+            return {
+                "status": "playback",
+                "position": round(self.position, 3),
+                "duration": (round(self.duration, 3)
+                             if self.duration is not None else None),
+                "paused": self.paused,
+            }
+
+    def close(self):
+        with self.lock:
+            self.cap.release()
+
+
+def video_source(path, downto=160, loop=True, start_at=0.0,
+                 cv2_module=None):
+    """Compatibility factory for callers that need a callable frame source."""
+    return VideoFileSource(path, downto, loop, start_at, cv2_module)
+
+
+def _control_reader(source, messages, stop):
+    """Read newline-delimited JSON commands without blocking the scope loop."""
+    for line in sys.stdin:
+        try:
+            message = json.loads(line)
+            if not isinstance(message, dict):
+                continue
+            result = source.transport(message.get("transport"),
+                                      message.get("position"))
+            if result == "shutdown":
+                stop.set()
+                return
+            messages.put({"status": "control", "ok": True})
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            messages.put({"status": "control", "ok": False,
+                          "message": str(exc)})
 
 
 def test_source():
@@ -313,16 +417,17 @@ def _profile(args, grab):
               "this.")
 
 
-def main():
+def build_parser():
     ap = argparse.ArgumentParser(
         description=__doc__.splitlines()[1],
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--source", choices=("screen", "ffmpeg", "video", "test"),
+    ap.add_argument("--source", choices=("screen", "ffmpeg", "camera",
+                                         "video", "test"),
                     default="test",
-                    help="screen = mss (simple, slow on macOS); ffmpeg = the "
-                         "platform fast path, captures and downscales natively")
+                    help="screen = mss; ffmpeg = desktop capture via ffmpeg; "
+                         "camera = custom FFmpeg input; video = looping file")
     ap.add_argument("--ffmpeg-input", metavar="FMT:SRC",
-                    help="override ffmpeg input, e.g. avfoundation:1:none")
+                    help="FFmpeg input, e.g. avfoundation:1:none or v4l2:/dev/video0")
     ap.add_argument("--display", type=int,
                     help="avfoundation screen index (see: ffmpeg -f "
                          "avfoundation -list_devices true -i \"\")")
@@ -375,27 +480,75 @@ def main():
                     help="audio callback size. Bigger = fewer Python wake-ups "
                          "and less CPU, at the cost of latency (1024 at 96 kHz "
                          "is 10.7 ms). 0 lets the driver choose.")
+    ap.add_argument("--scope-lowpass", type=float, metavar="HZ",
+                    help="low-pass output samples at this corner frequency")
+    ap.add_argument("--scope-channels", default="1,2", metavar="X,Y",
+                    help="1-based PortAudio channels carrying X and Y")
+    ap.add_argument("--scope-x-only", action=argparse.BooleanOptionalAction,
+                    default=False,
+                    help="send X only through one output channel for a Y-T scope")
+    ap.add_argument("--scope-trigger", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="include the unique X trigger edge (default on)")
+    ap.add_argument("--scope-trigger-us", type=float, default=250.0,
+                    metavar="US", help="Y-T trigger marker duration")
+    ap.add_argument("--scope-trigger-shape", choices=("ramp", "step"),
+                    default="ramp", help="shape of the X trigger marker")
+    ap.add_argument("--rotation", type=int, choices=(0, 90, 180, 270),
+                    default=0, help="rotate the displayed scope output")
+    ap.add_argument("--mirror", action=argparse.BooleanOptionalAction,
+                    default=False, help="mirror the displayed scope output")
+    ap.add_argument("--start-at", type=float, default=0.0, metavar="SECONDS",
+                    help=argparse.SUPPRESS)
+    ap.add_argument("--control", action="store_true",
+                    help=argparse.SUPPRESS)
     ap.add_argument("--profile", action="store_true",
                     help="measure where the time actually goes on THIS machine "
                          "and exit: capture, downscale, trace build")
     ap.add_argument("--device", help="audio output: index or name fragment")
     ap.add_argument("--ask", action="store_true")
-    args = ap.parse_args()
+    return ap
+
+
+def main(argv=None):
+    ap = build_parser()
+    args = ap.parse_args(argv)
+
+    if args.source == "video" and not args.file:
+        ap.error("--source video needs --file")
+    if args.source == "camera" and not args.ffmpeg_input:
+        ap.error("--source camera needs --ffmpeg-input")
+    if args.source not in ("video",) and (args.start_at or args.control):
+        ap.error("--start-at and --control require --source video")
+    if not np.isfinite(args.start_at) or args.start_at < 0:
+        ap.error("--start-at must be finite and non-negative")
+    try:
+        channel_pair = tuple(int(value.strip())
+                             for value in args.scope_channels.split(","))
+        from scope_out import parse_channel_pair, required_output_channels
+        channel_pair = parse_channel_pair(channel_pair)
+    except (TypeError, ValueError) as exc:
+        ap.error(str(exc))
+    if not np.isfinite(args.scope_trigger_us) or args.scope_trigger_us <= 0:
+        ap.error("--scope-trigger-us must be finite and greater than zero")
+    if args.scope_lowpass is not None and (
+            not np.isfinite(args.scope_lowpass) or args.scope_lowpass <= 0):
+        ap.error("--scope-lowpass must be finite and greater than zero")
 
     region = [int(v) for v in args.region.split(",")] if args.region else None
-    if args.source == "ffmpeg":
+    if args.source in ("ffmpeg", "camera"):
         grab = ffmpeg_source(width=args.downto, fps=args.capture_fps,
                              region=region, input_spec=args.ffmpeg_input,
                              display=args.display)
     elif args.source == "screen":
         grab = screen_source(region, downto=args.downto)
     elif args.source == "video":
-        if not args.file:
-            raise SystemExit("--source video needs --file")
-        grab = video_source(args.file, downto=args.downto)
+        video = video_source(args.file, downto=args.downto,
+                             start_at=args.start_at)
+        grab = video
     else:
         grab = test_source()
-    if args.source != "ffmpeg":
+    if args.source not in ("ffmpeg", "camera"):
         grab = Throttled(grab, fps=args.capture_fps)
 
     probe = grab()
@@ -403,12 +556,37 @@ def main():
           "after downscale")
 
     if args.profile:
-        _profile(args, grab)
+        try:
+            _profile(args, grab)
+        finally:
+            if hasattr(grab, "close"):
+                grab.close()
+            if args.source == "video":
+                video.close()
+            if hasattr(grab, "proc"):
+                grab.proc.terminate()
         return
 
-    scope = Scope(fps=args.fps, samples=args.samples, blocksize=args.blocksize,
-                  device=choose_device(ask=args.ask, device=args.device))
+    min_channels = required_output_channels(channel_pair, args.scope_x_only)
+    scope = Scope(
+        fps=args.fps, samples=args.samples, blocksize=args.blocksize,
+        device=choose_device(ask=args.ask, device=args.device,
+                             min_channels=min_channels),
+        lowpass_hz=args.scope_lowpass, x_only=args.scope_x_only,
+        channel_pair=channel_pair, trigger=args.scope_trigger,
+        trigger_shape=args.scope_trigger_shape,
+        yt_trigger_us=args.scope_trigger_us, rotation=args.rotation,
+        mirror=args.mirror)
     n = scope.samples_per_frame
+    stop = threading.Event()
+    control_messages = queue.Queue()
+    control_thread = None
+    if args.control:
+        control_thread = threading.Thread(
+            target=_control_reader,
+            args=(video, control_messages, stop),
+            name="scope-video-control", daemon=True)
+        control_thread.start()
 
     # Tone mapping for unknown live content.  Adapting per frame is what makes
     # cells flicker, so this is a slow exponential average -- seconds, not
@@ -487,7 +665,6 @@ def main():
 
         push()
         rws = cls = 0
-        import threading
 
         def pump():
             period = 1.0 / max(args.fps, 1)
@@ -499,18 +676,27 @@ def main():
                     pass
                 time.sleep(max(0.0, period - (time.perf_counter() - t0)))
 
-        stop = threading.Event()
         threading.Thread(target=pump, daemon=True, name="scope-frames").start()
 
     scope.stream.start()
-    print("[SCREEN] running -- Ctrl+C to stop")
+    print("[SCREEN] running -- Ctrl+C to stop", flush=True)
     try:
-        while True:
-            time.sleep(1.0)
+        last_report = 0.0
+        while not stop.is_set():
+            time.sleep(0.1)
+            while True:
+                try:
+                    message = control_messages.get_nowait()
+                except queue.Empty:
+                    break
+                print(json.dumps(message), flush=True)
+            if args.control and time.monotonic() - last_report >= 0.25:
+                print(json.dumps(video.playback()), flush=True)
+                last_report = time.monotonic()
             u = getattr(getattr(scope, "source", None), "underruns", 0)
             if u:
                 print(f"[SCREEN] {u} underruns -- raise --buffer-blocks or "
-                      "lower --fps")
+                      "lower --fps", flush=True)
                 scope.source.underruns = 0
     except KeyboardInterrupt:
         pass
@@ -521,6 +707,8 @@ def main():
             pass
         if hasattr(grab, "close"):
             grab.close()
+        if args.source == "video":
+            video.close()
         if hasattr(grab, "proc"):
             grab.proc.terminate()
         if getattr(scope, "source", None) is not None:
