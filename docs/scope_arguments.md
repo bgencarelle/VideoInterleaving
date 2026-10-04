@@ -546,6 +546,9 @@ control-panel style. Numeric readouts remain beside sliders; an amber line on
 each track marks the value at startup. It uses the same tapped XY samples as
 the `/scope` browser preview and renders the phosphor simulation off the audio
 callback.
+The window fits the monitor work area and the preview scales with window size.
+Use the header button or **F11** for fullscreen; **Esc** restores the window
+from fullscreen (or closes the GUI while windowed), and **Q** closes the GUI.
 
 The picture-rate, trace-rate, and raster-field sliders reopen the output stream
 and recalibrate after release. Other tuning sliders update the current renderer.

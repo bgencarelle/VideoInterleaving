@@ -81,6 +81,11 @@ Add `--scope-gui` to open the native live scope preview and slider tuner:
 python main.py --mode scope --dir images --scope-source images --scope-gui
 ```
 
+The window opens fitted to the monitor's usable area; its preview and controls
+resize with the window. Use the header button or **F11** to toggle fullscreen;
+**Esc** returns to the fitted window from fullscreen (or closes the GUI while
+windowed); **Q** closes the GUI.
+
 Sliders retain numeric readouts; an amber tick marks each startup value. Picture
 rate, trace refresh, and raster fields reopen the audio stream and recalibrate
 when applied. Other tuning sliders adjust the running renderer. Preview

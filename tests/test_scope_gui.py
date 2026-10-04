@@ -2,8 +2,9 @@ import unittest
 
 from scope_controls import KeyMap
 from scope_gui import (fit_square_image, make_slider_spec,
-                       slider_default_x, slider_fraction,
-                       slider_value_at)
+                       responsive_layout, slider_default_x,
+                       slider_fraction, slider_value_at,
+                       window_size_for_workarea)
 
 
 class ScopeSliderMathTests(unittest.TestCase):
@@ -29,7 +30,29 @@ class ScopeSliderMathTests(unittest.TestCase):
 
     def test_preview_scales_to_fit_the_smaller_gui_dimension(self):
         self.assertEqual(fit_square_image(800, 540), 540)
-        self.assertEqual(fit_square_image(800, 900), 680)
+        self.assertEqual(fit_square_image(800, 900), 800)
+        self.assertEqual(fit_square_image(800, 900, maximum=680), 680)
+
+    def test_preview_grows_with_the_window_and_stays_inside_its_panel(self):
+        small = responsive_layout(1280, 800)
+        large = responsive_layout(1920, 1080, 1.35)
+        compact = responsive_layout(900, 600, 0.75)
+        self.assertGreater(large["preview_size"], small["preview_size"])
+        self.assertGreater(small["preview_size"], compact["preview_size"])
+        for layout in (small, large, compact):
+            x, y = layout["preview_x"], layout["preview_y"]
+            left, top, right, bottom = layout["preview_rect"]
+            self.assertGreaterEqual(x, left)
+            self.assertGreaterEqual(y, top)
+            self.assertLessEqual(x + layout["preview_size"], right)
+            self.assertLessEqual(y + layout["preview_size"],
+                                 layout["preview_caption_y"])
+
+    def test_window_size_tracks_workarea_without_exceeding_it(self):
+        self.assertGreater(window_size_for_workarea(1920, 1080)[0], 1280)
+        width, height = window_size_for_workarea(800, 600)
+        self.assertLessEqual(width, 800 - 32)
+        self.assertLessEqual(height, 600 - 80)
 
 
 class ScopeGuiControlTests(unittest.TestCase):

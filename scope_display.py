@@ -1674,6 +1674,8 @@ def run_scope(clock_source=None):
                             "XY DAC output enabled"
                             if audible else
                             "XY DAC muted · physical scope holds center dot")
+                    elif _action[0] == "fullscreen":
+                        gui.set_fullscreen(_action[1])
                     elif _action[0] == "key":
                         keys.feed(_action[1])
 

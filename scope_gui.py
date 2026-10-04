@@ -11,8 +11,9 @@ import time
 
 
 WINDOW_SIZE = (1280, 800)
-MIN_WINDOW_SIZE = (960, 720)
+MIN_WINDOW_SIZE = (900, 600)
 PREVIEW_SIZE = 680
+MAX_PREVIEW_RENDER_SIZE = 1600
 SLIDER_ROW_HEIGHT = 54
 SLIDER_RANGES = {
     "ips": (1.0, 60.0, 1.0),
@@ -82,10 +83,59 @@ def slider_default_x(left, right, spec):
     return round(left + slider_fraction(spec.default, spec) * (right - left))
 
 
-def fit_square_image(width, height, maximum=PREVIEW_SIZE):
+def fit_square_image(width, height, maximum=None):
     """Largest square preview that fits its available GUI area."""
     width, height = max(0, int(width)), max(0, int(height))
-    return max(1, min(int(maximum), width, height))
+    size = min(width, height)
+    if maximum is not None:
+        size = min(size, max(1, int(maximum)))
+    return max(1, size)
+
+
+def window_size_for_workarea(width, height):
+    """Choose a useful window size that stays inside the monitor work area."""
+    width, height = max(1, int(width)), max(1, int(height))
+    available_width = max(1, width - 32)
+    available_height = max(1, height - 80)
+    minimum_width = min(MIN_WINDOW_SIZE[0], available_width)
+    minimum_height = min(MIN_WINDOW_SIZE[1], available_height)
+    return (
+        min(available_width, max(minimum_width, round(width * 0.94))),
+        min(available_height, max(minimum_height, round(height * 0.90))),
+    )
+
+
+def responsive_layout(width, height, scale=1.0):
+    """Return panel rectangles and a square preview fitted to this window."""
+    width, height = max(1, int(width)), max(1, int(height))
+    unit = lambda value: max(1, round(value * scale))
+    margin = max(unit(12), min(unit(32), round(width * 0.016)))
+    gap = max(unit(12), min(unit(24), round(width * 0.016)))
+    available_width = max(1, width - margin * 2 - gap)
+    left_column_right = margin + round(available_width * 0.58)
+    top = unit(76)
+    bottom = height - unit(56)
+    preview_rect = (margin, top, left_column_right, bottom)
+    panel = (left_column_right + gap, top, width - margin, bottom)
+    preview_top = top + unit(16)
+    preview_caption_y = bottom - unit(25)
+    preview_area_height = max(1, preview_caption_y - preview_top - unit(8))
+    preview_size = fit_square_image(
+        preview_rect[2] - preview_rect[0] - unit(38),
+        preview_area_height)
+    preview_x = preview_rect[0] + (
+        preview_rect[2] - preview_rect[0] - preview_size) // 2
+    preview_y = preview_top + (preview_area_height - preview_size) // 2
+    return {
+        "margin": margin,
+        "unit": unit,
+        "preview_rect": preview_rect,
+        "panel": panel,
+        "preview_size": preview_size,
+        "preview_x": preview_x,
+        "preview_y": preview_y,
+        "preview_caption_y": preview_caption_y,
+    }
 
 
 def _to_slider_value(name, state, exposure):
@@ -159,11 +209,16 @@ class ScopeGUI:
         self._preview_thread = None
         self._preview_seq = -1
         self._rendered_seq = -1
+        self._preview_target_size = PREVIEW_SIZE
+        self._rendered_size = None
         self._preview_points = None
         self._rendered_exposure = None
+        self._font_cache = {}
         self.texture = None
         self.program = None
         self.vao = None
+        self.fullscreen = False
+        self._windowed_geometry = None
         try:
             self._init_window()
         except Exception:
@@ -188,6 +243,31 @@ class ScopeGUI:
         if not glfw.init():
             raise RuntimeError("GLFW initialization failed for scope GUI")
 
+        monitor = glfw.get_primary_monitor()
+        work_area = None
+        if monitor is not None:
+            try:
+                work_area = tuple(int(value) for value in
+                                  glfw.get_monitor_workarea(monitor))
+            except Exception:
+                try:
+                    video_mode = glfw.get_video_mode(monitor)
+                    monitor_x, monitor_y = glfw.get_monitor_pos(monitor)
+                    work_area = (int(monitor_x), int(monitor_y),
+                                 int(video_mode.size.width),
+                                 int(video_mode.size.height))
+                except Exception:
+                    work_area = None
+        if work_area is not None and len(work_area) == 4:
+            area_x, area_y, area_width, area_height = work_area
+            window_size = window_size_for_workarea(area_width, area_height)
+            min_width = min(MIN_WINDOW_SIZE[0], max(1, area_width - 32))
+            min_height = min(MIN_WINDOW_SIZE[1], max(1, area_height - 80))
+        else:
+            work_area = None
+            window_size = WINDOW_SIZE
+            min_width, min_height = MIN_WINDOW_SIZE
+
         failures = []
         for use_gles in (False, True):
             glfw.default_window_hints()
@@ -207,20 +287,6 @@ class ScopeGUI:
                 version = 330
                 shader_version = "#version 330\n"
             glfw.window_hint(glfw.RESIZABLE, glfw.TRUE)
-            window_size = WINDOW_SIZE
-            try:
-                monitor = glfw.get_primary_monitor()
-                video_mode = glfw.get_video_mode(monitor) if monitor else None
-                if video_mode is not None:
-                    screen_width = int(video_mode.size.width)
-                    screen_height = int(video_mode.size.height)
-                    window_size = (
-                        min(WINDOW_SIZE[0],
-                            max(MIN_WINDOW_SIZE[0], screen_width - 32)),
-                        min(WINDOW_SIZE[1],
-                            max(MIN_WINDOW_SIZE[1], screen_height - 80)))
-            except Exception:
-                pass
             window = glfw.create_window(*window_size, "Scope · Live Tuner",
                                         None, None)
             if not window:
@@ -270,26 +336,44 @@ class ScopeGUI:
         self.font = self._font(17)
         self.small = self._font(13)
         self.tiny = self._font(11, mono=True)
+        self.work_area = work_area
+        self.primary_monitor = monitor
         glfw.set_window_close_callback(self.window,
                                        lambda _w: setattr(self, "close_requested", True))
-        glfw.set_window_size_limits(self.window, *MIN_WINDOW_SIZE,
+        glfw.set_window_size_limits(self.window, min_width, min_height,
                                     glfw.DONT_CARE, glfw.DONT_CARE)
+        if work_area is not None:
+            try:
+                glfw.set_window_pos(
+                    self.window,
+                    area_x + max(0, (area_width - window_size[0]) // 2),
+                    area_y + max(0, (area_height - window_size[1]) // 2))
+            except Exception:
+                pass
         glfw.set_mouse_button_callback(self.window, self._on_mouse_button)
         glfw.set_cursor_pos_callback(self.window, self._on_cursor)
         glfw.set_key_callback(self.window, self._on_key)
 
     def _font(self, size, mono=False):
+        key = int(size), bool(mono)
+        cached = self._font_cache.get(key)
+        if cached is not None:
+            return cached
         names = (("DejaVuSansMono.ttf", "DejaVuSans.ttf") if mono else
                  ("DejaVuSans.ttf", "DejaVuSansMono.ttf"))
         for name in names:
             try:
-                return self.ImageFont.truetype(name, size)
+                font = self.ImageFont.truetype(name, int(size))
+                self._font_cache[key] = font
+                return font
             except OSError:
                 pass
         try:
-            return self.ImageFont.load_default(size=size)
+            font = self.ImageFont.load_default(size=int(size))
         except TypeError:
-            return self.ImageFont.load_default()
+            font = self.ImageFont.load_default()
+        self._font_cache[key] = font
+        return font
 
     def _start_preview_worker(self):
         self._preview_thread = threading.Thread(
@@ -313,20 +397,25 @@ class ScopeGUI:
                     self._preview_points = points
                 exposure = self.preview_exposure
                 changed_exposure = exposure != self._rendered_exposure
+                target_size = min(
+                    MAX_PREVIEW_RENDER_SIZE,
+                    max(1, int(self._preview_target_size)))
+                changed_size = target_size != self._rendered_size
                 render_pending = (seq != self._rendered_seq
-                                 or changed_exposure)
+                                 or changed_exposure or changed_size)
                 render_due = (time.monotonic() - getattr(
                     self, "_last_preview_render", 0.0) >= 1.0 / 15.0)
                 if self._preview_points is not None and render_pending and render_due:
                     try:
                         frame = preview_frame(self._preview_points,
-                                              size=PREVIEW_SIZE,
+                                              size=target_size,
                                               exposure=exposure)
                         with self._preview_lock:
                             self._preview_rgb = frame
                             self._preview_error = ""
                         self._rendered_seq = self._preview_seq
                         self._rendered_exposure = exposure
+                        self._rendered_size = target_size
                         self._last_preview_render = time.monotonic()
                     except Exception as exc:
                         with self._preview_lock:
@@ -354,6 +443,40 @@ class ScopeGUI:
         actions, self._actions = self._actions, []
         return actions
 
+    def set_fullscreen(self, enabled):
+        """Switch between the fitted window and the primary display mode."""
+        enabled = bool(enabled)
+        if enabled == self.fullscreen:
+            return True
+        monitor = self.primary_monitor or self.glfw.get_primary_monitor()
+        if monitor is None:
+            self.message = "Fullscreen display is unavailable"
+            return False
+        if enabled:
+            x, y = self.glfw.get_window_pos(self.window)
+            width, height = self.glfw.get_window_size(self.window)
+            self._windowed_geometry = (int(x), int(y),
+                                       int(width), int(height))
+            mode = self.glfw.get_video_mode(monitor)
+            self.glfw.set_window_monitor(
+                self.window, monitor, 0, 0,
+                int(mode.size.width), int(mode.size.height),
+                int(mode.refresh_rate))
+            self.fullscreen = True
+            return True
+
+        if self._windowed_geometry is None:
+            area_size = (self.work_area[2:] if self.work_area is not None
+                         else WINDOW_SIZE)
+            width, height = window_size_for_workarea(*area_size)
+            x = y = 0
+        else:
+            x, y, width, height = self._windowed_geometry
+        self.glfw.set_window_monitor(
+            self.window, None, x, y, width, height, self.glfw.DONT_CARE)
+        self.fullscreen = False
+        return True
+
     def _slider_disabled(self, name, state):
         if name in ("ips", "fps", "fields") and state.get("mode_locked"):
             return True
@@ -376,35 +499,63 @@ class ScopeGUI:
         width, height = self.glfw.get_window_size(self.window)
         if width <= 0 or height <= 0:
             return
+        ui_scale = min(1.4, max(0.75, height / WINDOW_SIZE[1]))
+        unit = lambda value: max(1, round(value * ui_scale))
+        self._ui_unit = unit
+        self.font = self._font(round(17 * ui_scale))
+        self.small = self._font(round(13 * ui_scale))
+        self.tiny = self._font(round(11 * ui_scale), mono=True)
+        layout = responsive_layout(width, height, ui_scale)
         image = self.Image.new("RGBA", (width, height), (12, 19, 26, 255))
         draw = self.ImageDraw.Draw(image)
         state = self._state
         metrics = self._metrics
         self._hits = {}
 
-        draw.rectangle((0, 0, width, 56), fill=(10, 18, 25, 255))
-        draw.text((22, 15), "SCOPE  ·  LIVE TUNER", fill=(239, 245, 249),
+        header_height = unit(56)
+        draw.rectangle((0, 0, width, header_height), fill=(10, 18, 25, 255))
+        title_x, title_y = unit(22), unit(15)
+        title = "SCOPE  ·  LIVE TUNER"
+        draw.text((title_x, title_y), title, fill=(239, 245, 249),
                   font=self.font)
+        fullscreen_label = "Restore [F11]" if self.fullscreen else "Fullscreen [F11]"
+        button_width = max(unit(112),
+                           round(self.small.getlength(fullscreen_label))
+                           + unit(20))
+        button_height = unit(34)
+        margin = layout["margin"]
+        button_rect = (width - margin - button_width,
+                       max(1, (header_height - button_height) // 2),
+                       width - margin,
+                       max(1, (header_height + button_height) // 2))
+        draw.rounded_rectangle(
+            button_rect, radius=unit(4), fill=(20, 36, 47),
+            outline=(53, 78, 94), width=max(1, unit(1)))
+        draw.text((button_rect[0] + (button_width -
+                                    self.small.getlength(fullscreen_label)) / 2,
+                   button_rect[1] + unit(8)),
+                  fullscreen_label, fill=(216, 229, 237), font=self.small)
+        self._hits["fullscreen:toggle"] = button_rect
+
         header = (f"{metrics.get('device', 'connecting')}   ·   "
                   f"{metrics.get('sample_rate', 0):,} Hz   ·   "
                   f"{str(state.get('mode', 'raster')).upper()}")
-        draw.text((width - 520, 18), header, fill=(155, 187, 204),
-                  font=self.small)
+        title_end = title_x + self.font.getlength(title)
+        header_left = title_end + unit(18)
+        header_right = button_rect[0] - unit(12)
+        header_width = max(0, header_right - header_left)
+        if header_width:
+            draw.text((header_left, unit(18)),
+                      self._fit_text(header, self.small, header_width),
+                      fill=(155, 187, 204), font=self.small)
 
-        left_column_right = max(460, min(720, round(width * 0.53)))
-        content_bottom = height - 56
-        preview_rect = (20, 76, left_column_right, content_bottom)
+        preview_rect = layout["preview_rect"]
         draw.rounded_rectangle(preview_rect, radius=6, fill=(6, 10, 13, 255),
-                               outline=(49, 69, 83, 255), width=1)
-        preview_top = preview_rect[1] + 16
-        preview_caption_y = preview_rect[3] - 25
-        preview_area_height = max(1, preview_caption_y - preview_top - 8)
-        preview_size = fit_square_image(
-            preview_rect[2] - preview_rect[0] - 38,
-            preview_area_height)
-        preview_x = preview_rect[0] + (preview_rect[2] - preview_rect[0]
-                                       - preview_size) // 2
-        preview_y = preview_top + (preview_area_height - preview_size) // 2
+                               outline=(49, 69, 83, 255), width=unit(1))
+        preview_size = layout["preview_size"]
+        preview_x = layout["preview_x"]
+        preview_y = layout["preview_y"]
+        self._preview_target_size = min(preview_size, MAX_PREVIEW_RENDER_SIZE)
         with self._preview_lock:
             rgb = self._preview_rgb
             preview_error = self._preview_error
@@ -416,31 +567,42 @@ class ScopeGUI:
             image.alpha_composite(pic.convert("RGBA"), (preview_x, preview_y))
         else:
             msg = preview_error or "Waiting for the first scope trace…"
-            draw.text((preview_rect[0] + 22, preview_rect[1] + 24), msg,
+            draw.text((preview_rect[0] + unit(22),
+                       preview_rect[1] + unit(24)),
+                      self._fit_text(msg, self.small,
+                                     preview_rect[2] - preview_rect[0]
+                                     - unit(44)),
                       fill=(151, 174, 192), font=self.small)
-        draw.text((preview_rect[0] + 16, preview_rect[3] - 25),
-                  "Phosphor preview  ·  exposure changes this preview only",
+        draw.text((preview_rect[0] + unit(16), layout["preview_caption_y"]),
+                  self._fit_text(
+                      "Phosphor preview  ·  exposure changes this preview only",
+                      self.tiny, preview_rect[2] - preview_rect[0] - unit(32)),
                   fill=(119, 145, 160), font=self.tiny)
 
-        panel = (left_column_right + 20, 76, width - 20, content_bottom)
+        panel = layout["panel"]
         draw.rounded_rectangle(panel, radius=6, fill=(15, 24, 32, 255),
-                               outline=(49, 69, 83, 255), width=1)
-        draw.text((panel[0] + 18, panel[1] + 13), "Live controls",
+                               outline=(49, 69, 83, 255), width=unit(1))
+        draw.text((panel[0] + unit(18), panel[1] + unit(13)), "Live controls",
                   fill=(231, 240, 246), font=self.font)
-        draw.line((panel[0] + 18, panel[1] + 43, panel[2] - 18,
-                   panel[1] + 43), fill=(42, 58, 70), width=1)
-        draw.line((panel[2] - 182, panel[1] + 25, panel[2] - 182,
-                   panel[1] + 34), fill=(243, 178, 85), width=2)
-        draw.text((panel[2] - 174, panel[1] + 22), "startup default",
+        draw.line((panel[0] + unit(18), panel[1] + unit(43),
+                   panel[2] - unit(18), panel[1] + unit(43)),
+                  fill=(42, 58, 70), width=unit(1))
+        draw.line((panel[2] - unit(182), panel[1] + unit(25),
+                   panel[2] - unit(182), panel[1] + unit(34)),
+                  fill=(243, 178, 85), width=unit(2))
+        draw.text((panel[2] - unit(174), panel[1] + unit(22)),
+                  "startup default",
                   fill=(159, 173, 181), font=self.tiny)
 
-        controls_top = panel[1] + 52
+        controls_top = panel[1] + unit(52)
         available_controls_height = panel[3] - controls_top
+        row_fit = ((available_controls_height - unit(166))
+                   // len(SLIDER_RANGES))
+        preferred_row = max(unit(42), round(SLIDER_ROW_HEIGHT * ui_scale))
         slider_row_height = max(
-            42, min(SLIDER_ROW_HEIGHT,
-                    (available_controls_height - 166) // len(SLIDER_RANGES)))
-        track_left = panel[0] + 20
-        track_right = panel[2] - 124
+            unit(30), min(preferred_row, row_fit))
+        track_left = panel[0] + unit(20)
+        track_right = panel[2] - unit(124)
         for index, name in enumerate(SLIDER_RANGES):
             top = controls_top + index * slider_row_height
             spec = self.specs[name]
@@ -450,41 +612,46 @@ class ScopeGUI:
             readout = _format_value(name, value)
             if disabled and name in ("fields", "rows"):
                 readout = "Raster only"
-            draw.text((track_left, top + 3), SLIDER_LABELS[name],
+            draw.text((track_left, top + unit(3)), SLIDER_LABELS[name],
                       fill=label_color, font=self.small)
-            draw.text((panel[2] - 112, top + 3), readout,
+            draw.text((panel[2] - unit(112), top + unit(3)), readout,
                       fill=(115, 132, 145) if disabled else (235, 242, 247),
                       font=self.tiny)
-            y = top + slider_row_height - 14
+            y = top + max(unit(24), slider_row_height - unit(8))
+            thumb = min(unit(6), max(1, slider_row_height // 8))
+            marker_half = min(unit(9), max(1, slider_row_height // 4))
             track_color = (45, 61, 73) if disabled else (61, 78, 90)
-            draw.rounded_rectangle((track_left, y - 2, track_right, y + 2),
-                                   radius=2, fill=track_color)
+            draw.rounded_rectangle(
+                (track_left, y - unit(2), track_right, y + unit(2)),
+                radius=unit(2), fill=track_color)
             default_x = slider_default_x(track_left, track_right, spec)
-            draw.line((default_x, y - 9, default_x, y + 9),
+            draw.line((default_x, y - marker_half, default_x, y + marker_half),
                       fill=(243, 178, 85) if not disabled else (112, 101, 81),
-                      width=2)
+                      width=unit(2))
             current_x = round(track_left + slider_fraction(value, spec)
                                * (track_right - track_left))
             if current_x > track_left:
-                draw.rounded_rectangle((track_left, y - 2, current_x, y + 2),
-                                       radius=2,
+                draw.rounded_rectangle((track_left, y - unit(2), current_x,
+                                        y + unit(2)), radius=unit(2),
                                        fill=(63, 137, 174) if not disabled
                                        else (54, 66, 73))
-            thumb = 6 if not disabled else 4
+            if disabled:
+                thumb = max(1, thumb * 2 // 3)
             draw.ellipse((current_x - thumb, y - thumb,
                           current_x + thumb, y + thumb),
                          fill=(205, 232, 245) if not disabled else (105, 119, 128),
                          outline=(66, 133, 164) if not disabled else (82, 94, 101))
-            self._hits[f"slider:{name}"] = (track_left - 8, top,
-                                             track_right + 8,
-                                             top + slider_row_height - 2)
+            self._hits[f"slider:{name}"] = (track_left - unit(8), top,
+                                             track_right + unit(8),
+                                             top + slider_row_height - unit(2))
 
-        mode_y = controls_top + len(SLIDER_RANGES) * slider_row_height + 4
-        mode_gap = 5
-        mode_width = (panel[2] - panel[0] - 36 - mode_gap * 4) // 5
+        mode_y = controls_top + len(SLIDER_RANGES) * slider_row_height + unit(4)
+        mode_gap = unit(5)
+        mode_width = (panel[2] - panel[0] - unit(36) - mode_gap * 4) // 5
+        mode_height = unit(31)
         for i, mode in enumerate(MODES):
-            left = panel[0] + 18 + i * (mode_width + mode_gap)
-            rect = (left, mode_y, left + mode_width, mode_y + 31)
+            left = panel[0] + unit(18) + i * (mode_width + mode_gap)
+            rect = (left, mode_y, left + mode_width, mode_y + mode_height)
             selected = state.get("mode") == mode
             locked = bool(state.get("mode_locked"))
             unsupported = mode not in state.get("available_modes", MODES)
@@ -493,19 +660,22 @@ class ScopeGUI:
                 (35, 48, 57) if selected else (17, 25, 31))
             outline = ((84, 153, 181) if selected else (46, 66, 79)) if not disabled else (
                 (63, 78, 88) if selected else (38, 48, 56))
-            draw.rounded_rectangle(rect, radius=4, fill=fill, outline=outline,
-                                   width=1)
+            draw.rounded_rectangle(rect, radius=unit(4), fill=fill,
+                                   outline=outline, width=unit(1))
             text_width = self.small.getlength(mode.title())
-            draw.text((left + (mode_width - text_width) / 2, mode_y + 8),
+            draw.text((left + (mode_width - text_width) / 2,
+                       mode_y + unit(8)),
                       mode.title(),
                       fill=(231, 241, 247) if not disabled else (113, 127, 136),
                       font=self.small)
             if not disabled:
                 self._hits[f"mode:{mode}"] = rect
 
-        button_y = mode_y + 40
-        button_gap = 7
-        button_width = (panel[2] - panel[0] - 36 - 3 * button_gap) // 4
+        button_y = mode_y + unit(40)
+        button_gap = unit(7)
+        button_width = (panel[2] - panel[0] - unit(36)
+                        - 3 * button_gap) // 4
+        control_button_height = unit(31)
         buttons = (("key", "i", "Invert"),
                    ("key", "r", "Rotate"),
                    ("key", "m", "Mirror"),
@@ -513,17 +683,18 @@ class ScopeGUI:
                     "Hear XY: ON" if not state.get("audio_muted", True)
                     else "Hear XY: OFF"))
         for i, (kind, key, label) in enumerate(buttons):
-            left = panel[0] + 18 + i * (button_width + button_gap)
-            rect = (left, button_y, left + button_width, button_y + 31)
+            left = panel[0] + unit(18) + i * (button_width + button_gap)
+            rect = (left, button_y, left + button_width,
+                    button_y + control_button_height)
             audio_button = kind == "audio"
             active = audio_button and not state.get("audio_muted", True)
             draw.rounded_rectangle(
-                rect, radius=4,
+                rect, radius=unit(4),
                 fill=(42, 83, 105) if active else (20, 36, 47),
                 outline=(84, 153, 181) if active else (53, 78, 94), width=1)
             label_width = self.small.getlength(label)
             draw.text((left + (button_width - label_width) / 2,
-                       button_y + 8), label,
+                       button_y + unit(8)), label,
                       fill=(231, 241, 247) if audio_button
                       else (216, 229, 237), font=self.small)
             if audio_button:
@@ -531,7 +702,7 @@ class ScopeGUI:
             else:
                 self._hits[f"key:{key}"] = rect
 
-        stats_y = button_y + 40
+        stats_y = button_y + unit(40)
         trace_hz = float(metrics.get("trace_hz", 0) or 0)
         picture_hz = float(metrics.get("picture_hz", 0) or 0)
         samples = int(metrics.get("samples", 0) or 0)
@@ -542,31 +713,37 @@ class ScopeGUI:
         dac_latency = float(metrics.get("dac_latency_ms", 0.0) or 0.0)
         errors = (f"xruns {metrics.get('dropouts', 0)}/"
                   f"{metrics.get('underruns', 0)}")
-        draw.text((panel[0] + 18, stats_y),
-                  f"{trace_hz:.1f} trace/s  ·  {picture_hz:.1f} picture/s  ·  "
-                  f"{samples:,} samples  ·  grid {grid}",
+        draw.text((panel[0] + unit(18), stats_y),
+                  self._fit_text(
+                      f"{trace_hz:.1f} trace/s  ·  {picture_hz:.1f} picture/s  ·  "
+                      f"{samples:,} samples  ·  grid {grid}",
+                      self.small, panel[2] - panel[0] - unit(36)),
                   fill=(158, 190, 205), font=self.small)
-        draw.text((panel[0] + 18, stats_y + 21),
+        draw.text((panel[0] + unit(18), stats_y + unit(21)),
                   self._fit_text(
                       f"{metrics.get('fields', 1)} fields  ·  {buffer_kind} "
                       f"{buffer_text}  ·  DAC {dac_latency:.1f}ms  ·  {errors}",
-                      self.tiny, panel[2] - panel[0] - 36),
+                      self.tiny, panel[2] - panel[0] - unit(36)),
                   fill=(218, 153, 122) if (metrics.get("dropouts", 0)
                                             or metrics.get("underruns", 0))
                   else (133, 158, 173), font=self.tiny)
         note = self.message
         if note:
-            draw.text((panel[0] + 18, panel[3] - 23),
-                      self._fit_text(note, self.tiny, panel[2] - panel[0] - 36),
+            draw.text((panel[0] + unit(18), panel[3] - unit(23)),
+                      self._fit_text(note, self.tiny,
+                                     panel[2] - panel[0] - unit(36)),
                       fill=(243, 178, 85), font=self.tiny)
-        draw.rectangle((0, height - 36, width, height), fill=(9, 15, 20, 255))
-        draw.text((20, height - 27),
+        footer_height = max(36, unit(36))
+        draw.rectangle((0, height - footer_height, width, height),
+                       fill=(9, 15, 20, 255))
+        draw.text((unit(20), height - unit(27)),
                   "XY starts muted; Hear XY enables the DAC. Muted XY leaves a "
                   "center dot on a physical scope (no Z blanking channel).",
                   fill=(151, 169, 179), font=self.tiny)
-        draw.text((20, height - 13),
-                  "Gamma/trim tune dwell; scope intensity sets tube brightness. "
-                  "Esc / Q closes.",
+        footer_note = ("Gamma/trim tune dwell; scope intensity sets tube brightness. "
+                       "F11 fullscreen · Esc restore/close · Q close.")
+        draw.text((unit(20), height - unit(13)),
+                  self._fit_text(footer_note, self.tiny, width - unit(40)),
                   fill=(151, 169, 179), font=self.tiny)
 
         framebuffer = self.glfw.get_framebuffer_size(self.window)
@@ -598,7 +775,8 @@ class ScopeGUI:
         if rect is None:
             return None
         left, _top, right, _bottom = rect
-        return slider_value_at(x, left + 8, right - 8, self.specs[name])
+        pad = getattr(self, "_ui_unit", lambda value: value)(8)
+        return slider_value_at(x, left + pad, right - pad, self.specs[name])
 
     def _on_mouse_button(self, _window, button, action, _mods):
         if button != self.glfw.MOUSE_BUTTON_LEFT:
@@ -624,6 +802,8 @@ class ScopeGUI:
                 if rect[0] <= x <= rect[2] and rect[1] <= y <= rect[3]:
                     if hit.startswith("mode:"):
                         self._actions.append(("mode", hit.split(":", 1)[1]))
+                    elif hit == "fullscreen:toggle":
+                        self._actions.append(("fullscreen", not self.fullscreen))
                     elif hit == "audio:toggle":
                         self._actions.append((
                             "audio", bool(self._state.get("audio_muted", True))))
@@ -654,8 +834,15 @@ class ScopeGUI:
     def _on_key(self, _window, key, _scancode, action, _mods):
         if action != self.glfw.PRESS:
             return
-        if key in (self.glfw.KEY_ESCAPE, self.glfw.KEY_Q):
+        if key == self.glfw.KEY_ESCAPE:
+            if self.fullscreen:
+                self.set_fullscreen(False)
+            else:
+                self.close_requested = True
+        elif key == self.glfw.KEY_Q:
             self.close_requested = True
+        elif key == self.glfw.KEY_F11:
+            self._actions.append(("fullscreen", not self.fullscreen))
         elif key == self.glfw.KEY_V:
             self._actions.append(("key", "v"))
         elif key == self.glfw.KEY_I:
