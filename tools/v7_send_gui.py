@@ -315,11 +315,11 @@ def _is_live_field(dest):
             dest.startswith(KERNEL_PARAM_PREFIX))
 
 
-def _kernel_values(settings, kernel):
+def _kernel_values(settings, kernel, profile=None):
     """The saved values for ``kernel``, limited to parameters it still has."""
     saved = (settings.get('dct_kernel_params') or {}).get(kernel.name, {})
     return kernel.resolve({key: value for key, value in saved.items()
-                           if key in kernel.params})
+                           if key in kernel.params}, profile=profile)
 
 
 VIDEO_FILE_GLOB = '*.mp4 *.m4v *.mov *.mkv *.webm *.avi *.mpeg *.mpg *.wmv *.ts'
@@ -1236,7 +1236,7 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
         if dct_kernel != 'reference':
             try:
                 kernel_values = _kernel_values(
-                    settings, kernel_registry().get(dct_kernel))
+                    settings, kernel_registry().get(dct_kernel), profile)
             except v7_kernels.KernelError as exc:
                 raise ValueError(f'DCT kernel: {exc}.') from exc
     aspect_layout, aspect_tail = 'auto', DEFAULT_ASPECT_TAIL
@@ -1448,8 +1448,9 @@ def build_command(settings, devices, sd_module=None, python=None,
         if checked['dct_kernel'] != 'reference':
             kernel = kernel_registry().get(checked['dct_kernel'])
             command.extend(('--dct-kernel', checked['dct_kernel']))
+            kernel_defaults = kernel.defaults(checked['profile'])
             for key, value in sorted(checked['dct_kernel_values'].items()):
-                if value != kernel.params[key].default:
+                if value != kernel_defaults[key]:
                     command.extend(('--dct-kernel-param', f'{key}={value:g}'))
         for folder in KERNEL_DIRS:
             command.extend(('--dct-kernel-dir', str(folder)))
@@ -2427,10 +2428,11 @@ class SenderGui:
             found = self._kernel_param(dest)
             if found is None:
                 return ''
-            kernel, name, param = found
+            kernel, name, _param = found
             saved = (self.settings.get('dct_kernel_params') or {}).get(
                 kernel.name, {})
-            return saved.get(name, param.default)
+            return saved.get(name, kernel.defaults(
+                self.settings.get('profile'))[name])
         return self.settings.get(dest)
 
     def _edit_text(self, dest):
@@ -2462,9 +2464,10 @@ class SenderGui:
             found = self._kernel_param(dest)
             if found is None:
                 return ''
-            _kernel, name, param = found
+            kernel, name, param = found
+            default = kernel.defaults(self.settings.get('profile'))[name]
             return (f'{param.help or name} · {param.low:g} to {param.high:g}, '
-                    f'default {param.default:g}. Left/Right steps by '
+                    f'default {default:g}. Left/Right steps by '
                     f'{param.step:g} (Shift: five times) and is heard on the '
                     f'next frame; Enter types a value; Delete resets it.')
         if dest == 'dct_kernel':
@@ -2480,7 +2483,8 @@ class SenderGui:
     def _default_value(self, dest):
         if dest.startswith(KERNEL_PARAM_PREFIX):
             found = self._kernel_param(dest)
-            return None if found is None else found[2].default
+            return (None if found is None else
+                    found[0].defaults(self.settings.get('profile'))[found[1]])
         if dest in TONE_DEFAULTS:
             return TONE_DEFAULTS[dest]
         return ENCODE_DEFAULTS.get(dest)
@@ -2669,7 +2673,8 @@ class SenderGui:
         kernel = self._selected_kernel()
         message['kernel'] = 'reference' if kernel is None else kernel.name
         if kernel is not None:
-            message['kernel_params'] = _kernel_values(self.settings, kernel)
+            message['kernel_params'] = _kernel_values(
+                self.settings, kernel, self.settings.get('profile'))
         self._write_control(message)
 
     def _value_label(self, dest):

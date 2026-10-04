@@ -15,6 +15,10 @@ PARAMS = {
     'margin': (0.01, 0.0, 0.1, 0.005, 'extra slack, in picture units'),
     'chroma': (0, 0, 1, 1, '1 = refit colour planes too (about 2x the time)', True),
 }
+PROFILE_DEFAULTS = {
+    'aspect-mono-500': {'luma_mix': 0.25, 'margin': 0.1},
+    'aspect-fold-500': {'luma_mix': 0.05, 'margin': 0.1},
+}
 
 
 def post(grid, ctx, iterations, radius, margin, chroma):

@@ -35,11 +35,15 @@ three places, all optional:
     array down to the grid. Return a grid of the same shape.
 
 Optional module attributes: ``LABEL``, ``HELP``, ``NAME`` (default: the file
-name), ``SUPPORT``, ``RADIAL``, ``DEFER_GAIN_TO_CODEC`` and ``PARAMS``, a dict
-of name to ``Param`` (or a ``(default, low, high, step, help, integer)`` tuple,
-the last two optional). ``DEFER_GAIN_TO_CODEC`` opts into applying a pure gain
-at the folded sender's existing DCT, after the source values are clipped; that
-gain must not depend on the frame-specific ``ctx.reference``. This changes the
+name), ``SUPPORT``, ``RADIAL``, ``DEFER_GAIN_TO_CODEC``, ``HOST_DEFAULTS``,
+``PROFILE_DEFAULTS`` and ``PARAMS``, a dict of name to ``Param`` (or a
+``(default, low, high, step, help, integer)`` tuple, the last two optional).
+``HOST_DEFAULTS`` can override the starting values of ``luma_mix`` and
+``chroma_mix``; ``PROFILE_DEFAULTS`` maps a wire-profile name to parameter
+defaults for that profile. Explicit saved or command-line values take
+precedence. ``DEFER_GAIN_TO_CODEC`` opts into applying a pure gain at the
+folded sender's existing DCT, after the source values are clipped; that gain
+must not depend on the frame-specific ``ctx.reference``. This changes the
 gain/clamp order for samples that clip; without clipping, it is equivalent to
 the direct path. Every kernel also gets ``luma_mix`` and ``chroma_mix``: 0
 switches the kernel off for that plane, 1 is as written, above 1 pushes further.
@@ -238,6 +242,40 @@ class Kernel:
                 raise KernelError(f'parameter name {key!r} is not allowed')
             self.params[key] = Param.coerce(key, spec)
         self.params.update(HOST_PARAM_SPECS)
+        host_defaults = getattr(module, 'HOST_DEFAULTS', {}) or {}
+        if not isinstance(host_defaults, dict):
+            raise KernelError('HOST_DEFAULTS must be a dict')
+        self._host_defaults = {}
+        for key, value in host_defaults.items():
+            if key not in HOST_PARAMS:
+                raise KernelError(
+                    f'HOST_DEFAULTS key {key!r} is not a host parameter')
+            try:
+                self._host_defaults[key] = self.params[key].clamp(value)
+            except (TypeError, ValueError):
+                raise KernelError(
+                    f'HOST_DEFAULTS[{key!r}] must be a finite number')
+        profile_defaults = getattr(module, 'PROFILE_DEFAULTS', {}) or {}
+        if not isinstance(profile_defaults, dict):
+            raise KernelError('PROFILE_DEFAULTS must be a dict')
+        self._profile_defaults = {}
+        for profile, values in profile_defaults.items():
+            if not isinstance(profile, str) or not profile:
+                raise KernelError('PROFILE_DEFAULTS keys must be profile names')
+            if not isinstance(values, dict):
+                raise KernelError(
+                    f'PROFILE_DEFAULTS[{profile!r}] must be a dict')
+            resolved = {}
+            for key, value in values.items():
+                if key not in self.params:
+                    raise KernelError(
+                        f'PROFILE_DEFAULTS[{profile!r}] key {key!r} is not a parameter')
+                try:
+                    resolved[key] = self.params[key].clamp(value)
+                except (TypeError, ValueError):
+                    raise KernelError(
+                        f'PROFILE_DEFAULTS[{profile!r}][{key!r}] must be a finite number')
+            self._profile_defaults[profile] = resolved
         self._hooks = {}
         for hook in ('gain', 'response', 'kernel', 'post', 'prefilter'):
             function = getattr(module, hook, None)
@@ -306,12 +344,15 @@ class Kernel:
             options['preshrink'] = value
         return options
 
-    def defaults(self):
-        return {name: spec.default for name, spec in self.params.items()}
+    def defaults(self, profile=None):
+        defaults = {name: spec.default for name, spec in self.params.items()}
+        defaults.update(self._host_defaults)
+        defaults.update(self._profile_defaults.get(profile, {}))
+        return defaults
 
-    def resolve(self, values=None):
+    def resolve(self, values=None, profile=None):
         """Every parameter, clamped to its range; unknown names are refused."""
-        resolved = self.defaults()
+        resolved = self.defaults(profile)
         for name, value in (values or {}).items():
             if name not in self.params:
                 raise KernelError(f'{self.name} has no parameter {name!r}')
@@ -580,13 +621,13 @@ class KernelRegistry:
             raise KernelError(f'no kernel named {name!r} '
                               f'(have: {", ".join(self.names())})')
 
-    def select(self, name, values=None):
+    def select(self, name, values=None, profile=None):
         """A KernelSelection, or None for the reference (no kernel)."""
         kernel = self.get(name)
         if kernel is None:
             return None
         return KernelSelection(kernel, tuple(sorted(
-            kernel.resolve(values).items())))
+            kernel.resolve(values, profile=profile).items())))
 
     def describe(self):
         """[(name, label, help, {param: Param})] for a UI."""

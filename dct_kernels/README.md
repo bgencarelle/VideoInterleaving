@@ -30,6 +30,17 @@ sending. The tuple is `(default, low, high, step, help, integer)`, the last
 two optional. Every kernel also gets `luma_mix` and `chroma_mix`: 0 turns the
 kernel off for that plane, 1 is as written, above 1 pushes further.
 
+An optional `HOST_DEFAULTS` dict can set per-kernel starting values for those
+two mix controls, for example `HOST_DEFAULTS = {'luma_mix': 0.5}`. Explicit
+saved or command-line values still take precedence.
+
+An optional `PROFILE_DEFAULTS` dict can set starting values by wire profile,
+for example `PROFILE_DEFAULTS = {'aspect-mono-500': {'luma_mix': 0.25}}`.
+Profile values override `HOST_DEFAULTS` and the parameter declarations; saved
+or command-line values still take precedence. Aspect Mono and Aspect Stereo
+have separate tuned defaults for their layout-specific coefficient masks;
+other profiles use the general V7 defaults.
+
 ## Hooks (use any)
 
 | hook | what it is |

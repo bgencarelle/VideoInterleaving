@@ -11,10 +11,13 @@ HELP = ('Blow the sent band up the way an ideal viewer would, apply an '
         'is the band-limited picture whose upscaled edges are as steep and '
         'clean as that band allows. About 3 ms per round for luma.')
 PARAMS = {
-    'rounds': (3, 1, 8, 1, 'shock then re-project rounds (about 3 ms each)', True),
+    'rounds': (2, 1, 8, 1, 'shock then re-project rounds (about 3 ms each)', True),
     'strength': (0.6, 0.0, 1.5, 0.05, 'size of each shock step'),
     'up': (3, 2, 4, 1, 'upscaling used inside the filter', True),
     'chroma': (0, 0, 1, 1, '1 = steepen colour edges too', True),
+}
+PROFILE_DEFAULTS = {
+    'aspect-mono-500': {'luma_mix': 0.25, 'strength': 0.9},
 }
 
 

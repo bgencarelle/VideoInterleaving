@@ -4,6 +4,11 @@
 **Fixture:** first frame of `modem_tests/fixtures/v7_pixel_motion_16x9.mp4`
 (`854x480`; V7 grids `96x80`, `48x40`, `48x40`).
 
+The kernel defaults were subsequently tuned with the full table comparison in
+[`V7_KERNEL_DEFAULTS_TUNING.md`](V7_KERNEL_DEFAULTS_TUNING.md). Timings and
+exact-versus-deferred image comparisons below record the earlier parameter
+values.
+
 ## Measurements
 
 After warming Numba and kernel caches, 120 paired per-frame samples measured

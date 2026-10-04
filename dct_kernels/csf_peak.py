@@ -10,8 +10,12 @@ HELP = ('Contrast sensitivity peaks at middle spatial frequencies, and a '
 PARAMS = {
     'centre': (0.18, 0.03, 0.5, 0.01, 'bump position, cycles per sent pixel'),
     'width': (0.09, 0.02, 0.4, 0.01, 'bump width'),
-    'amount': (0.15, 0.0, 2.0, 0.05, 'how much the bump adds (0.15 = +15%)'),
-    'rolloff': (0.38, 0.1, 1.0, 0.01, 'frequency where the top starts to fall'),
+    'amount': (0.05, 0.0, 2.0, 0.05, 'how much the bump adds (0.05 = +5%)'),
+    'rolloff': (0.55, 0.1, 1.0, 0.01, 'frequency where the top starts to fall'),
+}
+PROFILE_DEFAULTS = {
+    'aspect-mono-500': {'chroma_mix': 0.0, 'luma_mix': 2.0},
+    'aspect-fold-500': {'chroma_mix': 0.0, 'luma_mix': 2.0},
 }
 
 

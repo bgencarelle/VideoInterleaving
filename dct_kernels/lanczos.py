@@ -7,7 +7,11 @@ HELP = ('Windowed sinc. Sharp edges with slight ringing; fewer lobes are '
 SUPPORT = 5.0
 PARAMS = {
     'lobes': (3, 2, 5, 1, 'sinc lobes kept (a)', True),
-    'width': (1.0, 0.5, 1.6, 0.05, 'kernel width in sent pixels'),
+    'width': (0.9, 0.5, 1.6, 0.05, 'kernel width in sent pixels'),
+}
+PROFILE_DEFAULTS = {
+    'aspect-mono-500': {'luma_mix': 0.25, 'width': 0.5},
+    'aspect-fold-500': {'luma_mix': 0.5, 'width': 0.5},
 }
 
 

@@ -9,8 +9,12 @@ HELP = ('Among all windows of this length, the discrete prolate spheroidal '
         'about 1 is nearly flat, 4 is a Gaussian-like taper. A cousin of '
         'Kaiser, derived rather than approximated.')
 PARAMS = {
-    'nw': (1.0, 0.5, 6.0, 0.1, 'time-bandwidth product'),
-    'floor': (0.0, 0.0, 0.5, 0.01, 'minimum gain at the band edge'),
+    'nw': (0.5, 0.5, 6.0, 0.1, 'time-bandwidth product'),
+    'floor': (0.15, 0.0, 0.5, 0.01, 'minimum gain at the band edge'),
+}
+PROFILE_DEFAULTS = {
+    'aspect-mono-500': {'floor': 0.5, 'luma_mix': 0.25},
+    'aspect-fold-500': {'luma_mix': 0.05},
 }
 
 

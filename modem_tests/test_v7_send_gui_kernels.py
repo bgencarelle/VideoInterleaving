@@ -70,6 +70,37 @@ class KernelGuiTests(unittest.TestCase):
         self.assertIn('width=0.8', command)
         self.assertEqual(command.count('--dct-kernel-param'), 1)
 
+    def test_kernel_specific_host_default_is_shown_and_not_sent_as_an_override(self):
+        gui = _gui(self.devices)
+        gui._assign('dct_kernel', 'csf_diamond')
+        self.assertEqual(gui._field_value('kp:luma_mix'), 0.25)
+        self.assertTrue(gui._is_default('kp:luma_mix'))
+        self.assertIn('default 0.25', gui._help_text('kp:luma_mix'))
+        command = self.command(gui)
+        self.assertNotIn('--dct-kernel-param', command)
+        gui._set_kernel_param('kp:luma_mix', 1.0)
+        command = self.command(gui)
+        self.assertIn('luma_mix=1', command)
+
+    def test_aspect_mono_shows_its_profile_kernel_defaults(self):
+        gui = _gui(self.devices)
+        gui.settings['profile'] = 'aspect-mono-500'
+        gui._assign('dct_kernel', 'lanczos')
+        self.assertEqual(gui._field_value('kp:width'), 0.5)
+        self.assertEqual(gui._field_value('kp:luma_mix'), 0.25)
+        command = self.command(gui)
+        self.assertNotIn('--dct-kernel-param', command)
+
+    def test_aspect_stereo_shows_its_profile_kernel_defaults(self):
+        gui = _gui(self.devices)
+        gui.settings['profile'] = 'aspect-fold-500'
+        gui._assign('dct_kernel', 'band_taper')
+        self.assertEqual(gui._field_value('kp:edge'), 0.9)
+        self.assertEqual(gui._field_value('kp:luma_mix'), 0.05)
+        self.assertEqual(gui._field_value('kp:use_guests'), 1)
+        command = self.command(gui)
+        self.assertNotIn('--dct-kernel-param', command)
+
     def test_pixel_encode_and_direct_dct_off_hide_and_drop_the_kernel(self):
         gui = _gui(self.devices)
         gui._assign('dct_kernel', 'gaussian')
@@ -90,9 +121,9 @@ class KernelGuiTests(unittest.TestCase):
     def test_stale_saved_parameters_are_ignored(self):
         gui = _gui(self.devices)
         gui._assign('dct_kernel', 'lanczos')
-        gui.settings['dct_kernel_params'] = {'lanczos': {'width': 0.9, 'gone': 3}}
+        gui.settings['dct_kernel_params'] = {'lanczos': {'width': 1.0, 'gone': 3}}
         command = self.command(gui)
-        self.assertIn('width=0.9', command)
+        self.assertIn('width=1', command)
         self.assertFalse([c for c in command if c.startswith('gone')])
 
     def test_typed_values_are_clamped_and_bad_text_is_refused(self):
@@ -115,11 +146,11 @@ class KernelGuiTests(unittest.TestCase):
         gui._step_field('kp:width', -1)
         payload = json.loads(control.write.call_args.args[0])
         self.assertEqual(payload['kernel'], 'lanczos')
-        self.assertAlmostEqual(payload['kernel_params']['width'], 0.95)
+        self.assertAlmostEqual(payload['kernel_params']['width'], 0.85)
         self.assertEqual(payload['dct']['sharpen'], 'off')
         control.flush.assert_called()
         gui._step_field('kp:width', -1, fast=True)
-        self.assertAlmostEqual(gui._field_value('kp:width'), 0.7)
+        self.assertAlmostEqual(gui._field_value('kp:width'), 0.6)
 
     def test_arrow_keys_step_and_cycle_while_sending(self):
         gui = _gui(self.devices)
@@ -234,7 +265,7 @@ class KernelGuiTests(unittest.TestCase):
         gui.selected = 'kp:width'
         gui._on_key(KeyStub, None, KeyStub.KEY_LEFT, 0, KeyStub.PRESS, 0)
         self.assertEqual(json.loads(control.write.call_args.args[0])
-                         ['kernel_params']['width'], 0.95)
+                         ['kernel_params']['width'], 0.85)
         gui._on_key(KeyStub, None, KeyStub.KEY_R, 0, KeyStub.PRESS, 0)
         sent = [json.loads(c.args[0]) for c in control.write.call_args_list]
         self.assertIn({'kernels': 'reload'}, sent)
@@ -301,7 +332,7 @@ class KernelGuiTests(unittest.TestCase):
         gui._assign('dct_kernel', 'lanczos')
         self.assertTrue(gui._value_label('kp:width').endswith('default'))
         gui._set_kernel_param('kp:width', 0.8)
-        self.assertEqual(gui._value_label('kp:width'), '0.8  ·  default 1')
+        self.assertEqual(gui._value_label('kp:width'), '0.8  ·  default 0.9')
         self.assertFalse(gui._is_default('kp:width'))
         self.assertIn('default Reference', gui._value_label('dct_kernel'))
         gui.settings['dct_preshrink'] = '6'
@@ -318,9 +349,9 @@ class KernelGuiTests(unittest.TestCase):
         gui.process = SimpleNamespace(stdin=control)
         gui.selected = 'kp:width'
         self.press(gui, KeyStub.KEY_DELETE)
-        self.assertEqual(gui._field_value('kp:width'), 1.0)
+        self.assertEqual(gui._field_value('kp:width'), 0.9)
         sent = json.loads(control.write.call_args_list[-1].args[0])
-        self.assertEqual(sent['kernel_params']['width'], 1.0)
+        self.assertEqual(sent['kernel_params']['width'], 0.9)
         self.assertEqual(sent['dct']['preshrink'], 6.0)         # others kept
         gui.selected = 'dct_preshrink'
         self.press(gui, KeyStub.KEY_BACKSPACE)

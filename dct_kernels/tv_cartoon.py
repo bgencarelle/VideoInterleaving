@@ -11,8 +11,12 @@ HELP = ('Total-variation (Rudin-Osher-Fatemi) smoothing keeps edges and '
 PARAMS = {
     'weight': (0.03, 0.0, 0.3, 0.005, 'smoothing strength (picture units)'),
     'iterations': (25, 1, 80, 1, 'Chambolle steps (about 0.03 ms each)', True),
-    'keep': (0.25, 0.0, 1.0, 0.05, 'fraction of the original detail kept'),
+    'keep': (0.5, 0.0, 1.0, 0.05, 'fraction of the original detail kept'),
     'chroma': (1, 0, 1, 1, '1 = flatten colour planes too', True),
+}
+PROFILE_DEFAULTS = {
+    'aspect-mono-500': {'keep': 0.75, 'luma_mix': 0.25},
+    'aspect-fold-500': {'keep': 0.75, 'luma_mix': 0.05},
 }
 
 

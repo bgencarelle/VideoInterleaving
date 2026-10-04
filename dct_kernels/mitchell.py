@@ -3,11 +3,16 @@ import numpy as np
 
 LABEL = 'Mitchell-Netravali'
 HELP = ('Cubic family. B softens, C sharpens. B=1/3 C=1/3 is the standard '
-        'compromise; B=0 C=0.5 is Catmull-Rom (sharper, a little ringing).')
+        'compromise; B=0 C=0.5 is Catmull-Rom (sharper, a little ringing). '
+        'The default C=0.8 is a sharper setting.')
 SUPPORT = 2.0
 PARAMS = {
     'B': (0.33, 0.0, 1.0, 0.05, 'blur'),
-    'C': (0.33, 0.0, 1.0, 0.05, 'sharpening'),
+    'C': (0.8, 0.0, 1.0, 0.05, 'sharpening'),
+}
+PROFILE_DEFAULTS = {
+    'aspect-mono-500': {'B': 0.0, 'luma_mix': 0.25},
+    'aspect-fold-500': {'luma_mix': 0.05},
 }
 
 

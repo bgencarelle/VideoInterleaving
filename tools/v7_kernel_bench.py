@@ -107,6 +107,7 @@ def shown_rgb(values, mask_set, up=4):
         rows, cols = grid
         coefficients = dctn(values[offset:offset+rows*cols].reshape(rows, cols),
                             norm='ortho')
+        offset += rows*cols
         coefficients[~mask] = 0
         # every plane is drawn at the luma grid's size times `up`
         height, width = GRIDS[0][0]*up, GRIDS[0][1]*up
@@ -121,7 +122,6 @@ def shown_rgb(values, mask_set, up=4):
         big = np.zeros((height, width))
         big[:rows, :cols] = coefficients*np.sqrt(height*width/(rows*cols))
         planes.append(idctn(big, norm='ortho')*.5+.5)
-        offset += rows*cols
     y, cb, cr = planes[0], (planes[1]-128/255)*1.0, (planes[2]-128/255)*1.0
     # values were 2x-1 coded in [0, 1] with 128/255 neutral chroma
     cb, cr = planes[1]-.5, planes[2]-.5

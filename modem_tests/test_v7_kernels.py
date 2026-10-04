@@ -321,6 +321,32 @@ class RegistryTests(unittest.TestCase):
             registry.select('lanczos', {'width': float('nan')})
         self.assertIsNone(registry.select(K.REFERENCE))
 
+    def test_kernel_host_defaults_are_applied_and_explicit_values_win(self):
+        with tempfile.TemporaryDirectory() as folder:
+            _write(folder, 'host_defaults', '''
+                import numpy as np
+                PARAMS = {'strength': (0.2, 0.0, 1.0, 0.1, 'strength')}
+                HOST_DEFAULTS = {'luma_mix': 0.25, 'chroma_mix': 0.5}
+                PROFILE_DEFAULTS = {
+                    'aspect-mono-500': {'strength': 0.8, 'luma_mix': 0.4}
+                }
+                def response(nu): return np.ones_like(nu)
+            ''')
+            registry = K.KernelRegistry([folder])
+            registry.scan()
+            kernel = registry.get('host_defaults')
+            self.assertEqual(kernel.defaults()['luma_mix'], 0.25)
+            self.assertEqual(kernel.defaults()['chroma_mix'], 0.5)
+            self.assertEqual(kernel.defaults('aspect-mono-500')['strength'], 0.8)
+            self.assertEqual(kernel.defaults('aspect-mono-500')['luma_mix'], 0.4)
+            selection = registry.select('host_defaults', {'luma_mix': 1.0})
+            self.assertEqual(selection.params['luma_mix'], 1.0)
+            self.assertEqual(selection.params['chroma_mix'], 0.5)
+            selection = registry.select(
+                'host_defaults', {'strength': 0.6}, profile='aspect-mono-500')
+            self.assertEqual(selection.params['strength'], 0.6)
+            self.assertEqual(selection.params['luma_mix'], 0.4)
+
 
 class GainTests(unittest.TestCase):
     def setUp(self):
@@ -374,6 +400,8 @@ class GainTests(unittest.TestCase):
     def test_csf_diamond_windows_chroma_by_default_with_opt_out(self):
         kernel = self.registry.get('csf_diamond')
         params = kernel.defaults()
+        self.assertAlmostEqual(params['luma_mix'], 0.25)
+        self.assertEqual(params['color_planes'], 1)
         self.assertIsNotNone(kernel.gain(self.luma, params))
         self.assertIsNotNone(kernel.gain(self.chroma, params))
         self.assertIsNone(kernel.gain(
@@ -672,6 +700,24 @@ class LiveControlTests(unittest.TestCase):
 
     def test_starts_on_the_reference(self):
         self.assertIsNone(self.controls.options({})['kernel'])
+
+    def test_profile_defaults_follow_the_selected_wire_profile(self):
+        aspect_mono = v7_live.LiveKernelControls(
+            self.registry, 'lanczos', profile='aspect-mono-500')
+        mono = aspect_mono.options({})['kernel']
+        self.assertEqual(mono.params['width'], 0.5)
+        self.assertEqual(mono.params['luma_mix'], 0.25)
+
+        aspect_stereo = v7_live.LiveKernelControls(
+            self.registry, 'lanczos', profile='aspect-fold-500')
+        stereo = aspect_stereo.options({})['kernel']
+        self.assertEqual(stereo.params['width'], 0.5)
+        self.assertEqual(stereo.params['luma_mix'], 0.5)
+
+        stereo_viewer = self.registry.select(
+            'viewer_solve', profile='aspect-fold-500')
+        self.assertEqual(stereo_viewer.params['luma_mix'], 0.2)
+        self.assertEqual(stereo_viewer.params['tame'], 0)
 
     def test_choosing_and_tuning_a_kernel(self):
         self.assertTrue(self.send(kernel='lanczos', kernel_params={'width': 0.8}))

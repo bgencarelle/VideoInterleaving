@@ -14,18 +14,23 @@ HELP = ('2D Contrast Sensitivity Function with oblique-effect diamond tuning. '
         'sensitive, while gently attenuating diagonal frequencies. amount is '
         'the mid-band boost; oblique is diagonal retention (1.0 = circular); '
         'p_norm shapes the diamond contour (< 2.0 = diamond); rolloff is the '
-        'high-frequency knee. By default it shapes chroma too; set '
-        'color_planes to 0 for luma only.')
+        'high-frequency knee. The default luma mix is 0.25; chroma shaping '
+        'remains enabled by default.')
 RADIAL = False
+HOST_DEFAULTS = {'luma_mix': 0.25}
 
 PARAMS = {
-    'amount': (0.15, 0.0, 0.6, 0.05, 'mid-band cardinal boost (0.15 = +15%)'),
-    'oblique': (0.75, 0.4, 1.0, 0.05, 'diagonal retention factor (1.0 = round)'),
-    'p_norm': (1.6, 1.2, 2.0, 0.1, 'L_p contour power (2.0 = round, 1.0 = diamond)'),
+    'amount': (0.05, 0.0, 0.6, 0.05, 'mid-band cardinal boost (0.05 = +5%)'),
+    'oblique': (0.95, 0.4, 1.0, 0.05, 'diagonal retention factor (1.0 = round)'),
+    'p_norm': (1.9, 1.2, 2.0, 0.1, 'L_p contour power (2.0 = round, 1.0 = diamond)'),
     'centre': (0.18, 0.05, 0.35, 0.01, 'peak frequency (cycles/pixel)'),
     'width': (0.10, 0.03, 0.25, 0.01, 'peak bandwidth'),
-    'rolloff': (0.42, 0.25, 0.55, 0.01, 'high-frequency roll-off start'),
+    'rolloff': (0.55, 0.25, 0.55, 0.01, 'high-frequency roll-off start'),
     'color_planes': (1, 0, 1, 1, '0 = leave chroma planes unchanged', True),
+}
+PROFILE_DEFAULTS = {
+    'aspect-mono-500': {'luma_mix': 0.1},
+    'aspect-fold-500': {'luma_mix': 0.05},
 }
 
 

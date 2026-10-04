@@ -185,8 +185,9 @@ class LiveKernelControls:
     DCT_LIMITS = {'sharpen_strength': (0.0, 1.0), 'clarity': (0.0, 1.0),
                   'chroma_gain': (1.0, 1.3), 'preshrink': (1.75, 8.0)}
 
-    def __init__(self, registry, name=None, params=None):
+    def __init__(self, registry, name=None, params=None, profile=None):
         self.registry = registry
+        self.profile = profile
         self._lock = threading.Lock()
         self._values = {}
         self._dct = {}
@@ -203,7 +204,7 @@ class LiveKernelControls:
     def _select(self):
         """Make the selection from the current name and values."""
         self._selection = self.registry.select(
-            self._name, self._params.get(self._name))
+            self._name, self._params.get(self._name), profile=self.profile)
 
     def update(self, line):
         try:
@@ -231,7 +232,8 @@ class LiveKernelControls:
                 if isinstance(values, dict):
                     candidate.setdefault(name, {}).update(values)
                 try:
-                    selection = self.registry.select(name, candidate.get(name))
+                    selection = self.registry.select(
+                        name, candidate.get(name), profile=self.profile)
                 except K.KernelError as exc:
                     # A refused change leaves the running kernel as it was
                     # (unless a rescan just removed it from under us).
@@ -239,7 +241,7 @@ class LiveKernelControls:
                     name = self._name
                     try:
                         selection = self.registry.select(
-                            name, self._params.get(name))
+                            name, self._params.get(name), profile=self.profile)
                     except K.KernelError:
                         name, selection = K.REFERENCE, None
                         self._notices.append('DCT kernel: back to reference')
@@ -702,7 +704,7 @@ def _kernel_cli_values(items):
     return values
 
 
-def _warm_kernels(model, registry, masks_for, dct_options):
+def _warm_kernels(model, registry, masks_for, dct_options, profile=None):
     """Encode a small test frame through every kernel (all hooks, default
     parameters) before the output stream is live."""
     frame = np.zeros((model.coder.grids[0][0]*4, model.coder.grids[0][1]*4, 3),
@@ -710,7 +712,7 @@ def _warm_kernels(model, registry, masks_for, dct_options):
     frame[::7] = 200
     for name in registry.names():
         try:
-            selection = registry.select(name)
+            selection = registry.select(name, profile=profile)
         except K.KernelError:
             continue
         masks = masks_for(0) if selection is not None else None
@@ -1073,6 +1075,24 @@ def _apply_profile_option(args):
         args.slices = 'stereo'
 
 
+def _kernel_defaults_profile(args):
+    """Return the selected wire profile for profile-specific kernel defaults."""
+    profile = getattr(args, 'profile', None)
+    if profile:
+        return profile
+    if getattr(args, 'aspect_mono', False):
+        return 'aspect-mono-500'
+    if getattr(args, 'aspect_fold', False):
+        return 'aspect-fold-500'
+    if getattr(args, 'experimental_mono_colour', False):
+        return 'mono-colour-500'
+    if getattr(args, 'experimental_mono_fold', False):
+        return 'mono-fold-500'
+    if getattr(args, 'experimental_fold', None) == 500:
+        return 'fold-500'
+    return None
+
+
 HOST_PARAM_NAMES = ('luma_mix', 'chroma_mix')
 
 
@@ -1134,6 +1154,7 @@ def _run_send_session(args):
         query_device_snapshot)
 
     _apply_profile_option(args)
+    kernel_profile = _kernel_defaults_profile(args)
     slots = _fold_slots(args)
     mono_fold_profile = bool(getattr(args, 'experimental_mono_fold', False))
     fold = _experimental_fold(slots)
@@ -1185,7 +1206,8 @@ def _run_send_session(args):
     try:
         kernel_controls = LiveKernelControls(
             kernel_registry, getattr(args, 'dct_kernel', None),
-            _kernel_cli_values(getattr(args, 'dct_kernel_param', None)))
+            _kernel_cli_values(getattr(args, 'dct_kernel_param', None)),
+            profile=kernel_profile)
         refused = kernel_controls.take_notices()
         if refused:
             raise K.KernelError(refused[0])
@@ -1773,7 +1795,8 @@ def _run_send_session(args):
                 warmup_direct_dct(model.coder.grids, model.coder.shapes)
                 # Run every kernel once so a live switch never meets a first
                 # call (imports, caches) on the frame thread.
-                _warm_kernels(model, kernel_registry, kernel_masks_for, dct_options)
+                _warm_kernels(model, kernel_registry, kernel_masks_for,
+                              dct_options, kernel_profile)
             # Start picture and soundtrack capture only after the output clock
             # is known, and close together so file/stream timelines begin near
             # the same source time.

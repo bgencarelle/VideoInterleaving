@@ -16,6 +16,10 @@ PARAMS = {
     'max_gain': (2.2, 1.0, 6.0, 0.1, 'ceiling on the boost at any frequency'),
     'tame': (6, 0, 30, 1, 'halo clean-up rounds after the boost (0 = off)', True),
 }
+PROFILE_DEFAULTS = {
+    'aspect-mono-500': {'luma_mix': 0.25, 'tame': 0},
+    'aspect-fold-500': {'luma_mix': 0.2, 'tame': 0},
+}
 
 _X = np.linspace(-2.0, 2.0, 1025)
 

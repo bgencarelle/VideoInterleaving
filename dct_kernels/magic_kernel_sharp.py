@@ -6,6 +6,10 @@ HELP = ('Quadratic B-spline (no ringing, no aliasing of its own) followed by '
         'the small [-1 6 -1] sharpening filter. sharp = 0 is the plain '
         'magic kernel, 1 the published Sharp, above 1 pushes further.')
 PARAMS = {'sharp': (1.0, 0.0, 2.0, 0.05, 'amount of the [-1 6 -1] filter')}
+PROFILE_DEFAULTS = {
+    'aspect-mono-500': {'luma_mix': 0.25, 'sharp': 1.5},
+    'aspect-fold-500': {'luma_mix': 0.05},
+}
 
 
 def response(nu, sharp):

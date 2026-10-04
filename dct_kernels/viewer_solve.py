@@ -18,9 +18,13 @@ HELP = ('Plain truncation is the best choice only for an ideal receiver. '
 PARAMS = {
     'viewer': (0, 0, 2, 1, '0 bilinear, 1 bicubic, 2 nearest', True),
     'iterations': (10, 1, 40, 1, 'conjugate-gradient steps', True),
-    'lam': (0.02, 0.0, 1.0, 0.005, 'pull toward the plain coefficients (bigger = gentler)'),
+    'lam': (0.5, 0.0, 1.0, 0.005, 'pull toward the plain coefficients (bigger = gentler)'),
     'up': (4, 2, 6, 1, 'model lattice: viewer pixels per sent pixel', True),
     'tame': (4, 0, 20, 1, 'halo clean-up rounds after the solve (0 = off)', True),
+}
+PROFILE_DEFAULTS = {
+    'aspect-mono-500': {'luma_mix': 0.25, 'tame': 0},
+    'aspect-fold-500': {'luma_mix': 0.2, 'tame': 0},
 }
 _FILTERS = (Image.Resampling.BILINEAR, Image.Resampling.BICUBIC,
             Image.Resampling.NEAREST)
