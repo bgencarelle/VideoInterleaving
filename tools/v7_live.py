@@ -1093,6 +1093,13 @@ def _kernel_defaults_profile(args):
     return None
 
 
+def _default_kernel_for_profile(profile):
+    """The quality-tuned active kernel default for Aspect profiles."""
+    if profile in ('aspect-fold-500', 'aspect-mono-500'):
+        return 'viewer_solve'
+    return K.REFERENCE
+
+
 HOST_PARAM_NAMES = ('luma_mix', 'chroma_mix')
 
 
@@ -1204,8 +1211,11 @@ def _run_send_session(args):
     # reported and skipped, an unknown choice is refused before any audio.
     kernel_registry = K.open_registry(getattr(args, 'dct_kernel_dir', None) or ())
     try:
+        kernel_name = getattr(args, 'dct_kernel', None)
+        if kernel_name is None:
+            kernel_name = _default_kernel_for_profile(kernel_profile)
         kernel_controls = LiveKernelControls(
-            kernel_registry, getattr(args, 'dct_kernel', None),
+            kernel_registry, kernel_name,
             _kernel_cli_values(getattr(args, 'dct_kernel_param', None)),
             profile=kernel_profile)
         refused = kernel_controls.take_notices()

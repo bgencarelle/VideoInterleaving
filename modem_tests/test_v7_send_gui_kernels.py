@@ -27,7 +27,7 @@ class KeyStub:
 def _gui(devices):
     gui = SenderGui(devices)
     gui.settings.update(device=3, source='test', profile='fold-500',
-                        dct_encode=True)
+                        dct_encode=True, dct_kernel='reference')
     return gui
 
 
@@ -40,6 +40,35 @@ class KernelGuiTests(unittest.TestCase):
 
     def command(self, gui):
         return build_command(gui.settings, self.devices, self.sd)
+
+    def test_aspect_profiles_activate_viewer_solve_by_default(self):
+        gui = SenderGui(self.devices)
+        gui.settings.update(device=3, source='test')
+        self.assertEqual(gui.settings['profile'], 'aspect-fold-500')
+        self.assertEqual(gui.settings['dct_kernel'], 'viewer_solve')
+        command = self.command(gui)
+        self.assertEqual(command[command.index('--dct-kernel')+1],
+                         'viewer_solve')
+        self.assertNotIn('--dct-kernel-param', command)
+        self.assertIn('default', gui._value_label('dct_kernel'))
+
+        gui._assign('profile', 'aspect-mono-500')
+        self.assertEqual(gui.settings['dct_kernel'], 'viewer_solve')
+        self.assertIn('best bilinear', dict((name, label) for label, name in
+                                           gui._choices('dct_kernel'))
+                      ['viewer_solve'])
+
+    def test_profile_switch_updates_only_an_untouched_kernel_default(self):
+        gui = SenderGui(self.devices)
+        self.assertEqual(gui.settings['dct_kernel'], 'viewer_solve')
+        gui._assign('profile', 'fold-500')
+        self.assertEqual(gui.settings['dct_kernel'], 'reference')
+        gui._assign('profile', 'aspect-fold-500')
+        self.assertEqual(gui.settings['dct_kernel'], 'viewer_solve')
+
+        gui._assign('dct_kernel', 'reference')
+        gui._assign('profile', 'aspect-mono-500')
+        self.assertEqual(gui.settings['dct_kernel'], 'reference')
 
     def test_the_reference_adds_nothing_to_the_command_line(self):
         gui = _gui(self.devices)

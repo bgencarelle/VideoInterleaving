@@ -719,6 +719,13 @@ class LiveControlTests(unittest.TestCase):
         self.assertEqual(stereo_viewer.params['luma_mix'], 0.2)
         self.assertEqual(stereo_viewer.params['tame'], 0)
 
+        self.assertEqual(v7_live._default_kernel_for_profile(
+            'aspect-mono-500'), 'viewer_solve')
+        self.assertEqual(v7_live._default_kernel_for_profile(
+            'aspect-fold-500'), 'viewer_solve')
+        self.assertEqual(v7_live._default_kernel_for_profile('fold-500'),
+                         K.REFERENCE)
+
     def test_choosing_and_tuning_a_kernel(self):
         self.assertTrue(self.send(kernel='lanczos', kernel_params={'width': 0.8}))
         selection = self.controls.options({})['kernel']

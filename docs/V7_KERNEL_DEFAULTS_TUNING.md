@@ -70,23 +70,23 @@ pair uses the updated defaults.
 
 ## Best kernel choice by benchmark mode
 
-The GUI labels `Reference` as the shipped default (no kernel), and marks the
-highest-natural-score kernel separately for each tested display mode. Those
-labels are recommendations, not a claim that one kernel wins for every
-viewer: `ideal` is the ideal-reconstruction test, while `bilinear` is a fixed
-bilinear-resampling simulation. The bilinear test does not detect the receiver
-window size or a runtime resolution threshold. The six-frame hold-out is
-reported separately and does not select the winner.
+The GUI marks the active default and the highest-natural-score kernel
+separately for each tested display mode. The Aspect profiles actively default
+to Viewer-model solve; General V7 remains at `Reference` (no kernel). `ideal`
+is the ideal-reconstruction test, while `bilinear` is a fixed bilinear-
+resampling simulation. The bilinear test does not detect the receiver window
+size or a runtime resolution threshold. The six-frame hold-out is reported
+separately and does not select the winner.
 
-| Profile | Best ideal-test kernel | Best bilinear-test kernel |
-| --- | --- | --- |
-| General V7 | Mid-band emphasis | Viewer-model solve |
-| Aspect Mono | Mid-band emphasis | Viewer-model solve |
-| Aspect Stereo | Viewer-model solve | Viewer-model solve |
+| Profile | Active default kernel | Best ideal-test kernel | Best bilinear-test kernel |
+| --- | --- | --- | --- |
+| General V7 | Reference (no kernel) | Mid-band emphasis | Viewer-model solve |
+| Aspect Mono | Viewer-model solve | Mid-band emphasis | Viewer-model solve |
+| Aspect Stereo | Viewer-model solve | Viewer-model solve | Viewer-model solve |
 
-The sender GUI shows the selected kernel's profile-specific parameter defaults
-on its parameter rows. Choosing a marked winner is still explicit; the default
-kernel remains `Reference` unless changed.
+The sender GUI and direct Aspect-profile sender commands use Viewer-model
+solve's profile-specific parameter defaults. The chooser marks the active
+default as well as the mode-specific winners; other kernels remain available.
 
 The CSF Diamond default moved from the worst ideal-mode and second-worst
 bilinear-mode natural-image mean to within 0.47 points of reference in ideal
@@ -197,9 +197,9 @@ Higher SSIMULACRA2 is better. Parentheses show the delta from the Aspect Mono
 reference (no kernel); natural pictures and the six-frame hold-out are kept as
 separate columns.
 
-The best natural-image score is Mid-band emphasis in ideal mode and
-Viewer-model solve in bilinear mode. The GUI labels both choices for this
-profile; the hold-out scores remain separate from this selection.
+The best single-mode natural-image score is Mid-band emphasis in ideal mode and
+Viewer-model solve in bilinear mode. Viewer-model solve is the active default
+as the balanced choice across both tests; the hold-out scores remain separate.
 
 | Kernel | Ideal natural | Ideal hold-out | Bilinear natural | Bilinear hold-out |
 | --- | ---: | ---: | ---: | ---: |

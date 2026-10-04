@@ -286,9 +286,9 @@ NUMERIC_STEPS = {'dct_sharpen_strength': (0.0, 1.0, 0.05),
 ENCODE_DEFAULTS = {'dct_kernel': 'reference', 'dct_preshrink': '4',
                    'dct_sharpen': 'off', 'dct_sharpen_strength': '0.25',
                    'dct_clarity': '0', 'dct_chroma_gain': '1'}
-# Benchmark winners by modeled display path. These labels are recommendations,
-# not automatic kernel selection: Reference remains the shipped no-kernel
-# default, and the winner changes with the Aspect profile and display mode.
+# Benchmark winners by modeled display path. The Aspect profiles use
+# Viewer-model solve as the balanced active default; the labels keep each
+# display-mode winner visible when the ideal winner differs.
 KERNEL_BENCHMARK_WINNERS = {
     'aspect-mono-500': {'ideal': 'csf_peak', 'bilinear': 'viewer_solve'},
     'aspect-fold-500': {'ideal': 'viewer_solve', 'bilinear': 'viewer_solve'},
@@ -297,6 +297,17 @@ DEFAULT_KERNEL_BENCHMARK_WINNERS = {
     'ideal': 'csf_peak',
     'bilinear': 'viewer_solve',
 }
+PROFILE_DEFAULT_KERNELS = {
+    'aspect-mono-500': 'viewer_solve',
+    'aspect-fold-500': 'viewer_solve',
+}
+
+
+def default_kernel_for_profile(profile):
+    """Kernel enabled by default for the selected sender wire profile."""
+    return PROFILE_DEFAULT_KERNELS.get(profile, ENCODE_DEFAULTS['dct_kernel'])
+
+
 TONE_DEFAULTS = {'brightness': '', 'gamma': '1'}
 TWEAK_FIELDS = tuple(TONE_DEFAULTS) + tuple(ENCODE_DEFAULTS)
 # The sending screen's controls, grouped by what they do.
@@ -336,11 +347,13 @@ def _kernel_values(settings, kernel, profile=None):
 VIDEO_FILE_GLOB = '*.mp4 *.m4v *.mov *.mkv *.webm *.avi *.mpeg *.mpg *.wmv *.ts'
 DEVICE_REFRESH_SECONDS = 3.0
 GUI_EVENT_WAIT_SECONDS = 0.5
-SENDER_PREFERENCES_VERSION = 5
+SENDER_PREFERENCES_VERSION = 6
 DEFAULT_ASPECT_TAIL = 'fixed'
 # Version 5 made the fixed tail the default (the rotating tails show stale
 # colour on moving pictures): an earlier saved tail starts at it once.
 V5_RESET_SETTINGS = ('aspect_tail',)
+# Version 6 makes the measured Aspect-profile winner the active kernel default;
+# migrate the old Reference selection but preserve an explicit kernel choice.
 # Settings whose defaults changed in version 4 (four folded profiles, Aspect
 # Fold 500 and Direct DCT encode by default; every profile encodes with Box):
 # earlier saved values are dropped.
@@ -359,7 +372,7 @@ def _load_sender_preferences(path):
     except (OSError, ValueError, TypeError):
         return {}
     version = values.get('version') if isinstance(values, dict) else None
-    if version not in (1, 2, 3, 4, SENDER_PREFERENCES_VERSION):
+    if version not in (1, 2, 3, 4, 5, SENDER_PREFERENCES_VERSION):
         return {}
     settings = values.get('settings')
     if isinstance(settings, dict):
@@ -374,6 +387,9 @@ def _load_sender_preferences(path):
         if version < 5:
             for key in V5_RESET_SETTINGS:
                 settings.pop(key, None)
+        if version < 6:
+            if settings.get('dct_kernel', 'reference') == 'reference':
+                settings.pop('dct_kernel', None)
         if settings.get('encode_filter') not in (
                 None, *dict(FILTER_CHOICES).values()):
             # Lanczos and bicubic are no longer wire models.
@@ -1241,9 +1257,10 @@ def validate_settings(settings, devices, sd_module=None, audio_devices=()):
             raise ValueError('DCT pre-shrink must be between 1.75 and 8.')
     else:
         dct_sharpen = 'off'
-    dct_kernel, kernel_values = 'reference', {}
+    default_kernel = default_kernel_for_profile(profile)
+    dct_kernel, kernel_values = default_kernel, {}
     if dct_encode and not settings.get('pixel_encode'):
-        dct_kernel = settings.get('dct_kernel', 'reference') or 'reference'
+        dct_kernel = settings.get('dct_kernel', default_kernel) or default_kernel
         if dct_kernel != 'reference':
             try:
                 kernel_values = _kernel_values(
@@ -1742,7 +1759,7 @@ class SenderGui:
             'dct_chroma_gain': '1',
             'dct_preshrink': '4',
             'collapsed_sections': [],
-            'dct_kernel': 'reference',
+            'dct_kernel': default_kernel_for_profile(DEFAULT_PROFILE),
             'dct_kernel_params': {},
             'aspect_layout': 'auto',
             'aspect_tail': DEFAULT_ASPECT_TAIL,
@@ -1800,16 +1817,24 @@ class SenderGui:
 
     def _restore_preferences(self):
         preferences = _load_sender_preferences(self.preference_path)
-        _restore_sender_settings(self.settings, preferences.get('settings'))
+        saved_settings = preferences.get('settings')
+        _restore_sender_settings(self.settings, saved_settings)
+        if not isinstance(saved_settings, dict) or 'dct_kernel' not in saved_settings:
+            self.settings['dct_kernel'] = default_kernel_for_profile(
+                self.settings.get('profile'))
         self.resume_positions = dict(preferences.get('resume') or {})
         self.output_device_identity = preferences.get('output_device')
         self.source_audio_device_identity = preferences.get(
             'source_audio_device')
-        if self.settings.get('dct_kernel', 'reference') not in \
-                kernel_registry().names():
+        kernel_names = kernel_registry().names()
+        if self.settings.get('dct_kernel', 'reference') not in kernel_names:
             self.notice = (f"DCT kernel {self.settings['dct_kernel']!r} is "
-                           'no longer in the kernel folder; using Reference.')
-            self.settings['dct_kernel'] = 'reference'
+                           'no longer in the kernel folder; using the profile default.')
+            default_kernel = default_kernel_for_profile(
+                self.settings.get('profile'))
+            self.settings['dct_kernel'] = (
+                default_kernel if default_kernel in kernel_names else
+                v7_kernels.REFERENCE)
         output = _match_device(self.devices, self.output_device_identity)
         if output is not None:
             self.settings['device'] = output.index
@@ -1895,11 +1920,15 @@ class SenderGui:
             winners = KERNEL_BENCHMARK_WINNERS.get(
                 self.settings.get('profile'), DEFAULT_KERNEL_BENCHMARK_WINNERS)
             ideal, bilinear = winners['ideal'], winners['bilinear']
+            default_kernel = default_kernel_for_profile(
+                self.settings.get('profile'))
             choices = []
             for name, label, _help, _params in kernel_registry().describe():
-                if name == v7_kernels.REFERENCE:
+                if name == default_kernel == v7_kernels.REFERENCE:
                     label += ' · default (no kernel)'
-                elif name == ideal == bilinear:
+                elif name == default_kernel:
+                    label += ' · default'
+                if name == ideal == bilinear:
                     label += ' · best ideal + bilinear'
                 elif name == ideal:
                     label += ' · best ideal'
@@ -2511,6 +2540,8 @@ class SenderGui:
                     found[0].defaults(self.settings.get('profile'))[found[1]])
         if dest in TONE_DEFAULTS:
             return TONE_DEFAULTS[dest]
+        if dest == 'dct_kernel':
+            return default_kernel_for_profile(self.settings.get('profile'))
         return ENCODE_DEFAULTS.get(dest)
 
     def _default_text(self, dest):
@@ -2518,7 +2549,11 @@ class SenderGui:
         if dest == 'brightness':
             return '1.0 (profile)'
         if dest == 'dct_kernel':
-            return 'Reference'
+            default = self._default_value(dest)
+            if default == v7_kernels.REFERENCE:
+                return 'Reference (no kernel)'
+            kernel = kernel_registry().get(default)
+            return default if kernel is None else kernel.label
         if isinstance(default, (int, float)):
             return f'{default:g}'
         if dest == 'dct_sharpen':
@@ -2535,7 +2570,7 @@ class SenderGui:
             return True
         value = self._field_value(dest)
         if dest == 'dct_kernel':
-            return value in (None, '', 'reference')
+            return value == default
         if dest == 'brightness':
             return not str(value or '').strip()
         try:
@@ -2596,6 +2631,8 @@ class SenderGui:
             return
         self.settings.update(TONE_DEFAULTS)
         self.settings.update(ENCODE_DEFAULTS)
+        self.settings['dct_kernel'] = default_kernel_for_profile(
+            self.settings.get('profile'))
         self.settings['dct_kernel_params'] = {}
         self.notice = ('Brightness, gamma, kernel, pre-shrink and sharpness '
                        'are back at their defaults.')
@@ -2610,6 +2647,8 @@ class SenderGui:
             self._ab_stash = self._tweak_snapshot()
             self.settings.update(TONE_DEFAULTS)
             self.settings.update(ENCODE_DEFAULTS)
+            self.settings['dct_kernel'] = default_kernel_for_profile(
+                self.settings.get('profile'))
             self.settings['dct_kernel_params'] = {}
             self.notice = ('A/B: now showing the shipped defaults (B). Press B '
                            'again for your settings.')
@@ -2656,7 +2695,11 @@ class SenderGui:
         registry = kernel_registry()
         added, removed = registry.scan()
         if self.settings.get('dct_kernel', 'reference') not in registry.names():
-            self.settings['dct_kernel'] = 'reference'
+            default_kernel = default_kernel_for_profile(
+                self.settings.get('profile'))
+            self.settings['dct_kernel'] = (
+                default_kernel if default_kernel in registry.names() else
+                v7_kernels.REFERENCE)
         text = ', '.join([f'+{name}' for name in added] +
                          [f'-{name}' for name in removed]) or 'no change'
         skipped = ''.join(f'; skipped {Path(path).name}: {message}'
@@ -2705,7 +2748,7 @@ class SenderGui:
         text = self._plain_value_label(dest)
         if dest == 'dct_kernel':
             return (text if self._is_default(dest) else
-                    f'{text}  ·  default Reference')
+                    f'{text}  ·  default {self._default_text(dest)}')
         if self._is_tweak(dest) and self._default_value(dest) is not None:
             if dest == 'brightness' and self._is_default(dest):
                 return text                  # already says "profile default"
@@ -2765,6 +2808,8 @@ class SenderGui:
     def _assign(self, dest, value):
         if self._ab_blocks(dest):
             return
+        kernel_was_default = (dest == 'profile' and
+                              self._is_default('dct_kernel'))
         self.settings[dest] = value
         if dest == 'preview_stage':
             self._forward_popout()
@@ -2779,6 +2824,8 @@ class SenderGui:
                 (self.preview_image, self.preview_counter,
                  self.preview_aspect, self.preview_handoff_ns) = frame
         elif dest == 'profile':
+            if kernel_was_default:
+                self.settings['dct_kernel'] = default_kernel_for_profile(value)
             self._profile_changed(value)
             if value not in FOLDED_PROFILES:
                 self.settings['perceptual_resize'] = 'off'

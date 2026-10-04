@@ -469,14 +469,20 @@ class SenderGuiTests(unittest.TestCase):
             'fixed')
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)/'prefs.json'
-            for version, expected in ((4, None), (5, 'chroma')):
+            for version, expected, saved_kernel, expected_kernel in (
+                    (4, None, 'reference', None),
+                    (5, 'chroma', 'reference', None),
+                    (5, 'chroma', 'lanczos', 'lanczos'),
+                    (6, 'chroma', 'reference', 'reference')):
                 path.write_text(json.dumps({
                     'version': version,
-                    'settings': {'aspect_tail': 'chroma', 'source': 'test'}}))
+                    'settings': {'aspect_tail': 'chroma', 'source': 'test',
+                                 'dct_kernel': saved_kernel}}))
                 loaded = _load_sender_preferences(path)
                 settings = loaded.get('settings', loaded)
                 self.assertEqual(settings.get('aspect_tail'), expected)
                 self.assertEqual(settings.get('source'), 'test')
+                self.assertEqual(settings.get('dct_kernel'), expected_kernel)
 
     def test_direct_dct_encode_options_reach_the_sender_cli(self):
         self.settings.update(profile='mono-colour-500', dct_encode=True,
@@ -1733,15 +1739,24 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
             if key.startswith('field:'):
                 self.assertLessEqual(rect[3], bottom)
 
-    def test_typical_setups_fit_the_default_window_without_scrolling(self):
+    def test_typical_setups_keep_kernel_tuning_reachable(self):
         for source in ('video', 'camera', 'screen', 'test'):
             for profile in ('aspect-fold-500', 'fold-500'):
                 with self.subTest(source=source, profile=profile):
-                    gui = self._gui(profile=profile)
+                    gui = self._gui()
+                    gui._assign('profile', profile)
                     gui.settings['source'] = source
                     items = gui._setup_items(self.SIZE[0])
-                    self.assertEqual(
-                        gui._max_scroll(items, gui._setup_room(self.SIZE)), 0)
+                    max_scroll = gui._max_scroll(
+                        items, gui._setup_room(self.SIZE))
+                    if gui.settings['dct_kernel'] == 'reference':
+                        self.assertEqual(max_scroll, 0)
+                    else:
+                        self.assertEqual(max_scroll > 0, source != 'test')
+                        target = gui._kernel_param_fields()[-1]
+                        gui._scroll_to(target, self.SIZE)
+                        gui._canvas(self.SIZE)
+                        self.assertIn(f'field:{target}', gui.hits)
 
     def test_every_setting_is_in_exactly_one_section(self):
         names = [dest for _title, group in SenderGui.SECTIONS
@@ -1938,6 +1953,7 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
             'chroma', '--speed', '1.25', '--brightness', '1.1', '--gamma',
             '0.9', '--dct-encode', '--dct-sharpen', 'taper',
             '--dct-sharpen-strength', '0.5', '--dct-clarity', '0.15',
+            '--dct-kernel', 'viewer_solve',
             '--luma-adjust', '--luma-adjust-linear', '--clip-aware-encode',
             '--capture-fps', '30.0', '--screen-backend', 'mss',
             '--region=0,0,1920,1080', '--capture-width', '160',
@@ -1959,13 +1975,14 @@ class SenderGuiButtonLayoutTests(unittest.TestCase):
                             restore_preferences=True)
             self.assertEqual(gui.settings['device'], 3)
             self.assertEqual(gui.settings['profile'], 'aspect-mono-500')
+            self.assertEqual(gui.settings['dct_kernel'], 'viewer_solve')
             self.assertEqual(gui.settings['aspect_layout'], '4:3')
             self.assertTrue(gui.settings['clip_aware'])
             self.assertNotIn('advanced', gui.settings)
             self.assertEqual(gui._canvas(self.SIZE).size, self.SIZE)
             gui._persist_preferences()
             saved = json.loads(path.read_text(encoding='utf-8'))
-        self.assertEqual(saved['version'], 5)
+        self.assertEqual(saved['version'], 6)
         self.assertNotIn('advanced', saved['settings'])
         self.assertEqual(saved['settings']['aspect_layout'], '4:3')
 
