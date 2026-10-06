@@ -39,12 +39,19 @@ PROFILE_CHOICES = (
     ('Mono video · aspect colour Fold 500', 'aspect-mono-500'),
     ('Mono video · colour Fold 500', 'mono-colour-500'),
     ('Stereo slices · each channel a whole picture · new', 'stereo-slices'),
+    ('Mono video · nested fold · more detail · experimental', 'aspect-mono-nested'),
+    ('Stereo redundant · nested fold · experimental', 'stereo-nested'),
 )
+# Nested-fold modes ride on these wires and share their kernel defaults.
+NESTED_BASE_PROFILES = {'aspect-mono-nested': 'aspect-mono-500',
+                        'stereo-nested': 'stereo-slices'}
 DEFAULT_PROFILE = 'aspect-fold-500'
-MONO_PROFILES = ('mono-colour-500', 'aspect-mono-500')
+MONO_PROFILES = ('mono-colour-500', 'aspect-mono-500', 'aspect-mono-nested')
 FOLDED_PROFILES = ('fold-500', 'mono-colour-500', 'aspect-fold-500',
-                   'aspect-mono-500', 'stereo-slices')
-ASPECT_PROFILES = ('aspect-fold-500', 'aspect-mono-500', 'stereo-slices')
+                   'aspect-mono-500', 'stereo-slices', 'aspect-mono-nested',
+                   'stereo-nested')
+ASPECT_PROFILES = ('aspect-fold-500', 'aspect-mono-500', 'stereo-slices',
+                   'aspect-mono-nested', 'stereo-nested')
 # Only the stereo aspect profile has a V7 tail (mono packets carry none).
 ASPECT_TAIL_PROFILES = ('aspect-fold-500',)
 ASPECT_LAYOUT_CHOICES = (
@@ -308,7 +315,8 @@ PROFILE_DEFAULT_KERNELS = {
 
 def default_kernel_for_profile(profile):
     """Kernel enabled by default for the selected sender wire profile."""
-    return PROFILE_DEFAULT_KERNELS.get(profile, ENCODE_DEFAULTS['dct_kernel'])
+    return PROFILE_DEFAULT_KERNELS.get(NESTED_BASE_PROFILES.get(profile, profile),
+                                       ENCODE_DEFAULTS['dct_kernel'])
 
 
 TONE_DEFAULTS = {'brightness': '', 'gamma': '1'}
@@ -344,7 +352,8 @@ def _kernel_values(settings, kernel, profile=None):
     """The saved values for ``kernel``, limited to parameters it still has."""
     saved = (settings.get('dct_kernel_params') or {}).get(kernel.name, {})
     return kernel.resolve({key: value for key, value in saved.items()
-                           if key in kernel.params}, profile=profile)
+                           if key in kernel.params},
+                          profile=NESTED_BASE_PROFILES.get(profile, profile))
 
 
 VIDEO_FILE_GLOB = '*.mp4 *.m4v *.mov *.mkv *.webm *.avi *.mpeg *.mpg *.wmv *.ts'
@@ -1479,7 +1488,8 @@ def build_command(settings, devices, sd_module=None, python=None,
         if checked['dct_kernel'] != 'reference':
             kernel = kernel_registry().get(checked['dct_kernel'])
             command.extend(('--dct-kernel', checked['dct_kernel']))
-            kernel_defaults = kernel.defaults(checked['profile'])
+            kernel_defaults = kernel.defaults(NESTED_BASE_PROFILES.get(
+                checked['profile'], checked['profile']))
             for key, value in sorted(checked['dct_kernel_values'].items()):
                 if value != kernel_defaults[key]:
                     command.extend(('--dct-kernel-param', f'{key}={value:g}'))
@@ -1921,7 +1931,9 @@ class SenderGui:
             return ASPECT_TAIL_CHOICES
         if dest == 'dct_kernel':
             winners = KERNEL_BENCHMARK_WINNERS.get(
-                self.settings.get('profile'), DEFAULT_KERNEL_BENCHMARK_WINNERS)
+                NESTED_BASE_PROFILES.get(self.settings.get('profile'),
+                                         self.settings.get('profile')),
+                DEFAULT_KERNEL_BENCHMARK_WINNERS)
             ideal, bilinear = winners['ideal'], winners['bilinear']
             default_kernel = default_kernel_for_profile(
                 self.settings.get('profile'))
@@ -2494,8 +2506,9 @@ class SenderGui:
             kernel, name, _param = found
             saved = (self.settings.get('dct_kernel_params') or {}).get(
                 kernel.name, {})
-            return saved.get(name, kernel.defaults(
-                self.settings.get('profile'))[name])
+            return saved.get(name, kernel.defaults(NESTED_BASE_PROFILES.get(
+                self.settings.get('profile'),
+                self.settings.get('profile')))[name])
         return self.settings.get(dest)
 
     def _edit_text(self, dest):
@@ -2528,7 +2541,9 @@ class SenderGui:
             if found is None:
                 return ''
             kernel, name, param = found
-            default = kernel.defaults(self.settings.get('profile'))[name]
+            default = kernel.defaults(NESTED_BASE_PROFILES.get(
+                self.settings.get('profile'),
+                self.settings.get('profile')))[name]
             return (f'{param.help or name} · {param.low:g} to {param.high:g}, '
                     f'default {default:g}. Left/Right steps by '
                     f'{param.step:g} (Shift: five times) and is heard on the '
@@ -2547,7 +2562,9 @@ class SenderGui:
         if dest.startswith(KERNEL_PARAM_PREFIX):
             found = self._kernel_param(dest)
             return (None if found is None else
-                    found[0].defaults(self.settings.get('profile'))[found[1]])
+                    found[0].defaults(NESTED_BASE_PROFILES.get(
+                        self.settings.get('profile'),
+                        self.settings.get('profile')))[found[1]])
         if dest in TONE_DEFAULTS:
             return TONE_DEFAULTS[dest]
         if dest == 'dct_kernel':

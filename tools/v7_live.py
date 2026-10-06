@@ -1100,6 +1100,10 @@ def _mix_mono_video_audio(modem, frames, source, delay, video_side,
     return output
 
 
+NESTED_BASE_PROFILES = {'aspect-mono-nested': 'aspect-mono-500',
+                        'stereo-nested': 'stereo-slices'}
+
+
 def _apply_profile_option(args):
     """Translate the sender GUI/CLI profile name to the wire flags."""
     profile = getattr(args, 'profile', None)
@@ -1117,13 +1121,23 @@ def _apply_profile_option(args):
         args.aspect_mono = True
     elif profile == 'stereo-slices':
         args.slices = 'stereo'
+    elif profile == 'aspect-mono-nested':
+        # aspect-mono-500's wire with the nested luma fold (experimental).
+        args.experimental_mono_fold = True
+        args.aspect_mono = True
+        args.nested_fold = True
+    elif profile == 'stereo-nested':
+        # stereo-slices' wire, each channel a nested-fold mono picture.
+        args.slices = 'stereo'
+        args.nested_fold = True
 
 
 def _kernel_defaults_profile(args):
     """Return the selected wire profile for profile-specific kernel defaults."""
     profile = getattr(args, 'profile', None)
     if profile:
-        return profile
+        # The nested-fold modes ride on these wires and share their kernels.
+        return NESTED_BASE_PROFILES.get(profile, profile)
     if getattr(args, 'aspect_mono', False):
         return 'aspect-mono-500'
     if getattr(args, 'aspect_fold', False):
@@ -1348,6 +1362,10 @@ def _run_send_session(args):
         from slice_wire import SliceWire
         from tone_code import warmup_status_templates
         slice_wire = SliceWire(getattr(args, 'aspect_layout', 'auto'))
+        if getattr(args, 'nested_fold', False):
+            import nested_fold
+            slice_wire = nested_fold.slice_wire(
+                getattr(args, 'aspect_layout', 'auto'), send=True)
         # Build every layout model the sender may need before audio starts.
         for layout in ((slice_wire.layout,) if slice_wire.layout != 'auto' else
                        tuple(dict.fromkeys(
@@ -1366,6 +1384,9 @@ def _run_send_session(args):
             mono_wire = AspectMonoWire(
                 model, side=getattr(args, 'mono_video_side', 'right'),
                 layout=getattr(args, 'aspect_layout', 'auto'))
+            if getattr(args, 'nested_fold', False):
+                import nested_fold
+                nested_fold.enable_mono(mono_wire, send=True)
         else:
             wire_class = (MonoColourFoldWire
                           if getattr(args, 'experimental_mono_colour', False)
@@ -2311,6 +2332,10 @@ class _AdaptiveProfileDecoder:
         # same receiver setting as the stereo aspect profile's.
         self.aspect_mono_wire = AspectMonoWire(base_model, side='both',
                                                layout=aspect_layout)
+        # Nested-fold packets are recognised per packet by their signature;
+        # stock packets, and layouts without a nested table, decode as before.
+        import nested_fold
+        nested_fold.enable_mono(self.aspect_mono_wire)
         self.aspect_mono_mode = self.aspect_mono_wire.status_mode
         self.mono_wires = {
             MONO_500: MonoFreshFoldWire(base_model, side='both'),
@@ -2342,8 +2367,7 @@ class _AdaptiveProfileDecoder:
         self._pixel_unconfirmed = 0
         # Stereo slices: each channel its own mono wire, under the aspect
         # mono status with the metadata model bit set to nearest.
-        from slice_wire import SliceWire
-        self.slice_wire = SliceWire(aspect_layout)
+        self.slice_wire = nested_fold.slice_wire(aspect_layout)
         self._last_slices = False
         self.supported_modes = frozenset(
             (FOLD_500, self.aspect_mode, *self.mono_wires))
@@ -2412,6 +2436,9 @@ class _AdaptiveProfileDecoder:
                      *getattr(self, 'pixel_wires', {}).values()):
             if wire is not None:
                 wire.reset()
+        mono = getattr(self, 'aspect_mono_wire', None)
+        if mono is not None and hasattr(mono, 'reset_nested'):
+            mono.reset_nested()
 
     def _reset_capture_positions(self):
         """Forget capture-sample positions after the input stream reopens.
@@ -4007,7 +4034,7 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
         # just decoded gave nothing usable, the other one stands in for it.
         slice_side = slice_other = None
         if (adaptive_profile is not None and profile_probes is not None and
-                len(profile_probes) > 1 and packet_direction >= 0 and
+                len(profile_probes) > 1 and
                 adaptive_profile.dispatch_mode ==
                 adaptive_profile.aspect_mono_mode and
                 adaptive_profile.dispatch_side in (0, 1) and
@@ -4016,26 +4043,47 @@ def _run_receive_session(args, fold, mono_wire=None, adaptive_profile=None,
             slice_side = adaptive_profile.dispatch_side
             other_probe = profile_probes[1-slice_side]
             other_audio = other_probe.audio
-            if (other_audio is not None and
-                    other_probe.input is not decode_input and
-                    other_probe.input.pulse_hits(other_audio)):
+            other_hits = (other_probe.input.pulse_hits(other_audio)
+                          if other_audio is not None and
+                          other_probe.input is not decode_input else ())
+            if other_hits:
+                other_options = dict(
+                    input_gain=other_probe.input.gain, models=models,
+                    model_factory=model_factory,
+                    force_float32=args.force_float32, state=slice_state,
+                    sample_rate=capture_rate,
+                    pilot_timing=args.pilot_timing,
+                    pulse_timing=args.pulse_timing,
+                    tone_equalization=args.tone_equalization)
                 try:
-                    other_results, _ = P.decode_pulse_stream(
-                        model, other_audio, latest_only=True,
-                        pulse_starts=other_probe.input.pulse_starts(other_audio),
-                        frame_boundary=args.frame_boundary,
-                        input_gain=other_probe.input.gain, models=models,
-                        model_factory=model_factory,
-                        force_float32=args.force_float32, state=slice_state,
-                        sample_rate=capture_rate,
-                        pilot_timing=args.pilot_timing,
-                        pulse_timing=args.pulse_timing,
-                        tone_equalization=args.tone_equalization)
+                    if packet_direction < 0:
+                        # Played backwards the other channel is the same
+                        # packet reversed: take its reverse hit nearest this
+                        # one in time and decode it the same way, so reverse
+                        # playback joins both channels as forward does.
+                        other_origin = other_probe.input.total-len(other_audio)
+                        backwards = [hit for hit in other_hits if hit[3] < 0]
+                        other_results = []
+                        if backwards:
+                            start, scale, _, _ = min(
+                                backwards, key=lambda hit: abs(
+                                    other_origin+hit[0]-absolute_arrival))
+                            other_results, _ = P.decode_reverse_packet(
+                                model, other_audio, start, scale,
+                                **other_options)
+                    else:
+                        other_results, _ = P.decode_pulse_stream(
+                            model, other_audio, latest_only=True,
+                            pulse_starts=other_probe.input.pulse_starts(
+                                other_audio),
+                            frame_boundary=args.frame_boundary,
+                            **other_options)
                 except Exception:
                     other_results = []
                 if other_results and other_results[-1].diag.get('slices'):
                     slice_other = other_results[-1]
-                    slice_other.diag['playback_direction'] = 1
+                    slice_other.diag['playback_direction'] = (
+                        -1 if packet_direction < 0 else 1)
 
             def usable(candidate):
                 return candidate is not None and (
@@ -4495,7 +4543,8 @@ def parser():
     send_profile.add_argument(
         '--profile', choices=('mono-fold-500', 'fold-500', 'mono-colour-500',
                               'aspect-fold-500',
-                              'aspect-mono-500', 'stereo-slices'),
+                              'aspect-mono-500', 'stereo-slices',
+                              'aspect-mono-nested', 'stereo-nested'),
         default=None,
         help=('wire profile: mono video with Fold 500 (recommended), '
               'stereo Fold 500 (default), '

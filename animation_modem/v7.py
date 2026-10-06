@@ -13,6 +13,8 @@ model, per-cell 2x2 MMSE, group LMMSE, confidence gate, tail store).
 """
 import math
 import sys
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
@@ -1065,6 +1067,24 @@ HEADER_PEAK_DB = 3.0
 BODY_BELOW_HEADER_DB = 1.5
 HEADER_PEAK = 10**(-HEADER_PEAK_DB/20)
 BODY_PEAK = HEADER_PEAK*10**(-BODY_BELOW_HEADER_DB/20)
+# Per-packet auto-level, off for the historical wire (where only a loud body
+# is scaled).  Inside ``body_auto_level()`` every packet's body is raised to
+# the ceiling a loud one is held at, by at most BODY_AUTO_LEVEL_MAX_DB.
+BODY_AUTO_LEVEL_MAX_DB = 12.0
+_AUTO_LEVEL = threading.local()
+
+
+@contextmanager
+def body_auto_level(enabled=True):
+    """Packets encoded in this block (this thread) use the whole headroom
+    under the header.  The pilots rise with the body, so a receiver reads
+    the packet exactly as before, at a better signal-to-noise ratio."""
+    previous = getattr(_AUTO_LEVEL, 'on', False)
+    _AUTO_LEVEL.on = bool(enabled)
+    try:
+        yield
+    finally:
+        _AUTO_LEVEL.on = previous
 
 
 @lru_cache(maxsize=16)
@@ -1120,6 +1140,9 @@ def encode_pulse_frame_coeffs(model, coeffs, counter, aspect_code=0,
     peak = float(np.max(np.abs(shaped)))
     if peak > BODY_PEAK:
         shaped *= np.float32(BODY_PEAK/peak)
+    elif getattr(_AUTO_LEVEL, 'on', False) and peak > 0:
+        # Per-packet auto-level (see body_auto_level).
+        shaped *= np.float32(min(BODY_PEAK/peak, 10**(BODY_AUTO_LEVEL_MAX_DB/20)))
     header, pulse_level = _shaped_preamble(int(pulse_profile_code))
     shaped += header
     shaped[meta_start:meta_start+META_SYMBOL, :] += meta_pcm[:, None]

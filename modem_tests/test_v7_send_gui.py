@@ -109,7 +109,8 @@ class SenderGuiTests(unittest.TestCase):
         self.assertEqual(
             tuple(value for _label, value in PRIMARY_PROFILE_CHOICES),
             ('aspect-fold-500', 'fold-500', 'aspect-mono-500',
-             'mono-colour-500', 'stereo-slices'))
+             'mono-colour-500', 'stereo-slices', 'aspect-mono-nested',
+             'stereo-nested'))
 
     def test_device_list_contains_only_output_devices_and_does_not_default(self):
         sd = Mock()
@@ -1213,7 +1214,8 @@ class SenderGuiTests(unittest.TestCase):
         self.assertTrue(gui.settings['dct_encode'])
         self.assertFalse(hasattr(gui, 'advanced'))
         expected = ('aspect-fold-500', 'fold-500', 'aspect-mono-500',
-                    'mono-colour-500', 'stereo-slices')
+                    'mono-colour-500', 'stereo-slices', 'aspect-mono-nested',
+                    'stereo-nested')
         self.assertEqual(tuple(value for _label, value in
                                gui._choices('profile')), expected)
         parser = v7_live.parser()

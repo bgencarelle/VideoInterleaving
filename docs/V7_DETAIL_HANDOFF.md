@@ -1,5 +1,58 @@
 # V7 higher-resolution converter handoff
 
+## Resolved: see `V7_SK_VERDICT.md`
+
+Now in the live tools as two experimental sender options, `aspect-mono-nested`
+and `stereo-nested` (sender GUI profile list; the receiver reads them without a
+setting). One table per layout, soft per-packet decoding, speed and reverse
+supported. Start at the top section of `V7_SK_VERDICT.md`.
+
+The folding question is answered. An adaptive nested fold carries 58% more
+effective luma detail on the clean real wire (1.26× linear), 52% at hiss −60,
+shrinking to 8% at hiss −40. The Shannon ceiling at measured V7 precision is 1.74× clean, so
+3× is impossible and 1.5× is out of reach of any mapping built here. The strip
+trials below measured a defective mapping, not the idea. Code:
+`tools/v7_sk_fold.py`, `v7_sk_adaptive.py`, `v7_sk_study.py`, `v7_sk_wire.py`; tests:
+`modem_tests/test_v7_sk_fold.py`. Not yet run on faces, mono or tape.
+
+## Earlier state (superseded where it conflicts)
+
+## Resolved: see `V7_SK_VERDICT.md`
+
+Now in the live tools as two experimental sender options, `aspect-mono-nested`
+and `stereo-nested` (sender GUI profile list; the receiver reads them without a
+setting). One table per layout, soft per-packet decoding, speed and reverse
+supported. Start at the top section of `V7_SK_VERDICT.md`.
+Open issues (grain, banding, colour, the filter still to build): `V7_NESTED_FOLD_ISSUES.md`.
+
+The folding question is answered. An adaptive nested fold carries 58% more
+effective luma detail on the clean real wire (1.26× linear), 52% at hiss −60,
+shrinking to 8% at hiss −40. The Shannon ceiling at measured V7 precision is 1.74× clean, so
+3× is impossible and 1.5× is out of reach of any mapping built here. The strip
+trials below measured a defective mapping, not the idea. Code:
+`tools/v7_sk_fold.py`, `v7_sk_adaptive.py`, `v7_sk_study.py`, `v7_sk_wire.py`; tests:
+`modem_tests/test_v7_sk_fold.py`. Not yet run on faces, mono or tape.
+
+## Earlier state (superseded where it conflicts)
+
+## Resolved: see `V7_SK_VERDICT.md`
+
+Now in the live tools as two experimental sender options, `aspect-mono-nested`
+and `stereo-nested` (sender GUI profile list; the receiver reads them without a
+setting). One table per layout, soft per-packet decoding, speed and reverse
+supported. Start at the top section of `V7_SK_VERDICT.md`.
+Open issues (grain, banding, colour, the filter still to build): `V7_NESTED_FOLD_ISSUES.md`.
+
+The folding question is answered. An adaptive nested fold carries 58% more
+effective luma detail on the clean real wire (1.26× linear), 52% at hiss −60,
+shrinking to 8% at hiss −40. The Shannon ceiling at measured V7 precision is 1.74× clean, so
+3× is impossible and 1.5× is out of reach of any mapping built here. The strip
+trials below measured a defective mapping, not the idea. Code:
+`tools/v7_sk_fold.py`, `v7_sk_adaptive.py`, `v7_sk_study.py`, `v7_sk_wire.py`; tests:
+`modem_tests/test_v7_sk_fold.py`. Not yet run on faces, mono or tape.
+
+## Earlier state (superseded where it conflicts)
+
 The higher-detail goal is **not solved**. The original theory folded
 higher-dimensional source-detail vectors into fewer analog amplitudes using
 Shannon–Kotel’nikov-style serpentine mappings. More strips reduced source
